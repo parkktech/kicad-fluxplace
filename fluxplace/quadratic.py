@@ -50,6 +50,20 @@ def _edges(parts, graph, topo):
                 deg[a] += wt
                 deg[b] += wt
 
+    # power-trace springs: a 28V/12V hop is a wide trace — keep its chain sequential
+    for name, members in getattr(graph, "power_traces", {}).items():
+        m = [r for r in members if r in parts]
+        if len(m) < 2:
+            continue
+        w = 1.2 / (len(m) - 1)
+        pin = {r: parts[r].get("pins", {}).get(name, (0.0, 0.0)) for r in m}
+        for i in range(len(m)):
+            for j in range(i + 1, len(m)):
+                a, b = m[i], m[j]
+                E.append((a, b, w, pin[a][0], pin[a][1], pin[b][0], pin[b][1]))
+                deg[a] += w
+                deg[b] += w
+
     # orphan rescue: parts with no signal lanes tie weakly to their cluster mates
     # (prefer mates that DO have signal edges, so orphans follow the anchored core)
     for gid, mem in group_parts(parts, topo).items():
@@ -210,7 +224,7 @@ def quad(parts, graph, topo, center=None, pad=0.45, rounds=7, fill=0.55,
         # connectors (minimal slide — the M.2 ends up beside the CPU, not on it),
         # then everything else with those anchors frozen
         if big:
-            bigpos = {r: pos[r] for r in big | set(fixed)}
+            bigpos = {r: pos[r] for r in sorted(big | set(fixed))}   # sorted: dict order drives legalize sweeps
             legalize(parts, bigpos, pad, iters=300, frozen=set(fixed), bounds=bounds)
             for r in big:
                 pos[r] = bigpos[r]

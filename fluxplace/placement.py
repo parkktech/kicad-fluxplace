@@ -66,20 +66,63 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
 
 
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
-                 fill=0.65, aspect=1.35, rounds=9, feedback=4):
+                 fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
+                 shrink=True, decaps=True):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
-      gate -> congestion feedback (bloat hot regions, re-legalize, re-score).
+      gate -> congestion feedback -> shrink-to-smallest-routable -> decap adjacency.
 
+    `seeds` > 1 runs perturbed attempts and keeps the best routable one.
     Returns (positions, angles, route_report). report['overflow'] == 0 means the
     coarse global router closed every net within capacity — routable."""
     from .quadratic import quad
-    from .builder import build
     from . import route as R
 
     prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
                  fill=fill, aspect=aspect, rounds=rounds)
+
+    best = None
+    for s in range(max(1, seeds)):
+        pr = prior if s == 0 else _jitter(prior, s)
+        p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
+                                                big_area, feedback)
+        ov = count_overlaps(parts, p, 0.0, angles)
+        key = (rep["overflow"] > 0 or ov > 0, _extent_area(parts, p, angles, pad),
+               hpwl(parts, graph, {r: tuple(v) for r, v in p.items()}))
+        if best is None or key < best[0]:
+            best = (key, p, angles, rep, frozen)
+    _, p, angles, rep, frozen = best
+
+    if shrink and rep["overflow"] == 0:
+        p, angles, rep = _shrink_pass(parts, graph, topo, p, angles, frozen, pad, R)
+    if decaps and rep["overflow"] == 0:
+        p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
+    return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
+
+
+def _jitter(prior, seed):
+    """Deterministic per-seed perturbation of the mental map (stable hash, no RNG)."""
+    out = {}
+    for r, (x, y) in prior.items():
+        hh = sum(ord(ch) * 131 ** i for i, ch in enumerate(r)) + seed * 7919
+        out[r] = (x + (hh % 9 - 4) * 0.5, y + ((hh // 9) % 9 - 4) * 0.5)
+    return out
+
+
+def _extent_area(parts, p, angles, pad):
+    xs0 = [p[r][0] - eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in p]
+    ys0 = [p[r][1] - eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in p]
+    xs1 = [p[r][0] + eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in p]
+    ys1 = [p[r][1] + eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in p]
+    return (max(xs1) - min(xs0)) * (max(ys1) - min(ys0))
+
+
+def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
+    """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen)."""
+    from .builder import build
+    from . import route as R
+
     angles = orient(parts, graph, prior)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in parts}
     fixed = [r for r in parts if kind_of(r)[0] == "J" and area[r] <= big_area]
@@ -97,15 +140,19 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         _shove_remaining(parts, p, angles, pad, frozen=frozen)
 
     rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    prev_hot = set()
     for _ in range(feedback):
         if rep["overflow"] == 0:
             break
         # inflate every part sitting on a hot cell: the legalizer then opens a
         # corridor exactly where the router ran out of capacity. If a hot cell is
-        # walled in by frozen modules only, the smallest of them is temporarily
-        # released — a corridor between two immovable objects can't widen otherwise.
+        # walled in by frozen modules only — or keeps re-heating round after round
+        # (a seam between two frozen walls) — the smallest adjacent frozen module
+        # is temporarily released: that corridor cannot widen any other way.
         g = rep["grid"]
         release = set()
+        recurring = {c for c in rep["hot"] if c in prev_hot}
+        prev_hot = set(rep["hot"])
         for c in rep["hot"]:
             hx, hy = g.cell_center(c)
             near, movable_near = [], []
@@ -117,11 +164,11 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                         movable_near.append(r)
             for r in movable_near:
                 parts[r]["bloat"] = min(2.4, parts[r].get("bloat", 0.0) + 0.6)
-            if near and not movable_near:
-                cand = [q for q in near if q != topo.hub] or near
-                small = min(cand, key=lambda q: area[q])
-                if small == topo.hub:
+            if near and (not movable_near or c in recurring):
+                cand = [q for q in near if q in frozen and q != topo.hub]
+                if not cand:
                     continue          # never move the hub to fix an edge overflow
+                small = min(cand, key=lambda q: area[q])
                 release.add(small)
                 parts[small]["bloat"] = min(2.4, parts[small].get("bloat", 0.0) + 0.6)
         legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen - release)
@@ -140,7 +187,110 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
             if count_overlaps(parts, p, 0.0, angles) == 0:
                 break
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
-    return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
+    return p, angles, rep, frozen
+
+
+def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
+    """Binary-search the smallest routable board: scale every position toward the
+    centroid, re-legalize inside the scaled bounds, and keep the tightest scale the
+    router still passes. Density is only ever bought with proof."""
+    cx = sum(v[0] for v in p0.values()) / len(p0)
+    cy = sum(v[1] for v in p0.values()) / len(p0)
+
+    def try_scale(s):
+        q = {r: [cx + (p0[r][0] - cx) * s, cy + (p0[r][1] - cy) * s] for r in p0}
+        xs0 = [q[r][0] - eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
+        ys0 = [q[r][1] - eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in q]
+        xs1 = [q[r][0] + eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
+        ys1 = [q[r][1] + eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in q]
+        bounds = (min(xs0) - 0.5, min(ys0) - 0.5, max(xs1) + 0.5, max(ys1) + 0.5)
+        for _ in range(6):
+            legalize(parts, q, pad, iters=500, angles=angles, bounds=bounds)
+            if count_overlaps(parts, q, 0.0, angles) == 0:
+                break
+            _shove_remaining(parts, q, angles, pad)
+        if count_overlaps(parts, q, 0.0, angles):
+            return None, None
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+        return (q, rep) if rep["overflow"] == 0 else (None, None)
+
+    best = None
+    lo_s, hi_s = lo, 1.0
+    for _ in range(4):
+        mid = (lo_s + hi_s) / 2
+        q, rep = try_scale(mid)
+        if q is not None:
+            best = (q, rep, mid)
+            hi_s = mid            # routable — try tighter
+        else:
+            lo_s = mid            # too tight — back off
+    if best is None:
+        return p0, angles, R.score(parts, {r: (v[0], v[1]) for r, v in p0.items()},
+                                   graph, angles)
+    return best[0], angles, best[1]
+
+
+def _decap_pass(parts, graph, p, angles, pad, R, rep):
+    """Walk plane-only decoupling caps to the nearest free spot hugging their owner
+    IC (nearest non-passive sharing one of their power nets). Reverts wholesale if
+    the move breaks the routability gate — adjacency never outranks routability."""
+    import copy
+    signal_refs = {r for members in graph.signal_nets.values() for r in members}
+    ptrace_refs = {r for members in getattr(graph, "power_traces", {}).items()
+                   for r in members[1]}
+    owners_of = {}
+    for r in p:
+        if kind_of(r) != "C" or r in signal_refs or r in ptrace_refs:
+            continue
+        my_nets = set(parts[r].get("pins", {}).keys())
+        cands = [q for q in p
+                 if q != r and not is_passive(q)
+                 and my_nets & set(parts[q].get("pins", {}).keys())]
+        if cands:
+            owners_of[r] = min(cands, key=lambda q: (abs(p[q][0] - p[r][0]) +
+                                                     abs(p[q][1] - p[r][1]), q))
+    if not owners_of:
+        return p, rep
+
+    q = {r: list(v) for r, v in p.items()}
+    moved = 0
+    for r, owner in sorted(owners_of.items()):
+        ow, oh = eff_size(parts, owner, angles.get(owner, 0.0), pad)
+        rw, rh = eff_size(parts, r, angles.get(r, 0.0), pad)
+        ox, oy = q[owner]
+        cur_d = abs(q[r][0] - ox) + abs(q[r][1] - oy)
+        # candidate slots ringing the owner's body, closest side first
+        slots = []
+        for k in range(-3, 4):
+            step = k * max(rw, rh) * 1.05
+            slots += [(ox + step, oy - (oh + rh) / 2 - 0.2),
+                      (ox + step, oy + (oh + rh) / 2 + 0.2),
+                      (ox - (ow + rw) / 2 - 0.2, oy + step),
+                      (ox + (ow + rw) / 2 + 0.2, oy + step)]
+        slots.sort(key=lambda t: abs(t[0] - q[r][0]) + abs(t[1] - q[r][1]))
+        for x, y in slots:
+            d = abs(x - ox) + abs(y - oy)
+            if d >= cur_d - 1.0:
+                break                      # nothing meaningfully closer
+            clear = True
+            for s in q:
+                if s == r:
+                    continue
+                sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
+                if (abs(x - q[s][0]) < (rw + sw) / 2 and
+                        abs(y - q[s][1]) < (rh + sh) / 2):
+                    clear = False
+                    break
+            if clear:
+                q[r] = [x, y]
+                moved += 1
+                break
+    if not moved:
+        return p, rep
+    rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+    if rep2["overflow"] > 0 or count_overlaps(parts, q, 0.0, angles):
+        return p, rep        # adjacency never outranks routability
+    return q, rep2
 
 
 def _shove_remaining(parts, pos, angles, pad, frozen=None):
@@ -166,6 +316,22 @@ def _shove_remaining(parts, pos, angles, pad, frozen=None):
                 pos[mover][0] += (oxx + 0.1) * sgn_x
             else:
                 pos[mover][1] += (oyy + 0.1) * sgn_y
+
+
+def pin_at(parts, r, net, angle=None):
+    """Pin-anchor offset from body center for `net`, at absolute `angle` degrees.
+    Offsets were read at the part's as-drawn angle (`angle0`); KiCad rotation maps
+    (x, y) -> (x cos t + y sin t, -x sin t + y cos t) — verified empirically."""
+    off = parts[r].get("pins", {}).get(net)
+    if not off:
+        return (0.0, 0.0)
+    a0 = parts[r].get("angle0", 0.0)
+    t = ((angle if angle is not None else a0) - a0) % 360.0
+    if t < 1e-6:
+        return off
+    rad = math.radians(t)
+    c, s = math.cos(rad), math.sin(rad)
+    return (off[0] * c + off[1] * s, -off[0] * s + off[1] * c)
 
 
 def _size(parts, r, pad=0.6):
@@ -285,7 +451,7 @@ def group_parts(parts, topo):
     from collections import defaultdict
     groups, assigned, cen = {}, set(), {}
     for i, b in enumerate(topo.branches):
-        mem = [r for r in b.members if r in parts]
+        mem = sorted(r for r in b.members if r in parts)   # members is a SET — sort or salt leaks in
         if not mem:
             continue
         gid = f"grp{i}"

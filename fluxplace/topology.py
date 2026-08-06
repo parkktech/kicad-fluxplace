@@ -70,9 +70,11 @@ def analyze(graph, prefer_hub=None):
 
 
 def _make_branch(cluster, adj, hub, graph):
-    conns = [r for r in cluster if kind_of(r) == "J"]
+    # deterministic root: sets iterate in salted-hash order, so sort before picking
+    # (an unsorted pick here made entire layouts vary run to run)
+    conns = sorted(r for r in cluster if kind_of(r) == "J")
     root = (conns[0] if conns
-            else max(cluster, key=lambda r: len(adj[r] & cluster)))
+            else max(sorted(cluster), key=lambda r: (len(adj[r] & cluster), r)))
     dist = {root: 0}
     q = deque([root])
     while q:

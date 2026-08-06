@@ -108,6 +108,70 @@ def test_place_routed_pipeline():
     print("ok  place_routed: legal + routable")
 
 
+def test_power_traces_and_pairs():
+    """graph v2: small-fanout power rails become routed traces (never GND); diff
+    pairs are detected by naming convention with the P side as master."""
+    from fluxplace.graph import classify, diff_pairs, power_width
+    power, signal, ptraces = classify({
+        "+28V_IN": ["J1", "F1"], "GND": ["a", "b", "c"],
+        "+5V": [chr(97 + i) for i in range(15)], "+3V3_M2": ["U2", "J3"],
+        "SIG": ["a", "b"]})
+    assert "+28V_IN" in ptraces and "+3V3_M2" in ptraces
+    assert "GND" not in ptraces and "+5V" not in ptraces, "planes must stay planes"
+    assert power_width("+28V_IN") == 3 and power_width("+3V3_M2") == 2
+    pairs = diff_pairs({"PCIE_TX_P_AC": 1, "PCIE_TX_N_AC": 1, "USB_DP": 1, "USB_DM": 1,
+                        "LONE_P": 1, "X": 1})
+    assert pairs == {"PCIE_TX_N_AC": "PCIE_TX_P_AC", "USB_DM": "USB_DP"}, pairs
+    print("ok  power traces + diff pairs classified")
+
+
+def test_pin_rotation():
+    """pin_at must match KiCad's empirical rotation: +90 deg maps (x, y) -> (y, -x)."""
+    parts = {"X": {"pins": {"N": (0.95, 0.0)}, "angle0": 0.0}}
+    x, y = P.pin_at(parts, "X", "N", 90)
+    assert abs(x) < 1e-9 and abs(y + 0.95) < 1e-9, (x, y)
+    x, y = P.pin_at(parts, "X", "N", 180)
+    assert abs(x + 0.95) < 1e-9 and abs(y) < 1e-9, (x, y)
+    # offsets read at a non-zero drawn angle rotate by the DELTA only
+    parts["X"]["angle0"] = 90.0
+    assert P.pin_at(parts, "X", "N", 90) == (0.95, 0.0)
+    print("ok  pin rotation matches KiCad convention")
+
+
+def test_layer_router_via_and_taper():
+    """Layer-aware A* pays for turns; wide-net reservation tapers at terminals."""
+    from fluxplace.route import Grid
+    g = Grid(0, 0, 40, 40, cell=2.0)
+    p = g.astar((0, 0), (8, 6))
+    assert p is not None and p[0] == (0, 0) and p[-1] == (8, 6)
+    turns = sum(1 for i in range(1, len(p) - 1)
+                if (p[i][0] - p[i - 1][0] != p[i + 1][0] - p[i][0]))
+    assert turns <= 2, f"free grid should route as an L/Z, got {turns} turns"
+    g.reserve(p, 3)
+    e_end = Grid._edge(p[0], p[1])
+    mid = len(p) // 2
+    e_mid = Grid._edge(p[mid], p[mid + 1])
+    assert g.usage[e_end] == 1, "terminal edges must taper to width 1"
+    assert g.usage[e_mid] == 3, "mid-route edges carry the full width"
+    g.release(p, 3)
+    assert all(u == 0 for u in g.usage.values()), "release must mirror reserve exactly"
+    print("ok  layer router: turns bounded, tapered width symmetric")
+
+
+def test_determinism():
+    """Same input -> byte-identical placement (salted-hash order must not leak)."""
+    parts1, nets1 = _synthetic()
+    cg1 = G.build(parts1, nets1)
+    t1 = T.analyze(cg1)
+    a = P.place_routed(parts1, cg1, t1)[0]
+    parts2, nets2 = _synthetic()
+    cg2 = G.build(parts2, nets2)
+    t2 = T.analyze(cg2)
+    b = P.place_routed(parts2, cg2, t2)[0]
+    assert a == b, "pipeline must be deterministic"
+    print("ok  pipeline deterministic")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -116,4 +180,8 @@ if __name__ == "__main__":
     test_quad_hub_central()
     test_router_gate()
     test_place_routed_pipeline()
+    test_power_traces_and_pairs()
+    test_pin_rotation()
+    test_layer_router_via_and_taper()
+    test_determinism()
     print("\nALL CORE TESTS PASSED")

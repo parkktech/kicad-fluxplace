@@ -52,23 +52,67 @@ def net_weight(name, fanout):
     return w / max(1, fanout - 1)
 
 
+_HEAVY_PWR_RE = re.compile(r"(28V|30V|24V|VIN|VBAT)", re.I)
+_GNDISH_RE = re.compile(r"^(GND|GNDA|AGND|DGND|PGND|VSS|EARTH)", re.I)
+
+
+def power_width(name):
+    """Routing width (in track slots) a power TRACE demands. High-voltage/high-current
+    input rails eat the most copper; everything else still needs a doubled track."""
+    return 3 if _HEAVY_PWR_RE.search(name) else 2
+
+
 def classify(nets, big_fanout=12):
-    """Split nets into power vs signal. Returns (power_names:set, signal:{name:[refs]})."""
-    power, signal = set(), {}
+    """Split nets three ways. Returns (power_names:set, signal:{name:[refs]},
+    power_traces:{name:[refs]}).
+
+    power_traces = power nets that are REAL TRACES, not planes: small-fanout rails
+    (28 V input hop, 12 V head feed, a buck's VOUT to its load). Ground and any
+    big-fanout rail stay planes — but a 2..6-node power hop needs wide copper and
+    therefore routing capacity; pretending it's free is how boards become unroutable."""
+    power, signal, ptraces = set(), {}, {}
     for name, refs in nets.items():
         refs = sorted(set(refs))
         if not name or name.startswith("unconnected") or len(refs) < 2:
             continue
         if is_power_net(name, len(refs), big_fanout):
             power.add(name)
+            if len(refs) <= 6 and not _GNDISH_RE.match(name.strip()):
+                ptraces[name] = refs
         else:
             signal[name] = refs
-    return power, signal
+    return power, signal, ptraces
+
+
+# diff-pair name conventions, tried in order: (pattern, replacement) mapping the
+# P-side name to its N-side partner
+_PAIR_RULES = (
+    (re.compile(r"_P$"), "_N"),
+    (re.compile(r"_P(_)"), r"_N\1"),
+    (re.compile(r"DP$"), "DM"),
+    (re.compile(r"_DP(_)"), r"_DM\1"),
+    (re.compile(r"D\+$"), "D-"),
+)
+
+
+def diff_pairs(signal_nets):
+    """{slave_net: master_net} for differential pairs found by naming convention.
+    The P/DP side is the master; its partner routes hugged against it."""
+    names = set(signal_nets)
+    pairs = {}
+    for n in sorted(names):   # sorted: set order is salted, and pair order steers routing
+        for pat, rep in _PAIR_RULES:
+            if pat.search(n):
+                partner = pat.sub(rep, n)
+                if partner in names and partner != n:
+                    pairs[partner] = n
+                break
+    return pairs
 
 
 def build(parts, nets, big_fanout=12):
     """Return a CommGraph over KEY nodes (passives collapsed into edges)."""
-    power, signal = classify(nets, big_fanout)
+    power, signal, ptraces = classify(nets, big_fanout)
 
     # weighted adjacency over ALL parts first
     w_adj = defaultdict(lambda: defaultdict(float))
@@ -103,16 +147,17 @@ def build(parts, nets, big_fanout=12):
                 for nn in plain_adj[c]:
                     if nn not in seen:
                         stack.append(nn)
-    return CommGraph(parts, power, signal, kg, keys)
+    return CommGraph(parts, power, signal, kg, keys, ptraces)
 
 
 class CommGraph:
-    def __init__(self, parts, power, signal, kg, keys):
+    def __init__(self, parts, power, signal, kg, keys, power_traces=None):
         self.parts = parts
         self.power_nets = power
         self.signal_nets = signal
         self.kg = kg              # {ref: {ref: weight}} key-node graph
         self.keys = keys
+        self.power_traces = power_traces or {}   # power nets that are real traces
 
     def degree(self, ref):
         return len(self.kg.get(ref, {}))

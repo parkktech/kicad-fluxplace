@@ -23,13 +23,13 @@ Final acceptance still goes through route.score() — the independent gate.
 import math
 from collections import defaultdict
 
-from .graph import net_weight, kind_of, is_passive
-from .placement import eff_size, _size
-from .route import Grid, build_grid
+from .graph import net_weight, kind_of, is_passive, power_width
+from .placement import eff_size, _size, pin_at
+from .route import Grid, apply_part_blockage
 
 
-def _overlaps_any(parts, angles, pad, committed, pos, r, x, y):
-    w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+def _overlaps_any(parts, angles, pad, committed, pos, r, x, y, ang=None):
+    w, h = eff_size(parts, r, ang if ang is not None else angles.get(r, 0.0), pad)
     for s in committed:
         sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
         if (abs(x - pos[s][0]) < (w + sw) / 2 and
@@ -93,21 +93,38 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
     grid = Grid(bounds[0] - 4, bounds[1] - 4, bounds[2] + 4, bounds[3] + 4,
                 cell=cell, layers=layers, pitch=pitch)
 
-    # per-part signal nets, heaviest first (these are the traces we imagine)
+    # per-part nets, heaviest first (these are the traces we imagine). Power
+    # traces ride along with their real widths so wide-copper corridors are
+    # reserved during construction, not discovered broken at the gate.
     pnets = defaultdict(list)
+    widths = {}
     for name, members in graph.signal_nets.items():
         wt = net_weight(name, len(members))
+        widths[name] = 1
         for r in members:
             if r in parts:
                 pnets[r].append((name, wt))
+    for name, members in getattr(graph, "power_traces", {}).items():
+        widths[name] = power_width(name)
+        for r in members:
+            if r in parts:
+                pnets[r].append((name, 1.2 / max(1, len(members) - 1)))
     for r in pnets:
         pnets[r].sort(key=lambda t: -t[1])
 
-    # connection weight ref<->ref for the placement order
+    # connection weight ref<->ref for the placement order (power ties count — the
+    # fuse belongs right after its connector, not at the end of the queue)
     wadj = defaultdict(lambda: defaultdict(float))
     for name, members in graph.signal_nets.items():
         m = [r for r in members if r in parts]
         wt = net_weight(name, len(m))
+        for i in range(len(m)):
+            for j in range(i + 1, len(m)):
+                wadj[m[i]][m[j]] += wt
+                wadj[m[j]][m[i]] += wt
+    for name, members in getattr(graph, "power_traces", {}).items():
+        m = [r for r in members if r in parts]
+        wt = 0.8 * power_width(name) / max(1, len(m) - 1)
         for i in range(len(m)):
             for j in range(i + 1, len(m)):
                 wadj[m[i]][m[j]] += wt
@@ -122,37 +139,36 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
         pos[r] = (x, y)
         committed.append(r)
         w, h = eff_size(parts, r, angles.get(r, 0.0), 0.0)
-        grid.block_rect(x, y, w, h, 0.8 if parts[r].get("tht") else 0.4)
-        for off in parts[r].get("pins", {}).values():
-            c = grid.cell_of(x + off[0], y + off[1])
-            if c in grid.block:
-                grid.block[c] *= 0.35   # escape room at the pins
+        apply_part_blockage(grid, parts, r, x, y, w, h)
         # really route this part's nets to the nearest already-placed pin, and
         # reserve the capacity: the imagined trace becomes a fact on the grid
         for name, wt in pnets[r]:
-            off = parts[r].get("pins", {}).get(name, (0.0, 0.0))
+            off = pin_at(parts, r, name, angles.get(r))
             mypin = (x + off[0], y + off[1])
             if net_placed[name]:
                 tx, ty = min(((p[1], p[2]) for p in net_placed[name]),
                              key=lambda p: abs(p[0] - mypin[0]) + abs(p[1] - mypin[1]))
-                path = grid.astar(grid.cell_of(*mypin), grid.cell_of(tx, ty))
+                path = grid.astar(grid.snap_terminal(grid.cell_of(*mypin)),
+                                  grid.snap_terminal(grid.cell_of(tx, ty)),
+                                  widths[name])
                 if path:
-                    grid.reserve(path)
+                    grid.reserve(path, widths[name])
                     routed[name].append(path)
             net_placed[name].append((r, mypin[0], mypin[1]))
 
-    def route_score(r, x, y):
+    def route_score(r, x, y, ang=None):
         """The eyeball check: L-route congestion estimate for every net this part
         would have to close to the placed set, weighted by criticality."""
         s = 0.0
         for name, wt in pnets[r][:6]:
             if not net_placed[name]:
                 continue
-            off = parts[r].get("pins", {}).get(name, (0.0, 0.0))
+            off = pin_at(parts, r, name, ang)
             mypin = (x + off[0], y + off[1])
             best = min(net_placed[name],
                        key=lambda p: abs(p[1] - mypin[0]) + abs(p[2] - mypin[1]))
-            s += wt * grid.l_estimate(grid.cell_of(*mypin), grid.cell_of(best[1], best[2]))
+            s += wt * grid.l_estimate(grid.cell_of(*mypin), grid.cell_of(best[1], best[2]),
+                                      widths[name])
         return s
 
     # ---- order: fixed walls, hub, then strongest-connection-first ----------
@@ -181,11 +197,42 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
                                q))
         remaining.discard(r)
         px, py = prior[r]
+        # audition around the mental-map spot AND around the pins this part must
+        # reach (the human move: "the fuse goes right at the connector")
+        anchor_pts = [(px, py)]
+        for name, wt in pnets[r][:2]:
+            if net_placed[name]:
+                tp = min(net_placed[name],
+                         key=lambda q: abs(q[1] - px) + abs(q[2] - py))
+                anchor_pts.append((tp[1], tp[2]))
+        cands, seen_c = [], set()
+        for ax, ay in anchor_pts:
+            for x, y in _candidates(parts, angles, pad, committed, pos, r, ax, ay, bounds):
+                k = (round(x, 1), round(y, 1))
+                if k not in seen_c:
+                    seen_c.add(k)
+                    cands.append((x, y))
         best, bestc = None, 1e18
-        for x, y in _candidates(parts, angles, pad, committed, pos, r, px, py, bounds):
-            c = route_score(r, x, y) + prior_pull * ((x - px) ** 2 + (y - py) ** 2)
+        base_ang = angles.get(r, parts[r].get("angle0", 0.0))
+        for x, y in cands:
+            c = route_score(r, x, y, base_ang) + prior_pull * ((x - px) ** 2 + (y - py) ** 2)
             if c < bestc:
                 best, bestc = (x, y), c
+        # rotation audition at the winning spot: a human turns the part so its pins
+        # face where the traces go. Big modules keep their drawn orientation.
+        besta = base_ang
+        w0, h0 = _size(parts, r, 0.0)
+        if w0 * h0 <= 150.0:
+            for k in (90.0, 180.0, 270.0):
+                ang = (base_ang + k) % 360.0
+                if _overlaps_any(parts, angles, pad, committed, pos, r,
+                                 best[0], best[1], ang=ang):
+                    continue
+                c = route_score(r, best[0], best[1], ang) +                     prior_pull * ((best[0] - px) ** 2 + (best[1] - py) ** 2)
+                if c < bestc - 1e-9:
+                    bestc, besta = c, ang
+        if besta != base_ang:
+            angles[r] = besta
         commit(r, best[0], best[1])
         for q in remaining:
             if r in wadj[q]:

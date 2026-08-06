@@ -36,7 +36,8 @@ def cmd_place(a):
     rep = None
     if a.strategy == "build":
         from fluxplace import route as R
-        pos, rot, rep = P.place_routed(parts, cg, topo, center=center, pad=a.pad)
+        pos, rot, rep = P.place_routed(parts, cg, topo, center=center, pad=a.pad,
+                                       seeds=a.seeds)
         print(R.summary(rep))
     else:
         pos, rot = P.place(parts, cg, topo, strategy=a.strategy, rotate=a.rotate,
@@ -54,6 +55,9 @@ def cmd_place(a):
             xs1.append(x + w / 2); ys1.append(y + h / 2)
         dims = IO.shrinkwrap_outline(board, min(xs0), min(ys0), max(xs1), max(ys1),
                                      margin=a.margin)
+    if rep is not None and getattr(a, "guides", False):
+        n = IO.emit_route_guides(board, rep)
+        print(f"route guides: {n} corridor segments on Eco1.User (group 'fluxplace-guides')")
     out = a.out or a.board
     IO.save(board, out)
     ov = P.count_overlaps(parts, pos, 0.2, angles=rot)
@@ -98,11 +102,82 @@ def cmd_eval(a):
 
 def cmd_route(a):
     from fluxplace import route as R
-    _, parts, nets, _ = _load(a.board)
+    board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout)
     pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
     rep = R.score(parts, pos, cg)
     print(R.summary(rep))
+    if a.guides:
+        n = IO.emit_route_guides(board, rep)
+        IO.save(board, a.out or a.board)
+        print(f"route guides: {n} corridor segments on Eco1.User -> {a.out or a.board}")
+
+
+def cmd_calibrate(a):
+    """Ground-truth the gate against a real autorouter (freerouting).
+    Exports Specctra DSN; runs freerouting if a jar is available (java -jar);
+    or parses an existing .ses produced elsewhere. Reports agreement."""
+    import os, subprocess, re
+    from fluxplace import route as R
+    board, parts, nets, IO = _load(a.board)
+    cg = G.build(parts, nets, a.big_fanout)
+    pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
+    rep = R.score(parts, pos, cg)
+    print("gate: " + ("ROUTABLE (overflow 0)" if rep["overflow"] == 0
+                      else f"CONGESTED (overflow {rep['overflow']})"))
+
+    ses = a.ses
+    if not ses:
+        dsn = os.path.splitext(a.board)[0] + ".dsn"
+        if not IO.export_dsn(board, dsn):
+            print("DSN export failed")
+            return
+        print(f"exported: {dsn}")
+        jar = a.jar or os.environ.get("FREEROUTING_JAR")
+        if not jar:
+            for cand in (os.path.expanduser("~/freerouting.jar"),
+                         "/opt/freerouting/freerouting.jar"):
+                if os.path.exists(cand):
+                    jar = cand
+                    break
+        if not jar:
+            print("no freerouting jar found — run it elsewhere and re-invoke with --ses:\n"
+                  "  java -jar freerouting.jar -de board.dsn -do board.ses -mp 20\n"
+                  "  (https://github.com/freerouting/freerouting/releases)")
+            return
+        ses = os.path.splitext(a.board)[0] + ".ses"
+        print(f"running freerouting ({jar})...")
+        try:
+            subprocess.run(["java", "-jar", jar, "-de", dsn, "-do", ses,
+                            "-mp", str(a.passes)], timeout=1800, check=True,
+                           capture_output=True)
+        except Exception as e:
+            print(f"freerouting failed: {e}")
+            return
+
+    txt = open(ses, errors="ignore").read()
+    import re as _re
+    ses_nets = set(_re.findall(r'\(net\s+"?([^\s")]+)', txt))
+    vias = txt.count("(via")
+    wires = txt.count("(wire")
+    # compare on OUR scope only: freerouting had to route plane nets as traces
+    # (no zones in the DSN), which the gate legitimately excludes
+    routable = set(cg.signal_nets) | set(cg.power_traces)
+    got = {n for n in ses_nets if n in routable or n.replace('"', "") in routable}
+    missing = sorted(routable - got)
+    print(f"freerouting session: {wires} wires, {vias} vias; "
+          f"{len(got)}/{len(routable)} gate-scope nets routed "
+          f"(+{len(ses_nets) - len(got)} plane/other nets)")
+    if missing and len(missing) <= 12:
+        print("gate-scope nets NOT in session: " + ", ".join(missing))
+    if rep["overflow"] == 0 and len(got) >= len(routable) * 0.98:
+        print("AGREEMENT: gate said routable, freerouting closed the gate scope — calibrated OK")
+    elif rep["overflow"] > 0 and len(got) < len(routable):
+        print("AGREEMENT: both see congestion — inspect gate hotspots for where")
+    else:
+        print("PARTIAL/DISAGREEMENT: raise --passes (freerouting may have stopped early), "
+              "or tune Grid pitch/util/blockage; the gate should sit slightly "
+              "conservative of freerouting")
 
 
 def main(argv=None):
@@ -129,6 +204,10 @@ def main(argv=None):
     pp.add_argument("--center-board", action="store_true")
     pp.add_argument("--free-connectors", action="store_true")
     pp.add_argument("--move-locked", action="store_true")
+    pp.add_argument("--seeds", type=int, default=1,
+                    help="try N perturbed placements, keep the best routable one")
+    pp.add_argument("--guides", action="store_true",
+                    help="draw the global-route corridors on Eco1.User (build strategy)")
     pp.set_defaults(fn=cmd_place)
 
     pl = sub.add_parser("plan", help="gather info + write a detailed placement plan")
@@ -144,7 +223,18 @@ def main(argv=None):
 
     pr = sub.add_parser("route", help="global-route the current placement, report congestion")
     pr.add_argument("--board", required=True)
+    pr.add_argument("--out", default=None)
+    pr.add_argument("--guides", action="store_true",
+                    help="draw the corridors on Eco1.User and save the board")
     pr.set_defaults(fn=cmd_route)
+
+    pc = sub.add_parser("calibrate",
+                        help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
+    pc.add_argument("--board", required=True)
+    pc.add_argument("--jar", default=None, help="path to freerouting.jar")
+    pc.add_argument("--ses", default=None, help="parse an existing .ses instead of running")
+    pc.add_argument("--passes", type=int, default=20)
+    pc.set_defaults(fn=cmd_calibrate)
 
     pe = sub.add_parser("eval"); pe.add_argument("--board", required=True)
     pe.add_argument("--pad", type=float, default=0.5)

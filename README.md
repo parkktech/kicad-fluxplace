@@ -60,11 +60,33 @@ It works the way an engineer does:
    (L-route congestion probes). The winner's nets are then **really routed**
    (congestion-negotiated A*) and reserved, so later parts can't crowd out earlier
    traces.
-3. **The gate** — an independent coarse global router (PathFinder-lite, capacity from
-   track pitch × signal layers, footprint-aware blockage, escape room at pins) routes
-   the whole board. `overflow == 0` means globally routable. If not, parts around the
+3. **The gate** — an independent coarse global router (PathFinder-lite) routes the
+   whole board. `overflow == 0` means globally routable. If not, parts around the
    hot cells get inflated spacing and the board re-legalizes — routability beats
-   density, always.
+   density, always. The v0.3 model is deliberately honest:
+   - **layer-aware**: horizontal and vertical runs draw on different layers'
+     capacity (classic H/V discipline); turning costs a via;
+   - **power-aware**: small-fanout power rails (28 V in, 12 V feeds, buck outputs)
+     are routed FIRST at 2–3 track-slots of width, tapering to land on their pads —
+     pretending power is free is how boards become unroutable;
+   - **pair-aware**: diff pairs route as master + hugged slave, and the report
+     scores how well each pair stayed together;
+   - **escape-aware**: fine-pitch parts project a fanout ring; pin cells keep
+     landing capacity; tiny in-line passives (PCIe AC caps) block nothing.
+4. **The search** — after the gate passes, the board is *shrunk to the smallest
+   scale that still routes* (binary search, each step re-gated), plane-only decaps
+   walk to their IC's side (reverted if the gate objects), and `--seeds N` tries
+   perturbed variants keeping the best routable one.
+
+Everything is deterministic: same board in, byte-identical placement out.
+
+### Route guides + ground truth
+
+- `place --guides` / `route --guides` draw the global corridors on `Eco1.User`
+  (group `fluxplace-guides`) — open the board and route along the reserved plan.
+- `calibrate` exports a Specctra DSN, runs freerouting (`--jar`/`$FREEROUTING_JAR`,
+  or parse an existing session with `--ses`) and reports whether the gate and a
+  real autorouter agree on this board.
 
 Rotation: `ortho` (default, assembly-friendly) · `fine` (any angle, lowest wirelength) · `none`.
 
