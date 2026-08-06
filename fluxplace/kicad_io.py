@@ -17,9 +17,16 @@ def read_board(board):
     net_refs = defaultdict(set)
     for fp in board.GetFootprints():
         ref = fp.GetReference()
-        bb = fp.GetBoundingBox(False, False)   # exclude text
         pos = fp.GetPosition()
-        # pad offsets relative to footprint origin (mm), averaged per net -> pin anchors
+        # KEEP-OUT extent = the FULL footprint bounding box (pads + silk + fab + courtyard).
+        # This is the true physical size for every part: a module's outline (bigger than its
+        # courtyard), a connector's body, an M.2 card region. The bbox is NOT centered on the
+        # footprint origin for many connectors, so track the body-center offset explicitly.
+        bb = fp.GetBoundingBox(False, False)   # False,False = exclude reference/value text
+        w = _mm(bb.GetWidth()); h = _mm(bb.GetHeight())
+        cx = _mm(bb.GetCenter().x); cy = _mm(bb.GetCenter().y)
+        offx = cx - _mm(pos.x); offy = cy - _mm(pos.y)   # body center relative to origin
+        # pad anchors, expressed relative to the BODY CENTER (so they track the body)
         pin_sum = defaultdict(lambda: [0.0, 0.0, 0])
         for pad in fp.Pads():
             nn = pad.GetNetname()
@@ -27,7 +34,7 @@ def read_board(board):
                 continue
             pp = pad.GetPosition()
             s = pin_sum[nn]
-            s[0] += _mm(pp.x - pos.x); s[1] += _mm(pp.y - pos.y); s[2] += 1
+            s[0] += _mm(pp.x) - cx; s[1] += _mm(pp.y) - cy; s[2] += 1
         pins = {n: (s[0] / s[2], s[1] / s[2]) for n, s in pin_sum.items()}
         try:
             sheet = fp.GetSheetname() or ""
@@ -38,10 +45,11 @@ def read_board(board):
             footprint=str(fp.GetFPID().GetLibItemName()),
             w=max(0.5, _mm(bb.GetWidth())),
             h=max(0.5, _mm(bb.GetHeight())),
-            x=_mm(pos.x), y=_mm(pos.y),
+            x=cx, y=cy,                 # BODY CENTER (not the footprint origin)
+            off=(offx, offy),           # body-center offset from origin, for write-back
             locked=fp.IsLocked(),
             sheet=sheet.strip("/") or "root",
-            pins=pins,          # {net: (dx_mm, dy_mm)} pin anchor offsets from center
+            pins=pins,          # {net: (dx_mm, dy_mm)} pin anchor offsets from body center
         )
         for nn in pins:
             net_refs[nn].add(ref)
@@ -53,8 +61,10 @@ def load(path):
     return pcbnew.LoadBoard(path)
 
 
-def apply_positions(board, positions, skip_locked=True):
-    """Move footprints to positions {ref:(x_mm,y_mm)}. Returns count moved."""
+def apply_positions(board, positions, parts=None, skip_locked=True):
+    """Move footprints so their BODY CENTER lands at positions {ref:(x_mm,y_mm)}. The
+    footprint origin is often offset from the body center (connectors), so set
+    origin = center - offset, computing the offset live from the current bbox."""
     n = 0
     for fp in board.GetFootprints():
         ref = fp.GetReference()
@@ -62,8 +72,13 @@ def apply_positions(board, positions, skip_locked=True):
             continue
         if skip_locked and fp.IsLocked():
             continue
+        cur = fp.GetPosition()
+        bb = fp.GetBoundingBox(False, False)
+        offx = _mm(bb.GetCenter().x) - _mm(cur.x)
+        offy = _mm(bb.GetCenter().y) - _mm(cur.y)
         x, y = positions[ref]
-        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(float(x)), pcbnew.FromMM(float(y))))
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(float(x) - offx),
+                                       pcbnew.FromMM(float(y) - offy)))
         n += 1
     return n
 

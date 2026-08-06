@@ -37,8 +37,8 @@ def cmd_place(a):
                        center=center, pad=a.pad, iters=a.iters)
     before = P.hpwl(parts, cg, {r: (parts[r]["x"], parts[r]["y"]) for r in parts})
     after = P.hpwl(parts, cg, pos)
-    IO.apply_positions(board, pos, skip_locked=not a.move_locked)
-    IO.apply_orientations(board, rot, skip_locked=not a.move_locked)
+    IO.apply_orientations(board, rot, skip_locked=not a.move_locked)   # rotate first
+    IO.apply_positions(board, pos, parts, skip_locked=not a.move_locked)  # then center
     dims = None
     if not a.no_outline:
         xs0 = []; ys0 = []; xs1 = []; ys1 = []

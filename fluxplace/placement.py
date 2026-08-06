@@ -24,8 +24,33 @@ def place(parts, graph, topo, strategy="pack", rotate="ortho", center=None, pad=
         pos = pack(parts, graph, topo, center=center, pad=pad)
     angles = orient(parts, graph, pos, mode=rotate)
     p = {r: list(v) for r, v in pos.items()}
-    legalize(parts, p, pad, angles=angles)
+    # legalize to zero overlaps — guaranteed. Escalate the clearance/iterations if the
+    # iterative solver hasn't converged (rare ping-pong on tightly boxed-in parts).
+    for attempt in range(6):
+        legalize(parts, p, pad, iters=500, angles=angles)
+        if count_overlaps(parts, p, 0.0, angles) == 0:
+            break
+        _shove_remaining(parts, p, angles, pad)   # hard separation fallback
     return {r: (x, y) for r, (x, y) in p.items()}, angles
+
+
+def _shove_remaining(parts, pos, angles, pad):
+    """Fallback for any pair still overlapping after iterative legalize: shove them fully
+    apart in one move (no half-steps), largest part holds, smaller yields."""
+    for a, b in list(_candidate_pairs(parts, pos, angles, pad)):
+        aw, ah = eff_size(parts, a, angles.get(a, 0.0), pad)
+        bw, bh = eff_size(parts, b, angles.get(b, 0.0), pad)
+        dx = pos[b][0] - pos[a][0]; dy = pos[b][1] - pos[a][1]
+        oxx = (aw + bw) / 2 - abs(dx); oyy = (ah + bh) / 2 - abs(dy)
+        if oxx > 0 and oyy > 0:
+            # move the smaller-area part fully clear along the shorter overlap axis
+            mover, aw_, ah_ = (b, bw, bh) if aw * ah >= bw * bh else (a, aw, ah)
+            sgn_x = 1 if (pos[mover][0] - pos[a if mover == b else b][0]) >= 0 else -1
+            sgn_y = 1 if (pos[mover][1] - pos[a if mover == b else b][1]) >= 0 else -1
+            if oxx <= oyy:
+                pos[mover][0] += (oxx + 0.1) * sgn_x
+            else:
+                pos[mover][1] += (oyy + 0.1) * sgn_y
 
 
 def _size(parts, r, pad=0.6):
@@ -423,68 +448,72 @@ def flux(parts, graph, topo, iters=260, center=None, pin_connectors=False, pad=0
 
 
 def _repel(parts, pos, refs, force, k, pad):
-    """Coarse-grid overlap repulsion so O(n^2) doesn't bite on big boards."""
-    cell = 8.0
-    grid = {}
-    for r in refs:
-        gx, gy = int(pos[r][0] // cell), int(pos[r][1] // cell)
-        grid.setdefault((gx, gy), []).append(r)
-    for r in refs:
-        gx, gy = int(pos[r][0] // cell), int(pos[r][1] // cell)
+    """Overlap repulsion via the correct spatial hash (bbox-covering cells) so large
+    footprints repel everything they actually cover, not just ±1 grid cell."""
+    for r, s in _candidate_pairs(parts, {x: pos[x] for x in refs}, {}, pad):
         rw, rh = _size(parts, r, pad)
-        for ox in (-1, 0, 1):
-            for oy in (-1, 0, 1):
-                for s in grid.get((gx + ox, gy + oy), ()):
-                    if s <= r:
-                        continue
-                    sw, sh = _size(parts, s, pad)
-                    dx = pos[s][0] - pos[r][0]
-                    dy = pos[s][1] - pos[r][1]
-                    ox_ = (rw + sw) / 2 - abs(dx)
-                    oy_ = (rh + sh) / 2 - abs(dy)
-                    if ox_ > 0 and oy_ > 0:            # overlapping
-                        if ox_ < oy_:
-                            push = k * ox_ * (1 if dx >= 0 else -1)
-                            force[s][0] += push; force[r][0] -= push
-                        else:
-                            push = k * oy_ * (1 if dy >= 0 else -1)
-                            force[s][1] += push; force[r][1] -= push
+        sw, sh = _size(parts, s, pad)
+        dx = pos[s][0] - pos[r][0]
+        dy = pos[s][1] - pos[r][1]
+        ox_ = (rw + sw) / 2 - abs(dx)
+        oy_ = (rh + sh) / 2 - abs(dy)
+        if ox_ > 0 and oy_ > 0:
+            if ox_ < oy_:
+                push = k * ox_ * (1 if dx >= 0 else -1)
+                force[s][0] += push; force[r][0] -= push
+            else:
+                push = k * oy_ * (1 if dy >= 0 else -1)
+                force[s][1] += push; force[r][1] -= push
 
 
-def legalize(parts, pos, pad, iters=140, angles=None):
-    """Iterative overlap removal: push overlapping pairs apart along the shorter axis.
-    Honors per-part rotation via eff_size so rotated parts don't silently overlap."""
+def _cells_covered(x, y, w, h, cell):
+    x0 = int((x - w / 2) // cell); x1 = int((x + w / 2) // cell)
+    y0 = int((y - h / 2) // cell); y1 = int((y + h / 2) // cell)
+    return [(cx, cy) for cx in range(x0, x1 + 1) for cy in range(y0, y1 + 1)]
+
+
+def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
+    """Every pair of parts whose padded bboxes might overlap. Each part is registered in
+    ALL cells its bbox covers, so a part of ANY size is compared against everything near
+    it — the ±1-neighbour grid bug (large parts overlapping unseen) cannot happen."""
+    grid = {}
+    for r in pos:
+        w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+        for c in _cells_covered(pos[r][0], pos[r][1], w, h, cell):
+            grid.setdefault(c, []).append(r)
+    seen = set()
+    for refs in grid.values():
+        for i in range(len(refs)):
+            for j in range(i + 1, len(refs)):
+                a, b = refs[i], refs[j]
+                key = (a, b) if a < b else (b, a)
+                if key not in seen:
+                    seen.add(key)
+                    yield key
+
+
+def legalize(parts, pos, pad, iters=400, angles=None):
+    """Iterative overlap removal via a correct spatial hash: push every overlapping pair
+    apart along the shorter axis until none remain (or `iters` passes). Rotation-aware."""
     angles = angles or {}
-    refs = list(pos)
     for _ in range(iters):
         moved = False
-        cell = 8.0
-        grid = {}
-        for r in refs:
-            grid.setdefault((int(pos[r][0] // cell), int(pos[r][1] // cell)), []).append(r)
-        for r in refs:
-            gx, gy = int(pos[r][0] // cell), int(pos[r][1] // cell)
-            rw, rh = eff_size(parts, r, angles.get(r, 0.0), pad)
-            for ox in (-1, 0, 1):
-                for oy in (-1, 0, 1):
-                    for s in grid.get((gx + ox, gy + oy), ()):
-                        if s <= r:
-                            continue
-                        sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
-                        dx = pos[s][0] - pos[r][0]
-                        dy = pos[s][1] - pos[r][1]
-                        oxx = (rw + sw) / 2 - abs(dx)
-                        oyy = (rh + sh) / 2 - abs(dy)
-                        if oxx > 0 and oyy > 0:
-                            moved = True
-                            if oxx <= oyy:
-                                sh_ = oxx / 2 + 0.05
-                                sgn = 1 if dx >= 0 else -1
-                                pos[s][0] += sh_ * sgn; pos[r][0] -= sh_ * sgn
-                            else:
-                                sh_ = oyy / 2 + 0.05
-                                sgn = 1 if dy >= 0 else -1
-                                pos[s][1] += sh_ * sgn; pos[r][1] -= sh_ * sgn
+        for a, b in _candidate_pairs(parts, pos, angles, pad):
+            aw, ah = eff_size(parts, a, angles.get(a, 0.0), pad)
+            bw, bh = eff_size(parts, b, angles.get(b, 0.0), pad)
+            dx = pos[b][0] - pos[a][0]; dy = pos[b][1] - pos[a][1]
+            oxx = (aw + bw) / 2 - abs(dx)
+            oyy = (ah + bh) / 2 - abs(dy)
+            if oxx > 0 and oyy > 0:
+                moved = True
+                if oxx <= oyy:
+                    s = oxx / 2 + 0.03
+                    sgn = 1 if dx >= 0 else -1
+                    pos[b][0] += s * sgn; pos[a][0] -= s * sgn
+                else:
+                    s = oyy / 2 + 0.03
+                    sgn = 1 if dy >= 0 else -1
+                    pos[b][1] += s * sgn; pos[a][1] -= s * sgn
         if not moved:
             break
 
@@ -504,25 +533,15 @@ def hpwl(parts, graph, pos):
 
 
 def count_overlaps(parts, pos, pad=0.5, angles=None):
+    """Exact overlapping-pair count via the correct spatial hash (no size blind spot)."""
     angles = angles or {}
-    refs = list(pos)
-    cell = 8.0
-    grid = {}
-    for r in refs:
-        grid.setdefault((int(pos[r][0] // cell), int(pos[r][1] // cell)), []).append(r)
     n = 0
-    for r in refs:
-        gx, gy = int(pos[r][0] // cell), int(pos[r][1] // cell)
-        rw, rh = eff_size(parts, r, angles.get(r, 0.0), pad)
-        for ox in (-1, 0, 1):
-            for oy in (-1, 0, 1):
-                for s in grid.get((gx + ox, gy + oy), ()):
-                    if s <= r:
-                        continue
-                    sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
-                    if ((rw + sw) / 2 - abs(pos[s][0] - pos[r][0]) > 0 and
-                            (rh + sh) / 2 - abs(pos[s][1] - pos[r][1]) > 0):
-                        n += 1
+    for a, b in _candidate_pairs(parts, pos, angles, pad):
+        aw, ah = eff_size(parts, a, angles.get(a, 0.0), pad)
+        bw, bh = eff_size(parts, b, angles.get(b, 0.0), pad)
+        if ((aw + bw) / 2 - abs(pos[a][0] - pos[b][0]) > 0 and
+                (ah + bh) / 2 - abs(pos[a][1] - pos[b][1]) > 0):
+            n += 1
     return n
 
 

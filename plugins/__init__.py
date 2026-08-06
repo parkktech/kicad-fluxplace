@@ -45,8 +45,8 @@ class FluxPlaceAction(pcbnew.ActionPlugin):
         pos, rot = P.place(parts, cg, topo, strategy="pack", rotate="ortho", center=center)
         before = P.hpwl(parts, cg, {r: (parts[r]["x"], parts[r]["y"]) for r in parts})
         after = P.hpwl(parts, cg, pos)
-        nmoved = IO.apply_positions(board, pos)
-        IO.apply_orientations(board, rot)
+        IO.apply_orientations(board, rot)                 # rotate first
+        nmoved = IO.apply_positions(board, pos, parts)    # then center
         xs0 = []; ys0 = []; xs1 = []; ys1 = []
         for r, (x, y) in pos.items():
             w, h = P.eff_size(parts, r, rot.get(r, 0.0), 0.0)
