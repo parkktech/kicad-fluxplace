@@ -1,0 +1,21 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "fluxplace — signal-flow placement",
+  "description": "Re-place a board by its component communication graph so routing falls out as a tree.",
+  "description_full": "fluxplace reads the board's netlist, builds a communication graph (power/ground excluded so they don't tie everything together), weights nets by criticality, and places components to minimise weighted wirelength. Clusters by schematic sheet (keeping decoupling caps on their IC), packs each cluster in signal order, bin-packs the clusters by connectivity, keeps large modules/connectors as keep-out obstacles with locked orientation, snaps small parts to orthogonal angles for cheap assembly, and shrink-wraps the board outline. Runs in the PCB editor (Tools -> External Plugins) or headless from the CLI.",
+  "identifier": "com.parkktech.fluxplace",
+  "type": "plugin",
+  "author": { "name": "Jason Ratzlaff", "contact": { "web": "https://github.com/parkktech/kicad-fluxplace" } },
+  "maintainer": { "name": "Jason Ratzlaff", "contact": { "web": "https://github.com/parkktech/kicad-fluxplace" } },
+  "license": "MIT",
+  "resources": { "homepage": "https://github.com/parkktech/kicad-fluxplace" },
+  "tags": ["placement", "autoplace", "layout", "routing", "dfm"],
+  "versions": [
+    {
+      "version": "0.1.0",
+      "status": "development",
+      "kicad_version": "8.0",
+      "download_url": "https://github.com/parkktech/kicad-fluxplace/archive/refs/tags/v0.1.0.zip"
+    }
+  ]
+}

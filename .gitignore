@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.kicad_pcb-bak
+.DS_Store
+build/
+dist/
+*.egg-info/
+*.png-bak
