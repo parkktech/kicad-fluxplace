@@ -11,8 +11,8 @@ import math
 from .graph import is_passive, kind_of
 
 
-def place(parts, graph, topo, strategy="pack", rotate="ortho", center=None, pad=0.8,
-          iters=260):
+def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=0.45,
+          iters=260, compact_gaps=False):
     """One-call placement: run a strategy, orient parts, and legalize with rotation
     accounted for. Returns (positions {ref:(x,y)}, angles {ref:deg}). Every entry point
     (CLI, GUI plugin) goes through this so nothing forgets the final legalize."""
@@ -24,13 +24,19 @@ def place(parts, graph, topo, strategy="pack", rotate="ortho", center=None, pad=
         pos = pack(parts, graph, topo, center=center, pad=pad)
     angles = orient(parts, graph, pos, mode=rotate)
     p = {r: list(v) for r, v in pos.items()}
-    # legalize to zero overlaps — guaranteed. Escalate the clearance/iterations if the
-    # iterative solver hasn't converged (rare ping-pong on tightly boxed-in parts).
-    for attempt in range(6):
-        legalize(parts, p, pad, iters=500, angles=angles)
-        if count_overlaps(parts, p, 0.0, angles) == 0:
-            break
-        _shove_remaining(parts, p, angles, pad)   # hard separation fallback
+
+    def settle():
+        for _ in range(6):
+            legalize(parts, p, pad, iters=500, angles=angles)
+            if count_overlaps(parts, p, 0.0, angles) == 0:
+                break
+            _shove_remaining(parts, p, angles, pad)
+
+    settle()
+    if compact_gaps:
+        # close whitespace while keeping connected parts together (anchors frozen)
+        compact(parts, p, angles, pad, graph=graph)
+        settle()
     return {r: (x, y) for r, (x, y) in p.items()}, angles
 
 
@@ -466,6 +472,47 @@ def _repel(parts, pos, refs, force, k, pad):
                 force[s][1] += push; force[r][1] -= push
 
 
+def _pack_dir(parts, pos, angles, pad, axis, gap=0.35, frozen=None):
+    """Shove each movable part toward the minimum along `axis` until it hits the boundary
+    or the edge of an already-placed part that overlaps it on the other axis. `frozen`
+    parts don't move but still block (so the M.2/CPU anchors hold and small parts pack
+    up against them). Preserves order along the axis; introduces no overlaps."""
+    frozen = frozen or set()
+    oaxis = 1 - axis
+    minc = min(pos[r][axis] - eff_size(parts, r, angles.get(r, 0.0), pad)[axis] / 2 for r in pos)
+    done = []
+    for r in sorted(pos, key=lambda k: pos[k][axis]):
+        if r in frozen:
+            done.append(r)
+            continue
+        rw = eff_size(parts, r, angles.get(r, 0.0), pad)
+        half = rw[axis] / 2; ohalf = rw[oaxis] / 2
+        limit = minc + half
+        for s in done:
+            sw = eff_size(parts, s, angles.get(s, 0.0), pad)
+            if abs(pos[r][oaxis] - pos[s][oaxis]) < ohalf + sw[oaxis] / 2:   # overlap on other axis
+                cand = pos[s][axis] + sw[axis] / 2 + gap + half
+                if cand > limit:
+                    limit = cand
+        pos[r][axis] = limit
+        done.append(r)
+
+
+def compact(parts, pos, angles, pad, graph=None, rounds=10, big_area=800.0):
+    """Close whitespace WITHOUT breaking connectivity. Only the TRUE anchor parts (CPU
+    module, M.2 socket — big enough to matter) are frozen where wirelength placement put
+    them, so the M.2 stays welded to the CPU it routes to. Everything else is pulled tight
+    around them by an alternating directional pack (fills corners the way gravity can't),
+    then a light gravity pass re-hugs each part to its net so routing stays short."""
+    frozen = {r for r in pos if _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] > big_area}
+    if len(frozen) == len(pos):
+        return
+    for _ in range(rounds):
+        _pack_dir(parts, pos, angles, pad, axis=0, frozen=frozen)
+        _pack_dir(parts, pos, angles, pad, axis=1, frozen=frozen)
+    legalize(parts, pos, pad, iters=200, angles=angles, frozen=frozen)
+
+
 def _cells_covered(x, y, w, h, cell):
     x0 = int((x - w / 2) // cell); x1 = int((x + w / 2) // cell)
     y0 = int((y - h / 2) // cell); y1 = int((y + h / 2) // cell)
@@ -492,10 +539,13 @@ def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
                     yield key
 
 
-def legalize(parts, pos, pad, iters=400, angles=None):
+def legalize(parts, pos, pad, iters=400, angles=None, frozen=None):
     """Iterative overlap removal via a correct spatial hash: push every overlapping pair
-    apart along the shorter axis until none remain (or `iters` passes). Rotation-aware."""
+    apart along the shorter axis until none remain (or `iters` passes). Rotation-aware.
+    `frozen` parts never move (anchors) — an overlapping movable part yields the full
+    overlap so anchors keep their position and connectivity."""
     angles = angles or {}
+    frozen = frozen or set()
     for _ in range(iters):
         moved = False
         for a, b in _candidate_pairs(parts, pos, angles, pad):
@@ -506,14 +556,18 @@ def legalize(parts, pos, pad, iters=400, angles=None):
             oyy = (ah + bh) / 2 - abs(dy)
             if oxx > 0 and oyy > 0:
                 moved = True
+                fa, fb = a in frozen, b in frozen
+                if fa and fb:
+                    continue
+                # split the correction: 0.5/0.5, or 1.0 onto the movable if the other is frozen
+                sa = 0.0 if fa else (1.0 if fb else 0.5)
+                sb = 0.0 if fb else (1.0 if fa else 0.5)
                 if oxx <= oyy:
-                    s = oxx / 2 + 0.03
-                    sgn = 1 if dx >= 0 else -1
-                    pos[b][0] += s * sgn; pos[a][0] -= s * sgn
+                    s = oxx + 0.03; sgn = 1 if dx >= 0 else -1
+                    pos[b][0] += s * sb * sgn; pos[a][0] -= s * sa * sgn
                 else:
-                    s = oyy / 2 + 0.03
-                    sgn = 1 if dy >= 0 else -1
-                    pos[b][1] += s * sgn; pos[a][1] -= s * sgn
+                    s = oyy + 0.03; sgn = 1 if dy >= 0 else -1
+                    pos[b][1] += s * sb * sgn; pos[a][1] -= s * sa * sgn
         if not moved:
             break
 
