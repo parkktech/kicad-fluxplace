@@ -39,9 +39,32 @@ routability come out of the same math. fluxplace adds the engineering judgment a
 
 | Strategy | What it does | Use when |
 |---|---|---|
-| `pack` *(default)* | Cluster → pack each cluster in signal order → bin-pack clusters by connectivity → compact. | Organized **and** compact; the everyday choice. |
-| `flux` | Pin-aware force-directed; pulls every pad to its net centroid. | Absolute densest / lowest wirelength. |
+| `build` | **The route-aware pipeline** — quadratic global solve (hub central by math) → constructive route-as-you-place builder → global-router gate → congestion feedback. Refuses to hand back an unroutable board. | **The best result.** What the GUI plugin runs. |
+| `quad` | Analytic quadratic placement + SimPL spreading alone (no router in the loop). | Fast hub-central layouts. |
+| `pack` *(CLI default)* | Cluster → pack each cluster in signal order → bin-pack clusters by connectivity → compact. | Organized **and** compact, no router. |
+| `flux` | Pin-aware force-directed; pulls every pad to its net centroid. | Legacy: dense but exiles the hub. |
 | `radial` | Hub centered, branches radiate to edge connectors. | A clean first-pass structure. |
+
+### Route-aware placement (`build`) — how it thinks
+
+It works the way an engineer does:
+
+1. **The mental map** — a quadratic solve over *pad positions* (pin offsets in the RHS;
+   the system stays linear). The hub lands at the weighted mean of everything it talks
+   to — central by math, not by pinning. Edge connectors are fixed on the perimeter;
+   big modules (CPU, M.2) are first-class movable objects that get pulled adjacent by
+   their heavy nets.
+2. **The hands** — parts commit one at a time, hub first, then always the part most
+   strongly tied to what's already down. Each part auditions spots near its map
+   position; candidates are scored by *estimating its actual traces* on a routing grid
+   (L-route congestion probes). The winner's nets are then **really routed**
+   (congestion-negotiated A*) and reserved, so later parts can't crowd out earlier
+   traces.
+3. **The gate** — an independent coarse global router (PathFinder-lite, capacity from
+   track pitch × signal layers, footprint-aware blockage, escape room at pins) routes
+   the whole board. `overflow == 0` means globally routable. If not, parts around the
+   hot cells get inflated spacing and the board re-legalizes — routability beats
+   density, always.
 
 Rotation: `ortho` (default, assembly-friendly) · `fine` (any angle, lowest wirelength) · `none`.
 
@@ -57,6 +80,7 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | Command | Purpose |
 |---|---|
 | `analyze` | Print the communication map: hub, forks, branches, lint. |
+| `route`   | Global-route the **current** placement and report congestion/overflow. |
 | `plan`    | Gather component + schematic info and write a **detailed placement plan** (markdown). |
 | `gather`  | Dump structured board facts as JSON. |
 | `place`   | Re-place and save. `--strategy pack\|flux\|radial --rotate ortho\|fine\|none --out out.kicad_pcb` |

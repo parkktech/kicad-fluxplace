@@ -28,7 +28,11 @@ def read_board(board):
         offx = cx - _mm(pos.x); offy = cy - _mm(pos.y)   # body center relative to origin
         # pad anchors, expressed relative to the BODY CENTER (so they track the body)
         pin_sum = defaultdict(lambda: [0.0, 0.0, 0])
+        drills = npads = 0
         for pad in fp.Pads():
+            npads += 1
+            if pad.GetDrillSize().x > 0:
+                drills += 1
             nn = pad.GetNetname()
             if not nn:
                 continue
@@ -48,6 +52,9 @@ def read_board(board):
             x=cx, y=cy,                 # BODY CENTER (not the footprint origin)
             off=(offx, offy),           # body-center offset from origin, for write-back
             locked=fp.IsLocked(),
+            # a couple of mounting holes don't wall off a 200-pin module: THT means
+            # a real drilled pin field (most pads drilled, or 5+ drills)
+            tht=(drills >= 5 or (npads and drills / npads > 0.5)),
             sheet=sheet.strip("/") or "root",
             pins=pins,          # {net: (dx_mm, dy_mm)} pin anchor offsets from body center
         )

@@ -24,8 +24,8 @@ class FluxPlaceAction(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "fluxplace — signal-flow placement"
         self.category = "Placement"
-        self.description = ("Re-place components by their communication graph (power "
-                            "excluded): cluster, pack, keep decaps on their IC, shrink-wrap.")
+        self.description = ("Route-aware placement: quadratic global solve (hub central), "
+                            "constructive route-as-you-place builder, global-router gate.")
         self.show_toolbar_button = True
         icon = os.path.join(_here, "icon.png")
         if os.path.exists(icon):
@@ -42,7 +42,8 @@ class FluxPlaceAction(pcbnew.ActionPlugin):
         cg = G.build(parts, nets)
         topo = T.analyze(cg)
         center = IO.board_center(board)
-        pos, rot = P.place(parts, cg, topo, strategy="pack", rotate="ortho", center=center)
+        from fluxplace import route as R
+        pos, rot, rep = P.place_routed(parts, cg, topo, center=center)
         before = P.hpwl(parts, cg, {r: (parts[r]["x"], parts[r]["y"]) for r in parts})
         after = P.hpwl(parts, cg, pos)
         IO.apply_orientations(board, rot)                 # rotate first
@@ -55,11 +56,15 @@ class FluxPlaceAction(pcbnew.ActionPlugin):
         dims = IO.shrinkwrap_outline(board, min(xs0), min(ys0), max(xs1), max(ys1))
         pcbnew.Refresh()
         pct = 100 * (before - after) / before if before else 0
+        routable = ("ROUTABLE — global router closed every net within capacity"
+                    if rep["overflow"] == 0 else
+                    f"WARNING: {rep['overflow']} congestion overflow(s) — review hotspots")
         wx.MessageBox(
-            f"Placed {nmoved} components by signal flow.\n\n"
+            f"Placed {nmoved} components (route-aware: quad + builder + global route).\n\n"
             f"Weighted wirelength: {before:.0f} → {after:.0f} mm ({pct:+.0f}%)\n"
             f"Board: {dims[0]:.0f} × {dims[1]:.0f} mm\n"
-            f"Hub: {topo.hub}   forks: {', '.join(topo.forks) or '—'}\n\n"
+            f"Hub: {topo.hub}   forks: {', '.join(topo.forks) or '—'}\n"
+            f"{routable}\n\n"
             "Review, then route. Undo (Ctrl-Z) reverts everything.",
             "fluxplace", wx.ICON_INFORMATION)
 

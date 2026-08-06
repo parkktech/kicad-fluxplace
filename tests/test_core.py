@@ -66,9 +66,54 @@ def test_hpwl_improves():
     print(f"ok  hpwl before={before:.0f} after={after:.0f}")
 
 
+def test_quad_hub_central():
+    """Quadratic placement must land the hub INSIDE its connectors' hull (the whole
+    point: force-directed exiles the hub to the periphery, quad must not)."""
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    pos, rot = P.place(parts, cg, topo, strategy="quad", rotate="ortho")
+    assert len(pos) == len(parts), "not every part placed"
+    assert P.count_overlaps(parts, pos, 0.15, angles=rot) == 0, "quad left overlaps"
+    lo_x = min(pos["J1"][0], pos["J2"][0]); hi_x = max(pos["J1"][0], pos["J2"][0])
+    assert lo_x < pos["U1"][0] < hi_x, "hub exiled outside the connector hull"
+    print("ok  quad: hub central, no overlaps")
+
+
+def test_router_gate():
+    """Global router on the quad layout: everything must route with zero overflow on
+    a tiny board, and the score must expose the gate fields."""
+    from fluxplace import route as R
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    pos, rot = P.place(parts, cg, topo, strategy="quad", rotate="ortho")
+    rep = R.score(parts, pos, cg, angles=rot)
+    assert rep["overflow"] == 0, f"tiny board must be routable, overflow={rep['overflow']}"
+    assert rep["nets"] >= 3, "expected several routed nets"
+    for n, d in rep["detour"].items():
+        assert d < 4.0, f"net {n} detours x{d:.1f} — routing is pathological"
+    print(f"ok  router: {rep['nets']} nets, overflow 0, wl {rep['wirelength']:.0f} mm")
+
+
+def test_place_routed_pipeline():
+    """The full route-aware pipeline: legal, all parts, and the routability gate."""
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    pos, rot, rep = P.place_routed(parts, cg, topo)
+    assert len(pos) == len(parts), "not every part placed"
+    assert P.count_overlaps(parts, pos, 0.15, angles=rot) == 0, "pipeline left overlaps"
+    assert rep["overflow"] == 0, "pipeline must deliver a routable placement here"
+    print("ok  place_routed: legal + routable")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
     test_placement_no_overlap()
     test_hpwl_improves()
+    test_quad_hub_central()
+    test_router_gate()
+    test_place_routed_pipeline()
     print("\nALL CORE TESTS PASSED")

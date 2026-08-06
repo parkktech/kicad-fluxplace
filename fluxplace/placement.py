@@ -12,25 +12,50 @@ from .graph import is_passive, kind_of
 
 
 def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=0.45,
-          iters=260, compact_gaps=False):
+          iters=260, compact_gaps=False, big_area=800.0):
     """One-call placement: run a strategy, orient parts, and legalize with rotation
     accounted for. Returns (positions {ref:(x,y)}, angles {ref:deg}). Every entry point
     (CLI, GUI plugin) goes through this so nothing forgets the final legalize."""
+    frozen = set()
     if strategy == "radial":
         pos = radial(parts, topo, center=center, pad=pad)
     elif strategy == "flux":
         pos = flux(parts, graph, topo, iters=iters, center=center, pad=pad)
+    elif strategy == "quad":
+        from .quadratic import quad
+        pos = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area)
+        # anchors (big modules) already sit where the math wants them — the final
+        # settle must not shove them around for the convenience of a decap
+        frozen = {r for r in pos
+                  if _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] > big_area}
     else:
         pos = pack(parts, graph, topo, center=center, pad=pad)
     angles = orient(parts, graph, pos, mode=rotate)
     p = {r: list(v) for r, v in pos.items()}
 
+    # for quad: hold the strategy's compact extent through the post-orient settle, so
+    # rotation-induced fixups resolve inward instead of ballooning the board
+    bounds = None
+    if strategy == "quad":
+        xs0 = [pos[r][0] - eff_size(parts, r, 0.0, pad)[0] / 2 for r in pos]
+        ys0 = [pos[r][1] - eff_size(parts, r, 0.0, pad)[1] / 2 for r in pos]
+        xs1 = [pos[r][0] + eff_size(parts, r, 0.0, pad)[0] / 2 for r in pos]
+        ys1 = [pos[r][1] + eff_size(parts, r, 0.0, pad)[1] / 2 for r in pos]
+        bounds = (min(xs0) - 1.0, min(ys0) - 1.0, max(xs1) + 1.0, max(ys1) + 1.0)
+
     def settle():
         for _ in range(6):
-            legalize(parts, p, pad, iters=500, angles=angles)
+            legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen, bounds=bounds)
             if count_overlaps(parts, p, 0.0, angles) == 0:
-                break
-            _shove_remaining(parts, p, angles, pad)
+                return
+            _shove_remaining(parts, p, angles, pad, frozen=frozen)
+        # last resort: anchors and bounds are advisory, zero overlap is not
+        if count_overlaps(parts, p, 0.0, angles):
+            for _ in range(6):
+                legalize(parts, p, pad, iters=500, angles=angles)
+                if count_overlaps(parts, p, 0.0, angles) == 0:
+                    return
+                _shove_remaining(parts, p, angles, pad)
 
     settle()
     if compact_gaps:
@@ -40,17 +65,101 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
     return {r: (x, y) for r, (x, y) in p.items()}, angles
 
 
-def _shove_remaining(parts, pos, angles, pad):
+def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
+                 fill=0.65, aspect=1.35, rounds=9, feedback=4):
+    """The full route-aware pipeline — placement that is not allowed to be unroutable:
+
+      quad (mental map) -> constructive builder (route-as-you-place) -> global-router
+      gate -> congestion feedback (bloat hot regions, re-legalize, re-score).
+
+    Returns (positions, angles, route_report). report['overflow'] == 0 means the
+    coarse global router closed every net within capacity — routable."""
+    from .quadratic import quad
+    from .builder import build
+    from . import route as R
+
+    prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
+                 fill=fill, aspect=aspect, rounds=rounds)
+    angles = orient(parts, graph, prior)
+    area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in parts}
+    fixed = [r for r in parts if kind_of(r)[0] == "J" and area[r] <= big_area]
+
+    pos, grid, routed = build(parts, graph, topo, prior, angles, pad=pad,
+                              fixed=fixed, big_area=big_area)
+    p = {r: list(v) for r, v in pos.items()}
+    frozen = {r for r in p if area[r] > big_area} | set(fixed)
+
+    # overlap-free by construction — but verify, never assume
+    for _ in range(4):
+        if count_overlaps(parts, p, 0.0, angles) == 0:
+            break
+        legalize(parts, p, pad, iters=400, angles=angles, frozen=frozen)
+        _shove_remaining(parts, p, angles, pad, frozen=frozen)
+
+    rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    for _ in range(feedback):
+        if rep["overflow"] == 0:
+            break
+        # inflate every part sitting on a hot cell: the legalizer then opens a
+        # corridor exactly where the router ran out of capacity. If a hot cell is
+        # walled in by frozen modules only, the smallest of them is temporarily
+        # released — a corridor between two immovable objects can't widen otherwise.
+        g = rep["grid"]
+        release = set()
+        for c in rep["hot"]:
+            hx, hy = g.cell_center(c)
+            near, movable_near = [], []
+            for r in p:
+                w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+                if abs(p[r][0] - hx) < w / 2 + g.cell and abs(p[r][1] - hy) < h / 2 + g.cell:
+                    near.append(r)
+                    if r not in frozen:
+                        movable_near.append(r)
+            for r in movable_near:
+                parts[r]["bloat"] = min(2.4, parts[r].get("bloat", 0.0) + 0.6)
+            if near and not movable_near:
+                cand = [q for q in near if q != topo.hub] or near
+                small = min(cand, key=lambda q: area[q])
+                if small == topo.hub:
+                    continue          # never move the hub to fix an edge overflow
+                release.add(small)
+                parts[small]["bloat"] = min(2.4, parts[small].get("bloat", 0.0) + 0.6)
+        legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen - release)
+        _shove_remaining(parts, p, angles, pad, frozen=frozen - release)
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    for r in parts:
+        parts[r].pop("bloat", None)
+    # the feedback moves parts — finish overlap-clean (frozen first, then free-for-all)
+    if count_overlaps(parts, p, 0.0, angles):
+        for fz in (frozen, set()):
+            for _ in range(6):
+                legalize(parts, p, pad, iters=500, angles=angles, frozen=fz)
+                if count_overlaps(parts, p, 0.0, angles) == 0:
+                    break
+                _shove_remaining(parts, p, angles, pad, frozen=fz)
+            if count_overlaps(parts, p, 0.0, angles) == 0:
+                break
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
+
+
+def _shove_remaining(parts, pos, angles, pad, frozen=None):
     """Fallback for any pair still overlapping after iterative legalize: shove them fully
     apart in one move (no half-steps), largest part holds, smaller yields."""
+    frozen = frozen or set()
     for a, b in list(_candidate_pairs(parts, pos, angles, pad)):
         aw, ah = eff_size(parts, a, angles.get(a, 0.0), pad)
         bw, bh = eff_size(parts, b, angles.get(b, 0.0), pad)
         dx = pos[b][0] - pos[a][0]; dy = pos[b][1] - pos[a][1]
         oxx = (aw + bw) / 2 - abs(dx); oyy = (ah + bh) / 2 - abs(dy)
         if oxx > 0 and oyy > 0:
-            # move the smaller-area part fully clear along the shorter overlap axis
+            # move the smaller-area part fully clear along the shorter overlap axis;
+            # a frozen part never yields (the other one takes the whole move)
             mover, aw_, ah_ = (b, bw, bh) if aw * ah >= bw * bh else (a, aw, ah)
+            if mover in frozen:
+                mover = a if mover == b else b
+                if mover in frozen:
+                    continue
             sgn_x = 1 if (pos[mover][0] - pos[a if mover == b else b][0]) >= 0 else -1
             sgn_y = 1 if (pos[mover][1] - pos[a if mover == b else b][1]) >= 0 else -1
             if oxx <= oyy:
@@ -60,8 +169,11 @@ def _shove_remaining(parts, pos, angles, pad):
 
 
 def _size(parts, r, pad=0.6):
+    """Padded keep-out size. `bloat` is per-part extra spacing set by the routability
+    feedback loop (congested regions inflate so the router gets corridors)."""
     p = parts[r]
-    return p.get("w", 2.0) + 2 * pad, p.get("h", 1.5) + 2 * pad
+    b = p.get("bloat", 0.0)
+    return p.get("w", 2.0) + 2 * (pad + b), p.get("h", 1.5) + 2 * (pad + b)
 
 
 def eff_size(parts, r, angle=0.0, pad=0.6):
@@ -145,8 +257,9 @@ def _place_orphans(parts, pos, cx, cy, pad):
         if mates:
             mx = sum(pos[m][0] for m in mates) / len(mates)
             my = sum(pos[m][1] for m in mates) / len(mates)
-            # tiny jitter so they don't stack exactly
-            pos[r] = (mx + (hash(r) % 7 - 3) * 0.6, my + (hash(r) % 5 - 2) * 0.6)
+            # tiny jitter so they don't stack exactly (stable hash: reproducible runs)
+            hh = sum(ord(ch) * 31 ** i for i, ch in enumerate(r))
+            pos[r] = (mx + (hh % 7 - 3) * 0.6, my + (hh % 5 - 2) * 0.6)
         else:
             pos[r] = (cx, cy)
 
@@ -539,15 +652,27 @@ def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
                     yield key
 
 
-def legalize(parts, pos, pad, iters=400, angles=None, frozen=None):
+def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None):
     """Iterative overlap removal via a correct spatial hash: push every overlapping pair
     apart along the shorter axis until none remain (or `iters` passes). Rotation-aware.
     `frozen` parts never move (anchors) — an overlapping movable part yields the full
-    overlap so anchors keep their position and connectivity."""
+    overlap so anchors keep their position and connectivity.
+    `bounds` = (x0, y0, x1, y1): movable parts are clamped inside after every sweep, so
+    overflow resolves inward (this is what keeps the board small instead of ballooning).
+    Clamping stops for the final third of the passes if it is fighting convergence —
+    zero overlaps beats a tidy outline."""
     angles = angles or {}
     frozen = frozen or set()
-    for _ in range(iters):
+    for it in range(iters):
         moved = False
+        if bounds and it < max(1, iters * 2 // 3):
+            x0, y0, x1, y1 = bounds
+            for r in pos:
+                if r in frozen:
+                    continue
+                w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+                pos[r][0] = max(x0 + w / 2, min(x1 - w / 2, pos[r][0]))
+                pos[r][1] = max(y0 + h / 2, min(y1 - h / 2, pos[r][1]))
         for a, b in _candidate_pairs(parts, pos, angles, pad):
             aw, ah = eff_size(parts, a, angles.get(a, 0.0), pad)
             bw, bh = eff_size(parts, b, angles.get(b, 0.0), pad)

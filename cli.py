@@ -33,8 +33,14 @@ def cmd_place(a):
     cg = G.build(parts, nets, a.big_fanout)
     topo = T.analyze(cg, prefer_hub=a.hub)
     center = IO.board_center(board) if a.center_board else (0.0, 0.0)
-    pos, rot = P.place(parts, cg, topo, strategy=a.strategy, rotate=a.rotate,
-                       center=center, pad=a.pad, iters=a.iters)
+    rep = None
+    if a.strategy == "build":
+        from fluxplace import route as R
+        pos, rot, rep = P.place_routed(parts, cg, topo, center=center, pad=a.pad)
+        print(R.summary(rep))
+    else:
+        pos, rot = P.place(parts, cg, topo, strategy=a.strategy, rotate=a.rotate,
+                           center=center, pad=a.pad, iters=a.iters)
     before = P.hpwl(parts, cg, {r: (parts[r]["x"], parts[r]["y"]) for r in parts})
     after = P.hpwl(parts, cg, pos)
     IO.apply_orientations(board, rot, skip_locked=not a.move_locked)   # rotate first
@@ -90,6 +96,15 @@ def cmd_eval(a):
     print(f"overlapping pairs (pad {a.pad}mm): {ov}")
 
 
+def cmd_route(a):
+    from fluxplace import route as R
+    _, parts, nets, _ = _load(a.board)
+    cg = G.build(parts, nets, a.big_fanout)
+    pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
+    rep = R.score(parts, pos, cg)
+    print(R.summary(rep))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -103,7 +118,7 @@ def main(argv=None):
     pp = sub.add_parser("place")
     pp.add_argument("--board", required=True)
     pp.add_argument("--out", default=None)
-    pp.add_argument("--strategy", choices=["radial", "flux", "pack"], default="pack",
+    pp.add_argument("--strategy", choices=["radial", "flux", "pack", "quad", "build"], default="pack",
                     help="pack=hierarchical (organized+compact, default); flux=force-directed; radial")
     pp.add_argument("--rotate", choices=["none", "ortho", "fine"], default="ortho",
                     help="ortho=snap 0/90/180/270 (assembly-friendly); fine=any angle")
@@ -119,13 +134,17 @@ def main(argv=None):
     pl = sub.add_parser("plan", help="gather info + write a detailed placement plan")
     pl.add_argument("--board", required=True)
     pl.add_argument("--out", default=None, help="write markdown to a file (else stdout)")
-    pl.add_argument("--strategy", choices=["radial", "flux", "pack"], default="pack")
+    pl.add_argument("--strategy", choices=["radial", "flux", "pack", "quad", "build"], default="pack")
     pl.add_argument("--rotate", choices=["none", "ortho", "fine"], default="ortho")
     pl.set_defaults(fn=cmd_plan)
 
     pg = sub.add_parser("gather", help="dump structured board facts as JSON")
     pg.add_argument("--board", required=True)
     pg.set_defaults(fn=cmd_gather)
+
+    pr = sub.add_parser("route", help="global-route the current placement, report congestion")
+    pr.add_argument("--board", required=True)
+    pr.set_defaults(fn=cmd_route)
 
     pe = sub.add_parser("eval"); pe.add_argument("--board", required=True)
     pe.add_argument("--pad", type=float, default=0.5)
