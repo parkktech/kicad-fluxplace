@@ -201,6 +201,47 @@ def cmd_fab(a):
     print(f"DRC {res['drc']}; package at {res['out']}")
 
 
+def cmd_auto(a):
+    """The 'magic' endpoint: board in -> PLACE -> ROUTE -> FAB -> review-ready package.
+    Each stage is logged with its verdict; the router is pluggable (KRT by default)."""
+    import os, subprocess, time
+    from fluxplace import fab
+    os.makedirs(a.out, exist_ok=True)
+    placed = os.path.join(a.out, "placed.kicad_pcb")
+    routed = os.path.join(a.out, "routed.kicad_pcb")
+
+    # ---- [1] PLACE (route-aware, escape-aware) ------------------------------------
+    board, parts, nets, IO = _load(a.board)
+    cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
+    t0 = time.time()
+    pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board), pad=a.pad)
+    IO.apply_orientations(board, rot, skip_locked=True)
+    IO.apply_positions(board, pos, parts, skip_locked=True)
+    IO.save(board, placed)
+    print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
+
+    # ---- [2] ROUTE (KRT route-fresh; ripping+rerouting keeps GND planes) -----------
+    t0 = time.time()
+    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
+           placed, routed, "--force-reroute", "--layers", *a.layers,
+           "--track-width", str(a.track), "--clearance", str(a.clearance),
+           "--via-size", "0.6", "--via-drill", "0.3"]
+    r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
+                       timeout=a.route_timeout)
+    src = routed if os.path.exists(routed) else placed
+    print(f"[2/3] routed via {os.path.basename(a.router_py)}  "
+          f"({'ok' if os.path.exists(routed) else 'router produced no board — using placement'})"
+          f"  ({time.time()-t0:.0f}s)")
+
+    # ---- [3] FAB -------------------------------------------------------------------
+    res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    verdict = res["drc"]
+    print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"
+          + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
+             if res.get("violations") is not None else ""))
+    print(f"AUTO complete: {a.out}/fab  ({verdict})")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -264,6 +305,19 @@ def main(argv=None):
     pf.add_argument("--out", required=True)
     pf.add_argument("--kicad-cli", default="kicad-cli")
     pf.set_defaults(fn=cmd_fab)
+
+    pau = sub.add_parser("auto", help="board in -> place -> route -> fab package out")
+    pau.add_argument("--board", required=True)
+    pau.add_argument("--out", required=True)
+    pau.add_argument("--pad", type=float, default=0.45)
+    pau.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    pau.add_argument("--track", type=float, default=0.2)
+    pau.add_argument("--clearance", type=float, default=0.2)
+    pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
+    pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    pau.add_argument("--route-timeout", type=int, default=1800)
+    pau.add_argument("--kicad-cli", default="kicad-cli")
+    pau.set_defaults(fn=cmd_auto)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
