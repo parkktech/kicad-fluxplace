@@ -238,6 +238,29 @@ def cmd_auto(a):
           f"({'ok' if ok else 'router produced no board — fabbing the placement'})"
           f"  ({time.time()-t0:.0f}s)")
 
+    # ---- [2b] ANNEAL: finish the stragglers automatically (no hand-routing) ---------
+    # route -> DRC -> step the still-stalled SIGNAL nets down the fine-pitch ladder and
+    # re-route; rails keep ampacity width. Then emit local .kicad_dru so the fine escape
+    # copper is DRC-legal (bulk stays conservative).
+    if ok and a.finish:
+        from fluxplace import adaptive as AD, escape as ESC
+        annealed = os.path.join(a.out, "annealed.kicad_pcb")
+        pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
+        rf = AD.krt_route_fn(a.router_py, a.router_dir, a.layers,
+                             power_nets=list(pw) or None,
+                             power_widths=[max(a.track, w * a.track) for w in pw.values()] or None,
+                             timeout=a.route_timeout)
+        t0 = time.time()
+        src, summ = AD.route_adaptive(src, annealed, rf, cg, kicad_cli=a.kicad_cli,
+                                      start_mm=a.clearance, floor_mm=a.floor)
+        d, _u = AD.drc_unrouted(src, a.kicad_cli)
+        zones = ESC.detect_escape_zones(parts, d)
+        open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, a.floor, a.floor))
+        print(f"[2b] anneal: {summ['final_unrouted']} unrouted after step-down "
+              f"{[r['width'] for r in summ['rounds']]}  ({time.time()-t0:.0f}s)"
+              + ("  — CLOSED 100%" if summ["closed"] else
+                 f"  — {len(zones)} zones need via-in-pad fanout" if zones else ""))
+
     # ---- [3] FAB -------------------------------------------------------------------
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
     verdict = res["drc"]
@@ -321,8 +344,11 @@ def main(argv=None):
     pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     pau.add_argument("--route-timeout", type=int, default=1800)
+    pau.add_argument("--floor", type=float, default=0.1, help="fine-pitch escape floor (mm)")
+    pau.add_argument("--no-finish", dest="finish", action="store_false",
+                     help="skip the adaptive step-down anneal (one route pass only)")
     pau.add_argument("--kicad-cli", default="kicad-cli")
-    pau.set_defaults(fn=cmd_auto)
+    pau.set_defaults(fn=cmd_auto, finish=True)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
