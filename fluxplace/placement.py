@@ -77,7 +77,7 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
 
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
-                 shrink=True, decaps=True):
+                 shrink=True, decaps=True, jitter_seed=0):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
@@ -93,9 +93,11 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=fill, aspect=aspect, rounds=rounds)
 
     locked = {r for r in parts if parts[r].get("locked")}
+    if jitter_seed:
+        prior = _jitter(prior, jitter_seed, locked)     # tournament candidate diversity
     best = None
     for s in range(max(1, seeds)):
-        pr = prior if s == 0 else _jitter(prior, s, locked)
+        pr = prior if s == 0 else _jitter(prior, s + jitter_seed, locked)
         p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
                                                 big_area, feedback)
         ov = count_overlaps(parts, p, 0.0, angles)
