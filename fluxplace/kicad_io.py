@@ -138,6 +138,39 @@ def board_center(board):
     return _mm(bb.GetCenter().x), _mm(bb.GetCenter().y)
 
 
+def signal_layers(board):
+    """Auto-detect the copper layers available for SIGNAL routing = every enabled copper
+    layer minus those that are a poured PLANE (a large zone, i.e. a GND/PWR pour). Outer
+    layers (F/B) are always signal. So the user never has to know the stackup:
+      4-layer GND/PWR-plane carrier -> [F.Cu, B.Cu]
+      6-layer sig/gnd/sig/sig/gnd/sig -> [F.Cu, In2.Cu, In3.Cu, B.Cu]"""
+    names = [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()]
+    bb = board.GetBoundingBox()
+    barea = (bb.GetWidth() * bb.GetHeight()) or 1
+    plane = set()
+    for z in board.Zones():
+        if hasattr(z, "GetIsRuleArea") and z.GetIsRuleArea():
+            continue
+        zb = z.GetBoundingBox()
+        if zb.GetWidth() * zb.GetHeight() > 0.4 * barea:      # a board-spanning pour = plane
+            for l in z.GetLayerSet().CuStack():
+                nm = board.GetLayerName(l)
+                if nm not in ("F.Cu", "B.Cu"):                # outer layers stay signal
+                    plane.add(nm)
+    sig = [n for n in names if n not in plane]
+    return sig or ["F.Cu", "B.Cu"]
+
+
+def default_rules(board):
+    """(track_mm, clearance_mm) from the board's default netclass — so the conservative
+    bulk rule comes from the board, not a guess. Falls back to 0.2/0.2."""
+    try:
+        nc = board.GetDesignSettings().GetDefault()
+        return (_mm(nc.GetTrackWidth()) or 0.2, _mm(nc.GetClearance()) or 0.2)
+    except Exception:
+        return (0.2, 0.2)
+
+
 def shrinkwrap_outline(board, x0_mm, y0_mm, x1_mm, y1_mm, margin=2.0):
     """Delete existing Edge.Cuts and draw a tight rectangle around the given placement
     bounds (mm). Caller supplies bounds from the placement — this is what makes the

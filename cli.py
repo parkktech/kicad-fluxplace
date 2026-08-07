@@ -223,17 +223,24 @@ def cmd_auto(a):
 
     # ---- [2] ROUTE — route-fresh-per-rung + fanout-aware finisher (universal) --------
     from fluxplace import adaptive as AD, escape as ESC
+    # AUTO-DETECT so an end user needs no stackup/rule knowledge: signal layers = copper
+    # minus poured planes; bulk track/clearance = the board's own default netclass.
+    layers = a.layers or IO.signal_layers(board)
+    dtrack, dclr = IO.default_rules(board)
+    track = a.track if a.track is not None else dtrack
+    clr = a.clearance if a.clearance is not None else dclr
+    print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  floor={a.floor}mm")
     t0 = time.time()
     pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
-    route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, a.layers,
-                                     base_w=a.track, base_c=a.clearance,
+    route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
+                                     base_w=track, base_c=clr,
                                      power_nets=list(pw) or None,
-                                     power_widths=[max(a.track, w * a.track) for w in pw.values()] or None,
+                                     power_widths=[max(track, w * track) for w in pw.values()] or None,
                                      timeout=a.route_timeout)
-    fanout = None if a.no_fanout else AD.krt_fanout(a.router_py, a.router_dir, a.layers,
+    fanout = None if a.no_fanout else AD.krt_fanout(a.router_py, a.router_dir, layers,
                                                     track_w=a.floor, clearance=a.floor)
     src, summ = AD.route_adaptive(placed, a.out, route_fresh, cg, parts,
-                                  kicad_cli=a.kicad_cli, start_mm=a.clearance,
+                                  kicad_cli=a.kicad_cli, start_mm=clr,
                                   floor_mm=a.floor, fanout=(fanout if a.finish else None),
                                   log=lambda m: print("   " + m))
     # local fine-pitch .kicad_dru so the escape copper is DRC-legal (bulk stays 0.2mm)
@@ -328,9 +335,12 @@ def main(argv=None):
     pau.add_argument("--board", required=True)
     pau.add_argument("--out", required=True)
     pau.add_argument("--pad", type=float, default=0.45)
-    pau.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
-    pau.add_argument("--track", type=float, default=0.2)
-    pau.add_argument("--clearance", type=float, default=0.2)
+    pau.add_argument("--layers", nargs="+", default=None,
+                     help="signal layers (default: auto-detect = copper minus poured planes)")
+    pau.add_argument("--track", type=float, default=None,
+                     help="bulk track width mm (default: board's default netclass)")
+    pau.add_argument("--clearance", type=float, default=None,
+                     help="bulk clearance mm (default: board's default netclass)")
     pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     pau.add_argument("--route-timeout", type=int, default=1800)
