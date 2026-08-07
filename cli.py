@@ -425,11 +425,30 @@ def cmd_auto(a):
     for lvl, code, msg in fchecks:
         print(f"    fab-profile {lvl} {code}: {msg}")
         verdict = "REVIEW"
+    # SI-lite: diff-pair intra-pair skew on the routed copper (report-only)
+    from fluxplace import si as SI
+    from fluxplace.graph import diff_pairs
+    dpairs = {s: m for s, m in diff_pairs(
+        {n: len(v) for n, v in cg.signal_nets.items()}).items()
+        if m in cg.signal_nets}
+    schecks, stable = (SI.check_board(src, dpairs) if dpairs else ([], []))
+    if dpairs:
+        worst = max((r[4] for r in stable), default=0.0)
+        print(f"    si-lite: {len(stable)} routed diff pairs, worst skew {worst:.2f}mm, "
+              f"{len(schecks)} finding(s)")
+        for lvl, code, msg in schecks:
+            print(f"    si-lite {lvl} {code}: {msg}")
     try:
         with open(os.path.join(a.out, "fab", "MANIFEST.txt"), "a") as mf:
             mf.write(f"\nfab profile: {a.profile}\n{fsummary}\n")
             for lvl, code, msg in fchecks:
                 mf.write(f"{lvl} {code}: {msg}\n")
+            if dpairs:
+                mf.write(f"\nsi-lite diff-pair skew (P/N routed mm | skew):\n")
+                for m, s, lm, ls, sk in stable:
+                    mf.write(f"  {m} / {s}: {lm:.1f} / {ls:.1f} | {sk:.2f}\n")
+                for lvl, code, msg in schecks:
+                    mf.write(f"{lvl} {code}: {msg}\n")
     except OSError:
         pass
     print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"

@@ -374,6 +374,23 @@ def test_candidate_selection():
     print("ok  candidates: DRC-best selection (unrouted, violations, base)")
 
 
+def test_si_pair_skew():
+    """SI-lite: intra-pair skew beyond the limit warns; matched pairs pass;
+    a half-routed pair reports UNROUTED_PAIR, never a bogus skew."""
+    from fluxplace.si import pair_skew_findings
+    lengths = {"USB_DP": 52.0, "USB_DM": 51.6,          # matched
+               "PCIE_TX_P": 80.0, "PCIE_TX_N": 84.5,    # 4.5mm skew
+               "ETH_P": 30.0}                            # N side unrouted
+    pairs = {"USB_DM": "USB_DP", "PCIE_TX_N": "PCIE_TX_P", "ETH_N": "ETH_P"}
+    findings, table = pair_skew_findings(lengths, pairs, warn_mm=1.0)
+    codes = sorted(c for _, c, _ in findings)
+    assert codes == ["PAIR_SKEW", "UNROUTED_PAIR"], findings
+    assert any("PCIE_TX_P/PCIE_TX_N: 4.50mm" in m for _, c, m in findings
+               if c == "PAIR_SKEW"), findings
+    assert len(table) == 2 and all(len(r) == 5 for r in table)
+    print("ok  si-lite: pair skew warns, matched passes, unrouted flagged")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -393,4 +410,5 @@ if __name__ == "__main__":
     test_channel_cut_and_open()
     test_adaptive_fanout_priority()
     test_candidate_selection()
+    test_si_pair_skew()
     print("\nALL CORE TESTS PASSED")

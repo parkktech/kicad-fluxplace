@@ -175,7 +175,7 @@ verification. Mapping to fluxplace, with status:
 | Constraints | net-aware widths/clearances, per-net step-down floor | 🔶 partial — no impedance/length-match ingest; needs YAML/netclass front-end |
 | Review & submit | fab package (gerbers/drill/P&P/DRC/MANIFEST) + diagnosis verdict | ✅ shipped; report could add per-stage summary + candidates table |
 | Parallel candidates | `auto --candidates N --parallel M`, DRC-best wins | ✅ shipped (validation pending on dig) |
-| Physics verification | DRC + real routed-% only | 🔶 gap — add SI-lite checks: diff-pair gap/uncoupled length, stackup-aware impedance rules, length-match assertions via kicad-cli custom rules |
+| Physics verification | DRC + routed-% + SI-lite v1 (fluxplace/si.py: diff-pair intra-pair skew at the fab gate, MANIFEST table) | 🔶 v1 shipped — next: uncoupled length, impedance rules, length-match classes |
 | Learned generator (RL) | deterministic generator + jittered population | deliberate non-goal for now — candidates + verifier captures most of the value at our scale |
 
 Priority order for the remaining gaps: (1) fab profiles, (2) constraint ingest
