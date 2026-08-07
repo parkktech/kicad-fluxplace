@@ -288,9 +288,26 @@ def cmd_auto_candidates(a):
 
 def cmd_preflight(a):
     """Upload-gate check: would a downstream parser (fab, assembly, another EDA
-    tool) reject this board? Prints findings; exits 1 on any FAIL."""
+    tool) reject this board? Prints findings; exits 1 on any FAIL. With --sch,
+    also cross-checks schematic pins against board pads (pin/pad parity)."""
+    import subprocess, tempfile
     board, parts, nets, IO = _load(a.board)
-    findings = IO.preflight(board)
+    findings = list(IO.preflight(board))
+    if a.sch:
+        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
+            xml = tf.name
+        r = subprocess.run([a.kicad_cli, "sch", "export", "netlist",
+                            "--format", "kicadxml", "--output", xml, a.sch],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            for ref, miss in sorted(IO.pin_pad_parity(board, xml).items()):
+                findings.append(("FAIL", "SCH_PIN_NO_PAD",
+                                 f"{ref}: schematic pin(s) {miss} have no pad on the "
+                                 f"footprint — 'pins not on the board' to a strict parser"))
+        else:
+            findings.append(("WARN", "NETLIST_EXPORT_FAILED",
+                             (r.stderr or "kicad-cli netlist export failed").strip()[:200]))
+        os.unlink(xml)
     for lvl, code, msg in findings:
         print(f"{lvl}  {code}: {msg}")
     if not findings:
@@ -464,6 +481,9 @@ def main(argv=None):
     ppre = sub.add_parser("preflight",
                           help="parse-level sanity: outline, pads on-board, pos-file parity")
     ppre.add_argument("--board", required=True)
+    ppre.add_argument("--sch", default=None,
+                      help="root schematic: also cross-check sch pins vs board pads")
+    ppre.add_argument("--kicad-cli", default="kicad-cli")
     ppre.set_defaults(fn=cmd_preflight)
 
     pau = sub.add_parser("auto", help="board in -> place -> route -> fab package out")

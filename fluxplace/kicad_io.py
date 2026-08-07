@@ -229,7 +229,31 @@ def preflight(board):
             out.append(("WARN", "POS_EXCLUDED_NETTED",
                         f"{ref}: {netted} netted pin(s) but excluded from position "
                         f"files — pos-driven parsers treat it as not-on-board"))
+        ec = sum(1 for g in fp.GraphicalItems()
+                 if g.GetLayer() == pcbnew.Edge_Cuts)
+        if ec:
+            out.append(("FAIL", "FP_EDGE_CUTS",
+                        f"{ref}: {ec} Edge.Cuts segment(s) drawn by the footprint — "
+                        f"a closed interior loop parses as a board CUTOUT, putting "
+                        f"every pad inside it off-board (card-edge templates like "
+                        f"Connector_PCBEdge do this; move them to Dwgs.User)"))
     return out
+
+
+def pin_pad_parity(board, netlist_xml):
+    """Cross-check the schematic netlist (kicadxml path) against the board: for each
+    component, schematic pins that have NO pad on its footprint. A strict parser
+    ('pins not on the board') or KiCad's own parity checker rejects these. Returns
+    {ref: [missing_pin, ...]}."""
+    import xml.etree.ElementTree as ET
+    comp_pins = {}
+    for net in ET.parse(netlist_xml).getroot().iter('net'):
+        for node in net.iter('node'):
+            comp_pins.setdefault(node.get('ref'), set()).add(node.get('pin'))
+    fps = {f.GetReference(): {p.GetPadName() for p in f.Pads()}
+           for f in board.GetFootprints()}
+    return {r: sorted(p - fps[r]) for r, p in comp_pins.items()
+            if r in fps and p - fps[r]}
 
 
 def parts_extent(parts, pos, angles, eff_size):
