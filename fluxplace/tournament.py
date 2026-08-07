@@ -138,8 +138,11 @@ def _ses_metrics(ses_path, log_path, routable):
 
 
 def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
-        place_jobs=2):
-    """Full tournament. Orchestration only — no pcbnew in this process."""
+        place_jobs=2, resume=False, oit=None):
+    """Full tournament. Orchestration only — no pcbnew in this process.
+    `resume`: reuse existing cand_*.json / .ses; adopt orphaned live JVMs.
+    `oit`: freerouting optimization-improvement threshold (%) — caps the silent
+    post-routing optimizer phase that otherwise runs for an hour per candidate."""
     os.makedirs(workdir, exist_ok=True)
     cands = candidates or CANDIDATES
 
@@ -154,7 +157,8 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=dict(os.environ))
 
-    pending = list(enumerate(cands))
+    pending = [(i, c) for i, c in enumerate(cands)
+               if not (resume and os.path.exists(os.path.join(workdir, f"cand_{i}.json")))]
     procs = []
     while pending or procs:
         while pending and len(procs) < place_jobs:
@@ -179,39 +183,62 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
             results.append(json.load(open(mp)))
 
     # ---- stage 2: freerouting the survivors, bounded concurrency ----
-    queue = [r for r in results if r.get("status") == "queued"]
+    def finish(r):
+        i = r["idx"]
+        met = _ses_metrics(os.path.join(workdir, f"cand_{i}.ses"),
+                           os.path.join(workdir, f"cand_{i}.frlog"),
+                           set(r.get("routable", [])))
+        r.update(met, status="routed")
+        log(f"cand {i}: unrouted={met['unrouted']} vias={met['vias']} "
+            f"wl={met['wl']}mm")
+
+    queue, external = [], []
+    for r in results:
+        if r.get("status") != "queued":
+            continue
+        i = r["idx"]
+        if resume and os.path.exists(os.path.join(workdir, f"cand_{i}.ses")):
+            finish(r)                       # already routed in a prior run
+        elif resume and subprocess.run(["pgrep", "-f", f"java .*cand_{i}\\.dsn"],
+                                       capture_output=True).returncode == 0:
+            external.append(r)              # adopt an orphaned live JVM
+            log(f"cand {i}: adopting live external JVM")
+        else:
+            queue.append(r)
+
     running = []
-    while queue or running:
+    while queue or running or external:
         while queue and len(running) < jobs:
             r = queue.pop(0)
             i = r["idx"]
+            cmd = ["java", "-jar", jar,
+                   "-de", os.path.join(workdir, f"cand_{i}.dsn"),
+                   "-do", os.path.join(workdir, f"cand_{i}.ses"),
+                   "-mp", str(passes)]
+            if oit is not None:
+                cmd += ["-oit", str(oit)]
             proc = subprocess.Popen(
-                ["java", "-jar", jar,
-                 "-de", os.path.join(workdir, f"cand_{i}.dsn"),
-                 "-do", os.path.join(workdir, f"cand_{i}.ses"),
-                 "-mp", str(passes)],
-                stdout=open(os.path.join(workdir, f"cand_{i}.frlog"), "w"),
+                cmd, stdout=open(os.path.join(workdir, f"cand_{i}.frlog"), "w"),
                 stderr=subprocess.STDOUT)
-            r["_t0"] = time.time()
             running.append((proc, r))
-            log(f"cand {i}: freerouting started")
+            log(f"cand {r['idx']}: freerouting started")
         time.sleep(5)
+        for r in list(external):
+            i = r["idx"]
+            alive = subprocess.run(["pgrep", "-f", f"java .*cand_{i}\\.dsn"],
+                                   capture_output=True).returncode == 0
+            if not alive:
+                external.remove(r)
+                finish(r)
         for proc, r in list(running):
             if proc.poll() is None:
                 continue
             running.remove((proc, r))
-            i = r["idx"]
-            met = _ses_metrics(os.path.join(workdir, f"cand_{i}.ses"),
-                               os.path.join(workdir, f"cand_{i}.frlog"),
-                               set(r.get("routable", [])))
-            r.update(met, status="routed",
-                     route_secs=round(time.time() - r.pop("_t0"), 0))
-            log(f"cand {i}: unrouted={met['unrouted']} vias={met['vias']} "
-                f"wl={met['wl']}mm ({r['route_secs']:.0f}s)")
+            finish(r)
 
     # ---- stage 3: fitness + winner + calibration snapshot ----
     routed = [r for r in results if r.get("status") == "routed"
-              and r.get("unrouted") is not None]
+              and r.get("unrouted") is not None and r.get("wires", 0) > 0]
     winner = None
     if routed:
         routed.sort(key=lambda r: (r["unrouted"], r["vias"], r["wl"]))

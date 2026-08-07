@@ -188,7 +188,8 @@ def cmd_tournament(a):
     if not jar or not os.path.exists(jar):
         print("need --jar or $FREEROUTING_JAR (freerouting 2.2.4+)")
         return
-    results, winner = TN.run(a.board, jar, a.workdir, passes=a.passes, jobs=a.jobs)
+    results, winner = TN.run(a.board, jar, a.workdir, passes=a.passes, jobs=a.jobs,
+                             resume=a.resume, oit=a.oit)
     if winner and a.apply_winner:
         ok, out = TN.import_winner(a.workdir, winner["idx"])
         print(f"winner copper imported: {out} (ok={ok})")
@@ -303,6 +304,10 @@ def main(argv=None):
     pt.add_argument("--passes", type=int, default=25)
     pt.add_argument("--jobs", type=int, default=3)
     pt.add_argument("--apply-winner", action="store_true")
+    pt.add_argument("--resume", action="store_true",
+                    help="reuse existing candidate boards/sessions; adopt live JVMs")
+    pt.add_argument("--oit", type=float, default=None,
+                    help="freerouting optimizer improvement threshold %% (caps the silent optimizer)")
     pt.set_defaults(fn=cmd_tournament)
 
     pf = sub.add_parser("fab", help="emit gerbers/drill/place/DRC package for review")

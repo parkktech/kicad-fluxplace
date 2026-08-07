@@ -43,6 +43,19 @@
   rules problem, NOT placement. With 0.127/0.127 the same nets route (38 left by
   pass 4 vs 122 stuck). Moral: netclasses must be set before judging placement.
 
+## Tournament #1 results (2026-08-06/07, RAZOR CM5)
+- 12 candidates, all passed the gate at overflow 0; 9 full freerouting sessions.
+- WINNER: fill 0.72 / aspect 1.35 / pad 0.6 — 41/444 unrouted, 302 vias, 3463mm.
+- All unrouted signals = the two DRC-broken provisional footprints, every time.
+- CALIBRATION: truth rank != gate rank (gate #1 -> truth #4; truth #1 was gate #4).
+  Truth rewards looser spacing (pad 0.6 won despite worst gate wirelength): the
+  gate over-values wirelength, under-values elbow room -> consider scoring util
+  headroom, or drop pitch to 0.30 so capacity reads tighter.
+- OPS lessons: freerouting settings live in freerouting.json (optimizer.max_passes
+  100 @ 0.01% = silent hour-long phase; cap to 8 @ 1.0%); -oit CLI flag is ignored;
+  SIGTERM does NOT save the session; via 0.5/0.3 packs tighter than JLC's 0.254
+  hole-to-copper -> use via_diameter 0.6 in classes for autoroute runs.
+
 ## Next ideas (in rough priority)
 1. Decap swaps (displace lighter parts) for the remaining slot-starved 21.
 2. Escape-aware candidate scoring (pin rows facing walls).
