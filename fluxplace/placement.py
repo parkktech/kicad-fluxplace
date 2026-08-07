@@ -696,9 +696,11 @@ def _size(parts, r, pad=0.6):
     clear of neighbours yet the board still legalizes to true zero overlap."""
     p = parts[r]
     b = p.get("bloat", 0.0)
-    if pad > 1e-9:
-        b += p.get("escape", 0.0)
-    return p.get("w", 2.0) + 2 * (pad + b), p.get("h", 1.5) + 2 * (pad + b)
+    ex = ey = 0.0
+    if pad > 1e-9:                          # halo is spacing only, never in the overlap test
+        esc = p.get("escape", 0.0)
+        ex, ey = esc if isinstance(esc, (tuple, list)) else (esc, esc)
+    return p.get("w", 2.0) + 2 * (pad + b + ex), p.get("h", 1.5) + 2 * (pad + b + ey)
 
 
 def eff_size(parts, r, angle=0.0, pad=0.6):

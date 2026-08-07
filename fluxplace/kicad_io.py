@@ -8,6 +8,21 @@ def _mm(nm):
     return nm / 1e6
 
 
+def _escape_halo(padxy, cx, cy, pitch, npads):
+    """Per-axis fanout room (ex, ey) for a fine-pitch part: a pad on a left/right edge
+    (|dx|>=|dy|) escapes in X, a top/bottom pad in Y. Room scales with pins-per-side on
+    that axis, capped. (0,0) for coarse parts."""
+    if pitch > 0.55 or npads < 8:
+        return (0.0, 0.0)
+    nx = ny = 0
+    for (px, py) in padxy:
+        if abs(px - cx) >= abs(py - cy):
+            nx += 1
+        else:
+            ny += 1
+    return (min(1.6, 0.3 + 0.03 * nx), min(1.6, 0.3 + 0.03 * ny))
+
+
 def read_board(board):
     """Return (parts, nets).
     parts: {ref: {value, footprint, w, h, x, y, locked}}
@@ -77,10 +92,14 @@ def read_board(board):
             tht=(drills >= 5 or (npads and drills / npads > 0.5)),
             sheet=sheet.strip("/") or "root",
             pitch=pitch,        # min pad centre spacing (mm); <=0.5 => fine-pitch escape
-            # escape halo: extra keep-clear reserved around a fine-pitch part so the
-            # placer leaves its fanout corridor open (peripheral parts route at bulk
-            # width if not crowded). Scales with pin count, capped. 0 for coarse parts.
-            escape=(min(1.6, 0.3 + 0.03 * npads) if (pitch <= 0.55 and npads >= 8) else 0.0),
+            # ANISOTROPIC escape halo (ex, ey): reserve fanout room on the axis the pins
+            # actually escape — a pad on a left/right edge escapes in X, a top/bottom pad
+            # in Y. So a rectangular TSSOP reserves room off its long (pin) sides, not its
+            # ends; an LQFP reserves ~equally. Added as spacing only (pad>0). Because the
+            # builder's rotation audition is router-scored, an anisotropic halo also makes
+            # it PREFER orientations that face the dense pin bank into open space — i.e.
+            # orientation-awareness falls out for free. 0 for coarse parts.
+            escape=_escape_halo(padxy, cx, cy, pitch, npads),
             pins=pins,          # {net: (dx_mm, dy_mm)} pin anchor offsets from body center
         )
         for nn in pins:
