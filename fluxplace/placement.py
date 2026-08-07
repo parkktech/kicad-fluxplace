@@ -112,6 +112,8 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     if shrink and rep["overflow"] == 0:
         p, angles, rep = _shrink_pass(parts, graph, topo, p, angles, frozen, pad, R)
     if rep["overflow"] == 0:
+        p, rep = _compact_gated(parts, graph, p, angles, frozen, pad, R, rep)
+    if rep["overflow"] == 0:
         p, rep = _flush_connectors(parts, graph, p, angles, pad, R, rep, big_area)
     if rep["overflow"] == 0:
         angles, rep = _orient_refine(parts, graph, p, angles, pad, R, rep)
@@ -448,6 +450,67 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
     return best[0], angles, best[1]
 
 
+def _clear_of(parts, angles, pad, done, pos, r, x, y):
+    """True if part r at (x,y) clears every already-placed part in `done` (same copper
+    side; THT pierces both). The AABB test the packer probes along each inward ray."""
+    w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+    rside, rtht = parts[r].get("side", "F"), parts[r].get("tht")
+    for s in done:
+        if rside != parts[s].get("side", "F") and not rtht and not parts[s].get("tht"):
+            continue
+        sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
+        if abs(x - pos[s][0]) < (w + sw) / 2 and abs(y - pos[s][1]) < (h + sh) / 2:
+            return False
+    return True
+
+
+def _compact_to_center(parts, pos, angles, pad, frozen):
+    """Pull every part inward toward the placement centroid until it touches the parts
+    already settled there — closing whitespace the way the corner-gravity pack can't
+    WITHOUT lengthening nets (parts converge on the hub, where their net-mates already
+    are). Frozen anchors seed the settled set; the nearest movable parts pack first, so
+    the board grows outward from the centre as a dense disc. No overlaps introduced."""
+    import math as _m
+    cx = sum(pos[r][0] for r in pos) / len(pos)
+    cy = sum(pos[r][1] for r in pos) / len(pos)
+    done = [r for r in pos if r in frozen]
+    movable = sorted((r for r in pos if r not in frozen),
+                     key=lambda r: (pos[r][0] - cx) ** 2 + (pos[r][1] - cy) ** 2)
+    for r in movable:
+        x, y = pos[r]
+        dx, dy = cx - x, cy - y
+        dist = _m.hypot(dx, dy)
+        if dist < 1e-6 or not _clear_of(parts, angles, pad, done, pos, r, x, y):
+            done.append(r)
+            continue
+        ux, uy = dx / dist, dy / dist
+        lo, hi = 0.0, dist                         # t=0 is clear; find the largest clear t
+        for _ in range(18):
+            mid = (lo + hi) / 2
+            if _clear_of(parts, angles, pad, done, pos, r, x + ux * mid, y + uy * mid):
+                lo = mid
+            else:
+                hi = mid
+        pos[r] = [x + ux * lo, y + uy * lo]
+        done.append(r)
+
+
+def _compact_gated(parts, graph, p, angles, frozen, pad, R, rep, rounds=3):
+    """Centroid compaction, router-gated. Pull parts inward, re-legalize, and KEEP the
+    denser layout only if it stays overlap-free and the router likes it at least as much.
+    Buys the last few percent of density with proof — never grows detours on faith."""
+    q = {r: list(v) for r, v in p.items()}
+    for _ in range(rounds):
+        _compact_to_center(parts, q, angles, pad, frozen)
+    legalize(parts, q, pad, iters=200, angles=angles, frozen=frozen)
+    if count_overlaps(parts, q, 0.0, angles) > 0:
+        return p, rep
+    rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+    if rep2["overflow"] <= rep["overflow"] + 1e-6:
+        return q, rep2
+    return p, rep
+
+
 def _decap_pass(parts, graph, p, angles, pad, R, rep):
     """Walk plane-only decoupling caps to the nearest free slot hugging their owner
     IC (nearest non-passive sharing one of their power nets). Moves are accepted in
@@ -583,9 +646,14 @@ def pin_at(parts, r, net, angle=None):
 
 def _size(parts, r, pad=0.6):
     """Padded keep-out size. `bloat` is per-part extra spacing set by the routability
-    feedback loop (congested regions inflate so the router gets corridors)."""
+    feedback loop (congested regions inflate so the router gets corridors). `escape` is
+    the fine-pitch fanout halo (kicad_io) — reserved ONLY as spacing (pad>0), never in
+    the physical-overlap test (pad=0), so a fine-pitch part keeps its escape corridor
+    clear of neighbours yet the board still legalizes to true zero overlap."""
     p = parts[r]
     b = p.get("bloat", 0.0)
+    if pad > 1e-9:
+        b += p.get("escape", 0.0)
     return p.get("w", 2.0) + 2 * (pad + b), p.get("h", 1.5) + 2 * (pad + b)
 
 

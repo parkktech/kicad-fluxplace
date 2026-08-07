@@ -29,17 +29,30 @@ def read_board(board):
         # pad anchors, expressed relative to the BODY CENTER (so they track the body)
         pin_sum = defaultdict(lambda: [0.0, 0.0, 0])
         drills = npads = 0
+        padxy = []
         for pad in fp.Pads():
             npads += 1
             if pad.GetDrillSize().x > 0:
                 drills += 1
+            pp = pad.GetPosition()
+            padxy.append((_mm(pp.x), _mm(pp.y)))
             nn = pad.GetNetname()
             if not nn:
                 continue
-            pp = pad.GetPosition()
             s = pin_sum[nn]
             s[0] += _mm(pp.x) - cx; s[1] += _mm(pp.y) - cy; s[2] += 1
         pins = {n: (s[0] / s[2], s[1] / s[2]) for n, s in pin_sum.items()}
+        # pin PITCH = smallest centre-to-centre between pads: the escape-difficulty
+        # signal. A fine-pitch part (<=0.5 mm) needs its fanout corridor kept clear or
+        # a wirelength-greedy placer crowds it and the escape can't route at bulk width.
+        pitch = 999.0
+        if len(padxy) >= 2:
+            for i in range(len(padxy)):
+                ax, ay = padxy[i]
+                for j in range(i + 1, len(padxy)):
+                    d = abs(ax - padxy[j][0]) + abs(ay - padxy[j][1])
+                    if 0.01 < d < pitch:
+                        pitch = d
         try:
             sheet = fp.GetSheetname() or ""
         except Exception:
@@ -63,6 +76,11 @@ def read_board(board):
             # a real drilled pin field (most pads drilled, or 5+ drills)
             tht=(drills >= 5 or (npads and drills / npads > 0.5)),
             sheet=sheet.strip("/") or "root",
+            pitch=pitch,        # min pad centre spacing (mm); <=0.5 => fine-pitch escape
+            # escape halo: extra keep-clear reserved around a fine-pitch part so the
+            # placer leaves its fanout corridor open (peripheral parts route at bulk
+            # width if not crowded). Scales with pin count, capped. 0 for coarse parts.
+            escape=(min(1.6, 0.3 + 0.03 * npads) if (pitch <= 0.55 and npads >= 8) else 0.0),
             pins=pins,          # {net: (dx_mm, dy_mm)} pin anchor offsets from body center
         )
         for nn in pins:
