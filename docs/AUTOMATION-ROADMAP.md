@@ -169,7 +169,7 @@ verification. Mapping to fluxplace, with status:
 |---|---|---|
 | Upload / parse gate | `preflight` (outline, pads-on-board, pos-file parity) + auto stage [0] + outline containment | ✅ shipped — reproduces Quilter's CM5 rejection locally |
 | Stackup | `signal_layers()` auto-detect (copper minus poured planes), threaded into the gate | ✅ shipped (the layers=2 bug was THE backbone fix) |
-| Fabricator constraints | bulk rule from board netclass; floor=0.1 hardcoded JLC-class | 🔶 partial — needs named fab profiles (`--profile jlcpcb-6L`: min track/clear/via/drill/annular) checked at fab-gate time |
+| Fabricator constraints | `--profile jlcpcb|jlcpcb-advanced|proto` (fluxplace/profiles.py): floor + via geometry into the router, finest-copper scan at the fab gate, recorded in MANIFEST | ✅ shipped |
 | Floorplan | locks-as-anchors, side-awareness, board outline | ✅ shipped; keep-outs not yet honored |
 | Circuit comprehension | graph/topology (hub, branches, power classes, diff pairs, big-fanout planes) | ✅ shipped; length-matching classes not yet |
 | Constraints | net-aware widths/clearances, per-net step-down floor | 🔶 partial — no impedance/length-match ingest; needs YAML/netclass front-end |

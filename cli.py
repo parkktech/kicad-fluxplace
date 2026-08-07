@@ -212,9 +212,11 @@ def _cand_argv(a, k, outdir):
         v += ["--hub", a.hub]
     v += ["auto", "--board", a.board, "--out", outdir,
           "--pad", str(a.pad), "--route-timeout", str(a.route_timeout),
-          "--floor", str(a.floor), "--router-py", a.router_py,
+          "--profile", a.profile, "--router-py", a.router_py,
           "--router-dir", a.router_dir, "--kicad-cli", a.kicad_cli,
           "--candidates", "1", "--jitter-seed", str(k), "--no-fab"]
+    if a.floor is not None:
+        v += ["--floor", str(a.floor)]
     if a.layers:
         v += ["--layers", *a.layers]
     if a.track is not None:
@@ -283,6 +285,12 @@ def cmd_auto_candidates(a):
         open(os.path.join(a.out, "candidates.json"), "w"), indent=1)
     res = fab.emit(os.path.join(a.out, "routed.kicad_pcb"),
                    os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    from fluxplace import profiles as PROF
+    fchecks, fsummary = PROF.check_board(os.path.join(a.out, "routed.kicad_pcb"),
+                                         PROF.get(a.profile))
+    print(f"    fab-profile [{a.profile}]: {fsummary}")
+    for lvl, code, msg in fchecks:
+        print(f"    fab-profile {lvl} {code}: {msg}")
     print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
 
 
@@ -328,6 +336,9 @@ def cmd_auto(a):
     routed = os.path.join(a.out, "routed.kicad_pcb")
 
     # ---- [0] PREFLIGHT — parse-level sanity a downstream tool would reject --------
+    from fluxplace import profiles as PROF
+    prof = PROF.get(a.profile)
+    floor = a.floor if a.floor is not None else prof["floor"]
     board, parts, nets, IO = _load(a.board)
     findings = IO.preflight(board)
     for lvl, code, msg in findings:
@@ -344,7 +355,8 @@ def cmd_auto(a):
     dtrack, dclr = IO.default_rules(board)
     track = a.track if a.track is not None else dtrack
     clr = a.clearance if a.clearance is not None else dclr
-    print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  floor={a.floor}mm")
+    print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  "
+          f"floor={floor}mm (profile {a.profile})")
     t0 = time.time()
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
                                    pad=a.pad, layers=len(layers),
@@ -371,6 +383,8 @@ def cmd_auto(a):
     pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
+                                     via_size=prof["route_via"][0],
+                                     via_drill=prof["route_via"][1],
                                      power_nets=list(pw) or None,
                                      power_widths=[max(track, w * track) for w in pw.values()] or None,
                                      timeout=a.route_timeout)
@@ -384,16 +398,18 @@ def cmd_auto(a):
         print("    fanout: OFF (<3 signal layers — escape vias would eat them)")
     else:
         fanout = AD.krt_fanout(a.router_py, a.router_dir, layers,
-                               track_w=a.floor, clearance=a.floor)
+                               track_w=floor, clearance=floor,
+                               via_size=prof["fanout_via"][0],
+                               via_drill=prof["fanout_via"][1])
     src, summ = AD.route_adaptive(placed, a.out, route_fresh, cg, parts,
                                   kicad_cli=a.kicad_cli, start_mm=clr,
-                                  floor_mm=a.floor, fanout=(fanout if a.finish else None),
+                                  floor_mm=floor, fanout=(fanout if a.finish else None),
                                   log=lambda m: print("   " + m))
     # local fine-pitch .kicad_dru so the escape copper is DRC-legal (bulk stays 0.2mm)
     if os.path.exists(src):
         d, _u = AD.drc_unrouted(src, a.kicad_cli)
         zones = ESC.detect_escape_zones(parts, d, min_unrouted=1)
-        open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, a.floor, a.floor))
+        open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, floor, floor))
     ladder = [r["width"] for r in summ["rounds"]]
     print(f"[2/3] route+anneal via {os.path.basename(a.router_py)}: "
           f"{summ['diagnosis']}  ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
@@ -404,6 +420,18 @@ def cmd_auto(a):
         return
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
     verdict = res["drc"]
+    fchecks, fsummary = PROF.check_board(src, prof)
+    print(f"    fab-profile [{a.profile}]: {fsummary}")
+    for lvl, code, msg in fchecks:
+        print(f"    fab-profile {lvl} {code}: {msg}")
+        verdict = "REVIEW"
+    try:
+        with open(os.path.join(a.out, "fab", "MANIFEST.txt"), "a") as mf:
+            mf.write(f"\nfab profile: {a.profile}\n{fsummary}\n")
+            for lvl, code, msg in fchecks:
+                mf.write(f"{lvl} {code}: {msg}\n")
+    except OSError:
+        pass
     print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
              if res.get("violations") is not None else ""))
@@ -499,7 +527,11 @@ def main(argv=None):
     pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     pau.add_argument("--route-timeout", type=int, default=1800)
-    pau.add_argument("--floor", type=float, default=0.1, help="fine-pitch escape floor (mm)")
+    pau.add_argument("--floor", type=float, default=None,
+                     help="fine-pitch escape floor mm (default: the fab profile's floor)")
+    pau.add_argument("--profile", default="jlcpcb",
+                     help="fabricator constraint profile: " + ", ".join(sorted(
+                         __import__("fluxplace.profiles", fromlist=["PROFILES"]).PROFILES)))
     pau.add_argument("--no-finish", dest="finish", action="store_false",
                      help="skip the adaptive step-down anneal (one route pass only)")
     pau.add_argument("--no-fanout", action="store_true",
