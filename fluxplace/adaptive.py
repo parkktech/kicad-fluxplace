@@ -119,16 +119,19 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
     import shutil
     best_board = cur + ".best"; shutil.copy(cur, best_board); best_n = len(unrouted)
 
+    force_fanout = False       # a worsened step-down skips the rest of the ladder
     while unrouted:
         cls = classify(graph, d)
         nxt = E.ladder_step(width)
-        if nxt is not None and cls["thin"]:
+        if not force_fanout and nxt is not None and cls["thin"]:
+            last = "step"
             width = nxt
             for n in cls["thin"]:
                 fine[n] = width                      # this net may neck (signal only)
             log(f"[{width}mm] step {len(cls['thin'])} stalled signal nets down (net-aware)")
             cur = route_fresh(placed, routed, fine, log=log)
         elif fanout is not None:
+            last = "fanout"
             zones = [z for z in E.detect_escape_zones(parts, d, min_unrouted=min_unrouted)
                      if z["ref"] not in fanned_refs]
             if not zones:
@@ -155,6 +158,17 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
         if len(unrouted) < best_n:
             shutil.copy(cur, best_board); best_n = len(unrouted)
         elif len(unrouted) > best_n:
+            if last == "step" and fanout is not None:
+                # a worsened step-down must not silence FANOUT — the residue that
+                # stalls the ladder is usually escape-shaped (dig: J20+U10 held 76%
+                # of stuck endpoints and fanout never got its turn). Revert to the
+                # best board's state and give fanout one shot at its zones.
+                log(f"step-down worsened ({best_n}->{len(unrouted)}) — "
+                    f"reverting to best, trying fanout")
+                force_fanout = True
+                shutil.copy(best_board, cur)
+                d, unrouted = drc_unrouted(cur, kicad_cli); unrouted.discard("GND")
+                continue
             log(f"round worsened ({best_n}->{len(unrouted)}) — reverting to best, stop")
             break
 
