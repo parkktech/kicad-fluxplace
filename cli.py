@@ -229,8 +229,12 @@ def cmd_auto(a):
            placed, routed, "--keep-input-copper", "--layers", *a.layers,
            "--track-width", str(a.track), "--clearance", str(a.clearance),
            "--via-size", "0.6", "--via-drill", "0.3"]
-    r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                       timeout=a.route_timeout)
+    r = None
+    try:
+        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
+                           timeout=a.route_timeout)
+    except subprocess.TimeoutExpired:
+        print(f"    router hit {a.route_timeout}s cap — continuing with partial/placement")
     ok = os.path.exists(routed)
     src = routed if ok else placed
     if not ok:

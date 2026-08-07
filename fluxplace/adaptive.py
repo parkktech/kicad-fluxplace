@@ -61,7 +61,11 @@ def krt_route_fn(krt_py, krt_dir, layers, via_size=0.6, via_drill=0.3, grid=0.1,
                "--nets", *sorted(nets)]
         if power_nets and power_widths:
             cmd += ["--power-nets", *power_nets, "--power-nets-widths", *map(str, power_widths)]
-        r = subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
+        try:
+            r = subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"    router hit {timeout}s cap on {len(nets)} nets — keeping prior board")
+            return inb
         if not os.path.exists(outb):
             log(f"    ! router produced no board: {(r.stderr or r.stdout)[-200:]}")
             return inb
