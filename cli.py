@@ -222,15 +222,20 @@ def cmd_auto(a):
 
     # ---- [2] ROUTE (KRT route-fresh; ripping+rerouting keeps GND planes) -----------
     t0 = time.time()
+    # route ALL nets fresh (the placement is unrouted); --keep-input-copper preserves any
+    # poured GND/power planes. No --force-reroute: with no nets listed it routes everything.
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
-           placed, routed, "--force-reroute", "--layers", *a.layers,
+           placed, routed, "--keep-input-copper", "--layers", *a.layers,
            "--track-width", str(a.track), "--clearance", str(a.clearance),
            "--via-size", "0.6", "--via-drill", "0.3"]
     r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
                        timeout=a.route_timeout)
-    src = routed if os.path.exists(routed) else placed
+    ok = os.path.exists(routed)
+    src = routed if ok else placed
+    if not ok:
+        print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
     print(f"[2/3] routed via {os.path.basename(a.router_py)}  "
-          f"({'ok' if os.path.exists(routed) else 'router produced no board — using placement'})"
+          f"({'ok' if ok else 'router produced no board — fabbing the placement'})"
           f"  ({time.time()-t0:.0f}s)")
 
     # ---- [3] FAB -------------------------------------------------------------------
