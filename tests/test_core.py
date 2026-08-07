@@ -364,6 +364,16 @@ def test_adaptive_fanout_priority(tmpdir="/tmp/fluxtest_ff"):
     print("ok  adaptive: fanout-priority on concentrated residue, ladder on spread")
 
 
+def test_candidate_selection():
+    """Population search: fewest unrouted wins; DRC violations break ties; the
+    un-jittered base (earliest) breaks the rest."""
+    from fluxplace.adaptive import pick_best
+    assert pick_best([("c0", 42, 900), ("c1", 33, 1200), ("c2", 40, 100)]) == 1
+    assert pick_best([("c0", 33, 900), ("c1", 33, 700)]) == 1, "violations tie-break"
+    assert pick_best([("c0", 33, 700), ("c1", 33, 700)]) == 0, "base wins pure ties"
+    print("ok  candidates: DRC-best selection (unrouted, violations, base)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -382,4 +392,5 @@ if __name__ == "__main__":
     test_escape_net_aware_floor()
     test_channel_cut_and_open()
     test_adaptive_fanout_priority()
+    test_candidate_selection()
     print("\nALL CORE TESTS PASSED")

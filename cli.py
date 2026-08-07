@@ -203,11 +203,96 @@ def cmd_fab(a):
     print(f"DRC {res['drc']}; package at {res['out']}")
 
 
+def _cand_argv(a, k, outdir):
+    """argv for one child candidate: same auto config, jitter-seed k, no fab."""
+    import sys
+    v = [sys.executable, "-u", os.path.abspath(__file__),
+         "--big-fanout", str(a.big_fanout)]
+    if a.hub:
+        v += ["--hub", a.hub]
+    v += ["auto", "--board", a.board, "--out", outdir,
+          "--pad", str(a.pad), "--route-timeout", str(a.route_timeout),
+          "--floor", str(a.floor), "--router-py", a.router_py,
+          "--router-dir", a.router_dir, "--kicad-cli", a.kicad_cli,
+          "--candidates", "1", "--jitter-seed", str(k), "--no-fab"]
+    if a.layers:
+        v += ["--layers", *a.layers]
+    if a.track is not None:
+        v += ["--track", str(a.track)]
+    if a.clearance is not None:
+        v += ["--clearance", str(a.clearance)]
+    if not a.finish:
+        v += ["--no-finish"]
+    if a.no_fanout:
+        v += ["--no-fanout"]
+    return v
+
+
+def cmd_auto_candidates(a):
+    """Population search (the Quilter lesson): the router is nondeterministic and
+    gate proxies don't predict routed-%, so run N independent place->route
+    candidates (candidate 0 = base placement, k>0 = jittered) with bounded
+    parallelism, verify each with real DRC, and keep the best. The winner's board
+    gets the fab package at --out; every candidate's artifacts stay in cand_k/."""
+    import json, subprocess, time
+    from fluxplace import adaptive as AD, fab
+    os.makedirs(a.out, exist_ok=True)
+    t0 = time.time()
+    live, done = {}, {}
+    todo = list(range(a.candidates))
+    print(f"[candidates] {a.candidates} place->route candidates, {a.parallel} in parallel")
+    while todo or live:
+        while todo and len(live) < max(1, a.parallel):
+            k = todo.pop(0)
+            outdir = os.path.join(a.out, f"cand_{k}")
+            os.makedirs(outdir, exist_ok=True)
+            log = open(os.path.join(outdir, "log.txt"), "w")
+            live[k] = (subprocess.Popen(_cand_argv(a, k, outdir), stdout=log,
+                                        stderr=subprocess.STDOUT), log, time.time())
+        time.sleep(5)
+        for k in list(live):
+            proc, log, ts = live[k]
+            if proc.poll() is None:
+                continue
+            log.close()
+            del live[k]
+            done[k] = os.path.join(a.out, f"cand_{k}", "routed.kicad_pcb")
+            print(f"  cand_{k}: exit {proc.returncode}  ({time.time()-ts:.0f}s)")
+
+    rows = []
+    for k in sorted(done):
+        if not os.path.exists(done[k]):
+            print(f"  cand_{k}: no routed board — dropped")
+            continue
+        d, un = AD.drc_unrouted(done[k], a.kicad_cli)
+        un.discard("GND")
+        rows.append((k, len(un), len(d.get("violations", []))))
+        print(f"  cand_{k}: unrouted={len(un)}  violations={rows[-1][2]}")
+    if not rows:
+        print("CANDIDATES failed: no candidate produced a routed board")
+        return
+    win = rows[AD.pick_best([(f"cand_{k}", u, v) for k, u, v in rows])][0]
+    print(f"[candidates] winner: cand_{win}  ({time.time()-t0:.0f}s total)")
+    import shutil
+    src_dir = os.path.join(a.out, f"cand_{win}")
+    for f in ("placed.kicad_pcb", "routed.kicad_pcb", "routed.kicad_dru"):
+        if os.path.exists(os.path.join(src_dir, f)):
+            shutil.copy(os.path.join(src_dir, f), os.path.join(a.out, f))
+    json.dump({"winner": win, "candidates": [
+        {"cand": k, "unrouted": u, "violations": v} for k, u, v in rows]},
+        open(os.path.join(a.out, "candidates.json"), "w"), indent=1)
+    res = fab.emit(os.path.join(a.out, "routed.kicad_pcb"),
+                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
+
+
 def cmd_auto(a):
     """The 'magic' endpoint: board in -> PLACE -> ROUTE -> FAB -> review-ready package.
     Each stage is logged with its verdict; the router is pluggable (KRT by default)."""
     import os, subprocess, time
     from fluxplace import fab
+    if a.candidates > 1:
+        return cmd_auto_candidates(a)
     os.makedirs(a.out, exist_ok=True)
     placed = os.path.join(a.out, "placed.kicad_pcb")
     routed = os.path.join(a.out, "routed.kicad_pcb")
@@ -225,7 +310,8 @@ def cmd_auto(a):
     print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  floor={a.floor}mm")
     t0 = time.time()
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
-                                   pad=a.pad, layers=len(layers))
+                                   pad=a.pad, layers=len(layers),
+                                   jitter_seed=a.jitter_seed)
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
     IO.save(board, placed)
@@ -265,6 +351,9 @@ def cmd_auto(a):
           f"{summ['diagnosis']}  ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
 
     # ---- [3] FAB -------------------------------------------------------------------
+    if a.no_fab:
+        print(f"AUTO candidate complete: {a.out} (fab skipped — parent selects the winner)")
+        return
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
     verdict = res["drc"]
     print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"
@@ -360,6 +449,15 @@ def main(argv=None):
     pau.add_argument("--no-fanout", action="store_true",
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--kicad-cli", default="kicad-cli")
+    pau.add_argument("--candidates", type=int, default=1,
+                     help="population search: N independent place->route candidates "
+                          "(cand 0 = base, k>0 jittered), DRC-best wins the fab package")
+    pau.add_argument("--parallel", type=int, default=3,
+                     help="max candidates routing at once (each KRT is multi-threaded)")
+    pau.add_argument("--jitter-seed", type=int, default=0,
+                     help="placement jitter seed (used by candidate children)")
+    pau.add_argument("--no-fab", action="store_true",
+                     help="skip the fab package (candidate children do this)")
     pau.set_defaults(fn=cmd_auto, finish=True)
 
     pc = sub.add_parser("calibrate",

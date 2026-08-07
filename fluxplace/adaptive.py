@@ -76,6 +76,14 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
     return fn
 
 
+def pick_best(rows):
+    """Population-search selection: rows = [(name, unrouted, violations)] ->
+    index of the winner. Fewest unrouted nets first, DRC violations break ties,
+    earliest candidate breaks the rest (candidate 0 = the un-jittered base, so
+    ties prefer the least-perturbed placement)."""
+    return min(range(len(rows)), key=lambda i: (rows[i][1], rows[i][2], i))
+
+
 def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.45,
                via_drill=0.25, method="auto", timeout=600):
     """fanout_fn backed by KRT bga_fanout: generate escape vias (dogbone/underpad) for a
