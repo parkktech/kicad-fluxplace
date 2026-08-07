@@ -218,6 +218,36 @@ def test_side_aware_overlap():
     print("ok  side-aware overlap (F/B pass, same-side + THT collide)")
 
 
+def test_escape_detection_and_ladder():
+    """Adaptive escape: cluster unrouted pads by part, flag the fine-pitch bottleneck,
+    step the local rule down the ladder, emit valid .kicad_dru."""
+    from fluxplace import escape as E
+    parts = {
+        "U10": dict(w=20, h=20, x=50, y=50),   # the stuck LQFP
+        "J20": dict(w=28, h=8, x=50, y=90),    # the stuck mezzanine
+        "R1":  dict(w=1, h=1, x=10, y=10),     # one stray unrouted pad — not a zone
+    }
+    def item(ref):
+        return {"items": [{"description": f"Pad 1 [NET] of {ref} on F.Cu"},
+                          {"description": "Track [NET] on B.Cu"}]}
+    drc = {"unconnected_items": [item("U10")] * 9 + [item("J20")] * 12 + [item("R1")] * 1}
+    zones = E.detect_escape_zones(parts, drc, min_unrouted=5)
+    refs = [z["ref"] for z in zones]
+    assert refs == ["J20", "U10"], f"worst-first fine-pitch zones expected, got {refs}"
+    assert "R1" not in refs, "a single stray unrouted pad must not become a zone"
+    z0 = zones[0]
+    assert z0["bbox"][2] - z0["bbox"][0] > 28, "zone must cover the part + margin"
+    # ladder steps down and stops at the floor
+    assert E.ladder_step(0.20) == 0.15 and E.ladder_step(0.125) == 0.10
+    assert E.ladder_step(0.10) is None, "must stop at the JLCPCB fine-pitch floor"
+    dru = E.dru_text(zones, 0.10, 0.10)
+    assert "escape_U10" in dru and "escape_J20" in dru and "track_width (min 0.1mm)" in dru
+    assert dru.startswith("(version 1)")
+    # no zones -> empty (valid) ruleset, never a crash
+    assert E.dru_text([], 0.1, 0.1).strip() == "(version 1)"
+    print("ok  adaptive escape: detect zones + step-down ladder + dru emit")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -232,4 +262,5 @@ if __name__ == "__main__":
     test_determinism()
     test_locked_anchor_respected()
     test_side_aware_overlap()
+    test_escape_detection_and_ladder()
     print("\nALL CORE TESTS PASSED")
