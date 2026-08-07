@@ -194,6 +194,13 @@ def cmd_tournament(a):
         print(f"winner copper imported: {out} (ok={ok})")
 
 
+def cmd_fab(a):
+    """Emit a build-quality manufacturing package (gerbers/drill/place/DRC) for review."""
+    from fluxplace import fab
+    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
+    print(f"DRC {res['drc']}; package at {res['out']}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -251,6 +258,12 @@ def main(argv=None):
     pt.add_argument("--jobs", type=int, default=3)
     pt.add_argument("--apply-winner", action="store_true")
     pt.set_defaults(fn=cmd_tournament)
+
+    pf = sub.add_parser("fab", help="emit gerbers/drill/place/DRC package for review")
+    pf.add_argument("--board", required=True)
+    pf.add_argument("--out", required=True)
+    pf.add_argument("--kicad-cli", default="kicad-cli")
+    pf.set_defaults(fn=cmd_fab)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
