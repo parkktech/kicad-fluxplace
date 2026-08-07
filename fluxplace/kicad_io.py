@@ -121,7 +121,8 @@ def shrinkwrap_outline(board, x0_mm, y0_mm, x1_mm, y1_mm, margin=2.0):
     board actually compact (the outline follows the parts)."""
     for d in list(board.GetDrawings()):
         if d.GetLayer() == pcbnew.Edge_Cuts:
-            board.Remove(d)
+            board.Delete(d)   # Delete, not Remove: Remove leaves a dangling owner
+                              # that corrupts SWIG proxies for later board calls
     m = margin
     x0 = pcbnew.FromMM(x0_mm - m); y0 = pcbnew.FromMM(y0_mm - m)
     x1 = pcbnew.FromMM(x1_mm + m); y1 = pcbnew.FromMM(y1_mm + m)
@@ -145,8 +146,8 @@ def emit_route_guides(board, rep, layer_name="Eco1.User"):
     for g in list(board.Groups()):
         if g.GetName() == "fluxplace-guides":
             for item in list(g.GetItems()):
-                board.Remove(item)
-            board.Remove(g)
+                board.Delete(item)
+            board.Delete(g)
     layer = board.GetLayerID(layer_name)
     grp = pcbnew.PCB_GROUP(board)
     grp.SetName("fluxplace-guides")

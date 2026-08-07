@@ -180,6 +180,20 @@ def cmd_calibrate(a):
               "conservative of freerouting")
 
 
+def cmd_tournament(a):
+    """Placement tournament with freerouting as the fitness function."""
+    import os
+    from fluxplace import tournament as TN
+    jar = a.jar or os.environ.get("FREEROUTING_JAR")
+    if not jar or not os.path.exists(jar):
+        print("need --jar or $FREEROUTING_JAR (freerouting 2.2.4+)")
+        return
+    results, winner = TN.run(a.board, jar, a.workdir, passes=a.passes, jobs=a.jobs)
+    if winner and a.apply_winner:
+        ok, out = TN.import_winner(a.workdir, winner["idx"])
+        print(f"winner copper imported: {out} (ok={ok})")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -227,6 +241,16 @@ def main(argv=None):
     pr.add_argument("--guides", action="store_true",
                     help="draw the corridors on Eco1.User and save the board")
     pr.set_defaults(fn=cmd_route)
+
+    pt = sub.add_parser("tournament",
+                        help="N placements -> gate filter -> freerouting judges -> winner")
+    pt.add_argument("--board", required=True)
+    pt.add_argument("--jar", default=None)
+    pt.add_argument("--workdir", required=True)
+    pt.add_argument("--passes", type=int, default=25)
+    pt.add_argument("--jobs", type=int, default=3)
+    pt.add_argument("--apply-winner", action="store_true")
+    pt.set_defaults(fn=cmd_tournament)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
