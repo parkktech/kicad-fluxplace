@@ -151,6 +151,21 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
     shutil.copy(best_board, cur); best_d, best_un = drc_unrouted(cur, kicad_cli)
     best_un.discard("GND")
     zones_left = E.detect_escape_zones(parts, best_d, min_unrouted=1) if best_un else []
+    zl = [z["ref"] for z in zones_left]
+    # DIAGNOSIS — tell the user WHY, and what to do:
+    base_n = rounds[0]["unrouted"]
+    improved = best_n < base_n
+    if not best_un:
+        diag = "CLOSED 100%"
+    elif not improved and not fanned_refs:
+        # tightening clearance didn't help -> the constraint is routing CAPACITY, not
+        # fine-pitch escape. The board needs more signal layers, not a finer rule.
+        diag = (f"LAYER-LIMITED: {len(best_un)} nets remain and the step-down did not help "
+                f"(clearance isn't the bottleneck) — this board needs more SIGNAL LAYERS")
+    else:
+        diag = (f"ESCAPE-LIMITED: {len(best_un)} nets at fine-pitch parts {zl[:8]} — "
+                f"generate via-in-pad fanout there (step-down closed the rest)")
+    log("DIAGNOSIS: " + diag)
     return cur, {"final_unrouted": len(best_un), "rounds": rounds,
-                 "closed": len(best_un) == 0, "fanned": fanned_refs,
-                 "zones_left": [z["ref"] for z in zones_left], "board": cur}
+                 "closed": not best_un, "fanned": fanned_refs, "diagnosis": diag,
+                 "zones_left": zl, "board": cur}

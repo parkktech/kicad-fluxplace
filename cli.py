@@ -249,10 +249,8 @@ def cmd_auto(a):
         zones = ESC.detect_escape_zones(parts, d, min_unrouted=1)
         open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, a.floor, a.floor))
     ladder = [r["width"] for r in summ["rounds"]]
-    tag = ("CLOSED 100%" if summ["closed"]
-           else f"{summ['final_unrouted']} nets remain in {summ['zones_left']}")
-    print(f"[2/3] route+anneal via {os.path.basename(a.router_py)}: {tag}  "
-          f"ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
+    print(f"[2/3] route+anneal via {os.path.basename(a.router_py)}: "
+          f"{summ['diagnosis']}  ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
 
     # ---- [3] FAB -------------------------------------------------------------------
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
