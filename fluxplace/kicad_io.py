@@ -52,6 +52,11 @@ def read_board(board):
             x=cx, y=cy,                 # BODY CENTER (not the footprint origin)
             off=(offx, offy),           # body-center offset from origin, for write-back
             locked=fp.IsLocked(),
+            # which side the SMD body sits on: opposite-side parts share the 2D
+            # footprint but never physically collide, so the placer must not spread
+            # them apart nor double-count their area (a double-sided board fits ~2x
+            # the parts of a single-sided one of the same outline).
+            side=("B" if fp.IsFlipped() else "F"),
             angle0=fp.GetOrientationDegrees(),   # angle the pin offsets were read at
             npads=npads,
             # a couple of mounting holes don't wall off a 200-pin module: THT means

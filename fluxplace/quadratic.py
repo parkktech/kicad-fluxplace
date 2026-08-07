@@ -193,17 +193,40 @@ def quad(parts, graph, topo, center=None, pad=0.45, rounds=7, fill=0.55,
     cx, cy = center or (0.0, 0.0)
     refs = list(parts)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in refs}
-    total = sum(area.values())
+    # side-aware fill target: front and back parts share the outline, so the board
+    # only needs to hold the busier side, not the sum. Summing both (the old model)
+    # inflated the target rectangle ~2x on a double-sided board and ballooned it.
+    area_f = sum(a for r, a in area.items() if parts[r].get("side", "F") != "B")
+    area_b = sum(a for r, a in area.items() if parts[r].get("side", "F") == "B")
+    total = max(area_f, area_b) or sum(area.values())
     W = math.sqrt(total / fill * aspect)
     H = (total / fill) / W
+
+    # locked parts are hard mechanical anchors (mezzanine at its mate coord, mounting
+    # holes at the board corners): they are FIXED at their real positions, and — when
+    # they span a real board — they DEFINE the placement region so the movable cloud
+    # fills the actual board instead of a phantom rectangle centered on the origin.
+    locked = {r for r in refs if parts[r].get("locked")}
+    if locked:
+        lx = [parts[r]["x"] for r in locked]; ly = [parts[r]["y"] for r in locked]
+        cx = (min(lx) + max(lx)) / 2; cy = (min(ly) + max(ly)) / 2
+        bw, bh = max(lx) - min(lx), max(ly) - min(ly)
+        # center the movable cloud on the anchor region; give it the LARGER of the
+        # fill-natural rectangle and the anchor span so parts neither balloon off the
+        # origin nor get crushed below what they need to legalize overlap-free.
+        W, H = max(W, bw), max(H, bh)
 
     E, _deg = _edges(parts, graph, topo)
     seed = radial(parts, topo, (cx, cy), pad)
 
     fixed = {}
     if pin_connectors:
-        conns = [r for r in refs if kind_of(r)[0] == "J" and area[r] <= big_area]
+        conns = [r for r in refs
+                 if kind_of(r)[0] == "J" and area[r] <= big_area and r not in locked]
         fixed = _pin_perimeter(parts, conns, seed, cx, cy, W, H, pad)
+    # locked anchors pin at their real coordinates (never re-pinned to the perimeter)
+    for r in locked:
+        fixed[r] = (parts[r]["x"], parts[r]["y"])
 
     movable = [r for r in refs if r not in fixed]
     big = {r for r in movable if area[r] > big_area}

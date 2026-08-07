@@ -33,6 +33,16 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
     angles = orient(parts, graph, pos, mode=rotate)
     p = {r: list(v) for r, v in pos.items()}
 
+    # locked parts are hard anchors: force them back to their real coords/orientation
+    # and freeze them, so the settle legalizes movable parts AROUND them instead of
+    # placing everything relative to where the strategy wished the anchors were.
+    locked = {r for r in parts if parts[r].get("locked")}
+    for r in locked:
+        if r in p:
+            p[r] = [parts[r]["x"], parts[r]["y"]]
+            angles[r] = parts[r].get("angle0", angles.get(r, 0.0))
+    frozen |= locked
+
     # for quad: hold the strategy's compact extent through the post-orient settle, so
     # rotation-induced fixups resolve inward instead of ballooning the board
     bounds = None
@@ -82,9 +92,10 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
                  fill=fill, aspect=aspect, rounds=rounds)
 
+    locked = {r for r in parts if parts[r].get("locked")}
     best = None
     for s in range(max(1, seeds)):
-        pr = prior if s == 0 else _jitter(prior, s)
+        pr = prior if s == 0 else _jitter(prior, s, locked)
         p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
                                                 big_area, feedback)
         ov = count_overlaps(parts, p, 0.0, angles)
@@ -244,10 +255,15 @@ def _orient_refine(parts, graph, p, angles, pad, R, rep, sweeps=2):
     return angles, rep2
 
 
-def _jitter(prior, seed):
-    """Deterministic per-seed perturbation of the mental map (stable hash, no RNG)."""
+def _jitter(prior, seed, locked=()):
+    """Deterministic per-seed perturbation of the mental map (stable hash, no RNG).
+    Locked anchors are never perturbed — they stay welded to their mate coords."""
+    locked = set(locked)
     out = {}
     for r, (x, y) in prior.items():
+        if r in locked:
+            out[r] = (x, y)
+            continue
         hh = sum(ord(ch) * 131 ** i for i, ch in enumerate(r)) + seed * 7919
         out[r] = (x + (hh % 9 - 4) * 0.5, y + ((hh // 9) % 9 - 4) * 0.5)
     return out
@@ -268,18 +284,39 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
 
     angles = orient(parts, graph, prior)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in parts}
-    fixed = [r for r in parts if kind_of(r)[0] == "J" and area[r] <= big_area]
+    locked = {r for r in parts if parts[r].get("locked")}
+    for r in locked:                       # locked parts keep their real orientation
+        angles[r] = parts[r].get("angle0", angles.get(r, 0.0))
+    # locked anchors commit first at their real coords (prior carries them from quad)
+    # and never move thereafter; small I/O connectors also seat first.
+    fixed = [r for r in parts
+             if (kind_of(r)[0] == "J" and area[r] <= big_area) or r in locked]
+
+    # when locked anchors span a real board, confine the builder+legalize to the region
+    # quad already laid the movable cloud into (its prior extent, anchor-centered and
+    # fill-sized). This reins in the ring-search — which otherwise flings low-fanout parts
+    # outward and balloons the board — without crushing parts below legal density.
+    lbounds = None
+    if locked:
+        lx = [parts[r]["x"] for r in locked]; ly = [parts[r]["y"] for r in locked]
+        if (max(lx) - min(lx)) * (max(ly) - min(ly)) > 1000.0:
+            m = 2.0
+            px0 = min(min(prior[r][0] for r in prior), min(lx)) - m
+            py0 = min(min(prior[r][1] for r in prior), min(ly)) - m
+            px1 = max(max(prior[r][0] for r in prior), max(lx)) + m
+            py1 = max(max(prior[r][1] for r in prior), max(ly)) + m
+            lbounds = (px0, py0, px1, py1)
 
     pos, grid, routed = build(parts, graph, topo, prior, angles, pad=pad,
-                              fixed=fixed, big_area=big_area)
+                              fixed=fixed, bounds=lbounds, big_area=big_area)
     p = {r: list(v) for r, v in pos.items()}
-    frozen = {r for r in p if area[r] > big_area} | set(fixed)
+    frozen = {r for r in p if area[r] > big_area} | set(fixed) | locked
 
     # overlap-free by construction — but verify, never assume
     for _ in range(4):
         if count_overlaps(parts, p, 0.0, angles) == 0:
             break
-        legalize(parts, p, pad, iters=400, angles=angles, frozen=frozen)
+        legalize(parts, p, pad, iters=400, angles=angles, frozen=frozen, bounds=lbounds)
         _shove_remaining(parts, p, angles, pad, frozen=frozen)
 
     rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
@@ -314,7 +351,7 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
                 small = min(cand, key=lambda q: area[q])
                 release.add(small)
                 parts[small]["bloat"] = min(2.4, parts[small].get("bloat", 0.0) + 0.6)
-        legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen - release)
+        legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen - release, bounds=lbounds)
         _shove_remaining(parts, p, angles, pad, frozen=frozen - release)
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
     for r in parts:
@@ -323,7 +360,7 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
     if count_overlaps(parts, p, 0.0, angles):
         for fz in (frozen, set()):
             for _ in range(6):
-                legalize(parts, p, pad, iters=500, angles=angles, frozen=fz)
+                legalize(parts, p, pad, iters=500, angles=angles, frozen=fz, bounds=lbounds)
                 if count_overlaps(parts, p, 0.0, angles) == 0:
                     break
                 _shove_remaining(parts, p, angles, pad, frozen=fz)
@@ -339,20 +376,23 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
     router still passes. Density is only ever bought with proof."""
     cx = sum(v[0] for v in p0.values()) / len(p0)
     cy = sum(v[1] for v in p0.values()) / len(p0)
+    locked = {r for r in p0 if parts[r].get("locked")}
 
     def try_scale(sx, sy=None):
         sy = sx if sy is None else sy
         q = {r: [cx + (p0[r][0] - cx) * sx, cy + (p0[r][1] - cy) * sy] for r in p0}
+        for r in locked:                   # locked anchors never scale toward centroid
+            q[r] = list(p0[r])
         xs0 = [q[r][0] - eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
         ys0 = [q[r][1] - eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in q]
         xs1 = [q[r][0] + eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
         ys1 = [q[r][1] + eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in q]
         bounds = (min(xs0) - 0.5, min(ys0) - 0.5, max(xs1) + 0.5, max(ys1) + 0.5)
         for _ in range(6):
-            legalize(parts, q, pad, iters=500, angles=angles, bounds=bounds)
+            legalize(parts, q, pad, iters=500, angles=angles, frozen=locked, bounds=bounds)
             if count_overlaps(parts, q, 0.0, angles) == 0:
                 break
-            _shove_remaining(parts, q, angles, pad)
+            _shove_remaining(parts, q, angles, pad, frozen=locked)
         if count_overlaps(parts, q, 0.0, angles):
             return None, None
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
@@ -1004,6 +1044,13 @@ def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
         for i in range(len(refs)):
             for j in range(i + 1, len(refs)):
                 a, b = refs[i], refs[j]
+                # two SMD parts on opposite copper sides overlap only in the 2D
+                # projection — they cannot physically collide, so they are not a
+                # legalization pair. A THT part (drilled pin field) pierces both
+                # sides and DOES collide with anything.
+                if (parts[a].get("side", "F") != parts[b].get("side", "F")
+                        and not parts[a].get("tht") and not parts[b].get("tht")):
+                    continue
                 key = (a, b) if a < b else (b, a)
                 if key not in seen:
                     seen.add(key)

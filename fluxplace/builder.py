@@ -30,7 +30,15 @@ from .route import Grid, apply_part_blockage
 
 def _overlaps_any(parts, angles, pad, committed, pos, r, x, y, ang=None):
     w, h = eff_size(parts, r, ang if ang is not None else angles.get(r, 0.0), pad)
+    rside, rtht = parts[r].get("side", "F"), parts[r].get("tht")
     for s in committed:
+        # a back-side SMD part nests freely under a front-side one (and vice versa):
+        # they share the 2D area but different copper, so they don't collide. THT
+        # parts pierce both sides and still block. This is what lets the 100+ back
+        # passives pack into the same outline as the front parts instead of being
+        # flung outward hunting for empty 2D space.
+        if rside != parts[s].get("side", "F") and not rtht and not parts[s].get("tht"):
+            continue
         sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
         if (abs(x - pos[s][0]) < (w + sw) / 2 and
                 abs(y - pos[s][1]) < (h + sh) / 2):

@@ -172,6 +172,52 @@ def test_determinism():
     print("ok  pipeline deterministic")
 
 
+def test_locked_anchor_respected():
+    """A locked part is a hard mechanical anchor: placement must return it EXACTLY at
+    its real coord (never at some phantom perimeter spot), and the movable cloud must
+    sit in the real board region around it, not off in origin-centered space."""
+    parts, nets = _synthetic()
+    # weld J1 far out at (200, 0); everything the pipeline does must keep it there.
+    parts["J1"]["x"], parts["J1"]["y"] = 200.0, 0.0
+    parts["J1"]["locked"] = True
+    parts["J1"]["angle0"] = 0.0
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    # quad alone must pin the locked anchor as an RHS constant
+    from fluxplace.quadratic import quad
+    qpos = quad(parts, cg, topo)
+    assert abs(qpos["J1"][0] - 200.0) < 1e-6 and abs(qpos["J1"][1]) < 1e-6, \
+        f"quad moved a locked anchor to {qpos['J1']}"
+    # full place() must return it welded, and its net-mate R1/U2 must be pulled toward
+    # the anchor region (not stranded near the origin where the strategy 'wanted' J1)
+    pos, ang = P.place(parts, cg, topo, strategy="quad")
+    assert abs(pos["J1"][0] - 200.0) < 1e-6 and abs(pos["J1"][1]) < 1e-6, \
+        f"place moved locked J1 to {pos['J1']}"
+    assert pos["R1"][0] > 60.0, f"R1 (on J1's net) should follow the anchor out, got {pos['R1']}"
+    print("ok  locked anchor welded + movable cloud follows it")
+
+
+def test_side_aware_overlap():
+    """Opposite-side SMD parts share the 2D projection but never collide; a THT part
+    pierces both sides and still collides with anything."""
+    parts = {
+        "C1": dict(value="x", w=2, h=2, x=0, y=0, side="F", pins={}),
+        "C2": dict(value="x", w=2, h=2, x=0, y=0, side="B", pins={}),   # dead-on, other side
+        "C3": dict(value="x", w=2, h=2, x=0, y=0, side="F", pins={}),   # dead-on, same side
+    }
+    # F vs B at the same spot: not an overlap
+    assert P.count_overlaps({"C1": parts["C1"], "C2": parts["C2"]},
+                            {"C1": (0, 0), "C2": (0, 0)}, 0.0) == 0, "F/B SMD must not collide"
+    # F vs F at the same spot: a real overlap
+    assert P.count_overlaps({"C1": parts["C1"], "C3": parts["C3"]},
+                            {"C1": (0, 0), "C3": (0, 0)}, 0.0) == 1, "same-side must collide"
+    # a THT part on the back still collides with a front SMD (drilled field spans both)
+    tht = dict(value="x", w=2, h=2, x=0, y=0, side="B", tht=True, pins={})
+    assert P.count_overlaps({"C1": parts["C1"], "T1": tht},
+                            {"C1": (0, 0), "T1": (0, 0)}, 0.0) == 1, "THT must collide across sides"
+    print("ok  side-aware overlap (F/B pass, same-side + THT collide)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -184,4 +230,6 @@ if __name__ == "__main__":
     test_pin_rotation()
     test_layer_router_via_and_taper()
     test_determinism()
+    test_locked_anchor_respected()
+    test_side_aware_overlap()
     print("\nALL CORE TESTS PASSED")
