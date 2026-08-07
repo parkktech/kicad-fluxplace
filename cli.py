@@ -221,50 +221,31 @@ def cmd_auto(a):
     IO.save(board, placed)
     print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
 
-    # ---- [2] ROUTE (KRT route-fresh; ripping+rerouting keeps GND planes) -----------
+    # ---- [2] ROUTE — route-fresh-per-rung + fanout-aware finisher (universal) --------
+    from fluxplace import adaptive as AD, escape as ESC
     t0 = time.time()
-    # route ALL nets fresh (the placement is unrouted); --keep-input-copper preserves any
-    # poured GND/power planes. No --force-reroute: with no nets listed it routes everything.
-    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
-           placed, routed, "--keep-input-copper", "--layers", *a.layers,
-           "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.6", "--via-drill", "0.3"]
-    r = None
-    try:
-        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                           timeout=a.route_timeout)
-    except subprocess.TimeoutExpired:
-        print(f"    router hit {a.route_timeout}s cap — continuing with partial/placement")
-    ok = os.path.exists(routed)
-    src = routed if ok else placed
-    if not ok:
-        print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
-    print(f"[2/3] routed via {os.path.basename(a.router_py)}  "
-          f"({'ok' if ok else 'router produced no board — fabbing the placement'})"
-          f"  ({time.time()-t0:.0f}s)")
-
-    # ---- [2b] ANNEAL: finish the stragglers automatically (no hand-routing) ---------
-    # route -> DRC -> step the still-stalled SIGNAL nets down the fine-pitch ladder and
-    # re-route; rails keep ampacity width. Then emit local .kicad_dru so the fine escape
-    # copper is DRC-legal (bulk stays conservative).
-    if ok and a.finish:
-        from fluxplace import adaptive as AD, escape as ESC
-        annealed = os.path.join(a.out, "annealed.kicad_pcb")
-        pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
-        rf = AD.krt_route_fn(a.router_py, a.router_dir, a.layers,
-                             power_nets=list(pw) or None,
-                             power_widths=[max(a.track, w * a.track) for w in pw.values()] or None,
-                             timeout=a.route_timeout)
-        t0 = time.time()
-        src, summ = AD.route_adaptive(src, annealed, rf, cg, kicad_cli=a.kicad_cli,
-                                      start_mm=a.clearance, floor_mm=a.floor)
+    pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
+    route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, a.layers,
+                                     base_w=a.track, base_c=a.clearance,
+                                     power_nets=list(pw) or None,
+                                     power_widths=[max(a.track, w * a.track) for w in pw.values()] or None,
+                                     timeout=a.route_timeout)
+    fanout = None if a.no_fanout else AD.krt_fanout(a.router_py, a.router_dir, a.layers,
+                                                    track_w=a.floor, clearance=a.floor)
+    src, summ = AD.route_adaptive(placed, a.out, route_fresh, cg, parts,
+                                  kicad_cli=a.kicad_cli, start_mm=a.clearance,
+                                  floor_mm=a.floor, fanout=(fanout if a.finish else None),
+                                  log=lambda m: print("   " + m))
+    # local fine-pitch .kicad_dru so the escape copper is DRC-legal (bulk stays 0.2mm)
+    if os.path.exists(src):
         d, _u = AD.drc_unrouted(src, a.kicad_cli)
-        zones = ESC.detect_escape_zones(parts, d)
+        zones = ESC.detect_escape_zones(parts, d, min_unrouted=1)
         open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, a.floor, a.floor))
-        print(f"[2b] anneal: {summ['final_unrouted']} unrouted after step-down "
-              f"{[r['width'] for r in summ['rounds']]}  ({time.time()-t0:.0f}s)"
-              + ("  — CLOSED 100%" if summ["closed"] else
-                 f"  — {len(zones)} zones need via-in-pad fanout" if zones else ""))
+    ladder = [r["width"] for r in summ["rounds"]]
+    tag = ("CLOSED 100%" if summ["closed"]
+           else f"{summ['final_unrouted']} nets remain in {summ['zones_left']}")
+    print(f"[2/3] route+anneal via {os.path.basename(a.router_py)}: {tag}  "
+          f"ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
 
     # ---- [3] FAB -------------------------------------------------------------------
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
@@ -356,6 +337,8 @@ def main(argv=None):
     pau.add_argument("--floor", type=float, default=0.1, help="fine-pitch escape floor (mm)")
     pau.add_argument("--no-finish", dest="finish", action="store_false",
                      help="skip the adaptive step-down anneal (one route pass only)")
+    pau.add_argument("--no-fanout", action="store_true",
+                     help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--kicad-cli", default="kicad-cli")
     pau.set_defaults(fn=cmd_auto, finish=True)
 
