@@ -156,10 +156,29 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
                     routed[name].append(path)
             net_placed[name].append((r, mypin[0], mypin[1]))
 
+    def corridor_tax(r, x, y, ang=None):
+        """What this part's body would STEAL from routes already committed: sum of
+        existing usage on edges under its footprint, scaled by how hard the body
+        blocks. A part must pay for parking in someone else's busy corridor."""
+        w, h = eff_size(parts, r, ang if ang is not None else angles.get(r, 0.0), 0.0)
+        frac = 0.8 if parts[r].get("tht") else 0.4
+        npads = parts[r].get("npads", 0)
+        if npads and npads <= 3 and w * h < 12.0:
+            return 0.0                     # tiny in-line passives block nothing
+        c0 = grid.cell_of(x - w / 2, y - h / 2)
+        c1 = grid.cell_of(x + w / 2, y + h / 2)
+        tax = 0.0
+        for ix in range(c0[0], c1[0] + 1):
+            for iy in range(c0[1], c1[1] + 1):
+                for e in (((ix, iy), (ix + 1, iy)), ((ix, iy), (ix, iy + 1))):
+                    tax += grid.usage.get(Grid._edge(*e), 0.0)
+        return frac * tax
+
     def route_score(r, x, y, ang=None):
         """The eyeball check: L-route congestion estimate for every net this part
-        would have to close to the placed set, weighted by criticality."""
-        s = 0.0
+        would have to close to the placed set, weighted by criticality — plus the
+        corridor tax for squatting on committed routes."""
+        s = 0.35 * corridor_tax(r, x, y, ang)
         for name, wt in pnets[r][:6]:
             if not net_placed[name]:
                 continue

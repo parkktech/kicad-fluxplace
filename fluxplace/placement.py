@@ -94,11 +94,154 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
             best = (key, p, angles, rep, frozen)
     _, p, angles, rep, frozen = best
 
-    if shrink and rep["overflow"] == 0:
-        p, angles, rep = _shrink_pass(parts, graph, topo, p, angles, frozen, pad, R)
+    # order matters: decaps hug their ICs FIRST (inside the loose envelope), then
+    # the shrink search compacts everything under the gate, then orientation tunes
     if decaps and rep["overflow"] == 0:
         p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
+    if shrink and rep["overflow"] == 0:
+        p, angles, rep = _shrink_pass(parts, graph, topo, p, angles, frozen, pad, R)
+    if rep["overflow"] == 0:
+        p, rep = _flush_connectors(parts, graph, p, angles, pad, R, rep, big_area)
+    if rep["overflow"] == 0:
+        angles, rep = _orient_refine(parts, graph, p, angles, pad, R, rep)
     return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
+
+
+def _flush_connectors(parts, graph, p, angles, pad, R, rep, big_area=800.0):
+    """Slide the fixed I/O connectors flush to the nearest board edge. Perimeter
+    pinning happens on quad's TARGET rectangle; shrink and settle drift them inward
+    (the audit found J50/J51 ~20 mm interior) and nothing re-flushes. Cable-facing
+    connectors belong at the wall. Gated: any slide the router dislikes reverts."""
+    conns = [r for r in p if kind_of(r)[0] == "J"
+             and _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] <= big_area]
+    if not conns:
+        return p, rep
+    xs0 = [p[r][0] - eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in p]
+    ys0 = [p[r][1] - eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in p]
+    xs1 = [p[r][0] + eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in p]
+    ys1 = [p[r][1] + eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in p]
+    ex0, ey0, ex1, ey1 = min(xs0), min(ys0), max(xs1), max(ys1)
+
+    q = {r: list(v) for r, v in p.items()}
+    moved = []
+    for r in sorted(conns):
+        w, h = eff_size(parts, r, angles.get(r, 0.0), pad)
+        # nearest wall and the flush coordinate against it
+        walls = [(p[r][0] - ex0, 0, ex0 + w / 2), (ex1 - p[r][0], 0, ex1 - w / 2),
+                 (p[r][1] - ey0, 1, ey0 + h / 2), (ey1 - p[r][1], 1, ey1 - h / 2)]
+        dist, axis, target = min(walls)
+        if dist < 1.0:
+            continue                        # already flush
+        cur = q[r][axis]
+        # walk toward the wall until blocked (largest legal step wins)
+        steps = 8
+        best_val = cur
+        for k in range(1, steps + 1):
+            val = cur + (target - cur) * k / steps
+            trial = list(q[r])
+            trial[axis] = val
+            clear = True
+            for s in q:
+                if s == r:
+                    continue
+                sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
+                if (abs(trial[0] - q[s][0]) < (w + sw) / 2 and
+                        abs(trial[1] - q[s][1]) < (h + sh) / 2):
+                    clear = False
+                    break
+            if clear:
+                best_val = val
+            else:
+                break
+        if abs(best_val - cur) > 1.0:
+            q[r][axis] = best_val
+            moved.append(r)
+    if not moved:
+        return p, rep
+    rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+    if rep2["overflow"] == 0 and count_overlaps(parts, q, 0.0, angles) == 0:
+        return q, rep2
+    return p, rep
+
+
+def _orient_refine(parts, graph, p, angles, pad, R, rep, sweeps=2):
+    """Post-placement orientation sweep. The builder picks each part's rotation
+    against the half-built board; everything committed afterwards moves the optimum
+    and nothing revisits — the audit found 35 parts (incl. an LQFP worth 36 weighted-
+    mm) facing the wrong way. Re-audition all 4 rotations against FINAL positions,
+    a couple of sweeps, then re-gate; revert wholesale if the router objects."""
+    from .graph import net_weight, power_width
+    from collections import defaultdict
+    pn = defaultdict(list)
+    for name, members in graph.signal_nets.items():
+        pn_w = net_weight(name, len(members))
+        for r in members:
+            pn[r].append((name, members, pn_w))
+    for name, members in getattr(graph, "power_traces", {}).items():
+        for r in members:
+            pn[r].append((name, members, 0.8 * power_width(name)))
+
+    snapshot = dict(angles)
+    changed_total = 0
+    for _ in range(sweeps):
+        changed = 0
+        for r in sorted(p):
+            if r not in pn:
+                continue
+            if _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] > 150.0:
+                continue
+            base = angles.get(r, parts[r].get("angle0", 0.0))
+
+            def cost(ang):
+                s = 0.0
+                for name, members, wt in pn[r][:8]:
+                    ox, oy = pin_at(parts, r, name, ang)
+                    px, py = p[r][0] + ox, p[r][1] + oy
+                    pts = []
+                    for q in members:
+                        if q == r or q not in p:
+                            continue
+                        qx, qy = pin_at(parts, q, name, angles.get(q))
+                        pts.append((p[q][0] + qx, p[q][1] + qy))
+                    if not pts:
+                        continue
+                    tx = sum(a for a, b in pts) / len(pts)
+                    ty = sum(b for a, b in pts) / len(pts)
+                    s += wt * (abs(px - tx) + abs(py - ty))
+                return s
+
+            best_a, best_c = base % 360.0, cost(base)
+            for k in (90.0, 180.0, 270.0):
+                a = (base + k) % 360.0
+                w, h = eff_size(parts, r, a, pad)
+                legal = True
+                for s2 in p:
+                    if s2 == r:
+                        continue
+                    sw, sh = eff_size(parts, s2, angles.get(s2, 0.0), pad)
+                    if (abs(p[r][0] - p[s2][0]) < (w + sw) / 2 and
+                            abs(p[r][1] - p[s2][1]) < (h + sh) / 2):
+                        legal = False
+                        break
+                if not legal:
+                    continue
+                c = cost(a)
+                if c < best_c - 0.3:
+                    best_a, best_c = a, c
+            if abs(best_a - base % 360.0) > 1e-6:
+                angles[r] = best_a
+                changed += 1
+        changed_total += changed
+        if not changed:
+            break
+    if not changed_total:
+        return angles, rep
+    rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    if rep2["overflow"] > 0 or count_overlaps(parts, p, 0.0, angles):
+        angles.clear()
+        angles.update(snapshot)      # orientation never outranks routability
+        return angles, rep
+    return angles, rep2
 
 
 def _jitter(prior, seed):
@@ -197,8 +340,9 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
     cx = sum(v[0] for v in p0.values()) / len(p0)
     cy = sum(v[1] for v in p0.values()) / len(p0)
 
-    def try_scale(s):
-        q = {r: [cx + (p0[r][0] - cx) * s, cy + (p0[r][1] - cy) * s] for r in p0}
+    def try_scale(sx, sy=None):
+        sy = sx if sy is None else sy
+        q = {r: [cx + (p0[r][0] - cx) * sx, cy + (p0[r][1] - cy) * sy] for r in p0}
         xs0 = [q[r][0] - eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
         ys0 = [q[r][1] - eff_size(parts, r, angles.get(r, 0.0), pad)[1] / 2 for r in q]
         xs1 = [q[r][0] + eff_size(parts, r, angles.get(r, 0.0), pad)[0] / 2 for r in q]
@@ -227,17 +371,37 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
     if best is None:
         return p0, angles, R.score(parts, {r: (v[0], v[1]) for r, v in p0.items()},
                                    graph, angles)
+    # anisotropic pass: the uniform search leaves per-axis slack (the audit found a
+    # 4 mm strip along one edge) — squeeze each axis independently on top
+    q0, rep0, s0 = best
+    p0 = {r: (v[0], v[1]) for r, v in q0.items()}
+    cx = sum(v[0] for v in p0.values()) / len(p0)
+    cy = sum(v[1] for v in p0.values()) / len(p0)
+    for axis in (0, 1):
+        lo_s, hi_s = 0.90, 1.0
+        for _ in range(3):
+            mid = (lo_s + hi_s) / 2
+            q, rep = try_scale(mid if axis == 0 else 1.0,
+                               mid if axis == 1 else 1.0)
+            if q is not None:
+                best = (q, rep, mid)
+                hi_s = mid
+            else:
+                lo_s = mid
+        if best[0] is not q0 and hi_s < 1.0:
+            p0 = {r: (v[0], v[1]) for r, v in best[0].items()}
     return best[0], angles, best[1]
 
 
 def _decap_pass(parts, graph, p, angles, pad, R, rep):
-    """Walk plane-only decoupling caps to the nearest free spot hugging their owner
-    IC (nearest non-passive sharing one of their power nets). Reverts wholesale if
-    the move breaks the routability gate — adjacency never outranks routability."""
-    import copy
+    """Walk plane-only decoupling caps to the nearest free slot hugging their owner
+    IC (nearest non-passive sharing one of their power nets). Moves are accepted in
+    gated batches — one bad move must not cancel twenty-nine good ones — and slots
+    are ranked by closeness to the OWNER (the audit found the old sort ranked by
+    closeness to the decap's current spot, so nothing ever moved)."""
     signal_refs = {r for members in graph.signal_nets.values() for r in members}
-    ptrace_refs = {r for members in getattr(graph, "power_traces", {}).items()
-                   for r in members[1]}
+    ptrace_refs = {r for name, members in getattr(graph, "power_traces", {}).items()
+                   for r in members}
     owners_of = {}
     for r in p:
         if kind_of(r) != "C" or r in signal_refs or r in ptrace_refs:
@@ -253,25 +417,53 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
         return p, rep
 
     q = {r: list(v) for r, v in p.items()}
-    moved = 0
-    for r, owner in sorted(owners_of.items()):
+    accepted = {r: (v[0], v[1]) for r, v in p.items()}
+    best_rep = rep
+    batch, moved = [], 0
+
+    def flush_batch():
+        nonlocal best_rep, moved, batch
+        if not batch:
+            return
+        rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+        if rep2["overflow"] == 0 and count_overlaps(parts, q, 0.0, angles) == 0:
+            for r in batch:
+                accepted[r] = (q[r][0], q[r][1])
+            best_rep = rep2
+            moved += len(batch)
+        else:
+            for r in batch:
+                q[r] = list(accepted[r])   # revert just this batch
+        batch = []
+
+    xs = [v[0] for v in p.values()]
+    ys = [v[1] for v in p.values()]
+    ex0, ex1, ey0, ey1 = min(xs), max(xs), min(ys), max(ys)
+    # farthest-first: the worst-strung decaps get first pick of the good slots
+    order = sorted(owners_of,
+                   key=lambda r: -(abs(p[owners_of[r]][0] - p[r][0]) +
+                                   abs(p[owners_of[r]][1] - p[r][1])))
+    for r in order:
+        owner = owners_of[r]
         ow, oh = eff_size(parts, owner, angles.get(owner, 0.0), pad)
         rw, rh = eff_size(parts, r, angles.get(r, 0.0), pad)
         ox, oy = q[owner]
         cur_d = abs(q[r][0] - ox) + abs(q[r][1] - oy)
-        # candidate slots ringing the owner's body, closest side first
         slots = []
-        for k in range(-3, 4):
+        for k in range(-4, 5):
             step = k * max(rw, rh) * 1.05
             slots += [(ox + step, oy - (oh + rh) / 2 - 0.2),
                       (ox + step, oy + (oh + rh) / 2 + 0.2),
                       (ox - (ow + rw) / 2 - 0.2, oy + step),
                       (ox + (ow + rw) / 2 + 0.2, oy + step)]
-        slots.sort(key=lambda t: abs(t[0] - q[r][0]) + abs(t[1] - q[r][1]))
+        # rank by closeness to the OWNER — that is the objective
+        slots.sort(key=lambda t: abs(t[0] - ox) + abs(t[1] - oy))
         for x, y in slots:
+            if not (ex0 <= x <= ex1 and ey0 <= y <= ey1):
+                continue                   # never stretch the board for a decap
             d = abs(x - ox) + abs(y - oy)
             if d >= cur_d - 1.0:
-                break                      # nothing meaningfully closer
+                continue                   # not a meaningful improvement
             clear = True
             for s in q:
                 if s == r:
@@ -283,14 +475,14 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
                     break
             if clear:
                 q[r] = [x, y]
-                moved += 1
+                batch.append(r)
                 break
+        if len(batch) >= 10:
+            flush_batch()
+    flush_batch()
     if not moved:
         return p, rep
-    rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
-    if rep2["overflow"] > 0 or count_overlaps(parts, q, 0.0, angles):
-        return p, rep        # adjacency never outranks routability
-    return q, rep2
+    return {r: list(accepted[r]) for r in accepted}, best_rep
 
 
 def _shove_remaining(parts, pos, angles, pad, frozen=None):
