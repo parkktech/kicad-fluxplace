@@ -65,11 +65,14 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
             cmd += ["--net-clearances", fpath]
         if power_nets and power_widths:
             cmd += ["--power-nets", *power_nets, "--power-nets-widths", *map(str, power_widths)]
+        fn.timed_out = False       # per-call: did THIS rung get truncated?
         try:
             subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
+            fn.timed_out = fn.any_timeout = True
             log(f"    route-fresh hit {timeout}s cap")
         return outb if os.path.exists(outb) else placed
+    fn.timed_out = fn.any_timeout = False
     return fn
 
 
@@ -162,14 +165,26 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
     # DIAGNOSIS — tell the user WHY, and what to do:
     base_n = rounds[0]["unrouted"]
     improved = best_n < base_n
+    timed = getattr(route_fresh, "any_timeout", False)
+    total_ep = sum(z["n"] for z in zones_left)
+    conc = (sum(z["n"] for z in zones_left[:3]) / total_ep) if total_ep else 0.0
     if not best_un:
         diag = "CLOSED 100%"
-    elif not improved and not fanned_refs:
-        # tightening clearance didn't help -> the constraint is routing CAPACITY, not
-        # fine-pitch escape. The board needs more signal layers, not a finer rule.
+    elif timed and not improved:
+        # a truncated rung proves nothing about clearance vs capacity (measured on
+        # dig: every rung hit the cap and the verdict flipped with more time)
+        diag = (f"TIME-CAPPED: {len(best_un)} nets remain but the router hit its time "
+                f"cap on a rung — raise --route-timeout before trusting a verdict"
+                + (f"; unrouted concentrate at {zl[:4]}" if conc >= 0.6 else ""))
+    elif not improved and not fanned_refs and conc < 0.6:
+        # tightening clearance didn't help and the residue is SPREAD -> the
+        # constraint is routing CAPACITY, not fine-pitch escape.
         diag = (f"LAYER-LIMITED: {len(best_un)} nets remain and the step-down did not help "
                 f"(clearance isn't the bottleneck) — this board needs more SIGNAL LAYERS")
     else:
+        # improved, or the residue clusters at a few fine-pitch parts (>=60% of
+        # stuck endpoints at the top 3) — that's an escape problem wherever the
+        # step-down stalled
         diag = (f"ESCAPE-LIMITED: {len(best_un)} nets at fine-pitch parts {zl[:8]} — "
                 f"generate via-in-pad fanout there (step-down closed the rest)")
     log("DIAGNOSIS: " + diag)
