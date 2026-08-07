@@ -1,60 +1,70 @@
 # RESUME — fluxplace automated layout+route+fab system
 
 **Paste to resume:** *"Resume the fluxplace automation work. Read docs/RESUME.md and
-docs/AUTOMATION-ROADMAP.md first. Continue the placement-layer levers that improve
-routing."*
+docs/AUTOMATION-ROADMAP.md first, plus the fluxplace-automation-system memory."*
 
 ## The goal
 Board (netlist) in → **placed, routed, DRC-clean board + build-quality Gerbers** out,
 one command, **any board**, no hand-routing. `fluxplace auto --board X --out Y`.
 
-## State (v0.6.0, ~24 commits, all pushed to origin/main; push is authorized)
+## State (main, all pushed; push is authorized)
 `fluxplace auto` runs end-to-end: **place** (escape-aware, side-aware, locks, compact,
-grow-to-route) → **route-fresh-per-rung** (KRT; rip+route-all each rung) → **net-aware
-step-down** (stalled SIGNAL nets get finer per-net clearance, rails keep width) →
-**fanout** (bga_fanout at geometric residue) → **keep-best** (never accept a worse round)
-→ **fab** (gerbers/drill/P&P/DRC/MANIFEST). **Auto-detects** signal layers (copper minus
-poured planes) + bulk rule (board default netclass). Reports a **diagnosis**: CLOSED /
-LAYER-LIMITED / ESCAPE-LIMITED.
+grow-to-route) → **route-fresh-per-rung** (KRT) → **net-aware step-down** → **fanout
+fallthrough** (a worsened step-down reverts to best and tries fanout — it no longer
+silences it) → **keep-best** → **fab**. Auto-detects signal layers + bulk rule
+**BEFORE placement** and threads the layer count into the gate (`_GateScorer`).
+Diagnosis: CLOSED / TIME-CAPPED / LAYER-LIMITED (spread residue) / ESCAPE-LIMITED
+(concentrated residue).
+
+## THE 2026-08-07 discoveries (don't relearn)
+1. **The layers=2 backbone bug (fixed):** route.score/builder modelled every board as
+   2-layer; on 4-signal-layer dig the gate under-called capacity, declared every
+   compact placement unroutable, and grow-to-route BALLOONED it to 222x239mm/8.3%
+   fill. All pre-fix "auto on dig" numbers were junk. Post-fix: **dig places 95x90mm,
+   overflow 0, fill 51.5% — smaller than the 100x100 hand board.**
+2. **First trustworthy dig routed result:** 42 unrouted nets @0.2mm bulk (hand layout:
+   102). Residue = J20 (25 endpoints) + U10 (21) — escape-shaped. THE NUMBER TO BEAT.
+3. **`gate-precharge` branch REJECTED by real-router A/B** (82 vs 42 unrouted, same
+   caps): escape-derating gate + via-lane halos + edge-relative axis fix looked fine
+   on gate proxies (+2% hpwl) but routed 2x worse. Parked unmerged. Salvage candidate:
+   the axis fix alone (raw |dx|>=|dy| really does misread LSHM 2x40 as 66/82 pads
+   escaping out the ends — bisect it solo before believing it helps).
+4. **Gate proxies (hpwl/area/overflow) do NOT predict real routed-%** across placement
+   variants. Real KRT A/B is the only merge gate for placement changes.
+5. Diagnosis needs time-cap awareness: a 1800s-capped rung proves nothing about
+   clearance vs capacity (both dig rungs capped; step-down "worsening" 42→44 was noise).
 
 ## Key files
-- `fluxplace/adaptive.py` — route_adaptive (the finisher), krt_route_fresh, krt_fanout, diagnosis
-- `fluxplace/escape.py` — detect_escape_zones, net_floor_mm, classify_stalled_nets, dru_text
-- `fluxplace/kicad_io.py` — signal_layers(), default_rules(), _escape_halo (anisotropic, per-axis)
-- `fluxplace/fab.py` — kicad-cli fab package; `cli.py` cmd_auto/cmd_fab
-- `fluxplace/placement.py` — placement (halo in _size, centroid packer, controlled expansion, feedback keeps-best)
+- `fluxplace/adaptive.py` — route_adaptive (finisher: rungs + fanout fallthrough),
+  krt_route_fresh (fn.any_timeout), krt_fanout (--nets = stuck nets only), diagnosis
+- `fluxplace/placement.py` — place_routed(layers=), _GateScorer, _open_channels
+  (congestion-wall → targeted lane, tried before uniform expansion), _expand_to_route
+- `fluxplace/route.py` — gate Grid, score(layers=), cut_overflow (wall detection)
+- `fluxplace/kicad_io.py` — signal_layers(), default_rules(), _escape_halo
+- `cli.py` cmd_auto — detects layers/rules BEFORE placing; fanout OFF when <3 signal
+  layers (through-vias eat the scarce layers — why fanout regressed CM5)
 
 ## Environment / how to run
-- **KRT fast router**: `~/tools/router-venv/bin/python` (venv --system-site-packages +
-  scipy/shapely; inherits pcbnew), KRT at `~/tools/KiCadRoutingTools`. freerouting jar
-  `~/tools/freerouting-2.2.4.jar`, java 25 headless OK (~1hr/board — oracle only, too slow for volume).
-- Run: `/usr/bin/python3 cli.py auto --board B --out DIR` (auto-detects the rest).
-- Bench (CM5 guardrail): `/usr/bin/python3 tests/bench.py --board <cm5> --baseline /tmp/cm5_base.json`.
+- KRT: `~/tools/router-venv/bin/python`, repo `~/tools/KiCadRoutingTools`.
+- Run: `/usr/bin/python3 -u cli.py auto --board B --out DIR` (auto-detects the rest);
+  `--route-timeout` default 1800s/rung — dig rungs hit it, raise for verdict-quality runs.
+- Bench (placement-only): `PYTHONPATH=/usr/lib/python3/dist-packages /usr/bin/python3
+  tests/bench.py --board <pcb>`; CM5 guardrail baseline /tmp/cm5_base.json is PRE-halo
+  (its >8% hpwl FAIL vs main is the known 3081ede halo cost, not a new regression).
+- Tests: `/usr/bin/python3 tests/test_core.py` (18 green, no pcbnew needed).
 
-## Empirical findings (real routers)
-- dig: **0.2mm→89%, 0.1mm→97%**; last ~3% = U10(LQFP-144)+J20(2-row mezz) FANOUT, not rules.
-- **CM5 is LAYER-LIMITED** (In1/In2 both planes → 2 signal layers → caps ~69 unrouted;
-  step-down made it worse → the diagnosis now says so). CM5 is the wrong board to judge 100%.
-- **dig is ESCAPE-LIMITED** (4 signal layers F/In2/In3/B) → the right end-to-end test.
-- step-down provably works (67→58 once --net-clearances file bug fixed); **fanout regressed
-  on CM5 (keep-best neutralizes it) — bga_fanout needs tuning to actually HELP.**
+## Gotchas (hard-won)
+- KRT `--net-clearances` = JSON **file path**; route-fresh always (leftover-patch thrashes).
+- `python3 -u` + on-disk artifacts for monitoring; never trust block-buffered logs.
+- Deterministic placement: same board+code → same layout (A/Bs replay rungs exactly).
+- CM5 = regression board (2 signal layers, layer-limited ~69 unrouted — wrong board to
+  judge 100% on). razor DIG board stays staged: D36 committed to its branch, nothing
+  pushed/fabbed/emailed.
 
-## NEXT — placement-layer levers (Jason: "placement is the backbone")
-The routing ceiling is a PLACEMENT problem (objective = HPWL rewards tight, but routing
-needs escape room + channels). Levers, priority order:
-1. ✅ **Anisotropic orientation-aware escape halo** — DONE (3081ede). VALIDATE on dig:
-   re-run `auto` on dig (the earlier /tmp/auto_dig run used PRE-halo code).
-2. **Channel-aware legalization** — keep min routing lanes between dense blocks (not just
-   non-overlap); the tight core leaves no through-channels.
-3. **Package-aware gate scoring** (`route.py`) — charge via/fanout cost for multi-row
-   fine-pitch parts so the optimizer avoids un-routable configs (gate said routable, real=89%).
-4. **Reserve fanout space** for 2-row+ parts + hand the router escape-via slots (why auto-fanout regressed).
-
-## Gotchas (don't relearn)
-- KRT `--net-clearances` takes a JSON **file path**, not inline string.
-- KRT **thrashes** re-routing leftover nets through congested copper → always route-fresh.
-- `nohup` block-buffers stdout → use `python3 -u`; track progress via on-disk artifacts
-  (*.netclr.json = rungs) not the log. Monitor slow runs by **PID + log mtime**, never pgrep -f.
-- CM5 is the regression guardrail (must not regress; overflow 0 all session). Razor DIG board:
-  D36 = local fine-pitch at U10/J20, committed to branch, **nothing pushed/fabbed** (stays staged).
-- In-flight at handoff: `/tmp/auto_dig.log` (pid 636023, PRE-halo code) — supersede with a fresh dig run.
+## NEXT
+1. **In flight:** dig auto with fanout fallthrough (/tmp/auto_dig_ff) — first run where
+   fanout actually fires at J20/U10. Beats 42 → new baseline.
+2. CM5 real-route A/B harness (KRT unrouted count) so placement changes get a cheap
+   second real-router check.
+3. Fixed-outline fit / legalizer density — the open placement frontier.
+4. Bisect the escape-axis fix solo if the last 3% stays stuck at J20/U10.
