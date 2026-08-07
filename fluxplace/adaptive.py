@@ -123,20 +123,19 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
     while unrouted:
         cls = classify(graph, d)
         nxt = E.ladder_step(width)
-        if not force_fanout and nxt is not None and cls["thin"]:
-            last = "step"
-            width = nxt
-            for n in cls["thin"]:
-                fine[n] = width                      # this net may neck (signal only)
-            log(f"[{width}mm] step {len(cls['thin'])} stalled signal nets down (net-aware)")
-            cur = route_fresh(placed, routed, fine, log=log)
-        elif fanout is not None:
+        # FANOUT-PRIORITY: when the residue is CONCENTRATED at a few fine-pitch
+        # parts (>=60% of stuck endpoints at the top-3 zones), escape vias are the
+        # mechanism that fits the failure — give fanout the router time before
+        # walking the clearance ladder (measured on dig: two ladder rungs bought
+        # 69->69->72 = nothing; the fanout rung bought 69->33). The ladder still
+        # runs for spread residue and for whatever fanout leaves behind.
+        zones = ([z for z in E.detect_escape_zones(parts, d, min_unrouted=min_unrouted)
+                  if z["ref"] not in fanned_refs] if fanout is not None else [])
+        all_ep = sum(z["n"] for z in E.detect_escape_zones(parts, d, min_unrouted=1))
+        zone_ep = sum(z["n"] for z in zones[:3])
+        concentrated = all_ep > 0 and zone_ep >= 0.6 * all_ep
+        if zones and (concentrated or force_fanout or nxt is None or not cls["thin"]):
             last = "fanout"
-            zones = [z for z in E.detect_escape_zones(parts, d, min_unrouted=min_unrouted)
-                     if z["ref"] not in fanned_refs]
-            if not zones:
-                log(f"floor + no new fanout targets: {len(unrouted)} nets remain")
-                break
             for z in zones:
                 stuck = sorted(unrouted & set(parts.get(z["ref"], {}).get("pins", {})))
                 log(f"fanout: escape vias for {z['ref']} ({z['n']} stuck pads, "
@@ -146,6 +145,16 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
                                 z["ref"], nets=stuck or None, log=log)
                 fanned_refs.append(z["ref"])
             cur = route_fresh(placed, routed, fine, log=log)
+        elif not force_fanout and nxt is not None and cls["thin"]:
+            last = "step"
+            width = nxt
+            for n in cls["thin"]:
+                fine[n] = width                      # this net may neck (signal only)
+            log(f"[{width}mm] step {len(cls['thin'])} stalled signal nets down (net-aware)")
+            cur = route_fresh(placed, routed, fine, log=log)
+        elif fanout is not None and not zones:
+            log(f"floor + no new fanout targets: {len(unrouted)} nets remain")
+            break
         else:
             log(f"floor reached (no fanout): {len(unrouted)} nets remain — need via-in-pad")
             break

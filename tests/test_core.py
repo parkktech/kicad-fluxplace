@@ -299,33 +299,18 @@ def test_channel_cut_and_open():
     print("ok  channel: cut_overflow wall detect + lane opening (locked holds)")
 
 
-def test_adaptive_fanout_fallthrough(tmpdir="/tmp/fluxtest_ff"):
-    """A worsened step-down must revert to best and give FANOUT its shot — not stop.
-    (dig: the ladder stalled at 0.15mm and fanout, which targets the actual escape
-    residue, never ran.)"""
+def _run_adaptive(drcs, parts, cg, tmpdir):
+    """Drive route_adaptive with stubbed router/DRC; returns (fanned, widths, summ)."""
     import os
     import shutil
     import fluxplace.adaptive as AD
-    parts, nets = _synthetic()
-    parts["U9"] = dict(w=8, h=8, x=0, y=0, pins={"SIGA": (0, 0)})
-    cg = G.build(parts, nets)
     shutil.rmtree(tmpdir, ignore_errors=True)
     os.makedirs(tmpdir)
     placed = os.path.join(tmpdir, "placed.kicad_pcb")
     open(placed, "w").write("board")
-
-    def item(net, ref):
-        return {"items": [{"description": f"Pad 1 [{net}] of {ref} on F.Cu"}]}
-    bad1 = {"unconnected_items": [item("SIGA", "U9")] * 10}          # 1 net stuck at U9
-    bad2 = {"unconnected_items": [item("SIGA", "U9")] * 10
-            + [item("SIGB", "U3")] * 6}                              # step made it worse
-    ok = {"unconnected_items": []}
-    # route#1 -> bad1 | step route#2 -> bad2 (worse) | revert re-DRC -> bad1 |
-    # fanout route#3 -> ok | final best DRC -> ok
-    drcs = [(bad1, {"SIGA"}), (bad2, {"SIGA", "SIGB"}), (bad1, {"SIGA"}),
-            (ok, set()), (ok, set())]
+    seq = list(drcs)
     real_drc = AD.drc_unrouted
-    AD.drc_unrouted = lambda cur, cli: drcs.pop(0)
+    AD.drc_unrouted = lambda cur, cli: seq.pop(0)
     fanned = []
 
     def route_fresh(src, outb, fine, log=print):
@@ -337,15 +322,46 @@ def test_adaptive_fanout_fallthrough(tmpdir="/tmp/fluxtest_ff"):
         open(outb, "w").write("fanned")
         return outb
     try:
-        cur, summ = AD.route_adaptive(placed, tmpdir, route_fresh, cg, parts,
-                                      fanout=fanout, log=lambda m: None)
+        _, summ = AD.route_adaptive(placed, tmpdir, route_fresh, cg, parts,
+                                    fanout=fanout, log=lambda m: None)
     finally:
         AD.drc_unrouted = real_drc
-    assert fanned and fanned[0][0] == "U9", f"fanout must run after the stall: {fanned}"
+    return fanned, [r["width"] for r in summ["rounds"]], summ
+
+
+def test_adaptive_fanout_priority(tmpdir="/tmp/fluxtest_ff"):
+    """Residue CONCENTRATED at a fine-pitch part -> fanout gets the router time
+    FIRST (no clearance ladder burned); residue SPREAD -> the ladder runs and
+    fanout is never called. (dig: two ladder rungs bought 69->69->72 = nothing;
+    the fanout rung bought 69->33.)"""
+    parts, nets = _synthetic()
+    parts["U9"] = dict(w=8, h=8, x=0, y=0, pins={"SIGA": (0, 0)})
+    cg = G.build(parts, nets)
+
+    def item(net, ref):
+        return {"items": [{"description": f"Pad 1 [{net}] of {ref} on F.Cu"}]}
+    ok = {"unconnected_items": []}
+
+    # concentrated: 10 stuck endpoints, all at U9 -> fanout first, then closed
+    bad = {"unconnected_items": [item("SIGA", "U9")] * 10}
+    fanned, widths, summ = _run_adaptive(
+        [(bad, {"SIGA"}), (ok, set()), (ok, set())], parts, cg, tmpdir)
+    assert fanned and fanned[0][0] == "U9", f"concentrated residue must fan first: {fanned}"
     assert "SIGA" in fanned[0][1], "fanout must target the stuck net"
-    assert summ["closed"] and summ["final_unrouted"] == 0, summ
-    assert summ["diagnosis"].startswith("CLOSED"), summ["diagnosis"]
-    print("ok  adaptive: worsened step-down falls through to fanout (closed 100%)")
+    assert widths == [0.2, 0.2], f"no ladder rung may run before fanout: {widths}"
+    assert summ["closed"] and summ["diagnosis"].startswith("CLOSED"), summ["diagnosis"]
+
+    # spread: stuck endpoints scattered over many parts (no zone reaches
+    # min_unrouted=5) -> ladder steps down, fanout never called
+    spread = {"unconnected_items": [item("SIGA", r) for r in
+                                    ("U2", "U3", "J1", "C1", "R1")]
+              + [item("SIGB", r) for r in ("U3", "J2", "C2")]}
+    fanned2, widths2, summ2 = _run_adaptive(
+        [(spread, {"SIGA", "SIGB"}), (ok, set()), (ok, set())], parts, cg, tmpdir)
+    assert not fanned2, f"spread residue must not trigger fanout: {fanned2}"
+    assert 0.15 in widths2, f"spread residue must walk the ladder: {widths2}"
+    assert summ2["closed"], summ2
+    print("ok  adaptive: fanout-priority on concentrated residue, ladder on spread")
 
 
 if __name__ == "__main__":
@@ -365,5 +381,5 @@ if __name__ == "__main__":
     test_escape_detection_and_ladder()
     test_escape_net_aware_floor()
     test_channel_cut_and_open()
-    test_adaptive_fanout_fallthrough()
+    test_adaptive_fanout_priority()
     print("\nALL CORE TESTS PASSED")
