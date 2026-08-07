@@ -76,19 +76,32 @@ and manufacturable while still closing the hard escapes.
 
 ---
 
-## 4. Honest validation state (what's proven vs not)
+## 4. Honest validation state (what's proven vs not) — updated with tonight's real routing
 
-- **Proven** on fluxplace's own fast route-gate + unit tests + the CM5/RF benches: placement
-  quality, divergence fixes, halo effect, expansion, net-aware floor, fab emit.
-- **NOT yet proven on a real router**, because freerouting here is **slow**: measured ~2–8 min
-  per pass, **~1 hour for a full session on the 300-part dig board**, and it plateaus (~237
-  unrouted). KRT (the fast Rust router) needs scipy/shapely, and pip is PEP-668-locked (I would
-  not `--break-system-packages` the Python pcbnew runs on).
-- A **CM5 tournament** (freerouting as fitness) was running at hand-off to get the first real
-  routed-percentage numbers; see `/tmp/tourney_cm5/tournament.json` for results.
+**Real-router routed-% on dig (from KRT artifacts, DRC-measured):**
 
-**Bottom line:** the placement/escape logic is sound and measured on the proxy; the last mile
-is a *routing-throughput* problem, not a placement one.
+| Rule | Routed | Unrouted | Where the unrouted sit |
+|---|---|---|---|
+| 0.20mm bulk | **89%** | 102 | congestion tail + U10/J20 |
+| 0.10mm | **97%** | 28 | almost entirely U10 (LQFP-144) + J20 (2-row mezzanine) |
+
+This **validates the step-down premise** (0.2→0.1 closes 89%→97%) *and* pins its limit: the
+last ~3% does **not** close even at 0.10mm, so the residue is a **placement/fanout** problem
+(escape halo giving J20 room, or via-in-pad), not a finer rule. The step-down owns the middle
+8%; escape-aware placement owns the last 3%. The two together are the whole answer.
+
+**Router throughput (measured tonight — the real bottleneck for "a lot of boards"):**
+- **KRT (Rust) is unblocked** — a venv with `--system-site-packages` (inherits pcbnew) + `pip
+  install scipy shapely` works; no need to touch the system Python. This is the router to build on.
+- KRT **route-fresh** (all signal nets, GND planes kept) is how the 97% board was made — usable.
+- KRT **re-routing leftover nets through congested copper THRASHES** (6.5 min, no output on 66
+  nets) — the A* fights the existing fill. **Design consequence:** the adaptive loop must
+  route-fresh per rung with per-net fine clearance on the stuck nets, not incrementally patch.
+- **freerouting** is correctness-strong but **~3.5 min/pass, ~1 hr/board** — fine as a quality
+  oracle / tournament fitness, **too slow for volume**. (CM5 tournament confirmed ~3.5min/pass.)
+
+**Bottom line:** placement + escape logic is sound and now corroborated by real routed-%; the
+remaining work is *router throughput* (KRT as the workhorse) + the last-3% placement fanout.
 
 ---
 
@@ -113,18 +126,23 @@ is a *routing-throughput* problem, not a placement one.
 5. **BOM + assembly** in the fab package (currently gerbers/drill/place/DRC; add BOM from the
    schematic and a JLCPCB-format CPL/BOM pair).
 
-## 6. Recommended next steps (priority order)
+## 6. Recommended next steps (priority order) — status after tonight
 
-1. **Stand up KRT in a venv** (scipy/shapely) and make it the default router; keep freerouting
-   as the high-quality fallback / fitness function. *Unblocks all real validation.*
-2. **Build the adaptive-escape driver** (`fluxplace route --adaptive`): the route→detect→
-   step-down→re-route loop over KRT, honoring the net-aware floor, notifying on completion.
-3. **Validate on dig end-to-end**: escape-aware placement → KRT route → adaptive escape at
-   J20 → DRC PASS → `fluxplace fab`. Compare routed-% to the hand `d034be5` (89%).
-4. **Better legalizer for density** (analytic/legalize-with-spreading) so fixed-outline boards
-   fit without growth — the one true placement-quality frontier left.
+1. ~~Stand up KRT in a venv~~ ✅ **DONE** — `/tmp/krtvenv` (venv `--system-site-packages` +
+   scipy/shapely). KRT is the workhorse router. *(Make the venv permanent, e.g. `tools/router-venv`.)*
+2. **Adaptive-escape driver** — ✅ scaffolded (`fluxplace/adaptive.py`: route→DRC→classify→
+   net-aware step-down→re-route). **TODO:** give it a `route_fn` that routes-fresh-per-rung
+   with `--net-clearances` on the stuck nets (not the leftover-patch mode that thrashes), and
+   a `fluxplace route --adaptive` CLI + notify-on-done.
+3. **Validate dig end-to-end**: escape-aware placement → KRT route-fresh → step-down at the
+   J20/U10 zones → DRC → `fluxplace fab`. Target: beat 89%, and see how far the escape halo
+   pushes the last 3% that pure rules can't (measured: 97% ceiling without it).
+4. **Better legalizer for density** (analytic legalization / legalize-with-spreading) so
+   fixed-outline boards fit without growth — the one real placement-quality frontier left,
+   and the thing that would push the last 3% by giving J20 fanout room.
 5. **Batch front-end**: `fluxplace auto --board X --profile jlcpcb-6L` runs [1]→[6] and drops a
-   review-ready package. This is the "magic" endpoint.
+   review-ready package with a one-line verdict + notify. This is the "magic" endpoint —
+   every stage under it now exists except the two drivers in (2) and (5).
 
 ## 7. One-command vision
 
