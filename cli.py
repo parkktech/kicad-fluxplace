@@ -217,6 +217,8 @@ def _cand_argv(a, k, outdir):
           "--candidates", "1", "--jitter-seed", str(k), "--no-fab"]
     if a.floor is not None:
         v += ["--floor", str(a.floor)]
+    if a.constraints:
+        v += ["--constraints", a.constraints]
     if a.layers:
         v += ["--layers", *a.layers]
     if a.track is not None:
@@ -336,8 +338,9 @@ def cmd_auto(a):
     routed = os.path.join(a.out, "routed.kicad_pcb")
 
     # ---- [0] PREFLIGHT — parse-level sanity a downstream tool would reject --------
-    from fluxplace import profiles as PROF
+    from fluxplace import profiles as PROF, constraints as CONS
     prof = PROF.get(a.profile)
+    cons = CONS.load(a.constraints)
     floor = a.floor if a.floor is not None else prof["floor"]
     board, parts, nets, IO = _load(a.board)
     findings = IO.preflight(board)
@@ -380,13 +383,19 @@ def cmd_auto(a):
     # ---- [2] ROUTE — route-fresh-per-rung + fanout-aware finisher (universal) --------
     from fluxplace import adaptive as AD, escape as ESC
     t0 = time.time()
-    pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
+    pours = CONS.pour_nets(cons)
+    pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})
+          if n not in pours}
+    pwidths = [CONS.power_width_mm(cons, n, max(track, w * track))
+               for n, w in pw.items()]
+    if pours:
+        print(f"    constraints: {sorted(pours)} ride pours (no fat trace)")
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],
                                      via_drill=prof["route_via"][1],
                                      power_nets=list(pw) or None,
-                                     power_widths=[max(track, w * track) for w in pw.values()] or None,
+                                     power_widths=pwidths or None,
                                      timeout=a.route_timeout)
     # fanout needs a spare layer to escape TO: on a <3-signal-layer board every
     # through-via also punches the other routing layer, so blanket escape vias make
@@ -431,7 +440,9 @@ def cmd_auto(a):
     dpairs = {s: m for s, m in diff_pairs(
         {n: len(v) for n, v in cg.signal_nets.items()}).items()
         if m in cg.signal_nets}
-    schecks, stable = (SI.check_board(src, dpairs) if dpairs else ([], []))
+    schecks, stable = (SI.check_board(src, dpairs,
+                                  warn_mm=lambda m: CONS.skew_limit_mm(cons, m))
+                   if dpairs else ([], []))
     if dpairs:
         worst = max((r[4] for r in stable), default=0.0)
         print(f"    si-lite: {len(stable)} routed diff pairs, worst skew {worst:.2f}mm, "
@@ -548,6 +559,9 @@ def main(argv=None):
     pau.add_argument("--route-timeout", type=int, default=1800)
     pau.add_argument("--floor", type=float, default=None,
                      help="fine-pitch escape floor mm (default: the fab profile's floor)")
+    pau.add_argument("--constraints", default=None,
+                     help="TOML constraint file: per-net currents/widths/pours, "
+                          "per-pair skew limits (see fluxplace/constraints.py)")
     pau.add_argument("--profile", default="jlcpcb",
                      help="fabricator constraint profile: " + ", ".join(sorted(
                          __import__("fluxplace.profiles", fromlist=["PROFILES"]).PROFILES)))

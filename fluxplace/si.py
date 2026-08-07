@@ -7,9 +7,12 @@ board measurement lives with the callers so this stays pcbnew-free and testable.
 
 def pair_skew_findings(lengths, pairs, warn_mm=1.0):
     """lengths: {net: routed_mm}; pairs: {slave: master} (graph.diff_pairs).
-    Returns ([(level, code, msg)], [(master, slave, lm, ls, skew)]) — a WARN per
-    pair whose |len(P) - len(N)| exceeds warn_mm, plus the full measured table.
-    Pairs with an unrouted side report UNROUTED_PAIR instead of a bogus skew."""
+    `warn_mm` is a float or a callable(master_net) -> mm (per-family constraint
+    limits). Returns ([(level, code, msg)], [(master, slave, lm, ls, skew)]) —
+    a WARN per pair whose |len(P) - len(N)| exceeds its limit, plus the full
+    measured table. Pairs with an unrouted side report UNROUTED_PAIR instead of
+    a bogus skew."""
+    lim = warn_mm if callable(warn_mm) else (lambda m: warn_mm)
     findings, table = [], []
     for slave, master in sorted(pairs.items()):
         lm, ls = lengths.get(master), lengths.get(slave)
@@ -19,10 +22,10 @@ def pair_skew_findings(lengths, pairs, warn_mm=1.0):
             continue
         skew = abs(lm - ls)
         table.append((master, slave, lm, ls, skew))
-        if skew > warn_mm:
+        if skew > lim(master):
             findings.append(("WARN", "PAIR_SKEW",
                              f"{master}/{slave}: {skew:.2f}mm intra-pair skew "
-                             f"(P {lm:.1f} / N {ls:.1f}mm, limit {warn_mm}mm)"))
+                             f"(P {lm:.1f} / N {ls:.1f}mm, limit {lim(master)}mm)"))
     return findings, table
 
 

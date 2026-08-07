@@ -391,6 +391,36 @@ def test_si_pair_skew():
     print("ok  si-lite: pair skew warns, matched passes, unrouted flagged")
 
 
+def test_constraints_ingest(path="/tmp/fluxtest_cons.toml"):
+    """Constraint TOML: currents become ampacity widths, pours opt rails out of
+    fat traces, pair families get skew limits by longest-prefix match."""
+    from fluxplace import constraints as C
+    open(path, "w").write('''
+[power."+5V"]
+max_current_ma = 4000
+pour = true
+[power.VIN_RAW]
+width_mm = 2.5
+[pairs.PCIE_TX]
+impedance_diff = 85
+skew_mm = 0.1
+[pairs.PCIE]
+skew_mm = 0.5
+[si]
+default_skew_mm = 1.0
+''')
+    cons = C.load(path)
+    assert C.power_width_mm(cons, "+5V", 0.4) == 2.0, "4A -> 2.0mm ampacity"
+    assert C.power_width_mm(cons, "VIN_RAW", 0.4) == 2.5, "explicit width wins"
+    assert C.power_width_mm(cons, "+3V3", 0.4) == 0.4, "unlisted keeps default"
+    assert C.pour_nets(cons) == {"+5V"}
+    assert C.skew_limit_mm(cons, "PCIE_TX_P") == 0.1, "longest prefix wins"
+    assert C.skew_limit_mm(cons, "PCIE_CLK_P") == 0.5, "family fallback"
+    assert C.skew_limit_mm(cons, "USB_DP") == 1.0, "si default"
+    assert C.load(None) == {}
+    print("ok  constraints: currents->widths, pours, per-family skew limits")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -411,4 +441,5 @@ if __name__ == "__main__":
     test_adaptive_fanout_priority()
     test_candidate_selection()
     test_si_pair_skew()
+    test_constraints_ingest()
     print("\nALL CORE TESTS PASSED")

@@ -172,7 +172,7 @@ verification. Mapping to fluxplace, with status:
 | Fabricator constraints | `--profile jlcpcb|jlcpcb-advanced|proto` (fluxplace/profiles.py): floor + via geometry into the router, finest-copper scan at the fab gate, recorded in MANIFEST | ✅ shipped |
 | Floorplan | locks-as-anchors, side-awareness, board outline | ✅ shipped; keep-outs not yet honored |
 | Circuit comprehension | graph/topology (hub, branches, power classes, diff pairs, big-fanout planes) | ✅ shipped; length-matching classes not yet |
-| Constraints | net-aware widths/clearances, per-net step-down floor | 🔶 partial — no impedance/length-match ingest; needs YAML/netclass front-end |
+| Constraints | --constraints file.toml (fluxplace/constraints.py): per-net max-current->ampacity widths, pour opt-outs, per-family skew limits; impedance recorded | ✅ v1 shipped — next: keep-outs, length-match classes, impedance enforcement |
 | Review & submit | fab package (gerbers/drill/P&P/DRC/MANIFEST) + diagnosis verdict | ✅ shipped; report could add per-stage summary + candidates table |
 | Parallel candidates | `auto --candidates N --parallel M`, DRC-best wins | ✅ shipped (validation pending on dig) |
 | Physics verification | DRC + routed-% + SI-lite v1 (fluxplace/si.py: diff-pair intra-pair skew at the fab gate, MANIFEST table) | 🔶 v1 shipped — next: uncoupled length, impedance rules, length-match classes |
