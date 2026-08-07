@@ -73,15 +73,12 @@ def _candidates(parts, angles, pad, committed, pos, r, px, py, bounds, max_ring=
             break
         ring += 1
     if not out:
-        # desperate: escape outward past everything (bounds grow implicitly)
-        rad = radii[-1]
-        while not out:
-            rad *= 1.5
-            for k in range(16):
-                x = px + rad * math.cos(2 * math.pi * k / 16)
-                y = py + rad * math.sin(2 * math.pi * k / 16)
-                if not _overlaps_any(parts, angles, pad, committed, pos, r, x, y):
-                    out.append((x, y))
+        # no clear spot near the mental-map position: seat the part at its prior clamped
+        # INTO the region and let the (bounded) post-build legalize open the gap. Escaping
+        # OUTWARD — the old behaviour — is what flung low-fanout parts (orphans, mounting
+        # holes) to the board edges and ballooned the extent to many times the core; a
+        # part is never worth growing the board for. O(1): the legalizer does the work.
+        out.append(clamp(px, py))
     return out
 
 
