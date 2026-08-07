@@ -108,6 +108,8 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
     d, unrouted = drc_unrouted(cur, kicad_cli); unrouted.discard("GND")
     rounds.append({"width": width, "unrouted": len(unrouted)})
     log(f"[{width}mm] unrouted: {len(unrouted)}")
+    import shutil
+    best_board = cur + ".best"; shutil.copy(cur, best_board); best_n = len(unrouted)
 
     while unrouted:
         cls = classify(graph, d)
@@ -139,8 +141,16 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
                        "fanned": list(fanned_refs)})
         log(f"[{width}mm] unrouted: {len(unrouted)}"
             + (f"  (fanned {fanned_refs})" if fanned_refs else ""))
+        # KEEP THE BEST: never accept a round (step-down OR fanout) that made it worse.
+        if len(unrouted) < best_n:
+            shutil.copy(cur, best_board); best_n = len(unrouted)
+        elif len(unrouted) > best_n:
+            log(f"round worsened ({best_n}->{len(unrouted)}) — reverting to best, stop")
+            break
 
-    zones_left = E.detect_escape_zones(parts, d, min_unrouted=1) if unrouted else []
-    return cur, {"final_unrouted": len(unrouted), "rounds": rounds,
-                 "closed": len(unrouted) == 0, "fanned": fanned_refs,
+    shutil.copy(best_board, cur); best_d, best_un = drc_unrouted(cur, kicad_cli)
+    best_un.discard("GND")
+    zones_left = E.detect_escape_zones(parts, best_d, min_unrouted=1) if best_un else []
+    return cur, {"final_unrouted": len(best_un), "rounds": rounds,
+                 "closed": len(best_un) == 0, "fanned": fanned_refs,
                  "zones_left": [z["ref"] for z in zones_left], "board": cur}
