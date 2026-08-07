@@ -265,6 +265,40 @@ def test_escape_net_aware_floor():
     print("ok  escape: net-aware floor (signal thins, rail keeps width)")
 
 
+def test_channel_cut_and_open():
+    """Channel-aware relief: a congestion WALL (overflow concentrated on one straight
+    cut) is detected by cut_overflow, and _open_channels shifts everything past the
+    cut by the lane width the router is short — locked parts and everything before
+    the cut hold position."""
+    from fluxplace import route as R
+    g = R.Grid(0, 0, 20, 20, cell=2.0, layers=2, pitch=0.35)
+    for iy in range(g.ny):                       # wall between columns 3|4
+        e = R.Grid._edge((3, iy), (4, iy))
+        g.usage[e] = g.cap((3, iy), (4, iy)) + 4.0
+    cuts = R.cut_overflow(g)
+    assert cuts[0][0] == "v" and cuts[0][1] == 3, cuts[0]
+    assert abs(cuts[0][3] - 4.0) < 1e-6, "need_tracks = worst single-edge deficit"
+
+    parts = {f"P{i}": dict(w=2.0, h=2.0) for i in range(4)}
+    parts["P3"]["locked"] = True                 # locked holds even past the cut
+    pos = {"P0": [2.0, 5.0], "P1": [2.0, 9.0], "P2": [12.0, 5.0], "P3": [12.0, 9.0]}
+
+    class StubR:                                 # score: the wall is fixed after one lane
+        cut_overflow = staticmethod(R.cut_overflow)
+        @staticmethod
+        def score(parts, p, graph, angles):
+            return dict(overflow=0.0, grid=g)
+
+    p2, rep2 = P._open_channels(parts, None, {r: list(v) for r, v in pos.items()},
+                                {}, 0.4, StubR, dict(overflow=10.0, grid=g))
+    assert rep2["overflow"] == 0.0
+    lane = min(3.0, max(0.6, 4.0 * 0.35))        # 1.4mm lane from the 4-track deficit
+    assert abs(p2["P2"][0] - (12.0 + lane)) < 0.5, "part past the cut rides the shift"
+    assert abs(p2["P0"][0] - 2.0) < 0.5, "part before the cut holds"
+    assert abs(p2["P3"][0] - 12.0) < 1e-9, "locked part holds its mate coords"
+    print("ok  channel: cut_overflow wall detect + lane opening (locked holds)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -281,4 +315,5 @@ if __name__ == "__main__":
     test_side_aware_overlap()
     test_escape_detection_and_ladder()
     test_escape_net_aware_floor()
+    test_channel_cut_and_open()
     print("\nALL CORE TESTS PASSED")

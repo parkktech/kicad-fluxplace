@@ -107,8 +107,12 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
             best = (key, p, angles, rep, frozen)
     _, p, angles, rep, frozen = best
 
-    # If the compact build is CONGESTED, grow the board the smallest amount that routes
-    # (compact-first, grow-only-if-needed). A board that already routes skips this.
+    # If the compact build is CONGESTED: first try opening a targeted routing LANE
+    # along the dominant congestion wall (channel-aware, cheap), then fall back to
+    # growing the whole board the smallest amount that routes (compact-first,
+    # grow-only-if-needed). A board that already routes skips both.
+    if rep["overflow"] > 0:
+        p, rep = _open_channels(parts, graph, p, angles, pad, R, rep)
     if rep["overflow"] > 0:
         p, rep = _expand_to_route(parts, graph, p, angles, pad, R, rep)
     # order matters: decaps hug their ICs FIRST (inside the loose envelope), then
@@ -454,6 +458,51 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
         if best[0] is not q0 and hi_s < 1.0:
             p0 = {r: (v[0], v[1]) for r, v in best[0].items()}
     return best[0], angles, best[1]
+
+
+def _open_channels(parts, graph, p, angles, pad, R, rep, rounds=4):
+    """Channel-aware relief: when the router's overflow concentrates along a straight
+    cut (a congestion WALL between dense blocks), open a continuous routing LANE there
+    by shifting everything past the cut outward by the track-width the router is short.
+    Targeted alternative to uniform expansion — HPWL grows only on nets that cross the
+    cut, and only by the lane width. Locked parts hold (mate coordinates); everything
+    else may ride the shift. Keep-best: a round that doesn't reduce overflow reverts."""
+    hold = {r for r in p if parts[r].get("locked")}
+    best_p = {r: list(v) for r, v in p.items()}
+    best = rep
+    for _ in range(rounds):
+        if rep["overflow"] <= 1e-9:
+            break
+        cuts = R.cut_overflow(rep["grid"])
+        if not cuts:
+            break
+        axis, idx, tot, need = cuts[0]
+        if tot < 0.3 * rep["overflow"]:
+            break                      # overflow is scattered, not a wall — wrong tool
+        g = rep["grid"]
+        lane = min(3.0, max(0.6, need * getattr(g, "pitch", 0.35)))
+        if axis == "v":
+            line = g.x0 + (idx + 1) * g.cell
+            for r in p:
+                if r not in hold and p[r][0] > line:
+                    p[r][0] += lane
+        else:
+            line = g.y0 + (idx + 1) * g.cell
+            for r in p:
+                if r not in hold and p[r][1] > line:
+                    p[r][1] += lane
+        for _ in range(4):
+            legalize(parts, p, pad, iters=400, angles=angles, frozen=hold)
+            if count_overlaps(parts, p, 0.0, angles) == 0:
+                break
+            _shove_remaining(parts, p, angles, pad, frozen=hold)
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+        if rep["overflow"] < best["overflow"] - 1e-6:
+            best_p = {r: list(v) for r, v in p.items()}
+            best = rep
+        else:
+            break
+    return {r: list(v) for r, v in best_p.items()}, best
 
 
 def _expand_to_route(parts, graph, p, angles, pad, R, rep, hi=2.5):
