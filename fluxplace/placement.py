@@ -1013,8 +1013,13 @@ def _pack_dir(parts, pos, angles, pad, axis, gap=0.35, frozen=None):
             continue
         rw = eff_size(parts, r, angles.get(r, 0.0), pad)
         half = rw[axis] / 2; ohalf = rw[oaxis] / 2
+        rside, rtht = parts[r].get("side", "F"), parts[r].get("tht")
         limit = minc + half
         for s in done:
+            # opposite-side SMD parts share the 2D area but not the copper: they don't
+            # block each other, so a back passive can pack straight under a front IC.
+            if rside != parts[s].get("side", "F") and not rtht and not parts[s].get("tht"):
+                continue
             sw = eff_size(parts, s, angles.get(s, 0.0), pad)
             if abs(pos[r][oaxis] - pos[s][oaxis]) < ohalf + sw[oaxis] / 2:   # overlap on other axis
                 cand = pos[s][axis] + sw[axis] / 2 + gap + half
