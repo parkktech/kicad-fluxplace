@@ -79,11 +79,16 @@ def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.4
     fine-pitch component so its pins reach an inner layer where they can route."""
     fo_py = os.path.join(krt_dir, "py_router", "bga_fanout.py")
 
-    def fn(board, outb, component, log=print):
+    def fn(board, outb, component, nets=None, log=print):
         cmd = [krt_py, fo_py, board, "--output", outb, "--component", component,
                "--layers", *layers, "--track-width", str(track_w),
                "--clearance", str(clearance), "--via-size", str(via_size),
                "--via-drill", str(via_drill), "--escape-method", method]
+        if nets:
+            # fan out ONLY the stuck nets: blanket fanout of every pin plants a via
+            # picket fence the next route-fresh must dodge (measured on CM5: fanout
+            # made unrouted WORSE and keep-best had to throw the round away)
+            cmd += ["--nets", *nets]
         try:
             subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -127,10 +132,12 @@ def route_adaptive(placed, out, route_fresh, graph, parts, kicad_cli="kicad-cli"
                 log(f"floor + no new fanout targets: {len(unrouted)} nets remain")
                 break
             for z in zones:
-                log(f"fanout: generating escape vias for {z['ref']} ({z['n']} stuck pads)")
+                stuck = sorted(unrouted & set(parts.get(z["ref"], {}).get("pins", {})))
+                log(f"fanout: escape vias for {z['ref']} ({z['n']} stuck pads, "
+                    f"{len(stuck)} stuck nets targeted)")
                 placed = fanout(placed, os.path.join(out, f"fan_{z['ref']}.kicad_pcb")
                                 if os.path.isdir(out) else placed + f".fan_{z['ref']}",
-                                z["ref"], log=log)
+                                z["ref"], nets=stuck or None, log=log)
                 fanned_refs.append(z["ref"])
             cur = route_fresh(placed, routed, fine, log=log)
         else:

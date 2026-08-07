@@ -237,8 +237,17 @@ def cmd_auto(a):
                                      power_nets=list(pw) or None,
                                      power_widths=[max(track, w * track) for w in pw.values()] or None,
                                      timeout=a.route_timeout)
-    fanout = None if a.no_fanout else AD.krt_fanout(a.router_py, a.router_dir, layers,
-                                                    track_w=a.floor, clearance=a.floor)
+    # fanout needs a spare layer to escape TO: on a <3-signal-layer board every
+    # through-via also punches the other routing layer, so blanket escape vias make
+    # congestion worse (measured on CM5, 2 signal layers: fanout regressed unrouted)
+    if a.no_fanout:
+        fanout = None
+    elif len(layers) < 3:
+        fanout = None
+        print("    fanout: OFF (<3 signal layers — escape vias would eat them)")
+    else:
+        fanout = AD.krt_fanout(a.router_py, a.router_dir, layers,
+                               track_w=a.floor, clearance=a.floor)
     src, summ = AD.route_adaptive(placed, a.out, route_fresh, cg, parts,
                                   kicad_cli=a.kicad_cli, start_mm=clr,
                                   floor_mm=a.floor, fanout=(fanout if a.finish else None),
