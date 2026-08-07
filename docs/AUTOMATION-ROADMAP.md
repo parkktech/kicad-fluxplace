@@ -155,3 +155,29 @@ fluxplace auto --netlist board.net --outline 97x85 --profile jlcpcb-6L --out ./f
 Everything from [1] to [6] exists in pieces today; the remaining work is the fast router and
 the two thin drivers (adaptive loop, batch front-end). The hard part — placement that routes —
 is done and measured.
+
+---
+
+## 8. Parity target: the Quilter workflow (added 2026-08-07)
+
+Jason's mandate: *"flux needs to do everything this app does."* Quilter's pipeline is
+Upload → Stackup → Fabricator Constraints → Floorplan → Circuit Comprehension →
+Constraints → Review & Submit, backed by parallel candidate layouts and physics/DRC
+verification. Mapping to fluxplace, with status:
+
+| Quilter step | fluxplace equivalent | Status |
+|---|---|---|
+| Upload / parse gate | `preflight` (outline, pads-on-board, pos-file parity) + auto stage [0] + outline containment | ✅ shipped — reproduces Quilter's CM5 rejection locally |
+| Stackup | `signal_layers()` auto-detect (copper minus poured planes), threaded into the gate | ✅ shipped (the layers=2 bug was THE backbone fix) |
+| Fabricator constraints | bulk rule from board netclass; floor=0.1 hardcoded JLC-class | 🔶 partial — needs named fab profiles (`--profile jlcpcb-6L`: min track/clear/via/drill/annular) checked at fab-gate time |
+| Floorplan | locks-as-anchors, side-awareness, board outline | ✅ shipped; keep-outs not yet honored |
+| Circuit comprehension | graph/topology (hub, branches, power classes, diff pairs, big-fanout planes) | ✅ shipped; length-matching classes not yet |
+| Constraints | net-aware widths/clearances, per-net step-down floor | 🔶 partial — no impedance/length-match ingest; needs YAML/netclass front-end |
+| Review & submit | fab package (gerbers/drill/P&P/DRC/MANIFEST) + diagnosis verdict | ✅ shipped; report could add per-stage summary + candidates table |
+| Parallel candidates | `auto --candidates N --parallel M`, DRC-best wins | ✅ shipped (validation pending on dig) |
+| Physics verification | DRC + real routed-% only | 🔶 gap — add SI-lite checks: diff-pair gap/uncoupled length, stackup-aware impedance rules, length-match assertions via kicad-cli custom rules |
+| Learned generator (RL) | deterministic generator + jittered population | deliberate non-goal for now — candidates + verifier captures most of the value at our scale |
+
+Priority order for the remaining gaps: (1) fab profiles, (2) constraint ingest
+(YAML: keep-outs, net rules, length-match classes), (3) SI-lite verification in the
+fab gate, (4) richer review report.
