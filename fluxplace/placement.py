@@ -320,6 +320,14 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
         _shove_remaining(parts, p, angles, pad, frozen=frozen)
 
     rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+    # KEEP THE BEST placement across feedback rounds and never accept a worse one.
+    # The bloat-and-relegalize mechanism opens corridors on a moderately congested
+    # board, but on a genuinely dense one it only SPREADS the board — which lengthens
+    # every net and makes congestion worse, a positive-feedback divergence (measured:
+    # 98x102/of82 -> 140x141/of308 in one round -> 317x356 over six). Reverting to the
+    # best-seen and stopping returns a compact board for the real autorouter instead.
+    best_p = {r: list(v) for r, v in p.items()}
+    best_rep = rep
     prev_hot = set()
     for _ in range(feedback):
         if rep["overflow"] == 0:
@@ -354,8 +362,15 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
         legalize(parts, p, pad, iters=500, angles=angles, frozen=frozen - release, bounds=lbounds)
         _shove_remaining(parts, p, angles, pad, frozen=frozen - release)
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+        if rep["overflow"] < best_rep["overflow"] - 1e-6:
+            best_p = {r: list(v) for r, v in p.items()}   # this round genuinely helped
+            best_rep = rep
+        else:
+            break                                          # not helping -> stop, keep best
     for r in parts:
         parts[r].pop("bloat", None)
+    p = {r: list(v) for r, v in best_p.items()}            # revert to the best placement seen
+    rep = best_rep
     # the feedback moves parts — finish overlap-clean (frozen first, then free-for-all)
     if count_overlaps(parts, p, 0.0, angles):
         for fz in (frozen, set()):
