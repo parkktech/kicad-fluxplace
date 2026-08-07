@@ -190,6 +190,58 @@ def default_rules(board):
         return (0.2, 0.2)
 
 
+def preflight(board):
+    """Parse-level sanity findings — the class of issue a downstream consumer
+    (fab house, assembly, or another EDA tool's parser) rejects a board for.
+    Returns [(level, code, msg)], level FAIL or WARN. Checks: closed outline,
+    every pad inside it, pads with no copper layer, and netted footprints
+    excluded from position files (a pos-file-driven parser then sees pins
+    belonging to a component that is 'not on the board' — measured: Quilter
+    rejected the CM5 carrier over exactly that on the M.2 module stand-in)."""
+    out = []
+    edges = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
+    bb = board.GetBoardEdgesBoundingBox()
+    if not edges or bb.GetWidth() <= 0 or bb.GetHeight() <= 0:
+        out.append(("FAIL", "OUTLINE_MISSING", "no closed Edge.Cuts outline"))
+        return out
+    x0, y0, x1, y1 = _mm(bb.GetLeft()), _mm(bb.GetTop()), _mm(bb.GetRight()), _mm(bb.GetBottom())
+    exclude_pos = getattr(pcbnew, "FP_EXCLUDE_FROM_POS_FILES", 4)
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        off = ncu = netted = 0
+        for pad in fp.Pads():
+            p = pad.GetPosition()
+            if not (x0 <= _mm(p.x) <= x1 and y0 <= _mm(p.y) <= y1):
+                off += 1
+            has_cu = any(board.GetLayerName(l).endswith(".Cu")
+                         for l in pad.GetLayerSet().Seq())
+            if pad.GetNetname():
+                netted += 1
+                if not has_cu:      # unnetted copper-less pads are paste apertures
+                    ncu += 1
+        if off:
+            out.append(("FAIL", "PAD_OFF_BOARD",
+                        f"{ref}: {off} pad(s) outside the board outline"))
+        if ncu:
+            out.append(("WARN", "PAD_NO_COPPER",
+                        f"{ref}: {ncu} NETTED pad(s) on no copper layer"))
+        if netted and (fp.GetAttributes() & exclude_pos):
+            out.append(("WARN", "POS_EXCLUDED_NETTED",
+                        f"{ref}: {netted} netted pin(s) but excluded from position "
+                        f"files — pos-driven parsers treat it as not-on-board"))
+    return out
+
+
+def parts_extent(parts, pos, angles, eff_size):
+    """(x0, y0, x1, y1) of the placed part bodies (mm) — the containment rect the
+    outline must cover for every pad to be on-board."""
+    xs0 = [pos[r][0] - eff_size(parts, r, angles.get(r, 0.0), 0.0)[0] / 2 for r in pos]
+    ys0 = [pos[r][1] - eff_size(parts, r, angles.get(r, 0.0), 0.0)[1] / 2 for r in pos]
+    xs1 = [pos[r][0] + eff_size(parts, r, angles.get(r, 0.0), 0.0)[0] / 2 for r in pos]
+    ys1 = [pos[r][1] + eff_size(parts, r, angles.get(r, 0.0), 0.0)[1] / 2 for r in pos]
+    return min(xs0), min(ys0), max(xs1), max(ys1)
+
+
 def shrinkwrap_outline(board, x0_mm, y0_mm, x1_mm, y1_mm, margin=2.0):
     """Delete existing Edge.Cuts and draw a tight rectangle around the given placement
     bounds (mm). Caller supplies bounds from the placement — this is what makes the

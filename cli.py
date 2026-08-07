@@ -286,6 +286,19 @@ def cmd_auto_candidates(a):
     print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
 
 
+def cmd_preflight(a):
+    """Upload-gate check: would a downstream parser (fab, assembly, another EDA
+    tool) reject this board? Prints findings; exits 1 on any FAIL."""
+    board, parts, nets, IO = _load(a.board)
+    findings = IO.preflight(board)
+    for lvl, code, msg in findings:
+        print(f"{lvl}  {code}: {msg}")
+    if not findings:
+        print("PREFLIGHT clean")
+    if any(lvl == "FAIL" for lvl, _, _ in findings):
+        raise SystemExit(1)
+
+
 def cmd_auto(a):
     """The 'magic' endpoint: board in -> PLACE -> ROUTE -> FAB -> review-ready package.
     Each stage is logged with its verdict; the router is pluggable (KRT by default)."""
@@ -297,8 +310,15 @@ def cmd_auto(a):
     placed = os.path.join(a.out, "placed.kicad_pcb")
     routed = os.path.join(a.out, "routed.kicad_pcb")
 
-    # ---- [1] PLACE (route-aware, escape-aware) ------------------------------------
+    # ---- [0] PREFLIGHT — parse-level sanity a downstream tool would reject --------
     board, parts, nets, IO = _load(a.board)
+    findings = IO.preflight(board)
+    for lvl, code, msg in findings:
+        print(f"    preflight {lvl} {code}: {msg}")
+    if any(lvl == "FAIL" for lvl, _, _ in findings):
+        print("    (continuing — placement may resolve; the placed board is re-checked)")
+
+    # ---- [1] PLACE (route-aware, escape-aware) ------------------------------------
     cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
     # AUTO-DETECT so an end user needs no stackup/rule knowledge: signal layers = copper
     # minus poured planes; bulk track/clearance = the board's own default netclass.
@@ -314,6 +334,17 @@ def cmd_auto(a):
                                    jitter_seed=a.jitter_seed)
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
+    # OUTLINE CONTAINMENT: if the placement exceeds the source outline, regrow the
+    # outline around the parts — otherwise every outside pad is off-board and the
+    # fab package is garbage (the exact parse error other tools reject boards for)
+    ex0, ey0, ex1, ey1 = IO.parts_extent(parts, pos, rot, P.eff_size)
+    ob = board.GetBoardEdgesBoundingBox()
+    ox0, oy0, ox1, oy1 = (v / 1e6 for v in (ob.GetLeft(), ob.GetTop(),
+                                            ob.GetRight(), ob.GetBottom()))
+    if ex0 < ox0 or ey0 < oy0 or ex1 > ox1 or ey1 > oy1:
+        w, h = IO.shrinkwrap_outline(board, ex0, ey0, ex1, ey1)
+        print(f"    outline regrown to {w:.0f}x{h:.0f}mm "
+              f"(placement exceeded the source outline)")
     IO.save(board, placed)
     print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
 
@@ -429,6 +460,11 @@ def main(argv=None):
     pf.add_argument("--out", required=True)
     pf.add_argument("--kicad-cli", default="kicad-cli")
     pf.set_defaults(fn=cmd_fab)
+
+    ppre = sub.add_parser("preflight",
+                          help="parse-level sanity: outline, pads on-board, pos-file parity")
+    ppre.add_argument("--board", required=True)
+    ppre.set_defaults(fn=cmd_preflight)
 
     pau = sub.add_parser("auto", help="board in -> place -> route -> fab package out")
     pau.add_argument("--board", required=True)
