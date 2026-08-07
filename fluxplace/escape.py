@@ -90,6 +90,36 @@ def ladder_step(current_mm):
     return None
 
 
+def net_floor_mm(graph, net, mfg_floor=0.10, base=0.20):
+    """Smallest width a net may be sized DOWN to — read from the schematic, so the
+    annealer never necks a current-carrying rail. A signal net may thin to the fab
+    floor (`mfg_floor`, ~JLCPCB 0.09-0.10 mm). A power/current net keeps its ampacity
+    width: `power_width` slots (28V/12V rails > buck outputs > a 1V8 feed) times the
+    base track width. That is the real answer to 'how small can THIS trace go'."""
+    from .graph import power_width
+    if net in getattr(graph, "power_nets", {}) or net in getattr(graph, "power_traces", {}):
+        return max(mfg_floor, power_width(net) * base)
+    return mfg_floor
+
+
+def classify_stalled_nets(graph, drc):
+    """Split the stalled nets into {thin, keep}. `thin` = signal nets the annealer may
+    size down to fine copper. `keep` = power/current rails that must NOT be necked — a
+    stalled rail needs ROOM (escape halo) or a slightly bigger board, not a thinner
+    trace. Classification comes straight from the schematic's net names/fanout."""
+    nets = set()
+    for u in drc.get("unconnected_items", []):
+        for it in u.get("items", []):
+            m = re.search(r"\[([^\]]+)\]", it.get("description", ""))
+            if m and m.group(1):
+                nets.add(m.group(1))
+    power = getattr(graph, "power_nets", {})
+    ptr = getattr(graph, "power_traces", {})
+    keep = sorted(n for n in nets if n in power or n in ptr)
+    thin = sorted(n for n in nets if n not in power and n not in ptr)
+    return {"thin": thin, "keep": keep}
+
+
 def apply_rule_areas(board, zones, layers=None):
     """Add a named KiCad Rule Area (keepout-free, name = escape_<ref>) over each zone's
     bbox so the .kicad_dru conditions can reference it. Idempotent: removes any prior

@@ -248,6 +248,23 @@ def test_escape_detection_and_ladder():
     print("ok  adaptive escape: detect zones + step-down ladder + dru emit")
 
 
+def test_escape_net_aware_floor():
+    """The step-down floor is per-net, read from the schematic: a signal net may thin to
+    the fab floor; a power/current rail keeps its ampacity width and must never be necked."""
+    from fluxplace import escape as E, graph as G
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    # GND / +3V3 are power (kept wide); SIGA is signal (may thin)
+    assert E.net_floor_mm(cg, "SIGA") == 0.10, "signal net thins to the fab floor"
+    assert E.net_floor_mm(cg, "GND") >= 0.20, "a power rail keeps >= its ampacity width"
+    drc = {"unconnected_items": [
+        {"items": [{"description": "Pad 1 [SIGA] of U2 on F.Cu"}]},
+        {"items": [{"description": "Pad 2 [GND] of U2 on F.Cu"}]}]}
+    cls = E.classify_stalled_nets(cg, drc)
+    assert "SIGA" in cls["thin"] and "GND" in cls["keep"], cls
+    print("ok  escape: net-aware floor (signal thins, rail keeps width)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -263,4 +280,5 @@ if __name__ == "__main__":
     test_locked_anchor_respected()
     test_side_aware_overlap()
     test_escape_detection_and_ladder()
+    test_escape_net_aware_floor()
     print("\nALL CORE TESTS PASSED")

@@ -105,6 +105,10 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
             best = (key, p, angles, rep, frozen)
     _, p, angles, rep, frozen = best
 
+    # If the compact build is CONGESTED, grow the board the smallest amount that routes
+    # (compact-first, grow-only-if-needed). A board that already routes skips this.
+    if rep["overflow"] > 0:
+        p, rep = _expand_to_route(parts, graph, p, angles, pad, R, rep)
     # order matters: decaps hug their ICs FIRST (inside the loose envelope), then
     # the shrink search compacts everything under the gate, then orientation tunes
     if decaps and rep["overflow"] == 0:
@@ -448,6 +452,44 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
         if best[0] is not q0 and hi_s < 1.0:
             p0 = {r: (v[0], v[1]) for r, v in best[0].items()}
     return best[0], angles, best[1]
+
+
+def _expand_to_route(parts, graph, p, angles, pad, R, rep, hi=2.5):
+    """Grow the board the SMALLEST amount that lets the router close it — "let it grow
+    slightly if needed, but keep it as compact as possible." Uniform scale away from the
+    centroid (locked anchors hold); binary-search the least expansion that reaches
+    overflow 0. If even `hi`x won't route, keep the least-congested layout found. Only
+    runs when the compact build is congested; a board that already routes is untouched."""
+    if rep["overflow"] <= 1e-9:
+        return p, rep
+    locked = {r for r in p if parts[r].get("locked")}
+    cx = sum(v[0] for v in p.values()) / len(p)
+    cy = sum(v[1] for v in p.values()) / len(p)
+
+    def at(s):
+        q = {r: [cx + (p[r][0] - cx) * s, cy + (p[r][1] - cy) * s] for r in p}
+        for r in locked:
+            q[r] = list(p[r])
+        for _ in range(4):
+            legalize(parts, q, pad, iters=400, angles=angles, frozen=locked)
+            if count_overlaps(parts, q, 0.0, angles) == 0:
+                break
+            _shove_remaining(parts, q, angles, pad, frozen=locked)
+        rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()}, graph, angles)
+        return q, rep2
+
+    lo_s, hi_s = 1.0, hi
+    best = ({r: list(v) for r, v in p.items()}, rep)   # fallback: the un-grown board
+    for _ in range(7):
+        mid = (lo_s + hi_s) / 2
+        q, rep2 = at(mid)
+        if rep2["overflow"] <= 1e-9:
+            best = (q, rep2); hi_s = mid                # routes — try growing less
+        else:
+            if rep2["overflow"] < best[1]["overflow"]:
+                best = (q, rep2)                        # track least-congested fallback
+            lo_s = mid                                  # still congested — grow more
+    return best[0], best[1]
 
 
 def _clear_of(parts, angles, pad, done, pos, r, x, y):
