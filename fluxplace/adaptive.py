@@ -60,7 +60,9 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
                "--via-size", str(via_size), "--via-drill", str(via_drill),
                "--grid-step", str(grid)]
         if fine:
-            cmd += ["--net-clearances", json.dumps(fine)]
+            fpath = outb + ".netclr.json"          # KRT --net-clearances takes a FILE path
+            json.dump(fine, open(fpath, "w"))
+            cmd += ["--net-clearances", fpath]
         if power_nets and power_widths:
             cmd += ["--power-nets", *power_nets, "--power-nets-widths", *map(str, power_widths)]
         try:
