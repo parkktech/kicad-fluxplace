@@ -449,6 +449,17 @@ def cmd_auto(a):
               f"{len(schecks)} finding(s)")
         for lvl, code, msg in schecks:
             print(f"    si-lite {lvl} {code}: {msg}")
+    # bypass proximity: a decap >10mm from its pin is inductively absent at HF.
+    # Measured on the FINISHED board (read back) so placement moves are seen.
+    fparts, fnets = IO.read_board(IO.load(src))
+    bchecks, btable = SI.bypass_findings(fparts, fnets, set(cg.power_nets))
+    if btable:
+        bworst = max(r[3] for r in btable)
+        print(f"    si-lite: {len(btable)} bypass caps, worst pin distance "
+              f"{bworst:.1f}mm, {len(bchecks)} finding(s)")
+        for lvl, code, msg in bchecks[:8]:
+            print(f"    si-lite {lvl} {code}: {msg}")
+        schecks = schecks + bchecks
     try:
         with open(os.path.join(a.out, "fab", "MANIFEST.txt"), "a") as mf:
             mf.write(f"\nfab profile: {a.profile}\n{fsummary}\n")

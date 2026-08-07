@@ -29,6 +29,48 @@ def pair_skew_findings(lengths, pairs, warn_mm=1.0):
     return findings, table
 
 
+def infer_bypass(parts, nets, power_nets):
+    """[(cap_ref, ic_ref, rail, dist_mm)]: every 2-net capacitor sitting between a
+    power rail and GND, paired with the nearest IC/module pin on that rail — the
+    pin it exists to decouple. Pure geometry from the read_board dict."""
+    out = []
+    for ref, p in parts.items():
+        if ref[0] != "C" or len(p.get("pins", {})) != 2:
+            continue
+        pn = set(p["pins"])
+        if "GND" not in pn:
+            continue
+        rail = next((n for n in pn if n != "GND"), None)
+        if rail not in power_nets:
+            continue
+        cx, cy = p["x"] + p["pins"][rail][0], p["y"] + p["pins"][rail][1]
+        best = None
+        for ic in nets.get(rail, []):
+            if ic == ref or ic[0] not in "UQ":
+                continue
+            q = parts.get(ic)
+            if not q or rail not in q.get("pins", {}):
+                continue
+            qx, qy = q["x"] + q["pins"][rail][0], q["y"] + q["pins"][rail][1]
+            d = ((cx - qx) ** 2 + (cy - qy) ** 2) ** 0.5
+            if best is None or d < best[1]:
+                best = (ic, d)
+        if best:
+            out.append((ref, best[0], rail, best[1]))
+    return out
+
+
+def bypass_findings(parts, nets, power_nets, warn_mm=10.0):
+    """Physics check: a bypass capacitor further than warn_mm from the pin it
+    decouples is inductively useless at HF (industry rule <=1cm). Returns
+    ([(level, code, msg)], [(cap, ic, rail, dist)])."""
+    table = infer_bypass(parts, nets, power_nets)
+    findings = [("WARN", "BYPASS_FAR",
+                 f"{c}: {d:.1f}mm from {ic} on {rail} (limit {warn_mm}mm)")
+                for c, ic, rail, d in table if d > warn_mm]
+    return findings, table
+
+
 def measure_net_lengths(board):
     """{net: total routed track length mm} from a pcbnew board (vias excluded)."""
     from collections import defaultdict

@@ -421,6 +421,25 @@ default_skew_mm = 1.0
     print("ok  constraints: currents->widths, pours, per-family skew limits")
 
 
+def test_bypass_proximity():
+    """A decap next to its IC pin passes; one stranded across the board warns;
+    caps not between a rail and GND are never treated as bypass."""
+    from fluxplace.si import bypass_findings
+    parts = {
+        "U1": dict(x=10, y=10, pins={"+3V3": (2, 0), "GND": (-2, 0)}),
+        "C1": dict(x=13, y=10, pins={"+3V3": (0, 0), "GND": (0, 1)}),   # 1mm away
+        "C2": dict(x=60, y=40, pins={"+3V3": (0, 0), "GND": (0, 1)}),   # stranded
+        "C3": dict(x=11, y=11, pins={"SIGA": (0, 0), "SIGB": (0, 1)}),  # AC coupling
+    }
+    nets = {"+3V3": ["U1", "C1", "C2"], "GND": ["U1", "C1", "C2"],
+            "SIGA": ["C3"], "SIGB": ["C3"]}
+    findings, table = bypass_findings(parts, nets, {"+3V3", "GND"}, warn_mm=10.0)
+    caps = {r[0] for r in table}
+    assert caps == {"C1", "C2"}, table
+    assert len(findings) == 1 and "C2" in findings[0][2], findings
+    print("ok  si-lite: bypass proximity (near passes, stranded warns)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -442,4 +461,5 @@ if __name__ == "__main__":
     test_candidate_selection()
     test_si_pair_skew()
     test_constraints_ingest()
+    test_bypass_proximity()
     print("\nALL CORE TESTS PASSED")
