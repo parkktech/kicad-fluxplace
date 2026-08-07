@@ -75,19 +75,40 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
     return {r: (x, y) for r, (x, y) in p.items()}, angles
 
 
+class _GateScorer:
+    """route-module proxy that pins the board's SIGNAL-LAYER count into every
+    score() call. The gate's capacity model must match the real stackup: scoring
+    a 6-layer board as the 2-layer default declares every dense placement
+    unroutable, so grow-to-route balloons it (measured on dig: 100x100 hand
+    board -> 222x239 mm at 8.3% fill, overflow still >0)."""
+
+    def __init__(self, mod, layers):
+        self._mod, self.layers = mod, max(2, int(layers))
+
+    def score(self, parts, pos, graph, angles=None, **kw):
+        kw.setdefault("layers", self.layers)
+        return self._mod.score(parts, pos, graph, angles, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._mod, name)
+
+
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
-                 shrink=True, decaps=True, jitter_seed=0):
+                 shrink=True, decaps=True, jitter_seed=0, layers=2):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
       gate -> congestion feedback -> shrink-to-smallest-routable -> decap adjacency.
 
     `seeds` > 1 runs perturbed attempts and keeps the best routable one.
+    `layers` = the board's SIGNAL layer count (kicad_io.signal_layers) — the gate
+    and builder size routing capacity from it.
     Returns (positions, angles, route_report). report['overflow'] == 0 means the
     coarse global router closed every net within capacity — routable."""
     from .quadratic import quad
-    from . import route as R
+    from . import route as _route_mod
+    R = _GateScorer(_route_mod, layers)
 
     prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
                  fill=fill, aspect=aspect, rounds=rounds)
@@ -99,7 +120,7 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     for s in range(max(1, seeds)):
         pr = prior if s == 0 else _jitter(prior, s + jitter_seed, locked)
         p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
-                                                big_area, feedback)
+                                                big_area, feedback, R=R)
         ov = count_overlaps(parts, p, 0.0, angles)
         key = (rep["overflow"] > 0 or ov > 0, _extent_area(parts, p, angles, pad),
                hpwl(parts, graph, {r: tuple(v) for r, v in p.items()}))
@@ -289,10 +310,12 @@ def _extent_area(parts, p, angles, pad):
     return (max(xs1) - min(xs0)) * (max(ys1) - min(ys0))
 
 
-def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
-    """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen)."""
+def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback, R=None):
+    """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen).
+    `R` = the route module or a _GateScorer pinning the board's layer count."""
     from .builder import build
-    from . import route as R
+    if R is None:
+        from . import route as R
 
     angles = orient(parts, graph, prior)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in parts}
@@ -320,7 +343,8 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
             lbounds = (px0, py0, px1, py1)
 
     pos, grid, routed = build(parts, graph, topo, prior, angles, pad=pad,
-                              fixed=fixed, bounds=lbounds, big_area=big_area)
+                              fixed=fixed, bounds=lbounds, big_area=big_area,
+                              layers=getattr(R, "layers", 2))
     p = {r: list(v) for r, v in pos.items()}
     frozen = {r for r in p if area[r] > big_area} | set(fixed) | locked
 

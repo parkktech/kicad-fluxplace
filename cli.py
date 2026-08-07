@@ -37,7 +37,8 @@ def cmd_place(a):
     if a.strategy == "build":
         from fluxplace import route as R
         pos, rot, rep = P.place_routed(parts, cg, topo, center=center, pad=a.pad,
-                                       seeds=a.seeds)
+                                       seeds=a.seeds,
+                                       layers=len(IO.signal_layers(board)))
         print(R.summary(rep))
     else:
         pos, rot = P.place(parts, cg, topo, strategy=a.strategy, rotate=a.rotate,
@@ -214,8 +215,17 @@ def cmd_auto(a):
     # ---- [1] PLACE (route-aware, escape-aware) ------------------------------------
     board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
+    # AUTO-DETECT so an end user needs no stackup/rule knowledge: signal layers = copper
+    # minus poured planes; bulk track/clearance = the board's own default netclass.
+    # Detected BEFORE placement — the gate's capacity model needs the real layer count.
+    layers = a.layers or IO.signal_layers(board)
+    dtrack, dclr = IO.default_rules(board)
+    track = a.track if a.track is not None else dtrack
+    clr = a.clearance if a.clearance is not None else dclr
+    print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  floor={a.floor}mm")
     t0 = time.time()
-    pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board), pad=a.pad)
+    pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
+                                   pad=a.pad, layers=len(layers))
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
     IO.save(board, placed)
@@ -223,13 +233,6 @@ def cmd_auto(a):
 
     # ---- [2] ROUTE — route-fresh-per-rung + fanout-aware finisher (universal) --------
     from fluxplace import adaptive as AD, escape as ESC
-    # AUTO-DETECT so an end user needs no stackup/rule knowledge: signal layers = copper
-    # minus poured planes; bulk track/clearance = the board's own default netclass.
-    layers = a.layers or IO.signal_layers(board)
-    dtrack, dclr = IO.default_rules(board)
-    track = a.track if a.track is not None else dtrack
-    clr = a.clearance if a.clearance is not None else dclr
-    print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  floor={a.floor}mm")
     t0 = time.time()
     pw = {n: G.power_width(n) for n in getattr(cg, "power_traces", {})}
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
