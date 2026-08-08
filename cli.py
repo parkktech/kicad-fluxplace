@@ -388,8 +388,21 @@ def cmd_auto(a):
     from fluxplace import comprehend as CO
     comp = CO.comprehend(parts, nets, cg)
     att = {}
+    csv_own = {}
+    if a.bypass_csv:
+        import csv as _csv
+        from collections import Counter as _Ctr
+        votes = {}
+        for row in _csv.DictReader(open(a.bypass_csv)):
+            votes.setdefault(row["capacitor"], _Ctr())[row["bypassed_component"]] += 1
+        csv_own = {c: v.most_common(1)[0][0] for c, v in votes.items()
+                   if c in parts and v.most_common(1)[0][0] in parts}
+        for c, ic in csv_own.items():
+            att.setdefault(ic, []).append(c)
+        print(f"    bypass-csv: {len(csv_own)} cap ownerships from {a.bypass_csv}")
     for c, ic, rail, d in comp["bypass"]:
-        att.setdefault(ic, []).append(c)
+        if c not in csv_own:
+            att.setdefault(ic, []).append(c)
     for cl in comp["crystals"]:
         att.setdefault(cl["parent"], []).extend([cl["crystal"]] + cl["load_caps"])
     natt = sum(len(v) for v in att.values())
@@ -713,6 +726,10 @@ def main(argv=None):
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--no-pairs", action="store_true",
                      help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--bypass-csv", default=None,
+                     help="cap->component ownership CSV (e.g. Quilter export); "
+                          "drives attachments so placement optimizes what the "
+                          "grader grades")
     pau.add_argument("--no-finisher", action="store_true",
                      help="skip the freerouting last-mile finisher")
     pau.add_argument("--kicad-cli", default="kicad-cli")
