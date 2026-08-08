@@ -152,6 +152,57 @@ def save(board, path=None):
     pcbnew.SaveBoard(path or board.GetFileName(), board)
 
 
+def repair_pad_overlaps(board, clearance_mm=0.1, max_shrink=0.45):
+    """Make stand-in footprints ROUTABLE: different-net pads that interpenetrate
+    are illegal copper no router can legally land on (measured: every router —
+    KRT and three Quilter jobs — stalls at exactly the parts preflight flags for
+    PAD_OVERLAP). Shrink each offending pad toward its own centre (pin position
+    unchanged) until the pair clears by clearance_mm, never below
+    (1 - max_shrink) of the original size. Returns [(ref, padA, padB)] repaired
+    and [(ref, padA, padB)] still overlapping (need a real footprint)."""
+    fixed, stuck = [], []
+
+    def gap(a, b):
+        ab, bb = a.GetBoundingBox(), b.GetBoundingBox()
+        ox = (min(ab.GetRight(), bb.GetRight()) - max(ab.GetLeft(), bb.GetLeft()))
+        oy = (min(ab.GetBottom(), bb.GetBottom()) - max(ab.GetTop(), bb.GetTop()))
+        return max(-ox, -oy) / 1e6          # >0 = separated on an axis by that many mm
+
+    for fp in board.GetFootprints():
+        pads = [p for p in fp.Pads() if p.GetNetname()
+                and any(board.GetLayerName(l).endswith(".Cu")
+                        for l in p.GetLayerSet().Seq())]
+        floor = {p.GetPadName(): (int(p.GetSize().x * (1 - max_shrink)),
+                                  int(p.GetSize().y * (1 - max_shrink)))
+                 for p in pads}
+        for i in range(len(pads)):
+            for j in range(i + 1, len(pads)):
+                a, b = pads[i], pads[j]
+                if a.GetNetname() == b.GetNetname() or gap(a, b) >= clearance_mm:
+                    continue
+                changed = False
+                for _ in range(14):
+                    if gap(a, b) >= clearance_mm:
+                        break
+                    stepped = False
+                    for p in (a, b):
+                        s, fl = p.GetSize(), floor[p.GetPadName()]
+                        ns = (max(fl[0], int(s.x * 0.92)),
+                              max(fl[1], int(s.y * 0.92)))
+                        if ns != (s.x, s.y):
+                            p.SetSize(pcbnew.VECTOR2I(*ns))
+                            stepped = changed = True
+                    if not stepped:
+                        break
+                rec = (fp.GetReference(), a.GetPadName(), b.GetPadName())
+                if gap(a, b) >= clearance_mm:
+                    if changed:
+                        fixed.append(rec)
+                else:
+                    stuck.append(rec)
+    return fixed, stuck
+
+
 def lock_net_copper(path, netnames):
     """Lock every track/via on the given nets (in-place file edit). KRT's bulk
     router documents 'KiCad-locked copper is never ripped' — this is how the

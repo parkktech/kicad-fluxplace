@@ -320,6 +320,11 @@ def cmd_preflight(a):
     also cross-checks schematic pins against board pads (pin/pad parity)."""
     import subprocess, tempfile
     board, parts, nets, IO = _load(a.board)
+    if a.fix_out:
+        fixed, stuck = IO.repair_pad_overlaps(board)
+        IO.save(board, a.fix_out)
+        print(f"repaired {len(fixed)} different-net pad overlaps -> {a.fix_out}"
+              + (f"; {len(stuck)} pairs NEED A REAL FOOTPRINT: {stuck[:6]}" if stuck else ""))
     findings = list(IO.preflight(board))
     if a.sch:
         with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
@@ -675,6 +680,9 @@ def main(argv=None):
     ppre.add_argument("--board", required=True)
     ppre.add_argument("--sch", default=None,
                       help="root schematic: also cross-check sch pins vs board pads")
+    ppre.add_argument("--fix-out", default=None,
+                      help="repair different-net pad overlaps (shrink toward pad "
+                           "centres, pins unchanged) and write the board here")
     ppre.add_argument("--kicad-cli", default="kicad-cli")
     ppre.set_defaults(fn=cmd_preflight)
 
