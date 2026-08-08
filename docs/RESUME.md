@@ -16,6 +16,23 @@ silences it) → **keep-best** → **fab**. Auto-detects signal layers + bulk ru
 Diagnosis: CLOSED / TIME-CAPPED / LAYER-LIMITED (spread residue) / ESCAPE-LIMITED
 (concentrated residue).
 
+**Board-truth commands (2026-08-08, the stand-in/netlist arc):**
+- `preflight --sch --components` — order-readiness gate BEFORE layout and BEFORE
+  ordering: stand-in footprint names (FAIL), sch-pin/pad parity (FAIL), pad-NET
+  parity vs the schematic netlist (FAIL — the CM5 shipped v1–v8 with its whole
+  +3V3 rail absent from the PCB net set), missing courtyard / 3D (WARN).
+- `replace-footprint --board --ref --lib --name [--sch] [--rename]` — swap a
+  stand-in for a real vendor land in place: keeps pos/rot/side + schematic KIID
+  link, re-nets pads by number, netlist as net truth (recovers pads the stand-in
+  never had). Proven: CM5 J80 (card-edge→real M.2 socket), U70, U71.
+- `sync-nets --board --sch` — headless "Update PCB from Schematic", nets only.
+- `fab --upload-out DIR` — ECAD upload set (board renamed to project stem +
+  pro/dru/sch), excludes .kicad_prl (the one package with it failed to parse).
+Sourcing that works from the sandbox: jlcsearch.tscircuit.com (LCSC index) +
+`easyeda2kicad --full --lcsc_id Cxxxx` (real vendor footprints + STEP). KiCad's
+own demos are a footprint goldmine: /usr/share/kicad/demos/cm5_minima = complete
+CM5+Hailo-8 reference (production M.2 socket land + both STEPs).
+
 ## THE 2026-08-07 discoveries (don't relearn)
 1. **The layers=2 backbone bug (fixed):** route.score/builder modelled every board as
    2-layer; on 4-signal-layer dig the gate under-called capacity, declared every
