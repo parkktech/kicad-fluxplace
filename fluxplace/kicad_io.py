@@ -241,8 +241,10 @@ def preflight(board):
         for i in range(len(plist)):
             for j in range(i + 1, len(plist)):
                 a2, b2 = plist[i], plist[j]
-                if a2[4] and a2[4] == b2[4]:
-                    continue      # same-net overlap = stitching/stacked idiom
+                if not a2[4] or not b2[4] or a2[4] == b2[4]:
+                    # same-net stacks/stitching and netless mechanical pads are
+                    # idioms; the short risk is two DIFFERENT nets overlapping
+                    continue
                 if (abs(a2[0] - b2[0]) < (a2[2] + b2[2]) / 2 and
                         abs(a2[1] - b2[1]) < (a2[3] + b2[3]) / 2):
                     clash += 1
