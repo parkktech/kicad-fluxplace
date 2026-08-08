@@ -83,11 +83,19 @@ def _candidates(parts, angles, pad, committed, pos, r, px, py, bounds, max_ring=
 
 
 def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
-          cell=2.0, layers=2, pitch=0.35, prior_pull=0.02, big_area=800.0):
+          cell=2.0, layers=2, pitch=0.35, prior_pull=0.02, big_area=800.0,
+          attachments=None):
     """Sequential route-aware construction. Returns (pos, grid, routed_paths).
-    `prior` = quad positions (mental map); `fixed` refs commit first at prior spots."""
+    `prior` = quad positions (mental map); `fixed` refs commit first at prior spots.
+    `attachments` = {owner: [refs]}: parts that must hug their owner (decaps,
+    crystal clusters) commit IMMEDIATELY after the owner lands, before the
+    neighbourhood fills — a post-hoc adjacency pass can only shuffle whatever
+    slots are left (measured: worst bypass cap 80mm out on a packed board)."""
     angles = angles or {}
     refs = list(parts)
+    att = {o: [c for c in caps if c in parts]
+           for o, caps in (attachments or {}).items() if o in parts}
+    attached_all = {c for caps in att.values() for c in caps}
     if bounds is None:
         xs0 = [prior[r][0] - _size(parts, r, pad)[0] / 2 for r in refs]
         ys0 = [prior[r][1] - _size(parts, r, pad)[1] / 2 for r in refs]
@@ -195,16 +203,30 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
                                       widths[name])
         return s
 
+    def commit_attachments(owner):
+        """The owner just landed: its decaps/cluster parts take the nearest free
+        ring slots NOW, before anything else claims the neighbourhood."""
+        for c in att.get(owner, ()):
+            if c in pos:
+                continue
+            ox, oy = pos[owner]
+            for x, y in _candidates(parts, angles, pad, committed, pos, c, ox, oy,
+                                    bounds):
+                commit(c, x, y)
+                break
+
     # ---- order: fixed walls, hub, then strongest-connection-first ----------
     for r in fixed:
         if r in parts and r not in pos:
             commit(r, prior[r][0], prior[r][1])
+            commit_attachments(r)
 
-    todo = [r for r in refs if r not in pos]
+    todo = [r for r in refs if r not in pos and r not in attached_all]
     hub = topo.hub if topo.hub in parts else None
     if hub and hub in todo:
         todo.remove(hub)
         commit(hub, prior[hub][0], prior[hub][1])
+        commit_attachments(hub)
 
     conn_to_placed = defaultdict(float)
     for r in todo:
@@ -258,8 +280,21 @@ def build(parts, graph, topo, prior, angles, pad=0.45, fixed=(), bounds=None,
         if besta != base_ang:
             angles[r] = besta
         commit(r, best[0], best[1])
+        commit_attachments(r)
         for q in remaining:
             if r in wadj[q]:
                 conn_to_placed[q] += wadj[q][r]
+
+    # safety sweep: an attachment whose ring was momentarily full (or whose owner
+    # was itself attached) still gets placed — near its owner if possible
+    for c in sorted(attached_all):
+        if c in pos:
+            continue
+        owner = next(o for o, caps in att.items() if c in caps)
+        ax, ay = pos.get(owner, prior.get(c, (0.0, 0.0)))
+        for x, y in _candidates(parts, angles, pad, committed, pos, c, ax, ay,
+                                bounds, max_ring=20):
+            commit(c, x, y)
+            break
 
     return pos, grid, routed

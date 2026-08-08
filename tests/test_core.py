@@ -459,6 +459,25 @@ def _crystal_board():
     return parts, nets
 
 
+def test_builder_attachments():
+    """Attachments commit immediately after their owner: a decap stranded 60mm
+    away in the prior ends adjacent to its IC, by construction, with the board
+    still legal and routable."""
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    att = {"U1": ["C1"], "U2": ["C2", "Y1", "C10", "C11"]}
+    pos, rot, rep = P.place_routed(parts, cg, topo, attachments=att)
+    assert rep["overflow"] == 0
+    assert P.count_overlaps(parts, pos, 0.0, angles=rot) == 0
+    for owner, caps in att.items():
+        for c in caps:
+            d = (abs(pos[c][0] - pos[owner][0]) + abs(pos[c][1] - pos[owner][1]))
+            assert d <= 16.0, f"{c} ended {d:.1f}mm from {owner}"
+    d1 = abs(pos["C1"][0] - pos["U1"][0]) + abs(pos["C1"][1] - pos["U1"][1])
+    print(f"ok  builder attachments: decaps/cluster hug owners (C1 {d1:.1f}mm from U1)")
+
+
 def test_comprehend():
     """Inference bundle: crystal finds its parent + load caps; pairs and bypass
     tables populate; power classes carried through."""
@@ -514,6 +533,7 @@ if __name__ == "__main__":
     test_si_pair_skew()
     test_constraints_ingest()
     test_bypass_proximity()
+    test_builder_attachments()
     test_comprehend()
     test_crystal_pass()
     print("\nALL CORE TESTS PASSED")

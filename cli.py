@@ -378,10 +378,22 @@ def cmd_auto(a):
     clr = a.clearance if a.clearance is not None else dclr
     print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  "
           f"floor={floor}mm (profile {a.profile})")
+    # ATTACHMENTS: every decap and crystal cluster hugs its owner DURING
+    # construction (comprehend inference), so adjacency is by construction
+    from fluxplace import comprehend as CO
+    comp = CO.comprehend(parts, nets, cg)
+    att = {}
+    for c, ic, rail, d in comp["bypass"]:
+        att.setdefault(ic, []).append(c)
+    for cl in comp["crystals"]:
+        att.setdefault(cl["parent"], []).extend([cl["crystal"]] + cl["load_caps"])
+    natt = sum(len(v) for v in att.values())
+    if natt:
+        print(f"    attachments: {natt} decap/crystal parts hug {len(att)} owners")
     t0 = time.time()
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
                                    pad=a.pad, layers=len(layers),
-                                   jitter_seed=a.jitter_seed)
+                                   jitter_seed=a.jitter_seed, attachments=att)
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
     # OUTLINE CONTAINMENT: if the placement exceeds the source outline, regrow the

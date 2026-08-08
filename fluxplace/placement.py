@@ -95,7 +95,8 @@ class _GateScorer:
 
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
-                 shrink=True, decaps=True, jitter_seed=0, layers=2):
+                 shrink=True, decaps=True, jitter_seed=0, layers=2,
+                 attachments=None):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
@@ -120,7 +121,8 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     for s in range(max(1, seeds)):
         pr = prior if s == 0 else _jitter(prior, s + jitter_seed, locked)
         p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
-                                                big_area, feedback, R=R)
+                                                big_area, feedback, R=R,
+                                                attachments=attachments)
         ov = count_overlaps(parts, p, 0.0, angles)
         key = (rep["overflow"] > 0 or ov > 0, _extent_area(parts, p, angles, pad),
                hpwl(parts, graph, {r: tuple(v) for r, v in p.items()}))
@@ -313,7 +315,8 @@ def _extent_area(parts, p, angles, pad):
     return (max(xs1) - min(xs0)) * (max(ys1) - min(ys0))
 
 
-def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback, R=None):
+def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback, R=None,
+                   attachments=None):
     """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen).
     `R` = the route module or a _GateScorer pinning the board's layer count."""
     from .builder import build
@@ -347,7 +350,8 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback, R=None):
 
     pos, grid, routed = build(parts, graph, topo, prior, angles, pad=pad,
                               fixed=fixed, bounds=lbounds, big_area=big_area,
-                              layers=getattr(R, "layers", 2))
+                              layers=getattr(R, "layers", 2),
+                              attachments=attachments)
     p = {r: list(v) for r, v in pos.items()}
     frozen = {r for r in p if area[r] > big_area} | set(fixed) | locked
 
