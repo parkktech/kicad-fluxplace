@@ -104,6 +104,14 @@ def upload_package(board, out, project_dir=None, log=print):
             dst = os.path.join(out, f)
             shutil.copy2(os.path.join(project_dir, f), dst)
             written.append(dst)
+    # a .kicad_dru beside the routed board is the pipeline's CURRENT rule set
+    # (per-run escape zones); it outranks any project-dir copy
+    board_dru = os.path.splitext(board)[0] + ".kicad_dru"
+    if os.path.exists(board_dru):
+        dst = os.path.join(out, stem + ".kicad_dru")
+        shutil.copy2(board_dru, dst)
+        if dst not in written:
+            written.append(dst)
     # the package IS what we just wrote: remove every stale KiCad file left
     # over from earlier versions (.kicad_prl, renamed sheets, dead boards)
     keep = {os.path.basename(f) for f in written}

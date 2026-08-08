@@ -557,6 +557,7 @@ def test_upload_package_excludes_prl():
             open(os.path.join(proj, f), "w").write("stub")
         routed = os.path.join(d, "routed.kicad_pcb")
         open(routed, "w").write("routed")
+        open(os.path.join(d, "routed.kicad_dru"), "w").write("current-rules")
         out = os.path.join(d, "upload")
         os.makedirs(out)
         open(os.path.join(out, "x.kicad_prl"), "w").write("stale")
@@ -570,6 +571,8 @@ def test_upload_package_excludes_prl():
         assert not os.path.exists(os.path.join(out, "x.kicad_prl"))
         assert not os.path.exists(os.path.join(out, "renamed_old.kicad_sch"))
         assert os.path.exists(os.path.join(out, "notes.txt"))  # non-KiCad kept
+        # the dru beside the routed board outranks the project-dir copy
+        assert open(os.path.join(out, "x.kicad_dru")).read() == "current-rules"
     print("ok  upload package: board renamed to project stem, no .kicad_prl")
 
 
