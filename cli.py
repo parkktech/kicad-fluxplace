@@ -426,31 +426,42 @@ def cmd_auto(a):
     dpairs0 = {s: m for s, m in _dp(
         {n: len(v) for n, v in cg.signal_nets.items()}).items()
         if m in cg.signal_nets}
+    locked_pairnets = []
     if dpairs0 and not a.no_pairs:
         pg = prof.get("pair_geom")
-        pr = AD.krt_route_diff(a.router_py, a.router_dir, layers, dpairs0,
-                               track_w=pg[0] if pg else track,
-                               gap=pg[1] if pg else 0.15,
-                               clearance=min(clr, 0.1) if pg else clr)
-        paired = pr(placed, os.path.join(a.out, "placed_pairs.kicad_pcb"),
-                    log=lambda m: print("   " + m))
-        if paired != placed:
-            placed = paired
-            # lock ONLY pairs route_diff completed, and PAIR-ATOMICALLY: locking
-            # the finished half of a pair while its partner falls to the bulk
-            # router bakes in asymmetry (measured: USB_VID 27.7mm skew). Both
-            # sides complete -> lock both; else both stay rippable.
-            _d, _un = AD.drc_unrouted(placed, a.kicad_cli)
-            locked_nets, failed = [], []
-            for s, m in sorted(dpairs0.items()):
-                if s in _un or m in _un:
-                    failed += [m, s]
-                else:
-                    locked_nets += [m, s]
-            nlocked = IO.lock_net_copper(placed, locked_nets) if locked_nets else 0
-            print(f"    pairs-first: {len(dpairs0)} pairs attempted, "
-                  f"{len(locked_nets) // 2} complete pairs locked ({nlocked} segments)"
-                  + (f", left to bulk: {sorted(failed)}" if failed else ""))
+        # RETRY loop: route_diff completion is nondeterministic (1-4 of 7 pairs
+        # per draw on CM5). Each round locks newly-complete pairs PAIR-ATOMICALLY
+        # (both sides or neither — locking half a pair bakes in asymmetry,
+        # measured 27.7mm skew) and re-attempts only the stragglers.
+        cur_b = placed
+        for attempt in range(3):
+            todo = {sl: m for sl, m in dpairs0.items()
+                    if m not in locked_pairnets and sl not in locked_pairnets}
+            if not todo:
+                break
+            pr = AD.krt_route_diff(a.router_py, a.router_dir, layers, todo,
+                                   track_w=pg[0] if pg else track,
+                                   gap=pg[1] if pg else 0.15,
+                                   clearance=min(clr, 0.1) if pg else clr)
+            nxt = pr(cur_b, os.path.join(a.out, f"placed_pairs{attempt}.kicad_pcb"),
+                     log=lambda m: print("   " + m))
+            if nxt == cur_b:
+                break
+            cur_b = nxt
+            _d, _un = AD.drc_unrouted(cur_b, a.kicad_cli)
+            new_locked = []
+            for sl, m in sorted(todo.items()):
+                if sl not in _un and m not in _un:
+                    new_locked += [m, sl]
+            if not new_locked:
+                break
+            IO.lock_net_copper(cur_b, new_locked)
+            locked_pairnets += new_locked
+        placed = cur_b
+        failed = sorted((set(dpairs0) | set(dpairs0.values())) - set(locked_pairnets))
+        print(f"    pairs-first: {len(dpairs0)} pairs, "
+              f"{len(locked_pairnets) // 2} locked coupled after retries"
+              + (f", left to bulk: {failed}" if failed else ""))
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],
@@ -475,6 +486,51 @@ def cmd_auto(a):
                                   kicad_cli=a.kicad_cli, start_mm=clr,
                                   floor_mm=floor, fanout=(fanout if a.finish else None),
                                   log=lambda m: print("   " + m))
+    # SKEW REPAIR: force-reroute the bulk-routed pairs as length-matched groups
+    # (locked coupled pairs are untouchable by design). Guarded: accept only if
+    # unrouted did not grow AND the worst skew actually improved.
+    from fluxplace import si as SI
+    import shutil as _sh
+    if dpairs0 and not a.no_pairs and os.path.exists(src):
+        unlocked = {sl: m for sl, m in dpairs0.items()
+                    if m not in locked_pairnets and sl not in locked_pairnets}
+        if unlocked:
+            lmfn = AD.krt_length_match(a.router_py, a.router_dir, layers, unlocked,
+                                       base_w=track, base_c=clr,
+                                       via_size=prof["route_via"][0],
+                                       via_drill=prof["route_via"][1])
+            cand = lmfn(src, os.path.join(a.out, "routed_lm.kicad_pcb"),
+                        log=lambda m: print("   " + m))
+            if cand != src and os.path.exists(cand):
+                _, u0 = AD.drc_unrouted(src, a.kicad_cli); u0.discard("GND")
+                _, u1 = AD.drc_unrouted(cand, a.kicad_cli); u1.discard("GND")
+                _, t0 = SI.check_board(src, dpairs0)
+                _, t1 = SI.check_board(cand, dpairs0)
+                w0 = max((r[4] for r in t0), default=0.0)
+                w1 = max((r[4] for r in t1), default=0.0)
+                if len(u1) <= len(u0) and w1 < w0 - 0.05:
+                    _sh.copy(cand, src)
+                    print(f"    length-match: worst skew {w0:.2f} -> {w1:.2f}mm (kept)")
+                else:
+                    print(f"    length-match: skew {w0:.2f} -> {w1:.2f}mm, "
+                          f"unrouted {len(u0)} -> {len(u1)} — discarded")
+
+    # FINISHER: freerouting on the residue (slow, completion-strong). Keep-best.
+    jar = os.path.expanduser("~/tools/freerouting-2.2.4.jar")
+    if not a.no_finisher and os.path.exists(jar) and os.path.exists(src):
+        _, u0 = AD.drc_unrouted(src, a.kicad_cli); u0.discard("GND")
+        if u0:
+            print(f"    finisher: freerouting on the last {len(u0)} nets")
+            fin = AD.freerouting_finish(jar)(src, os.path.join(a.out, "routed_fin.kicad_pcb"),
+                                             log=lambda m: print("   " + m))
+            if fin != src and os.path.exists(fin):
+                _, u1 = AD.drc_unrouted(fin, a.kicad_cli); u1.discard("GND")
+                if len(u1) < len(u0):
+                    _sh.copy(fin, src)
+                    print(f"    finisher: {len(u0)} -> {len(u1)} unrouted (kept)")
+                else:
+                    print(f"    finisher: {len(u1)} unrouted — discarded")
+
     # local fine-pitch .kicad_dru so the escape copper is DRC-legal (bulk stays 0.2mm)
     if os.path.exists(src):
         d, _u = AD.drc_unrouted(src, a.kicad_cli)
@@ -649,6 +705,8 @@ def main(argv=None):
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--no-pairs", action="store_true",
                      help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--no-finisher", action="store_true",
+                     help="skip the freerouting last-mile finisher")
     pau.add_argument("--kicad-cli", default="kicad-cli")
     pau.add_argument("--candidates", type=int, default=1,
                      help="population search: N independent place->route candidates "

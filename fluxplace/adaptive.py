@@ -112,6 +112,74 @@ def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
     return fn
 
 
+def krt_length_match(krt_py, krt_dir, layers, pairs, base_w=0.2, base_c=0.2,
+                     tolerance=0.5, via_size=0.6, via_drill=0.3, grid=0.1,
+                     timeout=1200):
+    """Skew repair: force-reroute the (still-unlocked) diff pairs as LENGTH-MATCHED
+    groups with meanders. KRT's --force-reroute restores the original copper if a
+    net fails, and never touches KiCad-locked copper — so coupled pairs from the
+    pairs-first stage keep their geometry and only the bulk-routed stragglers get
+    matched. This is the stage that turns millimetre skews into the 0.1mm class."""
+    route_py = os.path.join(krt_dir, "py_router", "route.py")
+    netnames = sorted(set(pairs) | set(pairs.values()))
+
+    def fn(board, outb, log=print):
+        if not netnames:
+            return board
+        cmd = [krt_py, route_py, board, outb, "--keep-input-copper",
+               "--force-reroute", "--nets", *netnames,
+               "--layers", *layers, "--track-width", str(base_w),
+               "--clearance", str(base_c), "--via-size", str(via_size),
+               "--via-drill", str(via_drill), "--grid-step", str(grid),
+               "--length-match-tolerance", str(tolerance)]
+        for s, m in sorted(pairs.items()):
+            cmd += ["--length-match-group", m, s]
+        try:
+            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True,
+                           timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"    length-match hit {timeout}s cap")
+        return outb if os.path.exists(outb) else board
+    return fn
+
+
+def freerouting_finish(jar, passes=6, timeout=1800):
+    """Last-mile finisher: freerouting is ~two orders slower than KRT but
+    completion-strong — on a board that is already 97%+ routed it only has the
+    hard residue to negotiate. DSN out -> jar -> SES back in via pcbnew.
+    Passthrough (returns the input path) on any failure; caller keep-bests."""
+    def fn(src, outb, log=print):
+        import pcbnew
+        from . import kicad_io as IO
+        b = pcbnew.LoadBoard(src)
+        dsn, ses = outb + ".dsn", outb + ".ses"
+        if not IO.export_dsn(b, dsn):
+            log("    finisher: DSN export failed — skipped")
+            return src
+        try:
+            subprocess.run(["java", "-jar", jar, "-de", dsn, "-do", ses,
+                            "-mp", str(passes)], capture_output=True,
+                           timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"    finisher hit {timeout}s cap")
+        except FileNotFoundError:
+            log("    finisher: java not available — skipped")
+            return src
+        if not os.path.exists(ses):
+            log("    finisher: no session produced — skipped")
+            return src
+        try:
+            if not pcbnew.ImportSpecctraSES(b, ses):
+                log("    finisher: SES import rejected — skipped")
+                return src
+        except Exception as e:
+            log(f"    finisher: SES import failed ({e}) — skipped")
+            return src
+        pcbnew.SaveBoard(outb, b)
+        return outb
+    return fn
+
+
 def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.45,
                via_drill=0.25, method="auto", timeout=600):
     """fanout_fn backed by KRT bga_fanout: generate escape vias (dogbone/underpad) for a
