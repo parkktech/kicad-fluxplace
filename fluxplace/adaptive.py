@@ -156,10 +156,20 @@ def freerouting_finish(jar, passes=6, timeout=1800):
         if not IO.export_dsn(b, dsn):
             log("    finisher: DSN export failed — skipped")
             return src
+        # HEADLESS, always: without this the jar opens a Swing window through
+        # WSLg on the user's desktop (measured). -Xss256m: freerouting's DSN
+        # parser recurses per polygon vertex — big GND pours overflow the
+        # default JVM stack (java.lang.StackOverflowError on load, measured).
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         try:
-            subprocess.run(["java", "-jar", jar, "-de", dsn, "-do", ses,
-                            "-mp", str(passes)], capture_output=True,
-                           timeout=timeout)
+            r = subprocess.run(["java", "-Djava.awt.headless=true", "-Xss256m",
+                                "-jar", jar, "-de", dsn, "-do", ses,
+                                "-mp", str(passes)], capture_output=True,
+                               timeout=timeout, env=env, text=True)
+            if r.returncode != 0:
+                log("    finisher: jar exited "
+                    f"{r.returncode}: {(r.stderr or r.stdout or '').strip()[:160]}")
         except subprocess.TimeoutExpired:
             log(f"    finisher hit {timeout}s cap")
         except FileNotFoundError:
