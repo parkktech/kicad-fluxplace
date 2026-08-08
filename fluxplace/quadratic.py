@@ -187,9 +187,12 @@ def _pin_perimeter(parts, refs, seed, cx, cy, W, H, pad):
 
 def quad(parts, graph, topo, center=None, pad=0.45, rounds=7, fill=0.55,
          aspect=1.35, big_area=800.0, alpha0=0.02, alpha_growth=1.7,
-         pin_connectors=True):
+         pin_connectors=True, fixed_bounds=None):
     """Analytic global placement + SimPL-lite spreading. Returns {ref: (x, y)} — legal
-    (overlap-free at `pad` spacing) with big modules central/adjacent per connectivity."""
+    (overlap-free at `pad` spacing) with big modules central/adjacent per connectivity.
+    `fixed_bounds` = (x0, y0, x1, y1) mm: the board outline is a hard mechanical
+    given (enclosure, mounting holes) — the target rectangle IS that region and
+    spreading never exceeds it (no fill-derived sizing, no slack)."""
     cx, cy = center or (0.0, 0.0)
     refs = list(parts)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in refs}
@@ -215,6 +218,10 @@ def quad(parts, graph, topo, center=None, pad=0.45, rounds=7, fill=0.55,
         # fill-natural rectangle and the anchor span so parts neither balloon off the
         # origin nor get crushed below what they need to legalize overlap-free.
         W, H = max(W, bw), max(H, bh)
+    if fixed_bounds:
+        fx0, fy0, fx1, fy1 = fixed_bounds
+        cx, cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
+        W, H = fx1 - fx0, fy1 - fy0
 
     E, _deg = _edges(parts, graph, topo)
     seed = radial(parts, topo, (cx, cy), pad)
@@ -233,9 +240,9 @@ def quad(parts, graph, topo, center=None, pad=0.45, rounds=7, fill=0.55,
     init = {r: tuple(seed[r]) for r in movable}
     # bounds slightly beyond the pin rectangle: legalization resolves inward, so the
     # final extent tracks the target-fill rect instead of ballooning outward
-    slack = 1.04
-    bounds = (cx - W / 2 * slack, cy - H / 2 * slack,
-              cx + W / 2 * slack, cy + H / 2 * slack)
+    slack = 1.0 if fixed_bounds else 1.04
+    bounds = fixed_bounds or (cx - W / 2 * slack, cy - H / 2 * slack,
+                              cx + W / 2 * slack, cy + H / 2 * slack)
     anchors, alpha = None, 0.0
     pos = {}
     for rd in range(rounds):

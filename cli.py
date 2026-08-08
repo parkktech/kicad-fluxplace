@@ -231,6 +231,12 @@ def _cand_argv(a, k, outdir):
         v += ["--no-finish"]
     if a.no_fanout:
         v += ["--no-fanout"]
+    if a.keep_outline:
+        v += ["--keep-outline"]
+    if a.no_pairs:
+        v += ["--no-pairs"]
+    if a.bypass_csv:
+        v += ["--bypass-csv", a.bypass_csv]
     return v
 
 
@@ -488,22 +494,37 @@ def cmd_auto(a):
     if natt:
         print(f"    attachments: {natt} decap/crystal parts hug {len(att)} owners")
     t0 = time.time()
+    ob = board.GetBoardEdgesBoundingBox()
+    ox0, oy0, ox1, oy1 = (v / 1e6 for v in (ob.GetLeft(), ob.GetTop(),
+                                            ob.GetRight(), ob.GetBottom()))
+    fixed_bounds = None
+    if a.keep_outline:
+        m = 0.5
+        fixed_bounds = (ox0 + m, oy0 + m, ox1 - m, oy1 - m)
+        print(f"    keep-outline: parts constrained to the source outline "
+              f"{ox1 - ox0:.0f}x{oy1 - oy0:.0f}mm (grow-to-route disabled)")
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
                                    pad=a.pad, layers=len(layers),
-                                   jitter_seed=a.jitter_seed, attachments=att)
+                                   jitter_seed=a.jitter_seed, attachments=att,
+                                   fixed_bounds=fixed_bounds)
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
     # OUTLINE CONTAINMENT: if the placement exceeds the source outline, regrow the
     # outline around the parts — otherwise every outside pad is off-board and the
-    # fab package is garbage (the exact parse error other tools reject boards for)
+    # fab package is garbage (the exact parse error other tools reject boards for).
+    # With --keep-outline the outline is a mechanical given and NEVER regrows: an
+    # overhang here is a loud FAIL, not a bigger board.
     ex0, ey0, ex1, ey1 = IO.parts_extent(parts, pos, rot, P.eff_size)
-    ob = board.GetBoardEdgesBoundingBox()
-    ox0, oy0, ox1, oy1 = (v / 1e6 for v in (ob.GetLeft(), ob.GetTop(),
-                                            ob.GetRight(), ob.GetBottom()))
     if ex0 < ox0 or ey0 < oy0 or ex1 > ox1 or ey1 > oy1:
-        w, h = IO.shrinkwrap_outline(board, ex0, ey0, ex1, ey1)
-        print(f"    outline regrown to {w:.0f}x{h:.0f}mm "
-              f"(placement exceeded the source outline)")
+        if a.keep_outline:
+            print(f"    FAIL KEEP_OUTLINE: parts extent "
+                  f"{ex1 - ex0:.1f}x{ey1 - ey0:.1f}mm exceeds the fixed outline "
+                  f"{ox1 - ox0:.0f}x{oy1 - oy0:.0f}mm — the design does not fit; "
+                  f"review gate overflow / free board area")
+        else:
+            w, h = IO.shrinkwrap_outline(board, ex0, ey0, ex1, ey1)
+            print(f"    outline regrown to {w:.0f}x{h:.0f}mm "
+                  f"(placement exceeded the source outline)")
     IO.save(board, placed)
     print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
 
@@ -859,6 +880,9 @@ def main(argv=None):
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--no-pairs", action="store_true",
                      help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--keep-outline", action="store_true",
+                     help="the source Edge.Cuts outline is a mechanical given: "
+                          "place inside it, never regrow (doesn't-fit = loud FAIL)")
     pau.add_argument("--bypass-csv", default=None,
                      help="cap->component ownership CSV (e.g. Quilter export); "
                           "drives attachments so placement optimizes what the "

@@ -96,7 +96,7 @@ class _GateScorer:
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
                  shrink=True, decaps=True, jitter_seed=0, layers=2,
-                 attachments=None):
+                 attachments=None, fixed_bounds=None):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
@@ -105,6 +105,11 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     `seeds` > 1 runs perturbed attempts and keeps the best routable one.
     `layers` = the board's SIGNAL layer count (kicad_io.signal_layers) — the gate
     and builder size routing capacity from it.
+    `fixed_bounds` = (x0, y0, x1, y1) mm: the outline is a hard mechanical given —
+    parts are placed and legalized INSIDE it and grow-to-route is disabled (a
+    board that doesn't fit reports overflow instead of ballooning; measured on
+    the CM5 carrier: free growth produced 166x150mm against a 113x107 enclosure,
+    which is a scrap board no matter how well it routes).
     Returns (positions, angles, route_report). report['overflow'] == 0 means the
     coarse global router closed every net within capacity — routable."""
     from .quadratic import quad
@@ -112,7 +117,8 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     R = _GateScorer(_route_mod, layers)
 
     prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
-                 fill=fill, aspect=aspect, rounds=rounds)
+                 fill=fill, aspect=aspect, rounds=rounds,
+                 fixed_bounds=fixed_bounds)
 
     locked = {r for r in parts if parts[r].get("locked")}
     if jitter_seed:
@@ -136,7 +142,7 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     # grow-only-if-needed). A board that already routes skips both.
     if rep["overflow"] > 0:
         p, rep = _open_channels(parts, graph, p, angles, pad, R, rep)
-    if rep["overflow"] > 0:
+    if rep["overflow"] > 0 and not fixed_bounds:
         p, rep = _expand_to_route(parts, graph, p, angles, pad, R, rep)
     # order matters: crystals claim their parent's OSC-pin slots FIRST (hardest
     # physics constraint), then decaps hug their ICs (inside the loose envelope),
@@ -153,6 +159,15 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         p, rep = _flush_connectors(parts, graph, p, angles, pad, R, rep, big_area)
     if rep["overflow"] == 0:
         angles, rep = _orient_refine(parts, graph, p, angles, pad, R, rep)
+    if fixed_bounds:
+        # HARD containment: every pass above may drift parts; the outline is a
+        # mechanical given, so clamp + re-legalize inside it and rescore honestly
+        pl = {r: list(v) for r, v in p.items()}
+        legalize(parts, pl, pad, iters=300, angles=angles,
+                 frozen=locked & set(pl), bounds=fixed_bounds)
+        p = pl
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
+                      graph, angles)
     return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
 
 

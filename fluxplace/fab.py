@@ -85,10 +85,10 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
 def upload_package(board, out, project_dir=None, log=print):
     """Assemble the ECAD upload set (external audit/re-route services parse
     these for component relationships): the routed board renamed to the
-    project's stem + the project's .kicad_pro, .kicad_dru and every schematic
-    sheet. Deliberately EXCLUDES .kicad_prl — it is per-user UI state, not
-    design data, and the one upload that included it failed to parse (CM5 v8).
-    Returns the list of files written."""
+    project's stem + the project's .kicad_pro and every schematic sheet —
+    NOTHING else. Measured against Quilter's uploader: .kicad_prl (per-user
+    UI state) and .kicad_dru both come back 'Unsupported file' errors, so the
+    set is exactly pcb + pro + sch. Returns the list of files written."""
     import shutil
     project_dir = project_dir or os.path.dirname(os.path.abspath(board))
     os.makedirs(out, exist_ok=True)
@@ -100,17 +100,9 @@ def upload_package(board, out, project_dir=None, log=print):
     shutil.copy2(board, dst)
     written.append(dst)
     for f in sorted(os.listdir(project_dir)):
-        if f.endswith((".kicad_pro", ".kicad_sch", ".kicad_dru")):
+        if f.endswith((".kicad_pro", ".kicad_sch")):
             dst = os.path.join(out, f)
             shutil.copy2(os.path.join(project_dir, f), dst)
-            written.append(dst)
-    # a .kicad_dru beside the routed board is the pipeline's CURRENT rule set
-    # (per-run escape zones); it outranks any project-dir copy
-    board_dru = os.path.splitext(board)[0] + ".kicad_dru"
-    if os.path.exists(board_dru):
-        dst = os.path.join(out, stem + ".kicad_dru")
-        shutil.copy2(board_dru, dst)
-        if dst not in written:
             written.append(dst)
     # the package IS what we just wrote: remove every stale KiCad file left
     # over from earlier versions (.kicad_prl, renamed sheets, dead boards)

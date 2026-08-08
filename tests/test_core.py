@@ -108,6 +108,25 @@ def test_place_routed_pipeline():
     print("ok  place_routed: legal + routable")
 
 
+def test_place_routed_fixed_bounds():
+    """--keep-outline: the outline is a mechanical given — every part body stays
+    inside fixed_bounds and grow-to-route never widens it."""
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    fb = (-40.0, -30.0, 40.0, 30.0)
+    pos, rot, rep = P.place_routed(parts, cg, topo, fixed_bounds=fb)
+    assert len(pos) == len(parts), "not every part placed"
+    assert P.count_overlaps(parts, pos, 0.15, angles=rot) == 0, "overlaps left"
+    for r, (x, y) in pos.items():
+        w, h = P.eff_size(parts, r, rot.get(r, 0.0), 0.0)
+        assert x - w / 2 >= fb[0] - 1e-6 and x + w / 2 <= fb[2] + 1e-6, \
+            f"{r} exceeds fixed bounds in x: {x}±{w/2}"
+        assert y - h / 2 >= fb[1] - 1e-6 and y + h / 2 <= fb[3] + 1e-6, \
+            f"{r} exceeds fixed bounds in y: {y}±{h/2}"
+    print("ok  place_routed fixed_bounds: all bodies inside the given outline")
+
+
 def test_power_traces_and_pairs():
     """graph v2: small-fanout power rails become routed traces (never GND); diff
     pairs are detected by naming convention with the P side as master."""
@@ -546,8 +565,8 @@ def test_netlist_pin_nets():
 
 
 def test_upload_package_excludes_prl():
-    """The ECAD upload set carries pro+sch+dru+board and never the .kicad_prl
-    (per-user UI state; its presence correlated with the one parse failure)."""
+    """The ECAD upload set is exactly board+pro+sch: .kicad_prl and .kicad_dru
+    both come back 'Unsupported file' from Quilter's uploader (measured)."""
     import tempfile
     from fluxplace import fab
     with tempfile.TemporaryDirectory() as d:
@@ -565,14 +584,13 @@ def test_upload_package_excludes_prl():
         open(os.path.join(out, "notes.txt"), "w").write("keep me")
         files = fab.upload_package(routed, out, project_dir=proj, log=lambda *a: None)
         names = sorted(os.path.basename(f) for f in files)
-        assert names == ["sub.kicad_sch", "x.kicad_dru", "x.kicad_pcb",
+        assert names == ["sub.kicad_sch", "x.kicad_pcb",
                          "x.kicad_pro", "x.kicad_sch"], names
         assert open(os.path.join(out, "x.kicad_pcb")).read() == "routed"
         assert not os.path.exists(os.path.join(out, "x.kicad_prl"))
+        assert not os.path.exists(os.path.join(out, "x.kicad_dru"))
         assert not os.path.exists(os.path.join(out, "renamed_old.kicad_sch"))
         assert os.path.exists(os.path.join(out, "notes.txt"))  # non-KiCad kept
-        # the dru beside the routed board outranks the project-dir copy
-        assert open(os.path.join(out, "x.kicad_dru")).read() == "current-rules"
     print("ok  upload package: board renamed to project stem, no .kicad_prl")
 
 
@@ -584,6 +602,7 @@ if __name__ == "__main__":
     test_quad_hub_central()
     test_router_gate()
     test_place_routed_pipeline()
+    test_place_routed_fixed_bounds()
     test_power_traces_and_pairs()
     test_pin_rotation()
     test_layer_router_via_and_taper()
