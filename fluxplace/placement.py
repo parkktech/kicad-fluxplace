@@ -163,8 +163,8 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         # HARD containment: every pass above may drift parts; the outline is a
         # mechanical given, so clamp + re-legalize inside it and rescore honestly
         pl = {r: list(v) for r, v in p.items()}
-        legalize(parts, pl, pad, iters=300, angles=angles,
-                 frozen=locked & set(pl), bounds=fixed_bounds)
+        legalize(parts, pl, pad, iters=600, angles=angles,
+                 frozen=locked & set(pl), bounds=fixed_bounds, hard_bounds=True)
         p = pl
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
                       graph, angles)
@@ -1381,7 +1381,8 @@ def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
                     yield key
 
 
-def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None):
+def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None,
+             hard_bounds=False):
     """Iterative overlap removal via a correct spatial hash: push every overlapping pair
     apart along the shorter axis until none remain (or `iters` passes). Rotation-aware.
     `frozen` parts never move (anchors) — an overlapping movable part yields the full
@@ -1389,12 +1390,14 @@ def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None):
     `bounds` = (x0, y0, x1, y1): movable parts are clamped inside after every sweep, so
     overflow resolves inward (this is what keeps the board small instead of ballooning).
     Clamping stops for the final third of the passes if it is fighting convergence —
-    zero overlaps beats a tidy outline."""
+    zero overlaps beats a tidy outline — UNLESS `hard_bounds`: a fixed enclosure
+    outline is non-negotiable, so clamping runs every pass (measured: the soft
+    final third let a border-row cap get pushed back over the board edge)."""
     angles = angles or {}
     frozen = frozen or set()
     for it in range(iters):
         moved = False
-        if bounds and it < max(1, iters * 2 // 3):
+        if bounds and (hard_bounds or it < max(1, iters * 2 // 3)):
             x0, y0, x1, y1 = bounds
             for r in pos:
                 if r in frozen:
