@@ -22,10 +22,11 @@ PROFILES = {
         fanout_via=(0.45, 0.30),                # escape via (dia, drill)
         edge_clearance=0.30,
     ),
-    # JLCPCB advanced HDI-ish tier (finer drill, tighter annular)
+    # JLCPCB advanced tier: 3.5 mil copper (0.0889mm — routers emit the exact
+    # mil value, so the min carries margin below 0.09), 0.25/0.15 vias
     "jlcpcb-advanced": dict(
-        track_min=0.09, clearance_min=0.09,
-        via_dia_min=0.30, via_drill_min=0.15,
+        track_min=0.088, clearance_min=0.088,
+        via_dia_min=0.25, via_drill_min=0.15,
         floor=0.09,
         route_via=(0.45, 0.25),
         fanout_via=(0.30, 0.15),

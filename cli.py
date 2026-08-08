@@ -421,7 +421,10 @@ def cmd_auto(a):
                     log=lambda m: print("   " + m))
         if paired != placed:
             placed = paired
-            print(f"    pairs-first: {len(dpairs0)} diff pairs pre-routed coupled")
+            pairnets = sorted(set(dpairs0) | set(dpairs0.values()))
+            nlocked = IO.lock_net_copper(placed, pairnets)
+            print(f"    pairs-first: {len(dpairs0)} diff pairs pre-routed coupled, "
+                  f"{nlocked} segments locked against the bulk rip")
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],

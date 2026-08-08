@@ -152,6 +152,22 @@ def save(board, path=None):
     pcbnew.SaveBoard(path or board.GetFileName(), board)
 
 
+def lock_net_copper(path, netnames):
+    """Lock every track/via on the given nets (in-place file edit). KRT's bulk
+    router documents 'KiCad-locked copper is never ripped' — this is how the
+    pairs-first coupled routes survive the route-fresh rip-everything pass
+    (measured without it: PCIE_TX re-routed single-ended with 22mm skew)."""
+    b = pcbnew.LoadBoard(path)
+    n = 0
+    names = set(netnames)
+    for t in b.GetTracks():
+        if t.GetNetname() in names:
+            t.SetLocked(True)
+            n += 1
+    pcbnew.SaveBoard(path, b)
+    return n
+
+
 def board_center(board):
     bb = board.GetBoundingBox()
     return _mm(bb.GetCenter().x), _mm(bb.GetCenter().y)

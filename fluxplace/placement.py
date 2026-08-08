@@ -728,16 +728,21 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
     are ranked by closeness to the OWNER (the audit found the old sort ranked by
     closeness to the decap's current spot, so nothing ever moved)."""
     signal_refs = {r for members in graph.signal_nets.values() for r in members}
-    ptrace_refs = {r for name, members in getattr(graph, "power_traces", {}).items()
-                   for r in members}
     owners_of = {}
     for r in p:
-        if kind_of(r) != "C" or r in signal_refs or r in ptrace_refs:
+        if kind_of(r) != "C" or r in signal_refs:
             continue
         my_nets = set(parts[r].get("pins", {}).keys())
+        # a DECOUPLING cap is rail+GND, whether the rail is a plane or a routed
+        # power trace (VBUS_C-class rails were excluded before, stranding their
+        # caps 80mm from the pin they serve). Owner = nearest non-passive with a
+        # pin on the RAIL — never a GND-only match, or everything owns everything.
+        if "GND" not in my_nets or len(my_nets) != 2:
+            continue
+        rails = my_nets - {"GND"}
         cands = [q for q in p
                  if q != r and not is_passive(q)
-                 and my_nets & set(parts[q].get("pins", {}).keys())]
+                 and rails & set(parts[q].get("pins", {}).keys())]
         if cands:
             owners_of[r] = min(cands, key=lambda q: (abs(p[q][0] - p[r][0]) +
                                                      abs(p[q][1] - p[r][1]), q))
