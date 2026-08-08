@@ -232,12 +232,16 @@ def preflight(board):
         # overlapping non-congruent pads inside one footprint read as a padstack
         # collision to strict checkers; exact stacked clones (same pos+size) are
         # the accepted multi-number idiom and stay silent
-        plist = [(p.GetPosition().x, p.GetPosition().y,
-                  p.GetSize().x, p.GetSize().y, p.GetNetname())
-                 for p in fp.Pads()
-                 if any(board.GetLayerName(l).endswith(".Cu")
-                        for l in p.GetLayerSet().Seq())]   # paste apertures exempt
+        plist = []
+        for p in fp.Pads():
+            if not any(board.GetLayerName(l).endswith(".Cu")
+                       for l in p.GetLayerSet().Seq()):
+                continue                                   # paste apertures exempt
+            pb = p.GetBoundingBox()                        # orientation-aware
+            plist.append((pb.GetLeft(), pb.GetTop(), pb.GetRight(),
+                          pb.GetBottom(), p.GetNetname()))
         clash = 0
+        eps = int(0.02 * 1e6)          # >20um interpenetration = a real overlap
         for i in range(len(plist)):
             for j in range(i + 1, len(plist)):
                 a2, b2 = plist[i], plist[j]
@@ -245,8 +249,8 @@ def preflight(board):
                     # same-net stacks/stitching and netless mechanical pads are
                     # idioms; the short risk is two DIFFERENT nets overlapping
                     continue
-                if (abs(a2[0] - b2[0]) < (a2[2] + b2[2]) / 2 and
-                        abs(a2[1] - b2[1]) < (a2[3] + b2[3]) / 2):
+                if (min(a2[2], b2[2]) - max(a2[0], b2[0]) > eps and
+                        min(a2[3], b2[3]) - max(a2[1], b2[1]) > eps):
                     clash += 1
         if clash:
             out.append(("WARN", "PAD_OVERLAP",
