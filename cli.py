@@ -415,22 +415,30 @@ def cmd_auto(a):
         {n: len(v) for n, v in cg.signal_nets.items()}).items()
         if m in cg.signal_nets}
     if dpairs0 and not a.no_pairs:
+        pg = prof.get("pair_geom")
         pr = AD.krt_route_diff(a.router_py, a.router_dir, layers, dpairs0,
-                               track_w=track, clearance=clr)
+                               track_w=pg[0] if pg else track,
+                               gap=pg[1] if pg else 0.15,
+                               clearance=min(clr, 0.1) if pg else clr)
         paired = pr(placed, os.path.join(a.out, "placed_pairs.kicad_pcb"),
                     log=lambda m: print("   " + m))
         if paired != placed:
             placed = paired
-            # lock ONLY the pairs route_diff actually COMPLETED: locking a failed
-            # pair's partial stubs blocks the bulk router from finishing it
-            # (measured: PCIE_RX went from routed-badly to unrouted)
+            # lock ONLY pairs route_diff completed, and PAIR-ATOMICALLY: locking
+            # the finished half of a pair while its partner falls to the bulk
+            # router bakes in asymmetry (measured: USB_VID 27.7mm skew). Both
+            # sides complete -> lock both; else both stay rippable.
             _d, _un = AD.drc_unrouted(placed, a.kicad_cli)
-            pairnets = sorted((set(dpairs0) | set(dpairs0.values())) - _un)
-            failed = sorted((set(dpairs0) | set(dpairs0.values())) & _un)
-            nlocked = IO.lock_net_copper(placed, pairnets) if pairnets else 0
+            locked_nets, failed = [], []
+            for s, m in sorted(dpairs0.items()):
+                if s in _un or m in _un:
+                    failed += [m, s]
+                else:
+                    locked_nets += [m, s]
+            nlocked = IO.lock_net_copper(placed, locked_nets) if locked_nets else 0
             print(f"    pairs-first: {len(dpairs0)} pairs attempted, "
-                  f"{len(pairnets)} nets complete+locked ({nlocked} segments)"
-                  + (f", incomplete left to bulk: {failed}" if failed else ""))
+                  f"{len(locked_nets) // 2} complete pairs locked ({nlocked} segments)"
+                  + (f", left to bulk: {sorted(failed)}" if failed else ""))
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],

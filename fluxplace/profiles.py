@@ -31,6 +31,9 @@ PROFILES = {
         route_via=(0.45, 0.25),
         fanout_via=(0.30, 0.15),
         edge_clearance=0.30,
+        # 100R differential geometry on the JLC 4-layer 7628 reference stackup
+        # (Simbeor-computed: 0.173mm trace / 0.107mm gap)
+        pair_geom=(0.173, 0.107),
     ),
     # generic conservative prototype fab (2-6 layer quick-turn anywhere)
     "proto": dict(
