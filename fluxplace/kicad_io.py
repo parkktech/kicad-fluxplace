@@ -394,6 +394,12 @@ def preflight(board):
             out.append(("WARN", "PAD_OVERLAP",
                         f"{ref}: {clash} overlapping non-congruent pad pair(s) — "
                         f"reads as a padstack collision to strict checkers"))
+        fpid = fp.GetFPID().GetUniStringLibId().upper()
+        if any(t in fpid for t in _STANDIN_TOKENS):
+            out.append(("WARN", "FP_STANDIN_NAME",
+                        f"{ref}: footprint name marks it a stand-in — every "
+                        f"router measured stalls on stand-in pin geometry; "
+                        f"replace before layout (see replace-footprint)"))
         ec = sum(1 for g in fp.GraphicalItems()
                  if g.GetLayer() == pcbnew.Edge_Cuts)
         if ec:
@@ -419,6 +425,125 @@ def pin_pad_parity(board, netlist_xml):
            for f in board.GetFootprints()}
     return {r: sorted(p - fps[r]) for r, p in comp_pins.items()
             if r in fps and p - fps[r]}
+
+
+def netlist_pin_nets(netlist_xml, ref):
+    """{pin: netname} for one component from a kicadxml netlist — the schematic
+    truth for pad-net assignment. Used by replace_footprint so pads the old
+    (stand-in) footprint never had — e.g. power pins — get their nets back
+    instead of inheriting the stand-in's holes (measured on the CM5 M.2 socket:
+    the card-edge stand-in dropped every 3.3V pad, unpowering the module)."""
+    import xml.etree.ElementTree as ET
+    out = {}
+    for net in ET.parse(netlist_xml).getroot().iter('net'):
+        name = net.get('name')
+        for node in net.iter('node'):
+            if node.get('ref') == ref:
+                out[node.get('pin')] = name
+    return out
+
+
+def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
+                      renames=None):
+    """Swap ref's footprint for a real library footprint in place: keep
+    position, rotation, side, reference/value and the schematic link (KIID
+    path), re-assign pad nets by pad number. net_by_pin ({pin: net}, e.g. from
+    netlist_pin_nets) is the preferred truth and overrides nets inherited from
+    the old pads; renames ({old_pad_num: new_pad_num}) maps vendor pad names
+    onto schematic pin numbers before net lookup. Nets missing from the board
+    are created. Returns a report dict; raises KeyError if ref or the library
+    footprint is not found."""
+    old = next((f for f in board.GetFootprints() if f.GetReference() == ref),
+               None)
+    if old is None:
+        raise KeyError(f"no footprint with reference {ref}")
+    new = pcbnew.FootprintLoad(pretty_dir, fp_name)
+    if new is None:
+        raise KeyError(f"footprint {fp_name!r} not found in {pretty_dir}")
+    for pad in new.Pads():
+        n = pad.GetPadName()
+        if renames and n in renames:
+            pad.SetPadName(renames[n])
+    pin_net = {p.GetPadName(): p.GetNetname()
+               for p in old.Pads() if p.GetNetname()}
+    if net_by_pin:
+        pin_net.update(net_by_pin)
+    if old.IsFlipped():
+        new.Flip(new.GetPosition(), False)
+    new.SetOrientation(old.GetOrientation())
+    new.SetPosition(old.GetPosition())
+    new.SetReference(ref)
+    new.SetValue(old.GetValue())
+    new.SetPath(old.GetPath())          # keep the schematic <-> board link
+    created, unnetted, assigned = [], [], 0
+    for pad in new.Pads():
+        net = pin_net.get(pad.GetPadName())
+        if not net:
+            if pad.GetPadName():
+                unnetted.append(pad.GetPadName())
+            continue
+        ni = board.FindNet(net)
+        if ni is None:
+            ni = pcbnew.NETINFO_ITEM(board, net)
+            board.Add(ni)
+            created.append(net)
+        pad.SetNet(ni)
+        assigned += 1
+    new_nums = {p.GetPadName() for p in new.Pads()}
+    board.Remove(old)
+    board.Add(new)
+    return {"assigned": assigned,
+            "unnetted_pads": sorted(set(unnetted), key=lambda s: (len(s), s)),
+            "pins_without_pads": sorted(set(pin_net) - new_nums,
+                                        key=lambda s: (len(s), s)),
+            "created_nets": created}
+
+
+_STANDIN_TOKENS = ("PROV", "STANDIN", "STAND-IN", "PLACEHOLDER")
+
+
+def component_audit(board, netlist_xml=None):
+    """Per-footprint order-readiness review — run BEFORE layout and BEFORE
+    ordering parts. Flags the failure classes measured to sink whole layouts
+    downstream: stand-in footprints (name tokens), schematic pins with no pad
+    (with a netlist), missing courtyards, and missing or stand-in 3D models
+    (tiny .wrl boxes). Returns [(level, ref, fpid, issue)]."""
+    import os
+    parity = pin_pad_parity(board, netlist_xml) if netlist_xml else {}
+    out = []
+    for fp in sorted(board.GetFootprints(), key=lambda f: f.GetReference()):
+        ref = fp.GetReference()
+        fpid = fp.GetFPID().GetUniStringLibId()
+        up = fpid.upper()
+        if any(t in up for t in _STANDIN_TOKENS):
+            out.append(("FAIL", ref, fpid,
+                        "stand-in footprint by name — replace with the real "
+                        "vendor land pattern before layout or ordering"))
+        if ref in parity:
+            out.append(("FAIL", ref, fpid,
+                        f"schematic pin(s) {parity[ref]} have no pad — symbol "
+                        f"and footprint disagree about what the part is"))
+        if not fp.Pads().size():
+            continue
+        crtyd = {pcbnew.F_CrtYd, pcbnew.B_CrtYd}
+        if not any(g.GetLayer() in crtyd for g in fp.GraphicalItems()):
+            out.append(("WARN", ref, fpid,
+                        "no courtyard — placement cannot reserve the body"))
+        models = list(fp.Models())
+        if not models:
+            out.append(("WARN", ref, fpid,
+                        "no 3D model — mechanical fit unreviewed"))
+        for m in models:
+            p = str(m.m_Filename)
+            if p.lower().endswith(".wrl"):
+                full = os.path.expandvars(
+                    p.replace("${KIPRJMOD}",
+                              os.path.dirname(board.GetFileName())))
+                if os.path.exists(full) and os.path.getsize(full) < 2048:
+                    out.append(("WARN", ref, fpid,
+                                f"3D model {os.path.basename(p)} is a tiny "
+                                f".wrl stand-in box"))
+    return out
 
 
 def parts_extent(parts, pos, angles, eff_size):

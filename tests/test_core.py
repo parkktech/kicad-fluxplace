@@ -524,6 +524,51 @@ def test_return_via_findings():
     print("ok  si-lite: return-path via check (near passes, far/absent warns)")
 
 
+def test_netlist_pin_nets():
+    """replace-footprint's net truth: (ref,pin)->net from a kicadxml netlist."""
+    import types, tempfile
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())  # kicad_io layering
+    from fluxplace import kicad_io as IO
+    xml = """<?xml version="1.0"?><export><nets>
+      <net code="1" name="+3V3"><node ref="J1" pin="2"/><node ref="J1" pin="4"/>
+        <node ref="U1" pin="7"/></net>
+      <net code="2" name="GND"><node ref="J1" pin="1"/></net>
+    </nets></export>"""
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as tf:
+        tf.write(xml); path = tf.name
+    try:
+        m = IO.netlist_pin_nets(path, "J1")
+        assert m == {"2": "+3V3", "4": "+3V3", "1": "GND"}, m
+        assert IO.netlist_pin_nets(path, "U9") == {}
+    finally:
+        os.unlink(path)
+    print("ok  netlist pin->net truth for replace-footprint")
+
+
+def test_upload_package_excludes_prl():
+    """The ECAD upload set carries pro+sch+dru+board and never the .kicad_prl
+    (per-user UI state; its presence correlated with the one parse failure)."""
+    import tempfile
+    from fluxplace import fab
+    with tempfile.TemporaryDirectory() as d:
+        proj = os.path.join(d, "proj"); os.makedirs(proj)
+        for f in ("x.kicad_pro", "x.kicad_sch", "sub.kicad_sch", "x.kicad_dru",
+                  "x.kicad_prl", "x.kicad_pcb"):
+            open(os.path.join(proj, f), "w").write("stub")
+        routed = os.path.join(d, "routed.kicad_pcb")
+        open(routed, "w").write("routed")
+        out = os.path.join(d, "upload")
+        os.makedirs(out)
+        open(os.path.join(out, "x.kicad_prl"), "w").write("stale")
+        files = fab.upload_package(routed, out, project_dir=proj, log=lambda *a: None)
+        names = sorted(os.path.basename(f) for f in files)
+        assert names == ["sub.kicad_sch", "x.kicad_dru", "x.kicad_pcb",
+                         "x.kicad_pro", "x.kicad_sch"], names
+        assert open(os.path.join(out, "x.kicad_pcb")).read() == "routed"
+        assert not os.path.exists(os.path.join(out, "x.kicad_prl"))
+    print("ok  upload package: board renamed to project stem, no .kicad_prl")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -550,4 +595,6 @@ if __name__ == "__main__":
     test_builder_attachments()
     test_comprehend()
     test_crystal_pass()
+    test_netlist_pin_nets()
+    test_upload_package_excludes_prl()
     print("\nALL CORE TESTS PASSED")

@@ -201,6 +201,8 @@ def cmd_fab(a):
     from fluxplace import fab
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
     print(f"DRC {res['drc']}; package at {res['out']}")
+    if a.upload_out:
+        fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)
 
 
 def _cand_argv(a, k, outdir):
@@ -314,11 +316,27 @@ def cmd_comprehend(a):
         print(txt)
 
 
+def _export_netlist_xml(kicad_cli, sch):
+    """Export the schematic netlist (kicadxml) to a temp file; returns
+    (path, error). Caller unlinks the path."""
+    import subprocess, tempfile
+    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
+        xml = tf.name
+    r = subprocess.run([kicad_cli, "sch", "export", "netlist",
+                        "--format", "kicadxml", "--output", xml, sch],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        os.unlink(xml)
+        return None, (r.stderr or "kicad-cli netlist export failed").strip()[:200]
+    return xml, None
+
+
 def cmd_preflight(a):
     """Upload-gate check: would a downstream parser (fab, assembly, another EDA
     tool) reject this board? Prints findings; exits 1 on any FAIL. With --sch,
-    also cross-checks schematic pins against board pads (pin/pad parity)."""
-    import subprocess, tempfile
+    also cross-checks schematic pins against board pads (pin/pad parity). With
+    --components, adds the per-footprint order-readiness audit (stand-ins,
+    parity, courtyards, 3D models) — run it before layout AND before ordering."""
     board, parts, nets, IO = _load(a.board)
     if a.fix_out:
         fixed, stuck = IO.repair_pad_overlaps(board)
@@ -326,20 +344,23 @@ def cmd_preflight(a):
         print(f"repaired {len(fixed)} different-net pad overlaps -> {a.fix_out}"
               + (f"; {len(stuck)} pairs NEED A REAL FOOTPRINT: {stuck[:6]}" if stuck else ""))
     findings = list(IO.preflight(board))
+    xml = None
     if a.sch:
-        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
-            xml = tf.name
-        r = subprocess.run([a.kicad_cli, "sch", "export", "netlist",
-                            "--format", "kicadxml", "--output", xml, a.sch],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
+        xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+        if xml:
             for ref, miss in sorted(IO.pin_pad_parity(board, xml).items()):
                 findings.append(("FAIL", "SCH_PIN_NO_PAD",
                                  f"{ref}: schematic pin(s) {miss} have no pad on the "
                                  f"footprint — 'pins not on the board' to a strict parser"))
         else:
-            findings.append(("WARN", "NETLIST_EXPORT_FAILED",
-                             (r.stderr or "kicad-cli netlist export failed").strip()[:200]))
+            findings.append(("WARN", "NETLIST_EXPORT_FAILED", err))
+    if a.components:
+        audit = IO.component_audit(board, xml)
+        for lvl, ref, fpid, issue in audit:
+            findings.append((lvl, "COMPONENT", f"{ref} [{fpid}]: {issue}"))
+        if not audit:
+            print("COMPONENT AUDIT clean — order-ready")
+    if xml:
         os.unlink(xml)
     for lvl, code, msg in findings:
         print(f"{lvl}  {code}: {msg}")
@@ -347,6 +368,38 @@ def cmd_preflight(a):
         print("PREFLIGHT clean")
     if any(lvl == "FAIL" for lvl, _, _ in findings):
         raise SystemExit(1)
+
+
+def cmd_replacefp(a):
+    """Swap one reference's footprint for a real library footprint, preserving
+    placement and the schematic link, re-assigning pad nets by pad number.
+    With --sch the schematic netlist is the net truth (recovers nets the
+    stand-in never had pads for). --rename maps vendor pad names onto
+    schematic pin numbers, e.g. --rename MP1:S1,MP2:S2."""
+    board, parts, nets, IO = _load(a.board)
+    net_by_pin = None
+    xml = None
+    if a.sch:
+        xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+        if not xml:
+            raise SystemExit(f"netlist export failed: {err}")
+        net_by_pin = IO.netlist_pin_nets(xml, a.ref)
+        os.unlink(xml)
+        if not net_by_pin:
+            print(f"note: {a.ref} not in schematic netlist; using old pad nets")
+    renames = None
+    if a.rename:
+        renames = dict(pair.split(":", 1) for pair in a.rename.split(","))
+    rep = IO.replace_footprint(board, a.ref, a.lib, a.name,
+                               net_by_pin=net_by_pin, renames=renames)
+    IO.save(board, a.out or a.board)
+    print(f"{a.ref} -> {a.name}: {rep['assigned']} pads netted"
+          + (f"; created nets {rep['created_nets']}" if rep['created_nets'] else ""))
+    if rep["unnetted_pads"]:
+        print(f"  unnetted pads (no schematic pin): {rep['unnetted_pads']}")
+    if rep["pins_without_pads"]:
+        print(f"  WARNING pins with no pad on the new footprint: "
+              f"{rep['pins_without_pads']}")
 
 
 def cmd_auto(a):
@@ -702,6 +755,11 @@ def main(argv=None):
     pf.add_argument("--board", required=True)
     pf.add_argument("--out", required=True)
     pf.add_argument("--kicad-cli", default="kicad-cli")
+    pf.add_argument("--upload-out", default=None,
+                    help="also assemble the ECAD upload set (board + pro + dru "
+                         "+ schematics, no .kicad_prl) into this directory")
+    pf.add_argument("--project-dir", default=None,
+                    help="project dir for --upload-out (default: board's dir)")
     pf.set_defaults(fn=cmd_fab)
 
     pco = sub.add_parser("comprehend",
@@ -719,7 +777,25 @@ def main(argv=None):
                       help="repair different-net pad overlaps (shrink toward pad "
                            "centres, pins unchanged) and write the board here")
     ppre.add_argument("--kicad-cli", default="kicad-cli")
+    ppre.add_argument("--components", action="store_true",
+                      help="per-footprint order-readiness audit: stand-ins, "
+                           "pin parity, courtyards, 3D models")
     ppre.set_defaults(fn=cmd_preflight)
+
+    prf = sub.add_parser("replace-footprint",
+                         help="swap a ref's footprint for a real library one, "
+                              "keep placement + schematic link, re-net by pad number")
+    prf.add_argument("--board", required=True)
+    prf.add_argument("--ref", required=True)
+    prf.add_argument("--lib", required=True, help="path to the .pretty directory")
+    prf.add_argument("--name", required=True, help="footprint name inside the lib")
+    prf.add_argument("--sch", default=None,
+                     help="root schematic: use its netlist as the pad-net truth")
+    prf.add_argument("--rename", default=None,
+                     help="vendor-pad:schematic-pin pairs, e.g. MP1:S1,MP2:S2")
+    prf.add_argument("--out", default=None, help="output board (default: in place)")
+    prf.add_argument("--kicad-cli", default="kicad-cli")
+    prf.set_defaults(fn=cmd_replacefp)
 
     pau = sub.add_parser("auto", help="board in -> place -> route -> fab package out")
     pau.add_argument("--board", required=True)

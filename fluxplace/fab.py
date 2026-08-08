@@ -80,3 +80,33 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
     log(f"fab package -> {out}  (DRC {verdict})")
     return {"out": out, "drc": verdict, "violations": nviol,
             "unconnected": nunc, "stages": done}
+
+
+def upload_package(board, out, project_dir=None, log=print):
+    """Assemble the ECAD upload set (external audit/re-route services parse
+    these for component relationships): the routed board renamed to the
+    project's stem + the project's .kicad_pro, .kicad_dru and every schematic
+    sheet. Deliberately EXCLUDES .kicad_prl — it is per-user UI state, not
+    design data, and the one upload that included it failed to parse (CM5 v8).
+    Returns the list of files written."""
+    import shutil
+    project_dir = project_dir or os.path.dirname(os.path.abspath(board))
+    os.makedirs(out, exist_ok=True)
+    pro = [f for f in os.listdir(project_dir) if f.endswith(".kicad_pro")]
+    stem = pro[0][:-len(".kicad_pro")] if pro else \
+        os.path.splitext(os.path.basename(board))[0]
+    written = []
+    dst = os.path.join(out, stem + ".kicad_pcb")
+    shutil.copy2(board, dst)
+    written.append(dst)
+    for f in sorted(os.listdir(project_dir)):
+        if f.endswith((".kicad_pro", ".kicad_sch", ".kicad_dru")):
+            dst = os.path.join(out, f)
+            shutil.copy2(os.path.join(project_dir, f), dst)
+            written.append(dst)
+    stale = os.path.join(out, stem + ".kicad_prl")
+    if os.path.exists(stale):
+        os.unlink(stale)
+        log(f"  removed stale {stem}.kicad_prl from package")
+    log(f"upload package: {len(written)} files -> {out}")
+    return written
