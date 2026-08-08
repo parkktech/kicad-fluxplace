@@ -104,9 +104,12 @@ def upload_package(board, out, project_dir=None, log=print):
             dst = os.path.join(out, f)
             shutil.copy2(os.path.join(project_dir, f), dst)
             written.append(dst)
-    stale = os.path.join(out, stem + ".kicad_prl")
-    if os.path.exists(stale):
-        os.unlink(stale)
-        log(f"  removed stale {stem}.kicad_prl from package")
+    # the package IS what we just wrote: remove every stale KiCad file left
+    # over from earlier versions (.kicad_prl, renamed sheets, dead boards)
+    keep = {os.path.basename(f) for f in written}
+    for f in sorted(os.listdir(out)):
+        if ".kicad_" in f and f not in keep:
+            os.unlink(os.path.join(out, f))
+            log(f"  removed stale {f} from package")
     log(f"upload package: {len(written)} files -> {out}")
     return written

@@ -560,12 +560,16 @@ def test_upload_package_excludes_prl():
         out = os.path.join(d, "upload")
         os.makedirs(out)
         open(os.path.join(out, "x.kicad_prl"), "w").write("stale")
+        open(os.path.join(out, "renamed_old.kicad_sch"), "w").write("stale")
+        open(os.path.join(out, "notes.txt"), "w").write("keep me")
         files = fab.upload_package(routed, out, project_dir=proj, log=lambda *a: None)
         names = sorted(os.path.basename(f) for f in files)
         assert names == ["sub.kicad_sch", "x.kicad_dru", "x.kicad_pcb",
                          "x.kicad_pro", "x.kicad_sch"], names
         assert open(os.path.join(out, "x.kicad_pcb")).read() == "routed"
         assert not os.path.exists(os.path.join(out, "x.kicad_prl"))
+        assert not os.path.exists(os.path.join(out, "renamed_old.kicad_sch"))
+        assert os.path.exists(os.path.join(out, "notes.txt"))  # non-KiCad kept
     print("ok  upload package: board renamed to project stem, no .kicad_prl")
 
 
