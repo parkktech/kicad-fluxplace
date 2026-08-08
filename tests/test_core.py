@@ -440,6 +440,58 @@ def test_bypass_proximity():
     print("ok  si-lite: bypass proximity (near passes, stranded warns)")
 
 
+def _crystal_board():
+    """Synthetic with a crystal cluster stranded far from its parent's OSC pins."""
+    parts, nets = _synthetic()
+    parts["U1"]["pins"]["+3V3"] = (0, 2)
+    parts["U2"]["pins"]["+3V3"] = (1, 1)
+    parts["U2"]["pins"]["XI"] = (-2, 0)
+    parts["U2"]["pins"]["XO"] = (-2, 1)
+    parts["Y1"] = dict(value="8MHz Crystal", w=3, h=2, x=-40, y=-30,
+                       pins={"XI": (-1, 0), "XO": (1, 0)})
+    parts["C10"] = dict(value="22pF", w=1, h=1, x=-44, y=-30,
+                        pins={"XI": (0, 0), "GND": (0, 1)})
+    parts["C11"] = dict(value="22pF", w=1, h=1, x=-44, y=-28,
+                        pins={"XO": (0, 0), "GND": (0, 1)})
+    nets["XI"] = ["U2", "Y1", "C10"]
+    nets["XO"] = ["U2", "Y1", "C11"]
+    nets["GND"] = nets["GND"] + ["C10", "C11"]
+    return parts, nets
+
+
+def test_comprehend():
+    """Inference bundle: crystal finds its parent + load caps; pairs and bypass
+    tables populate; power classes carried through."""
+    from fluxplace import comprehend as CO
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    comp = CO.comprehend(parts, nets, cg)
+    assert comp["crystals"] == [dict(crystal="Y1", parent="U2",
+                                     nets=["XI", "XO"], load_caps=["C10", "C11"])]
+    assert {r[0] for r in comp["bypass"]} == {"C1", "C2"}
+    assert "GND" in comp["power"] and "+3V3" in comp["power"]
+    txt = CO.to_toml(comp)
+    assert "[inferred.crystal.Y1]" in txt and 'parent = "U2"' in txt
+    print("ok  comprehend: crystal cluster + bypass + power inferred, TOML emits")
+
+
+def test_crystal_pass():
+    """The crystal pass pulls a stranded crystal + load caps to the parent's OSC
+    pins (<=10mm physics rule) without overlaps and with the gate still clean."""
+    from fluxplace import route as R
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    pos, rot, rep = P.place_routed(parts, cg, topo)
+    assert rep["overflow"] == 0
+    tx = pos["U2"][0] - 2
+    ty = pos["U2"][1] + 0.5
+    d = abs(pos["Y1"][0] - tx) + abs(pos["Y1"][1] - ty)
+    assert d <= 10.0, f"crystal ended {d:.1f}mm from its OSC pins"
+    assert P.count_overlaps(parts, pos, 0.0, angles=rot) == 0
+    print(f"ok  crystal pass: Y1 {d:.1f}mm from OSC pins, legal + routable")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -462,4 +514,6 @@ if __name__ == "__main__":
     test_si_pair_skew()
     test_constraints_ingest()
     test_bypass_proximity()
+    test_comprehend()
+    test_crystal_pass()
     print("\nALL CORE TESTS PASSED")

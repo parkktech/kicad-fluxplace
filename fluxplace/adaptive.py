@@ -84,6 +84,34 @@ def pick_best(rows):
     return min(range(len(rows)), key=lambda i: (rows[i][1], rows[i][2], i))
 
 
+def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
+                   gap=0.15, via_size=0.45, via_drill=0.25, timeout=900):
+    """Pairs-first pre-route via KRT route_diff.py: P and N routed TOGETHER at a
+    fixed gap, so coupling is by construction, not luck (the 'uncoupled spacing'
+    physics failure is a single-ended router treating the pair as two unrelated
+    nets). route.py treats routed diff pairs as protected copper, so the bulk
+    route-fresh afterwards builds around them. Returns fn(board, outb) -> board;
+    on failure the input board passes through untouched."""
+    rd_py = os.path.join(krt_dir, "py_router", "route_diff.py")
+    netnames = sorted(set(pairs) | set(pairs.values()))
+
+    def fn(board, outb, log=print):
+        if not netnames:
+            return board
+        cmd = [krt_py, rd_py, board, "--output", outb,
+               "--nets", *netnames, "--layers", *layers,
+               "--track-width", str(track_w), "--clearance", str(clearance),
+               "--diff-pair-gap", str(gap), "--via-size", str(via_size),
+               "--via-drill", str(via_drill), "--keep-input-copper"]
+        try:
+            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True,
+                           timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"    diff-pair pre-route hit {timeout}s cap")
+        return outb if os.path.exists(outb) else board
+    return fn
+
+
 def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.45,
                via_drill=0.25, method="auto", timeout=600):
     """fanout_fn backed by KRT bga_fanout: generate escape vias (dogbone/underpad) for a

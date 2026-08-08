@@ -136,8 +136,11 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         p, rep = _open_channels(parts, graph, p, angles, pad, R, rep)
     if rep["overflow"] > 0:
         p, rep = _expand_to_route(parts, graph, p, angles, pad, R, rep)
-    # order matters: decaps hug their ICs FIRST (inside the loose envelope), then
-    # the shrink search compacts everything under the gate, then orientation tunes
+    # order matters: crystals claim their parent's OSC-pin slots FIRST (hardest
+    # physics constraint), then decaps hug their ICs (inside the loose envelope),
+    # then the shrink search compacts everything under the gate, then orientation
+    if rep["overflow"] == 0:
+        p, rep = _crystal_pass(parts, graph, p, angles, pad, R, rep)
     if decaps and rep["overflow"] == 0:
         p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
     if shrink and rep["overflow"] == 0:
@@ -626,6 +629,96 @@ def _compact_gated(parts, graph, p, angles, frozen, pad, R, rep, rounds=3):
     if rep2["overflow"] <= rep["overflow"] + 1e-6:
         return q, rep2
     return p, rep
+
+
+def _crystal_pass(parts, graph, p, angles, pad, R, rep):
+    """Crystals and their load caps must hug the parent's oscillator pins: every
+    extra millimetre of XTAL trace is an EMI antenna and parasitic load the
+    oscillator wasn't compensated for (physics rule: pin distance and path
+    <=10mm, no vias). Move each crystal to the free slot nearest its parent's
+    OSC pins, then its load caps beside the crystal. One score-gated batch per
+    cluster — a cluster that can't improve reverts and costs nothing."""
+    from .comprehend import crystals as _crystals
+    clusters = [c for c in _crystals(parts, dict(graph.signal_nets))
+                if c["crystal"] in p and c["parent"] in p]
+    if not clusters:
+        return p, rep
+    q = {r: list(v) for r, v in p.items()}
+    accepted = {r: (v[0], v[1]) for r, v in p.items()}
+    best_rep = rep
+    xs = [v[0] for v in p.values()]
+    ys = [v[1] for v in p.values()]
+    ex0, ex1, ey0, ey1 = min(xs), max(xs), min(ys), max(ys)
+
+    def clear_at(ref, x, y):
+        rw, rh = eff_size(parts, ref, angles.get(ref, 0.0), pad)
+        for s in q:
+            if s == ref:
+                continue
+            sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
+            if (abs(x - q[s][0]) < (rw + sw) / 2 and
+                    abs(y - q[s][1]) < (rh + sh) / 2):
+                return False
+        return True
+
+    def best_slot(ref, tx, ty, cur_d):
+        rw, rh = eff_size(parts, ref, angles.get(ref, 0.0), pad)
+        step = max(rw, rh)
+        slots = []
+        for ring in (0.6, 1.0, 1.5, 2.2, 3.0):
+            for k in range(16):
+                a = math.tau * k / 16
+                slots.append((tx + ring * step * math.cos(a),
+                              ty + ring * step * math.sin(a)))
+        slots.sort(key=lambda t: abs(t[0] - tx) + abs(t[1] - ty))
+        for x, y in slots:
+            if not (ex0 <= x <= ex1 and ey0 <= y <= ey1):
+                continue
+            if abs(x - tx) + abs(y - ty) >= cur_d - 0.5:
+                continue                       # not a meaningful improvement
+            if clear_at(ref, x, y):
+                return (x, y)
+        return None
+
+    moved = 0
+    for cl in clusters:
+        parent, yref = cl["parent"], cl["crystal"]
+        offs = [parts[parent]["pins"][n] for n in cl["nets"]
+                if n in parts[parent].get("pins", {})]
+        if not offs:
+            continue
+        tx = q[parent][0] + sum(o[0] for o in offs) / len(offs)
+        ty = q[parent][1] + sum(o[1] for o in offs) / len(offs)
+        batch = []
+        spot = best_slot(yref, tx, ty,
+                         abs(q[yref][0] - tx) + abs(q[yref][1] - ty))
+        if spot:
+            q[yref] = list(spot)
+            batch.append(yref)
+        cx, cy = q[yref]
+        for cap in cl["load_caps"]:
+            if cap not in q:
+                continue
+            spot = best_slot(cap, cx, cy,
+                             abs(q[cap][0] - cx) + abs(q[cap][1] - cy))
+            if spot:
+                q[cap] = list(spot)
+                batch.append(cap)
+        if not batch:
+            continue
+        rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()},
+                       graph, angles)
+        if rep2["overflow"] == 0 and count_overlaps(parts, q, 0.0, angles) == 0:
+            for r in batch:
+                accepted[r] = (q[r][0], q[r][1])
+            best_rep = rep2
+            moved += len(batch)
+        else:
+            for r in batch:
+                q[r] = list(accepted[r])       # this cluster couldn't improve
+    if not moved:
+        return p, rep
+    return {r: list(accepted[r]) for r in accepted}, best_rep
 
 
 def _decap_pass(parts, graph, p, angles, pad, R, rep):

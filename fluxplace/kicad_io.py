@@ -229,6 +229,27 @@ def preflight(board):
             out.append(("WARN", "POS_EXCLUDED_NETTED",
                         f"{ref}: {netted} netted pin(s) but excluded from position "
                         f"files — pos-driven parsers treat it as not-on-board"))
+        # overlapping non-congruent pads inside one footprint read as a padstack
+        # collision to strict checkers; exact stacked clones (same pos+size) are
+        # the accepted multi-number idiom and stay silent
+        plist = [(p.GetPosition().x, p.GetPosition().y,
+                  p.GetSize().x, p.GetSize().y, p.GetNetname())
+                 for p in fp.Pads()
+                 if any(board.GetLayerName(l).endswith(".Cu")
+                        for l in p.GetLayerSet().Seq())]   # paste apertures exempt
+        clash = 0
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                a2, b2 = plist[i], plist[j]
+                if a2[4] and a2[4] == b2[4]:
+                    continue      # same-net overlap = stitching/stacked idiom
+                if (abs(a2[0] - b2[0]) < (a2[2] + b2[2]) / 2 and
+                        abs(a2[1] - b2[1]) < (a2[3] + b2[3]) / 2):
+                    clash += 1
+        if clash:
+            out.append(("WARN", "PAD_OVERLAP",
+                        f"{ref}: {clash} overlapping non-congruent pad pair(s) — "
+                        f"reads as a padstack collision to strict checkers"))
         ec = sum(1 for g in fp.GraphicalItems()
                  if g.GetLayer() == pcbnew.Edge_Cuts)
         if ec:

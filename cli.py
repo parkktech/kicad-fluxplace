@@ -296,6 +296,24 @@ def cmd_auto_candidates(a):
     print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
 
 
+def cmd_comprehend(a):
+    """Circuit comprehension: infer the electrical-intent tables (power classes,
+    diff pairs, bypass cap -> pin, crystal -> parent) and emit them for review.
+    The reviewed numbers belong in constraints.toml, which always wins."""
+    from fluxplace import comprehend as CO
+    board, parts, nets, IO = _load(a.board)
+    cg = G.build(parts, nets, a.big_fanout)
+    comp = CO.comprehend(parts, nets, cg)
+    txt = CO.to_toml(comp)
+    if a.out:
+        open(a.out, "w").write(txt)
+        print(f"wrote {a.out}  ({len(comp['bypass'])} bypass, "
+              f"{len(comp['pairs'])} pairs, {len(comp['crystals'])} crystals, "
+              f"{len(comp['power'])} power planes)")
+    else:
+        print(txt)
+
+
 def cmd_preflight(a):
     """Upload-gate check: would a downstream parser (fab, assembly, another EDA
     tool) reject this board? Prints findings; exits 1 on any FAIL. With --sch,
@@ -390,6 +408,20 @@ def cmd_auto(a):
                for n, w in pw.items()]
     if pours:
         print(f"    constraints: {sorted(pours)} ride pours (no fat trace)")
+    # PAIRS FIRST: coupled pre-route of differential pairs (route_diff), so the
+    # bulk router builds around their copper instead of splitting P from N
+    from fluxplace.graph import diff_pairs as _dp
+    dpairs0 = {s: m for s, m in _dp(
+        {n: len(v) for n, v in cg.signal_nets.items()}).items()
+        if m in cg.signal_nets}
+    if dpairs0 and not a.no_pairs:
+        pr = AD.krt_route_diff(a.router_py, a.router_dir, layers, dpairs0,
+                               track_w=track, clearance=clr)
+        paired = pr(placed, os.path.join(a.out, "placed_pairs.kicad_pcb"),
+                    log=lambda m: print("   " + m))
+        if paired != placed:
+            placed = paired
+            print(f"    pairs-first: {len(dpairs0)} diff pairs pre-routed coupled")
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],
@@ -547,6 +579,12 @@ def main(argv=None):
     pf.add_argument("--kicad-cli", default="kicad-cli")
     pf.set_defaults(fn=cmd_fab)
 
+    pco = sub.add_parser("comprehend",
+                         help="infer electrical intent: pairs, bypass, crystals, power")
+    pco.add_argument("--board", required=True)
+    pco.add_argument("--out", default=None, help="write TOML here (default: stdout)")
+    pco.set_defaults(fn=cmd_comprehend)
+
     ppre = sub.add_parser("preflight",
                           help="parse-level sanity: outline, pads on-board, pos-file parity")
     ppre.add_argument("--board", required=True)
@@ -580,6 +618,8 @@ def main(argv=None):
                      help="skip the adaptive step-down anneal (one route pass only)")
     pau.add_argument("--no-fanout", action="store_true",
                      help="don't generate via-in-pad fanout for geometric residue")
+    pau.add_argument("--no-pairs", action="store_true",
+                     help="skip the coupled diff-pair pre-route stage")
     pau.add_argument("--kicad-cli", default="kicad-cli")
     pau.add_argument("--candidates", type=int, default=1,
                      help="population search: N independent place->route candidates "

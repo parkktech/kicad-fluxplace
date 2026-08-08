@@ -61,13 +61,23 @@ def infer_bypass(parts, nets, power_nets):
 
 
 def bypass_findings(parts, nets, power_nets, warn_mm=10.0):
-    """Physics check: a bypass capacitor further than warn_mm from the pin it
-    decouples is inductively useless at HF (industry rule <=1cm). Returns
+    """Physics checks: a bypass capacitor further than warn_mm from the pin it
+    decouples is inductively useless at HF (industry rule <=1cm), and one on the
+    OPPOSITE board side guarantees >=2 layer switches in the decoupling loop
+    (each via ~0.5-1nH — the 'layer switch count' failure). Returns
     ([(level, code, msg)], [(cap, ic, rail, dist)])."""
     table = infer_bypass(parts, nets, power_nets)
-    findings = [("WARN", "BYPASS_FAR",
-                 f"{c}: {d:.1f}mm from {ic} on {rail} (limit {warn_mm}mm)")
-                for c, ic, rail, d in table if d > warn_mm]
+    findings = []
+    for c, ic, rail, d in table:
+        if d > warn_mm:
+            findings.append(("WARN", "BYPASS_FAR",
+                             f"{c}: {d:.1f}mm from {ic} on {rail} (limit {warn_mm}mm)"))
+        cs = parts.get(c, {}).get("side", "F")
+        is_ = parts.get(ic, {}).get("side", "F")
+        if cs != is_ and not parts.get(ic, {}).get("tht"):
+            findings.append(("WARN", "BYPASS_SIDE",
+                             f"{c}: on side {cs} but {ic} is on {is_} — the loop "
+                             f"needs >=2 layer switches (via inductance)"))
     return findings, table
 
 
