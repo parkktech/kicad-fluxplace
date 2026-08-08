@@ -511,6 +511,19 @@ def test_crystal_pass():
     print(f"ok  crystal pass: Y1 {d:.1f}mm from OSC pins, legal + routable")
 
 
+
+def test_return_via_findings():
+    """A pair via with a GND via nearby passes; far or absent GND warns."""
+    from fluxplace.si import return_via_findings
+    pv = [("PCIE_TX_P", 10.0, 10.0), ("PCIE_TX_N", 40.0, 40.0)]
+    f, t = return_via_findings(pv, [(None, 11.0, 10.5)], max_mm=10.0)
+    codes = [c for _, c, _ in f]
+    assert codes == ["RETURN_VIA_FAR"], f
+    f2, _ = return_via_findings(pv, [], max_mm=10.0)
+    assert [c for _, c, _ in f2] == ["NO_RETURN_VIA"] * 2
+    print("ok  si-lite: return-path via check (near passes, far/absent warns)")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -531,6 +544,7 @@ if __name__ == "__main__":
     test_adaptive_fanout_priority()
     test_candidate_selection()
     test_si_pair_skew()
+    test_return_via_findings()
     test_constraints_ingest()
     test_bypass_proximity()
     test_builder_attachments()

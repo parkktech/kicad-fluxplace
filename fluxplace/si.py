@@ -86,6 +86,44 @@ def bypass_findings(parts, nets, power_nets, warn_mm=10.0):
     return findings, table
 
 
+def return_via_findings(pair_vias, gnd_vias, max_mm=10.0):
+    """Return-path check: every via on a diff-pair net needs a GND stitching via
+    within max_mm — the pair's return current must change reference planes where
+    the signal does. pair_vias/gnd_vias: [(net_or_None, x_mm, y_mm)]. Returns
+    ([(level, code, msg)], [(net, x, y, nearest_gnd_mm|None)])."""
+    findings, table = [], []
+    for net, x, y in pair_vias:
+        best = None
+        for _, gx, gy in gnd_vias:
+            d = ((x - gx) ** 2 + (y - gy) ** 2) ** 0.5
+            if best is None or d < best:
+                best = d
+        table.append((net, x, y, best))
+        if best is None:
+            findings.append(("WARN", "NO_RETURN_VIA",
+                             f"{net} via at ({x:.1f},{y:.1f}): no GND via on the board"))
+        elif best > max_mm:
+            findings.append(("WARN", "RETURN_VIA_FAR",
+                             f"{net} via at ({x:.1f},{y:.1f}): nearest GND via "
+                             f"{best:.1f}mm away (limit {max_mm}mm)"))
+    return findings, table
+
+
+def collect_vias(board, pair_nets):
+    """([(net,x,y)] pair-net vias, [(None,x,y)] GND vias) from a pcbnew board."""
+    pv, gv = [], []
+    for t in board.GetTracks():
+        if t.GetClass() != "PCB_VIA":
+            continue
+        n = t.GetNetname()
+        p = t.GetPosition()
+        if n in pair_nets:
+            pv.append((n, p.x / 1e6, p.y / 1e6))
+        elif n == "GND":
+            gv.append((None, p.x / 1e6, p.y / 1e6))
+    return pv, gv
+
+
 def measure_net_lengths(board):
     """{net: total routed track length mm} from a pcbnew board (vias excluded)."""
     from collections import defaultdict

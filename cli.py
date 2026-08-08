@@ -533,6 +533,22 @@ def cmd_auto(a):
                     print(f"    length-match: skew {w0:.2f} -> {w1:.2f}mm, "
                           f"unrouted {len(u0)} -> {len(u1)} — discarded")
 
+    # RETURN VIAS: stitch GND next to pair vias (return current must change
+    # reference planes where the signal does). DRC-guarded: revert on regression.
+    if dpairs0 and not a.no_pairs and os.path.exists(src):
+        import shutil as _sh2
+        bak = src + ".prestitch"
+        _sh2.copy(src, bak)
+        d0v = len(AD.drc_unrouted(src, a.kicad_cli)[0].get("violations", []))
+        nrv = IO.add_return_vias(src, set(dpairs0) | set(dpairs0.values()))
+        if nrv:
+            d1v = len(AD.drc_unrouted(src, a.kicad_cli)[0].get("violations", []))
+            if d1v > d0v:
+                _sh2.copy(bak, src)
+                print(f"    return-vias: {nrv} added but DRC {d0v}->{d1v} — reverted")
+            else:
+                print(f"    return-vias: {nrv} GND stitching vias added (DRC {d0v}->{d1v})")
+
     # FINISHER: freerouting on the residue (slow, completion-strong). Keep-best.
     jar = os.path.expanduser("~/tools/freerouting-2.2.4.jar")
     if not a.no_finisher and os.path.exists(jar) and os.path.exists(src):
@@ -583,6 +599,12 @@ def cmd_auto(a):
         print(f"    si-lite: {len(stable)} routed diff pairs, worst skew {worst:.2f}mm, "
               f"{len(schecks)} finding(s)")
         for lvl, code, msg in schecks:
+            print(f"    si-lite {lvl} {code}: {msg}")
+        import pcbnew as _pn
+        _bd = _pn.LoadBoard(src)
+        rvf, _rt = SI.return_via_findings(*SI.collect_vias(_bd, set(dpairs) | set(dpairs.values())))
+        print(f"    si-lite: return-path vias — {len(rvf)} finding(s)")
+        for lvl, code, msg in rvf[:6]:
             print(f"    si-lite {lvl} {code}: {msg}")
     # bypass proximity: a decap >10mm from its pin is inductively absent at HF.
     # Measured on the FINISHED board (read back) so placement moves are seen.

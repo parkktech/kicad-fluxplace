@@ -203,6 +203,77 @@ def repair_pad_overlaps(board, clearance_mm=0.1, max_shrink=0.45):
     return fixed, stuck
 
 
+def add_return_vias(path, pair_nets, max_mm=8.0, via_mm=0.6, drill_mm=0.3):
+    """Stitch a GND return via near every pair-net via that lacks one within
+    max_mm (the return current must change reference planes where the signal
+    does). Candidate ring spots are kept clear of non-GND copper; caller guards
+    with DRC before/after. Returns number of vias added."""
+    import math
+    b = pcbnew.LoadBoard(path)
+    gnd = b.FindNet("GND")
+    if gnd is None:
+        return 0
+    tracks = [(t, t.GetPosition()) for t in b.GetTracks()]
+    pv, gv = [], []
+    for t in b.GetTracks():
+        if t.GetClass() != "PCB_VIA":
+            continue
+        if t.GetNetname() in pair_nets:
+            pv.append(t.GetPosition())
+        elif t.GetNetname() == "GND":
+            gv.append(t.GetPosition())
+
+    def clear_at(x, y):
+        for t, p in tracks:
+            if t.GetNetname() == "GND":
+                continue
+            if t.GetClass() == "PCB_VIA":
+                if abs(p.x - x) < 1.2e6 and abs(p.y - y) < 1.2e6:
+                    return False
+            else:
+                # coarse segment test: near either end or the midpoint
+                e = t.GetEnd()
+                for qx, qy in ((p.x, p.y), (e.x, e.y),
+                               ((p.x + e.x) // 2, (p.y + e.y) // 2)):
+                    if abs(qx - x) < 0.8e6 and abs(qy - y) < 0.8e6:
+                        return False
+        for fp in b.GetFootprints():
+            fb = fp.GetBoundingBox(False, False)
+            if (fb.GetLeft() - 0.5e6 < x < fb.GetRight() + 0.5e6 and
+                    fb.GetTop() - 0.5e6 < y < fb.GetBottom() + 0.5e6):
+                return False
+        return True
+
+    added = 0
+    for p in pv:
+        if any(((p.x - g.x) ** 2 + (p.y - g.y) ** 2) ** 0.5 < max_mm * 1e6
+               for g in gv):
+            continue
+        placed = False
+        for r in (1.0, 1.4, 1.9, 2.5):
+            for k in range(8):
+                a = math.tau * k / 8
+                x = int(p.x + r * 1e6 * math.cos(a))
+                y = int(p.y + r * 1e6 * math.sin(a))
+                if clear_at(x, y):
+                    v = pcbnew.PCB_VIA(b)
+                    v.SetViaType(pcbnew.VIATYPE_THROUGH)
+                    v.SetPosition(pcbnew.VECTOR2I(x, y))
+                    v.SetDrill(pcbnew.FromMM(drill_mm))
+                    v.SetWidth(pcbnew.FromMM(via_mm))
+                    v.SetNet(gnd)
+                    b.Add(v)
+                    gv.append(pcbnew.VECTOR2I(x, y))
+                    added += 1
+                    placed = True
+                    break
+            if placed:
+                break
+    if added:
+        pcbnew.SaveBoard(path, b)
+    return added
+
+
 def lock_net_copper(path, netnames):
     """Lock every track/via on the given nets (in-place file edit). KRT's bulk
     router documents 'KiCad-locked copper is never ripped' — this is how the
