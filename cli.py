@@ -504,10 +504,10 @@ def cmd_auto(a):
             if cand != src and os.path.exists(cand):
                 _, u0 = AD.drc_unrouted(src, a.kicad_cli); u0.discard("GND")
                 _, u1 = AD.drc_unrouted(cand, a.kicad_cli); u1.discard("GND")
-                _, t0 = SI.check_board(src, dpairs0)
-                _, t1 = SI.check_board(cand, dpairs0)
-                w0 = max((r[4] for r in t0), default=0.0)
-                w1 = max((r[4] for r in t1), default=0.0)
+                _, tb0 = SI.check_board(src, dpairs0)
+                _, tb1 = SI.check_board(cand, dpairs0)
+                w0 = max((r[4] for r in tb0), default=0.0)
+                w1 = max((r[4] for r in tb1), default=0.0)
                 if len(u1) <= len(u0) and w1 < w0 - 0.05:
                     _sh.copy(cand, src)
                     print(f"    length-match: worst skew {w0:.2f} -> {w1:.2f}mm (kept)")
