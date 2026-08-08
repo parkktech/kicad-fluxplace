@@ -44,6 +44,10 @@ def infer_bypass(parts, nets, power_nets):
         if rail not in power_nets:
             continue
         cx, cy = p["x"] + p["pins"][rail][0], p["y"] + p["pins"][rail][1]
+        # ownership: same schematic SHEET beats distance (intent beats accident —
+        # nearest-by-distance is self-fulfilling on a bad placement; calibrated
+        # against Quilter's schematic-driven table, sheet match recovers the
+        # assignments the distance rule got wrong)
         best = None
         for ic in nets.get(rail, []):
             if ic == ref or ic[0] not in "UQ":
@@ -53,10 +57,11 @@ def infer_bypass(parts, nets, power_nets):
                 continue
             qx, qy = q["x"] + q["pins"][rail][0], q["y"] + q["pins"][rail][1]
             d = ((cx - qx) ** 2 + (cy - qy) ** 2) ** 0.5
-            if best is None or d < best[1]:
-                best = (ic, d)
+            key = (0 if q.get("sheet") == p.get("sheet") else 1, d)
+            if best is None or key < best[1]:
+                best = (ic, key)
         if best:
-            out.append((ref, best[0], rail, best[1]))
+            out.append((ref, best[0], rail, best[1][1]))
     return out
 
 
