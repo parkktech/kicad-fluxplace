@@ -421,10 +421,16 @@ def cmd_auto(a):
                     log=lambda m: print("   " + m))
         if paired != placed:
             placed = paired
-            pairnets = sorted(set(dpairs0) | set(dpairs0.values()))
-            nlocked = IO.lock_net_copper(placed, pairnets)
-            print(f"    pairs-first: {len(dpairs0)} diff pairs pre-routed coupled, "
-                  f"{nlocked} segments locked against the bulk rip")
+            # lock ONLY the pairs route_diff actually COMPLETED: locking a failed
+            # pair's partial stubs blocks the bulk router from finishing it
+            # (measured: PCIE_RX went from routed-badly to unrouted)
+            _d, _un = AD.drc_unrouted(placed, a.kicad_cli)
+            pairnets = sorted((set(dpairs0) | set(dpairs0.values())) - _un)
+            failed = sorted((set(dpairs0) | set(dpairs0.values())) & _un)
+            nlocked = IO.lock_net_copper(placed, pairnets) if pairnets else 0
+            print(f"    pairs-first: {len(dpairs0)} pairs attempted, "
+                  f"{len(pairnets)} nets complete+locked ({nlocked} segments)"
+                  + (f", incomplete left to bulk: {failed}" if failed else ""))
     route_fresh = AD.krt_route_fresh(a.router_py, a.router_dir, layers,
                                      base_w=track, base_c=clr,
                                      via_size=prof["route_via"][0],
