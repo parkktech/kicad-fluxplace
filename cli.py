@@ -352,6 +352,15 @@ def cmd_preflight(a):
                 findings.append(("FAIL", "SCH_PIN_NO_PAD",
                                  f"{ref}: schematic pin(s) {miss} have no pad on the "
                                  f"footprint — 'pins not on the board' to a strict parser"))
+            diffs = IO.pad_net_parity(board, xml)
+            if diffs:
+                import collections
+                bynet = collections.Counter(t for _, _, _, t in diffs)
+                findings.append(("FAIL", "PAD_NET_MISMATCH",
+                                 f"{len(diffs)} pad(s) disagree with the schematic "
+                                 f"netlist (top: {bynet.most_common(3)}) — routers "
+                                 f"and DRC are working an incomplete net set; run "
+                                 f"sync-nets"))
         else:
             findings.append(("WARN", "NETLIST_EXPORT_FAILED", err))
     if a.components:
@@ -368,6 +377,23 @@ def cmd_preflight(a):
         print("PREFLIGHT clean")
     if any(lvl == "FAIL" for lvl, _, _ in findings):
         raise SystemExit(1)
+
+
+def cmd_syncnets(a):
+    """Make board pad nets agree with the schematic netlist (headless
+    'Update PCB from Schematic', nets only). The netlist is truth."""
+    board, parts, nets, IO = _load(a.board)
+    xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+    if not xml:
+        raise SystemExit(f"netlist export failed: {err}")
+    rep = IO.sync_pad_nets(board, xml)
+    os.unlink(xml)
+    IO.save(board, a.out or a.board)
+    print(f"sync-nets: {rep['assigned']} pad(s) re-netted across "
+          f"{len(rep['refs'])} component(s)"
+          + (f"; created nets {rep['created_nets'][:8]}" if rep['created_nets'] else ""))
+    for ref, n in sorted(rep["refs"].items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {ref}: {n}")
 
 
 def cmd_replacefp(a):
@@ -781,6 +807,15 @@ def main(argv=None):
                       help="per-footprint order-readiness audit: stand-ins, "
                            "pin parity, courtyards, 3D models")
     ppre.set_defaults(fn=cmd_preflight)
+
+    psn = sub.add_parser("sync-nets",
+                         help="make board pad nets agree with the schematic "
+                              "netlist (headless update-from-schematic, nets only)")
+    psn.add_argument("--board", required=True)
+    psn.add_argument("--sch", required=True)
+    psn.add_argument("--out", default=None, help="output board (default: in place)")
+    psn.add_argument("--kicad-cli", default="kicad-cli")
+    psn.set_defaults(fn=cmd_syncnets)
 
     prf = sub.add_parser("replace-footprint",
                          help="swap a ref's footprint for a real library one, "

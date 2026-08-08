@@ -499,6 +499,70 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
             "created_nets": created}
 
 
+def pad_net_parity(board, netlist_xml):
+    """Board pads whose net disagrees with the schematic netlist:
+    [(ref, pin, board_net, sch_net)]. Pads absent from the netlist are not
+    reported; per-instance 'unconnected-*' names count as agreeing. Measured
+    need: the CM5 carrier reached routing with its ENTIRE +3V3 rail absent
+    from the PCB netlist — every router routed 'everything' and DRC passed,
+    all against an incomplete net set."""
+    import xml.etree.ElementTree as ET
+    truth = {}
+    for net in ET.parse(netlist_xml).getroot().iter('net'):
+        name = net.get('name')
+        for node in net.iter('node'):
+            truth[(node.get('ref'), node.get('pin'))] = name
+    diffs = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        for pad in fp.Pads():
+            t = truth.get((ref, pad.GetPadName()))
+            cur = pad.GetNetname()
+            if t is None or cur == t:
+                continue
+            if (t.startswith("unconnected-") and
+                    cur.startswith("unconnected-")):
+                continue                    # same meaning, per-instance names
+            diffs.append((ref, pad.GetPadName(), cur, t))
+    return diffs
+
+
+def sync_pad_nets(board, netlist_xml):
+    """Apply pad_net_parity: make the board's pad nets agree with the
+    schematic netlist — the headless equivalent of 'Update PCB from
+    Schematic' for nets only (no footprint changes). The netlist is truth;
+    missing nets are created on the board. Walks every pad (duplicate pad
+    numbers — GND fingers, stacked standoff names — all get set). Returns a
+    report dict."""
+    import xml.etree.ElementTree as ET
+    truth = {}
+    for net in ET.parse(netlist_xml).getroot().iter('net'):
+        name = net.get('name')
+        for node in net.iter('node'):
+            truth[(node.get('ref'), node.get('pin'))] = name
+    created, refs = [], {}
+    assigned = 0
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        for pad in fp.Pads():
+            t = truth.get((ref, pad.GetPadName()))
+            cur = pad.GetNetname()
+            if t is None or cur == t:
+                continue
+            if (t.startswith("unconnected-") and
+                    cur.startswith("unconnected-")):
+                continue
+            ni = board.FindNet(t)
+            if ni is None:
+                ni = pcbnew.NETINFO_ITEM(board, t)
+                board.Add(ni)
+                created.append(t)
+            pad.SetNet(ni)
+            assigned += 1
+            refs[ref] = refs.get(ref, 0) + 1
+    return {"assigned": assigned, "created_nets": created, "refs": refs}
+
+
 _STANDIN_TOKENS = ("PROV", "STANDIN", "STAND-IN", "PLACEHOLDER")
 
 
