@@ -1,6 +1,8 @@
 """The only module that imports pcbnew. Reads parts+nets from a board and writes
 positions back. Works both in the KiCad GUI (pass the live board) and headless
 (load a .kicad_pcb path)."""
+import os
+
 import pcbnew
 
 
@@ -599,15 +601,41 @@ def component_audit(board, netlist_xml=None):
                         "no 3D model — mechanical fit unreviewed"))
         for m in models:
             p = str(m.m_Filename)
-            if p.lower().endswith(".wrl"):
-                full = os.path.expandvars(
-                    p.replace("${KIPRJMOD}",
-                              os.path.dirname(board.GetFileName())))
-                if os.path.exists(full) and os.path.getsize(full) < 2048:
-                    out.append(("WARN", ref, fpid,
-                                f"3D model {os.path.basename(p)} is a tiny "
-                                f".wrl stand-in box"))
+            full = _resolve_model_path(p, board)
+            if full is None:
+                out.append(("WARN", ref, fpid,
+                            f"3D model {os.path.basename(p)} DOES NOT RESOLVE "
+                            f"— renders as a missing body"))
+            elif (p.lower().endswith(".wrl")
+                  and os.path.getsize(full) < 2048):
+                out.append(("WARN", ref, fpid,
+                            f"3D model {os.path.basename(p)} is a tiny "
+                            f".wrl stand-in box"))
     return out
+
+
+def _resolve_model_path(path, board):
+    """Expand a footprint 3D-model path the way KiCad does (KIPRJMOD + the
+    versioned stock-model env vars / default install dirs). Returns the
+    existing absolute path or None — None is what the 3D viewer shows as a
+    silently missing body."""
+    import glob as _glob
+    prj = os.path.dirname(board.GetFileName())
+    p = path.replace("${KIPRJMOD}", prj).replace("$(KIPRJMOD)", prj)
+    if "${" in p or "$(" in p:
+        stock = (os.environ.get("KICAD9_3DMODEL_DIR")
+                 or os.environ.get("KICAD8_3DMODEL_DIR"))
+        cands = [stock] if stock else sorted(
+            _glob.glob("/usr/share/kicad*/3dmodels"), reverse=True)
+        tail = p.split("}", 1)[-1].split(")", 1)[-1].lstrip("/")
+        for c in cands:
+            if c and os.path.exists(os.path.join(c, tail)):
+                return os.path.join(c, tail)
+        return None
+    p = os.path.expandvars(p)
+    if not os.path.isabs(p):
+        p = os.path.join(prj, p)
+    return p if os.path.exists(p) else None
 
 
 def parts_extent(parts, pos, angles, eff_size):

@@ -168,6 +168,19 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         p = pl
         rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
                       graph, angles)
+        # the clamp shuffles the border region and can strand adjacency parts
+        # (measured: Y51 ended 19mm from its OSC pins — Quilter flagged it);
+        # re-run the physics passes, then re-contain their moves
+        if rep["overflow"] == 0:
+            p, rep = _crystal_pass(parts, graph, p, angles, pad, R, rep)
+            p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
+            pl = {r: list(v) for r, v in p.items()}
+            legalize(parts, pl, pad, iters=300, angles=angles,
+                     frozen=locked & set(pl), bounds=fixed_bounds,
+                     hard_bounds=True)
+            p = pl
+            rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
+                          graph, angles)
     return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
 
 
