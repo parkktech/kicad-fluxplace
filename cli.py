@@ -743,9 +743,9 @@ def cmd_auto(a):
               for n in (cons or {}).get("power", {})}
         try:
             PATCH.patch_board(src, src, kicad_cli=a.kicad_cli,
-                              track_w=track, clearance=clr,
-                              via_mm=prof["route_via"][0],
-                              drill_mm=prof["route_via"][1],
+                              track_w=floor, clearance=floor,
+                              via_mm=prof["fanout_via"][0],
+                              drill_mm=prof["fanout_via"][1],
                               net_widths=nw,
                               log=lambda m: print("   " + m))
         except Exception as e:

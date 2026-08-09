@@ -327,6 +327,61 @@ def dijkstra(grid, sources, targets, max_expand=2_000_000):
     return None
 
 
+def _escape_route(grid, src_island, tgt_islands, max_r_mm=1.5):
+    """Dogbone move: a laterally walled pad can still escape VERTICALLY —
+    seed the search with legal via spots within max_r of either end's cells
+    and write the stub+via if used. Returns an augmented path (may begin/end
+    with a stub hop + layer change) or None."""
+    R = max(2, int(max_r_mm / grid.cell))
+    nlayers = len(grid.layers)
+
+    def seeds(island):
+        out = {}
+        cells = list(island)[:400]
+        for (l, cx, cy) in cells:
+            for dx in range(-R, R + 1):
+                for dy in range(-R, R + 1):
+                    nx, ny = cx + dx, cy + dy
+                    if not grid.inside(nx, ny) or (nx, ny) in grid.via_blocked:
+                        continue
+                    key = (nx, ny)
+                    if key not in out:
+                        out[key] = (l, cx, cy)      # nearest-ish anchor cell
+        return out
+
+    s_seeds = seeds(src_island)
+    tgt = set().union(*tgt_islands)
+    t_seeds = seeds(tgt)
+    if not s_seeds:
+        return None
+    # sources: every layer at each source seed; targets likewise
+    src_nodes = {(k, sx, sy) for (sx, sy) in s_seeds for k in range(nlayers)}
+    tgt_nodes = {(k, tx, ty) for (tx, ty) in t_seeds for k in range(nlayers)}
+    tgt_nodes |= tgt
+    path = dijkstra(grid, src_nodes, tgt_nodes)
+    if path is None:
+        return None
+    # prepend stub from anchor pad cell if we started on a seed
+    head = path[0]
+    hk = (head[1], head[2])
+    if head not in src_island and hk in s_seeds:
+        al, ax, ay = s_seeds[hk]
+        pre = [(al, ax, ay)]
+        if al != head[0]:
+            pre.append((al, head[1], head[2]))   # stub on pad layer, then via
+        path = pre + path
+    tail = path[-1]
+    tk = (tail[1], tail[2])
+    if tail not in tgt and tk in t_seeds:
+        al, ax, ay = t_seeds[tk]
+        post = []
+        if al != tail[0]:
+            post.append((al, tail[1], tail[2]))
+        post.append((al, ax, ay))
+        path = path + post
+    return path
+
+
 def _simplify(path):
     """Merge collinear runs; keep layer-change points."""
     out = [path[0]]
@@ -432,6 +487,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             tgt = set().union(*rest)
             path = dijkstra(g, src, tgt)
             if path is None:
+                path = _escape_route(g, src, rest)
+            if path is None:
                 break
             added_items += apply_path(board, g, path, net, w, via_mm,
                                       drill_mm)
@@ -449,6 +506,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             while len(islands2) > 1 and r2 <= len(islands2) + 2:
                 src, rest = islands2[0], islands2[1:]
                 path = dijkstra(g2, src, set().union(*rest))
+                if path is None:
+                    path = _escape_route(g2, src, rest)
                 if path is None:
                     break
                 added_items += apply_path(board, g2, path, net, track_w,
@@ -504,6 +563,9 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     new_v = _vkeys(drc1) - _vkeys(drc0)
     bad_pts = [pt for _, items in new_v for pt in items]
     removed = 0
+    if new_v and log:
+        for t, items in list(new_v)[:6]:
+            log(f"      new-violation {t} at {items}")
     for it in added_items:
         pos = it.GetPosition()
         px, py = pos.x / 1e6, pos.y / 1e6
