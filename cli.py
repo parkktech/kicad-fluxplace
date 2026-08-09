@@ -466,6 +466,18 @@ def cmd_auto(a):
     dtrack, dclr = IO.default_rules(board)
     track = a.track if a.track is not None else dtrack
     clr = a.clearance if a.clearance is not None else dclr
+    # PROFILE FLOOR IS ABSOLUTE: the package must be orderable at the chosen
+    # service tier, so nothing the pipeline emits may be finer than the profile
+    # (measured: the CM5 netclass carries 3.5mil bulk track — legal on
+    # jlcpcb-advanced, a fab-gate FAIL under the standard profile it ran with)
+    if track < prof["track_min"]:
+        print(f"    profile clamp: board netclass track {track}mm < "
+              f"{prof['track_min']}mm ({a.profile} min) — clamped to profile")
+        track = prof["track_min"]
+    if clr < prof["clearance_min"]:
+        print(f"    profile clamp: board netclass clearance {clr}mm < "
+              f"{prof['clearance_min']}mm ({a.profile} min) — clamped to profile")
+        clr = prof["clearance_min"]
     print(f"    auto-detected: signal-layers={layers}  bulk={track}/{clr}mm  "
           f"floor={floor}mm (profile {a.profile})")
     # ATTACHMENTS: every decap and crystal cluster hugs its owner DURING
@@ -559,8 +571,11 @@ def cmd_auto(a):
                 break
             pr = AD.krt_route_diff(a.router_py, a.router_dir, layers, todo,
                                    track_w=pg[0] if pg else track,
-                                   gap=pg[1] if pg else 0.15,
-                                   clearance=min(clr, 0.1) if pg else clr)
+                                   gap=pg[1] if pg else max(0.15, prof["clearance_min"]),
+                                   clearance=(max(0.1, prof["clearance_min"])
+                                              if pg else clr),
+                                   via_size=prof["route_via"][0],
+                                   via_drill=prof["route_via"][1])
             nxt = pr(cur_b, os.path.join(a.out, f"placed_pairs{attempt}.kicad_pcb"),
                      log=lambda m: print("   " + m))
             if nxt == cur_b:
@@ -640,7 +655,9 @@ def cmd_auto(a):
         bak = src + ".prestitch"
         _sh2.copy(src, bak)
         d0v = len(AD.drc_unrouted(src, a.kicad_cli)[0].get("violations", []))
-        nrv = IO.add_return_vias(src, set(dpairs0) | set(dpairs0.values()))
+        nrv = IO.add_return_vias(src, set(dpairs0) | set(dpairs0.values()),
+                                 via_mm=prof["route_via"][0],
+                                 drill_mm=prof["route_via"][1])
         if nrv:
             d1v = len(AD.drc_unrouted(src, a.kicad_cli)[0].get("violations", []))
             if d1v > d0v:
