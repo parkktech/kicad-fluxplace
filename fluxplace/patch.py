@@ -139,11 +139,16 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
     slop = cell * 0.75                    # grid quantization safety
     half = track_w / 2.0
     def _mgn(item, layer):
+        # trust the CALLER's clearance (per-net derates in the board's .dru
+        # make finer legal for the patched nets — netclass max() re-sealed
+        # dig's escape lanes, measured); honor explicit per-item overrides
+        # (e.g. an NPTH keepout pad) via the local clearance only
+        loc = 0.0
         try:
-            c = item.GetOwnClearance(layer) / 1e6
-        except TypeError:
-            c = clearance
-        return max(c, clearance) + half + slop
+            loc = (item.GetLocalClearance() or 0) / 1e6
+        except (TypeError, AttributeError):
+            pass
+        return max(clearance, loc) + half + slop
     vmargin_base = via_r + slop
     net_cells = {l: set() for l in layers}
     net_vias = []
@@ -391,6 +396,21 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     refill_zones(board)
     base = out_path + ".base.kicad_pcb"
     pcbnew.SaveBoard(base, board)
+    # DRC truth needs the design-rule sidecars (per-net derates live in the
+    # .kicad_dru; without it the guard judges fine copper against bare
+    # netclass and everything looks illegal)
+    import shutil as _sh
+    srcdir = os.path.dirname(os.path.abspath(board_path))
+    stem = os.path.splitext(os.path.basename(board_path))[0]
+    for ext in (".kicad_dru", ".kicad_pro"):
+        sidecar = os.path.join(srcdir, stem + ext)
+        if os.path.exists(sidecar):
+            for tgt in (base, out_path + ".tmp.kicad_pcb", out_path):
+                d = os.path.splitext(tgt)[0] + ext
+                try:
+                    _sh.copy(sidecar, d)
+                except OSError:
+                    pass
     drc0, un0 = AD.drc_unrouted(base, kicad_cli)
     unc0 = len(drc0.get("unconnected_items", []))
     vio0 = len(drc0.get("violations", []))
