@@ -233,6 +233,8 @@ def _cand_argv(a, k, outdir):
         v += ["--no-fanout"]
     if a.keep_outline:
         v += ["--keep-outline"]
+    if a.no_patch:
+        v += ["--no-patch"]
     if a.no_pairs:
         v += ["--no-pairs"]
     if a.bypass_csv:
@@ -703,6 +705,22 @@ def cmd_auto(a):
             else:
                 print(f"    return-vias: {nrv} GND stitching vias added (DRC {d0v}->{d1v})")
 
+    # LAST-MILE PATCH: incremental single-net router closes the leftover
+    # unconstrained nets + refills pours (DRC-guarded, in-module revert)
+    if not a.no_patch and os.path.exists(src):
+        from fluxplace import patch as PATCH
+        nw = {n: CONS.power_width_mm(cons, n, max(track, 0.5))
+              for n in (cons or {}).get("power", {})}
+        try:
+            PATCH.patch_board(src, src, kicad_cli=a.kicad_cli,
+                              track_w=track, clearance=clr,
+                              via_mm=prof["route_via"][0],
+                              drill_mm=prof["route_via"][1],
+                              net_widths=nw,
+                              log=lambda m: print("   " + m))
+        except Exception as e:
+            print(f"    patch: stage failed ({e}) — board unchanged")
+
     # FINISHER: freerouting on the residue (slow, completion-strong). Keep-best.
     jar = os.path.expanduser("~/tools/freerouting-2.2.4.jar")
     if not a.no_finisher and os.path.exists(jar) and os.path.exists(src):
@@ -945,6 +963,8 @@ def main(argv=None):
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--no-pairs", action="store_true",
                      help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--no-patch", action="store_true",
+                     help="skip the last-mile single-net patch stage")
     pau.add_argument("--keep-outline", action="store_true",
                      help="the source Edge.Cuts outline is a mechanical given: "
                           "place inside it, never regrow (doesn't-fit = loud FAIL)")

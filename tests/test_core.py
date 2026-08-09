@@ -620,6 +620,41 @@ def test_model_registration_solver():
     print("ok  verify-models solver: pins landed on holes (err %.2fmm)" % check)
 
 
+def test_lastmile_dijkstra():
+    """patch: multi-source Dijkstra crosses a wall through the gap and via
+    moves respect the all-layer + via_blocked contract."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import dijkstra, _simplify
+
+    class G:                                     # 2-layer 20x20 toy grid
+        cell = 1.0
+        layers = ["F", "B"]
+        nx = ny = 20
+        blocked = {"F": {(10, y) for y in range(20) if y != 15},
+                   "B": set()}
+        via_blocked = {(x, y) for x in range(20) for y in range(20)
+                       if not (4 < x < 8 or 11 < x < 15)}   # two via windows
+
+        def inside(self, cx, cy):
+            return 1 <= cx < self.nx - 1 and 1 <= cy < self.ny - 1
+
+    g = G()
+    # same-layer route must use the wall gap at (10, 15)
+    p = dijkstra(g, {(0, 2, 2)}, {(0, 17, 2)})
+    assert p and (0, 10, 15) in p, "did not use the only wall gap"
+    # layer-hop route must via inside the allowed x-window
+    g2 = G()
+    g2.blocked = {"F": {(10, y) for y in range(20)}, "B": set()}
+    p2 = dijkstra(g2, {(0, 2, 2)}, {(0, 17, 2)})
+    hops = [(a, b) for a, b in zip(p2, p2[1:]) if a[0] != b[0]]
+    assert p2 and hops, "expected a via route"
+    assert all(4 < a[1] < 8 or 11 < a[1] < 15 for a, _ in hops), \
+        "via outside allowed windows"
+    assert len(_simplify(p2)) < len(p2), "simplify must merge collinear runs"
+    print("ok  last-mile patch: dijkstra gap + via contract + simplify")
+
+
 def test_order_guidance():
     """The what-do-I-pick block: service tier, stackup preset, impedances and
     rail currents from the constraints — never guessed at order time."""
@@ -666,5 +701,6 @@ if __name__ == "__main__":
     test_netlist_pin_nets()
     test_upload_package_excludes_prl()
     test_model_registration_solver()
+    test_lastmile_dijkstra()
     test_order_guidance()
     print("\nALL CORE TESTS PASSED")
