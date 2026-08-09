@@ -387,6 +387,23 @@ def cmd_preflight(a):
         raise SystemExit(1)
 
 
+def cmd_verifymodels(a):
+    """Verify every footprint's 3D model sits ON its pins (TH: pin shafts vs
+    holes; SMD: body over the footprint). --fix solves and writes the
+    correcting transform where possible."""
+    board, parts, nets, IO = _load(a.board)
+    from fluxplace import models as M
+    resolve = lambda p: IO._resolve_model_path(p, board)
+    finds = M.verify_board(board, resolve, fix=a.fix, tol=a.tol)
+    for ref, msg in finds:
+        print(f"{ref}: {msg}")
+    if not finds:
+        print("MODEL REGISTRATION clean — every model on its pins")
+    if a.fix:
+        IO.save(board, a.out or a.board)
+        print(f"saved {a.out or a.board}")
+
+
 def cmd_syncnets(a):
     """Make board pad nets agree with the schematic netlist (headless
     'Update PCB from Schematic', nets only). The netlist is truth."""
@@ -866,6 +883,16 @@ def main(argv=None):
                       help="per-footprint order-readiness audit: stand-ins, "
                            "pin parity, courtyards, 3D models")
     ppre.set_defaults(fn=cmd_preflight)
+
+    pvm = sub.add_parser("verify-models",
+                         help="verify 3D models sit ON their pins/footprints; "
+                              "--fix solves + writes correcting transforms")
+    pvm.add_argument("--board", required=True)
+    pvm.add_argument("--fix", action="store_true")
+    pvm.add_argument("--tol", type=float, default=0.6,
+                     help="max hole-to-pin distance mm (default 0.6)")
+    pvm.add_argument("--out", default=None, help="output board (default: in place)")
+    pvm.set_defaults(fn=cmd_verifymodels)
 
     psn = sub.add_parser("sync-nets",
                          help="make board pad nets agree with the schematic "

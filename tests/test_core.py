@@ -594,6 +594,32 @@ def test_upload_package_excludes_prl():
     print("ok  upload package: board renamed to project stem, no .kicad_prl")
 
 
+def test_model_registration_solver():
+    """verify-models: the solver lands a synthetic connector's pin shafts on
+    the footprint holes (rotation + translation + z-lift recovered)."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.models import solve_transform, _model_to_fp, _clusters, _fit
+    # synthetic model: 2x03 pin field at 3mm pitch, drawn displaced (+5,+2)
+    # and needing a 2mm z-lift; 20 points per pin shaft below board
+    pts = []
+    for px in (5.0, 8.0, 11.0):
+        for py in (2.0, 5.0):
+            for k in range(20):
+                pts.append((px, py, -2.2 - 0.05 * k))
+    holes = [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0),
+             (0.0, 3.0), (3.0, 3.0), (6.0, 3.0)]
+    sol, max_d = solve_transform(pts, holes, z_lift_scan=(0.0, 2.0))
+    assert sol is not None and max_d < 0.2, (sol, max_d)
+    rot, ox, oy, oz = sol
+    # confirm by applying: every hole must have a shaft within tolerance
+    loc = _model_to_fp(pts, (ox, oy, oz), rot)
+    tips = _clusters([(x, y) for x, y, z in loc if z < -0.25])
+    _, check = _fit(tips, holes)
+    assert check < 0.2, check
+    print("ok  verify-models solver: pins landed on holes (err %.2fmm)" % check)
+
+
 def test_order_guidance():
     """The what-do-I-pick block: service tier, stackup preset, impedances and
     rail currents from the constraints — never guessed at order time."""
@@ -639,5 +665,6 @@ if __name__ == "__main__":
     test_crystal_pass()
     test_netlist_pin_nets()
     test_upload_package_excludes_prl()
+    test_model_registration_solver()
     test_order_guidance()
     print("\nALL CORE TESTS PASSED")
