@@ -389,6 +389,20 @@ def cmd_preflight(a):
         raise SystemExit(1)
 
 
+def cmd_patch(a):
+    """Standalone last-mile patch: close leftover unrouted nets + heal pours
+    on a routed board (DRC-guarded; reverts routes that regress DRC)."""
+    from fluxplace import patch as PATCH, constraints as CONS
+    cons = CONS.load(a.constraints)
+    nw = {n: CONS.power_width_mm(cons, n, 0.5)
+          for n in (cons or {}).get("power", {})}
+    res = PATCH.patch_board(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
+                            track_w=a.track, clearance=a.clearance,
+                            net_widths=nw)
+    print(f"patch: accepted={res['accepted']} patched={res['patched']} "
+          f"failed={res['failed']}")
+
+
 def cmd_verifymodels(a):
     """Verify every footprint's 3D model sits ON its pins (TH: pin shafts vs
     holes; SMD: body over the footprint). --fix solves and writes the
@@ -901,6 +915,17 @@ def main(argv=None):
                       help="per-footprint order-readiness audit: stand-ins, "
                            "pin parity, courtyards, 3D models")
     ppre.set_defaults(fn=cmd_preflight)
+
+    ppa = sub.add_parser("patch",
+                         help="close leftover unrouted nets on a routed board "
+                              "(incremental single-net router, DRC-guarded)")
+    ppa.add_argument("--board", required=True)
+    ppa.add_argument("--out", default=None)
+    ppa.add_argument("--track", type=float, default=0.2)
+    ppa.add_argument("--clearance", type=float, default=0.2)
+    ppa.add_argument("--constraints", default=None)
+    ppa.add_argument("--kicad-cli", default="kicad-cli")
+    ppa.set_defaults(fn=cmd_patch)
 
     pvm = sub.add_parser("verify-models",
                          help="verify 3D models sit ON their pins/footprints; "
