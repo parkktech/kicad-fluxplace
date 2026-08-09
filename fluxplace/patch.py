@@ -327,13 +327,25 @@ def dijkstra(grid, sources, targets, max_expand=2_000_000):
     return None
 
 
-def _escape_route(grid, src_island, tgt_islands, max_r_mm=1.5):
+def _escape_route(grid, src_island, tgt_islands, max_r_mm=2.0):
     """Dogbone move: a laterally walled pad can still escape VERTICALLY —
     seed the search with legal via spots within max_r of either end's cells
     and write the stub+via if used. Returns an augmented path (may begin/end
     with a stub hop + layer change) or None."""
     R = max(2, int(max_r_mm / grid.cell))
     nlayers = len(grid.layers)
+
+    def _stub_clear(l, ax, ay, bx, by):
+        # the stub is real copper: every cell along it must be free on the
+        # anchor layer (unvalidated stubs plowed through neighbours, measured
+        # +30 violations at 3mm radius)
+        n = max(abs(bx - ax), abs(by - ay))
+        for k in range(3, n + 1):    # first cells sit inside the own pad
+            cx = ax + round((bx - ax) * k / n)
+            cy = ay + round((by - ay) * k / n)
+            if (cx, cy) in grid.blocked[grid.layers[l]]:
+                return False
+        return True
 
     def seeds(island):
         out = {}
@@ -345,7 +357,7 @@ def _escape_route(grid, src_island, tgt_islands, max_r_mm=1.5):
                     if not grid.inside(nx, ny) or (nx, ny) in grid.via_blocked:
                         continue
                     key = (nx, ny)
-                    if key not in out:
+                    if key not in out and _stub_clear(l, cx, cy, nx, ny):
                         out[key] = (l, cx, cy)      # nearest-ish anchor cell
         return out
 
@@ -479,7 +491,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             continue
         w = (net_widths or {}).get(net, track_w)
         g, islands = build_grid(board, lay, ni.GetNetCode(), w, clearance,
-                                cell=cell)
+                                cell=cell, via_r=via_mm / 2.0)
         n0 = len(islands)
         rounds = 0
         while len(islands) > 1 and rounds <= n0 + 2:
@@ -501,7 +513,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             # boxed-in islands: retry the leftovers at signal width — a
             # narrower neck beats an open rail (flagged for review)
             g2, islands2 = build_grid(board, lay, ni.GetNetCode(), track_w,
-                                      clearance, cell=max(0.1, cell * 0.6))
+                                      clearance, cell=max(0.1, cell * 0.6),
+                                      via_r=via_mm / 2.0)
             r2 = 0
             while len(islands2) > 1 and r2 <= len(islands2) + 2:
                 src, rest = islands2[0], islands2[1:]
@@ -543,23 +556,34 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     drc1, un1 = AD.drc_unrouted(tmp, kicad_cli)
     unc1 = len(drc1.get("unconnected_items", []))
     vio1 = len(drc1.get("violations", []))
-    if unc1 < unc0 and vio1 <= vio0:
+    def _vkeys(d):
+        # zone-fill items are EXCLUDED: the filler is nondeterministic run to
+        # run, shifting pad-vs-zone findings and producing phantom 'new'
+        # violations far from any added copper (measured: 4 phantoms blocked
+        # a clean 19->15 on CM5)
+        out = set()
+        for v in d.get("violations", []):
+            if any("Zone" in i.get("description", "")
+                   for i in v.get("items", [])):
+                continue
+            out.add((v.get("type"), tuple(sorted(
+                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
+                for i in v.get("items", [])))))
+        return out
+
+    if unc1 < unc0 and (vio1 <= vio0 or not (_vkeys(drc1) - _vkeys(drc0))):
         os.replace(tmp, out_path)
         os.unlink(base)
         log(f"    patch: ACCEPTED unconnected {unc0}->{unc1}, "
+            f"violations {vio0}->{vio1} (non-zone-new: 0)"
+            if vio1 > vio0 else
+            f"    patch: ACCEPTED unconnected {unc0}->{unc1}, "
             f"violations {vio0}->{vio1}")
         return {"patched": patched, "failed": failed, "accepted": True,
                 "unconnected": (unc0, unc1), "violations": (vio0, vio1)}
     # SUBSET-ACCEPT: the offending routes are identifiable — remove only the
     # added copper near NEW violations and keep the rest (all-or-nothing
     # threw away 15+ good routes over one bad one, measured)
-    def _vkeys(d):
-        out = set()
-        for v in d.get("violations", []):
-            out.add((v.get("type"), tuple(sorted(
-                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
-                for i in v.get("items", [])))))
-        return out
     new_v = _vkeys(drc1) - _vkeys(drc0)
     bad_pts = [pt for _, items in new_v for pt in items]
     removed = 0
@@ -567,12 +591,44 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
         for t, items in list(new_v)[:6]:
             log(f"      new-violation {t} at {items}")
     for it in added_items:
-        pos = it.GetPosition()
-        px, py = pos.x / 1e6, pos.y / 1e6
-        if any(abs(px - bx) < 2.0 and abs(py - by) < 2.0
-               for bx, by in bad_pts):
+        pts = [it.GetPosition()]
+        try:
+            pts.append(it.GetEnd())
+            pts.append(pcbnew.VECTOR2I((it.GetStart().x + it.GetEnd().x) // 2,
+                                       (it.GetStart().y + it.GetEnd().y) // 2))
+        except AttributeError:
+            pass
+        near = False
+        for pp in pts:
+            px, py = pp.x / 1e6, pp.y / 1e6
+            if any(abs(px - bx) < 2.0 and abs(py - by) < 2.0
+                   for bx, by in bad_pts):
+                near = True
+                break
+        if near:
             board.Remove(it)
             removed += 1
+    if not removed and new_v:
+        # position matching missed (measured repeatedly): fall back to
+        # NET-level subset — drop all added copper of any net named in a
+        # new violation, keep every other net's routes
+        import re as _re
+        bad_nets = set()
+        for v in drc1.get("violations", []):
+            k = (v.get("type"), tuple(sorted(
+                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
+                for i in v.get("items", []))))
+            if k in new_v:
+                for i in v.get("items", []):
+                    m = _re.search(r"\[([^\]]+)\]", i.get("description", ""))
+                    if m:
+                        bad_nets.add(m.group(1))
+        for it in added_items:
+            if it.GetNetname() in bad_nets and it.GetBoard() is not None:
+                board.Remove(it)
+                removed += 1
+        if removed:
+            log(f"      net-level subset: dropped nets {sorted(bad_nets)[:6]}")
     if removed and removed < len(added_items):
         refill_zones(board)
         pcbnew.SaveBoard(tmp, board)
