@@ -79,6 +79,40 @@ class Grid:
             self.block_disk(layer, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t,
                             r_mm)
 
+    def block_rect(self, layer, x_mm, y_mm, hw, hh, rot_deg, margin):
+        """Block an oriented rectangle (pad body) + margin. A circumscribed
+        disk overstates a 0.3x1.5 pad 5x and seals fine-pitch channels."""
+        import math as _m
+        r = _m.radians(rot_deg)
+        c, sn = _m.cos(r), _m.sin(r)
+        ext = _m.hypot(hw + margin, hh + margin)
+        cx0, cy0 = self.cxy(x_mm, y_mm)
+        rr = int(_m.ceil(ext / self.cell)) + 1
+        for dx in range(-rr, rr + 1):
+            for dy in range(-rr, rr + 1):
+                px = (dx) * self.cell
+                py = (dy) * self.cell
+                lx = px * c + py * sn
+                ly = -px * sn + py * c
+                if abs(lx) <= hw + margin and abs(ly) <= hh + margin:
+                    self.blocked[layer].add((cx0 + dx, cy0 + dy))
+
+    def block_via_rect(self, x_mm, y_mm, hw, hh, rot_deg, margin):
+        import math as _m
+        r = _m.radians(rot_deg)
+        c, sn = _m.cos(r), _m.sin(r)
+        ext = _m.hypot(hw + margin, hh + margin)
+        cx0, cy0 = self.cxy(x_mm, y_mm)
+        rr = int(_m.ceil(ext / self.cell)) + 1
+        for dx in range(-rr, rr + 1):
+            for dy in range(-rr, rr + 1):
+                px = dx * self.cell
+                py = dy * self.cell
+                lx = px * c + py * sn
+                ly = -px * sn + py * c
+                if abs(lx) <= hw + margin and abs(ly) <= hh + margin:
+                    self.via_blocked.add((cx0 + dx, cy0 + dy))
+
     def block_via_disk(self, x_mm, y_mm, r_mm):
         cx, cy = self.cxy(x_mm, y_mm)
         for c in _cells_disk(cx, cy, r_mm / self.cell):
@@ -161,12 +195,14 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
             r = max(pad.GetSize().x, pad.GetSize().y) / 2e6
             on = set(pad.GetLayerSet().Seq())
             th = pad.GetDrillSize().x > 0
+            hw = pad.GetSize().x / 2e6
+            hh = pad.GetSize().y / 2e6
+            prot = pad.GetOrientationDegrees()
             if pad.GetNetCode() != net_code and (th or any(
                     pcbnew.IsCopperLayer(l) and l not in g.blocked
                     for l in on)):
-                g.block_via_disk(p.x / 1e6, p.y / 1e6,
-                                 r + _mgn(pad, layers[0]) - half + via_r
-                                 + slop)
+                g.block_via_rect(p.x / 1e6, p.y / 1e6, hw, hh, prot,
+                                 _mgn(pad, layers[0]) - half + via_r + slop)
             for l in layers:
                 if not th and l not in on:
                     continue
@@ -176,8 +212,8 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
                     mg = _mgn(pad, l)
                     if th:
                         mg = max(mg, pad.GetDrillSize().x / 2e6 + hole_c
-                                 + half + slop)
-                    g.block_disk(l, p.x / 1e6, p.y / 1e6, r + mg)
+                                 + half + slop - min(hw, hh))
+                    g.block_rect(l, p.x / 1e6, p.y / 1e6, hw, hh, prot, mg)
     # group target-net cells into islands (per-layer 8-connectivity at pad
     # scale; net vias join layers)
     li = {l: i for i, l in enumerate(layers)}
@@ -304,7 +340,7 @@ def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
     ni = board.FindNet(net_code) if isinstance(net_code, str) else \
         board.GetNetInfo().GetNetItem(net_code)
     pts = _simplify(path)
-    added = 0
+    added = []
     for a, b in zip(pts, pts[1:]):
         ax, ay = grid.mm(a[1], a[2])
         bx, by = grid.mm(b[1], b[2])
@@ -316,7 +352,7 @@ def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
             v.SetDrill(int(drill_mm * 1e6))
             v.SetNet(ni)
             board.Add(v)
-            added += 1
+            added.append(v)
             continue
         if (ax, ay) == (bx, by):
             continue
@@ -327,7 +363,7 @@ def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
         t.SetLayer(grid.layers[a[0]])
         t.SetNet(ni)
         board.Add(t)
-        added += 1
+        added.append(t)
     return added
 
 
@@ -359,6 +395,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     unc0 = len(drc0.get("unconnected_items", []))
     vio0 = len(drc0.get("violations", []))
     targets = sorted(un0 - set(skip_nets))
+    added_items = []
     patched, failed = [], []
     for net in targets:
         ni = board.FindNet(net)
@@ -376,7 +413,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             path = dijkstra(g, src, tgt)
             if path is None:
                 break
-            apply_path(board, g, path, net, w, via_mm, drill_mm)
+            added_items += apply_path(board, g, path, net, w, via_mm,
+                                      drill_mm)
             end = path[-1]
             merged = next(i for i in rest if end in i)
             islands = [src | merged | set(path)] + \
@@ -393,7 +431,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 path = dijkstra(g2, src, set().union(*rest))
                 if path is None:
                     break
-                apply_path(board, g2, path, net, track_w, via_mm, drill_mm)
+                added_items += apply_path(board, g2, path, net, track_w,
+                                          via_mm, drill_mm)
                 end = path[-1]
                 merged = next(i for i in rest if end in i)
                 islands2 = [src | merged | set(path)] + \
@@ -432,7 +471,44 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             f"violations {vio0}->{vio1}")
         return {"patched": patched, "failed": failed, "accepted": True,
                 "unconnected": (unc0, unc1), "violations": (vio0, vio1)}
-    os.unlink(tmp)
+    # SUBSET-ACCEPT: the offending routes are identifiable — remove only the
+    # added copper near NEW violations and keep the rest (all-or-nothing
+    # threw away 15+ good routes over one bad one, measured)
+    def _vkeys(d):
+        out = set()
+        for v in d.get("violations", []):
+            out.add((v.get("type"), tuple(sorted(
+                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
+                for i in v.get("items", [])))))
+        return out
+    new_v = _vkeys(drc1) - _vkeys(drc0)
+    bad_pts = [pt for _, items in new_v for pt in items]
+    removed = 0
+    for it in added_items:
+        pos = it.GetPosition()
+        px, py = pos.x / 1e6, pos.y / 1e6
+        if any(abs(px - bx) < 2.0 and abs(py - by) < 2.0
+               for bx, by in bad_pts):
+            board.Remove(it)
+            removed += 1
+    if removed and removed < len(added_items):
+        refill_zones(board)
+        pcbnew.SaveBoard(tmp, board)
+        drc2, _ = AD.drc_unrouted(tmp, kicad_cli)
+        unc2 = len(drc2.get("unconnected_items", []))
+        vio2 = len(drc2.get("violations", []))
+        if unc2 < unc0 and vio2 <= vio0:
+            os.replace(tmp, out_path)
+            os.unlink(base)
+            log(f"    patch: SUBSET-ACCEPTED after removing {removed} "
+                f"offending item(s) — unconnected {unc0}->{unc2}, "
+                f"violations {vio0}->{vio2}")
+            return {"patched": patched, "failed": failed, "accepted": True,
+                    "unconnected": (unc0, unc2),
+                    "violations": (vio0, vio2), "removed": removed}
+        os.unlink(tmp)
+    elif os.path.exists(tmp):
+        os.unlink(tmp)
     os.replace(base, out_path)      # keep the refilled baseline: strictly
     log(f"    patch: routes REVERTED, refilled baseline kept "
         f"(unconnected {unc0}->{unc1}, violations {vio0}->{vio1})")

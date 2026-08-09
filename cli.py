@@ -235,6 +235,8 @@ def _cand_argv(a, k, outdir):
         v += ["--keep-outline"]
     if a.no_patch:
         v += ["--no-patch"]
+    if a.route_only:
+        v += ["--route-only"]
     if a.no_pairs:
         v += ["--no-pairs"]
     if a.bypass_csv:
@@ -568,19 +570,32 @@ def cmd_auto(a):
         fixed_bounds = (ox0 + m, oy0 + m, ox1 - m, oy1 - m)
         print(f"    keep-outline: parts constrained to the source outline "
               f"{ox1 - ox0:.0f}x{oy1 - oy0:.0f}mm (grow-to-route disabled)")
-    pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
-                                   pad=a.pad, layers=len(layers),
-                                   jitter_seed=a.jitter_seed, attachments=att,
-                                   fixed_bounds=fixed_bounds)
-    IO.apply_orientations(board, rot, skip_locked=True)
-    IO.apply_positions(board, pos, parts, skip_locked=True)
+    if a.route_only:
+        # keep the existing (hand) placement untouched — route/patch/fab only.
+        # This is the RF-board mode: the floorplan (RF islands, can walls) is
+        # engineering intent the placer must not disturb.
+        import shutil as _shro
+        _shro.copy(a.board, placed)
+        print(f"[1/3] route-only: existing placement kept ({len(parts)} parts)")
+        pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
+        rot = {}
+        rep = {"overflow": 0}
+    else:
+        pos, rot, rep = P.place_routed(parts, cg, topo,
+                                       center=IO.board_center(board),
+                                       pad=a.pad, layers=len(layers),
+                                       jitter_seed=a.jitter_seed,
+                                       attachments=att,
+                                       fixed_bounds=fixed_bounds)
+        IO.apply_orientations(board, rot, skip_locked=True)
+        IO.apply_positions(board, pos, parts, skip_locked=True)
     # OUTLINE CONTAINMENT: if the placement exceeds the source outline, regrow the
     # outline around the parts — otherwise every outside pad is off-board and the
     # fab package is garbage (the exact parse error other tools reject boards for).
     # With --keep-outline the outline is a mechanical given and NEVER regrows: an
     # overhang here is a loud FAIL, not a bigger board.
     ex0, ey0, ex1, ey1 = IO.parts_extent(parts, pos, rot, P.eff_size)
-    if ex0 < ox0 or ey0 < oy0 or ex1 > ox1 or ey1 > oy1:
+    if not a.route_only and (ex0 < ox0 or ey0 < oy0 or ex1 > ox1 or ey1 > oy1):
         if a.keep_outline:
             print(f"    FAIL KEEP_OUTLINE: parts extent "
                   f"{ex1 - ex0:.1f}x{ey1 - ey0:.1f}mm exceeds the fixed outline "
@@ -590,8 +605,9 @@ def cmd_auto(a):
             w, h = IO.shrinkwrap_outline(board, ex0, ey0, ex1, ey1)
             print(f"    outline regrown to {w:.0f}x{h:.0f}mm "
                   f"(placement exceeded the source outline)")
-    IO.save(board, placed)
-    print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
+    if not a.route_only:
+        IO.save(board, placed)
+        print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
 
     # ---- [2] ROUTE — route-fresh-per-rung + fanout-aware finisher (universal) --------
     from fluxplace import adaptive as AD, escape as ESC
@@ -988,6 +1004,9 @@ def main(argv=None):
                      help="don't generate via-in-pad fanout for geometric residue")
     pau.add_argument("--no-pairs", action="store_true",
                      help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--route-only", action="store_true",
+                     help="keep the existing placement (RF-board mode): "
+                          "route + patch + fab only")
     pau.add_argument("--no-patch", action="store_true",
                      help="skip the last-mile single-net patch stage")
     pau.add_argument("--keep-outline", action="store_true",
