@@ -594,6 +594,22 @@ def test_upload_package_excludes_prl():
     print("ok  upload package: board renamed to project stem, no .kicad_prl")
 
 
+def test_order_guidance():
+    """The what-do-I-pick block: service tier, stackup preset, impedances and
+    rail currents from the constraints — never guessed at order time."""
+    from fluxplace.profiles import order_guidance
+    cons = {"pairs": {"PCIE_TX": {"impedance_diff": 85, "skew_mm": 0.1},
+                      "USB_OTG": {"impedance_diff": 90, "skew_mm": 1.25}},
+            "power": {"+5V": {"max_current_ma": 4000, "pour": True},
+                      "+3V3": {"max_current_ma": 1500}}}
+    g = order_guidance("jlcpcb-advanced", 4, 2, (113.0, 107.0), cons)
+    assert 'JLCPCB 4-Layer (with power plane) | 3.5 mil / 3.5 mil' in g, g
+    assert "PCIE_TX = 85 ohm diff, skew 0.1 mm" in g, g
+    assert "USB_OTG = 90 ohm diff" in g and "+5V 4000mA (plane)" in g, g
+    assert "pcb + pro + sch only" in g
+    print("ok  order guidance: service, stackup pick, impedances, currents")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -623,4 +639,5 @@ if __name__ == "__main__":
     test_crystal_pass()
     test_netlist_pin_nets()
     test_upload_package_excludes_prl()
+    test_order_guidance()
     print("\nALL CORE TESTS PASSED")

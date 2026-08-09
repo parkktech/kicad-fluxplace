@@ -301,6 +301,8 @@ def cmd_auto_candidates(a):
     print(f"    fab-profile [{a.profile}]: {fsummary}")
     for lvl, code, msg in fchecks:
         print(f"    fab-profile {lvl} {code}: {msg}")
+    _order_guidance(a, os.path.join(a.out, "routed.kicad_pcb"),
+                    os.path.join(a.out, "fab"))
     print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
 
 
@@ -432,6 +434,24 @@ def cmd_replacefp(a):
     if rep["pins_without_pads"]:
         print(f"  WARNING pins with no pad on the new footprint: "
               f"{rep['pins_without_pads']}")
+
+
+def _order_guidance(a, routed, fab_dir):
+    """Print (and append to the MANIFEST) the what-do-I-pick block: fab
+    service tier, the stackup preset string upload tools show, impedance and
+    rail-current answers from the engineering constraints."""
+    from fluxplace import profiles as PROF, constraints as CONS, kicad_io as IO
+    board = IO.load(routed)
+    bb = board.GetBoardEdgesBoundingBox()
+    g = PROF.order_guidance(a.profile, board.GetCopperLayerCount(),
+                            len(IO.signal_layers(board)),
+                            (bb.GetWidth() / 1e6, bb.GetHeight() / 1e6),
+                            CONS.load(a.constraints))
+    print(g)
+    mf = os.path.join(fab_dir, "MANIFEST.txt")
+    if os.path.exists(mf):
+        with open(mf, "a") as f:
+            f.write(g + "\n")
 
 
 def cmd_auto(a):
@@ -750,6 +770,7 @@ def cmd_auto(a):
     print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
              if res.get("violations") is not None else ""))
+    _order_guidance(a, src, os.path.join(a.out, "fab"))
     print(f"AUTO complete: {a.out}/fab  ({verdict})")
 
 

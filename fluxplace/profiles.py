@@ -86,3 +86,55 @@ def check_board(board_path, profile, pcbnew=None):
                f"via {vmin if vmin is not None else '-'} / "
                f"drill {dmin if dmin is not None else '-'} (mm)")
     return out, summary
+
+
+# Human ordering facts per profile: the service to buy and the stackup preset
+# string external tools (Quilter, fab order forms) present. {n} = copper layers.
+ORDER_INFO = {
+    "jlcpcb": dict(
+        service="JLCPCB standard multilayer (0.1mm / ~4mil class)",
+        pick="JLCPCB {n}-Layer (with power plane) | 4 mil / 4 mil",
+        stackup="JLC7628 reference stackup, 1.6mm"),
+    "jlcpcb-advanced": dict(
+        service="JLCPCB advanced / controlled impedance (3.5 mil class)",
+        pick="JLCPCB {n}-Layer (with power plane) | 3.5 mil / 3.5 mil",
+        stackup="JLC7628 reference stackup, 1.6mm (impedance-controlled order)"),
+    "proto": dict(
+        service="conservative quick-turn prototype (0.15mm / 6mil class)",
+        pick="{n}-Layer | 6 mil / 6 mil",
+        stackup="fab default stackup"),
+}
+
+
+def order_guidance(profile_name, copper_layers, signal_layers, size_mm, cons):
+    """The 'what do I pick' block: printed when a board finishes preparing and
+    appended to the fab MANIFEST — service tier, the stackup preset string an
+    upload tool will show, impedance/skew answers, and rail currents, all from
+    the profile + engineering constraints (never guessed at order time)."""
+    info = ORDER_INFO.get(profile_name, ORDER_INFO["proto"])
+    lines = ["", "ORDER / UPLOAD GUIDANCE — what to pick",
+             f"  fab service : {info['service']}   [profile {profile_name}]",
+             f"  board       : {copper_layers} copper layers "
+             f"({signal_layers} signal + planes), "
+             f"{size_mm[0]:.0f} x {size_mm[1]:.0f} mm",
+             f"  stackup pick: \"{info['pick'].format(n=copper_layers)}\"",
+             f"  stackup     : {info['stackup']}"]
+    pairs = (cons or {}).get("pairs", {})
+    if pairs:
+        by = {}
+        for name, p in sorted(pairs.items()):
+            key = (p.get("impedance_diff"), p.get("skew_mm"))
+            by.setdefault(key, []).append(name)
+        for (z, skew), names in sorted(by.items(), key=lambda kv: kv[0][0] or 0):
+            lines.append(f"  impedance   : {', '.join(names)} = {z} ohm diff"
+                         + (f", skew {skew} mm" if skew else ""))
+    power = (cons or {}).get("power", {})
+    if power:
+        rails = sorted(power.items(),
+                       key=lambda kv: -(kv[1].get("max_current_ma") or 0))
+        lines.append("  rail currents: " + ", ".join(
+            f"{n} {p.get('max_current_ma')}mA" + (" (plane)" if p.get("pour") else "")
+            for n, p in rails if p.get("max_current_ma")))
+    lines.append("  upload set  : pcb + pro + sch only "
+                 "(fab --upload-out; never .kicad_prl/.kicad_dru)")
+    return "\n".join(lines)
