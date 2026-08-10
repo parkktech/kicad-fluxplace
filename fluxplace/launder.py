@@ -85,6 +85,34 @@ def _resolve(snapshot, item, pcbnew):
     return None
 
 
+def mutate(src_path, dst_path, picks):
+    """Run one board mutation (remove `picks` descriptors, refill pours,
+    save) in a FRESH subprocess and return the number removed. A pcbnew
+    session is effectively single-use once ZONE_FILLER has run — repeated
+    in-process refill/save cycles eventually segfault or corrupt SWIG
+    proxies (measured: every long patch run died in its final refill).
+    picks: [{"via": bool, "net": str, "x": mm, "y": mm}] — empty list =
+    refill+save only."""
+    import sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    wenv = dict(os.environ)
+    wenv["PYTHONPATH"] = repo + os.pathsep + wenv.get("PYTHONPATH", "")
+    pk = dst_path + ".picks.json"
+    with open(pk, "w") as f:
+        json.dump(picks, f)
+    r = subprocess.run([sys.executable, "-u", "-m", "fluxplace.launder",
+                        src_path, dst_path, pk],
+                       capture_output=True, text=True, timeout=900,
+                       env=wenv, cwd=repo)
+    os.unlink(pk)
+    for line in (r.stdout or "").splitlines()[::-1]:
+        if line.startswith("REMOVED "):
+            return int(line.split()[1])
+    raise RuntimeError(
+        f"mutate worker rc={r.returncode}: "
+        f"{(r.stdout or '')[-200:]} / {(r.stderr or '')[-300:]}")
+
+
 def launder_board(board_path, out_path, kicad_cli="kicad-cli",
                   max_rounds=4, log=print, dangling=False, prof=None):
     """Returns a summary dict. Writes out_path only when at least one
@@ -105,31 +133,9 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
                     shutil.copy(s, os.path.splitext(tgt)[0] + ext)
                 except OSError:
                     pass
-    # EVERY board mutation runs in a fresh SUBPROCESS: after one
-    # ZONE_FILLER/mutation cycle, this pcbnew session is poisoned — the
-    # next LoadBoard returns a raw SwigPyObject (measured; the leaked
-    # 'ZONE_FILLER *' destructor warnings are the tell). The parent only
-    # orchestrates descriptors, DRC runs, and the guard.
-    import sys
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    wenv = dict(os.environ)
-    wenv["PYTHONPATH"] = repo + os.pathsep + wenv.get("PYTHONPATH", "")
-
-    def _mutate(src_path, dst_path, subset):
-        pk = dst_path + ".picks.json"
-        with open(pk, "w") as f:
-            json.dump(subset, f)
-        r = subprocess.run([sys.executable, "-u", "-m", "fluxplace.launder",
-                            src_path, dst_path, pk],
-                           capture_output=True, text=True, timeout=900,
-                           env=wenv, cwd=repo)
-        os.unlink(pk)
-        for line in (r.stdout or "").splitlines()[::-1]:
-            if line.startswith("REMOVED "):
-                return int(line.split()[1])
-        raise RuntimeError(
-            f"launder worker rc={r.returncode}: "
-            f"{(r.stdout or '')[-200:]} / {(r.stderr or '')[-300:]}")
+    # EVERY board mutation runs in a fresh SUBPROCESS (see mutate) — the
+    # parent only orchestrates descriptors, DRC runs, and the guard.
+    _mutate = mutate
 
     def _refill_save(src_path, dst_path):
         _mutate(src_path, dst_path, [])

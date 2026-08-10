@@ -808,16 +808,18 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     dict; writes out_path only when the DRC guard accepts."""
     from . import adaptive as AD
     from . import kicad_io as IO
-    board = pcbnew.LoadBoard(board_path)
+    from .launder import mutate as _mutate
+    # THIS pcbnew session must never run ZONE_FILLER: repeated in-process
+    # refill/save cycles poison the SWIG session and long runs segfault in
+    # their final refill (measured 3-for-3 on CM5/dig/RF). All refills and
+    # guarded removals happen in fresh worker subprocesses; the parent only
+    # reads, routes, and ADDS copper.
+    base = out_path + ".base.kicad_pcb"
+    _mutate(board_path, base, [])          # baseline refill, out-of-process
+    board = pcbnew.LoadBoard(base)
     lay = layers or IO.signal_layers(board)
     # signal_layers returns NAMES; the grid and pcbnew items need int ids
     lay = [board.GetLayerID(l) if isinstance(l, str) else l for l in lay]
-    # BASELINE with fresh pours: refilling alone changes both DRC counts
-    # (measured: -10 violations, -7 unconnected — stale pours heal GND
-    # islands); the guard must compare like with like
-    refill_zones(board)
-    base = out_path + ".base.kicad_pcb"
-    pcbnew.SaveBoard(base, board)
     # DRC truth needs the design-rule sidecars (per-net derates live in the
     # .kicad_dru; without it the guard judges fine copper against bare
     # netclass and everything looks illegal)
@@ -963,9 +965,18 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
         os.replace(base, out_path)
         return {"patched": [], "failed": failed, "accepted": False,
                 "refilled_out": True}
-    refill_zones(board)
+    # save the raw (unfilled) patched state; the refill runs out-of-process
+    raw = out_path + ".raw.kicad_pcb"
+    pcbnew.SaveBoard(raw, board)
+    for ext in (".kicad_dru", ".kicad_pro"):
+        sidecar = os.path.join(srcdir, stem + ext)
+        if os.path.exists(sidecar):
+            try:
+                _sh.copy(sidecar, os.path.splitext(raw)[0] + ext)
+            except OSError:
+                pass
     tmp = out_path + ".tmp.kicad_pcb"
-    pcbnew.SaveBoard(tmp, board)
+    _mutate(raw, tmp, [])
     drc1, un1 = AD.drc_unrouted(tmp, kicad_cli)
     unc1 = len(drc1.get("unconnected_items", []))
     vio1 = len(drc1.get("violations", []))
@@ -987,6 +998,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     if unc1 < unc0 and (vio1 <= vio0 or not (_vkeys(drc1) - _vkeys(drc0))):
         os.replace(tmp, out_path)
         os.unlink(base)
+        os.unlink(raw)
         log(f"    patch: ACCEPTED unconnected {unc0}->{unc1}, "
             f"violations {vio0}->{vio1} (non-zone-new: 0)"
             if vio1 > vio0 else
@@ -1003,6 +1015,13 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     if new_v and log:
         for t, items in list(new_v)[:6]:
             log(f"      new-violation {t} at {items}")
+    def _desc(it):
+        return {"via": it.GetClass() == "PCB_VIA",
+                "net": it.GetNetname(),
+                "x": it.GetPosition().x / 1e6,
+                "y": it.GetPosition().y / 1e6}
+
+    drop = []
     for it in added_items:
         if it.GetBoard() is None:      # ripped back off the board already
             continue
@@ -1021,7 +1040,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 near = True
                 break
         if near:
-            board.Remove(it)
+            drop.append(_desc(it))
             removed += 1
     if not removed and new_v:
         # position matching missed (measured repeatedly): fall back to
@@ -1040,19 +1059,21 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                         bad_nets.add(m.group(1))
         for it in added_items:
             if it.GetNetname() in bad_nets and it.GetBoard() is not None:
-                board.Remove(it)
+                drop.append(_desc(it))
                 removed += 1
         if removed:
             log(f"      net-level subset: dropped nets {sorted(bad_nets)[:6]}")
     if removed and removed < len(added_items):
-        refill_zones(board)
-        pcbnew.SaveBoard(tmp, board)
+        # remove the offenders from the RAW state in a worker; the parent
+        # session never mutates-and-refills
+        _mutate(raw, tmp, drop)
         drc2, _ = AD.drc_unrouted(tmp, kicad_cli)
         unc2 = len(drc2.get("unconnected_items", []))
         vio2 = len(drc2.get("violations", []))
         if unc2 < unc0 and vio2 <= vio0:
             os.replace(tmp, out_path)
             os.unlink(base)
+            os.unlink(raw)
             log(f"    patch: SUBSET-ACCEPTED after removing {removed} "
                 f"offending item(s) — unconnected {unc0}->{unc2}, "
                 f"violations {vio0}->{vio2}")
@@ -1062,6 +1083,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
         os.unlink(tmp)
     elif os.path.exists(tmp):
         os.unlink(tmp)
+    if os.path.exists(raw):
+        os.unlink(raw)
     os.replace(base, out_path)      # keep the refilled baseline: strictly
     log(f"    patch: routes REVERTED, refilled baseline kept "
         f"(unconnected {unc0}->{unc1}, violations {vio0}->{vio1})")
