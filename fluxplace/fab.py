@@ -82,6 +82,49 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
             "unconnected": nunc, "stages": done}
 
 
+def quilter_csvs(cons, out, log=print):
+    """Emit Quilter Circuit-Comprehension CSVs from the constraints —
+    measured: their comprehension step IGNORES KiCad netclasses entirely
+    (every pair shown 100R, every rail 500mA on a package whose .kicad_pro
+    carried injected classes). Each comprehension table has an Upload CSV
+    button; these files feed it. Column labels match their tables."""
+    import csv
+    written = []
+    pairs = (cons or {}).get("pairs", {})
+    if pairs:
+        p = os.path.join(out, "quilter_diff_pairs.csv")
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Net Name (+)", "Net Name (-)",
+                        "Differential Impedance (\u03a9)",
+                        "Single-ended Impedance (\u03a9)",
+                        "Frequency (GHz)"])
+            for group, cfg in sorted(pairs.items()):
+                z = int(cfg.get("impedance_diff", 100))
+                sp, sn = ("_DP", "_DM") if "USB" in group.upper() \
+                    else ("_P", "_N")
+                w.writerow([group + sp, group + sn, z, z // 2, 1])
+        written.append(p)
+    power = (cons or {}).get("power", {})
+    if power:
+        p = os.path.join(out, "quilter_power_nets.csv")
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Net Name", "Maximum Current (mA)",
+                        "Attempt Power Pour?"])
+            for net, cfg in sorted(power.items()):
+                ma = cfg.get("max_current_ma")
+                if not ma:
+                    continue
+                w.writerow([net, int(ma),
+                            "true" if cfg.get("pour") else "false"])
+        written.append(p)
+    if written:
+        log("  quilter comprehension CSVs: "
+            + ", ".join(os.path.basename(x) for x in written))
+    return written
+
+
 def upload_package(board, out, project_dir=None, log=print):
     """Assemble the ECAD upload set (external audit/re-route services parse
     these for component relationships): the routed board renamed to the
@@ -112,7 +155,9 @@ def upload_package(board, out, project_dir=None, log=print):
     if os.path.exists(ctoml) and os.path.exists(pro):
         try:
             from . import constraints as CONS
-            CONS.inject_netclasses(pro, CONS.load(ctoml), log=log)
+            cons = CONS.load(ctoml)
+            CONS.inject_netclasses(pro, cons, log=log)
+            quilter_csvs(cons, out, log=log)
         except Exception as e:
             log(f"  netclass injection failed ({e}) — package unchanged")
     # the package IS what we just wrote: remove every stale KiCad file left
