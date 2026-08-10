@@ -528,19 +528,29 @@ def _route_rounds(board, g, islands, net, w, via_mm, drill_mm):
 
 def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
                  drill_mm, skip_nets, net_widths, track_w, log,
-                 rip_r_mm=3.0, max_rip=150, open_nets=()):
+                 rip_r_mm=3.0, max_rip=150, open_nets=(), exclude_nets=()):
     """Regional rip-up-and-reroute: when dijkstra + dogbone both fail, the
     island is WALLED by routed copper. Free the corridor between the island
     and its nearest sibling — record+delete foreign unlocked tracks/vias
     within rip_r of the corridor — route the target net FIRST through the
     opened lane, then re-route every displaced net. All-or-nothing: any
     displaced net that cannot fully reconnect rolls the whole transaction
-    back. Returns list of added items, or None."""
+    back. Returns (added_items_or_None, blame) where blame is the displaced
+    net that failed to reconnect (caller may exclude it and retry)."""
     via_r = via_mm / 2.0
+    # nets whose connectivity flows through a zone pour must not be ripped:
+    # the island model sees only tracks/vias/pads, so a pour-fed rail looks
+    # "fragmented" after a rip even though the refill would reconnect it —
+    # and requiring track-reconnect of pour copper is wrong both ways
+    # (measured: +3V3_D "8 islands not reconnected" rollback on RF)
+    no_rip = set(skip_nets) | set(exclude_nets)
+    for z in board.Zones():
+        if z.IsOnCopperLayer():
+            no_rip.add(z.GetNetname())
     g, islands = build_grid(board, lay, net_code, w, clearance, cell=cell,
                             via_r=via_r)
     if len(islands) <= 1:
-        return None
+        return None, None
     src_xy = _sample_xy(g, islands[0])
     tgt_xy = []
     for isl in islands[1:]:
@@ -556,7 +566,7 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
     cands = []
     for t in board.GetTracks():
         code = t.GetNetCode()
-        if code == net_code or t.GetNetname() in skip_nets or t.IsLocked() \
+        if code == net_code or t.GetNetname() in no_rip or t.IsLocked() \
                 or t.GetClass() == "PCB_ARC":
             continue
         if t.GetClass() == "PCB_VIA":
@@ -572,7 +582,7 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
                 or near((s.x + e.x) / 2e6, (s.y + e.y) / 2e6, rip_r_mm):
             cands.append(t)
     if not cands:
-        return None
+        return None, None
     if len(cands) > max_rip:
         # keep the closest to the walled end — that's where the wall is
         sx, sy = s_end
@@ -606,14 +616,14 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
         f"freed in {rip_r_mm}mm corridor")
     added = []
 
-    def rollback(reason):
+    def rollback(reason, blame=None):
         for it in added:
             if it.GetBoard() is not None:
                 board.Remove(it)
         for rec in records:
             _restore_item(board, rec)
         log(f"      rip-up: ROLLED BACK ({reason})")
-        return None
+        return None, blame
 
     # 1) target through the opened lane
     g, islands = build_grid(board, lay, net_code, w, clearance, cell=cell,
@@ -626,7 +636,7 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
     for dn in disp_nets:
         dni = board.FindNet(dn)
         if dni is None:
-            return rollback(f"{dn}: net vanished")
+            return rollback(f"{dn}: net vanished", blame=dn)
         dw = (net_widths or {}).get(dn) or max(disp_w[dn], track_w)
         g2, isl2 = build_grid(board, lay, dni.GetNetCode(), dw, clearance,
                               cell=cell, via_r=via_r)
@@ -640,10 +650,11 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
                                        drill_mm)
             added += got2
         if len(isl2) > pre_frag.get(dn, 1):
-            return rollback(f"{dn}: {len(isl2) - 1} island(s) not reconnected")
+            return rollback(f"{dn}: {len(isl2) - 1} island(s) not "
+                            f"reconnected", blame=dn)
     log(f"      rip-up: target routed, {len(disp_nets)} displaced net(s) "
         f"rerouted")
-    return added
+    return added, None
 
 
 # ---------------------------------------------------------------- main ----
@@ -710,12 +721,22 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             if path is None:
                 path = _escape_route(g, src, rest)
             if path is None and rip and rips < 3:
-                rips += 1
-                got = _rip_reroute(board, lay, net, ni.GetNetCode(), w,
-                                   clearance, cell, via_mm, drill_mm,
-                                   skip_nets, net_widths, track_w, log,
-                                   rip_r_mm=rip_r_mm, max_rip=max_rip,
-                                   open_nets=set(targets))
+                # blame-driven retry: a displaced net that failed to
+                # reconnect becomes un-rippable next attempt; a target that
+                # stayed unroutable gets a wider corridor
+                got, exclude, r = None, set(), rip_r_mm
+                while rips < 3 and got is None:
+                    rips += 1
+                    got, blame = _rip_reroute(
+                        board, lay, net, ni.GetNetCode(), w, clearance,
+                        cell, via_mm, drill_mm, skip_nets, net_widths,
+                        track_w, log, rip_r_mm=r, max_rip=max_rip,
+                        open_nets=set(targets), exclude_nets=exclude)
+                    if got is None:
+                        if blame:
+                            exclude.add(blame)
+                        else:
+                            r *= 1.6
                 if got:
                     added_items += got
                     g, islands = build_grid(board, lay, ni.GetNetCode(), w,
