@@ -676,6 +676,38 @@ def test_rip_corridor():
     print("ok  rip-up corridor: nearest pair + dense straight sampling")
 
 
+def test_rip_soft_path():
+    """rip-up v2: soft-penalty dijkstra crosses rippable copper and NAMES
+    the exact items in the way; a cheap detour beats a rip."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import dijkstra, _path_rip_ids
+
+    class G:
+        cell = 1.0
+        layers = ["F"]
+        nx = ny = 20
+        blocked = {"F": set()}
+        via_blocked = set()
+        via_soft = {}
+        soft_items = list(range(8))
+
+        def inside(self, cx, cy):
+            return 1 <= cx < self.nx - 1 and 1 <= cy < self.ny - 1
+
+    g = G()
+    g.soft = {"F": {(10, y): {7} for y in range(20)}}   # full soft wall
+    p = dijkstra(g, {(0, 2, 2)}, {(0, 17, 2)}, soft_penalty=400)
+    assert p, "soft wall must be crossable at a penalty"
+    assert _path_rip_ids(g, p) == {7}, "path must name the wall item"
+    g2 = G()
+    g2.soft = {"F": {(10, y): {3} for y in range(20) if y != 18}}
+    p2 = dijkstra(g2, {(0, 2, 2)}, {(0, 17, 2)}, soft_penalty=400)
+    assert p2 and not _path_rip_ids(g2, p2), \
+        "a reachable free gap must beat ripping"
+    print("ok  rip-up soft path: names the wall, prefers free detours")
+
+
 def test_order_guidance():
     """The what-do-I-pick block: service tier, stackup preset, impedances and
     rail currents from the constraints — never guessed at order time."""
@@ -724,5 +756,6 @@ if __name__ == "__main__":
     test_model_registration_solver()
     test_lastmile_dijkstra()
     test_rip_corridor()
+    test_rip_soft_path()
     test_order_guidance()
     print("\nALL CORE TESTS PASSED")

@@ -55,6 +55,34 @@ class Grid:
         # copper layer (a through-via pierces inner plane-layer tracks too —
         # measured short: patch via vs GND track on the inner GND layer)
         self.via_blocked = set()
+        # RIPPABLE occupancy: cell -> set of soft-item indices (see
+        # build_grid soft_ok). Soft cells are passable at a penalty; the
+        # items under a chosen path are the exact rip set.
+        self.soft = {l: {} for l in self.layers}
+        self.via_soft = {}
+        self.soft_items = []
+
+    def _mark_soft(self, layer, cells, idx):
+        m = self.soft[layer]
+        for c in cells:
+            m.setdefault(c, set()).add(idx)
+
+    def _mark_via_soft(self, cells, idx):
+        for c in cells:
+            self.via_soft.setdefault(c, set()).add(idx)
+
+    def cells_disk(self, x_mm, y_mm, r_mm):
+        cx, cy = self.cxy(x_mm, y_mm)
+        return list(_cells_disk(cx, cy, r_mm / self.cell))
+
+    def cells_seg(self, x1, y1, x2, y2, r_mm):
+        n = max(1, int(math.hypot(x2 - x1, y2 - y1) / (self.cell * 0.7)))
+        out = []
+        for k in range(n + 1):
+            t = k / n
+            out += self.cells_disk(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t,
+                                   r_mm)
+        return out
 
     def cxy(self, x_mm, y_mm):
         return (int((x_mm - self.x0) / self.cell),
@@ -127,12 +155,17 @@ class Grid:
 
 
 def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
-               via_r=0.3):
+               via_r=0.3, soft_ok=None):
     """Obstacles for routing net `net_code`: everything conductive that is
     NOT this net, dilated by clearance + track_w/2. Returns (grid, islands)
     where islands = list of cell-sets of the target net's existing copper,
     grouped by connectivity (vias join layers). Foreign copper on ANY copper
-    layer (inner planes included) blocks THROUGH-via placement."""
+    layer (inner planes included) blocks THROUGH-via placement.
+
+    soft_ok(item) — optional predicate marking foreign tracks/vias (never
+    pads) as RIPPABLE: their cells go into grid.soft/via_soft instead of
+    the hard block sets, so a soft-penalty dijkstra can cross them and name
+    the exact items in the way."""
     g = Grid(board, layers, cell)
     ds = board.GetDesignSettings()
     hole_c = ds.m_HoleClearance / 1e6
@@ -169,20 +202,38 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
                 mg = _mgn(t, layers[0])
                 # my track near their hole AND my hole near their copper
                 mg = max(mg, t.GetDrillValue() / 2e6 + hole_c + half + slop)
-                for l in layers:
-                    g.block_disk(l, p.x / 1e6, p.y / 1e6, r + mg)
-                # via copper vs their copper; via hole vs their hole
-                g.block_via_disk(p.x / 1e6, p.y / 1e6, max(
-                    r + (_mgn(t, layers[0]) - half) + via_r,
-                    t.GetDrillValue() / 2e6 + hole_c + via_r / 2) + slop)
+                x, y = p.x / 1e6, p.y / 1e6
+                vr = max(r + (_mgn(t, layers[0]) - half) + via_r,
+                         t.GetDrillValue() / 2e6 + hole_c + via_r / 2) + slop
+                if soft_ok is not None and soft_ok(t):
+                    idx = len(g.soft_items)
+                    g.soft_items.append(t)
+                    cs = g.cells_disk(x, y, r + mg)
+                    for l in layers:
+                        g._mark_soft(l, cs, idx)
+                    g._mark_via_soft(g.cells_disk(x, y, vr), idx)
+                else:
+                    for l in layers:
+                        g.block_disk(l, x, y, r + mg)
+                    # via copper vs their copper; via hole vs their hole
+                    g.block_via_disk(x, y, vr)
             continue
         lay = t.GetLayer()
         s, e = t.GetStart(), t.GetEnd()
+        sok = code != net_code and soft_ok is not None and soft_ok(t)
+        if sok:
+            t_idx = len(g.soft_items)
+            g.soft_items.append(t)
         if code != net_code and pcbnew.IsCopperLayer(lay):
-            g.block_via_seg(s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
-                            t.GetWidth() / 2e6 + max(
-                                (_mgn(t, lay) - half) + via_r,
-                                hole_c + via_r / 2) + slop)
+            vr = t.GetWidth() / 2e6 + max(
+                (_mgn(t, lay) - half) + via_r,
+                hole_c + via_r / 2) + slop
+            if sok:
+                g._mark_via_soft(g.cells_seg(s.x / 1e6, s.y / 1e6,
+                                             e.x / 1e6, e.y / 1e6, vr), t_idx)
+            else:
+                g.block_via_seg(s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
+                                vr)
         if lay not in g.blocked:
             continue
         if code == net_code:
@@ -191,6 +242,10 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
                 x = (s.x + (e.x - s.x) * k / n) / 1e6
                 y = (s.y + (e.y - s.y) * k / n) / 1e6
                 net_cells[lay].add(g.cxy(x, y))
+        elif sok:
+            g._mark_soft(lay, g.cells_seg(
+                s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
+                t.GetWidth() / 2e6 + _mgn(t, lay)), t_idx)
         else:
             g.block_seg(lay, s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
                         t.GetWidth() / 2e6 + _mgn(t, lay))
@@ -271,12 +326,19 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
 _VIA_COST = 14
 
 
-def dijkstra(grid, sources, targets, max_expand=2_000_000):
+def dijkstra(grid, sources, targets, max_expand=None, soft_penalty=None):
     """Multi-source multi-target over (layer_idx, cx, cy). Returns the cell
     path or None. Straight steps cost 10, diagonals 14, vias _VIA_COST*10
-    (via cell must be free on EVERY layer)."""
+    (via cell must be free on EVERY layer). With soft_penalty set, cells
+    holding rippable items (grid.soft) are passable at +penalty each — the
+    min-cost path then NAMES the cheapest rip set."""
     nlayers = len(grid.layers)
     blocked = [grid.blocked[l] for l in grid.layers]
+    soft = [grid.soft[l] for l in grid.layers] if soft_penalty else None
+    if max_expand is None:
+        # a 2M constant silently truncated big boards at fine cells
+        # (RF at 0.1mm is >4M nodes -> false "no path")
+        max_expand = max(2_000_000, grid.nx * grid.ny * nlayers * 2)
     tset = targets
     dist = {}
     prev = {}
@@ -307,6 +369,8 @@ def dijkstra(grid, sources, targets, max_expand=2_000_000):
                 continue
             m = (l, nx, ny)
             nd = d + c
+            if soft is not None and (nx, ny) in soft[l]:
+                nd += soft_penalty
             if nd < dist.get(m, 1 << 60):
                 dist[m] = nd
                 prev[m] = node
@@ -315,16 +379,35 @@ def dijkstra(grid, sources, targets, max_expand=2_000_000):
             ok = (cx, cy) not in grid.via_blocked and \
                 all((cx, cy) not in blocked[k] for k in range(nlayers))
             if ok:
+                vd = _VIA_COST * 10
+                if soft is not None and (
+                        (cx, cy) in grid.via_soft
+                        or any((cx, cy) in soft[k] for k in range(nlayers))):
+                    vd += soft_penalty
                 for k in range(nlayers):
                     if k == l:
                         continue
                     m = (k, cx, cy)
-                    nd = d + _VIA_COST * 10
+                    nd = d + vd
                     if nd < dist.get(m, 1 << 60):
                         dist[m] = nd
                         prev[m] = node
                         heapq.heappush(pq, (nd, m))
     return None
+
+
+def _path_rip_ids(grid, path):
+    """The exact soft items a path crosses: layer cells along it, plus the
+    full column + via_soft at every layer change (a through-via needs the
+    whole column clear)."""
+    ids = set()
+    for i, (l, cx, cy) in enumerate(path):
+        ids |= grid.soft[grid.layers[l]].get((cx, cy), set())
+        if i and path[i - 1][0] != l:
+            ids |= grid.via_soft.get((cx, cy), set())
+            for k in grid.layers:
+                ids |= grid.soft[k].get((cx, cy), set())
+    return ids
 
 
 def _escape_route(grid, src_island, tgt_islands, max_r_mm=2.0):
@@ -547,48 +630,49 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
     for z in board.Zones():
         if z.IsOnCopperLayer():
             no_rip.add(z.GetNetname())
+    soft_ok = (lambda t: t.GetNetname() not in no_rip and not t.IsLocked()
+               and t.GetClass() != "PCB_ARC")
     g, islands = build_grid(board, lay, net_code, w, clearance, cell=cell,
-                            via_r=via_r)
+                            via_r=via_r, soft_ok=soft_ok)
     if len(islands) <= 1:
         return None, None
-    src_xy = _sample_xy(g, islands[0])
-    tgt_xy = []
-    for isl in islands[1:]:
-        tgt_xy += _sample_xy(g, isl, cap=200)
-    anchors, s_end, _ = corridor_anchors(src_xy, tgt_xy)
-    lay_set = set(lay)
-
-    def near(x, y, r):
-        return any((x - ax) ** 2 + (y - ay) ** 2 <= r * r
-                   for ax, ay in anchors)
-
-    # collect rip candidates: foreign, unlocked, on signal layers, no arcs
-    cands = []
-    for t in board.GetTracks():
-        code = t.GetNetCode()
-        if code == net_code or t.GetNetname() in no_rip or t.IsLocked() \
-                or t.GetClass() == "PCB_ARC":
-            continue
-        if t.GetClass() == "PCB_VIA":
-            p = t.GetPosition()
-            if near(p.x / 1e6, p.y / 1e6, rip_r_mm):
-                cands.append(t)
-            continue
-        if t.GetLayer() not in lay_set:
-            continue
-        s, e = t.GetStart(), t.GetEnd()
-        if near(s.x / 1e6, s.y / 1e6, rip_r_mm) \
-                or near(e.x / 1e6, e.y / 1e6, rip_r_mm) \
-                or near((s.x + e.x) / 2e6, (s.y + e.y) / 2e6, rip_r_mm):
-            cands.append(t)
-    if not cands:
+    # min-cost path where rippable copper is passable at a penalty — the
+    # path NAMES the exact items in the way (the halo-blast variant freed
+    # 100-150 items of ~16 nets and some displaced net always stranded;
+    # measured on all three boards)
+    src, rest = islands[0], islands[1:]
+    path = dijkstra(g, src, set().union(*rest), soft_penalty=400)
+    if path is None:
+        # hard-walled even through rippable copper: say what the wall is
+        src_xy = _sample_xy(g, islands[0])
+        tgt_xy = []
+        for isl in rest:
+            tgt_xy += _sample_xy(g, isl, cap=200)
+        _, s_end, _ = corridor_anchors(src_xy, tgt_xy)
+        scx, scy = g.cxy(*s_end)
+        ring = int(2.0 / g.cell)
+        tot = free = hard_all = 0
+        for dx in range(-ring, ring + 1):
+            for dy in range(-ring, ring + 1):
+                cx2, cy2 = scx + dx, scy + dy
+                if not g.inside(cx2, cy2):
+                    continue
+                tot += 1
+                blk = sum(1 for l in g.layers if (cx2, cy2) in g.blocked[l])
+                if blk == len(g.layers):
+                    hard_all += 1
+                elif blk == 0:
+                    free += 1
+        log(f"      rip-up: HARD-WALLED (no path even through rippable "
+            f"copper) @2mm ring: {100 * hard_all // max(1, tot)}% "
+            f"all-layer-hard, {100 * free // max(1, tot)}% free"
+            + (f", excluded {sorted(exclude_nets)[:4]}" if exclude_nets
+               else ""))
         return None, None
+    cands = [g.soft_items[i] for i in _path_rip_ids(g, path)]
     if len(cands) > max_rip:
-        # keep the closest to the walled end — that's where the wall is
-        sx, sy = s_end
-        cands.sort(key=lambda t: (t.GetPosition().x / 1e6 - sx) ** 2
-                   + (t.GetPosition().y / 1e6 - sy) ** 2)
-        cands = cands[:max_rip]
+        log(f"      rip-up: path needs {len(cands)} rips > cap {max_rip}")
+        return None, None
     # pre-rip island counts for displaced nets that are THEMSELVES still
     # open (another unrouted target in the corridor must not be held to
     # "fully reconnect" — only to "no worse than before the rip")
@@ -612,8 +696,8 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
             disp_w.setdefault(rec[1], 0.0)
         board.Remove(t)
     disp_nets = sorted(disp_w)
-    log(f"      rip-up: {len(records)} item(s) of {len(disp_nets)} net(s) "
-        f"freed in {rip_r_mm}mm corridor")
+    log(f"      rip-up: path crosses {len(records)} item(s) of "
+        f"{len(disp_nets)} net(s) — surgical rip")
     added = []
 
     def rollback(reason, blame=None):
@@ -630,7 +714,8 @@ def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
                             via_r=via_r)
     got, islands = _route_rounds(board, g, islands, net, w, via_mm, drill_mm)
     if not got:
-        return rollback("target still unroutable")
+        # should be rare now: the rip freed exactly the soft path's items
+        return rollback("target still unroutable after surgical rip")
     added += got
     # 2) every displaced net must fully reconnect
     for dn in disp_nets:
@@ -720,23 +805,23 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             path = dijkstra(g, src, tgt)
             if path is None:
                 path = _escape_route(g, src, rest)
-            if path is None and rip and rips < 3:
+            if path is None and rip and rips < n0 + 2:
                 # blame-driven retry: a displaced net that failed to
-                # reconnect becomes un-rippable next attempt; a target that
-                # stayed unroutable gets a wider corridor
-                got, exclude, r = None, set(), rip_r_mm
-                while rips < 3 and got is None:
+                # reconnect becomes un-rippable on the next attempt; a
+                # no-blame failure is deterministic — stop
+                got, exclude = None, set()
+                while rips < n0 + 2 and got is None:
                     rips += 1
                     got, blame = _rip_reroute(
                         board, lay, net, ni.GetNetCode(), w, clearance,
                         cell, via_mm, drill_mm, skip_nets, net_widths,
-                        track_w, log, rip_r_mm=r, max_rip=max_rip,
+                        track_w, log, rip_r_mm=rip_r_mm, max_rip=max_rip,
                         open_nets=set(targets), exclude_nets=exclude)
                     if got is None:
                         if blame:
                             exclude.add(blame)
                         else:
-                            r *= 1.6
+                            break
                 if got:
                     added_items += got
                     g, islands = build_grid(board, lay, ni.GetNetCode(), w,
