@@ -185,6 +185,38 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
     the hard block sets, so a soft-penalty dijkstra can cross them and name
     the exact items in the way."""
     g = Grid(board, layers, cell)
+    # KEEPOUT rule areas: no-track areas hard-block their layers, no-via
+    # areas block through-via placement (measured on RF: stitching vias
+    # landed inside the RF-island keepouts -> items_not_allowed)
+    for z in board.Zones():
+        if not z.GetIsRuleArea():
+            continue
+        try:
+            no_trk = z.GetDoNotAllowTracks()
+            no_via = z.GetDoNotAllowVias()
+        except AttributeError:
+            continue
+        if not (no_trk or no_via):
+            continue
+        zl = set(z.GetLayerSet().Seq())
+        blay = [l for l in layers if l in zl]
+        if not blay and not no_via:
+            continue
+        o = z.Outline()
+        bb = z.GetBoundingBox()
+        c0x, c0y = g.cxy(bb.GetLeft() / 1e6, bb.GetTop() / 1e6)
+        c1x, c1y = g.cxy(bb.GetRight() / 1e6, bb.GetBottom() / 1e6)
+        for cx in range(c0x, c1x + 1):
+            for cy in range(c0y, c1y + 1):
+                x, y = g.mm(cx, cy)
+                import pcbnew as _pn
+                if not o.Contains(_pn.VECTOR2I(int(x * 1e6), int(y * 1e6))):
+                    continue
+                if no_trk:
+                    for l in blay:
+                        g.blocked[l].add((cx, cy))
+                if no_via and zl:
+                    g.via_blocked.add((cx, cy))
     ds = board.GetDesignSettings()
     hole_c = ds.m_HoleClearance / 1e6
     slop = cell * 0.75                    # grid quantization safety
