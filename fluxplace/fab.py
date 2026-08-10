@@ -104,6 +104,17 @@ def upload_package(board, out, project_dir=None, log=print):
             dst = os.path.join(out, f)
             shutil.copy2(os.path.join(project_dir, f), dst)
             written.append(dst)
+    # constraint intent travels IN the project file: inject netclasses from
+    # <stem>.constraints.toml so ECAD parsers read 85R pairs and real rail
+    # widths instead of guessing 100R/500mA (measured on Quilter)
+    ctoml = os.path.join(project_dir, stem + ".constraints.toml")
+    pro = os.path.join(out, stem + ".kicad_pro")
+    if os.path.exists(ctoml) and os.path.exists(pro):
+        try:
+            from . import constraints as CONS
+            CONS.inject_netclasses(pro, CONS.load(ctoml), log=log)
+        except Exception as e:
+            log(f"  netclass injection failed ({e}) — package unchanged")
     # the package IS what we just wrote: remove every stale KiCad file left
     # over from earlier versions (.kicad_prl, renamed sheets, dead boards)
     keep = {os.path.basename(f) for f in written}
