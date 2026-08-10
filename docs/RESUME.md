@@ -33,6 +33,42 @@ Sourcing that works from the sandbox: jlcsearch.tscircuit.com (LCSC index) +
 own demos are a footprint goldmine: /usr/share/kicad/demos/cm5_minima = complete
 CM5+Hailo-8 reference (production M.2 socket land + both STEPs).
 
+**THE 2026-08-10 TRUTH-AND-SIGHT ARC (it.4-11, don't relearn):**
+- **Board rules were lies**: `apply_rule_areas` had NO caller (the .kicad_dru
+  escape rules gated on areas no board carried); board-setup minimums never
+  learned the profile; and `pcbnew.SaveBoard` generates a DEFAULT .kicad_pro
+  that kicad-cli drc loads OVER the board's setup. ~1300 of ~1600 violations
+  per board were legal copper judged against wrong rules. Fix:
+  `profiles.apply_board_limits` (board setup) + `profiles.write_pro_limits`
+  (project file) — BOTH, everywhere a working copy is saved. The dru
+  emission is gone.
+- **The patcher was half-blind**: islands were proximity blobs (1.2mm merge)
+  — every fine-pitch open looked connected and was silently skipped
+  (CM5: DRC said 21 open nets, patcher saw 2). Islands are now per-item
+  cell sets union-found by real copper contact. First sighted run closed
+  15 nets.
+- **`fluxplace launder`**: deletes DRC-named parasitic copper (shorting
+  stitch vias, vias inside NPTHs) — a short is strictly worse than an open,
+  so its guard trades shorts for opens the patcher then closes.
+- **pcbnew sessions are single-use under churn**: repeated ZONE_FILLER or
+  heavy Remove/Add cycles end in SwigPyObject corruption or SIGSEGV. Every
+  launder mutation runs in a worker subprocess (`launder.mutate`);
+  patch_board never refills in-process. Long patch runs may STILL segfault
+  at the very end (Remove/Add churn) — the .tmp board + DRC json survive;
+  evaluate tmp vs base and adopt manually.
+- **Quilter ignores KiCad netclasses**: upload packages now carry
+  `quilter_diff_pairs.csv` + `quilter_power_nets.csv` for their
+  comprehension tables' Upload CSV buttons.
+- Rip-up is SURGICAL: soft-penalty dijkstra names the exact blocking items
+  (2-10, not a 150-item halo); blame-driven retry excludes displaced nets
+  that failed to reconnect; keepout rule areas block the grid; GND islands
+  get stitching vias only where KiCad itself reports them unconnected.
+- Standings 2026-08-10 (launder+patch, fair rules): CM5 17 unc/683 viol
+  zero shorts (was 4 unc/1646 with 115 shorts); dig ~90 unc/211 viol
+  (was 59/1580 with 30 shorts); RF 411 unc/552 (was 378/1197). Quilter
+  packages: razor-cm5-board/quilter-upload-flux (v13, pushed) +
+  razor-detector-board/quilter-upload-{rf,dig} (staged, NOT pushed).
+
 **Improvement-loop commands (2026-08-09/10 arc):**
 - `patch --board [--out --track --clearance --constraints]` — last-mile
   single-net router: island Dijkstra + dogbone escape vias (stub validated
