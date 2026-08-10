@@ -395,6 +395,9 @@ def cmd_patch(a):
     """Standalone last-mile patch: close leftover unrouted nets + heal pours
     on a routed board (DRC-guarded; reverts routes that regress DRC)."""
     from fluxplace import patch as PATCH, constraints as CONS
+    from fluxplace import profiles as PROF
+    prof = PROF.get(a.profile)
+    PROF.write_pro_limits(os.path.splitext(a.board)[0] + ".kicad_pro", prof)
     cons = CONS.load(a.constraints)
     nw = {n: CONS.power_width_mm(cons, n, 0.5)
           for n in (cons or {}).get("power", {})}
@@ -421,10 +424,12 @@ def cmd_launder(a):
     pcbnew.SaveBoard(out, b)
     del b
     gc.collect()
+    PROF.write_pro_limits(os.path.splitext(out)[0] + ".kicad_pro", prof)
     print(f"rules: setup constraints set to [{a.profile}] "
           f"(track {prof['track_min']}, via {prof['via_dia_min']}/"
-          f"{prof['via_drill_min']}, hole {prof['hole_clearance']})")
-    res = LAU.launder_board(out, out, kicad_cli=a.kicad_cli)
+          f"{prof['via_drill_min']}, hole {prof['hole_clearance']}) "
+          f"— board + project file")
+    res = LAU.launder_board(out, out, kicad_cli=a.kicad_cli, prof=prof)
     print(f"launder: rounds={res['rounds']} removed={res['removed']} "
           f"violations {res['violations'][0]}->{res['violations'][1]} "
           f"unconnected {res['unconnected'][0]}->{res['unconnected'][1]}")
@@ -760,10 +765,11 @@ def cmd_auto(a):
         _pn.SaveBoard(src, _b)
         del _b
         _gc.collect()
-        print(f"    rules: board setup constraints set to profile "
+        PROF.write_pro_limits(os.path.splitext(src)[0] + ".kicad_pro", prof)
+        print(f"    rules: board+project constraints set to profile "
               f"[{a.profile}] floor (track {prof['track_min']}, via "
               f"{prof['via_dia_min']}/{prof['via_drill_min']})")
-        lres = LAU.launder_board(src, src, kicad_cli=a.kicad_cli,
+        lres = LAU.launder_board(src, src, kicad_cli=a.kicad_cli, prof=prof,
                                  log=lambda m: print("   " + m))
         if lres["removed"]:
             print(f"    launder: {lres['removed']} parasitic item(s) gone, "
@@ -1000,6 +1006,10 @@ def main(argv=None):
                           "blocked corridor")
     ppa.add_argument("--max-rip", type=int, default=150)
     ppa.add_argument("--constraints", default=None)
+    ppa.add_argument("--profile", default="jlcpcb-advanced",
+                     help="fab profile stamped into the working "
+                          ".kicad_pro so guard DRC judges at the "
+                          "process floor")
     ppa.add_argument("--kicad-cli", default="kicad-cli")
     ppa.set_defaults(fn=cmd_patch)
 

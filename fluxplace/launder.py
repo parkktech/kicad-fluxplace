@@ -86,7 +86,7 @@ def _resolve(snapshot, item, pcbnew):
 
 
 def launder_board(board_path, out_path, kicad_cli="kicad-cli",
-                  max_rounds=4, log=print, dangling=False):
+                  max_rounds=4, log=print, dangling=False, prof=None):
     """Returns a summary dict. Writes out_path only when at least one
     round was accepted; otherwise the input is copied through.
     NOTE: the caller must not hold another live pcbnew board proxy —
@@ -138,6 +138,14 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
     # netclass clearance, so an unrefilled baseline makes every try look
     # like a regression (measured: 115+219 candidates, zero accepted)
     _refill_save(work, work)
+    if prof is not None:
+        # SaveBoard just generated a default .kicad_pro if none existed;
+        # kicad-cli drc loads project rules OVER the board's setup, so the
+        # working pro must carry the profile floor or every guard verdict
+        # is judged against KiCad defaults (measured)
+        from . import profiles as _PROF
+        _PROF.write_pro_limits(os.path.splitext(work)[0] + ".kicad_pro",
+                               prof)
     d = _drc(work, kicad_cli)
     vio0 = len(d.get("violations", []))
     unc0 = len(d.get("unconnected_items", []))

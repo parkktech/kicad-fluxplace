@@ -11,6 +11,7 @@ allowed to emit. It feeds three places:
 
 Values are the published capabilities of the named service, conservative side.
 """
+import os
 
 PROFILES = {
     # JLCPCB standard multilayer service (their 'standard' tier)
@@ -48,6 +49,40 @@ PROFILES = {
         hole_clearance=0.25, hole_to_hole=0.50,
     ),
 }
+
+
+def write_pro_limits(pro_path, prof):
+    """Stamp the profile's process floor into a .kicad_pro's
+    board.design_settings.rules. MANDATORY next to every working board:
+    pcbnew.SaveBoard silently generates a DEFAULT .kicad_pro (0.2 track,
+    0.5 via, 0.1 annular...) when none exists, and kicad-cli drc loads
+    project rules OVER the board's own setup — measured: every guard DRC
+    was judging fine copper against KiCad defaults, not the profile."""
+    import json
+    d = {}
+    if os.path.exists(pro_path):
+        try:
+            with open(pro_path) as f:
+                d = json.load(f)
+        except (ValueError, OSError):
+            d = {}
+    rules = d.setdefault("board", {}).setdefault(
+        "design_settings", {}).setdefault("rules", {})
+    rules.update({
+        "min_track_width": prof["track_min"],
+        "min_via_diameter": prof["via_dia_min"],
+        "min_through_hole_diameter": prof["via_drill_min"],
+        "min_via_annular_width": round(
+            (prof["via_dia_min"] - prof["via_drill_min"]) / 2, 4),
+        "min_hole_clearance": prof["hole_clearance"],
+        "min_hole_to_hole": prof["hole_to_hole"],
+        "min_copper_edge_clearance": prof["edge_clearance"],
+    })
+    for c in d.get("net_settings", {}).get("classes", []):
+        if c.get("clearance", 0) > prof["clearance_min"]:
+            c["clearance"] = prof["clearance_min"]
+    with open(pro_path, "w") as f:
+        json.dump(d, f, indent=2)
 
 
 def apply_board_limits(board, prof, pcbnew):
