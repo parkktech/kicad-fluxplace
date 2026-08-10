@@ -892,6 +892,39 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             failed.append((net, f"{len(islands) - 1} island(s) unreachable"))
             if not rounds:
                 log(f"    patch: {net} — no path through remaining space")
+    # GND ISLAND STITCHING: pour islands can't be track-patched (GND is
+    # skipped by design) but a through-via inside the island reaches the
+    # internal plane. Contact-based islands make the placement exact:
+    # pick a via-legal cell inside each minor island. Guarded by the same
+    # final DRC gate as everything else.
+    gnd = board.FindNet("GND")
+    if gnd is not None and "GND" in un0:
+        gv = 0
+        g, islands = build_grid(board, lay, gnd.GetNetCode(), track_w,
+                                clearance, cell=cell, via_r=via_mm / 2.0)
+        for isl in islands[1:]:
+            spot = None
+            for (k, cx, cy) in sorted(isl):
+                if (cx, cy) not in g.via_blocked and g.inside(cx, cy):
+                    spot = (cx, cy)
+                    break
+            if spot is None:
+                continue
+            x, y = g.mm(*spot)
+            v = pcbnew.PCB_VIA(board)
+            v.SetViaType(pcbnew.VIATYPE_THROUGH)
+            v.SetPosition(pcbnew.VECTOR2I(int(x * 1e6), int(y * 1e6)))
+            v.SetWidth(int(via_mm * 1e6))
+            v.SetDrill(int(drill_mm * 1e6))
+            v.SetNet(gnd)
+            board.Add(v)
+            added_items.append(v)
+            gv += 1
+        if gv:
+            patched.append(("GND", gv))
+            log(f"    patch: GND — {gv} stitching via(s) into pour "
+                f"island(s)")
+
     if not patched:
         # nothing routed, but the refilled baseline may still beat the
         # input (stale pours healed) — keep it as the output
