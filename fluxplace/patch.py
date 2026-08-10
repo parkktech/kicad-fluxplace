@@ -934,9 +934,28 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     gnd = board.FindNet("GND")
     if gnd is not None and "GND" in un0:
         gv = 0
+        # only stitch islands KiCad ITSELF reports unconnected: the island
+        # model has no pour copper, so most track-model "islands" are
+        # already pour-connected (measured: 214 no-op vias, +12 clearance,
+        # run reverted)
+        gnd_pts = []
+        for u in drc0.get("unconnected_items", []):
+            for i in u.get("items", []):
+                if "[GND]" in i.get("description", ""):
+                    p = i.get("pos", {})
+                    gnd_pts.append((p.get("x", 0), p.get("y", 0)))
         g, islands = build_grid(board, lay, gnd.GetNetCode(), track_w,
                                 clearance, cell=cell, via_r=via_mm / 2.0)
         for isl in islands[1:]:
+            hit = False
+            for (k, cx, cy) in isl:
+                x, y = g.mm(cx, cy)
+                if any(abs(x - px) < 1.0 and abs(y - py) < 1.0
+                       for px, py in gnd_pts):
+                    hit = True
+                    break
+            if not hit:
+                continue
             spot = None
             for (k, cx, cy) in sorted(isl):
                 if (cx, cy) not in g.via_blocked and g.inside(cx, cy):
