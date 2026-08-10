@@ -411,6 +411,7 @@ def cmd_launder(a):
     """Apply profile limits to the board's setup constraints, then delete
     the parasitic copper KiCad's own DRC names (dangling stubs, shorting
     stitch vias, vias against holes). Guarded per round."""
+    import gc
     import pcbnew
     from fluxplace import launder as LAU, profiles as PROF
     prof = PROF.get(a.profile)
@@ -418,6 +419,8 @@ def cmd_launder(a):
     PROF.apply_board_limits(b, prof, pcbnew)
     out = a.out or a.board
     pcbnew.SaveBoard(out, b)
+    del b
+    gc.collect()
     print(f"rules: setup constraints set to [{a.profile}] "
           f"(track {prof['track_min']}, via {prof['via_dia_min']}/"
           f"{prof['via_drill_min']}, hole {prof['hole_clearance']})")
@@ -749,11 +752,14 @@ def cmd_auto(a):
     # against holes). BEFORE the guarded stages so return-vias/patch/fab
     # all judge with truthful rules.
     if os.path.exists(src):
+        import gc as _gc
         import pcbnew as _pn
         from fluxplace import launder as LAU
         _b = _pn.LoadBoard(src)
         PROF.apply_board_limits(_b, prof, _pn)
         _pn.SaveBoard(src, _b)
+        del _b
+        _gc.collect()
         print(f"    rules: board setup constraints set to profile "
               f"[{a.profile}] floor (track {prof['track_min']}, via "
               f"{prof['via_dia_min']}/{prof['via_drill_min']})")

@@ -31,6 +31,22 @@ _DELETABLE = {
                                     # GND stubs (pours re-heal), guard-safe
 }
 
+# guarded phases. Guard semantics per phase:
+#  - "class_count": accept a try when the phase's own violation classes
+#    DROP, even if unconnected rises — an electrical short is strictly
+#    worse than an open, and the patch stage runs after the launder to
+#    reconnect what opening the short exposed.
+#  - "strict": violations and unconnected must both not rise.
+# The dangling phase is OFF by default: KiCad flags a track when EITHER
+# end hangs, so most "dangling" segments still carry connectivity through
+# their other end (measured: removing one 0.15mm GND stub re-opened a
+# track-to-via connection).
+_PHASES = (
+    ("shorts+holes", ("shorting_items", "hole_to_hole", "hole_clearance"),
+     "class_count"),
+    ("dangling", ("track_dangling", "via_dangling"), "strict"),
+)
+
 
 def _drc(board_path, kicad_cli):
     out = board_path + ".launder_drc.json"
@@ -43,8 +59,12 @@ def _drc(board_path, kicad_cli):
     return d
 
 
-def _resolve(board, item, pcbnew):
-    """DRC item -> board track/via object (never pads/zones)."""
+def _resolve(snapshot, item, pcbnew):
+    """DRC item -> track/via object from a pre-taken snapshot list (never
+    pads/zones). The snapshot exists because calling board.GetTracks()
+    repeatedly while also Remove()-ing items corrupts the SWIG TRACKS
+    binding — measured: Tracks() starts returning a raw SwigPyObject after
+    ~200 interleaved calls."""
     desc = item.get("description", "")
     want_via = desc.startswith("Via")
     want_trk = desc.startswith("Track")
@@ -55,7 +75,7 @@ def _resolve(board, item, pcbnew):
     pos = item.get("pos", {})
     v = pcbnew.VECTOR2I(int(pos.get("x", 0) * 1e6),
                         int(pos.get("y", 0) * 1e6))
-    for t in board.GetTracks():
+    for t in snapshot:
         if (t.GetClass() == "PCB_VIA") != want_via:
             continue
         if net is not None and t.GetNetname() != net:
@@ -66,9 +86,11 @@ def _resolve(board, item, pcbnew):
 
 
 def launder_board(board_path, out_path, kicad_cli="kicad-cli",
-                  max_rounds=4, log=print):
+                  max_rounds=4, log=print, dangling=False):
     """Returns a summary dict. Writes out_path only when at least one
-    round was accepted; otherwise the input is copied through."""
+    round was accepted; otherwise the input is copied through.
+    NOTE: the caller must not hold another live pcbnew board proxy —
+    coexisting boards break SWIG container iteration."""
     import pcbnew
     import shutil
     from .patch import refill_zones
@@ -83,74 +105,186 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
                     shutil.copy(s, os.path.splitext(tgt)[0] + ext)
                 except OSError:
                     pass
+    # EVERY board mutation runs in a fresh SUBPROCESS: after one
+    # ZONE_FILLER/mutation cycle, this pcbnew session is poisoned — the
+    # next LoadBoard returns a raw SwigPyObject (measured; the leaked
+    # 'ZONE_FILLER *' destructor warnings are the tell). The parent only
+    # orchestrates descriptors, DRC runs, and the guard.
+    import sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    wenv = dict(os.environ)
+    wenv["PYTHONPATH"] = repo + os.pathsep + wenv.get("PYTHONPATH", "")
+
+    def _mutate(src_path, dst_path, subset):
+        pk = dst_path + ".picks.json"
+        with open(pk, "w") as f:
+            json.dump(subset, f)
+        r = subprocess.run([sys.executable, "-u", "-m", "fluxplace.launder",
+                            src_path, dst_path, pk],
+                           capture_output=True, text=True, timeout=900,
+                           env=wenv, cwd=repo)
+        os.unlink(pk)
+        for line in (r.stdout or "").splitlines()[::-1]:
+            if line.startswith("REMOVED "):
+                return int(line.split()[1])
+        raise RuntimeError(
+            f"launder worker rc={r.returncode}: "
+            f"{(r.stdout or '')[-200:]} / {(r.stderr or '')[-300:]}")
+
+    def _refill_save(src_path, dst_path):
+        _mutate(src_path, dst_path, [])
+
+    # refilled baseline, like patch_board: pours re-flow under the new
+    # netclass clearance, so an unrefilled baseline makes every try look
+    # like a regression (measured: 115+219 candidates, zero accepted)
+    _refill_save(work, work)
     d = _drc(work, kicad_cli)
     vio0 = len(d.get("violations", []))
     unc0 = len(d.get("unconnected_items", []))
     total_removed = 0
     accepted_rounds = 0
     vio_prev, unc_prev = vio0, unc0
-    for rnd in range(max_rounds):
-        board = pcbnew.LoadBoard(work)
-        removed = 0
-        seen = set()
-        for v in d.get("violations", []):
-            mode = _DELETABLE.get(v.get("type"))
-            if mode is None:
-                continue
-            items = v.get("items", [])
-            objs = [_resolve(board, it, pcbnew) for it in items]
-            objs = [o for o in objs if o is not None and id(o) not in seen
-                    and o.GetBoard() is not None]
-            if not objs:
-                continue
-            pick = None
-            if mode == "single":
-                pick = objs[0]
-            elif mode == "via_first":
-                vias = [o for o in objs if o.GetClass() == "PCB_VIA"]
-                pick = vias[0] if vias else objs[0]
-            elif mode == "via_only":
-                vias = [o for o in objs if o.GetClass() == "PCB_VIA"]
-                pick = vias[0] if vias else None
-            elif mode == "gnd_only":
-                gnd = [o for o in objs if o.GetNetname() == "GND"]
-                pick = gnd[0] if gnd else None
-            if pick is None:
-                continue
-            seen.add(id(pick))
-            board.Remove(pick)
-            removed += 1
-        if not removed:
-            break
-        refill_zones(board)
-        tmp = work + ".round.kicad_pcb"
-        pcbnew.SaveBoard(tmp, board)
-        for ext in (".kicad_dru", ".kicad_pro"):
-            s = os.path.splitext(work)[0] + ext
-            if os.path.exists(s):
-                shutil.copy(s, os.path.splitext(tmp)[0] + ext)
-        d1 = _drc(tmp, kicad_cli)
-        vio1 = len(d1.get("violations", []))
-        unc1 = len(d1.get("unconnected_items", []))
-        if vio1 < vio_prev and unc1 <= unc_prev:
-            os.replace(tmp, work)
-            log(f"    launder round {rnd + 1}: removed {removed} item(s), "
-                f"violations {vio_prev}->{vio1}, unconnected "
-                f"{unc_prev}->{unc1}")
-            vio_prev, unc_prev = vio1, unc1
-            total_removed += removed
-            accepted_rounds += 1
-            d = d1
-        else:
-            os.unlink(tmp)
-            log(f"    launder round {rnd + 1}: removed {removed} but DRC "
-                f"{vio_prev}->{vio1}/{unc_prev}->{unc1} — round reverted")
-            break
+    tmp = work + ".round.kicad_pcb"
+    for phase_name, types, guard in _PHASES:
+        if phase_name == "dangling" and not dangling:
+            continue
+        for rnd in range(max_rounds):
+            # pick DESCRIPTORS straight from the DRC report — no board
+            # object needed until a try actually mutates one
+            seen = set()
+            picks = []
+            for v in d.get("violations", []):
+                if v.get("type") not in types:
+                    continue
+                mode = _DELETABLE[v.get("type")]
+                cands = []
+                for it in v.get("items", []):
+                    desc = it.get("description", "")
+                    if not desc.startswith(("Via", "Track")):
+                        continue
+                    m = re.search(r"\[([^\]]*)\]", desc)
+                    cands.append({
+                        "via": desc.startswith("Via"),
+                        "net": m.group(1) if m else None,
+                        "x": it.get("pos", {}).get("x", 0),
+                        "y": it.get("pos", {}).get("y", 0),
+                    })
+                cands = [c for c in cands
+                         if (c["via"], c["net"], c["x"], c["y"]) not in seen]
+                if not cands:
+                    continue
+                pick = None
+                if mode == "single":
+                    pick = cands[0]
+                elif mode in ("via_first", "via_only"):
+                    vias = [c for c in cands if c["via"]]
+                    pick = vias[0] if vias else (
+                        cands[0] if mode == "via_first" else None)
+                elif mode == "gnd_only":
+                    gnd = [c for c in cands if c["net"] == "GND"]
+                    pick = gnd[0] if gnd else None
+                if pick is None:
+                    continue
+                seen.add((pick["via"], pick["net"], pick["x"], pick["y"]))
+                picks.append(pick)
+            if not picks:
+                break
+
+            def _class_count(dd):
+                return sum(1 for v in dd.get("violations", [])
+                           if v.get("type") in types)
+
+            def _try(subset):
+                nonlocal vio_prev, unc_prev, total_removed, d
+                cls_prev = _class_count(d)
+                gone = _mutate(work, tmp, subset)
+                if not gone:
+                    return False
+                for ext in (".kicad_dru", ".kicad_pro"):
+                    s = os.path.splitext(work)[0] + ext
+                    if os.path.exists(s):
+                        shutil.copy(s, os.path.splitext(tmp)[0] + ext)
+                d1 = _drc(tmp, kicad_cli)
+                vio1 = len(d1.get("violations", []))
+                unc1 = len(d1.get("unconnected_items", []))
+                if guard == "class_count":
+                    ok = _class_count(d1) < cls_prev and vio1 <= vio_prev
+                else:
+                    ok = vio1 <= vio_prev and unc1 <= unc_prev
+                if ok:
+                    if unc1 > unc_prev:
+                        log(f"      try: -{gone} short/hole item(s) "
+                            f"opened {unc1 - unc_prev} connection(s) — "
+                            f"patcher's job next")
+                    os.replace(tmp, work)
+                    vio_prev, unc_prev = vio1, unc1
+                    total_removed += gone
+                    d = d1
+                    return True
+                os.unlink(tmp)
+                log(f"      try: -{gone} item(s) -> violations "
+                    f"{vio_prev}->{vio1}, unconnected {unc_prev}->{unc1} "
+                    f"(rejected)")
+                return False
+
+            queue = [picks]
+            tries = 0
+            kept = 0
+            while queue and tries < 12:
+                subset = queue.pop(0)
+                tries += 1
+                if _try(subset):
+                    kept += len(subset)
+                elif len(subset) > 1:
+                    mid = len(subset) // 2
+                    queue.append(subset[:mid])
+                    queue.append(subset[mid:])
+            if kept:
+                accepted_rounds += 1
+                log(f"    launder [{phase_name}] round {rnd + 1}: removed "
+                    f"{kept}/{len(picks)} item(s) in {tries} tries — "
+                    f"violations at {vio_prev}, unconnected at {unc_prev}")
+            else:
+                log(f"    launder [{phase_name}] round {rnd + 1}: no safe "
+                    f"removals among {len(picks)} candidate(s)")
+                break
     if accepted_rounds:
         os.replace(work, out_path)
     else:
-        shutil.copy(board_path, out_path)
+        if os.path.abspath(board_path) != os.path.abspath(out_path):
+            shutil.copy(board_path, out_path)
         if os.path.exists(work):
             os.unlink(work)
     return {"rounds": accepted_rounds, "removed": total_removed,
             "violations": (vio0, vio_prev), "unconnected": (unc0, unc_prev)}
+
+
+# ------------------------------------------------------------ worker ----
+
+def _worker(board_in, board_out, picks_json):
+    """Subprocess entry: one board mutation per interpreter, because a
+    pcbnew session is single-use once ZONE_FILLER has run (see above)."""
+    import pcbnew
+    from .patch import refill_zones
+    with open(picks_json) as f:
+        picks = json.load(f)
+    b = pcbnew.LoadBoard(board_in)
+    snap = [t for t in b.GetTracks()]
+    gone = 0
+    for c in picks:
+        o = _resolve(snap, {
+            "description": ("Via [" if c["via"] else "Track [")
+            + (c["net"] or "") + "]",
+            "pos": {"x": c["x"], "y": c["y"]},
+        }, pcbnew)
+        if o is not None and o.GetBoard() is not None:
+            b.Remove(o)
+            gone += 1
+    refill_zones(b)
+    pcbnew.SaveBoard(board_out, b)
+    print("REMOVED", gone)
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _worker(_sys.argv[1], _sys.argv[2], _sys.argv[3])
