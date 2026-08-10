@@ -391,17 +391,37 @@ def dijkstra(grid, sources, targets, max_expand=None, soft_penalty=None):
         # (RF at 0.1mm is >4M nodes -> false "no path")
         max_expand = max(2_000_000, grid.nx * grid.ny * nlayers * 2)
     tset = targets
+    # A*: octile distance to the target set's bounding box — admissible
+    # (never exceeds the true remaining cost), and plain Dijkstra explored
+    # RF's 4M+ nodes uniformly (measured: multi-hour runs)
+    tx0 = ty0 = 1 << 30
+    tx1 = ty1 = -(1 << 30)
+    for t in tset:
+        if t[1] < tx0:
+            tx0 = t[1]
+        if t[1] > tx1:
+            tx1 = t[1]
+        if t[2] < ty0:
+            ty0 = t[2]
+        if t[2] > ty1:
+            ty1 = t[2]
+
+    def h(cx, cy):
+        dx = tx0 - cx if cx < tx0 else (cx - tx1 if cx > tx1 else 0)
+        dy = ty0 - cy if cy < ty0 else (cy - ty1 if cy > ty1 else 0)
+        return (10 * dx + 4 * dy) if dx >= dy else (10 * dy + 4 * dx)
+
     dist = {}
     prev = {}
     pq = []
     for s in sources:
         dist[s] = 0
-        heapq.heappush(pq, (0, s))
+        heapq.heappush(pq, (h(s[1], s[2]), 0, s))
     steps = ((1, 0, 10), (-1, 0, 10), (0, 1, 10), (0, -1, 10),
              (1, 1, 14), (1, -1, 14), (-1, 1, 14), (-1, -1, 14))
     expanded = 0
     while pq:
-        d, node = heapq.heappop(pq)
+        _f, d, node = heapq.heappop(pq)
         if dist.get(node, -1) != d:
             continue
         if node in tset:
@@ -425,7 +445,7 @@ def dijkstra(grid, sources, targets, max_expand=None, soft_penalty=None):
             if nd < dist.get(m, 1 << 60):
                 dist[m] = nd
                 prev[m] = node
-                heapq.heappush(pq, (nd, m))
+                heapq.heappush(pq, (nd + h(nx, ny), nd, m))
         if nlayers > 1:
             ok = (cx, cy) not in grid.via_blocked and \
                 all((cx, cy) not in blocked[k] for k in range(nlayers))
@@ -435,6 +455,7 @@ def dijkstra(grid, sources, targets, max_expand=None, soft_penalty=None):
                         (cx, cy) in grid.via_soft
                         or any((cx, cy) in soft[k] for k in range(nlayers))):
                     vd += soft_penalty
+                hv = h(cx, cy)
                 for k in range(nlayers):
                     if k == l:
                         continue
@@ -443,7 +464,7 @@ def dijkstra(grid, sources, targets, max_expand=None, soft_penalty=None):
                     if nd < dist.get(m, 1 << 60):
                         dist[m] = nd
                         prev[m] = node
-                        heapq.heappush(pq, (nd, m))
+                        heapq.heappush(pq, (nd + hv, nd, m))
     return None
 
 
@@ -803,7 +824,7 @@ def refill_zones(board):
 def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 track_w=0.2, clearance=0.15, via_mm=0.6, drill_mm=0.3,
                 skip_nets=("GND",), net_widths=None, cell=0.25, log=print,
-                rip=True, rip_r_mm=3.0, max_rip=150):
+                rip=True, rip_r_mm=3.0, max_rip=150, checkpoint=8):
     """Close the leftover unrouted nets on a routed board. Returns a summary
     dict; writes out_path only when the DRC guard accepts."""
     from . import adaptive as AD
@@ -841,6 +862,133 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     targets = sorted(un0 - set(skip_nets))
     added_items = []
     patched, failed = [], []
+    # CHECKPOINTS: guard-accept every `checkpoint` nets instead of once at
+    # the end — a crash loses minutes not hours (long runs die of pcbnew
+    # session decay, measured 3-for-3), progress is monotone, and one bad
+    # net can no longer revert twenty good ones
+    chunk = []
+    accepted_ck = 0
+    raw = out_path + ".raw.kicad_pcb"
+    tmp = out_path + ".tmp.kicad_pcb"
+
+    def _vkeys(d):
+        # zone-fill items are EXCLUDED: the filler is nondeterministic run
+        # to run, shifting pad-vs-zone findings and producing phantom 'new'
+        # violations far from any added copper (measured)
+        out = set()
+        for v in d.get("violations", []):
+            if any("Zone" in i.get("description", "")
+                   for i in v.get("items", [])):
+                continue
+            out.add((v.get("type"), tuple(sorted(
+                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
+                for i in v.get("items", [])))))
+        return out
+
+    def _desc(it):
+        return {"via": it.GetClass() == "PCB_VIA",
+                "net": it.GetNetname(),
+                "x": it.GetPosition().x / 1e6,
+                "y": it.GetPosition().y / 1e6}
+
+    def _reload():
+        # in-memory state diverged from the accepted file (chunk revert or
+        # subset): reload. The parent never refills, so the session stays
+        # usable; if SWIG decay bites anyway, fail loudly.
+        nonlocal board
+        del board
+        board = pcbnew.LoadBoard(base)
+        try:
+            len(board.GetTracks())
+        except TypeError:
+            raise RuntimeError("pcbnew session decayed on reload — rerun "
+                               "patch on the accepted output")
+
+    def _checkpoint():
+        nonlocal drc0, unc0, vio0, accepted_ck
+        if not added_items:
+            chunk.clear()
+            return
+        import shutil as _sh2
+        pcbnew.SaveBoard(raw, board)
+        for ext in (".kicad_dru", ".kicad_pro"):
+            sc = os.path.join(srcdir, stem + ext)
+            if os.path.exists(sc):
+                try:
+                    _sh2.copy(sc, os.path.splitext(raw)[0] + ext)
+                    _sh2.copy(sc, os.path.splitext(tmp)[0] + ext)
+                except OSError:
+                    pass
+        _mutate(raw, tmp, [])
+        drc1, _ = AD.drc_unrouted(tmp, kicad_cli)
+        unc1 = len(drc1.get("unconnected_items", []))
+        vio1 = len(drc1.get("violations", []))
+        if unc1 < unc0 and (vio1 <= vio0
+                            or not (_vkeys(drc1) - _vkeys(drc0))):
+            _sh2.copy(tmp, base)
+            log(f"    checkpoint: ACCEPTED unconnected {unc0}->{unc1}, "
+                f"violations {vio0}->{vio1} ({len(chunk)} net(s))")
+            drc0, unc0, vio0 = drc1, unc1, vio1
+            patched.extend(chunk)
+            accepted_ck += 1
+            chunk.clear()
+            added_items.clear()
+            return
+        # SUBSET: drop only the added copper near NEW violations
+        new_v = _vkeys(drc1) - _vkeys(drc0)
+        bad_pts = [pt for _, items in new_v for pt in items]
+        for t, items in list(new_v)[:4]:
+            log(f"      new-violation {t} at {items}")
+        drop = []
+        alive = [it for it in added_items if it.GetBoard() is not None]
+        for it in alive:
+            pts = [it.GetPosition()]
+            try:
+                pts.append(it.GetEnd())
+            except AttributeError:
+                pass
+            if any(abs(pp.x / 1e6 - bx) < 2.0 and abs(pp.y / 1e6 - by) < 2.0
+                   for pp in pts for bx, by in bad_pts):
+                drop.append(it)
+        if not drop and new_v:
+            import re as _re
+            bad_nets = set()
+            for v in drc1.get("violations", []):
+                k = (v.get("type"), tuple(sorted(
+                    (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
+                    for i in v.get("items", []))))
+                if k in new_v:
+                    for i in v.get("items", []):
+                        m = _re.search(r"\[([^\]]+)\]",
+                                       i.get("description", ""))
+                        if m:
+                            bad_nets.add(m.group(1))
+            drop = [it for it in alive if it.GetNetname() in bad_nets]
+        if drop and len(drop) < len(alive):
+            _mutate(raw, tmp, [_desc(it) for it in drop])
+            drc2, _ = AD.drc_unrouted(tmp, kicad_cli)
+            unc2 = len(drc2.get("unconnected_items", []))
+            vio2 = len(drc2.get("violations", []))
+            if unc2 < unc0 and (vio2 <= vio0
+                                or not (_vkeys(drc2) - _vkeys(drc0))):
+                _sh2.copy(tmp, base)
+                log(f"    checkpoint: SUBSET-ACCEPTED -{len(drop)} "
+                    f"item(s) — unconnected {unc0}->{unc2}, violations "
+                    f"{vio0}->{vio2}")
+                drc0, unc0, vio0 = drc2, unc2, vio2
+                patched.extend(chunk)
+                accepted_ck += 1
+                chunk.clear()
+                added_items.clear()
+                _reload()
+                return
+        log(f"    checkpoint: reverted ({len(chunk)} net(s) — unconnected "
+            f"{unc0}->{unc1}, violations {vio0}->{vio1})")
+        chunk.clear()
+        added_items.clear()
+        _reload()
+
+    nets_done = 0
     for net in targets:
         ni = board.FindNet(net)
         if ni is None:
@@ -918,7 +1066,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 rounds += r2
                 islands = islands2
         if rounds:
-            patched.append((net, rounds))
+            chunk.append((net, rounds))
             left = len(islands) - 1
             log(f"    patch: {net} — {rounds} route(s)"
                 + (f", {left} island(s) unreachable" if left else " (closed)"))
@@ -926,6 +1074,9 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             failed.append((net, f"{len(islands) - 1} island(s) unreachable"))
             if not rounds:
                 log(f"    patch: {net} — no path through remaining space")
+        nets_done += 1
+        if nets_done % max(1, checkpoint) == 0:
+            _checkpoint()
     # GND ISLAND STITCHING: pour islands can't be track-patched (GND is
     # skipped by design) but a through-via inside the island reaches the
     # internal plane. Contact-based islands make the placement exact:
@@ -974,138 +1125,23 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             added_items.append(v)
             gv += 1
         if gv:
-            patched.append(("GND", gv))
+            chunk.append(("GND", gv))
             log(f"    patch: GND — {gv} stitching via(s) into pour "
                 f"island(s)")
 
-    if not patched:
-        # nothing routed, but the refilled baseline may still beat the
-        # input (stale pours healed) — keep it as the output
-        os.replace(base, out_path)
-        return {"patched": [], "failed": failed, "accepted": False,
-                "refilled_out": True}
-    # save the raw (unfilled) patched state; the refill runs out-of-process
-    raw = out_path + ".raw.kicad_pcb"
-    pcbnew.SaveBoard(raw, board)
-    for ext in (".kicad_dru", ".kicad_pro"):
-        sidecar = os.path.join(srcdir, stem + ext)
-        if os.path.exists(sidecar):
-            try:
-                _sh.copy(sidecar, os.path.splitext(raw)[0] + ext)
-            except OSError:
-                pass
-    tmp = out_path + ".tmp.kicad_pcb"
-    _mutate(raw, tmp, [])
-    drc1, un1 = AD.drc_unrouted(tmp, kicad_cli)
-    unc1 = len(drc1.get("unconnected_items", []))
-    vio1 = len(drc1.get("violations", []))
-    def _vkeys(d):
-        # zone-fill items are EXCLUDED: the filler is nondeterministic run to
-        # run, shifting pad-vs-zone findings and producing phantom 'new'
-        # violations far from any added copper (measured: 4 phantoms blocked
-        # a clean 19->15 on CM5)
-        out = set()
-        for v in d.get("violations", []):
-            if any("Zone" in i.get("description", "")
-                   for i in v.get("items", [])):
-                continue
-            out.add((v.get("type"), tuple(sorted(
-                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
-                for i in v.get("items", [])))))
-        return out
+    _checkpoint()
 
-    if unc1 < unc0 and (vio1 <= vio0 or not (_vkeys(drc1) - _vkeys(drc0))):
-        os.replace(tmp, out_path)
-        os.unlink(base)
-        os.unlink(raw)
-        log(f"    patch: ACCEPTED unconnected {unc0}->{unc1}, "
-            f"violations {vio0}->{vio1} (non-zone-new: 0)"
-            if vio1 > vio0 else
-            f"    patch: ACCEPTED unconnected {unc0}->{unc1}, "
-            f"violations {vio0}->{vio1}")
-        return {"patched": patched, "failed": failed, "accepted": True,
-                "unconnected": (unc0, unc1), "violations": (vio0, vio1)}
-    # SUBSET-ACCEPT: the offending routes are identifiable — remove only the
-    # added copper near NEW violations and keep the rest (all-or-nothing
-    # threw away 15+ good routes over one bad one, measured)
-    new_v = _vkeys(drc1) - _vkeys(drc0)
-    bad_pts = [pt for _, items in new_v for pt in items]
-    removed = 0
-    if new_v and log:
-        for t, items in list(new_v)[:6]:
-            log(f"      new-violation {t} at {items}")
-    def _desc(it):
-        return {"via": it.GetClass() == "PCB_VIA",
-                "net": it.GetNetname(),
-                "x": it.GetPosition().x / 1e6,
-                "y": it.GetPosition().y / 1e6}
-
-    drop = []
-    for it in added_items:
-        if it.GetBoard() is None:      # ripped back off the board already
-            continue
-        pts = [it.GetPosition()]
-        try:
-            pts.append(it.GetEnd())
-            pts.append(pcbnew.VECTOR2I((it.GetStart().x + it.GetEnd().x) // 2,
-                                       (it.GetStart().y + it.GetEnd().y) // 2))
-        except AttributeError:
-            pass
-        near = False
-        for pp in pts:
-            px, py = pp.x / 1e6, pp.y / 1e6
-            if any(abs(px - bx) < 2.0 and abs(py - by) < 2.0
-                   for bx, by in bad_pts):
-                near = True
-                break
-        if near:
-            drop.append(_desc(it))
-            removed += 1
-    if not removed and new_v:
-        # position matching missed (measured repeatedly): fall back to
-        # NET-level subset — drop all added copper of any net named in a
-        # new violation, keep every other net's routes
-        import re as _re
-        bad_nets = set()
-        for v in drc1.get("violations", []):
-            k = (v.get("type"), tuple(sorted(
-                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
-                for i in v.get("items", []))))
-            if k in new_v:
-                for i in v.get("items", []):
-                    m = _re.search(r"\[([^\]]+)\]", i.get("description", ""))
-                    if m:
-                        bad_nets.add(m.group(1))
-        for it in added_items:
-            if it.GetNetname() in bad_nets and it.GetBoard() is not None:
-                drop.append(_desc(it))
-                removed += 1
-        if removed:
-            log(f"      net-level subset: dropped nets {sorted(bad_nets)[:6]}")
-    if removed and removed < len(added_items):
-        # remove the offenders from the RAW state in a worker; the parent
-        # session never mutates-and-refills
-        _mutate(raw, tmp, drop)
-        drc2, _ = AD.drc_unrouted(tmp, kicad_cli)
-        unc2 = len(drc2.get("unconnected_items", []))
-        vio2 = len(drc2.get("violations", []))
-        if unc2 < unc0 and vio2 <= vio0:
-            os.replace(tmp, out_path)
-            os.unlink(base)
-            os.unlink(raw)
-            log(f"    patch: SUBSET-ACCEPTED after removing {removed} "
-                f"offending item(s) — unconnected {unc0}->{unc2}, "
-                f"violations {vio0}->{vio2}")
-            return {"patched": patched, "failed": failed, "accepted": True,
-                    "unconnected": (unc0, unc2),
-                    "violations": (vio0, vio2), "removed": removed}
-        os.unlink(tmp)
-    elif os.path.exists(tmp):
-        os.unlink(tmp)
     if os.path.exists(raw):
         os.unlink(raw)
-    os.replace(base, out_path)      # keep the refilled baseline: strictly
-    log(f"    patch: routes REVERTED, refilled baseline kept "
-        f"(unconnected {unc0}->{unc1}, violations {vio0}->{vio1})")
-    return {"patched": patched, "failed": failed, "accepted": False,
-            "unconnected": (unc0, unc1), "violations": (vio0, vio1)}
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    os.replace(base, out_path)
+    if accepted_ck:
+        log(f"    patch: {accepted_ck} checkpoint(s) kept — final "
+            f"unconnected {unc0}, violations {vio0}")
+    else:
+        log("    patch: no checkpoint accepted — refilled baseline kept")
+    return {"patched": patched, "failed": failed,
+            "accepted": accepted_ck > 0,
+            "unconnected": unc0, "violations": vio0,
+            "checkpoints": accepted_ck}

@@ -405,7 +405,8 @@ def cmd_patch(a):
                             track_w=a.track, clearance=a.clearance,
                             via_mm=a.via, drill_mm=a.drill, cell=a.cell,
                             net_widths=nw, rip=not a.no_rip,
-                            rip_r_mm=a.rip_radius, max_rip=a.max_rip)
+                            rip_r_mm=a.rip_radius, max_rip=a.max_rip,
+                            checkpoint=a.checkpoint)
     print(f"patch: accepted={res['accepted']} patched={res['patched']} "
           f"failed={res['failed']}")
 
@@ -1005,6 +1006,9 @@ def main(argv=None):
                      help="halo (mm) of foreign copper freed along the "
                           "blocked corridor")
     ppa.add_argument("--max-rip", type=int, default=150)
+    ppa.add_argument("--checkpoint", type=int, default=8,
+                     help="guard-accept every N nets (crash loses one "
+                          "chunk, not the run)")
     ppa.add_argument("--constraints", default=None)
     ppa.add_argument("--profile", default="jlcpcb-advanced",
                      help="fab profile stamped into the working "
