@@ -33,6 +33,29 @@ Sourcing that works from the sandbox: jlcsearch.tscircuit.com (LCSC index) +
 own demos are a footprint goldmine: /usr/share/kicad/demos/cm5_minima = complete
 CM5+Hailo-8 reference (production M.2 socket land + both STEPs).
 
+**Improvement-loop commands (2026-08-09/10 arc):**
+- `patch --board [--out --track --clearance --constraints]` — last-mile
+  single-net router: island Dijkstra + dogbone escape vias (stub validated
+  cell-by-cell), oriented-rect pad obstacles, KiCad-resolver clearances +
+  .kicad_dru sidecars, pour refill/heal, DRC guard with zone-phantom filter
+  and position+net-level subset-accept. Also runs inside `auto` at profile
+  floor geometry (skip: --no-patch). Measured: CM5 49->18 standalone; in
+  pipeline, CM5 v12 = 2 unrouted/240 viol (was ~1650), dig v4 = 27/88.
+- `auto --route-only` — keep the existing (hand) placement: route+patch+fab
+  only. This is the RF-board mode (RF islands/can walls untouched). RF first
+  route: 202 -> 36 after fanout at 40 parts.
+- `verify-models --board [--fix]` — 3D model registration: STEP pin shafts
+  vs TH holes (renderer convention: +z-rot is CLOCKWISE in the y-up frame),
+  body-over-footprint for module models; --fix solves rot/offset/z-lift.
+- **Constraint intent travels IN the .kicad_pro**: `upload_package`
+  auto-injects netclasses from `<stem>.constraints.toml` —
+  DP_<group>_<Z>R diff-pair classes (width/gap per impedance target,
+  constraints.PAIR_GEOM_BY_Z, JLC7628 values marked CALIBRATE) and
+  PWR_<net> ampacity widths (constraints.rail_width_mm). Without this,
+  external parsers guess 100R pairs / 500mA rails (measured on Quilter).
+  Upload set = exactly pcb+pro+sch; self-cleans stale *.kicad_* files.
+- ORDER/UPLOAD GUIDANCE block prints at end of every auto run + MANIFEST.
+
 ## THE 2026-08-07 discoveries (don't relearn)
 1. **The layers=2 backbone bug (fixed):** route.score/builder modelled every board as
    2-layer; on 4-signal-layer dig the gate under-called capacity, declared every

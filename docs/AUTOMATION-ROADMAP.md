@@ -181,3 +181,15 @@ verification. Mapping to fluxplace, with status:
 Priority order for the remaining gaps: (1) fab profiles, (2) constraint ingest
 (YAML: keep-outs, net rules, length-match classes), (3) SI-lite verification in the
 fab gate, (4) richer review report.
+
+## Status 2026-08-10 — the improvement-loop arc
+DONE since last update: real-footprint truth gates (preflight --components,
+replace-footprint, sync-nets), keep-outline + hard-bounds placement,
+last-mile patcher (dogbones, subset-accept), route-only mode, verify-models
+--fix, headless finisher (StackOverflow root cause: -Xss), profile-floor
+enforcement end-to-end, order guidance, netclass injection from
+constraints.toml into upload packages.
+Standings: CM5 v12 2 unrouted/240 viol; dig v4 27/88; RF v1 first route 36.
+NEXT: regional rip-up-and-reroute (walled cores on all 3), fanout-first in
+adaptive, constraint engine (replace PAIR_GEOM_BY_Z CALIBRATE values with a
+real impedance provider + IPC-2152), 2L gate recalibration.
