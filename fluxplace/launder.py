@@ -283,6 +283,9 @@ def _worker(board_in, board_out, picks_json):
     with open(picks_json) as f:
         picks = json.load(f)
     b = pcbnew.LoadBoard(board_in)
+    if b is None:
+        raise SystemExit(f"LoadBoard returned None for {board_in!r} — "
+                         f"missing or unreadable board file")
     snap = [t for t in b.GetTracks()]
     gone = 0
     for c in picks:
