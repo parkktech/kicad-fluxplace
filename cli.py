@@ -407,6 +407,26 @@ def cmd_patch(a):
           f"failed={res['failed']}")
 
 
+def cmd_launder(a):
+    """Apply profile limits to the board's setup constraints, then delete
+    the parasitic copper KiCad's own DRC names (dangling stubs, shorting
+    stitch vias, vias against holes). Guarded per round."""
+    import pcbnew
+    from fluxplace import launder as LAU, profiles as PROF
+    prof = PROF.get(a.profile)
+    b = pcbnew.LoadBoard(a.board)
+    PROF.apply_board_limits(b, prof, pcbnew)
+    out = a.out or a.board
+    pcbnew.SaveBoard(out, b)
+    print(f"rules: setup constraints set to [{a.profile}] "
+          f"(track {prof['track_min']}, via {prof['via_dia_min']}/"
+          f"{prof['via_drill_min']}, hole {prof['hole_clearance']})")
+    res = LAU.launder_board(out, out, kicad_cli=a.kicad_cli)
+    print(f"launder: rounds={res['rounds']} removed={res['removed']} "
+          f"violations {res['violations'][0]}->{res['violations'][1]} "
+          f"unconnected {res['unconnected'][0]}->{res['unconnected'][1]}")
+
+
 def cmd_verifymodels(a):
     """Verify every footprint's 3D model sits ON its pins (TH: pin shafts vs
     holes; SMD: body over the footprint). --fix solves and writes the
@@ -719,6 +739,31 @@ def cmd_auto(a):
                     print(f"    length-match: skew {w0:.2f} -> {w1:.2f}mm, "
                           f"unrouted {len(u0)} -> {len(u1)} — discarded")
 
+    # PROFILE LIMITS ONTO THE BOARD + LAUNDER: the board's setup constraints
+    # must state the PROFILE's process floor, or every fine track/via the
+    # pipeline legitimately emitted is judged illegal (measured: ~1300 of
+    # ~1600 violations on dig/CM5 were board-setup classes; the .kicad_dru
+    # area rules were dead letters — apply_rule_areas had no caller and the
+    # boards carried no escape_* areas). Then delete the parasitic copper
+    # KiCad's own DRC names (dangling stubs, shorting stitch vias, vias
+    # against holes). BEFORE the guarded stages so return-vias/patch/fab
+    # all judge with truthful rules.
+    if os.path.exists(src):
+        import pcbnew as _pn
+        from fluxplace import launder as LAU
+        _b = _pn.LoadBoard(src)
+        PROF.apply_board_limits(_b, prof, _pn)
+        _pn.SaveBoard(src, _b)
+        print(f"    rules: board setup constraints set to profile "
+              f"[{a.profile}] floor (track {prof['track_min']}, via "
+              f"{prof['via_dia_min']}/{prof['via_drill_min']})")
+        lres = LAU.launder_board(src, src, kicad_cli=a.kicad_cli,
+                                 log=lambda m: print("   " + m))
+        if lres["removed"]:
+            print(f"    launder: {lres['removed']} parasitic item(s) gone, "
+                  f"violations {lres['violations'][0]}->"
+                  f"{lres['violations'][1]}")
+
     # RETURN VIAS: stitch GND next to pair vias (return current must change
     # reference planes where the signal does). DRC-guarded: revert on regression.
     if dpairs0 and not a.no_pairs and os.path.exists(src):
@@ -769,11 +814,8 @@ def cmd_auto(a):
                 else:
                     print(f"    finisher: {len(u1)} unrouted — discarded")
 
-    # local fine-pitch .kicad_dru so the escape copper is DRC-legal (bulk stays 0.2mm)
-    if os.path.exists(src):
-        d, _u = AD.drc_unrouted(src, a.kicad_cli)
-        zones = ESC.detect_escape_zones(parts, d, min_unrouted=1)
-        open(os.path.splitext(src)[0] + ".kicad_dru", "w").write(ESC.dru_text(zones, floor, floor))
+    # (the old .kicad_dru area rules are gone: profile limits live in the
+    # board's own setup constraints now — see the rules+launder stage)
     ladder = [r["width"] for r in summ["rounds"]]
     print(f"[2/3] route+anneal via {os.path.basename(a.router_py)}: "
           f"{summ['diagnosis']}  ladder={ladder}  fanned={summ['fanned']}  ({time.time()-t0:.0f}s)")
@@ -954,6 +996,15 @@ def main(argv=None):
     ppa.add_argument("--constraints", default=None)
     ppa.add_argument("--kicad-cli", default="kicad-cli")
     ppa.set_defaults(fn=cmd_patch)
+
+    pla = sub.add_parser("launder",
+                         help="set board constraints to the fab profile "
+                              "floor + delete DRC-named parasitic copper")
+    pla.add_argument("--board", required=True)
+    pla.add_argument("--out", default=None)
+    pla.add_argument("--profile", default="jlcpcb-advanced")
+    pla.add_argument("--kicad-cli", default="kicad-cli")
+    pla.set_defaults(fn=cmd_launder)
 
     pvm = sub.add_parser("verify-models",
                          help="verify 3D models sit ON their pins/footprints; "

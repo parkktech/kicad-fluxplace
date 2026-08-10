@@ -21,6 +21,7 @@ PROFILES = {
         route_via=(0.6, 0.3),                   # bulk routing via (dia, drill)
         fanout_via=(0.45, 0.30),                # escape via (dia, drill)
         edge_clearance=0.30,
+        hole_clearance=0.20, hole_to_hole=0.25,
     ),
     # JLCPCB advanced tier: 3.5 mil copper (0.0889mm — routers emit the exact
     # mil value, so the min carries margin below 0.09), 0.25/0.15 vias
@@ -31,6 +32,7 @@ PROFILES = {
         route_via=(0.45, 0.25),
         fanout_via=(0.30, 0.15),
         edge_clearance=0.30,
+        hole_clearance=0.20, hole_to_hole=0.25,
         # 100R differential geometry on the JLC 4-layer 7628 reference stackup
         # (Simbeor-computed: 0.173mm trace / 0.107mm gap)
         pair_geom=(0.173, 0.107),
@@ -43,8 +45,31 @@ PROFILES = {
         route_via=(0.6, 0.3),
         fanout_via=(0.6, 0.3),
         edge_clearance=0.50,
+        hole_clearance=0.25, hole_to_hole=0.50,
     ),
 }
+
+
+def apply_board_limits(board, prof, pcbnew):
+    """Write the profile's process floor INTO the board's setup constraints
+    and the Default netclass clearance. Without this every sub-netclass
+    track/via the pipeline legitimately emits is judged illegal — measured:
+    ~1300 of dig's 1580 / CM5's 1646 violations were board-setup constraint
+    classes (track_width, via_diameter, drill_out_of_range, annular_width,
+    clearance at 0.2 netclass) on copper the profile explicitly allows."""
+    ds = board.GetDesignSettings()
+    ds.m_TrackMinWidth = int(prof["track_min"] * 1e6)
+    ds.m_ViasMinSize = int(prof["via_dia_min"] * 1e6)
+    ds.m_MinThroughDrill = int(prof["via_drill_min"] * 1e6)
+    ds.m_ViasMinAnnularWidth = int(
+        (prof["via_dia_min"] - prof["via_drill_min"]) / 2 * 1e6)
+    ds.m_HoleClearance = int(prof["hole_clearance"] * 1e6)
+    ds.m_HoleToHoleMin = int(prof["hole_to_hole"] * 1e6)
+    ds.m_CopperEdgeClearance = int(prof["edge_clearance"] * 1e6)
+    for _name, nc in board.GetAllNetClasses().items():
+        if nc.GetClearance() > int(prof["clearance_min"] * 1e6):
+            nc.SetClearance(int(prof["clearance_min"] * 1e6))
+    return prof
 
 
 def get(name):
