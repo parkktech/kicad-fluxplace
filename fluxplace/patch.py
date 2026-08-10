@@ -75,6 +75,24 @@ class Grid:
         cx, cy = self.cxy(x_mm, y_mm)
         return list(_cells_disk(cx, cy, r_mm / self.cell))
 
+    def cells_rect(self, x_mm, y_mm, hw, hh, rot_deg, margin=0.0):
+        import math as _m
+        r = _m.radians(rot_deg)
+        c, sn = _m.cos(r), _m.sin(r)
+        ext = _m.hypot(hw + margin, hh + margin)
+        cx0, cy0 = self.cxy(x_mm, y_mm)
+        rr = int(_m.ceil(ext / self.cell)) + 1
+        out = []
+        for dx in range(-rr, rr + 1):
+            for dy in range(-rr, rr + 1):
+                px = dx * self.cell
+                py = dy * self.cell
+                lx = px * c + py * sn
+                ly = -px * sn + py * c
+                if abs(lx) <= hw + margin and abs(ly) <= hh + margin:
+                    out.append((cx0 + dx, cy0 + dy))
+        return out
+
     def cells_seg(self, x1, y1, x2, y2, r_mm):
         n = max(1, int(math.hypot(x2 - x1, y2 - y1) / (self.cell * 0.7)))
         out = []
@@ -183,8 +201,8 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
             pass
         return max(clearance, loc) + half + slop
     vmargin_base = via_r + slop
-    net_cells = {l: set() for l in layers}
-    net_vias = []
+    lidx = {l: i for i, l in enumerate(layers)}
+    item_cells = []          # one cell-set per own-net item (real copper)
     for t in board.GetTracks():
         code = t.GetNetCode()
         if t.GetClass() == "PCB_VIA":
@@ -194,10 +212,9 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
             except TypeError:
                 r = t.GetWidth() / 2e6
             if code == net_code:
-                for l in layers:
-                    cx, cy = g.cxy(p.x / 1e6, p.y / 1e6)
-                    net_cells[l].add((cx, cy))
-                net_vias.append(g.cxy(p.x / 1e6, p.y / 1e6))
+                cs = g.cells_disk(p.x / 1e6, p.y / 1e6, r)
+                item_cells.append({(k, c[0], c[1])
+                                   for k in range(len(layers)) for c in cs})
             else:
                 mg = _mgn(t, layers[0])
                 # my track near their hole AND my hole near their copper
@@ -237,11 +254,9 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
         if lay not in g.blocked:
             continue
         if code == net_code:
-            n = max(1, int(t.GetLength() / 1e6 / (cell * 0.7)))
-            for k in range(n + 1):
-                x = (s.x + (e.x - s.x) * k / n) / 1e6
-                y = (s.y + (e.y - s.y) * k / n) / 1e6
-                net_cells[lay].add(g.cxy(x, y))
+            cs = g.cells_seg(s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
+                             t.GetWidth() / 2e6)
+            item_cells.append({(lidx[lay], cx, cy) for cx, cy in cs})
         elif sok:
             g._mark_soft(lay, g.cells_seg(
                 s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6,
@@ -263,61 +278,65 @@ def build_grid(board, layers, net_code, track_w, clearance, cell=0.25,
                     for l in on)):
                 g.block_via_rect(p.x / 1e6, p.y / 1e6, hw, hh, prot,
                                  _mgn(pad, layers[0]) - half + via_r + slop)
-            for l in layers:
-                if not th and l not in on:
-                    continue
-                if pad.GetNetCode() == net_code:
-                    net_cells[l].add(g.cxy(p.x / 1e6, p.y / 1e6))
-                else:
+            if pad.GetNetCode() == net_code:
+                # FULL pad body cells, not just the centre — contact-based
+                # island grouping needs a track ending at the pad EDGE to
+                # touch the pad's cells
+                cs = g.cells_rect(p.x / 1e6, p.y / 1e6, hw, hh, prot)
+                cells = set()
+                for l in layers:
+                    if th or l in on:
+                        cells.update((lidx[l], cx, cy) for cx, cy in cs)
+                if cells:
+                    item_cells.append(cells)
+            else:
+                for l in layers:
+                    if not th and l not in on:
+                        continue
                     mg = _mgn(pad, l)
                     if th:
                         mg = max(mg, pad.GetDrillSize().x / 2e6 + hole_c
                                  + half + slop - min(hw, hh))
                     g.block_rect(l, p.x / 1e6, p.y / 1e6, hw, hh, prot, mg)
-    # group target-net cells into islands (per-layer 8-connectivity at pad
-    # scale; net vias join layers)
-    li = {l: i for i, l in enumerate(layers)}
-    all_cells = set()
-    for l in layers:
-        for c in net_cells[l]:
-            all_cells.add((li[l], c[0], c[1]))
-    for cx, cy in net_vias:
-        for l in layers:
-            all_cells.add((li[l], cx, cy))
-    # flood-fill with a spatial hash: same-layer neighbours within R cells,
-    # plus any-layer stack at the same (x, y) — O(N * R^2)
-    islands = []
-    seen = set()
-    R = max(2, int(1.2 / cell))               # merge radius ~pad scale
-    by_layer = {}
-    by_xy = {}
-    for n in all_cells:
-        by_layer.setdefault((n[0], n[1] // R, n[2] // R), []).append(n)
-        by_xy.setdefault((n[1], n[2]), []).append(n)
-    for start in all_cells:
-        if start in seen:
-            continue
-        comp = set()
-        stack = [start]
-        while stack:
-            n = stack.pop()
-            if n in seen:
-                continue
-            seen.add(n)
-            comp.add(n)
-            nl, nx, ny = n
-            bx, by = nx // R, ny // R
-            for gx in (bx - 1, bx, bx + 1):
-                for gy in (by - 1, by, by + 1):
-                    for m in by_layer.get((nl, gx, gy), ()):
-                        if m not in seen and abs(m[1] - nx) <= R \
-                                and abs(m[2] - ny) <= R:
-                            stack.append(m)
-            for m in by_xy.get((nx, ny), ()):
-                if m not in seen:
-                    stack.append(m)
-        islands.append(comp)
-    islands.sort(key=len, reverse=True)
+    # group items into islands by REAL COPPER CONTACT: an item's cells are
+    # one node; nodes join when cells overlap or touch (8-adjacent, same
+    # layer). The old proximity flood-fill (merge radius 1.2mm) fused
+    # neighbouring OPEN fine-pitch pads into one island — the patcher
+    # silently skipped every gap smaller than the radius (measured on CM5:
+    # 21 unconnected nets, only 2 targeted; "closed" routes that joined
+    # proximity blobs, not copper).
+    owner = {}                                # (li, cx, cy) -> item idx
+    parent = list(range(len(item_cells)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i, cells in enumerate(item_cells):
+        for n in cells:
+            j = owner.get(n)
+            if j is None:
+                owner[n] = i
+            elif find(j) != find(i):
+                union(i, j)
+    for i, cells in enumerate(item_cells):
+        for (k, cx, cy) in cells:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    j = owner.get((k, cx + dx, cy + dy))
+                    if j is not None and find(j) != find(i):
+                        union(i, j)
+    groups = {}
+    for i, cells in enumerate(item_cells):
+        groups.setdefault(find(i), set()).update(cells)
+    islands = sorted(groups.values(), key=len, reverse=True)
     return g, islands
 
 
