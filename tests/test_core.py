@@ -655,6 +655,27 @@ def test_lastmile_dijkstra():
     print("ok  last-mile patch: dijkstra gap + via contract + simplify")
 
 
+def test_rip_corridor():
+    """rip-up: the corridor is the straight lane between the NEAREST
+    (src, tgt) sample pair, sampled densely enough that a rip_r halo test
+    never gaps."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import corridor_anchors
+
+    src = [(0.0, 0.0), (1.0, 0.0)]
+    tgt = [(11.0, 0.0), (50.0, 50.0)]
+    anchors, s_end, t_end = corridor_anchors(src, tgt)
+    assert s_end == (1.0, 0.0) and t_end == (11.0, 0.0), \
+        "must pick the nearest pair, not the first"
+    xs = sorted(a[0] for a in anchors)
+    assert xs[0] == 1.0 and xs[-1] == 11.0, "corridor spans src->tgt"
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    assert max(gaps) <= 1.01, "anchor sampling must be <= step_mm"
+    assert all(a[1] == 0.0 for a in anchors), "straight-line corridor"
+    print("ok  rip-up corridor: nearest pair + dense straight sampling")
+
+
 def test_order_guidance():
     """The what-do-I-pick block: service tier, stackup preset, impedances and
     rail currents from the constraints — never guessed at order time."""
@@ -702,5 +723,6 @@ if __name__ == "__main__":
     test_upload_package_excludes_prl()
     test_model_registration_solver()
     test_lastmile_dijkstra()
+    test_rip_corridor()
     test_order_guidance()
     print("\nALL CORE TESTS PASSED")

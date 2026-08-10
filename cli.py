@@ -400,7 +400,9 @@ def cmd_patch(a):
           for n in (cons or {}).get("power", {})}
     res = PATCH.patch_board(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
                             track_w=a.track, clearance=a.clearance,
-                            net_widths=nw)
+                            via_mm=a.via, drill_mm=a.drill, cell=a.cell,
+                            net_widths=nw, rip=not a.no_rip,
+                            rip_r_mm=a.rip_radius, max_rip=a.max_rip)
     print(f"patch: accepted={res['accepted']} patched={res['patched']} "
           f"failed={res['failed']}")
 
@@ -939,6 +941,16 @@ def main(argv=None):
     ppa.add_argument("--out", default=None)
     ppa.add_argument("--track", type=float, default=0.2)
     ppa.add_argument("--clearance", type=float, default=0.2)
+    ppa.add_argument("--via", type=float, default=0.6)
+    ppa.add_argument("--drill", type=float, default=0.3)
+    ppa.add_argument("--cell", type=float, default=0.25)
+    ppa.add_argument("--no-rip", action="store_true",
+                     help="disable regional rip-up-and-reroute at walled "
+                          "islands")
+    ppa.add_argument("--rip-radius", type=float, default=3.0,
+                     help="halo (mm) of foreign copper freed along the "
+                          "blocked corridor")
+    ppa.add_argument("--max-rip", type=int, default=150)
     ppa.add_argument("--constraints", default=None)
     ppa.add_argument("--kicad-cli", default="kicad-cli")
     ppa.set_defaults(fn=cmd_patch)

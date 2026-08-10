@@ -439,6 +439,213 @@ def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
     return added
 
 
+# ------------------------------------------------------- rip-up region ----
+
+def corridor_anchors(src_xy, tgt_xy, step_mm=1.0, halo_extra=1.5):
+    """Anchor points (mm) for the rip region: the straight corridor between
+    the nearest (src, tgt) sample pair, sampled every step_mm. Returns
+    (anchors, src_end, tgt_end). Pure geometry — unit-testable."""
+    best = None
+    for sx, sy in src_xy:
+        for tx, ty in tgt_xy:
+            d = (sx - tx) ** 2 + (sy - ty) ** 2
+            if best is None or d < best[0]:
+                best = (d, (sx, sy), (tx, ty))
+    _, (sx, sy), (tx, ty) = best
+    n = max(1, int(math.hypot(tx - sx, ty - sy) / step_mm))
+    anchors = [(sx + (tx - sx) * k / n, sy + (ty - sy) * k / n)
+               for k in range(n + 1)]
+    return anchors, (sx, sy), (tx, ty)
+
+
+def _sample_xy(grid, island, cap=400):
+    out = []
+    for i, (_, cx, cy) in enumerate(island):
+        if i >= cap:
+            break
+        out.append(grid.mm(cx, cy))
+    return out
+
+
+def _rec_item(t, lay0):
+    """Serializable record of a track/via for rollback."""
+    if t.GetClass() == "PCB_VIA":
+        p = t.GetPosition()
+        try:
+            w = t.GetWidth(lay0)
+        except TypeError:
+            w = t.GetWidth()
+        return ("via", t.GetNetname(), p.x, p.y, w, t.GetDrillValue())
+    s, e = t.GetStart(), t.GetEnd()
+    return ("trk", t.GetNetname(), t.GetLayer(), s.x, s.y, e.x, e.y,
+            t.GetWidth())
+
+
+def _restore_item(board, rec):
+    ni = board.FindNet(rec[1])
+    if rec[0] == "via":
+        v = pcbnew.PCB_VIA(board)
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetPosition(pcbnew.VECTOR2I(rec[2], rec[3]))
+        v.SetWidth(rec[4])
+        v.SetDrill(rec[5])
+        if ni:
+            v.SetNet(ni)
+        board.Add(v)
+        return v
+    t = pcbnew.PCB_TRACK(board)
+    t.SetLayer(rec[2])
+    t.SetStart(pcbnew.VECTOR2I(rec[3], rec[4]))
+    t.SetEnd(pcbnew.VECTOR2I(rec[5], rec[6]))
+    t.SetWidth(rec[7])
+    if ni:
+        t.SetNet(ni)
+    board.Add(t)
+    return t
+
+
+def _route_rounds(board, g, islands, net, w, via_mm, drill_mm):
+    """Shared island-merging loop: route until single island or stuck.
+    Returns (added_items, islands)."""
+    added = []
+    n0 = len(islands)
+    rounds = 0
+    while len(islands) > 1 and rounds <= n0 + 2:
+        src, rest = islands[0], islands[1:]
+        path = dijkstra(g, src, set().union(*rest))
+        if path is None:
+            path = _escape_route(g, src, rest)
+        if path is None:
+            break
+        added += apply_path(board, g, path, net, w, via_mm, drill_mm)
+        end = path[-1]
+        merged = next(i for i in rest if end in i)
+        islands = [src | merged | set(path)] + \
+            [i for i in rest if i is not merged]
+        rounds += 1
+    return added, islands
+
+
+def _rip_reroute(board, lay, net, net_code, w, clearance, cell, via_mm,
+                 drill_mm, skip_nets, net_widths, track_w, log,
+                 rip_r_mm=3.0, max_rip=150, open_nets=()):
+    """Regional rip-up-and-reroute: when dijkstra + dogbone both fail, the
+    island is WALLED by routed copper. Free the corridor between the island
+    and its nearest sibling — record+delete foreign unlocked tracks/vias
+    within rip_r of the corridor — route the target net FIRST through the
+    opened lane, then re-route every displaced net. All-or-nothing: any
+    displaced net that cannot fully reconnect rolls the whole transaction
+    back. Returns list of added items, or None."""
+    via_r = via_mm / 2.0
+    g, islands = build_grid(board, lay, net_code, w, clearance, cell=cell,
+                            via_r=via_r)
+    if len(islands) <= 1:
+        return None
+    src_xy = _sample_xy(g, islands[0])
+    tgt_xy = []
+    for isl in islands[1:]:
+        tgt_xy += _sample_xy(g, isl, cap=200)
+    anchors, s_end, _ = corridor_anchors(src_xy, tgt_xy)
+    lay_set = set(lay)
+
+    def near(x, y, r):
+        return any((x - ax) ** 2 + (y - ay) ** 2 <= r * r
+                   for ax, ay in anchors)
+
+    # collect rip candidates: foreign, unlocked, on signal layers, no arcs
+    cands = []
+    for t in board.GetTracks():
+        code = t.GetNetCode()
+        if code == net_code or t.GetNetname() in skip_nets or t.IsLocked() \
+                or t.GetClass() == "PCB_ARC":
+            continue
+        if t.GetClass() == "PCB_VIA":
+            p = t.GetPosition()
+            if near(p.x / 1e6, p.y / 1e6, rip_r_mm):
+                cands.append(t)
+            continue
+        if t.GetLayer() not in lay_set:
+            continue
+        s, e = t.GetStart(), t.GetEnd()
+        if near(s.x / 1e6, s.y / 1e6, rip_r_mm) \
+                or near(e.x / 1e6, e.y / 1e6, rip_r_mm) \
+                or near((s.x + e.x) / 2e6, (s.y + e.y) / 2e6, rip_r_mm):
+            cands.append(t)
+    if not cands:
+        return None
+    if len(cands) > max_rip:
+        # keep the closest to the walled end — that's where the wall is
+        sx, sy = s_end
+        cands.sort(key=lambda t: (t.GetPosition().x / 1e6 - sx) ** 2
+                   + (t.GetPosition().y / 1e6 - sy) ** 2)
+        cands = cands[:max_rip]
+    # pre-rip island counts for displaced nets that are THEMSELVES still
+    # open (another unrouted target in the corridor must not be held to
+    # "fully reconnect" — only to "no worse than before the rip")
+    pre_frag = {}
+    for t in cands:
+        n = t.GetNetname()
+        if n in open_nets and n not in pre_frag:
+            dni = board.FindNet(n)
+            if dni is not None:
+                _, pisl = build_grid(board, lay, dni.GetNetCode(), track_w,
+                                     clearance, cell=cell, via_r=via_r)
+                pre_frag[n] = len(pisl)
+    records = []
+    disp_w = {}                                # displaced net -> max width mm
+    for t in cands:
+        rec = _rec_item(t, lay[0])
+        records.append(rec)
+        if rec[0] == "trk":
+            disp_w[rec[1]] = max(disp_w.get(rec[1], 0.0), rec[7] / 1e6)
+        else:
+            disp_w.setdefault(rec[1], 0.0)
+        board.Remove(t)
+    disp_nets = sorted(disp_w)
+    log(f"      rip-up: {len(records)} item(s) of {len(disp_nets)} net(s) "
+        f"freed in {rip_r_mm}mm corridor")
+    added = []
+
+    def rollback(reason):
+        for it in added:
+            if it.GetBoard() is not None:
+                board.Remove(it)
+        for rec in records:
+            _restore_item(board, rec)
+        log(f"      rip-up: ROLLED BACK ({reason})")
+        return None
+
+    # 1) target through the opened lane
+    g, islands = build_grid(board, lay, net_code, w, clearance, cell=cell,
+                            via_r=via_r)
+    got, islands = _route_rounds(board, g, islands, net, w, via_mm, drill_mm)
+    if not got:
+        return rollback("target still unroutable")
+    added += got
+    # 2) every displaced net must fully reconnect
+    for dn in disp_nets:
+        dni = board.FindNet(dn)
+        if dni is None:
+            return rollback(f"{dn}: net vanished")
+        dw = (net_widths or {}).get(dn) or max(disp_w[dn], track_w)
+        g2, isl2 = build_grid(board, lay, dni.GetNetCode(), dw, clearance,
+                              cell=cell, via_r=via_r)
+        got2, isl2 = _route_rounds(board, g2, isl2, dn, dw, via_mm, drill_mm)
+        added += got2
+        if len(isl2) > 1 and dw > track_w:
+            # narrow retry, same policy as the main loop
+            g2, isl2 = build_grid(board, lay, dni.GetNetCode(), track_w,
+                                  clearance, cell=cell, via_r=via_r)
+            got2, isl2 = _route_rounds(board, g2, isl2, dn, track_w, via_mm,
+                                       drill_mm)
+            added += got2
+        if len(isl2) > pre_frag.get(dn, 1):
+            return rollback(f"{dn}: {len(isl2) - 1} island(s) not reconnected")
+    log(f"      rip-up: target routed, {len(disp_nets)} displaced net(s) "
+        f"rerouted")
+    return added
+
+
 # ---------------------------------------------------------------- main ----
 
 def refill_zones(board):
@@ -448,7 +655,8 @@ def refill_zones(board):
 
 def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 track_w=0.2, clearance=0.15, via_mm=0.6, drill_mm=0.3,
-                skip_nets=("GND",), net_widths=None, cell=0.25, log=print):
+                skip_nets=("GND",), net_widths=None, cell=0.25, log=print,
+                rip=True, rip_r_mm=3.0, max_rip=150):
     """Close the leftover unrouted nets on a routed board. Returns a summary
     dict; writes out_path only when the DRC guard accepts."""
     from . import adaptive as AD
@@ -494,12 +702,27 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                                 cell=cell, via_r=via_mm / 2.0)
         n0 = len(islands)
         rounds = 0
+        rips = 0
         while len(islands) > 1 and rounds <= n0 + 2:
             src, rest = islands[0], islands[1:]
             tgt = set().union(*rest)
             path = dijkstra(g, src, tgt)
             if path is None:
                 path = _escape_route(g, src, rest)
+            if path is None and rip and rips < 3:
+                rips += 1
+                got = _rip_reroute(board, lay, net, ni.GetNetCode(), w,
+                                   clearance, cell, via_mm, drill_mm,
+                                   skip_nets, net_widths, track_w, log,
+                                   rip_r_mm=rip_r_mm, max_rip=max_rip,
+                                   open_nets=set(targets))
+                if got:
+                    added_items += got
+                    g, islands = build_grid(board, lay, ni.GetNetCode(), w,
+                                            clearance, cell=cell,
+                                            via_r=via_mm / 2.0)
+                    rounds += 1
+                    continue
             if path is None:
                 break
             added_items += apply_path(board, g, path, net, w, via_mm,
@@ -591,6 +814,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
         for t, items in list(new_v)[:6]:
             log(f"      new-violation {t} at {items}")
     for it in added_items:
+        if it.GetBoard() is None:      # ripped back off the board already
+            continue
         pts = [it.GetPosition()]
         try:
             pts.append(it.GetEnd())
