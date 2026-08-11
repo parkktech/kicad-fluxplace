@@ -209,3 +209,28 @@ friction fits), power-rail budget -> quilter power CSV + ampacity widths,
 enclosure envelope -> outline cap + height keepouts, RF net list -> 50R
 netclass + pour pullback, diff pairs -> quilter CSV, rigid module patterns
 (CM5-style pair+holes) as reusable intent blocks.
+
+## 2026-08-11 — Quilter feature study (docs.quilter.ai/design-parameters)
+What they expose that flux lacks, in adoption order:
+1. **Placement regions via KiCad Rule Areas** — their convention: a rule area
+   with ALL keepout items deselected = placement REGION (hard constraint:
+   a region-assigned part never leaves it, even if the job fails). Flux
+   should read board rule areas: keepout-flagged -> obstacle; no-items ->
+   region. Gives block floorplanning with a standard KiCad authoring UI —
+   the missing piece for functional-cluster placement.
+2. **Side exploration** — auto single/double-sided placement as a search
+   dimension. Flux compact keeps sides fixed; add per-part side auditioning
+   (respecting the module escape ring rule) — the unused back ring is the
+   biggest density lever on the UTV board.
+3. **Fabricator profiles/stackups** — named rule bundles (JLC04 etc.)
+   instead of per-run --track/--clearance flags.
+4. **Net widths by LAYER** (flux has per-net only), preserved pours,
+   pre-routed trace locking (flux ~= keep-input-copper).
+5. They REQUIRE unplaced input + hard outline: their placer treats the
+   outline as a constraint to satisfy, not an output to shrinkwrap — flux
+   compact should grow an optional --outline W:H hard-target mode that
+   fails loudly instead of spreading.
+Can flux match them? Placement realism check: their moat is placement
+quality under hard outlines + side exploration; our moat is the known-good-
+arrangement compaction + adversarial DRC ranking + free/local. Items 1+2+5
+are implementable and would close most of the gap for THIS class of board.
