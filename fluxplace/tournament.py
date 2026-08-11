@@ -291,7 +291,10 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
             cmd = ["java", "-jar", jar,
                    "-de", os.path.join(workdir, f"cand_{i}.dsn"),
                    "-do", os.path.join(workdir, f"cand_{i}.ses"),
-                   "-mp", str(passes)]
+                   "-mp", str(passes),
+                   # v2 defaults to a short per-job timeout that silently
+                   # abandons the run with no .ses — give real boards hours
+                   "--router.job_timeout=02:00:00"]
             if oit is not None:
                 cmd += ["-oit", str(oit)]
             proc = subprocess.Popen(
