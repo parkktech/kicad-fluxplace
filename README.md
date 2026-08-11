@@ -106,7 +106,23 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `plan`    | Gather component + schematic info and write a **detailed placement plan** (markdown). |
 | `gather`  | Dump structured board facts as JSON. |
 | `place`   | Re-place and save. `--strategy pack\|flux\|radial --rotate ortho\|fine\|none --out out.kicad_pcb` |
-| `eval`    | Report weighted wirelength, overlaps, board extent. |
+| `eval`    | Weighted wirelength, overlaps, extent, **pin density**; `--prc` grades physics checks. |
+| `comprehend` | Auto-detect physics constraints (power nets w/ IPC-2221 widths, diff pairs, bypass caps, crystals, converters); `--prc` grades the placement against them. |
+| `compact` | Shrink a known-good placement → route → fab. Placement controls: `--rule-areas` (KiCad Rule Areas: named+empty = hard region, keepout = obstacle), `--outline W:H` (hard bounds, fails loudly), `--flip decaps\|passives` (back-side exploration), `--cluster-anchors`, `--quilter-contract`, `--preserve-pour NAME`, `--keep-copper`. |
+| `tournament` | Candidates × `--profiles` (fab rule bundles) → gate → freerouting → **lexicographic rank: DRC → completion → PRC passes → conservativeness → vias → wirelength last**. |
+
+### Physics constraints (comprehension)
+
+fluxplace auto-detects the constraint classes an experienced engineer holds in
+their head, using the same shallow-but-effective heuristics the commercial
+tools use (see `docs/QUILTER-DOCS-DIGEST.md`): bypass caps get ONE owner (the
+nearest IC on the shared rail) and a **capacitance rank — the smallest cap
+belongs closest to the pin**; crystals cluster with their series R and load
+caps; switching converters get a hot-loop objective (U + L + ceramic Cin/Cout);
+diff pairs come from suffix conventions (P/N, +/−, t/c…) with series elements
+merged. Each constraint is graded post-placement by tolerance-window physics
+rule checks (`eval --prc`), and the tournament ranks candidates by those
+results ahead of via count and wirelength.
 
 Examples:
 

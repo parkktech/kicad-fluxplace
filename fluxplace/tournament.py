@@ -264,7 +264,9 @@ def _ses_metrics(ses_path, log_path, routable):
                completion=None, min_w=None)
     if os.path.exists(log_path):
         last = None
-        for m in re.finditer(r"pass #\d+ .*?\((\d+) unrouted\)",
+        # matches both 2.2.x "(N unrouted)" and 2.3.x
+        # "(N unrouted and M violations)"
+        for m in re.finditer(r"pass #\d+ .*?\((\d+) unrouted",
                              open(log_path, errors="ignore").read()):
             last = int(m.group(1))
         out["unrouted"] = last
