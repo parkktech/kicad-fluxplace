@@ -18,8 +18,10 @@ Hard-won rules baked in (do not relax):
 Coordinates are BODY CENTERS (the parts model of kicad_io.read_board).
 """
 import math
+import re
 
-__all__ = ["compact", "parse_obstacles"]
+__all__ = ["compact", "parse_obstacles", "pick_flips", "assign_regions",
+           "cluster_anchor_map"]
 
 
 def parse_obstacles(specs, log=print):
@@ -77,9 +79,108 @@ def _keepout_ok(p, obstacles, g, tht_bands):
     return True
 
 
+def assign_regions(parts, regions, members_spec=None):
+    """Attach members to placement regions (Quilter model: membership is a
+    HARD constraint, and region linkage pins the part's side).
+
+    regions: [{name, side, bbox}] from kicad_io.read_rule_areas.
+    members_spec: {name: "auto" | [refs...]} — "auto" claims every unlocked
+    part whose center currently sits inside the region bbox (Altium-Room
+    style auto-association). Returns regions with `members` sets."""
+    out = []
+    for rg in regions:
+        spec = (members_spec or {}).get(rg["name"], "auto")
+        x0, y0, x1, y1 = rg["bbox"]
+        if spec == "auto":
+            members = {r for r, p in parts.items()
+                       if not p.get("locked")
+                       and x0 <= p["x"] <= x1 and y0 <= p["y"] <= y1}
+        else:
+            members = {r for r in spec if r in parts}
+        out.append(dict(rg, members=members))
+    return out
+
+
+def cluster_anchor_map(parts):
+    """Anchor stickiness (Quilter's tier-2 control): a cluster containing
+    locked part(s) gravitates toward THEIR centroid instead of the global
+    anchor. Clusters come from schematic sheets. {ref: (ax, ay)}."""
+    by_sheet = {}
+    for r, p in parts.items():
+        by_sheet.setdefault(p.get("sheet", "root"), []).append(r)
+    amap = {}
+    for sheet, refs in by_sheet.items():
+        lk = [r for r in refs if parts[r].get("locked")]
+        if not lk:
+            continue
+        ax = sum(parts[r]["x"] for r in lk) / len(lk)
+        ay = sum(parts[r]["y"] for r in lk) / len(lk)
+        for r in refs:
+            if not parts[r].get("locked"):
+                amap[r] = (ax, ay)
+    return amap
+
+
+def pick_flips(parts, mode, obstacles=(), comp=None):
+    """Side-exploration candidate set: which unlocked front parts to move to
+    the BACK side. Judged by the gate + freerouting, never assumed good.
+
+      decaps    bypass caps (from comprehension when given, else plane-only
+                heuristic) — the classic under-the-IC via-decoupling move
+      passives  every small (<2.2 mm) unlocked front SMD passive
+
+    THT parts never flip (drills pierce); parts inside a B-side obstacle
+    shadow (module on the back) never flip into it."""
+    if mode in (None, "", "none"):
+        return []
+    decap_refs = None
+    if comp:
+        decap_refs = {b["cap"] for b in comp.get("bypass_caps", ())}
+    out = []
+    for r, p in sorted(parts.items()):
+        if p.get("locked") or p.get("side", "F") != "F":
+            continue
+        if p.get("tht") or p.get("drills", 0) > 0:
+            continue
+        if max(p["w"], p["h"]) >= 2.2:
+            continue
+        if mode == "decaps":
+            if decap_refs is not None:
+                if r not in decap_refs:
+                    continue
+            elif not re.match(r"^C\d+$", r):
+                continue
+        elif mode == "passives":
+            if not re.match(r"^[RC]\d+$", r):
+                continue
+        else:
+            continue
+        blocked = False
+        for ob in obstacles:
+            if ob.get("side") != "B":
+                continue
+            if (abs(p["x"] - ob["x"]) < ob["w"] / 2 + p["w"] / 2 and
+                    abs(p["y"] - ob["y"]) < ob["h"] / 2 + p["h"] / 2):
+                blocked = True
+                break
+        if not blocked:
+            out.append(r)
+    return out
+
+
 def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
-            tht_bands=False, iters=600, log=print):
+            tht_bands=False, iters=600, log=print, regions=(),
+            bounds=None, cluster_anchors=None):
     """Scale unlocked parts toward `anchor`, legalize, gravity-pack.
+
+    regions: [{name, side, bbox, members}] — HARD placement regions (Quilter
+    semantics): members never leave their bbox and are pinned to the region's
+    side; violations are counted in stats["outside"] rather than silently
+    spread.
+    bounds: (x0, y0, x1, y1) — HARD outline: every unlocked part must fit
+    inside; violations counted in stats["outside"] (the caller fails loudly —
+    Quilter treats the outline as a constraint to satisfy, not an output).
+    cluster_anchors: {ref: (ax, ay)} per-part gravity override (anchoring).
 
     Returns (pos, stats): pos {ref: (x, y)} body centers for ALL parts
     (locked ones unchanged), stats dict.
@@ -88,6 +189,44 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
     refs = sorted(P)
     g = gap
     obstacles = list(obstacles)
+    cluster_anchors = dict(cluster_anchors or {})
+
+    region_of = {}
+    for rg in regions:
+        for r in rg.get("members", ()):
+            if r in P:
+                region_of[r] = rg
+                if rg.get("side") in ("F", "B"):
+                    P[r]["side"] = rg["side"]   # region linkage pins the side
+
+    def _clamp(ref):
+        """Pull a part inside its region / the hard bounds (center clamp)."""
+        p = P[ref]
+        if p["locked"]:
+            return
+        boxes = []
+        rg = region_of.get(ref)
+        if rg:
+            boxes.append(rg["bbox"])
+        if bounds is not None:
+            boxes.append(bounds)
+        for (x0, y0, x1, y1) in boxes:
+            p["c"][0] = min(max(p["c"][0], x0 + p["hw"]), x1 - p["hw"])
+            p["c"][1] = min(max(p["c"][1], y0 + p["hh"]), y1 - p["hh"])
+
+    def _inside_ok(ref, x, y):
+        p = P[ref]
+        boxes = []
+        rg = region_of.get(ref)
+        if rg:
+            boxes.append(rg["bbox"])
+        if bounds is not None and not p["locked"]:
+            boxes.append(bounds)
+        for (x0, y0, x1, y1) in boxes:
+            if not (x0 + p["hw"] <= x <= x1 - p["hw"] and
+                    y0 + p["hh"] <= y <= y1 - p["hh"]):
+                return False
+        return True
 
     if anchor is None:
         lk = [p for p in P.values() if p["locked"]]
@@ -96,12 +235,15 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
                   sum(p["c"][1] for p in src) / len(src))
     ax, ay = anchor
 
-    # ---- scale toward anchor ---------------------------------------------
-    for p in P.values():
+    # ---- scale toward anchor (per-cluster anchors when given) ------------
+    for r in refs:
+        p = P[r]
         if p["locked"]:
             continue
-        p["c"][0] = ax + sx * (p["c"][0] - ax)
-        p["c"][1] = ay + sy * (p["c"][1] - ay)
+        cax, cay = cluster_anchors.get(r, (ax, ay))
+        p["c"][0] = cax + sx * (p["c"][0] - cax)
+        p["c"][1] = cay + sy * (p["c"][1] - cay)
+        _clamp(r)
 
     def collides(p, q):
         if p["side"] != q["side"] and not (p["tht"] or q["tht"]):
@@ -149,12 +291,16 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
                             p["c"][0] += math.copysign(exx + 0.01, p["c"][0] - ob["x"])
                         moved = True
                         nudges += 1
+                if region_of.get(r1) or bounds is not None:
+                    _clamp(r1)     # regions/bounds are HARD — re-pin every pass
             if not moved:
                 break
         return it + 1
 
     # ---- hard resolve: spiral-relocate anything still stuck --------------
     def free_at(ref, x, y):
+        if not _inside_ok(ref, x, y):
+            return False
         p = dict(P[ref], c=[x, y])
         return _keepout_ok(p, obstacles, g, tht_bands) and not any(
             collides(p, P[r2]) for r2 in refs if r2 != ref)
@@ -237,15 +383,21 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
         return max(lo, min(hi, want))
 
     slid = 0.0
+
+    def _target(r):
+        return cluster_anchors.get(r, (ax, ay))
+
     for _ in range(pack):
         order = sorted((r for r in refs if not P[r]["locked"]),
-                       key=lambda r: math.hypot(P[r]["c"][0] - ax,
-                                                P[r]["c"][1] - ay))
-        for axis, want in ((0, ax), (1, ay)):
+                       key=lambda r: math.hypot(P[r]["c"][0] - _target(r)[0],
+                                                P[r]["c"][1] - _target(r)[1]))
+        for axis in (0, 1):
             for ref in order:
-                new = blocked_at(ref, axis, want)
+                new = blocked_at(ref, axis, _target(ref)[axis])
                 slid += abs(new - P[ref]["c"][axis])
                 P[ref]["c"][axis] = new
+                if region_of.get(ref) or bounds is not None:
+                    _clamp(ref)
 
     # pack starts from a clean state and cannot create overlaps, but belt
     # and braces: one more soft/hard cycle if anything slipped through
@@ -253,6 +405,13 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
         it += soft_pass(iters)
         hard += hard_pass()
     resid = resid_count()
+    # hard-constraint audit: a member outside its region, or any unlocked
+    # part outside the hard bounds, is a FAILURE to report loudly — never
+    # silently spread past a constraint (Quilter fails the job instead)
+    outside = sum(1 for r in refs
+                  if (region_of.get(r) or bounds is not None)
+                  and not P[r]["locked"]
+                  and not _inside_ok(r, P[r]["c"][0], P[r]["c"][1]))
     xs0 = [p["c"][0] - p["hw"] for p in P.values()]
     ys0 = [p["c"][1] - p["hh"] for p in P.values()]
     xs1 = [p["c"][0] + p["hw"] for p in P.values()]
@@ -261,6 +420,7 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
         xs0.append(ob["x"] - ob["w"] / 2); ys0.append(ob["y"] - ob["h"] / 2)
         xs1.append(ob["x"] + ob["w"] / 2); ys1.append(ob["y"] + ob["h"] / 2)
     stats = dict(nudges=nudges, iters=it + 1, hard=hard, resid=resid,
-                 slid=slid, anchor=(ax, ay),
+                 slid=slid, anchor=(ax, ay), outside=outside,
+                 sides={r: P[r]["side"] for r in refs},
                  extent=(min(xs0), min(ys0), max(xs1), max(ys1)))
     return {r: tuple(P[r]["c"]) for r in refs}, stats

@@ -480,35 +480,119 @@ def cmd_compact(a):
     from fluxplace import compact as C
     os.makedirs(a.out, exist_ok=True)
     board, parts, nets, IO = _load(a.board)
+    if getattr(a, "quilter_contract", False):
+        nl, nf = IO.quilter_contract(board, parts)
+        print(f"    quilter contract: {nl} inside outline -> LOCKED, "
+              f"{nf} outside -> free")
     # compact REROUTES: stale copper from the source board poisons planes
     # (pour sees existing zones -> 0 pours) and DRC (old tracks short the
     # new route). Strip tracks/vias/zones; refs held until exit (SWIG GC).
+    # Quilter model: pours are deleted+regenerated UNLESS explicitly named
+    # (--preserve-pour); --keep-copper preserves tracks/vias so the router
+    # extends partial routes instead of starting over.
+    preserve = set(getattr(a, "preserve_pour", []) or [])
     _keep = []
-    for t in list(board.GetTracks()):
-        _keep.append(t)
-        board.Remove(t)
+    if not getattr(a, "keep_copper", False):
+        for t in list(board.GetTracks()):
+            _keep.append(t)
+            board.Remove(t)
+    kept_pours = 0
     for z in list(board.Zones()):
+        try:
+            zname = z.GetZoneName() or ""
+            rule_area = z.GetIsRuleArea()
+        except Exception:
+            zname, rule_area = "", False
+        if rule_area:
+            continue                     # rule areas are constraints, not copper
+        if zname and zname in preserve:
+            kept_pours += 1
+            continue                     # named + registered -> preserved
         _keep.append(z)
         board.Remove(z)
     cmd_compact._keep = _keep
     if _keep:
-        print(f"    stripped {len(_keep)} stale tracks/vias/zones from source")
+        print(f"    stripped {len(_keep)} stale tracks/vias/zones from source"
+              + (f" (preserved {kept_pours} named pours)" if kept_pours else ""))
     obstacles = C.parse_obstacles(a.obstacle)
+
+    # Rule Areas (Quilter's KiCad convention): keepout-flagged -> obstacle;
+    # named + no keepout items -> hard placement region
+    regions = []
+    if a.rule_areas:
+        ra_regions, ra_keepouts = IO.read_rule_areas(board)
+        obstacles += ra_keepouts
+        members_spec = {}
+        for spec in a.region or []:
+            name, _, refs = spec.partition("=")
+            members_spec[name] = ("auto" if refs in ("", "auto")
+                                  else [r.strip() for r in refs.split(",")])
+        regions = C.assign_regions(parts, ra_regions, members_spec)
+        for rg in regions:
+            print(f"    region '{rg['name']}' [{rg['side']}]: "
+                  f"{len(rg['members'])} members")
+        if ra_keepouts:
+            print(f"    {len(ra_keepouts)} keepout rule areas -> obstacles")
+
+    # side exploration: flip chosen small parts to the back, judged by the
+    # router downstream — never assumed good
+    if a.flip and a.flip != "none":
+        from fluxplace import comprehend as CM
+        comp = CM.comprehend(CM.pads_from_board(board))
+        flips = C.pick_flips(parts, a.flip, obstacles=obstacles, comp=comp)
+        n = IO.flip_footprints(board, set(flips))
+        print(f"    side exploration [{a.flip}]: flipped {n} parts to back")
+        parts, nets = IO.read_board(board)   # sides/pins changed — re-read
+
     anchor = None
     if a.anchor:
         if a.anchor not in parts:
             raise SystemExit(f"--anchor {a.anchor}: no such ref")
         anchor = (parts[a.anchor]["x"], parts[a.anchor]["y"])
+
+    bounds = None
+    if a.outline:
+        try:
+            ow, oh = [float(v) for v in a.outline.split(":")]
+        except ValueError:
+            raise SystemExit(f"--outline {a.outline}: want W:H in mm")
+        # hard outline centered on the anchor (locked centroid by default)
+        if anchor is None:
+            lk = [p for p in parts.values() if p.get("locked")]
+            src = lk if lk else list(parts.values())
+            anchor_c = (sum(p["x"] for p in src) / len(src),
+                        sum(p["y"] for p in src) / len(src))
+        else:
+            anchor_c = anchor
+        bounds = (anchor_c[0] - ow / 2, anchor_c[1] - oh / 2,
+                  anchor_c[0] + ow / 2, anchor_c[1] + oh / 2)
+        print(f"    hard outline: {ow:.0f}x{oh:.0f} mm centered "
+              f"({anchor_c[0]:.1f}, {anchor_c[1]:.1f})")
+
+    camap = C.cluster_anchor_map(parts) if a.cluster_anchors else None
+    if camap:
+        print(f"    cluster anchors: {len(camap)} parts stick to their "
+              f"cluster's locked centroid")
+
     t0 = time.time()
     pos, st = C.compact(parts, a.sx, a.sy, anchor=anchor, gap=a.gap,
                         pack=a.pack, obstacles=obstacles,
-                        tht_bands=a.tht_bands)
+                        tht_bands=a.tht_bands, regions=regions,
+                        bounds=bounds, cluster_anchors=camap)
     IO.apply_positions(board, pos, parts, skip_locked=True)
     x0, y0, x1, y1 = st["extent"]
     print(f"[1/6] compacted sx={a.sx} sy={a.sy}: {st['nudges']} nudges/"
           f"{st['iters']} iters, {st['hard']} hard-relocated, "
           f"{st['resid']} residual overlaps, extent {x1-x0:.1f}x{y1-y0:.1f} mm"
           f"  ({time.time()-t0:.0f}s)")
+    if st.get("outside"):
+        # Quilter model: hard constraints fail LOUDLY, with diagnostics —
+        # never a silently-spread board
+        raise SystemExit(
+            f"compact: {st['outside']} parts could not satisfy their hard "
+            f"region/outline constraints. The constraint set is infeasible "
+            f"at this density — grow --outline, loosen --sx/--sy, or free "
+            f"some region members.")
     if st["resid"] and not a.allow_overlaps:
         raise SystemExit(
             f"compact: {st['resid']} residual overlaps after convergence — "
@@ -723,6 +807,33 @@ def main(argv=None):
                      help="phantom keep-out rect X:Y:W:H[:F|B] (mm), repeatable; "
                           "compaction keeps unlocked same-side + THT parts out "
                           "(module escape area must stay clear — see NEXT.md)")
+    pco.add_argument("--rule-areas", action="store_true",
+                     help="read board Rule Areas (Quilter convention: named + "
+                          "no keepout items = placement REGION, keepout items "
+                          "checked = obstacle)")
+    pco.add_argument("--region", action="append", default=[],
+                     help="region membership NAME=REF1,REF2 or NAME=auto "
+                          "(parts inside the area), repeatable; needs "
+                          "--rule-areas")
+    pco.add_argument("--outline", default=None,
+                     help="HARD outline W:H mm centered on the anchor — fails "
+                          "loudly if infeasible instead of spreading")
+    pco.add_argument("--cluster-anchors", action="store_true",
+                     help="parts stick to their schematic-sheet cluster's "
+                          "locked centroid instead of the global anchor")
+    pco.add_argument("--flip", choices=["none", "decaps", "passives"],
+                     default="none",
+                     help="side exploration: move small parts to the BACK "
+                          "before compacting (decaps = bypass caps only)")
+    pco.add_argument("--quilter-contract", action="store_true",
+                     help="Quilter I/O contract: parts inside the outline = "
+                          "locked, outside = free to place")
+    pco.add_argument("--preserve-pour", action="append", default=[],
+                     help="zone NAME to preserve instead of strip+regenerate "
+                          "(Quilter preserved-pours table), repeatable")
+    pco.add_argument("--keep-copper", action="store_true",
+                     help="keep existing tracks/vias (router extends partial "
+                          "routes instead of starting over)")
     pco.set_defaults(fn=cmd_compact)
 
     pli = sub.add_parser("lint",

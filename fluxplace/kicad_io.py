@@ -206,3 +206,117 @@ def emit_route_guides(board, rep, layer_name="Eco1.User"):
 def export_dsn(board, path):
     """Specctra DSN export for external-router calibration (freerouting)."""
     return bool(pcbnew.ExportSpecctraDSN(board, path))
+
+
+def read_rule_areas(board):
+    """Rule Areas -> (regions, keepouts), the Quilter KiCad convention
+    (docs/QUILTER-DOCS-DIGEST.md §3): a NAMED rule area with every keepout
+    item checkbox UNCHECKED is a placement REGION; one with keepout items
+    checked is a KEEPOUT/obstacle. Both are returned with bbox in mm and the
+    copper side they're linked to (F/B; areas on both coppers -> side "FB").
+
+    regions:  [{name, side, bbox:(x0,y0,x1,y1)}]
+    keepouts: [{x, y, w, h, side}]  (compact's obstacle rect format)
+    """
+    regions, keepouts = [], []
+    fcu = board.GetLayerID("F.Cu")
+    bcu = board.GetLayerID("B.Cu")
+    for z in board.Zones():
+        try:
+            if not z.GetIsRuleArea():
+                continue
+        except Exception:
+            continue
+        ls = z.GetLayerSet()
+        on_f = ls.Contains(fcu)
+        on_b = ls.Contains(bcu)
+        if not (on_f or on_b):
+            continue
+        side = "FB" if (on_f and on_b) else ("F" if on_f else "B")
+        bb = z.Outline().BBox()
+        bbox = (_mm(bb.GetLeft()), _mm(bb.GetTop()),
+                _mm(bb.GetRight()), _mm(bb.GetBottom()))
+        flags = []
+        for getter in ("GetDoNotAllowTracks", "GetDoNotAllowVias",
+                       "GetDoNotAllowPads", "GetDoNotAllowFootprints",
+                       "GetDoNotAllowCopperPour", "GetDoNotAllowZoneFills"):
+            try:
+                flags.append(bool(getattr(z, getter)()))
+            except Exception:
+                pass
+        name = ""
+        try:
+            name = z.GetZoneName() or ""
+        except Exception:
+            pass
+        if any(flags):
+            keepouts.append(dict(x=(bbox[0] + bbox[2]) / 2,
+                                 y=(bbox[1] + bbox[3]) / 2,
+                                 w=bbox[2] - bbox[0], h=bbox[3] - bbox[1],
+                                 side=("F" if side != "B" else "B")))
+        elif name:
+            regions.append(dict(name=name, side=side, bbox=bbox))
+    return regions, keepouts
+
+
+def quilter_contract(board, parts):
+    """Apply Quilter's I/O contract to the parts model: any part whose body
+    center is INSIDE the board outline is locked (pre-placed), anything
+    OUTSIDE is free to place. Lets one prepared board feed either engine and
+    enables the 'save your progress' loop: keep what you like inside, push
+    the rest out, rerun. Returns (n_locked, n_free)."""
+    bb = board.GetBoardEdgesBoundingBox()
+    x0, y0 = _mm(bb.GetLeft()), _mm(bb.GetTop())
+    x1, y1 = _mm(bb.GetRight()), _mm(bb.GetBottom())
+    n_locked = n_free = 0
+    for ref, p in parts.items():
+        inside = x0 <= p["x"] <= x1 and y0 <= p["y"] <= y1
+        p["locked"] = inside
+        n_locked += inside
+        n_free += not inside
+    return n_locked, n_free
+
+
+def plane_intent(board, power_pick=None):
+    """Layer-name plane semantics (Quilter's convention): copper layers named
+    *gnd*/*ground* pour the ground net; *pwr*/*power* pour `power_pick` (or
+    the highest-fanout power-family net). Returns [(layer_name, net_name)]."""
+    import re as _re
+    from .lint import GND_RE, POWER_RE, _basename
+    gnd_net = None
+    fanout = {}
+    for n in board.GetNetsByName():
+        name = str(n)
+        if not name:
+            continue
+        base = _basename(name)
+        if GND_RE.match(base) and gnd_net is None:
+            gnd_net = name
+        if POWER_RE.match(base):
+            fanout[name] = fanout.get(name, 0)
+    for pad_net in [p.GetNetname() for fp in board.GetFootprints()
+                    for p in fp.Pads()]:
+        if pad_net in fanout:
+            fanout[pad_net] += 1
+    pwr_net = power_pick or (max(sorted(fanout), key=lambda k: fanout[k])
+                             if fanout else None)
+    out = []
+    for lid in board.GetEnabledLayers().CuStack():
+        lname = board.GetLayerName(lid)
+        low = lname.lower()
+        if _re.search(r"gnd|ground", low) and gnd_net:
+            out.append((lname, gnd_net))
+        elif _re.search(r"pwr|power", low) and pwr_net:
+            out.append((lname, pwr_net))
+    return out
+
+
+def flip_footprints(board, refs):
+    """Flip the given footprints to the other side, in place (KiCad-standard
+    left-right flip about each footprint's own position). Returns count."""
+    n = 0
+    for fp in board.GetFootprints():
+        if fp.GetReference() in refs and not fp.IsLocked():
+            fp.Flip(fp.GetPosition(), False)
+            n += 1
+    return n

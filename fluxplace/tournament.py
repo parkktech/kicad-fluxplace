@@ -188,7 +188,8 @@ def rank_key(r):
 
 
 def parse_compact_grid(spec):
-    """'sx:sy[:gap[:pack]],...' -> [(sx, sy, gap, pack)]."""
+    """'sx:sy[:gap[:pack[:flip]]],...' -> [(sx, sy, gap, pack, flip)].
+    flip in {none, decaps, passives} — side-exploration axis."""
     out = []
     for item in (spec or "").split(","):
         item = item.strip()
@@ -197,15 +198,18 @@ def parse_compact_grid(spec):
         f = item.split(":")
         out.append((float(f[0]), float(f[1]),
                     float(f[2]) if len(f) > 2 else 0.45,
-                    int(f[3]) if len(f) > 3 else 3))
+                    int(f[3]) if len(f) > 3 else 3,
+                    f[4] if len(f) > 4 else "none"))
     return out
 
 
 def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
                              obstacle_specs, plane_nets,
-                             profile=DEFAULT_PROFILE):
+                             profile=DEFAULT_PROFILE, flip="none"):
     """Fresh interpreter: candidate = COMPACTED current placement (strips
-    stale copper first), gate-scored like any placer candidate."""
+    stale copper first), gate-scored like any placer candidate. `flip` is
+    the side-exploration axis: move decaps/small passives to the back and
+    let the gate + freerouting judge the density win."""
     sys.path.insert(0, _REPO)
     import pcbnew  # noqa: F401 — registers SWIG wrappers before board surgery
     from fluxplace import kicad_io as IO, graph as G, placement as P
@@ -223,13 +227,21 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
     compact_candidate_worker._keep = _keep
     parts, nets = IO.read_board(board)
     obstacles = CC.parse_obstacles(obstacle_specs or [], log=lambda *a: None)
+    nflip = 0
+    if flip and flip != "none":
+        from fluxplace import comprehend as CM
+        comp = CM.comprehend(CM.pads_from_board(board))
+        flips = CC.pick_flips(parts, flip, obstacles=obstacles, comp=comp)
+        nflip = IO.flip_footprints(board, set(flips))
+        parts, nets = IO.read_board(board)   # sides/pins changed — re-read
     t0 = time.time()
     pos, st = CC.compact(parts, sx, sy, gap=gap, pack=pack,
                          obstacles=obstacles)
     cg = G.build(parts, nets)
     rep = R.score(parts, pos, cg)
     meta = dict(idx=idx, mode="compact", fill=sx, aspect=sy, pad=gap,
-                jitter=pack, resid=st["resid"], overflow=rep["overflow"],
+                jitter=pack, flip=flip, nflip=nflip,
+                resid=st["resid"], overflow=rep["overflow"],
                 gate_wl=rep["wirelength"], hpwl=round(P.hpwl(parts, cg, pos)),
                 place_secs=round(time.time() - t0, 1),
                 routable=sorted(set(cg.signal_nets) | set(cg.power_traces)))
@@ -337,12 +349,13 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
     def spawn_place(i, cpf):
         c, pf = cpf
         if compact_grid:
-            sx, sy, gp, pk = c
+            sx, sy, gp, pk = c[:4]
+            fl = c[4] if len(c) > 4 else "none"
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
                     f"from fluxplace.tournament import compact_candidate_worker; "
                     f"compact_candidate_worker({board_path!r}, {workdir!r}, {i}, "
                     f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r}, "
-                    f"profile={pf!r})")
+                    f"profile={pf!r}, flip={fl!r})")
         else:
             fill, aspect, pad, jitter = c
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
