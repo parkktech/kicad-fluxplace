@@ -124,3 +124,29 @@ def test_tournament_grid_parse():
     g = TN.parse_compact_grid("0.44:0.47,0.5:0.45:0.4,0.55:0.4:0.42:6")
     assert g == [(0.44, 0.47, 0.45, 3), (0.5, 0.45, 0.4, 3),
                  (0.55, 0.4, 0.42, 6)]
+
+
+def test_intake_scripted():
+    from fluxplace import intake as IN
+    answers = iter([
+        "power", "signal", "3", "2",          # name, kind idx?, conn, edge/remote
+    ])
+    # scripted session: one power interface, remote, default panel; mounting on
+    script = iter(["power", "1", "3", "2", "",     # iface: kind=power conn=microfit remote panel-default
+                   "",                              # finish interfaces
+                   "1", "1", "2", "5.0"])           # holes yes, corners, M2.5... wait order: holes, pattern, size, inset
+    out = []
+    intent = IN.run(ask=lambda p: next(script, ""), say=out.append)
+    assert intent["interfaces"][0]["placement"] == "remote"
+    assert "DT-compatible" in intent["interfaces"][0]["panel_connector"] or \
+           intent["interfaces"][0]["panel_connector"]
+    assert intent["mounting"]["holes"] is True
+    assert intent["mounting"]["pattern"] == "corners"
+
+
+def test_intake_answers_passthrough():
+    from fluxplace import intake as IN
+    a = {"interfaces": [{"name": "x", "kind": "rf", "board_connector": "ufl",
+                         "placement": "edge", "panel_connector": None}],
+         "mounting": {"holes": False}}
+    assert IN.run(answers=a) == a

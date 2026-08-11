@@ -192,3 +192,20 @@ freerouting-2.3.0.jar (~/tools/) fixes it: routes 30+ min stably and
 auto-configures In1/In2 as power planes when >50% covered. Note 2.3.0
 resets unmigrated freerouting.json settings — re-check optimizer caps.
 Tournament default flow now validated end-to-end on the UTV board.
+
+## 2026-08-11 — `intake` subcommand (design interview)
+`fluxplace intake [--answers a.json] [--apply-board B]` -> design_intent.json.
+Asks per external interface: on-board connector (latching families first —
+JST XA/GH, Micro-Fit, terminal block, pin header (flagged), SOLDER PADS,
+USB-C, SMA, U.FL, other), EDGE vs REMOTE, and for remote-unspecified panels
+picks a sealed latching default by kind (power->Deutsch-DT-compatible AT04
+flange, audio->mini-XLR, rf->SMA bulkhead, data->M12/USB-C). Mounting: holes
+y/n, corners-equal-inset vs free, M2/M2.5/M3, inset mm; --apply-board drops
+locked GND corner holes on a board with an outline. Scriptable via injected
+ask/say + --answers (agent/CI friendly).
+Next intent consumers to build: edge-affinity per interface (feed the builder
+edge-flush pass), lint policy from environment (vibration -> flag ALL
+friction fits), power-rail budget -> quilter power CSV + ampacity widths,
+enclosure envelope -> outline cap + height keepouts, RF net list -> 50R
+netclass + pour pullback, diff pairs -> quilter CSV, rigid module patterns
+(CM5-style pair+holes) as reusable intent blocks.

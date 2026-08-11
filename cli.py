@@ -532,6 +532,27 @@ def cmd_models(a):
           f"-> {a.out or a.board}")
 
 
+def cmd_intake(a):
+    """Interactive design intake: connectors (on-board type, edge vs remote,
+    panel default), mounting holes. Writes design_intent.json; optionally
+    applies corner mounting holes to a board that already has its outline."""
+    import json as _json
+    from fluxplace import intake as IN
+    answers = _json.load(open(a.answers)) if a.answers else None
+    intent = IN.run(answers=answers)
+    with open(a.out, "w") as fh:
+        _json.dump(intent, fh, indent=1)
+    print(f"intent -> {a.out} ({len(intent['interfaces'])} interfaces, "
+          f"mounting={intent['mounting']})")
+    if a.apply_board:
+        from fluxplace import kicad_io as IO
+        board = IO.load(a.apply_board)
+        refs = IN.apply_mounting(board, intent)
+        if refs:
+            IO.save(board, a.apply_board)
+            print(f"applied {len(refs)} mounting holes -> {a.apply_board}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -692,6 +713,16 @@ def main(argv=None):
     pmo.add_argument("--audit-only", action="store_true",
                      help="just list footprints with missing/broken models")
     pmo.set_defaults(fn=cmd_models)
+
+    pin = sub.add_parser("intake",
+                         help="design interview: connectors (edge/remote + "
+                              "panel defaults), mounting -> design_intent.json")
+    pin.add_argument("--out", default="design_intent.json")
+    pin.add_argument("--answers", default=None,
+                     help="JSON with pre-filled answers (non-interactive)")
+    pin.add_argument("--apply-board", default=None,
+                     help="board to add corner mounting holes to now")
+    pin.set_defaults(fn=cmd_intake)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
