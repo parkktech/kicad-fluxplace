@@ -104,3 +104,25 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print(name, "OK")
+
+
+def test_suffixed_and_hierarchical_power_names():
+    pads = [pad("J15", "1", "+12V_IN", fp="Molex_Micro-Fit_3.0_43045", val="pwr"),
+            pad("J15", "2", "GND", fp="Molex_Micro-Fit_3.0_43045"),
+            pad("J13", "1", "/POWER_ENTRY/FAN_12V", fp="PinHeader_1x04_P2.54mm"),
+            pad("J13", "2", "GND", fp="PinHeader_1x04_P2.54mm")]
+    f = L.run(pads)
+    assert "no-power-entry" not in codes(f)          # +12V_IN counts as power
+    assert "power-on-friction-header" in codes(f)    # fan header flagged
+
+
+def test_waivers_suppress():
+    pads = (ic("U1", ["ETH_P0_P", "GND", "+3V3", "A"]) +
+            [pad("J1", "1", "+3V3", fp="JST_VH"),
+             pad("J1", "2", "GND", fp="JST_VH"),
+             pad("J2", "1", "A", fp="Conn_JST_PH"),
+             pad("J2", "2", "GND", fp="Conn_JST_PH")])
+    f = L.run(pads)
+    assert "dead-end-net" in codes(f)
+    f = L.run(pads, waivers=["dead-end-net:^net 'ETH_"])
+    assert "dead-end-net" not in codes(f)

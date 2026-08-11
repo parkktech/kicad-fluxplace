@@ -23,9 +23,18 @@ import re
 __all__ = ["run", "pads_from_board", "POWER_RE", "GND_RE"]
 
 POWER_RE = re.compile(
-    r"^(\+?\d+(\.\d+)?V\d*|VCC\w*|VDD\w*|VIN\w*|VBUS\w*|VBAT\w*|PWR\w*|"
-    r"V_?SYS\w*|P\d+V\d*|3V3|5V|12V|24V)$", re.I)
+    r"^(\+?\d+(\.\d+)?V\d*(_\w+)?|VCC\w*|VDD\w*|VIN\w*|VBUS\w*|VBAT\w*|"
+    r"PWR\w*|V_?SYS\w*|P\d+V\d*(_\w+)?|\w*_\d+V\d*)$", re.I)
 GND_RE = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
+
+
+def _basename(net):
+    """KiCad hierarchical nets ('/POWER_ENTRY/FAN_12V') -> leaf name."""
+    return net.rsplit("/", 1)[-1]
+
+
+def _is_power(net):
+    return bool(POWER_RE.match(_basename(net)))
 
 CONN_REF_RE = re.compile(r"^(J|CN|X|P)\d+", re.I)
 CONN_FP_RE = re.compile(
@@ -58,8 +67,12 @@ def _is_connector(ref, fpname, value):
         CONN_FP_RE.search(fpname + " " + value))
 
 
-def run(pads):
-    """pads: [{ref, footprint, value, pad, net, drill}] -> findings list."""
+def run(pads, waivers=None):
+    """pads: [{ref, footprint, value, pad, net, drill}] -> findings list.
+
+    waivers: ["code:regex", ...] — drop findings whose code matches and whose
+    msg or any ref matches the regex (for de-scoped features, spare footprints,
+    split-board interconnect stubs)."""
     findings = []
     by_part = {}
     net_pads = {}
@@ -82,7 +95,7 @@ def run(pads):
             "this board?", [])
     else:
         entry = {r for r in connectors
-                 if any(POWER_RE.match(p["net"]) for p in by_part[r])}
+                 if any(_is_power(p["net"]) for p in by_part[r])}
         if not entry:
             add("warning", "no-power-entry",
                 "no connector carries a power-family net (VCC/VIN/+NV...) — "
@@ -112,8 +125,8 @@ def run(pads):
             continue
         if MECH_RE.search(ps[0]["footprint"]):
             continue
-        has_pwr = any(POWER_RE.match(p["net"]) for p in numbered)
-        has_gnd = any(GND_RE.match(p["net"]) for p in numbered)
+        has_pwr = any(_is_power(p["net"]) for p in numbered)
+        has_gnd = any(GND_RE.match(_basename(p["net"])) for p in numbered)
         if has_pwr and not has_gnd:
             add("warning", "no-gnd-on-part",
                 f"{r} ({ps[0]['value']}) has power but no ground pin — "
@@ -146,12 +159,21 @@ def run(pads):
         ps = by_part[r]
         blob = ps[0]["footprint"]
         if FRICTION_HDR_RE.search(blob) and any(
-                POWER_RE.match(p["net"]) for p in ps):
+                _is_power(p["net"]) for p in ps):
             add("warning", "power-on-friction-header",
                 f"{r} feeds power through a friction-fit pin header — "
                 "use a latching connector for anything that must survive "
                 "vibration", [r])
 
+    if waivers:
+        rules = []
+        for w in waivers:
+            code, _, pat = w.partition(":")
+            rules.append((code, re.compile(pat or ".")))
+        findings = [f for f in findings if not any(
+            f["code"] == c and (rx.search(f["msg"]) or
+                                any(rx.search(r) for r in f["refs"]))
+            for c, rx in rules)]
     return findings
 
 

@@ -446,7 +446,7 @@ def cmd_lint(a):
     from fluxplace import lint as L
     from fluxplace import kicad_io as IO
     board = IO.load(a.board)
-    findings = L.run(L.pads_from_board(board))
+    findings = L.run(L.pads_from_board(board), waivers=a.waive)
     n = L.summarize(findings)
     if a.json:
         with open(a.json, "w") as fh:
@@ -583,6 +583,10 @@ def main(argv=None):
                               "wiring, dead-end nets, non-latching connectors")
     pli.add_argument("--board", required=True)
     pli.add_argument("--json", default=None, help="also write findings as JSON")
+    pli.add_argument("--waive", action="append", default=[],
+                     help="suppress findings: CODE:REGEX (matches msg or refs), "
+                          "repeatable — e.g. dead-end-net:^ETH_ for a de-scoped "
+                          "feature or unwired stubs on a split-board interconnect")
     pli.add_argument("--fail-on", choices=["never", "error", "warning"],
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
