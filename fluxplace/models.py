@@ -144,11 +144,18 @@ def fetch_step(mpn, dest_dir, creds, tok, log=print):
         return None, "download-blocked: %s -> %s" % (type(e).__name__, url[:90])
     if data[:2] == b"PK":
         z = zipfile.ZipFile(io.BytesIO(data))
-        member = [n for n in z.namelist()
-                  if n.lower().endswith((".step", ".stp"))]
+        member = sorted((n for n in z.namelist()
+                         if n.lower().endswith((".step", ".stp"))),
+                        key=lambda n: -z.getinfo(n).file_size)
+        member = member or [n for n in z.namelist()
+                            if n.lower().endswith(".wrl")]
         if not member:
             return None, "zip-without-step"
         data = z.read(member[0])
+        if member[0].lower().endswith(".wrl"):
+            dest = dest.with_suffix(".wrl")
+            dest.write_bytes(data)
+            return dest, "fetched"
     if not data.lstrip()[:40].startswith(b"ISO-10303"):
         return None, "not-a-step-file (%d bytes)" % len(data)
     dest.write_bytes(data)
@@ -187,6 +194,55 @@ def fetch_kicad_official(broken_path, dest_dir, log=print):
     return dest, "fetched"
 
 
+# ---------------------------------------------------------------- alignment
+_PT_RE = re.compile(
+    rb"CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(\s*"
+    rb"(-?[\d.Ee+-]+)\s*,\s*(-?[\d.Ee+-]+)\s*,\s*(-?[\d.Ee+-]+)\s*\)")
+
+
+def step_bbox(path):
+    """Approximate model bbox in mm from the STEP point cloud. Control
+    points can slightly overshoot true surfaces — good enough to center a
+    body and choose a 90-degree orientation. Returns (min, max) 3-tuples."""
+    data = pathlib.Path(path).read_bytes()
+    scale = 1.0
+    if re.search(rb"SI_UNIT\s*\(\s*\.MILLI\.", data):
+        scale = 1.0
+    elif re.search(rb"SI_UNIT\s*\([^)]*\.METRE\.", data):
+        scale = 1000.0
+    pts = _PT_RE.findall(data)
+    if not pts:
+        return None
+    xs = [float(p[0]) * scale for p in pts]
+    ys = [float(p[1]) * scale for p in pts]
+    zs = [float(p[2]) * scale for p in pts]
+    return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+
+def plan_alignment(step_path, fp_w, fp_h, log=print):
+    """Offset+rotation that centers the model on the footprint and floors
+    it to the board. If the model's XY aspect clearly disagrees with the
+    footprint's (both non-square, axes swapped), add a 90-degree z-rotation.
+    Returns dict(offset=(x,y,z), rotation=(0,0,zdeg)) in FOOTPRINT frame."""
+    bb = step_bbox(step_path)
+    if not bb:
+        return None
+    (x0, y0, z0), (x1, y1, z1) = bb
+    mw, mh = x1 - x0, y1 - y0
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    rot = 0.0
+    if fp_w and fp_h:
+        fp_land = fp_w >= fp_h * 1.15
+        m_land = mw >= mh * 1.15
+        fp_port = fp_h >= fp_w * 1.15
+        m_port = mh >= mw * 1.15
+        if (fp_land and m_port) or (fp_port and m_land):
+            rot = 90.0
+            cx, cy = cy, -cx  # centre after rotating the model +90 about z
+    return dict(offset=(-cx, cy, -z0), rotation=(0.0, 0.0, rot),
+                bbox=(mw, mh, z1 - z0))
+
+
 # ---------------------------------------------------------------- board side
 def resolve_vars(path, prj_dir):
     env = dict(os.environ)
@@ -214,16 +270,21 @@ def audit_board(board):
     return todo
 
 
-def attach(fp, path):
-    """Attach a STEP to a footprint (replacing broken entries)."""
+def attach(fp, path, plan=None):
+    """Attach a STEP to a footprint (replacing broken entries). `plan` from
+    plan_alignment() sets offset/rotation so arbitrary-origin vendor models
+    land centered, floored, and axis-matched."""
     import pcbnew
     fp.Models().clear()
     m = pcbnew.FP_3DMODEL()
     m.m_Filename = str(path)
+    if plan:
+        m.m_Offset = pcbnew.VECTOR3D(*plan["offset"])
+        m.m_Rotation = pcbnew.VECTOR3D(*plan["rotation"])
     fp.Models().append(m)
 
 
-def sync(board, mpn_map, dest_dir, path_prefix=None, log=print):
+def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print):
     """Audit `board`, fetch what `mpn_map` (ref -> MPN) covers, attach.
     Returns report dict; caller saves the board."""
     creds = credentials()
@@ -254,7 +315,16 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, log=print):
         wired = str(path)
         if path_prefix:
             wired = path_prefix.rstrip("/") + "/" + path.name
-        attach(fp, wired)
+        plan = None
+        if align and str(path).lower().endswith((".step", ".stp")):
+            bbf = fp.GetBoundingBox(False)
+            try:
+                import pcbnew
+                plan = plan_alignment(path, pcbnew.ToMM(bbf.GetWidth()),
+                                      pcbnew.ToMM(bbf.GetHeight()), log=log)
+            except Exception as e:
+                log(f"    align skipped for {ref}: {e}")
+        attach(fp, wired, plan)
         report[status].append((ref, mpn, wired))
         log(f"  {ref} {mpn}: {status} -> {wired}")
     return report

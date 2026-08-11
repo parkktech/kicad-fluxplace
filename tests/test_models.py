@@ -44,3 +44,36 @@ if __name__ == "__main__":
             else:
                 fn()
             print(name, "OK")
+
+
+STEP_FIXTURE = b"""ISO-10303-21;
+HEADER; FILE_DESCRIPTION(('x'),'2;1'); ENDSEC;
+DATA;
+#1=SI_UNIT(.MILLI.,.METRE.);
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=CARTESIAN_POINT('',(40.,10.,3.));
+#12=CARTESIAN_POINT('',(20.,5.,1.5));
+ENDSEC; END-ISO-10303-21;
+"""
+
+
+def test_step_bbox(tmp_path):
+    f = tmp_path / "m.step"
+    f.write_bytes(STEP_FIXTURE)
+    lo, hi = M.step_bbox(f)
+    assert lo == (0.0, 0.0, 0.0) and hi == (40.0, 10.0, 3.0)
+
+
+def test_plan_alignment_centers_and_floors(tmp_path):
+    f = tmp_path / "m.step"
+    f.write_bytes(STEP_FIXTURE)
+    plan = M.plan_alignment(f, fp_w=42.0, fp_h=12.0)   # landscape/landscape
+    assert plan["rotation"] == (0.0, 0.0, 0.0)
+    assert plan["offset"] == (-20.0, 5.0, 0.0)         # centered, floored
+
+
+def test_plan_alignment_rotates_mismatched_aspect(tmp_path):
+    f = tmp_path / "m.step"
+    f.write_bytes(STEP_FIXTURE)                        # model is landscape
+    plan = M.plan_alignment(f, fp_w=12.0, fp_h=42.0)   # footprint portrait
+    assert plan["rotation"][2] == 90.0
