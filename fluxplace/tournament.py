@@ -112,7 +112,7 @@ def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
 
     cpcb = os.path.join(workdir, f"cand_{idx}.kicad_pcb")
     IO.save(board, cpcb)
-    pro_src = os.path.splitext(board_path)[0] + ".kicad_pro"
+    pro_src = os.path.splitext(board.GetFileName())[0] + ".kicad_pro"
     if os.path.exists(pro_src):
         open(os.path.join(workdir, f"cand_{idx}.kicad_pro"), "w").write(open(pro_src).read())
     ok = bool(pcbnew.ExportSpecctraDSN(board, os.path.join(workdir, f"cand_{idx}.dsn")))
