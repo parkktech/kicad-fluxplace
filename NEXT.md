@@ -1,5 +1,32 @@
 # fluxplace — next session
 
+## 2026-08-11 latest — v0.8.0: the Quilter parity build (P0-P4 SHIPPED)
+Full adoption plan (docs/QUILTER-PARITY-PLAN.md) implemented in one session;
+suite 76 green. New modules: comprehend.py (constraint auto-detection),
+prc.py (placement physics rule checks, tolerance-window reports).
+- P0 tournament re-rank: rank_key = (DRC, unrouted, -prc_pass, -clearance,
+  -min_w, vias, wl) — wirelength LAST, per Quilter's published sort + our own
+  Tournament #1 calibration. Candidates get .ses imported + kicad-cli DRC'd;
+  realized min width + completion parsed from the session; >=95% = SUCCESS.
+- P1 comprehension: power nets (200/500mA floors, IPC-2221 widths), diff
+  pairs (suffix conventions + V-guard + series-segment merge), bypass caps
+  (ONE owner = nearest IC on rail; capacitance rank, smallest-closest),
+  crystals (incl. series-R + load caps — Quilter misses these), converters
+  (SW fanout<=4 guard, ceramic-window hot-loop caps, deterministic).
+  CLI: comprehend --prc; eval --prc; eval prints pin density (Quilter <20%).
+- P2 controls: kicad_io.read_rule_areas (named+no-items = REGION, Quilter's
+  exact convention), hard regions w/ side pinning in compact (stats[outside]
+  fails loudly), --outline W:H hard bounds, cluster anchors (locked-centroid
+  stickiness), pick_flips side exploration (decaps|passives -> back).
+- P3 compile targets: tournament PROFILES (jlc-fine/jlc-std/osh-6mil) sweep.
+- P4 contract: --quilter-contract (inside=locked), --preserve-pour NAME,
+  --keep-copper, plane_intent (layer-name gnd/pwr semantics).
+- constraint_seed: hot-loop members/pair elements/crystal clusters walked to
+  their anchor pre-compact (default on; --no-prc-seed).
+PRC audit of the three routed boards: 10-15/52 pass — U1 buck hot loop blown
+apart on ALL THREE (Cout 52-57mm from U1, loop 1500-1700mm^2). The seeded
+tournament (flux-tourney-q1) targets exactly this.
+
 ## Where it stands (v0.4.0)
 - **Route-aware placement shipped** (`--strategy build`, and the GUI plugin runs it):
   quadratic global solve (hub central) → constructive route-as-you-place builder →

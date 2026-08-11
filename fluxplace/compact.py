@@ -129,8 +129,11 @@ def pick_flips(parts, mode, obstacles=(), comp=None):
                 heuristic) — the classic under-the-IC via-decoupling move
       passives  every small (<2.2 mm) unlocked front SMD passive
 
-    THT parts never flip (drills pierce); parts inside a B-side obstacle
-    shadow (module on the back) never flip into it."""
+    THT parts never flip (drills pierce). Parts currently over a B-side
+    obstacle shadow DO flip — compact()'s obstacle constraint relocates
+    back-side parts out of shadows during legalization, and the router gate
+    judges the result. (v1 pre-excluded them and flipped nothing on boards
+    whose center IS the module shadow.)"""
     if mode in (None, "", "none"):
         return []
     decap_refs = None
@@ -155,16 +158,7 @@ def pick_flips(parts, mode, obstacles=(), comp=None):
                 continue
         else:
             continue
-        blocked = False
-        for ob in obstacles:
-            if ob.get("side") != "B":
-                continue
-            if (abs(p["x"] - ob["x"]) < ob["w"] / 2 + p["w"] / 2 and
-                    abs(p["y"] - ob["y"]) < ob["h"] / 2 + p["h"] / 2):
-                blocked = True
-                break
-        if not blocked:
-            out.append(r)
+        out.append(r)
     return out
 
 

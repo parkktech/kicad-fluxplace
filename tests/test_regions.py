@@ -96,10 +96,12 @@ class TestFlips(unittest.TestCase):
         flips = pick_flips(self._parts(), "decaps", comp=comp)
         self.assertEqual(flips, ["C1"])   # C3 THT, C4 locked
 
-    def test_passives_mode_and_shadow(self):
+    def test_passives_mode_flips_over_shadow_too(self):
+        # a part over the B shadow still flips — compact's obstacle
+        # constraint relocates it during legalization (the gate judges)
         ob = [dict(x=30, y=30, w=10, h=10, side="B")]
         flips = pick_flips(self._parts(), "passives", obstacles=ob)
-        self.assertEqual(flips, ["C1", "R1"])   # C2 shadowed, U1 big
+        self.assertEqual(flips, ["C1", "C2", "R1"])   # U1 big, C3 THT, C4 locked
 
     def test_none_mode(self):
         self.assertEqual(pick_flips(self._parts(), "none"), [])

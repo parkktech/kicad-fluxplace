@@ -301,6 +301,9 @@ def import_session(workdir, idx, out_board=None):
     code = (f"import sys; sys.path.insert(0, {_REPO!r}); import pcbnew; "
             f"b = pcbnew.LoadBoard({os.path.join(workdir, f'cand_{idx}.kicad_pcb')!r}); "
             f"ok = pcbnew.ImportSpecctraSES(b, {os.path.join(workdir, f'cand_{idx}.ses')!r}); "
+            # refill pours around the imported copper — DRC on stale
+            # pre-route fills reports phantom clearance results
+            f"pcbnew.ZONE_FILLER(b).Fill(b.Zones()); "
             f"pcbnew.SaveBoard({routed!r}, b); print('OK' if ok else 'FAIL')")
     rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
                         text=True, env=dict(os.environ))

@@ -241,7 +241,8 @@ def cmd_tournament(a):
         planes = tuple(tuple(p.split("=", 1)) for p in a.plane_nets)
     results, winner = TN.run(a.board, jar, a.workdir, passes=a.passes, jobs=a.jobs,
                              resume=a.resume, oit=a.oit, compact_grid=grid,
-                             obstacles=list(a.obstacle), plane_nets=planes)
+                             obstacles=list(a.obstacle), plane_nets=planes,
+                             profiles=a.profiles)
     if winner and a.apply_winner:
         ok, out = TN.import_winner(a.workdir, winner["idx"])
         print(f"winner copper imported: {out} (ok={ok})")
@@ -749,7 +750,11 @@ def main(argv=None):
                     help="freerouting optimizer improvement threshold %% (caps the silent optimizer)")
     pt.add_argument("--compact-grid", default=None,
                     help="seed candidates by COMPACTING the current placement: "
-                         "'sx:sy[:gap[:pack]],...' (replaces the placer grid)")
+                         "'sx:sy[:gap[:pack[:flip]]],...' (replaces the placer "
+                         "grid; flip = none|decaps|passives side exploration)")
+    pt.add_argument("--profiles", nargs="+", default=None,
+                    help="compile-target rule profiles to sweep "
+                         "(jlc-fine jlc-std osh-6mil); default jlc-fine")
     pt.add_argument("--obstacle", action="append", default=[],
                     help="keep-out rect X:Y:W:H[:F|B] for compact candidates")
     pt.add_argument("--plane-nets", nargs="+", default=None,
