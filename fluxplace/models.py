@@ -219,6 +219,196 @@ def step_bbox(path):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
+PROBE_MM = 40.0     # probe board edge length (calibration reference)
+
+
+def measure_model(model_path, rotation=(0.0, 0.0, 0.0), kicad_cli="kicad-cli",
+                  offset=None):
+    """TRUE rendered geometry of a model under a KiCad rotation/offset — by
+    RENDERING it. A throwaway board (known 40 mm outline = pixel scale)
+    carries one footprint with the model; kicad-cli renders orthographic top
+    and front views and the model's pixel bbox is measured. This is the
+    same pipeline as the deliverable renders, so whatever it measures is
+    what the user sees. (VRML export ignores FP_3DMODEL transforms; raw
+    STEP clouds lie via control points — rendering is the only honest
+    ruler.) Returns dict(w, h, z, zmin, cx, cy) mm or None."""
+    import pcbnew
+    import subprocess
+    import tempfile
+    from PIL import Image
+
+    def _px_bbox(png, bg_tol=18):
+        im = Image.open(png).convert("RGB")
+        w, h = im.size
+        corner = im.getpixel((2, 2))
+        xs, ys = [], []
+        px = im.load()
+        for y in range(0, h, 2):
+            for x in range(0, w, 2):
+                r, g, b2 = px[x, y]
+                if (abs(r - corner[0]) + abs(g - corner[1])
+                        + abs(b2 - corner[2])) > bg_tol:
+                    xs.append(x)
+                    ys.append(y)
+        if not xs:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _diff_bbox(bare_png, full_png, tol=26):
+        """Pixel bbox of what the MODEL added: full render minus bare."""
+        a = Image.open(bare_png).convert("RGB")
+        b = Image.open(full_png).convert("RGB")
+        if a.size != b.size:
+            return None
+        pa, pb = a.load(), b.load()
+        w, h = a.size
+        xs, ys = [], []
+        for y in range(0, h, 2):
+            for x in range(0, w, 2):
+                ra, ga, ba = pa[x, y]
+                rb, gb, bb = pb[x, y]
+                if abs(ra - rb) + abs(ga - gb) + abs(ba - bb) > tol:
+                    xs.append(x)
+                    ys.append(y)
+        if len(xs) < 4:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    with tempfile.TemporaryDirectory() as td:
+        def render(bp, side, out):
+            subprocess.run([kicad_cli, "pcb", "render", "--side", side,
+                            "--width", "600", "--height", "600",
+                            "--background", "opaque", "--quality", "basic",
+                            "-o", out, bp], capture_output=True, timeout=180)
+            return os.path.exists(out)
+
+        def probe_board(with_model):
+            board = pcbnew.BOARD()
+            half = pcbnew.FromMM(PROBE_MM / 2)
+            pts = [(-half, -half), (half, -half), (half, half), (-half, half)]
+            for i in range(4):
+                seg = pcbnew.PCB_SHAPE(board)
+                seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+                seg.SetStart(pcbnew.VECTOR2I(*pts[i]))
+                seg.SetEnd(pcbnew.VECTOR2I(*pts[(i + 1) % 4]))
+                seg.SetLayer(pcbnew.Edge_Cuts)
+                seg.SetWidth(pcbnew.FromMM(0.1))
+                board.Add(seg)
+            fp = pcbnew.FOOTPRINT(board)
+            fp.SetReference("X1")
+            fp.Reference().SetVisible(False)
+            fp.Value().SetVisible(False)
+            if with_model:
+                m = pcbnew.FP_3DMODEL()
+                m.m_Filename = str(model_path)
+                m.m_Rotation = pcbnew.VECTOR3D(*rotation)
+                if offset is not None:
+                    m.m_Offset = pcbnew.VECTOR3D(*offset)
+                fp.Models().append(m)
+            board.Add(fp)
+            fp.SetPosition(pcbnew.VECTOR2I(0, 0))
+            bp = os.path.join(td, f"probe{int(with_model)}.kicad_pcb")
+            pcbnew.SaveBoard(bp, board)
+            return bp
+
+        # calibration: bare board pixel width == PROBE_MM
+        bare = probe_board(False)
+        full = probe_board(True)
+        top_bare = os.path.join(td, "bare_top.png")
+        top_full = os.path.join(td, "full_top.png")
+        front_full = os.path.join(td, "full_front.png")
+        front_bare = os.path.join(td, "bare_front.png")
+        if not (render(bare, "top", top_bare) and render(full, "top", top_full)
+                and render(full, "front", front_full)
+                and render(bare, "front", front_bare)):
+            return None
+        cal = _px_bbox(top_bare)
+        if not cal:
+            return None
+        mm_per_px = PROBE_MM / max(1, cal[2] - cal[0])
+        bx = (cal[0] + cal[2]) / 2.0
+        by = (cal[1] + cal[3]) / 2.0
+        mb = _diff_bbox(top_bare, top_full)      # the model = what changed
+        if not mb:
+            return None
+        # front view: X horizontal, Z vertical (image y down). Its zoom
+        # auto-fits per render, so calibrate from the bare board SLAB whose
+        # thickness is known (1.6 mm) and whose top row is z=0.
+        fb = _diff_bbox(front_bare, front_full)
+        fbare = _px_bbox(front_bare)
+        z = zmin = None
+        if fb and fbare:
+            slab_px = max(1, fbare[3] - fbare[1])
+            mmz = 1.6 / slab_px
+            z = (fb[3] - fb[1]) * mmz
+            zmin = (fbare[1] - fb[3]) * mmz
+        return dict(
+            w=(mb[2] - mb[0]) * mm_per_px,
+            h=(mb[3] - mb[1]) * mm_per_px,
+            z=z, zmin=zmin,
+            cx=((mb[0] + mb[2]) / 2.0 - bx) * mm_per_px,
+            cy=((mb[1] + mb[3]) / 2.0 - by) * mm_per_px)
+
+
+# candidate base orientations for a misaligned vendor STEP: identity, the
+# four axis tips, upside down — each with an optional in-plane quarter turn
+ORIENT_CANDIDATES = [(0, 0, 0), (90, 0, 0), (-90, 0, 0),
+                     (0, 90, 0), (0, -90, 0), (180, 0, 0)]
+
+
+def orient_plan(model_path, fp_w, fp_h, kicad_cli="kicad-cli", log=print):
+    """Measurement-driven orientation solver: try every base orientation
+    (plus a Z-quarter-turn where the aspect asks for it), MEASURE each by
+    rendering, and keep the one whose board-plane footprint best matches
+    the part. The offset is then solved by probing: guess from the measured
+    center/floor, re-render, keep whichever sign convention actually
+    centers — no Euler/axis-convention assumptions anywhere. Returns
+    dict(offset, rotation, bbox) or None."""
+    best = None
+    for base in ORIENT_CANDIDATES:
+        meas = measure_model(model_path, base, kicad_cli)
+        if not meas:
+            continue
+        for zrot in (0.0, 90.0):
+            if zrot:
+                w, h = meas["h"], meas["w"]
+                rot = (base[0], base[1], base[2] + 90.0)
+            else:
+                w, h = meas["w"], meas["h"]
+                rot = base
+            score = abs(w - fp_w) + abs(h - fp_h)
+            if meas.get("z") is not None:
+                score += max(0.0, meas["z"] - max(fp_w, fp_h)) * 2.0
+            if best is None or score < best[0]:
+                best = (score, rot)
+    if best is None:
+        return None
+    rot = best[1]
+    final = measure_model(model_path, rot, kicad_cli)
+    if not final:
+        return None
+    zoff = -(final["zmin"] or 0.0)
+    # probe both XY sign conventions; keep whichever truly centers/floors
+    chosen = None
+    for cand in ((-final["cx"], final["cy"], zoff),
+                 (-final["cx"], -final["cy"], zoff)):
+        chk = measure_model(model_path, rot, kicad_cli, offset=cand)
+        if not chk:
+            continue
+        resid = abs(chk["cx"]) + abs(chk["cy"]) + abs(chk.get("zmin") or 0.0)
+        if chosen is None or resid < chosen[0]:
+            chosen = (resid, cand, chk)
+    if chosen is None:
+        return dict(offset=(-final["cx"], final["cy"], zoff), rotation=rot,
+                    bbox=(final["w"], final["h"], final["z"]))
+    resid, offset, chk = chosen
+    if resid > 1.5:
+        log(f"    orient: residual {resid:.1f}mm after centering "
+            f"{os.path.basename(str(model_path))} — inspect the render")
+    return dict(offset=offset, rotation=rot,
+                bbox=(chk["w"], chk["h"], chk["z"]))
+
+
 def plan_alignment(step_path, fp_w, fp_h, log=print):
     """Offset+rotation that centers the model on the footprint and floors
     it to the board. If the model's XY aspect clearly disagrees with the
@@ -330,11 +520,19 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
             wired = path_prefix.rstrip("/") + "/" + path.name
         plan = None
         if align and str(path).lower().endswith((".step", ".stp")):
-            bbf = fp.GetBoundingBox(False)
             try:
                 import pcbnew
-                plan = plan_alignment(path, pcbnew.ToMM(bbf.GetWidth()),
-                                      pcbnew.ToMM(bbf.GetHeight()), log=log)
+                # footprint dims in the footprint's LOCAL frame — the model
+                # rides the footprint's rotation, so a world-frame bbox on a
+                # 90-degree part would solve the orientation backwards (the
+                # bug that laid two same-model transformers the same way when
+                # their footprints were 90 degrees apart)
+                bbf = fp.GetBoundingBox(False, False)
+                fw = pcbnew.ToMM(bbf.GetWidth())
+                fh = pcbnew.ToMM(bbf.GetHeight())
+                if round(abs(fp.GetOrientationDegrees()) % 180) == 90:
+                    fw, fh = fh, fw
+                plan = orient_plan(path, fw, fh, log=log)
             except Exception as e:
                 log(f"    align skipped for {ref}: {e}")
         attach(fp, wired, plan)
