@@ -123,9 +123,11 @@ def test_heavy_squeeze_converges_clean():
 
 def test_tournament_grid_parse():
     from fluxplace import tournament as TN
-    g = TN.parse_compact_grid("0.44:0.47,0.5:0.45:0.4,0.55:0.4:0.42:6:decaps")
-    assert g == [(0.44, 0.47, 0.45, 3, "none"), (0.5, 0.45, 0.4, 3, "none"),
-                 (0.55, 0.4, 0.42, 6, "decaps")]
+    g = TN.parse_compact_grid(
+        "0.44:0.47,0.5:0.45:0.4,0.55:0.4:0.42:6:decaps:1")
+    assert g == [(0.44, 0.47, 0.45, 3, "none", 0),
+                 (0.5, 0.45, 0.4, 3, "none", 0),
+                 (0.55, 0.4, 0.42, 6, "decaps", 1)]
 
 
 def test_intake_scripted():

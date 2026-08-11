@@ -145,7 +145,10 @@ def pick_flips(parts, mode, obstacles=(), comp=None):
             continue
         if p.get("tht") or p.get("drills", 0) > 0:
             continue
-        if max(p["w"], p["h"]) >= 2.2:
+        # size guard uses the FULL footprint bbox (silk included): an 0603
+        # measures ~3 mm there. 3.5 admits 0402-0805 passives, still blocks
+        # electrolytics and anything with a real body
+        if max(p["w"], p["h"]) >= 3.5:
             continue
         if mode == "decaps":
             if decap_refs is not None:
@@ -162,7 +165,7 @@ def pick_flips(parts, mode, obstacles=(), comp=None):
     return out
 
 
-def constraint_seed(parts, comp, log=print):
+def constraint_seed(parts, comp, log=print, obstacles=()):
     """PRC-driven pre-seed: before compacting, walk unlocked members of the
     placement constraints next to their anchor part — converter hot-loop
     members ring their U, diff-pair series elements pair up side by side,
@@ -191,6 +194,19 @@ def constraint_seed(parts, comp, log=print):
             k += 1
         return slots
 
+    def _tht_banned(m, x, y):
+        """A THT member must not be seeded into an obstacle band (its pins
+        pierce both sides); a seed there just gets relocated to the board
+        edge and stretches the extent (q1: C12 walked to U1 -> y=67)."""
+        p = parts[m]
+        if not (p.get("tht") or p.get("drills", 0) > 0):
+            return False
+        for ob in obstacles:
+            if (abs(x - ob["x"]) < ob["w"] / 2 + p["w"] / 2 and
+                    abs(y - ob["y"]) < ob["h"] / 2 + p["h"] / 2):
+                return True
+        return False
+
     def _seed_group(aref, members):
         nonlocal moved
         if aref not in parts:
@@ -202,6 +218,8 @@ def constraint_seed(parts, comp, log=print):
         slots = _ring_slots(aref, [(parts[m]["w"], parts[m]["h"])
                                    for m in live])
         for m, (x, y) in zip(live, slots):
+            if _tht_banned(m, x, y):
+                continue
             if abs(parts[m]["x"] - x) + abs(parts[m]["y"] - y) > 4.0:
                 parts[m]["x"] = x
                 parts[m]["y"] = y

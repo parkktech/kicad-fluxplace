@@ -173,12 +173,18 @@ def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets,
 
 def rank_key(r):
     """Quilter-ordered lexicographic fitness (docs/QUILTER-PARITY-PLAN.md P0):
-    DRC first, completion second, physics-check passes third, rule
+    completion first, DRC second, physics-check passes third, rule
     conservativeness (larger clearance / realized min width = more fab
-    headroom = better), layers/vias, and wirelength strictly LAST."""
+    headroom = better), vias, and wirelength strictly LAST.
+
+    Completion outranks the DRC count deliberately: an unrouted airwire is a
+    worse defect than a clearance graze, and less copper trivially means
+    fewer violations (q1 rescore: the 36-unrouted candidate had the lowest
+    DRC count on the board — it must not win). Quilter reaches the same end
+    by never surfacing incomplete candidates at all."""
     return (
-        r["drc"] if r.get("drc") is not None else 9999,
         r.get("unrouted") if r.get("unrouted") is not None else 9999,
+        r["drc"] if r.get("drc") is not None else 9999,
         -(r.get("prc_pass") or 0),
         -(r.get("clearance") or 0.0),
         -(r.get("min_w") or 0.0),
@@ -188,8 +194,9 @@ def rank_key(r):
 
 
 def parse_compact_grid(spec):
-    """'sx:sy[:gap[:pack[:flip]]],...' -> [(sx, sy, gap, pack, flip)].
-    flip in {none, decaps, passives} — side-exploration axis."""
+    """'sx:sy[:gap[:pack[:flip[:bands]]]],...' -> tuples
+    (sx, sy, gap, pack, flip, bands). flip in {none, decaps, passives} —
+    side exploration; bands 0/1 — confine THT to obstacle top/bottom bands."""
     out = []
     for item in (spec or "").split(","):
         item = item.strip()
@@ -199,13 +206,15 @@ def parse_compact_grid(spec):
         out.append((float(f[0]), float(f[1]),
                     float(f[2]) if len(f) > 2 else 0.45,
                     int(f[3]) if len(f) > 3 else 3,
-                    f[4] if len(f) > 4 else "none"))
+                    f[4] if len(f) > 4 else "none",
+                    int(f[5]) if len(f) > 5 else 0))
     return out
 
 
 def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
                              obstacle_specs, plane_nets,
-                             profile=DEFAULT_PROFILE, flip="none"):
+                             profile=DEFAULT_PROFILE, flip="none",
+                             tht_bands=False):
     """Fresh interpreter: candidate = COMPACTED current placement (strips
     stale copper first), gate-scored like any placer candidate. `flip` is
     the side-exploration axis: move decaps/small passives to the back and
@@ -234,10 +243,10 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
         flips = CC.pick_flips(parts, flip, obstacles=obstacles, comp=comp)
         nflip = IO.flip_footprints(board, set(flips))
         parts, nets = IO.read_board(board)   # sides/pins changed — re-read
-    CC.constraint_seed(parts, comp, log=lambda *a: None)
+    CC.constraint_seed(parts, comp, log=lambda *a: None, obstacles=obstacles)
     t0 = time.time()
     pos, st = CC.compact(parts, sx, sy, gap=gap, pack=pack,
-                         obstacles=obstacles)
+                         obstacles=obstacles, tht_bands=tht_bands)
     cg = G.build(parts, nets)
     rep = R.score(parts, pos, cg)
     meta = dict(idx=idx, mode="compact", fill=sx, aspect=sy, pad=gap,
@@ -357,11 +366,12 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
         if compact_grid:
             sx, sy, gp, pk = c[:4]
             fl = c[4] if len(c) > 4 else "none"
+            tb = bool(c[5]) if len(c) > 5 else False
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
                     f"from fluxplace.tournament import compact_candidate_worker; "
                     f"compact_candidate_worker({board_path!r}, {workdir!r}, {i}, "
                     f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r}, "
-                    f"profile={pf!r}, flip={fl!r})")
+                    f"profile={pf!r}, flip={fl!r}, tht_bands={tb!r})")
         else:
             fill, aspect, pad, jitter = c
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "

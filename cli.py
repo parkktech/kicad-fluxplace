@@ -578,7 +578,7 @@ def cmd_compact(a):
     if not a.no_prc_seed:
         from fluxplace import comprehend as CM
         comp = CM.comprehend(CM.pads_from_board(board))
-        n = C.constraint_seed(parts, comp)
+        n = C.constraint_seed(parts, comp, obstacles=obstacles)
         if n:
             print(f"    PRC seed: walked {n} constraint members next to "
                   f"their anchor (hot loops, pair elements, crystals)")

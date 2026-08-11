@@ -16,7 +16,7 @@ def cand(**kw):
 
 
 class TestRank(unittest.TestCase):
-    def test_drc_beats_everything(self):
+    def test_drc_beats_everything_but_completion(self):
         clean_but_long = cand(drc=0, wl=9000, vias=500)
         dirty_but_short = cand(drc=3, wl=1000, vias=50)
         self.assertLess(rank_key(clean_but_long), rank_key(dirty_but_short))
@@ -25,6 +25,13 @@ class TestRank(unittest.TestCase):
         complete_long = cand(unrouted=0, wl=5000)
         incomplete_short = cand(unrouted=2, wl=1000)
         self.assertLess(rank_key(complete_long), rank_key(incomplete_short))
+
+    def test_completion_beats_low_drc(self):
+        # q1 rescore lesson: 36 airwires with few violations must NOT beat a
+        # fully-routed board with clearance grazes
+        full_but_grazes = cand(unrouted=0, drc=118)
+        holes_but_clean = cand(unrouted=36, drc=81)
+        self.assertLess(rank_key(full_but_grazes), rank_key(holes_but_clean))
 
     def test_prc_beats_vias_and_length(self):
         physics_good = cand(prc_pass=12, vias=400, wl=4000)
