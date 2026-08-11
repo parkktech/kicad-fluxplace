@@ -660,7 +660,8 @@ def cmd_models(a):
     for spec in a.mpn or []:
         ref, _, mpn = spec.partition("=")
         mpn_map[ref] = mpn
-    rep = M.sync(board, mpn_map, a.models_dir, path_prefix=a.path_prefix)
+    rep = M.sync(board, mpn_map, a.models_dir, path_prefix=a.path_prefix,
+                 force=getattr(a, "force", False))
     board.Save(a.out or a.board)
     print(f"models: {len(rep['fetched'])} fetched, {len(rep['cached'])} cached, "
           f"{len(rep['failed'])} failed, {len(rep['skipped'])} unmapped "
@@ -881,6 +882,9 @@ def main(argv=None):
                           "'${KIPRJMOD}/../lib/3dmodels') instead of absolute")
     pmo.add_argument("--audit-only", action="store_true",
                      help="just list footprints with missing/broken models")
+    pmo.add_argument("--force", action="store_true",
+                     help="every mapped ref gets an authoritative fetch and "
+                          "the REAL model replaces any attached stand-in")
     pmo.set_defaults(fn=cmd_models)
 
     pin = sub.add_parser("intake",

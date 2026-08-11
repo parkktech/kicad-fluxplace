@@ -284,15 +284,28 @@ def attach(fp, path, plan=None):
     fp.Models().append(m)
 
 
-def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print):
-    """Audit `board`, fetch what `mpn_map` (ref -> MPN) covers, attach.
-    Returns report dict; caller saves the board."""
+def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
+         force=False):
+    """Fetch authoritative models and attach. Default: only footprints whose
+    models are missing/broken. `force=True`: every ref in `mpn_map` gets an
+    authoritative fetch attempt and the REAL model replaces whatever is
+    attached (visual stand-ins included) — the accurate-models policy:
+    DigiKey CAD media first, Mouser MPN-normalization retry, KiCad official
+    for stdlib refs; a fetch failure keeps the current model and is
+    reported, never silently guessed around. Returns report dict; caller
+    saves the board."""
     creds = credentials()
     if "DIGIKEY_CLIENT_ID" not in creds:
         raise SystemExit("no DigiKey credentials (env or ~/.claude.json)")
     tok = _dk_token(creds)
     report = {"fetched": [], "cached": [], "skipped": [], "failed": []}
-    for fp, why in audit_board(board):
+    todo = list(audit_board(board))
+    if force:
+        seen = {fp.GetReference() for fp, _ in todo}
+        for fp in board.GetFootprints():
+            if fp.GetReference() in mpn_map and fp.GetReference() not in seen:
+                todo.append((fp, "force-refresh"))
+    for fp, why in todo:
         ref = fp.GetReference()
         path = status = None
         if why == "broken-path":
