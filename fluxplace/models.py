@@ -24,6 +24,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import urllib.parse
 import urllib.request
 import zipfile
@@ -224,6 +225,37 @@ PROBE_MM = 40.0     # probe board edge length (calibration reference)
 
 def measure_model(model_path, rotation=(0.0, 0.0, 0.0), kicad_cli="kicad-cli",
                   offset=None):
+    """TRUE rendered geometry of a model under a KiCad rotation/offset (see
+    _measure_inproc). ALWAYS runs in a fresh interpreter: building probe
+    BOARDs in a process that already holds another board corrupts SWIG
+    state and segfaults (the one-board-per-process gotcha). Returns
+    dict(w, h, z, zmin, cx, cy) mm or None."""
+    import json as _json
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    args = _json.dumps(dict(path=str(model_path), rotation=list(rotation),
+                            offset=list(offset) if offset else None,
+                            kicad_cli=kicad_cli))
+    code = ("import sys, json, os; sys.path.insert(0, %r); "
+            "from fluxplace.models import _measure_inproc; "
+            "a = json.loads(%r); "
+            "r = _measure_inproc(a['path'], tuple(a['rotation']), "
+            "a['kicad_cli'], tuple(a['offset']) if a['offset'] else None); "
+            "print('RESULT ' + json.dumps(r)); sys.stdout.flush(); "
+            "os._exit(0)" % (repo, args))
+    try:
+        rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, timeout=600, env=dict(os.environ))
+        for line in rc.stdout.splitlines():
+            if line.startswith("RESULT "):
+                return _json.loads(line[7:])
+    except Exception:
+        pass
+    return None
+
+
+def _measure_inproc(model_path, rotation=(0.0, 0.0, 0.0),
+                    kicad_cli="kicad-cli", offset=None):
     """TRUE rendered geometry of a model under a KiCad rotation/offset — by
     RENDERING it. A throwaway board (known 40 mm outline = pixel scale)
     carries one footprint with the model; kicad-cli renders orthographic top
@@ -337,15 +369,41 @@ def measure_model(model_path, rotation=(0.0, 0.0, 0.0), kicad_cli="kicad-cli",
         fb = _diff_bbox(front_bare, front_full)
         fbare = _px_bbox(front_bare)
         z = zmin = None
+        foot = 1.0
         if fb and fbare:
             slab_px = max(1, fbare[3] - fbare[1])
             mmz = 1.6 / slab_px
             z = (fb[3] - fb[1]) * mmz
             zmin = (fbare[1] - fb[3]) * mmz
+            # footedness: SMD bodies flare at the BOTTOM (gull-wing leads at
+            # board level). Width of the model's bottom quarter vs top
+            # quarter in the front view — >1 means feet-down, <1 means the
+            # leads point up (inverted). THE ±90-tip tie-breaker: plain
+            # bboxes measure identical either way.
+            a = Image.open(front_bare).convert("RGB")
+            bimg = Image.open(front_full).convert("RGB")
+            pa, pb2 = a.load(), bimg.load()
+            span = max(1, fb[3] - fb[1])
+            q = max(2, span // 4)
+
+            def _row_width(y0, y1):
+                wmax = 0
+                for y in range(max(0, y0), min(a.size[1], y1), 1):
+                    xs = [x for x in range(fb[0], fb[2] + 1, 1)
+                          if x < a.size[0] and (
+                              abs(pa[x, y][0] - pb2[x, y][0]) +
+                              abs(pa[x, y][1] - pb2[x, y][1]) +
+                              abs(pa[x, y][2] - pb2[x, y][2])) > 26]
+                    if xs:
+                        wmax = max(wmax, max(xs) - min(xs))
+                return wmax
+            wtop = _row_width(fb[1], fb[1] + q)
+            wbot = _row_width(fb[3] - q, fb[3] + 1)
+            foot = (wbot + 1.0) / (wtop + 1.0)
         return dict(
             w=(mb[2] - mb[0]) * mm_per_px,
             h=(mb[3] - mb[1]) * mm_per_px,
-            z=z, zmin=zmin,
+            z=z, zmin=zmin, foot=foot,
             cx=((mb[0] + mb[2]) / 2.0 - bx) * mm_per_px,
             cy=((mb[1] + mb[3]) / 2.0 - by) * mm_per_px)
 
@@ -356,14 +414,30 @@ ORIENT_CANDIDATES = [(0, 0, 0), (90, 0, 0), (-90, 0, 0),
                      (0, 90, 0), (0, -90, 0), (180, 0, 0)]
 
 
-def orient_plan(model_path, fp_w, fp_h, kicad_cli="kicad-cli", log=print):
+def orient_plan(model_path, fp_w, fp_h, kicad_cli="kicad-cli", log=print,
+                incumbent=None):
     """Measurement-driven orientation solver: try every base orientation
     (plus a Z-quarter-turn where the aspect asks for it), MEASURE each by
     rendering, and keep the one whose board-plane footprint best matches
-    the part. The offset is then solved by probing: guess from the measured
-    center/floor, re-render, keep whichever sign convention actually
-    centers — no Euler/axis-convention assumptions anywhere. Returns
-    dict(offset, rotation, bbox) or None."""
+    the part. Feet-down beats leads-up via the front-view footedness ratio
+    (plain bboxes cannot tell a part from its upside-down twin). The offset
+    is then solved by probing: guess from the measured center/floor,
+    re-render, keep whichever sign convention actually centers — no
+    Euler/axis-convention assumptions anywhere.
+
+    `incumbent`: (rotation, offset) currently on the footprint. A working
+    orientation is never replaced unless a candidate beats it by a clear
+    margin — the solver must not 'fix' the DF40 that was already right.
+    Returns dict(offset, rotation, bbox) or None."""
+
+    def _score(meas, w, h):
+        s = abs(w - fp_w) + abs(h - fp_h)
+        if meas.get("z") is not None:
+            s += max(0.0, meas["z"] - max(fp_w, fp_h)) * 2.0
+        if meas.get("foot", 1.0) < 0.95:
+            s += 4.0          # leads-up: heavily penalized
+        return s
+
     best = None
     for base in ORIENT_CANDIDATES:
         meas = measure_model(model_path, base, kicad_cli)
@@ -376,13 +450,18 @@ def orient_plan(model_path, fp_w, fp_h, kicad_cli="kicad-cli", log=print):
             else:
                 w, h = meas["w"], meas["h"]
                 rot = base
-            score = abs(w - fp_w) + abs(h - fp_h)
-            if meas.get("z") is not None:
-                score += max(0.0, meas["z"] - max(fp_w, fp_h)) * 2.0
+            score = _score(meas, w, h)
             if best is None or score < best[0]:
                 best = (score, rot)
     if best is None:
         return None
+    if incumbent is not None:
+        irot, ioff = incumbent
+        imeas = measure_model(model_path, irot, kicad_cli, offset=ioff)
+        if imeas:
+            iscore = _score(imeas, imeas["w"], imeas["h"])
+            if iscore <= best[0] + 1.5:
+                return None       # incumbent stands — do not touch it
     rot = best[1]
     final = measure_model(model_path, rot, kicad_cli)
     if not final:
@@ -519,6 +598,7 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
         if path_prefix:
             wired = path_prefix.rstrip("/") + "/" + path.name
         plan = None
+        keep_incumbent = False
         if align and str(path).lower().endswith((".step", ".stp")):
             try:
                 import pcbnew
@@ -532,9 +612,24 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
                 fh = pcbnew.ToMM(bbf.GetHeight())
                 if round(abs(fp.GetOrientationDegrees()) % 180) == 90:
                     fw, fh = fh, fw
-                plan = orient_plan(path, fw, fh, log=log)
+                incumbent = None
+                for m in fp.Models():
+                    if os.path.basename(m.m_Filename) == os.path.basename(
+                            str(path)):
+                        incumbent = (
+                            (m.m_Rotation.x, m.m_Rotation.y, m.m_Rotation.z),
+                            (m.m_Offset.x, m.m_Offset.y, m.m_Offset.z))
+                        break
+                plan = orient_plan(path, fw, fh, log=log,
+                                   incumbent=incumbent)
+                if plan is None and incumbent is not None:
+                    keep_incumbent = True
             except Exception as e:
                 log(f"    align skipped for {ref}: {e}")
+        if keep_incumbent:
+            report[status].append((ref, mpn, "incumbent-kept"))
+            log(f"  {ref} {mpn}: {status} (orientation already correct)")
+            continue
         attach(fp, wired, plan)
         report[status].append((ref, mpn, wired))
         log(f"  {ref} {mpn}: {status} -> {wired}")
