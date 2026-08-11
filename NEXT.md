@@ -91,7 +91,7 @@ placed → outline → planes → route → plane-finalize → DFM → fab in on
   two board connectors), enclosure bosses. Stripped before write-back.
 - **_legalize_bboxes** post-place overlap nudge (never moves locked parts).
 - Rigid connector pairs (CM5: two DF40 at 34.000 mm, pad-1 ends aligned) are pre-placed
-  + locked by a project script (razor-01-cm5/hardware/tools/cm5_pair.py). A first-class
+  + locked by a project script (utv-comms-bridge/hardware/tools/cm5_pair.py). A first-class
   `--rigid-group REF1,REF2@dx,dy` feature would generalize it.
 
 Result on the 129-part board: 92/92 nets, 216/216 pairs, 0 unrouted, 5 residual DRC
