@@ -138,3 +138,16 @@ UTV comms bridge results (129 parts, CM5 pair locked, 2-layer route 0.15/0.15):
 - 65x50 target needs a real dense placer (Quilter/EasyEDA compaction of the
   netlist) or escape-aware packing — compact alone plateaus ~5300 mm2 with the
   real (bigger) M1 footprints.
+
+## 2026-08-10 latest — `lint` subcommand (design-completeness rules)
+`fluxplace lint --board X [--json out] [--fail-on error|warning]` — catch unfinished
+wiring and connector smells BEFORE spending placement/routing effort. Rules v1:
+no-power-entry, no-io-connector, unwired-connector, dead-end-net, no-gnd-on-part,
+no-net-pads (info), **barrel-jack** (prefer LATCHING: JST VH/SM, Molex Micro/
+Mini-Fit, screw terminal — barrel plugs walk out under vibration),
+**power-on-friction-header** (same latching advice). Pure-python core
+(fluxplace/lint.py) on a flat pad list; tests/test_lint.py; suite 29 green.
+First run on the UTV board caught a REAL bug: R35/U6.SD_MODE strap net missing —
+the MAX98357A would never have left shutdown. Additive: no existing command changed.
+Next rule ideas: decoupling-cap-per-VDD presence, series-terminator on fast
+clocks, connector pin-1 silk, polarized-part silk markers.

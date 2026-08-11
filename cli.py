@@ -439,6 +439,25 @@ def cmd_compact(a):
     _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="COMPACT")
 
 
+def cmd_lint(a):
+    """Design-completeness lint: missing power wiring, dead-end nets,
+    unwired connectors, barrel-jack / friction-header connector smells."""
+    import json as _json
+    from fluxplace import lint as L
+    from fluxplace import kicad_io as IO
+    board = IO.load(a.board)
+    findings = L.run(L.pads_from_board(board))
+    n = L.summarize(findings)
+    if a.json:
+        with open(a.json, "w") as fh:
+            _json.dump(findings, fh, indent=1)
+        print(f"lint: wrote {a.json}")
+    if a.fail_on == "warning" and (n["error"] or n["warning"]):
+        raise SystemExit(1)
+    if a.fail_on == "error" and n["error"]:
+        raise SystemExit(1)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -558,6 +577,15 @@ def main(argv=None):
                           "compaction keeps unlocked same-side + THT parts out "
                           "(module escape area must stay clear — see NEXT.md)")
     pco.set_defaults(fn=cmd_compact)
+
+    pli = sub.add_parser("lint",
+                         help="design-completeness checks: missing power/IO "
+                              "wiring, dead-end nets, non-latching connectors")
+    pli.add_argument("--board", required=True)
+    pli.add_argument("--json", default=None, help="also write findings as JSON")
+    pli.add_argument("--fail-on", choices=["never", "error", "warning"],
+                     default="never", help="exit 1 at this severity (default never)")
+    pli.set_defaults(fn=cmd_lint)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
