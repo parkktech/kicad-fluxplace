@@ -227,13 +227,14 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
     compact_candidate_worker._keep = _keep
     parts, nets = IO.read_board(board)
     obstacles = CC.parse_obstacles(obstacle_specs or [], log=lambda *a: None)
+    from fluxplace import comprehend as CM
+    comp = CM.comprehend(CM.pads_from_board(board))
     nflip = 0
     if flip and flip != "none":
-        from fluxplace import comprehend as CM
-        comp = CM.comprehend(CM.pads_from_board(board))
         flips = CC.pick_flips(parts, flip, obstacles=obstacles, comp=comp)
         nflip = IO.flip_footprints(board, set(flips))
         parts, nets = IO.read_board(board)   # sides/pins changed — re-read
+    CC.constraint_seed(parts, comp, log=lambda *a: None)
     t0 = time.time()
     pos, st = CC.compact(parts, sx, sy, gap=gap, pack=pack,
                          obstacles=obstacles)

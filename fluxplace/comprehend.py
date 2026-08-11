@@ -203,11 +203,15 @@ def _bypass_caps(pads, by_part, net_pads):
         base = _basename(rail)
         if not (POWER_RE.match(base) or rail_voltage(rail) is not None):
             continue
-        # parents: non-passive parts on the SAME rail that also touch ground
+        # parents: ICs on the SAME rail that also touch ground. Connectors,
+        # LEDs, relays, switches and mechanicals are not "bypassed
+        # components" — a cap next to J10 is decoupling the RAIL, and its
+        # owner is the nearest IC on that rail.
         parents = []
         for q in net_pads.get(rail, ()):
             pr = q["ref"]
-            if pr == ref or re.match(r"^[RCLDY]\d+$|^X\d+$|^FB\d+$", pr, re.I):
+            if pr == ref or re.match(
+                    r"^([RCLDY]|X|FB|J|CN|P|LED|K|SW|MK|MH|TP)\d+$", pr, re.I):
                 continue
             if any(GND_RE.match(_basename(z["net"])) for z in by_part[pr]
                    if z["net"]):
@@ -221,11 +225,25 @@ def _bypass_caps(pads, by_part, net_pads):
             score = 1 if _VPIN_RE.match((q.get("pin") or "")) else 0
             cur = best.get(pr)
             if cur is None or score > cur[0]:
-                best[pr] = (score, q.get("pin") or q.get("pad") or "")
+                best[pr] = (score, q.get("pin") or q.get("pad") or "", q)
         farads = parse_value(by_part[ref][0].get("value", ""), "F")
-        for pr in sorted(best):
-            rows.append(dict(cap=ref, parent=pr, net=rail,
-                             pin=best[pr][1], farads=farads))
+        # ONE owner per cap (Quilter's model). Physical proximity stands in
+        # for the schematic explicit-wire rule when positions are known;
+        # netlist-only inputs fall back to the lowest refdes.
+        cx = by_part[ref][0].get("x")
+        cy = by_part[ref][0].get("y")
+
+        def _owner_rank(pr):
+            score, _, q = best[pr]
+            if cx is not None and q.get("x") is not None:
+                d = abs(q["x"] - cx) + abs(q["y"] - cy)
+            else:
+                d = 0.0
+            return (-score, d, pr)
+
+        owner = min(best, key=_owner_rank)
+        rows.append(dict(cap=ref, parent=owner, net=rail,
+                         pin=best[owner][1], farads=farads))
     # ascending-capacitance rank per (parent, net); unknown values rank last
     groups = defaultdict(list)
     for r in rows:
@@ -304,6 +322,13 @@ def _converters(by_part, net_pads):
             if not sw:
                 continue
             sw = sw[0]
+            # a real switch node is a tight 2-4 part net and NOT a named
+            # rail — a ferrite bead hanging off 3V3 touches many parts and
+            # must not promote every IC on the rail to "converter"
+            if len({q["ref"] for q in net_pads.get(sw, ())}) > 4:
+                continue
+            if POWER_RE.match(_basename(sw)) or rail_voltage(sw) is not None:
+                continue
             vout = [n for n in lnets if n != sw][0]
             # input rail: a power-family net on U that isn't SW/VOUT
             vins = sorted(n for n in unets
@@ -321,7 +346,10 @@ def _converters(by_part, net_pads):
 
 
 def _bulk_cap(net, by_part, net_pads):
-    """Largest-farad grounded cap on `net` (deterministic: ties by refdes)."""
+    """The hot-loop cap for a converter side: the largest grounded cap in the
+    CERAMIC range (100n..100u) — that is what carries the switching ripple.
+    A >100u bulk electrolytic only wins when no ceramic exists. Deterministic:
+    ties by refdes (vs Quilter's documented 'somewhat arbitrary' pick)."""
     if not net:
         return None
     cands = []
@@ -332,8 +360,10 @@ def _bulk_cap(net, by_part, net_pads):
         if not any(GND_RE.match(_basename(z["net"])) for z in by_part[r]
                    if z["net"]):
             continue
-        cands.append((-(parse_value(by_part[r][0].get("value", ""), "F") or 0.0), r))
-    return min(cands)[1] if cands else None
+        f = parse_value(by_part[r][0].get("value", ""), "F") or 0.0
+        ceramic = 1e-7 <= f <= 1e-4
+        cands.append((not ceramic, -f, r))
+    return min(cands)[2] if cands else None
 
 
 # ------------------------------------------------------------------- top level

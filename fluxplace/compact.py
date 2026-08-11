@@ -21,7 +21,7 @@ import math
 import re
 
 __all__ = ["compact", "parse_obstacles", "pick_flips", "assign_regions",
-           "cluster_anchor_map"]
+           "cluster_anchor_map", "constraint_seed"]
 
 
 def parse_obstacles(specs, log=print):
@@ -166,6 +166,77 @@ def pick_flips(parts, mode, obstacles=(), comp=None):
         if not blocked:
             out.append(r)
     return out
+
+
+def constraint_seed(parts, comp, log=print):
+    """PRC-driven pre-seed: before compacting, walk unlocked members of the
+    placement constraints next to their anchor part — converter hot-loop
+    members ring their U, diff-pair series elements pair up side by side,
+    crystal clusters hug the driver. The seed is only a proposal: soft/hard
+    legalization resolves collisions and the router gate has the last word.
+    Returns the number of parts moved."""
+    moved = 0
+
+    def _ring_slots(aref, member_dims):
+        a = parts[aref]
+        slots = []
+        k = 0
+        for (mw, mh) in member_dims:
+            side = k % 4
+            step = (k // 4 + 1)
+            if side == 0:
+                slots.append((a["x"] + a["w"] / 2 + mw / 2 + 0.4,
+                              a["y"] + (step - 1) * (mh + 0.4)))
+            elif side == 1:
+                slots.append((a["x"] - a["w"] / 2 - mw / 2 - 0.4,
+                              a["y"] + (step - 1) * (mh + 0.4)))
+            elif side == 2:
+                slots.append((a["x"], a["y"] + a["h"] / 2 + mh / 2 + 0.4))
+            else:
+                slots.append((a["x"], a["y"] - a["h"] / 2 - mh / 2 - 0.4))
+            k += 1
+        return slots
+
+    def _seed_group(aref, members):
+        nonlocal moved
+        if aref not in parts:
+            return
+        live = [m for m in members
+                if m in parts and not parts[m].get("locked")]
+        if not live:
+            return
+        slots = _ring_slots(aref, [(parts[m]["w"], parts[m]["h"])
+                                   for m in live])
+        for m, (x, y) in zip(live, slots):
+            if abs(parts[m]["x"] - x) + abs(parts[m]["y"] - y) > 4.0:
+                parts[m]["x"] = x
+                parts[m]["y"] = y
+                moved += 1
+
+    for cv in comp.get("converters", ()):
+        _seed_group(cv["u"], [m for m in cv.get("hot_loop", ())
+                              if m != cv["u"]])
+    for xt in comp.get("crystals", ()):
+        _seed_group(xt["crystal"], list(xt.get("series_r", ())) +
+                    list(xt.get("load_caps", ())))
+    for pr in comp.get("diff_pairs", ()):
+        segs = set(pr.get("segments", ()))
+        if len(segs) <= 2:
+            continue
+        series = sorted(r for r, p in parts.items()
+                        if re.match(r"^[RC]\d+$", r)
+                        and not p.get("locked")
+                        and len(set(p.get("pins", {})) & segs) == 2)
+        # side-by-side: snap partner next to the first of each pair
+        for i in range(0, len(series) - 1, 2):
+            a, b = series[i], series[i + 1]
+            tx = parts[a]["x"] + parts[a]["w"] / 2 + parts[b]["w"] / 2 + 0.35
+            ty = parts[a]["y"]
+            if abs(parts[b]["x"] - tx) + abs(parts[b]["y"] - ty) > 2.0:
+                parts[b]["x"] = tx
+                parts[b]["y"] = ty
+                moved += 1
+    return moved
 
 
 def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),

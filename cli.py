@@ -574,6 +574,14 @@ def cmd_compact(a):
         print(f"    cluster anchors: {len(camap)} parts stick to their "
               f"cluster's locked centroid")
 
+    if not a.no_prc_seed:
+        from fluxplace import comprehend as CM
+        comp = CM.comprehend(CM.pads_from_board(board))
+        n = C.constraint_seed(parts, comp)
+        if n:
+            print(f"    PRC seed: walked {n} constraint members next to "
+                  f"their anchor (hot loops, pair elements, crystals)")
+
     t0 = time.time()
     pos, st = C.compact(parts, a.sx, a.sy, anchor=anchor, gap=a.gap,
                         pack=a.pack, obstacles=obstacles,
@@ -834,6 +842,9 @@ def main(argv=None):
     pco.add_argument("--keep-copper", action="store_true",
                      help="keep existing tracks/vias (router extends partial "
                           "routes instead of starting over)")
+    pco.add_argument("--no-prc-seed", action="store_true",
+                     help="skip the physics pre-seed (hot-loop members, pair "
+                          "elements, crystal clusters walked to their anchor)")
     pco.set_defaults(fn=cmd_compact)
 
     pli = sub.add_parser("lint",
