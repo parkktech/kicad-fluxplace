@@ -202,47 +202,185 @@ def cmd_fab(a):
     print(f"DRC {res['drc']}; package at {res['out']}")
 
 
+_POWER_HEAVY = ("VBATT", "VBAT_IN", "VIN", "12V", "24V", "28V", "30V", "_SW")
+_POWER_ANY = ("VCC", "VDD", "PWR", "5V", "3V3", "1V8", "VBUS", "AVDD", "RAIL")
+
+
+def _classify_power(nets, plane_nets, big_fanout):
+    """name/fanout heuristic -> {netname: trace_width_mm} for the router's
+    route-power-first-and-wide discipline."""
+    widths = {}
+    for n, refs in nets.items():
+        if n in plane_nets:
+            continue
+        u = n.upper()
+        if any(k in u for k in _POWER_HEAVY):
+            widths[n] = 1.0
+        elif u.startswith("+") or any(k in u for k in _POWER_ANY):
+            widths[n] = 0.8 if ("5V" in u or "VBUS" in u) else 0.5
+        elif len(refs) >= big_fanout:
+            widths[n] = 0.5
+    return widths
+
+
+def _legalize_bboxes(parts, pos, rot, max_pass=4, gap=0.3):
+    """Post-placement insurance: nudge the smaller of any two overlapping part
+    bboxes apart (builder collisions have slipped through on keepout-bearing
+    footprints — an overlap here is a guaranteed short or courtyard DRC)."""
+    import math
+    moved = 0
+    for _ in range(max_pass):
+        dirty = False
+        refs = list(pos)
+        for i in range(len(refs)):
+            for j in range(i + 1, len(refs)):
+                r1, r2 = refs[i], refs[j]
+                w1, h1 = P.eff_size(parts, r1, rot.get(r1, 0.0), gap)
+                w2, h2 = P.eff_size(parts, r2, rot.get(r2, 0.0), gap)
+                x1, y1 = pos[r1]; x2, y2 = pos[r2]
+                ox = (w1 + w2) / 2 - abs(x1 - x2)
+                oy = (h1 + h2) / 2 - abs(y1 - y2)
+                if ox <= 0 or oy <= 0:
+                    continue
+                l1 = parts[r1].get("locked"); l2 = parts[r2].get("locked")
+                if l1 and l2:
+                    continue          # both are hard anchors — nothing to nudge
+                if l1 or l2:
+                    small = r2 if l1 else r1   # only the unlocked one may move
+                else:
+                    small = r1 if w1 * h1 <= w2 * h2 else r2
+                other = r2 if small == r1 else r1
+                sx, sy = pos[small]; bx, by = pos[other]
+                if ox < oy:
+                    sx += (ox + 0.05) * (1 if sx >= bx else -1)
+                else:
+                    sy += (oy + 0.05) * (1 if sy >= by else -1)
+                pos[small] = (sx, sy)
+                moved += 1; dirty = True
+        if not dirty:
+            break
+    return moved
+
+
 def cmd_auto(a):
-    """The 'magic' endpoint: board in -> PLACE -> ROUTE -> FAB -> review-ready package.
-    Each stage is logged with its verdict; the router is pluggable (KRT by default)."""
-    import os, subprocess, time
-    from fluxplace import fab
+    """The 'magic' endpoint: board in -> PLACE -> OUTLINE -> PLANES -> ROUTE ->
+    PLANE-FINALIZE -> DFM -> FAB. Each stage logged; router pluggable (KRT)."""
+    import os, subprocess, time, json
+    from fluxplace import fab, planes
+    import pcbnew
     os.makedirs(a.out, exist_ok=True)
     placed = os.path.join(a.out, "placed.kicad_pcb")
     routed = os.path.join(a.out, "routed.kicad_pcb")
+    finald = os.path.join(a.out, "final.kicad_pcb")
+    NSTAGE = 6
 
-    # ---- [1] PLACE (route-aware, escape-aware) ------------------------------------
+    # ---- [1] PLACE (route-aware, escape-aware) + overlap legalize ------------------
     board, parts, nets, IO = _load(a.board)
+    # phantom obstacles: rigid module shadows / enclosure bosses the placer must
+    # respect but that have no footprint (e.g. the body of a plug-on SoM whose
+    # connectors ARE on the board). Locked phantom parts, stripped before write-back.
+    phantoms = []
+    for i, spec in enumerate(a.obstacle or []):
+        fields = spec.split(":")
+        try:
+            ox, oy, ow, oh = [float(v) for v in fields[:4]]
+        except ValueError:
+            print(f"    ! bad --obstacle '{spec}' (want X:Y:W:H[:F|B] in mm) — skipped"); continue
+        side = fields[4].upper() if len(fields) > 4 else "F"
+        ref = f"__OBST{i}"
+        parts[ref] = dict(value="obstacle", footprint="phantom", w=ow, h=oh,
+                          x=ox, y=oy, off=(0.0, 0.0), locked=True, pins={},
+                          pitch=999.0, drills=0, npads=0, side=side)
+        phantoms.append(ref)
     cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
     t0 = time.time()
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board), pad=a.pad)
+    nudged = _legalize_bboxes(parts, pos, rot)
+    for ref in phantoms:
+        pos.pop(ref, None); rot.pop(ref, None); parts.pop(ref, None)
     IO.apply_orientations(board, rot, skip_locked=True)
     IO.apply_positions(board, pos, parts, skip_locked=True)
-    IO.save(board, placed)
-    print(f"[1/3] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}  ({time.time()-t0:.0f}s)")
+    print(f"[1/{NSTAGE}] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}"
+          f"  legalize-nudges={nudged}  ({time.time()-t0:.0f}s)")
 
-    # ---- [2] ROUTE (KRT route-fresh; ripping+rerouting keeps GND planes) -----------
+    # ---- [2] OUTLINE — the board follows the parts. Skipping this strands the ------
+    # placement outside Edge.Cuts and the router sees every pad as OFF-BOARD.
+    xs0 = []; ys0 = []; xs1 = []; ys1 = []
+    for r, (x, y) in pos.items():
+        w, h = P.eff_size(parts, r, rot.get(r, 0.0), 0.0)
+        xs0.append(x - w / 2); ys0.append(y - h / 2)
+        xs1.append(x + w / 2); ys1.append(y + h / 2)
+    dims = IO.shrinkwrap_outline(board, min(xs0), min(ys0), max(xs1), max(ys1),
+                                 margin=a.margin)
+    print(f"[2/{NSTAGE}] outline shrink-wrapped: {dims[0]:.1f} x {dims[1]:.1f} mm")
+
+    # ---- [3] PLANES — pour plane nets on all routing layers + stitch grid ----------
+    plane_nets = [] if a.no_planes else list(a.plane_nets)
+    if plane_nets:
+        layer_ids = [l for l in board.GetEnabledLayers().CuStack()]
+        nz = planes.pour(board, plane_nets[0], layers=layer_ids)
+        nv = planes.stitch(board, plane_nets[0])
+        print(f"[3/{NSTAGE}] planes: {nz} pours + {nv} stitch vias ({plane_nets[0]}, solid pads)")
+    else:
+        print(f"[3/{NSTAGE}] planes: skipped (--no-planes)")
+    IO.save(board, placed)
+
+    # ---- [4] ROUTE — explicit net list (KRT routes NOTHING without --nets), --------
+    # power nets first and wide, plane nets excluded (they are pours, not traces).
     t0 = time.time()
-    # route ALL nets fresh (the placement is unrouted); --keep-input-copper preserves any
-    # poured GND/power planes. No --force-reroute: with no nets listed it routes everything.
+    route_nets = [n for n in nets if n not in plane_nets]
+    pw = _classify_power(nets, plane_nets, a.big_fanout)
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
-           placed, routed, "--keep-input-copper", "--layers", *a.layers,
+           placed, "--output", routed, "--keep-input-copper", "--layers", *a.layers,
            "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.6", "--via-drill", "0.3"]
+           "--via-size", "0.45", "--via-drill", "0.2", "--nets", *route_nets]
+    if pw:
+        cmd += ["--power-nets", *pw.keys(), "--power-nets-widths",
+                *[str(w) for w in pw.values()]]
     r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
                        timeout=a.route_timeout)
     ok = os.path.exists(routed)
-    src = routed if ok else placed
     if not ok:
         print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
-    print(f"[2/3] routed via {os.path.basename(a.router_py)}  "
-          f"({'ok' if ok else 'router produced no board — fabbing the placement'})"
-          f"  ({time.time()-t0:.0f}s)")
+    summ = ""
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("JSON_SUMMARY:"):
+            try:
+                js = json.loads(line[13:])
+                summ = (f"  {js.get('successful',0)} ok / {js.get('failed',0)} failed"
+                        f", pairs {js.get('pad_pairs_connected','?')}/{js.get('pad_pairs_total','?')}")
+            except Exception:
+                pass
+    print(f"[4/{NSTAGE}] routed {len(route_nets)} nets{summ}  ({time.time()-t0:.0f}s)")
+    src = routed if ok else placed
 
-    # ---- [3] FAB -------------------------------------------------------------------
+    # ---- [5] PLANE FINALIZE + DFM — a pour alone connects nothing the fill can't ---
+    # physically reach (fine-pitch rows): one router pass ON the plane nets adds the
+    # stub+via escapes. Then clamp sub-fab vias, embed rules, refill, sync .kicad_pro.
+    if plane_nets and ok:
+        cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
+               routed, "--output", finald, "--keep-input-copper", "--layers", *a.layers,
+               "--track-width", str(a.track), "--clearance", str(max(a.clearance, 0.12)),
+               "--via-size", "0.45", "--via-drill", "0.2", "--nets", *plane_nets,
+               "--max-ripup", "60"]
+        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
+                           timeout=a.route_timeout)
+        src = finald if os.path.exists(finald) else routed
+    b2 = pcbnew.LoadBoard(src)
+    clamped, shrunk, grazing = planes.finalize_dfm(b2)
+    planes.refill(b2)
+    b2.Save(src)
+    pro = os.path.splitext(src)[0] + ".kicad_pro"
+    planes.sync_project_rules(pro, netclass_clearance=min(a.clearance, 0.13) * 0.75)
+    print(f"[5/{NSTAGE}] plane finalize + DFM: {clamped} vias clamped, {shrunk} graze-shrunk,"
+          f" zones filled, rules embedded (board + {os.path.basename(pro)})")
+    for (gx, gy, gap) in grazing:
+        print(f"    ! via at ({gx:.2f},{gy:.2f}) still grazes a pad ({gap} mm air) — review")
+
+    # ---- [6] FAB -------------------------------------------------------------------
     res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
     verdict = res["drc"]
-    print(f"[3/3] fab package -> {res['out']}  DRC {verdict}"
+    print(f"[6/{NSTAGE}] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
              if res.get("violations") is not None else ""))
     print(f"AUTO complete: {a.out}/fab  ({verdict})")
@@ -327,6 +465,15 @@ def main(argv=None):
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     pau.add_argument("--route-timeout", type=int, default=1800)
     pau.add_argument("--kicad-cli", default="kicad-cli")
+    pau.add_argument("--margin", type=float, default=2.0,
+                     help="Edge.Cuts margin around the shrink-wrapped placement (mm)")
+    pau.add_argument("--plane-nets", nargs="+", default=["GND"],
+                     help="nets poured as planes + stitched, excluded from trace routing")
+    pau.add_argument("--no-planes", action="store_true",
+                     help="skip the plane pour/stitch stage entirely")
+    pau.add_argument("--obstacle", action="append", default=[],
+                     help="phantom keep-out rect X:Y:W:H (mm), repeatable — e.g. a "
+                          "plug-on module body over its locked board connectors")
     pau.set_defaults(fn=cmd_auto)
 
     pc = sub.add_parser("calibrate",

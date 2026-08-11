@@ -69,3 +69,47 @@
 - Sizing parts by pad bbox / courtyard alone — use the FULL footprint bbox.
 - Boolean THT flag (one mounting hole walled off the whole CM5 module).
 - Blocking pin cells at full body blockage (false congestion at every connector).
+
+## 2026-08-10 late session — auto pipeline overhaul (UTV comms bridge board, 129 parts)
+Validated end-to-end on a fresh CM5 carrier netlist. `auto` was effectively broken; now:
+placed → outline → planes → route → plane-finalize → DFM → fab in one command.
+- **cmd_auto never shrink-wrapped Edge.Cuts** (cmd_place did). Placement landed outside
+  the outline; KRT saw every pad off-board and silently routed 0 nets. Fixed: stage [2].
+- **KRT routes NOTHING without --nets** (the "no list = everything" comment was wrong).
+  Fixed: explicit net list + `--power-nets/--power-nets-widths` from a name/fanout
+  classifier (`_classify_power`).
+- **New fluxplace/planes.py**: GND pours on all Cu layers (SOLID pad connection —
+  thermal spokes starve at fine pitch), collision-safe stitch grid, zone refill,
+  `finalize_dfm` (JLCPCB rule floor embedded in board, via clamp, graze-shrink),
+  `sync_project_rules` (.kicad_pro OVERRIDES the board at load — must be written too).
+  pcbnew gotcha: hold refs to ZONE/SHAPE_POLY_SET/removed items until after Save() —
+  GC'd SWIG proxies segfault inside Save.
+- **eff_size double-rotated pre-rotated parts**: stored w/h are at `angle0` but every
+  call site passes ABSOLUTE angles. Locked 90°-placed connectors were modeled sideways
+  (decap walk put caps ON the DF40 pad rows). eff_size now rotates by the delta.
+- **--obstacle X:Y:W:H**: phantom locked rects for plug-on module bodies (SoM over its
+  two board connectors), enclosure bosses. Stripped before write-back.
+- **_legalize_bboxes** post-place overlap nudge (never moves locked parts).
+- Rigid connector pairs (CM5: two DF40 at 34.000 mm, pad-1 ends aligned) are pre-placed
+  + locked by a project script (razor-01-cm5/hardware/tools/cm5_pair.py). A first-class
+  `--rigid-group REF1,REF2@dx,dy` feature would generalize it.
+
+Result on the 129-part board: 92/92 nets, 216/216 pairs, 0 unrouted, 5 residual DRC
+items — all KRT plane-finalize vias grazing 0.4 mm-pitch pads by 0.02–0.17 mm.
+### Upstream (KRT) issues found
+- Plane-finalize places 0.45 vias INLINE with 0.4-pitch connector rows: geometric max
+  air 0.075 mm < 0.0975 rule. Wants a diagonal-offset or smaller-via policy near
+  fine-pitch pads (graze-shrink in finalize_dfm mitigates the 0.075 cases only).
+- **KRT is run-to-run nondeterministic** (same board+args → 0 or 1 unrouted, different
+  via spots). Seed or thread-order pin needed before regression-testing against it.
+
+## Back-side module flow (CM5-Minima style) — works; density is now the frontier
+- `--obstacle` accepts `X:Y:W:H[:F|B]`; side-aware phantoms verified: back-side
+  module shadow blocks back SMDs and THT (pierces both) but frees the entire top.
+  129-part board: module zone clean, 0 unrouted (route-out5).
+- Board sizes across runs: front-module 109x91, back-module 140x110 — the placer's
+  air, not the side choice, is the limiter (the RAZOR benchmark is 124x114 too).
+  Target-class boards (65x50) need real density work: harder shrink under the gate,
+  denser builder auditioning, and shrink that can pull toward LOCKED anchors.
+- `--pad 0.3` is a regression (470 overlap nudges, 2 unrouted): the builder's
+  corridors assume ~0.45. Don't ship lower without retuning the route model.

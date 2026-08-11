@@ -702,9 +702,12 @@ def _size(parts, r, pad=0.6):
 
 
 def eff_size(parts, r, angle=0.0, pad=0.6):
-    """Bounding size accounting for rotation (swap for 90/270, rotated extent for fine)."""
+    """Bounding size at ABSOLUTE `angle` degrees. The stored w/h were measured at
+    the part's as-read orientation (`angle0`), so rotate by the DELTA — passing the
+    part's own current angle must be an identity, not a swap (pre-rotated locked
+    anchors like a SoM connector pair were being modeled sideways)."""
     w, h = _size(parts, r, pad)
-    a = angle % 180
+    a = (angle - parts[r].get("angle0", 0.0)) % 180
     if abs(a) < 1e-6 or abs(a - 180) < 1e-6:
         return w, h
     if abs(a - 90) < 1e-6:
