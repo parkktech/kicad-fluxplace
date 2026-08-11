@@ -43,10 +43,17 @@ def _model(parts):
         P[ref] = dict(
             c=[p["x"], p["y"]], hw=p["w"] / 2.0, hh=p["h"] / 2.0,
             side=p.get("side", "F"),
+            # small passives pack at production spacing; big parts keep air
+            gs=0.55 if max(p["w"], p["h"]) < 2.2 else 1.0,
             # any real drill penetrates both sides; fall back to the tht flag
             tht=(p.get("drills", 0) > 0 or p.get("tht", False)),
             locked=p.get("locked", False))
     return P
+
+
+def _g(p, q, g):
+    """pair gap: scaled down when BOTH parts are small passives."""
+    return g * max(p.get("gs", 1.0), q.get("gs", 1.0))
 
 
 def _blocks(p, ob, tht_bands):
@@ -99,8 +106,9 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
     def collides(p, q):
         if p["side"] != q["side"] and not (p["tht"] or q["tht"]):
             return False
-        return (abs(p["c"][0] - q["c"][0]) < p["hw"] + q["hw"] + g and
-                abs(p["c"][1] - q["c"][1]) < p["hh"] + q["hh"] + g)
+        gg = _g(p, q, g)
+        return (abs(p["c"][0] - q["c"][0]) < p["hw"] + q["hw"] + gg and
+                abs(p["c"][1] - q["c"][1]) < p["hh"] + q["hh"] + gg)
 
     # ---- soft legalize: pairwise push-apart + obstacle keep-out ----------
     def soft_pass(iters):
@@ -114,8 +122,9 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
                     q = P[r2]
                     if not collides(p, q):
                         continue
-                    ox = p["hw"] + q["hw"] + g - abs(p["c"][0] - q["c"][0])
-                    oy = p["hh"] + q["hh"] + g - abs(p["c"][1] - q["c"][1])
+                    gg = _g(p, q, g)
+                    ox = p["hw"] + q["hw"] + gg - abs(p["c"][0] - q["c"][0])
+                    oy = p["hh"] + q["hh"] + gg - abs(p["c"][1] - q["c"][1])
                     axis = 0 if ox < oy else 1
                     pen = (ox if axis == 0 else oy) + 0.01
                     s = 1.0 if p["c"][axis] < q["c"][axis] else -1.0
@@ -205,9 +214,10 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
             if q["side"] != p["side"] and not (p["tht"] or q["tht"]):
                 continue
             qh = (q["hw"], q["hh"])
-            if abs(p["c"][oth] - q["c"][oth]) >= h[oth] + qh[oth] + g:
+            gg = _g(p, q, g)
+            if abs(p["c"][oth] - q["c"][oth]) >= h[oth] + qh[oth] + gg:
                 continue
-            edge = h[axis] + qh[axis] + g
+            edge = h[axis] + qh[axis] + gg
             if q["c"][axis] >= p["c"][axis] and q["c"][axis] - edge < hi:
                 hi = max(lo, q["c"][axis] - edge)
             if q["c"][axis] <= p["c"][axis] and q["c"][axis] + edge > lo:

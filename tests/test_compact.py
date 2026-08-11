@@ -34,11 +34,13 @@ def test_no_overlaps_after_legalize():
     pos, st = C.compact(parts, 1.0, 1.0, gap=0.4, pack=0)
     assert st["resid"] == 0
     refs = sorted(pos)
+    # small parts pack at the adaptive (scaled) gap — 0.4 * 0.55
+    eff = 0.4 * 0.55 - 0.01
     for i, r1 in enumerate(refs):
         for r2 in refs[i + 1:]:
             dx = abs(pos[r1][0] - pos[r2][0])
             dy = abs(pos[r1][1] - pos[r2][1])
-            assert dx > 2.0 + 0.39 or dy > 2.0 + 0.39, (r1, r2, dx, dy)
+            assert dx > 2.0 + eff or dy > 2.0 + eff, (r1, r2, dx, dy)
 
 
 def test_locked_never_moves():
