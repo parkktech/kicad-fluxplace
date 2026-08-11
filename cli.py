@@ -188,8 +188,13 @@ def cmd_tournament(a):
     if not jar or not os.path.exists(jar):
         print("need --jar or $FREEROUTING_JAR (freerouting 2.2.4+)")
         return
+    grid = TN.parse_compact_grid(a.compact_grid) if a.compact_grid else None
+    planes = None
+    if a.plane_nets:
+        planes = tuple(tuple(p.split("=", 1)) for p in a.plane_nets)
     results, winner = TN.run(a.board, jar, a.workdir, passes=a.passes, jobs=a.jobs,
-                             resume=a.resume, oit=a.oit)
+                             resume=a.resume, oit=a.oit, compact_grid=grid,
+                             obstacles=list(a.obstacle), plane_nets=planes)
     if winner and a.apply_winner:
         ok, out = TN.import_winner(a.workdir, winner["idx"])
         print(f"winner copper imported: {out} (ok={ok})")
@@ -428,6 +433,19 @@ def cmd_compact(a):
     from fluxplace import compact as C
     os.makedirs(a.out, exist_ok=True)
     board, parts, nets, IO = _load(a.board)
+    # compact REROUTES: stale copper from the source board poisons planes
+    # (pour sees existing zones -> 0 pours) and DRC (old tracks short the
+    # new route). Strip tracks/vias/zones; refs held until exit (SWIG GC).
+    _keep = []
+    for t in list(board.GetTracks()):
+        _keep.append(t)
+        board.Remove(t)
+    for z in list(board.Zones()):
+        _keep.append(z)
+        board.Remove(z)
+    cmd_compact._keep = _keep
+    if _keep:
+        print(f"    stripped {len(_keep)} stale tracks/vias/zones from source")
     obstacles = C.parse_obstacles(a.obstacle)
     anchor = None
     if a.anchor:
@@ -569,6 +587,14 @@ def main(argv=None):
                     help="reuse existing candidate boards/sessions; adopt live JVMs")
     pt.add_argument("--oit", type=float, default=None,
                     help="freerouting optimizer improvement threshold %% (caps the silent optimizer)")
+    pt.add_argument("--compact-grid", default=None,
+                    help="seed candidates by COMPACTING the current placement: "
+                         "'sx:sy[:gap[:pack]],...' (replaces the placer grid)")
+    pt.add_argument("--obstacle", action="append", default=[],
+                    help="keep-out rect X:Y:W:H[:F|B] for compact candidates")
+    pt.add_argument("--plane-nets", nargs="+", default=None,
+                    help="candidate plane pours as Layer=Net pairs, e.g. "
+                         "In1.Cu=GND In2.Cu=+5V (default: GND + VIN_PROT)")
     pt.set_defaults(fn=cmd_tournament)
 
     pf = sub.add_parser("fab", help="emit gerbers/drill/place/DRC package for review")

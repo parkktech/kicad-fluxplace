@@ -117,3 +117,10 @@ def test_heavy_squeeze_converges_clean():
             ox = parts[a]["w"] / 2 + parts[b_]["w"] / 2 - dx
             oy = parts[a]["h"] / 2 + parts[b_]["h"] / 2 - dy
             assert ox <= 0.01 or oy <= 0.01, (a, b_, ox, oy)
+
+
+def test_tournament_grid_parse():
+    from fluxplace import tournament as TN
+    g = TN.parse_compact_grid("0.44:0.47,0.5:0.45:0.4,0.55:0.4:0.42:6")
+    assert g == [(0.44, 0.47, 0.45, 3), (0.5, 0.45, 0.4, 3),
+                 (0.55, 0.4, 0.42, 6)]

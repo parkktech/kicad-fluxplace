@@ -71,6 +71,15 @@ def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter):
         json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
         return
 
+    _materialize(board, parts, pos, angles, workdir, idx, meta,
+                 plane_nets=(("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")))
+
+
+def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
+    """Shared tail: apply placement, shrinkwrap, pour planes, save, DSN."""
+    import pcbnew
+    from fluxplace import kicad_io as IO, placement as P
+
     IO.apply_orientations(board, angles)
     IO.apply_positions(board, pos, parts)
     xs0 = []; ys0 = []; xs1 = []; ys1 = []
@@ -86,7 +95,7 @@ def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter):
     mm = pcbnew.FromMM
     pts = [(mm(bx0 - 1.5), mm(by0 - 1.5)), (mm(bx1 + 1.5), mm(by0 - 1.5)),
            (mm(bx1 + 1.5), mm(by1 + 1.5)), (mm(bx0 - 1.5), mm(by1 + 1.5))]
-    for layer_name, net_name in (("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")):
+    for layer_name, net_name in plane_nets:
         net = board.FindNet(net_name)
         if not net:
             continue
@@ -109,6 +118,54 @@ def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter):
     ok = bool(pcbnew.ExportSpecctraDSN(board, os.path.join(workdir, f"cand_{idx}.dsn")))
     meta["status"] = "queued" if ok else "dsn-failed"
     json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
+
+
+def parse_compact_grid(spec):
+    """'sx:sy[:gap[:pack]],...' -> [(sx, sy, gap, pack)]."""
+    out = []
+    for item in (spec or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        f = item.split(":")
+        out.append((float(f[0]), float(f[1]),
+                    float(f[2]) if len(f) > 2 else 0.45,
+                    int(f[3]) if len(f) > 3 else 3))
+    return out
+
+
+def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
+                             obstacle_specs, plane_nets):
+    """Fresh interpreter: candidate = COMPACTED current placement (strips
+    stale copper first), gate-scored like any placer candidate."""
+    sys.path.insert(0, _REPO)
+    from fluxplace import kicad_io as IO, graph as G, placement as P
+    from fluxplace import compact as CC, route as R
+
+    board = IO.load(board_path)
+    for t in list(board.GetTracks()):
+        board.Remove(t)
+    for z in list(board.Zones()):
+        board.Remove(z)
+    parts, nets = IO.read_board(board)
+    obstacles = CC.parse_obstacles(obstacle_specs or [], log=lambda *a: None)
+    t0 = time.time()
+    pos, st = CC.compact(parts, sx, sy, gap=gap, pack=pack,
+                         obstacles=obstacles)
+    cg = G.build(parts, nets)
+    rep = R.score(parts, pos, cg)
+    meta = dict(idx=idx, mode="compact", fill=sx, aspect=sy, pad=gap,
+                jitter=pack, resid=st["resid"], overflow=rep["overflow"],
+                gate_wl=rep["wirelength"], hpwl=round(P.hpwl(parts, cg, pos)),
+                place_secs=round(time.time() - t0, 1),
+                routable=sorted(set(cg.signal_nets) | set(cg.power_traces)))
+    if st["resid"] or rep["overflow"] > 0:
+        meta["status"] = "overlaps" if st["resid"] else "gate-rejected"
+        json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
+        return
+    angles = {r: parts[r].get("angle0", 0.0) for r in parts}
+    _materialize(board, parts, pos, angles, workdir, idx, meta,
+                 plane_nets=tuple(plane_nets))
 
 
 def _ses_metrics(ses_path, log_path, routable):
@@ -138,21 +195,32 @@ def _ses_metrics(ses_path, log_path, routable):
 
 
 def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
-        place_jobs=2, resume=False, oit=None):
+        place_jobs=2, resume=False, oit=None, compact_grid=None, obstacles=(),
+        plane_nets=None):
     """Full tournament. Orchestration only — no pcbnew in this process.
     `resume`: reuse existing cand_*.json / .ses; adopt orphaned live JVMs.
     `oit`: freerouting optimization-improvement threshold (%) — caps the silent
     post-routing optimizer phase that otherwise runs for an hour per candidate."""
     os.makedirs(workdir, exist_ok=True)
     cands = candidates or CANDIDATES
+    if compact_grid:
+        cands = list(compact_grid)
+    plane_nets = tuple(plane_nets or (("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")))
 
     # ---- stage 1: place candidates in fresh interpreters (parallel) ----
     def spawn_place(i, c):
-        fill, aspect, pad, jitter = c
-        code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
-                f"from fluxplace.tournament import candidate_worker; "
-                f"candidate_worker({board_path!r}, {workdir!r}, {i}, "
-                f"{fill}, {aspect}, {pad}, {jitter})")
+        if compact_grid:
+            sx, sy, gp, pk = c
+            code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
+                    f"from fluxplace.tournament import compact_candidate_worker; "
+                    f"compact_candidate_worker({board_path!r}, {workdir!r}, {i}, "
+                    f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r})")
+        else:
+            fill, aspect, pad, jitter = c
+            code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
+                    f"from fluxplace.tournament import candidate_worker; "
+                    f"candidate_worker({board_path!r}, {workdir!r}, {i}, "
+                    f"{fill}, {aspect}, {pad}, {jitter})")
         return subprocess.Popen([sys.executable, "-c", code],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=dict(os.environ))
