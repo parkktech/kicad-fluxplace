@@ -458,6 +458,33 @@ def cmd_lint(a):
         raise SystemExit(1)
 
 
+def cmd_models(a):
+    """Fetch real manufacturer STEP models (DigiKey /media, Mouser assist)
+    for footprints with missing/broken 3D models, wire them in, save."""
+    import json as _json
+    from fluxplace import models as M
+    from fluxplace import kicad_io as IO
+    board = IO.load(a.board)
+    if a.audit_only:
+        todo = M.audit_board(board)
+        for fp, why in todo:
+            print(f"  {fp.GetReference():6s} {why:12s} "
+                  f"{str(fp.GetFPID().GetLibItemName())[:50]}")
+        print(f"models: {len(todo)} footprints need a model")
+        return
+    mpn_map = {}
+    if a.map:
+        mpn_map.update(_json.load(open(a.map)))
+    for spec in a.mpn or []:
+        ref, _, mpn = spec.partition("=")
+        mpn_map[ref] = mpn
+    rep = M.sync(board, mpn_map, a.models_dir, path_prefix=a.path_prefix)
+    board.Save(a.out or a.board)
+    print(f"models: {len(rep['fetched'])} fetched, {len(rep['cached'])} cached, "
+          f"{len(rep['failed'])} failed, {len(rep['skipped'])} unmapped "
+          f"-> {a.out or a.board}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -590,6 +617,24 @@ def main(argv=None):
     pli.add_argument("--fail-on", choices=["never", "error", "warning"],
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
+
+    pmo = sub.add_parser("models",
+                         help="fetch real vendor STEP models (DigiKey/Mouser "
+                              "APIs) for footprints missing 3D models")
+    pmo.add_argument("--board", required=True)
+    pmo.add_argument("--out", default=None, help="save here (default: in place)")
+    pmo.add_argument("--models-dir", default="3dmodels",
+                     help="directory to store fetched .step files")
+    pmo.add_argument("--map", default=None,
+                     help="JSON file {ref: MPN} for parts needing models")
+    pmo.add_argument("--mpn", action="append", default=[],
+                     help="inline mapping REF=MPN, repeatable")
+    pmo.add_argument("--path-prefix", default=None,
+                     help="write model paths as PREFIX/name.step (e.g. "
+                          "'${KIPRJMOD}/../lib/3dmodels') instead of absolute")
+    pmo.add_argument("--audit-only", action="store_true",
+                     help="just list footprints with missing/broken models")
+    pmo.set_defaults(fn=cmd_models)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")

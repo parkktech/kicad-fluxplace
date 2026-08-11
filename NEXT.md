@@ -151,3 +151,19 @@ First run on the UTV board caught a REAL bug: R35/U6.SD_MODE strap net missing �
 the MAX98357A would never have left shutdown. Additive: no existing command changed.
 Next rule ideas: decoupling-cap-per-VDD presence, series-terminator on fast
 clocks, connector pin-1 silk, polarized-part silk markers.
+
+## 2026-08-11 — `models` subcommand (real 3D STEP fetch via distributor APIs)
+`fluxplace models --board X [--audit-only] [--map ref2mpn.json] [--mpn REF=MPN]
+[--models-dir D] [--path-prefix '${KIPRJMOD}/...']` — audits footprints for
+missing/BROKEN 3D model paths (env-var expansion + file-exists), then fetches:
+1. kicad-official: broken ${KICAD*_3DMODEL_DIR} refs pulled from the
+   kicad-packages3D GitLab (the footprint's own intended model)
+2. digikey /media "CAD Models" links (direct STEP or zip; validated ISO-10303)
+3. mouser search as MPN normalizer (their API has no CAD binaries)
+Reality check from the UTV board (11 gaps): only the Hirose DF40 had an open
+CAD link. FIVE stdlib footprints reference models that do not exist upstream
+either (Micro-Fit 43650-0215 vert, SK6812MINI, ublox_MAX, D_0402, TQFN-16
+EP1.23). Bourns/Taoglas/Molex CDNs 403 scripted fetches; SnapEDA/UL/CSE need
+logins. Policy: never fake a "real" model — visual stand-ins live in the
+BOARD repo (wire_visual_models.py) with a provenance/debt file, not here.
+tests/test_models.py (offline); suite 35 green.
