@@ -1,5 +1,36 @@
 # fluxplace — next session
 
+## 2026-08-11 final — v0.8.0 validated: utv-comms-flux-q3 (0 DRC / 0 opens)
+Tournament q3 winner (compact 0.80:0.72 bands+65-passive back-flip, judged by
+the new lexicographic rank) delivered as **utv-comms-flux-q3.kicad_pcb:
+76.3x86.7mm, 100% routed, 0 violations, 0 unconnected, 77 back-side parts**
+— cleanest board of the project (landscape-t1: 227 viol; tournament-a1: 20)
+at 13% less area, while Quilter returned ZERO candidates at 65x50 on the
+same netlist (43min, "unable to place", D29).
+Hard-won plumbing lessons (all in fluxplace now):
+- **pcbnew.ImportSpecctraSES returns True headless but mangles geometry**
+  (sub-mm gapped fragments, 10-15 phantom opens). fluxplace/ses.py ports the
+  UTV custom parser (ses*100=nm, Y flip); tournament.import_session uses it.
+- **freerouting sessions are complete only THROUGH the planes**: zone refill
+  islands the inner planes -> stranded fragments. Cure (deliver_winner.sh):
+  GND surface pours F+B + stitch grid 4mm (planes.pour/stitch) merges every
+  GND island; KRT --keep-input-copper --nets "+5V" straps the +5V islands;
+  finalize_dfm + 0.12 judge clearance + widen sub-0.088 neckdowns -> 0/0.
+- freerouting 2.3.x log phrasing "(N unrouted and M violations)" (regex
+  fixed); 2.3.0 GUI NPEs on ANY plane-connected DSN (gui_safe_dsn.py strips
+  pours for interactive use; headless unaffected).
+- rank lesson #2: completion MUST outrank DRC count (less copper = fewer
+  violations; a 36-airwire candidate had the lowest DRC on the board).
+- planes.py grew: via_stub_ends, via_at_points, tie_floating_clusters
+  (fill-verified), snap_opens, bridge_opens — kept for surgical use, but the
+  pour+stitch+KRT recipe is the proven path.
+Next: PRC-driven placement is still only 11/52 on compact flows (arrangement
+preserved => pair scatter persists) — the builder (place_routed) consumes
+comprehension only via decap ordering so far; feeding pin-distance windows
+into builder auditioning is the next quality lever. Also: emit the flip set
+as a right-sized back-ring region instead of free flips (Y stacking cost),
+and teach compact's THT bands about per-connector edge affinity from intake.
+
 ## 2026-08-11 latest — v0.8.0: the Quilter parity build (P0-P4 SHIPPED)
 Full adoption plan (docs/QUILTER-PARITY-PLAN.md) implemented in one session;
 suite 76 green. New modules: comprehend.py (constraint auto-detection),

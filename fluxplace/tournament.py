@@ -307,15 +307,22 @@ def _ses_metrics(ses_path, log_path, routable):
 
 def import_session(workdir, idx, out_board=None):
     """Import cand_<idx>.ses copper into cand_<idx>.kicad_pcb -> routed board
-    path (fresh interpreter for SWIG safety). Returns path or None."""
+    path (fresh interpreter for SWIG safety). Returns path or None.
+
+    Uses fluxplace.ses (direct session parse) — pcbnew.ImportSpecctraSES
+    returns True headless but mangles geometry into sub-mm-gapped fragments
+    (10-15 phantom opens per board)."""
     routed = out_board or os.path.join(workdir, f"cand_{idx}_routed.kicad_pcb")
-    code = (f"import sys; sys.path.insert(0, {_REPO!r}); import pcbnew; "
+    code = (f"import sys, os; sys.path.insert(0, {_REPO!r}); import pcbnew; "
+            f"from fluxplace import ses as S; "
             f"b = pcbnew.LoadBoard({os.path.join(workdir, f'cand_{idx}.kicad_pcb')!r}); "
-            f"ok = pcbnew.ImportSpecctraSES(b, {os.path.join(workdir, f'cand_{idx}.ses')!r}); "
+            f"nt, nv, nsk, unr = S.import_into(b, {os.path.join(workdir, f'cand_{idx}.ses')!r}); "
             # refill pours around the imported copper — DRC on stale
             # pre-route fills reports phantom clearance results
             f"pcbnew.ZONE_FILLER(b).Fill(b.Zones()); "
-            f"pcbnew.SaveBoard({routed!r}, b); print('OK' if ok else 'FAIL')")
+            f"pcbnew.SaveBoard({routed!r}, b); "
+            f"print('OK' if nt > 100 else 'FAIL', nt, nv, unr); "
+            f"sys.stdout.flush(); os._exit(0)")
     rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
                         text=True, env=dict(os.environ))
     if not (rc.stdout.strip().splitlines() or ["FAIL"])[-1].startswith("OK"):

@@ -123,6 +123,436 @@ def stitch(board, netname="GND", pitch=3.0, via_d=0.6, via_drill=0.3,
     return placed
 
 
+def via_stub_ends(board, netnames=("GND",), via_d=0.6, via_drill=0.3,
+                  keep=0.2):
+    """Targeted plane finalize: freerouting routes plane nets as short stubs
+    and trusts the plane to complete them; where the refit pour has a void,
+    connectivity breaks (kicad-cli 'missing connection' on GND/+5V only).
+    Drop a through-via at every DANGLING plane-net track endpoint — an
+    endpoint not already near a same-net via or pad — wherever it clears
+    other-net copper. Redundant plane vias are harmless; missing ones are
+    open circuits. Returns vias placed."""
+    placed = 0
+    K = _mm(keep)
+    for netname in netnames:
+        net = board.FindNet(netname)
+        if net is None:
+            continue
+        nc = net.GetNetCode()
+        anchors = []          # same-net via/pad positions (already tied down)
+        for t in board.GetTracks():
+            if t.GetNetCode() == nc and t.GetClass() == "PCB_VIA":
+                p = t.GetPosition()
+                anchors.append((p.x, p.y))
+        for f in board.GetFootprints():
+            for pad in f.Pads():
+                if pad.GetNetCode() == nc:
+                    p = pad.GetPosition()
+                    anchors.append((p.x, p.y))
+        obst = []             # other-net copper the new via must clear
+        for f in board.GetFootprints():
+            for pad in f.Pads():
+                if pad.GetNetCode() == nc:
+                    continue
+                p = pad.GetPosition(); s = pad.GetSize()
+                r = max(s.x, s.y) // 2 + _mm(via_d) // 2 + K
+                obst.append((p.x, p.y, r))
+        segs = []
+        for t in board.GetTracks():
+            if t.GetNetCode() == nc:
+                continue
+            a = t.GetStart(); b = t.GetEnd()
+            segs.append((a.x, a.y, b.x, b.y,
+                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+
+        def _seg_hit(x, y):
+            for ax, ay, bx, by, r in segs:
+                dx, dy = bx - ax, by - ay
+                L2 = dx * dx + dy * dy
+                u = 0.0 if L2 == 0 else max(
+                    0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+                px, py = ax + u * dx, ay + u * dy
+                if (x - px) ** 2 + (y - py) ** 2 < r * r:
+                    return True
+            return False
+
+        NEAR = _mm(0.4)
+        for t in list(board.GetTracks()):
+            if t.GetNetCode() != nc or t.GetClass() == "PCB_VIA":
+                continue
+            for end in (t.GetStart(), t.GetEnd()):
+                if any(abs(end.x - ax) < NEAR and abs(end.y - ay) < NEAR
+                       for ax, ay in anchors):
+                    continue
+                if any((end.x - ox) ** 2 + (end.y - oy) ** 2 < r * r
+                       for ox, oy, r in obst):
+                    continue
+                if _seg_hit(end.x, end.y):
+                    continue
+                v = pcbnew.PCB_VIA(board)
+                v.SetPosition(pcbnew.VECTOR2I(end.x, end.y))
+                v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
+                v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                v.SetNetCode(nc)
+                board.Add(v)
+                _keepalive.append(v)
+                anchors.append((end.x, end.y))
+                placed += 1
+    return placed
+
+
+def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
+                  keep=0.2):
+    """Drop a through-via at each (x, y) mm point on `netname`, skipping
+    spots that would graze other-net copper. For plane nets this is the
+    universal open-circuit repair: any two disconnected same-net islands
+    both reach the inner plane through their via. Returns vias placed."""
+    net = board.FindNet(netname)
+    if net is None:
+        return 0
+    nc = net.GetNetCode()
+    K = _mm(keep)
+    obst = []
+    for f in board.GetFootprints():
+        for pad in f.Pads():
+            if pad.GetNetCode() == nc:
+                continue
+            p = pad.GetPosition(); s = pad.GetSize()
+            obst.append((p.x, p.y, max(s.x, s.y) // 2 + _mm(via_d) // 2 + K))
+    segs = []
+    for t in board.GetTracks():
+        if t.GetNetCode() == nc:
+            continue
+        a = t.GetStart(); b = t.GetEnd()
+        segs.append((a.x, a.y, b.x, b.y,
+                     t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+    placed = 0
+    for (xm, ym) in points_mm:
+        x, y = _mm(xm), _mm(ym)
+        if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):
+            continue
+        hit = False
+        for ax, ay, bx, by, r in segs:
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            u = 0.0 if L2 == 0 else max(
+                0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+            px, py = ax + u * dx, ay + u * dy
+            if (x - px) ** 2 + (y - py) ** 2 < r * r:
+                hit = True
+                break
+        if hit:
+            continue
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
+        v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
+        v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        v.SetNetCode(nc)
+        board.Add(v)
+        _keepalive.append(v)
+        placed += 1
+    return placed
+
+
+def tie_tracks_to_plane(board, netname, plane_layer, pitch=6.0, via_d=0.6,
+                        via_drill=0.3, keep=0.2):
+    """Guarantee plane-net connectivity: every track run on `netname` gets a
+    through-via VERIFIED to land on filled plane copper (HitTestFilledArea),
+    spaced ~pitch. Freerouting routes plane nets as disconnected stubs and
+    trusts the plane; where the pour has voids the stub floats. Blind
+    via-dropping can't fix that (a via in a void connects nothing) — the
+    fill test is the difference. Returns vias placed."""
+    net = board.FindNet(netname)
+    if net is None:
+        return 0
+    nc = net.GetNetCode()
+    lid = board.GetLayerID(plane_layer)
+    zones = [z for z in board.Zones()
+             if not z.GetIsRuleArea() and z.GetNetCode() == nc
+             and z.IsOnLayer(lid)]
+    if not zones:
+        return 0
+    K = _mm(keep)
+    obst = []
+    for f in board.GetFootprints():
+        for pad in f.Pads():
+            if pad.GetNetCode() == nc:
+                continue
+            p = pad.GetPosition(); s = pad.GetSize()
+            obst.append((p.x, p.y, max(s.x, s.y) // 2 + _mm(via_d) // 2 + K))
+    segs = []
+    vias_here = []
+    for t in board.GetTracks():
+        if t.GetNetCode() != nc:
+            a = t.GetStart(); b = t.GetEnd()
+            segs.append((a.x, a.y, b.x, b.y,
+                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+        elif t.GetClass() == "PCB_VIA":
+            p = t.GetPosition()
+            vias_here.append((p.x, p.y))
+
+    def clear_at(x, y):
+        if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):
+            return False
+        for ax, ay, bx, by, r in segs:
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            u = 0.0 if L2 == 0 else max(
+                0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+            px, py = ax + u * dx, ay + u * dy
+            if (x - px) ** 2 + (y - py) ** 2 < r * r:
+                return False
+        return True
+
+    def on_fill(x, y):
+        pt = pcbnew.VECTOR2I(int(x), int(y))
+        return any(z.HitTestFilledArea(lid, pt, 0) for z in zones)
+
+    P = _mm(pitch)
+    placed = 0
+    for t in list(board.GetTracks()):
+        if t.GetNetCode() != nc or t.GetClass() == "PCB_VIA":
+            continue
+        a = t.GetStart(); b = t.GetEnd()
+        # already tied close enough?
+        if any(min((a.x - vx) ** 2 + (a.y - vy) ** 2,
+                   (b.x - vx) ** 2 + (b.y - vy) ** 2) < P * P
+               for vx, vy in vias_here):
+            continue
+        # sample along the segment: midpoint first, then quarters, then ends
+        cands = [0.5, 0.25, 0.75, 0.0, 1.0]
+        for u in cands:
+            x = a.x + u * (b.x - a.x)
+            y = a.y + u * (b.y - a.y)
+            if on_fill(x, y) and clear_at(x, y):
+                v = pcbnew.PCB_VIA(board)
+                v.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
+                v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
+                v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                v.SetNetCode(nc)
+                board.Add(v)
+                _keepalive.append(v)
+                vias_here.append((int(x), int(y)))
+                placed += 1
+                break
+    return placed
+
+
+def tie_floating_clusters(board, netname, plane_layer, via_d=0.6,
+                          via_drill=0.3, keep=0.2):
+    """The correct plane finalize: freerouting counts plane nets complete
+    because every fragment is SUPPOSED to reach the inner plane — but some
+    connectivity clusters end up with no via and no drilled pad, so they
+    float. Walk the real connectivity clusters (pcbnew BuildConnectivity),
+    find clusters with no tie to the plane, and drop ONE fill-verified,
+    clearance-checked via per floating cluster. Proximity heuristics fail
+    here (a neighbouring via can belong to a different cluster); cluster
+    membership is the only truth. Returns vias placed."""
+    net = board.FindNet(netname)
+    if net is None:
+        return 0
+    nc = net.GetNetCode()
+    lid = board.GetLayerID(plane_layer)
+    zones = [z for z in board.Zones()
+             if not z.GetIsRuleArea() and z.GetNetCode() == nc
+             and z.IsOnLayer(lid)]
+    if not zones:
+        return 0
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+
+    wires = [t for t in board.GetTracks()
+             if t.GetNetCode() == nc and t.GetClass() != "PCB_VIA"]
+
+    # obstacle model for clearance-checking the new via
+    K = _mm(keep)
+    obst = []
+    for f in board.GetFootprints():
+        for pad in f.Pads():
+            if pad.GetNetCode() == nc:
+                continue
+            p = pad.GetPosition(); s = pad.GetSize()
+            obst.append((p.x, p.y, max(s.x, s.y) // 2 + _mm(via_d) // 2 + K))
+    segs = []
+    for t in board.GetTracks():
+        if t.GetNetCode() != nc:
+            a = t.GetStart(); b = t.GetEnd()
+            segs.append((a.x, a.y, b.x, b.y,
+                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+
+    def clear_at(x, y):
+        if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):
+            return False
+        for ax, ay, bx, by, r in segs:
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            u = 0.0 if L2 == 0 else max(
+                0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / L2))
+            px, py = ax + u * dx, ay + u * dy
+            if (x - px) ** 2 + (y - py) ** 2 < r * r:
+                return False
+        return True
+
+    def on_fill(x, y):
+        pt = pcbnew.VECTOR2I(int(x), int(y))
+        return any(z.HitTestFilledArea(lid, pt, 0) for z in zones)
+
+    seen = set()
+    placed = 0
+    for t in wires:
+        if t.m_Uuid.AsString() in seen:
+            continue
+        # walk this cluster
+        cluster, stack = [], [t]
+        has_tie = False
+        while stack:
+            cur = stack.pop()
+            uid = cur.m_Uuid.AsString()
+            if uid in seen:
+                continue
+            seen.add(uid)
+            cluster.append(cur)
+            for nxt in conn.GetConnectedTracks(cur):
+                if nxt.GetClass() == "PCB_VIA":
+                    # a via only ties the cluster down if the plane fill
+                    # actually reaches it — a via standing in a fill void
+                    # (other-net clearance carve-out) floats
+                    p = nxt.GetPosition()
+                    if on_fill(p.x, p.y):
+                        has_tie = True
+                else:
+                    stack.append(nxt)
+            for pad in conn.GetConnectedPads(cur):
+                if pad.GetDrillSize().x > 0:
+                    p = pad.GetPosition()
+                    if on_fill(p.x, p.y):
+                        has_tie = True
+        if has_tie:
+            continue
+        # floating cluster: put one via on it, on filled plane copper
+        done = False
+        for seg in cluster:
+            a = seg.GetStart(); b = seg.GetEnd()
+            for u in (0.5, 0.25, 0.75, 0.0, 1.0):
+                x = a.x + u * (b.x - a.x)
+                y = a.y + u * (b.y - a.y)
+                if on_fill(x, y) and clear_at(x, y):
+                    v = pcbnew.PCB_VIA(board)
+                    v.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
+                    v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
+                    v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                    v.SetNetCode(nc)
+                    board.Add(v)
+                    _keepalive.append(v)
+                    placed += 1
+                    done = True
+                    break
+            if done:
+                break
+    return placed
+
+
+def snap_opens(board, pairs, max_gap=4.0):
+    """Close 'missing connection' items by SNAPPING the dangling fragment's
+    endpoint onto its partner copper — no new copper is drawn, so no new
+    clearance surface is created (bridge_opens' straight-line patches graze
+    neighbors in dense areas). For each pair: find the same-net track whose
+    endpoint sits at a reported position, and move that endpoint to the
+    partner item's nearest point (via center / partner endpoint / projected
+    point on the partner segment). Returns endpoints moved."""
+    moved = 0
+    tracks = [t for t in board.GetTracks() if t.GetClass() != "PCB_VIA"]
+    vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
+
+    def find_end(net, pos, tol=_mm(0.6)):
+        best = None
+        for t in tracks:
+            if t.GetNetname() != net:
+                continue
+            for which in (0, 1):
+                e = t.GetStart() if which == 0 else t.GetEnd()
+                d2 = (e.x - pos[0]) ** 2 + (e.y - pos[1]) ** 2
+                if d2 < tol * tol and (best is None or d2 < best[0]):
+                    best = (d2, t, which)
+        return best
+
+    def nearest_point(net, pos, exclude):
+        """Closest point on any same-net copper (via center, track segment)."""
+        best = None
+        for v in vias:
+            if v.GetNetname() != net:
+                continue
+            p = v.GetPosition()
+            d2 = (p.x - pos[0]) ** 2 + (p.y - pos[1]) ** 2
+            if best is None or d2 < best[0]:
+                best = (d2, (p.x, p.y))
+        for t in tracks:
+            if t.GetNetname() != net or t is exclude:
+                continue
+            a = t.GetStart(); b = t.GetEnd()
+            dx, dy = b.x - a.x, b.y - a.y
+            L2 = dx * dx + dy * dy
+            u = 0.0 if L2 == 0 else max(0.0, min(
+                1.0, ((pos[0] - a.x) * dx + (pos[1] - a.y) * dy) / L2))
+            px, py = a.x + u * dx, a.y + u * dy
+            d2 = (px - pos[0]) ** 2 + (py - pos[1]) ** 2
+            if best is None or d2 < best[0]:
+                best = (d2, (int(px), int(py)))
+        return best
+
+    G2 = _mm(max_gap) ** 2
+    for net_name, pa, la, pb, lb in pairs:
+        for (p_frag, p_anchor) in (((pa), (pb)), ((pb), (pa))):
+            frag_pos = (_mm(p_frag[0]), _mm(p_frag[1]))
+            hit = find_end(net_name, frag_pos)
+            if hit is None:
+                continue
+            _, t, which = hit
+            anchor_pos = (_mm(p_anchor[0]), _mm(p_anchor[1]))
+            np_ = nearest_point(net_name, anchor_pos, t)
+            if np_ is None or np_[0] > G2:
+                continue
+            tgt = pcbnew.VECTOR2I(*np_[1])
+            if which == 0:
+                t.SetStart(tgt)
+            else:
+                t.SetEnd(tgt)
+            moved += 1
+            break
+    return moved
+
+
+def bridge_opens(board, pairs, width=0.15, max_gap=3.0):
+    """Close 'missing connection' DRC items by drawing a short same-net track
+    between the two reported item positions. The freerouting .ses import
+    leaves sub-mm gaps (grid rounding): fragments sit 0.2-2.5 mm from the
+    copper they belong to, so a plane via can't help — copper must touch.
+
+    pairs: [(net, (xa, ya), layers_a, (xb, yb), layers_b), ...] with layers
+    as sets like {'F.Cu'} ({'F.Cu','B.Cu'} for a via). Returns bridges drawn.
+    """
+    placed = 0
+    for net_name, pa, la, pb, lb in pairs:
+        net = board.FindNet(net_name)
+        if net is None:
+            continue
+        gap = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2) ** 0.5
+        if gap > max_gap or gap == 0:
+            continue
+        common = (set(la) & set(lb)) or set(la) or set(lb)
+        layer = board.GetLayerID(sorted(common)[0])
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(pcbnew.VECTOR2I(_mm(pa[0]), _mm(pa[1])))
+        t.SetEnd(pcbnew.VECTOR2I(_mm(pb[0]), _mm(pb[1])))
+        t.SetWidth(_mm(width))
+        t.SetLayer(layer)
+        t.SetNetCode(net.GetNetCode())
+        board.Add(t)
+        _keepalive.append(t)
+        placed += 1
+    return placed
+
+
 def refill(board):
     """Refill every zone (call after routing edits, before DRC)."""
     filler = pcbnew.ZONE_FILLER(board)
