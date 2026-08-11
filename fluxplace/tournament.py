@@ -139,14 +139,20 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
     """Fresh interpreter: candidate = COMPACTED current placement (strips
     stale copper first), gate-scored like any placer candidate."""
     sys.path.insert(0, _REPO)
+    import pcbnew  # noqa: F401 — registers SWIG wrappers before board surgery
     from fluxplace import kicad_io as IO, graph as G, placement as P
     from fluxplace import compact as CC, route as R
 
+    os.makedirs(workdir, exist_ok=True)
     board = IO.load(board_path)
+    _keep = []  # hold refs until process exit — SWIG GC of removed items corrupts
     for t in list(board.GetTracks()):
+        _keep.append(t)
         board.Remove(t)
     for z in list(board.Zones()):
+        _keep.append(z)
         board.Remove(z)
+    compact_candidate_worker._keep = _keep
     parts, nets = IO.read_board(board)
     obstacles = CC.parse_obstacles(obstacle_specs or [], log=lambda *a: None)
     t0 = time.time()
@@ -159,7 +165,10 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
                 gate_wl=rep["wirelength"], hpwl=round(P.hpwl(parts, cg, pos)),
                 place_secs=round(time.time() - t0, 1),
                 routable=sorted(set(cg.signal_nets) | set(cg.power_traces)))
-    if st["resid"] or rep["overflow"] > 0:
+    # compact grids are small and the gate over-penalizes elbow room
+    # (tournament #1 calibration: truth rank != gate rank) — only reject
+    # hopeless congestion; freerouting is the judge that counts
+    if st["resid"] or rep["overflow"] > 30:
         meta["status"] = "overlaps" if st["resid"] else "gate-rejected"
         json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
         return
