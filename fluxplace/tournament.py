@@ -115,6 +115,17 @@ def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
     pro_src = os.path.splitext(board.GetFileName())[0] + ".kicad_pro"
     if os.path.exists(pro_src):
         open(os.path.join(workdir, f"cand_{idx}.kicad_pro"), "w").write(open(pro_src).read())
+    # razor calibration lesson: with default 0.2/0.2 netclasses freerouting
+    # proves DF40 escape impossible; 0.127/0.127 routes the same nets. Via
+    # class 0.6/0.3 keeps JLC hole-to-copper honest during autoroute.
+    try:
+        for _name, nc in board.GetAllNetClasses().items():
+            nc.SetClearance(pcbnew.FromMM(0.127))
+            nc.SetTrackWidth(pcbnew.FromMM(0.15))
+            nc.SetViaDiameter(pcbnew.FromMM(0.6))
+            nc.SetViaDrill(pcbnew.FromMM(0.3))
+    except Exception as e:
+        print("netclass prep skipped:", e)
     ok = bool(pcbnew.ExportSpecctraDSN(board, os.path.join(workdir, f"cand_{idx}.dsn")))
     meta["status"] = "queued" if ok else "dsn-failed"
     json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
