@@ -1107,11 +1107,26 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                     break
             if not hit:
                 continue
-            spot = None
+            # max-clearance spot: the FIRST legal cell hugged foreign
+            # copper (measured: 30 stitches closed 13 opens but +21
+            # violations, chunk reverted) — prefer the cell with the
+            # largest via-legal ring around it
+            spot, best = None, -1
             for (k, cx, cy) in sorted(isl):
-                if (cx, cy) not in g.via_blocked and g.inside(cx, cy):
-                    spot = (cx, cy)
-                    break
+                if (cx, cy) in g.via_blocked or not g.inside(cx, cy):
+                    continue
+                score = 0
+                for r in (1, 2, 3):
+                    if all((cx + dx, cy + dy) not in g.via_blocked
+                           for dx in range(-r, r + 1)
+                           for dy in range(-r, r + 1)):
+                        score = r
+                    else:
+                        break
+                if score > best:
+                    spot, best = (cx, cy), score
+                    if score == 3:
+                        break
             if spot is None:
                 continue
             x, y = g.mm(*spot)
