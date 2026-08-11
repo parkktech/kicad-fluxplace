@@ -183,3 +183,12 @@ tests/test_models.py (offline); suite 35 green.
   legalized to 0 bbox overlaps — bbox(False) vs courtyard discrepancy on
   some footprints; investigate (suspect rotated parts whose courtyard
   exceeds the graphic bbox).
+
+## 2026-08-11 — freerouting 2.2.4 is DEAD for headless jobs; use 2.3.0
+Every 2.2.4 CLI job died silently 2-4 min into routing (no .ses, no error,
+log ends after "Starting routing") — including configs that worked 2026-08-05
+on the razor boards. CLI/json job_timeout ruled out (45 min configured).
+freerouting-2.3.0.jar (~/tools/) fixes it: routes 30+ min stably and
+auto-configures In1/In2 as power planes when >50% covered. Note 2.3.0
+resets unmigrated freerouting.json settings — re-check optimizer caps.
+Tournament default flow now validated end-to-end on the UTV board.
