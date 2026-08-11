@@ -113,3 +113,28 @@ items — all KRT plane-finalize vias grazing 0.4 mm-pitch pads by 0.02–0.17 m
   denser builder auditioning, and shrink that can pull toward LOCKED anchors.
 - `--pad 0.3` is a regression (470 overlap nudges, 2 unrouted): the builder's
   corridors assume ~0.45. Don't ship lower without retuning the route model.
+
+## 2026-08-10 later — v0.7.0: `compact` subcommand (UTV comms bridge session 2)
+Placement compaction shipped as `fluxplace compact`: shrink a KNOWN-GOOD placement
+instead of re-placing (scale unlocked parts toward the locked anchor -> soft
+legalize -> spiral hard-resolve -> nearest-first gravity pack -> the same
+outline/planes/route/DFM/fab stages as `auto`, now shared via
+`_stages_outline_to_fab`). Core in `fluxplace/compact.py`, pure python, tested
+(tests/test_compact.py; suite 21 green). `auto` CLI and behavior unchanged;
+`read_board` gained an additive `drills` key (raw drilled-pad count).
+
+UTV comms bridge results (129 parts, CM5 pair locked, 2-layer route 0.15/0.15):
+- auto baseline 140x110 -> compact sx.44/sy.47 = **76.5x69.1, 92/92 nets,
+  216/216 pairs, 0 unrouted, 5 DRC** in 118 s. 2.9x area cut, one command.
+- Density wall found: ~5000 mm2 (47-50% bbox util) is where KRT starts failing
+  (30+ unrouted at 59x76 / 65x70). The failures cluster on I2S + power leaving
+  the module zone.
+- **Do not stuff the module shadow with back-side passives** — migrating 53
+  small passives under the CM5 killed the DF40 escape (that rule is now baked
+  into compact's obstacle keep-out: unlocked same-side + THT parts stay out).
+- Anomaly to chase: failing runs report pad_pairs_total ~101 vs 216 on the
+  clean run — KRT may abort its pair enumeration mid-run on those boards, so
+  the wall could be partly router artifact, not pure congestion.
+- 65x50 target needs a real dense placer (Quilter/EasyEDA compaction of the
+  netlist) or escape-aware packing — compact alone plateaus ~5300 mm2 with the
+  real (bigger) M1 footprints.

@@ -12,7 +12,7 @@
   "tags": ["placement", "autoplace", "layout", "routing", "dfm"],
   "versions": [
     {
-      "version": "0.6.0",
+      "version": "0.7.0",
       "status": "development",
       "kicad_version": "8.0",
       "download_url": "https://github.com/parkktech/kicad-fluxplace/archive/refs/tags/v0.1.0.zip"

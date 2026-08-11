@@ -76,6 +76,7 @@ def read_board(board):
             # a real drilled pin field (most pads drilled, or 5+ drills)
             tht=(drills >= 5 or (npads and drills / npads > 0.5)),
             sheet=sheet.strip("/") or "root",
+            drills=drills,      # raw drilled-pad count (any drill penetrates both sides)
             pitch=pitch,        # min pad centre spacing (mm); <=0.5 => fine-pitch escape
             # escape halo: extra keep-clear reserved around a fine-pitch part so the
             # placer leaves its fanout corridor open (peripheral parts route at bulk

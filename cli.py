@@ -302,6 +302,20 @@ def cmd_auto(a):
     IO.apply_positions(board, pos, parts, skip_locked=True)
     print(f"[1/{NSTAGE}] placed {len(pos)} parts  gate-overflow={rep['overflow']:.0f}"
           f"  legalize-nudges={nudged}  ({time.time()-t0:.0f}s)")
+    _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO")
+
+
+def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
+    """Stages [2]-[6] shared by `auto` and `compact`: OUTLINE -> PLANES ->
+    ROUTE -> PLANE-FINALIZE/DFM -> FAB. Behavior identical to the original
+    cmd_auto tail (extracted verbatim, v0.7.0)."""
+    import os, subprocess, time, json
+    from fluxplace import fab, planes
+    import pcbnew
+    placed = os.path.join(a.out, "placed.kicad_pcb")
+    routed = os.path.join(a.out, "routed.kicad_pcb")
+    finald = os.path.join(a.out, "final.kicad_pcb")
+    NSTAGE = 6
 
     # ---- [2] OUTLINE — the board follows the parts. Skipping this strands the ------
     # placement outside Edge.Cuts and the router sees every pad as OFF-BOARD.
@@ -383,7 +397,46 @@ def cmd_auto(a):
     print(f"[6/{NSTAGE}] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
              if res.get("violations") is not None else ""))
-    print(f"AUTO complete: {a.out}/fab  ({verdict})")
+    print(f"{label} complete: {a.out}/fab  ({verdict})")
+
+
+def cmd_compact(a):
+    """Shrink a KNOWN-GOOD placement: scale unlocked parts toward the locked
+    anchor, legalize + gravity-pack (fluxplace.compact), then the same
+    OUTLINE -> PLANES -> ROUTE -> DFM -> FAB stages as `auto`. Use when the
+    builder's density, not its arrangement, is the limiter."""
+    import os, time
+    from fluxplace import compact as C
+    os.makedirs(a.out, exist_ok=True)
+    board, parts, nets, IO = _load(a.board)
+    obstacles = C.parse_obstacles(a.obstacle)
+    anchor = None
+    if a.anchor:
+        if a.anchor not in parts:
+            raise SystemExit(f"--anchor {a.anchor}: no such ref")
+        anchor = (parts[a.anchor]["x"], parts[a.anchor]["y"])
+    t0 = time.time()
+    pos, st = C.compact(parts, a.sx, a.sy, anchor=anchor, gap=a.gap,
+                        pack=a.pack, obstacles=obstacles,
+                        tht_bands=a.tht_bands)
+    IO.apply_positions(board, pos, parts, skip_locked=True)
+    x0, y0, x1, y1 = st["extent"]
+    print(f"[1/6] compacted sx={a.sx} sy={a.sy}: {st['nudges']} nudges/"
+          f"{st['iters']} iters, {st['hard']} hard-relocated, "
+          f"{st['resid']} residual overlaps, extent {x1-x0:.1f}x{y1-y0:.1f} mm"
+          f"  ({time.time()-t0:.0f}s)")
+    if st["resid"]:
+        print("    ! residual overlaps — inspect before fab")
+    rot = {r: parts[r].get("angle0", 0.0) for r in parts}  # eff_size identity
+    # phantom entries so the shrink-wrapped outline covers the obstacle rects
+    # (a plug-on module shadow must stay on-board even where no part reaches)
+    for i, ob in enumerate(obstacles):
+        ref = f"__OBST{i}"
+        parts[ref] = dict(w=ob["w"], h=ob["h"], x=ob["x"], y=ob["y"],
+                          off=(0.0, 0.0), angle0=0.0, locked=True, pins={})
+        pos[ref] = (ob["x"], ob["y"])
+        rot[ref] = 0.0
+    _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="COMPACT")
 
 
 def main(argv=None):
@@ -475,6 +528,36 @@ def main(argv=None):
                      help="phantom keep-out rect X:Y:W:H (mm), repeatable — e.g. a "
                           "plug-on module body over its locked board connectors")
     pau.set_defaults(fn=cmd_auto)
+
+    pco = sub.add_parser("compact",
+                         help="shrink a known-good placement -> route -> fab "
+                              "(scale toward locked anchor, legalize, pack)")
+    pco.add_argument("--board", required=True)
+    pco.add_argument("--out", required=True)
+    pco.add_argument("--sx", type=float, required=True, help="X scale toward anchor (<1 shrinks)")
+    pco.add_argument("--sy", type=float, required=True, help="Y scale toward anchor (<1 shrinks)")
+    pco.add_argument("--gap", type=float, default=0.42, help="min bbox-to-bbox air (mm)")
+    pco.add_argument("--pack", type=int, default=5, help="gravity-pack sweeps (0 = off)")
+    pco.add_argument("--anchor", default=None,
+                     help="ref to shrink toward (default: centroid of locked parts)")
+    pco.add_argument("--tht-bands", action="store_true",
+                     help="THT parts only above/below obstacle bands (frees X width)")
+    pco.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    pco.add_argument("--track", type=float, default=0.2)
+    pco.add_argument("--clearance", type=float, default=0.2)
+    pco.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
+    pco.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    pco.add_argument("--route-timeout", type=int, default=1800)
+    pco.add_argument("--kicad-cli", default="kicad-cli")
+    pco.add_argument("--margin", type=float, default=2.0,
+                     help="Edge.Cuts margin around the shrink-wrapped placement (mm)")
+    pco.add_argument("--plane-nets", nargs="+", default=["GND"])
+    pco.add_argument("--no-planes", action="store_true")
+    pco.add_argument("--obstacle", action="append", default=[],
+                     help="phantom keep-out rect X:Y:W:H[:F|B] (mm), repeatable; "
+                          "compaction keeps unlocked same-side + THT parts out "
+                          "(module escape area must stay clear — see NEXT.md)")
+    pco.set_defaults(fn=cmd_compact)
 
     pc = sub.add_parser("calibrate",
                         help="ground-truth the gate vs freerouting (DSN export / .ses parse)")
