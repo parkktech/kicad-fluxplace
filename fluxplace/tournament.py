@@ -288,7 +288,12 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
         while queue and len(running) < jobs:
             r = queue.pop(0)
             i = r["idx"]
-            cmd = ["java", "-jar", jar,
+            # freerouting v2 keeps mutable global state (config, logs, locks)
+            # in java.io.tmpdir/freerouting — concurrent JVMs sharing it die
+            # silently. Give every job its own tmpdir.
+            jtmp = os.path.join(workdir, f"jvmtmp_{i}")
+            os.makedirs(jtmp, exist_ok=True)
+            cmd = ["java", f"-Djava.io.tmpdir={jtmp}", "-jar", jar,
                    "-de", os.path.join(workdir, f"cand_{i}.dsn"),
                    "-do", os.path.join(workdir, f"cand_{i}.ses"),
                    "-mp", str(passes),
