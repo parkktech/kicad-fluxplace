@@ -167,3 +167,19 @@ EP1.23). Bourns/Taoglas/Molex CDNs 403 scripted fetches; SnapEDA/UL/CSE need
 logins. Policy: never fake a "real" model — visual stand-ins live in the
 BOARD repo (wire_visual_models.py) with a provenance/debt file, not here.
 tests/test_models.py (offline); suite 35 green.
+
+## 2026-08-11 — hardening from the UTV runs
+- Stage 4/5 router subprocess timeouts no longer kill the pipeline (r6 lost
+  its DFM/fab after a GOOD main route because the GND pass hit 1800s and the
+  TimeoutExpired propagated). Both stages catch it and continue with the best
+  board on disk.
+- Stage 4 now prints `actual-unconnected=N` from pcbnew connectivity — KRT's
+  JSON_SUMMARY is demonstrably unreliable (reported "1 ok, pairs 2/2" on a
+  fully-connected 93-net board, and "9 ok/14 failed" pair totals that vary
+  run to run). Trust the board, not the router's accounting.
+- models: STEP point-cloud bbox + auto-align (center/z-floor/90deg aspect)
+  shipped; see 40e69f9.
+- Open item: r6 DRC showed 24 courtyard overlaps on a compact placement that
+  legalized to 0 bbox overlaps — bbox(False) vs courtyard discrepancy on
+  some footprints; investigate (suspect rotated parts whose courtyard
+  exceeds the graphic bbox).

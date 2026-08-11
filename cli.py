@@ -351,13 +351,18 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     if pw:
         cmd += ["--power-nets", *pw.keys(), "--power-nets-widths",
                 *[str(w) for w in pw.values()]]
-    r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                       timeout=a.route_timeout)
+    try:
+        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
+                           timeout=a.route_timeout)
+    except subprocess.TimeoutExpired:
+        r = None
+        print(f"    ! router timed out after {a.route_timeout}s — continuing "
+              "with whatever it saved")
     ok = os.path.exists(routed)
-    if not ok:
+    if not ok and r is not None:
         print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
     summ = ""
-    for line in (r.stdout or "").splitlines():
+    for line in ((r.stdout if r else "") or "").splitlines():
         if line.startswith("JSON_SUMMARY:"):
             try:
                 js = json.loads(line[13:])
@@ -365,7 +370,17 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                         f", pairs {js.get('pad_pairs_connected','?')}/{js.get('pad_pairs_total','?')}")
             except Exception:
                 pass
-    print(f"[4/{NSTAGE}] routed {len(route_nets)} nets{summ}  ({time.time()-t0:.0f}s)")
+    # KRT's own summary is unreliable (observed: "1 ok, pairs 2/2" on a fully
+    # connected board) — report the board's actual ratsnest instead.
+    real = ""
+    if ok:
+        try:
+            rb = pcbnew.LoadBoard(routed)
+            rb.BuildConnectivity()
+            real = f"  actual-unconnected={rb.GetConnectivity().GetUnconnectedCount(True)}"
+        except Exception:
+            pass
+    print(f"[4/{NSTAGE}] routed {len(route_nets)} nets{summ}{real}  ({time.time()-t0:.0f}s)")
     src = routed if ok else placed
 
     # ---- [5] PLANE FINALIZE + DFM — a pour alone connects nothing the fill can't ---
@@ -377,8 +392,12 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                "--track-width", str(a.track), "--clearance", str(max(a.clearance, 0.12)),
                "--via-size", "0.45", "--via-drill", "0.2", "--nets", *plane_nets,
                "--max-ripup", "60"]
-        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
+        try:
+            subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
                            timeout=a.route_timeout)
+        except subprocess.TimeoutExpired:
+            print(f"    ! plane-finalize route timed out after {a.route_timeout}s"
+                  " — proceeding to DFM/fab with the main-route board")
         src = finald if os.path.exists(finald) else routed
     b2 = pcbnew.LoadBoard(src)
     clamped, shrunk, grazing = planes.finalize_dfm(b2)
