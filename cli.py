@@ -185,8 +185,13 @@ def cmd_tournament(a):
     import os
     from fluxplace import tournament as TN
     jar = a.jar or os.environ.get("FREEROUTING_JAR")
+    if not jar:
+        # 2.3.0+ required: 2.2.4 dies silently on headless jobs (NEXT.md)
+        cand = os.path.expanduser("~/tools/freerouting-2.3.0.jar")
+        jar = cand if os.path.exists(cand) else None
     if not jar or not os.path.exists(jar):
-        print("need --jar or $FREEROUTING_JAR (freerouting 2.2.4+)")
+        print("need --jar or $FREEROUTING_JAR (freerouting 2.3.0+; "
+              "2.2.4 dies silently headless)")
         return
     grid = TN.parse_compact_grid(a.compact_grid) if a.compact_grid else None
     planes = None
