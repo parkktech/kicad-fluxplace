@@ -8,8 +8,11 @@ This module closes the loop the way serious flows do:
      autorouter minutes on a placement the proxy already rejects.
   2. Each survivor becomes a real .kicad_pcb (project netclasses + GND/power
      planes poured) and freerouting attacks it, several JVMs in parallel.
-  3. Fitness, lexicographic: unrouted (asc) -> vias (asc) -> wire length (asc).
-     The winner is what a real router found cleanest.
+  3. Fitness, lexicographic, Quilter-ordered (docs/QUILTER-PARITY-PLAN.md P0):
+     DRC violations -> unrouted -> placement-PRC passes (desc) -> rule
+     conservativeness (clearance, realized min width, desc) -> vias -> wire
+     length LAST. Tournament #1 taught us the gate over-values wirelength;
+     Quilter's published sort orders confirm: length is only a tie-break.
   4. The winner's .ses imports straight back as copper (ImportSpecctraSES) —
      the tournament delivers a routed board.
   5. Calibration: gate rank vs freerouting rank across candidates shows whether
@@ -45,8 +48,19 @@ CANDIDATES = [
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Compile-target rule profiles (Quilter: fabricator constraint bundles).
+# A tournament can sweep candidates x profiles; every profile is a named
+# hard-floor set the candidate is BUILT and JUDGED under.
+PROFILES = {
+    "jlc-fine": dict(track=0.15, clearance=0.127, via_d=0.6, via_drill=0.3),
+    "jlc-std":  dict(track=0.20, clearance=0.20,  via_d=0.6, via_drill=0.3),
+    "osh-6mil": dict(track=0.1524, clearance=0.1524, via_d=0.6, via_drill=0.254),
+}
+DEFAULT_PROFILE = "jlc-fine"
 
-def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter):
+
+def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter,
+                     profile=DEFAULT_PROFILE):
     """Runs in a FRESH interpreter: place one candidate, write board + planes +
     DSN + metrics json. Never called from the orchestrator process."""
     sys.path.insert(0, _REPO)
@@ -72,10 +86,30 @@ def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter):
         return
 
     _materialize(board, parts, pos, angles, workdir, idx, meta,
-                 plane_nets=(("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")))
+                 plane_nets=(("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")),
+                 profile=profile)
 
 
-def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
+def _placement_prcs(board, parts, pos, angles, meta):
+    """Grade the placement with the physics rule checks (pure python) and fold
+    the counts into the candidate's metrics — a RANKING TIER, ahead of vias
+    and wirelength."""
+    try:
+        from fluxplace import comprehend as CM, prc as PR
+        comp = CM.comprehend(CM.pads_from_board(board))
+        rows, npass, nfail = PR.score(
+            parts, {r: tuple(v) for r, v in pos.items()}, angles, comp)
+        meta["prc_pass"] = npass
+        meta["prc_fail"] = nfail
+        meta["prc_failed"] = sorted(
+            f"{r['check']}:{'+'.join(r['refs'])}" for r in rows
+            if not r["ok"])[:24]
+    except Exception as e:              # PRC grading must never kill a worker
+        meta["prc_error"] = str(e)
+
+
+def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets,
+                 profile=DEFAULT_PROFILE):
     """Shared tail: apply placement, shrinkwrap, pour planes, save, DSN."""
     import pcbnew
     from fluxplace import kicad_io as IO, placement as P
@@ -110,18 +144,23 @@ def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
         board.Add(z)
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
 
-    # razor calibration lesson: with default 0.2/0.2 netclasses freerouting
-    # proves DF40 escape impossible; 0.127/0.127 routes the same nets. Via
-    # class 0.6/0.3 keeps JLC hole-to-copper honest. Set BEFORE saving so the
-    # candidate board judges the routing by the same rules it was given.
+    # Compile-target rules (Quilter: candidate is built AND judged under one
+    # named profile). razor calibration lesson: with default 0.2/0.2 netclasses
+    # freerouting proves DF40 escape impossible; 0.127/0.127 routes the same
+    # nets. Via 0.6/0.3 keeps JLC hole-to-copper honest.
+    prof = PROFILES.get(profile, PROFILES[DEFAULT_PROFILE])
+    meta["profile"] = profile
+    meta["clearance"] = prof["clearance"]
+    meta["track"] = prof["track"]
     try:
         for _name, nc in board.GetAllNetClasses().items():
-            nc.SetClearance(pcbnew.FromMM(0.127))
-            nc.SetTrackWidth(pcbnew.FromMM(0.15))
-            nc.SetViaDiameter(pcbnew.FromMM(0.6))
-            nc.SetViaDrill(pcbnew.FromMM(0.3))
+            nc.SetClearance(pcbnew.FromMM(prof["clearance"]))
+            nc.SetTrackWidth(pcbnew.FromMM(prof["track"]))
+            nc.SetViaDiameter(pcbnew.FromMM(prof["via_d"]))
+            nc.SetViaDrill(pcbnew.FromMM(prof["via_drill"]))
     except Exception as e:
         print("netclass prep skipped:", e)
+    _placement_prcs(board, parts, pos, angles, meta)
     cpcb = os.path.join(workdir, f"cand_{idx}.kicad_pcb")
     IO.save(board, cpcb)
     pro_src = os.path.splitext(board.GetFileName())[0] + ".kicad_pro"
@@ -130,6 +169,22 @@ def _materialize(board, parts, pos, angles, workdir, idx, meta, plane_nets):
     ok = bool(pcbnew.ExportSpecctraDSN(board, os.path.join(workdir, f"cand_{idx}.dsn")))
     meta["status"] = "queued" if ok else "dsn-failed"
     json.dump(meta, open(os.path.join(workdir, f"cand_{idx}.json"), "w"))
+
+
+def rank_key(r):
+    """Quilter-ordered lexicographic fitness (docs/QUILTER-PARITY-PLAN.md P0):
+    DRC first, completion second, physics-check passes third, rule
+    conservativeness (larger clearance / realized min width = more fab
+    headroom = better), layers/vias, and wirelength strictly LAST."""
+    return (
+        r["drc"] if r.get("drc") is not None else 9999,
+        r.get("unrouted") if r.get("unrouted") is not None else 9999,
+        -(r.get("prc_pass") or 0),
+        -(r.get("clearance") or 0.0),
+        -(r.get("min_w") or 0.0),
+        r.get("vias", 0),
+        r.get("wl", 0.0),
+    )
 
 
 def parse_compact_grid(spec):
@@ -147,7 +202,8 @@ def parse_compact_grid(spec):
 
 
 def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
-                             obstacle_specs, plane_nets):
+                             obstacle_specs, plane_nets,
+                             profile=DEFAULT_PROFILE):
     """Fresh interpreter: candidate = COMPACTED current placement (strips
     stale copper first), gate-scored like any placer candidate."""
     sys.path.insert(0, _REPO)
@@ -186,12 +242,13 @@ def compact_candidate_worker(board_path, workdir, idx, sx, sy, gap, pack,
         return
     angles = {r: parts[r].get("angle0", 0.0) for r in parts}
     _materialize(board, parts, pos, angles, workdir, idx, meta,
-                 plane_nets=tuple(plane_nets))
+                 plane_nets=tuple(plane_nets), profile=profile)
 
 
 def _ses_metrics(ses_path, log_path, routable):
     """Parse a freerouting session + log into fitness numbers."""
-    out = dict(unrouted=None, wires=0, vias=0, wl=0.0, routed_scope=0)
+    out = dict(unrouted=None, wires=0, vias=0, wl=0.0, routed_scope=0,
+               completion=None, min_w=None)
     if os.path.exists(log_path):
         last = None
         for m in re.finditer(r"pass #\d+ .*?\((\d+) unrouted\)",
@@ -205,43 +262,93 @@ def _ses_metrics(ses_path, log_path, routable):
     out["vias"] = txt.count("(via")
     ses_nets = set(re.findall(r'\(net\s+"?([^\s")]+)', txt))
     out["routed_scope"] = len({n for n in ses_nets if n in routable})
+    if routable:
+        out["completion"] = round(out["routed_scope"] / len(routable), 4)
     wl = 0.0   # sum manhattan runs of each path's coordinate list (0.1 um units)
-    for pm in re.finditer(r"\(path\s+\S+\s+\d+((?:\s+-?[\d.]+)+)\s*\)", txt):
-        nums = [float(v) for v in pm.group(1).split()]
+    min_w = None   # narrowest wire ACTUALLY drawn (Quilter reports realized
+                   # geometry incl. neck-downs, not the rule value)
+    for pm in re.finditer(r"\(path\s+\S+\s+(\d+)((?:\s+-?[\d.]+)+)\s*\)", txt):
+        w = int(pm.group(1))
+        if w > 0:
+            min_w = w if min_w is None else min(min_w, w)
+        nums = [float(v) for v in pm.group(2).split()]
         pts = list(zip(nums[0::2], nums[1::2]))
         for a, b in zip(pts, pts[1:]):
             wl += abs(a[0] - b[0]) + abs(a[1] - b[1])
     out["wl"] = round(wl / 1e4)   # -> mm
+    if min_w is not None:
+        out["min_w"] = round(min_w / 1e4, 4)
     return out
+
+
+def import_session(workdir, idx, out_board=None):
+    """Import cand_<idx>.ses copper into cand_<idx>.kicad_pcb -> routed board
+    path (fresh interpreter for SWIG safety). Returns path or None."""
+    routed = out_board or os.path.join(workdir, f"cand_{idx}_routed.kicad_pcb")
+    code = (f"import sys; sys.path.insert(0, {_REPO!r}); import pcbnew; "
+            f"b = pcbnew.LoadBoard({os.path.join(workdir, f'cand_{idx}.kicad_pcb')!r}); "
+            f"ok = pcbnew.ImportSpecctraSES(b, {os.path.join(workdir, f'cand_{idx}.ses')!r}); "
+            f"pcbnew.SaveBoard({routed!r}, b); print('OK' if ok else 'FAIL')")
+    rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                        text=True, env=dict(os.environ))
+    if not (rc.stdout.strip().splitlines() or ["FAIL"])[-1].startswith("OK"):
+        return None
+    pro = os.path.join(workdir, f"cand_{idx}.kicad_pro")
+    if os.path.exists(pro):
+        open(os.path.splitext(routed)[0] + ".kicad_pro", "w").write(open(pro).read())
+    return routed
+
+
+def drc_count(board_path, kicad_cli="kicad-cli"):
+    """kicad-cli DRC on a routed board -> (violations, unconnected) or
+    (None, None) when the tool is unavailable. Violations EXCLUDE unconnected
+    items (the router's completion number already covers those)."""
+    rpt = os.path.splitext(board_path)[0] + "_drc.json"
+    try:
+        subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
+                        "--severity-error", "-o", rpt, board_path],
+                       capture_output=True, text=True, timeout=600)
+        d = json.load(open(rpt))
+        return (len(d.get("violations", [])),
+                len(d.get("unconnected_items", [])))
+    except Exception:
+        return None, None
 
 
 def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
         place_jobs=2, resume=False, oit=None, compact_grid=None, obstacles=(),
-        plane_nets=None):
+        plane_nets=None, profiles=None):
     """Full tournament. Orchestration only — no pcbnew in this process.
     `resume`: reuse existing cand_*.json / .ses; adopt orphaned live JVMs.
     `oit`: freerouting optimization-improvement threshold (%) — caps the silent
-    post-routing optimizer phase that otherwise runs for an hour per candidate."""
+    post-routing optimizer phase that otherwise runs for an hour per candidate.
+    `profiles`: list of PROFILES names — the compile-target sweep (Quilter:
+    stackup x rule-set). Every placement candidate is built and judged once
+    per profile; candidate count multiplies accordingly."""
     os.makedirs(workdir, exist_ok=True)
     cands = candidates or CANDIDATES
     if compact_grid:
         cands = list(compact_grid)
+    profiles = list(profiles or [DEFAULT_PROFILE])
+    cands = [(c, pf) for pf in profiles for c in cands]
     plane_nets = tuple(plane_nets or (("In1.Cu", "GND"), ("In2.Cu", "VIN_PROT")))
 
     # ---- stage 1: place candidates in fresh interpreters (parallel) ----
-    def spawn_place(i, c):
+    def spawn_place(i, cpf):
+        c, pf = cpf
         if compact_grid:
             sx, sy, gp, pk = c
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
                     f"from fluxplace.tournament import compact_candidate_worker; "
                     f"compact_candidate_worker({board_path!r}, {workdir!r}, {i}, "
-                    f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r})")
+                    f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r}, "
+                    f"profile={pf!r})")
         else:
             fill, aspect, pad, jitter = c
             code = (f"import sys; sys.path.insert(0, {_REPO!r}); "
                     f"from fluxplace.tournament import candidate_worker; "
                     f"candidate_worker({board_path!r}, {workdir!r}, {i}, "
-                    f"{fill}, {aspect}, {pad}, {jitter})")
+                    f"{fill}, {aspect}, {pad}, {jitter}, profile={pf!r})")
         return subprocess.Popen([sys.executable, "-c", code],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=dict(os.environ))
@@ -278,8 +385,17 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
                            os.path.join(workdir, f"cand_{i}.frlog"),
                            set(r.get("routable", [])))
         r.update(met, status="routed")
-        log(f"cand {i}: unrouted={met['unrouted']} vias={met['vias']} "
-            f"wl={met['wl']}mm")
+        # Quilter's hard gate: judge the REAL board. Import the session and
+        # DRC it — a candidate with violations must never outrank a clean one.
+        routed_pcb = import_session(workdir, i)
+        if routed_pcb:
+            viol, unconn = drc_count(routed_pcb)
+            r["drc"] = viol
+            r["drc_unconnected"] = unconn
+        log(f"cand {i}: unrouted={met['unrouted']} drc={r.get('drc')} "
+            f"prc={r.get('prc_pass')}/{(r.get('prc_pass') or 0) + (r.get('prc_fail') or 0)} "
+            f"vias={met['vias']} wl={met['wl']}mm "
+            f"completion={met.get('completion')}")
 
     queue, external = [], []
     for r in results:
@@ -338,11 +454,21 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
               and r.get("unrouted") is not None and r.get("wires", 0) > 0]
     winner = None
     if routed:
-        routed.sort(key=lambda r: (r["unrouted"], r["vias"], r["wl"]))
+        routed.sort(key=rank_key)
         winner = routed[0]
-        log(f"WINNER: cand {winner['idx']} (fill {winner['fill']}, "
-            f"aspect {winner['aspect']}, pad {winner['pad']}, jitter {winner['jitter']}) "
-            f"— unrouted {winner['unrouted']}, vias {winner['vias']}, wl {winner['wl']}mm")
+        comp = winner.get("completion")
+        # Quilter's job-level bar: success = a >=95%-complete candidate exists
+        verdict = ("SUCCESS" if (comp or 0) >= 0.95 and not winner.get("drc")
+                   else "PARTIAL")
+        log(f"WINNER [{verdict}]: cand {winner['idx']} (fill {winner['fill']}, "
+            f"aspect {winner['aspect']}, pad {winner['pad']}, jitter {winner['jitter']}, "
+            f"profile {winner.get('profile')}) — drc {winner.get('drc')}, "
+            f"unrouted {winner['unrouted']}, "
+            f"prc {winner.get('prc_pass')}/{(winner.get('prc_pass') or 0) + (winner.get('prc_fail') or 0)}, "
+            f"vias {winner['vias']}, wl {winner['wl']}mm")
+        if winner.get("drc"):
+            log(f"WARNING: best candidate still carries {winner['drc']} DRC "
+                f"violations — Quilter would not surface this; fix before fab")
         gate_rank = sorted(routed, key=lambda r: r["gate_wl"])
         log("calibration (gate rank -> truth rank): " + ", ".join(
             f"c{r['idx']}:{gate_rank.index(r) + 1}->{routed.index(r) + 1}"
@@ -354,15 +480,6 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
 
 
 def import_winner(workdir, winner_idx, out_board=None):
-    """Import the winning session's copper into the winning candidate board.
-    Run in a fresh interpreter (subprocess) for the same SWIG-safety reason."""
-    code = (f"import sys; sys.path.insert(0, {_REPO!r}); import pcbnew; "
-            f"b = pcbnew.LoadBoard({os.path.join(workdir, f'cand_{winner_idx}.kicad_pcb')!r}); "
-            f"ok = pcbnew.ImportSpecctraSES(b, {os.path.join(workdir, f'cand_{winner_idx}.ses')!r}); "
-            f"out = {out_board!r} or "
-            f"{os.path.join(workdir, f'cand_{winner_idx}_routed.kicad_pcb')!r}; "
-            f"pcbnew.SaveBoard(out, b); print('OK' if ok else 'FAIL', out)")
-    rc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                        env=dict(os.environ))
-    line = (rc.stdout.strip().splitlines() or ["FAIL"])[-1]
-    return line.startswith("OK"), line.split(" ", 1)[-1]
+    """Import the winning session's copper into the winning candidate board."""
+    routed = import_session(workdir, winner_idx, out_board)
+    return routed is not None, routed or ""

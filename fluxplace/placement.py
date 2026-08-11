@@ -601,16 +601,38 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
     xs = [v[0] for v in p.values()]
     ys = [v[1] for v in p.values()]
     ex0, ex1, ey0, ey1 = min(xs), max(xs), min(ys), max(ys)
-    # farthest-first: the worst-strung decaps get first pick of the good slots
+    # Quilter's decap ordering rule (docs/QUILTER-DOCS-DIGEST.md §5): smaller
+    # capacitance belongs CLOSER to the pin. Anchor each decap on the owner's
+    # PIN for their shared power net (not the body center), and within an
+    # owner let the smallest cap claim the nearest slot first. Owner groups
+    # still go worst-strung-first so the ugliest clusters get fixed first.
+    from .comprehend import parse_value
+    from .lint import GND_RE, _basename
+    farad = {r: (parse_value(parts[r].get("value", ""), "F") or 1.0)
+             for r in owners_of}
+    pin_off, worst = {}, {}
+    for r, o in owners_of.items():
+        d = abs(p[o][0] - p[r][0]) + abs(p[o][1] - p[r][1])
+        worst[o] = max(worst.get(o, 0.0), d)
+        shared = sorted(n for n in parts[r].get("pins", {})
+                        if n in parts[o].get("pins", {})
+                        and not GND_RE.match(_basename(n)))
+        if shared:
+            try:
+                pin_off[r] = pin_at(parts, o, shared[0], angles.get(o))
+            except Exception:
+                pass
     order = sorted(owners_of,
-                   key=lambda r: -(abs(p[owners_of[r]][0] - p[r][0]) +
-                                   abs(p[owners_of[r]][1] - p[r][1])))
+                   key=lambda r: (-worst[owners_of[r]], owners_of[r],
+                                  farad[r], r))
     for r in order:
         owner = owners_of[r]
         ow, oh = eff_size(parts, owner, angles.get(owner, 0.0), pad)
         rw, rh = eff_size(parts, r, angles.get(r, 0.0), pad)
         ox, oy = q[owner]
-        cur_d = abs(q[r][0] - ox) + abs(q[r][1] - oy)
+        tdx, tdy = pin_off.get(r, (0.0, 0.0))
+        tx, ty = ox + tdx, oy + tdy          # the power PIN is the target
+        cur_d = abs(q[r][0] - tx) + abs(q[r][1] - ty)
         slots = []
         for k in range(-4, 5):
             step = k * max(rw, rh) * 1.05
@@ -618,12 +640,12 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
                       (ox + step, oy + (oh + rh) / 2 + 0.2),
                       (ox - (ow + rw) / 2 - 0.2, oy + step),
                       (ox + (ow + rw) / 2 + 0.2, oy + step)]
-        # rank by closeness to the OWNER — that is the objective
-        slots.sort(key=lambda t: abs(t[0] - ox) + abs(t[1] - oy))
+        # rank by closeness to the power PIN — that is the objective
+        slots.sort(key=lambda t: abs(t[0] - tx) + abs(t[1] - ty))
         for x, y in slots:
             if not (ex0 <= x <= ex1 and ey0 <= y <= ey1):
                 continue                   # never stretch the board for a decap
-            d = abs(x - ox) + abs(y - oy)
+            d = abs(x - tx) + abs(y - ty)
             if d >= cur_d - 1.0:
                 continue                   # not a meaningful improvement
             clear = True

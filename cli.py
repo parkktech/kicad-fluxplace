@@ -98,6 +98,48 @@ def cmd_eval(a):
           f"extent={max(xs)-min(xs):.0f} x {max(ys)-min(ys):.0f} mm")
     ov = P.count_overlaps(parts, pos, a.pad)
     print(f"overlapping pairs (pad {a.pad}mm): {ov}")
+    print(f"pin density: {pin_density(board):.1f}% "
+          f"(pad copper / board area; Quilter refuses >20%)")
+    if getattr(a, "prc", False):
+        from fluxplace import comprehend as CM, prc as PR
+        comp = CM.comprehend(CM.pads_from_board(board))
+        angles = {r: parts[r].get("angle0", 0.0) for r in parts}
+        rows, _, _ = PR.score(parts, pos, angles, comp)
+        PR.summarize(rows, failed_only=getattr(a, "failed_only", False))
+
+
+def pin_density(board):
+    """Quilter's input-complexity metric: component pad area / board area x100.
+    Their guidance: designs over 20% are not recommended for auto-layout —
+    use this to compare density targets across boards on a common scale."""
+    import pcbnew
+    pad_area = 0.0
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            s = pad.GetSize()
+            pad_area += (s.x / 1e6) * (s.y / 1e6)
+    bb = board.GetBoardEdgesBoundingBox()
+    w = bb.GetWidth() / 1e6
+    h = bb.GetHeight() / 1e6
+    if w <= 0 or h <= 0:
+        return 0.0
+    return 100.0 * pad_area / (w * h)
+
+
+def cmd_comprehend(a):
+    import json as _json
+    from fluxplace import comprehend as CM, prc as PR
+    board, parts, nets, IO = _load(a.board)
+    comp = CM.comprehend(CM.pads_from_board(board))
+    CM.summarize(comp)
+    if a.prc:
+        pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
+        angles = {r: parts[r].get("angle0", 0.0) for r in parts}
+        rows, _, _ = PR.score(parts, pos, angles, comp)
+        PR.summarize(rows, failed_only=a.failed_only)
+    if a.json:
+        _json.dump(comp, open(a.json, "w"), indent=1)
+        print(f"wrote: {a.json}")
 
 
 def cmd_route(a):
@@ -734,7 +776,20 @@ def main(argv=None):
 
     pe = sub.add_parser("eval"); pe.add_argument("--board", required=True)
     pe.add_argument("--pad", type=float, default=0.5)
+    pe.add_argument("--prc", action="store_true",
+                    help="grade placement physics rule checks too")
+    pe.add_argument("--failed-only", action="store_true")
     pe.set_defaults(fn=cmd_eval)
+
+    pco = sub.add_parser("comprehend",
+                         help="auto-detect physics constraints (power nets, "
+                              "diff pairs, bypass caps, crystals, converters)")
+    pco.add_argument("--board", required=True)
+    pco.add_argument("--json", default=None, help="write constraints JSON here")
+    pco.add_argument("--prc", action="store_true",
+                     help="also grade the current placement against them")
+    pco.add_argument("--failed-only", action="store_true")
+    pco.set_defaults(fn=cmd_comprehend)
 
     a = ap.parse_args(argv)
     a.fn(a)
