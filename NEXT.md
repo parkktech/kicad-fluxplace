@@ -210,6 +210,18 @@ enclosure envelope -> outline cap + height keepouts, RF net list -> 50R
 netclass + pour pullback, diff pairs -> quilter CSV, rigid module patterns
 (CM5-style pair+holes) as reusable intent blocks.
 
+## 2026-08-11 later — FULL Quilter docs crawl (all 74 pages) → adoption plan
+Complete crawl digested in docs/QUILTER-DOCS-DIGEST.md (every heuristic + number:
+detection rules, PRC formulas/tolerances, lexicographic sort tuples, envelope).
+Application plan in docs/QUILTER-PARITY-PLAN.md (P0–P4). Headline: Quilter ranks
+candidates lexicographically with WIRELENGTH LAST — independently confirms
+Tournament #1's "gate over-values wirelength" finding; P0 = re-rank tournament by
+(DRC, completion, constraint passes, conservativeness, layers, length). Also:
+decap ordering is capacitance-ascending toward the pin (our pass lacks the value
+sort); their detection layer is shallow lexical rules we can copy verbatim; their
+docs admit gaps (series-R crystals, connector detection, lock granularity) that
+are our surpass list. The section below is superseded by the plan doc.
+
 ## 2026-08-11 — Quilter feature study (docs.quilter.ai/design-parameters)
 What they expose that flux lacks, in adoption order:
 1. **Placement regions via KiCad Rule Areas** — their convention: a rule area
