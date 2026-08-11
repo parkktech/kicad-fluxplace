@@ -93,3 +93,27 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print(name, "OK")
+
+
+def test_heavy_squeeze_converges_clean():
+    # r6/r8 regression: aggressive anisotropic squeeze with locked islands
+    # left 25+ real overlaps that the single-shot legalizer never cleared
+    parts = {}
+    for i in range(80):
+        parts[f"R{i}"] = mkpart(4.0 * (i % 10), 4.0 * (i // 10),
+                                w=2.5, h=1.5)
+    parts["T1"] = mkpart(20, 10, w=19.4, h=9.9)     # big transformer
+    parts["T2"] = mkpart(10, 25, w=9.9, h=19.4)
+    parts["U1"] = mkpart(18, 16, w=5, h=24, locked=True)
+    parts["U2"] = mkpart(30, 16, w=5, h=24, locked=True)
+    ob = [dict(x=24, y=16, w=20, h=28, side="B")]
+    pos, st = C.compact(parts, 0.55, 0.40, gap=0.42, pack=6, obstacles=ob)
+    assert st["resid"] == 0, st
+    refs = sorted(pos)
+    for i, a in enumerate(refs):
+        for b_ in refs[i + 1:]:
+            dx = abs(pos[a][0] - pos[b_][0])
+            dy = abs(pos[a][1] - pos[b_][1])
+            ox = parts[a]["w"] / 2 + parts[b_]["w"] / 2 - dx
+            oy = parts[a]["h"] / 2 + parts[b_]["h"] / 2 - dy
+            assert ox <= 0.01 or oy <= 0.01, (a, b_, ox, oy)

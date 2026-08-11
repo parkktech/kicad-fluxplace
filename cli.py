@@ -444,8 +444,13 @@ def cmd_compact(a):
           f"{st['iters']} iters, {st['hard']} hard-relocated, "
           f"{st['resid']} residual overlaps, extent {x1-x0:.1f}x{y1-y0:.1f} mm"
           f"  ({time.time()-t0:.0f}s)")
+    if st["resid"] and not a.allow_overlaps:
+        raise SystemExit(
+            f"compact: {st['resid']} residual overlaps after convergence — "
+            "NOT routing a physically broken placement (relax --sx/--sy/--gap, "
+            "or pass --allow-overlaps to proceed anyway)")
     if st["resid"]:
-        print("    ! residual overlaps — inspect before fab")
+        print("    ! residual overlaps — proceeding under --allow-overlaps")
     rot = {r: parts[r].get("angle0", 0.0) for r in parts}  # eff_size identity
     # phantom entries so the shrink-wrapped outline covers the obstacle rects
     # (a plug-on module shadow must stay on-board even where no part reaches)
@@ -605,6 +610,8 @@ def main(argv=None):
     pco.add_argument("--pack", type=int, default=5, help="gravity-pack sweeps (0 = off)")
     pco.add_argument("--anchor", default=None,
                      help="ref to shrink toward (default: centroid of locked parts)")
+    pco.add_argument("--allow-overlaps", action="store_true",
+                     help="route even if legalization left overlaps (default: abort)")
     pco.add_argument("--tht-bands", action="store_true",
                      help="THT parts only above/below obstacle bands (frees X width)")
     pco.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])

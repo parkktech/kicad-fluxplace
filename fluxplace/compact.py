@@ -103,43 +103,46 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
                 abs(p["c"][1] - q["c"][1]) < p["hh"] + q["hh"] + g)
 
     # ---- soft legalize: pairwise push-apart + obstacle keep-out ----------
-    nudges = it = 0
-    for it in range(iters):
-        moved = False
-        for i, r1 in enumerate(refs):
-            p = P[r1]
-            for r2 in refs[i + 1:]:
-                q = P[r2]
-                if not collides(p, q):
-                    continue
-                ox = p["hw"] + q["hw"] + g - abs(p["c"][0] - q["c"][0])
-                oy = p["hh"] + q["hh"] + g - abs(p["c"][1] - q["c"][1])
-                axis = 0 if ox < oy else 1
-                pen = (ox if axis == 0 else oy) + 0.01
-                s = 1.0 if p["c"][axis] < q["c"][axis] else -1.0
-                wp = 0.0 if p["locked"] else (0.5 if not q["locked"] else 1.0)
-                wq = 0.0 if q["locked"] else (0.5 if not p["locked"] else 1.0)
-                if wp == wq == 0.0:
-                    continue
-                p["c"][axis] -= s * pen * wp
-                q["c"][axis] += s * pen * wq
-                moved = True
-                nudges += 1
-            for ob in obstacles:
-                if not _blocks(p, ob, tht_bands):
-                    continue
-                band = tht_bands and p["tht"]
-                exx = ob["w"] / 2 + p["hw"] + g - abs(p["c"][0] - ob["x"])
-                exy = ob["h"] / 2 + p["hh"] + g - abs(p["c"][1] - ob["y"])
-                if exy > 0 and (band or exx > 0):
-                    if band or exy <= exx:
-                        p["c"][1] += math.copysign(exy + 0.01, p["c"][1] - ob["y"])
-                    else:
-                        p["c"][0] += math.copysign(exx + 0.01, p["c"][0] - ob["x"])
+    def soft_pass(iters):
+        nonlocal nudges
+        it = 0
+        for it in range(iters):
+            moved = False
+            for i, r1 in enumerate(refs):
+                p = P[r1]
+                for r2 in refs[i + 1:]:
+                    q = P[r2]
+                    if not collides(p, q):
+                        continue
+                    ox = p["hw"] + q["hw"] + g - abs(p["c"][0] - q["c"][0])
+                    oy = p["hh"] + q["hh"] + g - abs(p["c"][1] - q["c"][1])
+                    axis = 0 if ox < oy else 1
+                    pen = (ox if axis == 0 else oy) + 0.01
+                    s = 1.0 if p["c"][axis] < q["c"][axis] else -1.0
+                    wp = 0.0 if p["locked"] else (0.5 if not q["locked"] else 1.0)
+                    wq = 0.0 if q["locked"] else (0.5 if not p["locked"] else 1.0)
+                    if wp == wq == 0.0:
+                        continue
+                    p["c"][axis] -= s * pen * wp
+                    q["c"][axis] += s * pen * wq
                     moved = True
                     nudges += 1
-        if not moved:
-            break
+                for ob in obstacles:
+                    if not _blocks(p, ob, tht_bands):
+                        continue
+                    band = tht_bands and p["tht"]
+                    exx = ob["w"] / 2 + p["hw"] + g - abs(p["c"][0] - ob["x"])
+                    exy = ob["h"] / 2 + p["hh"] + g - abs(p["c"][1] - ob["y"])
+                    if exy > 0 and (band or exx > 0):
+                        if band or exy <= exx:
+                            p["c"][1] += math.copysign(exy + 0.01, p["c"][1] - ob["y"])
+                        else:
+                            p["c"][0] += math.copysign(exx + 0.01, p["c"][0] - ob["x"])
+                        moved = True
+                        nudges += 1
+            if not moved:
+                break
+        return it + 1
 
     # ---- hard resolve: spiral-relocate anything still stuck --------------
     def free_at(ref, x, y):
@@ -147,28 +150,46 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
         return _keepout_ok(p, obstacles, g, tht_bands) and not any(
             collides(p, P[r2]) for r2 in refs if r2 != ref)
 
-    hard = 0
-    for r1 in refs:
-        p = P[r1]
-        if p["locked"]:
-            continue
-        if _keepout_ok(p, obstacles, g, tht_bands) and not any(
-                collides(p, P[r2]) for r2 in refs if r2 != r1):
-            continue
-        placed = False
-        for radius in [k * 1.5 for k in range(1, 40)]:
-            steps = max(8, int(radius * 2))
-            for k in range(steps):
-                th = 2 * math.pi * k / steps
-                if free_at(r1, p["c"][0] + radius * math.cos(th),
-                           p["c"][1] + radius * math.sin(th)):
-                    p["c"] = [p["c"][0] + radius * math.cos(th),
-                              p["c"][1] + radius * math.sin(th)]
-                    hard += 1
-                    placed = True
+    def hard_pass():
+        moved = 0
+        for r1 in refs:
+            p = P[r1]
+            if p["locked"]:
+                continue
+            if _keepout_ok(p, obstacles, g, tht_bands) and not any(
+                    collides(p, P[r2]) for r2 in refs if r2 != r1):
+                continue
+            placed = False
+            # spiral out to board scale — a 58 mm cap starved dense boards
+            for radius in [k * 1.5 for k in range(1, 80)]:
+                steps = max(12, int(radius * 2.5))
+                for k in range(steps):
+                    th = 2 * math.pi * k / steps
+                    if free_at(r1, p["c"][0] + radius * math.cos(th),
+                               p["c"][1] + radius * math.sin(th)):
+                        p["c"] = [p["c"][0] + radius * math.cos(th),
+                                  p["c"][1] + radius * math.sin(th)]
+                        placed = True
+                        moved += 1
+                        break
+                if placed:
                     break
-            if placed:
-                break
+        return moved
+
+    def resid_count():
+        return sum(1 for i, r1 in enumerate(refs) for r2 in refs[i + 1:]
+                   if collides(P[r1], P[r2]))
+
+    # ---- converge: alternate soft and hard until clean -------------------
+    nudges = 0
+    it = hard = 0
+    for cycle in range(4):
+        it += soft_pass(iters)
+        if resid_count() == 0:
+            break
+        hard += hard_pass()
+        if resid_count() == 0:
+            break
 
     # ---- gravity pack: slide toward anchor, nearest-first ----------------
     def blocked_at(ref, axis, want):
@@ -216,8 +237,12 @@ def compact(parts, sx, sy, anchor=None, gap=0.42, pack=5, obstacles=(),
                 slid += abs(new - P[ref]["c"][axis])
                 P[ref]["c"][axis] = new
 
-    resid = sum(1 for i, r1 in enumerate(refs) for r2 in refs[i + 1:]
-                if collides(P[r1], P[r2]))
+    # pack starts from a clean state and cannot create overlaps, but belt
+    # and braces: one more soft/hard cycle if anything slipped through
+    if resid_count():
+        it += soft_pass(iters)
+        hard += hard_pass()
+    resid = resid_count()
     xs0 = [p["c"][0] - p["hw"] for p in P.values()]
     ys0 = [p["c"][1] - p["hh"] for p in P.values()]
     xs1 = [p["c"][0] + p["hw"] for p in P.values()]
