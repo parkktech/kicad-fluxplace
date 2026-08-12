@@ -111,14 +111,45 @@ def mouser_lookup(mpn, creds):
 
 
 # ---------------------------------------------------------------- step fetch
-def fetch_step(mpn, dest_dir, creds, tok, log=print):
-    """Fetch the real STEP for `mpn` into dest_dir. Returns (path, status)."""
+# hosts whose "CAD Models" links always need a browser login — attempting a
+# scripted download just burns a timeout every run (DigiKey-first policy:
+# DigiKey/Mouser APIs are the sources; anything else is best-effort only)
+LOGIN_WALLED = ("snapeda.com", "snapmagic.com", "componentsearchengine.com",
+                "samacsys.com", "ultralibrarian.com")
+
+
+def _fail_cache(dest_dir):
+    p = pathlib.Path(dest_dir) / ".fetch_failures.json"
+    try:
+        return p, json.load(open(p))
+    except Exception:
+        return p, {}
+
+
+def fetch_step(mpn, dest_dir, creds, tok, log=print, force=False):
+    """Fetch the real STEP for `mpn` into dest_dir. Returns (path, status).
+
+    Failures are remembered in dest_dir/.fetch_failures.json so a blocked
+    CDN or an MPN DigiKey doesn't carry is not re-attempted (with its
+    timeout) on every subsequent run — pass force=True to retry them."""
     dest_dir = pathlib.Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^\w.+-]", "_", mpn)
     dest = dest_dir / (safe + ".step")
     if dest.exists() and dest.stat().st_size > 1000:
         return dest, "cached"
+    cache_path, fails = _fail_cache(dest_dir)
+
+    def _fail(status):
+        fails[mpn] = status
+        try:
+            json.dump(fails, open(cache_path, "w"), indent=1)
+        except Exception:
+            pass
+        return None, status
+
+    if not force and mpn in fails:
+        return None, "known-fail (use --force to retry): %s" % fails[mpn]
     try:
         real, links = dk_media(mpn, creds, tok)
     except Exception as e:
@@ -128,21 +159,23 @@ def fetch_step(mpn, dest_dir, creds, tok, log=print):
             try:
                 real, links = dk_media(alt, creds, tok)
             except Exception as e2:
-                return None, "api-error: %s" % e2
+                return _fail("api-error: %s" % e2)
         else:
-            return None, "api-error: %s" % e
+            return _fail("api-error: %s" % e)
     cad = [m for m in links if m.get("MediaType") == "CAD Models" and
            "STP" in (m.get("Title", "") + m.get("Url", "")).upper()]
     cad = cad or [m for m in links if m.get("MediaType") == "CAD Models"]
     if not cad:
         kinds = sorted({m.get("MediaType") for m in links})
-        return None, "no-CAD-link (media: %s)" % ", ".join(k or "?" for k in kinds)
+        return _fail("no-CAD-link (media: %s)" % ", ".join(k or "?" for k in kinds))
     url = cad[0]["Url"]
+    if any(h in url.lower() for h in LOGIN_WALLED):
+        return _fail("login-walled: %s" % url[:90])
     try:
         req = urllib.request.Request(url, headers=UA)
-        data = urllib.request.urlopen(req, timeout=60).read()
+        data = urllib.request.urlopen(req, timeout=20).read()
     except Exception as e:
-        return None, "download-blocked: %s -> %s" % (type(e).__name__, url[:90])
+        return _fail("download-blocked: %s -> %s" % (type(e).__name__, url[:90]))
     if data[:2] == b"PK":
         z = zipfile.ZipFile(io.BytesIO(data))
         member = sorted((n for n in z.namelist()
@@ -151,14 +184,14 @@ def fetch_step(mpn, dest_dir, creds, tok, log=print):
         member = member or [n for n in z.namelist()
                             if n.lower().endswith(".wrl")]
         if not member:
-            return None, "zip-without-step"
+            return _fail("zip-without-step")
         data = z.read(member[0])
         if member[0].lower().endswith(".wrl"):
             dest = dest.with_suffix(".wrl")
             dest.write_bytes(data)
             return dest, "fetched"
     if not data.lstrip()[:40].startswith(b"ISO-10303"):
-        return None, "not-a-step-file (%d bytes)" % len(data)
+        return _fail("not-a-step-file (%d bytes)" % len(data))
     dest.write_bytes(data)
     return dest, "fetched"
 
@@ -589,7 +622,8 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
             report["skipped"].append((ref, why, "no MPN mapping"))
             continue
         if not path:
-            path, status = fetch_step(mpn, dest_dir, creds, tok, log=log)
+            path, status = fetch_step(mpn, dest_dir, creds, tok, log=log,
+                                      force=force)
         if not path:
             report["failed"].append((ref, mpn or why, status))
             log(f"  ! {ref} {mpn}: {status}")
