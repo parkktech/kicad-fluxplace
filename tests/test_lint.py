@@ -126,3 +126,23 @@ def test_waivers_suppress():
     assert "dead-end-net" in codes(f)
     f = L.run(pads, waivers=["dead-end-net:^net 'ETH_"])
     assert "dead-end-net" not in codes(f)
+
+
+def test_rf_friction_coax_flagged():
+    from fluxplace.lint import run
+    pads = [dict(ref="J4", footprint="U.FL_Hirose_U.FL-R-SMT-1_Vertical",
+                 value="U.FL", pad="1", net="RF_EXT", drill=False),
+            dict(ref="J4", footprint="U.FL_Hirose_U.FL-R-SMT-1_Vertical",
+                 value="U.FL", pad="2", net="GND", drill=False)]
+    codes = {f["code"] for f in run(pads)}
+    assert "rf-friction-coax" in codes
+
+
+def test_locking_coax_not_flagged():
+    from fluxplace.lint import run
+    pads = [dict(ref="J4", footprint="IPEX_MHF_I_LK_20278", value="MHF LK",
+                 pad="1", net="RF_EXT", drill=False),
+            dict(ref="J4", footprint="IPEX_MHF_I_LK_20278", value="MHF LK",
+                 pad="2", net="GND", drill=False)]
+    codes = {f["code"] for f in run(pads)}
+    assert "rf-friction-coax" not in codes

@@ -42,6 +42,7 @@ CONN_FP_RE = re.compile(
     r"df\d+|receptacle|plug", re.I)
 BARREL_RE = re.compile(r"barrel|dc.?jack|jack.?dc|\bpj-?\d|5\.5x2\.[15]", re.I)
 FRICTION_HDR_RE = re.compile(r"pinheader|pin_header|pinsocket|pin_socket", re.I)
+RF_FRICTION_RE = re.compile(r"u\.?fl|umcc|\bmhf\b|ipex|i-pex", re.I)
 MECH_RE = re.compile(r"mount|fiducial|logo|hole|testpoint|tp_|solderjumper", re.I)
 
 
@@ -164,6 +165,17 @@ def run(pads, waivers=None):
                 f"{r} feeds power through a friction-fit pin header — "
                 "use a latching connector for anything that must survive "
                 "vibration", [r])
+
+    # --- RF friction coax: U.FL/MHF snap-fits walk off under vibration ---
+    for r, ps in sorted(by_part.items()):
+        blob = (ps[0]["footprint"] + " " + ps[0]["value"])
+        if RF_FRICTION_RE.search(blob) and not re.search(r"lk|lock", blob, re.I):
+            add("warning", "rf-friction-coax",
+                f"{r} is a snap-fit micro-coax (U.FL/MHF class, ~30 cycles, "
+                "a few N retention) — for vibration environments use a "
+                "locking variant (I-PEX MHF LK), a threaded connector "
+                "(SMA/MMCX), or adhesive-stake the mated pair with strain "
+                "relief", [r])
 
     if waivers:
         rules = []
