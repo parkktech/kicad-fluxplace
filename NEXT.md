@@ -13,9 +13,25 @@ part costs a RE-LAYOUT, not a re-order.
   NONE/RISK before placing), `--no-sourcing`.
 - Advisory by default on purpose: a lead-time part is a schedule decision, not
   a layout defect. Only NONE/RISK are blockers.
-- Degrades gracefully: no credentials, no map, or an API outage prints a note
-  and places anyway. Mouser 403s under heavy use are rate limiting — DigiKey
-  data still carries the verdict.
+- **Rate limits (measured, not guessed):** Mouser answers a BURST with HTTP
+  403, not 429 — its limit is ~30 calls/min, so calls are throttled to 2.1 s
+  with 3 s/6 s backoff retries. DigiKey gets a 0.25 s throttle, 429/5xx
+  retries, AND a 401 re-auth: its OAuth token expires in ~10 min and a
+  throttled sweep of a large BOM outlives it, which would otherwise fail every
+  remaining part mid-run.
+- **Mouser is a SECOND OPINION**, only queried when DigiKey has not already
+  settled the part (ample stock + Active). On a 65-MPN board that is ~8 Mouser
+  calls instead of 65 — the quota is spent on the parts that actually need
+  adjudicating. `--sourcing-both` forces full dual-source data.
+- **A failed lookup is never a NONE.** grade() takes an `errors` list and emits
+  ERR (never a blocker) when a distributor did not answer, and a failed lookup
+  is never written to the cache. Without this, one transient 403 became a false
+  "nobody stocks this part" — and under --strict-sourcing, a bogus abort.
+- Degrades gracefully: no credentials, no map, or a total API outage prints a
+  note and places anyway.
+- The project-side gate (utv-comms-bridge hardware/tools/check_availability.py)
+  is now a thin wrapper over this module — they drifted once and only the
+  plugin copy got the fixes above.
 - Why it exists (utv-comms-bridge D41/D43): an Ethernet magjack lifted from a
   reference design cleared placement, routing, DRC and fab packaging before
   anyone asked a distributor — DigiKey did not carry it, Mouser had 0 stock and

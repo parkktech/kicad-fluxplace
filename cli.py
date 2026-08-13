@@ -43,6 +43,7 @@ def _sourcing_preflight(a, stage="placement"):
                                mpn_map=getattr(a, "mpn_map", None),
                                need=getattr(a, "sourcing_need", 10),
                                refresh=getattr(a, "sourcing_refresh", False),
+                               both=getattr(a, "sourcing_both", False),
                                log=lambda m: print(m, flush=True))
     except Exception as e:                      # never let sourcing block work
         print(f"    sourcing pre-flight skipped: {e}", flush=True)
@@ -63,7 +64,7 @@ def cmd_sourcing(a):
     print(f"sourcing: {len(by_mpn)} MPNs from {path}")
     report, counts = S.check(by_mpn, need=a.sourcing_need,
                              cache_dir=os.path.dirname(path),
-                             refresh=a.sourcing_refresh)
+                             refresh=a.sourcing_refresh, both=a.sourcing_both)
     blockers = S.summary(report, counts, a.sourcing_need, show_ok=a.show_ok)
     if a.json:
         json_mod = __import__("json")
@@ -753,6 +754,10 @@ def main(argv=None):
                     help="skip the pre-flight entirely")
     ap.add_argument("--sourcing-refresh", action="store_true",
                     help="ignore the 24h stock cache")
+    ap.add_argument("--sourcing-both", action="store_true",
+                    help="always query BOTH distributors (default: Mouser is "
+                         "only asked when DigiKey has not already settled the "
+                         "part — saves Mouser's ~30 calls/min quota)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     ps = sub.add_parser("sourcing",

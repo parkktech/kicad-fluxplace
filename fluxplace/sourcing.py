@@ -23,6 +23,7 @@ Verdicts:
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -47,16 +48,43 @@ def _dk_token(creds):
     return json.load(urllib.request.urlopen(req, timeout=30))["access_token"]
 
 
-def _dk(mpn, creds, tok):
+_DK_MIN_INTERVAL = 0.25         # s between calls; DigiKey throttles bursts too
+_last_dk = [0.0]
+
+
+def _dk(mpn, creds, tok, retries=3, on_token=None):
+    """Returns [stock, status, price, ''] or None (DigiKey answered: not
+    carried). Raises if DigiKey never answered — see grade(errors=).
+
+    Retries 429/5xx with backoff and RE-AUTHENTICATES on 401: the OAuth token
+    expires in ~10 minutes and a throttled sweep of a large BOM outlives it,
+    which would otherwise fail every remaining part in the run."""
     body = json.dumps({"Keywords": mpn, "Limit": 5,
                        "FilterOptionsRequest": {
                            "MarketPlaceFilter": "ExcludeMarketPlace"}}).encode()
-    req = urllib.request.Request(
-        "https://api.digikey.com/products/v4/search/keyword", data=body,
-        headers={"Content-Type": "application/json",
-                 "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
-                 "Authorization": "Bearer " + tok})
-    d = json.load(urllib.request.urlopen(req, timeout=30))
+    for attempt in range(retries):
+        wait = _DK_MIN_INTERVAL - (time.time() - _last_dk[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_dk[0] = time.time()
+        req = urllib.request.Request(
+            "https://api.digikey.com/products/v4/search/keyword", data=body,
+            headers={"Content-Type": "application/json",
+                     "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
+                     "Authorization": "Bearer " + tok})
+        try:
+            d = json.load(urllib.request.urlopen(req, timeout=30))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and attempt < retries - 1:
+                tok = _dk_token(creds)          # expired mid-sweep
+                if on_token:
+                    on_token(tok)
+                continue
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
     for p in d.get("Products", []):
         # keyword search is fuzzy: only an exact MPN hit counts
         if p.get("ManufacturerProductNumber", "").upper() != mpn.upper():
@@ -67,16 +95,39 @@ def _dk(mpn, creds, tok):
     return None
 
 
-def _mouser(mpn, creds):
+_MOUSER_MIN_INTERVAL = 2.1      # Mouser allows ~30 calls/min; bursts 403
+_last_mouser = [0.0]
+
+
+def _mouser(mpn, creds, retries=3):
     """Mouser's Availability is a STRING ('1,234 In Stock'); the integer field
-    is unreliable — parse the string (utv-comms V1.2 lesson)."""
+    is unreliable — parse the string (utv-comms V1.2 lesson).
+
+    Mouser answers a BURST with HTTP 403 (not 429), so calls are throttled and
+    403/429/5xx are retried with backoff. Raises on final failure: the caller
+    must be able to tell "Mouser says nobody stocks it" (None) apart from
+    "Mouser did not answer" (exception) — conflating them turns a transient
+    outage into a false NONE verdict and, under --strict-sourcing, a bogus
+    abort."""
     body = json.dumps({"SearchByPartRequest": {
         "mouserPartNumber": mpn, "partSearchOptions": "Exact"}}).encode()
     req = urllib.request.Request(
         "https://api.mouser.com/api/v1/search/partnumber?apiKey="
         + creds["MOUSER_API_KEY"], data=body,
         headers={"Content-Type": "application/json"})
-    d = json.load(urllib.request.urlopen(req, timeout=30))
+    for attempt in range(retries):
+        wait = _MOUSER_MIN_INTERVAL - (time.time() - _last_mouser[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_mouser[0] = time.time()
+        try:
+            d = json.load(urllib.request.urlopen(req, timeout=30))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))   # 3s, 6s — past the burst window
+                continue
+            raise
     for p in (d.get("SearchResults") or {}).get("Parts", []) or []:
         if p.get("ManufacturerPartNumber", "").upper() != mpn.upper():
             continue
@@ -89,16 +140,22 @@ def _mouser(mpn, creds):
     return None
 
 
-def grade(dk, mo, need):
+def grade(dk, mo, need, errors=()):
+    """errors = distributors whose lookup FAILED (as opposed to answered
+    'not carried'). A failed lookup is missing evidence, never evidence of
+    absence — grading it as NONE would abort a layout over an API hiccup."""
     stock = (dk[0] if dk else 0) + (mo[0] if mo else 0)
     status = " ".join(str(x[1]) for x in (dk, mo) if x).lower()
     if any(b in status for b in BAD):
         return "RISK", stock
-    if not dk and not mo:
-        return "NONE", 0
     if stock >= need:
         return "OK", stock
-    return ("LOW", stock) if stock else ("LEAD", 0)
+    if not dk and not mo:
+        # nothing found anywhere — only a real NONE if BOTH actually answered
+        return ("ERR" if errors else "NONE"), 0
+    if stock:
+        return "LOW", stock
+    return ("ERR", 0) if errors else ("LEAD", 0)
 
 
 # ------------------------------------------------------------------ mpn map
@@ -128,7 +185,8 @@ def load_map(path):
 
 
 # ------------------------------------------------------------------- check
-def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print):
+def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
+          both=False):
     """-> (report, counts). Never raises on a per-part API error: an outage
     must not block a layout, it just leaves that part ungraded."""
     creds = credentials()
@@ -143,8 +201,10 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print):
         except Exception:
             cache = {}
     tok, report, counts = None, {}, {}
+    skipped = set()
     for mpn in sorted(by_mpn):
         hit = cache.get(mpn)
+        errs = []
         if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
             dk, mo = hit.get("dk"), hit.get("mo")
         else:
@@ -153,19 +213,34 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print):
                 if "DIGIKEY_CLIENT_ID" in creds:
                     if tok is None:
                         tok = _dk_token(creds)
-                    dk = _dk(mpn, creds, tok)
+
+                    def _keep(new_tok):
+                        nonlocal tok
+                        tok = new_tok
+                    dk = _dk(mpn, creds, tok, on_token=_keep)
             except Exception as e:
+                errs.append("DigiKey")
                 log(f"    ! DigiKey {mpn}: {e}")
-            try:
-                if "MOUSER_API_KEY" in creds:
-                    mo = _mouser(mpn, creds)
-            except Exception as e:
-                log(f"    ! Mouser {mpn}: {e}")
-            cache[mpn] = {"_t": time.time(), "dk": dk, "mo": mo}
-        verdict, stock = grade(dk, mo, need)
+            settled = (dk and dk[0] >= need
+                       and not any(b in str(dk[1]).lower() for b in BAD))
+            if settled and not both:
+                skipped.add(mpn)        # DigiKey already passes it; don't burn
+            else:                       # a throttled Mouser call to confirm
+                try:
+                    if "MOUSER_API_KEY" in creds:
+                        mo = _mouser(mpn, creds)
+                except Exception as e:
+                    errs.append("Mouser")
+                    log(f"    ! Mouser {mpn}: {e}")
+            # only cache a COMPLETE answer — caching a failed lookup would
+            # freeze a transient outage into the report for 24 h
+            if not errs:
+                cache[mpn] = {"_t": time.time(), "dk": dk, "mo": mo}
+        verdict, stock = grade(dk, mo, need, errors=errs)
         counts[verdict] = counts.get(verdict, 0) + 1
         report[mpn] = {"refs": by_mpn[mpn], "verdict": verdict,
-                       "stock": stock, "digikey": dk, "mouser": mo}
+                       "stock": stock, "digikey": dk, "mouser": mo,
+                       "mouser_skipped": mpn in skipped}
     try:
         json.dump(cache, open(cache_path, "w"))
     except Exception:
@@ -181,9 +256,11 @@ def summary(report, counts, need, log=print, show_ok=False):
             continue
         dk, mo = r["digikey"], r["mouser"]
         lead = (mo[3] if mo and len(mo) > 3 and mo[3] else "")
+        mo_txt = ("MO skip" if r.get("mouser_skipped")
+                  else (("MO %d" % mo[0]) if mo else "MO -"))
         log(f"    {r['verdict']:5s} {mpn:26s} "
             f"{('DK %d' % dk[0]) if dk else 'DK -':>9s} "
-            f"{('MO %d' % mo[0]) if mo else 'MO -':>9s}"
+            f"{mo_txt:>9s}"
             f"{('  lead ' + lead) if lead else ''}   [{' '.join(r['refs'])}]")
     tally = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     log(f"    sourcing: {len(report)} MPNs  {tally}  (need >= {need})")
@@ -194,7 +271,7 @@ def summary(report, counts, need, log=print, show_ok=False):
 
 
 def preflight(board_path, mpn_map=None, need=10, strict=False, refresh=False,
-              log=print):
+              log=print, both=False):
     """Run before placement. Returns the blocker list (empty when clean).
 
     With strict=True the caller should abort: placing a part nobody sells
@@ -209,7 +286,7 @@ def preflight(board_path, mpn_map=None, need=10, strict=False, refresh=False,
         f"{os.path.basename(path)}")
     report, counts = check(by_mpn, need=need,
                            cache_dir=os.path.dirname(path), refresh=refresh,
-                           log=log)
+                           log=log, both=both)
     if not report:
         return []
     return summary(report, counts, need, log=log)
