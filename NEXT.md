@@ -1,5 +1,34 @@
 # fluxplace — next session
 
+## 2026-08-12 — SOURCING PRE-FLIGHT: the placer asks the distributors first
+New `fluxplace/sourcing.py` + a `sourcing` subcommand + a pre-flight hook in
+**place / compact / auto / tournament**. Placement is the point of no return
+for a part choice: once a footprint is placed, routed and DRC'd, an unbuyable
+part costs a RE-LAYOUT, not a re-order.
+- Grades every MPN against live DigiKey + Mouser: OK / LOW / LEAD (catalogued,
+  0 stock) / RISK (EOL-NRND) / NONE (nobody carries it). 24 h cache beside the
+  map file, `--sourcing-refresh` to force.
+- Global flags: `--mpn-map` (auto-discovered next to the board / ../tools/ if
+  omitted), `--sourcing-need N` (default 10), `--strict-sourcing` (ABORT on
+  NONE/RISK before placing), `--no-sourcing`.
+- Advisory by default on purpose: a lead-time part is a schedule decision, not
+  a layout defect. Only NONE/RISK are blockers.
+- Degrades gracefully: no credentials, no map, or an API outage prints a note
+  and places anyway. Mouser 403s under heavy use are rate limiting — DigiKey
+  data still carries the verdict.
+- Why it exists (utv-comms-bridge D41/D43): an Ethernet magjack lifted from a
+  reference design cleared placement, routing, DRC and fab packaging before
+  anyone asked a distributor — DigiKey did not carry it, Mouser had 0 stock and
+  a 140-day lead. The first run of this check found FIVE MORE zero-stock parts
+  already committed to that board (GH-3 header 180 d, buck input caps 112 d,
+  CM5 decaps 70 d, tact switch special-order, a 4-pieces-left resistor).
+- Companion trap, worth knowing before any substitution: **a land-pattern match
+  is not a part match.** Gigabit magjacks share one industry-standard footprint
+  across vendors with incompatible pinouts (three vendors, three pinouts,
+  verified). Always read the datasheet pin table.
+
+# fluxplace — next session
+
 ## 2026-08-11 final — v0.8.0 validated: utv-comms-flux-q3 (0 DRC / 0 opens)
 Tournament q3 winner (compact 0.80:0.72 bands+65-passive back-flip, judged by
 the new lexicographic rank) delivered as **utv-comms-flux-q3.kicad_pcb:

@@ -28,7 +28,52 @@ def cmd_analyze(a):
     print(T.summary(topo))
 
 
+def _sourcing_preflight(a, stage="placement"):
+    """Ask the distributors BEFORE committing parts to copper.
+
+    Placement is the point of no return for a part choice: once a footprint is
+    placed, routed and DRC'd, an unbuyable part costs a re-layout, not a
+    re-order. Advisory by default (a lead-time part is a schedule call);
+    --strict-sourcing aborts on NONE/RISK verdicts."""
+    if getattr(a, "no_sourcing", False):
+        return
+    from fluxplace import sourcing as S
+    try:
+        blockers = S.preflight(a.board,
+                               mpn_map=getattr(a, "mpn_map", None),
+                               need=getattr(a, "sourcing_need", 10),
+                               refresh=getattr(a, "sourcing_refresh", False),
+                               log=lambda m: print(m, flush=True))
+    except Exception as e:                      # never let sourcing block work
+        print(f"    sourcing pre-flight skipped: {e}", flush=True)
+        return
+    if blockers and getattr(a, "strict_sourcing", False):
+        raise SystemExit(
+            f"ABORT before {stage}: {len(blockers)} part(s) cannot be bought "
+            f"({', '.join(blockers)}). Fix the BOM or drop --strict-sourcing.")
+
+
+def cmd_sourcing(a):
+    """Standalone: grade every MPN against live DigiKey + Mouser stock."""
+    from fluxplace import sourcing as S
+    path = a.mpn_map or S.find_map(a.board)
+    if not path:
+        raise SystemExit("no mpn_map.json found (pass --mpn-map)")
+    by_mpn = S.load_map(path)
+    print(f"sourcing: {len(by_mpn)} MPNs from {path}")
+    report, counts = S.check(by_mpn, need=a.sourcing_need,
+                             cache_dir=os.path.dirname(path),
+                             refresh=a.sourcing_refresh)
+    blockers = S.summary(report, counts, a.sourcing_need, show_ok=a.show_ok)
+    if a.json:
+        json_mod = __import__("json")
+        json_mod.dump(report, open(a.json, "w"), indent=1)
+        print(f"wrote {a.json}")
+    raise SystemExit(1 if blockers else 0)
+
+
 def cmd_place(a):
+    _sourcing_preflight(a, "placement")
     board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout)
     topo = T.analyze(cg, prefer_hub=a.hub)
@@ -225,6 +270,7 @@ def cmd_calibrate(a):
 def cmd_tournament(a):
     """Placement tournament with freerouting as the fitness function."""
     import os
+    _sourcing_preflight(a, "the tournament")
     from fluxplace import tournament as TN
     jar = a.jar or os.environ.get("FREEROUTING_JAR")
     if not jar:
@@ -319,6 +365,7 @@ def cmd_auto(a):
     """The 'magic' endpoint: board in -> PLACE -> OUTLINE -> PLANES -> ROUTE ->
     PLANE-FINALIZE -> DFM -> FAB. Each stage logged; router pluggable (KRT)."""
     import os, subprocess, time, json
+    _sourcing_preflight(a, "the auto pipeline")
     from fluxplace import fab, planes
     import pcbnew
     os.makedirs(a.out, exist_ok=True)
@@ -478,6 +525,7 @@ def cmd_compact(a):
     OUTLINE -> PLANES -> ROUTE -> DFM -> FAB stages as `auto`. Use when the
     builder's density, not its arrangement, is the limiter."""
     import os, time
+    _sourcing_preflight(a, "compaction")
     from fluxplace import compact as C
     os.makedirs(a.out, exist_ok=True)
     board, parts, nets, IO = _load(a.board)
@@ -694,7 +742,26 @@ def main(argv=None):
     ap.add_argument("--big-fanout", type=int, default=12,
                     help="signal nets with >= this many nodes are treated as planes")
     ap.add_argument("--hub", default=None, help="force a specific ref as the hub")
+    ap.add_argument("--mpn-map", default=None,
+                    help="ref->MPN json for the sourcing pre-flight "
+                         "(auto-discovered next to the board if omitted)")
+    ap.add_argument("--sourcing-need", type=int, default=10,
+                    help="units that must be in stock to pass (default 10)")
+    ap.add_argument("--strict-sourcing", action="store_true",
+                    help="ABORT placement when a part is unbuyable (NONE/RISK)")
+    ap.add_argument("--no-sourcing", action="store_true",
+                    help="skip the pre-flight entirely")
+    ap.add_argument("--sourcing-refresh", action="store_true",
+                    help="ignore the 24h stock cache")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ps = sub.add_parser("sourcing",
+                        help="grade every MPN against live DigiKey+Mouser stock")
+    ps.add_argument("--board", required=True)
+    ps.add_argument("--json", help="write the full report here")
+    ps.add_argument("--show-ok", action="store_true",
+                    help="list every part, not just the problems")
+    ps.set_defaults(fn=cmd_sourcing)
 
     pa = sub.add_parser("analyze"); pa.add_argument("--board", required=True)
     pa.set_defaults(fn=cmd_analyze)
