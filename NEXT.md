@@ -29,6 +29,22 @@ part costs a RE-LAYOUT, not a re-order.
   "nobody stocks this part" — and under --strict-sourcing, a bogus abort.
 - Degrades gracefully: no credentials, no map, or a total API outage prints a
   note and places anyway.
+- **MPN matching is normalised, and the two APIs want OPPOSITE query strings.**
+  Distributors and BOMs disagree on cosmetics that carry no engineering
+  meaning. Real false alarms this produced on a shipped board: our
+  'BM03B-GHS-TBT(LF)(SN)' vs DigiKey's 'BM03B-GHS-TBT' (27k in stock), and our
+  'KMR221GLFS' vs DigiKey's 'KMR221G LFS' — note the SPACE (95k in stock).
+  Both were reported "nobody carries this" and nearly triggered needless part
+  swaps. Now: `_norm()` drops parenthesised qualifiers and non-alphanumerics
+  for COMPARISON, `_search_term()` cleans the QUERY for DigiKey (whose keyword
+  search returns nothing for the parenthesised form) while Mouser is asked for
+  the literal MPN first (its Exact search misses the base form). Packaging
+  variants are accepted but reported as '~matched <mpn>' so a substitution is
+  never silent; different values (0710KL vs 0768KL, XAL7070-153 vs -562) still
+  never match. Regression-tested in tests/test_sourcing.py.
+- Lesson for future edits here: a scripted string-replace on this file SILENTLY
+  NO-OPS if the surrounding text has drifted — one of the fixes above appeared
+  to apply and did not, and only a live lookup caught it. Verify after editing.
 - The project-side gate (utv-comms-bridge hardware/tools/check_availability.py)
   is now a thin wrapper over this module — they drifted once and only the
   plugin copy got the fixes above.

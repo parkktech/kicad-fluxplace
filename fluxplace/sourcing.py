@@ -22,6 +22,7 @@ Verdicts:
 """
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +35,34 @@ CACHE_TTL = 24 * 3600          # stock moves daily, not minutely
 BAD = ("obsolete", "discontinued", "end of life", "eol", "nrnd",
        "not recommended", "last time buy")
 BLOCKERS = ("NONE", "RISK")
+
+
+# ------------------------------------------------------------------ matching
+def _norm(s):
+    """Compare MPNs the way a human does.
+
+    Distributors and BOMs disagree on cosmetics that carry no engineering
+    meaning: plating/packaging qualifiers in parentheses and stray spaces.
+    Real cases that made this gate cry wolf: our 'BM03B-GHS-TBT(LF)(SN)' vs
+    DigiKey's 'BM03B-GHS-TBT' (27k in stock), and our 'KMR221GLFS' vs
+    DigiKey's 'KMR221G LFS' (95k in stock). Both were reported as "nobody
+    carries this" and nearly triggered a needless part swap."""
+    s = re.sub(r"\([^)]*\)", "", s or "")      # drop (LF), (SN), (LF)(SN) ...
+    return re.sub(r"[^A-Z0-9]", "", s.upper())
+
+
+def _same_part(candidate, mpn):
+    """-> (matched?, exact?). A distributor MPN that merely EXTENDS ours is
+    the same part in different packaging (tape/reel/bulk); accept it but let
+    the caller show what it matched, so a substitution is never silent."""
+    a, b = _norm(candidate), _norm(mpn)
+    if not a or not b:
+        return False, False
+    if a == b:
+        return True, True
+    if (a.startswith(b) or b.startswith(a)) and abs(len(a) - len(b)) <= 4:
+        return True, False
+    return False, False
 
 
 # ------------------------------------------------------------------ lookups
@@ -52,6 +81,17 @@ _DK_MIN_INTERVAL = 0.25         # s between calls; DigiKey throttles bursts too
 _last_dk = [0.0]
 
 
+def _search_term(mpn):
+    """What to actually ASK the distributor for.
+
+    Parenthesised plating/packaging qualifiers break DigiKey's keyword search:
+    querying 'BM03B-GHS-TBT(LF)(SN)' returns nothing, while 'BM03B-GHS-TBT'
+    returns the part with 27k in stock. Normalising only the COMPARISON was
+    not enough — the query has to be clean too."""
+    base = re.sub(r"\([^)]*\)", "", mpn or "").strip()
+    return base or mpn
+
+
 def _dk(mpn, creds, tok, retries=3, on_token=None):
     """Returns [stock, status, price, ''] or None (DigiKey answered: not
     carried). Raises if DigiKey never answered — see grade(errors=).
@@ -59,7 +99,7 @@ def _dk(mpn, creds, tok, retries=3, on_token=None):
     Retries 429/5xx with backoff and RE-AUTHENTICATES on 401: the OAuth token
     expires in ~10 minutes and a throttled sweep of a large BOM outlives it,
     which would otherwise fail every remaining part in the run."""
-    body = json.dumps({"Keywords": mpn, "Limit": 5,
+    body = json.dumps({"Keywords": _search_term(mpn), "Limit": 10,
                        "FilterOptionsRequest": {
                            "MarketPlaceFilter": "ExcludeMarketPlace"}}).encode()
     for attempt in range(retries):
@@ -85,14 +125,22 @@ def _dk(mpn, creds, tok, retries=3, on_token=None):
                 time.sleep(2 ** attempt)
                 continue
             raise
+    best = None
     for p in d.get("Products", []):
-        # keyword search is fuzzy: only an exact MPN hit counts
-        if p.get("ManufacturerProductNumber", "").upper() != mpn.upper():
+        # keyword search is fuzzy — accept only a normalised MPN match, but
+        # DO accept packaging variants (see _same_part) and say which one
+        cand = p.get("ManufacturerProductNumber", "")
+        ok, exact = _same_part(cand, mpn)
+        if not ok:
             continue
-        return [p.get("QuantityAvailable", 0),
-                (p.get("ProductStatus") or {}).get("Status", "?"),
-                p.get("UnitPrice"), ""]
-    return None
+        row = [p.get("QuantityAvailable", 0),
+               (p.get("ProductStatus") or {}).get("Status", "?"),
+               p.get("UnitPrice"), "", ("" if exact else cand)]
+        if exact:
+            return row
+        if best is None or row[0] > best[0]:
+            best = row              # keep the best-stocked variant
+    return best
 
 
 _MOUSER_MIN_INTERVAL = 2.1      # Mouser allows ~30 calls/min; bursts 403
@@ -109,8 +157,22 @@ def _mouser(mpn, creds, retries=3):
     "Mouser did not answer" (exception) — conflating them turns a transient
     outage into a false NONE verdict and, under --strict-sourcing, a bogus
     abort."""
+    # DigiKey and Mouser want OPPOSITE things: DigiKey's keyword search chokes
+    # on '(LF)(SN)' and needs the base MPN, while Mouser catalogues the full
+    # string and its Exact search misses the base. Try the literal first, then
+    # the cleaned form.
+    terms = [mpn] if _search_term(mpn) == mpn else [mpn, _search_term(mpn)]
+    for term in terms:
+        row = _mouser_once(term, mpn, creds, retries)
+        if row is not None:
+            return row
+    return None
+
+
+def _mouser_once(term, mpn, creds, retries=3):
     body = json.dumps({"SearchByPartRequest": {
-        "mouserPartNumber": mpn, "partSearchOptions": "Exact"}}).encode()
+        "mouserPartNumber": term,
+        "partSearchOptions": "Exact"}}).encode()
     req = urllib.request.Request(
         "https://api.mouser.com/api/v1/search/partnumber?apiKey="
         + creds["MOUSER_API_KEY"], data=body,
@@ -129,14 +191,16 @@ def _mouser(mpn, creds, retries=3):
                 continue
             raise
     for p in (d.get("SearchResults") or {}).get("Parts", []) or []:
-        if p.get("ManufacturerPartNumber", "").upper() != mpn.upper():
+        ok, exact = _same_part(p.get("ManufacturerPartNumber", ""), mpn)
+        if not ok:
             continue
         digits = "".join(c for c in (p.get("Availability") or "0").split()[0]
                          if c.isdigit())
         breaks = p.get("PriceBreaks") or []
         return [int(digits or 0), p.get("LifecycleStatus") or "Active",
                 (breaks[0].get("Price") if breaks else None),
-                p.get("LeadTime") or ""]
+                p.get("LeadTime") or "",
+                ("" if exact else p.get("ManufacturerPartNumber", ""))]
     return None
 
 
@@ -256,12 +320,18 @@ def summary(report, counts, need, log=print, show_ok=False):
             continue
         dk, mo = r["digikey"], r["mouser"]
         lead = (mo[3] if mo and len(mo) > 3 and mo[3] else "")
+        variant = ""
+        for src in (dk, mo):
+            if src and len(src) > 4 and src[4]:
+                variant = f"  ~matched {src[4]}"
+                break
         mo_txt = ("MO skip" if r.get("mouser_skipped")
                   else (("MO %d" % mo[0]) if mo else "MO -"))
         log(f"    {r['verdict']:5s} {mpn:26s} "
             f"{('DK %d' % dk[0]) if dk else 'DK -':>9s} "
             f"{mo_txt:>9s}"
-            f"{('  lead ' + lead) if lead else ''}   [{' '.join(r['refs'])}]")
+            f"{('  lead ' + lead) if lead else ''}{variant}"
+            f"   [{' '.join(r['refs'])}]")
     tally = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     log(f"    sourcing: {len(report)} MPNs  {tally}  (need >= {need})")
     blockers = [m for m, r in report.items() if r["verdict"] in BLOCKERS]
