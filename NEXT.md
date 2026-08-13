@@ -1,3 +1,29 @@
+## 2026-08-12 — DELIVERY SPLIT: the zip is for the fab, the docs are not
+New `fab.deliver()` + `fluxplace deliver` + `fluxplace/fabdoc.py`.
+
+Two different humans consume a fab package and must NOT get the same bundle:
+the fab's CAM engineer wants only manufacturing data as one uploadable zip;
+whoever places the order wants the settings, the paste-to-engineer note and the
+flags **readable without unzipping anything**. Mixing them is how a harness BOM
+ends up in a Gerber upload, or how nobody reads the brief because it was buried
+in the zip.
+
+- `CAM_ONLY = (gerbers, drill, place, drc.json, MANIFEST.txt)` — nothing else
+  enters the zip. BOMs and briefs are copied LOOSE beside it.
+- `--brief X.md` also generates a styled .docx via `fabdoc.py` (navy headings,
+  Table Grid tables, blockquote -> boxed note). The markdown stays the single
+  source of truth so the pair cannot drift (the V1.2 .md/.docx did, by hand).
+- fabdoc runs under a python that has python-docx: the CLI runs on KiCad's
+  python for pcbnew, which usually does not, so it re-invokes `python3 -m
+  fluxplace.fabdoc` as a fallback rather than silently dropping the .docx.
+- Markdown gotchas handled: hard-wrapped prose and wrapped bullets are JOINED
+  into single Word paragraphs (otherwise the output reads as ragged
+  half-sentences), and backticks inside a **bold** span are stripped rather
+  than printed literally.
+- Proven on utv-comms V1.3: zip = 38 CAM files, loose = README-FIRST.txt,
+  brief .md + .docx, assembly BOM, harness BOM. Verified no BOM/doc leaks into
+  the zip, and the .docx was eyeballed via LibreOffice -> PDF -> PNG.
+
 # fluxplace — next session
 
 ## 2026-08-12 — SOURCING PRE-FLIGHT: the placer asks the distributors first

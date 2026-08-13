@@ -73,6 +73,49 @@ def cmd_sourcing(a):
     raise SystemExit(1 if blockers else 0)
 
 
+def cmd_deliver(a):
+    """Split a fab package for its two audiences: a CAM-only zip for the
+    fab's engineer, plus loose readable docs for whoever places the order."""
+    from fluxplace import fab as F
+    docs = list(a.doc or [])
+    if a.brief:
+        docs.append(a.brief)
+        if not a.no_docx:
+            out = os.path.join(os.path.dirname(a.brief) or ".",
+                               (a.docx_name or os.path.splitext(
+                                   os.path.basename(a.brief))[0] + ".docx"))
+            title = a.title or a.name
+            sub = a.subtitle or "PCB Fabrication Submission"
+            made = False
+            try:
+                from fluxplace import fabdoc
+                fabdoc.build(a.brief, out, title, sub)
+                made = True
+            except ImportError:
+                # we run under KiCad's python (for pcbnew), which often lacks
+                # python-docx — hand the job to an interpreter that has it
+                import subprocess
+                here = os.path.dirname(os.path.abspath(__file__))
+                for py in ("python3", "/usr/bin/python3"):
+                    try:
+                        r = subprocess.run(
+                            [py, "-m", "fluxplace.fabdoc", a.brief, out,
+                             title, sub], cwd=here, capture_output=True,
+                            timeout=120)
+                        if r.returncode == 0 and os.path.exists(out):
+                            made = True
+                            break
+                    except Exception:
+                        continue
+            if made:
+                docs.append(out)
+                print(f"    brief -> {out}")
+            else:
+                print("    python-docx unavailable — markdown brief only")
+    F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
+              log=lambda m: print(m, flush=True))
+
+
 def cmd_place(a):
     _sourcing_preflight(a, "placement")
     board, parts, nets, IO = _load(a.board)
@@ -759,6 +802,23 @@ def main(argv=None):
                          "only asked when DigiKey has not already settled the "
                          "part — saves Mouser's ~30 calls/min quota)")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    pd = sub.add_parser("deliver",
+                        help="split a fab package: CAM-only zip + loose docs "
+                             "for the person ordering")
+    pd.add_argument("--fab-dir", required=True, help="an emit() output dir")
+    pd.add_argument("--out", required=True, help="delivery folder to create")
+    pd.add_argument("--name", required=True, help="zip basename")
+    pd.add_argument("--brief", help="submission brief .md (a .docx is "
+                                    "generated beside it)")
+    pd.add_argument("--docx-name", help="override the generated .docx name")
+    pd.add_argument("--title"); pd.add_argument("--subtitle")
+    pd.add_argument("--no-docx", action="store_true")
+    pd.add_argument("--doc", action="append",
+                    help="extra human-facing file, repeatable (README etc.)")
+    pd.add_argument("--bom", action="append",
+                    help="BOM/commercial file kept OUT of the zip, repeatable")
+    pd.set_defaults(fn=cmd_deliver)
 
     ps = sub.add_parser("sourcing",
                         help="grade every MPN against live DigiKey+Mouser stock")

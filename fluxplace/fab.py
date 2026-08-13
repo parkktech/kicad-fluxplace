@@ -80,3 +80,59 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
     log(f"fab package -> {out}  (DRC {verdict})")
     return {"out": out, "drc": verdict, "violations": nviol,
             "unconnected": nunc, "stages": done}
+
+
+# --------------------------------------------------------------- delivery
+# Two different humans consume this output and they must not be handed the
+# same bundle:
+#   * the fab's CAM/PCB engineer wants ONLY manufacturing data, uploaded as
+#     one zip to the quote page;
+#   * whoever places the order wants something readable WITHOUT unzipping
+#     anything — the settings, the note to paste, the flags.
+# Mixing them is how a harness BOM ends up in a Gerber upload, or how the
+# person ordering never reads the brief because it was buried in the zip.
+CAM_ONLY = ("gerbers", "drill", "place", "drc.json", "MANIFEST.txt")
+
+
+def deliver(fab_dir, out_dir, name, docs=(), extras=(), log=print):
+    """Split a fab package into `out_dir`: a CAM-only zip plus loose docs.
+
+    fab_dir : an emit() output directory
+    name    : zip basename, e.g. 'utv-comms-v1.3-fab'
+    docs    : human-facing files (brief .md/.docx, README) copied loose
+    extras  : commercial files (BOMs) copied loose — NOT put in the zip
+    """
+    import shutil
+    import tempfile
+    import zipfile
+
+    os.makedirs(out_dir, exist_ok=True)
+    zip_path = os.path.join(out_dir, name + ".zip")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, name)
+        os.makedirs(root)
+        packed = []
+        for item in CAM_ONLY:
+            src = os.path.join(fab_dir, item)
+            if not os.path.exists(src):
+                continue
+            dst = os.path.join(root, item)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            packed.append(item)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for dirpath, _, files in os.walk(root):
+                for fn in files:
+                    full = os.path.join(dirpath, fn)
+                    z.write(full, os.path.relpath(full, tmp))
+    loose = []
+    for f in list(docs) + list(extras):
+        if f and os.path.exists(f):
+            shutil.copy2(f, out_dir)
+            loose.append(os.path.basename(f))
+    log(f"delivery -> {out_dir}")
+    log(f"  zip (fab CAM only): {os.path.basename(zip_path)}  [{', '.join(packed)}]")
+    log(f"  loose (for the buyer): {', '.join(loose) if loose else '(none)'}")
+    return {"zip": zip_path, "packed": packed, "loose": loose}
