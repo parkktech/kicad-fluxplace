@@ -461,13 +461,28 @@ def worksheet(f, zip_name=None, extra_notes=()):
 
     A("## 1. What to upload where")
     A("")
-    A("- **Gerber/CAM field:** `%s` — the zip, whole, nothing added, nothing "
-      "unzipped." % (zip_name or "the fab zip"))
-    A("- **BOM field (assembly only):** the assembly BOM CSV. `place/pos.csv` "
-      "is already inside the zip; attach a copy here if the form asks for "
-      "centroid data separately.")
-    A("- **Never upload:** harness/off-board BOMs, this worksheet, or the "
-      "submission brief. They are yours, not theirs.")
+    A("PCBWay's assembly page has **four separate upload fields**. The files in "
+      "this folder are numbered to match them — upload each one into the field "
+      "with its number, and nothing anywhere else.")
+    A("")
+    A("| # | Field on the page | Upload this | Accepts |")
+    A("|---|---|---|---|")
+    A("| 1 | Upload Gerber file | `%s` | .rar .zip .7z, max 50 MB |"
+      % (f.get("slot_gerbers") or (zip_name or "the CAM zip")))
+    A("| 2 | Parts List (BOM) Upload | `%s` | .rar .zip .7z .xls .xlsx .csv |"
+      % (f.get("slot_bom") or "the assembly BOM .csv"))
+    A("| 3 | Upload Centroid file | `%s` | .rar .zip .7z .xls .xlsx .csv |"
+      % (f.get("slot_centroid") or "the centroid .csv"))
+    A("| 4 | Upload assembly other files | `%s` | assembly-related documents |"
+      % (f.get("slot_notes") or "the assembly instructions .docx"))
+    A("")
+    A("The centroid is **not** inside the gerber zip — PCBWay wants it in its "
+      "own field, and a pick-and-place buried in the CAM archive is a file "
+      "their assembly desk never opens. Anything PCB-fabrication related does "
+      "go inside the zip, which is where the DRC report and manifest are.")
+    A("")
+    A("**Do not upload** this worksheet, the submission brief, or any "
+      "off-board/harness BOM. Those are yours.")
     A("")
 
     A("## 2. Assembly Service")
@@ -609,6 +624,108 @@ def worksheet(f, zip_name=None, extra_notes=()):
     return "\n".join(L)
 
 
+def assembly_notes(f, extra=""):
+    """The document for PCBWay's FOURTH upload slot ("other assembly files").
+
+    Everything here is an instruction to the assembler, derived from the board:
+    what not to fit, what is hand-soldered, what we consign, what must never be
+    substituted. It is deliberately separate from the buyer's worksheet — that
+    one is for filling in a form, this one travels with the job.
+    """
+    L = []
+    A = L.append
+    A("# Assembly instructions — %s" % f["name"])
+    A("")
+    A("Generated %s from `%s`. This document accompanies the BOM and the "
+      "centroid file. If anything here conflicts with a verbal instruction or "
+      "an assumption, THIS document wins — please ask us rather than deciding."
+      % (f["date"], f.get("board", "the board file")))
+    A("")
+
+    A("## 1. Board")
+    A("")
+    A("| | |")
+    A("|---|---|")
+    if f.get("size_mm"):
+        A("| Size | %.1f x %.1f mm |" % f["size_mm"])
+    A("| Layers | %s |" % (f.get("layers") or "?"))
+    if f.get("thickness_mm"):
+        A("| Thickness | %.1f mm |" % f["thickness_mm"])
+    sides, _ = _sides_pick(f)
+    A("| Assembly sides | %s |" % sides)
+    A("| Placements | %s (%s top / %s bottom) |"
+      % (f.get("placements", "?"), f.get("top", "?"), f.get("bottom", "?")))
+    A("| Unique parts | %s |" % (f.get("unique_parts") or "see BOM"))
+    A("")
+
+    A("## 2. Do not populate")
+    A("")
+    if f.get("dnp_refs"):
+        A("**%s — DO NOT FIT.** The lands exist in the gerbers on purpose and "
+          "these parts are deliberately absent from the centroid file. Fitting "
+          "them is a defect. They carry a DO-NOT-POPULATE line in the BOM."
+          % ", ".join(f["dnp_refs"]))
+    else:
+        A("Every part on the BOM is populated. Nothing is DNP.")
+    A("")
+
+    A("## 3. Process notes")
+    A("")
+    if f.get("top") and f.get("bottom"):
+        A("- **Double-sided reflow.** Both faces carry parts; quote a two-pass "
+          "process, not one.")
+    if f.get("fine_refs"):
+        A("- **Fine pitch: %s.**%s These set the stencil and the paste process."
+          % (", ".join(f["fine_refs"]),
+             (" Finest pitch on the board is %.2f mm." % f["finest_pitch_mm"])
+             if f.get("finest_pitch_mm") else ""))
+    if f.get("tht_refs"):
+        A("- **Through-hole: %s.** Hand-solder or selective wave; everything "
+          "else is SMT reflow. Each one has a position and rotation in the "
+          "centroid file." % ", ".join(f["tht_refs"]))
+    if f.get("mixed_refs"):
+        A("- **Mixed technology: %s.** SMT body with through-hole anchors — "
+          "reflow the body, hand-solder the anchors." % ", ".join(f["mixed_refs"]))
+    if f.get("hidden_joint_refs"):
+        A("- **Bottom-terminated packages: %s.** Joints under the package that "
+          "no optical inspection can see — the parts to X-ray on a first "
+          "article." % ", ".join(f["hidden_joint_refs"]))
+    A("- Rotations follow KiCad conventions; expect the usual CAM rotation "
+      "corrections on QFN and SOT parts. Please tell us what you changed.")
+    A("")
+
+    A("## 4. Parts we supply (do not buy these)")
+    A("")
+    if f.get("consign"):
+        A("| MPN | Why | Used by |")
+        A("|---|---|---|")
+        for mpn, verdict, refs in f["consign"]:
+            why = {"NONE": "not carried by any distributor",
+                   "LEAD": "catalogued but 0 stock / long lead",
+                   "RISK": "EOL / NRND",
+                   "LOW": "distributor stock too thin to trust"}.get(verdict, verdict)
+            A("| %s | %s | %s |" % (mpn, why, refs))
+        A("")
+        A("These arrive from us. Do not source alternates for them.")
+    else:
+        A("None — every line on the BOM is a turnkey buy.")
+    A("")
+
+    A("## 5. Substitutions — the rule")
+    A("")
+    A("**Do not substitute any part on land-pattern fit alone.** Several "
+      "packages on this board share an industry-standard land with "
+      "vendor-specific pinouts: a wrong-pinout part solders in perfectly, "
+      "passes every electrical test on your line, and arrives dead. If a part "
+      "cannot be sourced, stop and contact us — we will consign it rather than "
+      "accept a substitution.")
+    A("")
+    if extra:
+        A(extra.strip())
+        A("")
+    return "\n".join(L)
+
+
 def _sensitive_why(f):
     hits = []
     if f.get("fine_refs"):
@@ -673,23 +790,50 @@ def _assembly_note(f, extra_notes=()):
 
 
 # --------------------------------------------------------------------- write
+def slot_names(name):
+    """PCBWay's four upload fields, as four filenames numbered to match them.
+
+    Numbering is the whole point: the buyer reads the folder in the same order
+    as the page, and a file cannot end up in the wrong field by accident.
+    """
+    return {"slot_gerbers": "1-GERBERS-%s.zip" % name,
+            "slot_bom": "2-BOM-%s.csv" % name,
+            "slot_centroid": "3-CENTROID-%s.csv" % name,
+            "slot_notes": "4-ASSEMBLY-INSTRUCTIONS-%s.docx" % name}
+
+
 def write(out_dir, f, zip_name=None, extra_notes=(), docx=True, title=None,
-          log=print):
-    """Write the worksheet .md (and .docx) into `out_dir`. -> [paths]"""
+          assembly_extra="", log=print):
+    """Write the worksheet and the assembly-instructions doc into `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
+    from fluxplace import fabdoc
+    made = []
+
+    def _emit(md_path, out_docx, doc_title, doc_sub):
+        made.append(md_path)
+        if not docx:
+            return
+        if fabdoc.render(md_path, out_docx, doc_title, doc_sub):
+            made.append(out_docx)
+        else:
+            log("    python-docx unavailable — %s is markdown only"
+                % os.path.basename(md_path))
+
     base = "PCBWay-Order-Worksheet-%s" % f["name"]
     md = os.path.join(out_dir, base + ".md")
     with open(md, "w", encoding="utf-8") as fh:
         fh.write(worksheet(f, zip_name=zip_name, extra_notes=extra_notes))
-    made = [md]
-    if docx:
-        from fluxplace import fabdoc
-        out = os.path.join(out_dir, base + ".docx")
-        if fabdoc.render(md, out, "PCBWay order worksheet",
-                         "%s — fill in, then submit" % (title or f["name"])):
-            made.append(out)
-        else:
-            log("    python-docx unavailable — worksheet is markdown only")
+    _emit(md, os.path.join(out_dir, base + ".docx"), "PCBWay order worksheet",
+          "%s — fill in, then submit" % (title or f["name"]))
+
+    # slot 4: travels WITH the job, unlike the worksheet which stays with the buyer
+    nbase = "4-ASSEMBLY-INSTRUCTIONS-%s" % f["name"]
+    nmd = os.path.join(out_dir, nbase + ".md")
+    with open(nmd, "w", encoding="utf-8") as fh:
+        fh.write(assembly_notes(f, extra=assembly_extra))
+    _emit(nmd, os.path.join(out_dir, nbase + ".docx"), "Assembly instructions",
+          "%s — upload with the assembly order" % (title or f["name"]))
+
     for p in made:
         log("    pcbway -> %s" % p)
     return made

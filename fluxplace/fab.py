@@ -94,16 +94,25 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
 #     anything — the settings, the note to paste, the flags.
 # Mixing them is how a harness BOM ends up in a Gerber upload, or how the
 # person ordering never reads the brief because it was buried in the zip.
-CAM_ONLY = ("gerbers", "drill", "place", "drc.json", "MANIFEST.txt")
+# What belongs in the GERBER upload. Note `place` is NOT here: PCBWay's assembly
+# page has a SEPARATE centroid upload field, and a pick-and-place buried in the
+# gerber zip is a file their assembly desk never sees. drc.json and MANIFEST stay
+# — PCBWay explicitly says fab-related documents belong inside the gerber zip.
+CAM_ONLY = ("gerbers", "drill", "drc.json", "MANIFEST.txt")
+CENTROID = ("place", "pos.csv")
 
 
-def deliver(fab_dir, out_dir, name, docs=(), extras=(), log=print):
-    """Split a fab package into `out_dir`: a CAM-only zip plus loose docs.
+def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
+            log=print):
+    """Split a fab package into `out_dir`: a CAM-only zip plus loose files.
 
-    fab_dir : an emit() output directory
-    name    : zip basename, e.g. 'utv-comms-v1.3-fab'
-    docs    : human-facing files (brief .md/.docx, README) copied loose
-    extras  : commercial files (BOMs) copied loose — NOT put in the zip
+    fab_dir       : an emit() output directory
+    name          : zip basename, e.g. '1-GERBERS-utv-comms-v1.3'
+    docs          : human-facing files (brief .md/.docx, README) copied loose
+    extras        : files copied loose — either a path, or (path, new_name) when
+                    the upload slot wants a specific filename
+    centroid_name : filename to copy place/pos.csv out under, for the separate
+                    centroid upload. None keeps the old single-zip behaviour.
     """
     import shutil
     import tempfile
@@ -115,7 +124,8 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), log=print):
         root = os.path.join(tmp, name)
         os.makedirs(root)
         packed = []
-        for item in CAM_ONLY:
+        items = list(CAM_ONLY) if centroid_name else list(CAM_ONLY) + ["place"]
+        for item in items:
             src = os.path.join(fab_dir, item)
             if not os.path.exists(src):
                 continue
@@ -130,16 +140,29 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), log=print):
                 for fn in files:
                     full = os.path.join(dirpath, fn)
                     z.write(full, os.path.relpath(full, tmp))
+    centroid = None
+    if centroid_name:
+        src = os.path.join(fab_dir, *CENTROID)
+        if os.path.exists(src):
+            centroid = os.path.join(out_dir, centroid_name)
+            shutil.copy2(src, centroid)
+
     loose = []
     for f in list(docs) + list(extras):
+        rename = None
+        if isinstance(f, (tuple, list)):
+            f, rename = f
         if not f or not os.path.exists(f):
             continue
+        dst = os.path.join(out_dir, rename or os.path.basename(f))
         # a doc that already lives in the delivery folder (re-running deliver on
         # a package whose brief is kept there) must not be copied onto itself
-        if not os.path.samefile(os.path.dirname(os.path.abspath(f)), out_dir):
-            shutil.copy2(f, out_dir)
-        loose.append(os.path.basename(f))
+        if not os.path.exists(dst) or not os.path.samefile(f, dst):
+            shutil.copy2(f, dst)
+        loose.append(os.path.basename(dst))
     log(f"delivery -> {out_dir}")
-    log(f"  zip (fab CAM only): {os.path.basename(zip_path)}  [{', '.join(packed)}]")
-    log(f"  loose (for the buyer): {', '.join(loose) if loose else '(none)'}")
-    return {"zip": zip_path, "packed": packed, "loose": loose}
+    log(f"  gerber upload: {os.path.basename(zip_path)}  [{', '.join(packed)}]")
+    if centroid:
+        log(f"  centroid upload: {os.path.basename(centroid)}")
+    log(f"  loose: {', '.join(loose) if loose else '(none)'}")
+    return {"zip": zip_path, "packed": packed, "loose": loose, "centroid": centroid}

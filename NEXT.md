@@ -1,3 +1,32 @@
+## 2026-08-13 — PACKAGING FOLLOWS THE UPLOAD FORM, NOT OUR FILING HABITS
+`deliver` now emits PCBWay's assembly page as FOUR files, numbered to match its
+four upload fields, because that page does not take one bundle:
+
+    1-GERBERS-<base>.zip                 -> Upload Gerber file (.rar/.zip/.7z, 50 MB)
+    2-BOM-<base>.csv                     -> Parts List (BOM) Upload
+    3-CENTROID-<base>.csv                -> Upload Centroid file
+    4-ASSEMBLY-INSTRUCTIONS-<base>.docx  -> Upload assembly other files
+
+The numbering is the feature: the buyer reads the folder in the same order as the
+page, so a file cannot land in the wrong field. `fab.CAM_ONLY` loses `place` —
+the centroid is copied out beside the zip instead (`deliver(centroid_name=...)`),
+because a pick-and-place buried in a CAM archive is a file the assembly desk
+never opens. drc.json and MANIFEST stay inside: PCBWay explicitly asks for
+fab-related documents to travel in the gerber upload.
+
+Slot 4 is a new generated document, `pcbway.assembly_notes()` — instructions
+that travel WITH the job, as opposed to the worksheet which stays with the buyer:
+board summary, DO-NOT-POPULATE list, double-sided/fine-pitch/THT/mixed-technology
+process notes, X-ray candidates, the consign table with a reason per part, and
+the no-substitution-on-land-fit rule. `--assembly-notes FILE.md` appends
+project-specific text verbatim (utv-comms uses it for the J12 required pinout,
+the J7 no-shunt rule and under-module clearance).
+
+`fab.deliver()` extras now accept `(path, new_name)` so a file can be renamed
+into its slot, and the same-file guard compares the destination rather than the
+directory. `--no-pcbway` still emits the old single-zip layout.
+tests/test_pcbway.py: 117 green.
+
 ## 2026-08-13 — THE ORDER FORM IS AN OUTPUT, NOT A MEMORY TEST
 New `fluxplace/pcbway.py` + `fluxplace pcbway`, and `deliver` now emits a
 **PCBWay order worksheet** (.md + .docx) beside the CAM zip (`--no-pcbway` opts

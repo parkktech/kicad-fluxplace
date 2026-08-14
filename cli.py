@@ -9,7 +9,7 @@ Run with KiCad's python so pcbnew is importable, e.g.:
   PYTHONPATH=/usr/lib/python3/dist-packages /usr/bin/python3 cli.py place \
       --board board.kicad_pcb --strategy flux --rotate ortho --out out.kicad_pcb
 """
-import argparse, sys, os
+import argparse, re, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fluxplace import graph as G, topology as T, placement as P
 
@@ -91,17 +91,36 @@ def cmd_deliver(a):
                 print(f"    brief -> {made}")
             else:
                 print("    python-docx unavailable — markdown brief only")
-    F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
+    if a.no_pcbway:
+        F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
+                  log=lambda m: print(m, flush=True))
+        return
+
+    # PCBWay's assembly page takes FOUR separate uploads — gerbers, BOM,
+    # centroid, assembly documents — so emit one file per field, numbered to
+    # match the page. The centroid comes OUT of the zip to get there.
+    from fluxplace import pcbway
+    base = re.sub(r"-fab$", "", a.name)
+    slots = pcbway.slot_names(base)
+    extras = []
+    boms = list(a.bom or [])
+    facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=boms,
+                           sourcing=a.sourcing_json, quantity=a.quantity,
+                           name=a.name)
+    facts.update(slots)
+    # the board's own BOM is upload #2; anything else stays under its own name
+    board_bom = next((b for b in boms
+                      if os.path.basename(b) in (facts.get("bom_files") or [])), None)
+    for b in boms:
+        extras.append((b, slots["slot_bom"]) if b == board_bom else b)
+    F.deliver(a.fab_dir, a.out, os.path.splitext(slots["slot_gerbers"])[0],
+              docs=docs, extras=extras, centroid_name=slots["slot_centroid"],
               log=lambda m: print(m, flush=True))
-    # the order worksheet is written straight into the delivery folder AFTER the
-    # split, so it can never end up inside the CAM zip
-    if not a.no_pcbway:
-        from fluxplace import pcbway
-        facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir,
-                               boms=(a.bom or []), sourcing=a.sourcing_json,
-                               quantity=a.quantity, name=a.name)
-        pcbway.write(a.out, facts, zip_name=a.name + ".zip",
-                     docx=not a.no_docx, title=a.title)
+    notes = ""
+    if a.assembly_notes and os.path.exists(a.assembly_notes):
+        notes = open(a.assembly_notes, encoding="utf-8").read()
+    pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"],
+                 docx=not a.no_docx, title=a.title, assembly_extra=notes)
 
 
 def cmd_pcbway(a):
@@ -824,7 +843,11 @@ def main(argv=None):
                                             "report; its non-OK parts become "
                                             "the consign list")
     pd.add_argument("--no-pcbway", action="store_true",
-                    help="skip the PCBWay order worksheet")
+                    help="skip the PCBWay four-slot layout and worksheet; emit "
+                         "a single CAM zip the old way")
+    pd.add_argument("--assembly-notes", help="markdown file appended verbatim "
+                                             "to the assembly-instructions doc "
+                                             "(upload slot 4)")
     pd.set_defaults(fn=cmd_deliver)
 
     pw = sub.add_parser("pcbway",

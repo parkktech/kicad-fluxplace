@@ -297,6 +297,63 @@ class TestBomSelection(unittest.TestCase):
         self.assertIsNone(board.get("unique_parts"))
 
 
+class TestUploadSlots(unittest.TestCase):
+    def test_four_slots_are_numbered_to_match_the_page(self):
+        # PCBWay's assembly page has four upload fields. Numbering the files to
+        # match them is what stops a centroid landing in the Gerber field.
+        s = P.slot_names("demo-v1")
+        self.assertEqual(s["slot_gerbers"], "1-GERBERS-demo-v1.zip")
+        self.assertEqual(s["slot_bom"], "2-BOM-demo-v1.csv")
+        self.assertEqual(s["slot_centroid"], "3-CENTROID-demo-v1.csv")
+        self.assertEqual(s["slot_notes"], "4-ASSEMBLY-INSTRUCTIONS-demo-v1.docx")
+
+    def test_worksheet_names_every_slot_and_its_accepted_formats(self):
+        import tempfile
+        f = P.collect(board=_board(tempfile.mkdtemp()), name="demo")
+        f.update(P.slot_names("demo"))
+        md = P.worksheet(f)
+        for want in ("Upload Gerber file", "Parts List (BOM) Upload",
+                     "Upload Centroid file", "Upload assembly other files",
+                     "1-GERBERS-demo.zip", "2-BOM-demo.csv",
+                     "3-CENTROID-demo.csv", ".rar .zip .7z", "50 MB"):
+            self.assertIn(want, md, "%s missing from the upload table" % want)
+
+    def test_centroid_leaves_the_gerber_zip(self):
+        # a pick-and-place inside the CAM archive is a file the assembly desk
+        # never opens — PCBWay wants it in its own field
+        from fluxplace import fab as FAB
+        self.assertNotIn("place", FAB.CAM_ONLY)
+        self.assertEqual(FAB.CENTROID, ("place", "pos.csv"))
+
+
+class TestAssemblyNotes(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.f = P.collect(board=_board(tempfile.mkdtemp()), name="demo")
+        self.f["consign"] = [("XAL7070-153MEC", "NONE", "L1")]
+
+    def test_it_instructs_rather_than_describes(self):
+        # this document travels WITH the job, so every claim has to be an
+        # instruction the assembler can act on
+        n = P.assembly_notes(self.f)
+        self.assertIn("DO NOT FIT", n)
+        self.assertIn("R38", n)
+        self.assertIn("Through-hole", n)
+        self.assertIn("XAL7070-153MEC", n)        # consign list
+        self.assertIn("not carried by any distributor", n)
+        self.assertIn("land-pattern fit alone", n)  # the D42 rule
+
+    def test_project_notes_are_appended_verbatim(self):
+        n = P.assembly_notes(self.f, extra="## 6. J12 pinout\n\nExact map here.")
+        self.assertIn("## 6. J12 pinout", n)
+        self.assertIn("Exact map here.", n)
+
+    def test_no_consign_parts_says_so_plainly(self):
+        f = dict(self.f); f.pop("consign")
+        self.assertIn("every line on the BOM is a turnkey buy",
+                      P.assembly_notes(f))
+
+
 class TestPlaceCrossCheck(unittest.TestCase):
     def test_a_part_missing_from_pos_csv_is_flagged_not_dropped(self):
         # ANT1 (a THT patch antenna) is excluded from KiCad's position file.
