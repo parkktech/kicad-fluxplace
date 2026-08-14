@@ -121,6 +121,14 @@ def cmd_deliver(a):
         notes = open(a.assembly_notes, encoding="utf-8").read()
     pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"],
                  docx=not a.no_docx, title=a.title, assembly_extra=notes)
+    # spreadsheet twins of the two CSV uploads — an upload widget that refuses
+    # one CSV will take the .xlsx, and mid-order is the wrong time to find out
+    for slot in ("slot_bom", "slot_centroid"):
+        src = os.path.join(a.out, slots[slot])
+        if os.path.exists(src):
+            alt = pcbway.to_xlsx(src, os.path.splitext(src)[0] + ".xlsx")
+            if alt:
+                print(f"    alt format -> {os.path.basename(alt)}")
 
 
 def cmd_pcbway(a):

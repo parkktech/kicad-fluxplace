@@ -473,8 +473,12 @@ def worksheet(f, zip_name=None, extra_notes=()):
       % (f.get("slot_bom") or "the assembly BOM .csv"))
     A("| 3 | Upload Centroid file | `%s` | .rar .zip .7z .xls .xlsx .csv |"
       % (f.get("slot_centroid") or "the centroid .csv"))
-    A("| 4 | Upload assembly other files | `%s` | assembly-related documents |"
-      % (f.get("slot_notes") or "the assembly instructions .docx"))
+    A("| 4 | Upload assembly other files | `%s` | **PDF** — this field rejects .docx |"
+      % (f.get("slot_notes") or "the assembly instructions .pdf"))
+    A("")
+    A("If a field refuses a `.csv`, upload the `.xlsx` of the same name sitting "
+      "beside it — same content, different wrapper. The unnumbered `.docx` and "
+      "`.md` files are editable sources; they are not uploads.")
     A("")
     A("The centroid is **not** inside the gerber zip — PCBWay wants it in its "
       "own field, and a pick-and-place buried in the CAM archive is a file "
@@ -795,11 +799,65 @@ def slot_names(name):
 
     Numbering is the whole point: the buyer reads the folder in the same order
     as the page, and a file cannot end up in the wrong field by accident.
+
+    Formats are what each field ACCEPTS, which is not the same as what we find
+    convenient to author. Slot 4 in particular is **PDF, not .docx** — PCBWay
+    rejects a Word file there ("Assembly Instruction Drawing" is a drawing
+    field). The .docx stays in the folder as the editable source, deliberately
+    WITHOUT a number so nobody tries to upload it.
     """
     return {"slot_gerbers": "1-GERBERS-%s.zip" % name,
             "slot_bom": "2-BOM-%s.csv" % name,
             "slot_centroid": "3-CENTROID-%s.csv" % name,
-            "slot_notes": "4-ASSEMBLY-INSTRUCTIONS-%s.docx" % name}
+            "slot_notes": "4-ASSEMBLY-INSTRUCTIONS-%s.pdf" % name}
+
+
+def _to_pdf(src, out_dir, log=print):
+    """LibreOffice-convert a .docx/.md to PDF. -> path or None (never raises)."""
+    import shutil
+    import subprocess
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        log("    no libreoffice — cannot make the PDF upload for slot 4")
+        return None
+    try:
+        subprocess.run([soffice, "--headless", "--convert-to", "pdf",
+                        "--outdir", out_dir, src],
+                       capture_output=True, timeout=300)
+    except Exception as e:
+        log("    pdf conversion failed: %s" % str(e)[:80])
+        return None
+    pdf = os.path.join(out_dir,
+                       os.path.splitext(os.path.basename(src))[0] + ".pdf")
+    return pdf if os.path.exists(pdf) else None
+
+
+def to_xlsx(csv_path, out_path, log=print):
+    """A spreadsheet twin of a CSV upload. -> path or None.
+
+    Belt and braces: PCBWay lists .csv as accepted for the BOM and centroid
+    fields, but an upload widget that refuses one CSV will take the .xlsx, and
+    finding that out at 11pm mid-order is not the moment to go looking.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return None
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = os.path.splitext(os.path.basename(csv_path))[0][:31]
+        for row in csv.reader(open(csv_path, encoding="utf-8")):
+            ws.append(row)
+        for col in ws.columns:
+            width = max((len(str(c.value or "")) for c in col[:60]), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(60, width + 2)
+        ws.freeze_panes = "A2"
+        wb.save(out_path)
+        return out_path
+    except Exception as e:
+        log("    xlsx conversion failed: %s" % str(e)[:80])
+        return None
 
 
 def write(out_dir, f, zip_name=None, extra_notes=(), docx=True, title=None,
@@ -826,13 +884,25 @@ def write(out_dir, f, zip_name=None, extra_notes=(), docx=True, title=None,
     _emit(md, os.path.join(out_dir, base + ".docx"), "PCBWay order worksheet",
           "%s — fill in, then submit" % (title or f["name"]))
 
-    # slot 4: travels WITH the job, unlike the worksheet which stays with the buyer
-    nbase = "4-ASSEMBLY-INSTRUCTIONS-%s" % f["name"]
+    # Slot 4 travels WITH the job, unlike the worksheet which stays with the
+    # buyer — and it uploads as PDF, because PCBWay's "other assembly files"
+    # field rejects .docx. The Word file stays as the editable source, unnumbered.
+    nbase = "assembly-instructions-%s" % f["name"]
     nmd = os.path.join(out_dir, nbase + ".md")
     with open(nmd, "w", encoding="utf-8") as fh:
         fh.write(assembly_notes(f, extra=assembly_extra))
-    _emit(nmd, os.path.join(out_dir, nbase + ".docx"), "Assembly instructions",
+    ndocx = os.path.join(out_dir, nbase + ".docx")
+    _emit(nmd, ndocx, "Assembly instructions",
           "%s — upload with the assembly order" % (title or f["name"]))
+    if docx and os.path.exists(ndocx):
+        pdf = _to_pdf(ndocx, out_dir, log=log)
+        if pdf:
+            target = os.path.join(out_dir, "4-ASSEMBLY-INSTRUCTIONS-%s.pdf"
+                                  % f["name"])
+            os.replace(pdf, target)
+            made.append(target)
+        else:
+            log("    WARNING: slot 4 has no PDF — PCBWay will reject the .docx")
 
     for p in made:
         log("    pcbway -> %s" % p)

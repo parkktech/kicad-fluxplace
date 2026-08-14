@@ -5,7 +5,7 @@ four upload fields, because that page does not take one bundle:
     1-GERBERS-<base>.zip                 -> Upload Gerber file (.rar/.zip/.7z, 50 MB)
     2-BOM-<base>.csv                     -> Parts List (BOM) Upload
     3-CENTROID-<base>.csv                -> Upload Centroid file
-    4-ASSEMBLY-INSTRUCTIONS-<base>.docx  -> Upload assembly other files
+    4-ASSEMBLY-INSTRUCTIONS-<base>.pdf   -> Upload assembly other files
 
 The numbering is the feature: the buyer reads the folder in the same order as the
 page, so a file cannot land in the wrong field. `fab.CAM_ONLY` loses `place` —
@@ -25,7 +25,15 @@ the J7 no-shunt rule and under-module clearance).
 `fab.deliver()` extras now accept `(path, new_name)` so a file can be renamed
 into its slot, and the same-file guard compares the destination rather than the
 directory. `--no-pcbway` still emits the old single-zip layout.
-tests/test_pcbway.py: 117 green.
+**Formats are what each field ACCEPTS, not what is convenient to author.**
+PCBWay rejected the first attempt on file type: slot 4 takes a PDF, not a .docx
+("Assembly Instruction Drawing" is a drawing field). `write()` now LibreOffice-
+converts the Word file to `4-ASSEMBLY-INSTRUCTIONS-<base>.pdf` and leaves the
+.docx/.md in the folder UNNUMBERED as editable sources, so nobody uploads them.
+It warns loudly if no PDF could be made rather than shipping a doomed .docx.
+`to_xlsx()` also writes spreadsheet twins of the two CSV uploads — an upload
+widget that refuses one CSV will take the .xlsx, and mid-order is the wrong time
+to discover that. tests/test_pcbway.py: 119 green.
 
 ## 2026-08-13 — THE ORDER FORM IS AN OUTPUT, NOT A MEMORY TEST
 New `fluxplace/pcbway.py` + `fluxplace pcbway`, and `deliver` now emits a

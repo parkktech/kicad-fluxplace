@@ -305,7 +305,27 @@ class TestUploadSlots(unittest.TestCase):
         self.assertEqual(s["slot_gerbers"], "1-GERBERS-demo-v1.zip")
         self.assertEqual(s["slot_bom"], "2-BOM-demo-v1.csv")
         self.assertEqual(s["slot_centroid"], "3-CENTROID-demo-v1.csv")
-        self.assertEqual(s["slot_notes"], "4-ASSEMBLY-INSTRUCTIONS-demo-v1.docx")
+
+    def test_slot_four_is_pdf_because_the_field_rejects_docx(self):
+        # shipped as .docx once; PCBWay refused the upload on file type. The
+        # Word file is now an unnumbered source and the upload is a PDF.
+        self.assertEqual(P.slot_names("demo-v1")["slot_notes"],
+                         "4-ASSEMBLY-INSTRUCTIONS-demo-v1.pdf")
+
+    def test_csv_uploads_get_a_spreadsheet_twin(self):
+        import csv as _csv
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "2-BOM-demo.csv")
+        with open(src, "w", newline="") as fh:
+            w = _csv.writer(fh); w.writerow(["Refs", "Qty", "MPN"])
+            w.writerow(["U5", 1, "TLV320AIC3104IRHBR"])
+        out = P.to_xlsx(src, os.path.join(tmp, "2-BOM-demo.xlsx"))
+        self.assertTrue(out and os.path.exists(out))
+        import openpyxl
+        ws = openpyxl.load_workbook(out).active
+        self.assertEqual([c.value for c in ws[1]], ["Refs", "Qty", "MPN"])
+        self.assertEqual(ws["C2"].value, "TLV320AIC3104IRHBR")
 
     def test_worksheet_names_every_slot_and_its_accepted_formats(self):
         import tempfile
