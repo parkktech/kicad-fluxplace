@@ -70,6 +70,17 @@ BOARD = """(kicad_pcb
 \t\t\t(at 0 3.5)
 \t\t)
 \t)
+\t(footprint "R_0603_1608Metric"
+\t\t(layer "B.Cu")
+\t\t(property "Reference" "R38")
+\t\t(attr smd dnp)
+\t\t(pad "1" smd roundrect
+\t\t\t(at 0 0)
+\t\t)
+\t\t(pad "2" smd roundrect
+\t\t\t(at 1.6 0)
+\t\t)
+\t)
 \t(footprint "CP_Radial_D10.0mm_P5.00mm"
 \t\t(layer "B.Cu")
 \t\t(property "Reference" "C12")
@@ -164,6 +175,36 @@ class TestBoardFacts(unittest.TestCase):
         self.assertEqual(self.f["hidden_joint_refs"], ["U5"])
 
 
+class TestDnp(unittest.TestCase):
+    def test_a_dnp_land_is_not_a_part_and_not_a_missing_part(self):
+        # R38 is deliberately unpopulated (D51: U2's FB divider). It must not be
+        # counted, priced, or reported as a part the assembler forgot — and the
+        # worksheet has to SAY do-not-populate, or someone helpfully fits it.
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        f = P.collect(board=_board(tmp), name="demo")
+        self.assertEqual(f["dnp_refs"], ["R38"])
+        self.assertNotIn("R38", f["tht_refs"] + f["fine_refs"])
+        md = P.worksheet(f)
+        self.assertIn("Do not populate: R38", md)
+        self.assertIn("DO NOT POPULATE: R38", md)
+
+    def test_dnp_absence_from_pos_csv_is_not_flagged_as_unplaced(self):
+        import os as _os
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        board = _board(tmp)
+        _os.makedirs(_os.path.join(tmp, "place"))
+        with open(_os.path.join(tmp, "place", "pos.csv"), "w") as fh:
+            fh.write("Ref,Val,Package,PosX,PosY,Rot,Side\n")
+            fh.write("U5,x,x,0,0,0,top\n")
+            fh.write("C12,x,x,0,0,0,bottom\n")
+            fh.write("J3,x,x,0,0,0,top\n")
+        f = P.collect(board=board, fab_dir=tmp, name="demo")
+        self.assertEqual(f["unplaced_refs"], [])      # R38 is DNP, not forgotten
+        self.assertEqual(f["placements"], 3)
+
+
 class TestFormTiers(unittest.TestCase):
     def test_track_tier_covers_the_design_it_does_not_round_up(self):
         # 0.09 mm track / 0.088 mm space is 3.54 / 3.46 mil. Picking 4/4mil
@@ -231,6 +272,29 @@ class TestWorksheet(unittest.TestCase):
         facts = dict(self.facts, consign=[("XAL7070-153MEC", "LEAD", "L1")])
         self.assertIn("**Combo", P.worksheet(facts))
         self.assertIn("XAL7070-153MEC", P.worksheet(facts))
+
+
+class TestBomSelection(unittest.TestCase):
+    def test_a_harness_bom_is_not_counted_as_board_parts(self):
+        # deliver hands us both BOMs. The harness file lists panel connectors and
+        # cable ends by "J1 panel"-style item names, and counting its 17 MPNs as
+        # board parts told PCBWay this board has 84 unique parts, not 67.
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        board = P.collect(board=_board(tmp), name="demo")
+        brd = os.path.join(tmp, "bom.csv")
+        with open(brd, "w") as fh:
+            fh.write("Refs,Qty,Value,Footprint,MPN\n")
+            fh.write("U5,1,codec,x,TLV320AIC3104IRHBR\n")
+            fh.write("C12,1,1500uF,x,EEU-FR1C152\n")
+        harness = os.path.join(tmp, "harness.csv")
+        with open(harness, "w") as fh:
+            fh.write("Item,Qty,Description,Manufacturer,MPN\n")
+            fh.write("J1 panel,1,mini-XLR,Switchcraft,TB5M\n")
+        f = P.collect(board=_board(tmp), boms=[brd, harness], name="demo")
+        self.assertEqual(f["unique_parts"], 2)
+        self.assertEqual(f["bom_files"], ["bom.csv"])
+        self.assertIsNone(board.get("unique_parts"))
 
 
 class TestPlaceCrossCheck(unittest.TestCase):

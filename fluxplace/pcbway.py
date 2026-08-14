@@ -151,12 +151,16 @@ def _footprints(text):
                 d = abs(x1 - x2) + abs(y1 - y2)   # rotation-invariant, so the
                 if 0.01 < d < pitch:              # footprint frame is fine
                     pitch = d
+        attr = re.search(r"\(attr ([^)]*)\)", f)
         out.append(dict(
             ref=(ref.group(1) if ref else "?"),
             lib=(lib.group(1) if lib else ""),
             side=("B" if re.search(r'\(layer "B\.Cu"\)', f) else "F"),
             pads=len(pads), tht_pads=drilled, pitch=pitch,
             tht=bool(pads) and (drilled >= 5 or drilled / len(pads) > 0.5),
+            # a DNP land is absent from the centroid file ON PURPOSE — it must not
+            # be counted as a part, nor flagged as one the assembler forgot
+            dnp=bool(attr and "dnp" in attr.group(1).split()),
         ))
     return out
 
@@ -220,7 +224,8 @@ def board_facts(path):
 
     fps = _footprints(text)
     f["footprints"] = fps
-    placeable = [p for p in fps if p["pads"]]
+    f["dnp_refs"] = sorted((p["ref"] for p in fps if p["dnp"]), key=_refkey)
+    placeable = [p for p in fps if p["pads"] and not p["dnp"]]
     f["tht_refs"] = sorted((p["ref"] for p in placeable if p["tht"]), key=_refkey)
     fine = [p for p in placeable
             if p["pitch"] <= FINE_PITCH_MM and p["pads"] >= 8]
@@ -251,21 +256,38 @@ def place_facts(fab_dir):
             "pos_refs": [r.get("Ref") or r.get("ref") for r in rows]}
 
 
-def bom_facts(paths):
-    """Unique-part count = BOM lines carrying an MPN (what PCBWay means by 'kinds')."""
-    lines, mpns = 0, []
+def bom_facts(paths, board_refs=None):
+    """Unique-part count = BOM lines carrying an MPN (what PCBWay calls 'kinds').
+
+    Only counts files that are THIS BOARD's BOM. `deliver` is also handed the
+    harness/panel BOM — cable ends, panel connectors, things the assembler never
+    sees — and counting those inflates every number the quote is priced from.
+    The test is structural: a board BOM has a Refs column naming footprints that
+    exist on the board.
+    """
+    lines, mpns, used = 0, [], []
     for p in paths or ():
         if not p or not os.path.exists(p):
             continue
         try:
-            for r in csv.DictReader(open(p, encoding="utf-8")):
-                mpn = (r.get("MPN") or r.get("mpn") or "").strip()
-                if mpn:
-                    lines += 1
-                    mpns.append(mpn)
+            rows = list(csv.DictReader(open(p, encoding="utf-8")))
         except Exception:
             continue
-    return {"unique_parts": lines or None, "mpns": mpns}
+        if not rows:
+            continue
+        col = next((c for c in ("Refs", "refs", "Reference", "Designator")
+                    if c in rows[0]), None)
+        if not col:
+            continue
+        if board_refs is not None and not any(
+                set((r.get(col) or "").split()) & board_refs for r in rows):
+            continue
+        used.append(os.path.basename(p))
+        for r in rows:
+            if (r.get("MPN") or r.get("mpn") or "").strip():
+                lines += 1
+                mpns.append(r["MPN"].strip() if r.get("MPN") else r["mpn"].strip())
+    return {"unique_parts": lines or None, "mpns": mpns, "bom_files": used}
 
 
 def sourcing_facts(path):
@@ -347,7 +369,8 @@ def collect(board=None, fab_dir=None, boms=(), sourcing=None, quantity=None,
         f.update(board_facts(board))
     if fab_dir:
         f.update(place_facts(fab_dir))
-    f.update(bom_facts(boms))
+    f.update(bom_facts(boms, board_refs={p["ref"] for p in f.get("footprints", [])}
+                       or None))
     f.update(sourcing_facts(sourcing))
 
     # placements: prefer the pick-and-place file (mounting holes and DNP parts are
@@ -368,7 +391,7 @@ def collect(board=None, fab_dir=None, boms=(), sourcing=None, quantity=None,
         mech = re.compile(r"MountingHole|Fiducial|TestPoint", re.I)
         placed = set(f["pos_refs"])
         missing = [p for p in fps if p["pads"] and p["ref"] not in placed
-                   and not mech.search(p["lib"])]
+                   and not p["dnp"] and not mech.search(p["lib"])]
         f["unplaced_refs"] = sorted((p["ref"] for p in missing), key=_refkey)
         if missing:
             f["placements"] = f.get("placements", 0) + len(missing)
@@ -488,6 +511,11 @@ def worksheet(f, zip_name=None, extra_notes=()):
     if f.get("mixed_refs"):
         A("- Mixed-technology parts (SMT body, through-hole anchors, counted as "
           "SMD above but they need hand joints): %s" % ", ".join(f["mixed_refs"]))
+    if f.get("dnp_refs"):
+        A("- **Do not populate: %s.** These lands are on the board and in the "
+          "gerbers on purpose, and they are excluded from `place/pos.csv` on "
+          "purpose. Fitting them is a defect, not a favour."
+          % ", ".join(f["dnp_refs"]))
     if f.get("unplaced_refs"):
         A("- **On the board but NOT in `place/pos.csv`: %s.** KiCad excludes "
           "these from the centroid file, so an assembler working from that file "
@@ -632,6 +660,10 @@ def _assembly_note(f, extra_notes=()):
                     "%s — take the location from the assembly drawing and BOM, "
                     "and do not treat their absence from the centroid file as "
                     "DNP." % ", ".join(f["unplaced_refs"]))
+    if f.get("dnp_refs"):
+        bits.append("DO NOT POPULATE: %s — the lands exist by design and are "
+                    "deliberately left off the centroid file."
+                    % ", ".join(f["dnp_refs"]))
     bits.append("Do not substitute any part on land-pattern fit alone: several "
                 "packages here share an industry-standard land with vendor-specific "
                 "pinouts. If a part cannot be sourced, contact us and we will "

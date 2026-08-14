@@ -45,10 +45,13 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
                          "--output", ddir + os.sep, "--format", "excellon",
                          "--drill-origin", "plot", "--excellon-separate-th",
                          "--generate-map", "--map-format", "gerberx2", board], log)
-    # pick-and-place, both sides, CSV, mm
+    # pick-and-place, both sides, CSV, mm. --exclude-dnp because this file is a
+    # BUILD INSTRUCTION: a part flagged do-not-populate must not be handed to the
+    # machine, and an assembler who fits one is following our own data.
     done["place"] = _run([kicad_cli, "pcb", "export", "pos",
                          "--output", os.path.join(pdir, "pos.csv"),
-                         "--format", "csv", "--units", "mm", "--side", "both", board], log)
+                         "--format", "csv", "--units", "mm", "--side", "both",
+                          "--exclude-dnp", board], log)
     # DRC — the go/no-go the engineer checks first
     drc_path = os.path.join(out, "drc.json")
     _run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
