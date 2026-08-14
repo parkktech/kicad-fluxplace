@@ -129,9 +129,13 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), log=print):
                     z.write(full, os.path.relpath(full, tmp))
     loose = []
     for f in list(docs) + list(extras):
-        if f and os.path.exists(f):
+        if not f or not os.path.exists(f):
+            continue
+        # a doc that already lives in the delivery folder (re-running deliver on
+        # a package whose brief is kept there) must not be copied onto itself
+        if not os.path.samefile(os.path.dirname(os.path.abspath(f)), out_dir):
             shutil.copy2(f, out_dir)
-            loose.append(os.path.basename(f))
+        loose.append(os.path.basename(f))
     log(f"delivery -> {out_dir}")
     log(f"  zip (fab CAM only): {os.path.basename(zip_path)}  [{', '.join(packed)}]")
     log(f"  loose (for the buyer): {', '.join(loose) if loose else '(none)'}")

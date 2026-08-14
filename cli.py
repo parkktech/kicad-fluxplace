@@ -76,7 +76,7 @@ def cmd_sourcing(a):
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
-    from fluxplace import fab as F
+    from fluxplace import fab as F, fabdoc
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -84,36 +84,34 @@ def cmd_deliver(a):
             out = os.path.join(os.path.dirname(a.brief) or ".",
                                (a.docx_name or os.path.splitext(
                                    os.path.basename(a.brief))[0] + ".docx"))
-            title = a.title or a.name
-            sub = a.subtitle or "PCB Fabrication Submission"
-            made = False
-            try:
-                from fluxplace import fabdoc
-                fabdoc.build(a.brief, out, title, sub)
-                made = True
-            except ImportError:
-                # we run under KiCad's python (for pcbnew), which often lacks
-                # python-docx — hand the job to an interpreter that has it
-                import subprocess
-                here = os.path.dirname(os.path.abspath(__file__))
-                for py in ("python3", "/usr/bin/python3"):
-                    try:
-                        r = subprocess.run(
-                            [py, "-m", "fluxplace.fabdoc", a.brief, out,
-                             title, sub], cwd=here, capture_output=True,
-                            timeout=120)
-                        if r.returncode == 0 and os.path.exists(out):
-                            made = True
-                            break
-                    except Exception:
-                        continue
+            made = fabdoc.render(a.brief, out, a.title or a.name,
+                                 a.subtitle or "PCB Fabrication Submission")
             if made:
-                docs.append(out)
-                print(f"    brief -> {out}")
+                docs.append(made)
+                print(f"    brief -> {made}")
             else:
                 print("    python-docx unavailable — markdown brief only")
     F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
               log=lambda m: print(m, flush=True))
+    # the order worksheet is written straight into the delivery folder AFTER the
+    # split, so it can never end up inside the CAM zip
+    if not a.no_pcbway:
+        from fluxplace import pcbway
+        facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir,
+                               boms=(a.bom or []), sourcing=a.sourcing_json,
+                               quantity=a.quantity, name=a.name)
+        pcbway.write(a.out, facts, zip_name=a.name + ".zip",
+                     docx=not a.no_docx, title=a.title)
+
+
+def cmd_pcbway(a):
+    """The PCBWay quote form, answered from the board file wherever the design
+    already decides the answer."""
+    from fluxplace import pcbway
+    facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=(a.bom or []),
+                           sourcing=a.sourcing_json, quantity=a.quantity,
+                           name=a.name)
+    pcbway.write(a.out_dir, facts, zip_name=a.zip_name, docx=not a.no_docx)
 
 
 def cmd_place(a):
@@ -818,7 +816,30 @@ def main(argv=None):
                     help="extra human-facing file, repeatable (README etc.)")
     pd.add_argument("--bom", action="append",
                     help="BOM/commercial file kept OUT of the zip, repeatable")
+    pd.add_argument("--board", help="the .kicad_pcb, so the PCBWay order "
+                                    "worksheet can be filled from the design")
+    pd.add_argument("--quantity", type=int, help="board qty, pre-filled on the "
+                                                 "worksheet")
+    pd.add_argument("--sourcing-json", help="a `fluxplace sourcing --json` "
+                                            "report; its non-OK parts become "
+                                            "the consign list")
+    pd.add_argument("--no-pcbway", action="store_true",
+                    help="skip the PCBWay order worksheet")
     pd.set_defaults(fn=cmd_deliver)
+
+    pw = sub.add_parser("pcbway",
+                        help="PCBWay order worksheet: every field on the quote "
+                             "form, pre-filled from the board")
+    pw.add_argument("--board", help=".kicad_pcb to measure")
+    pw.add_argument("--fab-dir", help="an emit() output dir (for place/pos.csv)")
+    pw.add_argument("--bom", action="append", help="assembly BOM csv, repeatable")
+    pw.add_argument("--sourcing-json")
+    pw.add_argument("--quantity", type=int)
+    pw.add_argument("--name", help="worksheet name (default: the board's)")
+    pw.add_argument("--zip-name", help="the CAM zip the buyer uploads")
+    pw.add_argument("--out-dir", required=True)
+    pw.add_argument("--no-docx", action="store_true")
+    pw.set_defaults(fn=cmd_pcbway)
 
     ps = sub.add_parser("sourcing",
                         help="grade every MPN against live DigiKey+Mouser stock")

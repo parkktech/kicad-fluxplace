@@ -6,29 +6,36 @@ they want something readable outside a zip, on a phone if need be. This keeps
 the .md as the single source of truth and generates the .docx from it, so the
 two can never disagree (the V1.2 pair drifted by hand).
 
-Requires python-docx; `deliver` degrades to markdown-only without it.
+Requires python-docx; `deliver` degrades to markdown-only without it. The import
+is deliberately INSIDE build(): the CLI often runs on KiCad's python (for
+pcbnew), which usually has no python-docx, and `render()` below needs to be
+importable there so it can hand the job to a python that does.
 
-Used by `fluxplace deliver`; also runnable directly:
+Used by `fluxplace deliver` and `fluxplace/pcbway.py`; also runnable directly:
     python3 -m fluxplace.fabdoc IN.md OUT.docx "Title" "Subtitle"
 """
+import os
 import re
+import subprocess
 import sys
 
-import docx
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt, RGBColor
-
-NAVY = RGBColor(0x1F, 0x3A, 0x5F)
-GREY = RGBColor(0x60, 0x60, 0x60)
-RED = RGBColor(0xB0, 0x20, 0x20)
+# plain tuples, not RGBColor: this module must import without python-docx so
+# render() can still reach an interpreter that has it
+NAVY = (0x1F, 0x3A, 0x5F)
+GREY = (0x60, 0x60, 0x60)
+RED = (0xB0, 0x20, 0x20)
 
 
 def _runs(par, text, size=10.5, bold=False, color=None):
     """Emit text, honouring **bold** and `code` spans."""
-    for chunk in re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text):
+    from docx.shared import Pt, RGBColor
+    for chunk in re.split(r"(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)", text):
         if not chunk:
             continue
-        if chunk.startswith("**") and chunk.endswith("**"):
+        if chunk.startswith("*") and not chunk.startswith("**") and \
+                chunk.endswith("*"):
+            r = par.add_run(chunk[1:-1]); r.italic = True; r.bold = bold
+        elif chunk.startswith("**") and chunk.endswith("**"):
             # a bold span may contain `code`; Word has no nesting here, so
             # keep the bold and drop the backticks rather than print them
             r = par.add_run(chunk[2:-2].replace("`", "")); r.bold = True
@@ -39,11 +46,13 @@ def _runs(par, text, size=10.5, bold=False, color=None):
             r = par.add_run(chunk); r.bold = bold
         r.font.size = Pt(size)
         if color is not None:
-            r.font.color.rgb = color
+            r.font.color.rgb = RGBColor(*color)
     return par
 
 
 def build(md_path, out_path, title, subtitle):
+    import docx
+    from docx.shared import Inches, Pt
     lines = open(md_path, encoding="utf-8").read().splitlines()
     d = docx.Document()
     s = d.sections[0]
@@ -159,6 +168,32 @@ def build(md_path, out_path, title, subtitle):
 
     d.save(out_path)
     return out_path
+
+
+def render(md_path, out_path, title, subtitle):
+    """build(), but never raises: -> the .docx path, or None if no interpreter
+    on this machine has python-docx.
+
+    The CLI runs under KiCad's python for pcbnew, which usually lacks
+    python-docx — so rather than silently dropping the Word file (the one file
+    the buyer actually opens), hand the job to a python that has it.
+    """
+    try:
+        build(md_path, out_path, title, subtitle)
+        return out_path
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for py in ("python3", "/usr/bin/python3"):
+        try:
+            r = subprocess.run([py, "-m", "fluxplace.fabdoc", md_path,
+                                out_path, title, subtitle], cwd=here,
+                               capture_output=True, timeout=120)
+            if r.returncode == 0 and os.path.exists(out_path):
+                return out_path
+        except Exception:
+            continue
+    return None
 
 
 if __name__ == "__main__":

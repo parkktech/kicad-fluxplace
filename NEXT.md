@@ -1,3 +1,46 @@
+## 2026-08-13 — THE ORDER FORM IS AN OUTPUT, NOT A MEMORY TEST
+New `fluxplace/pcbway.py` + `fluxplace pcbway`, and `deliver` now emits a
+**PCBWay order worksheet** (.md + .docx) beside the CAM zip (`--no-pcbway` opts
+out; `--board`, `--quantity`, `--sourcing-json` feed it).
+
+PCBWay's Assembly page asks ~40 questions and half of them are already answered
+in the .kicad_pcb. The worksheet mirrors the page field for field — every option
+transcribed as a module constant, so the doc lists the real choices — with a
+derived middle column and a blank one to tick:
+
+- size = Edge.Cuts bbox **+ the outline stroke** (the board is cut outside the
+  line; this is the number KiCad reports and the fab quotes), layers, thickness,
+  min drill, measured min track vs the project's rule clearance -> the finest
+  track/space TIER THAT COVERS THE DESIGN (0.090/0.088 mm is 3/3mil, NOT the
+  4/4mil a human eyeballs), ENIG whenever anything sits at <= 0.65 mm pitch.
+- counts the price is built from: unique parts (BOM lines with an MPN), SMD,
+  BGA/QFP (fine pitch by geometry, not by name), THT (>=5 drilled pads or most
+  pads drilled — the same rule kicad_io uses), X-ray suggestion from
+  bottom-terminated packages.
+- policy answers it will not soften: substitutes-made-in-China = **No** (same
+  land, different pinout, arrives dead), Combo instead of Turnkey when a
+  sourcing report has LEAD/RISK/NONE parts, which are listed as consign rows.
+- anything the design cannot answer prints `CHOOSE`, never a guess.
+
+Cross-check that earned its keep: the worksheet compares the board's own
+footprint list against `place/pos.csv`. On utv-comms V1.3 it found ANT1 — a
+GNSS patch carrying `exclude_from_pos_files` — missing from the centroid file,
+i.e. a part the assembler would never have fitted. (Fixed in the board.)
+
+Parser bugs found while proving it, both silent: a non-greedy regex terminated
+inside the nested `(stroke ...)` block so `(layer "Edge.Cuts")` never appeared
+and the board had no outline — `_blocks()` now matches parens properly; and
+`np_thru_hole` board-locks were counted as pads, which read a 2-pin Micro-Fit
+with 2 mechanical pegs as an SMD part.
+
+Also: `fabdoc.build`'s docx import moved INSIDE the function and the
+"find a python that has python-docx" fallback became `fabdoc.render()` — one
+implementation, used by both the brief and the worksheet (cli.py had it inline).
+Italic `*text*` now renders instead of printing asterisks. `fab.deliver()` no
+longer explodes copying a doc that already lives in the delivery folder — which
+is exactly what re-running deliver on a shipped package does.
+tests/test_pcbway.py: 18 cases, suite 108 green.
+
 ## 2026-08-12 — DELIVERY SPLIT: the zip is for the fab, the docs are not
 New `fab.deliver()` + `fluxplace deliver` + `fluxplace/fabdoc.py`.
 
