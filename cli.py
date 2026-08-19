@@ -478,11 +478,18 @@ def cmd_auto_candidates(a):
     print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
 
 
-def cmd_comprehend(a):
-    """Circuit comprehension: infer the electrical-intent tables (power classes,
-    diff pairs, bypass cap -> pin, crystal -> parent) and emit them for review.
-    The reviewed numbers belong in constraints.toml, which always wins."""
-    from fluxplace import comprehend as CO
+def cmd_comprehend_intent(a):
+    """Circuit comprehension, si.py-backed: infer the electrical-intent tables
+    (power classes, diff pairs, bypass cap -> pin, crystal -> parent) and emit
+    them as TOML for review. The reviewed numbers belong in constraints.toml,
+    which always wins.
+
+    This is the origin/main lineage of `comprehend`, kept alongside ours after
+    the 2026-08-19 merge: it produces a different artifact (TOML intent tables
+    from comprehend_si) than `comprehend` (JSON physics constraints + PRC
+    grading), and both are used.
+    """
+    from fluxplace import comprehend_si as CO
     board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout)
     comp = CO.comprehend(parts, nets, cg)
@@ -1126,6 +1133,51 @@ def cmd_intake(a):
             print(f"applied {len(refs)} mounting holes -> {a.apply_board}")
 
 
+# --------------------------------------------------------------------------- doctor
+def cmd_doctor(a):
+    """Preflight the whole suite and optionally install what pip can fix.
+
+    This exists because fluxplace drives KiCad, a router, an office suite and
+    two distributor APIs, and for its first 67 commits it declared none of that.
+    A user's first run should tell them what is missing, not die inside stage 4.
+    """
+    from fluxplace import deps
+    res = deps.check_all()
+    if a.json:
+        import json as _json
+        print(_json.dumps(res, indent=2))
+    else:
+        print(deps.report(res, show_ok=not a.problems_only))
+    if a.install:
+        pips = deps.pip_installable(res)
+        if pips:
+            deps.install(pips)
+            print()
+            print(deps.report(deps.check_all(), show_ok=False))
+    elif a.interactive:
+        deps.prompt_and_install()
+    # exit non-zero only when the suite genuinely cannot run
+    import sys as _sys
+    if deps.blocking(deps.check_all()):
+        _sys.exit(1)
+
+
+def _require(*tiers):
+    """Guard for commands with hard prerequisites: fail with a readable preflight
+    instead of an ImportError three stages into a pipeline."""
+    from fluxplace import deps
+    miss = deps.missing(tiers=tiers or None)
+    if miss:
+        print("fluxplace: missing requirements for this command\n")
+        for m in miss:
+            print("  MISS %-30s %s" % (m["label"], m["detail"]))
+            if m["hint"]:
+                print("       %s" % m["hint"])
+        print("\nRun `fluxplace doctor --install` to fix what pip can.")
+        import sys as _sys
+        _sys.exit(1)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
@@ -1278,11 +1330,12 @@ def main(argv=None):
                     help="project dir for --upload-out (default: board's dir)")
     pf.set_defaults(fn=cmd_fab)
 
-    pco = sub.add_parser("comprehend",
-                         help="infer electrical intent: pairs, bypass, crystals, power")
-    pco.add_argument("--board", required=True)
-    pco.add_argument("--out", default=None, help="write TOML here (default: stdout)")
-    pco.set_defaults(fn=cmd_comprehend)
+    pci = sub.add_parser("comprehend-intent",
+                         help="infer electrical intent as TOML: pairs, bypass, "
+                              "crystals, power (si.py-backed)")
+    pci.add_argument("--board", required=True)
+    pci.add_argument("--out", default=None, help="write TOML here (default: stdout)")
+    pci.set_defaults(fn=cmd_comprehend_intent)
 
     ppre = sub.add_parser("preflight",
                           help="parse-level sanity: outline, pads on-board, pos-file parity")
@@ -1552,6 +1605,18 @@ def main(argv=None):
                      help="also grade the current placement against them")
     pco.add_argument("--failed-only", action="store_true")
     pco.set_defaults(fn=cmd_comprehend)
+
+    pdoc = sub.add_parser("doctor",
+                          help="preflight: check KiCad, python deps, router, "
+                               "distributor keys and the wider suite")
+    pdoc.add_argument("--install", action="store_true",
+                      help="pip install the missing packages we can fix")
+    pdoc.add_argument("--interactive", action="store_true",
+                      help="ask before installing")
+    pdoc.add_argument("--problems-only", action="store_true",
+                      help="hide the checks that already pass")
+    pdoc.add_argument("--json", action="store_true", help="machine-readable output")
+    pdoc.set_defaults(fn=cmd_doctor)
 
     a = ap.parse_args(argv)
     a.fn(a)

@@ -1,0 +1,24 @@
+# fluxplace — pip-installable requirements.
+#
+# This file covers ONLY what pip can provide. The suite also needs KiCad 10,
+# Java, the freerouting jar, LibreOffice and distributor API credentials.
+# Run `fluxplace doctor` to check every requirement, pip-installable or not:
+#
+#     python3 cli.py doctor
+#     python3 cli.py doctor --install      # fix what pip can
+#
+# IMPORTANT — install these into the SAME interpreter that can import pcbnew.
+# On Linux/WSL that is normally /usr/bin/python3, not a conda or pyenv python.
+# Installing openpyxl into conda while fluxplace runs on system python is the
+# single most common way to break this suite:
+#
+#     /usr/bin/python3 -m pip install --user -r requirements.txt
+
+numpy>=1.24
+Pillow>=10.0
+python-docx>=1.1
+openpyxl>=3.1
+
+# NOT pip-installable, and deliberately absent:
+#   pcbnew   ships with KiCad 10 (not on PyPI)
+#   wx       ships with KiCad 10

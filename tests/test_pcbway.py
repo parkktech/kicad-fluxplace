@@ -6,7 +6,11 @@ part nobody solders, or a fabrication tier the board does not fit in.
 """
 import os
 import sys
+import importlib.util
 import unittest
+
+HAVE_OPENPYXL = importlib.util.find_spec('openpyxl') is not None
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fluxplace import pcbway as P                          # noqa: E402
@@ -312,6 +316,8 @@ class TestUploadSlots(unittest.TestCase):
         self.assertEqual(P.slot_names("demo-v1")["slot_notes"],
                          "4-ASSEMBLY-INSTRUCTIONS-demo-v1.pdf")
 
+    @unittest.skipUnless(HAVE_OPENPYXL,
+        'openpyxl not installed for this interpreter — run `fluxplace doctor --install`')
     def test_csv_uploads_get_a_spreadsheet_twin(self):
         import csv as _csv
         import tempfile

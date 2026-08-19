@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluxplace"
+version = "0.8.0"
+description = "Signal-flow placement, routing, DFM and fab packaging for KiCad 10 — a full PCB engineering suite."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Jason Ratzlaff" }]
+keywords = ["kicad", "pcb", "placement", "autoplace", "routing", "dfm", "manufacturing"]
+
+# NOTE: pcbnew is NOT here and cannot be. It ships with KiCad, is not on PyPI,
+# and is only importable from the interpreter KiCad installed it for (on Linux
+# that is normally /usr/bin/python3, NOT conda/pyenv). `fluxplace doctor`
+# checks for it and says so plainly. wxPython likewise comes from KiCad.
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Manufacturing documents: the fab-submission brief, the PCBWay order worksheet,
+# the assembly instructions, and the .xlsx twins of the BOM/centroid uploads.
+fab = [
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "Pillow>=10.0",
+]
+# Everything a workstation needs to run the whole pipeline.
+all = [
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "Pillow>=10.0",
+]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+fluxplace = "cli:main"
+
+[project.urls]
+Homepage = "https://github.com/parkktech/kicad-fluxplace"
+Source = "https://github.com/parkktech/kicad-fluxplace"
+
+[tool.setuptools]
+packages = ["fluxplace"]
+py-modules = ["cli"]
+
+# ---------------------------------------------------------------------------
+# Requirements that pip cannot install. `fluxplace doctor` checks every one of
+# these and tells the user exactly what is missing and how to get it.
+#
+#   KiCad 10.0+          pcbnew bindings + kicad-cli. The whole suite is built
+#                        on it; there is no fallback.
+#   Java 17+             runs the router.
+#   freerouting 2.3.0+   the autorouter jar. 2.2.4 dies silently on headless
+#                        jobs — pin 2.3.0 or newer. Put it at
+#                        ~/tools/freerouting-2.3.0.jar or set FREEROUTING_JAR.
+#   LibreOffice          renders the assembly instructions to PDF. PCBWay
+#                        rejects .docx on that upload field.
+#   DIGIKEY_CLIENT_ID    live stock/pricing for the availability gate and the
+#   DIGIKEY_CLIENT_SECRET  real-STEP 3D model fetch.
+#   MOUSER_API_KEY       second distributor for the same gate.
+#
+# The wider toolchain this suite expects (MCP servers and skills, configured in
+# your host, not by pip): kicad, kicad-pro, kicad-jlcpcb, kicad-happy,
+# pcb-designer. See README.md.
+# ---------------------------------------------------------------------------

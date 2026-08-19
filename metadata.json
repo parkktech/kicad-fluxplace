@@ -1,21 +1,42 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
-  "name": "fluxplace — signal-flow placement",
-  "description": "Re-place a board by its component communication graph so routing falls out as a tree.",
-  "description_full": "fluxplace reads the board's netlist, builds a communication graph (power/ground excluded so they don't tie everything together), weights nets by criticality, and places components to minimise weighted wirelength. Clusters by schematic sheet (keeping decoupling caps on their IC), packs each cluster in signal order, bin-packs the clusters by connectivity, keeps large modules/connectors as keep-out obstacles with locked orientation, snaps small parts to orthogonal angles for cheap assembly, and shrink-wraps the board outline. Runs in the PCB editor (Tools -> External Plugins) or headless from the CLI.",
+  "name": "fluxplace \u2014 KiCad engineering suite",
+  "description": "Signal-flow placement, routing, DFM and fab packaging for KiCad 10 \u2014 placement, autorouting, comprehension, sourcing and the manufacturer upload package, end to end.",
+  "description_full": "fluxplace is a full PCB engineering suite for KiCad 10, not just a placer. It reads the board's communication graph (power/ground excluded so they do not tie everything together), places components so routing falls out as a tree, runs a placement tournament judged by a real router, pours and stitches planes, laundres copper against DRC, patches walled islands with rip-up-and-reroute, checks every MPN against live DigiKey/Mouser stock before a part reaches copper, and emits the manufacturer upload package (gerbers, drill, centroid, BOM, assembly instructions, order worksheet) shaped to the fab's own upload form.\n\nREQUIRES KiCad 10.0 or newer (pcbnew + kicad-cli). Several capabilities need components pip cannot install: Java and the freerouting 2.3.0+ jar for routing, LibreOffice for the PDF upload slot, and DigiKey/Mouser API credentials for the availability gate. On first run the plugin checks every requirement and offers to install the python packages for you; `fluxplace doctor` does the same from the CLI.",
   "identifier": "com.parkktech.fluxplace",
   "type": "plugin",
-  "author": { "name": "Jason Ratzlaff", "contact": { "web": "https://github.com/parkktech/kicad-fluxplace" } },
-  "maintainer": { "name": "Jason Ratzlaff", "contact": { "web": "https://github.com/parkktech/kicad-fluxplace" } },
+  "author": {
+    "name": "Jason Ratzlaff",
+    "contact": {
+      "web": "https://github.com/parkktech/kicad-fluxplace"
+    }
+  },
+  "maintainer": {
+    "name": "Jason Ratzlaff",
+    "contact": {
+      "web": "https://github.com/parkktech/kicad-fluxplace"
+    }
+  },
   "license": "MIT",
-  "resources": { "homepage": "https://github.com/parkktech/kicad-fluxplace" },
-  "tags": ["placement", "autoplace", "layout", "routing", "dfm"],
+  "resources": {
+    "homepage": "https://github.com/parkktech/kicad-fluxplace"
+  },
+  "tags": [
+    "placement",
+    "autoplace",
+    "layout",
+    "routing",
+    "dfm",
+    "manufacturing",
+    "sourcing",
+    "fabrication"
+  ],
   "versions": [
     {
-      "version": "0.7.0",
+      "version": "0.8.0",
       "status": "development",
-      "kicad_version": "8.0",
-      "download_url": "https://github.com/parkktech/kicad-fluxplace/archive/refs/tags/v0.1.0.zip"
+      "kicad_version": "10.0",
+      "download_url": "https://github.com/parkktech/kicad-fluxplace/archive/refs/tags/v0.8.0.zip"
     }
   ]
 }

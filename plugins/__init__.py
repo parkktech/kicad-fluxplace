@@ -20,6 +20,70 @@ except Exception as e:            # surface import problems in the dialog, don't
     _IMPORT_ERR = str(e)
 
 
+def _preflight_gate():
+    """Check the suite's requirements before touching the board, and offer to
+    install what pip can fix.
+
+    A user who installs this plugin from the PCM gets the python package and
+    nothing else — not the router jar, not LibreOffice, not python-docx. Finding
+    that out when stage 4 of a pipeline dies is the worst possible time. So we
+    say it up front, once, and offer to fix the part we can.
+
+    Returns True when it is safe to continue.
+    """
+    import wx
+    try:
+        from fluxplace import deps
+    except Exception:
+        return True                     # never block the board on our own check
+
+    res = deps.check_all()
+    blocking = deps.blocking(res)
+    missing = deps.missing(res)
+    if not missing:
+        return True
+
+    pips = deps.pip_installable(res)
+    lines = ["fluxplace needs the following to run as a full KiCad engineering",
+             "suite. Missing right now:", ""]
+    for m in missing:
+        lines.append("  - %s" % m["label"])
+        if m["why"]:
+            lines.append("      needed for: %s" % m["why"])
+    lines.append("")
+
+    if blocking:
+        lines.append("The first %d are CORE — placement cannot run without them."
+                     % len(blocking))
+        lines.append("")
+    if pips:
+        lines.append("%d of these are python packages this plugin can install"
+                     % len(pips))
+        lines.append("for you now, into:")
+        lines.append("    %s" % sys.executable)
+        lines.append("")
+        lines.append("Install them now?")
+        style = wx.YES_NO | wx.ICON_QUESTION
+        if wx.MessageBox("\n".join(lines), "fluxplace — requirements", style) == wx.YES:
+            ok = deps.install(pips)
+            still = deps.missing(deps.check_all())
+            wx.MessageBox(
+                ("Install finished.\n\n" if ok else "Install FAILED.\n\n")
+                + ("Everything required is now present."
+                   if not still else
+                   "Still missing:\n" + "\n".join("  - " + m["label"] for m in still)
+                   + "\n\nThese are not pip-installable — see the README."),
+                "fluxplace", wx.ICON_INFORMATION if ok else wx.ICON_ERROR)
+            return not deps.blocking(deps.check_all())
+        return not blocking             # user declined; continue only if usable
+    else:
+        lines.append("None of these can be installed with pip. See the README")
+        lines.append("for how to install each one.")
+        wx.MessageBox("\n".join(lines), "fluxplace — requirements",
+                      wx.ICON_WARNING if not blocking else wx.ICON_ERROR)
+        return not blocking
+
+
 class FluxPlaceAction(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "fluxplace — signal-flow placement"
@@ -36,6 +100,8 @@ class FluxPlaceAction(pcbnew.ActionPlugin):
         if _IMPORT_ERR:
             wx.MessageBox("fluxplace core failed to import:\n\n" + _IMPORT_ERR,
                           "fluxplace", wx.ICON_ERROR)
+            return
+        if not _preflight_gate():
             return
         board = pcbnew.GetBoard()
         parts, nets = IO.read_board(board)
