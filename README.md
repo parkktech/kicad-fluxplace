@@ -187,15 +187,27 @@ Installing `openpyxl` into a conda python instead appears to work and then fails
 run time, because that python has no `pcbnew`. **This is the single most common way
 to break this suite.**
 
-On Debian/Ubuntu the correct fix is the distro package, and `doctor` works this out
-for you:
+**The fix, and it needs no root.** Create a venv that *inherits* system
+site-packages. A plain venv is useless here — it would not have `pcbnew` — but
+`--system-site-packages` inherits `pcbnew`, `wx`, `numpy` and `Pillow` from the
+system interpreter while giving you a writable `site-packages` that PEP 668 does
+not police. One interpreter ends up with everything, and nothing on the system
+python is touched:
+
+```
+/usr/bin/python3 -m venv --system-site-packages ~/.fluxplace-venv
+~/.fluxplace-venv/bin/pip install python-docx openpyxl
+~/.fluxplace-venv/bin/python cli.py doctor      # -> All checks passed
+```
+
+`fluxplace doctor --install` does exactly this for you, and once the venv exists
+it installs into it automatically.
+
+If you would rather use root, the distro packages work too:
 
 ```
 sudo apt-get install -y python3-docx python3-openpyxl python3-numpy python3-pil
 ```
-
-Inside a virtualenv that can already see `pcbnew`, `pip install -r requirements.txt`
-is fine.
 
 ### Wider toolchain
 

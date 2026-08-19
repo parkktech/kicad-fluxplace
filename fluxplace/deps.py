@@ -313,6 +313,74 @@ def summary_line(results=None):
 # installing
 # --------------------------------------------------------------------------
 
+DEFAULT_VENV = "~/.fluxplace-venv"
+
+
+def venv_python(path=DEFAULT_VENV):
+    """Path to the interpreter inside our bootstrap venv, if it exists."""
+    p = os.path.join(os.path.expanduser(path), "bin", "python")
+    if os.name == "nt":
+        p = os.path.join(os.path.expanduser(path), "Scripts", "python.exe")
+    return p if os.path.exists(p) else None
+
+
+def bootstrap_venv(path=DEFAULT_VENV, log=print):
+    """Create a venv that INHERITS system site-packages, then pip into it.
+
+    This is the answer to the KiCad-on-Linux bind, and it needs no root.
+
+    A plain venv is useless here: it would not have pcbnew, which only exists in
+    the distro python's site-packages and is not on PyPI. But
+    `venv --system-site-packages` inherits pcbnew, wx, numpy and Pillow from the
+    system interpreter while giving us a writable site-packages that PEP 668
+    does not police. One interpreter ends up with everything, and nothing on the
+    system python is touched.
+
+    Returns the venv's python path on success, else None.
+    """
+    target = os.path.expanduser(path)
+    base = _system_python()
+    log("creating venv with system site-packages: %s" % target)
+    log("  base interpreter: %s  (the one that owns pcbnew)" % base)
+    try:
+        r = subprocess.run([base, "-m", "venv", "--system-site-packages", target],
+                           text=True)
+        if r.returncode != 0:
+            log("venv creation FAILED")
+            return None
+    except Exception as e:
+        log("venv creation failed: %s" % e)
+        return None
+
+    py = venv_python(path)
+    if not py:
+        log("venv created but no interpreter found in it")
+        return None
+
+    pips = [m["pip"] for m in missing() if m.get("pip")]
+    if pips:
+        log("installing into the venv: %s" % " ".join(pips))
+        r = subprocess.run([py, "-m", "pip", "install"] + pips, text=True)
+        if r.returncode != 0:
+            log("pip into the venv FAILED")
+            return None
+    log("")
+    log("done. Run fluxplace with:")
+    log("    %s cli.py <command>" % py)
+    return py
+
+
+def _system_python():
+    """The interpreter most likely to own pcbnew. If we are already running on
+    it, use it; otherwise fall back to the well-known distro path."""
+    if _has_module("pcbnew"):
+        return sys.executable
+    for cand in ("/usr/bin/python3", "/usr/local/bin/python3"):
+        if os.path.exists(cand):
+            return cand
+    return sys.executable
+
+
 def externally_managed():
     """True if this interpreter is PEP 668 externally-managed (Debian/Ubuntu
     system python). Those refuse `pip install`, including --user."""
@@ -354,12 +422,26 @@ def install_plan(results=None):
         return ("pip", cmd + pips,
                 "pip into %s" % sys.executable)
 
+    # Externally managed. Two correct answers; prefer the one needing no root.
+    #
+    # A venv created with --system-site-packages inherits pcbnew/wx/numpy from
+    # this interpreter and gives us a writable site-packages PEP 668 does not
+    # police. No sudo, nothing on the system python touched.
+    py = venv_python()
+    if py:
+        pips = [m["pip"] for m in miss if m.get("pip")]
+        return ("venv-existing", [py, "-m", "pip", "install"] + pips,
+                "installing into the existing fluxplace venv at %s, which "
+                "already inherits pcbnew from the system python" % DEFAULT_VENV)
+
     apts = [m["apt"] for m in miss if m.get("apt")]
     if apts and _apt_available():
-        return ("apt", ["sudo", "apt-get", "install", "-y"] + apts,
-                "this interpreter is PEP 668 externally-managed, so the distro "
-                "package is the correct install (pip would be refused, and a "
-                "venv would not have pcbnew)")
+        return ("venv", ["<bootstrap>"],
+                "this interpreter is PEP 668 externally-managed. The no-root fix "
+                "is a venv with --system-site-packages: it inherits pcbnew from "
+                "the system python and lets pip work. `doctor --install` will "
+                "create it at %s. The alternative needs root: sudo apt-get "
+                "install -y %s" % (DEFAULT_VENV, " ".join(apts)))
 
     pips = [m["pip"] for m in miss if m.get("pip")]
     return ("pip-break", [sys.executable, "-m", "pip", "install",
@@ -379,6 +461,8 @@ def install(pips=None, log=print, upgrade=False, assume_yes=False):
         log("nothing to install")
         return True
     log("plan: %s" % note)
+    if kind == "venv":
+        return bootstrap_venv(log=log) is not None
     if kind == "apt" and not assume_yes and os.geteuid() != 0:
         # sudo may prompt; make that visible rather than hanging silently
         log("this needs root:")
