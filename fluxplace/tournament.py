@@ -74,7 +74,8 @@ def candidate_worker(board_path, workdir, idx, fill, aspect, pad, jitter,
     t0 = time.time()
     pos, angles, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board),
                                       pad=pad, fill=fill, aspect=aspect,
-                                      jitter_seed=jitter)
+                                      jitter_seed=jitter,
+                                      layers=len(IO.signal_layers(board)))
     meta = dict(idx=idx, fill=fill, aspect=aspect, pad=pad, jitter=jitter,
                 overflow=rep["overflow"], gate_wl=rep["wirelength"],
                 pair_sep=rep.get("pair_sep"), hpwl=round(P.hpwl(parts, cg, pos)),

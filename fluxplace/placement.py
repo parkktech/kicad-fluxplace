@@ -75,22 +75,50 @@ def place(parts, graph, topo, strategy="flux", rotate="ortho", center=None, pad=
     return {r: (x, y) for r, (x, y) in p.items()}, angles
 
 
+class _GateScorer:
+    """route-module proxy that pins the board's SIGNAL-LAYER count into every
+    score() call. The gate's capacity model must match the real stackup: scoring
+    a 6-layer board as the 2-layer default declares every dense placement
+    unroutable, so grow-to-route balloons it (measured on dig: 100x100 hand
+    board -> 222x239 mm at 8.3% fill, overflow still >0)."""
+
+    def __init__(self, mod, layers):
+        self._mod, self.layers = mod, max(2, int(layers))
+
+    def score(self, parts, pos, graph, angles=None, **kw):
+        kw.setdefault("layers", self.layers)
+        return self._mod.score(parts, pos, graph, angles, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._mod, name)
+
+
 def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
                  fill=0.65, aspect=1.35, rounds=9, feedback=6, seeds=1,
-                 shrink=True, decaps=True, jitter_seed=0):
+                 shrink=True, decaps=True, jitter_seed=0, layers=2,
+                 attachments=None, fixed_bounds=None):
     """The full route-aware pipeline — placement that is not allowed to be unroutable:
 
       quad (mental map) -> constructive builder (route-as-you-place) -> global-router
       gate -> congestion feedback -> shrink-to-smallest-routable -> decap adjacency.
 
     `seeds` > 1 runs perturbed attempts and keeps the best routable one.
+    `layers` = the board's SIGNAL layer count (kicad_io.signal_layers) — the gate
+    and builder size routing capacity from it.
+    `fixed_bounds` = (x0, y0, x1, y1) mm: the outline is a hard mechanical given —
+    parts are placed and legalized INSIDE it and grow-to-route is disabled (a
+    board that doesn't fit reports overflow instead of ballooning; measured on
+    the CM5 carrier: free growth produced 166x150mm against a 113x107 enclosure,
+    which is a scrap board no matter how well it routes).
     Returns (positions, angles, route_report). report['overflow'] == 0 means the
     coarse global router closed every net within capacity — routable."""
     from .quadratic import quad
-    from . import route as R
+    from . import route as _route_mod
+    R = _GateScorer(_route_mod, layers)
 
     prior = quad(parts, graph, topo, center=center, pad=pad, big_area=big_area,
-                 fill=fill, aspect=aspect, rounds=rounds)
+                 fill=fill, aspect=aspect, rounds=rounds,
+                 fixed_bounds=fixed_bounds)
 
     locked = {r for r in parts if parts[r].get("locked")}
     if jitter_seed:
@@ -99,7 +127,8 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
     for s in range(max(1, seeds)):
         pr = prior if s == 0 else _jitter(prior, s + jitter_seed, locked)
         p, angles, rep, frozen = _pipeline_once(parts, graph, topo, pr, pad,
-                                                big_area, feedback)
+                                                big_area, feedback, R=R,
+                                                attachments=attachments)
         ov = count_overlaps(parts, p, 0.0, angles)
         key = (rep["overflow"] > 0 or ov > 0, _extent_area(parts, p, angles, pad),
                hpwl(parts, graph, {r: tuple(v) for r, v in p.items()}))
@@ -107,12 +136,19 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
             best = (key, p, angles, rep, frozen)
     _, p, angles, rep, frozen = best
 
-    # If the compact build is CONGESTED, grow the board the smallest amount that routes
-    # (compact-first, grow-only-if-needed). A board that already routes skips this.
+    # If the compact build is CONGESTED: first try opening a targeted routing LANE
+    # along the dominant congestion wall (channel-aware, cheap), then fall back to
+    # growing the whole board the smallest amount that routes (compact-first,
+    # grow-only-if-needed). A board that already routes skips both.
     if rep["overflow"] > 0:
+        p, rep = _open_channels(parts, graph, p, angles, pad, R, rep)
+    if rep["overflow"] > 0 and not fixed_bounds:
         p, rep = _expand_to_route(parts, graph, p, angles, pad, R, rep)
-    # order matters: decaps hug their ICs FIRST (inside the loose envelope), then
-    # the shrink search compacts everything under the gate, then orientation tunes
+    # order matters: crystals claim their parent's OSC-pin slots FIRST (hardest
+    # physics constraint), then decaps hug their ICs (inside the loose envelope),
+    # then the shrink search compacts everything under the gate, then orientation
+    if rep["overflow"] == 0:
+        p, rep = _crystal_pass(parts, graph, p, angles, pad, R, rep)
     if decaps and rep["overflow"] == 0:
         p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
     if shrink and rep["overflow"] == 0:
@@ -123,6 +159,28 @@ def place_routed(parts, graph, topo, center=None, pad=0.45, big_area=800.0,
         p, rep = _flush_connectors(parts, graph, p, angles, pad, R, rep, big_area)
     if rep["overflow"] == 0:
         angles, rep = _orient_refine(parts, graph, p, angles, pad, R, rep)
+    if fixed_bounds:
+        # HARD containment: every pass above may drift parts; the outline is a
+        # mechanical given, so clamp + re-legalize inside it and rescore honestly
+        pl = {r: list(v) for r, v in p.items()}
+        legalize(parts, pl, pad, iters=600, angles=angles,
+                 frozen=locked & set(pl), bounds=fixed_bounds, hard_bounds=True)
+        p = pl
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
+                      graph, angles)
+        # the clamp shuffles the border region and can strand adjacency parts
+        # (measured: Y51 ended 19mm from its OSC pins — Quilter flagged it);
+        # re-run the physics passes, then re-contain their moves
+        if rep["overflow"] == 0:
+            p, rep = _crystal_pass(parts, graph, p, angles, pad, R, rep)
+            p, rep = _decap_pass(parts, graph, p, angles, pad, R, rep)
+            pl = {r: list(v) for r, v in p.items()}
+            legalize(parts, pl, pad, iters=300, angles=angles,
+                     frozen=locked & set(pl), bounds=fixed_bounds,
+                     hard_bounds=True)
+            p = pl
+            rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()},
+                          graph, angles)
     return {r: (v[0], v[1]) for r, v in p.items()}, angles, rep
 
 
@@ -285,10 +343,13 @@ def _extent_area(parts, p, angles, pad):
     return (max(xs1) - min(xs0)) * (max(ys1) - min(ys0))
 
 
-def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
-    """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen)."""
+def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback, R=None,
+                   attachments=None):
+    """builder -> gate -> congestion feedback. Returns (p, angles, rep, frozen).
+    `R` = the route module or a _GateScorer pinning the board's layer count."""
     from .builder import build
-    from . import route as R
+    if R is None:
+        from . import route as R
 
     angles = orient(parts, graph, prior)
     area = {r: _size(parts, r, 0.0)[0] * _size(parts, r, 0.0)[1] for r in parts}
@@ -316,7 +377,9 @@ def _pipeline_once(parts, graph, topo, prior, pad, big_area, feedback):
             lbounds = (px0, py0, px1, py1)
 
     pos, grid, routed = build(parts, graph, topo, prior, angles, pad=pad,
-                              fixed=fixed, bounds=lbounds, big_area=big_area)
+                              fixed=fixed, bounds=lbounds, big_area=big_area,
+                              layers=getattr(R, "layers", 2),
+                              attachments=attachments)
     p = {r: list(v) for r, v in pos.items()}
     frozen = {r for r in p if area[r] > big_area} | set(fixed) | locked
 
@@ -456,6 +519,51 @@ def _shrink_pass(parts, graph, topo, p0, angles, frozen, pad, R, lo=0.80):
     return best[0], angles, best[1]
 
 
+def _open_channels(parts, graph, p, angles, pad, R, rep, rounds=4):
+    """Channel-aware relief: when the router's overflow concentrates along a straight
+    cut (a congestion WALL between dense blocks), open a continuous routing LANE there
+    by shifting everything past the cut outward by the track-width the router is short.
+    Targeted alternative to uniform expansion — HPWL grows only on nets that cross the
+    cut, and only by the lane width. Locked parts hold (mate coordinates); everything
+    else may ride the shift. Keep-best: a round that doesn't reduce overflow reverts."""
+    hold = {r for r in p if parts[r].get("locked")}
+    best_p = {r: list(v) for r, v in p.items()}
+    best = rep
+    for _ in range(rounds):
+        if rep["overflow"] <= 1e-9:
+            break
+        cuts = R.cut_overflow(rep["grid"])
+        if not cuts:
+            break
+        axis, idx, tot, need = cuts[0]
+        if tot < 0.3 * rep["overflow"]:
+            break                      # overflow is scattered, not a wall — wrong tool
+        g = rep["grid"]
+        lane = min(3.0, max(0.6, need * getattr(g, "pitch", 0.35)))
+        if axis == "v":
+            line = g.x0 + (idx + 1) * g.cell
+            for r in p:
+                if r not in hold and p[r][0] > line:
+                    p[r][0] += lane
+        else:
+            line = g.y0 + (idx + 1) * g.cell
+            for r in p:
+                if r not in hold and p[r][1] > line:
+                    p[r][1] += lane
+        for _ in range(4):
+            legalize(parts, p, pad, iters=400, angles=angles, frozen=hold)
+            if count_overlaps(parts, p, 0.0, angles) == 0:
+                break
+            _shove_remaining(parts, p, angles, pad, frozen=hold)
+        rep = R.score(parts, {r: (v[0], v[1]) for r, v in p.items()}, graph, angles)
+        if rep["overflow"] < best["overflow"] - 1e-6:
+            best_p = {r: list(v) for r, v in p.items()}
+            best = rep
+        else:
+            break
+    return {r: list(v) for r, v in best_p.items()}, best
+
+
 def _expand_to_route(parts, graph, p, angles, pad, R, rep, hi=2.5):
     """Grow the board the SMALLEST amount that lets the router close it — "let it grow
     slightly if needed, but keep it as compact as possible." Uniform scale away from the
@@ -555,6 +663,96 @@ def _compact_gated(parts, graph, p, angles, frozen, pad, R, rep, rounds=3):
     return p, rep
 
 
+def _crystal_pass(parts, graph, p, angles, pad, R, rep):
+    """Crystals and their load caps must hug the parent's oscillator pins: every
+    extra millimetre of XTAL trace is an EMI antenna and parasitic load the
+    oscillator wasn't compensated for (physics rule: pin distance and path
+    <=10mm, no vias). Move each crystal to the free slot nearest its parent's
+    OSC pins, then its load caps beside the crystal. One score-gated batch per
+    cluster — a cluster that can't improve reverts and costs nothing."""
+    from .comprehend import crystals as _crystals
+    clusters = [c for c in _crystals(parts, dict(graph.signal_nets))
+                if c["crystal"] in p and c["parent"] in p]
+    if not clusters:
+        return p, rep
+    q = {r: list(v) for r, v in p.items()}
+    accepted = {r: (v[0], v[1]) for r, v in p.items()}
+    best_rep = rep
+    xs = [v[0] for v in p.values()]
+    ys = [v[1] for v in p.values()]
+    ex0, ex1, ey0, ey1 = min(xs), max(xs), min(ys), max(ys)
+
+    def clear_at(ref, x, y):
+        rw, rh = eff_size(parts, ref, angles.get(ref, 0.0), pad)
+        for s in q:
+            if s == ref:
+                continue
+            sw, sh = eff_size(parts, s, angles.get(s, 0.0), pad)
+            if (abs(x - q[s][0]) < (rw + sw) / 2 and
+                    abs(y - q[s][1]) < (rh + sh) / 2):
+                return False
+        return True
+
+    def best_slot(ref, tx, ty, cur_d):
+        rw, rh = eff_size(parts, ref, angles.get(ref, 0.0), pad)
+        step = max(rw, rh)
+        slots = []
+        for ring in (0.6, 1.0, 1.5, 2.2, 3.0):
+            for k in range(16):
+                a = math.tau * k / 16
+                slots.append((tx + ring * step * math.cos(a),
+                              ty + ring * step * math.sin(a)))
+        slots.sort(key=lambda t: abs(t[0] - tx) + abs(t[1] - ty))
+        for x, y in slots:
+            if not (ex0 <= x <= ex1 and ey0 <= y <= ey1):
+                continue
+            if abs(x - tx) + abs(y - ty) >= cur_d - 0.5:
+                continue                       # not a meaningful improvement
+            if clear_at(ref, x, y):
+                return (x, y)
+        return None
+
+    moved = 0
+    for cl in clusters:
+        parent, yref = cl["parent"], cl["crystal"]
+        offs = [parts[parent]["pins"][n] for n in cl["nets"]
+                if n in parts[parent].get("pins", {})]
+        if not offs:
+            continue
+        tx = q[parent][0] + sum(o[0] for o in offs) / len(offs)
+        ty = q[parent][1] + sum(o[1] for o in offs) / len(offs)
+        batch = []
+        spot = best_slot(yref, tx, ty,
+                         abs(q[yref][0] - tx) + abs(q[yref][1] - ty))
+        if spot:
+            q[yref] = list(spot)
+            batch.append(yref)
+        cx, cy = q[yref]
+        for cap in cl["load_caps"]:
+            if cap not in q:
+                continue
+            spot = best_slot(cap, cx, cy,
+                             abs(q[cap][0] - cx) + abs(q[cap][1] - cy))
+            if spot:
+                q[cap] = list(spot)
+                batch.append(cap)
+        if not batch:
+            continue
+        rep2 = R.score(parts, {r: (v[0], v[1]) for r, v in q.items()},
+                       graph, angles)
+        if rep2["overflow"] == 0 and count_overlaps(parts, q, 0.0, angles) == 0:
+            for r in batch:
+                accepted[r] = (q[r][0], q[r][1])
+            best_rep = rep2
+            moved += len(batch)
+        else:
+            for r in batch:
+                q[r] = list(accepted[r])       # this cluster couldn't improve
+    if not moved:
+        return p, rep
+    return {r: list(accepted[r]) for r in accepted}, best_rep
+
+
 def _decap_pass(parts, graph, p, angles, pad, R, rep):
     """Walk plane-only decoupling caps to the nearest free slot hugging their owner
     IC (nearest non-passive sharing one of their power nets). Moves are accepted in
@@ -562,16 +760,21 @@ def _decap_pass(parts, graph, p, angles, pad, R, rep):
     are ranked by closeness to the OWNER (the audit found the old sort ranked by
     closeness to the decap's current spot, so nothing ever moved)."""
     signal_refs = {r for members in graph.signal_nets.values() for r in members}
-    ptrace_refs = {r for name, members in getattr(graph, "power_traces", {}).items()
-                   for r in members}
     owners_of = {}
     for r in p:
-        if kind_of(r) != "C" or r in signal_refs or r in ptrace_refs:
+        if kind_of(r) != "C" or r in signal_refs:
             continue
         my_nets = set(parts[r].get("pins", {}).keys())
+        # a DECOUPLING cap is rail+GND, whether the rail is a plane or a routed
+        # power trace (VBUS_C-class rails were excluded before, stranding their
+        # caps 80mm from the pin they serve). Owner = nearest non-passive with a
+        # pin on the RAIL — never a GND-only match, or everything owns everything.
+        if "GND" not in my_nets or len(my_nets) != 2:
+            continue
+        rails = my_nets - {"GND"}
         cands = [q for q in p
                  if q != r and not is_passive(q)
-                 and my_nets & set(parts[q].get("pins", {}).keys())]
+                 and rails & set(parts[q].get("pins", {}).keys())]
         if cands:
             owners_of[r] = min(cands, key=lambda q: (abs(p[q][0] - p[r][0]) +
                                                      abs(p[q][1] - p[r][1]), q))
@@ -718,9 +921,11 @@ def _size(parts, r, pad=0.6):
     clear of neighbours yet the board still legalizes to true zero overlap."""
     p = parts[r]
     b = p.get("bloat", 0.0)
-    if pad > 1e-9:
-        b += p.get("escape", 0.0)
-    return p.get("w", 2.0) + 2 * (pad + b), p.get("h", 1.5) + 2 * (pad + b)
+    ex = ey = 0.0
+    if pad > 1e-9:                          # halo is spacing only, never in the overlap test
+        esc = p.get("escape", 0.0)
+        ex, ey = esc if isinstance(esc, (tuple, list)) else (esc, esc)
+    return p.get("w", 2.0) + 2 * (pad + b + ex), p.get("h", 1.5) + 2 * (pad + b + ey)
 
 
 def eff_size(parts, r, angle=0.0, pad=0.6):
@@ -1214,7 +1419,8 @@ def _candidate_pairs(parts, pos, angles, pad, cell=6.0):
                     yield key
 
 
-def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None):
+def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None,
+             hard_bounds=False):
     """Iterative overlap removal via a correct spatial hash: push every overlapping pair
     apart along the shorter axis until none remain (or `iters` passes). Rotation-aware.
     `frozen` parts never move (anchors) — an overlapping movable part yields the full
@@ -1222,12 +1428,14 @@ def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None):
     `bounds` = (x0, y0, x1, y1): movable parts are clamped inside after every sweep, so
     overflow resolves inward (this is what keeps the board small instead of ballooning).
     Clamping stops for the final third of the passes if it is fighting convergence —
-    zero overlaps beats a tidy outline."""
+    zero overlaps beats a tidy outline — UNLESS `hard_bounds`: a fixed enclosure
+    outline is non-negotiable, so clamping runs every pass (measured: the soft
+    final third let a border-row cap get pushed back over the board edge)."""
     angles = angles or {}
     frozen = frozen or set()
     for it in range(iters):
         moved = False
-        if bounds and it < max(1, iters * 2 // 3):
+        if bounds and (hard_bounds or it < max(1, iters * 2 // 3)):
             x0, y0, x1, y1 = bounds
             for r in pos:
                 if r in frozen:

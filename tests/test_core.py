@@ -108,6 +108,25 @@ def test_place_routed_pipeline():
     print("ok  place_routed: legal + routable")
 
 
+def test_place_routed_fixed_bounds():
+    """--keep-outline: the outline is a mechanical given — every part body stays
+    inside fixed_bounds and grow-to-route never widens it."""
+    parts, nets = _synthetic()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    fb = (-40.0, -30.0, 40.0, 30.0)
+    pos, rot, rep = P.place_routed(parts, cg, topo, fixed_bounds=fb)
+    assert len(pos) == len(parts), "not every part placed"
+    assert P.count_overlaps(parts, pos, 0.15, angles=rot) == 0, "overlaps left"
+    for r, (x, y) in pos.items():
+        w, h = P.eff_size(parts, r, rot.get(r, 0.0), 0.0)
+        assert x - w / 2 >= fb[0] - 1e-6 and x + w / 2 <= fb[2] + 1e-6, \
+            f"{r} exceeds fixed bounds in x: {x}±{w/2}"
+        assert y - h / 2 >= fb[1] - 1e-6 and y + h / 2 <= fb[3] + 1e-6, \
+            f"{r} exceeds fixed bounds in y: {y}±{h/2}"
+    print("ok  place_routed fixed_bounds: all bodies inside the given outline")
+
+
 def test_power_traces_and_pairs():
     """graph v2: small-fanout power rails become routed traces (never GND); diff
     pairs are detected by naming convention with the P side as master."""
@@ -265,6 +284,446 @@ def test_escape_net_aware_floor():
     print("ok  escape: net-aware floor (signal thins, rail keeps width)")
 
 
+def test_channel_cut_and_open():
+    """Channel-aware relief: a congestion WALL (overflow concentrated on one straight
+    cut) is detected by cut_overflow, and _open_channels shifts everything past the
+    cut by the lane width the router is short — locked parts and everything before
+    the cut hold position."""
+    from fluxplace import route as R
+    g = R.Grid(0, 0, 20, 20, cell=2.0, layers=2, pitch=0.35)
+    for iy in range(g.ny):                       # wall between columns 3|4
+        e = R.Grid._edge((3, iy), (4, iy))
+        g.usage[e] = g.cap((3, iy), (4, iy)) + 4.0
+    cuts = R.cut_overflow(g)
+    assert cuts[0][0] == "v" and cuts[0][1] == 3, cuts[0]
+    assert abs(cuts[0][3] - 4.0) < 1e-6, "need_tracks = worst single-edge deficit"
+
+    parts = {f"P{i}": dict(w=2.0, h=2.0) for i in range(4)}
+    parts["P3"]["locked"] = True                 # locked holds even past the cut
+    pos = {"P0": [2.0, 5.0], "P1": [2.0, 9.0], "P2": [12.0, 5.0], "P3": [12.0, 9.0]}
+
+    class StubR:                                 # score: the wall is fixed after one lane
+        cut_overflow = staticmethod(R.cut_overflow)
+        @staticmethod
+        def score(parts, p, graph, angles):
+            return dict(overflow=0.0, grid=g)
+
+    p2, rep2 = P._open_channels(parts, None, {r: list(v) for r, v in pos.items()},
+                                {}, 0.4, StubR, dict(overflow=10.0, grid=g))
+    assert rep2["overflow"] == 0.0
+    lane = min(3.0, max(0.6, 4.0 * 0.35))        # 1.4mm lane from the 4-track deficit
+    assert abs(p2["P2"][0] - (12.0 + lane)) < 0.5, "part past the cut rides the shift"
+    assert abs(p2["P0"][0] - 2.0) < 0.5, "part before the cut holds"
+    assert abs(p2["P3"][0] - 12.0) < 1e-9, "locked part holds its mate coords"
+    print("ok  channel: cut_overflow wall detect + lane opening (locked holds)")
+
+
+def _run_adaptive(drcs, parts, cg, tmpdir):
+    """Drive route_adaptive with stubbed router/DRC; returns (fanned, widths, summ)."""
+    import os
+    import shutil
+    import fluxplace.adaptive as AD
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    os.makedirs(tmpdir)
+    placed = os.path.join(tmpdir, "placed.kicad_pcb")
+    open(placed, "w").write("board")
+    seq = list(drcs)
+    real_drc = AD.drc_unrouted
+    AD.drc_unrouted = lambda cur, cli: seq.pop(0)
+    fanned = []
+
+    def route_fresh(src, outb, fine, log=print):
+        open(outb, "w").write("routed")
+        return outb
+
+    def fanout(board, outb, ref, nets=None, log=print):
+        fanned.append((ref, tuple(nets or ())))
+        open(outb, "w").write("fanned")
+        return outb
+    try:
+        _, summ = AD.route_adaptive(placed, tmpdir, route_fresh, cg, parts,
+                                    fanout=fanout, log=lambda m: None)
+    finally:
+        AD.drc_unrouted = real_drc
+    return fanned, [r["width"] for r in summ["rounds"]], summ
+
+
+def test_adaptive_fanout_priority(tmpdir="/tmp/fluxtest_ff"):
+    """Residue CONCENTRATED at a fine-pitch part -> fanout gets the router time
+    FIRST (no clearance ladder burned); residue SPREAD -> the ladder runs and
+    fanout is never called. (dig: two ladder rungs bought 69->69->72 = nothing;
+    the fanout rung bought 69->33.)"""
+    parts, nets = _synthetic()
+    parts["U9"] = dict(w=8, h=8, x=0, y=0, pins={"SIGA": (0, 0)})
+    cg = G.build(parts, nets)
+
+    def item(net, ref):
+        return {"items": [{"description": f"Pad 1 [{net}] of {ref} on F.Cu"}]}
+    ok = {"unconnected_items": []}
+
+    # concentrated: 10 stuck endpoints, all at U9 -> fanout first, then closed
+    bad = {"unconnected_items": [item("SIGA", "U9")] * 10}
+    fanned, widths, summ = _run_adaptive(
+        [(bad, {"SIGA"}), (ok, set()), (ok, set())], parts, cg, tmpdir)
+    assert fanned and fanned[0][0] == "U9", f"concentrated residue must fan first: {fanned}"
+    assert "SIGA" in fanned[0][1], "fanout must target the stuck net"
+    assert widths == [0.2, 0.2], f"no ladder rung may run before fanout: {widths}"
+    assert summ["closed"] and summ["diagnosis"].startswith("CLOSED"), summ["diagnosis"]
+
+    # spread: stuck endpoints scattered over many parts (no zone reaches
+    # min_unrouted=5) -> ladder steps down, fanout never called
+    spread = {"unconnected_items": [item("SIGA", r) for r in
+                                    ("U2", "U3", "J1", "C1", "R1")]
+              + [item("SIGB", r) for r in ("U3", "J2", "C2")]}
+    fanned2, widths2, summ2 = _run_adaptive(
+        [(spread, {"SIGA", "SIGB"}), (ok, set()), (ok, set())], parts, cg, tmpdir)
+    assert not fanned2, f"spread residue must not trigger fanout: {fanned2}"
+    assert 0.15 in widths2, f"spread residue must walk the ladder: {widths2}"
+    assert summ2["closed"], summ2
+    print("ok  adaptive: fanout-priority on concentrated residue, ladder on spread")
+
+
+def test_candidate_selection():
+    """Population search: fewest unrouted wins; DRC violations break ties; the
+    un-jittered base (earliest) breaks the rest."""
+    from fluxplace.adaptive import pick_best
+    assert pick_best([("c0", 42, 900), ("c1", 33, 1200), ("c2", 40, 100)]) == 1
+    assert pick_best([("c0", 33, 900), ("c1", 33, 700)]) == 1, "violations tie-break"
+    assert pick_best([("c0", 33, 700), ("c1", 33, 700)]) == 0, "base wins pure ties"
+    print("ok  candidates: DRC-best selection (unrouted, violations, base)")
+
+
+def test_si_pair_skew():
+    """SI-lite: intra-pair skew beyond the limit warns; matched pairs pass;
+    a half-routed pair reports UNROUTED_PAIR, never a bogus skew."""
+    from fluxplace.si import pair_skew_findings
+    lengths = {"USB_DP": 52.0, "USB_DM": 51.6,          # matched
+               "PCIE_TX_P": 80.0, "PCIE_TX_N": 84.5,    # 4.5mm skew
+               "ETH_P": 30.0}                            # N side unrouted
+    pairs = {"USB_DM": "USB_DP", "PCIE_TX_N": "PCIE_TX_P", "ETH_N": "ETH_P"}
+    findings, table = pair_skew_findings(lengths, pairs, warn_mm=1.0)
+    codes = sorted(c for _, c, _ in findings)
+    assert codes == ["PAIR_SKEW", "UNROUTED_PAIR"], findings
+    assert any("PCIE_TX_P/PCIE_TX_N: 4.50mm" in m for _, c, m in findings
+               if c == "PAIR_SKEW"), findings
+    assert len(table) == 2 and all(len(r) == 5 for r in table)
+    print("ok  si-lite: pair skew warns, matched passes, unrouted flagged")
+
+
+def test_constraints_ingest(path="/tmp/fluxtest_cons.toml"):
+    """Constraint TOML: currents become ampacity widths, pours opt rails out of
+    fat traces, pair families get skew limits by longest-prefix match."""
+    from fluxplace import constraints as C
+    open(path, "w").write('''
+[power."+5V"]
+max_current_ma = 4000
+pour = true
+[power.VIN_RAW]
+width_mm = 2.5
+[pairs.PCIE_TX]
+impedance_diff = 85
+skew_mm = 0.1
+[pairs.PCIE]
+skew_mm = 0.5
+[si]
+default_skew_mm = 1.0
+''')
+    cons = C.load(path)
+    assert C.power_width_mm(cons, "+5V", 0.4) == 2.0, "4A -> 2.0mm ampacity"
+    assert C.power_width_mm(cons, "VIN_RAW", 0.4) == 2.5, "explicit width wins"
+    assert C.power_width_mm(cons, "+3V3", 0.4) == 0.4, "unlisted keeps default"
+    assert C.pour_nets(cons) == {"+5V"}
+    assert C.skew_limit_mm(cons, "PCIE_TX_P") == 0.1, "longest prefix wins"
+    assert C.skew_limit_mm(cons, "PCIE_CLK_P") == 0.5, "family fallback"
+    assert C.skew_limit_mm(cons, "USB_DP") == 1.0, "si default"
+    assert C.load(None) == {}
+    print("ok  constraints: currents->widths, pours, per-family skew limits")
+
+
+def test_bypass_proximity():
+    """A decap next to its IC pin passes; one stranded across the board warns;
+    caps not between a rail and GND are never treated as bypass."""
+    from fluxplace.si import bypass_findings
+    parts = {
+        "U1": dict(x=10, y=10, pins={"+3V3": (2, 0), "GND": (-2, 0)}),
+        "C1": dict(x=13, y=10, pins={"+3V3": (0, 0), "GND": (0, 1)}),   # 1mm away
+        "C2": dict(x=60, y=40, pins={"+3V3": (0, 0), "GND": (0, 1)}),   # stranded
+        "C3": dict(x=11, y=11, pins={"SIGA": (0, 0), "SIGB": (0, 1)}),  # AC coupling
+    }
+    nets = {"+3V3": ["U1", "C1", "C2"], "GND": ["U1", "C1", "C2"],
+            "SIGA": ["C3"], "SIGB": ["C3"]}
+    findings, table = bypass_findings(parts, nets, {"+3V3", "GND"}, warn_mm=10.0)
+    caps = {r[0] for r in table}
+    assert caps == {"C1", "C2"}, table
+    assert len(findings) == 1 and "C2" in findings[0][2], findings
+    print("ok  si-lite: bypass proximity (near passes, stranded warns)")
+
+
+def _crystal_board():
+    """Synthetic with a crystal cluster stranded far from its parent's OSC pins."""
+    parts, nets = _synthetic()
+    parts["U1"]["pins"]["+3V3"] = (0, 2)
+    parts["U2"]["pins"]["+3V3"] = (1, 1)
+    parts["U2"]["pins"]["XI"] = (-2, 0)
+    parts["U2"]["pins"]["XO"] = (-2, 1)
+    parts["Y1"] = dict(value="8MHz Crystal", w=3, h=2, x=-40, y=-30,
+                       pins={"XI": (-1, 0), "XO": (1, 0)})
+    parts["C10"] = dict(value="22pF", w=1, h=1, x=-44, y=-30,
+                        pins={"XI": (0, 0), "GND": (0, 1)})
+    parts["C11"] = dict(value="22pF", w=1, h=1, x=-44, y=-28,
+                        pins={"XO": (0, 0), "GND": (0, 1)})
+    nets["XI"] = ["U2", "Y1", "C10"]
+    nets["XO"] = ["U2", "Y1", "C11"]
+    nets["GND"] = nets["GND"] + ["C10", "C11"]
+    return parts, nets
+
+
+def test_builder_attachments():
+    """Attachments commit immediately after their owner: a decap stranded 60mm
+    away in the prior ends adjacent to its IC, by construction, with the board
+    still legal and routable."""
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    att = {"U1": ["C1"], "U2": ["C2", "Y1", "C10", "C11"]}
+    pos, rot, rep = P.place_routed(parts, cg, topo, attachments=att)
+    assert rep["overflow"] == 0
+    assert P.count_overlaps(parts, pos, 0.0, angles=rot) == 0
+    for owner, caps in att.items():
+        for c in caps:
+            d = (abs(pos[c][0] - pos[owner][0]) + abs(pos[c][1] - pos[owner][1]))
+            assert d <= 16.0, f"{c} ended {d:.1f}mm from {owner}"
+    d1 = abs(pos["C1"][0] - pos["U1"][0]) + abs(pos["C1"][1] - pos["U1"][1])
+    print(f"ok  builder attachments: decaps/cluster hug owners (C1 {d1:.1f}mm from U1)")
+
+
+def test_comprehend():
+    """Inference bundle: crystal finds its parent + load caps; pairs and bypass
+    tables populate; power classes carried through."""
+    from fluxplace import comprehend as CO
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    comp = CO.comprehend(parts, nets, cg)
+    assert comp["crystals"] == [dict(crystal="Y1", parent="U2",
+                                     nets=["XI", "XO"], load_caps=["C10", "C11"])]
+    assert {r[0] for r in comp["bypass"]} == {"C1", "C2"}
+    assert "GND" in comp["power"] and "+3V3" in comp["power"]
+    txt = CO.to_toml(comp)
+    assert "[inferred.crystal.Y1]" in txt and 'parent = "U2"' in txt
+    print("ok  comprehend: crystal cluster + bypass + power inferred, TOML emits")
+
+
+def test_crystal_pass():
+    """The crystal pass pulls a stranded crystal + load caps to the parent's OSC
+    pins (<=10mm physics rule) without overlaps and with the gate still clean."""
+    from fluxplace import route as R
+    parts, nets = _crystal_board()
+    cg = G.build(parts, nets)
+    topo = T.analyze(cg)
+    pos, rot, rep = P.place_routed(parts, cg, topo)
+    assert rep["overflow"] == 0
+    tx = pos["U2"][0] - 2
+    ty = pos["U2"][1] + 0.5
+    d = abs(pos["Y1"][0] - tx) + abs(pos["Y1"][1] - ty)
+    assert d <= 10.0, f"crystal ended {d:.1f}mm from its OSC pins"
+    assert P.count_overlaps(parts, pos, 0.0, angles=rot) == 0
+    print(f"ok  crystal pass: Y1 {d:.1f}mm from OSC pins, legal + routable")
+
+
+
+def test_return_via_findings():
+    """A pair via with a GND via nearby passes; far or absent GND warns."""
+    from fluxplace.si import return_via_findings
+    pv = [("PCIE_TX_P", 10.0, 10.0), ("PCIE_TX_N", 40.0, 40.0)]
+    f, t = return_via_findings(pv, [(None, 11.0, 10.5)], max_mm=10.0)
+    codes = [c for _, c, _ in f]
+    assert codes == ["RETURN_VIA_FAR"], f
+    f2, _ = return_via_findings(pv, [], max_mm=10.0)
+    assert [c for _, c, _ in f2] == ["NO_RETURN_VIA"] * 2
+    print("ok  si-lite: return-path via check (near passes, far/absent warns)")
+
+
+def test_netlist_pin_nets():
+    """replace-footprint's net truth: (ref,pin)->net from a kicadxml netlist."""
+    import types, tempfile
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())  # kicad_io layering
+    from fluxplace import kicad_io as IO
+    xml = """<?xml version="1.0"?><export><nets>
+      <net code="1" name="+3V3"><node ref="J1" pin="2"/><node ref="J1" pin="4"/>
+        <node ref="U1" pin="7"/></net>
+      <net code="2" name="GND"><node ref="J1" pin="1"/></net>
+    </nets></export>"""
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as tf:
+        tf.write(xml); path = tf.name
+    try:
+        m = IO.netlist_pin_nets(path, "J1")
+        assert m == {"2": "+3V3", "4": "+3V3", "1": "GND"}, m
+        assert IO.netlist_pin_nets(path, "U9") == {}
+    finally:
+        os.unlink(path)
+    print("ok  netlist pin->net truth for replace-footprint")
+
+
+def test_upload_package_excludes_prl():
+    """The ECAD upload set is exactly board+pro+sch: .kicad_prl and .kicad_dru
+    both come back 'Unsupported file' from Quilter's uploader (measured)."""
+    import tempfile
+    from fluxplace import fab
+    with tempfile.TemporaryDirectory() as d:
+        proj = os.path.join(d, "proj"); os.makedirs(proj)
+        for f in ("x.kicad_pro", "x.kicad_sch", "sub.kicad_sch", "x.kicad_dru",
+                  "x.kicad_prl", "x.kicad_pcb"):
+            open(os.path.join(proj, f), "w").write("stub")
+        routed = os.path.join(d, "routed.kicad_pcb")
+        open(routed, "w").write("routed")
+        open(os.path.join(d, "routed.kicad_dru"), "w").write("current-rules")
+        out = os.path.join(d, "upload")
+        os.makedirs(out)
+        open(os.path.join(out, "x.kicad_prl"), "w").write("stale")
+        open(os.path.join(out, "renamed_old.kicad_sch"), "w").write("stale")
+        open(os.path.join(out, "notes.txt"), "w").write("keep me")
+        files = fab.upload_package(routed, out, project_dir=proj, log=lambda *a: None)
+        names = sorted(os.path.basename(f) for f in files)
+        assert names == ["sub.kicad_sch", "x.kicad_pcb",
+                         "x.kicad_pro", "x.kicad_sch"], names
+        assert open(os.path.join(out, "x.kicad_pcb")).read() == "routed"
+        assert not os.path.exists(os.path.join(out, "x.kicad_prl"))
+        assert not os.path.exists(os.path.join(out, "x.kicad_dru"))
+        assert not os.path.exists(os.path.join(out, "renamed_old.kicad_sch"))
+        assert os.path.exists(os.path.join(out, "notes.txt"))  # non-KiCad kept
+    print("ok  upload package: board renamed to project stem, no .kicad_prl")
+
+
+def test_model_registration_solver():
+    """verify-models: the solver lands a synthetic connector's pin shafts on
+    the footprint holes (rotation + translation + z-lift recovered)."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.models import solve_transform, _model_to_fp, _clusters, _fit
+    # synthetic model: 2x03 pin field at 3mm pitch, drawn displaced (+5,+2)
+    # and needing a 2mm z-lift; 20 points per pin shaft below board
+    pts = []
+    for px in (5.0, 8.0, 11.0):
+        for py in (2.0, 5.0):
+            for k in range(20):
+                pts.append((px, py, -2.2 - 0.05 * k))
+    holes = [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0),
+             (0.0, 3.0), (3.0, 3.0), (6.0, 3.0)]
+    sol, max_d = solve_transform(pts, holes, z_lift_scan=(0.0, 2.0))
+    assert sol is not None and max_d < 0.2, (sol, max_d)
+    rot, ox, oy, oz = sol
+    # confirm by applying: every hole must have a shaft within tolerance
+    loc = _model_to_fp(pts, (ox, oy, oz), rot)
+    tips = _clusters([(x, y) for x, y, z in loc if z < -0.25])
+    _, check = _fit(tips, holes)
+    assert check < 0.2, check
+    print("ok  verify-models solver: pins landed on holes (err %.2fmm)" % check)
+
+
+def test_lastmile_dijkstra():
+    """patch: multi-source Dijkstra crosses a wall through the gap and via
+    moves respect the all-layer + via_blocked contract."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import dijkstra, _simplify
+
+    class G:                                     # 2-layer 20x20 toy grid
+        cell = 1.0
+        layers = ["F", "B"]
+        nx = ny = 20
+        blocked = {"F": {(10, y) for y in range(20) if y != 15},
+                   "B": set()}
+        via_blocked = {(x, y) for x in range(20) for y in range(20)
+                       if not (4 < x < 8 or 11 < x < 15)}   # two via windows
+
+        def inside(self, cx, cy):
+            return 1 <= cx < self.nx - 1 and 1 <= cy < self.ny - 1
+
+    g = G()
+    # same-layer route must use the wall gap at (10, 15)
+    p = dijkstra(g, {(0, 2, 2)}, {(0, 17, 2)})
+    assert p and (0, 10, 15) in p, "did not use the only wall gap"
+    # layer-hop route must via inside the allowed x-window
+    g2 = G()
+    g2.blocked = {"F": {(10, y) for y in range(20)}, "B": set()}
+    p2 = dijkstra(g2, {(0, 2, 2)}, {(0, 17, 2)})
+    hops = [(a, b) for a, b in zip(p2, p2[1:]) if a[0] != b[0]]
+    assert p2 and hops, "expected a via route"
+    assert all(4 < a[1] < 8 or 11 < a[1] < 15 for a, _ in hops), \
+        "via outside allowed windows"
+    assert len(_simplify(p2)) < len(p2), "simplify must merge collinear runs"
+    print("ok  last-mile patch: dijkstra gap + via contract + simplify")
+
+
+def test_rip_corridor():
+    """rip-up: the corridor is the straight lane between the NEAREST
+    (src, tgt) sample pair, sampled densely enough that a rip_r halo test
+    never gaps."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import corridor_anchors
+
+    src = [(0.0, 0.0), (1.0, 0.0)]
+    tgt = [(11.0, 0.0), (50.0, 50.0)]
+    anchors, s_end, t_end = corridor_anchors(src, tgt)
+    assert s_end == (1.0, 0.0) and t_end == (11.0, 0.0), \
+        "must pick the nearest pair, not the first"
+    xs = sorted(a[0] for a in anchors)
+    assert xs[0] == 1.0 and xs[-1] == 11.0, "corridor spans src->tgt"
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    assert max(gaps) <= 1.01, "anchor sampling must be <= step_mm"
+    assert all(a[1] == 0.0 for a in anchors), "straight-line corridor"
+    print("ok  rip-up corridor: nearest pair + dense straight sampling")
+
+
+def test_rip_soft_path():
+    """rip-up v2: soft-penalty dijkstra crosses rippable copper and NAMES
+    the exact items in the way; a cheap detour beats a rip."""
+    import types
+    sys.modules.setdefault("pcbnew", types.SimpleNamespace())
+    from fluxplace.patch import dijkstra, _path_rip_ids
+
+    class G:
+        cell = 1.0
+        layers = ["F"]
+        nx = ny = 20
+        blocked = {"F": set()}
+        via_blocked = set()
+        via_soft = {}
+        soft_items = list(range(8))
+
+        def inside(self, cx, cy):
+            return 1 <= cx < self.nx - 1 and 1 <= cy < self.ny - 1
+
+    g = G()
+    g.soft = {"F": {(10, y): {7} for y in range(20)}}   # full soft wall
+    p = dijkstra(g, {(0, 2, 2)}, {(0, 17, 2)}, soft_penalty=400)
+    assert p, "soft wall must be crossable at a penalty"
+    assert _path_rip_ids(g, p) == {7}, "path must name the wall item"
+    g2 = G()
+    g2.soft = {"F": {(10, y): {3} for y in range(20) if y != 18}}
+    p2 = dijkstra(g2, {(0, 2, 2)}, {(0, 17, 2)}, soft_penalty=400)
+    assert p2 and not _path_rip_ids(g2, p2), \
+        "a reachable free gap must beat ripping"
+    print("ok  rip-up soft path: names the wall, prefers free detours")
+
+
+def test_order_guidance():
+    """The what-do-I-pick block: service tier, stackup preset, impedances and
+    rail currents from the constraints — never guessed at order time."""
+    from fluxplace.profiles import order_guidance
+    cons = {"pairs": {"PCIE_TX": {"impedance_diff": 85, "skew_mm": 0.1},
+                      "USB_OTG": {"impedance_diff": 90, "skew_mm": 1.25}},
+            "power": {"+5V": {"max_current_ma": 4000, "pour": True},
+                      "+3V3": {"max_current_ma": 1500}}}
+    g = order_guidance("jlcpcb-advanced", 4, 2, (113.0, 107.0), cons)
+    assert 'JLCPCB 4-Layer (with power plane) | 3.5 mil / 3.5 mil' in g, g
+    assert "PCIE_TX = 85 ohm diff, skew 0.1 mm" in g, g
+    assert "USB_OTG = 90 ohm diff" in g and "+5V 4000mA (plane)" in g, g
+    assert "pcb + pro + sch only" in g
+    print("ok  order guidance: service, stackup pick, impedances, currents")
+
+
 if __name__ == "__main__":
     test_graph_power_split()
     test_hub_and_branches()
@@ -273,6 +732,7 @@ if __name__ == "__main__":
     test_quad_hub_central()
     test_router_gate()
     test_place_routed_pipeline()
+    test_place_routed_fixed_bounds()
     test_power_traces_and_pairs()
     test_pin_rotation()
     test_layer_router_via_and_taper()
@@ -281,4 +741,21 @@ if __name__ == "__main__":
     test_side_aware_overlap()
     test_escape_detection_and_ladder()
     test_escape_net_aware_floor()
+    test_channel_cut_and_open()
+    test_adaptive_fanout_priority()
+    test_candidate_selection()
+    test_si_pair_skew()
+    test_return_via_findings()
+    test_constraints_ingest()
+    test_bypass_proximity()
+    test_builder_attachments()
+    test_comprehend()
+    test_crystal_pass()
+    test_netlist_pin_nets()
+    test_upload_package_excludes_prl()
+    test_model_registration_solver()
+    test_lastmile_dijkstra()
+    test_rip_corridor()
+    test_rip_soft_path()
+    test_order_guidance()
     print("\nALL CORE TESTS PASSED")

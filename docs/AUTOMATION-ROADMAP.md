@@ -155,3 +155,41 @@ fluxplace auto --netlist board.net --outline 97x85 --profile jlcpcb-6L --out ./f
 Everything from [1] to [6] exists in pieces today; the remaining work is the fast router and
 the two thin drivers (adaptive loop, batch front-end). The hard part — placement that routes —
 is done and measured.
+
+---
+
+## 8. Parity target: the Quilter workflow (added 2026-08-07)
+
+Jason's mandate: *"flux needs to do everything this app does."* Quilter's pipeline is
+Upload → Stackup → Fabricator Constraints → Floorplan → Circuit Comprehension →
+Constraints → Review & Submit, backed by parallel candidate layouts and physics/DRC
+verification. Mapping to fluxplace, with status:
+
+| Quilter step | fluxplace equivalent | Status |
+|---|---|---|
+| Upload / parse gate | `preflight` (outline, pads-on-board, pos-file parity) + auto stage [0] + outline containment | ✅ shipped — reproduces Quilter's CM5 rejection locally |
+| Stackup | `signal_layers()` auto-detect (copper minus poured planes), threaded into the gate | ✅ shipped (the layers=2 bug was THE backbone fix) |
+| Fabricator constraints | `--profile jlcpcb|jlcpcb-advanced|proto` (fluxplace/profiles.py): floor + via geometry into the router, finest-copper scan at the fab gate, recorded in MANIFEST | ✅ shipped |
+| Floorplan | locks-as-anchors, side-awareness, board outline | ✅ shipped; keep-outs not yet honored |
+| Circuit comprehension | graph/topology (hub, branches, power classes, diff pairs, big-fanout planes) | ✅ shipped; length-matching classes not yet |
+| Constraints | --constraints file.toml (fluxplace/constraints.py): per-net max-current->ampacity widths, pour opt-outs, per-family skew limits; impedance recorded | ✅ v1 shipped — next: keep-outs, length-match classes, impedance enforcement |
+| Review & submit | fab package (gerbers/drill/P&P/DRC/MANIFEST) + diagnosis verdict | ✅ shipped; report could add per-stage summary + candidates table |
+| Parallel candidates | `auto --candidates N --parallel M`, DRC-best wins | ✅ shipped (validation pending on dig) |
+| Physics verification | DRC + routed-% + SI-lite v1 (fluxplace/si.py: diff-pair intra-pair skew at the fab gate, MANIFEST table) | 🔶 v1 shipped — next: uncoupled length, impedance rules, length-match classes |
+| Learned generator (RL) | deterministic generator + jittered population | deliberate non-goal for now — candidates + verifier captures most of the value at our scale |
+
+Priority order for the remaining gaps: (1) fab profiles, (2) constraint ingest
+(YAML: keep-outs, net rules, length-match classes), (3) SI-lite verification in the
+fab gate, (4) richer review report.
+
+## Status 2026-08-10 — the improvement-loop arc
+DONE since last update: real-footprint truth gates (preflight --components,
+replace-footprint, sync-nets), keep-outline + hard-bounds placement,
+last-mile patcher (dogbones, subset-accept), route-only mode, verify-models
+--fix, headless finisher (StackOverflow root cause: -Xss), profile-floor
+enforcement end-to-end, order guidance, netclass injection from
+constraints.toml into upload packages.
+Standings: CM5 v12 2 unrouted/240 viol; dig v4 27/88; RF v1 first route 36.
+NEXT: regional rip-up-and-reroute (walled cores on all 3), fanout-first in
+adaptive, constraint engine (replace PAIR_GEOM_BY_Z CALIBRATE values with a
+real impedance provider + IPC-2152), 2L gate recalibration.

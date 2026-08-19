@@ -46,6 +46,7 @@ class Grid:
         per_layer = max(1, int(cell / pitch * util))
         share = max(1, layers // 2)          # layers dedicated to each direction
         self.cap_dir = per_layer * share * (1.0 + leak)
+        self.pitch = pitch
         self.via_cost = via_cost
         self.block = defaultdict(float)    # cell -> blocked fraction [0..1]
         self.usage = defaultdict(float)    # edge -> committed track slots
@@ -229,6 +230,32 @@ class Grid:
                 hot[e[0]] += over
                 hot[e[1]] += over
         return dict(hot)
+
+
+def cut_overflow(g):
+    """Aggregate overflow crossing each straight full-board cut. A vertical cut sits
+    between grid column ix and ix+1 and is crossed by horizontal edges; a horizontal
+    cut between row iy and iy+1 by vertical edges. Returns cuts sorted worst-first as
+    (axis, index, total_over, need_tracks) where need_tracks is the worst single-edge
+    deficit on that cut — the lane width (in track slots) the router is short there.
+    A dominant cut = a congestion WALL: the placement needs a continuous lane, which
+    per-part inflation (hot-cell bloat) cannot produce."""
+    tot = defaultdict(float)
+    need = defaultdict(float)
+    for e, u in g.usage.items():
+        a, b = e
+        over = u - g.cap(a, b)
+        if over <= 0:
+            continue
+        if a[1] == b[1]:                     # horizontal edge -> crosses a vertical cut
+            k = ("v", min(a[0], b[0]))
+        else:                                # vertical edge -> crosses a horizontal cut
+            k = ("h", min(a[1], b[1]))
+        tot[k] += over
+        need[k] = max(need[k], over)
+    cuts = [(ax, ix, t, need[(ax, ix)]) for (ax, ix), t in tot.items()]
+    cuts.sort(key=lambda c: (-c[2], c[0], c[1]))
+    return cuts
 
 
 # -------------------------------------------------------------------- model build

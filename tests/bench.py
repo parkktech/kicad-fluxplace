@@ -36,7 +36,7 @@ def main():
     center = IO.board_center(board)
 
     t0 = time.time()
-    kw = {}
+    kw = {"layers": len(IO.signal_layers(board))}
     if a.seeds != 1:
         kw["seeds"] = a.seeds
     pos, angles, rep = P.place_routed(parts, cg, topo, center=center, **kw)

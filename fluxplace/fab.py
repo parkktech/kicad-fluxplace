@@ -166,3 +166,99 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
         log(f"  centroid upload: {os.path.basename(centroid)}")
     log(f"  loose: {', '.join(loose) if loose else '(none)'}")
     return {"zip": zip_path, "packed": packed, "loose": loose, "centroid": centroid}
+
+
+# ---------------------------------------------------------------------------
+# Restored from the origin/main line of development during the 2026-08-19
+# merge. These two were written against the same emit() output as deliver()
+# above and are unrelated to it: quilter_csvs exports the comprehension tables
+# a Quilter-class reviewer consumes, and upload_package is the older
+# single-bundle packaging kept for callers that predate the D48/D56 split.
+# ---------------------------------------------------------------------------
+def quilter_csvs(cons, out, log=print):
+    """Emit Quilter Circuit-Comprehension CSVs from the constraints —
+    measured: their comprehension step IGNORES KiCad netclasses entirely
+    (every pair shown 100R, every rail 500mA on a package whose .kicad_pro
+    carried injected classes). Each comprehension table has an Upload CSV
+    button; these files feed it. Column labels match their tables."""
+    import csv
+    written = []
+    pairs = (cons or {}).get("pairs", {})
+    if pairs:
+        p = os.path.join(out, "quilter_diff_pairs.csv")
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Net Name (+)", "Net Name (-)",
+                        "Differential Impedance (\u03a9)",
+                        "Single-ended Impedance (\u03a9)",
+                        "Frequency (GHz)"])
+            for group, cfg in sorted(pairs.items()):
+                z = int(cfg.get("impedance_diff", 100))
+                sp, sn = ("_DP", "_DM") if "USB" in group.upper() \
+                    else ("_P", "_N")
+                w.writerow([group + sp, group + sn, z, z // 2, 1])
+        written.append(p)
+    power = (cons or {}).get("power", {})
+    if power:
+        p = os.path.join(out, "quilter_power_nets.csv")
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Net Name", "Maximum Current (mA)",
+                        "Attempt Power Pour?"])
+            for net, cfg in sorted(power.items()):
+                ma = cfg.get("max_current_ma")
+                if not ma:
+                    continue
+                w.writerow([net, int(ma),
+                            "true" if cfg.get("pour") else "false"])
+        written.append(p)
+    if written:
+        log("  quilter comprehension CSVs: "
+            + ", ".join(os.path.basename(x) for x in written))
+    return written
+
+
+def upload_package(board, out, project_dir=None, log=print):
+    """Assemble the ECAD upload set (external audit/re-route services parse
+    these for component relationships): the routed board renamed to the
+    project's stem + the project's .kicad_pro and every schematic sheet —
+    NOTHING else. Measured against Quilter's uploader: .kicad_prl (per-user
+    UI state) and .kicad_dru both come back 'Unsupported file' errors, so the
+    set is exactly pcb + pro + sch. Returns the list of files written."""
+    import shutil
+    project_dir = project_dir or os.path.dirname(os.path.abspath(board))
+    os.makedirs(out, exist_ok=True)
+    pro = [f for f in os.listdir(project_dir) if f.endswith(".kicad_pro")]
+    stem = pro[0][:-len(".kicad_pro")] if pro else \
+        os.path.splitext(os.path.basename(board))[0]
+    written = []
+    dst = os.path.join(out, stem + ".kicad_pcb")
+    shutil.copy2(board, dst)
+    written.append(dst)
+    for f in sorted(os.listdir(project_dir)):
+        if f.endswith((".kicad_pro", ".kicad_sch")):
+            dst = os.path.join(out, f)
+            shutil.copy2(os.path.join(project_dir, f), dst)
+            written.append(dst)
+    # constraint intent travels IN the project file: inject netclasses from
+    # <stem>.constraints.toml so ECAD parsers read 85R pairs and real rail
+    # widths instead of guessing 100R/500mA (measured on Quilter)
+    ctoml = os.path.join(project_dir, stem + ".constraints.toml")
+    pro = os.path.join(out, stem + ".kicad_pro")
+    if os.path.exists(ctoml) and os.path.exists(pro):
+        try:
+            from . import constraints as CONS
+            cons = CONS.load(ctoml)
+            CONS.inject_netclasses(pro, cons, log=log)
+            quilter_csvs(cons, out, log=log)
+        except Exception as e:
+            log(f"  netclass injection failed ({e}) — package unchanged")
+    # the package IS what we just wrote: remove every stale KiCad file left
+    # over from earlier versions (.kicad_prl, renamed sheets, dead boards)
+    keep = {os.path.basename(f) for f in written}
+    for f in sorted(os.listdir(out)):
+        if ".kicad_" in f and f not in keep:
+            os.unlink(os.path.join(out, f))
+            log(f"  removed stale {f} from package")
+    log(f"upload package: {len(written)} files -> {out}")
+    return written

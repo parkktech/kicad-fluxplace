@@ -151,7 +151,8 @@ def cmd_place(a):
     if a.strategy == "build":
         from fluxplace import route as R
         pos, rot, rep = P.place_routed(parts, cg, topo, center=center, pad=a.pad,
-                                       seeds=a.seeds)
+                                       seeds=a.seeds,
+                                       layers=len(IO.signal_layers(board)))
         print(R.summary(rep))
     else:
         pos, rot = P.place(parts, cg, topo, strategy=a.strategy, rotate=a.rotate,
@@ -368,6 +369,323 @@ def cmd_fab(a):
     from fluxplace import fab
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
     print(f"DRC {res['drc']}; package at {res['out']}")
+    if a.upload_out:
+        fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)
+
+
+def _cand_argv(a, k, outdir):
+    """argv for one child candidate: same auto config, jitter-seed k, no fab."""
+    import sys
+    v = [sys.executable, "-u", os.path.abspath(__file__),
+         "--big-fanout", str(a.big_fanout)]
+    if a.hub:
+        v += ["--hub", a.hub]
+    v += ["auto", "--board", a.board, "--out", outdir,
+          "--pad", str(a.pad), "--route-timeout", str(a.route_timeout),
+          "--profile", a.profile, "--router-py", a.router_py,
+          "--router-dir", a.router_dir, "--kicad-cli", a.kicad_cli,
+          "--candidates", "1", "--jitter-seed", str(k), "--no-fab"]
+    if a.floor is not None:
+        v += ["--floor", str(a.floor)]
+    if a.constraints:
+        v += ["--constraints", a.constraints]
+    if a.layers:
+        v += ["--layers", *a.layers]
+    if a.track is not None:
+        v += ["--track", str(a.track)]
+    if a.clearance is not None:
+        v += ["--clearance", str(a.clearance)]
+    if not a.finish:
+        v += ["--no-finish"]
+    if a.no_fanout:
+        v += ["--no-fanout"]
+    if a.keep_outline:
+        v += ["--keep-outline"]
+    if a.no_patch:
+        v += ["--no-patch"]
+    if a.route_only:
+        v += ["--route-only"]
+    if a.no_pairs:
+        v += ["--no-pairs"]
+    if a.bypass_csv:
+        v += ["--bypass-csv", a.bypass_csv]
+    return v
+
+
+def cmd_auto_candidates(a):
+    """Population search (the Quilter lesson): the router is nondeterministic and
+    gate proxies don't predict routed-%, so run N independent place->route
+    candidates (candidate 0 = base placement, k>0 = jittered) with bounded
+    parallelism, verify each with real DRC, and keep the best. The winner's board
+    gets the fab package at --out; every candidate's artifacts stay in cand_k/."""
+    import json, subprocess, time
+    from fluxplace import adaptive as AD, fab
+    os.makedirs(a.out, exist_ok=True)
+    t0 = time.time()
+    live, done = {}, {}
+    todo = list(range(a.candidates))
+    print(f"[candidates] {a.candidates} place->route candidates, {a.parallel} in parallel")
+    while todo or live:
+        while todo and len(live) < max(1, a.parallel):
+            k = todo.pop(0)
+            outdir = os.path.join(a.out, f"cand_{k}")
+            os.makedirs(outdir, exist_ok=True)
+            log = open(os.path.join(outdir, "log.txt"), "w")
+            live[k] = (subprocess.Popen(_cand_argv(a, k, outdir), stdout=log,
+                                        stderr=subprocess.STDOUT), log, time.time())
+        time.sleep(5)
+        for k in list(live):
+            proc, log, ts = live[k]
+            if proc.poll() is None:
+                continue
+            log.close()
+            del live[k]
+            done[k] = os.path.join(a.out, f"cand_{k}", "routed.kicad_pcb")
+            print(f"  cand_{k}: exit {proc.returncode}  ({time.time()-ts:.0f}s)")
+
+    rows = []
+    for k in sorted(done):
+        if not os.path.exists(done[k]):
+            print(f"  cand_{k}: no routed board — dropped")
+            continue
+        d, un = AD.drc_unrouted(done[k], a.kicad_cli)
+        un.discard("GND")
+        rows.append((k, len(un), len(d.get("violations", []))))
+        print(f"  cand_{k}: unrouted={len(un)}  violations={rows[-1][2]}")
+    if not rows:
+        print("CANDIDATES failed: no candidate produced a routed board")
+        return
+    win = rows[AD.pick_best([(f"cand_{k}", u, v) for k, u, v in rows])][0]
+    print(f"[candidates] winner: cand_{win}  ({time.time()-t0:.0f}s total)")
+    import shutil
+    src_dir = os.path.join(a.out, f"cand_{win}")
+    for f in ("placed.kicad_pcb", "routed.kicad_pcb", "routed.kicad_dru"):
+        if os.path.exists(os.path.join(src_dir, f)):
+            shutil.copy(os.path.join(src_dir, f), os.path.join(a.out, f))
+    json.dump({"winner": win, "candidates": [
+        {"cand": k, "unrouted": u, "violations": v} for k, u, v in rows]},
+        open(os.path.join(a.out, "candidates.json"), "w"), indent=1)
+    res = fab.emit(os.path.join(a.out, "routed.kicad_pcb"),
+                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    from fluxplace import profiles as PROF
+    fchecks, fsummary = PROF.check_board(os.path.join(a.out, "routed.kicad_pcb"),
+                                         PROF.get(a.profile))
+    print(f"    fab-profile [{a.profile}]: {fsummary}")
+    for lvl, code, msg in fchecks:
+        print(f"    fab-profile {lvl} {code}: {msg}")
+    _order_guidance(a, os.path.join(a.out, "routed.kicad_pcb"),
+                    os.path.join(a.out, "fab"))
+    print(f"AUTO complete: {a.out}/fab  ({res['drc']}, winner cand_{win})")
+
+
+def cmd_comprehend(a):
+    """Circuit comprehension: infer the electrical-intent tables (power classes,
+    diff pairs, bypass cap -> pin, crystal -> parent) and emit them for review.
+    The reviewed numbers belong in constraints.toml, which always wins."""
+    from fluxplace import comprehend as CO
+    board, parts, nets, IO = _load(a.board)
+    cg = G.build(parts, nets, a.big_fanout)
+    comp = CO.comprehend(parts, nets, cg)
+    txt = CO.to_toml(comp)
+    if a.out:
+        open(a.out, "w").write(txt)
+        print(f"wrote {a.out}  ({len(comp['bypass'])} bypass, "
+              f"{len(comp['pairs'])} pairs, {len(comp['crystals'])} crystals, "
+              f"{len(comp['power'])} power planes)")
+    else:
+        print(txt)
+
+
+def _export_netlist_xml(kicad_cli, sch):
+    """Export the schematic netlist (kicadxml) to a temp file; returns
+    (path, error). Caller unlinks the path."""
+    import subprocess, tempfile
+    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
+        xml = tf.name
+    r = subprocess.run([kicad_cli, "sch", "export", "netlist",
+                        "--format", "kicadxml", "--output", xml, sch],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        os.unlink(xml)
+        return None, (r.stderr or "kicad-cli netlist export failed").strip()[:200]
+    return xml, None
+
+
+def cmd_preflight(a):
+    """Upload-gate check: would a downstream parser (fab, assembly, another EDA
+    tool) reject this board? Prints findings; exits 1 on any FAIL. With --sch,
+    also cross-checks schematic pins against board pads (pin/pad parity). With
+    --components, adds the per-footprint order-readiness audit (stand-ins,
+    parity, courtyards, 3D models) — run it before layout AND before ordering."""
+    board, parts, nets, IO = _load(a.board)
+    if a.fix_out:
+        fixed, stuck = IO.repair_pad_overlaps(board)
+        IO.save(board, a.fix_out)
+        print(f"repaired {len(fixed)} different-net pad overlaps -> {a.fix_out}"
+              + (f"; {len(stuck)} pairs NEED A REAL FOOTPRINT: {stuck[:6]}" if stuck else ""))
+    findings = list(IO.preflight(board))
+    xml = None
+    if a.sch:
+        xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+        if xml:
+            for ref, miss in sorted(IO.pin_pad_parity(board, xml).items()):
+                findings.append(("FAIL", "SCH_PIN_NO_PAD",
+                                 f"{ref}: schematic pin(s) {miss} have no pad on the "
+                                 f"footprint — 'pins not on the board' to a strict parser"))
+            diffs = IO.pad_net_parity(board, xml)
+            if diffs:
+                import collections
+                bynet = collections.Counter(t for _, _, _, t in diffs)
+                findings.append(("FAIL", "PAD_NET_MISMATCH",
+                                 f"{len(diffs)} pad(s) disagree with the schematic "
+                                 f"netlist (top: {bynet.most_common(3)}) — routers "
+                                 f"and DRC are working an incomplete net set; run "
+                                 f"sync-nets"))
+        else:
+            findings.append(("WARN", "NETLIST_EXPORT_FAILED", err))
+    if a.components:
+        audit = IO.component_audit(board, xml)
+        for lvl, ref, fpid, issue in audit:
+            findings.append((lvl, "COMPONENT", f"{ref} [{fpid}]: {issue}"))
+        if not audit:
+            print("COMPONENT AUDIT clean — order-ready")
+    if xml:
+        os.unlink(xml)
+    for lvl, code, msg in findings:
+        print(f"{lvl}  {code}: {msg}")
+    if not findings:
+        print("PREFLIGHT clean")
+    if any(lvl == "FAIL" for lvl, _, _ in findings):
+        raise SystemExit(1)
+
+
+def cmd_patch(a):
+    """Standalone last-mile patch: close leftover unrouted nets + heal pours
+    on a routed board (DRC-guarded; reverts routes that regress DRC)."""
+    from fluxplace import patch as PATCH, constraints as CONS
+    from fluxplace import profiles as PROF
+    prof = PROF.get(a.profile)
+    PROF.write_pro_limits(os.path.splitext(a.board)[0] + ".kicad_pro", prof)
+    cons = CONS.load(a.constraints)
+    nw = {n: CONS.power_width_mm(cons, n, 0.5)
+          for n in (cons or {}).get("power", {})}
+    res = PATCH.patch_board(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
+                            track_w=a.track, clearance=a.clearance,
+                            via_mm=a.via, drill_mm=a.drill, cell=a.cell,
+                            net_widths=nw, rip=not a.no_rip,
+                            rip_r_mm=a.rip_radius, max_rip=a.max_rip,
+                            checkpoint=a.checkpoint)
+    print(f"patch: accepted={res['accepted']} patched={res['patched']} "
+          f"failed={res['failed']}")
+
+
+def cmd_launder(a):
+    """Apply profile limits to the board's setup constraints, then delete
+    the parasitic copper KiCad's own DRC names (dangling stubs, shorting
+    stitch vias, vias against holes). Guarded per round."""
+    import gc
+    import pcbnew
+    from fluxplace import launder as LAU, profiles as PROF
+    prof = PROF.get(a.profile)
+    b = pcbnew.LoadBoard(a.board)
+    PROF.apply_board_limits(b, prof, pcbnew)
+    out = a.out or a.board
+    pcbnew.SaveBoard(out, b)
+    del b
+    gc.collect()
+    PROF.write_pro_limits(os.path.splitext(out)[0] + ".kicad_pro", prof)
+    print(f"rules: setup constraints set to [{a.profile}] "
+          f"(track {prof['track_min']}, via {prof['via_dia_min']}/"
+          f"{prof['via_drill_min']}, hole {prof['hole_clearance']}) "
+          f"— board + project file")
+    res = LAU.launder_board(out, out, kicad_cli=a.kicad_cli, prof=prof)
+    print(f"launder: rounds={res['rounds']} removed={res['removed']} "
+          f"violations {res['violations'][0]}->{res['violations'][1]} "
+          f"unconnected {res['unconnected'][0]}->{res['unconnected'][1]}")
+
+
+def cmd_verifymodels(a):
+    """Verify every footprint's 3D model sits ON its pins (TH: pin shafts vs
+    holes; SMD: body over the footprint). --fix solves and writes the
+    correcting transform where possible."""
+    board, parts, nets, IO = _load(a.board)
+    from fluxplace import models as M
+    resolve = lambda p: IO._resolve_model_path(p, board)
+    finds = M.verify_board(board, resolve, fix=a.fix, tol=a.tol)
+    for ref, msg in finds:
+        print(f"{ref}: {msg}")
+    if not finds:
+        print("MODEL REGISTRATION clean — every model on its pins")
+    if a.fix:
+        IO.save(board, a.out or a.board)
+        print(f"saved {a.out or a.board}")
+
+
+def cmd_syncnets(a):
+    """Make board pad nets agree with the schematic netlist (headless
+    'Update PCB from Schematic', nets only). The netlist is truth."""
+    board, parts, nets, IO = _load(a.board)
+    xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+    if not xml:
+        raise SystemExit(f"netlist export failed: {err}")
+    rep = IO.sync_pad_nets(board, xml)
+    os.unlink(xml)
+    IO.save(board, a.out or a.board)
+    print(f"sync-nets: {rep['assigned']} pad(s) re-netted across "
+          f"{len(rep['refs'])} component(s)"
+          + (f"; created nets {rep['created_nets'][:8]}" if rep['created_nets'] else ""))
+    for ref, n in sorted(rep["refs"].items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {ref}: {n}")
+
+
+def cmd_replacefp(a):
+    """Swap one reference's footprint for a real library footprint, preserving
+    placement and the schematic link, re-assigning pad nets by pad number.
+    With --sch the schematic netlist is the net truth (recovers nets the
+    stand-in never had pads for). --rename maps vendor pad names onto
+    schematic pin numbers, e.g. --rename MP1:S1,MP2:S2."""
+    board, parts, nets, IO = _load(a.board)
+    net_by_pin = None
+    xml = None
+    if a.sch:
+        xml, err = _export_netlist_xml(a.kicad_cli, a.sch)
+        if not xml:
+            raise SystemExit(f"netlist export failed: {err}")
+        net_by_pin = IO.netlist_pin_nets(xml, a.ref)
+        os.unlink(xml)
+        if not net_by_pin:
+            print(f"note: {a.ref} not in schematic netlist; using old pad nets")
+    renames = None
+    if a.rename:
+        renames = dict(pair.split(":", 1) for pair in a.rename.split(","))
+    rep = IO.replace_footprint(board, a.ref, a.lib, a.name,
+                               net_by_pin=net_by_pin, renames=renames)
+    IO.save(board, a.out or a.board)
+    print(f"{a.ref} -> {a.name}: {rep['assigned']} pads netted"
+          + (f"; created nets {rep['created_nets']}" if rep['created_nets'] else ""))
+    if rep["unnetted_pads"]:
+        print(f"  unnetted pads (no schematic pin): {rep['unnetted_pads']}")
+    if rep["pins_without_pads"]:
+        print(f"  WARNING pins with no pad on the new footprint: "
+              f"{rep['pins_without_pads']}")
+
+
+def _order_guidance(a, routed, fab_dir):
+    """Print (and append to the MANIFEST) the what-do-I-pick block: fab
+    service tier, the stackup preset string upload tools show, impedance and
+    rail-current answers from the engineering constraints."""
+    from fluxplace import profiles as PROF, constraints as CONS, kicad_io as IO
+    board = IO.load(routed)
+    bb = board.GetBoardEdgesBoundingBox()
+    g = PROF.order_guidance(a.profile, board.GetCopperLayerCount(),
+                            len(IO.signal_layers(board)),
+                            (bb.GetWidth() / 1e6, bb.GetHeight() / 1e6),
+                            CONS.load(a.constraints))
+    print(g)
+    mf = os.path.join(fab_dir, "MANIFEST.txt")
+    if os.path.exists(mf):
+        with open(mf, "a") as f:
+            f.write(g + "\n")
 
 
 _POWER_HEAVY = ("VBATT", "VBAT_IN", "VIN", "12V", "24V", "28V", "30V", "_SW")
@@ -435,6 +753,8 @@ def cmd_auto(a):
     PLANE-FINALIZE -> DFM -> FAB. Each stage logged; router pluggable (KRT)."""
     import os, subprocess, time, json
     _sourcing_preflight(a, "the auto pipeline")
+    if getattr(a, "candidates", 1) > 1:
+        return cmd_auto_candidates(a)
     from fluxplace import fab, planes
     import pcbnew
     os.makedirs(a.out, exist_ok=True)
@@ -951,18 +1271,145 @@ def main(argv=None):
     pf.add_argument("--board", required=True)
     pf.add_argument("--out", required=True)
     pf.add_argument("--kicad-cli", default="kicad-cli")
+    pf.add_argument("--upload-out", default=None,
+                    help="also assemble the ECAD upload set (board + pro + dru "
+                         "+ schematics, no .kicad_prl) into this directory")
+    pf.add_argument("--project-dir", default=None,
+                    help="project dir for --upload-out (default: board's dir)")
     pf.set_defaults(fn=cmd_fab)
+
+    pco = sub.add_parser("comprehend",
+                         help="infer electrical intent: pairs, bypass, crystals, power")
+    pco.add_argument("--board", required=True)
+    pco.add_argument("--out", default=None, help="write TOML here (default: stdout)")
+    pco.set_defaults(fn=cmd_comprehend)
+
+    ppre = sub.add_parser("preflight",
+                          help="parse-level sanity: outline, pads on-board, pos-file parity")
+    ppre.add_argument("--board", required=True)
+    ppre.add_argument("--sch", default=None,
+                      help="root schematic: also cross-check sch pins vs board pads")
+    ppre.add_argument("--fix-out", default=None,
+                      help="repair different-net pad overlaps (shrink toward pad "
+                           "centres, pins unchanged) and write the board here")
+    ppre.add_argument("--kicad-cli", default="kicad-cli")
+    ppre.add_argument("--components", action="store_true",
+                      help="per-footprint order-readiness audit: stand-ins, "
+                           "pin parity, courtyards, 3D models")
+    ppre.set_defaults(fn=cmd_preflight)
+
+    ppa = sub.add_parser("patch",
+                         help="close leftover unrouted nets on a routed board "
+                              "(incremental single-net router, DRC-guarded)")
+    ppa.add_argument("--board", required=True)
+    ppa.add_argument("--out", default=None)
+    ppa.add_argument("--track", type=float, default=0.2)
+    ppa.add_argument("--clearance", type=float, default=0.2)
+    ppa.add_argument("--via", type=float, default=0.6)
+    ppa.add_argument("--drill", type=float, default=0.3)
+    ppa.add_argument("--cell", type=float, default=0.25)
+    ppa.add_argument("--no-rip", action="store_true",
+                     help="disable regional rip-up-and-reroute at walled "
+                          "islands")
+    ppa.add_argument("--rip-radius", type=float, default=3.0,
+                     help="halo (mm) of foreign copper freed along the "
+                          "blocked corridor")
+    ppa.add_argument("--max-rip", type=int, default=150)
+    ppa.add_argument("--checkpoint", type=int, default=8,
+                     help="guard-accept every N nets (crash loses one "
+                          "chunk, not the run)")
+    ppa.add_argument("--constraints", default=None)
+    ppa.add_argument("--profile", default="jlcpcb-advanced",
+                     help="fab profile stamped into the working "
+                          ".kicad_pro so guard DRC judges at the "
+                          "process floor")
+    ppa.add_argument("--kicad-cli", default="kicad-cli")
+    ppa.set_defaults(fn=cmd_patch)
+
+    pla = sub.add_parser("launder",
+                         help="set board constraints to the fab profile "
+                              "floor + delete DRC-named parasitic copper")
+    pla.add_argument("--board", required=True)
+    pla.add_argument("--out", default=None)
+    pla.add_argument("--profile", default="jlcpcb-advanced")
+    pla.add_argument("--kicad-cli", default="kicad-cli")
+    pla.set_defaults(fn=cmd_launder)
+
+    pvm = sub.add_parser("verify-models",
+                         help="verify 3D models sit ON their pins/footprints; "
+                              "--fix solves + writes correcting transforms")
+    pvm.add_argument("--board", required=True)
+    pvm.add_argument("--fix", action="store_true")
+    pvm.add_argument("--tol", type=float, default=0.6,
+                     help="max hole-to-pin distance mm (default 0.6)")
+    pvm.add_argument("--out", default=None, help="output board (default: in place)")
+    pvm.set_defaults(fn=cmd_verifymodels)
+
+    psn = sub.add_parser("sync-nets",
+                         help="make board pad nets agree with the schematic "
+                              "netlist (headless update-from-schematic, nets only)")
+    psn.add_argument("--board", required=True)
+    psn.add_argument("--sch", required=True)
+    psn.add_argument("--out", default=None, help="output board (default: in place)")
+    psn.add_argument("--kicad-cli", default="kicad-cli")
+    psn.set_defaults(fn=cmd_syncnets)
+
+    prf = sub.add_parser("replace-footprint",
+                         help="swap a ref's footprint for a real library one, "
+                              "keep placement + schematic link, re-net by pad number")
+    prf.add_argument("--board", required=True)
+    prf.add_argument("--ref", required=True)
+    prf.add_argument("--lib", required=True, help="path to the .pretty directory")
+    prf.add_argument("--name", required=True, help="footprint name inside the lib")
+    prf.add_argument("--sch", default=None,
+                     help="root schematic: use its netlist as the pad-net truth")
+    prf.add_argument("--rename", default=None,
+                     help="vendor-pad:schematic-pin pairs, e.g. MP1:S1,MP2:S2")
+    prf.add_argument("--out", default=None, help="output board (default: in place)")
+    prf.add_argument("--kicad-cli", default="kicad-cli")
+    prf.set_defaults(fn=cmd_replacefp)
 
     pau = sub.add_parser("auto", help="board in -> place -> route -> fab package out")
     pau.add_argument("--board", required=True)
     pau.add_argument("--out", required=True)
     pau.add_argument("--pad", type=float, default=0.45)
-    pau.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
-    pau.add_argument("--track", type=float, default=0.2)
-    pau.add_argument("--clearance", type=float, default=0.2)
+    pau.add_argument("--layers", nargs="+", default=None,
+                     help="signal layers (default: auto-detect = copper minus poured planes)")
+    pau.add_argument("--track", type=float, default=None,
+                     help="bulk track width mm (default: board's default netclass)")
+    pau.add_argument("--clearance", type=float, default=None,
+                     help="bulk clearance mm (default: board's default netclass)")
     pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     pau.add_argument("--route-timeout", type=int, default=1800)
+    pau.add_argument("--floor", type=float, default=None,
+                     help="fine-pitch escape floor mm (default: the fab profile's floor)")
+    pau.add_argument("--constraints", default=None,
+                     help="TOML constraint file: per-net currents/widths/pours, "
+                          "per-pair skew limits (see fluxplace/constraints.py)")
+    pau.add_argument("--profile", default="jlcpcb",
+                     help="fabricator constraint profile: " + ", ".join(sorted(
+                         __import__("fluxplace.profiles", fromlist=["PROFILES"]).PROFILES)))
+    pau.add_argument("--no-finish", dest="finish", action="store_false",
+                     help="skip the adaptive step-down anneal (one route pass only)")
+    pau.add_argument("--no-fanout", action="store_true",
+                     help="don't generate via-in-pad fanout for geometric residue")
+    pau.add_argument("--no-pairs", action="store_true",
+                     help="skip the coupled diff-pair pre-route stage")
+    pau.add_argument("--route-only", action="store_true",
+                     help="keep the existing placement (RF-board mode): "
+                          "route + patch + fab only")
+    pau.add_argument("--no-patch", action="store_true",
+                     help="skip the last-mile single-net patch stage")
+    pau.add_argument("--keep-outline", action="store_true",
+                     help="the source Edge.Cuts outline is a mechanical given: "
+                          "place inside it, never regrow (doesn't-fit = loud FAIL)")
+    pau.add_argument("--bypass-csv", default=None,
+                     help="cap->component ownership CSV (e.g. Quilter export); "
+                          "drives attachments so placement optimizes what the "
+                          "grader grades")
+    pau.add_argument("--no-finisher", action="store_true",
+                     help="skip the freerouting last-mile finisher")
     pau.add_argument("--kicad-cli", default="kicad-cli")
     pau.add_argument("--margin", type=float, default=2.0,
                      help="Edge.Cuts margin around the shrink-wrapped placement (mm)")
