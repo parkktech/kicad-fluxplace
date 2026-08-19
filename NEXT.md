@@ -1,3 +1,88 @@
+## 2026-08-19 — "0 DRC" IS A CLAIM ABOUT WHAT WE CHECKED, AND WE NEVER SAY WHAT THAT WAS
+
+**Found by an outside reviewer on utv-comms-v13, not by us.** His words: the
+report "is only counting errors, and it has about a dozen check types switched
+off, including a few you actually want on for this board, like solder mask
+bridging and annular width around the DF40 and the QFNs. So clean is real, but
+narrower than it looks. That is exactly the kind of thing that passes every
+automated check and still bites at assembly."
+
+He is right, and it is our bug, not KiCad's.
+
+**What actually happens today.** `rule_severities` in the `.kicad_pro` decides
+which checks run. On utv-comms-v13, **13 of 62 rules are set to `ignore`** —
+and a rule set to `ignore` is not reported at ANY severity, so
+`--severity-error` and an all-severity run are equally blind to it. The 13:
+
+    annular_width                 <- he named this one
+    solder_mask_bridge            <- and this one
+    courtyards_overlap            missing_courtyard
+    malformed_courtyard           npth_inside_courtyard
+    pth_inside_courtyard          track_not_centered_on_via
+    footprint_type_mismatch       footprint_filters_mismatch
+    lib_footprint_issues          lib_footprint_mismatch
+    tuning_profile_track_geometries
+
+fluxplace never SET those (grep: we never write `rule_severities`) — they come
+in with the generated project. But we inherit them silently and then report a
+verdict as if we had checked everything.
+
+**The specific defect** — `fluxplace/fab.py`, the DRC block:
+
+```python
+d = json.load(open(drc_path))
+nviol = len(d.get("violations", []))
+nunc  = len(d.get("unconnected_items", []))
+verdict = "PASS" if (nviol == 0 and nunc == 0) else "REVIEW"
+```
+
+`d["ignored_checks"]` is sitting in that same JSON — KiCad 10 emits it for
+exactly this reason — and we never read it. We then write **`DRC verdict :
+PASS`** into `MANIFEST.txt`, which ships inside the fab zip. A fab reads PASS
+and has no way to learn that mask bridging was never evaluated.
+
+`grep -rn ignored_checks` across the package: zero hits. The data was always
+there; we just never looked.
+
+**Why these two ignores matter on a board like this one.** Both bite at
+assembly, which is after the money is spent:
+
+- `solder_mask_bridge` — 8 parts at 0.40 mm pitch (DF40 100-pin ×2, plus the
+  QFNs/SONs). Mask slivers between fine-pitch pads are the classic solder-
+  bridge source, and it is a mask-layer defect that no amount of copper
+  clearance checking finds.
+- `annular_width` — the fab was going to be asked for 0.3 mm min drill on a
+  3/3 mil board. Thin annular rings survive DRC and die at drill breakout.
+
+**What to build.**
+
+1. **Never emit a bare PASS again.** `fab.py` reads `ignored_checks` and the
+   verdict becomes qualified: `PASS (13 checks not evaluated)` — with the list
+   written into `MANIFEST.txt` underneath it. A verdict that does not state its
+   own scope is marketing, not engineering.
+2. **A required-check floor.** Define the set that must be ACTIVE for a
+   fab-bound package — `solder_mask_bridge`, `annular_width`, `hole_clearance`,
+   `hole_near_hole`, `copper_edge_clearance`, courtyard rules — and have
+   `deliver`/`fab` refuse, or loudly warn, when any of them is `ignore`. This
+   is the same shape as the D43 availability gate: the check exists to stop a
+   silent default reaching a fab.
+3. **Offer to fix rather than only complain.** A `--enforce-drc-profile` flag
+   that rewrites `rule_severities` to the floor, re-runs, and reports the delta.
+   Most of these are `ignore` because a generator wrote a lazy default, not
+   because anyone decided it.
+4. **Say it in the brief too.** `pcbway.py` / the fab brief should carry the
+   evaluated-vs-ignored check list, so the assembler sees the scope of the
+   clean report they are being handed.
+
+**The general lesson, worth keeping.** The availability gate (D43) came from a
+part that cleared layout, routing, DRC and packaging before anyone asked a
+distributor. This is the same failure with a different subject: a green result
+whose *scope* nobody stated. Any verdict fluxplace prints — DRC, sourcing,
+lint, QA — should carry what it did not examine. Green is only information if
+you know its edges.
+
+---
+
 ## 2026-08-13 — PACKAGING FOLLOWS THE UPLOAD FORM, NOT OUR FILING HABITS
 `deliver` now emits PCBWay's assembly page as FOUR files, numbered to match its
 four upload fields, because that page does not take one bundle:
