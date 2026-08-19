@@ -235,6 +235,68 @@ install what it can.
 **PCM:** add this repo's `metadata.json` as a Plugin & Content Manager repository for
 one-click install + updates.
 
+## MCP server
+
+fluxplace exposes its commands as Model Context Protocol tools, so an agent can
+analyse boards, audit DRC scope, check part availability and build fab packages
+directly.
+
+```
+python3 -m fluxplace.mcp_server            # 20 tools (read + write)
+python3 -m fluxplace.mcp_server --all      # + the long-running pipelines
+python3 -m fluxplace.mcp_server --list     # show the tools and exit
+```
+
+Register it alongside your other KiCad servers:
+
+```json
+{
+  "mcpServers": {
+    "fluxplace": {
+      "command": "/home/you/.fluxplace-venv/bin/python",
+      "args": ["-m", "fluxplace.mcp_server"],
+      "env": { "PYTHONPATH": "/path/to/kicad-fluxplace" }
+    }
+  }
+}
+```
+
+Use the interpreter that can import `pcbnew` — the venv from the section above,
+or your system python. The server has **no third-party dependencies**: it speaks
+JSON-RPC 2.0 over stdio directly, so it runs anywhere the CLI runs, including on
+a PEP 668 distro python where installing an SDK is the exact friction `doctor`
+exists to remove.
+
+**Tool schemas are derived from the CLI parser**, not hand-written. Add a flag to
+a subcommand and the MCP tool gains it on the next start; there is no second
+description of the commands to drift.
+
+Commands are classified by what they cost you. `read` (analysis, never touches
+the board) and `write` (produces files) are exposed by default. `long` — `auto`,
+`tournament`, `compact`, `place`, `patch`, `launder` — are minute-scale pipelines
+that rewrite the board, which is the wrong shape for a synchronous tool call, so
+they are behind `--all`.
+
+### Board audit tools
+
+Three of the tools exist because of specific misses on real boards, and they
+answer questions nothing else in the toolchain does:
+
+- **`fluxplace_drc_scope`** — what a DRC result actually *examined*. A board can
+  report "0 violations at all severities" while a dozen rules sit at `ignore` in
+  the `.kicad_pro`, and a rule set to ignore is not reported at any severity. It
+  names which checks are off, flags the ones that are fab-critical (solder-mask
+  bridging, annular width — the ones that pass every automated check and then
+  bite at assembly), and with `full=true` re-runs DRC with every check enabled on
+  a throwaway copy and reports what newly surfaced.
+- **`fluxplace_netlist`** — the connection list read back out of the routed
+  board. A board generated from a netlist spec has no `.kicad_sch` at all, and
+  this is then the only connectivity document that exists.
+- **`fluxplace_stackup`** — layer stack, which layers carry plane pours, the
+  netclass track and differential-pair geometry, and a straight answer on whether
+  controlled impedance can be verified from the files at all. It cannot if no
+  dielectric is defined, however precise the netclass looks.
+
 ## Architecture
 
 ```
@@ -244,6 +306,9 @@ fluxplace/
   placement.py   strategies (radial/flux/pack), rotation, legalization, HPWL, compaction
   kicad_io.py    the ONLY pcbnew-dependent module: read parts+nets+pads, write positions
   report.py      gather() + plan_markdown()
+  audit.py       DRC scope, netlist read-back, stackup/impedance verifiability
+  deps.py        the dependency registry both front ends preflight against
+  mcp_server.py  MCP tools, derived from the CLI parser
 plugins/         KiCad Action Plugin (GUI entry)
 cli.py           headless entry
 ```

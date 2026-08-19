@@ -1178,7 +1178,135 @@ def _require(*tiers):
         _sys.exit(1)
 
 
-def main(argv=None):
+# ------------------------------------------------------------------- audit
+def cmd_drc_scope(a):
+    """What a DRC result actually examined.
+
+    Born from an outside review: a board signed off as "0 violations at all
+    severities" had 13 of 62 rules set to ignore, including solder-mask bridging
+    and annular width. A rule set to ignore is not reported at ANY severity, so
+    the clean result was true and narrow at once — and nothing said so.
+    """
+    from fluxplace import audit
+    import json as _json
+    res = audit.drc_scope(a.board, a.report)
+    if a.full:
+        res["full_run"] = audit.drc_full(a.board, kicad_cli=a.kicad_cli,
+                                         out_path=a.out)
+    if a.json:
+        print(_json.dumps(res, indent=2)); return
+
+    print("DRC scope for %s" % os.path.basename(res["board"]))
+    print("=" * 70)
+    print("  rules total   : %s" % res["rules_total"])
+    print("  evaluated     : %s" % res["rules_active"])
+    print("  IGNORED       : %s" % res["rules_ignored"])
+    if res["ignored"]:
+        for k in res["ignored"]:
+            print("      - %s" % k)
+    if res["fab_critical_ignored"]:
+        print()
+        print("  FAB-CRITICAL checks that are switched off:")
+        for c in res["fab_critical_ignored"]:
+            print("      %s" % c["check"])
+            print("          %s" % c["why_it_matters"])
+    if "report" in res and "violations" in res.get("report", {}):
+        r = res["report"]
+        print()
+        print("  report %s: %s violations, %s unconnected"
+              % (os.path.basename(r["path"]), r["violations"], r["unconnected"]))
+    print()
+    print("  VERDICT: %s" % res["verdict"])
+    if "full_run" in res:
+        f = res["full_run"]
+        print()
+        print("  Full re-run with every check enabled:")
+        if "error" in f:
+            print("      error: %s" % f["error"])
+        else:
+            print("      enabled %d previously-ignored check(s)"
+                  % len(f["enabled_for_this_run"]))
+            print("      %s violations, %s unconnected"
+                  % (f["violations"], f["unconnected"]))
+            if f["newly_surfaced"]:
+                print("      NEWLY SURFACED by the previously-ignored checks:")
+                for k, n in sorted(f["newly_surfaced"].items()):
+                    print("          %-32s %d" % (k, n))
+            else:
+                print("      nothing new surfaced — the clean result holds at full scope")
+
+
+def cmd_netlist(a):
+    """Read connectivity back out of the board.
+
+    For a board generated from a netlist spec there is no .kicad_sch at all;
+    this is the only connectivity document that exists. Even with a schematic,
+    this is what the copper says.
+    """
+    from fluxplace import audit
+    import json as _json
+    res = audit.netlist(a.board, fmt="json" if a.json else "text")
+    text = _json.dumps(res, indent=2) if a.json else res
+    if a.out:
+        with open(a.out, "w") as fh:
+            fh.write(text + "\n")
+        print("wrote %s" % a.out)
+    else:
+        print(text)
+
+
+def cmd_stackup(a):
+    """Report the layer stack, plane assignment and netclass geometry — and say
+    plainly whether controlled impedance can be verified from these files."""
+    from fluxplace import audit
+    import json as _json
+    res = audit.stackup(a.board)
+    if a.json:
+        print(_json.dumps(res, indent=2)); return
+    print("Stackup for %s" % os.path.basename(res["board"]))
+    print("=" * 70)
+    print("  copper layers    : %d" % res["copper_layers"])
+    for l in res["layers"]:
+        planes = res["plane_layers"].get(l["name"])
+        note = ("  <- pour: %s" % ", ".join(planes)) if planes else ""
+        print("      %-8s%s" % (l["name"], note))
+    print("  board thickness  : %s mm" % res["board_thickness_mm"])
+    print("  stackup defined  : %s" % res["stackup_defined"])
+    print("  dielectric/Er    : %s" % res["dielectric_defined"])
+    if res["netclasses"]:
+        print()
+        print("  netclasses:")
+        for c in res["netclasses"]:
+            print("      %-12s track=%s clr=%s dp=%s/%s"
+                  % (c["name"], c["track_width"], c["clearance"],
+                     c["diff_pair_width"], c["diff_pair_gap"]))
+    for pat in res["netclass_patterns"]:
+        print("      pattern %s -> %s" % (pat.get("pattern"), pat.get("netclass")))
+    print()
+    print("  IMPEDANCE VERIFIABLE: %s" % ("yes" if res["impedance_verifiable"] else "NO"))
+    for line in _wrap_text(res["impedance_note"], 66):
+        print("      %s" % line)
+
+
+def _wrap_text(text, width):
+    words, line, lines = text.split(), "", []
+    for w in words:
+        if len(line) + len(w) + 1 > width:
+            lines.append(line); line = w
+        else:
+            line = (line + " " + w).strip()
+    if line:
+        lines.append(line)
+    return lines
+
+
+def build_parser():
+    """Build the full argument parser.
+
+    Split out of main() so the MCP server can introspect the REAL parser rather
+    than maintain a parallel description of the commands. One source of truth:
+    add a flag here and the MCP tool schema gains it automatically.
+    """
     ap = argparse.ArgumentParser(prog="fluxplace")
     ap.add_argument("--big-fanout", type=int, default=12,
                     help="signal nets with >= this many nodes are treated as planes")
@@ -1618,6 +1746,39 @@ def main(argv=None):
     pdoc.add_argument("--json", action="store_true", help="machine-readable output")
     pdoc.set_defaults(fn=cmd_doctor)
 
+    pds = sub.add_parser("drc-scope",
+                         help="what a DRC result actually examined — which checks "
+                              "are switched off, and what a full-scope re-run finds")
+    pds.add_argument("--board", required=True)
+    pds.add_argument("--report", default=None,
+                     help="an existing kicad-cli DRC json to describe")
+    pds.add_argument("--full", action="store_true",
+                     help="re-run DRC with EVERY check enabled (on a temp copy)")
+    pds.add_argument("--out", default=None, help="write the full-run report here")
+    pds.add_argument("--kicad-cli", default="kicad-cli")
+    pds.add_argument("--json", action="store_true")
+    pds.set_defaults(fn=cmd_drc_scope)
+
+    pnl = sub.add_parser("netlist",
+                         help="read the connection list back out of the board "
+                              "(the netlist a board with no schematic still has)")
+    pnl.add_argument("--board", required=True)
+    pnl.add_argument("--out", default=None, help="write here instead of stdout")
+    pnl.add_argument("--json", action="store_true")
+    pnl.set_defaults(fn=cmd_netlist)
+
+    pst = sub.add_parser("stackup",
+                         help="layer stack, plane assignment, netclass geometry, "
+                              "and whether impedance is verifiable at all")
+    pst.add_argument("--board", required=True)
+    pst.add_argument("--json", action="store_true")
+    pst.set_defaults(fn=cmd_stackup)
+
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     a = ap.parse_args(argv)
     a.fn(a)
 
