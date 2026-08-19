@@ -455,3 +455,84 @@ def check_traces(board_path, profile, nets=None, target_z=50.0, tolerance=10.0):
                     % (len(bad), len(rows), tolerance, target_z)) if bad
                    else "all checked nets are within tolerance",
     }
+
+
+def check_reference_planes(board_path, plane_layers=None):
+    """Are the 'plane' layers actually planes?
+
+    This check exists because of a miss that made every impedance number on a
+    board meaningless. The board declared 4-layer Sig/GND/PWR/Sig, and it DID
+    have a GND pour on In1 and a +5V pour on In2 — so a zone-level check said
+    'planes present, as intended'. But both inner layers also carried ~1000-1500
+    mm of routing across 57 nets each. They were shared signal layers with pour
+    filling the gaps, not reference planes.
+
+    That distinction is the whole ballgame. Microstrip impedance is defined
+    against a CONTINUOUS reference plane one dielectric away. A reference carved
+    up by 57 nets' worth of traces is not continuous, so the impedance is not
+    merely unverified — it is not controlled, and no trace width can fix it.
+    Checking that a pour exists is not checking that a plane exists.
+    """
+    import pcbnew
+    board = pcbnew.LoadBoard(board_path)
+
+    if plane_layers is None:
+        plane_layers = []
+        for z in board.Zones():
+            seq = z.GetLayerSet().Seq()
+            for i in range(len(seq)):
+                nm = board.GetLayerName(seq[i])
+                if nm not in plane_layers:
+                    plane_layers.append(nm)
+
+    bbox = board.GetBoardEdgesBoundingBox()
+    board_area = (pcbnew.ToMM(bbox.GetWidth()) * pcbnew.ToMM(bbox.GetHeight())) or None
+
+    rows = []
+    for name in plane_layers:
+        lid = board.GetLayerID(name)
+        if lid < 0:
+            continue
+        pour_net, area = None, 0.0
+        for z in board.Zones():
+            seq = z.GetLayerSet().Seq()
+            if any(seq[i] == lid for i in range(len(seq))):
+                pour_net = z.GetNetname()
+                try:
+                    area += z.GetFilledArea() / 1e12
+                except Exception:
+                    pass
+        length, nets = 0.0, set()
+        for t in board.GetTracks():
+            if t.GetClass() == "PCB_TRACK" and t.GetLayer() == lid:
+                length += pcbnew.ToMM(t.GetLength())
+                nets.add(t.GetNetname())
+        nets.discard(pour_net)
+        coverage = (100.0 * area / board_area) if board_area else None
+        # A layer is a usable reference if essentially nothing else routes on it.
+        solid = len(nets) == 0
+        rows.append({
+            "layer": name,
+            "pour_net": pour_net,
+            "filled_area_mm2": round(area, 1),
+            "coverage_pct": round(coverage, 1) if coverage else None,
+            "foreign_routing_mm": round(length, 1),
+            "foreign_nets": len(nets),
+            "is_reference_plane": solid,
+        })
+
+    broken = [r for r in rows if r["pour_net"] and not r["is_reference_plane"]]
+    return {
+        "board_area_mm2": round(board_area, 0) if board_area else None,
+        "layers": rows,
+        "broken_planes": [r["layer"] for r in broken],
+        "impedance_controllable": not broken,
+        "verdict": (
+            "NOT CONTROLLABLE — %s carr%s routing from other nets, so no "
+            "continuous reference plane exists. Impedance cannot be set by trace "
+            "width on this arrangement; the layer assignment has to change first."
+            % (", ".join(r["layer"] for r in broken),
+               "ies" if len(broken) == 1 else "y")
+        ) if broken else
+        "Reference planes are continuous; trace geometry determines impedance.",
+    }
