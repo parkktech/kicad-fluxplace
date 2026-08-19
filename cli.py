@@ -1300,6 +1300,101 @@ def _wrap_text(text, width):
     return lines
 
 
+def cmd_stackup_apply(a):
+    """Define the board's stackup from a named fab profile, and/or solve the
+    trace geometry the stackup implies."""
+    from fluxplace import stackup as ST
+    import json as _json
+
+    if a.list_profiles:
+        for n in ST.profile_names():
+            p = ST.PROFILES[n]
+            print("%-18s %-8s %5.2f mm  %s"
+                  % (n, p["vendor"], ST.total_thickness(n), p["description"]))
+        return
+
+    if not a.profile:
+        print("need --profile (or --list-profiles). Available: %s"
+              % ", ".join(ST.profile_names()))
+        return
+
+    res = {"profile": a.profile}
+    if a.apply:
+        res["apply"] = ST.apply_to_board(a.board, a.profile, backup=not a.no_backup)
+    if a.traces or a.nets:
+        res["traces"] = ST.check_traces(
+            a.board, a.profile,
+            nets=[n.strip() for n in a.nets.split(",")] if a.nets else None,
+            target_z=a.target_se, tolerance=a.tolerance)
+    res["check"] = ST.check_netclasses(a.board, a.profile,
+                                       target_se=a.target_se,
+                                       target_diff=a.target_diff,
+                                       tolerance=a.tolerance)
+    if a.json:
+        print(_json.dumps(res, indent=2)); return
+
+    ck = res["check"]
+    print("Stackup: %s" % a.profile)
+    print("  %s" % ST.PROFILES[a.profile]["description"])
+    print("  total thickness      : %.3f mm" % ST.total_thickness(a.profile))
+    print("  outer dielectric     : %.4f mm, Er %.2f"
+          % (ck["dielectric_height_mm"], ck["epsilon_r"]))
+    print("  outer copper         : %.4f mm" % ck["copper_thickness_mm"])
+    if "apply" in res:
+        ap = res["apply"]
+        if ap.get("changed"):
+            print("  WRITTEN to the board (backup: %s)" % ap.get("backup"))
+        else:
+            print("  NOT written: %s" % ap.get("reason"))
+    print()
+    print("Geometry this stackup implies:")
+    r = ck["recommended"]
+    print("  %.0f ohm single-ended : %s mm track"
+          % (ck["target_single_ended"], r["single_ended_width_mm"]))
+    print("  %.0f ohm differential : %s mm track / %s mm gap"
+          % (ck["target_differential"], r["diff_pair_width_mm"], r["diff_pair_gap_mm"]))
+    print()
+    print("Netclasses as they stand (assumed outer-layer microstrip):")
+    for row in ck["netclasses"]:
+        print("  %s" % row["netclass"])
+        if row.get("single_ended_z") is not None:
+            flag = "OK " if row.get("single_ended_ok") else "OFF"
+            print("      track %s mm -> %5.1f ohm  (%+.0f%% vs %.0f)  [%s]"
+                  % (row["track_width"], row["single_ended_z"],
+                     row["single_ended_error_pct"], ck["target_single_ended"], flag))
+        if row.get("differential_z") is not None:
+            flag = "OK " if row.get("differential_ok") else "OFF"
+            print("      diff %s/%s mm -> %5.1f ohm  (%+.0f%% vs %.0f)  [%s]"
+                  % (row["diff_pair_width"], row["diff_pair_gap"],
+                     row["differential_z"], row["differential_error_pct"],
+                     ck["target_differential"], flag))
+    if "traces" in res:
+        tr = res["traces"]
+        print()
+        print("Routed copper on RF-named nets (target %.0f ohm, needs %s mm):"
+              % (tr["target_z"], tr["required_width_mm"]))
+        for r in tr["nets"]:
+            flag = "OFF" if (r["worst_error_pct"] or 0) > tr["tolerance_pct"] else "OK "
+            extra = []
+            if r["vias"]:
+                extra.append("%d via%s" % (r["vias"], "" if r["vias"] == 1 else "s"))
+            if r["crosses_inner_layers"]:
+                extra.append("crosses inner layers")
+            print("  [%s] %-13s %6.1f mm  %s%s"
+                  % (flag, r["net"], r["total_length_mm"],
+                     "/".join(str(w["width_mm"]) for w in r["widths"]) + " mm",
+                     ("  (" + ", ".join(extra) + ")") if extra else ""))
+            for w in r["widths"]:
+                if w["microstrip_z"] is not None:
+                    print("           %.4f mm -> %5.1f ohm (%+.0f%%)"
+                          % (w["width_mm"], w["microstrip_z"], w["error_pct"]))
+        print()
+        print("  %s" % tr["verdict"])
+    print()
+    for line in _wrap_text(ck["caveat"], 66):
+        print("  %s" % line)
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -1773,6 +1868,28 @@ def build_parser():
     pst.add_argument("--board", required=True)
     pst.add_argument("--json", action="store_true")
     pst.set_defaults(fn=cmd_stackup)
+
+    psa = sub.add_parser("stackup-define",
+                         help="define the board stackup from a fab profile and "
+                              "solve the trace geometry it implies")
+    psa.add_argument("--board", required=True)
+    psa.add_argument("--profile", default=None, help="fab stackup profile name")
+    psa.add_argument("--list-profiles", action="store_true")
+    psa.add_argument("--apply", action="store_true",
+                     help="write the stackup into the .kicad_pcb")
+    psa.add_argument("--no-backup", action="store_true")
+    psa.add_argument("--target-se", type=float, default=50.0,
+                     help="single-ended impedance target in ohms (default 50)")
+    psa.add_argument("--target-diff", type=float, default=100.0,
+                     help="differential impedance target in ohms (default 100)")
+    psa.add_argument("--tolerance", type=float, default=10.0,
+                     help="percent tolerance before a netclass is flagged")
+    psa.add_argument("--traces", action="store_true",
+                     help="also grade the ACTUAL routed copper on RF-named nets")
+    psa.add_argument("--nets", default=None,
+                     help="comma-separated nets to grade instead of auto-detecting")
+    psa.add_argument("--json", action="store_true")
+    psa.set_defaults(fn=cmd_stackup_apply)
 
     return ap
 

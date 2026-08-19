@@ -227,3 +227,85 @@ class TestDrcScope(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImpedance(unittest.TestCase):
+    """The solver that found six RF nets at 74 ohm on a board that had already
+    passed DRC, netlist verification and a fab quote."""
+
+    def test_known_50_ohm_geometry(self):
+        from fluxplace import stackup as ST
+        # 0.33 mm over 0.2 mm FR4 prepreg is the classic ~50 ohm microstrip
+        z = ST.microstrip_z0(0.3304, 0.2, 0.035, 4.4)
+        self.assertAlmostEqual(z, 50.0, delta=1.0)
+
+    def test_impedance_falls_as_width_rises(self):
+        from fluxplace import stackup as ST
+        wide = ST.microstrip_z0(0.5, 0.2, 0.035, 4.4)
+        narrow = ST.microstrip_z0(0.1, 0.2, 0.035, 4.4)
+        self.assertLess(wide, narrow)
+
+    def test_solver_inverts_the_forward_calc(self):
+        from fluxplace import stackup as ST
+        for target in (40.0, 50.0, 75.0, 90.0):
+            w = ST.solve_microstrip_width(target, 0.2, 0.035, 4.4)
+            self.assertIsNotNone(w, "no width found for %s ohm" % target)
+            self.assertAlmostEqual(ST.microstrip_z0(w, 0.2, 0.035, 4.4),
+                                   target, delta=0.5)
+
+    def test_differential_is_near_twice_single_ended_but_lower(self):
+        from fluxplace import stackup as ST
+        z0 = ST.microstrip_z0(0.2, 0.2, 0.035, 4.4)
+        zd = ST.diff_microstrip_z(0.2, 0.2, 0.2, 0.035, 4.4)
+        self.assertLess(zd, 2 * z0)          # coupling always pulls it down
+        self.assertGreater(zd, 1.2 * z0)
+
+    def test_tighter_gap_lowers_differential_impedance(self):
+        from fluxplace import stackup as ST
+        loose = ST.diff_microstrip_z(0.2, 0.5, 0.2, 0.035, 4.4)
+        tight = ST.diff_microstrip_z(0.2, 0.1, 0.2, 0.035, 4.4)
+        self.assertLess(tight, loose)
+
+    def test_profiles_sum_to_their_nominal_thickness(self):
+        from fluxplace import stackup as ST
+        for name in ST.profile_names():
+            t = ST.total_thickness(name)
+            self.assertAlmostEqual(t, 1.6, delta=0.05,
+                                   msg="%s totals %s mm" % (name, t))
+
+    def test_rf_net_detection(self):
+        from fluxplace import stackup as ST
+        for n in ("RF_GNSS", "ANT_BIAS", "GNSS_PPS", "U_FL_IN"):
+            self.assertTrue(ST.looks_rf(n), n)
+        for n in ("SPK_COMM_P", "+3V3", "SDA"):
+            self.assertFalse(ST.looks_rf(n), n)
+
+    def test_stackup_sexp_is_wellformed(self):
+        from fluxplace import stackup as ST
+        s = ST.render_stackup_sexp("pcbway-4l-1.6")
+        self.assertEqual(s.count("("), s.count(")"), "unbalanced parens")
+        self.assertIn("epsilon_r", s)
+        self.assertIn('(type "copper")', s)
+
+    def test_apply_refuses_to_clobber_an_existing_stackup(self):
+        import tempfile
+        from fluxplace import stackup as ST
+        p = os.path.join(tempfile.mkdtemp(), "b.kicad_pcb")
+        with open(p, "w") as fh:
+            fh.write("(kicad_pcb\n\t(setup\n\t\t(stackup\n\t\t)\n\t)\n)")
+        r = ST.apply_to_board(p, "pcbway-4l-1.6", backup=False)
+        self.assertFalse(r["changed"])
+        self.assertIn("already", r["reason"])
+
+    def test_apply_inserts_into_setup(self):
+        import tempfile
+        from fluxplace import stackup as ST
+        p = os.path.join(tempfile.mkdtemp(), "b.kicad_pcb")
+        with open(p, "w") as fh:
+            fh.write("(kicad_pcb\n\t(setup\n\t\t(pad_to_mask_clearance 0)\n\t)\n)")
+        r = ST.apply_to_board(p, "pcbway-4l-1.6", backup=False)
+        self.assertTrue(r["changed"])
+        with open(p) as fh:
+            out = fh.read()
+        self.assertIn("(stackup", out)
+        self.assertIn("epsilon_r", out)

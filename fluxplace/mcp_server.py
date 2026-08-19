@@ -85,6 +85,15 @@ POLICY = {
                                    "the netclass track/diff-pair geometry, and whether "
                                    "controlled impedance can be verified from these files "
                                    "at all — it cannot if no dielectric is defined."),
+    "stackup-define":    ("write", "Define the board stackup from a named fab profile "
+                                   "(JLCPCB/PCBWay 4-layer 1.6mm and others), solve the "
+                                   "trace geometry it implies for 50 ohm single-ended and "
+                                   "100 ohm differential, and grade both the netclasses AND "
+                                   "the actual routed copper against those targets. With "
+                                   "apply=true it writes the stackup into the .kicad_pcb "
+                                   "(backed up first, refuses to overwrite an existing one). "
+                                   "Without a stackup, no impedance claim on a board can be "
+                                   "checked at all."),
     "verify-models":     ("read",  "Verify 3D models sit on their footprint pins — displaced "
                                    "models look like mechanical truth and are a review hazard."),
 
