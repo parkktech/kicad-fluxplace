@@ -43,6 +43,7 @@ PROFILES = {
     "jlcpcb-4l-1.6": {
         "description": "JLCPCB standard 4-layer 1.6 mm (JLC7628), 1 oz outer / 0.5 oz inner",
         "vendor": "JLCPCB",
+        "reference_layers": ["In1.Cu"],
         "layers": [
             {"type": "copper",     "name": "F.Cu",   "thickness": 0.035},
             {"type": "prepreg",    "material": "7628", "thickness": 0.2104,
@@ -59,6 +60,7 @@ PROFILES = {
     "pcbway-4l-1.6": {
         "description": "PCBWay standard 4-layer 1.6 mm, 1 oz outer / 0.5 oz inner",
         "vendor": "PCBWay",
+        "reference_layers": ["In1.Cu"],
         "layers": [
             {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
             {"type": "prepreg", "material": "7628", "thickness": 0.2,
@@ -69,6 +71,52 @@ PROFILES = {
             {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
             {"type": "prepreg", "material": "7628", "thickness": 0.2,
              "epsilon_r": 4.4, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
+        ],
+    },
+    "jlcpcb-6l-1.6": {
+        "description": "JLCPCB standard 6-layer 1.6 mm — Sig/GND/Sig/Sig/PWR/Sig",
+        "vendor": "JLCPCB",
+        "reference_layers": ["In1.Cu", "In4.Cu"],
+        "layers": [
+            {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
+            {"type": "prepreg", "material": "3313", "thickness": 0.0994,
+             "epsilon_r": 4.05, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In1.Cu", "thickness": 0.0152},
+            {"type": "core",    "material": "FR4", "thickness": 0.15,
+             "epsilon_r": 4.5, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
+            {"type": "prepreg", "material": "2116", "thickness": 0.9704,
+             "epsilon_r": 4.3, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In3.Cu", "thickness": 0.0152},
+            {"type": "core",    "material": "FR4", "thickness": 0.15,
+             "epsilon_r": 4.5, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In4.Cu", "thickness": 0.0152},
+            {"type": "prepreg", "material": "3313", "thickness": 0.0994,
+             "epsilon_r": 4.05, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
+        ],
+    },
+    "pcbway-6l-1.6": {
+        "description": "PCBWay standard 6-layer 1.6 mm — Sig/GND/Sig/Sig/PWR/Sig",
+        "vendor": "PCBWay",
+        "reference_layers": ["In1.Cu", "In4.Cu"],
+        "layers": [
+            {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
+            {"type": "prepreg", "material": "1080", "thickness": 0.1,
+             "epsilon_r": 4.1, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In1.Cu", "thickness": 0.0152},
+            {"type": "core",    "material": "FR4", "thickness": 0.2,
+             "epsilon_r": 4.5, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
+            {"type": "prepreg", "material": "7628", "thickness": 0.8692,
+             "epsilon_r": 4.4, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In3.Cu", "thickness": 0.0152},
+            {"type": "core",    "material": "FR4", "thickness": 0.2,
+             "epsilon_r": 4.5, "loss_tangent": 0.02},
+            {"type": "copper",  "name": "In4.Cu", "thickness": 0.0152},
+            {"type": "prepreg", "material": "1080", "thickness": 0.1,
+             "epsilon_r": 4.1, "loss_tangent": 0.02},
             {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
         ],
     },
@@ -535,4 +583,93 @@ def check_reference_planes(board_path, plane_layers=None):
                "ies" if len(broken) == 1 else "y")
         ) if broken else
         "Reference planes are continuous; trace geometry determines impedance.",
+    }
+
+
+def solve_diff_options(target_z, h, t, er, gaps=None, min_feature=0.0889):
+    """Manufacturable (width, gap) pairs that hit a differential target.
+
+    A single answer is not useful when it lands under the fab's minimum feature.
+    On a thin 6-layer outer dielectric, 100 ohm at gap=h wants ~0.10/0.10 mm,
+    which is 3.9 mil — right at the edge of standard 3/3 mil process and a poor
+    place to sit. Opening the gap lets the trace widen, which is both easier to
+    fabricate and less sensitive to etch tolerance. This returns the options so
+    the choice is visible instead of implicit.
+
+    min_feature defaults to 3.5 mil (0.0889 mm), a common standard-process
+    floor; anything below it is returned but flagged.
+    """
+    if gaps is None:
+        gaps = [round(h * m, 4) for m in (1.0, 1.5, 2.0, 2.5, 3.0, 4.0)]
+    out = []
+    for g in gaps:
+        w = _bisect(lambda w: diff_microstrip_z(w, g, h, t, er), target_z, 0.03, 5.0)
+        if w is None:
+            continue
+        out.append({
+            "gap_mm": round(g, 4),
+            "width_mm": round(w, 4),
+            "achieved_z": round(diff_microstrip_z(w, g, h, t, er), 1),
+            "manufacturable": w >= min_feature and g >= min_feature,
+            "min_feature_mm": min_feature,
+        })
+    return out
+
+
+def enforce_reference_planes(board_path, profile, log=print):
+    """Report what would have to move for a profile's reference layers to
+    actually be reference planes.
+
+    fluxplace can now DECLARE which layers a stackup intends as planes
+    (`reference_layers` on each profile). This compares the intent against the
+    copper and reports the gap: which nets are squatting on a plane layer and
+    how much routing has to be relocated. It does not move anything — a
+    reference plane is restored by re-routing, and re-routing is a placement
+    decision, not a cleanup.
+    """
+    import pcbnew
+    refs = PROFILES[profile].get("reference_layers") or []
+    if not refs:
+        return {"profile": profile, "reference_layers": [],
+                "note": "profile declares no reference layers"}
+
+    board = pcbnew.LoadBoard(board_path)
+    rows = []
+    for name in refs:
+        lid = board.GetLayerID(name)
+        if lid < 0:
+            rows.append({"layer": name, "present_on_board": False})
+            continue
+        by_net = {}
+        for t in board.GetTracks():
+            if t.GetClass() == "PCB_TRACK" and t.GetLayer() == lid:
+                n = t.GetNetname()
+                by_net[n] = by_net.get(n, 0.0) + pcbnew.ToMM(t.GetLength())
+        pour = None
+        for z in board.Zones():
+            seq = z.GetLayerSet().Seq()
+            if any(seq[i] == lid for i in range(len(seq))):
+                pour = z.GetNetname()
+        by_net.pop(pour, None)
+        rows.append({
+            "layer": name,
+            "present_on_board": True,
+            "pour_net": pour,
+            "squatting_nets": len(by_net),
+            "routing_to_relocate_mm": round(sum(by_net.values()), 1),
+            "worst_offenders": sorted(by_net.items(), key=lambda kv: -kv[1])[:8],
+            "is_clean": not by_net,
+        })
+    dirty = [r for r in rows if r.get("present_on_board") and not r.get("is_clean")]
+    return {
+        "profile": profile,
+        "reference_layers": refs,
+        "layers": rows,
+        "clean": not dirty,
+        "verdict": ("%d reference layer(s) still carry routing; %.0f mm across "
+                    "%d net(s) must be relocated before impedance is controlled"
+                    % (len(dirty),
+                       sum(r["routing_to_relocate_mm"] for r in dirty),
+                       sum(r["squatting_nets"] for r in dirty))) if dirty
+                   else "all declared reference layers are clean planes",
     }

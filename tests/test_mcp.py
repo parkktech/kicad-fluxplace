@@ -309,3 +309,55 @@ class TestImpedance(unittest.TestCase):
             out = fh.read()
         self.assertIn("(stackup", out)
         self.assertIn("epsilon_r", out)
+
+
+class TestSixLayerAndPlanes(unittest.TestCase):
+    """6-layer support and the reference-plane contract."""
+
+    def test_six_layer_profiles_exist_and_hit_1_6mm(self):
+        from fluxplace import stackup as ST
+        for n in ("jlcpcb-6l-1.6", "pcbway-6l-1.6"):
+            self.assertIn(n, ST.PROFILES)
+            self.assertAlmostEqual(ST.total_thickness(n), 1.6, delta=0.002,
+                                   msg="%s totals %s" % (n, ST.total_thickness(n)))
+
+    def test_six_layer_has_six_copper_layers(self):
+        from fluxplace import stackup as ST
+        for n in ("jlcpcb-6l-1.6", "pcbway-6l-1.6"):
+            cu = [l for l in ST.PROFILES[n]["layers"] if l["type"] == "copper"]
+            self.assertEqual(len(cu), 6)
+
+    def test_every_profile_declares_its_reference_layers(self):
+        """A stackup that does not say which layers are planes cannot be
+        checked against the copper, which is how the original miss happened."""
+        from fluxplace import stackup as ST
+        for n in ST.profile_names():
+            if len(ST.PROFILES[n]["layers"]) > 3:      # 2-layer has no inner plane
+                self.assertTrue(ST.PROFILES[n].get("reference_layers"),
+                                "%s declares no reference_layers" % n)
+
+    def test_thinner_dielectric_needs_a_narrower_50r_trace(self):
+        from fluxplace import stackup as ST
+        h4, er4 = ST.outer_dielectric("pcbway-4l-1.6")
+        h6, er6 = ST.outer_dielectric("pcbway-6l-1.6")
+        self.assertLess(h6, h4)
+        w4 = ST.solve_microstrip_width(50, h4, 0.035, er4)
+        w6 = ST.solve_microstrip_width(50, h6, 0.035, er6)
+        self.assertLess(w6, w4)
+
+    def test_diff_options_widen_the_trace_as_the_gap_opens(self):
+        from fluxplace import stackup as ST
+        h, er = ST.outer_dielectric("pcbway-6l-1.6")
+        opts = ST.solve_diff_options(100.0, h, 0.035, er)
+        self.assertGreater(len(opts), 3)
+        widths = [o["width_mm"] for o in opts]
+        self.assertEqual(widths, sorted(widths), "wider gap must allow wider trace")
+        for o in opts:
+            self.assertAlmostEqual(o["achieved_z"], 100.0, delta=0.5)
+
+    def test_min_feature_flagging(self):
+        from fluxplace import stackup as ST
+        h, er = ST.outer_dielectric("pcbway-6l-1.6")
+        opts = ST.solve_diff_options(100.0, h, 0.035, er, min_feature=0.2)
+        self.assertTrue(any(not o["manufacturable"] for o in opts),
+                        "a 0.2mm floor should rule some options out")
