@@ -649,3 +649,21 @@ class TestOutputBudget(unittest.TestCase):
         src = _i.getsource(audit.netlist_summary)
         self.assertIn("single_pad_nets", src)
         self.assertIn("largest_nets", src)
+
+
+class TestManifestScope(unittest.TestCase):
+    """The fab MANIFEST ships inside the gerber zip. A PASS in it that does not
+    say what was checked is the exact defect an outside reviewer caught."""
+
+    def test_manifest_reads_ignored_checks(self):
+        import inspect as _i
+        from fluxplace import fab
+        src = _i.getsource(fab.emit)
+        self.assertIn("ignored_checks", src)
+        self.assertIn("NOT evaluated", src)
+
+    def test_clean_scope_is_stated_positively_too(self):
+        """'no checks ignored' has to be printed, not merely implied by silence."""
+        import inspect as _i
+        from fluxplace import fab
+        self.assertIn("no checks ignored", _i.getsource(fab.emit))

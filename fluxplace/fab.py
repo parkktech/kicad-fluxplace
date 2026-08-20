@@ -56,13 +56,27 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
     drc_path = os.path.join(out, "drc.json")
     _run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
           "--output", drc_path, board], log)
+    # A verdict that does not state its own scope is marketing, not engineering.
+    # An outside reviewer had to point out that a board signed off as "0 DRC at
+    # all severities" had 13 of 62 rules set to `ignore` — and a rule set to
+    # ignore is reported at NO severity, so the clean result was true and narrow
+    # at once. KiCad writes `ignored_checks` into this very report; we were not
+    # reading it while printing PASS into the package that ships to the fab.
     verdict, nviol, nunc = "UNKNOWN", None, None
+    ignored, scope_note = [], ""
     if os.path.exists(drc_path):
         try:
             d = json.load(open(drc_path))
             nviol = len(d.get("violations", []))
             nunc = len(d.get("unconnected_items", []))
+            ignored = [c.get("key") for c in d.get("ignored_checks", []) if c.get("key")]
             verdict = "PASS" if (nviol == 0 and nunc == 0) else "REVIEW"
+            if ignored:
+                verdict += " (%d check(s) NOT evaluated)" % len(ignored)
+                scope_note = ("checks NOT evaluated (set to `ignore` in the project):\n"
+                              + "\n".join("               - %s" % k for k in sorted(ignored)))
+            else:
+                scope_note = "scope        : every rule evaluated; no checks ignored"
         except Exception:
             pass
     done["drc"] = verdict
@@ -73,6 +87,7 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
         f.write(f"source board : {os.path.basename(board)}\n")
         f.write(f"DRC verdict  : {verdict}"
                 + (f"  ({nviol} violations, {nunc} unconnected)" if nviol is not None else "")
+                + (f"\n{scope_note}" if scope_note else "")
                 + "\n")
         f.write("stages       : " + ", ".join(f"{k}={'ok' if v is True or v=='PASS' else v}"
                                                for k, v in done.items()) + "\n")
