@@ -403,3 +403,68 @@ def converge(board_path, kicad_cli="kicad-cli", max_rounds=6, log=print):
         refill(board_path, log=lambda *_: None)
     return {"converged": False, "reason": "hit the round limit",
             "history": history}
+
+
+# ---------------------------------------------------------------------------
+# Notes from the utv-comms V1.3 -> V1.4 part swap, so the next one is cheaper.
+#
+# pcbnew's SWIG bindings invalidate the footprint iterator once you have called
+# board.Remove() on tracks in the same process: GetFootprints() then yields raw
+# SwigPyObject with no methods. Do removals of different item types in SEPARATE
+# processes, or materialise every list you need before the first Remove().
+#
+# A courtyard scan that only considers same-side parts is wrong. Through-hole
+# parts block BOTH sides, because their pads pass through the board. A 1500 uF
+# radial cap sitting where you want an SMD module is just as much in the way
+# from the back as from the front, and a scan that misses that will hand you a
+# placement that cannot be manufactured.
+# ---------------------------------------------------------------------------
+
+def free_slots(board_path, w_mm, h_mm, back=False, margin=0.5,
+               xlim=None, ylim=None, step=0.5, ignore=()):
+    """Where could a w x h part go, honestly?
+
+    Blockers are: same-side courtyards, plus EVERY through-hole part regardless
+    of side. `ignore` lets a caller ask "where could this go if I moved that",
+    which is the question you actually have when a bulk cap is squatting on the
+    only sensible pocket.
+    """
+    import pcbnew
+    b = pcbnew.LoadBoard(board_path)
+    eb = b.GetBoardEdgesBoundingBox()
+    X0, Y0 = pcbnew.ToMM(eb.GetX()), pcbnew.ToMM(eb.GetY())
+    X1, Y1 = pcbnew.ToMM(eb.GetRight()), pcbnew.ToMM(eb.GetBottom())
+
+    def is_tht(f):
+        return any(p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH)
+                   for p in f.Pads())
+
+    boxes = []
+    for f in b.GetFootprints():
+        if f.GetReference() in ignore:
+            continue
+        tht = is_tht(f)
+        if not (tht or f.IsFlipped() == back):
+            continue
+        lay = pcbnew.B_CrtYd if f.IsFlipped() else pcbnew.F_CrtYd
+        c = f.GetCourtyard(lay)
+        if c.OutlineCount() == 0:
+            continue
+        bb = c.BBox()
+        boxes.append((pcbnew.ToMM(bb.GetX()), pcbnew.ToMM(bb.GetY()),
+                      pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom())))
+
+    W, H = w_mm + margin, h_mm + margin
+    xa, xb = (xlim or (X0, X1))
+    ya, yb = (ylim or (Y0, Y1))
+    out = []
+    y = max(ya, Y0 + margin)
+    while y + H <= min(yb, Y1 - margin):
+        x = max(xa, X0 + margin)
+        while x + W <= min(xb, X1 - margin):
+            if all(x + W <= bx0 or x >= bx1 or y + H <= by0 or y >= by1
+                   for bx0, by0, bx1, by1 in boxes):
+                out.append((round(x + W / 2, 2), round(y + H / 2, 2)))
+            x += step
+        y += step
+    return out

@@ -514,3 +514,21 @@ class TestDatasheetGate(unittest.TestCase):
             r = S.datasheet_gate(["PART-A", "PART-B"], log=lambda *_: None)
         self.assertEqual(r["blocked"], ["PART-A", "PART-B"])
         self.assertIn("cannot be verified", r["verdict"])
+
+
+class TestFreeSlots(unittest.TestCase):
+    """Placement search has to count through-hole parts as blocking BOTH sides.
+    A radial cap in the pocket you want is just as in the way from the back as
+    from the front, and a scan that misses it hands you an unbuildable board."""
+
+    def test_tht_blocks_both_sides(self):
+        import inspect as _i
+        from fluxplace import migrate
+        src = _i.getsource(migrate.free_slots)
+        self.assertIn("PAD_ATTRIB_PTH", src)
+        self.assertIn("if not (tht or f.IsFlipped() == back):", src)
+
+    def test_ignore_lets_you_ask_what_if_i_moved_that(self):
+        import inspect as _i
+        from fluxplace import migrate
+        self.assertIn("ignore", _i.signature(migrate.free_slots).parameters)
