@@ -1398,6 +1398,30 @@ def cmd_stackup_apply(a):
         print("  %s" % line)
 
 
+def cmd_schematic(a):
+    """Generate a .kicad_sch from the netlist spec (or from the copper), then
+    prove it by exporting its netlist and diffing against the source."""
+    from fluxplace import schematic as SC
+    import json as _json
+    res = SC.generate(a.spec or a.board, a.out, title=a.title,
+                      from_copper=bool(a.board and not a.spec))
+    print("wrote %s" % res["path"])
+    print("  %d components, %d nets, %d pins, %.0f x %.0f mm, %d column(s)"
+          % (res["components"], res["nets"], res["pins"],
+             res["sheet_mm"][0], res["sheet_mm"][1], res["columns"]))
+    if a.spec and not a.no_verify:
+        v = SC.verify(a.out, a.spec, kicad_cli=a.kicad_cli)
+        print()
+        print("  VERIFY: %s" % v.get("verdict", v.get("error")))
+        if v.get("ok"):
+            print("    %d nets / %d pins in both" % (v["nets_in_spec"], v["pins_in_spec"]))
+        else:
+            for k in ("missing_nets", "extra_nets"):
+                if v.get(k): print("    %s: %s" % (k, v[k][:8]))
+            for d in v.get("differing_nets", [])[:5]: print("    DIFF %s" % d)
+        if a.json: print(_json.dumps(v, indent=2))
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -1898,6 +1922,18 @@ def build_parser():
                      help="comma-separated nets to grade instead of auto-detecting")
     psa.add_argument("--json", action="store_true")
     psa.set_defaults(fn=cmd_stackup_apply)
+
+    psc = sub.add_parser("schematic",
+                         help="generate a .kicad_sch from a netlist spec (or a "
+                              "board) and verify it against its source")
+    psc.add_argument("--spec", default=None, help="spec JSON (preferred: it is the source of truth)")
+    psc.add_argument("--board", default=None, help="or derive from the routed copper")
+    psc.add_argument("--out", required=True)
+    psc.add_argument("--title", default=None)
+    psc.add_argument("--no-verify", action="store_true")
+    psc.add_argument("--kicad-cli", default="kicad-cli")
+    psc.add_argument("--json", action="store_true")
+    psc.set_defaults(fn=cmd_schematic)
 
     return ap
 

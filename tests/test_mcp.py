@@ -695,3 +695,73 @@ class TestDatasheetUrlRobustness(unittest.TestCase):
         ok, detail = S.datasheet_reachable("ftp:/nope")
         self.assertFalse(ok)
         self.assertIn("unusable URL", detail)
+
+
+class TestSchematicGeneration(unittest.TestCase):
+    """A generated schematic nobody can check is worse than none — it invites
+    belief. The netlist round-trip is what makes it trustworthy."""
+
+    SPEC = {"name": "t",
+            "components": [{"ref": "R1", "value": "10k", "lib": "L", "fp": "F"},
+                           {"ref": "U1", "value": "IC", "lib": "L", "fp": "G"}],
+            "nets": {"GND": [["R1", "1"], ["U1", "2"]],
+                     "SIG": [["R1", "2"], ["U1", "1"]]}}
+
+    def _spec(self):
+        import tempfile, os, json
+        p = os.path.join(tempfile.mkdtemp(), "s.json")
+        with open(p, "w") as fh:
+            json.dump(self.SPEC, fh)
+        return p
+
+    def test_generates_balanced_sexpr(self):
+        import tempfile, os
+        from fluxplace import schematic as S
+        out = os.path.join(tempfile.mkdtemp(), "a.kicad_sch")
+        r = S.generate(self._spec(), out)
+        self.assertEqual(r["components"], 2)
+        self.assertEqual(r["pins"], 4)
+        txt = open(out).read()
+        self.assertEqual(txt.count("("), txt.count(")"), "unbalanced s-expression")
+        self.assertTrue(txt.startswith("(kicad_sch"))
+        self.assertIn("sheet_instances", txt)
+
+    def test_every_net_becomes_a_global_label(self):
+        import tempfile, os
+        from fluxplace import schematic as S
+        out = os.path.join(tempfile.mkdtemp(), "b.kicad_sch")
+        S.generate(self._spec(), out)
+        txt = open(out).read()
+        for net in ("GND", "SIG"):
+            self.assertIn('(global_label "%s"' % net, txt)
+
+    def test_pin_numbers_are_the_real_pad_numbers(self):
+        """The schematic and the footprint must agree by construction, not by
+        a mapping someone maintains."""
+        import tempfile, os
+        from fluxplace import schematic as S
+        out = os.path.join(tempfile.mkdtemp(), "c.kicad_sch")
+        S.generate(self._spec(), out)
+        txt = open(out).read()
+        self.assertIn('(number "1"', txt)
+        self.assertIn('(number "2"', txt)
+
+    def test_output_is_deterministic(self):
+        """Same spec must give the same bytes, or every regeneration is a
+        spurious git diff."""
+        import tempfile, os
+        from fluxplace import schematic as S
+        sp = self._spec()
+        d = tempfile.mkdtemp()
+        a, b = os.path.join(d, "1.sch"), os.path.join(d, "2.sch")
+        S.generate(sp, a); S.generate(sp, b)
+        self.assertEqual(open(a).read(), open(b).read())
+
+    def test_lib_symbol_reference_is_a_prefix_not_a_designator(self):
+        import tempfile, os
+        from fluxplace import schematic as S
+        out = os.path.join(tempfile.mkdtemp(), "d.kicad_sch")
+        S.generate(self._spec(), out)
+        head = open(out).read().split("(symbol (lib_id")[0]
+        self.assertIn('(property "Reference" "R"', head)
+        self.assertNotIn('(property "Reference" "R1"', head)

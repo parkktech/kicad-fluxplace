@@ -145,6 +145,12 @@ POLICY = {
                                    "(backed up first, refuses to overwrite an existing one). "
                                    "Without a stackup, no impedance claim on a board can be "
                                    "checked at all."),
+    "schematic":         ("write", "Generate a real .kicad_sch from the netlist spec "
+                                   "(or from the routed copper) and VERIFY it by exporting "
+                                   "its netlist and diffing against the source. For a board "
+                                   "built from a spec rather than drawn, this is the "
+                                   "reviewable electrical document that otherwise does not "
+                                   "exist. Net-label style, not hand-drawn signal flow."),
     "verify-models":     ("read",  "Verify 3D models sit on their footprint pins — displaced "
                                    "models look like mechanical truth and are a review hazard."),
 
