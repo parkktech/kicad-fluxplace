@@ -1,3 +1,63 @@
+## 2026-08-19 — TODO: send for quote via the PCBWay partner API
+
+**Status: specified, not built.** Checked against the live docs at
+`api-partner.pcbway.com/Help` on 2026-08-19.
+
+### What their API actually offers
+
+    api/Pcb/PcbQuotation        bare-board price estimate
+    api/SMT/SMTQuotation        assembly price estimate
+    api/Pcb/GetFreightByOrder   shipping
+    api/Pcb/PlaceOrder          creates a cart entry
+    api/Pcb/ConfirmOrder        TAKES PAYMENT
+    api/Pcb/CheckOrderDetails / QueryOrderProcess / CancelOrder
+    api/Account/QueryBalance
+    api/Address/GetCountry|GetState|GetCity
+
+Access needs partner approval by email (anson@pcbway.com), per
+pcbway.com/api_cooperation.html.
+
+### Why this is worth building
+
+`fluxplace/pcbway.py` already DERIVES every answer the quote needs from the
+board itself — size from the Edge.Cuts bbox, layer count, 3/3 mil from the
+measured track/clearance, min drill, ENIG from the fine-pitch count, Both-sides
+from pos.csv, unique/SMD/fine-pitch/THT part counts, the consign list. That is
+the same payload `PcbQuotation` and `SMTQuotation` want. Today we render it to a
+worksheet a human retypes into a web form; D49 exists precisely because
+re-measuring those by eye is how a 3.5 mil board gets quoted as 6/6 mil.
+
+So: `fluxplace quote --board X` submits the derived parameters and returns real
+pricing, and the worksheet becomes the fallback rather than the product.
+
+### What it CANNOT do — do not let this creep
+
+**There is no inventory or parts-library endpoint. None.** PCBWay does keep
+components in stock for assembly, but it is not queryable; it is a question to
+their sales desk. So this must NEVER become a sourcing input:
+`SOURCING_POLICY` stands, DigiKey and Mouser remain the only authorities on
+stock, and the availability gate does not learn about PCBWay. A gate whose
+answer arrives by email is not a gate.
+
+### Hard requirements when it is built
+
+1. **`PlaceOrder` and `ConfirmOrder` spend money. They must never be reachable
+   from an MCP tool, and never from a `--yes` flag.** Quote endpoints are read-
+   only and safe to expose; ordering is not, and the two must not share a code
+   path that a future refactor could merge. Put ordering behind an explicit
+   interactive confirmation that names the amount, or leave it out entirely.
+2. Credentials follow the existing pattern — env first, then
+   `~/.claude.json`, never printed. Same as DigiKey/Mouser.
+3. A quote is a claim about a specific board revision. Stamp the returned price
+   with the board file's hash, or it will be quoted against one board and
+   ordered against another.
+4. `api.pcbway.com` did not resolve from the dev machine on 2026-08-19 (000)
+   while `www.pcbway.com` answered 200. Check `api-partner.pcbway.com`
+   reachability before assuming the integration can run headless here — the
+   Pulse and Mouser datasheet hosts have already taught this lesson twice.
+
+---
+
 ## 2026-08-19 — "0 DRC" IS A CLAIM ABOUT WHAT WE CHECKED, AND WE NEVER SAY WHAT THAT WAS
 
 **Found by an outside reviewer on utv-comms-v13, not by us.** His words: the
