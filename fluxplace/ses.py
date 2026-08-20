@@ -130,3 +130,44 @@ def import_into(board, ses_path, replace=True):
     board.BuildConnectivity()
     unrouted = board.GetConnectivity().GetUnconnectedCount(True)
     return n_tracks, n_vias, n_skip, unrouted
+
+
+# ---------------------------------------------------------------------------
+# DSN export: declare the reference planes, or the router will route through
+# them.
+# ---------------------------------------------------------------------------
+
+def declare_power_planes(dsn_path, layers, out_path=None):
+    """Mark `layers` as `(type power)` in a Specctra DSN.
+
+    KiCad's DSN exporter writes EVERY copper layer as `(type signal)`, including
+    layers that are solid GND or PWR pours. A router reading that file is being
+    told, in the only language it has, that it may route on the reference plane
+    — and it will.
+
+    Measured on utv-comms-v14: with all six layers exported as `signal`,
+    freerouting put 415 mm of Ethernet across 14 nets onto In1.Cu and In4.Cu —
+    the GND and PWR planes the whole 6-layer promotion existed to create. It had
+    even auto-detected In1.Cu as a plane from its pour coverage and routed on it
+    anyway, because the layer type said it could.
+
+    Moving that copper off afterwards is not a fix: dropping 71 stranded
+    segments onto already-occupied signal layers produced 16 tracks_crossing and
+    5 shorting_items. The constraint has to reach the router, not be repaired
+    after it.
+
+    Call this between export and routing.
+    """
+    import re
+    src = open(dsn_path).read()
+    changed = []
+    for lay in layers:
+        pat = r'(\(layer %s\s*\n\s*\(type )signal(\))' % re.escape(lay)
+        new = re.sub(pat, r'\1power\2', src)
+        if new != src:
+            changed.append(lay)
+            src = new
+    out = out_path or dsn_path
+    open(out, "w").write(src)
+    return {"path": out, "declared": changed,
+            "missed": [l for l in layers if l not in changed]}

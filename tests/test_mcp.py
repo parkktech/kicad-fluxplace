@@ -551,3 +551,49 @@ class TestSesImport(unittest.TestCase):
         near the real cause; the docstring has to say so."""
         from fluxplace import ses
         self.assertIn("co-located", ses.import_into.__doc__)
+
+
+class TestPowerPlaneDeclaration(unittest.TestCase):
+    """KiCad exports every copper layer as (type signal), including solid
+    planes. A router reading that is being told it may route on the reference."""
+
+    DSN = """(pcb x
+  (structure
+    (layer F.Cu
+      (type signal)
+    )
+    (layer In1.Cu
+      (type signal)
+    )
+    (layer In4.Cu
+      (type signal)
+    )
+  )
+)"""
+
+    def _tmp(self):
+        import tempfile, os
+        p = os.path.join(tempfile.mkdtemp(), "b.dsn")
+        with open(p, "w") as fh:
+            fh.write(self.DSN)
+        return p
+
+    def test_declares_only_the_named_layers(self):
+        from fluxplace import ses
+        p = self._tmp()
+        r = ses.declare_power_planes(p, ["In1.Cu", "In4.Cu"])
+        self.assertEqual(sorted(r["declared"]), ["In1.Cu", "In4.Cu"])
+        out = open(p).read()
+        self.assertEqual(out.count("(type power)"), 2)
+        # F.Cu must be left alone
+        self.assertIn("(layer F.Cu\n      (type signal)", out)
+
+    def test_reports_layers_it_could_not_find(self):
+        from fluxplace import ses
+        r = ses.declare_power_planes(self._tmp(), ["In1.Cu", "In9.Cu"])
+        self.assertEqual(r["declared"], ["In1.Cu"])
+        self.assertEqual(r["missed"], ["In9.Cu"])
+
+    def test_reason_is_recorded(self):
+        from fluxplace import ses
+        self.assertIn("reference plane", ses.declare_power_planes.__doc__)
