@@ -532,3 +532,22 @@ class TestFreeSlots(unittest.TestCase):
         import inspect as _i
         from fluxplace import migrate
         self.assertIn("ignore", _i.signature(migrate.free_slots).parameters)
+
+
+class TestSesImport(unittest.TestCase):
+    """A Specctra session is the COMPLETE routing, not a patch."""
+
+    def test_import_clears_existing_routing_by_default(self):
+        import inspect as _i
+        from fluxplace import ses
+        sig = _i.signature(ses.import_into)
+        self.assertIn("replace", sig.parameters)
+        self.assertIs(sig.parameters["replace"].default, True)
+        src = _i.getsource(ses.import_into)
+        self.assertIn("board.Remove(t)", src)
+
+    def test_the_reason_is_recorded_not_just_the_behaviour(self):
+        """The failure mode presents as co-located holes, which points nowhere
+        near the real cause; the docstring has to say so."""
+        from fluxplace import ses
+        self.assertIn("co-located", ses.import_into.__doc__)

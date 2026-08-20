@@ -48,10 +48,29 @@ def _find_all(node, key):
             yield from _find_all(c, key)
 
 
-def import_into(board, ses_path):
+def import_into(board, ses_path, replace=True):
     """Build tracks/vias from `ses_path` onto `board` (a loaded pcbnew
-    BOARD). Returns (tracks, vias, skipped_nets, unconnected_after)."""
+    BOARD). Returns (tracks, vias, skipped_nets, unconnected_after).
+
+    replace=True (the default, and almost always what you want) clears the
+    board's existing tracks and vias first.
+
+    A Specctra session is the COMPLETE routing for the board its DSN was
+    exported from, not a patch. Importing one onto a board that still holds its
+    original copper doubles every segment, and the duplicates land exactly on
+    top of each other — which DRC reports as co-located holes rather than as
+    anything resembling the real cause. Measured on utv-comms-v14: importing
+    without clearing produced 199 holes_co_located and 334 violations total;
+    clearing first, from the same session file, gave 131. Same routing, same
+    board; the difference was entirely doubled copper.
+
+    Pass replace=False only if you know the session covers a subset and you
+    intend to merge.
+    """
     import pcbnew
+    if replace:
+        for t in list(board.GetTracks()):
+            board.Remove(t)
     layer_id = {pcbnew.LayerName(l): l
                 for l in board.GetEnabledLayers().CuStack()}
     ni = board.GetNetInfo()
