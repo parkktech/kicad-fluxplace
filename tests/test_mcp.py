@@ -667,3 +667,31 @@ class TestManifestScope(unittest.TestCase):
         import inspect as _i
         from fluxplace import fab
         self.assertIn("no checks ignored", _i.getsource(fab.emit))
+
+
+class TestDatasheetUrlRobustness(unittest.TestCase):
+    """DigiKey returns protocol-relative URLs. A gate that crashes on a
+    malformed input is worse than one that grades it."""
+
+    def test_protocol_relative_is_normalised(self):
+        from fluxplace import sourcing as S
+        import unittest.mock as mock
+        seen = {}
+        class R:
+            headers = {"Content-Type": "application/pdf"}
+            def read(self, n): return b"%PDF-1.4"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def fake(req, timeout=None):
+            seen["url"] = req.full_url
+            return R()
+        with mock.patch("urllib.request.urlopen", fake):
+            ok, _ = S.datasheet_reachable("//mm.digikey.com/x.pdf")
+        self.assertTrue(ok)
+        self.assertTrue(seen["url"].startswith("https://"))
+
+    def test_garbage_url_grades_rather_than_raises(self):
+        from fluxplace import sourcing as S
+        ok, detail = S.datasheet_reachable("ftp:/nope")
+        self.assertFalse(ok)
+        self.assertIn("unusable URL", detail)

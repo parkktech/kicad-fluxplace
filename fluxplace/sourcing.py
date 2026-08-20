@@ -441,6 +441,14 @@ def datasheet_reachable(url, timeout=_DS_TIMEOUT):
     import urllib.request
     if not url:
         return (False, "no datasheet URL from either distributor")
+    # DigiKey hands back protocol-relative URLs ('//mm.digikey.com/...') which
+    # urllib refuses with "unknown url type". Normalise rather than crash — a
+    # gate that dies on a malformed input is worse than one that grades it.
+    url = url.strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not url.lower().startswith(("http://", "https://")):
+        return (False, "unusable URL: %r" % url[:60])
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
         "Accept": "application/pdf,*/*"})
@@ -457,6 +465,8 @@ def datasheet_reachable(url, timeout=_DS_TIMEOUT):
         return (False, "unexpected content-type %r" % ctype)
     except urllib.error.HTTPError as e:
         return (False, "HTTP %s" % e.code)
+    except ValueError as e:
+        return (False, "bad URL: %s" % str(e)[:50])
     except Exception as e:
         return (False, type(e).__name__)
 
