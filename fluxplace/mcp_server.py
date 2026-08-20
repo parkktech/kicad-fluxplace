@@ -38,6 +38,57 @@ PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "fluxplace"
 
 # --------------------------------------------------------------------------
+# Output budget.
+#
+# Every byte a tool prints lands in the caller's context window and stays there
+# for the rest of the conversation. `fluxplace netlist` on a 143-part board is
+# 21 KB — roughly 5,400 tokens — for one call, and an agent debugging a board
+# will call several tools several times. Unbounded output is not a formatting
+# problem, it is a budget the caller never agreed to spend.
+#
+# So a tool result is capped. Past the cap the full text goes to a file and the
+# caller gets the head, the tail, and the path — because the two ends of a
+# report are almost always where the answer is (the summary line and the
+# verdict), and the middle is the enumeration they can grep if they need it.
+#
+# Truncation is always ANNOUNCED. Silently returning a prefix would be the same
+# failure as a DRC report that does not say what it skipped.
+# --------------------------------------------------------------------------
+
+MAX_RESULT_CHARS = int(os.environ.get("FLUXPLACE_MCP_MAX_CHARS", "6000"))
+HEAD_LINES = 40
+TAIL_LINES = 25
+
+
+def budget(text, tool="result", max_chars=None):
+    """Cap a tool result, spilling the remainder to a file. -> (text, spilled)"""
+    cap = MAX_RESULT_CHARS if max_chars is None else max_chars
+    if cap <= 0 or len(text) <= cap:
+        return text, None
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="fluxplace-%s-" % tool.replace("/", "_"),
+                                suffix=".txt")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    lines = text.splitlines()
+    if len(lines) <= HEAD_LINES + TAIL_LINES:
+        head, tail, hidden = lines, [], 0
+    else:
+        head = lines[:HEAD_LINES]
+        tail = lines[-TAIL_LINES:]
+        hidden = len(lines) - HEAD_LINES - TAIL_LINES
+    out = list(head)
+    out.append("")
+    out.append("... %d of %d lines omitted (%d chars total). Full output:"
+               % (hidden, len(lines), len(text)))
+    out.append("    %s" % path)
+    out.append("Read or grep that file for the omitted section rather than "
+               "re-running with a wider net.")
+    out.append("")
+    out.extend(tail)
+    return "\n".join(out), path
+
+# --------------------------------------------------------------------------
 # Which commands become tools, and what they cost.
 # Anything in the CLI but absent here is not exposed at all — a new subcommand
 # is opt-in, so an experimental command cannot silently become a tool.
@@ -334,7 +385,12 @@ class Server:
         name = (params or {}).get("name", "")
         args = (params or {}).get("arguments", {})
         text, is_err = call_tool(name, args, self.expose_long)
-        return {"content": [{"type": "text", "text": text}], "isError": bool(is_err)}
+        text, spilled = budget(text, tool=name)
+        res = {"content": [{"type": "text", "text": text}],
+               "isError": bool(is_err)}
+        if spilled:
+            res["_meta"] = {"fullOutput": spilled}
+        return res
 
     HANDLERS = {
         "initialize": on_initialize,

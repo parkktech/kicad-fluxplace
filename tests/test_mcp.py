@@ -597,3 +597,55 @@ class TestPowerPlaneDeclaration(unittest.TestCase):
     def test_reason_is_recorded(self):
         from fluxplace import ses
         self.assertIn("reference plane", ses.declare_power_planes.__doc__)
+
+
+class TestOutputBudget(unittest.TestCase):
+    """Every byte a tool prints lands in the caller's context and stays there.
+    Unbounded output is a budget the caller never agreed to spend."""
+
+    def test_short_output_is_untouched(self):
+        from fluxplace import mcp_server as M
+        t, spill = M.budget("hello", tool="x")
+        self.assertEqual(t, "hello")
+        self.assertIsNone(spill)
+
+    def test_long_output_is_capped_and_spilled(self):
+        import os
+        from fluxplace import mcp_server as M
+        big = "\n".join("line %d" % i for i in range(4000))
+        t, spill = M.budget(big, tool="x", max_chars=2000)
+        self.assertLess(len(t), len(big))
+        self.assertTrue(spill and os.path.exists(spill))
+        with open(spill) as fh:
+            self.assertEqual(fh.read(), big, "the spill must be COMPLETE")
+        os.unlink(spill)
+
+    def test_truncation_is_announced_never_silent(self):
+        """A silently-truncated result is the same failure as a DRC report that
+        does not say what it skipped."""
+        import os
+        from fluxplace import mcp_server as M
+        big = "\n".join("line %d" % i for i in range(4000))
+        t, spill = M.budget(big, tool="x", max_chars=2000)
+        self.assertIn("omitted", t)
+        self.assertIn(spill, t)
+        os.unlink(spill)
+
+    def test_head_and_tail_both_survive(self):
+        """The summary is at the top and the verdict at the bottom; a middle
+        cut keeps both."""
+        import os
+        from fluxplace import mcp_server as M
+        lines = ["FIRST"] + ["filler %d" % i for i in range(4000)] + ["VERDICT"]
+        t, spill = M.budget("\n".join(lines), tool="x", max_chars=2000)
+        self.assertIn("FIRST", t)
+        self.assertIn("VERDICT", t)
+        os.unlink(spill)
+
+    def test_netlist_summary_is_far_cheaper_than_the_dump(self):
+        import inspect as _i
+        from fluxplace import audit
+        self.assertTrue(hasattr(audit, "netlist_summary"))
+        src = _i.getsource(audit.netlist_summary)
+        self.assertIn("single_pad_nets", src)
+        self.assertIn("largest_nets", src)

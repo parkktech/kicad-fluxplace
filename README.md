@@ -286,6 +286,21 @@ the board) and `write` (produces files) are exposed by default. `long` — `auto
 that rewrite the board, which is the wrong shape for a synchronous tool call, so
 they are behind `--all`.
 
+### Token budget
+
+Tool output lands in the caller's context and stays there for the rest of the
+conversation, so results are capped (default 6000 chars, `FLUXPLACE_MCP_MAX_CHARS`
+to change). Past the cap the full text is written to a temp file and the reply
+carries the head, the tail and the path — the two ends of a report are where the
+summary and the verdict live, and the middle is the enumeration you can grep.
+Truncation is always stated; a silently-shortened result would be the same
+failure as a DRC report that does not say what it skipped.
+
+`fluxplace_netlist` on a 143-part board went from ~5,400 tokens to ~925 capped,
+or ~236 with `summary=true`, which returns counts, the largest nets and any
+single-pad nets — the shape plus the outliers, which is what the full dump was
+usually being read for.
+
 ### Board audit tools
 
 Three of the tools exist because of specific misses on real boards, and they

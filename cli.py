@@ -1245,6 +1245,8 @@ def cmd_netlist(a):
     """
     from fluxplace import audit
     import json as _json
+    if getattr(a, "summary", False):
+        print(_json.dumps(audit.netlist_summary(a.board), indent=2)); return
     res = audit.netlist(a.board, fmt="json" if a.json else "text")
     text = _json.dumps(res, indent=2) if a.json else res
     if a.out:
@@ -1860,6 +1862,9 @@ def build_parser():
                               "(the netlist a board with no schematic still has)")
     pnl.add_argument("--board", required=True)
     pnl.add_argument("--out", default=None, help="write here instead of stdout")
+    pnl.add_argument("--summary", action="store_true",
+                     help="counts, biggest nets and single-pad nets only — the "
+                          "cheap answer to 'what is on this board'")
     pnl.add_argument("--json", action="store_true")
     pnl.set_defaults(fn=cmd_netlist)
 

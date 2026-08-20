@@ -187,6 +187,35 @@ def drc_full(board_path, kicad_cli="kicad-cli", out_path=None, log=print):
 # netlist
 # --------------------------------------------------------------------------
 
+def netlist_summary(board_path):
+    """The netlist at a glance: counts, and only the nets worth a second look.
+
+    Written because the full connection list is ~21 KB on a 143-part board, and
+    an agent asking "what is on this board" almost never needs all 534 pad
+    references — it needs the shape, plus the outliers. Single-pad nets are
+    probably a mistake; very high fan-out nets are the power rails, and knowing
+    which they are is most of what the full dump was being read for.
+    """
+    d = netlist(board_path, fmt="json")
+    sizes = sorted(((len(v), k) for k, v in d["net_table"].items()), reverse=True)
+    singles = [k for n, k in sizes if n == 1]
+    sides = {}
+    for c in d["component_table"]:
+        sides[c["side"]] = sides.get(c["side"], 0) + 1
+    return {
+        "board": d["board"],
+        "components": d["components"],
+        "nets": d["nets"],
+        "connected_pads": d["connected_pads"],
+        "components_by_side": sides,
+        "largest_nets": [{"net": k, "pads": n} for n, k in sizes[:10]],
+        "single_pad_nets": singles,
+        "note": ("Summary only. Use netlist without summary=true, or with "
+                 "out=<path>, for the full %d-pad connection list."
+                 % d["connected_pads"]),
+    }
+
+
 def netlist(board_path, fmt="text"):
     """Read connectivity back out of a routed board.
 
