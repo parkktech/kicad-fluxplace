@@ -1320,7 +1320,8 @@ def cmd_stackup_apply(a):
 
     res = {"profile": a.profile}
     if a.apply:
-        res["apply"] = ST.apply_to_board(a.board, a.profile, backup=not a.no_backup)
+        res["apply"] = ST.apply_to_board(a.board, a.profile,
+                                         backup=not a.no_backup, replace=a.replace)
     if a.traces or a.nets:
         res["traces"] = ST.check_traces(
             a.board, a.profile,
@@ -1878,6 +1879,8 @@ def build_parser():
     psa.add_argument("--apply", action="store_true",
                      help="write the stackup into the .kicad_pcb")
     psa.add_argument("--no-backup", action="store_true")
+    psa.add_argument("--replace", action="store_true",
+                     help="replace an existing stackup instead of refusing")
     psa.add_argument("--target-se", type=float, default=50.0,
                      help="single-ended impedance target in ohms (default 50)")
     psa.add_argument("--target-diff", type=float, default=100.0,

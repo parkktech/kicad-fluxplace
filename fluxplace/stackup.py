@@ -269,7 +269,31 @@ def render_stackup_sexp(profile, indent="\t\t"):
     return "\n".join(L)
 
 
-def apply_to_board(board_path, profile, backup=True, log=print):
+def strip_stackup(src):
+    """Remove an existing (stackup ...) block, brace-balanced."""
+    i = src.find("(stackup")
+    if i < 0:
+        return src, False
+    depth, j = 0, i
+    while j < len(src):
+        if src[j] == "(":
+            depth += 1
+        elif src[j] == ")":
+            depth -= 1
+            if depth == 0:
+                j += 1
+                break
+        j += 1
+    # swallow the trailing newline+indent the block sat on
+    k = i
+    while k > 0 and src[k-1] in " \t":
+        k -= 1
+    if k > 0 and src[k-1] == "\n":
+        k -= 1
+    return src[:k] + src[j:], True
+
+
+def apply_to_board(board_path, profile, backup=True, replace=False, log=print):
     """Write the stackup into the .kicad_pcb `(setup ...)` block.
 
     Text-level surgery rather than pcbnew, because the board stackup is not
@@ -282,9 +306,14 @@ def apply_to_board(board_path, profile, backup=True, log=print):
     with open(board_path) as fh:
         src = fh.read()
 
+    replaced = False
     if "(stackup" in src:
-        return {"changed": False,
-                "reason": "board already has a stackup; refusing to overwrite it"}
+        if not replace:
+            return {"changed": False,
+                    "reason": "board already has a stackup; refusing to overwrite it "
+                              "(pass replace=True / --replace to change it)"}
+        src, replaced = strip_stackup(src)
+        log("replacing the existing stackup")
 
     m = re.search(r"^(\s*)\(setup\b", src, flags=re.M)
     if not m:
@@ -304,7 +333,7 @@ def apply_to_board(board_path, profile, backup=True, log=print):
     with open(board_path, "w") as fh:
         fh.write(out)
 
-    return {"changed": True, "profile": profile,
+    return {"changed": True, "profile": profile, "replaced_existing": replaced,
             "total_thickness_mm": total_thickness(profile),
             "backup": (board_path + ".bak-stackup") if backup else None}
 

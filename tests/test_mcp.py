@@ -361,3 +361,57 @@ class TestSixLayerAndPlanes(unittest.TestCase):
         opts = ST.solve_diff_options(100.0, h, 0.035, er, min_feature=0.2)
         self.assertTrue(any(not o["manufacturable"] for o in opts),
                         "a 0.2mm floor should rule some options out")
+
+
+class TestLayerMigration(unittest.TestCase):
+    """4->6 layer promotion. The rules that stop it corrupting a board."""
+
+    def test_plan_frees_the_two_reference_layers(self):
+        from fluxplace import migrate
+        p = migrate.plan_4l_to_6l()
+        froms = {m["from"] for m in p["moves"]}
+        tos = {m["to"] for m in p["moves"]}
+        self.assertEqual(froms, {"In1.Cu", "In2.Cu"})
+        self.assertEqual(tos, {"In2.Cu", "In3.Cu"})
+        self.assertEqual({n["layer"] for n in p["new_planes"]}, {"In1.Cu", "In4.Cu"})
+        self.assertEqual(p["unchanged"], ["F.Cu", "B.Cu"])
+
+    def test_inner_move_order_avoids_collision(self):
+        """In2->In3 must happen before In1->In2, or the second move overwrites
+        tracks the first has not read yet."""
+        import inspect as _i
+        from fluxplace import migrate
+        src = _i.getsource(migrate.migrate_4l_to_6l)
+        self.assertLess(src.index('moved["In2.Cu->In3.Cu"] += 1'),
+                        src.index('moved["In1.Cu->In2.Cu"] += 1'))
+
+    def test_net_from_description(self):
+        from fluxplace import migrate
+        self.assertEqual(
+            migrate._net_from_desc("Track [+5V] on In3.Cu, length 0.6 mm"), "+5V")
+        self.assertEqual(
+            migrate._net_from_desc("Via [GND] on F.Cu - B.Cu"), "GND")
+        self.assertIsNone(migrate._net_from_desc("no brackets here"))
+
+    def test_absorb_only_touches_inner_layers(self):
+        """An outer-layer track terminates on outer-layer pads; moving it to a
+        plane disconnects it from the pads it exists to reach. Caught in the
+        field: absorbing two B.Cu tracks onto In4.Cu turned 0 unconnected
+        into 2."""
+        import inspect as _i
+        from fluxplace import migrate
+        src = _i.getsource(migrate.absorb_into_plane)
+        self.assertIn("if t.GetLayer() not in inner:", src)
+
+    def test_migration_refuses_blind_buried_vias(self):
+        import inspect as _i
+        from fluxplace import migrate
+        src = _i.getsource(migrate.migrate_4l_to_6l)
+        self.assertIn("blind_or_buried_vias", src)
+
+    def test_converge_reports_failure_rather_than_looping_forever(self):
+        import inspect as _i
+        from fluxplace import migrate
+        src = _i.getsource(migrate.converge)
+        self.assertIn("max_rounds", src)
+        self.assertIn('"converged": False', src)
