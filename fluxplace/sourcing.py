@@ -360,3 +360,127 @@ def preflight(board_path, mpn_map=None, need=10, strict=False, refresh=False,
     if not report:
         return []
     return summary(report, counts, need, log=log)
+
+
+# ---------------------------------------------------------------- datasheets
+#
+# D43 taught that a part nobody stocks is a design bug, not a purchasing
+# problem. This is the same lesson one step earlier: a part whose DATASHEET
+# cannot be retrieved is a design bug too, because the pinout cannot be
+# verified, and an unverified pinout is exactly what turns a correct land
+# pattern into a board that arrives dead.
+#
+# Real case that produced this: three in-stock gigabit LAN magnetics modules
+# were selected on price and availability, and then every route to their pin
+# table was blocked — the manufacturer's document host refused connections, the
+# distributor's PDF mirror served a bot-check page, and the distributor API's
+# media endpoint simply pointed back at the unreachable manufacturer. The parts
+# graded OK on stock and were still unusable.
+
+_DS_TIMEOUT = 20
+
+
+def datasheet_url(mpn, creds):
+    """Best datasheet URL for an MPN, DigiKey first then Mouser. None if
+    neither distributor offers one.
+
+    Queries the search endpoints directly rather than reusing _dk()/_mouser():
+    those return a graded [stock, status, price] row for the availability gate
+    and deliberately discard everything else, including the datasheet link.
+    """
+    import json as _json
+    import urllib.request
+
+    if "DIGIKEY_CLIENT_ID" in creds:
+        try:
+            tok = _dk_token(creds)
+            body = _json.dumps({"Keywords": _search_term(mpn), "Limit": 5}).encode()
+            req = urllib.request.Request(
+                "https://api.digikey.com/products/v4/search/keyword", data=body,
+                headers={"Authorization": "Bearer " + tok,
+                         "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
+                         "Content-Type": "application/json",
+                         "X-DIGIKEY-Locale-Site": "US",
+                         "X-DIGIKEY-Locale-Currency": "USD"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = _json.load(r)
+            for p in data.get("Products", []) or []:
+                if _same_part(p.get("ManufacturerProductNumber") or "", mpn):
+                    if p.get("DatasheetUrl"):
+                        return p["DatasheetUrl"]
+        except Exception:
+            pass
+
+    if "MOUSER_API_KEY" in creds:
+        try:
+            body = _json.dumps({"SearchByPartRequest": {
+                "mouserPartNumber": mpn, "partSearchOptions": "Exact"}}).encode()
+            req = urllib.request.Request(
+                "https://api.mouser.com/api/v1/search/partnumber?apiKey="
+                + creds["MOUSER_API_KEY"], data=body,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = _json.load(r)
+            for p in ((data.get("SearchResults") or {}).get("Parts") or []):
+                if _same_part(p.get("ManufacturerPartNumber") or "", mpn):
+                    if p.get("DataSheetUrl"):
+                        return p["DataSheetUrl"]
+        except Exception:
+            pass
+    return None
+
+
+def datasheet_reachable(url, timeout=_DS_TIMEOUT):
+    """(ok, detail). Reachability, not just an HTTP 200.
+
+    A 200 that returns HTML or JavaScript is a bot-check page, not a datasheet,
+    and reporting it as reachable would be worse than reporting nothing — it
+    would tell the engineer the document is available when it is not.
+    """
+    import urllib.error
+    import urllib.request
+    if not url:
+        return (False, "no datasheet URL from either distributor")
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+        "Accept": "application/pdf,*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            head = r.read(1024)
+        if head.startswith(b"%PDF"):
+            return (True, "PDF")
+        if "pdf" in ctype:
+            return (True, ctype)
+        if head.lstrip()[:1] in (b"<", b"v", b"("):
+            return (False, "served HTML/JS (bot check), not a document")
+        return (False, "unexpected content-type %r" % ctype)
+    except urllib.error.HTTPError as e:
+        return (False, "HTTP %s" % e.code)
+    except Exception as e:
+        return (False, type(e).__name__)
+
+
+def datasheet_gate(mpns, creds=None, log=print):
+    """Grade a list of MPNs on whether their datasheet can actually be read.
+
+    Verdicts: OK (a real document came back), BLOCKED (a URL exists but nothing
+    usable is served), NONE (no distributor offers a datasheet at all).
+    """
+    creds = creds or credentials()
+    rows = []
+    for mpn in mpns:
+        url = datasheet_url(mpn, creds)
+        ok, detail = datasheet_reachable(url)
+        verdict = "OK" if ok else ("BLOCKED" if url else "NONE")
+        rows.append({"mpn": mpn, "url": url, "verdict": verdict, "detail": detail})
+        log("    %-8s %-22s %s" % (verdict, mpn, detail))
+    blocked = [r for r in rows if r["verdict"] != "OK"]
+    return {
+        "rows": rows,
+        "blocked": [r["mpn"] for r in blocked],
+        "verdict": ("%d of %d datasheet(s) cannot be retrieved — those pinouts "
+                    "cannot be verified, so those parts cannot be committed to "
+                    "copper" % (len(blocked), len(rows))) if blocked
+                   else "every datasheet is retrievable",
+    }

@@ -464,3 +464,53 @@ class TestSourcingPolicy(unittest.TestCase):
                 any(bad in h.lower() for bad in ("lcsc", "easyeda", "snapeda",
                                                  "jlcparts", "octopart")),
                 "models.py reaches a forbidden source: %s" % h)
+
+
+class TestDatasheetGate(unittest.TestCase):
+    """A part whose datasheet cannot be read is a design bug, not a research
+    inconvenience: its pinout cannot be verified, and an unverified pinout is
+    what turns a correct land pattern into a board that arrives dead (D42)."""
+
+    def test_pdf_magic_is_accepted(self):
+        from fluxplace import sourcing as S
+        import unittest.mock as mock
+        class R:
+            headers = {"Content-Type": "application/pdf"}
+            def read(self, n): return b"%PDF-1.7 ..."
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        with mock.patch("urllib.request.urlopen", return_value=R()):
+            ok, detail = S.datasheet_reachable("https://x/y.pdf")
+        self.assertTrue(ok)
+
+    def test_bot_check_html_is_not_reachable(self):
+        """A 200 that returns HTML is a bot-check page. Calling that 'reachable'
+        is worse than reporting nothing — it tells the engineer the document is
+        available when it is not."""
+        from fluxplace import sourcing as S
+        import unittest.mock as mock
+        class R:
+            headers = {"Content-Type": "text/html"}
+            def read(self, n): return b"<html><script>challenge</script>"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        with mock.patch("urllib.request.urlopen", return_value=R()):
+            ok, detail = S.datasheet_reachable("https://x/y.pdf")
+        self.assertFalse(ok)
+        self.assertIn("bot check", detail)
+
+    def test_no_url_is_reported_as_such(self):
+        from fluxplace import sourcing as S
+        ok, detail = S.datasheet_reachable(None)
+        self.assertFalse(ok)
+        self.assertIn("no datasheet URL", detail)
+
+    def test_gate_verdict_names_the_blocked_parts(self):
+        from fluxplace import sourcing as S
+        import unittest.mock as mock
+        with mock.patch.object(S, "datasheet_url", return_value="https://x/y.pdf"), \
+             mock.patch.object(S, "datasheet_reachable", return_value=(False, "HTTP 403")), \
+             mock.patch.object(S, "credentials", return_value={}):
+            r = S.datasheet_gate(["PART-A", "PART-B"], log=lambda *_: None)
+        self.assertEqual(r["blocked"], ["PART-A", "PART-B"])
+        self.assertIn("cannot be verified", r["verdict"])
