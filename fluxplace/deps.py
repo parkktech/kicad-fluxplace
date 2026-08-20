@@ -41,6 +41,26 @@ import sys
 
 KICAD_MIN = (10, 0)
 
+# --------------------------------------------------------------------------
+# Sourcing policy — DigiKey and Mouser, and nothing else.
+#
+# Two APIs answer authoritatively, with credentials, and can be held to account
+# for stock and price. Everything else in this space is a scraped index that
+# goes down when you need it (the jlcparts index behind LCSC search has returned
+# HTTP 404 for weeks at a time, mid-project, twice) or a CDN that serves a
+# login wall. A sourcing gate whose answer depends on whether a third-party
+# mirror is up is not a gate.
+#
+# JLCPCB and PCBWay still appear throughout fluxplace as FABRICATORS — DFM
+# profiles, trace/space floors, stackups, order worksheets. That is a different
+# role and is unaffected: a fab is where the board is made, not where the parts
+# are bought.
+# --------------------------------------------------------------------------
+SOURCING_POLICY = ("DigiKey and Mouser only. No LCSC/jlcparts, no SnapEDA, no "
+                   "vendor CDNs. JLCPCB/PCBWay are fabricators here, not part "
+                   "sources.")
+FORBIDDEN_SOURCES = ("lcsc", "jlcparts", "snapeda", "octopart", "easyeda")
+
 REQUIREMENTS = [
     # ---- core ------------------------------------------------------------
     dict(key="pcbnew", kind="python", module="pcbnew", tier="core",
@@ -108,9 +128,11 @@ REQUIREMENTS = [
          why="DFM checks, BOM-with-pricing, component-contract verification"),
     dict(key="mcp-kicad-jlcpcb", kind="service", tier="suite",
          label="MCP server: kicad-jlcpcb",
-         why="LCSC sourcing, schematic/PCB generation, JLCPCB packaging"),
+         why="board generation from a netlist spec, and JLCPCB fab packaging. "
+             "NOT used for part sourcing — see SOURCING_POLICY"),
     dict(key="skill-kicad-happy", kind="service", tier="suite",
-         label="Plugin: kicad-happy", why="datasheets + digikey/mouser/lcsc/jlcpcb skills"),
+         label="Plugin: kicad-happy",
+         why="datasheets and the digikey/mouser skills"),
     dict(key="skill-pcb-designer", kind="service", tier="suite",
          label="Skill: pcb-designer", why="DFM, stackups, RF layout guidance"),
 ]
@@ -256,6 +278,10 @@ def report(results=None, show_ok=True):
         out.append("")
         out.append(TIER_TITLE[tier])
         out.append("-" * 72)
+        if tier == "sourcing":
+            for line in _wrap(SOURCING_POLICY, 68):
+                out.append("  %s" % line)
+            out.append("")
         for r in shown:
             out.append("  [%s] %-34s %s" % (MARK[r["ok"]], r["label"], r["detail"]))
             if r["ok"] is not True:

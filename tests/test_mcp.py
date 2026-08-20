@@ -415,3 +415,52 @@ class TestLayerMigration(unittest.TestCase):
         src = _i.getsource(migrate.converge)
         self.assertIn("max_rounds", src)
         self.assertIn('"converged": False', src)
+
+
+class TestSourcingPolicy(unittest.TestCase):
+    """DigiKey + Mouser only. Pinned, because this drifted once already: the
+    dependency registry advertised 'LCSC sourcing' as a suite capability long
+    after the code had stopped using it, and the jlcparts index behind LCSC
+    search has been returning HTTP 404 for weeks at a time mid-project."""
+
+    def test_policy_is_stated(self):
+        from fluxplace import deps
+        self.assertIn("DigiKey", deps.SOURCING_POLICY)
+        self.assertIn("Mouser", deps.SOURCING_POLICY)
+        self.assertIn("LCSC", deps.SOURCING_POLICY)
+
+    def test_no_forbidden_source_is_advertised_as_a_capability(self):
+        from fluxplace import deps
+        for req in deps.REQUIREMENTS:
+            why = (req.get("why") or "").lower()
+            label = (req.get("label") or "").lower()
+            for bad in deps.FORBIDDEN_SOURCES:
+                self.assertNotIn(bad, label,
+                                 "%s is advertised in a requirement label" % bad)
+                if bad in why:
+                    self.assertIn("not used", why,
+                                  "%r appears in %r without disclaiming it"
+                                  % (bad, req.get("key")))
+
+    def test_sourcing_code_queries_only_digikey_and_mouser(self):
+        """The gate's answer must not depend on a third-party mirror being up."""
+        import os
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "fluxplace", "sourcing.py")).read()
+        hosts = set(re.findall(r"https?://([A-Za-z0-9.\-]+)", src))
+        for h in hosts:
+            self.assertTrue(
+                any(ok in h for ok in ("digikey.com", "mouser.com")),
+                "sourcing.py reaches a non-DigiKey/Mouser host: %s" % h)
+
+    def test_model_fetch_queries_only_digikey_and_mouser(self):
+        import os
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "fluxplace", "models.py")).read()
+        for h in set(re.findall(r"https?://([A-Za-z0-9.\-]+)", src)):
+            self.assertFalse(
+                any(bad in h.lower() for bad in ("lcsc", "easyeda", "snapeda",
+                                                 "jlcparts", "octopart")),
+                "models.py reaches a forbidden source: %s" % h)

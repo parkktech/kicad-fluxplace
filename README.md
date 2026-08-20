@@ -174,6 +174,15 @@ install the missing python packages for you.
 | route | Java 17+ and **freerouting 2.3.0+** | the autorouter. 2.2.4 dies silently on headless jobs — pin 2.3.0 |
 | sourcing | `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `MOUSER_API_KEY` | the availability gate and real-STEP 3D fetch |
 
+**Sourcing policy: DigiKey and Mouser, nothing else.** Two APIs that answer
+authoritatively, with credentials, and can be held to account for stock and
+price. No LCSC/jlcparts, no SnapEDA, no vendor CDNs — the jlcparts index behind
+LCSC search has returned HTTP 404 for weeks at a time, mid-project, twice, and a
+gate whose answer depends on a third-party mirror being up is not a gate.
+JLCPCB and PCBWay still appear throughout as **fabricators** — DFM profiles,
+trace floors, stackups, order worksheets. A fab is where the board is made, not
+where the parts are bought.
+
 Put the router jar at `~/tools/freerouting-2.3.0.jar`, or point `FREEROUTING_JAR` at it.
 
 ### The interpreter trap — read this one
@@ -216,8 +225,8 @@ cannot autodetect them:
 
 - **MCP `kicad`** — project analysis, ERC/DRC, BOM, netlist, thumbnails
 - **MCP `kicad-pro`** — DFM checks, BOM-with-pricing, component-contract verification
-- **MCP `kicad-jlcpcb`** — LCSC sourcing, schematic/PCB generation, JLCPCB packaging
-- **`kicad-happy`** — datasheets plus the digikey/mouser/lcsc/jlcpcb skills
+- **MCP `kicad-jlcpcb`** — board generation from a netlist spec, JLCPCB fab packaging
+- **`kicad-happy`** — datasheets plus the digikey/mouser skills
 - **`pcb-designer`** — DFM, stackups, RF layout guidance
 
 ## Install
