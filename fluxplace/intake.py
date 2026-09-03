@@ -17,7 +17,8 @@ be driven non-interactively from an answers JSON (agent- and CI-friendly).
 """
 import json
 
-__all__ = ["ON_BOARD", "PANEL_DEFAULTS", "run", "load_intent"]
+__all__ = ["ON_BOARD", "PANEL_DEFAULTS", "ENV_LOCATION", "run", "load_intent",
+           "ask_environment"]
 
 # choice key -> (label, concrete part guidance)
 ON_BOARD = {
@@ -70,6 +71,8 @@ def run(ask=input, say=print, answers=None):
     """Interview -> intent dict. `answers` (dict) short-circuits questions:
     {"interfaces": [...], "mounting": {...}} entries are taken as given."""
     if answers and "interfaces" in answers and "mounting" in answers:
+        # taken as given; a missing environment surfaces later as the
+        # review gate's ENV_UNDEFINED warning rather than a prompt here
         return dict(answers)
 
     intent = {"interfaces": [], "mounting": {}}
@@ -119,7 +122,60 @@ def run(ask=input, say=print, answers=None):
         m["inset_mm"] = float(ask("Corner inset in mm [default 4.0]: ")
                               or "4.0")
     intent["mounting"] = m
+    intent["environment"] = ((answers or {}).get("environment")
+                             or ask_environment(ask, say))
     return intent
+
+
+ENV_LOCATION = {
+    "bench": ("Indoor, bench or desk (0..+50 C, no vibration)",
+              dict(temp_min_c=0, temp_max_c=50, vibration="low", moisture="dry")),
+    "enclosed-outdoor": ("Sealed enclosure outdoors / vehicle cabin "
+                         "(-30..+85 C, humid, vibration)",
+                         dict(temp_min_c=-30, temp_max_c=85, vibration="high",
+                              moisture="humid")),
+    "exposed-vehicle": ("Vehicle exterior / UTV / marine (-40..+85 C, wet, "
+                        "severe vibration and shock)",
+                        dict(temp_min_c=-40, temp_max_c=85, vibration="high",
+                             moisture="outdoor")),
+    "industrial": ("Industrial cabinet (-20..+70 C, dust, some vibration)",
+                   dict(temp_min_c=-20, temp_max_c=70, vibration="high",
+                        moisture="humid")),
+    "custom": ("Custom — enter the numbers", {}),
+}
+
+ENV_TRANSIENT = {
+    "none": "Regulated supply / USB / battery only",
+    "auto-12v": "12 V vehicle battery (load dump, ISO 7637 pulses)",
+    "auto-24v": "24 V vehicle battery",
+}
+
+
+def ask_environment(ask, say):
+    """Where will this product LIVE? Every part is derated against the answer
+    and the review gate fails a part rated narrower than the product. This
+    exists because a 0..+70 C LAN transformer reached an outdoor UTV board's
+    external review with nothing having asked."""
+    say("== Product environment ==")
+    loc = _choice(ask, say, "Where does the product live", ENV_LOCATION,
+                  default="enclosed-outdoor")
+    env = dict(ENV_LOCATION[loc][1])
+    env["location"] = loc
+    if loc == "custom" or not env.get("temp_min_c") and env.get("temp_min_c") != 0:
+        env["temp_min_c"] = float(ask("Minimum operating temperature C [-40]: ") or -40)
+        env["temp_max_c"] = float(ask("Maximum operating temperature C [85]: ") or 85)
+        env["vibration"] = _choice(ask, say, "Vibration",
+                                   {"low": "low", "high": "high"}, default="high")
+        env["moisture"] = _choice(ask, say, "Moisture",
+                                  {"dry": "dry", "humid": "humid",
+                                   "condensing": "condensing", "outdoor": "outdoor"},
+                                  default="humid")
+    env["transient"] = _choice(ask, say, "Input power transient class",
+                               ENV_TRANSIENT, default="auto-12v")
+    say(f"  -> env: {env['temp_min_c']:g}..{env['temp_max_c']:g} C, "
+        f"vibration {env['vibration']}, moisture {env['moisture']}, "
+        f"transient {env['transient']}")
+    return env
 
 
 def load_intent(path):

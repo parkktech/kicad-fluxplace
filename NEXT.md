@@ -1,3 +1,44 @@
+## 2026-09-03 — the design-review gate (`review`), built from an external review
+
+**Status: built, tested, wired into `fab` and `deliver` as a hard gate.**
+
+An outside reviewer read utv-comms V1.4 — 0 DRC at full scope, netlist 534/534,
+sourcing graded, packaged — and found nine problems fluxplace had never looked
+for: ESD arrays on the straight-copper PTT net, an ESD array with GND on the
+wrong pin, a PowerDI5060-8 on a SOIC-8 land pattern, 45 mm of Ethernet
+intra-pair skew, RF at ~66 ohm on the inner layers the 50 ohm claim never
+graded, a 0..+70 C transformer on an outdoor product, a spec still saying
+65x50 mm 4-layer, a hold-up claim off by 30x, open sourcing.
+
+Every one of those was the board checked against itself passing while the
+board checked against the spec / the datasheet / the environment failed.
+`fluxplace/review.py` now does the latter; `fluxplace/partdata.py` pulls
+package, pin count, operating temperature, lifecycle and TVS clamp from the
+DigiKey and Mouser APIs (7-day cache beside mpn_map.json); `intake` asks where
+the product lives and writes `[env]`; constraints grew `[env]`, `[nets.X]
+straight_copper / max_vias`, `[rf]`, `[power.X] holdup_*`, `[protection]`.
+
+Run against V1.4 with live data it reproduces all nine findings and adds
+three the human missed: L2 is a 1008 inductor on an 0805 footprint, four JST
+GH/SH headers are rated -25 C against a -40 C environment, and SW1 is in the
+spec but not on the board. False-positive tuning done on the same board:
+RF detection is token-based (`PWRFAIL` is not RF), pair skew is a FAIL only
+for high-speed / constrained families (audio pairs get a WARN), `V-` is a
+ground role, mechanical pads (MP/SH) do not count as pins.
+
+Also fixed: `verify-models` called `models.verify_board`, which does not
+exist; it is `model_verify.verify_board`.
+
+### Not yet
+- Pinmap verification is against the KiCad official symbol when one exists
+  for the MPN prefix; parts without one get PINMAP_UNVERIFIED unless the spec
+  carries `pinmap_source`. Parsing the datasheet pin table itself is the
+  next step (the `datasheets` skill can extract it).
+- The asymmetric-stripline number is the parallel-combination closed form,
+  same +-10% caveat as the rest of stackup.py.
+- Environment-driven derating beyond temperature (vibration -> THT/retention,
+  moisture -> coating note) is advisory only.
+
 ## 2026-08-19 — TODO: send for quote via the PCBWay partner API
 
 **Status: specified, not built.** Checked against the live docs at

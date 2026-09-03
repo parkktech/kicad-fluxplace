@@ -77,6 +77,7 @@ def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
     from fluxplace import fab as F, fabdoc
+    _review_gate(a, stage="deliver")
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -367,6 +368,7 @@ def cmd_tournament(a):
 def cmd_fab(a):
     """Emit a build-quality manufacturing package (gerbers/drill/place/DRC) for review."""
     from fluxplace import fab
+    _review_gate(a, stage="fab")
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
     print(f"DRC {res['drc']}; package at {res['out']}")
     if a.upload_out:
@@ -616,9 +618,9 @@ def cmd_verifymodels(a):
     holes; SMD: body over the footprint). --fix solves and writes the
     correcting transform where possible."""
     board, parts, nets, IO = _load(a.board)
-    from fluxplace import models as M
+    from fluxplace import model_verify as MV
     resolve = lambda p: IO._resolve_model_path(p, board)
-    finds = M.verify_board(board, resolve, fix=a.fix, tol=a.tol)
+    finds = MV.verify_board(board, resolve, fix=a.fix, tol=a.tol)
     for ref, msg in finds:
         print(f"{ref}: {msg}")
     if not finds:
@@ -1084,6 +1086,83 @@ def cmd_lint(a):
         raise SystemExit(1)
 
 
+def _review_gate(a, stage="review", hard=True):
+    """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
+    distributor package/pin/temperature data, pinmap vs the official symbol,
+    spec/board sync, hold-up and TVS margins. Runs before anything leaves for
+    a fab. FAIL aborts unless --no-review; returns the findings."""
+    import json as _json
+    from fluxplace import review as R
+    from fluxplace import constraints as C
+    if getattr(a, "no_review", False):
+        print(f"    review gate SKIPPED (--no-review) before {stage}", flush=True)
+        return []
+    board = getattr(a, "board", None)
+    if not board:
+        print(f"    review gate: no --board given, nothing to review before {stage}")
+        return []
+    facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None))
+    spec = None
+    spec_path = getattr(a, "spec", None)
+    if spec_path:
+        spec = _json.load(open(spec_path))
+    cons = C.load(getattr(a, "constraints", None))
+    partdata = {}
+    if not getattr(a, "no_api", False) and facts["mpn_map"]:
+        from fluxplace import partdata as PD
+        cache_dir = os.path.dirname(facts.get("mpn_map_path") or board) or "."
+        partdata = PD.fetch(sorted(set(facts["mpn_map"].values())),
+                            cache_dir=cache_dir,
+                            refresh=getattr(a, "refresh", False),
+                            log=lambda m: print(m, flush=True))
+    idx = R.lib_index()
+    findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
+                     waivers=getattr(a, "waive", None) or ())
+    print(f"REVIEW ({stage}) — {board}")
+    n = R.summarize(findings, log=lambda m: print(m, flush=True))
+    if getattr(a, "json", None) and stage == "review":
+        with open(a.json, "w") as fh:
+            _json.dump(findings, fh, indent=1)
+        print(f"review: wrote {a.json}")
+    if hard and n["fail"]:
+        raise SystemExit(f"ABORT before {stage}: {n['fail']} review FAIL(s). "
+                         f"Fix them, waive them (--waive CODE:REGEX) or pass "
+                         f"--no-review to ship anyway.")
+    return findings
+
+
+def cmd_review(a):
+    """Standalone design review; exit 1 per --fail-on."""
+    from fluxplace import review as R
+    findings = _review_gate(a, stage="review", hard=False)
+    n = {"fail": sum(f["level"] == "FAIL" for f in findings),
+         "warning": sum(f["level"] == "WARN" for f in findings)}
+    if a.fail_on == "warning" and (n["fail"] or n["warning"]):
+        raise SystemExit(1)
+    if a.fail_on == "error" and n["fail"]:
+        raise SystemExit(1)
+
+
+def _add_review_args(p, gate=False):
+    p.add_argument("--spec", default=None,
+                   help="netlist/board spec JSON (board size, layers, "
+                        "components with pinmaps) to hold the copper against")
+    p.add_argument("--constraints", default=None,
+                   help="constraints TOML: [env], [nets], [rf], [power], "
+                        "[protection] rules for the review gate")
+    p.add_argument("--mpn-map", default=None,
+                   help="ref->MPN map (auto-discovered when omitted)")
+    p.add_argument("--no-api", action="store_true",
+                   help="skip DigiKey/Mouser part data (offline review)")
+    p.add_argument("--refresh", action="store_true",
+                   help="ignore the 7-day part-data cache")
+    p.add_argument("--waive", action="append", default=[],
+                   help="suppress findings: CODE:REGEX, repeatable")
+    if gate:
+        p.add_argument("--no-review", action="store_true",
+                       help="skip the design-review gate (ships known FAILs)")
+
+
 def cmd_models(a):
     """Fetch real manufacturer STEP models (DigiKey /media, Mouser assist)
     for footprints with missing/broken 3D models, wire them in, save."""
@@ -1123,7 +1202,14 @@ def cmd_intake(a):
     with open(a.out, "w") as fh:
         _json.dump(intent, fh, indent=1)
     print(f"intent -> {a.out} ({len(intent['interfaces'])} interfaces, "
-          f"mounting={intent['mounting']})")
+          f"mounting={intent['mounting']}, env={intent.get('environment')})")
+    if a.constraints_out and intent.get("environment"):
+        from fluxplace import constraints as C
+        block = C.env_toml(intent["environment"])
+        mode = "a" if os.path.exists(a.constraints_out) else "w"
+        with open(a.constraints_out, mode) as fh:
+            fh.write(("\n" if mode == "a" else "") + block)
+        print(f"[env] -> {a.constraints_out}")
     if a.apply_board:
         from fluxplace import kicad_io as IO
         board = IO.load(a.apply_board)
@@ -1478,6 +1564,7 @@ def build_parser():
     pd.add_argument("--assembly-notes", help="markdown file appended verbatim "
                                              "to the assembly-instructions doc "
                                              "(upload slot 4)")
+    _add_review_args(pd, gate=True)
     pd.set_defaults(fn=cmd_deliver)
 
     pw = sub.add_parser("pcbway",
@@ -1578,6 +1665,7 @@ def build_parser():
                          "+ schematics, no .kicad_prl) into this directory")
     pf.add_argument("--project-dir", default=None,
                     help="project dir for --upload-out (default: board's dir)")
+    _add_review_args(pf, gate=True)
     pf.set_defaults(fn=cmd_fab)
 
     pci = sub.add_parser("comprehend-intent",
@@ -1800,6 +1888,19 @@ def build_parser():
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
 
+    prv = sub.add_parser("review",
+                         help="design-review gate: spec net rules, diff-pair "
+                              "skew, per-layer RF impedance, distributor "
+                              "package/pin/temperature vs footprint, pinmap vs "
+                              "the official symbol, spec/board sync, hold-up "
+                              "and TVS margin")
+    prv.add_argument("--board", required=True)
+    _add_review_args(prv)
+    prv.add_argument("--json", default=None, help="also write findings as JSON")
+    prv.add_argument("--fail-on", choices=["never", "error", "warning"],
+                     default="error", help="exit 1 at this severity (default error)")
+    prv.set_defaults(fn=cmd_review)
+
     pmo = sub.add_parser("models",
                          help="fetch real vendor STEP models (DigiKey/Mouser "
                               "APIs) for footprints missing 3D models")
@@ -1829,6 +1930,9 @@ def build_parser():
                      help="JSON with pre-filled answers (non-interactive)")
     pin.add_argument("--apply-board", default=None,
                      help="board to add corner mounting holes to now")
+    pin.add_argument("--constraints-out", default=None,
+                     help="write/append the [env] block to this constraints "
+                          "TOML so the review gate derates against it")
     pin.set_defaults(fn=cmd_intake)
 
     pc = sub.add_parser("calibrate",

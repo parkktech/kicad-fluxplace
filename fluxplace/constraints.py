@@ -13,6 +13,35 @@ optional; anything not stated keeps the heuristic default. Schema:
     [si]
     default_skew_mm = 1.0   # SI-lite limit for pairs with no family entry
 
+    [env]                   # the PRODUCT environment — drives the review gate
+    temp_min_c = -30        # every part must be rated at least this wide
+    temp_max_c = 85
+    vibration = "high"      # low | high  (vehicle / handheld = high)
+    moisture = "outdoor"    # dry | humid | condensing | outdoor
+    transient = "auto-12v"  # none | auto-12v | auto-24v (input protection class)
+
+    [nets.PTT_THRU]         # per-net rules the reviewer holds the copper to
+    straight_copper = ["J1A:1", "J2A:1"]   # ONLY these pads may be on the net
+    max_vias = 0            # (RF nets) layer transitions allowed
+
+    [rf]
+    target_z = 50           # single-ended target for RF-named nets
+    tolerance_pct = 10
+    max_vias = 1
+    nets = ["RF_GNSS"]      # optional: explicit list instead of name hints
+
+    [power."+5V"]           # (in addition to the ampacity fields above)
+    holdup_ms = 20          # ride-through the spec promises ...
+    nominal_v = 5.0         # ... from this rail voltage ...
+    min_v = 4.75            # ... down to the load's minimum ...
+    load_a = 1.0            # ... at this current. Checked against bulk C.
+
+    [protection]
+    tvs_ref = "D1"
+    downstream_max_v = 40   # rating of the first device behind the TVS
+    clamp_v = 38.9          # optional; distributor data fills it when absent
+    min_margin_pct = 15
+
 Width rule: conservative 1oz external copper, ~0.5 mm per amp with a 0.3 mm
 floor — wide enough for a 10C rise at the stated current, narrow enough not to
 eat the board. The engineer can always state width_mm directly instead.
@@ -58,6 +87,36 @@ def skew_limit_mm(cons, master):
     if best:
         return best[1]
     return float(cons.get("si", {}).get("default_skew_mm", 1.0))
+
+
+def env_profile(cons):
+    """The product environment, or None when nobody stated one. Numbers are
+    floats; strings are lower-cased. A temperature range is the minimum a
+    profile must carry — without it no part can be derated."""
+    e = (cons or {}).get("env")
+    if not e:
+        return None
+    if "temp_min_c" not in e or "temp_max_c" not in e:
+        return None
+    return {
+        "temp_min_c": float(e["temp_min_c"]),
+        "temp_max_c": float(e["temp_max_c"]),
+        "vibration": str(e.get("vibration", "low")).lower(),
+        "moisture": str(e.get("moisture", "dry")).lower(),
+        "transient": str(e.get("transient", "none")).lower(),
+    }
+
+
+def env_toml(env):
+    """Render an environment dict (intake output) as a [env] TOML block."""
+    lines = ["[env]"]
+    for k in ("temp_min_c", "temp_max_c"):
+        if k in env:
+            lines.append(f"{k} = {float(env[k]):g}")
+    for k in ("vibration", "moisture", "transient", "location"):
+        if env.get(k):
+            lines.append(f'{k} = "{env[k]}"')
+    return "\n".join(lines) + "\n"
 
 
 # Differential geometry per impedance target on the JLC7628-class stackup

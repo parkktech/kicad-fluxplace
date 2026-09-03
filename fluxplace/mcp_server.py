@@ -153,6 +153,14 @@ POLICY = {
                                    "exist. Net-label style, not hand-drawn signal flow."),
     "verify-models":     ("read",  "Verify 3D models sit on their footprint pins — displaced "
                                    "models look like mechanical truth and are a review hazard."),
+    "review":            ("read",  "The design-review gate — what an outside reviewer checks "
+                                   "that DRC, ERC and lint do not: spec net rules (straight-"
+                                   "copper nets), diff-pair skew and layer use, RF impedance "
+                                   "graded on the layer the copper is actually on, distributor "
+                                   "package / pin count / operating temperature vs the "
+                                   "footprint and the [env] profile, spec pinmap vs the KiCad "
+                                   "official symbol, spec/board size and layer sync, hold-up "
+                                   "and TVS margin. fab and deliver run it and abort on FAIL."),
 
     # ---- write: produce files, fast ---------------------------------------
     "fab":               ("write", "Emit the manufacturing package: gerbers, drill, centroid, "
