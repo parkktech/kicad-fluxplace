@@ -29,7 +29,37 @@ ground role, mechanical pads (MP/SH) do not count as pins.
 Also fixed: `verify-models` called `models.verify_board`, which does not
 exist; it is `model_verify.verify_board`.
 
+### Repairs (same day)
+`fluxplace/repair.py` + `fluxplace/tune.py`, wired as `repair` and `tune`:
+loop/stub removal on 2-pin nets, per-layer RF re-widthing (review's
+`layer_geometry`/`z0_on_layer` solved for width), pin remap with local,
+zone-aware stub rip and GND vias, twin-pad netting, silkscreen text in a free
+spot, hairpin shortcuts + DRC-guarded meanders for pair skew. Three pcbnew
+lessons paid for on the way: proxies of removed items must outlive the
+session (`repair._GRAVEYARD`) or `board.GetTracks()` degrades to an
+un-iterable SwigPyObject; `GetNetsByName`/`FindNet`/`GetEnabledLayers` come
+back unwrapped in the venv build — read net codes off the copper and use
+`IsOnLayer`; pruning a plane net's dangling copper without a zone test
+deleted 225 GND items (the prune is now local to the pad and zone-aware).
+
+### Closing the loop on a real board (utv-comms V1.5, same day)
+`drc-fix`, `finish` and `repair --stitch` came out of driving V1.4 -> V1.5:
+a footprint swap (SOIC-8 -> PowerPAK SO-8) shorts the track that used to
+run past it; widened RF grazes other nets' vias; the patcher's grid cannot
+cross a CM5 fanout but freerouting can, if you only take back the nets you
+asked for. Two more pcbnew lessons: `board.GetItem(KIID)` is not exposed in
+this build, so DRC items are resolved geometrically from the report's own
+description + position; and a via "fix" that ignores the inner layers (the
+first island-via attempt) is worse than the finding it fixes — every via
+placement now checks all layers for other nets' copper and holes, and is
+DRC-guarded on top. The board went 0 DRC / 0 unconnected / 0 review FAIL,
+with waivers for the three things the tools could not do (a -40 C gigabit
+transformer with a reachable datasheet, one pair in the CM5 fanout, a
+112-day ESD part).
+
 ### Not yet
+- `repair`/`tune`/`drc-fix`/`finish` have no pcbnew-free unit tests (they are all board
+  mutation); they are exercised on utv-comms V1.5.
 - Pinmap verification is against the KiCad official symbol when one exists
   for the MPN prefix; parts without one get PINMAP_UNVERIFIED unless the spec
   carries `pinmap_source`. Parsing the datasheet pin table itself is the

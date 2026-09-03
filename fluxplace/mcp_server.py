@@ -170,6 +170,25 @@ POLICY = {
     "pcbway":            ("write", "Generate the PCBWay order worksheet and assembly "
                                    "instructions from the board, so the order form is not "
                                    "answered from memory."),
+    "repair":            ("write", "Copper repairs the review gate asks for: remove router "
+                                   "loops/stubs on differential pairs, re-width RF segments to "
+                                   "what their layer needs, remap pads to corrected nets (rips "
+                                   "old stubs, drops GND vias), net twin pads, add silkscreen "
+                                   "text. Optionally runs the patcher for unrouted pads."),
+    "finish":            ("long",  "Route named nets with freerouting and take back only "
+                                   "their copper (planes declared as power in the DSN); kept "
+                                   "only if DRC does not worsen and the unconnected count "
+                                   "falls. For the connection the grid patcher cannot close."),
+    "drc-fix":           ("write", "Fix the DRC noise a repair leaves behind: rip tracks "
+                                   "that short a swapped footprint's pads, neck widened RF "
+                                   "segments at clearance pinches, snap or delete stray track "
+                                   "ends, move colliding reference text; loops DRC until the "
+                                   "count stops falling."),
+    "tune":              ("long",  "DRC-guarded differential-pair length tuning: bridge "
+                                   "hairpins on the long side, add serpentine meanders on "
+                                   "the short side, accept each step only when kicad-cli "
+                                   "DRC does not get worse, until every pair is inside its "
+                                   "[pairs.*] skew_mm limit."),
     "models":            ("write", "Fetch real manufacturer STEP models via distributor APIs "
                                    "and wire them to footprints."),
     "intake":            ("write", "Design interview: capture design intent to JSON."),

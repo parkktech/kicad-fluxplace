@@ -1116,8 +1116,10 @@ def _review_gate(a, stage="review", hard=True):
                             refresh=getattr(a, "refresh", False),
                             log=lambda m: print(m, flush=True))
     idx = R.lib_index()
+    waivers = list(getattr(a, "waive", None) or ()) + list(
+        (cons.get("review", {}) or {}).get("waive", []))
     findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
-                     waivers=getattr(a, "waive", None) or ())
+                     waivers=waivers)
     print(f"REVIEW ({stage}) — {board}")
     n = R.summarize(findings, log=lambda m: print(m, flush=True))
     if getattr(a, "json", None) and stage == "review":
@@ -1129,6 +1131,130 @@ def _review_gate(a, stage="review", hard=True):
                          f"Fix them, waive them (--waive CODE:REGEX) or pass "
                          f"--no-review to ship anyway.")
     return findings
+
+
+def cmd_repair(a):
+    """Copper repairs the review gate asks for: pair loop removal, per-layer
+    RF widths, pin remaps with stub rip + GND vias, twin-pad nets, silkscreen
+    text. Saves to --out (default: in place) and can run the last-mile patcher
+    for anything a remap left unrouted."""
+    import json as _json
+    from fluxplace import repair as RP, review as R, constraints as C
+    from fluxplace import kicad_io as IO
+    board = IO.load(a.board)
+    log = lambda m: print(m, flush=True)
+    did = []
+    if a.fix_pads:
+        n = RP.fix_dup_pads(board, log=log)
+        did.append(f"twin pads netted: {n}")
+    if a.pairs is not None:
+        prefixes = a.pairs or ["ETH_"]
+        tot = []
+        for pfx in prefixes:
+            tot += RP.redundant_copper(board, prefix=pfx, log=log)
+        did.append(f"redundant copper removed on {len(tot)} net(s)")
+    if a.remap:
+        mapping = _json.load(open(a.remap))
+        rep = RP.remap_pins(board, mapping, rip=not a.no_rip, log=log)
+        did.append(f"remapped {len(rep['changed'])} pad(s), ripped {rep['ripped']} "
+                   f"items, {rep['vias']} GND via(s), {len(rep['unrouted'])} to route")
+    if a.rf:
+        cons = C.load(a.constraints)
+        rf = cons.get("rf", {})
+        facts = R.facts_from_board(a.board)
+        nets = set(rf.get("nets", [])) or {n for n in facts["net_pads"] if R.is_rf(n)}
+        planes = a.planes or facts["plane_layers"]
+        ch = RP.rf_widths(board, facts["stackup"], planes, nets,
+                          target_z=float(rf.get("target_z", 50.0)), log=log)
+        did.append(f"RF segments re-widthed: {len(ch)} on {sorted(nets)}")
+    for spec in (a.stitch or []):
+        ref, _, num = spec.partition(":")
+        RP.stitch(board, ref, num, max_mm=a.stitch_max, log=log)
+        did.append(f"stitch {spec}")
+    if a.text:
+        at = None
+        if a.text_at:
+            at = tuple(float(v) for v in a.text_at.split(","))
+        RP.add_text(board, a.text, layer=a.text_layer, at=at, size_mm=a.text_size,
+                    prefer=a.text_prefer, log=log)
+        did.append(f"text added: {a.text!r}")
+    out = a.out or a.board
+    IO.save(board, out)
+    print(f"repair: {'; '.join(did) or 'nothing requested'} -> {out}")
+    if a.patch:
+        from fluxplace import patch as PATCH
+        res = PATCH.patch_board(out, out, kicad_cli=a.kicad_cli,
+                                track_w=a.track, clearance=a.clearance,
+                                via_mm=a.via, drill_mm=a.drill, cell=a.cell,
+                                log=log)
+        print(f"patch: accepted={res['accepted']} patched={res['patched']} "
+              f"failed={res['failed']}")
+
+
+def cmd_finish(a):
+    """Route named nets with freerouting and take ONLY their copper back,
+    DRC-guarded: the result is kept if violations do not rise and the
+    unconnected count falls."""
+    import shutil
+    from fluxplace import finish as FN, tune as TU
+    out = a.out or a.board
+    tmp = out + ".finish.kicad_pcb"
+    base = TU.drc_counts(a.board, a.kicad_cli)
+    print(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
+    res = FN.route_nets(a.board, tmp, a.nets, planes=a.planes, jar=a.jar,
+                        passes=a.passes, log=lambda m: print(m, flush=True))
+    if not res:
+        raise SystemExit("finish: nothing produced")
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(a.board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
+    v, u = TU.drc_counts(tmp, a.kicad_cli)
+    if v <= base[0] and u < base[1]:
+        shutil.move(tmp, out)
+        print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
+    else:
+        print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
+              f"(was {base[0]} / {base[1]}); scratch left at {tmp}")
+        raise SystemExit(1)
+
+
+def cmd_drcfix(a):
+    """Fix the DRC noise repairs leave behind (shorts from a bigger land
+    pattern, RF clearance after re-widthing, dangling/uncentered tracks,
+    silkscreen reference collisions), looping DRC until it stops falling."""
+    from fluxplace import drcfix as DF
+    hist, d = DF.loop(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
+                      rounds=a.rounds, islands=a.island_vias,
+                      log=lambda m: print(m, flush=True))
+    import collections
+    c = collections.Counter(v.get("type") for v in d.get("violations", []))
+    if c:
+        print("  remaining: " + ", ".join(f"{k} x{n}" for k, n in c.most_common()))
+    for u in d.get("unconnected_items", [])[:12]:
+        print("  unconnected: " + " <-> ".join(i.get("description", "")[:50]
+                                              for i in u.get("items", [])))
+
+
+def cmd_tune(a):
+    """DRC-guarded differential-pair length tuning: hairpin shortcuts on the
+    long side, serpentine meanders on the short side, every step accepted
+    only if kicad-cli DRC does not get worse."""
+    from fluxplace import tune as TU, constraints as C, graph as G
+    from fluxplace import kicad_io as IO
+    board = IO.load(a.board)
+    names = sorted({t.GetNetname() for t in board.GetTracks() if t.GetNetname()})
+    pairs = G.diff_pairs(names)
+    if a.prefix:
+        pairs = {s: m for s, m in pairs.items() if m.startswith(tuple(a.prefix))}
+    cons = C.load(a.constraints)
+    lim = lambda master: C.skew_limit_mm(cons, master)
+    rep = TU.tune_pairs(a.board, a.out or a.board, pairs, lim, kicad_cli=a.kicad_cli,
+                        amp_mm=a.amplitude, max_rounds=a.rounds,
+                        log=lambda m: print(m, flush=True))
+    for master, slave, lm, ls in rep:
+        flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
+        print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
 
 
 def cmd_review(a):
@@ -1900,6 +2026,87 @@ def build_parser():
     prv.add_argument("--fail-on", choices=["never", "error", "warning"],
                      default="error", help="exit 1 at this severity (default error)")
     prv.set_defaults(fn=cmd_review)
+
+    prp = sub.add_parser("repair",
+                         help="copper repairs the review gate asks for: pair "
+                              "loop removal, per-layer RF widths, pin remap "
+                              "with stub rip, twin-pad nets, silkscreen text")
+    prp.add_argument("--board", required=True)
+    prp.add_argument("--out", default=None, help="default: overwrite --board")
+    prp.add_argument("--fix-pads", action="store_true",
+                     help="net the unnetted twin of a same-numbered pad")
+    prp.add_argument("--pairs", nargs="*", default=None, metavar="PREFIX",
+                     help="remove loops/stubs on 2-pin nets with these name "
+                          "prefixes (default ETH_)")
+    prp.add_argument("--remap", default=None,
+                     help='JSON {"D7": {"1": "MIC_N", "2": "GND"}}: re-net pads, '
+                          "rip old stubs, GND via beside pads that become GND")
+    prp.add_argument("--no-rip", action="store_true")
+    prp.add_argument("--rf", action="store_true",
+                     help="re-width RF segments to the impedance their layer needs")
+    prp.add_argument("--planes", nargs="*", default=None,
+                     help="reference plane layers (default: detected)")
+    prp.add_argument("--constraints", default=None, help="[rf] target/nets")
+    prp.add_argument("--stitch", action="append", default=[], metavar="REF:PAD",
+                     help="join a pad to the nearest same-net copper on its "
+                          "layer with one straight track (repeatable)")
+    prp.add_argument("--stitch-max", type=float, default=3.0)
+    prp.add_argument("--text", default=None, help="silkscreen text to add")
+    prp.add_argument("--text-layer", default="F.SilkS")
+    prp.add_argument("--text-size", type=float, default=1.0)
+    prp.add_argument("--text-at", default=None, help="x,y mm (default: free spot)")
+    prp.add_argument("--text-prefer", default="bottom-right",
+                     choices=["bottom-right", "bottom-left", "top-left", "top-right"])
+    prp.add_argument("--patch", action="store_true",
+                     help="run the last-mile patcher afterwards for unrouted pads")
+    prp.add_argument("--kicad-cli", default="kicad-cli")
+    prp.add_argument("--track", type=float, default=0.2)
+    prp.add_argument("--clearance", type=float, default=0.15)
+    prp.add_argument("--via", type=float, default=0.45)
+    prp.add_argument("--drill", type=float, default=0.25)
+    prp.add_argument("--cell", type=float, default=0.25, help="patcher grid mm")
+    prp.set_defaults(fn=cmd_repair)
+
+    pfn = sub.add_parser("finish",
+                         help="route named nets with freerouting and take only "
+                              "their copper back, DRC-guarded")
+    pfn.add_argument("--board", required=True)
+    pfn.add_argument("--out", default=None)
+    pfn.add_argument("--nets", nargs="+", required=True)
+    pfn.add_argument("--planes", nargs="*", default=["In1.Cu", "In4.Cu"],
+                     help="plane layers declared (type power) in the DSN")
+    pfn.add_argument("--jar", default=None)
+    pfn.add_argument("--passes", type=int, default=3)
+    pfn.add_argument("--kicad-cli", default="kicad-cli")
+    pfn.set_defaults(fn=cmd_finish)
+
+    pdf = sub.add_parser("drc-fix",
+                         help="fix the DRC noise a repair leaves behind: rip "
+                              "tracks shorting a swapped footprint, neck RF "
+                              "segments at clearance pinches, snap/delete "
+                              "stray track ends, move colliding reference text")
+    pdf.add_argument("--board", required=True)
+    pdf.add_argument("--out", default=None)
+    pdf.add_argument("--rounds", type=int, default=3)
+    pdf.add_argument("--island-vias", action="store_true",
+                     help="DRC-guarded via into each outer-layer plane island "
+                          "that has no via (kept only if DRC does not worsen)")
+    pdf.add_argument("--kicad-cli", default="kicad-cli")
+    pdf.set_defaults(fn=cmd_drcfix)
+
+    ptu = sub.add_parser("tune",
+                         help="DRC-guarded diff-pair length tuning: hairpin "
+                              "shortcuts and serpentine meanders until every "
+                              "pair is within its [pairs] skew limit")
+    ptu.add_argument("--board", required=True)
+    ptu.add_argument("--out", default=None)
+    ptu.add_argument("--prefix", nargs="*", default=None,
+                     help="only pairs whose master net starts with these")
+    ptu.add_argument("--constraints", default=None, help="[pairs.*] skew_mm limits")
+    ptu.add_argument("--amplitude", type=float, default=0.6, help="meander amplitude mm")
+    ptu.add_argument("--rounds", type=int, default=6)
+    ptu.add_argument("--kicad-cli", default="kicad-cli")
+    ptu.set_defaults(fn=cmd_tune)
 
     pmo = sub.add_parser("models",
                          help="fetch real vendor STEP models (DigiKey/Mouser "

@@ -24,6 +24,7 @@ ENVIRONMENT. This module does that:
   HOLDUP_SHORT           bulk capacitance cannot deliver the stated ride-through
   TVS_MARGIN             clamp voltage vs the downstream device rating
   ENV_UNDEFINED          nobody answered the environment questions
+  PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
 
 Pure logic runs on a `facts` dict so it is testable without pcbnew;
 `facts_from_board()` at the bottom is the only pcbnew consumer. Findings are
@@ -205,6 +206,7 @@ def check_rf(facts, cons):
     tol = float(rf.get("tolerance_pct", 10.0))
     max_vias = int(rf.get("max_vias", 1))
     min_seg = float(rf.get("min_segment_mm", 1.0))
+    neck_max = float(rf.get("neck_max_mm", 1.5))   # deliberate neck-downs at pinches
     names = set(rf.get("nets", [])) or {n for n in facts["net_pads"] if is_rf(n)}
     stackup = facts.get("stackup") or []
     planes = set(facts.get("plane_layers", []))
@@ -228,7 +230,7 @@ def check_rf(facts, cons):
                           f"transition is an impedance discontinuity"))
         worst = None
         for layer, w, mm in tr.get("segments", []):
-            if mm < min_seg:
+            if mm < min_seg or mm <= neck_max:
                 continue
             geom = layer_geometry(stackup, planes, layer)
             if geom is None:
@@ -475,9 +477,13 @@ def check_parts(facts, spec, partdata, cons, idx=None):
                                   f"'{fp.split(':')[-1]}'", refs=[ref]))
             npins = data.get("pins") or _pins_from_pkg(pkg)
             npads = p.get("connectable_pads")
+            total = p.get("pads_total", npads)
             if npins and npads and npins != npads and not p.get("tht_mech"):
-                # distributors count leads; footprints may add an EP pad
-                if not (npads == npins + 1 and "EP" in fp.upper()):
+                # distributors count leads; footprints may add an EP pad, or
+                # merge several leads into one tab pad number (PowerPAK: five
+                # pads numbered 5 for leads 5-8)
+                if not (npads == npins + 1 and "EP" in fp.upper()) and not (
+                        total and total >= npins and npads < npins):
                     out.append(_f(FAIL, "PIN_COUNT_MISMATCH",
                                   f"{ref} {mpn}: {npins} pins per distributor, "
                                   f"{npads} connectable pads on the footprint",
@@ -556,6 +562,19 @@ def check_parts(facts, spec, partdata, cons, idx=None):
 # ==========================================================================
 # 5. Spec <-> board sync
 # ==========================================================================
+def check_pads(facts):
+    """Twin pads (two pads, one number) where only one twin got a net: the
+    generator netted the first and left the other floating. SW1 on V1.4 had
+    half its pads on nothing and read as a mechanical part."""
+    dups = facts.get("dup_bare_pads") or []
+    if not dups:
+        return []
+    return [_f(WARN, "PAD_TWIN_UNNETTED",
+               f"{len(dups)} twin pad(s) with no net beside a netted twin: "
+               f"{', '.join(f'{r}.{n}' for r, n in dups[:10])} — "
+               f"`fluxplace repair --fix-pads`", refs=[r for r, _ in dups])]
+
+
 def check_spec_sync(facts, spec, size_tol_mm=2.0):
     out = []
     if not spec:
@@ -704,6 +723,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=()):
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx)
     out += check_spec_sync(facts, spec)
+    out += check_pads(facts)
     out += check_power(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
@@ -759,6 +779,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
     board = pcbnew.LoadBoard(board_path)
     bb = board.GetBoardEdgesBoundingBox()
     parts, net_pads = {}, defaultdict(list)
+    dup_bare = set()
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         pads, conn = {}, 0
@@ -768,13 +789,20 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
                 continue
             if num not in pads and num.isdigit():
                 conn += 1
-            pads[num] = pad.GetNetname()
+            nn = pad.GetNetname()
+            if num in pads and pads[num] and not nn:
+                dup_bare.add((ref, num))
+                continue
+            if num in pads and nn and not pads[num]:
+                dup_bare.add((ref, num))
+            pads[num] = nn or pads.get(num, "")
             if pad.GetNetname():
                 net_pads[pad.GetNetname()].append((ref, num))
         parts[ref] = {
             "value": fp.GetValue(),
             "footprint": fp.GetFPID().GetUniStringLibId(),
             "pads": pads, "connectable_pads": conn,
+            "pads_total": sum(1 for pad in fp.Pads() if pad.GetNumber().isdigit()),
             "mech": not any(pads.values()),
             "tht": any(p.GetDrillSize().x > 0 for p in fp.Pads()),
         }
@@ -829,4 +857,5 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "layer_track_mm": dict(layer_len),
         "mpn_map": mp,
         "mpn_map_path": path,
+        "dup_bare_pads": sorted(dup_bare),
     }

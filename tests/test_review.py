@@ -412,3 +412,26 @@ def test_parse_stackup_text():
     assert [r["type"] for r in rows] == ["copper", "prepreg", "copper"]
     assert rows[1]["thickness"] == 0.1 and rows[1]["epsilon_r"] == 4.1
     assert rows[2]["name"] == "In1.Cu"
+
+
+# ------------------------------------------------------------- drcfix parse
+def test_drc_item_description_regex():
+    from fluxplace import drcfix as DF
+    m = DF._DESC.match("Track [RF_GNSS] on In2.Cu, length 17.6112 mm")
+    assert m.groups() == ("Track", None, "RF_GNSS", None, "In2.Cu", "17.6112")
+    m = DF._DESC.match("Via [ETH_P0_P] on F.Cu - B.Cu")
+    assert m.group(1) == "Via" and m.group(3) == "ETH_P0_P"
+    m = DF._DESC.match("Pad 5 [VBATT_IN] of Q1 on F.Cu")
+    assert m.group(2) == "5" and m.group(3) == "VBATT_IN" and m.group(4) == "Q1"
+    assert DF._DESC.match("Reference field of Q1") is None
+
+
+def test_review_waivers_from_constraints_shape():
+    # [review] waive entries are plain CODE:REGEX strings, same as --waive
+    cons = {"review": {"waive": ["TEMP_RATING:^T3 "]}}
+    f = facts(mpn_map={"T3": "X"})
+    f["parts"]["T3"] = part("X", "lib:SOIC-24", {"1": "A"})
+    pd = {"X": {"package": None, "pins": None, "temp_min": 0, "temp_max": 70}}
+    env = {"env": {"temp_min_c": -40, "temp_max_c": 85}}
+    out = R.run(f, cons=env, partdata=pd, waivers=cons["review"]["waive"])
+    assert "TEMP_RATING" not in codes(out)
