@@ -488,6 +488,7 @@ def test_models_gate(tmp_path):
         "U2": {"footprint": "Y", "models": [], "mech": False},
         "J1": {"footprint": "Z", "models": [str(tmp_path / "nope.step")], "mech": False},
         "MH1": {"footprint": "Hole", "models": [], "mech": True},
+        "A1": {"footprint": "Patch", "models": [str(tmp_path / "Taoglas_patch_standin.wrl")], "mech": False},
     }}
     codes = {(f["code"], f["refs"][0]) for f in R.check_models(facts)}
-    assert codes == {("MODEL_MISSING", "U2"), ("MODEL_FILE_MISSING", "J1")}
+    assert codes == {("MODEL_MISSING", "U2"), ("MODEL_FILE_MISSING", "J1"), ("MODEL_STANDIN", "A1")}

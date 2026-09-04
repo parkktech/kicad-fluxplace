@@ -20,6 +20,7 @@ ENVIRONMENT. This module does that:
   TEMP_RATING            part rated narrower than the product environment
   MODEL_MISSING          electrical footprint without a 3D model
   MODEL_FILE_MISSING     3D model path that resolves to no file
+  MODEL_STANDIN          model file named as a stand-in / placeholder
   SPEC_SIZE_MISMATCH / SPEC_LAYER_MISMATCH / SPEC_COMPONENT_MISMATCH /
   SPEC_FOOTPRINT_MISMATCH
                          the spec JSON and the copper have drifted apart
@@ -779,6 +780,12 @@ def check_models(facts, board_path=None):
                           refs=[ref]))
             continue
         for m in models:
+            if re.search(r"stand-?in|placeholder|dummy|generic", os.path.basename(m), re.I):
+                out.append(_f(FAIL, "MODEL_STANDIN",
+                              f"{ref}: 3D model {os.path.basename(m)} is a hand-made stand-in; "
+                              f"the rule is a real vendor/EasyEDA body (fluxplace models --fetch)",
+                              refs=[ref]))
+                continue
             full = resolve_model(m, board_path or facts.get("board_path", ""))
             if not os.path.exists(full):
                 base, ext = os.path.splitext(full)
