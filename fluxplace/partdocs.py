@@ -24,6 +24,9 @@ the page it came from.
 
 pdftotext (poppler-utils) is used for page text; when it is missing, page
 evidence cannot be checked and is reported as such (never silently passed).
+Fetching uses curl_cffi (Chrome TLS impersonation) when installed: the
+manufacturer hosts that refuse scripts accept a browser fingerprint, so no
+human has to click through for a public document.
 """
 import hashlib
 import json
@@ -67,6 +70,25 @@ def _safe_name(mpn):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", mpn).strip("_") or "part"
 
 
+def _get(url, timeout=60):
+    """(status, content_type, bytes). Uses curl_cffi impersonating Chrome
+    when installed — manufacturer CDNs (Amphenol, Littelfuse, onsemi, C&K,
+    Molex, measured) answer 403 to a plain client's TLS fingerprint and 200
+    to a browser's; the document is public either way. Falls back to urllib."""
+    try:
+        from curl_cffi import requests as cffi
+        r = cffi.get(url, impersonate="chrome", timeout=timeout, allow_redirects=True,
+                     headers={"Accept": "application/pdf,*/*"})
+        return r.status_code, r.headers.get("content-type", ""), r.content
+    except ImportError:
+        pass
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0",
+        "Accept": "application/pdf,*/*"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.headers.get("Content-Type", ""), r.read()
+
+
 def _download(url, dest, timeout=60):
     """-> (ok, detail). A 200 that is not a PDF is a bot page, not a document."""
     if not url:
@@ -74,14 +96,12 @@ def _download(url, dest, timeout=60):
     url = url.strip()
     if url.startswith("//"):
         url = "https:" + url
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0",
-        "Accept": "application/pdf,*/*"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = r.read()
+        status, ctype, data = _get(url, timeout)
     except Exception as e:
         return False, type(e).__name__ + (" %s" % getattr(e, "code", "") if hasattr(e, "code") else "")
+    if status != 200:
+        return False, "HTTP %s" % status
     if not data.startswith(b"%PDF"):
         return False, "served %s, not a PDF" % (data[:15].decode("latin1", "replace").strip() or "nothing")
     with open(dest, "wb") as fh:

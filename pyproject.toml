@@ -21,6 +21,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Part documentation: fetch datasheets from manufacturer hosts that refuse a
+# plain client's TLS fingerprint (Amphenol, Littelfuse, onsemi, C&K, Molex —
+# measured); curl_cffi impersonates Chrome. pdftotext (poppler) reads pages.
+docs = [
+    "curl_cffi>=0.7",
+]
 # Manufacturing documents: the fab-submission brief, the PCBWay order worksheet,
 # the assembly instructions, and the .xlsx twins of the BOM/centroid uploads.
 fab = [

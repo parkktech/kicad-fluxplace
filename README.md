@@ -363,6 +363,13 @@ because a board reached an outside reviewer with an ESD array's ground on the
 wrong pin — the pinmap had been typed from memory and no tool had asked for
 the page it came from.
 
+Datasheet fetching does not need a human: `datasheets` asks DigiKey, Mouser
+and Nexar for the URL and downloads it with **`curl_cffi` impersonating
+Chrome** (`pip install fluxplace[docs]`), which is what the manufacturer CDNs
+that 403 a plain client (Amphenol, Littelfuse, onsemi, C&K, Molex, measured)
+actually check. A host that is unreachable outright is reported for a browser
+fetch and registered with `--adopt`.
+
 Part data comes from the **DigiKey and Mouser APIs**, with **Nexar (Octopart)**
 as the third source when both miss — its datasheets are mirrored on
 `datasheet.octopart.com`, which serves plain PDFs where manufacturers'
