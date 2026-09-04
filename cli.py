@@ -1167,6 +1167,9 @@ def cmd_repair(a):
         ch = RP.rf_widths(board, facts["stackup"], planes, nets,
                           target_z=float(rf.get("target_z", 50.0)), log=log)
         did.append(f"RF segments re-widthed: {len(ch)} on {sorted(nets)}")
+    for ref in (a.clear_under or []):
+        n, nets = RP.clear_under(board, ref, log=log)
+        did.append(f"cleared {n} item(s) under {ref}")
     for spec in (a.stitch or []):
         ref, _, num = spec.partition(":")
         RP.stitch(board, ref, num, max_mm=a.stitch_max, log=log)
@@ -2047,6 +2050,9 @@ def build_parser():
     prp.add_argument("--planes", nargs="*", default=None,
                      help="reference plane layers (default: detected)")
     prp.add_argument("--constraints", default=None, help="[rf] target/nets")
+    prp.add_argument("--clear-under", action="append", default=[], metavar="REF",
+                     help="rip other nets' copper colliding with REF's pads (after "
+                          "a swap to a bigger land pattern), prune, leave for --patch")
     prp.add_argument("--stitch", action="append", default=[], metavar="REF:PAD",
                      help="join a pad to the nearest same-net copper on its "
                           "layer with one straight track (repeatable)")

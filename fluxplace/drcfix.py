@@ -130,9 +130,64 @@ def _split_neck(board, track, px, py, half_mm, base_w):
     return True
 
 
+def _spot_clear(board, pt, r_mm, netcode, ignore=()):
+    """No other-net copper or any hole within r_mm of pt on any copper
+    layer — exact shape collision (a bounding-box test let a pushed via land
+    0.116 mm from a pad, measured)."""
+    import pcbnew
+    circle = pcbnew.SHAPE_CIRCLE(pt, int(r_mm * 1e6))
+    cu = [pcbnew.F_Cu, pcbnew.B_Cu] + [pcbnew.In1_Cu + 2 * i
+                                       for i in range(max(0, board.GetCopperLayerCount() - 2))]
+    for t in board.GetTracks():
+        if any(t is g for g in ignore) or t.GetNetCode() == netcode:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            if t.HitTest(pt, int(r_mm * 1e6)):
+                return False
+            continue
+        try:
+            if t.GetEffectiveShape(t.GetLayer()).Collide(circle, 0):
+                return False
+        except Exception:
+            if t.HitTest(pt, int(r_mm * 1e6)):
+                return False
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetCode() == netcode and p.GetDrillSize().x == 0:
+                continue
+            for l in cu:
+                if not p.IsOnLayer(l):
+                    continue
+                try:
+                    if p.GetEffectiveShape(l).Collide(circle, 0):
+                        return False
+                except Exception:
+                    if p.HitTest(pt, int(r_mm * 1e6)):
+                        return False
+                break
+    return True
+
+
+def _relocate_via(board, via, np_):
+    """Move `via` to np_ if the spot is clear on every layer; drag the ends
+    of same-net tracks that terminate on it. Returns True if moved."""
+    r = via.GetWidth(via.TopLayer()) / 2e6 + 0.125
+    if not _spot_clear(board, np_, r, via.GetNetCode(), ignore=(via,)):
+        return False
+    vp = via.GetPosition()
+    for tr in board.GetTracks():
+        if tr.GetClass() != "PCB_TRACK" or tr.GetNetCode() != via.GetNetCode():
+            continue
+        if tr.GetStart() == vp:
+            tr.SetStart(np_)
+        if tr.GetEnd() == vp:
+            tr.SetEnd(np_)
+    via.SetPosition(np_)
+    return True
+
+
 def _shift_via(board, via, track, by_mm):
-    """Move `via` away from `track` by by_mm along the perpendicular; drag
-    the ends of same-net tracks that terminate on it."""
+    """Move `via` away from `track` by by_mm along the perpendicular."""
     import pcbnew
     vp = via.GetPosition()
     s, e = track.GetStart(), track.GetEnd()
@@ -148,33 +203,19 @@ def _shift_via(board, via, track, by_mm):
         return False
     nx, ny = nx / d, ny / d
     np_ = pcbnew.VECTOR2I(int(vp.x + nx * by_mm * 1e6), int(vp.y + ny * by_mm * 1e6))
-    for tr in board.GetTracks():
-        if tr.GetClass() != "PCB_TRACK" or tr.GetNetCode() != via.GetNetCode():
-            continue
-        if tr.GetStart() == vp:
-            tr.SetStart(np_)
-        if tr.GetEnd() == vp:
-            tr.SetEnd(np_)
-    via.SetPosition(np_)
-    return True
+    return _relocate_via(board, via, np_)
 
 
-def _push_via(board, via, other, by_mm):
+def _push_via(board, via, other_pos, by_mm):
+    """Move `via` straight away from the point other_pos by by_mm."""
     import pcbnew
-    vp, op = via.GetPosition(), other.GetPosition()
-    dx, dy = vp.x - op.x, vp.y - op.y
+    vp = via.GetPosition()
+    dx, dy = vp.x - other_pos.x, vp.y - other_pos.y
     d = math.hypot(dx, dy)
     if d < 1:
         return False
     np_ = pcbnew.VECTOR2I(int(vp.x + dx / d * by_mm * 1e6), int(vp.y + dy / d * by_mm * 1e6))
-    for tr in board.GetTracks():
-        if tr.GetClass() == "PCB_TRACK" and tr.GetNetCode() == via.GetNetCode():
-            if tr.GetStart() == vp:
-                tr.SetStart(np_)
-            if tr.GetEnd() == vp:
-                tr.SetEnd(np_)
-    via.SetPosition(np_)
-    return True
+    return _relocate_via(board, via, np_)
 
 
 def _move_ref(board, ref, log):
@@ -206,7 +247,7 @@ def _move_ref(board, ref, log):
     return True
 
 
-def fix(board, drc, rf_base_w=0.15, is_rf=None, log=print):
+def fix(board, drc, rf_base_w=0.15, is_rf=None, max_push_mm=0.12, log=print):
     """Apply the fixes above for every violation in `drc`. Returns counts."""
     import pcbnew
     from . import review as R
@@ -245,7 +286,23 @@ def fix(board, drc, rf_base_w=0.15, is_rf=None, log=print):
             if others and others[0].get("pos"):
                 px, py = others[0]["pos"]["x"], others[0]["pos"]["y"]
             done = False
-            for it in tracks:
+            # first choice: the OTHER item is a via of another net and the
+            # deficit is small -> push that via off the RF corridor (tracks
+            # ending on it follow). A neck is the fallback: it keeps the
+            # discontinuity, the push removes it.
+            m = re.search(r"clearance ([\d.]+) mm; actual ([\d.]+) mm", v.get("description", ""))
+            ovias = [it for it in others if it.get("description", "").startswith("Via")]
+            if m and ovias and tracks and float(m.group(1)) - float(m.group(2)) <= max_push_mm:
+                via = _item(board, ovias[0])
+                trk = _item(board, tracks[0])
+                if via is not None and trk is not None and is_rf(trk.GetNetname()) \
+                        and not is_rf(via.GetNetname()):
+                    by = float(m.group(1)) - float(m.group(2)) + 0.02
+                    if _shift_via(board, via, trk, by):
+                        log(f"    push via {via.GetNetname()} {by:.3f} mm off {trk.GetNetname()}")
+                        n["shifted"] = n.get("shifted", 0) + 1
+                        done = True
+            for it in ([] if done else tracks):
                 obj = _item(board, it)
                 if obj is None or obj.GetClass() != "PCB_TRACK":
                     continue
@@ -260,6 +317,19 @@ def fix(board, drc, rf_base_w=0.15, is_rf=None, log=print):
                     done = True
                     break
             vias_ = [it for it in items if it.get("description", "").startswith("Via")]
+            pads_ = [it for it in items if it.get("description", "").startswith("Pad")]
+            if not done and len(vias_) == 1 and len(pads_) == 1:
+                # via grazing a pad: push the via straight off the pad
+                m = re.search(r"clearance ([\d.]+) mm; actual ([\d.]+) mm", v.get("description", ""))
+                via = _item(board, vias_[0])
+                pad = _item(board, pads_[0])
+                if m and via is not None and pad is not None and \
+                        float(m.group(1)) - float(m.group(2)) <= max_push_mm:
+                    by = float(m.group(1)) - float(m.group(2)) + 0.02
+                    if _push_via(board, via, pad.GetPosition(), by):
+                        log(f"    push via {via.GetNetname()} {by:.3f} mm off pad {pads_[0]['description'][:24]}")
+                        n["shifted"] = n.get("shifted", 0) + 1
+                        done = True
             if not done and len(vias_) == 2:
                 # via grazing via by a few um: move the one nothing lands on
                 # (a stitching via), else the second, straight away from the other
@@ -270,7 +340,7 @@ def fix(board, drc, rf_base_w=0.15, is_rf=None, log=print):
                         return sum(1 for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"
                                    and (t.GetStart() == via.GetPosition() or t.GetEnd() == via.GetPosition()))
                     mv, other = (a, b) if _lands(a) <= _lands(b) else (b, a)
-                    if _push_via(board, mv, other, float(m.group(1)) - float(m.group(2)) + 0.01):
+                    if _push_via(board, mv, other.GetPosition(), float(m.group(1)) - float(m.group(2)) + 0.01):
                         log(f"    push via {mv.GetNetname()} off via {other.GetNetname()}")
                         n["shifted"] = n.get("shifted", 0) + 1
                         done = True
@@ -291,6 +361,8 @@ def fix(board, drc, rf_base_w=0.15, is_rf=None, log=print):
                         done = True
             if not done:
                 n["skipped"] += 1
+        elif typ == "clearance_pad_track_placeholder":
+            pass
         elif typ == "via_dangling":
             for it in items:
                 obj = _item(board, it)

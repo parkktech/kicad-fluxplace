@@ -25,7 +25,8 @@ import math
 import re
 
 __all__ = ["redundant_copper", "rf_widths", "remap_pins", "fix_dup_pads",
-           "add_text", "prune_dangling", "measure", "stitch", "stitch_islands"]
+           "add_text", "prune_dangling", "measure", "stitch", "stitch_islands",
+           "clear_under"]
 
 # Proxies of items removed from a board must OUTLIVE the session: once Python
 # garbage-collects one ("memory leak of type 'PCB_TRACK *', no destructor
@@ -482,6 +483,47 @@ def stitch(board, ref, padnum, max_mm=3.0, width_mm=0.2, log=print, twin_only=Fa
     log(f"    {ref}.{padnum}: stitched {d:.2f} mm to {pad.GetNetname()} on "
         f"{board.GetLayerName(layer)}")
     return d
+
+
+# ------------------------------------------------------------ clear under
+def clear_under(board, ref, clearance_mm=0.13, log=print):
+    """Rip every track/via of ANOTHER net that collides with a pad of `ref`
+    (pad shape grown by the clearance), then prune what that leaves
+    dangling near the part. For a footprint swap onto a bigger land
+    pattern: the copper that used to run beside the old pads now runs
+    through the new ones. Returns (ripped, nets)."""
+    import pcbnew
+    fp = board.FindFootprintByReference(ref)
+    if not fp:
+        return 0, set()
+    pads = [(p, p.GetNetCode(), p.GetPosition()) for p in fp.Pads() if p.GetNumber()]
+    grow = int(clearance_mm * 1e6)
+    victims, nets = [], set()
+    for t in board.GetTracks():
+        for p, code, pos in pads:
+            if t.GetNetCode() == code:
+                continue
+            if t.GetClass() == "PCB_VIA":
+                hit = p.HitTest(t.GetPosition(), int(t.GetWidth(pcbnew.F_Cu) / 2) + grow)
+            else:
+                if not p.IsOnLayer(t.GetLayer()):
+                    continue
+                try:
+                    shp = p.GetEffectiveShape(t.GetLayer())
+                    hit = t.GetEffectiveShape(t.GetLayer()).Collide(shp, grow)
+                except Exception:
+                    hit = p.HitTest(t.GetStart(), grow) or p.HitTest(t.GetEnd(), grow)
+            if hit:
+                victims.append((t, pos))
+                nets.add(t.GetNetCode())
+                break
+    for t, pos in victims:
+        log(f"    {ref}: rip {t.GetClass()} [{t.GetNetname()}] under pad area")
+        _remove(board, t)
+    c = fp.GetPosition()
+    for code in nets:
+        prune_dangling(board, code, near=(c.x / 1e6, c.y / 1e6), radius_mm=12.0)
+    return len(victims), {board.FindNet(n).GetNetname() if False else n for n in nets}
 
 
 # ---------------------------------------------------------------- islands

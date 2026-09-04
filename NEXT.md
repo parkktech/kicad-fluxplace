@@ -57,6 +57,16 @@ with waivers for the three things the tools could not do (a -40 C gigabit
 transformer with a reachable datasheet, one pair in the CM5 fanout, a
 112-day ESD part).
 
+### Same evening: `repair --clear-under`, via pushes that check every layer
+A footprint swap onto a bigger land pattern (Würth 24-SOIC → Pulse H5084,
+rows 7.5 → 8.99 mm) puts other nets' vias and tracks inside the new pads.
+`repair --clear-under REF` rips exactly that copper (pad shape + clearance,
+any layer the pad is on), prunes locally, and hands the nets to `finish`/
+`--patch`. Via moves (`drc-fix` push off an RF track, off a via, off a pad)
+all go through one `_relocate_via` that requires the new spot to be clear
+of every other net's copper and every hole on every layer, by exact shape
+collision — the bounding-box version let a via land 0.116 mm from a pad.
+
 ### Not yet
 - `repair`/`tune`/`drc-fix`/`finish` have no pcbnew-free unit tests (they are all board
   mutation); they are exercised on utv-comms V1.5.
