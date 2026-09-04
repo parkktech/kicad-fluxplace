@@ -931,6 +931,10 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
     def V(i, j):
         return pcbnew.VECTOR2I(int(round((x0 + i * cell) * 1e6)), int(round((y0 + j * cell) * 1e6)))
 
+    def snap_ok(a, b, l):
+        # the snapped last segment leaves the grid: check it by exact shape
+        return _seg_clear(board, a, b, l, net, width_mm, clearance_mm)
+
     added = []
     first = True
     for idx, (l, pts) in enumerate(runs):
@@ -940,6 +944,8 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
             # from it to the pad centre / track centreline so the join is real
             a = V(*pts[0])
             b = _snap_to_net(board, a, l, net, own_pads, skip=_uuids(added))
+            if a != b and not snap_ok(a, b, l):
+                b = a
             if a != b:
                 t = pcbnew.PCB_TRACK(board)
                 t.SetStart(a)
@@ -953,7 +959,9 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
             a = P if (first and k == 0) else V(*pts[k])
             b = V(*pts[k + 1])
             if idx == len(runs) - 1 and k == len(pts) - 2:
-                b = _snap_to_net(board, b, l, net, own_pads, skip=_uuids(added))
+                b2 = _snap_to_net(board, b, l, net, own_pads, skip=_uuids(added))
+                if b2 != b and snap_ok(a, b2, l):
+                    b = b2      # else keep the grid point: it lies inside target copper
             if a == b:
                 continue
             t = pcbnew.PCB_TRACK(board)
@@ -977,6 +985,39 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
     log(f"    bridge {ref}.{padnum}: {len(added)} item(s), {len(runs)} layer run(s) "
         f"{[board.GetLayerName(l) for l, _ in runs]}, {dist[goal]:.1f} mm cost")
     return added
+
+
+def _seg_clear(board, a, b, layer, net, width_mm, clearance_mm):
+    """Exact-shape check of a candidate segment against every foreign
+    track, via and pad on `layer`. The maze grid is conservative but the
+    snap to a pad centre leaves the grid — on utv-comms V1.5 that snap
+    into T3 pad 18 crossed pad 17, the other leg of the same pair."""
+    import pcbnew
+    seg = pcbnew.SHAPE_SEGMENT(a, b, pcbnew.FromMM(width_mm))
+    clr = pcbnew.FromMM(clearance_mm)
+    for t in board.GetTracks():
+        if t.GetNetCode() == net:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            if not t.IsOnLayer(layer):
+                continue
+        elif t.GetLayer() != layer:
+            continue
+        try:
+            if t.GetEffectiveShape(layer).Collide(seg, clr):
+                return False
+        except Exception:
+            return False
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetCode() == net or not p.IsOnLayer(layer):
+                continue
+            try:
+                if p.GetEffectiveShape(layer).Collide(seg, clr):
+                    return False
+            except Exception:
+                return False
+    return True
 
 
 def _uuids(items):
