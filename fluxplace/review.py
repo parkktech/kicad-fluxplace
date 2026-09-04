@@ -25,6 +25,10 @@ ENVIRONMENT. This module does that:
   TVS_MARGIN             clamp voltage vs the downstream device rating
   ENV_UNDEFINED          nobody answered the environment questions
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
+  MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
+                         a part without a part number, without its datasheet
+                         on disk, or with a pinmap the cited page does not
+                         back (partdocs.py) — FAIL by default ([docs] strict)
 
 Pure logic runs on a `facts` dict so it is testable without pcbnew;
 `facts_from_board()` at the bottom is the only pcbnew consumer. Findings are
@@ -510,6 +514,10 @@ def check_parts(facts, spec, partdata, cons, idx=None):
 
         # pinmap vs the official KiCad symbol for the same part
         pinmap = (sp or {}).get("pinmap")
+        cited = str((sp or {}).get("pinmap_source") or "")
+        if pinmap and (cited.lower().rstrip("0123456789#p").endswith(".pdf") or "#p" in cited):
+            pinmap = None      # datasheet page cited: partdocs checks it; the
+                               # prefix-matched library symbol is weaker evidence
         if pinmap:
             sym = lib_symbol_for(mpn, (sp or {}).get("value") or p.get("value"),
                                  idx) if idx else None
@@ -552,10 +560,37 @@ def check_parts(facts, spec, partdata, cons, idx=None):
                               f"page/URL) — verify against the pin table",
                               refs=[ref]))
     if unchecked:
-        out.append(_f(WARN, "PART_DATA_UNAVAILABLE",
+        out.append(_f(FAIL if (cons or {}).get("docs", {}).get("strict", True) else WARN,
+                      "PART_DATA_UNAVAILABLE",
                       f"{len(unchecked)} part(s) with an MPN but no distributor "
                       f"data: {', '.join(unchecked[:12])}"
                       f"{'...' if len(unchecked) > 12 else ''}", refs=unchecked))
+    return out
+
+
+# ==========================================================================
+# 4b. Documentation — no part without its datasheet on disk and pin evidence
+# ==========================================================================
+def check_docs(facts, spec, ds_dir, strict=True):
+    """MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
+    from partdocs.spec_check, plus the same MPN rule for board parts that are
+    not in the spec."""
+    from . import partdocs as PD2
+    out = []
+    mpn_map = facts.get("mpn_map", {})
+    if spec:
+        for level, code, ref, msg in PD2.spec_check(spec, ds_dir, mpn_map=mpn_map,
+                                                    strict=strict, log=lambda m: None):
+            out.append(_f(level, code, msg, refs=[ref]))
+    spec_refs = {c.get("ref") for c in (spec or {}).get("components", [])}
+    for ref, p in facts["parts"].items():
+        if ref in spec_refs or p.get("mech") or ref.startswith("__"):
+            continue
+        if not mpn_map.get(ref) and not PD2.is_passive(ref, p.get("footprint", ""),
+                                                        p.get("connectable_pads")):
+            out.append(_f(FAIL if strict else WARN, "MPN_MISSING",
+                          f"{ref} ({p.get('value', '')}): on the board with no "
+                          f"manufacturer part number", refs=[ref]))
     return out
 
 
@@ -713,11 +748,17 @@ def _waived(fnd, waivers):
     return False
 
 
-def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=()):
+def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
+        ds_dir=None):
     facts = dict(facts)
     facts["partdata"] = partdata or {}
+    docs = (cons or {}).get("docs", {})
+    strict = bool(docs.get("strict", True))
+    ds_dir = ds_dir or docs.get("datasheets")
     out = []
     out += check_env(facts, cons)
+    if ds_dir or spec:
+        out += check_docs(facts, spec, ds_dir or "", strict=strict)
     out += check_net_rules(facts, cons)
     out += check_pairs(facts, cons)
     out += check_rf(facts, cons)

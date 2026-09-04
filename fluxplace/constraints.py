@@ -36,6 +36,10 @@ optional; anything not stated keeps the heuristic default. Schema:
     min_v = 4.75            # ... down to the load's minimum ...
     load_a = 1.0            # ... at this current. Checked against bulk C.
 
+    [docs]                  # documentation is a build requirement
+    datasheets = "docs/datasheets"   # every MPN's PDF lives here, with datasheets.json
+    strict = true           # missing MPN / datasheet / pin evidence = FAIL, not WARN
+
     [protection]
     tvs_ref = "D1"
     downstream_max_v = 40   # rating of the first device behind the TVS

@@ -197,6 +197,8 @@ def test_unchecked_parts_are_reported_not_passed():
     f = facts(mpn_map={"U9": "NOPE-123"})
     f["parts"]["U9"] = part("x", "lib:SOT-23-6", {"1": "A"})
     out = R.check_parts(f, None, {"NOPE-123": None}, {})
+    assert "PART_DATA_UNAVAILABLE" in codes(out, "FAIL")      # strict docs by default
+    out = R.check_parts(f, None, {"NOPE-123": None}, {"docs": {"strict": False}})
     assert "PART_DATA_UNAVAILABLE" in codes(out, "WARN")
 
 

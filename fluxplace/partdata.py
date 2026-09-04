@@ -258,6 +258,20 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
                 mo = _mouser_details(mpn, creds)
             except Exception as e:
                 log(f"    ! Mouser data {mpn}: {e}")
+        nx = None
+        if (dk is None and mo is None) or ((dk or mo or {}).get("package") is None):
+            try:
+                from . import nexar as NX
+                if NX.available(creds):
+                    nx = NX.part_data(mpn, creds)
+            except Exception as e:
+                log(f"    ! Nexar data {mpn}: {e}")
+        if nx and not (dk or mo):
+            mo = nx
+        elif nx:
+            for k, v in nx.items():
+                if (dk or mo).get(k) in (None, "", {}) and v not in (None, "", {}):
+                    (dk or mo)[k] = v
         data = None
         if dk or mo:
             data = dict(mo or {})

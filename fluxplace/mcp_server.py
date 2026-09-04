@@ -153,6 +153,15 @@ POLICY = {
                                    "exist. Net-label style, not hand-drawn signal flow."),
     "verify-models":     ("read",  "Verify 3D models sit on their footprint pins — displaced "
                                    "models look like mechanical truth and are a review hazard."),
+    "datasheets":        ("write", "Fetch every MPN's datasheet into the project through the "
+                                   "DigiKey/Mouser APIs, hash it into datasheets.json, and "
+                                   "list the ones that need a browser. Documentation is a "
+                                   "build requirement: review fails a part with no datasheet "
+                                   "on disk."),
+    "spec-check":        ("read",  "Documentation gate on a netlist spec: every part has a "
+                                   "manufacturer part number, its datasheet on disk, and a "
+                                   "pinmap whose names appear on the cited datasheet page. "
+                                   "schematic refuses an undocumented spec."),
     "review":            ("read",  "The design-review gate — what an outside reviewer checks "
                                    "that DRC, ERC and lint do not: spec net rules (straight-"
                                    "copper nets), diff-pair skew and layer use, RF impedance "

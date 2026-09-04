@@ -67,6 +67,26 @@ all go through one `_relocate_via` that requires the new spot to be clear
 of every other net's copper and every hole on every layer, by exact shape
 collision — the bounding-box version let a via land 0.116 mm from a pad.
 
+### Documentation as a build requirement (user directive, same day)
+"Never set a component without having the pinout and proper docs."
+`fluxplace/partdocs.py`: `datasheets` fetches every MPN's PDF into the
+project and hashes it into `datasheets.json`; `spec-check` / `review` fail
+a part with no MPN, no datasheet on disk, no named pinmap (>2 pins, not a
+connector), or a pinmap whose names the cited page does not carry
+(`pinmap_source: "X.pdf#p3"`, pdftotext, name normalisation so I/O1 == IO1,
+V- == GND, IN+ == INP). `schematic --datasheets` refuses an undocumented
+spec. Passives with an MPN but no PDF are a WARN; everything else is a FAIL
+under `[docs] strict = true`, the default.
+
+### Nexar (Octopart) as the third source — wired, waiting on a quota
+`fluxplace/nexar.py`: client-credentials auth, `supSearchMpn`, datasheet URL
+(octopart CDN), part data (package / temperature / lifecycle / stock).
+Hooked into `sourcing.datasheet_urls` and `partdata.fetch` as the fallback
+when DigiKey and Mouser both miss. The user's app currently answers "part
+limit of 0 — upgrade your plan": the Supply API quota has to be enabled in
+the Nexar portal before it returns anything. CAD (symbol/footprint/3D) via
+Nexar's Design domain was not explored — same quota wall.
+
 ### Not yet
 - `repair`/`tune`/`drc-fix`/`finish` have no pcbnew-free unit tests (they are all board
   mutation); they are exercised on utv-comms V1.5.

@@ -380,6 +380,59 @@ def preflight(board_path, mpn_map=None, need=10, strict=False, refresh=False,
 _DS_TIMEOUT = 20
 
 
+def datasheet_urls(mpn, creds):
+    """Every datasheet URL the distributors offer for an MPN, DigiKey first
+    then Mouser (they often point at different hosts, and one host's bot
+    wall is the other's plain PDF)."""
+    import json as _json
+    import urllib.request
+    out = []
+    if "DIGIKEY_CLIENT_ID" in creds:
+        try:
+            tok = _dk_token(creds)
+            body = _json.dumps({"Keywords": _search_term(mpn), "Limit": 5}).encode()
+            req = urllib.request.Request(
+                "https://api.digikey.com/products/v4/search/keyword", data=body,
+                headers={"Authorization": "Bearer " + tok,
+                         "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = _json.load(r)
+            for p in data.get("Products", []) or []:
+                if _same_part(p.get("ManufacturerProductNumber") or "", mpn)[0] and p.get("DatasheetUrl"):
+                    out.append(p["DatasheetUrl"])
+        except Exception:
+            pass
+    if "MOUSER_API_KEY" in creds:
+        try:
+            body = _json.dumps({"SearchByPartRequest": {
+                "mouserPartNumber": mpn, "partSearchOptions": "Exact"}}).encode()
+            req = urllib.request.Request(
+                "https://api.mouser.com/api/v1/search/partnumber?apiKey="
+                + creds["MOUSER_API_KEY"], data=body,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = _json.load(r)
+            for p in ((data.get("SearchResults") or {}).get("Parts") or []):
+                if _same_part(p.get("ManufacturerPartNumber") or "", mpn)[0] and p.get("DataSheetUrl"):
+                    out.append(p["DataSheetUrl"])
+        except Exception:
+            pass
+    try:
+        from . import nexar as NX
+        if NX.available(creds):
+            u = NX.datasheet_url(mpn, creds)
+            if u:
+                out.append(u)
+    except Exception:
+        pass
+    seen, uniq = set(), []
+    for u in out:
+        if u not in seen:
+            seen.add(u); uniq.append(u)
+    return uniq
+
+
 def datasheet_url(mpn, creds):
     """Best datasheet URL for an MPN, DigiKey first then Mouser. None if
     neither distributor offers one.

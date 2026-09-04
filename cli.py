@@ -1118,8 +1118,15 @@ def _review_gate(a, stage="review", hard=True):
     idx = R.lib_index()
     waivers = list(getattr(a, "waive", None) or ()) + list(
         (cons.get("review", {}) or {}).get("waive", []))
+    ds_dir = getattr(a, "datasheets", None) or (cons.get("docs", {}) or {}).get("datasheets")
+    if ds_dir and not os.path.isabs(ds_dir):
+        base = os.path.dirname(os.path.abspath(getattr(a, "constraints", None) or board))
+        cand = [os.path.join(base, ds_dir), os.path.join(base, "..", ds_dir),
+                os.path.join(base, "..", "..", ds_dir)]
+        ds_dir = next((os.path.normpath(c) for c in cand if os.path.isdir(c)),
+                      os.path.normpath(cand[0]))
     findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
-                     waivers=waivers)
+                     waivers=waivers, ds_dir=ds_dir)
     print(f"REVIEW ({stage}) — {board}")
     n = R.summarize(findings, log=lambda m: print(m, flush=True))
     if getattr(a, "json", None) and stage == "review":
@@ -1260,6 +1267,65 @@ def cmd_tune(a):
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
 
 
+def cmd_datasheets(a):
+    """Fetch every MPN's datasheet into the project (DigiKey/Mouser APIs),
+    record it in datasheets.json with a hash, and say which ones need a
+    browser. With --adopt, register PDFs dropped in by hand."""
+    import json as _json
+    from fluxplace import partdocs as PD2, sourcing as S
+    mpns = []
+    if a.mpn_map:
+        m = _json.load(open(a.mpn_map))
+        mpns = [v for k, v in m.items() if not k.startswith("_") and isinstance(v, str) and v]
+    elif a.board:
+        path = S.find_map(a.board)
+        if path:
+            m = _json.load(open(path))
+            mpns = [v for k, v in m.items() if not k.startswith("_") and isinstance(v, str) and v]
+    mpns += list(a.mpn or [])
+    if a.adopt:
+        files = dict(x.split("=", 1) for x in a.adopt)
+        PD2.adopt(a.out, files, log=lambda m: print(m, flush=True))
+    urls = dict(x.split("=", 1) for x in (a.url or []))
+    res = PD2.fetch(mpns, a.out, refresh=a.refresh, urls=urls,
+                    log=lambda m: print(m, flush=True))
+    have = sum(1 for v in res.values() if v)
+    miss = sorted(k for k, v in res.items() if not v)
+    print(f"datasheets: {have}/{len(res)} on disk in {a.out}")
+    if miss:
+        print("  need a browser (drop the PDF in and run --adopt MPN=file.pdf): "
+              + ", ".join(miss))
+        raise SystemExit(1 if a.strict else 0)
+
+
+def cmd_speccheck(a):
+    """Documentation gate on a netlist spec: MPN, datasheet on disk, pinmap
+    evidence on the cited page. Exit 1 on FAIL."""
+    import json as _json
+    from fluxplace import partdocs as PD2
+    spec = _json.load(open(a.spec))
+    mpn_map = {}
+    if a.mpn_map:
+        mpn_map = {k: v for k, v in _json.load(open(a.mpn_map)).items()
+                   if not k.startswith("_") and isinstance(v, str)}
+    if a.cite:
+        spec, rep = PD2.cite(spec, a.datasheets, mpn_map=mpn_map, only_missing=not a.recite,
+                             log=lambda m: print(m, flush=True))
+        if a.write:
+            with open(a.spec, "w") as fh:
+                _json.dump(spec, fh, indent=1)
+            print(f"spec-check: pinmap_source written for "
+                  f"{sum(1 for r in rep if r[2] >= 0.8)} part(s) -> {a.spec}")
+    finds = PD2.spec_check(spec, a.datasheets, mpn_map=mpn_map, strict=not a.lenient)
+    n = {"FAIL": 0, "WARN": 0, "INFO": 0}
+    for level, code, ref, msg in finds:
+        n[level] += 1
+        print(f"  {level:4s} {code:24s} {msg}")
+    print(f"spec-check: {n['FAIL']} FAIL, {n['WARN']} WARN, {n['INFO']} INFO")
+    if n["FAIL"]:
+        raise SystemExit(1)
+
+
 def cmd_review(a):
     """Standalone design review; exit 1 per --fail-on."""
     from fluxplace import review as R
@@ -1283,6 +1349,9 @@ def _add_review_args(p, gate=False):
                    help="ref->MPN map (auto-discovered when omitted)")
     p.add_argument("--no-api", action="store_true",
                    help="skip DigiKey/Mouser part data (offline review)")
+    p.add_argument("--datasheets", default=None,
+                   help="datasheet directory with datasheets.json (default: "
+                        "[docs] datasheets in the constraints)")
     p.add_argument("--refresh", action="store_true",
                    help="ignore the 7-day part-data cache")
     p.add_argument("--waive", action="append", default=[],
@@ -1618,6 +1687,20 @@ def cmd_schematic(a):
     prove it by exporting its netlist and diffing against the source."""
     from fluxplace import schematic as SC
     import json as _json
+    if a.spec and a.datasheets and not a.undocumented:
+        from fluxplace import partdocs as PD2
+        mpn_map = {}
+        if a.mpn_map:
+            mpn_map = {k: v for k, v in _json.load(open(a.mpn_map)).items()
+                       if not k.startswith("_") and isinstance(v, str)}
+        finds = PD2.spec_check(_json.load(open(a.spec)), a.datasheets, mpn_map=mpn_map)
+        fails = [f for f in finds if f[0] == "FAIL"]
+        for level, code, ref, msg in fails:
+            print(f"  FAIL {code:24s} {msg}")
+        if fails:
+            raise SystemExit(f"schematic: refusing to generate — {len(fails)} undocumented "
+                             f"part(s). Fetch datasheets / cite pinmap_source, or pass "
+                             f"--undocumented to override.")
     res = SC.generate(a.spec or a.board, a.out, title=a.title,
                       from_copper=bool(a.board and not a.spec))
     print("wrote %s" % res["path"])
@@ -2017,6 +2100,36 @@ def build_parser():
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
 
+    pds = sub.add_parser("datasheets",
+                         help="fetch every MPN's datasheet into the project "
+                              "(DigiKey/Mouser), hash it into datasheets.json, "
+                              "list the ones that need a browser")
+    pds.add_argument("--out", required=True, help="datasheet directory")
+    pds.add_argument("--board", default=None, help="board (mpn_map.json auto-found)")
+    pds.add_argument("--mpn-map", default=None)
+    pds.add_argument("--mpn", action="append", default=[], help="extra MPN, repeatable")
+    pds.add_argument("--url", action="append", default=[], metavar="MPN=URL",
+                     help="datasheet URL found by hand, repeatable")
+    pds.add_argument("--adopt", action="append", default=[], metavar="MPN=FILE",
+                     help="register a PDF already in --out, repeatable")
+    pds.add_argument("--refresh", action="store_true")
+    pds.add_argument("--strict", action="store_true", help="exit 1 if any are missing")
+    pds.set_defaults(fn=cmd_datasheets)
+
+    psc2 = sub.add_parser("spec-check",
+                          help="documentation gate on a netlist spec: every "
+                               "part has an MPN, its datasheet on disk, and a "
+                               "pinmap the cited datasheet page backs")
+    psc2.add_argument("--spec", required=True)
+    psc2.add_argument("--datasheets", required=True)
+    psc2.add_argument("--mpn-map", default=None)
+    psc2.add_argument("--lenient", action="store_true", help="WARN instead of FAIL")
+    psc2.add_argument("--cite", action="store_true",
+                      help="find the datasheet page backing each pinmap and cite it")
+    psc2.add_argument("--recite", action="store_true", help="re-cite even when cited")
+    psc2.add_argument("--write", action="store_true", help="write citations into --spec")
+    psc2.set_defaults(fn=cmd_speccheck)
+
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "
                               "skew, per-layer RF impedance, distributor "
@@ -2248,6 +2361,12 @@ def build_parser():
     psc.add_argument("--out", required=True)
     psc.add_argument("--title", default=None)
     psc.add_argument("--no-verify", action="store_true")
+    psc.add_argument("--datasheets", default=None,
+                     help="datasheet dir: refuse to generate from a spec whose "
+                          "parts are not documented (spec-check)")
+    psc.add_argument("--mpn-map", default=None)
+    psc.add_argument("--undocumented", action="store_true",
+                     help="generate anyway (recorded in the output)")
     psc.add_argument("--kicad-cli", default="kicad-cli")
     psc.add_argument("--json", action="store_true")
     psc.set_defaults(fn=cmd_schematic)

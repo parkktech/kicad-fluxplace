@@ -117,6 +117,8 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `drc-fix` | Fix the DRC noise a repair leaves behind, from the report's own items: rip a track that runs into a swapped footprint's pad, neck a widened RF segment at a clearance pinch, push a via off another via/track by a few µm, snap or delete stray track ends, move colliding reference text; loops DRC until the count stops falling. `--island-vias` drops a via beside a plane pad whose pour island has none (DRC-guarded). |
 | `finish`  | Route named nets with freerouting (planes declared as `power` in the DSN) and take back **only those nets' copper**, kept only if DRC does not worsen and the unconnected count falls — for the connection the grid patcher cannot close. |
 | `tune`    | DRC-guarded differential-pair length tuning: hairpin shortcuts on the long side, serpentine meanders on the short side, each step kept only if `kicad-cli` DRC does not get worse, until every pair is inside its `[pairs.*] skew_mm`. |
+| `datasheets` | Fetch every MPN's datasheet into the project through the DigiKey/Mouser APIs, hash it into `datasheets.json`, list the ones that need a browser (`--adopt MPN=file.pdf` registers a hand-dropped PDF). |
+| `spec-check` | **Documentation gate** on a netlist spec: every part has an MPN, its datasheet on disk, and a `pinmap` whose names appear on the cited datasheet page (`pinmap_source: "X.pdf#p3"`). `schematic --datasheets` refuses to generate from an undocumented spec; `review` fails the same way (`[docs] strict = true`). |
 | `intake`  | Design interview → `design_intent.json`. Now also asks **where the product lives** (temperature range, vibration, moisture, input-transient class); `--constraints-out` writes the `[env]` block the review gate derates against. |
 
 ### Physics constraints (comprehension)
@@ -350,7 +352,22 @@ FAIL in it.
 | `TVS_MARGIN` | `[protection]` clamp voltage vs the downstream device rating (clamp from the constraints or from the distributor data). |
 | `ENV_UNDEFINED` | Nobody answered the environment questions, so nothing can be derated. |
 
-Part data comes from the **DigiKey and Mouser APIs only** (same credentials as
+**No part without its papers.** With `[docs]` in the constraints (`datasheets =
+"docs/datasheets"`, `strict = true` — the default) the gate fails a part that
+has no manufacturer part number (`MPN_MISSING`), whose datasheet is not on disk
+in the project (`DATASHEET_MISSING`), that uses more than two pins without a
+named pinmap (`PINMAP_MISSING`), or whose pinmap names are not found on the
+datasheet page it cites (`PINMAP_EVIDENCE_WEAK`). A distributor that cannot
+describe the part is a FAIL too (`PART_DATA_UNAVAILABLE`). The rule exists
+because a board reached an outside reviewer with an ESD array's ground on the
+wrong pin — the pinmap had been typed from memory and no tool had asked for
+the page it came from.
+
+Part data comes from the **DigiKey and Mouser APIs**, with **Nexar (Octopart)**
+as the third source when both miss — its datasheets are mirrored on
+`datasheet.octopart.com`, which serves plain PDFs where manufacturers'
+own hosts bot-wall a script (`NEXAR_CLIENT_ID` / `NEXAR_CLIENT_SECRET`,
+supply.domain; needs a Nexar plan with a part quota) (same credentials as
 `sourcing` and `models`), cached for 7 days beside the `mpn_map.json`. A part
 the distributors cannot describe is reported as `PART_DATA_UNAVAILABLE`, never
 silently passed. `--no-api` runs the offline checks alone.

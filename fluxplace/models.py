@@ -37,7 +37,8 @@ UA = {"User-Agent": "Mozilla/5.0"}
 # ---------------------------------------------------------------- credentials
 def credentials():
     """-> dict with any of DIGIKEY_CLIENT_ID/SECRET, MOUSER_API_KEY found."""
-    keys = ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "MOUSER_API_KEY")
+    keys = ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "MOUSER_API_KEY",
+            "NEXAR_CLIENT_ID", "NEXAR_CLIENT_SECRET")
     out = {k: os.getenv(k) for k in keys if os.getenv(k)}
     if len(out) == len(keys):
         return out
