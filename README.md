@@ -374,7 +374,8 @@ Part data comes from the **DigiKey and Mouser APIs**, with **Nexar (Octopart)**
 as the third source when both miss — its datasheets are mirrored on
 `datasheet.octopart.com`, which serves plain PDFs where manufacturers'
 own hosts bot-wall a script (`NEXAR_CLIENT_ID` / `NEXAR_CLIENT_SECRET`,
-supply.domain; needs a Nexar plan with a part quota) (same credentials as
+supply.domain). Nexar meters part lookups (10/day on the evaluation plan),
+so it is consulted only after both distributors miss (same credentials as
 `sourcing` and `models`), cached for 7 days beside the `mpn_map.json`. A part
 the distributors cannot describe is reported as `PART_DATA_UNAVAILABLE`, never
 silently passed. `--no-api` runs the offline checks alone.

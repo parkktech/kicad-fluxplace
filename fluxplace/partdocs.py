@@ -259,6 +259,9 @@ def evidence(pinmap, pdf_path, pages, min_ratio=0.8):
     txt = page_text(pdf_path, pages or None)
     if txt is None:
         return None, [], sorted(pinmap), "pdftotext unavailable or PDF unreadable"
+    if len(txt.strip()) < 40:
+        return None, [], sorted(pinmap), ("cited page(s) carry no text (drawing/scan) — "
+                                          "verify by eye and cite a text page or the family sheet")
     toks = _tokens(txt)
     flat = _norm(txt)
     found, missing = [], []

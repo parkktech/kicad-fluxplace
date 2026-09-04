@@ -259,7 +259,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             except Exception as e:
                 log(f"    ! Mouser data {mpn}: {e}")
         nx = None
-        if (dk is None and mo is None) or ((dk or mo or {}).get("package") is None):
+        if dk is None and mo is None:      # metered: last resort only
             try:
                 from . import nexar as NX
                 if NX.available(creds):

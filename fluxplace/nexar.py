@@ -6,6 +6,9 @@ own hosts bot-wall a script), cross-distributor stock in one query, and a
 normalised spec set (package, operating temperature, lifecycle) for parts
 the two APIs describe thinly.
 
+Quota: the evaluation plan meters PART LOOKUPS (10 per day, measured
+2026-09-03) — call Nexar only after DigiKey and Mouser both miss, and never
+in a loop over a whole BOM. Results are cached in memory for the process.
 Auth: client-credentials against identity.nexar.com, scope supply.domain;
 tokens live ~24 h and are cached in memory. Credentials come from
 models.credentials() (NEXAR_CLIENT_ID / NEXAR_CLIENT_SECRET, env or
@@ -62,9 +65,14 @@ def token(creds):
     return _TOKEN["value"]
 
 
+_CACHE = {}
+
+
 def search(mpn, creds, limit=3):
     """Raw Nexar parts for an MPN (best match first), or [] on any failure."""
     from .sourcing import _same_part
+    if mpn in _CACHE:
+        return _CACHE[mpn]
     try:
         tok = token(creds)
         body = json.dumps({"query": _QUERY, "variables": {"q": mpn, "limit": limit}}).encode()
@@ -81,7 +89,8 @@ def search(mpn, creds, limit=3):
         if ok:
             parts.append((0 if exact else 1, p))
     parts.sort(key=lambda x: x[0])
-    return [p for _, p in parts]
+    _CACHE[mpn] = [p for _, p in parts]
+    return _CACHE[mpn]
 
 
 def datasheet_url(mpn, creds):

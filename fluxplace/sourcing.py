@@ -418,14 +418,17 @@ def datasheet_urls(mpn, creds):
                     out.append(p["DataSheetUrl"])
         except Exception:
             pass
-    try:
-        from . import nexar as NX
-        if NX.available(creds):
-            u = NX.datasheet_url(mpn, creds)
-            if u:
-                out.append(u)
-    except Exception:
-        pass
+    # Nexar only when the two distributors offer nothing: the evaluation plan
+    # meters PART LOOKUPS (10/day measured), so every call must earn its keep
+    if not out:
+        try:
+            from . import nexar as NX
+            if NX.available(creds):
+                u = NX.datasheet_url(mpn, creds)
+                if u:
+                    out.append(u)
+        except Exception:
+            pass
     seen, uniq = set(), []
     for u in out:
         if u not in seen:
