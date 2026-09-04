@@ -707,7 +707,7 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
             text = PD.page_text(path, pages or [1]) or ""
         except Exception:
             text = ""
-        # a drawing whose only text is the title block (Amphonol 10164227:
+        # a drawing whose only text is the title block (Amphenol 10164227:
         # part-number structure and a print date, every dimension is line
         # art) is unreadable for this purpose, not a page that lacks the number
         if len(re.findall(r"\d+\.\d+", text)) < 5:
