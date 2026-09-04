@@ -87,6 +87,15 @@ limit of 0 — upgrade your plan": the Supply API quota has to be enabled in
 the Nexar portal before it returns anything. CAD (symbol/footprint/3D) via
 Nexar's Design domain was not explored — same quota wall.
 
+### China-build availability (user directive, same day)
+`fluxplace/lcsc.py`: JLCPCB's own parts endpoint via curl_cffi (the jlcsearch
+community mirror reported 22 units for a 10k resistor JLCPCB holds 14.6 M of).
+`sourcing --china`, `review` `CN_*` findings, `[sourcing.cn_alias]` for MPN
+spellings, LCSC's datasheet copy as the fourth datasheet fallback. Caveat:
+the endpoint's basic/extended tier field is not trustworthy (a known basic
+part reads "expand"), so no tier reporting. Leading zeros on all-numeric
+MPNs are ignored in matching (Molex 0436500215 == 436500215).
+
 ### Not yet
 - `repair`/`tune`/`drc-fix`/`finish` have no pcbnew-free unit tests (they are all board
   mutation); they are exercised on utv-comms V1.5.

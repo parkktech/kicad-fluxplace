@@ -25,6 +25,8 @@ ENVIRONMENT. This module does that:
   TVS_MARGIN             clamp voltage vs the downstream device rating
   ENV_UNDEFINED          nobody answered the environment questions
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
+  CN_ABSENT / CN_NONE / CN_LOW   [sourcing] china = true: LCSC/JLCPCB stock
+                         per part — what a Shenzhen assembly line actually pulls
   MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
                          a part without a part number, without its datasheet
                          on disk, or with a pinmap the cited page does not
@@ -595,6 +597,47 @@ def check_docs(facts, spec, ds_dir, strict=True):
 
 
 # ==========================================================================
+# 4c. China-build availability — LCSC / JLCPCB stock
+# ==========================================================================
+def check_china(facts, cons, cache_path=None, log=lambda m: None):
+    """[sourcing] china = true -> every MPN must be in the JLCPCB/LCSC
+    library with stock >= cn_need (default 100). A part DigiKey has and LCSC
+    does not is an import on the assembly line. CN_ABSENT/CN_NONE FAIL,
+    CN_LOW WARN; waive per part with a consign note."""
+    src = (cons or {}).get("sourcing", {})
+    if not src.get("china"):
+        return []
+    from . import lcsc as L
+    need = int(src.get("cn_need", 100))
+    alias = src.get("cn_alias", {}) or {}      # our MPN -> the string LCSC lists it under
+    mpn_map = facts.get("mpn_map", {})
+    by = {}
+    for ref, mpn in mpn_map.items():
+        by.setdefault(mpn, []).append(ref)
+    res0 = L.check([alias.get(m, m) for m in by], need=need, cache_path=cache_path, log=log)
+    res = {m: res0[alias.get(m, m)] for m in by}
+    out = []
+    for mpn, r in sorted(res.items()):
+        refs = sorted(by[mpn])
+        row = r["row"] or {}
+        if r["grade"] == "CN_ABSENT":
+            out.append(_f(FAIL, "CN_ABSENT", f"{' '.join(refs)} {mpn}: not in the JLCPCB/LCSC "
+                          f"library — consign it or choose a stocked part", refs=refs))
+        elif r["grade"] == "CN_NONE":
+            out.append(_f(FAIL, "CN_NONE", f"{' '.join(refs)} {mpn}: LCSC {row.get('lcsc')} "
+                          f"has 0 stock", refs=refs))
+        elif r["grade"] == "CN_LOW":
+            out.append(_f(WARN, "CN_LOW", f"{' '.join(refs)} {mpn}: LCSC {row.get('lcsc')} "
+                          f"stock {row.get('stock')} < {need}", refs=refs))
+        elif r["grade"] == "ERR":
+            out.append(_f(WARN, "CN_UNCHECKED", f"{' '.join(refs)} {mpn}: LCSC lookup failed",
+                          refs=refs))
+        # (JLCPCB's basic/extended tier is not reliably exposed by this endpoint
+        #  — a known basic 10k resistor comes back "expand" — so no tier INFO)
+    return out
+
+
+# ==========================================================================
 # 5. Spec <-> board sync
 # ==========================================================================
 def check_pads(facts):
@@ -764,6 +807,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx)
     out += check_spec_sync(facts, spec)
+    out += check_china(facts, cons, cache_path=(os.path.join(os.path.dirname(
+        facts.get("mpn_map_path") or "."), ".lcsc_cache.json") if facts.get("mpn_map_path") else None))
     out += check_pads(facts)
     out += check_power(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}

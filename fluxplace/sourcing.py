@@ -48,7 +48,10 @@ def _norm(s):
     DigiKey's 'KMR221G LFS' (95k in stock). Both were reported as "nobody
     carries this" and nearly triggered a needless part swap."""
     s = re.sub(r"\([^)]*\)", "", s or "")      # drop (LF), (SN), (LF)(SN) ...
-    return re.sub(r"[^A-Z0-9]", "", s.upper())
+    n = re.sub(r"[^A-Z0-9]", "", s.upper())
+    # Molex writes 0436500215 where LCSC writes 436500215: a leading zero on
+    # an all-numeric part number is catalogue formatting, not identity
+    return n.lstrip("0") if n.isdigit() else n
 
 
 def _same_part(candidate, mpn):
@@ -427,6 +430,14 @@ def datasheet_urls(mpn, creds):
                 u = NX.datasheet_url(mpn, creds)
                 if u:
                     out.append(u)
+        except Exception:
+            pass
+    if not out:                 # LCSC's copy (JLCPCB parts API), last
+        try:
+            from . import lcsc as L
+            row = L.lookup(mpn)
+            if row and row.get("datasheet"):
+                out.append(row["datasheet"])
         except Exception:
             pass
     seen, uniq = set(), []

@@ -36,6 +36,12 @@ optional; anything not stated keeps the heuristic default. Schema:
     min_v = 4.75            # ... down to the load's minimum ...
     load_a = 1.0            # ... at this current. Checked against bulk C.
 
+    [sourcing]              # where the board will be built
+    china = true            # grade every MPN on LCSC/JLCPCB stock too (CN_* findings)
+    cn_need = 100           # units the assembly house must be able to pull
+    [sourcing.cn_alias]     # our MPN -> the string LCSC catalogues it under
+    "G6K-2F-Y DC5" = "G6K-2F-Y-5V"
+
     [docs]                  # documentation is a build requirement
     datasheets = "docs/datasheets"   # every MPN's PDF lives here, with datasheets.json
     strict = true           # missing MPN / datasheet / pin evidence = FAIL, not WARN

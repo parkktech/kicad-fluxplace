@@ -66,6 +66,24 @@ def cmd_sourcing(a):
                              cache_dir=os.path.dirname(path),
                              refresh=a.sourcing_refresh, both=a.sourcing_both)
     blockers = S.summary(report, counts, a.sourcing_need, show_ok=a.show_ok)
+    if a.china:
+        from fluxplace import lcsc as L
+        res = L.check(list(by_mpn), need=a.cn_need,
+                      cache_path=os.path.join(os.path.dirname(path), ".lcsc_cache.json"),
+                      refresh=a.sourcing_refresh)
+        order = {"CN_ABSENT": 0, "CN_NONE": 1, "CN_LOW": 2, "ERR": 3, "CN_OK": 4}
+        for mpn, r in sorted(res.items(), key=lambda kv: (order.get(kv[1]["grade"], 9), kv[0])):
+            row = r["row"] or {}
+            if r["grade"] == "CN_OK" and not a.show_ok:
+                continue
+            print(f"    {r['grade']:9s} {mpn:26s} {str(row.get('lcsc') or '-'):10s} "
+                  f"stock={row.get('stock', '-')!s:>7} "
+                  f"{'basic' if row.get('basic') else 'ext':5s}   [{' '.join(by_mpn[mpn])}]")
+        from collections import Counter
+        c = Counter(r["grade"] for r in res.values())
+        print("    china: " + "  ".join(f"{k}={v}" for k, v in sorted(c.items()))
+              + f"  (need >= {a.cn_need} at LCSC)")
+        blockers += [m for m, r in res.items() if r["grade"] in ("CN_ABSENT", "CN_NONE")]
     if a.json:
         json_mod = __import__("json")
         json_mod.dump(report, open(a.json, "w"), indent=1)
@@ -1799,6 +1817,10 @@ def build_parser():
     ps.add_argument("--json", help="write the full report here")
     ps.add_argument("--show-ok", action="store_true",
                     help="list every part, not just the problems")
+    ps.add_argument("--china", action="store_true",
+                    help="also grade every MPN on LCSC/JLCPCB stock (China assembly)")
+    ps.add_argument("--cn-need", type=int, default=100,
+                    help="LCSC units required for CN_OK (default 100)")
     ps.set_defaults(fn=cmd_sourcing)
 
     pa = sub.add_parser("analyze"); pa.add_argument("--board", required=True)
