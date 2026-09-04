@@ -432,6 +432,15 @@ to be wrong, all on `main`:
   about hyphens); **`finish --timeout`**; the patcher's launder worker takes
   absolute paths; LGA packages classify; split-paddle footprints report the
   modal pad size.
+- **3D bodies are a gate and a fetch** — `review` FAILs any electrical
+  footprint with no model (`MODEL_MISSING`), a model path that resolves to no
+  file (`MODEL_FILE_MISSING`), or a file named as a stand-in
+  (`MODEL_STANDIN`); mounting holes are exempt. `models --check` lists the
+  holes, `models --fetch` fills them from EasyEDA by LCSC code (easyeda2kicad,
+  optional `[models]` extra) and records provenance. Lesson from V1.5: a board
+  that renders with holes had passed DRC, review and packaging; the RJ45 pointed
+  at a library file that did not exist, the transformer had no body at all.
+  pcbnew pitfall: `fp.Models()` iterates by value — write back by index.
 - **Working rule** used on that project: the top-level model orchestrates,
   reviews reports and commits; every mechanical pipeline step runs in a
   Sonnet subagent from an exact recipe. Long jobs are watched with a
