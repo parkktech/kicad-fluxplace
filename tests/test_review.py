@@ -477,3 +477,17 @@ def test_landpattern_geometry_and_gate(tmp_path):
     assert not any(c == "LANDPATTERN_MISMATCH" and r == "T4" for c, r, _ in codes)
     assert ("LANDPATTERN_UNCITED", "X1", "FAIL") in codes
     assert not any(r == "C1" for _, r, _ in codes)
+
+
+def test_models_gate(tmp_path):
+    from fluxplace import review as R
+    good = tmp_path / "ok.step"
+    good.write_text("x")
+    facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
+        "U1": {"footprint": "X", "models": [str(good)], "mech": False},
+        "U2": {"footprint": "Y", "models": [], "mech": False},
+        "J1": {"footprint": "Z", "models": [str(tmp_path / "nope.step")], "mech": False},
+        "MH1": {"footprint": "Hole", "models": [], "mech": True},
+    }}
+    codes = {(f["code"], f["refs"][0]) for f in R.check_models(facts)}
+    assert codes == {("MODEL_MISSING", "U2"), ("MODEL_FILE_MISSING", "J1")}

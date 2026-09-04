@@ -18,6 +18,8 @@ ENVIRONMENT. This module does that:
   PINMAP_ROLE_MISMATCH / PINMAP_PIN_ABSENT / PINMAP_UNVERIFIED
                          spec pinmap vs the KiCad official symbol for the MPN
   TEMP_RATING            part rated narrower than the product environment
+  MODEL_MISSING          electrical footprint without a 3D model
+  MODEL_FILE_MISSING     3D model path that resolves to no file
   SPEC_SIZE_MISMATCH / SPEC_LAYER_MISMATCH / SPEC_COMPONENT_MISMATCH /
   SPEC_FOOTPRINT_MISMATCH
                          the spec JSON and the copper have drifted apart
@@ -742,6 +744,52 @@ def _ds_temp(ds_dir, mpn):
     return _DS_TEMP_CACHE[key]
 
 
+_MODEL_ENV = {"KICAD10_3DMODEL_DIR": "/usr/share/kicad/3dmodels",
+              "KICAD9_3DMODEL_DIR": "/usr/share/kicad/3dmodels",
+              "KICAD8_3DMODEL_DIR": "/usr/share/kicad/3dmodels"}
+
+
+def resolve_model(path, board_path):
+    """Expand ${KIPRJMOD} / ${KICADn_3DMODEL_DIR} (environment first, then the
+    Linux defaults) and return the absolute file path."""
+    prj = os.path.dirname(os.path.abspath(board_path)) if board_path else ""
+    out = path.replace("${KIPRJMOD}", prj)
+    for k, dflt in _MODEL_ENV.items():
+        out = out.replace("${%s}" % k, os.environ.get(k, dflt))
+    return out
+
+
+def check_models(facts, board_path=None):
+    """Every electrical footprint carries a 3D model whose file exists.
+    A board that renders with holes is a board nobody has looked at: the
+    V1.5 RJ45 pointed at RJHSE5380.step (library file: RJHSE538X) and the
+    swapped transformer had no body at all, and both shipped through DRC,
+    review and packaging (2026-09-04). Mechanical footprints (no nets) are
+    exempt. FAIL, because the user's rule is real vendor models on every
+    part, not a stand-in and not a hole."""
+    out = []
+    for ref, p in sorted(facts["parts"].items()):
+        if p.get("mech") or "models" not in p:   # hand-built facts carry no model list
+            continue
+        models = p.get("models") or []
+        if not models:
+            out.append(_f(FAIL, "MODEL_MISSING",
+                          f"{ref}: footprint {p.get('footprint', '')} has no 3D model "
+                          f"(fluxplace models --fetch, or a vendor STEP in the project lib)",
+                          refs=[ref]))
+            continue
+        for m in models:
+            full = resolve_model(m, board_path or facts.get("board_path", ""))
+            if not os.path.exists(full):
+                base, ext = os.path.splitext(full)
+                alt = [e for e in (".step", ".stp", ".wrl") if os.path.exists(base + e)]
+                out.append(_f(FAIL, "MODEL_FILE_MISSING",
+                              f"{ref}: 3D model {m} does not resolve to a file"
+                              + (f" (same name exists as {alt[0]})" if alt else ""),
+                              refs=[ref]))
+    return out
+
+
 def check_docs(facts, spec, ds_dir, strict=True):
     """MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
     from partdocs.spec_check, plus the same MPN rule for board parts that are
@@ -981,6 +1029,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_china(facts, cons, cache_path=(os.path.join(os.path.dirname(
         facts.get("mpn_map_path") or "."), ".lcsc_cache.json") if facts.get("mpn_map_path") else None))
     out += check_pads(facts)
+    out += check_models(facts)
     out += check_power(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
@@ -1060,6 +1109,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "footprint": fp.GetFPID().GetUniStringLibId(),
             "pads": pads, "connectable_pads": conn,
             "pads_total": sum(1 for pad in fp.Pads() if pad.GetNumber().isdigit()),
+            "models": [m.m_Filename for m in fp.Models()],
             "pad_geom": [(pad.GetNumber(), pad.GetFPRelativePosition().x / 1e6, pad.GetFPRelativePosition().y / 1e6,
                           pad.GetSize().x / 1e6, pad.GetSize().y / 1e6) for pad in fp.Pads()],
             "mech": not any(pads.values()),
@@ -1105,6 +1155,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             if not ref.startswith("_") and isinstance(mpn, str) and mpn:
                 mp[ref] = mpn
     return {
+        "board_path": board_path,
         "board": board_path,
         "size_mm": (pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())),
         "copper_layers": board.GetCopperLayerCount(),
