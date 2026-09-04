@@ -704,7 +704,10 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
             text = PD.page_text(path, pages or [1]) or ""
         except Exception:
             text = ""
-        if not text.strip():
+        # a drawing whose only text is the title block (Amphonol 10164227:
+        # part-number structure and a print date, every dimension is line
+        # art) is unreadable for this purpose, not a page that lacks the number
+        if len(re.findall(r"\d+\.\d+", text)) < 5:
             out.append(_f(WARN, "LANDPATTERN_PAGE_UNREADABLE",
                           f"{ref}: {src} is a text-less drawing — the cited pitch "
                           f"{lp.get('pitch')} mm was read by eye; verify it once more "

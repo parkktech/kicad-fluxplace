@@ -1,3 +1,10 @@
+## 2026-09-04 — MPN normaliser drops parenthesised variants
+
+`DF40HC(3.0)-100DS-0.4V(51)` is searched at DigiKey as `DF40HC-100DS-0.4V` (the
+normaliser strips the "(3.0)"), which returns nothing although DigiKey lists
+the part. Query the literal MPN first, fall back to the normalised form. Found
+by the Sonnet pipeline agent while verifying a J10/J11 swap.
+
 ## 2026-09-04 — two gates from one transformer: land pattern and datasheet temperature
 
 The V1.5 transformer footprint (Pulse HX5084, drawn in-project) had 1.27 mm
