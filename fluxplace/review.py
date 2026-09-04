@@ -608,8 +608,13 @@ def landpattern_geometry(pad_geom):
     other = 2 if axis == 1 else 1
     cross = sorted({round(g[other], 3) for g in pads})
     rows = round(cross[-1] - cross[0], 3) if len(cross) > 1 else 0.0
-    sizes = sorted({(round(g[3], 3), round(g[4], 3)) for g in pads}, key=lambda t: -t[0] * t[1])
-    return {"pitch": pitch, "rows": rows, "pad": sizes[0], "pins": len({str(g[0]) for g in pads})}
+    # the pad size is the one most pins use (a split paddle strip is not it)
+    count = {}
+    for g in pads:
+        k = (round(g[3], 3), round(g[4], 3))
+        count[k] = count.get(k, 0) + 1
+    pad = max(count, key=lambda k: (count[k], k[0] * k[1]))
+    return {"pitch": pitch, "rows": rows, "pad": pad, "pins": len({str(g[0]) for g in pads})}
 
 
 def _num_in_text(text, value_mm):
