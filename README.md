@@ -400,6 +400,34 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `tolerance_pct`, `max_vias`, `nets`), `[pairs.<FAMILY>]` (`skew_mm`),
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`.
 
+## What changed on 2026-09-04
+
+Driven by the utv-comms V1.5 IMU add and a transformer footprint that turned out
+to be wrong, all on `main`:
+
+- **`repair --bridge REF:PAD`** — a multi-layer maze router for the one pad the
+  last-mile patcher and freerouting both give up on. Dijkstra on a
+  clearance-rasterised grid per copper layer, layer changes only where a
+  through via clears every layer, final snap into the pad clearance-checked by
+  exact shape, DRC-guarded, zones refilled on accept.
+- **Land-pattern citations** — `landpattern` on a spec component names the
+  drawing page and the pitch / pad / rows / pins read from it; `review`
+  measures the footprint against those numbers (FAIL on 0.03 mm), FAILs any
+  footprint from `[docs] project_libs` without a citation, and WARNs when the
+  cited page is a text-less drawing ("read by eye — verify before ordering").
+  Born from a 24-pin transformer drawn at 1.27 mm pitch for a 0.99 mm part.
+- **Datasheet temperature** — `partdocs.datasheet_temp` reads the operating
+  range from the PDF text; `review` prefers it over the distributor field.
+  DigiKey said +85 °C for a relay whose sheet says +70 °C.
+- **LCSC lookup** retries without punctuation (JLCPCB's search is literal
+  about hyphens); **`finish --timeout`**; the patcher's launder worker takes
+  absolute paths; LGA packages classify; split-paddle footprints report the
+  modal pad size.
+- **Working rule** used on that project: the top-level model orchestrates,
+  reviews reports and commits; every mechanical pipeline step runs in a
+  Sonnet subagent from an exact recipe. Long jobs are watched with a
+  grep-until loop on their log, never with `pgrep` on their own command line.
+
 ## Architecture
 
 ```
