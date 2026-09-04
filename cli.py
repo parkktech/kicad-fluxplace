@@ -9,7 +9,7 @@ Run with KiCad's python so pcbnew is importable, e.g.:
   PYTHONPATH=/usr/lib/python3/dist-packages /usr/bin/python3 cli.py place \
       --board board.kicad_pcb --strategy flux --rotate ortho --out out.kicad_pcb
 """
-import argparse, re, sys, os
+import argparse, re, sys, os, subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fluxplace import graph as G, topology as T, placement as P
 
@@ -1158,6 +1158,50 @@ def _review_gate(a, stage="review", hard=True):
     return findings
 
 
+def _bridge_guarded(path, spec, a, log):
+    """repair.bridge on a copy; keep it only if DRC violations do not rise
+    and the unconnected count falls."""
+    import shutil
+    from fluxplace import repair as RP, tune as TU
+    from fluxplace import kicad_io as IO
+    ref, _, num = spec.partition(":")
+    tmp = os.path.splitext(path)[0] + "-bridge.kicad_pcb"
+    shutil.copy(path, tmp)
+    for ext in (".kicad_pro", ".kicad_dru"):   # DRC judges with the project's rules
+        side = os.path.splitext(path)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
+    board = IO.load(tmp)
+    added = RP.bridge(board, ref, num, layers=a.bridge_layers or None, cell=a.cell,
+                      width_mm=a.track, clearance_mm=a.clearance, via_mm=a.via,
+                      drill_mm=a.drill, log=log)
+    if not added:
+        os.unlink(tmp)
+        return False
+    IO.save(board, tmp)
+    v0, u0 = TU.drc_counts(path, a.kicad_cli)
+    v1, u1 = TU.drc_counts(tmp, a.kicad_cli)
+    ok = v1 <= v0 and u1 < u0
+    print(f"bridge {spec}: DRC {v0}/{u0} -> {v1}/{u1} {'kept' if ok else 'REVERTED'}")
+    if ok:
+        shutil.move(tmp, path)
+        # the new copper cut the pours: save the file with fills the fab
+        # gate will judge (a stale fill read as 19 zone-clearance hits on V1.5)
+        subprocess.run([a.kicad_cli, "pcb", "drc", "--refill-zones", "--save-board",
+                        "--format", "json", "-o", tmp + ".drc.json", path],
+                       capture_output=True, text=True)
+        for junk in (tmp + ".drc.json",):
+            if os.path.exists(junk):
+                os.unlink(junk)
+    else:
+        os.unlink(tmp)
+    for ext in (".kicad_pro", ".kicad_dru", ".kicad_prl"):
+        side = os.path.splitext(tmp)[0] + ext
+        if os.path.exists(side):
+            os.unlink(side)
+    return ok
+
+
 def cmd_repair(a):
     """Copper repairs the review gate asks for: pair loop removal, per-layer
     RF widths, pin remaps with stub rip + GND vias, twin-pad nets, silkscreen
@@ -1209,6 +1253,8 @@ def cmd_repair(a):
     out = a.out or a.board
     IO.save(board, out)
     print(f"repair: {'; '.join(did) or 'nothing requested'} -> {out}")
+    for spec in (a.bridge or []):
+        _bridge_guarded(out, spec, a, log)
     if a.patch:
         from fluxplace import patch as PATCH
         res = PATCH.patch_board(out, out, kicad_cli=a.kicad_cli,
@@ -2198,6 +2244,11 @@ def build_parser():
     prp.add_argument("--text-at", default=None, help="x,y mm (default: free spot)")
     prp.add_argument("--text-prefer", default="bottom-right",
                      choices=["bottom-right", "bottom-left", "top-left", "top-right"])
+    prp.add_argument("--bridge", action="append", default=[], metavar="REF:PAD",
+                     help="maze-route one unconnected pad to its net across layers "
+                          "(DRC-guarded; for what --patch and finish cannot reach)")
+    prp.add_argument("--bridge-layers", nargs="*", default=None,
+                     help="copper layers the bridge may use (default: all)")
     prp.add_argument("--patch", action="store_true",
                      help="run the last-mile patcher afterwards for unrouted pads")
     prp.add_argument("--kicad-cli", default="kicad-cli")

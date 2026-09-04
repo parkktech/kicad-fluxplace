@@ -287,6 +287,7 @@ _PKG_RULES = [
     (r"\b(?:W|V|U|T|X2)?(?:QFN|MLF|MLPQ|MLPD|LFCSP)-?(\d+)", "QFN", "g"),
     (r"\b(\d+)-(?:W|V|U|T|X2)?(?:DFN|SON|WSON|VSON|USON|WDFN|UDFN|TDFN|VDFN|X2SON)\b", "DFN", "g1"),
     (r"\b(?:W|V|U|T|X2)?(?:DFN|SON|WSON|VSON|USON|WDFN|UDFN|TDFN|VDFN|X2SON)-?(\d+)", "DFN", "g"),
+    (r"\b(\d+)-(?:LGA|VFLGA|WLGA|HLGA)\b", "LGA", "g1"), (r"\b(?:VF|W|H)?LGA-?(\d+)", "LGA", "g"),
     (r"\bTO-?252(?:-(\d))?", "TO252", "g"), (r"\bD-?PAK\b", "TO252", None),
     (r"\bTO-?263(?:-(\d))?", "TO263", "g"), (r"\bD2-?PAK\b", "TO263", None),
     (r"\bTO-?220(?:-(\d))?", "TO220", "g"), (r"\bTO-?92(?:-(\d))?", "TO92", "g"),

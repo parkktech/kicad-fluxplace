@@ -1,3 +1,20 @@
+## 2026-09-03 — `repair --bridge`: the maze router for the last pad
+
+Adding the IMU to utv-comms V1.5 left one pad (U13.14, I2C_SDA) that neither
+the last-mile patcher (grid 0.15, reverted by its guard: 0→2 violations) nor
+freerouting (`finish --nets I2C_SDA`, 900 s cap) could close: the only exit
+from the IMU corner crosses a USB pair, VBUS and I2S on In2, and no
+single-layer dogleg exists on any layer (probed F/In2/In3/B, 1- and 3-segment).
+`repair --bridge U13:14 --bridge-layers F.Cu In2.Cu In3.Cu B.Cu --cell 0.2`
+found F.Cu → In2 → B.Cu in 4 s, DRC 0/1 → 0/0.
+
+Two lessons went into the code: (1) SWIG pad proxies never compare with `is`
+(the source pad was its own target for one run) — key on ref + pad number;
+(2) a guard that accepts copper must ALSO save the board with refilled zones,
+or the next `fab` judges stale pours (19 zone-clearance hits that vanished on
+refill). Package classifier now reads LGA (`14-LGA (2.5x3)` vs
+`Bosch_LGA-14_3x2.5mm_P0.5mm` agreed once it could).
+
 ## 2026-09-03 — the design-review gate (`review`), built from an external review
 
 **Status: built, tested, wired into `fab` and `deliver` as a hard gate.**

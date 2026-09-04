@@ -19,6 +19,8 @@ for anything the remap left unrouted.
                      switches, some connectors): the generator netted one of
                      them; copy the net to its twin.
   add_text           silkscreen text in a free spot (board id / version).
+  bridge             maze-route one unconnected pad to its net across layers
+                     when the patcher and freerouting both give up.
 """
 import heapq
 import math
@@ -26,7 +28,7 @@ import re
 
 __all__ = ["redundant_copper", "rf_widths", "remap_pins", "fix_dup_pads",
            "add_text", "prune_dangling", "measure", "stitch", "stitch_islands",
-           "clear_under"]
+           "clear_under", "bridge"]
 
 # Proxies of items removed from a board must OUTLIVE the session: once Python
 # garbage-collects one ("memory leak of type 'PCB_TRACK *', no destructor
@@ -719,3 +721,297 @@ def add_text(board, text, layer="F.SilkS", at=None, size_mm=1.0,
     board.Add(item)
     log(f"    text '{text}' on {layer} at ({at[0]:.1f}, {at[1]:.1f})")
     return at
+
+
+def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_mm=0.13,
+           via_mm=0.45, drill_mm=0.25, margin_mm=4.0, via_cost_mm=3.0, log=print):
+    """Maze-route ONE unconnected pad to the nearest copper of its own net.
+
+    The last-mile patcher and freerouting both gave up on U13.14 (I2C_SDA,
+    utv-comms V1.5): the only way out of the IMU corner crosses a USB pair,
+    VBUS and I2S on In2, and no single-layer dogleg exists. This is a
+    multi-layer Dijkstra on a `cell` mm grid: every foreign track, via and
+    pad on each layer is rasterised with the track clearance; a layer change
+    is allowed only where a through via clears EVERY copper layer (the
+    island-via lesson: check all layers by shape, not bbox). Own-net copper
+    is the target set, so the route ends on whichever track, via or pad of
+    the net is cheapest to reach. Straight runs are simplified against the
+    same grid. Returns the list of items added ([] if no path)."""
+    import numpy as np
+    import pcbnew
+    fp = board.FindFootprintByReference(ref)
+    pad = next(p for p in fp.Pads() if p.GetNumber() == str(padnum))
+    net = pad.GetNetCode()
+    ni = pad.GetNet()
+    cu = _cu_layers(board)
+    lids = [l for l in cu if not layers or board.GetLayerName(l) in layers]
+    r_t = width_mm / 2 + clearance_mm
+    r_v = via_mm / 2 + clearance_mm
+    own_tracks = [t for t in board.GetTracks() if t.GetNetCode() == net]
+    def is_src(f, p):   # SWIG proxies never compare `is`; key on ref + number
+        return f.GetReference() == ref and p.GetNumber() == str(padnum)
+    own_pads = [p for f in board.GetFootprints() for p in f.Pads()
+                if p.GetNetCode() == net and not is_src(f, p)]
+    if not own_tracks and not own_pads:
+        log(f"    bridge {ref}.{padnum}: net has no other copper")
+        return []
+    # region
+    P = pad.GetPosition()
+    xs = [P.x] + [t.GetStart().x for t in own_tracks] + [t.GetEnd().x for t in own_tracks] + [p.GetPosition().x for p in own_pads]
+    ys = [P.y] + [t.GetStart().y for t in own_tracks] + [t.GetEnd().y for t in own_tracks] + [p.GetPosition().y for p in own_pads]
+    eb = board.GetBoardEdgesBoundingBox()
+    x0 = max(min(xs) / 1e6 - margin_mm, eb.GetLeft() / 1e6 + 0.5)
+    x1 = min(max(xs) / 1e6 + margin_mm, eb.GetRight() / 1e6 - 0.5)
+    y0 = max(min(ys) / 1e6 - margin_mm, eb.GetTop() / 1e6 + 0.5)
+    y1 = min(max(ys) / 1e6 + margin_mm, eb.GetBottom() / 1e6 - 0.5)
+    nx = int((x1 - x0) / cell) + 1
+    ny = int((y1 - y0) / cell) + 1
+    gx = x0 + np.arange(nx) * cell
+    gy = y0 + np.arange(ny) * cell
+    GX, GY = np.meshgrid(gx, gy)
+
+    def mark(grid, ax, ay, bx, by, r):
+        lo_i = max(0, int((min(ax, bx) - r - x0) / cell) - 1)
+        hi_i = min(nx, int((max(ax, bx) + r - x0) / cell) + 2)
+        lo_j = max(0, int((min(ay, by) - r - y0) / cell) - 1)
+        hi_j = min(ny, int((max(ay, by) + r - y0) / cell) + 2)
+        if lo_i >= hi_i or lo_j >= hi_j:
+            return
+        X = GX[lo_j:hi_j, lo_i:hi_i]
+        Y = GY[lo_j:hi_j, lo_i:hi_i]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-12:
+            d = np.hypot(X - ax, Y - ay)
+        else:
+            u = np.clip(((X - ax) * dx + (Y - ay) * dy) / L2, 0, 1)
+            d = np.hypot(X - (ax + u * dx), Y - (ay + u * dy))
+        grid[lo_j:hi_j, lo_i:hi_i] |= d <= r
+
+    def mark_rect(grid, bb, r):
+        lo_i = max(0, int((bb.GetLeft() / 1e6 - r - x0) / cell) - 1)
+        hi_i = min(nx, int((bb.GetRight() / 1e6 + r - x0) / cell) + 2)
+        lo_j = max(0, int((bb.GetTop() / 1e6 - r - y0) / cell) - 1)
+        hi_j = min(ny, int((bb.GetBottom() / 1e6 + r - y0) / cell) + 2)
+        if lo_i >= hi_i or lo_j >= hi_j:
+            return
+        X = GX[lo_j:hi_j, lo_i:hi_i]
+        Y = GY[lo_j:hi_j, lo_i:hi_i]
+        ddx = np.maximum(np.maximum(bb.GetLeft() / 1e6 - X, X - bb.GetRight() / 1e6), 0)
+        ddy = np.maximum(np.maximum(bb.GetTop() / 1e6 - Y, Y - bb.GetBottom() / 1e6), 0)
+        grid[lo_j:hi_j, lo_i:hi_i] |= np.hypot(ddx, ddy) <= r
+
+    obs = {}
+    via_obs = np.zeros((ny, nx), bool)
+    tgt = {}
+    for lid in cu:
+        o_t = np.zeros((ny, nx), bool)
+        o_v = np.zeros((ny, nx), bool)
+        tg = np.zeros((ny, nx), bool)
+        for t in board.GetTracks():
+            isvia = t.GetClass() == "PCB_VIA"
+            if isvia and not t.IsOnLayer(lid):
+                continue
+            if not isvia and t.GetLayer() != lid:
+                continue
+            if t.GetNetCode() == net:
+                if isvia:
+                    mark(tg, t.GetPosition().x / 1e6, t.GetPosition().y / 1e6,
+                         t.GetPosition().x / 1e6, t.GetPosition().y / 1e6, t.GetWidth() / 2e6)
+                else:
+                    mark(tg, t.GetStart().x / 1e6, t.GetStart().y / 1e6,
+                         t.GetEnd().x / 1e6, t.GetEnd().y / 1e6, t.GetWidth() / 2e6)
+                continue
+            hw = t.GetWidth() / 2e6
+            if isvia:
+                px, py = t.GetPosition().x / 1e6, t.GetPosition().y / 1e6
+                mark(o_t, px, py, px, py, hw + r_t)
+                mark(o_v, px, py, px, py, hw + r_v)
+            else:
+                a, b = t.GetStart(), t.GetEnd()
+                mark(o_t, a.x / 1e6, a.y / 1e6, b.x / 1e6, b.y / 1e6, hw + r_t)
+                mark(o_v, a.x / 1e6, a.y / 1e6, b.x / 1e6, b.y / 1e6, hw + r_v)
+        for f in board.GetFootprints():
+            for p in f.Pads():
+                if not p.IsOnLayer(lid) and p.GetAttribute() not in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                    continue
+                if p.GetNetCode() == net:
+                    if p.IsOnLayer(lid) and not is_src(f, p):
+                        mark_rect(tg, p.GetBoundingBox(), 0.0)
+                    continue
+                mark_rect(o_t, p.GetBoundingBox(), r_t)
+                mark_rect(o_v, p.GetBoundingBox(), r_v)
+        obs[lid] = o_t
+        via_obs |= o_v
+        tgt[lid] = tg
+    # source: the pad's own cell(s)
+    si = int(round((P.x / 1e6 - x0) / cell))
+    sj = int(round((P.y / 1e6 - y0) / cell))
+    src = [(l, sj, si) for l in lids if pad.IsOnLayer(l)]
+    src = [s for s in src if 0 <= s[1] < ny and 0 <= s[2] < nx and not obs[s[0]][s[1], s[2]]]
+    if not src:
+        log(f"    bridge {ref}.{padnum}: source cell blocked")
+        return []
+    # Dijkstra over (layer, j, i)
+    dist = {}
+    prev = {}
+    pq = []
+    for s in src:
+        dist[s] = 0.0
+        heapq.heappush(pq, (0.0, s))
+    steps = [(-1, 0, cell), (1, 0, cell), (0, -1, cell), (0, 1, cell),
+             (-1, -1, cell * 1.4142), (-1, 1, cell * 1.4142), (1, -1, cell * 1.4142), (1, 1, cell * 1.4142)]
+    goal = None
+    while pq:
+        d, s = heapq.heappop(pq)
+        if d > dist.get(s, 1e18):
+            continue
+        l, j, i = s
+        if tgt[l][j, i] and (j, i) != (sj, si):
+            goal = s
+            break
+        for dj, di, c in steps:
+            nj, ni_ = j + dj, i + di
+            if 0 <= nj < ny and 0 <= ni_ < nx and not obs[l][nj, ni_]:
+                if dj and di and (obs[l][j, ni_] or obs[l][nj, i]):
+                    continue  # no corner cutting
+                t = (l, nj, ni_)
+                nd = d + c
+                if nd < dist.get(t, 1e18):
+                    dist[t] = nd
+                    prev[t] = s
+                    heapq.heappush(pq, (nd, t))
+        if not via_obs[j, i] and (j, i) != (sj, si):
+            for l2 in lids:
+                if l2 == l or obs[l2][j, i]:
+                    continue
+                t = (l2, j, i)
+                nd = d + via_cost_mm
+                if nd < dist.get(t, 1e18):
+                    dist[t] = nd
+                    prev[t] = s
+                    heapq.heappush(pq, (nd, t))
+    if goal is None:
+        log(f"    bridge {ref}.{padnum}: no path on {[board.GetLayerName(l) for l in lids]} "
+            f"(grid {nx}x{ny} @ {cell} mm)")
+        return []
+    path = [goal]
+    while path[-1] in prev:
+        path.append(prev[path[-1]])
+    path.reverse()
+    # split into per-layer runs, simplify each by line of sight on the grid
+    runs = []
+    for l, j, i in path:
+        if runs and runs[-1][0] == l:
+            runs[-1][1].append((i, j))
+        else:
+            runs.append((l, [(i, j)]))
+
+    def clear_line(l, a, b):
+        n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) * 2) + 1)
+        for k in range(n + 1):
+            f = k / n
+            i = int(round(a[0] + (b[0] - a[0]) * f))
+            j = int(round(a[1] + (b[1] - a[1]) * f))
+            if obs[l][j, i]:
+                return False
+        return True
+
+    def simplify(l, pts):
+        out = [pts[0]]
+        k = 0
+        while k < len(pts) - 1:
+            m = len(pts) - 1
+            while m > k + 1 and not clear_line(l, pts[k], pts[m]):
+                m -= 1
+            out.append(pts[m])
+            k = m
+        return out
+
+    def V(i, j):
+        return pcbnew.VECTOR2I(int(round((x0 + i * cell) * 1e6)), int(round((y0 + j * cell) * 1e6)))
+
+    added = []
+    first = True
+    for idx, (l, pts) in enumerate(runs):
+        pts = simplify(l, pts)
+        if idx == len(runs) - 1 and len(pts) == 1:
+            # the via landed inside the target copper: still run a track
+            # from it to the pad centre / track centreline so the join is real
+            a = V(*pts[0])
+            b = _snap_to_net(board, a, l, net, own_pads, skip=_uuids(added))
+            if a != b:
+                t = pcbnew.PCB_TRACK(board)
+                t.SetStart(a)
+                t.SetEnd(b)
+                t.SetLayer(l)
+                t.SetWidth(pcbnew.FromMM(width_mm))
+                t.SetNet(ni)
+                board.Add(t)
+                added.append(t)
+        for k in range(len(pts) - 1):
+            a = P if (first and k == 0) else V(*pts[k])
+            b = V(*pts[k + 1])
+            if idx == len(runs) - 1 and k == len(pts) - 2:
+                b = _snap_to_net(board, b, l, net, own_pads, skip=_uuids(added))
+            if a == b:
+                continue
+            t = pcbnew.PCB_TRACK(board)
+            t.SetStart(a)
+            t.SetEnd(b)
+            t.SetLayer(l)
+            t.SetWidth(pcbnew.FromMM(width_mm))
+            t.SetNet(ni)
+            board.Add(t)
+            added.append(t)
+        first = False
+        if idx < len(runs) - 1:
+            v = pcbnew.PCB_VIA(board)
+            v.SetPosition(V(*pts[-1]))
+            v.SetViaType(pcbnew.VIATYPE_THROUGH)
+            v.SetWidth(pcbnew.FromMM(via_mm))
+            v.SetDrill(pcbnew.FromMM(drill_mm))
+            v.SetNet(ni)
+            board.Add(v)
+            added.append(v)
+    log(f"    bridge {ref}.{padnum}: {len(added)} item(s), {len(runs)} layer run(s) "
+        f"{[board.GetLayerName(l) for l, _ in runs]}, {dist[goal]:.1f} mm cost")
+    return added
+
+
+def _uuids(items):
+    return {i.m_Uuid.AsString() for i in items}
+
+
+def _snap_to_net(board, pt, layer, net, own_pads, skip=()):
+    """Move the final point onto the centreline of the nearest own-net
+    item on `layer` (pad centre, via centre, or the foot of the
+    perpendicular on a track) so the join is exact, not a grid cell.
+    `skip` holds the uuids of copper this bridge itself just added."""
+    import pcbnew
+    best = None
+    for p in own_pads:
+        if p.IsOnLayer(layer):
+            d = math.hypot(p.GetPosition().x - pt.x, p.GetPosition().y - pt.y)
+            if best is None or d < best[0]:
+                best = (d, p.GetPosition())
+    for t in board.GetTracks():
+        if t.GetNetCode() != net or t.m_Uuid.AsString() in skip:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            if t.IsOnLayer(layer):
+                d = math.hypot(t.GetPosition().x - pt.x, t.GetPosition().y - pt.y)
+                if best is None or d < best[0]:
+                    best = (d, t.GetPosition())
+            continue
+        if t.GetLayer() != layer:
+            continue
+        a, b = t.GetStart(), t.GetEnd()
+        dx, dy = b.x - a.x, b.y - a.y
+        L2 = dx * dx + dy * dy
+        u = 0.0 if L2 == 0 else max(0.0, min(1.0, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / L2))
+        q = pcbnew.VECTOR2I(int(a.x + u * dx), int(a.y + u * dy))
+        d = math.hypot(q.x - pt.x, q.y - pt.y)
+        if best is None or d < best[0]:
+            best = (d, q)
+    return best[1] if best and best[0] < 1.0e6 else pt
