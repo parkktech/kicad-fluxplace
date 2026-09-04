@@ -438,7 +438,7 @@ def lib_symbol_for(mpn, value, idx):
     return (best[1], best[2]) if best else None
 
 
-def check_parts(facts, spec, partdata, cons, idx=None):
+def check_parts(facts, spec, partdata, cons, idx=None, ds_dir=None):
     """Footprint vs distributor package, pin count vs pads, pinmap vs the
     official symbol, operating temperature vs the environment."""
     out = []
@@ -496,17 +496,24 @@ def check_parts(facts, spec, partdata, cons, idx=None):
                                   f"{npads} connectable pads on the footprint",
                                   refs=[ref]))
             tmin, tmax = data.get("temp_min"), data.get("temp_max")
+            src = "per distributor"
+            dst = _ds_temp(ds_dir, mpn)
+            if dst:
+                (dlo, dhi), line = dst
+                if tmin is None or tmax is None or dlo > tmin or dhi < tmax:
+                    # the sheet is the rating; the distributor field is a copy
+                    tmin, tmax, src = dlo, dhi, f"per datasheet ('{line[:60]}')"
             if env and tmin is not None and tmax is not None:
                 if tmin > env["temp_min_c"] or tmax < env["temp_max_c"]:
                     out.append(_f(FAIL, "TEMP_RATING",
-                                  f"{ref} {mpn}: rated {tmin:+.0f}..{tmax:+.0f} C, "
+                                  f"{ref} {mpn}: rated {tmin:+.0f}..{tmax:+.0f} C {src}, "
                                   f"product environment needs "
                                   f"{env['temp_min_c']:+.0f}..{env['temp_max_c']:+.0f} C",
                                   refs=[ref]))
             elif env and (tmin is None or tmax is None) and ref[0] in "UQDTKJL":
                 out.append(_f(INFO, "TEMP_UNRATED",
                               f"{ref} {mpn}: no operating-temperature data from "
-                              f"the distributors — confirm from the datasheet",
+                              f"the distributors or the datasheet text — confirm by eye",
                               refs=[ref]))
             lc = (data.get("lifecycle") or "").lower()
             if any(b in lc for b in ("obsolete", "discontinued", "nrnd",
@@ -574,6 +581,159 @@ def check_parts(facts, spec, partdata, cons, idx=None):
 # ==========================================================================
 # 4b. Documentation — no part without its datasheet on disk and pin evidence
 # ==========================================================================
+def landpattern_geometry(pad_geom):
+    """Measured land pattern of a footprint from its pad list (footprint
+    coordinates, mm): pitch = smallest centre spacing between pads that
+    share a row or a column; rows = extent of the pattern across the
+    pitch axis; pad = size of the numbered pads; pins = distinct pad
+    numbers (a paddle split into strips counts once)."""
+    pads = [g for g in pad_geom if str(g[0]).isdigit()]
+    if len(pads) < 2:
+        return None
+    best = None
+    for axis in (1, 2):
+        other = 2 if axis == 1 else 1
+        groups = {}
+        for g in pads:
+            groups.setdefault(round(g[other], 2), []).append(round(g[axis], 3))
+        for coords in groups.values():
+            cs = sorted(set(coords))
+            for i in range(len(cs) - 1):
+                gap = round(cs[i + 1] - cs[i], 3)
+                if gap > 0 and (best is None or gap < best[0]):
+                    best = (gap, axis)
+    if best is None:
+        return None
+    pitch, axis = best
+    other = 2 if axis == 1 else 1
+    cross = sorted({round(g[other], 3) for g in pads})
+    rows = round(cross[-1] - cross[0], 3) if len(cross) > 1 else 0.0
+    sizes = sorted({(round(g[3], 3), round(g[4], 3)) for g in pads}, key=lambda t: -t[0] * t[1])
+    return {"pitch": pitch, "rows": rows, "pad": sizes[0], "pins": len({str(g[0]) for g in pads})}
+
+
+def _num_in_text(text, value_mm):
+    """True if value_mm appears on the page in mm (0.99, .99) or inches
+    (0.039, .039), to two decimals either way."""
+    forms = set()
+    for v in (value_mm, value_mm / 25.4):
+        for fmt in ("%.2f", "%.3f"):
+            t = fmt % v
+            forms.add(t)
+            forms.add(t.lstrip("0"))
+    return any(re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text) for f in forms if f)
+
+
+def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
+    """A footprint drawn for the project must cite the drawing it was
+    transcribed from, and the drawing must agree with the pads.
+
+    utv-comms V1.5 shipped a 24-pin transformer land at 1.27 mm pitch for a
+    part whose sheet says 0.99 mm; the footprint's own description said
+    1.27 too, so nothing checked it against the datasheet (D70x). The rule:
+    `landpattern` in the spec component names the page and the numbers
+    read from it — {"source": "X.pdf#p3", "pitch": 0.99, "pad": [0.64,
+    1.78], "rows": 8.99, "pins": 24} — the numbers are measured on the
+    footprint (FAIL on any 0.03 mm disagreement) and, where the page has
+    text, the pitch must be printed on it (WARN when the page is a
+    text-less drawing: verify it by eye, and say so).
+    Footprints whose name is in a project .pretty ([docs] project_libs, a
+    list of directories) with no `landpattern` are a FAIL under strict
+    docs; KiCad-library footprints are not asked — their land patterns
+    are the library's responsibility."""
+    from . import partdocs as PD
+    out = []
+    spec_parts = {c["ref"]: c for c in (spec or {}).get("components", [])}
+    # project_libs are .pretty directories (generated boards carry no lib
+    # nickname on their footprints, so the name is matched against the files)
+    drawn = set()
+    for d in project_libs:
+        for cand in (d, os.path.join(ds_dir or "", "..", "..", d)):
+            drawn |= {os.path.splitext(os.path.basename(f))[0]
+                      for f in glob.glob(os.path.join(cand, "*.kicad_mod"))}
+    for ref, p in sorted(facts["parts"].items()):
+        fp = p.get("footprint", "")
+        name = fp.split(":")[-1]
+        sp = spec_parts.get(ref, {})
+        lp = sp.get("landpattern")
+        if not lp:
+            if name in drawn and not p.get("mech"):
+                out.append(_f(FAIL if strict else WARN, "LANDPATTERN_UNCITED",
+                              f"{ref}: {fp} is a project-drawn footprint with no "
+                              f"`landpattern` citation in the spec (source page + "
+                              f"pitch/pad/rows/pins read from it)", refs=[ref]))
+            continue
+        meas = landpattern_geometry(p.get("pad_geom", []))
+        if not meas:
+            continue
+        bad = []
+        for key in ("pitch", "rows"):
+            if lp.get(key) is not None and meas.get(key) is not None and \
+                    abs(float(lp[key]) - float(meas[key])) > 0.03:
+                bad.append(f"{key} cited {lp[key]} vs drawn {meas[key]}")
+        if lp.get("pad"):
+            cw, ch = [float(v) for v in lp["pad"]]
+            mw, mh = meas["pad"]
+            if not ((abs(cw - mw) <= 0.03 and abs(ch - mh) <= 0.03) or
+                    (abs(cw - mh) <= 0.03 and abs(ch - mw) <= 0.03)):
+                bad.append(f"pad cited {cw}x{ch} vs drawn {mw}x{mh}")
+        if lp.get("pins") and int(lp["pins"]) != meas["pins"]:
+            bad.append(f"pins cited {lp['pins']} vs drawn {meas['pins']}")
+        if bad:
+            out.append(_f(FAIL, "LANDPATTERN_MISMATCH",
+                          f"{ref}: footprint {fp} disagrees with its cited drawing "
+                          f"{lp.get('source')}: " + "; ".join(bad), refs=[ref]))
+        src = lp.get("source") or ""
+        fname, pages = PD.parse_source(src)
+        if not fname:
+            out.append(_f(FAIL if strict else WARN, "LANDPATTERN_UNCITED",
+                          f"{ref}: landpattern.source {src!r} is not file.pdf#pN", refs=[ref]))
+            continue
+        path = os.path.join(ds_dir or "", fname)
+        if not os.path.exists(path):
+            out.append(_f(FAIL if strict else WARN, "LANDPATTERN_SOURCE_MISSING",
+                          f"{ref}: cited drawing {fname} is not in {ds_dir}", refs=[ref]))
+            continue
+        text = ""
+        try:
+            text = PD.page_text(path, pages or [1]) or ""
+        except Exception:
+            text = ""
+        if not text.strip():
+            out.append(_f(WARN, "LANDPATTERN_PAGE_UNREADABLE",
+                          f"{ref}: {src} is a text-less drawing — the cited pitch "
+                          f"{lp.get('pitch')} mm was read by eye; verify it once more "
+                          f"before ordering", refs=[ref]))
+        elif lp.get("pitch") is not None and not _num_in_text(text, float(lp["pitch"])):
+            out.append(_f(FAIL, "LANDPATTERN_NOT_ON_PAGE",
+                          f"{ref}: pitch {lp['pitch']} mm is not printed on {src}",
+                          refs=[ref]))
+    return out
+
+
+_DS_TEMP_CACHE = {}
+
+
+def _ds_temp(ds_dir, mpn):
+    """partdocs.datasheet_temp for the MPN's manifest file, memoised."""
+    if not ds_dir or not mpn:
+        return None
+    key = (ds_dir, mpn)
+    if key not in _DS_TEMP_CACHE:
+        from . import partdocs as PD
+        res = None
+        try:
+            man = PD.load_manifest(ds_dir)
+            ent = man.get(mpn) or {}
+            f = ent.get("file")
+            if f and os.path.exists(os.path.join(ds_dir, f)):
+                res = PD.datasheet_temp(os.path.join(ds_dir, f))
+        except Exception:
+            res = None
+        _DS_TEMP_CACHE[key] = res
+    return _DS_TEMP_CACHE[key]
+
+
 def check_docs(facts, spec, ds_dir, strict=True):
     """MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
     from partdocs.spec_check, plus the same MPN rule for board parts that are
@@ -803,10 +963,12 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_env(facts, cons)
     if ds_dir or spec:
         out += check_docs(facts, spec, ds_dir or "", strict=strict)
+        out += check_landpattern(facts, spec, ds_dir or "",
+                                 project_libs=docs.get("project_libs", ()), strict=strict)
     out += check_net_rules(facts, cons)
     out += check_pairs(facts, cons)
     out += check_rf(facts, cons)
-    out += check_parts(facts, spec, partdata, cons, idx=idx)
+    out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)
     out += check_spec_sync(facts, spec)
     out += check_china(facts, cons, cache_path=(os.path.join(os.path.dirname(
         facts.get("mpn_map_path") or "."), ".lcsc_cache.json") if facts.get("mpn_map_path") else None))
@@ -890,6 +1052,8 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "footprint": fp.GetFPID().GetUniStringLibId(),
             "pads": pads, "connectable_pads": conn,
             "pads_total": sum(1 for pad in fp.Pads() if pad.GetNumber().isdigit()),
+            "pad_geom": [(pad.GetNumber(), pad.GetFPRelativePosition().x / 1e6, pad.GetFPRelativePosition().y / 1e6,
+                          pad.GetSize().x / 1e6, pad.GetSize().y / 1e6) for pad in fp.Pads()],
             "mech": not any(pads.values()),
             "tht": any(p.GetDrillSize().x > 0 for p in fp.Pads()),
         }

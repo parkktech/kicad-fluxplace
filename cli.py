@@ -1275,7 +1275,7 @@ def cmd_finish(a):
     tmp = out + ".finish.kicad_pcb"
     base = TU.drc_counts(a.board, a.kicad_cli)
     print(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
-    res = FN.route_nets(a.board, tmp, a.nets, planes=a.planes, jar=a.jar,
+    res = FN.route_nets(a.board, tmp, a.nets, planes=a.planes, jar=a.jar, timeout=a.timeout,
                         passes=a.passes, log=lambda m: print(m, flush=True))
     if not res:
         raise SystemExit("finish: nothing produced")
@@ -2269,6 +2269,8 @@ def build_parser():
                      help="plane layers declared (type power) in the DSN")
     pfn.add_argument("--jar", default=None)
     pfn.add_argument("--passes", type=int, default=3)
+    pfn.add_argument("--timeout", type=int, default=900,
+                     help="freerouting wall-clock cap in seconds")
     pfn.add_argument("--kicad-cli", default="kicad-cli")
     pfn.set_defaults(fn=cmd_finish)
 

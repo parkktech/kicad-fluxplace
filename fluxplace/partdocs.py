@@ -36,7 +36,7 @@ import subprocess
 import time
 import urllib.request
 
-__all__ = ["fetch", "load_manifest", "page_text", "evidence", "spec_check",
+__all__ = ["datasheet_temp", "fetch", "load_manifest", "page_text", "evidence", "spec_check",
            "PASSIVE_PREFIXES", "manifest_path"]
 
 MANIFEST = "datasheets.json"
@@ -442,3 +442,39 @@ def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
                 out.append(("FAIL" if strict else "WARN", "PINMAP_EVIDENCE_WEAK", ref,
                             f"{ref} {mpn}: {detail}; not found: {', '.join(missing[:8])}"))
     return out
+
+_TEMP_LINE = re.compile(
+    r"(?:operating|ambient|working|functional)[^\n]{0,80}?temp(?:erature|\.)?[^\n]{0,140}?"
+    r"(-\s?\d{1,3}|\b0)\s*(?:°\s*C|C\b|℃)?\s*(?:to|~|\.\.\.?|…|–|-|—|/)\s*\+?\s?(\d{1,3})\s*(?:°\s*C|C\b|℃)",
+    re.I)
+
+
+def datasheet_temp(pdf):
+    """Operating-temperature range printed in the datasheet, as
+    ((lo, hi), line) or None. The distributor's parametric field is a
+    transcription; the sheet is the rating. DigiKey listed Omron's G6K
+    relay at -40..+85 C while Omron's own sheet says 'Ambient operating
+    temperature -40 to 70 C' — the review believed DigiKey (D70x)."""
+    try:
+        text = page_text(pdf) or ""
+    except Exception:
+        return None
+    text = text.replace("−", "-").replace("\u2013", "-")
+    best = None
+    for m in _TEMP_LINE.finditer(text):
+        try:
+            lo = float(m.group(1).replace(" ", ""))
+            hi = float(m.group(2))
+        except ValueError:
+            continue
+        if lo >= hi or hi > 260 or lo < -100:
+            continue
+        line = text[max(0, m.start() - 10):m.end()].strip().replace("\n", " ")
+        if "storage" in line.lower() or "junction" in line.lower():
+            continue
+        cand = ((lo, hi), line)
+        # keep the NARROWEST range: the product's operating rating, not a
+        # test-condition or a storage range that slipped past the filter
+        if best is None or (hi - lo) < (best[0][1] - best[0][0]):
+            best = cand
+    return best

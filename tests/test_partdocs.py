@@ -97,3 +97,15 @@ def test_spec_check_fails_undocumented_parts():
     # INP/INN alias IN+/IN- ; GND aliases V- ; VCC aliases V+
     ok, found, missing, _ = PD.evidence(spec["components"][0]["pinmap"], os.path.join(d, "U9.pdf"), [1])
     assert ok, missing
+
+
+@pytest.mark.skipif(not HAVE_PDFTOTEXT, reason="pdftotext not installed")
+def test_datasheet_temp_reads_the_sheet_not_the_distributor():
+    d = tempfile.mkdtemp()
+    pdf = os.path.join(d, "G6K.pdf")
+    _pdf(pdf, ["Storage temperature -40 to 100 C", "Ambient operating temperature -40 to 70 C",
+               "Ambient operating humidity 5% to 85%"])
+    rng, line = PD.datasheet_temp(pdf)
+    assert rng == (-40.0, 70.0) and "operating" in line.lower()
+    _pdf(pdf, ["Coil resistance 237 ohm", "Rated voltage 5 VDC"])
+    assert PD.datasheet_temp(pdf) is None

@@ -43,6 +43,8 @@ optional; anything not stated keeps the heuristic default. Schema:
     "G6K-2F-Y DC5" = "G6K-2F-Y-5V"
 
     [docs]                  # documentation is a build requirement
+    project_libs = ["hardware/lib/footprints/utv-comms.pretty"]  # footprints
+                            # drawn here need a `landpattern` citation in the spec
     datasheets = "docs/datasheets"   # every MPN's PDF lives here, with datasheets.json
     strict = true           # missing MPN / datasheet / pin evidence = FAIL, not WARN
 

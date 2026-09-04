@@ -1,3 +1,18 @@
+## 2026-09-04 — two gates from one transformer: land pattern and datasheet temperature
+
+The V1.5 transformer footprint (Pulse HX5084, drawn in-project) had 1.27 mm
+pitch; both Pulse drawings say 0.99 mm. Its own description said 1.27, so
+nothing checked it against the sheet. Now `landpattern` on a spec component
+cites the page and the numbers read from it; `review` measures the footprint
+against them (FAIL on 0.03 mm), checks the pitch is printed on the page when
+the page has text, and FAILs any footprint from `[docs] project_libs` that
+carries no citation. Same review pass: DigiKey lists Omron's G6K relay at
+-40..+85 C, Omron's sheet says -40 to 70 C, and Seiko's MS621FE cell is
+-20..+60 C — `partdocs.datasheet_temp` reads the sheet and the review prefers
+it. Also: `lcsc.lookup` retries without punctuation (RJHSE-5380 vs RJHSE5380),
+`finish --timeout`, and the patcher's launder worker takes absolute paths
+(it ran with cwd=repo and lost relative board paths).
+
 ## 2026-09-03 — `repair --bridge`: the maze router for the last pad
 
 Adding the IMU to utv-comms V1.5 left one pad (U13.14, I2C_SDA) that neither

@@ -19,6 +19,7 @@ Grades (per part, `need` units):
   CN_ABSENT  not in the JLCPCB library at all  (consign, or pick another part)
 """
 import json
+import re
 import time
 
 from .sourcing import _same_part
@@ -67,6 +68,19 @@ def lookup(mpn, timeout=30):
                      "min_buy": c.get("minPurchaseNum"),
                      "datasheet": c.get("dataManualUrl") or c.get("dataManualOfficialLink") or "",
                      "pseudo": (c.get("componentBrandEn") or "").lower().startswith("jlcpcb")})
+    best = _best(rows)
+    # JLCPCB's keyword search is literal about hyphens: "RJHSE-5380" finds
+    # only the -010-T reel listing (0 stock) while "RJHSE5380" holds 1349.
+    # Re-ask without punctuation when the first answer is thin.
+    bare = re.sub(r"[-_./ ]", "", mpn)
+    if bare != mpn and (best is None or not best["exact"] or best["stock"] == 0):
+        alt = lookup(bare, timeout=timeout) if bare else None
+        if alt and (best is None or alt["stock"] > best["stock"]):
+            best = alt
+    return best
+
+
+def _best(rows):
     if not rows:
         return None
     real = [x for x in rows if not x["pseudo"]] or rows

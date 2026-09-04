@@ -97,6 +97,8 @@ def mutate(src_path, dst_path, picks):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     wenv = dict(os.environ)
     wenv["PYTHONPATH"] = repo + os.pathsep + wenv.get("PYTHONPATH", "")
+    # the worker runs with cwd=repo: every path it gets must be absolute
+    src_path, dst_path = os.path.abspath(src_path), os.path.abspath(dst_path)
     pk = dst_path + ".picks.json"
     with open(pk, "w") as f:
         json.dump(picks, f)

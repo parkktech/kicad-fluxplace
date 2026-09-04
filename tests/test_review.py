@@ -437,3 +437,43 @@ def test_review_waivers_from_constraints_shape():
     env = {"env": {"temp_min_c": -40, "temp_max_c": 85}}
     out = R.run(f, cons=env, partdata=pd, waivers=cons["review"]["waive"])
     assert "TEMP_RATING" not in codes(out)
+
+
+def test_landpattern_geometry_and_gate(tmp_path):
+    """Pulse HX5084: 24 pads, 0.99 pitch, two rows 8.99 apart. A footprint
+    drawn at 1.27 pitch against a spec citing 0.99 must FAIL; a matching one
+    with an unreadable drawing page WARNs; an uncited project footprint FAILs."""
+    import os
+    from fluxplace import review as R
+    def pads(pitch):
+        g = []
+        for i in range(12):
+            x = round((i - 5.5) * pitch, 3)
+            g.append((str(i + 1), x, 4.495, 0.64, 1.78))
+            g.append((str(24 - i), x, -4.495, 0.64, 1.78))
+        return g
+    geo = R.landpattern_geometry(pads(0.99))
+    assert geo["pitch"] == 0.99 and geo["rows"] == 8.99 and geo["pins"] == 24 and geo["pad"] == (0.64, 1.78)
+    lib = tmp_path / "proj.pretty"
+    lib.mkdir()
+    (lib / "Pulse_H5084_SMD24.kicad_mod").write_text("(footprint)")
+    (lib / "Other_Drawn.kicad_mod").write_text("(footprint)")
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "HX.pdf").write_bytes(b"%PDF-1.4\n")   # unreadable drawing
+    facts = {"parts": {
+        "T3": {"footprint": "Pulse_H5084_SMD24", "pad_geom": pads(1.27), "mech": False},
+        "T4": {"footprint": "Pulse_H5084_SMD24", "pad_geom": pads(0.99), "mech": False},
+        "X1": {"footprint": "Other_Drawn", "pad_geom": pads(0.99), "mech": False},
+        "C1": {"footprint": "C_0402_1005Metric", "pad_geom": [], "mech": False},
+    }}
+    lp = {"source": "HX.pdf#p3", "pitch": 0.99, "pad": [0.64, 1.78], "rows": 8.99, "pins": 24}
+    spec = {"components": [{"ref": "T3", "landpattern": lp}, {"ref": "T4", "landpattern": lp},
+                           {"ref": "X1"}, {"ref": "C1"}]}
+    finds = R.check_landpattern(facts, spec, str(ds), project_libs=[str(lib)], strict=True)
+    codes = {(f["code"], f["refs"][0], f["level"]) for f in finds}
+    assert ("LANDPATTERN_MISMATCH", "T3", "FAIL") in codes
+    assert ("LANDPATTERN_PAGE_UNREADABLE", "T4", "WARN") in codes
+    assert not any(c == "LANDPATTERN_MISMATCH" and r == "T4" for c, r, _ in codes)
+    assert ("LANDPATTERN_UNCITED", "X1", "FAIL") in codes
+    assert not any(r == "C1" for _, r, _ in codes)
