@@ -1,3 +1,12 @@
+## 2026-09-04 — pcbnew pitfall: `fp.Models()` iterates by value
+
+`for m in fp.Models(): m.m_Filename = ...` edits a throwaway copy and the
+board saves unchanged (the Sonnet agent's first "fix" of the V1.5 RJ45 model
+path was a silent no-op). Index the vector and write back: `v = fp.Models();
+m = v[i]; m.m_Filename = ...; v[i] = m`. models.attach() should be audited for
+the same idiom. Also: the KiCad library RJHSE538X.step sits 1.97 mm off the
+RJHSE5380 footprint's holes per verify-models — cosmetic, not copper.
+
 ## 2026-09-04 — `models --fetch`: EasyEDA/LCSC as a second 3D-model source
 
 `review`'s `check_models` FAILs any electrical footprint with no 3D model or
