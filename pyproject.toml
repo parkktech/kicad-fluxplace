@@ -34,11 +34,18 @@ fab = [
     "openpyxl>=3.1",
     "Pillow>=10.0",
 ]
+# EasyEDA/LCSC 3D model fetch (`fluxplace models --fetch`): a second source
+# for the model body itself, keyed by LCSC "Cxxxxx" code, for parts whose
+# DigiKey CAD Models link is login-walled (SnapEDA/UL/CSE) or absent.
+models = [
+    "easyeda2kicad>=0.8",
+]
 # Everything a workstation needs to run the whole pipeline.
 all = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "Pillow>=10.0",
+    "easyeda2kicad>=0.8",
 ]
 dev = [
     "pytest>=7.4",

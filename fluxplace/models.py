@@ -19,17 +19,21 @@ Pure-python helpers are separated from pcbnew so the resolution logic is
 testable: `audit(models_iter, resolver)` decides missing/broken; fetching
 and board wiring live in `fetch_step` / `attach`.
 """
+import datetime
 import io
 import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
 import zipfile
 
-__all__ = ["credentials", "audit_board", "fetch_step", "attach", "sync"]
+__all__ = ["credentials", "audit_board", "fetch_step", "attach", "sync",
+          "missing_models", "easyeda_model", "fetch_missing"]
 
 UA = {"User-Agent": "Mozilla/5.0"}
 
@@ -669,3 +673,180 @@ def sync(board, mpn_map, dest_dir, path_prefix=None, align=True, log=print,
         report[status].append((ref, mpn, wired))
         log(f"  {ref} {mpn}: {status} -> {wired}")
     return report
+
+
+# ------------------------------------------------------------ easyeda / lcsc
+# Second source for the model itself (not just provenance): DigiKey's CAD
+# media link is frequently a login-walled SnapEDA/UL/CSE redirect (see
+# LOGIN_WALLED above) even for parts DigiKey happily sells. EasyEDA/LCSC
+# publishes a real STEP/WRL for most parts it stocks, keyed by LCSC code —
+# `easyeda2kicad --3d` is the community exporter for it. Never a
+# hand-authored stand-in: a fetch that fails is reported, not faked.
+def missing_models(board, board_path=None):
+    """Electrical footprints (at least one pad carries a net — mechanical
+    hardware with no net is exempt, same rule as review.check_models) whose
+    3D model list is empty or does not resolve to a file on disk.
+    -> [(ref, footprint_name, reason)] with reason "no-model" or
+    "broken-path"."""
+    from . import review as R
+    board_path = board_path or board.GetFileName()
+    out = []
+    for fp in board.GetFootprints():
+        if not any(pad.GetNetname() for pad in fp.Pads()):
+            continue    # mechanical: no net, exempt (review.check_models rule)
+        ref = fp.GetReference()
+        name = str(fp.GetFPID().GetUniStringLibId())
+        models = list(fp.Models())
+        if not models:
+            out.append((ref, name, "no-model"))
+            continue
+        if not any(os.path.exists(R.resolve_model(m.m_Filename, board_path))
+                  for m in models):
+            out.append((ref, name, "broken-path"))
+    return out
+
+
+def _easyeda_cli():
+    """Console script next to this interpreter (the venv it was pip
+    installed into), falling back to PATH."""
+    cand = os.path.join(os.path.dirname(sys.executable), "easyeda2kicad")
+    return cand if os.path.exists(cand) else "easyeda2kicad"
+
+
+def _easyeda_version():
+    try:
+        import easyeda2kicad
+        return getattr(easyeda2kicad, "__version__", None) or \
+            __import__("importlib.metadata",
+                       fromlist=["version"]).version("easyeda2kicad")
+    except Exception:
+        return "?"
+
+
+def easyeda_model(lcsc_code, out_dir, log=print):
+    """Fetch a 3D body for `lcsc_code` (a JLCPCB/LCSC "Cxxxxx" number) via
+    the `easyeda2kicad` community exporter's `--3d` mode. -> path to a
+    .step (preferred) or .wrl under out_dir, or None.
+
+    Every failure here is SOFT: missing package, subprocess error, timeout,
+    or no output file all just log why and return None — the caller
+    reports the ref as unresolved rather than raising."""
+    try:
+        import easyeda2kicad  # noqa: F401  -- presence check only
+    except ImportError:
+        log("    easyeda_model: easyeda2kicad is not installed — "
+            "pip install easyeda2kicad into this venv (see the [models] "
+            "extra) to enable EasyEDA/LCSC 3D model fetch")
+        return None
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = out_dir / "easyeda"
+    try:
+        rc = subprocess.run(
+            [_easyeda_cli(), "--3d", "--lcsc_id", lcsc_code,
+             "--output", str(stem)],
+            capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        log(f"    easyeda_model {lcsc_code}: timed out after 120s")
+        return None
+    except Exception as e:
+        log(f"    easyeda_model {lcsc_code}: {type(e).__name__}: {e}")
+        return None
+    if rc.returncode != 0:
+        msg = (rc.stderr or rc.stdout or "").strip()[:200]
+        log(f"    easyeda_model {lcsc_code}: exit {rc.returncode}: {msg}")
+        return None
+    found = (sorted(out_dir.rglob("*.step")) or sorted(out_dir.rglob("*.stp"))
+            or sorted(out_dir.rglob("*.wrl")))
+    if not found:
+        log(f"    easyeda_model {lcsc_code}: no .step/.stp/.wrl produced "
+            f"under {out_dir}")
+        return None
+    return found[0]
+
+
+def _safe_name(text):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", (text or "").strip()) or "part"
+
+
+def fetch_missing(board_path, mpn_map, lib_dir, sources_json, log=print):
+    """For every electrical footprint missing a model (`missing_models`):
+    look up its MPN's LCSC code (`lcsc.lookup`, cached per MPN this run),
+    fetch the body from EasyEDA (`easyeda_model`), copy it into `lib_dir`,
+    attach it to the footprint (rotation/offset 0 — orientation is a render
+    check, not solved here), and record provenance in `sources_json`.
+
+    The board is saved (to `board_path`) only if something was attached.
+    -> {"attached": [(ref, mpn, filename)], "unresolved": [(ref, reason)]}."""
+    from . import kicad_io as IO
+    from . import lcsc  # lazy: lcsc -> sourcing -> models (credentials) cycle
+    board = IO.load(board_path)
+    board_dir = os.path.dirname(os.path.abspath(board_path))
+    lib_dir = pathlib.Path(lib_dir)
+    result = {"attached": [], "unresolved": []}
+    todo = missing_models(board, board_path=board_path)
+    if not todo:
+        return result
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    expected_lib_dir = os.path.normpath(
+        os.path.join(board_dir, "..", "lib", "3dmodels"))
+    use_kiprjmod = os.path.normpath(str(lib_dir)) == expected_lib_dir
+    sources = {}
+    if os.path.exists(sources_json):
+        try:
+            sources = json.load(open(sources_json))
+        except Exception as e:
+            log(f"    fetch_missing: could not read {sources_json}: {e}")
+    sources.setdefault("real", {})
+    version = _easyeda_version()
+    lcsc_cache = {}
+    changed = False
+    for ref, fp_name, reason in todo:
+        mpn = mpn_map.get(ref)
+        if not mpn:
+            result["unresolved"].append((ref, "no MPN mapping"))
+            continue
+        if mpn in lcsc_cache:
+            row = lcsc_cache[mpn]
+        else:
+            try:
+                row = lcsc.lookup(mpn)
+            except Exception as e:
+                log(f"    fetch_missing {ref} {mpn}: lcsc lookup failed: {e}")
+                row = None
+            lcsc_cache[mpn] = row
+        if not row or not row.get("lcsc"):
+            result["unresolved"].append((ref, f"no LCSC match for {mpn}"))
+            continue
+        code = row["lcsc"]
+        got = easyeda_model(code, lib_dir / ".easyeda_tmp" / code, log=log)
+        if not got:
+            result["unresolved"].append(
+                (ref, f"easyeda2kicad produced nothing for {code}"))
+            continue
+        fname = f"{_safe_name(row.get('brand'))}_{_safe_name(mpn)}{got.suffix.lower()}"
+        dest = lib_dir / fname
+        shutil.copyfile(got, dest)
+        target = next((f for f in board.GetFootprints()
+                      if f.GetReference() == ref), None)
+        if target is None:
+            result["unresolved"].append((ref, "footprint no longer on board"))
+            continue
+        wired = (f"${{KIPRJMOD}}/../lib/3dmodels/{fname}" if use_kiprjmod
+                else str(dest))
+        attach(target, wired)
+        result["attached"].append((ref, mpn, fname))
+        today = datetime.date.today().isoformat()
+        sources["real"][ref] = (
+            f"{mpn} — EasyEDA/LCSC 3D model for {code} via "
+            f"easyeda2kicad {version}, fetched {today} -> {dest}. "
+            f"Orientation unverified until rendered.")
+        changed = True
+        log(f"  {ref} {mpn}: EasyEDA {code} -> {fname}")
+    if changed:
+        board.Save(board_path)
+        try:
+            json.dump(sources, open(sources_json, "w"), indent=1)
+        except Exception as e:
+            log(f"    fetch_missing: could not write {sources_json}: {e}")
+    return result

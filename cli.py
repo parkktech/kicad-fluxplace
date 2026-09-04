@@ -1425,12 +1425,65 @@ def _add_review_args(p, gate=False):
                        help="skip the design-review gate (ships known FAILs)")
 
 
+def _models_lib_dir(a):
+    board_dir = os.path.dirname(os.path.abspath(a.board))
+    return a.lib_dir or os.path.normpath(
+        os.path.join(board_dir, "..", "lib", "3dmodels"))
+
+
+def _models_mpn_map(a, S, _json):
+    """{ref: MPN}, from --mpn-map or auto-found beside the board (the same
+    mpn_map.json sourcing/review use), skipping "_"-prefixed keys."""
+    path = a.mpn_map or S.find_map(a.board)
+    if not path:
+        return {}, None
+    raw = _json.load(open(path))
+    return ({ref: mpn for ref, mpn in raw.items()
+            if not ref.startswith("_") and isinstance(mpn, str) and mpn},
+           path)
+
+
+def _models_sources_json(a, mpn_map_path, lib_dir):
+    if a.sources:
+        return a.sources
+    if mpn_map_path:
+        beside = os.path.join(os.path.dirname(mpn_map_path),
+                              "model_sources.json")
+        if os.path.exists(beside):
+            return beside
+    return os.path.join(lib_dir, "model_sources.json")
+
+
 def cmd_models(a):
-    """Fetch real manufacturer STEP models (DigiKey /media, Mouser assist)
-    for footprints with missing/broken 3D models, wire them in, save."""
+    """Fetch real manufacturer STEP models (DigiKey /media, Mouser assist,
+    or --fetch's EasyEDA/LCSC) for footprints with missing/broken 3D
+    models, wire them in, save."""
     import json as _json
     from fluxplace import models as M
     from fluxplace import kicad_io as IO
+    from fluxplace import sourcing as S
+
+    if a.check:
+        board = IO.load(a.board)
+        todo = M.missing_models(board, board_path=a.board)
+        for ref, fp_name, reason in todo:
+            print(f"  {ref:6s} {reason:12s} {fp_name[:50]}")
+        print(f"models --check: {len(todo)} footprints missing a model")
+        sys.exit(1 if todo else 0)
+
+    if a.fetch:
+        lib_dir = _models_lib_dir(a)
+        mpn_map, mpn_map_path = _models_mpn_map(a, S, _json)
+        sources_json = _models_sources_json(a, mpn_map_path, lib_dir)
+        rep = M.fetch_missing(a.board, mpn_map, lib_dir, sources_json)
+        for ref, mpn, fname in rep["attached"]:
+            print(f"  {ref:6s} attached   {mpn} -> {fname}")
+        for ref, reason in rep["unresolved"]:
+            print(f"  {ref:6s} unresolved {reason}")
+        print(f"models --fetch: {len(rep['attached'])} attached, "
+              f"{len(rep['unresolved'])} unresolved -> {sources_json}")
+        sys.exit(1 if rep["unresolved"] else 0)
+
     board = IO.load(a.board)
     if a.audit_only:
         todo = M.audit_board(board)
@@ -2321,6 +2374,23 @@ def build_parser():
     pmo.add_argument("--force", action="store_true",
                      help="every mapped ref gets an authoritative fetch and "
                           "the REAL model replaces any attached stand-in")
+    pmo.add_argument("--check", action="store_true",
+                     help="list electrical footprints with a missing/broken "
+                          "3D model (no network) and exit 1 if any")
+    pmo.add_argument("--fetch", action="store_true",
+                     help="pull missing 3D bodies from EasyEDA by LCSC code "
+                          "(needs easyeda2kicad), attach with provenance, "
+                          "exit 1 if anything stayed unresolved")
+    pmo.add_argument("--lib-dir", default=None,
+                     help="--fetch: where fetched STEP files land "
+                          "(default: <board_dir>/../lib/3dmodels)")
+    pmo.add_argument("--sources", default=None,
+                     help="--fetch: provenance JSON to update (default: "
+                          "model_sources.json beside mpn_map.json, else in "
+                          "--lib-dir)")
+    pmo.add_argument("--mpn-map", default=None,
+                     help="--fetch: JSON file {ref: MPN} (default: "
+                          "auto-found like other commands)")
     pmo.set_defaults(fn=cmd_models)
 
     pin = sub.add_parser("intake",

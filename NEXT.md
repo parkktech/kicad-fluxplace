@@ -1,3 +1,22 @@
+## 2026-09-04 — `models --fetch`: EasyEDA/LCSC as a second 3D-model source
+
+`review`'s `check_models` FAILs any electrical footprint with no 3D model or
+one whose path doesn't resolve, but the only fetch path (`models`'s default
+DigiKey CAD-media sync) misses whenever the vendor's CAD link is login-walled
+(SnapEDA/UL/CSE) — which is common. Added `missing_models()` (the same
+mechanical-exemption rule as `review.check_models`, via `review.resolve_model`)
+and `fetch_missing()`: for each hole, `lcsc.lookup(mpn)` gets the LCSC code,
+`easyeda_model()` shells out to `easyeda2kicad --3d --lcsc_id` (new `[models]`
+extra; soft-fails to a clear "pip install" message if not installed), the
+body is copied into the project's `lib/3dmodels/` and attached at
+rotation/offset 0 with a provenance line in `model_sources.json` (orientation
+flagged as unverified until rendered). CLI: `fluxplace models --fetch` and a
+network-free `--check` that just lists the holes; both exit 1 if anything is
+left unresolved, so a pipeline notices. `easyeda_model` had to stay a lazy
+`from . import lcsc` inside `fetch_missing` — a top-level import re-creates
+the existing `models` ↔ `sourcing` ↔ `lcsc` circular-import cycle (`sourcing`
+imports `credentials` from `models`).
+
 ## 2026-09-04 — MPN normaliser drops parenthesised variants
 
 `DF40HC(3.0)-100DS-0.4V(51)` is searched at DigiKey as `DF40HC-100DS-0.4V` (the

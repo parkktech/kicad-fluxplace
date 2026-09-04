@@ -122,6 +122,7 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `datasheets` | Fetch every MPN's datasheet into the project through the DigiKey/Mouser APIs, hash it into `datasheets.json`, list the ones that need a browser (`--adopt MPN=file.pdf` registers a hand-dropped PDF). |
 | `spec-check` | **Documentation gate** on a netlist spec: every part has an MPN, its datasheet on disk, and a `pinmap` whose names appear on the cited datasheet page (`pinmap_source: "X.pdf#p3"`). `schematic --datasheets` refuses to generate from an undocumented spec; `review` fails the same way (`[docs] strict = true`). |
 | `intake`  | Design interview → `design_intent.json`. Now also asks **where the product lives** (temperature range, vibration, moisture, input-transient class); `--constraints-out` writes the `[env]` block the review gate derates against. |
+| `models`  | Real vendor 3D bodies for footprints `review`'s `check_models` would FAIL: DigiKey CAD-media fetch (default), or `--check` to just list every missing/broken model (no network, exit 1 if any) and `--fetch` to pull the missing ones from EasyEDA by LCSC code (`easyeda2kicad`, the `[models]` extra) and attach them with provenance, exiting 1 if anything stays unresolved. |
 
 ### Physics constraints (comprehension)
 
@@ -405,6 +406,14 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 Driven by the utv-comms V1.5 IMU add and a transformer footprint that turned out
 to be wrong, all on `main`:
 
+- **`models --fetch` / `--check`** — `review`'s `check_models` FAILs any
+  electrical footprint with no 3D model or a model path that doesn't resolve;
+  `--check` lists those with no network call, and `--fetch` closes the hole by
+  looking up each ref's MPN on LCSC (`fluxplace.lcsc.lookup`) and pulling the
+  body from EasyEDA via `easyeda2kicad --3d` — a second model source for parts
+  whose DigiKey CAD-media link is login-walled. Attached at rotation/offset
+  zero with a provenance line recorded in `model_sources.json`; every failure
+  (no MPN, no LCSC match, exporter miss) is soft and reported, never faked.
 - **`repair --bridge REF:PAD`** — a multi-layer maze router for the one pad the
   last-mile patcher and freerouting both give up on. Dijkstra on a
   clearance-rasterised grid per copper layer, layer changes only where a
