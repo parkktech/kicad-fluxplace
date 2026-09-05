@@ -1,3 +1,12 @@
+## 2026-09-05 — verify-models is wrong for back-side footprints
+
+Its "body centroid outside the footprint region" test flagged the CM5 overlay
+on J10 (B.Cu, flipped) at the correct seat and passed a wrong one: it ignores
+KiCad's back-side transform (offset/rotation applied in the footprint frame,
+then X mirrored and Z flipped; model +Y is board -Y). Fix: apply the same
+transform the viewer does before comparing. Until then judge back-side
+models on `--side bottom` renders.
+
 ## 2026-09-04 — pcbnew pitfall: `fp.Models()` iterates by value
 
 `for m in fp.Models(): m.m_Filename = ...` edits a throwaway copy and the
