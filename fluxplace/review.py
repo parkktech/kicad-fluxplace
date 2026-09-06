@@ -61,6 +61,27 @@ def _f(level, code, msg, refs=()):
     return {"level": level, "code": code, "msg": msg, "refs": sorted(set(refs))}
 
 
+_MECH_FOOTPRINT = re.compile(r"MountingHole|Fiducial|TestPoint|Logo", re.I)
+_MECH_REF = re.compile(r"^(MH|MK|H|FID|TP)\d", re.I)
+
+
+def is_mechanical(ref, footprint, pads):
+    """True for a footprint every part-level check (models, sourcing,
+    package/pin-count, temperature) should exempt as mechanical — a screw,
+    fiducial, test point or logo, never a component.
+
+    `not any(pads.values())` (no pad on any net) is the base rule, but a
+    mounting hole's pad is routinely tied to GND for chassis bonding
+    (MH1-4/MK1-4 on utv-comms V1.5) — that tie doesn't make it an
+    electrical part. So a footprint is ALSO mechanical when its footprint
+    name or reference matches the common KiCad conventions for one, even
+    with a net on its pad."""
+    if not any(pads.values()):
+        return True
+    return bool(_MECH_FOOTPRINT.search(footprint or "")
+               or _MECH_REF.match(ref or ""))
+
+
 # ==========================================================================
 # 1. Net rules from the spec/constraints
 # ==========================================================================
@@ -767,7 +788,13 @@ def check_models(facts, board_path=None):
     swapped transformer had no body at all, and both shipped through DRC,
     review and packaging (2026-09-04). Mechanical footprints (no nets) are
     exempt. FAIL, because the user's rule is real vendor models on every
-    part, not a stand-in and not a hole."""
+    part, not a stand-in and not a hole.
+
+    Message format is "{ref} rest..." (ref, then a SPACE — never a colon
+    directly after it), matching every other check in this module: a
+    waiver like "MODEL_STANDIN:^ANT1 " matches against `msg` (and each
+    entry in `refs`) with `re.search`, and "^ANT1 " needs that space to
+    land right after the ref, not swallowed by a colon."""
     out = []
     for ref, p in sorted(facts["parts"].items()):
         if p.get("mech") or "models" not in p:   # hand-built facts carry no model list
@@ -775,14 +802,14 @@ def check_models(facts, board_path=None):
         models = p.get("models") or []
         if not models:
             out.append(_f(FAIL, "MODEL_MISSING",
-                          f"{ref}: footprint {p.get('footprint', '')} has no 3D model "
+                          f"{ref} footprint {p.get('footprint', '')} has no 3D model "
                           f"(fluxplace models --fetch, or a vendor STEP in the project lib)",
                           refs=[ref]))
             continue
         for m in models:
             if re.search(r"stand-?in|placeholder|dummy|generic", os.path.basename(m), re.I):
                 out.append(_f(FAIL, "MODEL_STANDIN",
-                              f"{ref}: 3D model {os.path.basename(m)} is a hand-made stand-in; "
+                              f"{ref} 3D model {os.path.basename(m)} is a hand-made stand-in; "
                               f"the rule is a real vendor/EasyEDA body (fluxplace models --fetch)",
                               refs=[ref]))
                 continue
@@ -791,7 +818,7 @@ def check_models(facts, board_path=None):
                 base, ext = os.path.splitext(full)
                 alt = [e for e in (".step", ".stp", ".wrl") if os.path.exists(base + e)]
                 out.append(_f(FAIL, "MODEL_FILE_MISSING",
-                              f"{ref}: 3D model {m} does not resolve to a file"
+                              f"{ref} 3D model {m} does not resolve to a file"
                               + (f" (same name exists as {alt[0]})" if alt else ""),
                               refs=[ref]))
     return out
@@ -897,8 +924,14 @@ def check_spec_sync(facts, spec, size_tol_mm=2.0):
                           f"spec says {b['layer_count']} layers, board has "
                           f"{facts['copper_layers']}"))
     srefs = {c["ref"] for c in spec.get("components", [])}
+    # Deliberately NOT `not p.get("mech")`: is_mechanical() also exempts a
+    # mounting hole/fiducial/test point whose pad carries a net (MH1-4/MK1-4
+    # tied to GND for chassis bonding) from the models/sourcing/temperature
+    # checks — but the spec documents those refs as components too, so
+    # spec-sync compares against "has any net at all", the pre-2026-09-06
+    # rule, not the broader mechanical exemption.
     brefs = {r for r, p in facts["parts"].items()
-             if not p.get("mech") and not r.startswith("__")}
+             if any((p.get("pads") or {}).values()) and not r.startswith("__")}
     only_spec, only_board = sorted(srefs - brefs), sorted(brefs - srefs)
     if only_spec or only_board:
         out.append(_f(FAIL, "SPEC_COMPONENT_MISMATCH",
@@ -1111,15 +1144,16 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             pads[num] = nn or pads.get(num, "")
             if pad.GetNetname():
                 net_pads[pad.GetNetname()].append((ref, num))
+        footprint_name = fp.GetFPID().GetUniStringLibId()
         parts[ref] = {
             "value": fp.GetValue(),
-            "footprint": fp.GetFPID().GetUniStringLibId(),
+            "footprint": footprint_name,
             "pads": pads, "connectable_pads": conn,
             "pads_total": sum(1 for pad in fp.Pads() if pad.GetNumber().isdigit()),
             "models": [m.m_Filename for m in fp.Models()],
             "pad_geom": [(pad.GetNumber(), pad.GetFPRelativePosition().x / 1e6, pad.GetFPRelativePosition().y / 1e6,
                           pad.GetSize().x / 1e6, pad.GetSize().y / 1e6) for pad in fp.Pads()],
-            "mech": not any(pads.values()),
+            "mech": is_mechanical(ref, footprint_name, pads),
             "tht": any(p.GetDrillSize().x > 0 for p in fp.Pads()),
         }
     tracks = {}

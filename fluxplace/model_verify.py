@@ -102,6 +102,76 @@ def _fit(tips, holes):
     return sum(ds) / len(ds), max(ds)
 
 
+def _rotate_xyz(pts, rx_deg, ry_deg, rz_deg, scale=(1.0, 1.0, 1.0)):
+    """Full X-then-Y-then-Z Euler rotation (R = Rz . Ry . Rx applied to each
+    point) — the same order/sign KiCad's model rotation uses. Verified
+    against the real DF40C-100DS-0.4V receptacle STEP (rot -90,0,90): raw
+    model extents (22.6 x 3.4 x 2.1mm) map to a sane 22.6mm-long, 2.1mm-tall
+    connector, not the reverse. Only used for the Z-seat check below — the
+    XY pin-in-hole math in `verify_footprint` stays Z-rotation-only (its own
+    `_model_to_fp`, already verified against seated boards) since a 3-axis
+    rotation's effect on THAT math is unverified."""
+    rx, ry, rz = math.radians(rx_deg), math.radians(ry_deg), math.radians(rz_deg)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    out = []
+    for x, y, z in pts:
+        x, y, z = x * scale[0], y * scale[1], z * scale[2]
+        x, y, z = x, y * cx - z * sx, y * sx + z * cx           # Rx
+        x, y, z = x * cy + z * sy, y, -x * sy + z * cy          # Ry
+        x, y, z = x * cz - y * sz, x * sz + y * cz, z           # Rz
+        out.append((x, y, z))
+    return out
+
+
+def seat_gap(zmin, zmax, offset_z, flipped=False, thickness=0.0,
+             confidence_tol=0.3):
+    """How far (mm) a model's seat face sits from its mounting plane, or
+    None if this model's own geometry doesn't look authored with a seat at
+    its origin (so there is no ground truth to judge the offset against).
+
+    zmin/zmax: the model's bounding box in footprint-local mm, AFTER its own
+    rotation/scale but BEFORE its FP_3DMODEL offset — the geometry as
+    authored, still centered on whatever origin the STEP happened to use.
+    offset_z: the FP_3DMODEL z-offset that is supposed to carry the model's
+    seat face onto the mounting plane (footprint-local z=0 — KiCad's local
+    frame calls the surface a footprint is placed on "zero" whether that
+    copper layer is the front or the back of the board).
+    flipped: True for a footprint on a back copper layer. Render-verified
+    (2026-09-06, the J10/J11 case this was built for): KiCad applies the
+    FP_3DMODEL offset in the footprint's OWN local frame BEFORE the
+    back-side mirror/flip, so a positive offset_z moves a body away from
+    the board on either side, front or back — the sign of a mis-seat is
+    NOT flipped by which copper layer the footprint is on. `flipped` is
+    kept as a parameter (some earlier, unverified doc guessed otherwise)
+    in case a future asymmetric-model case needs it, but it does not
+    change this function's result today.
+    thickness: board thickness (mm) — accepted for a caller that wants the
+    seat expressed as an absolute/world Z (front mount at 0, back mount at
+    -thickness) instead of footprint-local; unused in the magnitude below,
+    since local z=0 already means "this footprint's own mount plane" on
+    either side of the board.
+
+    Some models (vendor connector STEPs, in practice) are authored with the
+    mating/seat face AT their own origin — the body/pins reach away from it
+    on one side, so `zmin` or `zmax` sits near 0 even before any offset.
+    That IS ground truth: a nonzero FP_3DMODEL offset then means exactly
+    the seat gap (positive = floating above the mount plane, away from the
+    board; negative = buried in the board). Many library body models
+    (transformers, MOSFETs, radial caps) are authored some other way —
+    centered, or measured from an arbitrary corner — where NEITHER bound is
+    near 0 to begin with; their (possibly large) offset.z is a deliberate
+    alignment, not a defect, and "nearest bound to 0" is not a seat face at
+    all. `confidence_tol` gates on exactly that: only judge a model whose
+    un-offset geometry already put a bound within it of the origin.
+    """
+    seat_raw = zmin if abs(zmin) <= abs(zmax) else zmax
+    if abs(seat_raw) > confidence_tol:
+        return None
+    return seat_raw + offset_z
+
+
 def verify_footprint(fp, resolve, tol=0.6):
     """Check one footprint's model registration.
     Returns list of (level, issue) findings; empty = registered."""
@@ -114,10 +184,26 @@ def verify_footprint(fp, resolve, tol=0.6):
         pts = step_points(path)
         if len(pts) < 50:
             continue                      # wrl or trivial model — can't judge
-        if abs(m.m_Rotation.x) > 0.1 or abs(m.m_Rotation.y) > 0.1:
-            continue          # 3-axis model rotation — outside this checker's math
         off = (m.m_Offset.x, m.m_Offset.y, m.m_Offset.z)
         sc = (m.m_Scale.x, m.m_Scale.y, m.m_Scale.z)
+
+        # Z-seat check — runs on every model regardless of rotation axes
+        # (unlike the XY pin-fit math below, which only trusts a Z-only
+        # rotation). Catches a body floating off/buried in the board even
+        # when the STEP was authored lying on its side and needs a 3-axis
+        # rotation to stand up (e.g. a receptacle rotated -90,0,90).
+        rotated = _rotate_xyz(pts, m.m_Rotation.x, m.m_Rotation.y,
+                              m.m_Rotation.z, sc)
+        zs = [z for _, _, z in rotated]
+        gap = seat_gap(min(zs), max(zs), off[2], flipped=fp.IsFlipped())
+        if gap is not None and abs(gap) > tol:
+            where = "buried in the board" if gap < 0 else "floating above the mount plane"
+            findings.append(("WARN",
+                             f"model {os.path.basename(path)}: seat gap "
+                             f"{gap:+.2f}mm — {where} (tol {tol})"))
+
+        if abs(m.m_Rotation.x) > 0.1 or abs(m.m_Rotation.y) > 0.1:
+            continue          # 3-axis model rotation — outside the XY pin-fit math
         loc = _model_to_fp(pts, off, m.m_Rotation.z, sc)
         sub = [(x, y) for x, y, z in loc if z < -0.25]
         tips = _clusters(sub)

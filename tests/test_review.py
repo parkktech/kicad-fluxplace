@@ -492,3 +492,75 @@ def test_models_gate(tmp_path):
     }}
     codes = {(f["code"], f["refs"][0]) for f in R.check_models(facts)}
     assert codes == {("MODEL_MISSING", "U2"), ("MODEL_FILE_MISSING", "J1"), ("MODEL_STANDIN", "A1")}
+
+
+def test_check_models_messages_start_with_ref_space_not_colon():
+    # every finding's msg must be waivable the same way the rest of this
+    # module's checks are: "{ref} rest..." — a colon right after ref
+    # (the old "ANT1: 3D model..." shape) defeats "CODE:^REF " waivers.
+    facts = {"board_path": "/x/b.kicad_pcb", "parts": {
+        "U2": {"footprint": "Y", "models": [], "mech": False},
+        "J1": {"footprint": "Z", "models": ["/x/nope.step"], "mech": False},
+        "A1": {"footprint": "Patch", "models": ["/x/Taoglas_patch_standin.wrl"], "mech": False},
+    }}
+    for f in R.check_models(facts):
+        ref = f["refs"][0]
+        assert f["msg"].startswith(ref + " "), f["msg"]
+
+
+def test_model_standin_waiver_matches_after_colon_fix(tmp_path):
+    # the literal regression: ANT1's Taoglas patch has no vendor STEP and no
+    # EasyEDA body (D-something, constraints-v15.toml), waived as
+    # "MODEL_STANDIN:^ANT1 " — that waiver must actually suppress it now.
+    facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
+        "ANT1": {"footprint": "Patch", "models": [str(tmp_path / "ANT-GP1575_standin.wrl")],
+                 "mech": False},
+    }}
+    finds = R.check_models(facts)
+    assert [f["code"] for f in finds] == ["MODEL_STANDIN"]
+    assert R._waived(finds[0], ["MODEL_STANDIN:^ANT1 "])
+    surviving = [f for f in finds if not R._waived(f, ["MODEL_STANDIN:^ANT1 "])]
+    assert surviving == []
+
+
+def test_is_mechanical_mounting_hole_with_grounded_pad():
+    # MH1-4/MK1-4 on utv-comms V1.5: a mounting hole's pad tied to GND for
+    # chassis bonding is not, by that tie, an electrical component.
+    assert R.is_mechanical("MH1", "MountingHole_3.2mm_M3_Pad", {"1": "GND"})
+    assert R.is_mechanical("MK1", "MountingHole_2.7mm_M2.5_DIN965_Pad_TopBottom",
+                           {"1": "GND"})
+    # ref-prefix convention alone also qualifies, even with an odd footprint name
+    assert R.is_mechanical("TP3", "SomeCustomTestPad", {"1": "RX_TAP"})
+    # a genuinely grounded electrical part must NOT be exempted
+    assert not R.is_mechanical("C1", "C_0402_1005Metric", {"1": "GND", "2": "3V3"})
+    # the base rule (no net at all) still applies regardless of name
+    assert R.is_mechanical("U9", "Some_IC_Footprint", {"1": "", "2": ""})
+
+
+import pytest  # noqa: E402
+
+pcbnew = pytest.importorskip("pcbnew")
+
+
+def test_facts_from_board_exempts_grounded_mounting_hole(tmp_path):
+    board_path = tmp_path / "b.kicad_pcb"
+    board = pcbnew.BOARD()
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    board.Add(gnd)
+
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("MH1")
+    fp.SetFPID(pcbnew.LIB_ID("MountingHole", "MountingHole_3.2mm_M3_Pad"))
+    p = pcbnew.PAD(fp)
+    p.SetNumber("1")
+    p.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+    p.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+    p.SetSize(pcbnew.VECTOR2I(int(3.2e6), int(3.2e6)))
+    p.SetDrillSize(pcbnew.VECTOR2I(int(3.2e6), int(3.2e6)))
+    p.SetNet(gnd)
+    fp.Add(p)
+    board.Add(fp)
+    pcbnew.SaveBoard(str(board_path), board)
+
+    facts = R.facts_from_board(str(board_path))
+    assert facts["parts"]["MH1"]["mech"] is True

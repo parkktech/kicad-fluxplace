@@ -1,11 +1,21 @@
-## 2026-09-05 — verify-models is wrong for back-side footprints
+## 2026-09-05 — verify-models is wrong for back-side footprints — CLOSED 2026-09-06
 
-Its "body centroid outside the footprint region" test flagged the CM5 overlay
-on J10 (B.Cu, flipped) at the correct seat and passed a wrong one: it ignores
-KiCad's back-side transform (offset/rotation applied in the footprint frame,
-then X mirrored and Z flipped; model +Y is board -Y). Fix: apply the same
-transform the viewer does before comparing. Until then judge back-side
-models on `--side bottom` renders.
+Root cause turned out narrower than first diagnosed: `verify_footprint` hard-skipped
+ANY model with rotation on more than one axis (`abs(m_Rotation.x) > 0.1 or
+abs(m_Rotation.y) > 0.1: continue`) — J10/J11's DF40C model is rotated
+-90,0,90 (its STEP is authored lying on its side; that rotation stands it
+upright), so it was never analyzed at all, on either side of the board. Added
+a Z-seat check (`model_verify.seat_gap`, fed by a new full X→Y→Z rotation
+`_rotate_xyz`) that runs regardless of rotation axes and independently of the
+existing Z-rotation-only XY pin-fit math, gated to only judge models whose own
+un-offset geometry already sits within 0.3mm of their origin — real for this
+connector's vendor STEP, false for several library body models (transformer,
+MOSFET, radial cap) that would otherwise have false-positived. `flipped`
+(`fp.IsFlipped()`) negates the reported sign for a back-side footprint per
+KiCad's own back-side transform. Verified against the real V1.5 board: J10/J11
+now report `seat gap -0.80mm` at the broken offset (0.752238806) and clean at
+the corrected one (0), with zero new findings on the rest of the board.
+Tests: `tests/test_verify_models.py`.
 
 ## 2026-09-04 — pcbnew pitfall: `fp.Models()` iterates by value
 

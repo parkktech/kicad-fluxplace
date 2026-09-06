@@ -123,6 +123,7 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `spec-check` | **Documentation gate** on a netlist spec: every part has an MPN, its datasheet on disk, and a `pinmap` whose names appear on the cited datasheet page (`pinmap_source: "X.pdf#p3"`). `schematic --datasheets` refuses to generate from an undocumented spec; `review` fails the same way (`[docs] strict = true`). |
 | `intake`  | Design interview → `design_intent.json`. Now also asks **where the product lives** (temperature range, vibration, moisture, input-transient class); `--constraints-out` writes the `[env]` block the review gate derates against. |
 | `models`  | Real vendor 3D bodies for footprints `review`'s `check_models` would FAIL: DigiKey CAD-media fetch (default), or `--check` to just list every missing/broken model (no network, exit 1 if any) and `--fetch` to pull the missing ones from EasyEDA by LCSC code (`easyeda2kicad`, the `[models]` extra) and attach them with provenance, exiting 1 if anything stays unresolved. |
+| `verify-models` | Verify 3D models sit ON their pins/footprint — pin shafts in TH holes, an SMD body over its courtyard, and (front **or back** copper layer) a seat-gap check that catches a body floating off or buried into the board, including models rotated on more than one axis to stand a sideways-authored STEP upright. `--fix` solves + writes correcting transforms. |
 
 ### Physics constraints (comprehension)
 
@@ -400,6 +401,40 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[env]`, `[nets.<NET>]` (`straight_copper`, `max_vias`), `[rf]` (`target_z`,
 `tolerance_pct`, `max_vias`, `nets`), `[pairs.<FAMILY>]` (`skew_mm`),
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`.
+
+## What changed on 2026-09-06
+
+- **`verify-models` seat-gap check, and a bug it fixes** — a Hirose DF40C
+  receptacle on utv-comms V1.5's back copper (J10/J11, model rotated
+  -90,0,90 to stand a sideways-authored STEP upright) sat 0.75-0.8mm off
+  the board and into the CM5 module mounted below it, and `verify-models`
+  never said a word: any model with rotation on more than one axis was
+  hard-skipped, so it was simply never checked. `model_verify.py` now
+  computes each model's rotated Z-extent with a full X→Y→Z rotation
+  (`_rotate_xyz`, not just the Z-only math the XY pin-fit check trusts) and
+  a `seat_gap()` that compares it against the model's own FP_3DMODEL
+  offset — flagged `WARN ... seat gap ... buried in the board / floating
+  off the board`. Deliberately conservative: a model is only judged when
+  its own un-offset geometry already puts a bound within 0.3mm of its
+  origin (a real seat-at-origin convention, true for this connector's
+  vendor STEP); library body models authored some other way (a
+  transformer, a MOSFET, a radial cap — checked against real board data:
+  T1/T2, Q1, C12/C13) return `None` rather than a false "floating" WARN.
+  Render-verified: a positive offset floats a body above the mount plane on
+  EITHER side of the board (KiCad applies the offset before the back-side
+  mirror), so `flipped` (`fp.IsFlipped()`) does not change the sign.
+- **`review`'s mechanical exemption now survives a grounded mounting hole**
+  — MH1-4/MK1-4 tied to GND for chassis bonding read as electrical (a
+  net on the pad) and FAILed `MODEL_MISSING`; `is_mechanical()` also
+  exempts a footprint/reference matching the MountingHole/Fiducial/
+  TestPoint/Logo conventions, used everywhere `check_models` and friends
+  decide `mech` (`check_spec_sync` keeps the older "any net" rule instead,
+  since the spec documents those refs as components).
+- **`check_models` findings are waivable again** — its messages read
+  `"{ref}: 3D model..."`; every waiver in this project is `CODE:^REF `
+  matched by regex, and the colon ate the space `^REF ` needs, so
+  `"MODEL_STANDIN:^ANT1 "` never matched ANT1's patch antenna stand-in.
+  Reformatted to `"{ref} 3D model..."` like the rest of the module.
 
 ## What changed on 2026-09-04
 
