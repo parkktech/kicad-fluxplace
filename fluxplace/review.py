@@ -821,6 +821,21 @@ def check_models(facts, board_path=None):
                               f"{ref} 3D model {m} does not resolve to a file"
                               + (f" (same name exists as {alt[0]})" if alt else ""),
                               refs=[ref]))
+                continue
+            # a file that EXISTS is not the same as a file that RENDERS —
+            # J12 (RJ45 magjack, 2026-09-04-ish): an EasyEDA-fetched
+            # STEP/WRL resolved fine (this far) but never loaded a body in
+            # the 3D viewer. FAIL, not WARN: an unreadable model is
+            # functionally the same defect check_models exists to catch
+            # (a board that renders with a hole nobody looked at) as
+            # MODEL_MISSING, just discovered one step later.
+            from . import model_verify as MV
+            if not MV.model_file_readable(full):
+                out.append(_f(FAIL, "MODEL_FILE_UNREADABLE",
+                              f"{ref} 3D model {os.path.basename(m)} exists but doesn't "
+                              f"parse into geometry (STEP with <50 points, or a WRL with "
+                              f"no Shape/IndexedFaceSet) — renders as a missing body",
+                              refs=[ref]))
     return out
 
 

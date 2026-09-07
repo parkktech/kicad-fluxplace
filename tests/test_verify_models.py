@@ -405,6 +405,179 @@ def test_solve_transform_identity_wins_over_th_only_180_fit():
     assert rot == 0, f"solver picked rotation {rot}, expected identity (0)"
 
 
+# --------------------------------------------------------- posture_gap
+def test_posture_gap_flags_body_on_its_side():
+    # Q1 (PowerPAK SO-8, 7cb0f77): rot(0,0,0) gives XY (6.24, 1.50) against
+    # a (5.99, 5.00) fab outline; Z depth 5.93mm — a 90-degree rotation
+    # about X would recover the missing height.
+    rotated = [(-3.12, -0.33, -3.31), (3.12, 1.17, 2.63)]
+    msg = MV.posture_gap(rotated, fab_extent=(5.99, 5.00))
+    assert msg and "on its side" in msg
+
+
+def test_posture_gap_clean_when_already_flat():
+    # HEAD's corrected Q1: rot(-90,0,180) gives XY (6.24, 5.93) against the
+    # same fab outline — already matches, no rotation needed.
+    rotated = [(-3.12, -2.63, -1.17), (3.12, 3.31, 0.33)]
+    assert MV.posture_gap(rotated, fab_extent=(5.99, 5.00)) is None
+
+
+def test_posture_gap_none_without_fab_extent():
+    assert MV.posture_gap([(0, 0, 0), (1, 1, 1)], fab_extent=None) is None
+
+
+def test_posture_gap_does_not_flag_leads_wider_than_fab_body():
+    # a SOT-23: leads splay past the drawn Fab body on X — normal, not a
+    # posture defect. A tight two-sided XY-vs-fab match would flag this;
+    # the shortfall/recovery test must not.
+    rotated = [(-1.25, -1.5, 0.0), (1.25, 1.5, 1.2)]   # w=2.5 h=3.0 d=1.2
+    assert MV.posture_gap(rotated, fab_extent=(1.4, 3.0)) is None
+
+
+def test_fab_extent_from_courtyard_rectangle():
+    board = pcbnew.BOARD()
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("X1")
+    board.Add(fp)
+    shape = pcbnew.PCB_SHAPE(fp)
+    shape.SetShape(pcbnew.SHAPE_T_RECT)
+    shape.SetStart(pcbnew.VECTOR2I(int(-2e6), int(-1.5e6)))
+    shape.SetEnd(pcbnew.VECTOR2I(int(2e6), int(1.5e6)))
+    shape.SetLayer(pcbnew.F_CrtYd)
+    fp.Add(shape)
+    w, h = MV._fab_extent(fp)
+    assert math.isclose(w, 4.0, abs_tol=0.2)
+    assert math.isclose(h, 3.0, abs_tol=0.2)
+
+
+def test_fab_extent_none_with_no_fab_or_courtyard_graphics():
+    board = pcbnew.BOARD()
+    fp = pcbnew.FOOTPRINT(board)
+    board.Add(fp)
+    assert MV._fab_extent(fp) is None
+
+
+# ----------------------------------------------------- buried_mass_gap
+def test_buried_mass_gap_flags_majority_buried():
+    # T1/T2 (SM-LP-5001 stand-in, 172264a/4719085): 92% of points sit more
+    # than 0.5mm below the mount plane after offset, with a thin cap above.
+    below = [(0.0, 0.0, -3.0)] * 92
+    above = [(0.0, 0.0, 3.0)] * 8
+    msg = MV.buried_mass_gap(below + above, offset_z=0.82)
+    assert msg and "upside down" in msg
+
+
+def test_buried_mass_gap_clean_when_seated_normally():
+    # correctly seated: bulk above the plane, at most a thin lead dip below.
+    above = [(0.0, 0.0, 1.0)] * 90
+    below = [(0.0, 0.0, -0.1)] * 10
+    assert MV.buried_mass_gap(above + below, offset_z=0.0) is None
+
+
+def test_buried_mass_gap_none_when_entirely_above():
+    pts = [(0.0, 0.0, float(z)) for z in range(1, 40)]
+    assert MV.buried_mass_gap(pts, offset_z=0.0) is None
+
+
+def test_buried_mass_gap_none_with_too_few_points():
+    assert MV.buried_mass_gap([(0, 0, -5)] * 5, offset_z=0.0) is None
+
+
+# ------------------------------------------------ library_transform_diff
+def test_library_transform_diff_none_when_matching():
+    assert MV.library_transform_diff(
+        "a.step", (0, 0, 0), (0, 0, 0), "a.step", (0, 0, 0), (0, 0, 0)) is None
+
+
+def test_library_transform_diff_warns_same_file_different_transform():
+    # J5, 4719085: board points at the SAME stock model the library does,
+    # but rotate.z is 180 instead of the library's 0.
+    level, msg = MV.library_transform_diff(
+        "${KICAD10_3DMODEL_DIR}/x/USB_C.step", (0, 0, 0), (0, 0, 180),
+        "${KICAD10_3DMODEL_DIR}/x/USB_C.step", (0, 0, 0), (0, 0, 0))
+    assert level == "WARN"
+    assert "transform differs" in msg
+
+
+def test_library_transform_diff_info_when_file_also_differs():
+    # HEAD's Q1: the library's PowerPAK_SO-8_Single.kicad_mod (stock KiCad
+    # Package_SO.pretty) references PowerPAK_SO-8_Single.step at identity;
+    # the project's own board references a DIFFERENT-named real vendor
+    # STEP (Vishay_PowerPAK_SO-8_Single.step), deliberately re-oriented —
+    # a different body reference, not a silently mis-transformed one.
+    level, msg = MV.library_transform_diff(
+        "${KIPRJMOD}/../lib/3dmodels/Vishay_PowerPAK_SO-8_Single.step",
+        (0, -0.34, 0.79), (-90, 0, 180),
+        "${KICAD10_3DMODEL_DIR}/Package_SO.3dshapes/PowerPAK_SO-8_Single.step",
+        (0, 0, 0), (0, 0, 0))
+    assert level == "INFO"
+
+
+# --------------------------------------------------- find_library_footprint
+def test_find_library_footprint_project_lib_first(tmp_path):
+    lib = tmp_path / "proj.pretty"
+    lib.mkdir()
+    (lib / "Widget.kicad_mod").write_text(
+        '(footprint "Widget"\n'
+        '  (model "widget.step"\n'
+        '    (offset (xyz 1 2 3))\n'
+        '    (scale (xyz 1 1 1))\n'
+        '    (rotate (xyz 0 0 90))\n'
+        '  )\n'
+        ')\n')
+    found = MV.find_library_footprint("Widget", project_libs=[str(lib)])
+    assert found == str(lib / "Widget.kicad_mod")
+    models = MV._library_models(found)
+    assert models == [("widget.step", (1.0, 2.0, 3.0), (0.0, 0.0, 90.0))]
+
+
+def test_find_library_footprint_none_when_absent(tmp_path):
+    assert MV.find_library_footprint("NoSuchFootprint12345", project_libs=[str(tmp_path)]) is None
+
+
+# ------------------------------------------------- overlay_registration_gap
+def test_overlay_registration_gap_flags_mismatch():
+    # J10, 3beae58: the CM5 module overlay's mating geometry landed away
+    # from J10's own pad field (measured on the real board: 5 of its
+    # points fell in-window vs 15 on the corrected revision).
+    pad_bbox = (-9.8, 9.8, -1.54, 1.54)
+    off_target = [(40.0, 40.0, 0.0)] * 200   # nowhere near the pad field
+    msg = MV.overlay_registration_gap(off_target, offset=(0, 0, 0), pad_bbox=pad_bbox)
+    assert msg and "does not land" in msg
+
+
+def test_overlay_registration_gap_clean_when_landed():
+    pad_bbox = (-9.8, 9.8, -1.54, 1.54)
+    landed = [(float(x), 0.0, 0.0) for x in range(-9, 10)] * 2   # >= min_pts in-window
+    assert MV.overlay_registration_gap(landed, offset=(0, 0, 0), pad_bbox=pad_bbox) is None
+
+
+# ----------------------------------------------------- model_file_readable
+def test_model_file_readable_true_for_real_step(tmp_path):
+    step = tmp_path / "ok.step"
+    step.write_bytes(_step_fixture(0.0, 1.5))
+    assert MV.model_file_readable(str(step)) is True
+
+
+def test_model_file_readable_false_for_truncated_step(tmp_path):
+    step = tmp_path / "truncated.step"
+    step.write_text("ISO-10303-21;\nDATA;\n#10=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\n")
+    assert MV.model_file_readable(str(step)) is False
+
+
+def test_model_file_readable_wrl_needs_shape_and_facet_set(tmp_path):
+    good = tmp_path / "good.wrl"
+    good.write_text("#VRML V2.0 utf8\nShape { geometry IndexedFaceSet { } }\n")
+    bad = tmp_path / "bad.wrl"
+    bad.write_text("#VRML V2.0 utf8\n# nothing here\n")
+    assert MV.model_file_readable(str(good)) is True
+    assert MV.model_file_readable(str(bad)) is False
+
+
+def test_model_file_readable_false_for_missing_file(tmp_path):
+    assert MV.model_file_readable(str(tmp_path / "nope.step")) is False
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

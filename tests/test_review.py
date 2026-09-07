@@ -479,10 +479,22 @@ def test_landpattern_geometry_and_gate(tmp_path):
     assert not any(r == "C1" for _, r, _ in codes)
 
 
+def _valid_step_text(n=60):
+    """A trivial STEP with >=50 CARTESIAN_POINTs — enough for
+    model_file_readable() to consider it a real, parseable body (same
+    floor model_verify.verify_footprint uses)."""
+    lines = ["ISO-10303-21;", "HEADER; FILE_DESCRIPTION(('x'),'2;1'); ENDSEC;",
+            "DATA;", "#1=SI_UNIT(.MILLI.,.METRE.);"]
+    for i in range(n):
+        lines.append(f"#{10+i}=CARTESIAN_POINT('',({i * 0.01},0.,0.));")
+    lines.append("ENDSEC; END-ISO-10303-21;")
+    return "\n".join(lines) + "\n"
+
+
 def test_models_gate(tmp_path):
     from fluxplace import review as R
     good = tmp_path / "ok.step"
-    good.write_text("x")
+    good.write_text(_valid_step_text())
     facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
         "U1": {"footprint": "X", "models": [str(good)], "mech": False},
         "U2": {"footprint": "Y", "models": [], "mech": False},
@@ -492,6 +504,33 @@ def test_models_gate(tmp_path):
     }}
     codes = {(f["code"], f["refs"][0]) for f in R.check_models(facts)}
     assert codes == {("MODEL_MISSING", "U2"), ("MODEL_FILE_MISSING", "J1"), ("MODEL_STANDIN", "A1")}
+
+
+def test_models_gate_flags_unreadable_step_and_wrl(tmp_path):
+    # J12, 2026-09-04-ish: an EasyEDA STEP/WRL that resolved to a real file
+    # (exists, not a MODEL_MISSING/MODEL_FILE_MISSING/MODEL_STANDIN name)
+    # but never loaded a body in the 3D viewer — nothing upstream of the
+    # viewer itself ever checked that far. Every other check in this test
+    # module passes a good model with real content (see _valid_step_text);
+    # here the content itself is the defect.
+    from fluxplace import review as R
+    truncated = tmp_path / "truncated.step"
+    truncated.write_text("ISO-10303-21;\nHEADER; ENDSEC;\nDATA;\n"
+                         "#10=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\n")
+    bad_wrl = tmp_path / "bad.wrl"
+    bad_wrl.write_text("#VRML V2.0 utf8\n# empty stand-in, no geometry\n")
+    good_wrl = tmp_path / "good.wrl"
+    good_wrl.write_text("#VRML V2.0 utf8\nShape { geometry IndexedFaceSet { } }\n")
+    facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
+        "J12": {"footprint": "RJ45", "models": [str(truncated)], "mech": False},
+        "J13": {"footprint": "RJ45", "models": [str(bad_wrl)], "mech": False},
+        "J14": {"footprint": "RJ45", "models": [str(good_wrl)], "mech": False},
+    }}
+    finds = R.check_models(facts)
+    codes = {(f["code"], f["refs"][0], f["level"]) for f in finds}
+    assert ("MODEL_FILE_UNREADABLE", "J12", "FAIL") in codes
+    assert ("MODEL_FILE_UNREADABLE", "J13", "FAIL") in codes
+    assert not any(r == "J14" for _, r, _ in codes)
 
 
 def test_check_models_messages_start_with_ref_space_not_colon():

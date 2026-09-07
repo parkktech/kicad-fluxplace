@@ -123,7 +123,37 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `spec-check` | **Documentation gate** on a netlist spec: every part has an MPN, its datasheet on disk, and a `pinmap` whose names appear on the cited datasheet page (`pinmap_source: "X.pdf#p3"`). `schematic --datasheets` refuses to generate from an undocumented spec; `review` fails the same way (`[docs] strict = true`). |
 | `intake`  | Design interview → `design_intent.json`. Now also asks **where the product lives** (temperature range, vibration, moisture, input-transient class); `--constraints-out` writes the `[env]` block the review gate derates against. |
 | `models`  | Real vendor 3D bodies for footprints `review`'s `check_models` would FAIL: DigiKey CAD-media fetch (default), or `--check` to just list every missing/broken model (no network, exit 1 if any) and `--fetch` to pull the missing ones from EasyEDA by LCSC code (`easyeda2kicad`, the `[models]` extra) and attach them with provenance, exiting 1 if anything stays unresolved. |
-| `verify-models` | Verify 3D models sit ON their pins/footprint — pin shafts in TH holes, an SMD body over its courtyard, and (front **or back** copper layer) a seat-gap check that catches a body floating off or buried into the board, including models rotated on more than one axis to stand a sideways-authored STEP upright. `--fix` solves + writes correcting transforms. |
+| `verify-models` | Verify 3D models sit ON their pins/footprint — pin shafts in TH holes, an SMD body over its courtyard, and (front **or back** copper layer) a seat-gap check that catches a body floating off or buried into the board, including models rotated on more than one axis to stand a sideways-authored STEP upright. Also checks posture, upside-down, library-transform drift, and mated-overlay registration (see **Placement rules** below). `--fix` solves + writes correcting transforms; `--constraints` feeds `[docs] project_libs` into the library-transform check. |
+
+#### Placement rules
+
+Beyond pins-in-holes, `verify-models` (`model_verify.verify_footprint`) runs
+these checks on every modelled footprint — all WARN-level except the last:
+
+- **seat** (`seat_gap`) — the model's own seat face floats off or is buried
+  into the mount plane, on either copper layer.
+- **posture** (`posture_gap`) — the body looks like it's standing on edge:
+  one XY extent has collapsed to well under half the matching Fab/Courtyard
+  dimension while Z is close to what's missing — a 90° X/Y rotation away
+  from flat.
+- **upside-down** (`buried_mass_gap`) — most of the body's own point mass
+  sits below the mount plane after its offset, with some part still above
+  it (catches a badly-inverted seating that `seat_gap` intentionally
+  declines to judge; does not catch every upside-down case — see
+  `NEXT.md` 2026-09-07 for the one it misses and why).
+- **library transform** (`library_transform_diff`) — the board's FP_3DMODEL
+  offset/rotate disagrees with the same-named KiCad/project library
+  footprint's own (WARN when it's still the same model file, so the
+  transform alone diverged; INFO when the file differs too — a
+  deliberately swapped-in body).
+- **mated overlay** (`overlay_registration_gap`) — a second, much-larger
+  body on a footprint (a module drawn on its mating connector) doesn't have
+  enough of its own geometry landing near the mount plane inside this
+  footprint's actual pad field.
+- **SMD leads** — a connector's SMD signal leads aren't on their pads
+  (independent of any TH pin-in-hole fit).
+- **TH pins** — a connector's through-hole pin shafts aren't in their
+  holes.
 
 ### Physics constraints (comprehension)
 
@@ -401,6 +431,58 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[env]`, `[nets.<NET>]` (`straight_copper`, `max_vias`), `[rf]` (`target_z`,
 `tolerance_pct`, `max_vias`, `nets`), `[pairs.<FAMILY>]` (`skew_mm`),
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`.
+
+## What changed on 2026-09-07
+
+Code review of `verify-models`' placement/verification rules against every
+defect the utv-comms-bridge board hit in the two prior days that passed
+`verify-models` silently at the time (Q1 on edge, Q1 flat-but-upside-down,
+T1/T2 upside down, J5's transform silently drifting from the library, the
+CM5 overlay on J10 missing its mating registration, J12 pointing at an
+unreadable body). Added, each a pure function + wiring in
+`model_verify.verify_footprint` + tests in `tests/test_verify_models.py`:
+
+- **POSTURE** (`posture_gap`) — flags Q1 on edge at commit 7cb0f77 (XY
+  collapsed to 6.24x1.50mm against a 5.99x5.00mm Fab outline, Z runs
+  5.93mm), silent on the rest of the real V1.5 board including SOT-23/
+  0805/RJ45/JST parts whose leads legitimately extend past their drawn
+  Fab body (a tight two-sided XY-vs-Fab match, tried first, false-flagged
+  those; the shipped version requires a genuine shortfall recoverable by
+  a 90° swap, not just any mismatch).
+- **UPSIDE-DOWN** (`buried_mass_gap`) — flags T1/T2 (172264a, 4719085:
+  92% of the model's points sit >0.5mm below the mount plane after its
+  offset). Only catches this one signature; does NOT catch Q1's flat-but-
+  upside-down case (0b0cf82) — see `NEXT.md` 2026-09-07 for what was tried
+  and why it was rejected (~30 false positives across legitimately-seated
+  passives, SOT-23s, the K1 relay, L1, U3, J3, J6).
+- **LIBRARY-TRANSFORM** (`library_transform_diff` + `find_library_footprint`
+  / `_library_models`) — flags J5 at 4719085 (board still references the
+  stock KiCad USB-C receptacle STEP but rotate.z is 180 vs the library
+  footprint's 0). WARN when the board's model file matches the library's
+  (same body, transform alone drifted); INFO when the file also differs
+  (Q1's own case at HEAD — a deliberately swapped-in real vendor STEP).
+  Searches `[docs] project_libs` (new `verify-models --constraints`) and
+  every `/usr/share/kicad*/footprints/*.pretty` by footprint name — board
+  footprints here carry no library nickname once placed. `--fix` never
+  touches a model whose transform already equals the library's (it never
+  touched library-transform findings at all; unchanged TH-solve path).
+- **MATED OVERLAY** (`overlay_registration_gap`) — closes the
+  2026-09-06 NEXT.md item; see there for the tuning detail. Flags J10 at
+  3beae58, silent at HEAD.
+- **MODEL_FILE_UNREADABLE** (`model_verify.model_file_readable`, wired into
+  `review.check_models`) — FAIL when a model file exists and resolves but
+  doesn't parse into geometry (STEP under 50 points, or a WRL with no
+  Shape/IndexedFaceSet). Tested against a truncated STEP and a Shape-less
+  WRL; the real J12 defect file itself wasn't reproducible (its current
+  on-disk WRL does carry Shape/IndexedFaceSet and reads fine).
+
+Full-suite `verify-models` on the real board (HEAD) is unchanged except one
+new, correct, non-blocking addition: `Q1: INFO ... transform differs from
+the library's` (Q1's real vendor STEP, deliberately re-oriented from the
+library footprint's zero-transform default). `pytest -q`: 272 passed, 7
+pre-existing `test_core.py` failures (unrelated, out of scope — a
+`fluxplace.comprehend.crystals` import and a `fluxplace.models.solve_transform`
+rename that moved to `model_verify`).
 
 ## What changed on 2026-09-06
 

@@ -637,8 +637,20 @@ def cmd_verifymodels(a):
     correcting transform where possible."""
     board, parts, nets, IO = _load(a.board)
     from fluxplace import model_verify as MV
+    project_libs = []
+    if a.constraints:
+        from fluxplace import constraints as CONS
+        cons = CONS.load(a.constraints)
+        board_dir = os.path.dirname(os.path.abspath(a.board))
+        for d in cons.get("docs", {}).get("project_libs", []):
+            # same fallback precedence check_landpattern uses for
+            # project_libs: as given (relative to CWD, the normal case
+            # when run from the repo root) or relative to the board.
+            project_libs.append(d)
+            if not os.path.isabs(d):
+                project_libs.append(os.path.join(board_dir, "..", "..", d))
     resolve = lambda p: IO._resolve_model_path(p, board)
-    finds = MV.verify_board(board, resolve, fix=a.fix, tol=a.tol)
+    finds = MV.verify_board(board, resolve, fix=a.fix, tol=a.tol, project_libs=project_libs)
     for ref, msg in finds:
         print(f"{ref}: {msg}")
     if not finds:
@@ -2067,6 +2079,10 @@ def build_parser():
     pvm.add_argument("--tol", type=float, default=0.6,
                      help="max hole-to-pin distance mm (default 0.6)")
     pvm.add_argument("--out", default=None, help="output board (default: in place)")
+    pvm.add_argument("--constraints", default=None,
+                     help="constraints TOML — [docs] project_libs is searched "
+                          "(alongside KiCad's stock libraries) for the "
+                          "LIBRARY-TRANSFORM check")
     pvm.set_defaults(fn=cmd_verifymodels)
 
     psn = sub.add_parser("sync-nets",

@@ -20,6 +20,7 @@ SMD-only footprints get a coarser check: the model's above-board bounding
 box must overlap the footprint's courtyard/body region (catches models that
 wander off entirely, e.g. an M.2 module model not seated over its socket).
 """
+import glob
 import math
 import os
 import re
@@ -128,6 +129,33 @@ def _smd_pads(fp):
         dy = (p.GetPosition().y - orig.y) / 1e6
         out.append(_board_to_fp(fp, dx, dy))
     return out
+
+
+def _fab_extent(fp):
+    """Footprint-local (mm) (width, height) of the footprint's own F.Fab/
+    B.Fab drawing, or its F.CrtYd/B.CrtYd courtyard when it carries no Fab
+    graphics. Ground truth for `posture_gap`: the package outline as drawn,
+    independent of whatever a 3D model's own raw geometry happens to be.
+    Uses each graphic item's own board-frame bounding box, corner-mapped
+    into the footprint-local frame via `_board_to_fp` — exact for the
+    common case (rectangles/lines at the footprint's own 0/90/180/270
+    orientation), a reasonable approximation otherwise. None when the
+    footprint carries neither layer's graphics (e.g. a bare-pads test
+    fixture)."""
+    for layers in ((pcbnew.F_Fab, pcbnew.B_Fab), (pcbnew.F_CrtYd, pcbnew.B_CrtYd)):
+        xs, ys = [], []
+        orig = fp.GetPosition()
+        for item in fp.GraphicalItems():
+            if item.GetLayer() not in layers:
+                continue
+            bb = item.GetBoundingBox()
+            for cx, cy in ((bb.GetLeft(), bb.GetTop()), (bb.GetRight(), bb.GetTop()),
+                          (bb.GetLeft(), bb.GetBottom()), (bb.GetRight(), bb.GetBottom())):
+                lx, ly = _board_to_fp(fp, (cx - orig.x) / 1e6, (cy - orig.y) / 1e6)
+                xs.append(lx); ys.append(ly)
+        if len(xs) >= 2:
+            return max(xs) - min(xs), max(ys) - min(ys)
+    return None
 
 
 def _fit(tips, holes):
@@ -245,21 +273,276 @@ def seat_gap(zmin, zmax, offset_z, flipped=False, thickness=0.0,
     return seat_raw + offset_z
 
 
-def verify_footprint(fp, resolve, tol=0.6):
+def posture_gap(rotated_pts, fab_extent, shortfall_frac=0.5, recovery_frac=0.75):
+    """WARN text (or None) when a model looks like it's standing on edge
+    rather than lying flat against the board.
+
+    `rotated_pts`: the model's points after its OWN rotation/scale (any
+    axes — `_rotate_xyz`), footprint-local mm, translation still pending
+    (extent is translation-invariant, so the FP_3DMODEL offset doesn't
+    matter here). `fab_extent`: (width, height) of the footprint's own
+    F.Fab/courtyard outline (`_fab_extent`) — the package footprint as
+    drawn, ground truth for how the part should look from above.
+
+    The signature of "on its side": ONE of the body's current XY extents
+    is far SHORTER than the matching fab dimension (its true in-plane size
+    got rotated into Z instead) while the body's Z extent is close to that
+    same fab dimension — i.e. a 90-degree rotation about the OTHER axis
+    would swap Z back into that XY slot and recover the size. Real case
+    (Q1, PowerPAK SO-8, 7cb0f77): rot(0,0,0) gives XY (6.24, 1.50) against
+    a (5.99, 5.00) fab outline — height collapsed to 30% of true — while Z
+    depth is 5.93, almost exactly the missing height.
+
+    Deliberately NOT a close-match-both-ways test (comparing the full XY
+    bbox to the fab bbox within a tolerance): real STEP bodies routinely
+    have leads/shields extending past the drawn Fab/Courtyard outline (a
+    SOT-23's leads splay wider than its Fab body; an RJ45 magjack's shield
+    tabs run past its Courtyard) — that is normal, not a posture defect,
+    and a tight two-sided match flags it anyway. Requiring a genuine
+    SHORTFALL recoverable by a swap is narrower and, measured against the
+    real V1.5 board (133 modelled footprints, HEAD), fires on nothing but
+    the injected defect."""
+    if not fab_extent or not rotated_pts:
+        return None
+    fw, fh = fab_extent
+    if fw <= 0 or fh <= 0:
+        return None
+    xs = [p[0] for p in rotated_pts]
+    ys = [p[1] for p in rotated_pts]
+    zs = [p[2] for p in rotated_pts]
+    w, h, d = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
+
+    if h < shortfall_frac * fh and d >= recovery_frac * fh:
+        return (f"body on its side — X extent collapsed to {h:.2f}mm of a "
+                f"{fh:.2f}mm fab outline while Z runs {d:.2f}mm; rotate "
+                f"90° about X to lay it flat")
+    if w < shortfall_frac * fw and d >= recovery_frac * fw:
+        return (f"body on its side — Y extent collapsed to {w:.2f}mm of a "
+                f"{fw:.2f}mm fab outline while Z runs {d:.2f}mm; rotate "
+                f"90° about Y to lay it flat")
+    return None
+
+
+def buried_mass_gap(rotated_pts, offset_z, buried_tol=0.5, buried_frac=0.5,
+                    min_pts=20):
+    """WARN text (or None) when most of a model's own mass sits below the
+    board's mount plane once its FP_3DMODEL Z offset is applied — a body
+    correctly seated on the board reaches AWAY from it (z >= ~0 for most
+    of its bulk); if instead most of it is buried more than `buried_tol`
+    below the plane, with some part still above it, the model is oriented
+    upside down (or badly misplaced) even though its own raw geometry
+    never had a bound near its own origin (so `seat_gap` — which requires
+    exactly that to trust a model's authored seat — has no ground truth to
+    judge it against and correctly declines).
+
+    Real case (T1/T2, Bourns SM-LP-5001, an earlier stand-in STEP,
+    172264a/4719085): rot(90,0,0), offset.z 0.818 puts 92% of the model's
+    points below z=-0.5mm (2-3mm buried) with only a thin cap above —
+    `seat_gap` explicitly stays silent on this exact case (neither raw
+    bound near 0 — see test_seat_gap_none_when_neither_bound_is_near_the_
+    origin) because a large offset.z is trusted as a deliberate alignment
+    on a body not authored seat-at-origin. This is a different question:
+    not "is the offset a defect" but "which way is the body facing" —
+    and the buried-mass signature answers it independent of authorship.
+    Measured clean (zero false positives) against every modelled
+    footprint on the real V1.5 board at HEAD."""
+    if len(rotated_pts) < min_pts:
+        return None
+    zs = [p[2] + offset_z for p in rotated_pts]
+    n = len(zs)
+    below = sum(1 for z in zs if z < -buried_tol)
+    above = sum(1 for z in zs if z > buried_tol)
+    if above > 0 and below / n >= buried_frac:
+        return (f"body upside down or badly buried — {below/n*100:.0f}% of "
+                f"its points sit more than {buried_tol}mm below the mount "
+                f"plane after the model's own offset/rotation")
+    return None
+
+
+def _library_models(mod_path):
+    """[(model_filename, offset_xyz, rotate_xyz), ...] for every (model
+    ...) block in a .kicad_mod file — a small paren-balanced text scan (no
+    full s-expression parser needed for files this size, same approach the
+    rest of this module uses for STEP files)."""
+    try:
+        data = open(mod_path, "r", errors="ignore").read()
+    except OSError:
+        return []
+    out = []
+    for m in re.finditer(r'\(model\s+"([^"]+)"', data):
+        start = m.start()
+        depth, i = 0, start
+        while i < len(data):
+            if data[i] == "(":
+                depth += 1
+            elif data[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        block = data[start:i + 1]
+        off = re.search(r'\(offset\s*\(xyz\s+([-\d.eE]+)\s+([-\d.eE]+)\s+([-\d.eE]+)\)\s*\)', block)
+        rot = re.search(r'\(rotate\s*\(xyz\s+([-\d.eE]+)\s+([-\d.eE]+)\s+([-\d.eE]+)\)\s*\)', block)
+        offset = tuple(float(v) for v in off.groups()) if off else (0.0, 0.0, 0.0)
+        rotate = tuple(float(v) for v in rot.groups()) if rot else (0.0, 0.0, 0.0)
+        out.append((m.group(1), offset, rotate))
+    return out
+
+
+def find_library_footprint(fp_name, project_libs=()):
+    """Absolute path to <fp_name>.kicad_mod in a project .pretty ([docs]
+    project_libs) or a stock KiCad footprint library, or None. Board
+    footprints in this project carry no library nickname (FPID lib is
+    blank once placed), so this matches by footprint NAME alone across
+    every .pretty directory — same precedence review.check_landpattern
+    already uses for project libraries, extended to KiCad's own stock
+    libraries (glob is self-contained; no lib-table lookup needed)."""
+    for d in project_libs:
+        cand = os.path.join(d, fp_name + ".kicad_mod")
+        if os.path.exists(cand):
+            return cand
+    for pretty in sorted(glob.glob("/usr/share/kicad*/footprints/*.pretty")):
+        cand = os.path.join(pretty, fp_name + ".kicad_mod")
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def library_transform_diff(board_file, board_offset, board_rotate,
+                           lib_file, lib_offset, lib_rotate, tol=0.05):
+    """(level, message) when a board footprint's FP_3DMODEL transform
+    disagrees with the same-named library footprint's own — None when
+    they agree within `tol` (mm for offset, degrees for rotate).
+
+    WARN when the board still references the SAME model file the library
+    does (the transform alone silently diverged from the library's own —
+    real case, J5 2026-09-06: a `--fix` run flipped the board's copy of
+    the stock USB-C receptacle model 180 degrees about Z while the
+    library's own footprint kept rotate (0,0,0)). INFO when the file
+    differs too — a deliberately swapped-in body (a different real STEP,
+    or the project's own self-contained copy of the same asset under
+    hardware/lib/3dmodels) is a different situation, not a mis-transform,
+    and gets a lighter finding."""
+    d_off = max(abs(a - b) for a, b in zip(board_offset, lib_offset))
+    d_rot = max(abs(a - b) for a, b in zip(board_rotate, lib_rotate))
+    if d_off <= tol and d_rot <= tol:
+        return None
+    same_file = os.path.basename(str(board_file)) == os.path.basename(str(lib_file))
+    level = "WARN" if same_file else "INFO"
+    return (level,
+            f"transform differs from the library's (offset "
+            f"{tuple(round(v, 3) for v in board_offset)} vs "
+            f"{tuple(round(v, 3) for v in lib_offset)}, rotate "
+            f"{tuple(round(v, 1) for v in board_rotate)} vs "
+            f"{tuple(round(v, 1) for v in lib_rotate)})")
+
+
+def overlay_registration_gap(rotated_pts, offset, pad_bbox, margin=5.0,
+                             z_tol=0.3, min_pts=10):
+    """WARN text (or None) when a large module/overlay model — a second
+    body on a footprint, its own XY footprint far bigger than the
+    footprint it's attached to (a CM5 module drawn on its mating
+    connector's footprint, say) — doesn't have enough of its own geometry
+    sitting near the mount plane AND inside this footprint's own pad
+    field. `pad_bbox` is (xmin, xmax, ymin, ymax), footprint-local mm
+    (holes + SMD pads, unioned) — where THIS footprint's actual pins are,
+    as opposed to the overlay's own (much larger) bounding box.
+
+    Real case (J10, CM5R5 module overlay, 3beae58): the module was drawn
+    rotated the wrong way about Z for two revisions. Its symmetric
+    mounting holes still lined up (blind to the error), but its
+    asymmetric mating plug landed off J10's actual pad field. Empirically
+    tuned against that one case (5 points landed in-window on the broken
+    revision vs 15 on the corrected one — the only footprint on this
+    board whose models even qualify as an overlay at all, so there is no
+    wider population to validate `min_pts` against; treat it as a first
+    cut)."""
+    ox, oy, oz = offset
+    x0, x1, y0, y1 = pad_bbox
+    x0, x1, y0, y1 = x0 - margin, x1 + margin, y0 - margin, y1 + margin
+    inwin = sum(1 for x, y, z in rotated_pts
+               if abs(z + oz) <= z_tol and x0 <= x + ox <= x1 and y0 <= y + oy <= y1)
+    if inwin < min_pts:
+        return (f"overlay's mating geometry does not land on this "
+                f"footprint ({inwin} of its points sit near the mount "
+                f"plane inside this footprint's pad field, want >= {min_pts})")
+    return None
+
+
+def model_file_readable(path):
+    """True if a 3D model file looks like it will actually render
+    something rather than silently coming up blank in the 3D viewer: a
+    STEP with a real point cloud (>=50 CARTESIAN_POINTs — the same floor
+    `verify_footprint` uses before it trusts a model's own geometry), or a
+    WRL that at least declares a Shape/IndexedFaceSet node. An unknown
+    extension is not this function's call to make (returns True) — some
+    other check's job.
+
+    Real case (J12, RJ45 magjack, 2026-09-04-ish): an EasyEDA-fetched
+    STEP/WRL that existed on disk and resolved to a real path, but whose
+    content the 3D viewer could never actually turn into geometry — every
+    upstream check (file exists, path resolves) passed; nothing checked
+    this far."""
+    if not path or not os.path.exists(path):
+        return False
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".step", ".stp"):
+        return len(step_points(path)) >= 50
+    if ext == ".wrl":
+        try:
+            data = open(path, "rb").read().decode("utf-8", errors="ignore")
+        except OSError:
+            return False
+        return bool(re.search(r"\bShape\b", data)) and "IndexedFaceSet" in data
+    return True
+
+
+def verify_footprint(fp, resolve, tol=0.6, project_libs=()):
     """Check one footprint's model registration.
-    Returns list of (level, issue) findings; empty = registered."""
+    Returns list of (level, issue) findings; empty = registered.
+
+    `project_libs`: .pretty directories to search first for a same-named
+    library footprint (the LIBRARY-TRANSFORM check, `library_transform_
+    diff`) — passed through from [docs] project_libs; KiCad's own stock
+    libraries are always searched too."""
     holes = _th_holes(fp)
     smd_pads = _smd_pads(fp)
+    fab_extent = _fab_extent(fp)
+    all_pads = holes + smd_pads
+    pad_bbox = None
+    if all_pads:
+        pxs = [p[0] for p in all_pads]
+        pys = [p[1] for p in all_pads]
+        pad_bbox = (min(pxs), max(pxs), min(pys), max(pys))
+    fp_bbox_area = (fab_extent[0] * fab_extent[1]) if fab_extent else None
+    lib_path = find_library_footprint(str(fp.GetFPID().GetLibItemName()), project_libs)
+    lib_models = _library_models(lib_path) if lib_path else []
+    models = list(fp.Models())
     findings = []
-    for m in fp.Models():
+    for idx, m in enumerate(models):
+        board_off = (m.m_Offset.x, m.m_Offset.y, m.m_Offset.z)
+        board_rot = (m.m_Rotation.x, m.m_Rotation.y, m.m_Rotation.z)
+
+        # LIBRARY-TRANSFORM — needs only the transform numbers, not the
+        # model's own geometry, so it runs even for a model this function
+        # otherwise can't judge (unresolvable path, WRL, trivial point
+        # count).
+        if idx < len(lib_models):
+            lib_file, lib_off, lib_rot = lib_models[idx]
+            diff = library_transform_diff(str(m.m_Filename), board_off, board_rot,
+                                          lib_file, lib_off, lib_rot)
+            if diff is not None:
+                level, msg = diff
+                findings.append((level,
+                                 f"model {os.path.basename(str(m.m_Filename))}: {msg}"))
+
         path = resolve(str(m.m_Filename))
         if path is None:
             continue                      # unresolvable = component_audit's job
         pts = step_points(path)
         if len(pts) < 50:
             continue                      # wrl or trivial model — can't judge
-        off = (m.m_Offset.x, m.m_Offset.y, m.m_Offset.z)
-        sc = (m.m_Scale.x, m.m_Scale.y, m.m_Scale.z)
+        off, sc = board_off, (m.m_Scale.x, m.m_Scale.y, m.m_Scale.z)
 
         # Z-seat check — runs on every model regardless of rotation axes
         # (unlike the XY pin-fit math below, which only trusts a Z-only
@@ -275,6 +558,28 @@ def verify_footprint(fp, resolve, tol=0.6):
             findings.append(("WARN",
                              f"model {os.path.basename(path)}: seat gap "
                              f"{gap:+.2f}mm — {where} (tol {tol})"))
+
+        # POSTURE — on its side rather than flat.
+        posture = posture_gap(rotated, fab_extent)
+        if posture is not None:
+            findings.append(("WARN", f"model {os.path.basename(path)}: {posture}"))
+
+        # UPSIDE-DOWN — most of the body's mass buried below the plane.
+        buried = buried_mass_gap(rotated, off[2])
+        if buried is not None:
+            findings.append(("WARN", f"model {os.path.basename(path)}: {buried}"))
+
+        # MATED OVERLAY — a second, much-larger body (a module drawn on
+        # its mating connector's footprint) whose own mating geometry
+        # doesn't land inside this footprint's actual pad field.
+        if len(models) >= 2 and fp_bbox_area and pad_bbox:
+            xs = [p[0] for p in rotated]
+            ys = [p[1] for p in rotated]
+            area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            if area > 3 * fp_bbox_area:
+                overlay = overlay_registration_gap(rotated, off, pad_bbox)
+                if overlay is not None:
+                    findings.append(("WARN", f"model {os.path.basename(path)}: {overlay}"))
 
         if abs(m.m_Rotation.x) > 0.1 or abs(m.m_Rotation.y) > 0.1:
             continue          # 3-axis model rotation — outside the XY pin-fit math
@@ -399,14 +704,14 @@ def solve_transform(pts, holes, smd_pads=None, tol=0.6,
     return best[0], best[1]
 
 
-def verify_board(board, resolve, fix=False, tol=0.6, log=print):
+def verify_board(board, resolve, fix=False, tol=0.6, log=print, project_libs=()):
     """Verify (and optionally fix) every footprint model registration.
     Returns [(ref, finding), ...]; with fix=True, solvable TH mismatches are
     re-transformed in place (caller saves the board)."""
     out = []
     for fp in sorted(board.GetFootprints(), key=lambda f: f.GetReference()):
         ref = fp.GetReference()
-        finds = verify_footprint(fp, resolve, tol=tol)
+        finds = verify_footprint(fp, resolve, tol=tol, project_libs=project_libs)
         for lvl, msg in finds:
             out.append((ref, f"{lvl} {msg}"))
         if not (fix and finds):
