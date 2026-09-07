@@ -404,6 +404,27 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 
 ## What changed on 2026-09-06
 
+- **`verify-models --fix` rotated J5 (a USB-C receptacle) 180° wrong, and why** —
+  root cause was `_th_holes`'s board→footprint-local un-rotation: it used
+  the SAME matrix KiCad's own placement uses (local→board), not its
+  inverse, so two forward applications compose to `Rot(-2*theta)` — the
+  identity at theta=0/180, an exact 180° point negation at theta=90/270.
+  J5 sits at fp orientation 90; the "holes" the pin-fit check scored
+  against were quietly the true holes rotated 180° from reality, so
+  `solve_transform` correctly (by its own corrupted yardstick) "solved" a
+  180° rotation — a perfect fit to a 180°-wrong target. Fixed in the new
+  `_board_to_fp`. Independently, even with the sign fixed, J5's 2 TH
+  alignment pegs + 4 TH shell holes fit measurably *better* at 180° than
+  at the true 0° (a property of this connector's own hole layout, not a
+  bug) — added an SMD-lead check (`_smd_pads`, a z∈[-0.05,0.05mm] lead-
+  flange slice compared against the footprint's real SMD pads) as a
+  second signal, and made `solve_transform` treat the on-board transform
+  as the prior: a non-identity rotation is only accepted when it clears
+  identity's own TH fit by a solid margin *and* does not worsen the
+  SMD-lead fit. `verify_board`'s fix path now also skips any footprint
+  whose current transform already fits within tol on both metrics,
+  rather than re-solving it into a "solved" one. Tests:
+  `tests/test_verify_models.py`.
 - **`verify-models` seat-gap check, and a bug it fixes** — a Hirose DF40C
   receptacle on utv-comms V1.5's back copper (J10/J11, model rotated
   -90,0,90 to stand a sideways-authored STEP upright) sat 0.75-0.8mm off

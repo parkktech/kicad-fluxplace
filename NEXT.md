@@ -1,3 +1,25 @@
+## 2026-09-06 — verify-models: SMD-lead check's z-band false-positives on some connectors
+
+The J5 (USB-C) 180°-rotation bug is fixed — root cause was a sign error in
+`_th_holes`'s board→local un-rotation (see README "What changed on
+2026-09-06"), plus a new SMD-lead cross-check (`_smd_pads` +
+`verify_footprint`'s `z∈[-0.05,0.05mm]` lead-flange slice) as a second
+signal for `solve_transform`'s rotation choice. Re-running `verify-models`
+on the real V1.5 board with this change surfaces new WARNs beyond J5:
+J1A/J2A/J9 (JST_GH_BM0xB-GHS-TBT connectors, all the same official KiCad
+library pairing, offset/rotate all zero) each report ~1.08mm — traced to
+the connector's two ground/mounting tabs specifically (the 3 signal pins
+individually measure a clean ~0.49mm); the tab's contact point likely
+sits at a slightly different z than the z=0 flange the check assumes,
+so the z-band is probably clipping the wrong slice of the tab rather
+than finding a real mis-registration. J10 also gets a large (~19mm) new
+SMD-lead WARN on the CM5R5 module overlay, consistent with — not
+independent of — the already-tracked mated-module-overlay gap above.
+None of these were investigated with a render/visual-QA pass; they need
+one before being trusted as real findings or waived as z-band artifacts.
+If they turn out to be artifacts, the general fix is probably per-tab
+(not per-footprint) z-window detection instead of one fixed band.
+
 ## 2026-09-06 — verify-models: mated-module overlays
 
 When a footprint carries a second (module) body — a mezzanine/overlay model

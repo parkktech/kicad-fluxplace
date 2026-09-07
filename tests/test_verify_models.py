@@ -203,6 +203,208 @@ def test_verify_footprint_front_side_unchanged_behaviour(tmp_path):
     assert seat and "floating above the mount plane" in seat[0]
 
 
+# ------------------------------------------- J5 (2026-09-06) regressions
+#
+# Root cause: `_th_holes`'s board->footprint-local un-rotation used the
+# SAME rotation matrix KiCad's own placement uses (local->board), not its
+# inverse — two forward applications compose to Rot(-2*theta), invisible
+# at theta = 0/180 and an exact 180-degree point negation at theta =
+# +/-90. J5 sits at fp orientation 90: the corrupted "holes" list was the
+# true holes rotated 180 from reality, so `solve_transform` correctly (by
+# its own now-wrong yardstick) "solved" a 180-degree rotation for the
+# model — a perfect fit to a 180-degree-wrong target. Fixed in
+# `_board_to_fp`. The SMD-lead check and solver tie-break below are the
+# second line of defense: even with holes correctly computed, J5's 2 TH
+# pegs + 4 TH shell holes alone fit BETTER at 180 than at the true 0 (a
+# property of this specific connector's hole layout, independent of the
+# sign bug) — only the 16 real SMD signal leads tell the two rotations
+# apart, and the old solver never looked at them.
+
+def _replicate(points, jitter=0.01):
+    """Each (x,y,z) repeated with tiny jitter — >=3 copies per position so
+    `_clusters`'s default min_pts=3 finds it, and >=50 total so
+    step_points()/verify_footprint's "can't judge" gate clears, without
+    moving the cluster center."""
+    out = []
+    reps = max(1, 60 // max(1, len(points)) + 1)
+    for x, y, z in points:
+        for i in range(reps):
+            dx = jitter * (i % 3 - 1)
+            dy = jitter * ((i // 3) % 3 - 1)
+            out.append((x + dx, y + dy, z))
+    return out
+
+
+def _pts_step(points, jitter=0.01):
+    """A trivial STEP with >=50 CARTESIAN_POINTs at the given (x,y,z) mm
+    positions, each replicated with tiny jitter so step_points() clears
+    verify_footprint's `len(pts) < 50` "can't judge" gate without moving
+    the cluster center."""
+    lines = ["ISO-10303-21;", "HEADER; FILE_DESCRIPTION(('x'),'2;1'); ENDSEC;",
+            "DATA;", "#1=SI_UNIT(.MILLI.,.METRE.);"]
+    for n, (x, y, z) in enumerate(_replicate(points, jitter)):
+        lines.append(f"#{10+n}=CARTESIAN_POINT('',({x},{y},{z}));")
+    lines.append("ENDSEC; END-ISO-10303-21;")
+    return ("\n".join(lines) + "\n").encode()
+
+
+# J5's real geometry (measured off the actual board, 2026-09-06): 2 TH
+# alignment pegs + 4 TH shell/mounting holes, footprint-local (rot 0).
+_J5_TH_HOLES = [(-2.89, -2.605), (2.89, -2.605),
+                (-4.32, -3.105), (4.32, -3.105),
+                (-4.32, 1.075), (4.32, 1.075)]
+# a representative row of SMD signal leads along the front edge
+_J5_SMD_PADS = [(x, -3.68) for x in (-3.2, -2.4, -1.25, -0.25, 0.25, 1.25, 2.4, 3.2)]
+
+
+def _j5_like_footprint(board, orientation=90.0, anchor_mm=(50.0, 50.0)):
+    """A J5-like footprint: TH pegs/shell holes + a row of SMD leads,
+    placed at a NON-zero orientation — the exact condition that exposed
+    the `_th_holes` sign bug (invisible at 0/180)."""
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("J5")
+    ax, ay = (int(anchor_mm[0] * 1e6), int(anchor_mm[1] * 1e6))
+    fp.SetPosition(pcbnew.VECTOR2I(ax, ay))
+    fp.SetOrientationDegrees(orientation)
+    theta = math.radians(orientation)
+    c, s = math.cos(theta), math.sin(theta)
+
+    def board_pos(lx, ly):
+        bx = lx * c + ly * s
+        by = -lx * s + ly * c
+        return pcbnew.VECTOR2I(ax + int(bx * 1e6), ay + int(by * 1e6))
+
+    for i, (lx, ly) in enumerate(_J5_TH_HOLES):
+        p = pcbnew.PAD(fp)
+        p.SetNumber(f"TH{i}")
+        p.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+        p.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+        p.SetSize(pcbnew.VECTOR2I(int(1.0e6), int(1.0e6)))
+        p.SetDrillSize(pcbnew.VECTOR2I(int(0.6e6), int(0.6e6)))
+        p.SetPosition(board_pos(lx, ly))
+        fp.Add(p)
+
+    for i, (lx, ly) in enumerate(_J5_SMD_PADS):
+        p = pcbnew.PAD(fp)
+        p.SetNumber(f"A{i}")
+        p.SetShape(pcbnew.PAD_SHAPE_RECT)
+        p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        p.SetSize(pcbnew.VECTOR2I(int(0.4e6), int(0.6e6)))
+        lset = pcbnew.LSET()
+        lset.AddLayer(pcbnew.F_Cu)
+        p.SetLayerSet(lset)
+        p.SetPosition(board_pos(lx, ly))
+        fp.Add(p)
+
+    board.Add(fp)
+    return fp
+
+
+def _j5_like_model_points(rot180_leads=False, th_at_true_holes=False):
+    """Model geometry (its OWN local frame, before any solved rotation).
+
+    Pin shafts (z<-0.25) are authored at the true holes NEGATED — i.e.
+    exactly where the true holes land after a 180 rotation. That means a
+    solver trying rotations will find the pins fit the true holes BEST at
+    z-rotation 180 (mirrors the real, measured J5 STEP: its TH fit is
+    strictly better at 180 than at the correct 0). Set
+    `th_at_true_holes=True` to instead author them at the true (rot-0)
+    positions, for the "already seated, do nothing" test.
+
+    Leads (z in [-0.05, 0.05]) are authored at the true SMD pad positions
+    (clean at rot 0); `rot180_leads=True` authors them pre-negated instead
+    (so they land on the pads only after a 180 rotation) — the
+    "mis-rotated body" case verify_footprint's SMD check must catch.
+
+    `_model_to_fp` (the module's own model-frame -> footprint-frame map)
+    is, at z-rotation 0, (x, y) -> (x, -y) — a Y-only flip, from the
+    y-up-model/y-down-board convention — not the identity. So "author a
+    point that lands on true position (fx, fy) at rotation R" needs that
+    map's actual inverse at R, not a naive negation:
+      R=0:   input (fx, -fy)  ->  output (fx, fy)
+      R=180: input (-fx, fy)  ->  output (fx, fy)
+    (`_model_to_fp`'s 2x2 transform is involutory — its own inverse — at
+    any z-rotation, verified against these two cases directly.)
+    """
+    pts = []
+    for lx, ly in _J5_TH_HOLES:
+        x, y = (lx, -ly) if th_at_true_holes else (-lx, ly)
+        pts.append((x, y, -1.0))
+    for lx, ly in _J5_SMD_PADS:
+        x, y = (-lx, ly) if rot180_leads else (lx, -ly)
+        pts.append((x, y, 0.0))
+    return pts
+
+
+def test_th_holes_and_smd_pads_match_true_local_at_90deg():
+    # regression for the _th_holes/_smd_pads sign bug: at a 90-degree
+    # footprint orientation the old un-rotation returned every position
+    # negated (180 degrees off) from the true footprint-local frame.
+    board = pcbnew.BOARD()
+    fp = _j5_like_footprint(board, orientation=90.0)
+    holes = MV._th_holes(fp)
+    pads = MV._smd_pads(fp)
+    for got, want in zip(sorted(holes), sorted(_J5_TH_HOLES)):
+        assert math.isclose(got[0], want[0], abs_tol=0.01)
+        assert math.isclose(got[1], want[1], abs_tol=0.01)
+    for got, want in zip(sorted(pads), sorted(_J5_SMD_PADS)):
+        assert math.isclose(got[0], want[0], abs_tol=0.01)
+        assert math.isclose(got[1], want[1], abs_tol=0.01)
+
+
+def test_verify_footprint_smd_leads_clean_when_seated(tmp_path):
+    step = tmp_path / "j5.step"
+    step.write_bytes(_pts_step(_j5_like_model_points(rot180_leads=False,
+                                                      th_at_true_holes=True)))
+    board = pcbnew.BOARD()
+    fp = _j5_like_footprint(board)
+    _attach_model(fp, step, offset_z=0.0)
+
+    findings = MV.verify_footprint(fp, resolve=lambda p: p, tol=0.6)
+    smd = [m for _lvl, m in findings if "SMD leads" in m]
+    assert not smd, findings
+
+
+def test_verify_footprint_smd_leads_warn_when_body_rotated_180(tmp_path):
+    step = tmp_path / "j5.step"
+    step.write_bytes(_pts_step(_j5_like_model_points(rot180_leads=True,
+                                                      th_at_true_holes=True)))
+    board = pcbnew.BOARD()
+    fp = _j5_like_footprint(board)
+    _attach_model(fp, step, offset_z=0.0)
+
+    findings = MV.verify_footprint(fp, resolve=lambda p: p, tol=0.6)
+    smd = [m for _lvl, m in findings if "SMD leads" in m]
+    assert smd, findings
+    assert "rotated/mirrored" in smd[0]
+
+
+def test_solve_transform_identity_wins_over_th_only_180_fit():
+    # the literal J5 defect: TH pegs+holes alone fit BETTER at 180 than at
+    # the true 0 (pins authored pre-negated); the solver must still pick
+    # identity because the SMD leads (authored correctly, at true rot-0
+    # positions) would be wrecked by a 180 rotation.
+    pts = _replicate(_j5_like_model_points(rot180_leads=False,
+                                           th_at_true_holes=False))
+    holes = _J5_TH_HOLES
+    smd_pads = _J5_SMD_PADS
+
+    # sanity: confirm the TH-only fit really is ambiguous/better at 180,
+    # so this test is exercising the veto and not a non-existent scenario
+    loc0 = MV._model_to_fp(pts, (0.0, 0.0, 0.0), 0)
+    tips0 = MV._clusters([(x, y) for x, y, z in loc0 if z < -0.25], min_pts=1)
+    _, d0 = MV._fit(tips0, holes)
+    loc180 = MV._model_to_fp(pts, (0.0, 0.0, 0.0), 180)
+    tips180 = MV._clusters([(x, y) for x, y, z in loc180 if z < -0.25], min_pts=1)
+    _, d180 = MV._fit(tips180, holes)
+    assert d180 < d0 - 0.05, "fixture no longer reproduces the ambiguous-TH case"
+
+    sol, max_d = MV.solve_transform(pts, holes, smd_pads=smd_pads, tol=0.6)
+    assert sol is not None
+    rot = sol[0]
+    assert rot == 0, f"solver picked rotation {rot}, expected identity (0)"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):
