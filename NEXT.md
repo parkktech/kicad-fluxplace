@@ -1,3 +1,22 @@
+## 2026-09-06 — verify-models: mated-module overlays
+
+When a footprint carries a second (module) body — a mezzanine/overlay model
+representing a mated part rather than the footprint's own component, e.g. the
+UTV board's J10 carrying both the Amphenol receptacle body and a CM5R5 module
+overlay for mated-assembly renders — check that the module's connector solid
+overlaps the footprint's own body in XY. The CM5 overlay was rotated 180°
+wrong about the board normal for two revisions (V1.4 and V1.5 through
+2026-09-06, D70ad in utv-comms-bridge/docs/DECISIONS.md): the offset placed
+the module's symmetric mounting-hole pattern correctly but put the asymmetric
+board-to-board plugs 5 mm beside J10/J11 instead of on them, and nothing in
+`verify_footprint`/`model_verify` flagged it because the check only judges a
+footprint's own model against its own pads — it has no notion of "this second
+model is supposed to mate with the first". Add a check: for a footprint with
+>1 model where one is tagged/named as a mated-module overlay, compute the
+overlay's own connector sub-geometry (or just its XY centroid) after transform
+and require it land within some tolerance of the primary model's connector
+centroid — not just within the footprint's overall body/courtyard.
+
 ## 2026-09-05 — verify-models is wrong for back-side footprints — CLOSED 2026-09-06
 
 Root cause turned out narrower than first diagnosed: `verify_footprint` hard-skipped
