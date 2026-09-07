@@ -562,15 +562,41 @@ def _simplify(path):
     return out
 
 
+def _via_centers(board, net_code_int):
+    """Existing through-vias already on this net: (x_mm, y_mm, radius_mm).
+    A dijkstra path terminates wherever it first touches an island's cell
+    coverage — for a via that can be anywhere in its blocking disk, not its
+    true drill centre. A track end left there overlaps the via's copper
+    (routing-legal) but fails KiCad's track_not_centered_on_via DRC check,
+    which requires an actual centred connection, not just an overlap."""
+    out = []
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA" and t.GetNetCode() == net_code_int:
+            p = t.GetPosition()
+            out.append((p.x / 1e6, p.y / 1e6, t.GetWidth() / 2e6))
+    return out
+
+
+def _snap_to_via(x, y, centers):
+    """If (x, y) falls inside a known via's copper, return that via's exact
+    centre instead — never leave a track end merely near a via."""
+    for (vx, vy, vr) in centers:
+        if (x - vx) ** 2 + (y - vy) ** 2 <= vr * vr:
+            return vx, vy
+    return x, y
+
+
 def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
     """Write the cell path as tracks + through-vias."""
     ni = board.FindNet(net_code) if isinstance(net_code, str) else \
         board.GetNetInfo().GetNetItem(net_code)
+    net_code_int = ni.GetNetCode()
+    centers = _via_centers(board, net_code_int)
     pts = _simplify(path)
     added = []
     for a, b in zip(pts, pts[1:]):
-        ax, ay = grid.mm(a[1], a[2])
-        bx, by = grid.mm(b[1], b[2])
+        ax, ay = _snap_to_via(*grid.mm(a[1], a[2]), centers)
+        bx, by = _snap_to_via(*grid.mm(b[1], b[2]), centers)
         if a[0] != b[0]:                     # layer change -> via
             v = pcbnew.PCB_VIA(board)
             v.SetViaType(pcbnew.VIATYPE_THROUGH)
@@ -580,6 +606,7 @@ def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
             v.SetNet(ni)
             board.Add(v)
             added.append(v)
+            centers.append((ax, ay, via_mm / 2.0))
             continue
         if (ax, ay) == (bx, by):
             continue

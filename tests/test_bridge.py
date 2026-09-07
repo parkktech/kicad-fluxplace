@@ -2,6 +2,7 @@
 Needs pcbnew (skipped elsewhere). Builds a 2-layer board with two pads of net
 SIG on F.Cu separated by a foreign F.Cu wall: the only route is a via to
 B.Cu and back, and it must not touch the wall."""
+import math
 import os
 import sys
 
@@ -10,6 +11,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 pcbnew = pytest.importorskip("pcbnew")
 from fluxplace import repair as RP  # noqa: E402
+from fluxplace import patch as PATCH  # noqa: E402
 
 
 def _pad(board, ref, at, net):
@@ -98,3 +100,56 @@ def test_bridge_reports_no_path():
     msgs = []
     assert RP.bridge(board, "A", "1", layers=["F.Cu", "B.Cu"], cell=0.25, log=msgs.append) == []
     assert msgs and "no path" in msgs[-1]
+
+
+def test_apply_path_snaps_track_end_onto_via_centre():
+    """patch.apply_path — the utv-comms V1.5 repair --patch bug (D70ag): a
+    dijkstra path terminates on WHATEVER grid cell of an existing via's
+    island it first reaches, not the via's true drill centre. Drawing the
+    joining track to that cell centre leaves a track end merely inside the
+    via's copper, not centred on it, which KiCad's own DRC guard then
+    catches as track_not_centered_on_via and the patch reverts itself.
+    apply_path must snap onto the via's exact position instead."""
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(2)
+    sig = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(sig)
+    # an existing via NOT aligned to any 0.25 mm grid cell centre — exactly
+    # the situation a real board's copper is in
+    via_x, via_y = 10.13, 10.07
+    v = pcbnew.PCB_VIA(board)
+    v.SetViaType(pcbnew.VIATYPE_THROUGH)
+    v.SetPosition(pcbnew.VECTOR2I(int(via_x * 1e6), int(via_y * 1e6)))
+    v.SetWidth(int(0.6e6))         # radius 0.3 mm
+    v.SetDrill(int(0.3e6))
+    v.SetNet(sig)
+    board.Add(v)
+
+    class _FakeGrid:
+        """Just enough of patch.Grid for apply_path: .layers and .mm()."""
+        cell = 0.25
+        x0 = 0.0
+        y0 = 0.0
+        layers = [pcbnew.F_Cu, pcbnew.B_Cu]
+
+        def mm(self, cx, cy):
+            return (self.x0 + (cx + 0.5) * self.cell,
+                    self.y0 + (cy + 0.5) * self.cell)
+
+    grid = _FakeGrid()
+    # the cell dijkstra would have reached first: inside the via's 0.3 mm
+    # disc but ~0.2 mm off its true centre (cell centre (10.125, 9.875))
+    cx, cy = 40, 39
+    cell_x, cell_y = grid.mm(cx, cy)
+    assert math.hypot(cell_x - via_x, cell_y - via_y) < 0.3      # inside the via
+    assert (cell_x, cell_y) != (via_x, via_y)                    # but off-centre
+
+    path = [(0, cx - 4, cy), (0, cx, cy)]      # one F.Cu run into the via
+    added = PATCH.apply_path(board, grid, path, "SIG", width_mm=0.15,
+                             via_mm=0.6, drill_mm=0.3)
+    trk = added[-1]
+    assert trk.GetClass() == "PCB_TRACK"
+    end = trk.GetEnd()
+    assert (end.x, end.y) == (v.GetPosition().x, v.GetPosition().y), (
+        "track end must be snapped onto the existing via's exact centre, "
+        "not the grid cell that merely overlaps its copper")
