@@ -54,6 +54,11 @@ optional; anything not stated keeps the heuristic default. Schema:
     clamp_v = 38.9          # optional; distributor data fills it when absent
     min_margin_pct = 15
 
+    [fab]                   # what the quoted fab process can actually build
+    blind_vias = false      # default false: a blind/buried/micro via on the
+    buried_vias = false     # board is a VIA_TYPE review FAIL unless the
+    microvias = false       # matching flag here says the process supports it
+
 Width rule: conservative 1oz external copper, ~0.5 mm per amp with a 0.3 mm
 floor — wide enough for a 10C rise at the stated current, narrow enough not to
 eat the board. The engineer can always state width_mm directly instead.

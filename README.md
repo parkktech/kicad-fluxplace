@@ -430,7 +430,43 @@ stays visible in review instead of disappearing.
 Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[env]`, `[nets.<NET>]` (`straight_copper`, `max_vias`), `[rf]` (`target_z`,
 `tolerance_pct`, `max_vias`, `nets`), `[pairs.<FAMILY>]` (`skew_mm`),
-`[power."<RAIL>"]` (`holdup_ms` …), `[protection]`.
+`[power."<RAIL>"]` (`holdup_ms` …), `[protection]`, `[fab]` (`blind_vias`,
+`buried_vias`, `microvias`).
+
+## What changed on 2026-09-08
+
+**VIA_TYPE gate**: `review` and `fab` never looked at via *type* — only
+geometry/DRC did, and DRC does not care whether a via is through, blind,
+buried or micro as long as it is drilled and clears clearance. A repair
+pass on utv-comms V1.5 (`fluxplace finish`, freerouting session import)
+picked up 3 blind vias on a 6-layer profile that only quotes through-via
+pricing, and nothing flagged it before fab packaging.
+
+- `review.check_via_types(facts, cons)` — new FAIL `VIA_TYPE`: any
+  blind/buried/micro via found on the board, unless the matching
+  `[fab] blind_vias` / `buried_vias` / `microvias` constraint is `true`.
+  Wired into `review.run()`, so both `fluxplace review` and the
+  `_review_gate()` that `fab`/`deliver` call before packaging now FAIL on
+  it — same stop-ship contract as every other FAIL code.
+- `review.facts_from_board()` now records `facts["vias"]` (net, x, y,
+  type, layer pair) and `facts["via_type_counts"]`, classified from
+  KiCad 10's `VIATYPE_THROUGH` / `VIATYPE_BLIND` / `VIATYPE_BURIED` /
+  `VIATYPE_MICROVIA` (falls back to layer-pair geometry for an
+  undefined/future enum value rather than assuming through).
+- **Root cause fixed**: `finish.route_nets()` copied
+  `t.GetViaType()`/`t.SetLayerPair(t.TopLayer(), t.BottomLayer())`
+  verbatim from the freerouting session for every via it took — the DSN
+  via list can offer blind/buried vias and freerouting will use one on a
+  dense net. It now always creates `VIATYPE_THROUGH` F.Cu-B.Cu vias
+  regardless of what the session chose. The other via-creation sites in
+  `repair.py`/`patch.py`/`kicad_io.py`/`migrate.py` already forced
+  `VIATYPE_THROUGH` at construction and needed no change — confirmed by
+  new regression tests.
+- Tests in `tests/test_review.py`: facts-only `check_via_types` cases
+  (blind/buried FAIL, through-only quiet, `[fab]` flags waive their own
+  type only), a `facts_from_board` case with real blind/buried/through
+  vias built via pcbnew, and via-creation regression tests for
+  `repair._gnd_via` and `patch.apply_path` asserting `VIATYPE_THROUGH`.
 
 ## What changed on 2026-09-07
 

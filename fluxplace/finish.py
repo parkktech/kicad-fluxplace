@@ -81,10 +81,15 @@ def route_nets(board_path, out_path, nets, planes=("In1.Cu", "In4.Cu"), jar=None
         if t.GetClass() == "PCB_VIA":
             v = pcbnew.PCB_VIA(board)
             v.SetPosition(t.GetPosition())
-            v.SetViaType(t.GetViaType())
+            # Always through, F.Cu-B.Cu — never copy freerouting's via type/
+            # layer pair verbatim. The DSN via list can offer blind/buried
+            # vias and freerouting will pick one on a dense net; nothing
+            # downstream (DRC, fab manifest) checks via TYPE, only geometry,
+            # so a blind via reaches gerbers on a through-via-only quote.
+            v.SetViaType(pcbnew.VIATYPE_THROUGH)
             v.SetWidth(t.GetWidth(t.TopLayer()))
             v.SetDrill(t.GetDrill())
-            v.SetLayerPair(t.TopLayer(), t.BottomLayer())
+            v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
             v.SetNet(ni)
             board.Add(v)
             nv += 1

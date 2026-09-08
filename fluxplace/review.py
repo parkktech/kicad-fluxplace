@@ -28,6 +28,8 @@ ENVIRONMENT. This module does that:
   TVS_MARGIN             clamp voltage vs the downstream device rating
   ENV_UNDEFINED          nobody answered the environment questions
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
+  VIA_TYPE               blind/buried/micro via on a through-via-only fab
+                         profile ([fab] blind_vias/buried_vias/microvias)
   CN_ABSENT / CN_NONE / CN_LOW   [sourcing] china = true: LCSC/JLCPCB stock
                          per part — what a Shenzhen assembly line actually pulls
   MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
@@ -52,7 +54,8 @@ from . import stackup as ST
 from .comprehend import parse_value
 
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
-           "packages_agree", "lib_index", "lib_pins", "pin_role"]
+           "packages_agree", "lib_index", "lib_pins", "pin_role",
+           "check_via_types"]
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 
@@ -919,6 +922,35 @@ def check_pads(facts):
                f"`fluxplace repair --fix-pads`", refs=[r for r, _ in dups])]
 
 
+def check_via_types(facts, cons):
+    """Blind/buried/micro vias on a profile that only quotes through vias:
+    a repair/patch/finish pass can pick these up unnoticed (freerouting's
+    session import in particular carries whatever via type the router
+    chose) and DRC/fab never look at via TYPE, only geometry. FAIL unless
+    the constraints explicitly say the fab process supports them
+    ([fab] blind_vias / buried_vias / microvias = true)."""
+    vias = facts.get("vias") or []
+    if not vias:
+        return []
+    fab = (cons or {}).get("fab", {})
+    allowed = {k for k, key in (("blind", "blind_vias"), ("buried", "buried_vias"),
+                                ("micro", "microvias")) if fab.get(key)}
+    bad = [v for v in vias if v["type"] != "through" and v["type"] not in allowed]
+    if not bad:
+        return []
+    bad.sort(key=lambda v: (v["net"], v["x"], v["y"]))
+    detail = "; ".join(f"{v['net']} ({v['x']:g},{v['y']:g}) {v['layers']}"
+                        for v in bad[:10])
+    if len(bad) > 10:
+        detail += f"; ... {len(bad) - 10} more"
+    return [_f(FAIL, "VIA_TYPE",
+               f"{len(bad)} blind/buried/micro via(s) on a through-via-only "
+               f"profile: {detail} — set [fab] blind_vias / buried_vias / "
+               f"microvias = true if the quoted fab process supports them, "
+               f"else re-route to through vias",
+               refs=sorted({v["net"] for v in bad}))]
+
+
 def check_spec_sync(facts, spec, size_tol_mm=2.0):
     out = []
     if not spec:
@@ -1084,6 +1116,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_china(facts, cons, cache_path=(os.path.join(os.path.dirname(
         facts.get("mpn_map_path") or "."), ".lcsc_cache.json") if facts.get("mpn_map_path") else None))
     out += check_pads(facts)
+    out += check_via_types(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
@@ -1173,6 +1206,8 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
         }
     tracks = {}
     layer_len = defaultdict(float)
+    vias = []
+    via_type_counts = defaultdict(int)
     for t in board.GetTracks():
         n = t.GetNetname()
         if not n:
@@ -1181,6 +1216,29 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
                                   "vias": 0, "segments": defaultdict(float)})
         if t.GetClass() == "PCB_VIA":
             d["vias"] += 1
+            top, bot = t.TopLayer(), t.BottomLayer()
+            vt = t.GetViaType()
+            if vt == pcbnew.VIATYPE_THROUGH:
+                kind = "through"
+            elif vt == pcbnew.VIATYPE_MICROVIA:
+                kind = "micro"
+            elif vt == pcbnew.VIATYPE_BLIND:
+                kind = "blind"
+            elif vt == pcbnew.VIATYPE_BURIED:
+                kind = "buried"
+            else:
+                # VIATYPE_NOT_DEFINED or a future enum value: fall back to
+                # geometry rather than silently pass it as through — blind
+                # touches an outer layer (F.Cu/B.Cu), buried does not.
+                outer = (pcbnew.F_Cu, pcbnew.B_Cu)
+                kind = "blind" if (top in outer or bot in outer) else "buried"
+            via_type_counts[kind] += 1
+            pos = t.GetPosition()
+            vias.append({
+                "net": n, "type": kind,
+                "x": round(pcbnew.ToMM(pos.x), 4), "y": round(pcbnew.ToMM(pos.y), 4),
+                "layers": f"{board.GetLayerName(top)}-{board.GetLayerName(bot)}",
+            })
             continue
         if t.GetClass() != "PCB_TRACK":
             continue
@@ -1224,4 +1282,6 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "mpn_map": mp,
         "mpn_map_path": path,
         "dup_bare_pads": sorted(dup_bare),
+        "vias": vias,
+        "via_type_counts": dict(via_type_counts),
     }

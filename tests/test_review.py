@@ -308,6 +308,33 @@ def test_spec_sync_size_layers_components():
     assert R.check_spec_sync(facts(), good) == []
 
 
+# -------------------------------------------------------------------- vias
+def test_via_type_blind_fails_without_fab_flag():
+    f = facts(vias=[
+        {"net": "VBAT_CHG", "type": "blind", "x": 28.2, "y": 4.065, "layers": "B.Cu-In2.Cu"},
+        {"net": "SW_SETUP", "type": "blind", "x": 27.619, "y": 2.647, "layers": "In3.Cu-B.Cu"},
+        {"net": "GND", "type": "through", "x": 10.0, "y": 10.0, "layers": "F.Cu-B.Cu"},
+    ])
+    out = R.check_via_types(f, {})
+    assert codes(out, "FAIL") == {"VIA_TYPE"}
+    assert "2 blind/buried/micro via" in out[0]["msg"]
+    assert out[0]["refs"] == ["SW_SETUP", "VBAT_CHG"]
+
+
+def test_via_type_through_only_is_quiet():
+    f = facts(vias=[{"net": "GND", "type": "through", "x": 0, "y": 0, "layers": "F.Cu-B.Cu"}])
+    assert R.check_via_types(f, {}) == []
+    assert R.check_via_types(facts(vias=[]), {}) == []
+
+
+def test_via_type_blind_allowed_by_fab_flag():
+    f = facts(vias=[{"net": "VBAT_CHG", "type": "blind", "x": 28.2, "y": 4.065,
+                      "layers": "B.Cu-In2.Cu"}])
+    assert R.check_via_types(f, {"fab": {"blind_vias": True}}) == []
+    # buried_vias/microvias don't cover a blind via
+    assert codes(R.check_via_types(f, {"fab": {"buried_vias": True}}), "FAIL") == {"VIA_TYPE"}
+
+
 # ------------------------------------------------------------------ power
 def test_holdup_math():
     f = facts(net_pads={"+5V": [], "GND": []})
@@ -603,3 +630,78 @@ def test_facts_from_board_exempts_grounded_mounting_hole(tmp_path):
 
     facts = R.facts_from_board(str(board_path))
     assert facts["parts"]["MH1"]["mech"] is True
+
+
+def test_facts_from_board_classifies_blind_buried_and_through_vias(tmp_path):
+    board_path = tmp_path / "vb.kicad_pcb"
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(6)
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    board.Add(gnd)
+
+    def add_via(x_mm, top, bot, vtype):
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(pcbnew.VECTOR2I(int(x_mm * 1e6), int(1 * 1e6)))
+        v.SetViaType(vtype)
+        v.SetLayerPair(top, bot)
+        v.SetWidth(pcbnew.FromMM(0.4))
+        v.SetDrill(pcbnew.FromMM(0.2))
+        v.SetNet(gnd)
+        board.Add(v)
+
+    add_via(1.0, pcbnew.B_Cu, pcbnew.In2_Cu, pcbnew.VIATYPE_BLIND)
+    add_via(2.0, pcbnew.In2_Cu, pcbnew.In3_Cu, pcbnew.VIATYPE_BURIED)
+    add_via(3.0, pcbnew.F_Cu, pcbnew.B_Cu, pcbnew.VIATYPE_THROUGH)
+    pcbnew.SaveBoard(str(board_path), board)
+
+    facts = R.facts_from_board(str(board_path))
+    kinds = sorted(v["type"] for v in facts["vias"])
+    assert kinds == ["blind", "buried", "through"]
+    assert facts["via_type_counts"] == {"blind": 1, "buried": 1, "through": 1}
+    out = R.check_via_types(facts, {})
+    assert codes(out, "FAIL") == {"VIA_TYPE"}
+    assert "2 blind/buried/micro via" in out[0]["msg"]
+
+
+def test_gnd_via_created_by_repair_is_through(tmp_path):
+    from fluxplace import repair as RP
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(6)
+    gnd = pcbnew.NETINFO_ITEM(board, "GND")
+    board.Add(gnd)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("U1")
+    fp.SetPosition(pcbnew.VECTOR2I(0, 0))
+    p = pcbnew.PAD(fp)
+    p.SetNumber("1")
+    p.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+    p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    p.SetSize(pcbnew.VECTOR2I(int(0.5e6), int(0.5e6)))
+    p.SetPosition(pcbnew.VECTOR2I(int(1e6), 0))
+    fp.Add(p)
+    board.Add(fp)
+
+    via = RP._gnd_via(board, fp, p, gnd)
+    assert via.GetViaType() == pcbnew.VIATYPE_THROUGH
+    assert via.TopLayer() == pcbnew.F_Cu and via.BottomLayer() == pcbnew.B_Cu
+
+
+def test_patch_apply_path_via_is_through(tmp_path):
+    from fluxplace import patch as PT
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(6)
+    net = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(net)
+
+    class Grid:
+        def mm(self, gx, gy):
+            return float(gx), float(gy)
+        layers = {0: pcbnew.F_Cu, 1: pcbnew.In1_Cu}
+
+    grid = Grid()
+    path = [(0, 0.0, 0.0), (1, 1.0, 1.0)]   # layer change 0 -> 1: forces a via
+    added = PT.apply_path(board, grid, path, "SIG", width_mm=0.2, via_mm=0.4,
+                          drill_mm=0.2)
+    vias = [a for a in added if a.GetClass() == "PCB_VIA"]
+    assert vias, "expected apply_path to create a via on the layer change"
+    assert all(v.GetViaType() == pcbnew.VIATYPE_THROUGH for v in vias)
