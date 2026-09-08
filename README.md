@@ -109,10 +109,11 @@ PYTHONPATH=$KP python3 cli.py <command> --board board.kicad_pcb [opts]
 | `eval`    | Weighted wirelength, overlaps, extent, **pin density**; `--prc` grades physics checks. |
 | `comprehend` | Auto-detect physics constraints (power nets w/ IPC-2221 widths, diff pairs, bypass caps, crystals, converters); `--prc` grades the placement against them. |
 | `compact` | Shrink a known-good placement → route → fab. Placement controls: `--rule-areas` (KiCad Rule Areas: named+empty = hard region, keepout = obstacle), `--outline W:H` (hard bounds, fails loudly), `--flip decaps\|passives` (back-side exploration), `--cluster-anchors`, `--quilter-contract`, `--preserve-pour NAME`, `--keep-copper`. |
-| `deliver` | Package a fab output for ordering: **PCBWay's four upload slots as four numbered files** (gerber zip / BOM / centroid / assembly instructions) plus loose readable docs (brief, order worksheet) for whoever places the order. `--no-pcbway` for a single CAM zip. |
+| `fab` | Emit the gerbers/drill/place/DRC package for review; runs the `review` gate first and **aborts on FAIL**. Wipes `gerbers/`, `drill/` and `place/` before every export, so a re-cut into the same `--out` never leaves a prior cut's files behind, and `MANIFEST.txt` lists exactly the files that export actually wrote. |
+| `deliver` | Package a fab output for ordering: **PCBWay's four upload slots as four numbered files** (gerber zip / BOM / centroid / assembly instructions) plus loose readable docs (brief, order worksheet) for whoever places the order. `--no-pcbway` for a single CAM zip. Zips exactly the files `fab`'s `MANIFEST.txt` lists — a stale file left in the output directory by an old export can no longer reach the zip. |
 | `pcbway` | PCBWay's Assembly quote form, field by field, answered from the board: size, layers, track/space tier, drill, finish, sides, unique/SMD/fine-pitch/THT counts, consign list. `CHOOSE` wherever the design has no opinion. |
 | `tournament` | Candidates × `--profiles` (fab rule bundles) → gate → freerouting → **lexicographic rank: DRC → completion → PRC passes → conservativeness → vias → wirelength last**. |
-| `review`  | **The design-review gate** (see below): spec net rules, diff-pair skew/layers, RF impedance on the layer the copper is on, DigiKey/Mouser package · pin count · temperature vs footprint and `[env]`, spec pinmap vs the KiCad official symbol, spec/board sync, hold-up and TVS margin. `fab` and `deliver` run it and **abort on FAIL** (`--no-review` to override, `--waive CODE:REGEX` per finding). |
+| `review`  | **The design-review gate** (see below): spec net rules, diff-pair skew/layers, RF impedance on the layer the copper is on, DigiKey/Mouser package · pin count · temperature vs footprint and `[env]`, spec pinmap vs the KiCad official symbol, spec/board sync, hold-up and TVS margin, **via type** (blind/buried/micro FAIL unless `[fab]` allows it). `fab` and `deliver` run it and **abort on FAIL** (`--no-review` to override, `--waive CODE:REGEX` per finding). |
 | `repair`  | Copper repairs the review gate asks for: remove router loops/stubs on 2-pin nets, re-width RF segments to what **their layer** needs, remap pads to corrected nets (rips the old stubs, drops a GND via beside pads that become ground), net the unnetted twin of a same-numbered pad, add silkscreen text in a free spot. `--patch` closes what a remap left unrouted; `--bridge REF:PAD` maze-routes one pad the patcher and freerouting both gave up on — multi-layer Dijkstra on a grid with every foreign track/via/pad rasterised at clearance, layer changes only where a through via clears every copper layer, DRC-guarded and zones refilled on accept. |
 | `review` also carries **land-pattern citations** (`landpattern` on a spec component: source page + pitch/pad/rows/pins, measured against the footprint; project-drawn footprints without one FAIL) and reads **operating temperature from the datasheet text**, preferring it over the distributor field when the two disagree. |
 | `drc-fix` | Fix the DRC noise a repair leaves behind, from the report's own items: rip a track that runs into a swapped footprint's pad, neck a widened RF segment at a clearance pinch, push a via off another via/track by a few µm, snap or delete stray track ends, move colliding reference text; loops DRC until the count stops falling. `--island-vias` drops a via beside a plane pad whose pour island has none (DRC-guarded). |
@@ -433,180 +434,86 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`, `[fab]` (`blind_vias`,
 `buried_vias`, `microvias`).
 
-## What changed on 2026-09-08
+## What changed 2026-09-06 → 2026-09-08
 
-**VIA_TYPE gate**: `review` and `fab` never looked at via *type* — only
-geometry/DRC did, and DRC does not care whether a via is through, blind,
-buried or micro as long as it is drilled and clears clearance. A repair
-pass on utv-comms V1.5 (`fluxplace finish`, freerouting session import)
-picked up 3 blind vias on a 6-layer profile that only quotes through-via
-pricing, and nothing flagged it before fab packaging.
+Three days closing out the utv-comms-bridge V1.5 external review, grouped
+by command (commit hashes from `git log 61eccd9..HEAD`).
 
-- `review.check_via_types(facts, cons)` — new FAIL `VIA_TYPE`: any
-  blind/buried/micro via found on the board, unless the matching
-  `[fab] blind_vias` / `buried_vias` / `microvias` constraint is `true`.
-  Wired into `review.run()`, so both `fluxplace review` and the
-  `_review_gate()` that `fab`/`deliver` call before packaging now FAIL on
-  it — same stop-ship contract as every other FAIL code.
-- `review.facts_from_board()` now records `facts["vias"]` (net, x, y,
-  type, layer pair) and `facts["via_type_counts"]`, classified from
-  KiCad 10's `VIATYPE_THROUGH` / `VIATYPE_BLIND` / `VIATYPE_BURIED` /
-  `VIATYPE_MICROVIA` (falls back to layer-pair geometry for an
-  undefined/future enum value rather than assuming through).
-- **Root cause fixed**: `finish.route_nets()` copied
-  `t.GetViaType()`/`t.SetLayerPair(t.TopLayer(), t.BottomLayer())`
-  verbatim from the freerouting session for every via it took — the DSN
-  via list can offer blind/buried vias and freerouting will use one on a
-  dense net. It now always creates `VIATYPE_THROUGH` F.Cu-B.Cu vias
-  regardless of what the session chose. The other via-creation sites in
-  `repair.py`/`patch.py`/`kicad_io.py`/`migrate.py` already forced
-  `VIATYPE_THROUGH` at construction and needed no change — confirmed by
-  new regression tests.
-- Tests in `tests/test_review.py`: facts-only `check_via_types` cases
-  (blind/buried FAIL, through-only quiet, `[fab]` flags waive their own
-  type only), a `facts_from_board` case with real blind/buried/through
-  vias built via pcbnew, and via-creation regression tests for
-  `repair._gnd_via` and `patch.apply_path` asserting `VIATYPE_THROUGH`.
+**`verify-models`** — new placement/verification rules, each found against a
+real defect that had passed silently:
 
-**Fab output hygiene**: `fab.emit()` wrote into `gerbers/`, `drill/` and
-`place/` with plain `os.makedirs(..., exist_ok=True)` — a re-cut into the
-same `--out` never removed a prior cut's files, only added/overwrote
-kicad-cli's current output over them. On utv-comms V1.5 the blind-via
-cut's `-back-in2.drl`/`-back-in3.drl` drill files (and their gerberX2
-maps) survived the through-via re-cut, because kicad-cli only ever
-*writes* what the current board needs and never deletes a file a past
-export left that the current board no longer produces. `deliver()` then
-`shutil.copytree`'d the whole `drill/` directory into the PCBWay gerber
-zip, stale files included.
+- **posture** (`posture_gap`, `400c4d5`) — flags a body standing on edge
+  (Q1 at commit 7cb0f77: XY collapsed to 6.24×1.50mm against a
+  5.99×5.00mm Fab outline). Requires a genuine shortfall recoverable by a
+  90° swap, not just any Fab/XY mismatch — a tighter two-sided match tried
+  first false-flagged every SOT-23/0805/RJ45/JST part whose leads
+  legitimately extend past their drawn Fab body.
+- **upside-down** (`buried_mass_gap`, `c5f5c52`) — flags T1/T2 (92% of the
+  model's points sit >0.5mm below the mount plane after its offset).
+  Catches only this one signature — see `NEXT.md` for the flat-but-inverted
+  case it misses (Q1, a different defect) and why.
+- **seat gap** (`seat_gap`, `400c4d5`) — the multi-axis-rotation skip that
+  hid J10/J11's DF40C receptacles floating 0.75–0.8mm into the CM5 module
+  is closed: any model with rotation on more than one axis is now
+  Z-extent-checked via a full X→Y→Z rotation, not just the Z-only math the
+  XY pin-fit check trusts.
+- **library transform** (`library_transform_diff`, `c5f5c52`) — flags J5
+  (board references the stock KiCad USB-C STEP but rotate.z is 180 vs the
+  library footprint's 0); WARN when the model file still matches the
+  library's, INFO when it's also a deliberately swapped-in body.
+  `verify-models --constraints` feeds `[docs] project_libs` into the
+  search. `--fix` never touches a model whose transform already equals
+  the library's.
+- **mated overlay** (`overlay_registration_gap`, `c5f5c52`) — flags the
+  CM5 overlay on J10 (3beae58, D70ad) missing its mating registration to
+  J10/J11; silent once corrected. Tuned against that one before/after
+  pair — see `NEXT.md`.
+- **board→footprint transform fixed** (`88d85f4`) — `_th_holes`'s
+  board→local un-rotation used the same matrix KiCad's placement uses
+  instead of its inverse, so `verify-models --fix` "solved" J5 into a
+  180°-wrong rotation that fit a target which was itself rotated 180° from
+  reality. Fixed in `_board_to_fp`; added an SMD-lead check (`_smd_pads`, a
+  z∈[-0.05,0.05mm] lead-flange slice against the real SMD pads) as a
+  second signal, and `solve_transform` now treats the on-board transform
+  as a prior — a non-identity rotation is accepted only when it clears
+  identity's own TH fit by a solid margin *and* doesn't worsen the
+  SMD-lead fit.
+- **MODEL_FILE_UNREADABLE** (`c5f5c52`) — FAIL when a model file resolves
+  but doesn't parse into geometry (STEP under 50 points, or a WRL with no
+  Shape/IndexedFaceSet), wired into `review.check_models`.
 
-- `fab._reset_dir()` — `emit()` now `shutil.rmtree`s `gerbers/`, `drill/`
-  and `place/` before every export (these subdirs hold only files `emit()`
-  itself generated, never anything a person dropped there, so a full wipe
-  is safe). `emit()`'s return dict gains `"files"`: the exact file list
-  per section, read off disk *after* export, not what kicad-cli was asked
-  to produce.
-- `MANIFEST.txt` gains machine-readable `FILE : <section>/<name>` lines
-  for every file `emit()` actually wrote — the manifest is now a complete,
-  current listing, not just a verdict summary.
-- `fab.deliver()` no longer `shutil.copytree`s the `gerbers/`/`drill/`
-  directories into the zip. `fab._manifest_files()` parses the `FILE`
-  lines from `MANIFEST.txt` and `deliver()` copies exactly those files
-  (falls back to a directory listing only for a pre-fix package with no
-  `FILE` lines) — a file that isn't in the manifest can no longer reach a
-  gerber upload no matter how it got into the directory.
-- New `tests/test_fab.py` (kicad-cli faked out via a monkeypatched
-  `fab._run`, no real export needed): a stale `*-back-in2.drl` pre-seeded
-  in `drill/` is gone after `emit()`, a second `emit()` into the same
-  `--out` doesn't accumulate a first run's files, and `deliver()` zips
-  from the manifest — a leftover file in the source directory that isn't
-  in `MANIFEST.txt` never makes it into the zip.
+**`review`** — `is_mechanical()` now also exempts a footprint/reference
+matching the MountingHole/Fiducial/TestPoint/Logo conventions, so a grounded
+mounting hole (MH1-4/MK1-4) no longer FAILs `MODEL_MISSING` (`400c4d5`).
+`check_models` messages reformatted `"{ref} 3D model..."` — the old
+`"{ref}: 3D model..."` ate the space a `CODE:^REF ` waiver regex needs, so
+`MODEL_STANDIN:^ANT1 ` never matched ANT1's antenna stand-in (`400c4d5`).
+New **`VIA_TYPE`** FAIL (`0fbff9e`): any blind/buried/micro via found on the
+board, unless the matching `[fab] blind_vias`/`buried_vias`/`microvias`
+constraint is `true` — wired into both `review` and the gate `fab`/`deliver`
+call, same stop-ship contract as every other FAIL. `facts_from_board()`
+gains `facts["vias"]`/`facts["via_type_counts"]` from KiCad 10's
+`VIATYPE_*` enum. Root cause closed in the same commit: `finish.route_nets()`
+had copied the via type straight off the freerouting session, so a dense
+net's blind/buried via choice reached the board; it now always creates
+`VIATYPE_THROUGH` F.Cu–B.Cu vias regardless of what the session chose.
 
-## What changed on 2026-09-07
+**`repair --patch`** (`3343fef`) — the maze router's new track ends could
+land inside an existing via's copper but off its exact centre (a grid-cell
+quantization artefact), so KiCad's own `track_not_centered_on_via` DRC
+reverted an otherwise-correct route every time. `apply_path` now snaps
+every track end onto any existing via's true centre before writing
+geometry. Found closing the J4 SMA corridor on the UTV board.
 
-Code review of `verify-models`' placement/verification rules against every
-defect the utv-comms-bridge board hit in the two prior days that passed
-`verify-models` silently at the time (Q1 on edge, Q1 flat-but-upside-down,
-T1/T2 upside down, J5's transform silently drifting from the library, the
-CM5 overlay on J10 missing its mating registration, J12 pointing at an
-unreadable body). Added, each a pure function + wiring in
-`model_verify.verify_footprint` + tests in `tests/test_verify_models.py`:
-
-- **POSTURE** (`posture_gap`) — flags Q1 on edge at commit 7cb0f77 (XY
-  collapsed to 6.24x1.50mm against a 5.99x5.00mm Fab outline, Z runs
-  5.93mm), silent on the rest of the real V1.5 board including SOT-23/
-  0805/RJ45/JST parts whose leads legitimately extend past their drawn
-  Fab body (a tight two-sided XY-vs-Fab match, tried first, false-flagged
-  those; the shipped version requires a genuine shortfall recoverable by
-  a 90° swap, not just any mismatch).
-- **UPSIDE-DOWN** (`buried_mass_gap`) — flags T1/T2 (172264a, 4719085:
-  92% of the model's points sit >0.5mm below the mount plane after its
-  offset). Only catches this one signature; does NOT catch Q1's flat-but-
-  upside-down case (0b0cf82) — see `NEXT.md` 2026-09-07 for what was tried
-  and why it was rejected (~30 false positives across legitimately-seated
-  passives, SOT-23s, the K1 relay, L1, U3, J3, J6).
-- **LIBRARY-TRANSFORM** (`library_transform_diff` + `find_library_footprint`
-  / `_library_models`) — flags J5 at 4719085 (board still references the
-  stock KiCad USB-C receptacle STEP but rotate.z is 180 vs the library
-  footprint's 0). WARN when the board's model file matches the library's
-  (same body, transform alone drifted); INFO when the file also differs
-  (Q1's own case at HEAD — a deliberately swapped-in real vendor STEP).
-  Searches `[docs] project_libs` (new `verify-models --constraints`) and
-  every `/usr/share/kicad*/footprints/*.pretty` by footprint name — board
-  footprints here carry no library nickname once placed. `--fix` never
-  touches a model whose transform already equals the library's (it never
-  touched library-transform findings at all; unchanged TH-solve path).
-- **MATED OVERLAY** (`overlay_registration_gap`) — closes the
-  2026-09-06 NEXT.md item; see there for the tuning detail. Flags J10 at
-  3beae58, silent at HEAD.
-- **MODEL_FILE_UNREADABLE** (`model_verify.model_file_readable`, wired into
-  `review.check_models`) — FAIL when a model file exists and resolves but
-  doesn't parse into geometry (STEP under 50 points, or a WRL with no
-  Shape/IndexedFaceSet). Tested against a truncated STEP and a Shape-less
-  WRL; the real J12 defect file itself wasn't reproducible (its current
-  on-disk WRL does carry Shape/IndexedFaceSet and reads fine).
-
-Full-suite `verify-models` on the real board (HEAD) is unchanged except one
-new, correct, non-blocking addition: `Q1: INFO ... transform differs from
-the library's` (Q1's real vendor STEP, deliberately re-oriented from the
-library footprint's zero-transform default). `pytest -q`: 272 passed, 7
-pre-existing `test_core.py` failures (unrelated, out of scope — a
-`fluxplace.comprehend.crystals` import and a `fluxplace.models.solve_transform`
-rename that moved to `model_verify`).
-
-## What changed on 2026-09-06
-
-- **`verify-models --fix` rotated J5 (a USB-C receptacle) 180° wrong, and why** —
-  root cause was `_th_holes`'s board→footprint-local un-rotation: it used
-  the SAME matrix KiCad's own placement uses (local→board), not its
-  inverse, so two forward applications compose to `Rot(-2*theta)` — the
-  identity at theta=0/180, an exact 180° point negation at theta=90/270.
-  J5 sits at fp orientation 90; the "holes" the pin-fit check scored
-  against were quietly the true holes rotated 180° from reality, so
-  `solve_transform` correctly (by its own corrupted yardstick) "solved" a
-  180° rotation — a perfect fit to a 180°-wrong target. Fixed in the new
-  `_board_to_fp`. Independently, even with the sign fixed, J5's 2 TH
-  alignment pegs + 4 TH shell holes fit measurably *better* at 180° than
-  at the true 0° (a property of this connector's own hole layout, not a
-  bug) — added an SMD-lead check (`_smd_pads`, a z∈[-0.05,0.05mm] lead-
-  flange slice compared against the footprint's real SMD pads) as a
-  second signal, and made `solve_transform` treat the on-board transform
-  as the prior: a non-identity rotation is only accepted when it clears
-  identity's own TH fit by a solid margin *and* does not worsen the
-  SMD-lead fit. `verify_board`'s fix path now also skips any footprint
-  whose current transform already fits within tol on both metrics,
-  rather than re-solving it into a "solved" one. Tests:
-  `tests/test_verify_models.py`.
-- **`verify-models` seat-gap check, and a bug it fixes** — a Hirose DF40C
-  receptacle on utv-comms V1.5's back copper (J10/J11, model rotated
-  -90,0,90 to stand a sideways-authored STEP upright) sat 0.75-0.8mm off
-  the board and into the CM5 module mounted below it, and `verify-models`
-  never said a word: any model with rotation on more than one axis was
-  hard-skipped, so it was simply never checked. `model_verify.py` now
-  computes each model's rotated Z-extent with a full X→Y→Z rotation
-  (`_rotate_xyz`, not just the Z-only math the XY pin-fit check trusts) and
-  a `seat_gap()` that compares it against the model's own FP_3DMODEL
-  offset — flagged `WARN ... seat gap ... buried in the board / floating
-  off the board`. Deliberately conservative: a model is only judged when
-  its own un-offset geometry already puts a bound within 0.3mm of its
-  origin (a real seat-at-origin convention, true for this connector's
-  vendor STEP); library body models authored some other way (a
-  transformer, a MOSFET, a radial cap — checked against real board data:
-  T1/T2, Q1, C12/C13) return `None` rather than a false "floating" WARN.
-  Render-verified: a positive offset floats a body above the mount plane on
-  EITHER side of the board (KiCad applies the offset before the back-side
-  mirror), so `flipped` (`fp.IsFlipped()`) does not change the sign.
-- **`review`'s mechanical exemption now survives a grounded mounting hole**
-  — MH1-4/MK1-4 tied to GND for chassis bonding read as electrical (a
-  net on the pad) and FAILed `MODEL_MISSING`; `is_mechanical()` also
-  exempts a footprint/reference matching the MountingHole/Fiducial/
-  TestPoint/Logo conventions, used everywhere `check_models` and friends
-  decide `mech` (`check_spec_sync` keeps the older "any net" rule instead,
-  since the spec documents those refs as components).
-- **`check_models` findings are waivable again** — its messages read
-  `"{ref}: 3D model..."`; every waiver in this project is `CODE:^REF `
-  matched by regex, and the colon ate the space `^REF ` needs, so
-  `"MODEL_STANDIN:^ANT1 "` never matched ANT1's patch antenna stand-in.
-  Reformatted to `"{ref} 3D model..."` like the rest of the module.
+**`fab`/`deliver`** (`098e8bf`) — `fab.emit()` wrote into `gerbers/`,
+`drill/` and `place/` with plain `makedirs(exist_ok=True)`, so a re-cut
+into the same `--out` never removed a prior cut's files; a blind-via cut's
+stale drill files survived a through-via re-cut and `deliver()`'s
+`shutil.copytree` carried them into the PCBWay gerber zip. `_reset_dir()`
+now wipes those three subdirs before every export; `MANIFEST.txt` gains
+machine-readable `FILE : <section>/<name>` lines for every file `emit()`
+actually wrote, and `deliver()` zips exactly those manifest-listed files
+instead of copying the directories wholesale.
 
 ## What changed on 2026-09-04
 

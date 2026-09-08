@@ -1,69 +1,34 @@
-## 2026-09-07 — verify-models: UPSIDE-DOWN only catches the buried-mass case, not a flat flip
+## 2026-09-08 — verify-models: three open items from the placement-rules audit
 
-`model_verify.buried_mass_gap` (WARN "body upside down or badly buried")
-reliably catches ONE real signature: most of a model's own point mass sitting
-below the mount plane after its offset (T1/T2's SM-LP-5001 stand-in,
-172264a/4719085 — 92% buried, zero false positives across the whole real V1.5
-board). It does NOT catch the OTHER real upside-down defect on this board:
-Q1 (Vishay PowerPAK SO-8, commit 0b0cf82) sat flat and correctly postured but
-mounting-face-up instead of down — the body never crosses the mount plane at
-all, so there is no "buried mass" to find.
+`verify-models` gained posture/buried-mass/library-transform/mated-overlay/
+MODEL_FILE_UNREADABLE checks this week (README "What changed 2026-09-06 →
+2026-09-08", commits 400c4d5/f1a3c05/88d85f4/c5f5c52). Three gaps found along
+the way are still open:
 
-Tried and rejected: matching a thin z-band's XY extent against the
-footprint's Fab/Courtyard outline (the "small flat face at one end" signature
-that DOES distinguish Q1's two orientations — a 23-point band at z-top on the
-broken revision vs a 22-point band at z-bottom on the corrected one).
-Generalizing that same test across the real board produced ~30 false
-positives (every 0805/1206 cap, every SOT-23/-5/-6, the K1 relay, the L1
-inductor, U3's GNSS module, J3, J6) — real STEP tessellation density is not a
-reliable proxy for "this is the mounting face": many molded packages are
-close to the same footprint outline at BOTH ends (a rectangular block, top
-and bottom), so "does a thin slice match the outline" fires on legitimate
-parts as often as on a genuine flip. No parameter setting (span floor,
-tolerance, point-count bounds) threaded the needle between missing Q1 and
-false-flagging the rest of the board. Needs real mesh topology (which face's
-normal points away from the board) to do properly — not available from a flat
-CARTESIAN_POINT list. Flagging this as a known gap rather than shipping a
-noisy or blind rule.
-
-## 2026-09-06 — verify-models: SMD-lead check's z-band false-positives on some connectors
-
-The J5 (USB-C) 180°-rotation bug is fixed — root cause was a sign error in
-`_th_holes`'s board→local un-rotation (see README "What changed on
-2026-09-06"), plus a new SMD-lead cross-check (`_smd_pads` +
-`verify_footprint`'s `z∈[-0.05,0.05mm]` lead-flange slice) as a second
-signal for `solve_transform`'s rotation choice. Re-running `verify-models`
-on the real V1.5 board with this change surfaces new WARNs beyond J5:
-J1A/J2A/J9 (JST_GH_BM0xB-GHS-TBT connectors, all the same official KiCad
-library pairing, offset/rotate all zero) each report ~1.08mm — traced to
-the connector's two ground/mounting tabs specifically (the 3 signal pins
-individually measure a clean ~0.49mm); the tab's contact point likely
-sits at a slightly different z than the z=0 flange the check assumes,
-so the z-band is probably clipping the wrong slice of the tab rather
-than finding a real mis-registration. J10 also gets a large (~19mm) new
-SMD-lead WARN on the CM5R5 module overlay, consistent with — not
-independent of — the already-tracked mated-module-overlay gap above.
-None of these were investigated with a render/visual-QA pass; they need
-one before being trusted as real findings or waived as z-band artifacts.
-If they turn out to be artifacts, the general fix is probably per-tab
-(not per-footprint) z-window detection instead of one fixed band.
-
-## 2026-09-06 — verify-models: mated-module overlays — CLOSED 2026-09-07
-
-Added `model_verify.overlay_registration_gap` + wiring in `verify_footprint`:
-for a footprint carrying >=2 models where one model's own rotated XY extent
-is >3x the footprint's own Fab/Courtyard bbox area (a module/overlay, not the
-footprint's own component), WARN unless the overlay has enough of its own
-geometry both near the mount plane (|z| <= 0.3mm after its offset) AND inside
-this footprint's actual pad-field bbox (+5mm margin) — `min_pts=10`. Verified
-against the real defect: J10 at commit 3beae58 (the CM5 module rotated 180°
-wrong about Z, D70ad) reports 5 points in-window and WARNs; the corrected
-HEAD revision reports 15 and is silent. This is the ONLY footprint on the
-real V1.5 board whose models even qualify as an overlay (>3x-bbox second
-model) — `min_pts=10` is tuned against that one before/after pair, not a
-broader population, so treat it as a first cut that may need retuning the
-next time this pattern shows up on a different footprint. Tests:
-`tests/test_verify_models.py` (`test_overlay_registration_gap_*`).
+- **Flat-but-inverted body detection.** `buried_mass_gap` only catches a
+  model most of whose point mass sits below the mount plane (T1/T2's real
+  defect, 172264a). It does NOT catch Q1's flat-but-upside-down case
+  (0b0cf82 on utv-comms V1.5): correctly postured, never crosses the mount
+  plane, so there is no buried mass to find. A thin-z-band-vs-Fab-outline
+  match was tried and rejected — real STEP tessellation density false-
+  flagged ~30 legitimate parts (every 0805/1206 cap, every SOT-23/-5/-6, K1,
+  L1, U3, J3, J6). Needs real mesh topology (which face's normal points
+  away from the board), not available from a flat CARTESIAN_POINT list.
+- **Mated-overlay rule tuned on one board.** `overlay_registration_gap`'s
+  `min_pts=10` threshold (c5f5c52) was tuned against the single J10
+  CM5-overlay before/after pair (3beae58 vs HEAD, D70ad) — the only
+  footprint on the real V1.5 board that even qualifies as an overlay
+  (>3x-bbox second model). Treat as a first cut; retune when this pattern
+  shows up on a different footprint.
+- **JST SMD-lead z-band false WARNs.** The `[-0.05, 0.05mm]` lead-flange
+  slice the SMD-lead check uses (88d85f4) reports ~1.08mm on J1A/J2A/J9's
+  ground/mounting tabs (JST_GH_BM0xB-GHS-TBT, offset/rotate all zero — the 3
+  signal pins alone measure a clean ~0.49mm); the tab's contact point likely
+  sits at a different z than the z=0 flange the check assumes. Not yet
+  render/visual-QA verified as real vs. artifact; still present as of
+  098e8bf, untouched by this week's via-type and fab-hygiene work. If it
+  turns out to be an artifact, the fix is probably per-tab (not
+  per-footprint) z-window detection.
 
 ## 2026-09-05 — verify-models is wrong for back-side footprints — CLOSED 2026-09-06
 
