@@ -15,6 +15,7 @@ surfaced in the manifest so the engineer can see exactly what was assumed.
 """
 import json
 import os
+import shutil
 import subprocess
 
 
@@ -26,14 +27,35 @@ def _run(args, log):
     return r.returncode == 0
 
 
+def _reset_dir(path):
+    """Wipe a fluxplace-owned export subdir before a fresh cut. gerbers/,
+    drill/ and place/ hold ONLY files fab.emit() itself generated on some
+    previous run — never anything a person dropped there — so a full clear
+    is safe, and it is the only thing that guarantees a re-cut can't leave
+    a file from a prior board STATE behind. Measured 2026-09-08: a blind-via
+    board re-cut to through-vias left the old back-In2/In3 drill files (and
+    their gerberX2 map) sitting in drill/ — kicad-cli only ever WRITES the
+    files the current board needs, it never deletes ones a past export left
+    that the current board no longer produces — and deliver() zipped the
+    stale files into the PCBWay gerber upload right along with the real
+    ones."""
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    os.makedirs(path, exist_ok=True)
+
+
+def _listfiles(d):
+    return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+
+
 def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
     the failure in the manifest so the engineer sees exactly what did and didn't emit."""
     os.makedirs(out, exist_ok=True)
-    gdir = os.path.join(out, "gerbers"); os.makedirs(gdir, exist_ok=True)
-    ddir = os.path.join(out, "drill"); os.makedirs(ddir, exist_ok=True)
-    pdir = os.path.join(out, "place"); os.makedirs(pdir, exist_ok=True)
+    gdir = os.path.join(out, "gerbers"); _reset_dir(gdir)
+    ddir = os.path.join(out, "drill"); _reset_dir(ddir)
+    pdir = os.path.join(out, "place"); _reset_dir(pdir)
     done = {}
 
     # gerbers: all fab layers, Protel extensions, no board-name in filenames (JLC-friendly)
@@ -81,6 +103,15 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
             pass
     done["drc"] = verdict
 
+    # The exact files on disk after this export — not what kicad-cli was
+    # ASKED to produce, what it actually left behind. The subdirs were wiped
+    # by _reset_dir() above, so this list is complete and current; it is
+    # also what deliver() zips, so a stale file can never reach the fab
+    # (it would have to appear in this listing, which means this export
+    # wrote it moments ago).
+    files = {"gerbers": _listfiles(gdir), "drill": _listfiles(ddir),
+             "place": _listfiles(pdir)}
+
     man = os.path.join(out, "MANIFEST.txt")
     with open(man, "w") as f:
         f.write("fluxplace fab package\n")
@@ -95,9 +126,15 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
         f.write("fab target   : JLCPCB 4/6-layer standard (0.09mm min trace/space)\n")
         f.write("NOTE         : engineer review pass expected before release — "
                 "check DRC, silk legibility, and any fine-pitch escape zones.\n")
+        # Machine-readable file list — deliver() parses these "FILE" lines
+        # and zips exactly them, never a directory glob, so this manifest
+        # is the one and only source of truth for what ships.
+        for section in ("gerbers", "drill", "place"):
+            for name in files[section]:
+                f.write(f"FILE         : {section}/{name}\n")
     log(f"fab package -> {out}  (DRC {verdict})")
     return {"out": out, "drc": verdict, "violations": nviol,
-            "unconnected": nunc, "stages": done}
+            "unconnected": nunc, "stages": done, "files": files}
 
 
 # --------------------------------------------------------------- delivery
@@ -117,6 +154,29 @@ CAM_ONLY = ("gerbers", "drill", "drc.json", "MANIFEST.txt")
 CENTROID = ("place", "pos.csv")
 
 
+def _manifest_files(fab_dir):
+    """Parse the "FILE : <section>/<name>" lines an emit() MANIFEST.txt
+    carries -> {section: [name, ...]}. The one source of truth for what a
+    fab package actually contains: deliver() must build the zip from this,
+    never from os.listdir()/copytree on the section directory, or a file
+    left behind from a state emit() didn't clean (or dropped there by hand)
+    ships to the fab silently. Returns {} for a pre-2026-09-08 package with
+    no FILE lines — the caller falls back to a directory listing for those."""
+    man = os.path.join(fab_dir, "MANIFEST.txt")
+    out = {}
+    if not os.path.exists(man):
+        return out
+    for line in open(man):
+        if not line.startswith("FILE"):
+            continue
+        _, _, rel = line.partition(":")
+        rel = rel.strip()
+        section, sep, name = rel.partition("/")
+        if sep:
+            out.setdefault(section, []).append(name)
+    return out
+
+
 def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
             log=print):
     """Split a fab package into `out_dir`: a CAM-only zip plus loose files.
@@ -129,12 +189,12 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
     centroid_name : filename to copy place/pos.csv out under, for the separate
                     centroid upload. None keeps the old single-zip behaviour.
     """
-    import shutil
     import tempfile
     import zipfile
 
     os.makedirs(out_dir, exist_ok=True)
     zip_path = os.path.join(out_dir, name + ".zip")
+    manifest = _manifest_files(fab_dir)
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, name)
         os.makedirs(root)
@@ -146,7 +206,17 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
                 continue
             dst = os.path.join(root, item)
             if os.path.isdir(src):
-                shutil.copytree(src, dst)
+                # Manifest-driven copy: only files emit() actually wrote on
+                # its last run, never a directory glob. Falls back to a
+                # listing only for a package with no FILE lines (pre-fix).
+                names = manifest.get(item)
+                if names is None:
+                    names = _listfiles(src)
+                os.makedirs(dst, exist_ok=True)
+                for fname in names:
+                    fsrc = os.path.join(src, fname)
+                    if os.path.isfile(fsrc):
+                        shutil.copy2(fsrc, os.path.join(dst, fname))
             else:
                 shutil.copy2(src, dst)
             packed.append(item)

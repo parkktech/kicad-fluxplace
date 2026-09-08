@@ -468,6 +468,39 @@ pricing, and nothing flagged it before fab packaging.
   vias built via pcbnew, and via-creation regression tests for
   `repair._gnd_via` and `patch.apply_path` asserting `VIATYPE_THROUGH`.
 
+**Fab output hygiene**: `fab.emit()` wrote into `gerbers/`, `drill/` and
+`place/` with plain `os.makedirs(..., exist_ok=True)` — a re-cut into the
+same `--out` never removed a prior cut's files, only added/overwrote
+kicad-cli's current output over them. On utv-comms V1.5 the blind-via
+cut's `-back-in2.drl`/`-back-in3.drl` drill files (and their gerberX2
+maps) survived the through-via re-cut, because kicad-cli only ever
+*writes* what the current board needs and never deletes a file a past
+export left that the current board no longer produces. `deliver()` then
+`shutil.copytree`'d the whole `drill/` directory into the PCBWay gerber
+zip, stale files included.
+
+- `fab._reset_dir()` — `emit()` now `shutil.rmtree`s `gerbers/`, `drill/`
+  and `place/` before every export (these subdirs hold only files `emit()`
+  itself generated, never anything a person dropped there, so a full wipe
+  is safe). `emit()`'s return dict gains `"files"`: the exact file list
+  per section, read off disk *after* export, not what kicad-cli was asked
+  to produce.
+- `MANIFEST.txt` gains machine-readable `FILE : <section>/<name>` lines
+  for every file `emit()` actually wrote — the manifest is now a complete,
+  current listing, not just a verdict summary.
+- `fab.deliver()` no longer `shutil.copytree`s the `gerbers/`/`drill/`
+  directories into the zip. `fab._manifest_files()` parses the `FILE`
+  lines from `MANIFEST.txt` and `deliver()` copies exactly those files
+  (falls back to a directory listing only for a pre-fix package with no
+  `FILE` lines) — a file that isn't in the manifest can no longer reach a
+  gerber upload no matter how it got into the directory.
+- New `tests/test_fab.py` (kicad-cli faked out via a monkeypatched
+  `fab._run`, no real export needed): a stale `*-back-in2.drl` pre-seeded
+  in `drill/` is gone after `emit()`, a second `emit()` into the same
+  `--out` doesn't accumulate a first run's files, and `deliver()` zips
+  from the manifest — a leftover file in the source directory that isn't
+  in `MANIFEST.txt` never makes it into the zip.
+
 ## What changed on 2026-09-07
 
 Code review of `verify-models`' placement/verification rules against every
