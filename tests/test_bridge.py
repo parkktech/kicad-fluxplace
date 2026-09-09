@@ -153,3 +153,44 @@ def test_apply_path_snaps_track_end_onto_via_centre():
     assert (end.x, end.y) == (v.GetPosition().x, v.GetPosition().y), (
         "track end must be snapped onto the existing via's exact centre, "
         "not the grid cell that merely overlaps its copper")
+
+
+def test_apply_path_clamps_narrow_width_to_fab_floor():
+    """D-fabcap: PCBWay's upload audit rejected two 0.09 mm GND stubs on the
+    utv-comms V1.5 board ("minimum trace width ... no less than 0.1mm")
+    that neither DRC nor review had caught because the board's own
+    design-rule minimum (0.088 mm) was looser than the fab's real floor.
+    apply_path (the primitive every repair/patch/bridge/drc-fix pass writes
+    copper through) must raise a requested width/via/drill up to the [fab]
+    floor instead of writing it narrow, and log that it did."""
+    board = pcbnew.BOARD()
+    board.SetCopperLayerCount(2)
+    sig = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(sig)
+
+    class _FlatGrid:
+        layers = [pcbnew.F_Cu, pcbnew.B_Cu]
+
+        def mm(self, cx, cy):
+            return float(cx), float(cy)
+
+    grid = _FlatGrid()
+    path = [(0, 0.0, 0.0), (0, 1.0, 1.0)]      # single F.Cu run, no via
+    logged = []
+    cons = {"fab": {"min_track_mm": 0.1, "min_via_dia_mm": 0.4, "min_drill_mm": 0.2}}
+    added = PATCH.apply_path(board, grid, path, "SIG", width_mm=0.09,
+                             via_mm=0.3, drill_mm=0.15, cons=cons, log=logged.append)
+    tracks = [a for a in added if a.GetClass() == "PCB_TRACK"]
+    assert tracks, "expected a track segment"
+    for t in tracks:
+        assert pcbnew.ToMM(t.GetWidth()) == pytest.approx(0.1), (
+            "0.09 mm request must be clamped up to [fab] min_track_mm=0.1, "
+            "not written narrow")
+    assert any("min_track_mm" in m for m in logged)
+
+    # no constraints loaded -> no opinion, the narrow request goes through
+    # unclamped (this is what let the original 0.09 mm stub happen)
+    added2 = PATCH.apply_path(board, grid, path, "SIG", width_mm=0.09,
+                              via_mm=0.3, drill_mm=0.15)
+    t2 = [a for a in added2 if a.GetClass() == "PCB_TRACK"][0]
+    assert pcbnew.ToMM(t2.GetWidth()) == pytest.approx(0.09)

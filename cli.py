@@ -601,7 +601,7 @@ def cmd_patch(a):
                             via_mm=a.via, drill_mm=a.drill, cell=a.cell,
                             net_widths=nw, rip=not a.no_rip,
                             rip_r_mm=a.rip_radius, max_rip=a.max_rip,
-                            checkpoint=a.checkpoint)
+                            checkpoint=a.checkpoint, cons=cons)
     print(f"patch: accepted={res['accepted']} patched={res['patched']} "
           f"failed={res['failed']}")
 
@@ -1170,7 +1170,7 @@ def _review_gate(a, stage="review", hard=True):
     return findings
 
 
-def _bridge_guarded(path, spec, a, log):
+def _bridge_guarded(path, spec, a, log, cons=None):
     """repair.bridge on a copy; keep it only if DRC violations do not rise
     and the unconnected count falls."""
     import shutil
@@ -1186,7 +1186,7 @@ def _bridge_guarded(path, spec, a, log):
     board = IO.load(tmp)
     added = RP.bridge(board, ref, num, layers=a.bridge_layers or None, cell=a.cell,
                       width_mm=a.track, clearance_mm=a.clearance, via_mm=a.via,
-                      drill_mm=a.drill, log=log)
+                      drill_mm=a.drill, cons=cons, log=log)
     if not added:
         os.unlink(tmp)
         return False
@@ -1224,6 +1224,7 @@ def cmd_repair(a):
     from fluxplace import kicad_io as IO
     board = IO.load(a.board)
     log = lambda m: print(m, flush=True)
+    cons = C.load(a.constraints)   # [fab] floors every width/via/drill below
     did = []
     if a.fix_pads:
         n = RP.fix_dup_pads(board, log=log)
@@ -1236,24 +1237,23 @@ def cmd_repair(a):
         did.append(f"redundant copper removed on {len(tot)} net(s)")
     if a.remap:
         mapping = _json.load(open(a.remap))
-        rep = RP.remap_pins(board, mapping, rip=not a.no_rip, log=log)
+        rep = RP.remap_pins(board, mapping, rip=not a.no_rip, cons=cons, log=log)
         did.append(f"remapped {len(rep['changed'])} pad(s), ripped {rep['ripped']} "
                    f"items, {rep['vias']} GND via(s), {len(rep['unrouted'])} to route")
     if a.rf:
-        cons = C.load(a.constraints)
         rf = cons.get("rf", {})
         facts = R.facts_from_board(a.board)
         nets = set(rf.get("nets", [])) or {n for n in facts["net_pads"] if R.is_rf(n)}
         planes = a.planes or facts["plane_layers"]
         ch = RP.rf_widths(board, facts["stackup"], planes, nets,
-                          target_z=float(rf.get("target_z", 50.0)), log=log)
+                          target_z=float(rf.get("target_z", 50.0)), cons=cons, log=log)
         did.append(f"RF segments re-widthed: {len(ch)} on {sorted(nets)}")
     for ref in (a.clear_under or []):
         n, nets = RP.clear_under(board, ref, log=log)
         did.append(f"cleared {n} item(s) under {ref}")
     for spec in (a.stitch or []):
         ref, _, num = spec.partition(":")
-        RP.stitch(board, ref, num, max_mm=a.stitch_max, log=log)
+        RP.stitch(board, ref, num, max_mm=a.stitch_max, cons=cons, log=log)
         did.append(f"stitch {spec}")
     if a.text:
         at = None
@@ -1266,13 +1266,13 @@ def cmd_repair(a):
     IO.save(board, out)
     print(f"repair: {'; '.join(did) or 'nothing requested'} -> {out}")
     for spec in (a.bridge or []):
-        _bridge_guarded(out, spec, a, log)
+        _bridge_guarded(out, spec, a, log, cons=cons)
     if a.patch:
         from fluxplace import patch as PATCH
         res = PATCH.patch_board(out, out, kicad_cli=a.kicad_cli,
                                 track_w=a.track, clearance=a.clearance,
                                 via_mm=a.via, drill_mm=a.drill, cell=a.cell,
-                                log=log)
+                                cons=cons, log=log)
         print(f"patch: accepted={res['accepted']} patched={res['patched']} "
               f"failed={res['failed']}")
 
@@ -1309,9 +1309,10 @@ def cmd_drcfix(a):
     """Fix the DRC noise repairs leave behind (shorts from a bigger land
     pattern, RF clearance after re-widthing, dangling/uncentered tracks,
     silkscreen reference collisions), looping DRC until it stops falling."""
-    from fluxplace import drcfix as DF
+    from fluxplace import drcfix as DF, constraints as C
+    cons = C.load(a.constraints)   # [fab] floors the RF neck-fallback width
     hist, d = DF.loop(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
-                      rounds=a.rounds, islands=a.island_vias,
+                      rounds=a.rounds, islands=a.island_vias, cons=cons,
                       log=lambda m: print(m, flush=True))
     import collections
     c = collections.Counter(v.get("type") for v in d.get("violations", []))
@@ -2355,6 +2356,8 @@ def build_parser():
                      help="DRC-guarded via into each outer-layer plane island "
                           "that has no via (kept only if DRC does not worsen)")
     pdf.add_argument("--kicad-cli", default="kicad-cli")
+    pdf.add_argument("--constraints", default=None,
+                     help="[fab] min_track_mm floors the RF clearance-neck fallback")
     pdf.set_defaults(fn=cmd_drcfix)
 
     ptu = sub.add_parser("tune",

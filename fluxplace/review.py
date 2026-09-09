@@ -30,6 +30,16 @@ ENVIRONMENT. This module does that:
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
   VIA_TYPE               blind/buried/micro via on a through-via-only fab
                          profile ([fab] blind_vias/buried_vias/microvias)
+  FAB_MIN_TRACK / FAB_MIN_DRILL / FAB_MIN_ANNULAR / FAB_MIN_VIA
+                         copper geometry (track/arc width, via/PTH drill,
+                         annular ring, via diameter) under what the quoted
+                         fab process can build ([fab] min_track_mm etc.) —
+                         DRC and lint only ever check the board's OWN
+                         design-rule minimum, not the fab's real floor
+  FAB_DESIGN_RULE_BELOW_PROFILE
+                         the board's own design-settings minimums are
+                         looser than the [fab] profile — the gap that let a
+                         repair pass draw a 0.09 mm GND stub DRC never saw
   CN_ABSENT / CN_NONE / CN_LOW   [sourcing] china = true: LCSC/JLCPCB stock
                          per part — what a Shenzhen assembly line actually pulls
   MPN_MISSING / DATASHEET_MISSING / PINMAP_MISSING / PINMAP_EVIDENCE_WEAK
@@ -55,7 +65,7 @@ from .comprehend import parse_value
 
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
-           "check_via_types"]
+           "check_via_types", "check_fab_capability"]
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 
@@ -951,6 +961,102 @@ def check_via_types(facts, cons):
                refs=sorted({v["net"] for v in bad}))]
 
 
+def _fab_list(items, fmt, limit=10):
+    detail = "; ".join(fmt(it) for it in items[:limit])
+    if len(items) > limit:
+        detail += f"; ... {len(items) - limit} more"
+    return detail
+
+
+def check_fab_capability(facts, cons):
+    """Trace/via/drill geometry graded against what the quoted fab process
+    can actually build ([fab] in constraints), not against the board's own
+    (editable, sometimes wrong) design-rule minimum. Born from PCBWay's
+    upload audit rejecting the UTV V1.5 gerbers ("The minimum trace width
+    should be no less than 0.1mm") over two 0.09 mm GND stubs: the board's
+    own design-rule minimum was 0.088 mm, so DRC, lint and `review`'s
+    VIA_TYPE check all judged the copper against a floor looser than the
+    fab that would actually build it. Only grades when [fab] is present —
+    with no constraints loaded this has no opinion on manufacturability."""
+    fab = (cons or {}).get("fab")
+    if fab is None:
+        return []
+    fab = C.fab_profile(cons)
+    out = []
+
+    narrow = sorted(
+        (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),
+        key=lambda s: (s["net"], s["layer"], s["x"], s["y"]))
+    if narrow:
+        out.append(_f(FAIL, "FAB_MIN_TRACK",
+                      f"{len(narrow)} track/arc segment(s) narrower than "
+                      f"[fab] min_track_mm={fab['min_track_mm']:g}: " +
+                      _fab_list(narrow, lambda s: f"{s['net']} {s['layer']} "
+                                f"{s['width']:g}mm ({s['x']:g},{s['y']:g})"),
+                      refs={s["net"] for s in narrow}))
+
+    vias = facts.get("vias") or []
+    bad_drill = [v for v in vias if v.get("drill_mm") is not None
+                and v["drill_mm"] < fab["min_drill_mm"]]
+    bad_via = [v for v in vias if v.get("dia_mm") is not None
+              and v["dia_mm"] < fab["min_via_dia_mm"]]
+    bad_ann = [v for v in vias if v.get("dia_mm") is not None and v.get("drill_mm") is not None
+              and (v["dia_mm"] - v["drill_mm"]) / 2.0 < fab["min_annular_mm"]]
+    for p in facts.get("pth_pads") or []:
+        if p.get("drill_mm") is not None and p["drill_mm"] < fab["min_drill_mm"]:
+            bad_drill.append(p)
+        if p.get("dia_mm") is not None and p.get("drill_mm") is not None and \
+                (p["dia_mm"] - p["drill_mm"]) / 2.0 < fab["min_annular_mm"]:
+            bad_ann.append(p)
+
+    def _via_ref(it):
+        return it.get("net") or f"{it.get('ref')}.{it.get('pad')}"
+
+    if bad_drill:
+        bad_drill.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
+        out.append(_f(FAIL, "FAB_MIN_DRILL",
+                      f"{len(bad_drill)} via/PTH drill(s) narrower than "
+                      f"[fab] min_drill_mm={fab['min_drill_mm']:g}: " +
+                      _fab_list(bad_drill, lambda it: f"{_via_ref(it)} "
+                                f"{it['drill_mm']:g}mm ({it.get('x', 0):g},{it.get('y', 0):g})"),
+                      refs={_via_ref(it) for it in bad_drill}))
+    if bad_via:
+        bad_via.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
+        out.append(_f(FAIL, "FAB_MIN_VIA",
+                      f"{len(bad_via)} via(s) narrower than "
+                      f"[fab] min_via_dia_mm={fab['min_via_dia_mm']:g}: " +
+                      _fab_list(bad_via, lambda it: f"{_via_ref(it)} "
+                                f"{it['dia_mm']:g}mm ({it.get('x', 0):g},{it.get('y', 0):g})"),
+                      refs={_via_ref(it) for it in bad_via}))
+    if bad_ann:
+        bad_ann.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
+        out.append(_f(FAIL, "FAB_MIN_ANNULAR",
+                      f"{len(bad_ann)} via/PTH annular ring(s) narrower than "
+                      f"[fab] min_annular_mm={fab['min_annular_mm']:g}: " +
+                      _fab_list(bad_ann, lambda it: f"{_via_ref(it)} "
+                                f"{(it['dia_mm'] - it['drill_mm']) / 2.0:g}mm "
+                                f"({it.get('x', 0):g},{it.get('y', 0):g})"),
+                      refs={_via_ref(it) for it in bad_ann}))
+
+    dm = facts.get("design_min") or {}
+    pairs = (("track_mm", "min_track_mm"), ("via_mm", "min_via_dia_mm"),
+             ("drill_mm", "min_drill_mm"), ("clearance_mm", "min_clearance_mm"))
+    below = {k: (dm[k], fab[fk]) for k, fk in pairs
+             if dm.get(k) is not None and dm[k] < fab[fk]}
+    profile = fab.get("profile") or "quoted fab"
+    if below:
+        detail = "; ".join(f"{k} {have:g} < {need:g}" for k, (have, need) in sorted(below.items()))
+        out.append(_f(WARN, "FAB_DESIGN_RULE_BELOW_PROFILE",
+                      f"board design-rule minimum(s) looser than the {profile} "
+                      f"profile: {detail} — this is what lets a repair/patch "
+                      f"pass draw copper the fab will then reject; tighten "
+                      f"Board Setup > Design Rules or raise [fab] min_*"))
+    elif dm:
+        out.append(_f(INFO, "FAB_DESIGN_RULE_OK",
+                      f"board design-rule minimums meet the {profile} profile"))
+    return out
+
+
 def check_spec_sync(facts, spec, size_tol_mm=2.0):
     out = []
     if not spec:
@@ -1117,6 +1223,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
         facts.get("mpn_map_path") or "."), ".lcsc_cache.json") if facts.get("mpn_map_path") else None))
     out += check_pads(facts)
     out += check_via_types(facts, cons)
+    out += check_fab_capability(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
@@ -1174,6 +1281,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
     bb = board.GetBoardEdgesBoundingBox()
     parts, net_pads = {}, defaultdict(list)
     dup_bare = set()
+    pth_pads = []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         pads, conn = {}, 0
@@ -1181,6 +1289,14 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             num = pad.GetNumber()
             if not num:
                 continue
+            if pad.GetAttribute() == pcbnew.PAD_ATTRIB_PTH and pad.GetDrillSize().x > 0:
+                p = pad.GetPosition()
+                pth_pads.append({
+                    "ref": ref, "pad": num,
+                    "drill_mm": round(pcbnew.ToMM(pad.GetDrillSize().x), 4),
+                    "dia_mm": round(pcbnew.ToMM(min(pad.GetSize().x, pad.GetSize().y)), 4),
+                    "x": round(pcbnew.ToMM(p.x), 4), "y": round(pcbnew.ToMM(p.y), 4),
+                })
             if num not in pads and num.isdigit():
                 conn += 1
             nn = pad.GetNetname()
@@ -1208,6 +1324,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
     layer_len = defaultdict(float)
     vias = []
     via_type_counts = defaultdict(int)
+    track_geom = []
     for t in board.GetTracks():
         n = t.GetNetname()
         if not n:
@@ -1234,17 +1351,38 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
                 kind = "blind" if (top in outer or bot in outer) else "buried"
             via_type_counts[kind] += 1
             pos = t.GetPosition()
+            try:
+                dia_mm = round(pcbnew.ToMM(t.GetWidth(top)), 4)
+            except TypeError:
+                dia_mm = round(pcbnew.ToMM(t.GetWidth()), 4)
             vias.append({
                 "net": n, "type": kind,
                 "x": round(pcbnew.ToMM(pos.x), 4), "y": round(pcbnew.ToMM(pos.y), 4),
                 "layers": f"{board.GetLayerName(top)}-{board.GetLayerName(bot)}",
+                "dia_mm": dia_mm,
+                "drill_mm": round(pcbnew.ToMM(t.GetDrillValue()), 4),
             })
             continue
-        if t.GetClass() != "PCB_TRACK":
+        cls = t.GetClass()
+        if cls not in ("PCB_TRACK", "PCB_ARC"):
             continue
-        ln = pcbnew.ToMM(t.GetLength())
         lname = board.GetLayerName(t.GetLayer())
         w = round(pcbnew.ToMM(t.GetWidth()), 4)
+        s, e = t.GetStart(), t.GetEnd()
+        # fab-capability geometry (review.check_fab_capability): every
+        # track AND arc segment, position included so a narrow one can be
+        # pointed at directly — unlike `segments` below this is not
+        # aggregated by (layer, width), and arcs (excluded from `length`/
+        # `segments` historically) are included here on purpose.
+        track_geom.append({
+            "net": n, "layer": lname, "width": w,
+            "x": round(pcbnew.ToMM((s.x + e.x) / 2), 4),
+            "y": round(pcbnew.ToMM((s.y + e.y) / 2), 4),
+            "kind": "arc" if cls == "PCB_ARC" else "track",
+        })
+        if cls != "PCB_TRACK":
+            continue
+        ln = pcbnew.ToMM(t.GetLength())
         d["length"] += ln
         d["layers"][lname] += ln
         d["segments"][(lname, w)] += ln
@@ -1268,6 +1406,13 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
         for ref, mpn in json.load(open(path)).items():
             if not ref.startswith("_") and isinstance(mpn, str) and mpn:
                 mp[ref] = mpn
+    ds = board.GetDesignSettings()
+    design_min = {
+        "track_mm": round(pcbnew.ToMM(ds.m_TrackMinWidth), 4),
+        "via_mm": round(pcbnew.ToMM(ds.m_ViasMinSize), 4),
+        "drill_mm": round(pcbnew.ToMM(ds.m_MinThroughDrill), 4),
+        "clearance_mm": round(pcbnew.ToMM(ds.m_MinClearance), 4),
+    }
     return {
         "board_path": board_path,
         "board": board_path,
@@ -1284,4 +1429,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "dup_bare_pads": sorted(dup_bare),
         "vias": vias,
         "via_type_counts": dict(via_type_counts),
+        "track_geom": track_geom,
+        "pth_pads": pth_pads,
+        "design_min": design_min,
     }

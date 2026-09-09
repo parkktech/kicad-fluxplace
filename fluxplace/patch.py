@@ -586,8 +586,15 @@ def _snap_to_via(x, y, centers):
     return x, y
 
 
-def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm):
-    """Write the cell path as tracks + through-vias."""
+def apply_path(board, grid, path, net_code, width_mm, via_mm, drill_mm,
+               cons=None, log=None):
+    """Write the cell path as tracks + through-vias. `cons`, when given,
+    floors width_mm/via_mm/drill_mm at the [fab] minimums (D-fabcap) before
+    any copper is written."""
+    from . import constraints as C
+    width_mm = C.clamp_track_mm(width_mm, cons, log, what=f"apply_path {net_code}")
+    via_mm = C.clamp_via_mm(via_mm, cons, log, what=f"apply_path {net_code}")
+    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what=f"apply_path {net_code}")
     ni = board.FindNet(net_code) if isinstance(net_code, str) else \
         board.GetNetInfo().GetNetItem(net_code)
     net_code_int = ni.GetNetCode()
@@ -851,12 +858,22 @@ def refill_zones(board):
 def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 track_w=0.2, clearance=0.15, via_mm=0.6, drill_mm=0.3,
                 skip_nets=("GND",), net_widths=None, cell=0.25, log=print,
-                rip=True, rip_r_mm=3.0, max_rip=150, checkpoint=8):
+                rip=True, rip_r_mm=3.0, max_rip=150, checkpoint=8, cons=None):
     """Close the leftover unrouted nets on a routed board. Returns a summary
-    dict; writes out_path only when the DRC guard accepts."""
+    dict; writes out_path only when the DRC guard accepts. `cons`, when
+    given, floors track_w/via_mm/drill_mm/net_widths at the [fab] minimums
+    (D-fabcap) before any copper the patcher writes — every apply_path /
+    _route_rounds call below closes over these already-clamped locals."""
     from . import adaptive as AD
+    from . import constraints as C
     from . import kicad_io as IO
     from .launder import mutate as _mutate
+    track_w = C.clamp_track_mm(track_w, cons, log, what="patch")
+    via_mm = C.clamp_via_mm(via_mm, cons, log, what="patch")
+    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what="patch")
+    if net_widths:
+        net_widths = {n: C.clamp_track_mm(v, cons, log, what=f"patch {n}")
+                      for n, v in net_widths.items()}
     # THIS pcbnew session must never run ZONE_FILLER: repeated in-process
     # refill/save cycles poison the SWIG session and long runs segfault in
     # their final refill (measured 3-for-3 on CM5/dig/RF). All refills and

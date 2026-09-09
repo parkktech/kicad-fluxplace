@@ -432,7 +432,9 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[env]`, `[nets.<NET>]` (`straight_copper`, `max_vias`), `[rf]` (`target_z`,
 `tolerance_pct`, `max_vias`, `nets`), `[pairs.<FAMILY>]` (`skew_mm`),
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`, `[fab]` (`blind_vias`,
-`buried_vias`, `microvias`).
+`buried_vias`, `microvias`, `min_track_mm`, `min_clearance_mm`,
+`min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
+`profile`).
 
 ## What changed 2026-09-06 → 2026-09-08
 
@@ -514,6 +516,44 @@ now wipes those three subdirs before every export; `MANIFEST.txt` gains
 machine-readable `FILE : <section>/<name>` lines for every file `emit()`
 actually wrote, and `deliver()` zips exactly those manifest-listed files
 instead of copying the directories wholesale.
+
+## What changed 2026-09-08 — fab-capability gate
+
+**`review`** — PCBWay's gerber-upload audit rejected the utv-comms V1.5
+board ("The minimum trace width should be no less than 0.1mm") over two
+0.09 mm GND stubs that `review`, DRC and lint had all passed clean, because
+every one of them judged the copper against the board's OWN design-rule
+minimum (0.088 mm) — looser than the fab that would actually build it —
+never against the fab's real floor. `[fab]` gains `min_track_mm` (0.1),
+`min_clearance_mm` (0.1), `min_drill_mm` (0.2), `min_annular_mm` (0.1),
+`min_via_dia_mm` (0.4), `min_silk_width_mm` (0.15) and a `profile` label
+(e.g. `"pcbway-6L"`) alongside the existing `blind_vias`/`buried_vias`/
+`microvias`; `constraints.fab_profile()` fills defaults for whatever the
+engineer didn't state. New `check_fab_capability()`: FAIL **`FAB_MIN_TRACK`**
+for every track/arc segment narrower than `min_track_mm` (net, layer,
+width, position — 10 shown + count); FAIL **`FAB_MIN_DRILL`** /
+**`FAB_MIN_VIA`** / **`FAB_MIN_ANNULAR`** for vias and PTH pads under the
+drill/diameter/annular-ring floors; WARN **`FAB_DESIGN_RULE_BELOW_PROFILE`**
+when the board's own Board Setup minimums (`m_TrackMinWidth`,
+`m_ViasMinSize`, `m_MinThroughDrill`, `m_MinClearance`) are looser than the
+profile — the root-cause gap that let a repair pass draw the 0.09 mm stub
+in the first place — INFO `FAB_DESIGN_RULE_OK` otherwise. Only grades when
+`[fab]` is loaded; no constraints, no opinion. `facts_from_board()` gains
+`facts["track_geom"]` (every track AND arc segment, net/layer/width/x/y —
+arcs were previously invisible to any geometry check), `facts["pth_pads"]`,
+`facts["design_min"]`, and vias gain `dia_mm`/`drill_mm`.
+
+**`repair` / `patch` / `bridge` / `drc-fix`** — every place copper gets
+created or narrowed now clamps up to the `[fab]` floor when constraints are
+loaded, instead of writing whatever the geometry solver asked for:
+`repair.rf_widths` (a target-impedance solve on a thin layer), `repair.stitch`,
+`repair.stitch_islands`, `repair.bridge`, `repair._gnd_via`/`remap_pins`,
+`patch.apply_path`/`patch_board` (every track/via/drill it writes, including
+the `net_widths` map), and `drcfix.fix`'s RF clearance-neck fallback — the
+exact mechanism that produced the original 0.09 mm GND stubs. Each clamp
+logs when it raises a width. `cli.py`'s `repair`, `patch` and (new
+`--constraints`) `drc-fix` subcommands load `[fab]` once and thread it
+through.
 
 ## What changed on 2026-09-04
 

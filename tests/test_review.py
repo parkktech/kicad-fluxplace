@@ -335,6 +335,79 @@ def test_via_type_blind_allowed_by_fab_flag():
     assert codes(R.check_via_types(f, {"fab": {"buried_vias": True}}), "FAIL") == {"VIA_TYPE"}
 
 
+# ------------------------------------------------------- fab capability
+def test_fab_min_track_flags_narrow_stub():
+    # the PCBWay upload-audit incident: two 0.09 mm GND stubs, board's own
+    # design-rule minimum (0.088 mm) looser than the fab's real floor
+    f = facts(track_geom=[
+        {"net": "GND", "layer": "F.Cu", "width": 0.09, "x": 12.3, "y": 4.5, "kind": "track"},
+        {"net": "GND", "layer": "F.Cu", "width": 0.09, "x": 12.9, "y": 5.1, "kind": "track"},
+        {"net": "+5V", "layer": "F.Cu", "width": 0.4, "x": 1.0, "y": 1.0, "kind": "track"},
+    ], design_min={"track_mm": 0.088, "via_mm": 0.4, "drill_mm": 0.2, "clearance_mm": 0.1})
+    out = R.check_fab_capability(f, {"fab": {}})
+    assert codes(out, "FAIL") == {"FAB_MIN_TRACK"}
+    fail = [o for o in out if o["code"] == "FAB_MIN_TRACK"][0]
+    assert "2 track/arc segment(s)" in fail["msg"]
+    assert "0.09mm" in fail["msg"]
+    assert fail["refs"] == ["GND"]
+    # the board's own minimum being looser than the profile is a WARN
+    assert codes(out, "WARN") == {"FAB_DESIGN_RULE_BELOW_PROFILE"}
+
+
+def test_fab_min_track_clean_at_015():
+    f = facts(track_geom=[
+        {"net": "GND", "layer": "F.Cu", "width": 0.15, "x": 1.0, "y": 1.0, "kind": "track"},
+    ], design_min={"track_mm": 0.15, "via_mm": 0.45, "drill_mm": 0.25, "clearance_mm": 0.12})
+    out = R.check_fab_capability(f, {"fab": {}})
+    assert codes(out, "FAIL") == set()
+    assert codes(out, "WARN") == set()
+    assert codes(out, "INFO") == {"FAB_DESIGN_RULE_OK"}
+
+
+def test_fab_design_rule_below_profile_warns_even_with_no_narrow_copper():
+    # the root-cause finding: a loose board minimum is a WARN on its own,
+    # independent of whether any copper actually landed under the floor
+    f = facts(track_geom=[], design_min={"track_mm": 0.088, "via_mm": 0.4,
+                                          "drill_mm": 0.2, "clearance_mm": 0.1})
+    out = R.check_fab_capability(f, {"fab": {}})
+    assert codes(out, "FAIL") == set()
+    assert codes(out, "WARN") == {"FAB_DESIGN_RULE_BELOW_PROFILE"}
+    assert "track_mm 0.088 < 0.1" in out[0]["msg"]
+
+
+def test_fab_min_drill_annular_and_via_diameter():
+    f = facts(
+        track_geom=[],
+        vias=[{"net": "GND", "type": "through", "x": 1.0, "y": 1.0,
+               "layers": "F.Cu-B.Cu", "dia_mm": 0.35, "drill_mm": 0.15}],
+        pth_pads=[{"ref": "J1A", "pad": "1", "drill_mm": 0.18, "dia_mm": 0.5,
+                   "x": 5.0, "y": 5.0}],
+        design_min={"track_mm": 0.1, "via_mm": 0.4, "drill_mm": 0.2, "clearance_mm": 0.1},
+    )
+    out = R.check_fab_capability(f, {"fab": {}})
+    assert codes(out, "FAIL") == {"FAB_MIN_DRILL", "FAB_MIN_ANNULAR", "FAB_MIN_VIA"}
+    by_code = {o["code"]: o for o in out}
+    assert "J1A.1" in by_code["FAB_MIN_DRILL"]["msg"]
+    assert "GND" in by_code["FAB_MIN_DRILL"]["msg"]
+    assert "GND" in by_code["FAB_MIN_VIA"]["msg"]
+
+
+def test_fab_capability_no_opinion_without_fab_constraints():
+    # no [fab] block at all -> the gate has nothing to grade against
+    f = facts(track_geom=[{"net": "GND", "layer": "F.Cu", "width": 0.01,
+                            "x": 0, "y": 0, "kind": "track"}])
+    assert R.check_fab_capability(f, {}) == []
+    assert R.check_fab_capability(f, None) == []
+
+
+def test_fab_capability_wired_into_run():
+    f = facts(track_geom=[
+        {"net": "GND", "layer": "F.Cu", "width": 0.09, "x": 1.0, "y": 1.0, "kind": "track"},
+    ], design_min={"track_mm": 0.088, "via_mm": 0.4, "drill_mm": 0.2, "clearance_mm": 0.1})
+    out = R.run(f, cons={"fab": {}})
+    assert "FAB_MIN_TRACK" in codes(out, "FAIL")
+
+
 # ------------------------------------------------------------------ power
 def test_holdup_math():
     f = facts(net_pads={"+5V": [], "GND": []})

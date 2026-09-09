@@ -223,10 +223,13 @@ def redundant_copper(board, prefix="ETH_", nets=None, min_gain_mm=0.5, log=print
 
 # ---------------------------------------------------------------- RF widths
 def rf_widths(board, stackup, planes, nets, target_z=50.0, tol_pct=5.0,
-              w_min=0.1, w_max=1.0, log=print):
+              w_min=0.1, w_max=1.0, cons=None, log=print):
     """Set each RF segment's width to what ITS layer needs for target_z.
-    Returns [(net, layer, old_w, new_w, mm)]."""
+    Returns [(net, layer, old_w, new_w, mm)]. `cons`, when given, floors the
+    solved width at [fab] min_track_mm (D-fabcap) — a target_z solve on a
+    thin layer can otherwise land under what the fab will build."""
     import pcbnew
+    from . import constraints as C
     from . import review as R
     from .stackup import _bisect
     solved = {}
@@ -241,6 +244,8 @@ def rf_widths(board, stackup, planes, nets, target_z=50.0, tol_pct=5.0,
             w = None
             if geom and not (geom[0] is None and geom[2] is None):
                 w = _bisect(lambda x: R.z0_on_layer(x, geom)[0], target_z, w_min, w_max)
+                if w:
+                    w = C.clamp_track_mm(round(w, 3), cons, log, what=f"RF {n} {layer}")
             solved[layer] = round(w, 3) if w else None
         w = solved[layer]
         old = round(_mm(t.GetWidth()), 3)
@@ -355,10 +360,14 @@ def _rip_pad_stubs(board, pad, netcode):
 
 
 def _gnd_via(board, fp, pad, gnd, via_mm=0.45, drill_mm=0.25, gap_mm=0.75,
-             track_mm=0.2):
+             track_mm=0.2, cons=None, log=None):
     """Drop a via to ground beside `pad`, pointing AWAY from the footprint
     body, joined by a short track. Returns the via."""
     import pcbnew
+    from . import constraints as C
+    via_mm = C.clamp_via_mm(via_mm, cons, log, what="gnd_via")
+    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what="gnd_via")
+    track_mm = C.clamp_track_mm(track_mm, cons, log, what="gnd_via")
     c, p = fp.GetPosition(), pad.GetPosition()
     dx, dy = p.x - c.x, p.y - c.y
     d = math.hypot(dx, dy) or 1.0
@@ -381,7 +390,7 @@ def _gnd_via(board, fp, pad, gnd, via_mm=0.45, drill_mm=0.25, gap_mm=0.75,
     return via
 
 
-def remap_pins(board, mapping, rip=True, gnd_via=True, log=print):
+def remap_pins(board, mapping, rip=True, gnd_via=True, cons=None, log=print):
     """mapping: {ref: {pad_number: new_net}}. Pads are re-netted; stubs on
     the old net are ripped; pads that become GND get a via to the plane.
     Returns {"changed": [(ref, pad, old, new)], "ripped": n, "vias": n,
@@ -412,7 +421,7 @@ def remap_pins(board, mapping, rip=True, gnd_via=True, log=print):
             pad.SetNet(net)
             changed.append((ref, num, old, new))
             if new == "GND" and gnd_via and gnd:
-                _gnd_via(board, fp, pad, gnd)
+                _gnd_via(board, fp, pad, gnd, cons=cons, log=log)
                 vias += 1
             elif new:
                 unrouted.append((ref, num, new))
@@ -421,13 +430,16 @@ def remap_pins(board, mapping, rip=True, gnd_via=True, log=print):
 
 
 # ------------------------------------------------------------------ stitch
-def stitch(board, ref, padnum, max_mm=3.0, width_mm=0.2, log=print, twin_only=False):
+def stitch(board, ref, padnum, max_mm=3.0, width_mm=0.2, cons=None, log=print,
+           twin_only=False):
     """Join a pad to the nearest same-net copper on its own layer with one
     straight track (the last inch a grid router keeps failing on: a pad
     whose net already passes 1-2 mm away). Same-net pads count as targets
     too — a twin pad (two pads, one number) joins its sibling. With
     `twin_only`, an already-connected pad is skipped. Returns length or 0."""
     import pcbnew
+    from . import constraints as C
+    width_mm = C.clamp_track_mm(width_mm, cons, log, what=f"stitch {ref}.{padnum}")
     fp = board.FindFootprintByReference(ref)
     if not fp:
         return 0.0
@@ -555,7 +567,7 @@ def _clear_for_via(board, pt, r_mm, netcode):
 
 
 def stitch_islands(board, net="GND", via_mm=0.45, drill_mm=0.25, clearance_mm=0.15,
-                   rings=(0.8, 1.1, 1.4, 1.8, 2.2, 2.6, 3.0), log=print):
+                   rings=(0.8, 1.1, 1.4, 1.8, 2.2, 2.6, 3.0), cons=None, log=print):
     """A via beside every SMD pad of `net` whose outer-layer pour island
     holds no via and no through-hole pad — that island is the pad's only
     connection. Candidate spots ring the pad at 0.8..1.4 mm and must be
@@ -563,6 +575,9 @@ def stitch_islands(board, net="GND", via_mm=0.45, drill_mm=0.25, clearance_mm=0.
     dropped by island centroid alone landed on inner-layer copper: 8 vias,
     34 hole-clearance violations, measured). Returns vias added."""
     import pcbnew
+    from . import constraints as C
+    via_mm = C.clamp_via_mm(via_mm, cons, log, what=f"stitch_islands {net}")
+    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what=f"stitch_islands {net}")
     ni = None
     for fp in board.GetFootprints():
         for p in fp.Pads():
@@ -724,7 +739,8 @@ def add_text(board, text, layer="F.SilkS", at=None, size_mm=1.0,
 
 
 def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_mm=0.13,
-           via_mm=0.45, drill_mm=0.25, margin_mm=4.0, via_cost_mm=3.0, log=print):
+           via_mm=0.45, drill_mm=0.25, margin_mm=4.0, via_cost_mm=3.0, cons=None,
+           log=print):
     """Maze-route ONE unconnected pad to the nearest copper of its own net.
 
     The last-mile patcher and freerouting both gave up on U13.14 (I2C_SDA,
@@ -736,9 +752,15 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
     island-via lesson: check all layers by shape, not bbox). Own-net copper
     is the target set, so the route ends on whichever track, via or pad of
     the net is cheapest to reach. Straight runs are simplified against the
-    same grid. Returns the list of items added ([] if no path)."""
+    same grid. `cons`, when given, floors width_mm/via_mm/drill_mm at the
+    [fab] minimums (D-fabcap) before the grid is built. Returns the list of
+    items added ([] if no path)."""
     import numpy as np
     import pcbnew
+    from . import constraints as C
+    width_mm = C.clamp_track_mm(width_mm, cons, log, what=f"bridge {ref}.{padnum}")
+    via_mm = C.clamp_via_mm(via_mm, cons, log, what=f"bridge {ref}.{padnum}")
+    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what=f"bridge {ref}.{padnum}")
     fp = board.FindFootprintByReference(ref)
     pad = next(p for p in fp.Pads() if p.GetNumber() == str(padnum))
     net = pad.GetNetCode()

@@ -247,11 +247,16 @@ def _move_ref(board, ref, log):
     return True
 
 
-def fix(board, drc, rf_base_w=0.15, is_rf=None, max_push_mm=0.12, log=print):
-    """Apply the fixes above for every violation in `drc`. Returns counts."""
+def fix(board, drc, rf_base_w=0.15, is_rf=None, max_push_mm=0.12, cons=None, log=print):
+    """Apply the fixes above for every violation in `drc`. Returns counts.
+    `cons`, when given, floors rf_base_w at [fab] min_track_mm (D-fabcap) —
+    the neck fallback below is exactly the mechanism that put two 0.09 mm
+    GND-adjacent stubs on the utv-comms V1.5 board past DRC unnoticed."""
     import pcbnew
+    from . import constraints as C
     from . import review as R
     is_rf = is_rf or R.is_rf
+    rf_base_w = C.clamp_track_mm(rf_base_w, cons, log, what="drc-fix neck")
     n = {"ripped": 0, "necked": 0, "snapped": 0, "dangling": 0, "silk": 0, "skipped": 0}
     prune_after = []
     moved = set()
@@ -442,9 +447,11 @@ def guarded_islands(work, kicad_cli, log=print):
     return False
 
 
-def loop(board_path, out_path, kicad_cli="kicad-cli", rounds=3, islands=False, log=print):
+def loop(board_path, out_path, kicad_cli="kicad-cli", rounds=3, islands=False,
+         cons=None, log=print):
     """DRC -> fix -> save, repeated while the violation count keeps falling.
-    Fresh pcbnew session per round (SWIG decay)."""
+    Fresh pcbnew session per round (SWIG decay). `cons` is forwarded to
+    `fix()` to floor any neck width at [fab] min_track_mm."""
     import pcbnew
     import shutil
     work = out_path
@@ -459,7 +466,7 @@ def loop(board_path, out_path, kicad_cli="kicad-cli", rounds=3, islands=False, l
         if v == 0:
             break
         b = pcbnew.LoadBoard(work)
-        n = fix(b, d, log=log)
+        n = fix(b, d, cons=cons, log=log)
         log(f"    fixes: {n}")
         if not any(n.get(k) for k in ("ripped", "necked", "snapped", "dangling",
                                       "silk", "shifted", "island_vias")):

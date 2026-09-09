@@ -58,6 +58,18 @@ optional; anything not stated keeps the heuristic default. Schema:
     blind_vias = false      # default false: a blind/buried/micro via on the
     buried_vias = false     # board is a VIA_TYPE review FAIL unless the
     microvias = false       # matching flag here says the process supports it
+    profile = "pcbway-6L"   # label only — documents which fab's capability
+                            # table the numbers below came from
+    min_track_mm = 0.1      # narrowest copper the quoted fab will accept —
+    min_clearance_mm = 0.1  # PCBWay rejected a 0.09 mm UTV V1.5 GND stub at
+    min_drill_mm = 0.2      # upload ("minimum trace width ... no less than
+    min_annular_mm = 0.1    # 0.1mm") that DRC/fab never caught because the
+    min_via_dia_mm = 0.4    # board's own design-rule minimum (0.088 mm) was
+    min_silk_width_mm = 0.15 # looser than the fab's real floor (D-fabcap).
+                            # review.check_fab_capability() grades every
+                            # track/arc/via/PTH pad against these; repair,
+                            # patch, bridge and drc-fix clamp any width/via/
+                            # drill they create or narrow up to these floors.
 
 Width rule: conservative 1oz external copper, ~0.5 mm per amp with a 0.3 mm
 floor — wide enough for a 10C rise at the stated current, narrow enough not to
@@ -85,6 +97,61 @@ def power_width_mm(cons, net, default_mm):
     if "max_current_ma" in p:
         return max(0.3, 0.5 * float(p["max_current_ma"]) / 1000.0)
     return default_mm
+
+
+_FAB_DEFAULTS = {
+    "min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_drill_mm": 0.2,
+    "min_annular_mm": 0.1, "min_via_dia_mm": 0.4, "min_silk_width_mm": 0.15,
+}
+
+
+def fab_profile(cons):
+    """The [fab] capability floor, defaults filled in. `profile` is a label
+    only (e.g. "pcbway-6L") — nothing here reads it, it documents which
+    fab's numbers these are."""
+    fab = dict((cons or {}).get("fab", {}))
+    out = dict(_FAB_DEFAULTS)
+    for k in _FAB_DEFAULTS:
+        if k in fab:
+            out[k] = float(fab[k])
+    out["profile"] = fab.get("profile")
+    for k in ("blind_vias", "buried_vias", "microvias"):
+        out[k] = bool(fab.get(k, False))
+    return out
+
+
+def _clamp_floor(value_mm, cons, key, log=None, what=""):
+    """Raise `value_mm` up to the [fab] floor named by `key` when
+    constraints are loaded; otherwise pass it through unchanged (no
+    constraints = no opinion on what the fab can build). Logs the raise."""
+    if not cons or value_mm is None:
+        return value_mm
+    floor = fab_profile(cons)[key]
+    if value_mm < floor:
+        if log:
+            log(f"    fab-capability clamp: {what + ' ' if what else ''}"
+                f"{value_mm:g} mm -> {floor:g} mm ({key})")
+        return floor
+    return value_mm
+
+
+def clamp_track_mm(width_mm, cons, log=None, what=""):
+    """Clamp a track/arc width a repair/patch/route pass is about to WRITE
+    up to [fab] min_track_mm. Born from D-fabcap: PCBWay's upload audit
+    rejected two 0.09 mm GND stubs that neither DRC nor review had flagged
+    because the board's own design-rule minimum (0.088 mm) was looser than
+    the fab's real floor."""
+    return _clamp_floor(width_mm, cons, "min_track_mm", log, what)
+
+
+def clamp_via_mm(dia_mm, cons, log=None, what=""):
+    """Clamp a via/pad copper diameter up to [fab] min_via_dia_mm."""
+    return _clamp_floor(dia_mm, cons, "min_via_dia_mm", log, what)
+
+
+def clamp_drill_mm(drill_mm, cons, log=None, what=""):
+    """Clamp a via/PTH drill up to [fab] min_drill_mm."""
+    return _clamp_floor(drill_mm, cons, "min_drill_mm", log, what)
 
 
 def pour_nets(cons):
