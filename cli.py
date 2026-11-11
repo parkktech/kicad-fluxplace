@@ -193,12 +193,82 @@ def cmd_place(a):
         n = IO.emit_route_guides(board, rep)
         print(f"route guides: {n} corridor segments on Eco1.User (group 'fluxplace-guides')")
     out = a.out or a.board
+    frep = _fit_sheet(a, board)
     IO.save(board, out)
+    _fit_paper(frep, out)
     ov = P.count_overlaps(parts, pos, 0.2, angles=rot)
     print(f"placed {len(pos)} parts [{a.strategy}, rotate={a.rotate}]  "
           f"HPWL {before:.0f} -> {after:.0f} mm ({100*(before-after)/before:+.0f}%)  "
           f"overlaps={ov}" + (f"  board={dims[0]:.0f}x{dims[1]:.0f}mm" if dims else ""))
     print(f"saved: {out}")
+
+
+# ---- fit-sheet (fluxplace/sheet.py) ----------------------------------------
+_HINT_CMDS = {"finish": "out", "repair": "out", "tune": "out", "drc-fix": "out",
+              "patch": "out", "sync-nets": "out", "replace-footprint": "out"}
+
+
+def _fit_sheet(a, board, cons_path=None, label="fit-sheet"):
+    """Translate a freshly built board onto the drawing sheet (in memory; the
+    caller saves, then calls _fit_paper on every file it saved). None when
+    --no-fit-sheet or nothing to do."""
+    if getattr(a, "no_fit_sheet", False):
+        return None
+    from fluxplace import sheet as SH
+    try:
+        rep = SH.fit(board)
+    except Exception as e:                      # never lose a build to the fit
+        print(f"    ! {label} skipped: {e}")
+        return None
+    print("    " + SH.summary_line(rep, label))
+    if rep["moved"] and cons_path and os.path.exists(cons_path):
+        n = SH.rewrite_constraints(open(cons_path).read(), 0, 0)[1]
+        if n:
+            dx, dy = rep["offset"]
+            print(f"    {label}: {cons_path} has {n} absolute coordinate row(s) "
+                  f"([lock.at]/keepout rect) — NOT rewritten; shift them with "
+                  f"`fluxplace fit-sheet --board <x> --constraints {cons_path} "
+                  f"--shift {dx:g},{dy:g}`")
+    return rep
+
+
+def _fit_paper(rep, *paths):
+    """Write the chosen paper into saved board files (pcbnew 10 cannot)."""
+    if rep and rep.get("paper_changed"):
+        from fluxplace import sheet as SH
+        for p in paths:
+            if p and os.path.exists(p):
+                SH.set_paper_text(p, rep["paper"])
+
+
+def _sheet_hint(path):
+    """One line when a board a copper-only command just wrote is off the page."""
+    try:
+        from fluxplace import sheet as SH
+        if SH.off_sheet_file(path):
+            print("board is off the sheet \u2014 run `fluxplace fit-sheet`")
+    except Exception:
+        pass
+
+
+def cmd_fit_sheet(a):
+    from fluxplace import sheet as SH
+    if a.shift:                                  # constraints only, board untouched
+        if not a.constraints:
+            raise SystemExit("--shift needs --constraints")
+        rep = {"offset": tuple(float(v) for v in a.shift.split(","))}
+    else:
+        rep = SH.fit_file(a.board, out=a.out, paper=a.paper, dry_run=a.dry_run,
+                          refill=a.refill)
+        print("\n".join(SH.summary(rep, dry_run=a.dry_run)))
+    if a.constraints and rep["offset"] != (0, 0):
+        txt = open(a.constraints).read()
+        new, n = SH.rewrite_constraints(txt, *rep["offset"])
+        if a.dry_run:
+            print(f"constraints: {n} coordinate row(s) in {a.constraints} would shift")
+        else:
+            open(a.constraints, "w").write(new)
+            print(f"constraints: {n} coordinate row(s) in {a.constraints} shifted")
 
 
 def cmd_plan(a):
@@ -381,6 +451,12 @@ def cmd_tournament(a):
     if winner and a.apply_winner:
         ok, out = TN.import_winner(a.workdir, winner["idx"])
         print(f"winner copper imported: {out} (ok={ok})")
+        if ok and not a.no_fit_sheet:
+            from fluxplace import sheet as SH
+            try:
+                print("    " + SH.summary_line(SH.fit_file(out, refill=False), "fit-sheet"))
+            except Exception as e:
+                print(f"    ! fit-sheet skipped: {e}")
 
 
 def cmd_fab(a):
@@ -423,6 +499,8 @@ def _cand_argv(a, k, outdir):
         v += ["--keep-outline"]
     if a.no_patch:
         v += ["--no-patch"]
+    if a.no_fit_sheet:
+        v += ["--no-fit-sheet"]
     if a.route_only:
         v += ["--route-only"]
     if a.no_pairs:
@@ -855,6 +933,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     dims = IO.shrinkwrap_outline(board, min(xs0), min(ys0), max(xs1), max(ys1),
                                  margin=a.margin)
     print(f"[2/{NSTAGE}] outline shrink-wrapped: {dims[0]:.1f} x {dims[1]:.1f} mm")
+    frep = _fit_sheet(a, board, cons_path=getattr(a, "constraints", None))
 
     # ---- [3] PLANES — pour plane nets on all routing layers + stitch grid ----------
     plane_nets = [] if a.no_planes else list(a.plane_nets)
@@ -866,6 +945,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     else:
         print(f"[3/{NSTAGE}] planes: skipped (--no-planes)")
     IO.save(board, placed)
+    _fit_paper(frep, placed)
 
     # ---- [4] ROUTE — explicit net list (KRT routes NOTHING without --nets), --------
     # power nets first and wide, plane nets excluded (they are pours, not traces).
@@ -888,6 +968,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         print(f"    ! router timed out after {a.route_timeout}s — continuing "
               "with whatever it saved")
     ok = os.path.exists(routed)
+    _fit_paper(frep, routed)
     if not ok and r is not None:
         print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
     summ = adaptive.krt_summary((r.stdout if r else "") or "")
@@ -921,10 +1002,12 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
             print(f"    ! plane-finalize route timed out after {a.route_timeout}s"
                   " — proceeding to DFM/fab with the main-route board")
         src = finald if os.path.exists(finald) else routed
+    _fit_paper(frep, src)
     b2 = pcbnew.LoadBoard(src)
     clamped, shrunk, grazing = planes.finalize_dfm(b2)
     planes.refill(b2)
     b2.Save(src)
+    _fit_paper(frep, src)
     pro = os.path.splitext(src)[0] + ".kicad_pro"
     planes.sync_project_rules(pro, netclass_clearance=min(a.clearance, 0.13) * 0.75)
     print(f"[5/{NSTAGE}] plane finalize + DFM: {clamped} vias clamped, {shrunk} graze-shrunk,"
@@ -2001,6 +2084,8 @@ def build_parser():
                     help="try N perturbed placements, keep the best routable one")
     pp.add_argument("--guides", action="store_true",
                     help="draw the global-route corridors on Eco1.User (build strategy)")
+    pp.add_argument("--no-fit-sheet", action="store_true",
+                    help="don't translate the board onto the drawing sheet")
     pp.set_defaults(fn=cmd_place)
 
     pl = sub.add_parser("plan", help="gather info + write a detailed placement plan")
@@ -2021,9 +2106,30 @@ def build_parser():
                     help="draw the corridors on Eco1.User and save the board")
     pr.set_defaults(fn=cmd_route)
 
+    pfs = sub.add_parser("fit-sheet",
+                         help="translate the whole board onto the drawing sheet "
+                              "(centred above the title block; paper auto-picked)")
+    pfs.add_argument("--board", required=True)
+    pfs.add_argument("--out", default=None, help="write here instead of in place")
+    pfs.add_argument("--paper", default="auto",
+                     choices=["auto", "A5", "A4", "A3", "A2", "A1", "A0",
+                              "A", "B", "C", "D"])
+    pfs.add_argument("--constraints", default=None,
+                     help="constraints TOML: [lock.at] and [[keepout]] rect "
+                          "coordinates are shifted by the same offset, in place")
+    pfs.add_argument("--shift", default=None, metavar="DX,DY",
+                     help="with --constraints: only rewrite the constraints by this "
+                          "offset (what a build command printed); board untouched")
+    pfs.add_argument("--dry-run", action="store_true", help="plan only, write nothing")
+    pfs.add_argument("--refill", action="store_true",
+                     help="refill zones after the move (a translation does not need it)")
+    pfs.set_defaults(fn=cmd_fit_sheet)
+
     pt = sub.add_parser("tournament",
                         help="N placements -> gate filter -> freerouting judges -> winner")
     pt.add_argument("--board", required=True)
+    pt.add_argument("--no-fit-sheet", action="store_true",
+                    help="don't translate the imported winner onto the drawing sheet")
     pt.add_argument("--jar", default=None)
     pt.add_argument("--workdir", required=True)
     pt.add_argument("--passes", type=int, default=25)
@@ -2206,6 +2312,9 @@ def build_parser():
     pau.add_argument("--obstacle", action="append", default=[],
                      help="phantom keep-out rect X:Y:W:H (mm), repeatable — e.g. a "
                           "plug-on module body over its locked board connectors")
+    pau.add_argument("--no-fit-sheet", action="store_true",
+                     help="don't translate the board onto the drawing sheet "
+                          "(also rewrites --constraints' absolute coordinates when it does)")
     pau.set_defaults(fn=cmd_auto)
 
     pco = sub.add_parser("compact",
@@ -2268,6 +2377,8 @@ def build_parser():
     pco.add_argument("--no-prc-seed", action="store_true",
                      help="skip the physics pre-seed (hot-loop members, pair "
                           "elements, crystal clusters walked to their anchor)")
+    pco.add_argument("--no-fit-sheet", action="store_true",
+                     help="don't translate the board onto the drawing sheet")
     pco.set_defaults(fn=cmd_compact)
 
     pli = sub.add_parser("lint",
@@ -2606,6 +2717,8 @@ def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
     a.fn(a)
+    if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
+        _sheet_hint(getattr(a, "out", None) or a.board)
 
 
 if __name__ == "__main__":

@@ -352,6 +352,10 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
                 ex += [px - hw, px + hw]
                 ey += [py - hw, py + hw]
     size = (max(ex) - min(ex), max(ey) - min(ey)) if ex else (0.0, 0.0)
+    outline_bbox = ([round(min(ex), 4), round(min(ey), 4), round(max(ex), 4),
+                     round(max(ey), 4)] if ex else None)
+    from . import sheet as SH
+    page = SH.page_from_tree(root)
 
     mp = {}
     path = mpn_map or S.find_map(board_path)
@@ -374,6 +378,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
     return {
         "board_path": board_path, "board": board_path, "backend": "file",
         "size_mm": size,
+        "outline_bbox": outline_bbox, "page": page,
         "copper_layers": len(copper),
         "parts": parts,
         "net_pads": dict(net_pads),

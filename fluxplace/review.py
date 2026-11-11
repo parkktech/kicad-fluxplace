@@ -81,7 +81,7 @@ from .comprehend import parse_value
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
            "check_via_types", "check_fab_capability", "check_spec_nets",
-           "check_keepouts", "check_locks", "check_policy", "check_bom",
+           "check_keepouts", "check_locks", "check_sheet", "check_policy", "check_bom",
            "lock_toml",
            "board_backend"]
 
@@ -1371,6 +1371,40 @@ def check_locks(facts, cons):
     return out
 
 
+def check_sheet(facts, cons):
+    """SHEET_OFF_PAGE: the board outline must sit inside the drawing sheet's
+    usable area (10 mm frame + 5 mm) and clear of the title block — otherwise
+    the board opens half outside the page frame. WARN; FAIL with
+    `[sheet] enforce = true`. Silent when fitted or when the facts carry no
+    page. No Edge.Cuts: the footprint extents stand in (and the message says
+    so). Fix: `fluxplace fit-sheet`."""
+    from . import sheet as SH
+    pg = facts.get("page")
+    if not pg:
+        return []
+    bb, src = facts.get("outline_bbox"), "outline"
+    if not bb:
+        boxes = [p["bbox"] for p in facts.get("parts", {}).values() if p.get("bbox")]
+        if not boxes:
+            return []
+        bb = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+              max(b[2] for b in boxes), max(b[3] for b in boxes)]
+        src = "footprint extents (no Edge.Cuts)"
+    w, h = pg["w_mm"], pg["h_mm"]
+    if not SH.off_sheet(bb, w, h):
+        return []
+    area, tb = SH.usable(w, h)
+    why = ("overlaps the title block" if SH.overlaps_title_block(bb, w, h) and
+           bb[0] >= area[0] and bb[1] >= area[1] and bb[2] <= area[2] and bb[3] <= area[3]
+           else "is outside the usable area")
+    enforce = bool(((cons or {}).get("sheet") or {}).get("enforce", False))
+    return [_f(FAIL if enforce else WARN, "SHEET_OFF_PAGE",
+               f"board {src} x {bb[0]:.1f}..{bb[2]:.1f}, y {bb[1]:.1f}..{bb[3]:.1f} mm "
+               f"{why} on {pg['paper']} {w:g} x {h:g} mm (usable x {area[0]:g}..{area[2]:g}, "
+               f"y {area[1]:g}..{area[3]:g}; title block from x {tb[0]:g}, y {tb[1]:g}) "
+               f"— run `fluxplace fit-sheet`")]
+
+
 def lock_toml(facts, patterns):
     """A [lock.at] block for the footprints matching `patterns`, from the
     board as it stands — the baseline a later revision must keep."""
@@ -1518,6 +1552,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_spec_nets(facts, spec)
     out += check_keepouts(facts, cons)
     out += check_locks(facts, cons)
+    out += check_sheet(facts, cons)
     out += check_policy(facts, cons)
     out += check_bom(facts, cons, spec)
     order = {FAIL: 0, WARN: 1, INFO: 2}
@@ -1600,6 +1635,8 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
     from . import sourcing as S
     board = pcbnew.LoadBoard(board_path)
     bb = board.GetBoardEdgesBoundingBox()
+    from . import sheet as SH
+    ob, _ = SH.outline_bbox_swig(board, fallback=False)
     parts, net_pads = {}, defaultdict(list)
     dup_bare = set()
     pth_pads = []
@@ -1743,6 +1780,8 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "board_path": board_path,
         "board": board_path, "backend": "swig",
         "size_mm": (pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())),
+        "outline_bbox": [round(v, 4) for v in ob] if ob else None,
+        "page": SH.read_paper(board_path),
         "copper_layers": board.GetCopperLayerCount(),
         "parts": parts,
         "net_pads": dict(net_pads),
