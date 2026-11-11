@@ -25,7 +25,10 @@ import math
 import os
 import re
 
-import pcbnew
+try:                       # absent on KiCad 11 (no SWIG); the pure-file
+    import pcbnew          # helpers here (model_file_readable) still work
+except ImportError:
+    pcbnew = None
 
 _PT = re.compile(r"CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(\s*([-\d.E+e]+)"
                  r"\s*,\s*([-\d.E+e]+)\s*,\s*([-\d.E+e]+)\s*\)", re.S)

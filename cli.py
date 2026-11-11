@@ -1568,6 +1568,15 @@ def cmd_doctor(a):
         print(_json.dumps(res, indent=2))
     else:
         print(deps.report(res, show_ok=not a.problems_only))
+        from fluxplace import review as _R
+        be = _R.board_backend()
+        print("\nboard backend: %s — %s" % (be, (
+            "pcbnew (SWIG) present: every command available"
+            if be == "swig" else
+            "no pcbnew module (KiCad 11, or the wrong interpreter): review, lock "
+            "and the spec/keep-out/policy gates read the board file directly; "
+            "commands that WRITE a board (place, repair, patch, finish, tune, "
+            "planes) need KiCad <= 10 until the IPC port")))
     if a.install:
         pips = deps.pip_installable(res)
         if pips:

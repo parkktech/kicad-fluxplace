@@ -80,7 +80,8 @@ from .comprehend import parse_value
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
            "check_via_types", "check_fab_capability", "check_spec_nets",
-           "check_keepouts", "check_locks", "check_policy", "lock_toml"]
+           "check_keepouts", "check_locks", "check_policy", "lock_toml",
+           "board_backend"]
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 
@@ -1545,8 +1546,35 @@ def parse_stackup_text(raw):
     return rows
 
 
-def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
-    """Everything the checks need, measured once."""
+def board_backend(prefer=None):
+    """"swig" when the pcbnew python module is importable (KiCad <= 10),
+    else "file" (boardfile.py — S-expression reader, no KiCad python at all;
+    the only option on KiCad 11, which drops SWIG). FLUXPLACE_BACKEND or
+    `prefer` forces one."""
+    want = (prefer or os.environ.get("FLUXPLACE_BACKEND") or "").lower()
+    if want in ("swig", "file"):
+        return want
+    import importlib.util
+    try:
+        return "swig" if importlib.util.find_spec("pcbnew") else "file"
+    except (ImportError, ValueError):
+        return "file"
+
+
+def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0,
+                     backend=None):
+    """Everything the checks need, measured once — through pcbnew when it
+    exists, straight from the file when it does not (same dict either way;
+    tests/test_boardfile.py holds the two to field-by-field agreement)."""
+    if board_backend(backend) == "file":
+        from . import boardfile as BF
+        return BF.facts_from_file(board_path, mpn_map=mpn_map,
+                                  plane_track_max_mm=plane_track_max_mm)
+    return _facts_swig(board_path, mpn_map=mpn_map,
+                       plane_track_max_mm=plane_track_max_mm)
+
+
+def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
     import pcbnew
     from collections import defaultdict
     from . import sourcing as S
@@ -1693,7 +1721,7 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
     }
     return {
         "board_path": board_path,
-        "board": board_path,
+        "board": board_path, "backend": "swig",
         "size_mm": (pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())),
         "copper_layers": board.GetCopperLayerCount(),
         "parts": parts,
