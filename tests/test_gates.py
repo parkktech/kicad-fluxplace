@@ -149,3 +149,33 @@ def test_run_wires_the_new_gates_in():
     out = R.run(f, cons={"env": {"temp_min_c": -40, "temp_max_c": 85},
                          "lock": {"at": {"MH1": [0, 0]}}})
     assert {"NET_SINGLE_PAD", "LOCK_MISSING"} <= set(codes(out))
+
+
+# ------------------------------------------------- router version support
+def test_freerouting_cmd_by_jar_version():
+    from fluxplace import finish as F
+    assert F.jar_version("/x/freerouting-2.5.0.jar") == (2, 5, 0)
+    old = F.freerouting_cmd("/x/freerouting-2.3.0.jar", "a.dsn", "a.ses", 6)
+    new = F.freerouting_cmd("/x/freerouting-2.5.0.jar", "a.dsn", "a.ses", 6)
+    assert old[-2:] == ["-mp", "6"] and "-mp" not in new
+    assert "--router.autorouter.max_passes=6" in new and "--gui.enabled=false" in new
+    assert F.freerouting_cmd("/x/freerouting.jar", "a", "b", 3)[-2:] == ["-mp", "3"]
+
+
+def test_krt_extra_and_summary(tmp_path):
+    from fluxplace import adaptive as AD
+    old, new = tmp_path / "old" / "py_router", tmp_path / "new" / "py_router"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (old / "route.py").write_text('p.add_argument("--nets")')
+    (new / "route.py").write_text('p.add_argument("--nets")')
+    (new / "fab_tiers.py").write_text("g.add_argument('--fab-tier', choices=T)")
+    assert AD.krt_extra(str(tmp_path / "old")) == []
+    assert AD.krt_extra(str(tmp_path / "new")) == ["--fab-tier", "standard"]
+    assert "5 ok / 1 failed" in AD.krt_summary(
+        'x\nJSON_SUMMARY: {"successful": 5, "failed": 1, "pad_pairs_total": 9}')
+    s = AD.krt_summary('JSON_SUMMARY: {"routed_single": []}\n'
+                       'JSON_SUMMARY_MIN: {"routed": 113, "failed": 4, "escalations": 0,'
+                       ' "pad_pairs_open": {"count": 4}}')
+    assert "113 routed / 4 failed" in s and "open pad pairs 4" in s
+    assert AD.krt_summary("") == ""

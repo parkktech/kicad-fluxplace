@@ -47,6 +47,66 @@ def classify(graph, drc):
     return E.classify_stalled_nets(graph, drc)
 
 
+_KRT_FLAGS = {}
+
+
+def krt_flags(krt_dir, script="route.py"):
+    """Option names a KiCadRoutingTools script accepts, read from its source —
+    the checkout is a moving target (v0.19 -> v0.23 added 25 flags to route.py)
+    and an unknown flag aborts the run."""
+    key = (krt_dir, script)
+    if key not in _KRT_FLAGS:
+        import glob
+        import re
+        # shared option groups live in sibling modules (--fab-tier is defined
+        # in fab_tiers.py, not route.py), so scan the package, not the script
+        found = set()
+        for f in glob.glob(os.path.join(krt_dir, "py_router", "*.py")):
+            try:
+                found |= set(re.findall(r"""['"](--[a-z0-9][a-z0-9-]*)['"]""",
+                                        open(f, errors="replace").read()))
+            except OSError:
+                pass
+        _KRT_FLAGS[key] = found
+    return _KRT_FLAGS[key]
+
+
+def krt_extra(krt_dir, script="route.py"):
+    """Arguments newer checkouts need for the behaviour fluxplace assumes.
+
+    --fab-tier standard: since v0.23 the default tier is `auto`, which quietly
+    drops below the requested track/clearance/via (3856 escalations, 0.0889 mm
+    track and 0.25 mm via on the utv-comms V1.5 trial) — copper the [fab]
+    profile then rejects. `standard` keeps any escalation inside the standard
+    fab tier (a 3-net smoke run still stepped 0.15 -> 0.1375 mm clearance, so
+    it is the tier's floor, not the requested size; review's FAB_* gate stays
+    the judge). Older checkouts accept the flag too (standard|advanced)."""
+    return ["--fab-tier", "standard"] if "--fab-tier" in krt_flags(krt_dir, script) else []
+
+
+def krt_summary(stdout):
+    """One line from a KRT run's JSON trailer. v0.23 keeps the run tally in
+    JSON_SUMMARY_MIN (JSON_SUMMARY became a per-stage reconciliation subset);
+    older checkouts only print JSON_SUMMARY."""
+    best = None
+    for line in (stdout or "").splitlines():
+        for tag in ("JSON_SUMMARY_MIN:", "JSON_SUMMARY:"):
+            if line.startswith(tag):
+                try:
+                    js = json.loads(line[len(tag):])
+                except ValueError:
+                    continue
+                if tag == "JSON_SUMMARY_MIN:":
+                    return (f"  {js.get('routed', '?')} routed / {js.get('failed', '?')} failed"
+                            f", open pad pairs {(js.get('pad_pairs_open') or {}).get('count', '?')}"
+                            f", fab escalations {js.get('escalations', 0)}")
+                if "successful" in js or "pad_pairs_total" in js:
+                    best = (f"  {js.get('successful', 0)} ok / {js.get('failed', 0)} failed"
+                            f", pairs {js.get('pad_pairs_connected', '?')}/"
+                            f"{js.get('pad_pairs_total', '?')}")
+    return best or ""
+
+
 def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.6,
                     via_drill=0.3, grid=0.1, power_nets=None, power_widths=None, timeout=1200):
     """route_fresh_fn backed by KiCadRoutingTools: rip prior signal copper, keep planes,
@@ -58,7 +118,7 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
                "--rip-existing-nets", "*", "--layers", *layers,
                "--track-width", str(base_w), "--clearance", str(base_c),
                "--via-size", str(via_size), "--via-drill", str(via_drill),
-               "--grid-step", str(grid)]
+               "--grid-step", str(grid), *krt_extra(krt_dir)]
         if fine:
             fpath = outb + ".netclr.json"          # KRT --net-clearances takes a FILE path
             json.dump(fine, open(fpath, "w"))
@@ -131,7 +191,7 @@ def krt_length_match(krt_py, krt_dir, layers, pairs, base_w=0.2, base_c=0.2,
                "--layers", *layers, "--track-width", str(base_w),
                "--clearance", str(base_c), "--via-size", str(via_size),
                "--via-drill", str(via_drill), "--grid-step", str(grid),
-               "--length-match-tolerance", str(tolerance)]
+               "--length-match-tolerance", str(tolerance), *krt_extra(krt_dir)]
         for s, m in sorted(pairs.items()):
             cmd += ["--length-match-group", m, s]
         try:
@@ -163,10 +223,9 @@ def freerouting_finish(jar, passes=6, timeout=1800):
         env = {k: v for k, v in os.environ.items()
                if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         try:
-            r = subprocess.run(["java", "-Djava.awt.headless=true", "-Xss256m",
-                                "-jar", jar, "-de", dsn, "-do", ses,
-                                "-mp", str(passes)], capture_output=True,
-                               timeout=timeout, env=env, text=True)
+            from .finish import freerouting_cmd
+            r = subprocess.run(freerouting_cmd(jar, dsn, ses, passes),
+                               capture_output=True, timeout=timeout, env=env, text=True)
             if r.returncode != 0:
                 log("    finisher: jar exited "
                     f"{r.returncode}: {(r.stderr or r.stdout or '').strip()[:160]}")

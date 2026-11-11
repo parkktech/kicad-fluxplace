@@ -838,7 +838,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     ROUTE -> PLANE-FINALIZE/DFM -> FAB. Behavior identical to the original
     cmd_auto tail (extracted verbatim, v0.7.0)."""
     import os, subprocess, time, json
-    from fluxplace import fab, planes
+    from fluxplace import fab, planes, adaptive
     import pcbnew
     placed = os.path.join(a.out, "placed.kicad_pcb")
     routed = os.path.join(a.out, "routed.kicad_pcb")
@@ -875,7 +875,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
            placed, "--output", routed, "--keep-input-copper", "--layers", *a.layers,
            "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.45", "--via-drill", "0.2", "--nets", *route_nets]
+           "--via-size", "0.45", "--via-drill", "0.2",
+           *adaptive.krt_extra(a.router_dir), "--nets", *route_nets]
     if pw:
         cmd += ["--power-nets", *pw.keys(), "--power-nets-widths",
                 *[str(w) for w in pw.values()]]
@@ -889,15 +890,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     ok = os.path.exists(routed)
     if not ok and r is not None:
         print("    router stderr:", (r.stderr or r.stdout or "")[-240:].replace("\n", " "))
-    summ = ""
-    for line in ((r.stdout if r else "") or "").splitlines():
-        if line.startswith("JSON_SUMMARY:"):
-            try:
-                js = json.loads(line[13:])
-                summ = (f"  {js.get('successful',0)} ok / {js.get('failed',0)} failed"
-                        f", pairs {js.get('pad_pairs_connected','?')}/{js.get('pad_pairs_total','?')}")
-            except Exception:
-                pass
+    summ = adaptive.krt_summary((r.stdout if r else "") or "")
     # KRT's own summary is unreliable (observed: "1 ok, pairs 2/2" on a fully
     # connected board) — report the board's actual ratsnest instead.
     real = ""
@@ -918,7 +911,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
                routed, "--output", finald, "--keep-input-copper", "--layers", *a.layers,
                "--track-width", str(a.track), "--clearance", str(max(a.clearance, 0.12)),
-               "--via-size", "0.45", "--via-drill", "0.2", "--nets", *plane_nets,
+               "--via-size", "0.45", "--via-drill", "0.2",
+               *adaptive.krt_extra(a.router_dir), "--nets", *plane_nets,
                "--max-ripup", "60"]
         try:
             subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,

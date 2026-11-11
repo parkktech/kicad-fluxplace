@@ -100,7 +100,7 @@ REQUIREMENTS = [
          label="Java runtime", why="runs the freerouting jar",
          pip=None, hint="apt install default-jre-headless"),
     dict(key="freerouting", kind="jar", tier="route",
-         label="freerouting 2.3.0+ jar",
+         label="freerouting 2.3.0+ jar (2.5.0 supported, opt-in via FREEROUTING_JAR)",
          why="the autorouter behind `tournament` and the auto pipeline",
          pip=None,
          hint="Download freerouting-2.3.0.jar from "
