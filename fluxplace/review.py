@@ -71,6 +71,7 @@ import math
 import os
 import re
 
+from . import bomopt as BO
 from . import constraints as C
 from . import graph as G
 from . import si as SI
@@ -80,7 +81,8 @@ from .comprehend import parse_value
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
            "check_via_types", "check_fab_capability", "check_spec_nets",
-           "check_keepouts", "check_locks", "check_policy", "lock_toml",
+           "check_keepouts", "check_locks", "check_policy", "check_bom",
+           "lock_toml",
            "board_backend"]
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
@@ -1388,6 +1390,23 @@ _CHIP_SIZES = ["01005", "0201", "0402", "0603", "0805", "1206", "1210",
 _CHIP_RE = re.compile(r"_(01005|0201|0402|0603|0805|1206|1210|1812|2010|2512)_\d{4}Metric")
 
 
+def check_bom(facts, cons, spec=None):
+    """[bom] — part-count budgets. Silent unless the constraints have a `[bom]`
+    table and the review was given --spec. Returns only the budget findings
+    plus one INFO line; the candidate list is `fluxplace bom-opt`."""
+    if (cons or {}).get("bom") is None or not spec:
+        return []
+    res = BO.analyze(spec.get("components", []), spec.get("nets", {}),
+                     facts.get("mpn_map"), cons)
+    s = res["summary"]
+    out = [f for f in res["findings"] if f["level"] in (FAIL, WARN)]
+    k = sum(f["code"] in BO.SAVINGS_CODES for f in res["findings"])
+    out.append(_f(INFO, "BOM_SUMMARY",
+                  f"{s['fitted_parts']} fitted parts, {s['unique_parts']} part numbers; "
+                  f"run `fluxplace bom-opt` for {k} reduction candidates"))
+    return out
+
+
 def _is_aec(data):
     raw = (data or {}).get("raw_params") or {}
     blob = " ".join(f"{k} {v}" for k, v in raw.items()) + " " + str(
@@ -1500,6 +1519,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_keepouts(facts, cons)
     out += check_locks(facts, cons)
     out += check_policy(facts, cons)
+    out += check_bom(facts, cons, spec)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))

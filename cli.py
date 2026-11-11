@@ -1415,6 +1415,42 @@ def cmd_review(a):
         raise SystemExit(1)
 
 
+def cmd_bomopt(a):
+    """Part-count report; exit 1 only on a FAIL budget finding."""
+    import json as _json
+    from fluxplace import bomopt as BO
+    from fluxplace import constraints as C
+    spec = _json.load(open(a.spec))
+    mpn = _json.load(open(a.mpn_map)) if a.mpn_map else None
+    res = BO.analyze(spec.get("components", []), spec.get("nets", {}), mpn,
+                     C.load(a.constraints))
+    s = res["summary"]
+    print(f"BOM-OPT — {a.spec}")
+    print(f"  total parts      {s['total_parts']}  (fitted {s['fitted_parts']}, "
+          f"DNP {s['dnp_parts']})")
+    print(f"  unique parts     {s['unique_parts']}  (MPNs {s['unique_mpns']}, "
+          f"passive values {s['unique_values']}, single-use {s['single_use_mpns']})")
+    print("  by kind          " + "  ".join(f"{k}={v}" for k, v in s["by_kind"].items() if v))
+    print(f"  passive ratio    {s['passive_ratio']:.0%}")
+    place = lines = 0
+    for code in sorted({f["code"] for f in res["findings"]}):
+        group = [f for f in res["findings"] if f["code"] == code]
+        print(f"\n{code} ({len(group)})")
+        for f in group:
+            print(f"  {f['level']:4s} {f['msg']}")
+            sv = f.get("saves") or {}
+            place += sv.get("placements", 0)
+            lines += sv.get("lines", 0)
+    print(f"\nPotential reduction: {place} placements, {lines} line items "
+          f"(candidates — review each)")
+    if a.json:
+        with open(a.json, "w") as fh:
+            _json.dump(res, fh, indent=1)
+        print(f"bom-opt: wrote {a.json}")
+    if any(f["level"] == "FAIL" for f in res["findings"]):
+        raise SystemExit(1)
+
+
 def _add_review_args(p, gate=False):
     p.add_argument("--spec", default=None,
                    help="netlist/board spec JSON (board size, layers, "
@@ -2285,6 +2321,16 @@ def build_parser():
     plk.add_argument("--refs", default="MH*,MK*,H*",
                      help="comma-separated reference globs (default MH*,MK*,H*)")
     plk.set_defaults(fn=cmd_lock)
+
+    pbo = sub.add_parser("bom-opt",
+                         help="part-count optimization: array, value-merge, "
+                              "package, parallel and 0-ohm candidates plus the "
+                              "[bom] budget (exit 1 on a FAIL budget)")
+    pbo.add_argument("--spec", required=True, help="spec JSON (components, nets)")
+    pbo.add_argument("--mpn-map", default=None, help="{ref: mpn} JSON")
+    pbo.add_argument("--constraints", default=None, help="constraints TOML ([bom])")
+    pbo.add_argument("--json", default=None, help="also write the result as JSON")
+    pbo.set_defaults(fn=cmd_bomopt)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "
