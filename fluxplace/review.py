@@ -47,6 +47,20 @@ ENVIRONMENT. This module does that:
                          on disk, or with a pinmap the cited page does not
                          back (partdocs.py) — FAIL by default ([docs] strict)
 
+  NET_SINGLE_PAD / SPEC_NET_SPLIT / SPEC_PIN_UNRESOLVED
+                         the spec's nets against the copper, pad by pad — a
+                         one-pad net has no ratsnest edge, so DRC reports
+                         "0 unconnected" for a pin that was never wired
+  KEEPOUT_COMPONENT      a part inside a [[keepout]] region (under a
+                         mezzanine module, in an antenna corner) on the
+                         forbidden side or above the height limit
+  LOCK_MOVED / LOCK_MISSING
+                         a footprint the enclosure fixes ([lock.at] — bolt
+                         pattern, panel connectors) is not where it must be
+  POLICY_NOT_AEC / POLICY_DIELECTRIC / POLICY_PASSIVE_SIZE
+                         [policy] part-selection rules: automotive grade,
+                         allowed MLCC dielectrics, largest default chip size
+
 Pure logic runs on a `facts` dict so it is testable without pcbnew;
 `facts_from_board()` at the bottom is the only pcbnew consumer. Findings are
 {"level": FAIL|WARN|INFO, "code", "msg", "refs"} — FAIL is a stop-ship, the
@@ -65,7 +79,8 @@ from .comprehend import parse_value
 
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
-           "check_via_types", "check_fab_capability"]
+           "check_via_types", "check_fab_capability", "check_spec_nets",
+           "check_keepouts", "check_locks", "check_policy", "lock_toml"]
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 
@@ -1188,6 +1203,260 @@ def check_env(facts, cons):
 
 
 # ==========================================================================
+# 9. The spec's nets against the copper, pad by pad
+# ==========================================================================
+def _spec_pads(comp, pin, pads):
+    """Pad numbers a spec pin names: through the component's pinmap when it
+    has one, else the pin taken as a pad number. [] when neither resolves."""
+    pm = (comp or {}).get("pinmap") or {}
+    v = pm.get(pin, pin)
+    cand = [str(x) for x in (v if isinstance(v, (list, tuple)) else [v])]
+    return [c for c in cand if c in pads]
+
+
+def check_spec_nets(facts, spec):
+    """DRC proves the copper matches the board's OWN netlist. It cannot see a
+    pad that was never put on its net: a one-pad net has no ratsnest edge
+    (utv-comms V1.5 IMU_INT1 — J10.24 carried no net, DRC read 0 unconnected,
+    the interrupt line reached nothing). This compares every spec net to the
+    pads, and flags any named board net that lands on a single pad."""
+    out = []
+    parts = facts["parts"]
+    for net, pads in sorted((facts.get("net_pads") or {}).items()):
+        uniq = sorted(set(map(tuple, pads)))
+        if len(uniq) == 1 and not net.lower().startswith("unconnected-"):
+            ref, num = uniq[0]
+            out.append(_f(FAIL, "NET_SINGLE_PAD",
+                          f"{net}: only {ref}.{num} is on it — a one-pad net has "
+                          f"no ratsnest edge, DRC will not report it open",
+                          refs=[ref]))
+    if not spec:
+        return out
+    comps = {c["ref"]: c for c in spec.get("components", [])}
+    nets = spec.get("nets") or {}
+    if isinstance(nets, list):
+        nets = {n.get("name"): n.get("pins", []) for n in nets}
+    unresolved = []
+    for name, pins in sorted(nets.items()):
+        groups = {}
+        for ref, pin in pins:
+            p = parts.get(ref)
+            if not p:
+                continue                    # SPEC_COMPONENT_MISMATCH owns this
+            got = _spec_pads(comps.get(ref), str(pin), p["pads"])
+            if not got:
+                unresolved.append(f"{ref}.{pin}")
+                continue
+            for pad in got:
+                groups.setdefault(p["pads"][pad] or "", []).append(f"{ref}.{pad}")
+        if len(groups) > 1 or "" in groups:
+            desc = "; ".join(
+                f"{'NO NET' if not n else n}: {', '.join(sorted(v)[:6])}"
+                for n, v in sorted(groups.items(), key=lambda kv: -len(kv[1])))
+            out.append(_f(FAIL, "SPEC_NET_SPLIT",
+                          f"{name}: the spec ties these pads together, the board "
+                          f"has them on different nets — {desc}",
+                          refs=sorted({x.split('.')[0] for v in groups.values() for x in v})))
+    if unresolved:
+        out.append(_f(WARN, "SPEC_PIN_UNRESOLVED",
+                      f"{len(unresolved)} spec pin(s) match no pad and no pinmap "
+                      f"entry, so their nets were not checked: "
+                      f"{', '.join(unresolved[:10])}",
+                      refs=sorted({u.split('.')[0] for u in unresolved})))
+    return out
+
+
+# ==========================================================================
+# 10. Mechanical contracts: keep-outs and locked positions
+# ==========================================================================
+def _glob_any(ref, patterns):
+    import fnmatch
+    return any(fnmatch.fnmatchcase(ref, p) for p in patterns or ())
+
+
+def _height_mm(data):
+    """Seated height from distributor parameters, mm, or None."""
+    raw = (data or {}).get("raw_params") or {}
+    for k in ("Height - Seated (Max)", "Height (Max)", "Thickness (Max)", "Height"):
+        m = re.search(r"([0-9.]+)\s*mm", str(raw.get(k, "")))
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def check_keepouts(facts, cons):
+    """[[keepout]] regions: no component body on the named side, or none
+    taller than max_height_mm. Born from utv-comms V1.5, where 25 parts sat
+    under the CM5 inside a 1.5 mm mezzanine gap and every gate was green —
+    courtyard DRC cannot see a module that is a second model on a connector.
+
+        [[keepout]]
+        name = "under CM5"
+        side = "B"                     # F | B | both
+        rect = [5.0, 2.0, 60.0, 42.0]  # x0, y0, x1, y1 mm — or:
+        around = ["MK1", "MK2", "MK3", "MK4"]   # bbox of these refs' origins
+        margin_mm = 0.5
+        allow = ["J10", "J11", "MK*"]
+        max_height_mm = 0.6            # optional: shorter parts may stay
+    """
+    out = []
+    parts = facts["parts"]
+    mpn_of = facts.get("mpn_map", {})
+    partdata = facts.get("partdata") or {}
+    for i, k in enumerate((cons or {}).get("keepout", []) or []):
+        name = k.get("name", f"keepout {i + 1}")
+        rect = k.get("rect")
+        if not rect and k.get("around"):
+            pts = [parts[r]["pos"] for r in parts
+                   if _glob_any(r, k["around"]) and parts[r].get("pos")]
+            if len(pts) >= 2:
+                rect = [min(p[0] for p in pts), min(p[1] for p in pts),
+                        max(p[0] for p in pts), max(p[1] for p in pts)]
+        if not rect:
+            out.append(_f(WARN, "KEEPOUT_UNDEFINED",
+                          f"{name}: no rect and `around` resolved to fewer than "
+                          f"two footprints — the keep-out checks nothing"))
+            continue
+        m = float(k.get("margin_mm", 0.0))
+        x0, y0, x1, y1 = rect[0] - m, rect[1] - m, rect[2] + m, rect[3] + m
+        side = str(k.get("side", "both")).upper()[:1]
+        hmax = k.get("max_height_mm")
+        for ref in sorted(parts):
+            p = parts[ref]
+            bb = p.get("bbox")
+            if not bb or _glob_any(ref, k.get("allow")):
+                continue
+            if side in ("F", "B") and p.get("side") != side:
+                continue
+            if bb[2] <= x0 or bb[0] >= x1 or bb[3] <= y0 or bb[1] >= y1:
+                continue
+            if hmax is not None:
+                h = _height_mm(partdata.get(mpn_of.get(ref)))
+                if h is not None and h <= float(hmax):
+                    continue
+                why = (f"{h:g} mm tall, limit {float(hmax):g} mm" if h is not None
+                       else f"height unknown, limit {float(hmax):g} mm")
+            else:
+                why = "no components allowed"
+            out.append(_f(FAIL, "KEEPOUT_COMPONENT",
+                          f"{ref} ({p.get('value', '')}) is inside '{name}' on "
+                          f"{p.get('side', '?')}.Cu — {why}", refs=[ref]))
+    return out
+
+
+def check_locks(facts, cons):
+    """[lock.at] REF = [x, y] (optionally [x, y, "F"|"B"]): footprints the
+    enclosure fixes — bolt pattern, panel connectors, light pipe — must be
+    exactly there. A layout pass that nudges a mounting hole passes DRC."""
+    out = []
+    lock = (cons or {}).get("lock") or {}
+    tol = float(lock.get("tol_mm", 0.01))
+    for ref, want in sorted((lock.get("at") or {}).items()):
+        p = facts["parts"].get(ref)
+        if not p or not p.get("pos"):
+            out.append(_f(FAIL, "LOCK_MISSING",
+                          f"{ref}: locked at ({want[0]:g}, {want[1]:g}) but not on "
+                          f"the board", refs=[ref]))
+            continue
+        x, y = p["pos"]
+        if abs(x - want[0]) > tol or abs(y - want[1]) > tol or (
+                len(want) > 2 and p.get("side") != str(want[2]).upper()[:1]):
+            out.append(_f(FAIL, "LOCK_MOVED",
+                          f"{ref}: locked at ({want[0]:g}, {want[1]:g}), found at "
+                          f"({x:g}, {y:g}) on {p.get('side', '?')}.Cu "
+                          f"(tolerance {tol:g} mm)", refs=[ref]))
+    return out
+
+
+def lock_toml(facts, patterns):
+    """A [lock.at] block for the footprints matching `patterns`, from the
+    board as it stands — the baseline a later revision must keep."""
+    rows = ["[lock]", "tol_mm = 0.01", "", "[lock.at]"]
+    for ref in sorted(facts["parts"]):
+        p = facts["parts"][ref]
+        if _glob_any(ref, patterns) and p.get("pos"):
+            rows.append(f'{ref} = [{p["pos"][0]:g}, {p["pos"][1]:g}, "{p.get("side", "F")}"]')
+    return "\n".join(rows) + "\n"
+
+
+# ==========================================================================
+# 11. Part-selection policy
+# ==========================================================================
+_CHIP_SIZES = ["01005", "0201", "0402", "0603", "0805", "1206", "1210",
+               "1812", "2010", "2512"]
+_CHIP_RE = re.compile(r"_(01005|0201|0402|0603|0805|1206|1210|1812|2010|2512)_\d{4}Metric")
+
+
+def _is_aec(data):
+    raw = (data or {}).get("raw_params") or {}
+    blob = " ".join(f"{k} {v}" for k, v in raw.items()) + " " + str(
+        (data or {}).get("description", ""))
+    if re.search(r"AEC-?Q\d{3}", blob, re.I):
+        return True
+    return str(raw.get("Grade", "")).strip().lower() == "automotive"
+
+
+def check_policy(facts, cons):
+    """[policy] — house rules for part selection, checked on every part:
+
+        [policy]
+        grade = "automotive"                       # WARN on a non-AEC part
+        mlcc_dielectrics = ["X7R", "X7S", "C0G"]   # FAIL on anything else
+        passive_max = "0402"                       # WARN on a larger R/C/L/FB chip
+        exempt = ["M1", "J*"]                      # refs the policy skips
+
+    A deliberate exception is a `[review] waive` entry with its reason."""
+    pol = (cons or {}).get("policy") or {}
+    if not pol:
+        return []
+    out = []
+    parts = facts["parts"]
+    mpn_of = facts.get("mpn_map", {})
+    partdata = facts.get("partdata") or {}
+    allowed = [d.upper() for d in pol.get("mlcc_dielectrics", [])]
+    pmax = str(pol.get("passive_max", ""))
+    want_aec = str(pol.get("grade", "")).lower() == "automotive"
+    nodata = []
+    for ref in sorted(parts):
+        p = parts[ref]
+        if p.get("mech") or _glob_any(ref, pol.get("exempt")):
+            continue
+        mpn = mpn_of.get(ref)
+        data = partdata.get(mpn) if mpn else None
+        m = _CHIP_RE.search(p.get("footprint", ""))
+        if pmax in _CHIP_SIZES and m and re.match(r"(R|C|L|FB)\d", ref):
+            if _CHIP_SIZES.index(m.group(1)) > _CHIP_SIZES.index(pmax):
+                out.append(_f(WARN, "POLICY_PASSIVE_SIZE",
+                              f"{ref} ({p.get('value', '')}) is {m.group(1)}, policy "
+                              f"default is {pmax} or smaller — shrink it or waive "
+                              f"with the reason (voltage, power, pulse rating)",
+                              refs=[ref]))
+        if not (want_aec or allowed):
+            continue
+        if not data:
+            nodata.append(ref)
+            continue
+        raw = data.get("raw_params") or {}
+        tc = str(raw.get("Temperature Coefficient") or raw.get("Dielectric") or "").upper()
+        if allowed and ref.startswith("C") and re.match(r"[A-Z]\d[A-Z]|C0G|NP0", tc):
+            if not any(a in tc for a in allowed):
+                out.append(_f(FAIL, "POLICY_DIELECTRIC",
+                              f"{ref} {mpn}: {tc} dielectric, policy allows "
+                              f"{', '.join(allowed)}", refs=[ref]))
+        if want_aec and not _is_aec(data):
+            out.append(_f(WARN, "POLICY_NOT_AEC",
+                          f"{ref} {mpn}: no AEC-Q qualification in the distributor "
+                          f"data — pick the automotive part or waive with the reason",
+                          refs=[ref]))
+    if nodata:
+        out.append(_f(INFO, "POLICY_UNCHECKED",
+                      f"{len(nodata)} part(s) have no distributor data, so grade "
+                      f"and dielectric were not checked: {', '.join(nodata[:12])}",
+                      refs=nodata))
+    return out
+
+
+# ==========================================================================
 # run / summarize
 # ==========================================================================
 def _waived(fnd, waivers):
@@ -1226,6 +1495,10 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_fab_capability(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
+    out += check_spec_nets(facts, spec)
+    out += check_keepouts(facts, cons)
+    out += check_locks(facts, cons)
+    out += check_policy(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
@@ -1309,7 +1582,12 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0):
             if pad.GetNetname():
                 net_pads[pad.GetNetname()].append((ref, num))
         footprint_name = fp.GetFPID().GetUniStringLibId()
+        fpos, fbb = fp.GetPosition(), fp.GetBoundingBox(False)
         parts[ref] = {
+            "pos": (round(pcbnew.ToMM(fpos.x), 4), round(pcbnew.ToMM(fpos.y), 4)),
+            "side": "B" if fp.IsFlipped() else "F",
+            "bbox": tuple(round(pcbnew.ToMM(v), 4) for v in (
+                fbb.GetLeft(), fbb.GetTop(), fbb.GetRight(), fbb.GetBottom())),
             "value": fp.GetValue(),
             "footprint": footprint_name,
             "pads": pads, "connectable_pads": conn,

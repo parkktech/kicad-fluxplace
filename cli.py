@@ -1403,6 +1403,12 @@ def cmd_speccheck(a):
         raise SystemExit(1)
 
 
+def cmd_lock(a):
+    from fluxplace import review as R
+    facts = R.facts_from_board(a.board)
+    print(R.lock_toml(facts, [r.strip() for r in a.refs.split(",") if r.strip()]), end="")
+
+
 def cmd_review(a):
     """Standalone design review; exit 1 per --fail-on."""
     from fluxplace import review as R
@@ -2267,6 +2273,15 @@ def build_parser():
     psc2.add_argument("--recite", action="store_true", help="re-cite even when cited")
     psc2.add_argument("--write", action="store_true", help="write citations into --spec")
     psc2.set_defaults(fn=cmd_speccheck)
+
+    plk = sub.add_parser("lock",
+                         help="print a [lock.at] constraints block for the "
+                              "footprints matching --refs, from the board as it "
+                              "stands — the bolt pattern a later revision must keep")
+    plk.add_argument("--board", required=True)
+    plk.add_argument("--refs", default="MH*,MK*,H*",
+                     help="comma-separated reference globs (default MH*,MK*,H*)")
+    plk.set_defaults(fn=cmd_lock)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "

@@ -436,6 +436,22 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
 `profile`).
 
+## What changed 2026-11-10 — spec-net, keep-out, lock and policy gates
+
+Four gates added to `review`, each a defect the utv-comms V1.5 board carried
+with DRC 0/0 and every earlier gate green. All four run on the pure `facts`
+dict (`tests/test_gates.py`, no pcbnew).
+
+| Code | What it catches | Config |
+|---|---|---|
+| `NET_SINGLE_PAD` (FAIL) | A named net that lands on one pad. It has no ratsnest edge, so DRC reports 0 unconnected for a pin that was never wired (V1.5 `IMU_INT1`; still true of `ETH_nLED2/3`). | none |
+| `SPEC_NET_SPLIT` (FAIL), `SPEC_PIN_UNRESOLVED` (WARN) | Every spec net compared to the copper pad by pad, through each component's `pinmap`. | `--spec` |
+| `KEEPOUT_COMPONENT` (FAIL) | A part inside a `[[keepout]]` region on the forbidden side, or taller than `max_height_mm` (height from the distributor's "Height - Seated (Max)"; unknown height fails). V1.5 had 27 parts under the CM5 in a 1.5 mm mezzanine gap. | `[[keepout]] name, side, rect \| around, margin_mm, allow, max_height_mm` |
+| `LOCK_MOVED` / `LOCK_MISSING` (FAIL) | A footprint the enclosure fixes (bolt pattern, panel connector) is not at its locked position. `fluxplace lock --board B --refs 'MH*,MK*'` prints the block from an existing board. | `[lock] tol_mm`, `[lock.at] REF = [x, y, "F"]` |
+| `POLICY_DIELECTRIC` (FAIL), `POLICY_NOT_AEC` / `POLICY_PASSIVE_SIZE` (WARN) | House part-selection rules from distributor parameters: allowed MLCC dielectrics, automotive (AEC-Q) grade, largest default chip size. Exceptions go in `[review] waive` with the reason. | `[policy] grade, mlcc_dielectrics, passive_max, exempt` |
+
+`facts_from_board()` gains `pos`, `side` and `bbox` per footprint.
+
 ## What changed 2026-09-06 → 2026-09-08
 
 Three days closing out the utv-comms-bridge V1.5 external review, grouped
