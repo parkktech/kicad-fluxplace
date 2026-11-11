@@ -1534,6 +1534,27 @@ def cmd_bomopt(a):
         raise SystemExit(1)
 
 
+def cmd_route_diagnose(a):
+    """Read-only: why did these nets not route, and what to move. Exit 0."""
+    import json as _json
+    from fluxplace import routediag as RD
+    B = RD.load(a.board, track=a.track, clearance=a.clearance)
+    if a.nets:
+        failed, src = [n for n in a.nets.split(",") if n], "--nets"
+    elif a.log:
+        st = RD.parse_logs(a.log)
+        failed, src = sorted(n for n, s in st.items() if s == "FAILED"), "log"
+    else:
+        failed, src = RD.unrouted_nets(B), "board (2+ pads, no copper)"
+    print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}")
+    res = RD.diagnose(B, failed)
+    print(RD.format_text(res))
+    if a.json:
+        with open(a.json, "w") as fh:
+            _json.dump(res, fh, indent=1)
+        print(f"route-diagnose: wrote {a.json}")
+
+
 def _add_review_args(p, gate=False):
     p.add_argument("--spec", default=None,
                    help="netlist/board spec JSON (board size, layers, "
@@ -2442,6 +2463,18 @@ def build_parser():
     pbo.add_argument("--constraints", default=None, help="constraints TOML ([bom])")
     pbo.add_argument("--json", default=None, help="also write the result as JSON")
     pbo.set_defaults(fn=cmd_bomopt)
+
+    prd = sub.add_parser("route-diagnose",
+                         help="read-only: explain why nets stayed unrouted and "
+                              "which parts to move (never edits the board)")
+    prd.add_argument("board")
+    prd.add_argument("--log", action="append", default=[],
+                     help="router log (repeatable); a net's last attempt decides")
+    prd.add_argument("--nets", default=None, help="comma-separated failed nets")
+    prd.add_argument("--json", default=None, help="also write the result as JSON")
+    prd.add_argument("--track", type=float, default=None, help="default track width mm")
+    prd.add_argument("--clearance", type=float, default=None, help="clearance mm")
+    prd.set_defaults(fn=cmd_route_diagnose)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "
