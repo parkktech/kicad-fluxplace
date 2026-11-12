@@ -17,6 +17,7 @@ Use the interpreter with pcbnew: `fluxplace CMD ...`. Unsure: `fluxplace doctor`
 | whole flow, staged | `pipeline BOARD --workdir W` | `--constraints C --spec S --from/--to STAGE --status --route-budget S` |
 | is it ready to route | `route-ready BOARD` | `--constraints --spec --waive CODE:REGEX --all` |
 | area budget before placing | `floorplan-check BOARD` | `--constraints --spec` |
+| silkscreen check/fit | `silk BOARD` | `--fix --out O --constraints` |
 | tree/chain templates | `templates BOARD` | `--constraints --spec --out O` |
 | rotate connectors | `anchor-check BOARD` | `--apply --out OUT` |
 | support parts to ICs | `clusters BOARD` | `--apply --out OUT` |

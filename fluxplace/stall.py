@@ -137,6 +137,7 @@ def stall_loop(board, outdir, route_fn, cons=None, spec=None, rounds=3, replace=
         text, ncut = BW.strip_nets(text, aff - set(plane_nets))
         with open(nxt, "w", errors="surrogateescape") as fh:
             fh.write(text)
+        BW.run_post_write(nxt, mv)
         side = os.path.splitext(cur)[0] + ".kicad_pro"
         if os.path.exists(side):
             import shutil

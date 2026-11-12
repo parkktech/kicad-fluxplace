@@ -245,6 +245,11 @@ def apply_plan(board, out, plan, py=None):
         os.unlink(pf)
     if MARK not in r.stdout:
         raise RuntimeError("silk apply failed: " + (r.stderr.strip().splitlines() or ["no output"])[-1][:200])
+    if os.path.abspath(board) != os.path.abspath(out):       # SaveBoard writes a DEFAULT .kicad_pro: keep the project's
+        import shutil
+        sp = os.path.splitext(board)[0] + ".kicad_pro"
+        if os.path.exists(sp):
+            shutil.copy(sp, os.path.splitext(out)[0] + ".kicad_pro")
     return json.loads(r.stdout.split(MARK, 1)[1])
 
 
@@ -752,3 +757,36 @@ def fix_board(board, out, cons=None, side="both", only=None, py=None, log=print)
         shutil.copy(board, out)
     after = check(load_scene(out, py), cfg, side) if res["plan"] else before
     return before, after, res
+
+
+def after_write(board, moved, cons=None, log=print, py=None):
+    """Write hook (boardwrite.run_post_write): one silk summary line for the footprints just moved and, with
+    `[silk] auto_fit` (default true), re-fit their reference texts and any text they now collide with, in place.
+    Never raises: a missing pcbnew or a failed fit is one line, the write itself already succeeded."""
+    cfg = settings(cons)
+    if not cfg["enabled"]:
+        return None
+    moved = sorted(set(moved or ()))
+    try:
+        sc = load_scene(board, py)
+        before = check(sc, cfg)
+        if not cfg["auto_fit"]:
+            log(summary_line(before) + " (auto_fit off)")
+            return before
+        near = set(moved)
+        for f in before:                                  # texts of other parts now colliding with a moved one
+            if set(f["refs"]) & set(moved):
+                near |= set(f["refs"])
+        res = fit(sc, cfg, before, only=near)
+        if not res["plan"]:
+            log(summary_line(before))
+            return before
+        apply_plan(board, board, res["plan"], py)
+        after = check(load_scene(board, py), cfg)
+        log(summary_line(before) + " -> " + summary_line(after, "").strip(": ").strip()
+            + f" ({len(res['moved'])} ref(s) re-placed, {len(res['hidden'])} hidden"
+            + (": " + ", ".join(res["hidden"][:6]) if res["hidden"] else "") + ")")
+        return after
+    except Exception as e:                                # noqa: BLE001 - advisory hook
+        log(f"silk: not run ({str(e)[:120]})")
+        return None

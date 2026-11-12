@@ -73,6 +73,7 @@ def flip_file(src, dst, refs):
             a = a[:na[r][0]] + b[nb[r][0]:nb[r][1]] + a[na[r][1]:]
     with open(dst, "w", errors="surrogateescape") as fh:
         fh.write(a)
+    BW.run_post_write(dst, refs)
     return facts
 
 

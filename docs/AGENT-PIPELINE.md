@@ -15,7 +15,8 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 | 4 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`) | route-ready.json |
 | 5 | `route` | batch routing on OPEN CONNECTIONS (pcbnew connectivity; router gets the project's fab floors, no vias in pads; every batch audited, a violating one is discarded as `RULE_VIOLATION`; `[route] mode = "parallel"` = per-net jobs + merge) (35 nets per router call, 240 s each, checkpoint `ck-NNN.kicad_pcb` after each, halving on timeout, leftovers pass), keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` (last good checkpoint) and `leftovers.json` | board.kicad_pcb, diagnosis |
 | 6 | `tune` | DRC-guarded diff-pair length tuning | board.kicad_pcb |
-| 7 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
+| 7 | `silk` | `silk --fix`: re-places reference texts so the silkscreen is on the board, off pads/holes, not stacked; copper and footprints untouched (`docs/commands/silk.md`) | board.kicad_pcb, stage.log |
+| 8 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
 
 `state.json` fields: `stage`, `verdict` (`pass|fail|blocked|na`), `board` (the file the next stage reads),
 `stages{name:{verdict,line,dir,board}}`, `scorecard{score,crossings,ratsnest_mm,overflow,fail,open}`,
@@ -53,7 +54,7 @@ table of at most 15 lines. A stage not implemented in this build reports `na` an
 ```
 fluxplace pipeline B --constraints C --spec S --workdir W --to route-ready     # stages 1-4
 fluxplace pipeline B --workdir W --from route --to route --route-budget 1800     # stage 5 (`--from STAGE --board B` creates state.json itself; later stages can omit B)
-fluxplace pipeline --workdir W --from tune --to review                         # stages 6-7
+fluxplace pipeline --workdir W --from tune --to review                         # stages 6-8
 fluxplace pipeline --workdir W --status
 ```
 Exit code: 0 stage(s) passed, 1 stopped on `fail`/`blocked`. The last printed line is `pipeline: <verdict> at <stage>`.

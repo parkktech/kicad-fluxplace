@@ -183,7 +183,7 @@ def _routable_place(a, board_in, board_out):
         raise
     # flipped parts: write the pre-flip pose as text, then let pcbnew do the flip (text cannot mirror)
     BW.move_file(board_in, board_out, {r: ((x, y, (180.0 - ang) % 360.0) if r in flips else (x, y, ang))
-                                       for r, (x, y, ang) in mv.items()})
+                                       for r, (x, y, ang) in mv.items()}, post=not flips)
     if flips:
         from fluxplace import flip as FL
         pre = RD.load(board_out)
@@ -1364,6 +1364,7 @@ def _review_gate(a, stage="review", hard=True):
         print(f"    review gate: no --board given, nothing to review before {stage}")
         return []
     facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None))
+    facts.setdefault("board_path", board)
     spec = None
     spec_path = getattr(a, "spec", None)
     if spec_path:
@@ -3320,6 +3321,26 @@ def build_parser():
     return ap
 
 
+_SILK_HOOK_CMDS = ("place", "clusters", "templates", "anchor-check", "fit-sheet", "repair", "auto", "refine",
+                   "route", "stall")
+
+
+def _silk_hook(a):
+    """Register the silkscreen summary/auto-fit on every board write that moves footprints (boardwrite.move_file,
+    flip_file, stall rounds). `[silk] enabled = false` in the constraints turns it off."""
+    from fluxplace import boardwrite as BW
+    BW.set_post_write(None)
+    if a.cmd not in _SILK_HOOK_CMDS:
+        return
+    try:
+        from fluxplace import constraints as C
+        cons = C.load(getattr(a, "constraints", None))
+    except Exception:                                    # noqa: BLE001
+        cons = {}
+    from fluxplace import silk as SK
+    BW.set_post_write(lambda path, refs: SK.after_write(path, refs, cons))
+
+
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
@@ -3329,6 +3350,7 @@ def main(argv=None):
         text, ok = CC.report()
         print(text)
         raise SystemExit(0 if ok else 1)
+    _silk_hook(a)
     if a.cmd in OUT.COMPACT_CMDS:
         OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
     else:

@@ -104,11 +104,26 @@ def apply_moves(text, moves):
     return text, done
 
 
-def move_file(src, dst, moves):
+_POST_WRITE = []          # callbacks (board_path, moved_refs); the CLI registers the silkscreen hook here
+
+
+def set_post_write(fn):
+    """Register (or clear with None) the callback run after every board that moved footprints is written."""
+    _POST_WRITE[:] = [fn] if fn else []
+
+
+def run_post_write(path, refs):
+    for fn in _POST_WRITE:
+        fn(path, sorted(refs))
+
+
+def move_file(src, dst, moves, post=True):
     text = open(src, errors="surrogateescape").read()
     out, done = apply_moves(text, moves)
     with open(dst, "w", errors="surrogateescape") as fh:
         fh.write(out)
+    if post and done:
+        run_post_write(dst, done)
     return done
 
 
