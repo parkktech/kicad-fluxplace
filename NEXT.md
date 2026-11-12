@@ -1,3 +1,24 @@
+## 2026-11-12 - constructive flow: modules -> floorplan -> fan-out -> route (branch fan-flow)
+
+Built because `plan-route` predicted the real board's routing only 7-27 % of the time before copper (failures were local and order
+dependent). New commands: `density`, `fanout`, `modules`, `floorplan` (docs/commands/*.md, docs/FLOW.md); `pipeline --flow constructive`;
+routing keeps locked fan-out (router `--keep-input-copper --no-stub-layer-swap`, audit code FANOUT_RIPPED, order: pairs, RF, clocks first).
+
+Measured on the UTV V1.6 placement 228a8ef (337 parts, 270 nets, scratch constraints: +3V3 pour, J4 chain movable):
+
+| step | result |
+|---|---|
+| density | F 56 % / B 32 % utilisation, OK; 0.3 s |
+| fanout, existing placement | 756/762 required pins (no pour), 843/850 with +3V3 declared; DRC added none; ~15 s; deterministic |
+| modules | 124 modules (25 fixed); isolated fan-out 847/850 |
+| floorplan, current outline | 844/848, 4 blocked (U307.18, U312.2, U410.17, U9.2); 0 new legality violations; wire length +2.7 %, crossings -5 %, RF_EXT 50 -> 47 mm (target 15 not met) |
+| sizes +0..+10 mm per edge | blocked 4, 3, 6, 3, 2, 1: FANOUT_OK never; U312.2 GND (0.35 mm pitch) has no legal via site at any size |
+
+Open: the floorplanner cannot move large THT blocks (J4) near their net partners (no ejection moves); no side flips; the constructive start is
+worse than the source poses; (c) decoupling `via -> cap -> pin` is a cost term only (the IC pin gets no track to its cap); lanes of
+neighbours are not reserved against each other; channel overflow is reported by plan-route, not searched. The router honours the
+fan-out (kept, never re-layered) and the class order; it has no per-net layer or corridor interface, so the plan's layers/corridors are not used.
+
 ## 2026-11-12 - plan-route (map, escape planner, global router): what it predicts and what it does not
 
 ### Second pass (same day)

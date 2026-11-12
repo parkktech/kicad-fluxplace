@@ -32,7 +32,7 @@ def main():
                 continue
             groups += 1
             seen.add(u)
-            seen.update(q.m_Uuid.AsString() for q in c.GetConnectedPads(p))
+            seen.update(q.m_Uuid.AsString() for q in c.GetConnectedItems(p) if q.Type() == pcbnew.PCB_PAD_T)
         if groups > 1:
             nets[n] = groups - 1
     print(json.dumps({"nets": nets, "unconnected": c.GetUnconnectedCount(False)}))
