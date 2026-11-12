@@ -19,6 +19,7 @@ Estimated copper length = octile distance between the connection ends + the deto
 """
 import heapq
 import math
+import re
 import time
 from collections import defaultdict
 
@@ -73,6 +74,11 @@ class GlobalRoute:
             self.layers += ["In5.Cu", "In6.Cu"]
         self.planes = planes
         self.nl = len(self.layers)
+        # preferred direction per layer: `[plan] layer_dir = {"In2.Cu" = "h", "In3.Cu" = "v"}` (default In2 east-west, In3 north-south)
+        ld = {"In2.Cu": "h", "In3.Cu": "v"}
+        ld.update(((self.cons.get("plan") or {}).get("layer_dir") or {}))
+        self.pref = [({"h": 0, "v": 1}.get(str(ld.get(l, "")).lower())) for l in self.layers]
+        self.wrong = float((self.cons.get("plan") or {}).get("wrong_way", 1.5))
         self.lid = {l: k for k, l in enumerate(self.layers)}
         x0, y0, x1, y1 = B["bbox"]
         self.cell = float(self.pr["cell_mm"])
@@ -526,6 +532,7 @@ class GlobalRoute:
         tx0, tx1, ty0, ty1 = tbox
         capH, capV, uH, uV, hH, hV = self.capH, self.capV, self.uH, self.uV, self.hH, self.hV
         vcap, vu, hv = self.vcap, self.vu, self.hv
+        pref, wrong = self.pref, self.wrong
         dist, prev = {}, {}
         pq = []
         for s in srcs:
@@ -561,6 +568,9 @@ class GlobalRoute:
                 else:
                     over = use + w - cap
                     step = cell * (1.0 + hist) + (pres * cell * over if over > 0 else 0.0)
+                    pf = pref[l]
+                    if pf is not None and pf != dr:
+                        step *= wrong
                 v = l * N + nc
                 nd = g + step
                 if nd < dist.get(v, 1e18):
@@ -765,6 +775,7 @@ class GlobalRoute:
                 out[name] = {"len": 0.0, "vias": 0, "layers": [], "unreached": len(nt["terms"]) - 1, "cells": 0}
                 continue
             ln, un, lays, cells = 0.0, 0, set(), 0
+            hist = {}
             for cn in r["conns"]:
                 p = cn.get("path")
                 if not p:
@@ -777,8 +788,10 @@ class GlobalRoute:
                 ln += octile(a[0] - ex, a[1] - ey) + max(0.0, steps - man) * self.cell
                 for nd in p:
                     lays.add(self.layers[nd // self.N])
+                    hist[self.layers[nd // self.N]] = hist.get(self.layers[nd // self.N], 0) + 1
                 cells += len(p)
-            out[name] = {"len": round(ln, 2), "vias": r["vias"], "layers": sorted(lays), "unreached": un, "cells": cells}
+            out[name] = {"len": round(ln, 2), "vias": r["vias"], "layers": sorted(lays), "unreached": un, "cells": cells,
+                         "dom": max(hist, key=lambda k: (hist[k], k)) if hist else ""}
         return out
 
     def summary(self):
@@ -891,6 +904,27 @@ def findings(gr, ns, parts_near=None):
             out.append({"code": "PLAN_RF_LAYER_CHANGES", "net": name, "value": st["vias"], "limit": nt["max_vias"],
                         "msg": f"{name} (RF) needs {st['vias']} layer change(s) > {nt['max_vias']} allowed",
                         "suggestion": "put both ends on the same side or clear a straight outer-layer channel"})
+    buses = defaultdict(list)
+    for name, nt in gr.nets.items():
+        if ns[name]["len"] >= 12.0 and ns[name].get("dom") and nt["cls"] != "rail":
+            key = name
+            for _ in range(3):
+                key = re.sub(r"(_?[PN]|_?[DM]|\d+)$", "", key)
+            if len(key) >= 3:
+                buses[key].append(name)
+    for key, mem in sorted(buses.items()):
+        if len(mem) < 3:
+            continue
+        cnt = defaultdict(int)
+        for n in mem:
+            cnt[ns[n]["dom"]] += 1
+        top = max(cnt, key=lambda k: (cnt[k], k))
+        odd = sorted(n for n in mem if ns[n]["dom"] != top)
+        if odd and len(odd) >= max(1, len(mem) // 4):
+            out.append({"code": "PLAN_BUS_WEAVE", "net": odd[0], "nets": mem[:12], "value": len(odd), "limit": 0, "at": [0, 0],
+                        "msg": f"bus {key}*: {len(mem)} nets, {cnt[top]} mainly on {top} but {', '.join(odd[:4])} "
+                               f"on {', '.join(sorted({ns[n]['dom'] for n in odd}))}",
+                        "suggestion": f"keep the {key}* group on one layer: free a channel on {top} or move the whole group"})
     for pn, mem in sorted(gr.pair_origin.items()):
         out.append({"code": "PLAN_PAIR_SPLIT", "net": "/".join(mem),
                     "msg": f"pair {'/'.join(mem)} could not stay together: its {PAIR_UNITS:g}-pitch demand exceeds the "

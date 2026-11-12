@@ -17,7 +17,7 @@ from . import globalroute as GR
 from . import netclass as NC
 
 CODES = ["PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_POWER_NO_PLANE", "PLAN_NO_VIA_SITE", "PLAN_OVERFLOW", "PLAN_NET_OVER_BUDGET", "PLAN_PAIR_SPLIT",
-         "PLAN_RF_LAYER_CHANGES", "PLAN_UNREACHABLE"]
+         "PLAN_RF_LAYER_CHANGES", "PLAN_UNREACHABLE", "PLAN_BUS_WEAVE", "PLAN_PART_IN_CORRIDOR", "PLAN_RETURN_PATH", "PLAN_ZONING"]
 FAIL_CODES = ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_OVERFLOW")
 
 
@@ -46,10 +46,10 @@ def score_of(pr, findings, ns, cls=None):
     ln = sum(v["len"] for v in ns.values())
     wl = sum(v["len"] * max(0.25, (cls or {}).get(n, {}).get("weight", 1.0)) for n, v in ns.items())
     comp = {"sealed": c["PLAN_PIN_SEALED"], "oversub": c["PLAN_ESCAPE_OVERSUBSCRIBED"], "power_no_plane": c["PLAN_POWER_NO_PLANE"], "no_via_site": c["PLAN_NO_VIA_SITE"], "overflow": round(over, 1),
-            "over_budget_mm": round(ob, 1), "pair_split": c["PLAN_PAIR_SPLIT"], "rf_changes": c["PLAN_RF_LAYER_CHANGES"],
+            "over_budget_mm": round(ob, 1), "pair_split": c["PLAN_PAIR_SPLIT"], "rf_changes": c["PLAN_RF_LAYER_CHANGES"], "weave": c["PLAN_BUS_WEAVE"], "corridor": c["PLAN_PART_IN_CORRIDOR"], "return_path": c["PLAN_RETURN_PATH"], "zoning": c["PLAN_ZONING"],
             "unreached": unr, "copper_mm": round(ln, 1), "weighted_copper": round(wl)}
     s = (pr["w_sealed"] * (comp["sealed"] + comp["oversub"]) + pr["w_nosite"] * comp["power_no_plane"] + pr["w_nosite"] * comp["no_via_site"] + pr["w_overflow"] * over +
-         pr["w_overbudget_hard"] * ob + pr["w_pair"] * comp["pair_split"] + pr["w_rf"] * comp["rf_changes"] +
+         pr["w_overbudget_hard"] * ob + pr["w_pair"] * comp["pair_split"] + 4.0 * comp["weave"] + 3.0 * comp["corridor"] + 2.0 * comp["return_path"] + 5.0 * comp["zoning"] + pr["w_rf"] * comp["rf_changes"] +
          pr["w_unreach"] * unr + pr["w_len"] * wl)
     return round(s, 1), comp
 
@@ -75,6 +75,8 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
     t3 = time.time()
     ns = gr.net_stats()
     f = list(plan.findings) + GR.findings(gr, ns)
+    from . import planrules as PRL
+    f += PRL.part_in_corridor(gr, B) + PRL.return_path(gr, plan, B, cons) + PRL.zoning(B, cls, cons)
     sc, comp = score_of(pr, f, ns, cls)
     return {"pr": pr, "cls": cls, "plan": plan, "gr": gr, "ns": ns, "findings": f, "score": sc, "comp": comp, "state": state,
             "mode": "ignore-routing" if ignore_routing else "default",
@@ -94,7 +96,7 @@ def verdict(R):
 def rank(findings):
     """Worst first: sealed pins, overflow by size, unreachable, no via site, budget excess, rest."""
     w = {"PLAN_PIN_SEALED": 0, "PLAN_ESCAPE_OVERSUBSCRIBED": 0, "PLAN_POWER_NO_PLANE": 3, "PLAN_UNREACHABLE": 1, "PLAN_OVERFLOW": 2, "PLAN_NO_VIA_SITE": 3,
-         "PLAN_NET_OVER_BUDGET": 4, "PLAN_RF_LAYER_CHANGES": 5, "PLAN_PAIR_SPLIT": 6}
+         "PLAN_NET_OVER_BUDGET": 4, "PLAN_BUS_WEAVE": 6, "PLAN_PART_IN_CORRIDOR": 5, "PLAN_RETURN_PATH": 5, "PLAN_ZONING": 5, "PLAN_RF_LAYER_CHANGES": 5, "PLAN_PAIR_SPLIT": 6}
 
     def key(f):
         mag = f.get("overflow") or ((f.get("value", 0) - f.get("limit", 0)) if f.get("limit") is not None else 0) or 0
