@@ -45,11 +45,18 @@ def _centre(part):
 
 
 def fixed_set(B, cons):
-    """Parts the floorplan holds: [placement] fixed, [lock.at], locked, mounting hardware and the detected anchors, minus
-    `[floorplan] movable = [refs]` (the owner lets those move)."""
-    from . import routable as RB
-    mv = set(((cons or {}).get("floorplan") or {}).get("movable", []))
-    return set(RB._fixed_set(B, cons)) - mv
+    """Parts the floorplan holds: [placement] fixed, [placement] anchors, [lock.at], locked parts, mounting hardware and the
+    refs of a `[placement.group.X]` that has a `centre` (the CM5 pair), minus `[floorplan] movable = [refs]`. Detected anchors
+    (every connector / module) are NOT held unless listed: the owner's list decides."""
+    from . import preroute as PR
+    cons = cons or {}
+    pl = cons.get("placement") or {}
+    fx = set(PR.explicit_fixed(B, cons)) | set(pl.get("anchors", []) or [])
+    fx |= {r for r in B["parts"] if MECH.match(r)}
+    for g in (pl.get("group") or {}).values():
+        if isinstance(g, dict) and g.get("centre") and g.get("refs"):
+            fx |= set(g["refs"])
+    return {r for r in fx if r in B["parts"]} - set((cons.get("floorplan") or {}).get("movable", []))
 
 
 ATTACH_MM = 15.0                    # a support farther than this from its module's anchor is its own module
