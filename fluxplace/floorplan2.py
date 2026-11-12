@@ -774,6 +774,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         req = sum(v["req"] for v in per.values())
         ok = sum(v["ok"] for v in per.values())
         blocked = [p for v in per.values() for p in v["blocked"]]
+        print(f"  [{tag}] round {rd}: fan-out {ok}/{req}, blocked {len(blocked)}: " + ", ".join(f"{p['ref']}.{p['pin']}" for p in blocked[:8]), flush=True)
         res["rounds"].append({"round": rd, "escaped": ok, "required": req, "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked],
                               "why": [f"{p['ref']}.{p['pin']} {p['net']} {p.get('blocker')}" for p in blocked[:8]]})
         if not blocked or rd == args.rounds:

@@ -74,3 +74,43 @@ def test_grow_outline_and_riders(tmp_path):
     open(str(tmp_path / "g.kicad_pcb"), "w").write(t2)
     B2 = RD.load(str(tmp_path / "g.kicad_pcb"))
     assert abs((B2["bbox"][2] - B["bbox"][2]) - 3.0) < 1e-6 and abs(B2["bbox"][0] - B["bbox"][0]) < 1e-6
+
+
+def _small_board(tmp):
+    body = PB.fp("J1", 5, 40, [PB.pad(str(i + 1), 0, i * 2.0, f"N{i}", 1.2, 1.2) for i in range(6)])
+    body += PB.fp("J2", 95, 40, [PB.pad(str(i + 1), 0, i * 2.0, f"M{i}", 1.2, 1.2) for i in range(6)])
+    for k in range(4):
+        nets = [f"N{(i + k) % 6}" for i in range(3)] + [f"M{(i + k) % 6}" for i in range(3)]
+        body += PB.fp(f"U{k + 1}", 30 + 12 * k, 20 + 15 * (k % 2), [PB.pad(str(i + 1), 0, i * 1.0, n, 0.6, 0.6) for i, n in enumerate(nets)],
+                      court=(-1.5, -1.5, 1.5, 6.0))
+    return PB.write(tmp, body)
+
+
+def test_floorplan_legal_deterministic_and_fixed_held(tmp_path):
+    cons = {"placement": {"fixed": ["J1", "J2"]}}
+    res = []
+    for _ in range(2):
+        B = RD.load(_small_board(tmp_path))
+        M = MD.build(B, cons, None, arrange=False)
+        P = FP.Plan(B, cons, None, M)
+        P.set_claims({})
+        P.freeze_baseline()
+        assert FP.construct(P, seed=1) == []
+        FP.anneal(P, iters=400, seed=1)
+        res.append(FP.all_moves(P))
+        assert not any(P.L.issues().values())             # legal: no overlap, outside, keep-out, pad short
+        assert (B["parts"]["J1"]["pos"][0], B["parts"]["J1"]["pos"][1]) == (5.0, 40.0)
+    assert res[0] == res[1]
+
+
+def test_annealing_does_not_worsen_cost(tmp_path):
+    cons = {"placement": {"fixed": ["J1", "J2"]}}
+    B = RD.load(_small_board(tmp_path))
+    M = MD.build(B, cons, None, arrange=False)
+    P = FP.Plan(B, cons, None, M)
+    P.set_claims({})
+    P.freeze_baseline()
+    FP.construct(P, seed=1)
+    c0 = P.total(P.cost_parts())
+    FP.anneal(P, iters=600, seed=1)
+    assert P.total(P.cost_parts()) <= c0 + 1e-6
