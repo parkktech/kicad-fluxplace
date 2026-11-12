@@ -14,6 +14,7 @@
      again, and the result is verified (it raises instead of writing a bad board).
 """
 import math
+import time
 from collections import defaultdict
 
 from . import anchors as AN
@@ -21,6 +22,7 @@ from . import clusters as CL
 from . import geom as GM
 from . import legalise as LG
 from . import netclass as NC
+from . import preroute as PR
 
 _MECH_PREFIX = ("MH", "MK", "FID", "TP", "H")
 XING_MM = 3.0       # one ratsnest crossing among a unit's own nets costs this much length
@@ -91,6 +93,56 @@ class Placer:
         self.cls = NC.classify(B, self.cons, spec)
         self.fixed = _fixed_set(B, self.cons)
         self.moves = {}          # ref -> (x, y, ang): everything this run changed
+        pl = self.cons.get("placement") or {}
+        self.t_end = time.time() + float(pl.get("time_limit_s", 600))
+        self.max_rounds = int(pl.get("max_rounds", 6))
+        self.origin = self.snapshot()
+        self.best = None         # (score, snapshot)
+        self.history = []
+
+    def snapshot(self):
+        return {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in self.B["parts"].items()}
+
+    def restore(self, snap):
+        for r, (x, y, a) in snap.items():
+            p = self.B["parts"][r]
+            if (p["pos"][0], p["pos"][1], p["angle"]) != (x, y, a):
+                GM.place(p, x, y, a)
+        self._nets()
+
+    def score(self):
+        """The gate's own scalar (preroute.score) on the live model."""
+        f, card = PR.run(self.B, self.cons, self.spec)
+        return card["score"]
+
+    def valid(self):
+        M = LG._Model(self.B, self.cons, self.fixed, self.B["bbox"])
+        P = self.B["parts"]
+        rep = LG.verify(self.B, M, {r: (*P[r]["pos"], P[r]["angle"]) for r in P
+                                    if (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"]) != self.origin[r]},
+                        self.B["bbox"])
+        return not rep["outside"] and not rep["overlaps"]
+
+    def consider(self, label):
+        """Keep the best valid state seen; True when the search should stop (plateau/time)."""
+        if not self.valid():
+            self.log(f"{label}: state not legal yet, not scored")
+            return False
+        sc = self.score()
+        prev = self.best[0] if self.best else None
+        better = prev is None or sc < prev
+        if better:
+            self.best = (sc, self.snapshot())
+        self.history.append(sc)
+        self.log(f"{label}: score {sc:.0f}" + ("" if better else f" (best {prev:.0f})"))
+        if time.time() > self.t_end:
+            self.log("wall-clock limit reached")
+            return True
+        h = self.history
+        if len(h) >= 3 and (min(h[:-2]) - min(h[-2:])) <= 0.01 * abs(min(h[:-2])):
+            self.log("plateau: < 1 % improvement in 2 rounds")
+            return True
+        return False
 
     # ---- helpers on the live model --------------------------------------
     def commit(self, ref, x, y, ang):
@@ -130,7 +182,8 @@ class Placer:
                 continue
             c = (sum(p["x"] for p in oth) / len(oth), sum(p["y"] for p in oth) / len(oth))
             o = (sum(p["x"] for p in own) / len(own), sum(p["y"] for p in own) / len(own))
-            res.append((info["weight"] / max(1, len(self.pads[n]) - 1), o, c, n))
+            hard = 3.0 if info["class"] in PR.HARD else 1.0       # hard budgets pull 3x
+            res.append((hard * info["weight"] / max(1, len(self.pads[n]) - 1), o, c, n))
         return res
 
     @staticmethod
@@ -173,7 +226,7 @@ class Placer:
         self._nets()
         return cl
 
-    def converge(self, cl, rounds=3, sweeps=25, tol=0.25):
+    def converge(self, cl, rounds=6, sweeps=25, tol=0.25):
         self._nets()
         P = self.B["parts"]
         U = units(self.B, cl, self.fixed)
@@ -181,7 +234,7 @@ class Placer:
         ch = chains(self.B, self.cls, self.fixed, unit_of)
         self.log(f"{len(U)} movable unit(s), {len(ch)} signal chain(s)")
         order = sorted(U, key=lambda k: (-len(U[k]), k))
-        for rnd in range(rounds):
+        for rnd in range(min(rounds, self.max_rounds)):
             for sw in range(sweeps):
                 big = 0.0
                 for k in order:
@@ -219,6 +272,10 @@ class Placer:
                     turned += 1
             self.log(f"round {rnd + 1}: {turned} unit(s) turned")
             self.legalise(U, strict=False)
+            for ms in U.values():              # units may have been split: refresh support seats first
+                pass
+            if self.consider(f"round {rnd + 1}"):
+                break
         return U
 
     def _order_chains(self, chains_, U):
@@ -259,7 +316,7 @@ class Placer:
         self._nets()
         return rep
 
-    def run(self, rounds=3):
+    def run(self, rounds=6):
         self.turn_anchors()
         cl = self.seat_support()
         U = self.converge(cl, rounds)
@@ -282,11 +339,20 @@ class Placer:
                            bounds=(x0 + em, y0 + em, x1 - em, y1 - em))
             self.moves.update(mv)
             self._nets()
-        for r in list(self.moves):
-            p = self.B["parts"][r]
-            self.moves[r] = (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"])
+        if self.valid():
+            self.consider("final")
+        if self.best is None or self.score() > self.best[0]:
+            # never return a worse board than the best one seen (the input counts)
+            if self.best:
+                self.restore(self.best[1])
+            else:
+                self.restore(self.origin)
+        base = self.origin
+        P = self.B["parts"]
+        self.moves = {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in P.items()
+                      if (p["pos"][0], p["pos"][1], p["angle"]) != base[r]}
         M = LG._Model(self.B, self.cons, self.fixed, self.B["bbox"])
-        rep = LG.verify(self.B, M, {r: m for r, m in self.moves.items()}, self.B["bbox"])
+        rep = LG.verify(self.B, M, dict(self.moves), self.B["bbox"])
         if rep["outside"] or rep["overlaps"]:
             raise LG.PlacementError(f"routable: {len(rep['outside'])} outside the outline, "
                                     f"{len(rep['overlaps'])} overlap(s): {(rep['outside'] + rep['overlaps'])[:6]}")
@@ -302,6 +368,6 @@ def PRX(a, b, c, d):
     return ccw(a, b, c) * ccw(a, b, d) < 0 and ccw(c, d, a) * ccw(c, d, b) < 0
 
 
-def place(B, cons=None, spec=None, rounds=3, log=print):
+def place(B, cons=None, spec=None, rounds=6, log=print):
     """-> {ref: (x, y, angle)} for every part that changes. Mutates B."""
     return Placer(B, cons, spec, log).run(rounds)

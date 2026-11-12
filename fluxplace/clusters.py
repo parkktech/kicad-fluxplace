@@ -135,6 +135,31 @@ def cap_uf(value):
     return float(m.group(1)) * {"p": 1e-6, "n": 1e-3, "u": 1.0, "µ": 1.0, "m": 1e3, "": 1.0}[m.group(2).lower()]
 
 
+HALO_MM = 0.6           # legalise.ESC_MIN: the mandatory escape halo of a fine-pitch IC
+_BOOT = re.compile(r"BOOT|BST|CBOOT", re.I)
+_VIN = re.compile(r"^(VIN|VBAT|VSUP|PVIN|VI)\d*$|VIN|VBATT", re.I)
+
+
+def reg_rank(s, parts, pinname, cls):
+    """Regulator template priority: 0 switch node, 1 input-capacitor loop, 2 bootstrap,
+    3 feedback/output/everything else (conflicts are resolved in this order)."""
+    pn = pinname.get(s["pad"], "")
+    # a bootstrap cap spans BOOT and SW: it is the bootstrap, not the switch-node part
+    for n in s.get("nets", ()):
+        if _BOOT.search(n or ""):
+            return 2
+    for q in parts[s["ic"]]["pads"]:
+        if q["net"] in s.get("nets", ()) and _BOOT.search(pinname.get(q["num"], "")):
+            return 2
+    if s["cls"] == "switch_node":
+        return 0
+    if _BOOT.search(pn) or _BOOT.search(s["net"]):
+        return 2
+    if _VIN.search(pn) or _VIN.search(s["net"]):
+        return 1
+    return 3
+
+
 def build(B, cons=None, spec=None):
     """[{ic, supports: [{ref, net, pad, cls, weight, dist, limit}]}], ordered:
     switch-node parts first, then by class weight, then by distance."""
@@ -164,9 +189,17 @@ def build(B, cons=None, spec=None):
             "cls": info["class"] if info else "signal", "weight": info["weight"] if info else 1.0,
             "dist": dist, "limit": lim})
     out = []
+    names = NC.pin_names(spec)
     for ic in sorted(by):
-        sup = sorted(by[ic], key=lambda s: (-s["weight"], s["dist"], s["ref"]))
-        out.append({"ic": ic, "supports": sup})
+        reg = any(s["cls"] == "switch_node" for s in by[ic])
+        for s in by[ic]:
+            s["ic"] = ic
+            s["nets"] = [q["net"] for q in parts[s["ref"]]["pads"]]
+            s["rank"] = reg_rank(s, parts, names.get(ic, {}), cls) if reg else 9
+            if _pitch(parts[ic]) <= 0.5:
+                s["dist"] = max(0.0, s["dist"] - HALO_MM)   # measured from the edge of the keep-clear halo
+        sup = sorted(by[ic], key=lambda s: (s["rank"], -s["weight"], s["dist"], s["ref"]))
+        out.append({"ic": ic, "supports": sup, "regulator": reg})
     return out, links
 
 
@@ -324,6 +357,10 @@ def format_text(cl, links=()):
     L = []
     for c in cl:
         L.append(f"{c['ic']}  ({len(c['supports'])} support part(s))")
+        if c.get("regulator"):
+            tag = {0: "switch node", 1: "input cap", 2: "bootstrap", 3: "feedback/output"}
+            L.append("  regulator template: " + "; ".join(
+                f"{tag[s['rank']]} {s['ref']} {s['dist']:.1f} mm" for s in c["supports"] if s["rank"] < 9))
         for s in c["supports"]:
             flag = "FAR " if s["dist"] > s["limit"] else "    "
             g = "" if s["sure"] else " (guessed owner)"

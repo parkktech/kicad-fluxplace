@@ -161,7 +161,10 @@ def findings(B, cons=None, spec=None, cls=None):
     from .preroute import _f, FAIL
     tol = float(((cons or {}).get("preroute") or {}).get("anchor_tolerance_pct", 15.0))
     out = []
+    pinned = set(((cons or {}).get("placement") or {}).get("fixed", []))
     for r in evaluate(B, cons, spec, cls):
+        if set(r["refs"]) <= pinned:
+            continue                      # declared fixed: not the placer's to turn
         if r["worse_pct"] > tol and r["best"]["delta"] % 360 != 0:
             b, c = r["best"], r["current"]
             out.append(_f(FAIL, "ANCHOR_MISORIENTED",

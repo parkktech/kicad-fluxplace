@@ -174,6 +174,11 @@ def _routable_place(a, board_in, board_out):
             raise SystemExit(f"place [routable] REFUSED: {e}")
         raise
     BW.move_file(board_in, board_out, mv)
+    if getattr(a, "strip_stale", False):
+        from fluxplace import placechecks as PCK
+        text, n = PCK.strip_stale_text(open(board_out, errors="surrogateescape").read(), RD.load(board_out))
+        open(board_out, "w", errors="surrogateescape").write(text)
+        print(f"  --strip-stale: removed {n} stale track/via item(s)")
     f1, c1 = PR.run(RD.load(board_out), cons, spec)
     return mv, (f0, c0), (f1, c1)
 
@@ -1717,6 +1722,12 @@ def cmd_route_ready(a):
         with open(a.json, "w") as fh:
             _json.dump({"scorecard": card, "findings": f}, fh, indent=1)
         print(f"route-ready: wrote {a.json}")
+    if a.strip_stale:
+        from fluxplace import placechecks as PCK
+        out = a.out or a.board
+        text, n = PCK.strip_stale_text(open(a.board, errors="surrogateescape").read(), B)
+        open(out, "w", errors="surrogateescape").write(text)
+        print(f"route-ready --strip-stale: removed {n} stale track/via item(s) -> {out}")
     if card["fail"]:
         raise SystemExit(1)
 
@@ -2306,6 +2317,8 @@ def build_parser():
                          "chains, channel-aware legalise; text-only, keeps locked parts and anchors)")
     pp.add_argument("--constraints", default=None, help="constraints TOML ([placement], [lock], [keepout]) for routable")
     pp.add_argument("--spec", default=None, help="spec JSON (pin names) for routable")
+    pp.add_argument("--strip-stale", action="store_true",
+                    help="routable: remove tracks/vias left dangling by the move")
     pp.add_argument("--rotate", choices=["none", "ortho", "fine"], default="ortho",
                     help="ortho=snap 0/90/180/270 (assembly-friendly); fine=any angle")
     pp.add_argument("--iters", type=int, default=260)
@@ -2734,6 +2747,9 @@ def build_parser():
     prr.add_argument("--json", default=None, help="write scorecard + findings as JSON")
     prr.add_argument("--all", action="store_true", help="list every finding")
     prr.add_argument("--waive", action="append", default=[], help="CODE:REGEX, repeatable")
+    prr.add_argument("--strip-stale", action="store_true",
+                     help="remove tracks/vias whose ends no longer land on a pad/track of their net")
+    prr.add_argument("--out", default=None, help="with --strip-stale: output board (default: in place)")
     prr.add_argument("--track", type=float, default=None)
     prr.add_argument("--clearance", type=float, default=None)
     prr.set_defaults(fn=cmd_route_ready)

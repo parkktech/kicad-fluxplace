@@ -133,3 +133,25 @@ def strip_nets(text, nets):
             k -= 1
         text = text[:k] + text[e:]
     return text, len(cut)
+
+
+def strip_indexed(text, seg_idx, via_idx):
+    """Remove track/arc nodes (`seg_idx`) and vias (`via_idx`) by their position in file
+    order, the order routediag.load lists them in."""
+    root_end = _end(text, text.index("("))
+    cut, si, vi = [], 0, 0
+    for cs, ce in _children(text, 0, root_end):
+        if text.startswith(("(segment", "(arc"), cs):
+            if si in seg_idx:
+                cut.append((cs, ce))
+            si += 1
+        elif text.startswith("(via", cs):
+            if vi in via_idx:
+                cut.append((cs, ce))
+            vi += 1
+    for s, e in reversed(cut):
+        k = s
+        while k > 0 and text[k - 1] in " \t":
+            k -= 1
+        text = text[:k] + text[e:]
+    return text

@@ -27,20 +27,33 @@ from . import anchors as AN
 from . import clusters as CL
 from . import geom as GM
 from . import netclass as NC
+from . import placechecks as PCK
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED",
-         "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS"]
+         "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
+         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY"]
 
 
-def _f(level, code, msg, refs=(), value=None, limit=None):
+def _f(level, code, msg, refs=(), value=None, limit=None, cls=None):
     return {"level": level, "code": code, "msg": msg, "refs": sorted(set(refs)),
-            "value": value, "limit": limit}
+            "value": value, "limit": limit, "cls": cls}
+
+
+HARD = ("rf", "switch_node", "bypass", "pair")      # budgets a move may not break
+
+
+def explicit_fixed(B, cons):
+    """Parts nobody may move: locked, [lock.at], [placement] fixed."""
+    return ({r for r, p in B["parts"].items() if p.get("locked")}
+            | set(((cons or {}).get("lock") or {}).get("at", {}))
+            | set(((cons or {}).get("placement") or {}).get("fixed", [])))
 
 
 # ------------------------------------------------------------------ checks
-def net_over_budget(B, cls):
+def net_over_budget(B, cls, cons=None):
     out = []
+    fixed = explicit_fixed(B, cons)
     pads = NC.net_pads(B)
     for net, info in sorted(cls.items()):
         lim = NC.effective_budget(info)
@@ -52,10 +65,18 @@ def net_over_budget(B, cls):
                                                   for q in pads[net]))
             ends = sorted({p["ref"] for p in pads[net]})
             pr = f" (pair with {info['partner']})" if info["partner"] else ""
+            if set(ends) <= fixed:
+                # both ends are fixed: no placement move can meet this budget
+                out.append(_f(WARN, "ANCHOR_SPACING",
+                              f"{net} [{info['class']}]{pr}: {' and '.join(ends[:4])} are fixed "
+                              f"{ln:.1f} mm apart (minimum achievable {ln:.1f} mm, budget {lim:g} mm); "
+                              f"move an anchor or raise the budget", refs=ends, value=round(ln, 2),
+                              limit=lim, cls=info["class"]))
+                continue
             out.append(_f(FAIL, "NET_OVER_BUDGET",
                           f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm "
                           f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''})",
-                          refs=ends, value=round(ln, 2), limit=lim))
+                          refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]))
     return out
 
 
@@ -351,12 +372,16 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
     cons = cons or {}
     cls = NC.classify(B, cons, spec)
     f = []
-    f += net_over_budget(B, cls)
+    f += net_over_budget(B, cls, cons)
     f += support_far(B, cons, spec)
     if anchors:
         f += AN.findings(B, cons, spec, cls)
     f += pin_escape_blocked(B)
     f += keepout_trapped(B)
+    f += PCK.connector_blocked(B, cons)
+    f += PCK.height_regions(B, cons)
+    f += PCK.stale_copper(B)
+    f += PCK.side_policy(B, cons, spec)
     cg = congestion(B, cls, cons)
     f += congestion_findings(cg, cons)
     edges = routed_edges(B, cls)
@@ -372,7 +397,41 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
             "counts": {c: sum(1 for x in f if x["code"] == c) for c in CODES},
             "fail": sum(1 for x in f if x["level"] == FAIL),
             "warn": sum(1 for x in f if x["level"] == WARN)}
+    card["block_mm"] = round(PCK.block_mm(B, spec, cons), 1)
+    card["score"] = score(f, card)
     return f, card
+
+
+# ---- the ONE objective: every optimiser minimises this, the gate prints it --------------
+W_HARD, W_SOFT, W_SUPPORT, W_STRUCT, W_CONG, W_XING, W_ANCHOR, W_BLOCK = 20.0, 3.0, 5.0, 500.0, 25.0, 0.05, 300.0, 0.5
+
+
+def score(findings, card):
+    """score = class-weighted ratsnest mm
+             + 20  x mm over budget of rf/switch_node/bypass/pair nets      (HARD)
+             +  3  x mm over budget of other nets                           (soft)
+             +  5  x mm support parts sit beyond their limit
+             + 500 x (PIN_ESCAPE_BLOCKED + KEEPOUT_TRAPPED + CONNECTOR_BLOCKED + HEIGHT_REGION FAILs)
+             + 25  x congestion overflow (track-cells)
+             + 0.05 x ratsnest crossings
+             + 300 x ANCHOR_MISORIENTED
+             + 0.5 x block bounding-box half-perimeters (mm), only when blocks are defined
+    Lower is better. Waived findings do not count (the gate has already dropped them)."""
+    t = card["weighted_ratsnest_mm"]
+    for x in findings:
+        c = x["code"]
+        over = max(0.0, (x["value"] or 0) - (x["limit"] or 0))
+        if c == "NET_OVER_BUDGET":
+            t += (W_HARD if x.get("cls") in HARD else W_SOFT) * over
+        elif c == "SUPPORT_PART_FAR":
+            t += W_SUPPORT * over
+        elif c in ("PIN_ESCAPE_BLOCKED", "KEEPOUT_TRAPPED", "CONNECTOR_BLOCKED") or (
+                c == "HEIGHT_REGION" and x["level"] == FAIL):
+            t += W_STRUCT
+        elif c == "ANCHOR_MISORIENTED":
+            t += W_ANCHOR
+    t += W_CONG * card["congestion"]["overflow"] + W_XING * card["crossings"] + W_BLOCK * card.get("block_mm", 0.0)
+    return round(t, 1)
 
 
 def worst(findings, n=10, per_code=4):
@@ -391,6 +450,7 @@ def worst(findings, n=10, per_code=4):
 
 def format_text(findings, card, title=""):
     L = [f"ROUTE-READY {title}".rstrip(),
+         f"  score (single objective, lower=better) : {card['score']:.0f}",
          f"  class-weighted ratsnest length : {card['weighted_ratsnest_mm']:.0f} mm",
          f"  ratsnest crossings             : {card['crossings']}",
          f"  congestion                     : overflow {card['congestion']['overflow']:g} in "

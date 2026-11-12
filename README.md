@@ -677,6 +677,39 @@ starting area, or > 1 m, aborts with `REFUSED` and writes nothing.
 * Verified with a stub router in `tests/test_stall.py`; a live KiCadRoutingTools run of
   `auto` was not done.
 
+### 8. One objective, hard budgets, side/height/connector/stale checks
+
+* **Single score** (`preroute.score`, printed by `route-ready`, minimised by `routable`):
+  class-weighted ratsnest mm + 20 x mm over budget on rf/switch_node/bypass/pair nets
+  (HARD) + 3 x mm over budget on other nets + 5 x mm support parts are beyond their limit
+  + 500 x each PIN_ESCAPE_BLOCKED / KEEPOUT_TRAPPED / CONNECTOR_BLOCKED / HEIGHT_REGION FAIL
+  + 25 x congestion overflow + 0.05 x crossings + 300 x ANCHOR_MISORIENTED
+  + 0.5 x block bounding-box half-perimeters (when blocks are defined). Waived findings do
+  not count. `routable` scores the live board after every round, keeps the best legal state
+  (the input counts), stops on plateau (< 1 % better over 2 rounds), `[placement]
+  time_limit_s` (600) or `max_rounds` (6), and never returns a worse board than the best seen.
+* **Hard vs soft**: HARD classes pull 3x in the placer and cost 20 vs 3 per mm in the score; a
+  round that breaks one is simply not the best state. (No per-move rejection.)
+* `[placement.side]` `default`, `override` (ref/glob -> side): `SIDE_POLICY` WARN for parts off
+  their side and for support parts on the other side of their IC unless within 1 mm of one of
+  its pins. `routable` never flips a part (the text writer cannot mirror a footprint), so it
+  cannot move parts to the other side; the flip cost is therefore not modelled.
+  `[[placement.height_region]]` (`name`, `rect`, `side`, `max_height_mm`) + `[placement.heights]`
+  (ref/glob -> mm): `HEIGHT_REGION` FAIL above the limit, WARN for unknown height. STEP bounding
+  boxes are NOT read; heights must be given.
+* Blocks: `spec["blocks"]` / a component `block` field / `[placement] block_refdes = true`.
+* Regulator clusters rank support parts: switch node, input-cap loop, bootstrap, then
+  feedback/output (`clusters` prints the lengths achieved).
+* `ANCHOR_SPACING` (WARN): a budget that cannot be met because every part on the net is
+  locked / `[lock.at]` / `[placement] fixed`; names the anchors and the minimum achievable length.
+  Support-part distance is measured from the edge of the 0.6 mm escape halo of fine-pitch ICs.
+* `CONNECTOR_BLOCKED`: edge connectors (`[placement.connectors] J12 = {opening = "-y"}` in
+  footprint coordinates, else inferred from courtyard-vs-pad asymmetry, WARN only when inferred)
+  must open outward across the nearest edge and a `plug_mm` (15) box projected outward must
+  hit no part.
+* `STALE_COPPER` (WARN): tracks/vias with an end that lands on no pad, via or track of their net
+  (to a fixpoint); `route-ready --strip-stale [--out]` and `place --strategy routable --strip-stale`.
+
 ### 6. Pre-route gate — `fluxplace route-ready BOARD [--constraints TOML] [--spec JSON] [--json OUT] [--all]`
 
 One-screen scorecard (class-weighted ratsnest length, counts per code, worst 10),
