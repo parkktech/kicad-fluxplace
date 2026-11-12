@@ -1096,9 +1096,46 @@ def _write(self, sol, out):
             b.Add(v)
             g.AddItem(v)
             n += 1
+    for z in self.job.get("pours", []):
+        self.add_zone(z)
     b.Save(out)
 
 
+def _add_zone(self, z):
+    """a declared pour (`[[plan.pour]]`) becomes a real zone on its layers: whole outline for "board", else a rectangle."""
+    b = self.b
+    net = b.FindNet(z["net"])
+    if net is None:
+        return
+    for ln in z["layers"]:
+        if ln not in self.M.lid:
+            continue
+        zone = pcbnew.ZONE(b)
+        zone.SetLayer(self.M.lid[ln])
+        zone.SetNet(net)
+        zone.SetAssignedPriority(0)
+        zone.SetLocalClearance(nm(max(self.M.C, 0.2)))
+        zone.SetMinThickness(nm(0.15))
+        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+        zone.SetZoneName(f"pour {z['net']} {ln}")
+        ch = pcbnew.SHAPE_LINE_CHAIN()
+        r = z.get("region", "board")
+        if r == "board" or r is None:
+            o = self.M.outline.Outline(0)
+            for i in range(o.PointCount()):
+                ch.Append(o.CPoint(i))
+        elif isinstance(r[0], (int, float)):
+            for (x, y) in ((r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3])):
+                ch.Append(V2(nm(x), nm(y)))
+        else:
+            for (x, y) in r:
+                ch.Append(V2(nm(x), nm(y)))
+        ch.SetClosed(True)
+        zone.Outline().AddOutline(ch)
+        b.Add(zone)
+
+
+Fan.add_zone = _add_zone
 Fan.report = _report
 Fan.blame_of = _blame_of
 Fan.gap_to = _gap_to

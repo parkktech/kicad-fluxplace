@@ -716,6 +716,14 @@ def span_summary(spans):
 
 
 # ---------------------------------------------------------------- driver
+def _pro(src, dst):
+    """the project file (netclasses, design rules) travels with every board written: the fan-out and the router read it."""
+    import shutil
+    pro = os.path.splitext(src)[0] + ".kicad_pro"
+    if os.path.exists(pro):
+        shutil.copyfile(pro, os.path.splitext(dst)[0] + ".kicad_pro")
+
+
 def floorplan_once(board, cons, spec, grow, args, text_in, workdir, tag, log=print):
     """one size: both starts (constructive, source poses), each annealed and fan-out repaired; the better one wins
     (passes first, then fewer blocked pins, then the weighted cost). -> (result, Plan, board model)."""
@@ -745,6 +753,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         path_g = os.path.join(workdir, f"{tag}.grown.kicad_pcb")
         text2, done = BW.apply_moves(text, moves_g)
         open(path_g, "w", errors="surrogateescape").write(text2)
+        _pro(board, path_g)
     B = RD.load(path_g)
     M = MD.build(B, cons, spec, arrange=True)
     P = Plan(B, cons, spec, M, log=log)
@@ -767,6 +776,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     for rd in range(args.rounds + 1):
         moves = dict(all_moves(P))
         BW.move_file(path_g, out_path, moves, post=False)
+        _pro(board, out_path)
         a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                nodes=200000, repairs=12, check_only=True)
         Bn, fres = FO.run(out_path, cons, spec, None, a, None)
@@ -886,6 +896,7 @@ def cmd_floorplan(a):
     best = history[-1]
     import shutil
     shutil.copyfile(best["board"], out)
+    _pro(a.board, out)
     rp = os.path.splitext(out)[0] + ".floorplan.json"
     json.dump({"history": [{k: v for k, v in h.items() if k != "blocked"} for h in history], "final": best["tag"]}, open(rp, "w"), indent=1, default=str)
     print(f"floorplan: {'PASS' if passes(best) else 'FAIL'} at grow {best['grow']}; wrote {out}; report {rp}; total {time.time() - t0:.0f} s")
