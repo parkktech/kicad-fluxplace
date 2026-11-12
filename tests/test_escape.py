@@ -79,3 +79,29 @@ def test_no_via_in_a_signal_pad(tmp_path):
         dx = max(abs(x - q["x"]) - q["ex"], 0)
         dy = max(abs(y - q["y"]) - q["ey"], 0)
         assert (dx * dx + dy * dy) ** 0.5 >= 0.45 / 2 + 0.127 - 1e-6
+
+
+def test_group_oversubscribed_names_part_side_and_counts(tmp_path):
+    B, pl = plan(board(tmp_path, 0.35), ignore_routing=True)
+    f = [x for x in pl.findings if x["code"] == "PLAN_ESCAPE_OVERSUBSCRIBED"]
+    assert f and f[0]["part"] == "U1" and f[0]["side"] == "W" and f[0]["needed"] == 10 and f[0]["slots"] < 10
+    B, pl = plan(board(tmp_path, 3.0), ignore_routing=True)
+    assert not [x for x in pl.findings if x["code"] == "PLAN_ESCAPE_OVERSUBSCRIBED"]
+
+
+def test_rail_without_plane_or_pour_is_reported(tmp_path):
+    body = "".join(PB.fp(f"C{i}", 10 + 3 * i, 30, [PB.pad("1", 0, 0, "+3V3", 0.8, 0.8), PB.pad("2", 0, 1.5, "GND", 0.8, 0.8)])
+                    for i in range(22))
+    B, pl = plan(PB.write(tmp_path, body), ignore_routing=True)
+    f = [x for x in pl.findings if x["code"] == "PLAN_POWER_NO_PLANE"]
+    assert f and f[0]["net"] == "+3V3" and f[0]["value"] == 22 and "pour" in f[0]["suggestion"]
+    assert not [x for x in pl.findings if x["code"] == "PLAN_NO_VIA_SITE"]
+
+
+def test_power_pin_names_its_feeding_layer(tmp_path):
+    zone = ('(zone (net "+5V") (net_name "+5V") (layer "B.Cu") (name "") (hatch edge 0.5) (polygon (pts '
+            '(xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n')
+    body = zone + PB.fp("C1", 30, 30, [PB.pad("1", 0, 0, "+5V", 0.8, 0.8), PB.pad("2", 5, 0, "X", 0.8, 0.8)])
+    body += PB.fp("C2", 60, 30, [PB.pad("1", 0, 0, "+5V", 0.8, 0.8), PB.pad("2", 5, 0, "X", 0.8, 0.8)])
+    B, pl = plan(PB.write(tmp_path, body), ignore_routing=True)
+    assert pl.pins[("C1", "1")]["kind"] == "via" and "B.Cu" in pl.pins[("C1", "1")]["feed"]

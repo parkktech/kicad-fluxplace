@@ -16,9 +16,9 @@ from . import escapeplan as EP
 from . import globalroute as GR
 from . import netclass as NC
 
-CODES = ["PLAN_PIN_SEALED", "PLAN_NO_VIA_SITE", "PLAN_OVERFLOW", "PLAN_NET_OVER_BUDGET", "PLAN_PAIR_SPLIT",
+CODES = ["PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_POWER_NO_PLANE", "PLAN_NO_VIA_SITE", "PLAN_OVERFLOW", "PLAN_NET_OVER_BUDGET", "PLAN_PAIR_SPLIT",
          "PLAN_RF_LAYER_CHANGES", "PLAN_UNREACHABLE"]
-FAIL_CODES = ("PLAN_PIN_SEALED", "PLAN_OVERFLOW")
+FAIL_CODES = ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_OVERFLOW")
 
 
 def open_state(B, board_path=None, method="text"):
@@ -45,17 +45,17 @@ def score_of(pr, findings, ns, cls=None):
     unr = sum(f["value"] for f in findings if f["code"] == "PLAN_UNREACHABLE")
     ln = sum(v["len"] for v in ns.values())
     wl = sum(v["len"] * max(0.25, (cls or {}).get(n, {}).get("weight", 1.0)) for n, v in ns.items())
-    comp = {"sealed": c["PLAN_PIN_SEALED"], "no_via_site": c["PLAN_NO_VIA_SITE"], "overflow": round(over, 1),
+    comp = {"sealed": c["PLAN_PIN_SEALED"], "oversub": c["PLAN_ESCAPE_OVERSUBSCRIBED"], "power_no_plane": c["PLAN_POWER_NO_PLANE"], "no_via_site": c["PLAN_NO_VIA_SITE"], "overflow": round(over, 1),
             "over_budget_mm": round(ob, 1), "pair_split": c["PLAN_PAIR_SPLIT"], "rf_changes": c["PLAN_RF_LAYER_CHANGES"],
             "unreached": unr, "copper_mm": round(ln, 1), "weighted_copper": round(wl)}
-    s = (pr["w_sealed"] * comp["sealed"] + pr["w_nosite"] * comp["no_via_site"] + pr["w_overflow"] * over +
+    s = (pr["w_sealed"] * (comp["sealed"] + comp["oversub"]) + pr["w_nosite"] * comp["power_no_plane"] + pr["w_nosite"] * comp["no_via_site"] + pr["w_overflow"] * over +
          pr["w_overbudget_hard"] * ob + pr["w_pair"] * comp["pair_split"] + pr["w_rf"] * comp["rf_changes"] +
          pr["w_unreach"] * unr + pr["w_len"] * wl)
     return round(s, 1), comp
 
 
 def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=None, log=None, iterations=None,
-        open_method="text", cls=None):
+        open_method="text", cls=None, variant=None):
     """-> result dict {pr, cls, plan, gr, ns, findings, score, comp, state, timing, mode}."""
     log = log or (lambda m: None)
     cons = cons or {}
@@ -69,7 +69,7 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
     t1 = time.time()
     plan = EP.plan_escapes(B, cons, cls, pr, ignore_routing=ignore_routing, routed_nets=state["routed"])
     t2 = time.time()
-    gr = GR.GlobalRoute(B, cons, cls, pr, plan, ignore_routing, routed_nets=state["routed"], groups=state["groups"], log=log)
+    gr = GR.GlobalRoute(B, cons, cls, pr, plan, ignore_routing, routed_nets=state["routed"], groups=state["groups"], log=log, variant=variant)
     gr.build()
     gr.route_all()
     t3 = time.time()
@@ -85,7 +85,7 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
 def verdict(R):
     f = R["findings"]
     c = Counter(x["code"] for x in f)
-    fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_OVERFLOW"])
+    fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_OVERFLOW"] or c["PLAN_ESCAPE_OVERSUBSCRIBED"])
     return {"score": R["score"], "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
             "components": R["comp"], "mode": R["mode"], "nets_planned": len(R["gr"].nets),
             "overflow_total": R["gr"].summary()["overflow"], "timing": R["timing"]}
@@ -93,7 +93,7 @@ def verdict(R):
 
 def rank(findings):
     """Worst first: sealed pins, overflow by size, unreachable, no via site, budget excess, rest."""
-    w = {"PLAN_PIN_SEALED": 0, "PLAN_UNREACHABLE": 1, "PLAN_OVERFLOW": 2, "PLAN_NO_VIA_SITE": 3,
+    w = {"PLAN_PIN_SEALED": 0, "PLAN_ESCAPE_OVERSUBSCRIBED": 0, "PLAN_POWER_NO_PLANE": 3, "PLAN_UNREACHABLE": 1, "PLAN_OVERFLOW": 2, "PLAN_NO_VIA_SITE": 3,
          "PLAN_NET_OVER_BUDGET": 4, "PLAN_RF_LAYER_CHANGES": 5, "PLAN_PAIR_SPLIT": 6}
 
     def key(f):

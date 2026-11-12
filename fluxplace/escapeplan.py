@@ -23,7 +23,7 @@ Floors come from `[plan]` in the constraints (track_mm, clearance_mm, via_mm, dr
 """
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from . import geom as GM
 from . import netclass as NC
@@ -33,7 +33,7 @@ DEFAULTS = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm"
             "fine_pitch_mm": 0.65, "fine_pads": 16, "pour_pads": 20, "thermal_pad_mm2": 2.0,
             "via_cost_mm": 3.0, "iterations": 10, "util": 0.8, "w_sealed": 100.0, "w_nosite": 40.0,
             "w_overflow": 5.0, "w_overbudget": 3.0, "w_overbudget_hard": 20.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
-            "w_len": 0.05, "jog_frac": 0.5}
+            "w_len": 0.05, "jog_frac": 0.5, "via_units": 2.0}
 SIDE_NAMES = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}      # KiCad y grows downward
 MECH = ("MH", "MK", "FID", "TP", "H")
 
@@ -102,12 +102,29 @@ def plane_nets(B, cons, cls, pr):
         out.setdefault(n, {"kind": "pour", "layers": set()})
     pads = NC.net_pads(B)
     for n, info in cls.items():
-        if n not in out and (NC.is_ground(n) or (info["class"] == "rail" and info["pads"] >= pr["pour_pads"])):
+        if n not in out and NC.is_ground(n):
             out[n] = {"kind": "pour", "layers": set()}
     for n in list(pads):
         if NC.is_ground(n) and n not in out:
             out[n] = {"kind": "pour", "layers": set()}
     return out
+
+
+def power_no_plane(B, cons, cls, pr, pnets):
+    """{net: pins} for rails of >= pour_pads pads that have neither a plane nor a pour (nor `[plan] plane_nets`)."""
+    return {n: info["pads"] for n, info in cls.items()
+            if info["class"] == "rail" and info["pads"] >= pr["pour_pads"] and n not in pnets and not NC.is_ground(n)}
+
+
+def plan_layers(B, cons):
+    """(signal layers, plane layers): preroute.layer_split, but an inner layer that carries tracks (>= 20 segments, a mixed
+    signal + pour layer such as In2/In3 after the +3V3 fill) stays a signal layer."""
+    from . import preroute as PR
+    sig, planes = PR.layer_split(B, cons)
+    n = Counter(s["layer"] for s in B["segs"])
+    mixed = [l for l in planes if n[l] >= 20]
+    sig = [l for l in B["copper"] if l in sig or l in mixed]
+    return sig, [l for l in planes if l not in mixed]
 
 
 class Obstacles:
@@ -281,6 +298,7 @@ class Plan:
 
     def __init__(self):
         self.pins, self.findings, self.headroom, self.used = {}, [], {}, {}
+        self.nopour, self.extra, self.groups = {}, [], []
         self.stats = {}
 
 
@@ -295,6 +313,14 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
     ob = Obstacles(B, pr, ignore_routing)
     pnets = pnets if pnets is not None else plane_nets(B, cons, cls, pr)
     plan.plane = pnets
+    npw = power_no_plane(B, cons, cls, pr, pnets)
+    plan.nopour = npw
+    for n, cnt in sorted(npw.items()):
+        plan.extra.append({"code": "PLAN_POWER_NO_PLANE", "net": n, "value": cnt, "at": [0, 0],
+                              "msg": f"{n} has {cnt} pins and neither a plane nor a pour: its distribution is routed as a tree "
+                                     f"and charged to the cells it crosses",
+                              "suggestion": f"give {n} a pour on an inner signal layer (zone on In2/In3 with a via beside each pad), "
+                                            f"or widen its distribution: {cnt} pins need >= {cnt} via sites or a 2 mm bus"})
     parts = B["parts"]
     refs = sorted(r for r in parts if (only_refs is None or r in only_refs) and not is_mech(r))
     lane_len, clr, via_r = pr["lane_len_mm"], pr["clearance_mm"], pr["via_mm"] / 2
@@ -324,6 +350,9 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
             layers = frozenset(q["layers"]) if len(q["layers"]) < 3 else out_layer
             rec = {"ref": ref, "pad": q["num"], "net": net, "x": round(q["x"], 2), "y": round(q["y"], 2),
                    "layer": sorted(layers)[0], "fine": fine, "plane": net in pnets}
+            if net in pnets:
+                fl = sorted(pnets[net]["layers"]) or ["pour (pad layer)"]
+                rec["feed"] = fl[0] if len(fl) == 1 else "/".join(l[:-3] for l in fl)
             plan.pins[key] = rec
             if net in pnets:
                 pour = [z for z in B["zones"] if z["net"] == net and not z["keepout"] and (z["layers"] & layers)
@@ -484,8 +513,97 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
             rec["cands"] = len(cand[(best_ph, key)])
     plan.stats = {"phase": best_ph, "sites_tested": len(site_cache), "needs": len(needs)}
     _findings(B, pr, plan, parts, ob, fine_refs)
+    _oversubscribed(B, pr, plan, parts, ob, fine_refs, site_ok, best_ph)
+    plan.findings = plan.extra + plan.findings
     _headroom(B, pr, plan, parts, ob, fine_refs, site_ok, best_ph)
     return plan
+
+
+def _oversubscribed(B, pr, plan, parts, ob, fine_refs, site_ok, phase):
+    """Per pin GROUP (one row/side of a fine-pitch part): the signal pins of the row must all leave through the fan-out region.
+    Supply = tracks the free part of the region's outer edge carries on the pad layer (edge_len / pitch) + via slots in the
+    region (assigned or free).  Needed > supply -> PLAN_ESCAPE_OVERSUBSCRIBED (part, side, pins needed vs slots available)."""
+    reach, tw = pr["reach_mm"], pr["pitch_mm"]
+    for ref in sorted(fine_refs):
+        part = parts[ref]
+        pp = [q for q in part["pads"] if not q.get("np")]
+        if not pp:
+            continue
+        cx = sum(q["x"] for q in pp) / len(pp)
+        cy = sum(q["y"] for q in pp) / len(pp)
+        rows = defaultdict(list)
+        for q in pp:
+            rec = plan.pins.get((ref, q["num"]))
+            if not rec or rec.get("kind") in (None, "pour", "attached", "no_site") or rec.get("plane"):
+                continue
+            if rec.get("kind") == "direct" and rec.get("dir"):
+                d = {"E": (1, 0), "W": (-1, 0), "S": (0, 1), "N": (0, -1)}[rec["dir"]]
+                if rec.get("inward"):
+                    d = (-d[0], -d[1])
+            else:
+                d = exit_dirs(part, q, cx, cy)[0]
+            rows[(d, rec["layer"], round((q["y"] if d[1] else q["x"]) / 0.3))].append((q, d))
+        for (d, layer, _k), items in rows.items():
+            n = len(items)
+            if n < 4:
+                continue
+            qs = [q for q, _d in items]
+            along = (lambda q: q["y"]) if d[0] else (lambda q: q["x"])
+            t0, t1 = min(along(q) for q in qs) - 0.4, max(along(q) for q in qs) + 0.4
+            if d[0]:
+                edge = (max(q["x"] + q["ex"] for q in qs) if d[0] > 0 else min(q["x"] - q["ex"] for q in qs)) + d[0] * reach
+            else:
+                edge = (max(q["y"] + q["ey"] for q in qs) if d[1] > 0 else min(q["y"] - q["ey"] for q in qs)) + d[1] * reach
+            free, steps = 0.0, max(1, int((t1 - t0) / 0.1))
+            lay = frozenset({layer})
+            for k in range(steps):
+                t = t0 + (k + 0.5) * (t1 - t0) / steps
+                x, y = (edge, t) if d[0] else (t, edge)
+                r = (x - 0.06, y - 0.06, x + 0.06, y + 0.06)
+                if ob.hits(r, pr["clearance_mm"], lay, "") or ob.keepout_hit(x, y, lay) or not GM.in_outline(B, r, pr["edge_clr_mm"]):
+                    continue
+                free += (t1 - t0) / steps
+            n_dir = sum(1 for q in qs if plan.pins[(ref, q["num"])].get("kind") == "direct")
+            tracks = min(n_dir, int(free / tw))
+            # slots only where a lane (or the stub of one) reaches: depth = the best free lane of the row + a via
+            depth = min(reach, max((plan.pins[(ref, q["num"])].get("lane") or 0.0) for q in qs) + pr["via_mm"] + pr["clearance_mm"])
+            if n_dir:
+                depth = reach
+            edge = edge - d[0] * (reach - depth) - 0.0 if d[0] else edge
+            if d[1]:
+                edge = edge - d[1] * (reach - depth)
+            # via slots in the region between the row and the edge
+            if d[0]:
+                box = (min(edge, min(q["x"] for q in qs)), t0, max(edge, max(q["x"] for q in qs)), t1)
+            else:
+                box = (t0, min(edge, min(q["y"] for q in qs)), t1, max(edge, max(q["y"] for q in qs)))
+            slots = 0
+            for ij, (x, y) in hexsites(phase, box[0], box[1], box[2], box[3], pr["slot_mm"]):
+                if box[0] <= x <= box[2] and box[1] <= y <= box[3] and ok_site(site_ok, phase, ij, x, y):
+                    slots += 1
+            supply = tracks + slots
+            pts = []
+            for k in range(int((t1 - t0) / 0.5) + 1):
+                t = t0 + k * 0.5
+                pts.append((round(edge, 2), round(t, 2)) if d[0] else (round(t, 2), round(edge, 2)))
+            plan.groups.append({"ref": ref, "side": SIDE_NAMES[d], "layer": layer, "dir": 0 if d[0] else 1, "n": n, "slots": slots,
+                                "edge": pts, "nets": sorted({plan.pins[(ref, q["num"])]["net"] for q in qs}),
+                                "pin": qs[0]["num"], "at": [round(qs[0]["x"], 2), round(qs[0]["y"], 2)]})
+            if n > supply:
+                side = SIDE_NAMES[d]
+                plan.extra.append({"code": "PLAN_ESCAPE_OVERSUBSCRIBED", "part": ref, "side": side, "pin": qs[0]["num"],
+                                   "net": plan.pins[(ref, qs[0]["num"])]["net"], "at": [round(qs[0]["x"], 2), round(qs[0]["y"], 2)],
+                                   "needed": n, "slots": supply, "value": n - supply, "limit": 0,
+                                   "msg": f"{ref} side {side} ({layer}): {n} signal pins need {n} escapes but the fan-out region offers "
+                                          f"{supply} ({tracks} tracks over {free:.1f} mm of free edge + {slots} via slots)",
+                                   "suggestion": f"open the {_dirword(d, True)} fan-out of {ref}: clear {n - supply} more track/slot place(s) "
+                                                 f"(move the part or the neighbours in front of {ref}'s {_dirword(d, True)} side), "
+                                                 f"or reassign {n - supply} signal(s) to another side"})
+
+
+def ok_site(site_ok, ph, ij, x, y):
+    ok, owner = site_ok(ph, ij, (x, y))
+    return ok and not owner
 
 
 def rebuild_findings(B, pr, plan, ignore_routing=True):
@@ -494,6 +612,7 @@ def rebuild_findings(B, pr, plan, ignore_routing=True):
     plan.findings = []
     fine = {r for r, p in B["parts"].items() if is_fine(p, pr)}
     _findings(B, pr, plan, B["parts"], ob, fine)
+    plan.findings = plan.extra + plan.findings
     return plan.findings
 
 

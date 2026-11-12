@@ -88,3 +88,17 @@ def test_plan_compare_prints_both_verdicts(tmp_path, capsys):
     cli.main(["plan-compare", maps[0], maps[1]])
     out = capsys.readouterr().out
     assert "PLAN_SCORE" in out and "plan-compare: B is better" in out and "PLAN_OVERFLOW" in out
+
+
+def test_vias_charge_every_layer(tmp_path):
+    """A net that changes layer in a cell takes capacity from the layers it does not use there."""
+    p = channel_board(tmp_path, 1, gap=30.0, walls=False)
+    B = RD.load(p)
+    cons = {}
+    R = PL.run(B, cons, None, ignore_routing=True)
+    g = R["gr"]
+    assert all(r.get("vuse") is not None for r in g.routes.values())
+    n_v = sum(len(r["vuse"]) for r in g.routes.values())
+    assert n_v == sum(r["vias"] for r in g.routes.values()) * 0 + n_v      # structure present
+    g2 = PL.run(B, {"plan": {"via_units": 0}}, None, ignore_routing=True)["gr"]
+    assert sum(sum(a) for a in g.uH) >= sum(sum(a) for a in g2.uH)

@@ -53,7 +53,7 @@ def octile(dx, dy):
 
 class GlobalRoute:
     def __init__(self, B, cons=None, cls=None, pr=None, plan=None, ignore_routing=True, routed_nets=(),
-                 groups=None, log=None):
+                 groups=None, log=None, variant=None):
         from . import preroute as PR
         self.B, self.cons = B, cons or {}
         self.pr = pr or EP.plan_params(cons)
@@ -63,8 +63,14 @@ class GlobalRoute:
         self.routed = set(routed_nets)
         self.groups = groups or {}
         self.log = log or (lambda m: None)
-        sig, planes = PR.layer_split(B, self.cons)
+        sig, planes = EP.plan_layers(B, self.cons)
         self.layers = [l for l in B["copper"] if l in sig] or list(B["copper"])
+        self.variant = variant
+        if variant == "plane3v3" and len(self.layers) > 3:          # one inner signal layer becomes a dedicated plane
+            self.layers.remove([l for l in self.layers if l not in (B["copper"][0], B["copper"][-1])][-1])
+        self.real = list(self.layers)
+        if variant == "8layer":                                      # two more signal layers, no pads, full capacity
+            self.layers += ["In5.Cu", "In6.Cu"]
         self.planes = planes
         self.nl = len(self.layers)
         self.lid = {l: k for k, l in enumerate(self.layers)}
@@ -125,6 +131,8 @@ class GlobalRoute:
         for q in self.B["parts"][ref]["pads"]:
             r = EP.prect(q)
             ids = [self.lid[l] for l in q["layers"] if l in self.lid]
+            if q["tht"]:
+                ids += [self.lid[l] for l in self.layers if l not in self.real]
             if ids:
                 self._add_rect(ref, r, ids, g)
             vr = (r[0] - vg, r[1] - vg, r[2] + vg, r[3] + vg)
@@ -487,7 +495,18 @@ class GlobalRoute:
                         vcells.add(a % N)
         for c in vcells:
             self.vu[c] += w if not nt["pair"] else 2.0
-        self.routes[name] = {"conns": conns, "keys": keys, "vcells": vcells, "vias": vias}
+        # a via's barrel, annulus and clearance block every layer it passes: charge the layers the net does not use there
+        vuse = []
+        vb = self.pr["via_units"]
+        if vb > 0:
+            for c in vcells:
+                used = {nd // N for cn in conns if cn.get("path") for nd in cn["path"] if nd % N == c}
+                for l in range(nl):
+                    if l not in used:
+                        uH[l][c] += vb
+                        uV[l][c] += vb
+                        vuse.append((l, c))
+        self.routes[name] = {"conns": conns, "keys": keys, "vcells": vcells, "vias": vias, "vuse": vuse}
         return all(c.get("path") for c in conns)
 
     def _mark(self, path, mine):
@@ -614,6 +633,10 @@ class GlobalRoute:
             (self.uH if d == 0 else self.uV)[l][c] -= w
         for c in r["vcells"]:
             self.vu[c] -= w if not self.nets[name]["pair"] else 2.0
+        vb = self.pr["via_units"]
+        for (l, c) in r.get("vuse", ()):
+            self.uH[l][c] -= vb
+            self.uV[l][c] -= vb
 
     # ------------------------------------------------------------------ negotiation
     def overflow_cells(self):
@@ -718,6 +741,9 @@ class GlobalRoute:
                 (self.uH if d == 0 else self.uV)[l][c] += w
             for c in r["vcells"]:
                 self.vu[c] += w if not self.nets[n]["pair"] else 2.0
+            for (l, c) in r.get("vuse", ()):
+                self.uH[l][c] += self.pr["via_units"]
+                self.uV[l][c] += self.pr["via_units"]
 
     def snapshot(self):
         return {"routes": dict(self.routes), "uH": [list(a) for a in self.uH], "uV": [list(a) for a in self.uV],
@@ -817,6 +843,28 @@ def findings(gr, ns, parts_near=None):
                            f"{gr.layers[worst[2]]} demand {dem:g} / capacity {cap}; overflow {tot:.1f}; {len(nm)} net(s) "
                            f"({', '.join(nm[:5])}{'...' if len(nm) > 5 else ''}); bordering {', '.join(near[:4]) or 'no part'}",
                     "suggestion": _widen_suggestion(gr, B, bb, near, tot)})
+    # pin groups after routing: tracks the row's fan-out edge still has (capacity minus through traffic) + via slots vs pins
+    seen_static = {(f["part"], f["side"]) for f in (gr.plan.extra if gr.plan is not None else []) if f["code"] == "PLAN_ESCAPE_OVERSUBSCRIBED"}
+    for g in (gr.plan.groups if gr.plan is not None else []):
+        l = gr.lid.get(g["layer"])
+        if l is None or (g["ref"], g["side"]) in seen_static:
+            continue
+        cs = {gr.cell_of(x, y) for x, y in g["edge"]}
+        own = {n for n, nt in gr.nets.items() if set(nt["members"]) & set(g["nets"])}
+        sup = 0.0
+        for c in cs:
+            use = (gr.uH if g["dir"] == 0 else gr.uV)[l][c]
+            mine = sum(gr.nets[n]["units"] for n in own if n in gr.routes and (l, c, g["dir"]) in gr.routes[n]["keys"])
+            cap = (gr.capH if g["dir"] == 0 else gr.capV)[l][c]
+            sup += max(0.0, cap - (use - mine))
+        supply = int(sup) + g["slots"]
+        if g["n"] > supply:
+            out.append({"code": "PLAN_ESCAPE_OVERSUBSCRIBED", "part": g["ref"], "side": g["side"], "pin": g["pin"], "net": g["nets"][0],
+                        "at": g["at"], "needed": g["n"], "slots": supply, "value": g["n"] - supply, "limit": 0,
+                        "msg": f"{g['ref']} side {g['side']} ({g['layer']}): {g['n']} signal pins need escapes, the fan-out edge has "
+                               f"{int(sup)} free track(s) after through traffic + {g['slots']} via slot(s) = {supply}",
+                        "suggestion": f"{g['n'] - supply} pin(s) of {g['ref']}'s {g['side']} side have no escape: widen the channel in front of "
+                                      f"that side (move the neighbours or the part) or move through traffic to another layer"})
     for c in range(gr.N):
         if gr.vu[c] > gr.vcap[c]:
             x, y = gr.xy_of(c)

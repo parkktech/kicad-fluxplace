@@ -59,7 +59,7 @@ class PlanState:
 
     def snapshot(self):
         g = self.gr
-        return {"pins": dict(self.plan.pins), "used": dict(self.plan.used), "findings": list(self.plan.findings),
+        return {"pins": dict(self.plan.pins), "used": dict(self.plan.used), "findings": list(self.plan.findings), "extra": list(self.plan.extra), "groups": list(self.plan.groups),
                 "gr": g.snapshot(), "nets": {n: (nt["terms"], nt.get("split")) for n, nt in g.nets.items()},
                 "netset": dict(g.nets), "order": list(g.order), "capH": [list(a) for a in g.capH],
                 "capV": [list(a) for a in g.capV], "vcap": list(g.vcap), "split": (set(g.split_pairs), dict(g.pair_origin)),
@@ -68,6 +68,7 @@ class PlanState:
     def restore(self, s, moved):
         g = self.gr
         self.plan.pins, self.plan.used, self.plan.findings = s["pins"], s["used"], s["findings"]
+        self.plan.extra, self.plan.groups = s["extra"], s["groups"]
         g.nets, g.order = dict(s["netset"]), list(s["order"])
         for n, (t, sp) in s["nets"].items():
             g.nets[n]["terms"] = t
@@ -105,6 +106,8 @@ class PlanState:
         plan.used = {ij: k for ij, k in plan.used.items() if k[0] not in A}
         plan.pins.update(sub.pins)
         plan.used.update(sub.used)
+        plan.extra = [e for e in plan.extra if e.get("part") not in A] + [e for e in sub.extra if e.get("part") in A]
+        plan.groups = [g for g in plan.groups if g["ref"] not in A] + [g for g in sub.groups if g["ref"] in A]
         EP.rebuild_findings(B, self.pr, plan, True)
         self.gr.update_after_move(set(moved), A, True)
         self._measure()
