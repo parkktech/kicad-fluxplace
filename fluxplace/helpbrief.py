@@ -10,12 +10,13 @@ MAX_LINES = 15
 
 # command -> doc that holds the long form (moved from the README, nothing deleted)
 CMD_DOC = {
+    "pipeline": "../AGENT-PIPELINE",
     "review": "review", "route-ready": "route-ready", "route-diagnose": "route-diagnose",
     "clusters": "clusters", "anchor-check": "anchor-check", "place": "place",
     "bom-opt": "bom-opt", "fit-sheet": "fit-sheet", "auto": "auto", "compact": "auto",
     "route-status": "route-wait", "route-wait": "route-wait", "drc-scope": "audit",
     "stackup": "audit", "stackup-define": "audit", "netlist": "audit",
-    "analyze": "cli", "plan": "cli", "gather": "cli", "route": "cli", "tournament": "cli",
+    "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "cli", "tournament": "cli",
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli",
 }
 

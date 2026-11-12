@@ -35,7 +35,7 @@ class TestSchemaDerivation(unittest.TestCase):
         self.assertLess(len(default), len(every))
 
     def test_required_args_are_marked_required(self):
-        t = next(t for t in M.build_tools() if t["name"] == "fluxplace_netlist")
+        t = next(t for t in M.build_tools() if t["name"] == "fluxplace_route_ready")
         self.assertIn("board", t["inputSchema"]["properties"])
         self.assertIn("board", t["inputSchema"].get("required", []))
 
@@ -765,3 +765,55 @@ class TestSchematicGeneration(unittest.TestCase):
         head = open(out).read().split("(symbol (lib_id")[0]
         self.assertIn('(property "Reference" "R"', head)
         self.assertNotIn('(property "Reference" "R1"', head)
+
+
+class TestFootprint(unittest.TestCase):
+    """tools/list is always-loaded context: every byte is paid on every session."""
+
+    def test_budgets(self):
+        tools = M.build_tools()
+        for t in tools:
+            self.assertLessEqual(len(t["description"]), 300 if t["name"] == "fluxplace_run" else 160, t["name"])
+            for k, v in t["inputSchema"]["properties"].items():
+                self.assertLessEqual(len(v.get("description", "")), 80, (t["name"], k))
+        self.assertLess(len(M.INSTRUCTIONS), 300)
+        self.assertLess(len(json.dumps(tools, separators=(",", ":"))), 12000)
+
+    def test_listed_params_exist_in_parser(self):
+        import cli
+        subs = M._subparsers(cli.build_parser())
+        for cmd, keep in M.LISTED.items():
+            dests = {a.dest for a in subs[cmd]._actions}
+            missing = [k for k in keep if k not in dests]
+            self.assertFalse(missing, (cmd, missing))
+
+    def test_required_are_listed(self):
+        import cli
+        subs = M._subparsers(cli.build_parser())
+        for cmd, keep in M.LISTED.items():
+            for a in subs[cmd]._actions:
+                if a.required and a.option_strings:
+                    self.assertIn(a.dest, keep, (cmd, a.dest))
+
+    def test_every_policy_command_is_reachable(self):
+        tools = M.build_tools(expose_long=True)
+        listed = {t["_cmd"] for t in tools}
+        run = next(t for t in tools if t["name"] == "fluxplace_run")
+        for cmd, (kind, _d) in M.POLICY.items():
+            self.assertTrue(cmd in listed or cmd in run["description"], cmd)
+
+    def test_positional_args_are_passed(self):
+        import cli
+        subs = M._subparsers(cli.build_parser())
+        argv = M._argv_for("route-ready", {"board": "/b.kicad_pcb", "all": True}, subs["route-ready"])
+        self.assertEqual(argv[:2], ["route-ready", "/b.kicad_pcb"])
+        self.assertIn("--all", argv)
+
+    def test_run_tool_dispatches_and_respects_policy(self):
+        text, err = M.call_tool("fluxplace_run", {"command": "help-brief", "args": {"command": "lint"}})
+        self.assertFalse(err)
+        self.assertIn("fluxplace lint", text)
+        text, err = M.call_tool("fluxplace_run", {"command": "auto", "args": {}})
+        self.assertTrue(err)                       # long: refused by default
+        text, err = M.call_tool("fluxplace_run", {"command": "nonsense"})
+        self.assertTrue(err)

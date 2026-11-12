@@ -35,6 +35,9 @@ import sys
 import traceback
 
 PROTOCOL_VERSION = "2025-06-18"
+INSTRUCTIONS = ("fluxplace: KiCad placement, route gating, review, fab. Output is compact; the full report "
+                "path is printed. Flags: fluxplace_help_brief. Others: fluxplace_run. Never poll "
+                "logs: fluxplace_route_wait. Failures: fluxplace_doctor.")
 SERVER_NAME = "fluxplace"
 
 # --------------------------------------------------------------------------
@@ -95,127 +98,87 @@ def budget(text, tool="result", max_chars=None):
 # --------------------------------------------------------------------------
 
 POLICY = {
-    # ---- read: analysis, no board mutation --------------------------------
-    "doctor":            ("read",  "Preflight the whole toolchain: KiCad, python packages, "
-                                   "router, distributor credentials and the wider suite. "
-                                   "Run this first when anything fails unexpectedly."),
-    "analyze":           ("read",  "Analyze a board's communication graph: parts, nets, "
-                                   "hub and fork topology."),
-    "gather":            ("read",  "Dump structured board facts as JSON — parts, nets, "
-                                   "pads, geometry."),
-    "plan":              ("read",  "Gather board facts and write a detailed placement plan "
-                                   "in markdown."),
-    "lint":              ("read",  "Design-completeness rules: unwired power/IO, dead-end "
-                                   "nets, connector retention advice for high-vibration use."),
-    "comprehend":        ("read",  "Auto-detect physics constraints from the netlist — power "
-                                   "nets, differential pairs, bypass caps, crystals, "
-                                   "converters — and optionally grade the placement against "
-                                   "them."),
-    "comprehend-intent": ("read",  "Infer electrical intent as TOML: pairs, bypass, crystals, "
-                                   "power classes."),
-    "eval":              ("read",  "Score the current placement, optionally against the "
-                                   "physics rule checks."),
-    "route":             ("read",  "Global-route the current placement and report congestion "
-                                   "hotspots without modifying the board."),
-    "sourcing":          ("read",  "Grade every MPN against live DigiKey and Mouser stock. "
-                                   "This is the availability gate: a part nobody stocks is a "
-                                   "design bug, not a purchasing problem."),
+    # cmd: (kind, one-sentence description <= 160 chars). Long guidance: docs/commands/mcp.md
+    # and `fluxplace help-brief CMD`.
+    # ---- read ---------------------------------------------------------------
+    "doctor":            ("read",  "Preflight KiCad, python deps, router and API keys; run first when anything fails. "
+                                   "context=true measures the agent-context footprint."),
+    "help-brief":        ("read",  "At most 15 lines on one command (flags, output); no command: one line per command."),
+    "analyze":           ("read",  "Board communication graph: parts, nets, hub and fork topology."),
+    "gather":            ("read",  "Dump structured board facts as JSON."),
+    "plan":              ("read",  "Write a markdown placement plan from board facts."),
+    "lint":              ("read",  "Design-completeness lint: unwired power/IO, dead-end nets, connector advice."),
+    "comprehend":        ("read",  "Detect physics constraints (power nets, pairs, bypass, crystals); grade placement."),
+    "comprehend-intent": ("read",  "Infer electrical intent as TOML."),
+    "eval":              ("read",  "Score the placement (wirelength, overlaps, pin density); prc adds rule checks."),
+    "route":             ("read",  "Global-route the placement and report congestion; board unchanged."),
+    "sourcing":          ("read",  "Grade every MPN against live DigiKey/Mouser stock (availability gate)."),
     "preflight":         ("read",  "Check a board is ready for the next pipeline stage."),
-    "drc-scope":         ("read",  "Report what a DRC result actually examined: which "
-                                   "checks are switched off in the project, which of those "
-                                   "matter for fabrication, and (with full=true) what a "
-                                   "re-run with every check enabled actually finds. A clean "
-                                   "DRC report is a claim about scope — this is how you "
-                                   "learn the scope."),
-    "netlist":           ("read",  "Read the connection list back out of the routed board: "
-                                   "every net with its pads, every component, pin by pin. "
-                                   "For a board generated from a netlist spec there is no "
-                                   ".kicad_sch at all, and this is the only connectivity "
-                                   "document that exists."),
-    "stackup":           ("read",  "Report the layer stack, which layers carry plane pours, "
-                                   "the netclass track/diff-pair geometry, and whether "
-                                   "controlled impedance can be verified from these files "
-                                   "at all — it cannot if no dielectric is defined."),
-    "stackup-define":    ("write", "Define the board stackup from a named fab profile "
-                                   "(JLCPCB/PCBWay 4-layer 1.6mm and others), solve the "
-                                   "trace geometry it implies for 50 ohm single-ended and "
-                                   "100 ohm differential, and grade both the netclasses AND "
-                                   "the actual routed copper against those targets. With "
-                                   "apply=true it writes the stackup into the .kicad_pcb "
-                                   "(backed up first, refuses to overwrite an existing one). "
-                                   "Without a stackup, no impedance claim on a board can be "
-                                   "checked at all."),
-    "schematic":         ("write", "Generate a real .kicad_sch from the netlist spec "
-                                   "(or from the routed copper) and VERIFY it by exporting "
-                                   "its netlist and diffing against the source. For a board "
-                                   "built from a spec rather than drawn, this is the "
-                                   "reviewable electrical document that otherwise does not "
-                                   "exist. Net-label style, not hand-drawn signal flow."),
-    "verify-models":     ("read",  "Verify 3D models sit on their footprint pins — displaced "
-                                   "models look like mechanical truth and are a review hazard."),
-    "datasheets":        ("write", "Fetch every MPN's datasheet into the project through the "
-                                   "DigiKey/Mouser APIs, hash it into datasheets.json, and "
-                                   "list the ones that need a browser. Documentation is a "
-                                   "build requirement: review fails a part with no datasheet "
-                                   "on disk."),
-    "spec-check":        ("read",  "Documentation gate on a netlist spec: every part has a "
-                                   "manufacturer part number, its datasheet on disk, and a "
-                                   "pinmap whose names appear on the cited datasheet page. "
-                                   "schematic refuses an undocumented spec."),
-    "review":            ("read",  "The design-review gate — what an outside reviewer checks "
-                                   "that DRC, ERC and lint do not: spec net rules (straight-"
-                                   "copper nets), diff-pair skew and layer use, RF impedance "
-                                   "graded on the layer the copper is actually on, distributor "
-                                   "package / pin count / operating temperature vs the "
-                                   "footprint and the [env] profile, spec pinmap vs the KiCad "
-                                   "official symbol, spec/board size and layer sync, hold-up "
-                                   "and TVS margin. fab and deliver run it and abort on FAIL."),
-
-    # ---- write: produce files, fast ---------------------------------------
-    "fab":               ("write", "Emit the manufacturing package: gerbers, drill, centroid, "
-                                   "DRC report and manifest."),
-    "deliver":           ("write", "Package a fab directory for upload: CAM-only zip plus the "
-                                   "loose documents whoever places the order actually reads."),
-    "pcbway":            ("write", "Generate the PCBWay order worksheet and assembly "
-                                   "instructions from the board, so the order form is not "
-                                   "answered from memory."),
-    "repair":            ("write", "Copper repairs the review gate asks for: remove router "
-                                   "loops/stubs on differential pairs, re-width RF segments to "
-                                   "what their layer needs, remap pads to corrected nets (rips "
-                                   "old stubs, drops GND vias), net twin pads, add silkscreen "
-                                   "text. Optionally runs the patcher for unrouted pads."),
-    "finish":            ("long",  "Route named nets with freerouting and take back only "
-                                   "their copper (planes declared as power in the DSN); kept "
-                                   "only if DRC does not worsen and the unconnected count "
-                                   "falls. For the connection the grid patcher cannot close."),
-    "drc-fix":           ("write", "Fix the DRC noise a repair leaves behind: rip tracks "
-                                   "that short a swapped footprint's pads, neck widened RF "
-                                   "segments at clearance pinches, snap or delete stray track "
-                                   "ends, move colliding reference text; loops DRC until the "
-                                   "count stops falling."),
-    "tune":              ("long",  "DRC-guarded differential-pair length tuning: bridge "
-                                   "hairpins on the long side, add serpentine meanders on "
-                                   "the short side, accept each step only when kicad-cli "
-                                   "DRC does not get worse, until every pair is inside its "
-                                   "[pairs.*] skew_mm limit."),
-    "models":            ("write", "Fetch real manufacturer STEP models via distributor APIs "
-                                   "and wire them to footprints."),
+    "drc-scope":         ("read",  "What a DRC run actually examined: ignored checks; full=true re-runs with all enabled."),
+    "netlist":           ("read",  "Connection list read back from the board (every net with its pads)."),
+    "stackup":           ("read",  "Layer stack, plane layers, netclass geometry, impedance verifiability."),
+    "verify-models":     ("read",  "Check 3D models sit on their footprint pins."),
+    "spec-check":        ("read",  "Documentation gate on a spec: MPN, datasheet on disk, pinmap on cited page."),
+    "review":            ("read",  "Design-review gate: net rules, pair skew, RF impedance, part data, pinmap, sync. "
+                                   "Compact: verdict, counts, worst N, report path."),
+    "bom-opt":           ("read",  "Part-count report: array, value-merge, package and parallel candidates."),
+    "route-ready":       ("read",  "Pre-route gate scorecard (net budgets, support parts, anchors, congestion); exit 1 on FAIL."),
+    "route-diagnose":    ("read",  "Why nets stayed unrouted and which parts to move; read-only."),
+    "clusters":          ("write", "IC support clusters; apply=true re-seats far support parts to out (input kept)."),
+    "anchor-check":      ("write", "Per-anchor rotation table; apply=true rotates misoriented ones to out."),
+    "route-status":      ("read",  "One line from a router run's status file. Never tail router logs."),
+    "route-wait":        ("read",  "Block until the router run is done/stalled/checkpointed; one line plus result and "
+                                   "diagnosis path. Keep timeout <= 300 here."),
+    "pipeline":          ("write", "Staged pipeline with W/state.json handoff; run one stage with from/to; status=true "
+                                   "prints the table. Stages may take minutes."),
+    # ---- write --------------------------------------------------------------
+    "stackup-define":    ("write", "Define the stackup from a fab profile, solve 50/100 ohm geometry; apply=true writes it."),
+    "schematic":         ("write", "Generate a .kicad_sch from a spec or board and verify it against the netlist."),
+    "datasheets":        ("write", "Fetch every MPN's datasheet via DigiKey/Mouser into the project."),
+    "fab":               ("write", "Manufacturing package: gerbers, drill, centroid, DRC report (runs the review gate)."),
+    "deliver":           ("write", "Package a fab directory for upload: CAM zip plus loose documents."),
+    "pcbway":            ("write", "PCBWay order worksheet and assembly instructions from the board."),
+    "repair":            ("write", "Copper repairs the review gate asks for: pair loops, RF widths, pin remap, text."),
+    "finish":            ("long",  "Route named nets with freerouting; kept only if DRC does not worsen."),
+    "drc-fix":           ("write", "Fix DRC noise a repair leaves behind; loops until the count stops falling."),
+    "tune":              ("long",  "DRC-guarded differential-pair length tuning to the [pairs.*] skew limits."),
+    "models":            ("write", "Fetch real vendor STEP models via distributor APIs and wire them to footprints."),
     "intake":            ("write", "Design interview: capture design intent to JSON."),
-
-    # ---- long: minute-scale pipelines, board-mutating ----------------------
-    "auto":              ("long",  "Full pipeline: place, outline, planes, route, DFM, fab "
-                                   "package. Minutes."),
-    "compact":           ("long",  "Shrink a known-good placement and re-run the downstream "
-                                   "stages. Minutes."),
-    "tournament":        ("long",  "Run competing placement candidates and rank them by a "
-                                   "real router. Many minutes."),
-    "place":             ("long",  "Re-place the board by signal flow. Rewrites positions."),
+    # ---- long: minutes, board-mutating ---------------------------------------
+    "auto":              ("long",  "Full pipeline: place, route, DFM, fab package. Minutes."),
+    "compact":           ("long",  "Shrink a known-good placement and re-run downstream stages. Minutes."),
+    "tournament":        ("long",  "Run competing placements and rank them by a real router. Many minutes."),
+    "place":             ("long",  "Re-place the board (strategy routable: connection-driven). Rewrites positions."),
     "patch":             ("long",  "Regional rip-up and reroute for walled copper islands."),
     "launder":           ("long",  "DRC-driven copper launder pass."),
     "calibrate":         ("long",  "Calibrate placement scoring against router ground truth."),
     "sync-nets":         ("long",  "Synchronise nets onto the board."),
     "replace-footprint": ("long",  "Swap a footprint across the board."),
 }
+
+# Own tool (schema) in tools/list: cmd -> the parameters shown. Everything else in POLICY is reached
+# through fluxplace_run (listed in its description). Unlisted flags still work when passed.
+LISTED = {
+    "doctor": ["problems_only", "context"],
+    "help-brief": ["command"],
+    "review": ["board", "spec", "constraints", "no_api", "waive", "fail_on", "top", "full_output"],
+    "route-ready": ["board", "constraints", "spec", "waive", "all", "top", "full_output"],
+    "route-diagnose": ["board", "nets", "log", "constraints", "spec", "top"],
+    "clusters": ["board", "constraints", "spec", "apply", "out"],
+    "anchor-check": ["board", "constraints", "spec", "apply", "out"],
+    "route-status": ["target"],
+    "route-wait": ["target", "timeout", "until"],
+    "pipeline": ["board", "workdir", "constraints", "spec", "from_stage", "to_stage", "status", "route_budget"],
+    "lint": ["board", "waive", "fail_on"],
+    "eval": ["board", "prc"],
+    "sourcing": ["board", "show_ok"],
+    "spec-check": ["spec", "datasheets", "mpn_map"],
+    "bom-opt": ["spec", "constraints"],
+    "drc-scope": ["board", "report", "full"],
+    "fab": ["board", "out", "spec", "constraints", "no_api"],
+    "deliver": ["fab_dir", "out", "name"],
+}
+RUN_TOOL = "fluxplace_run"
 
 ALWAYS = ("read", "write")
 
@@ -241,8 +204,22 @@ def _json_type(action):
     return {"type": "string"}
 
 
-def schema_for(parser):
-    """JSON Schema for one subparser's arguments."""
+PARAM_DESC_MAX = 80
+
+
+def _short(text, n=PARAM_DESC_MAX):
+    text = " ".join((text or "").split())
+    for stop in ("; ", ". ", " (", " - "):
+        if stop in text:
+            text = text.split(stop)[0]
+    return text if len(text) <= n else text[: n - 1].rstrip() + "~"
+
+
+def schema_for(parser, keep=None):
+    """JSON Schema for one subparser's arguments (descriptions <= 80 chars).
+
+    ``keep`` limits the listed parameters (flags outside it still work when a
+    caller passes them: _argv_for reads the real parser, not this schema)."""
     import argparse as _ap
     props, required = {}, []
     for act in parser._actions:
@@ -250,18 +227,23 @@ def schema_for(parser):
             continue
         if act.dest == argparse.SUPPRESS:
             continue
+        if keep is not None and act.dest not in keep:
+            continue
         frag = _json_type(act)
-        if act.help:
-            frag["description"] = act.help
-        if act.default is not None and not isinstance(act.default, bool) \
-           and act.default != argparse.SUPPRESS:
+        d = _short(act.help)
+        if d:
+            frag["description"] = d
+        if isinstance(act.default, (int, float)) and not isinstance(act.default, bool) \
+           and act.default is not None:
             frag["default"] = act.default
         props[act.dest] = frag
-        if act.required:
+        if act.required or (not act.option_strings and act.nargs not in ("?", "*")):
             required.append(act.dest)
+    if keep is not None:
+        props = {k: props[k] for k in keep if k in props}
     out = {"type": "object", "properties": props}
     if required:
-        out["required"] = required
+        out["required"] = [r for r in required if r in props]
     return out
 
 
@@ -284,31 +266,37 @@ def cmd_from_tool(name):
 
 
 def build_tools(expose_long=False):
-    """The MCP tool list, derived from the live CLI parser."""
+    """The MCP tool list, derived from the live CLI parser: curated commands get their own
+    (short) schema, everything else is reachable through fluxplace_run."""
     import cli
     ap = cli.build_parser()
     subs = _subparsers(ap)
-    tools = []
-    for cmd, parser in sorted(subs.items()):
+    tools, via_run = [], []
+    for cmd, parser in subs.items():
         pol = POLICY.get(cmd)
         if not pol:
             continue
         kind, desc = pol
         if kind == "long" and not expose_long:
             continue
-        note = ""
-        if kind == "write":
-            note = "\n\nWrites files to disk."
-        elif kind == "long":
-            note = ("\n\nLONG-RUNNING and board-mutating: this can take many minutes "
-                    "and rewrites the .kicad_pcb. Prefer the CLI for these.")
+        keep = LISTED.get(cmd)
+        if keep is None and kind != "long":
+            via_run.append(cmd)
+            continue
+        note = " LONG-RUNNING: minutes, rewrites the board." if kind == "long" else ""
+        tools.append({"name": tool_name(cmd), "description": desc + note,
+                      "inputSchema": schema_for(parser, keep), "_kind": kind, "_cmd": cmd})
+    order = list(LISTED)
+    tools.sort(key=lambda t: (order.index(t["_cmd"]) if t["_cmd"] in LISTED else 99, t["name"]))
+    if via_run:
         tools.append({
-            "name": tool_name(cmd),
-            "description": desc + note,
-            "inputSchema": schema_for(parser),
-            "_kind": kind,
-            "_cmd": cmd,
-        })
+            "name": RUN_TOOL,
+            "description": "Run another fluxplace command by name: " + ", ".join(sorted(via_run))
+                           + ". Flags: help_brief.",
+            "inputSchema": {"type": "object", "required": ["command"], "properties": {
+                "command": {"type": "string"},
+                "args": {"type": "object", "description": "flag name (underscores) -> value; board/spec are flags too"}}},
+            "_kind": "write", "_cmd": "run"})
     return tools
 
 
@@ -324,12 +312,19 @@ def _argv_for(cmd, args, parser):
     to CLI users. One code path, one behaviour.
     """
     import argparse as _ap
-    by_dest = {}
+    by_dest, positionals = {}, []
     for act in parser._actions:
         if act.option_strings:
             by_dest[act.dest] = act
+        elif not isinstance(act, _ap._HelpAction) and act.dest not in ("fn", "cmd", "help"):
+            positionals.append(act)
 
     argv = [cmd]
+    for act in positionals:                    # positional parameters (route-ready BOARD ...)
+        val = (args or {}).get(act.dest)
+        if val is None:
+            continue
+        argv += [str(v) for v in val] if isinstance(val, list) else [str(val)]
     for key, val in (args or {}).items():
         act = by_dest.get(key)
         if act is None or val is None:
@@ -348,7 +343,13 @@ def _argv_for(cmd, args, parser):
 
 def call_tool(name, args, expose_long=False):
     """Run one tool. Returns (text, is_error)."""
-    cmd = cmd_from_tool(name)
+    if name == RUN_TOOL:
+        cmd = (args or {}).get("command", "")
+        args = (args or {}).get("args") or {}
+        if not isinstance(args, dict):
+            return ("args must be an object of flag -> value", True)
+    else:
+        cmd = cmd_from_tool(name)
     if not cmd:
         return ("unknown tool: %s" % name, True)
     pol = POLICY.get(cmd)
@@ -405,11 +406,7 @@ class Server:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": self._version()},
-            "instructions": (
-                "fluxplace drives KiCad 10 for PCB placement, routing analysis, "
-                "design linting, live part sourcing and manufacturer packaging. "
-                "Call fluxplace_doctor first if anything behaves unexpectedly — "
-                "most failures are a missing dependency, and it names them."),
+            "instructions": INSTRUCTIONS,
         }
 
     def _version(self):
@@ -478,7 +475,7 @@ class Server:
                 self._write(resp)
 
     def _write(self, obj):
-        self.out.write(json.dumps(obj) + "\n")
+        self.out.write(json.dumps(obj, separators=(",", ":")) + "\n")
         self.out.flush()
 
 

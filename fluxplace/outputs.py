@@ -167,8 +167,8 @@ def _clip(s, n=MSG_WIDTH):
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
-def verdict_line(cmd, rc, parsed, raw):
-    ok = "ok" if rc == 0 else "FAIL"
+def pick_summary(cmd, raw, parsed):
+    """The command's own most informative summary line (verbatim)."""
     summ = None
     for l in raw.splitlines():
         if l.strip().lower().startswith(cmd) and re.search(r"\d", l):
@@ -177,7 +177,12 @@ def verdict_line(cmd, rc, parsed, raw):
     summ = (res[-1] if res else None) or summ or parsed["summary"]
     if not summ:
         summ = next((l.strip() for l in raw.splitlines() if l.strip()), "")
-    summ = _clip(_RE_PATH.sub(r"\1", summ), 160)
+    return summ
+
+
+def verdict_line(cmd, rc, parsed, raw):
+    ok = "ok" if rc == 0 else "FAIL"
+    summ = _clip(_RE_PATH.sub(r"\1", pick_summary(cmd, raw, parsed)), 160)
     lv = {}
     for it in parsed["items"]:
         lv[it["level"]] = lv.get(it["level"], 0) + 1
@@ -339,7 +344,7 @@ def run_compact(cmd, a, fn):
     raw = strip_noise(buf.getvalue())
     if err_msg:
         raw += "\n" + err_msg
-    small = len(raw.encode()) <= MAX_BYTES and raw.count("\n") < MAX_LINES
+    small = len(raw.encode()) <= MAX_BYTES - 300 and raw.count("\n") < MAX_LINES - 4
     base = _report_base(a, cmd)
     paths = []
     if not small:
@@ -363,7 +368,7 @@ def run_compact(cmd, a, fn):
         body = raw.splitlines()
         if body and body[0].strip().lower().startswith(cmd):
             body = body[1:]                         # the verdict line carries it
-        sm = (p["summary"] or "").strip()
+        sm = pick_summary(cmd, raw, p)
         body = [l for l in body if not sm or l.strip() != sm]
         text = verdict_line(cmd, rc, p, raw) + ("\n" + "\n".join(body) if body else "")
     else:

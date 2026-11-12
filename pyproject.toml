@@ -63,6 +63,9 @@ Source = "https://github.com/parkktech/kicad-fluxplace"
 packages = ["fluxplace"]
 py-modules = ["cli"]
 
+[tool.setuptools.package-data]
+fluxplace = ["sample/*"]
+
 # ---------------------------------------------------------------------------
 # Requirements that pip cannot install. `fluxplace doctor` checks every one of
 # these and tells the user exactly what is missing and how to get it.

@@ -3139,6 +3139,10 @@ def build_parser():
     phb.add_argument("command", nargs="?", default=None)
     phb.set_defaults(fn=cmd_help_brief)
 
+    sub.choices["doctor"].add_argument(
+        "--context", action="store_true",
+        help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
+
     from fluxplace import outputs as OUT
     OUT.add_flags(ap, sub)
     return ap
@@ -3148,6 +3152,11 @@ def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
     from fluxplace import outputs as OUT
+    if a.cmd == "doctor" and getattr(a, "context", False):
+        from fluxplace import context_check as CC
+        text, ok = CC.report()
+        print(text)
+        raise SystemExit(0 if ok else 1)
     if a.cmd in OUT.COMPACT_CMDS:
         OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
     else:
