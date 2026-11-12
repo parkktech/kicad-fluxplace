@@ -312,20 +312,30 @@ def _sealed(B, net, ps):
     return out
 
 
+def _owners(B):
+    """{support ref: ownership} from the cluster model (cached on the board)."""
+    if "_own" not in B:
+        from . import clusters as CL
+        B["_own"] = CL.ownership(B, cons=B.get("_cons"), spec=B.get("_spec"), min_pads=3)[0]
+    return B["_own"]
+
+
 def _far(B, net, ps):
-    ics = [p for p in ps if not NOT_IC.match(p["ref"]) and B["parts"][p["ref"]]["n_pads"] > 2]
-    out = []
-    if not ics:
-        return out
+    """A support part (passive/crystal) far from the IC that OWNS it: ownership is
+    the cluster model's (unique-IC net, else reference-designator block); a rail
+    cap whose owner is only a guess is not reported, and a cap is never measured
+    against an arbitrary nearest IC."""
+    own, out = _owners(B), []
     for p in ps:
         part = B["parts"].get(p["ref"])
-        if not part or not PASSIVE.match(p["ref"]) or part["n_pads"] != 2:
+        o = own.get(p["ref"])
+        if not part or not o or o["net"] != net or o["how"] == "spread" or not PASSIVE.match(p["ref"]):
             continue
         other = [q for q in part["pads"] if q["num"] != p["num"]]
         gnd = p["ref"].startswith("C") and other and GROUND.match(other[0]["net"] or "")
         tight = gnd or any(k in net.upper() for k in TIGHT_NAMES)
         lim = FAR_TIGHT_MM if tight else FAR_MM
-        ic = min(ics, key=lambda q: math.hypot(q["x"] - p["x"], q["y"] - p["y"]))
+        ic = next(q for q in B["parts"][o["ic"]]["pads"] if q["num"] == o["pad"])
         d = math.hypot(ic["x"] - p["x"], ic["y"] - p["y"])
         if d > lim:
             out.append({"cause": "FAR_SUPPORT_PART", "part": p["ref"], "toward": _pad_name(ic),
@@ -422,7 +432,9 @@ def _congestion(B, net, ps):
                            "pads or give it a layer/priority"}]
 
 
-def diagnose(B, failed):
+def diagnose(B, failed, cons=None, spec=None):
+    B["_cons"], B["_spec"] = cons, spec
+    B.pop("_own", None)
     pads = defaultdict(list)
     for p in B["pads"]:
         if p["net"]:

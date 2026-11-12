@@ -1547,12 +1547,44 @@ def cmd_route_diagnose(a):
     else:
         failed, src = RD.unrouted_nets(B), "board (2+ pads, no copper)"
     print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}")
-    res = RD.diagnose(B, failed)
+    cons, spec = _text_ctx(a)
+    res = RD.diagnose(B, failed, cons or None, spec)
     print(RD.format_text(res))
     if a.json:
         with open(a.json, "w") as fh:
             _json.dump(res, fh, indent=1)
         print(f"route-diagnose: wrote {a.json}")
+
+
+def _text_ctx(a):
+    """(constraints dict, spec dict|None) from --constraints / --spec."""
+    import json as _json
+    from fluxplace import constraints as C
+    spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
+    return C.load(getattr(a, "constraints", None)), spec
+
+
+def cmd_clusters(a):
+    """IC support clusters; --apply re-seats far support parts, ICs never move."""
+    from fluxplace import routediag as RD, clusters as CL, boardwrite as BW
+    cons, spec = _text_ctx(a)
+    B = RD.load(a.board)
+    cl, links = CL.build(B, cons, spec)
+    far0 = CL.far_parts(cl)
+    print(CL.format_text(cl, links))
+    print(f"clusters: {len(cl)} IC(s), {sum(len(c['supports']) for c in cl)} support part(s), "
+          f"{len(far0)} beyond limit")
+    if not a.apply:
+        return
+    if not a.out:
+        raise SystemExit("clusters --apply needs --out (the input board is never overwritten)")
+    x0, y0, x1, y1 = B["bbox"]
+    moves = CL.reseat(B, cl, everything=a.all, guess=a.guess,
+                      bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), log=print)
+    BW.move_file(a.board, a.out, moves)
+    cl2, _ = CL.build(B, cons, spec)
+    print(f"clusters --apply: moved {len(moves)} part(s); beyond limit {len(far0)} -> "
+          f"{len(CL.far_parts(cl2))}; wrote {a.out}")
 
 
 def _add_review_args(p, gate=False):
@@ -2474,7 +2506,21 @@ def build_parser():
     prd.add_argument("--json", default=None, help="also write the result as JSON")
     prd.add_argument("--track", type=float, default=None, help="default track width mm")
     prd.add_argument("--clearance", type=float, default=None, help="clearance mm")
+    prd.add_argument("--constraints", default=None, help="constraints TOML (net classes, support ownership)")
+    prd.add_argument("--spec", default=None, help="spec JSON (pin names)")
     prd.set_defaults(fn=cmd_route_diagnose)
+
+    pcl = sub.add_parser("clusters",
+                         help="IC support clusters (which 2-pin parts belong to which IC); "
+                              "--apply re-seats far support parts, ICs never move")
+    pcl.add_argument("board")
+    pcl.add_argument("--constraints", default=None)
+    pcl.add_argument("--spec", default=None)
+    pcl.add_argument("--apply", action="store_true")
+    pcl.add_argument("--out", default=None)
+    pcl.add_argument("--all", action="store_true", help="re-seat every support part, not only far ones")
+    pcl.add_argument("--guess", action="store_true", help="also move parts whose owner is a guess")
+    pcl.set_defaults(fn=cmd_clusters)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "

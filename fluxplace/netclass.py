@@ -39,17 +39,17 @@ _RF_TOK = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
 _CLK = re.compile(r"(^|_)(X?TAL\d?|CLK|MCLK|REFCLK|OSC\d?|XO\d?|XIN|XOUT)(_|$|\d)", re.I)
 _SWNAME = re.compile(r"(^|_)(SW|LX|PHASE|SWITCH)\d?($|_)", re.I)
 _PINSW = re.compile(r"^(SW|LX|PH|PHASE|SWITCH|SW\d)$", re.I)
-_CONN = re.compile(r"^(J|P|CN|H|MH|MK|TP|FID|ANT|BT|SW|S)\d|^(MH|MK|FID|TP)")
-_PASSIVE = re.compile(r"^(FB|C|R|L|RN|D|F|TVS)\d")
+_IC = re.compile(r"^(U|IC)\d")
 
 
 def is_ground(net):
     return bool(RD.GROUND.match(net or ""))
 
 
-def is_ic(ref, part):
-    """Non-connector, non-passive part with >= 5 distinct pads."""
-    return (part["n_pads"] >= 5 and not _CONN.match(ref) and not _PASSIVE.match(ref))
+def is_ic(ref, part, min_pads=5):
+    """An integrated circuit: U*/IC* reference with >= 5 distinct pads. Connectors,
+    relays, transformers, inductors and passives are not ICs."""
+    return part["n_pads"] >= min_pads and bool(_IC.match(ref))
 
 
 def is_cap(ref, part):
@@ -153,12 +153,12 @@ def classify(B, cons=None, spec=None):
                     sw = True
             if sw:
                 cls, why = "switch_node", "regulator SW pin to inductor"
-            elif _CLK.search(net) or any(re.match(r"^(Y|X|XO|OSC)\d", r) for r in refs):
+            elif len(ps) >= RAIL_PADS:
+                cls, why = "rail", f"{len(ps)} pads"
+            elif _CLK.search(net) or (len(ps) <= 4 and any(re.match(r"^(Y|X|XO|OSC)\d", r) for r in refs)):
                 cls = "clock"
                 why = "crystal/oscillator" if any(re.match(r"^(Y|X|XO|OSC)\d", r) for r in refs) \
                     and len(ps) <= 3 else "clock-named"
-            elif len(ps) >= RAIL_PADS:
-                cls, why = "rail", f"{len(ps)} pads"
             elif len(ics) == 1 and len(ps) <= 4 and any(
                     is_cap(p["ref"], parts[p["ref"]]) and any(
                         q["num"] != p["num"] and is_ground(q["net"]) for q in parts[p["ref"]]["pads"])
