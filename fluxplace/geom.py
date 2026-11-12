@@ -99,3 +99,53 @@ class Hash:
                 r, s = self.r[k]
                 if s == side and overlap(r, rect, gap):
                     yield k
+
+
+# ---- board outline (Edge.Cuts segments, arcs flattened; even-odd region) -----------------
+def seg_hits_rect(a, b, r):
+    """Does segment ab touch rectangle r (x0, y0, x1, y1)? Liang-Barsky."""
+    x0, y0 = a
+    dx, dy = b[0] - x0, b[1] - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - r[0]), (dx, r[2] - x0), (-dy, y0 - r[1]), (dy, r[3] - y0)):
+        if p == 0:
+            if q < 0:
+                return False
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return False
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return False
+            t1 = min(t1, t)
+    return t0 <= t1
+
+
+def edge_has(edge, x, y):
+    """Even-odd point-in-outline over a list of segments."""
+    ins = False
+    for (ax, ay), (bx, by) in edge:
+        if (ay > y) != (by > y) and x < (bx - ax) * (y - ay) / (by - ay) + ax:
+            ins = not ins
+    return ins
+
+
+def in_outline(B, rect, margin=0.0):
+    """True when `rect` lies inside the board outline with at least `margin` mm to every
+    outline segment. Rounded corners and cut-outs count; falls back to the bounding box
+    when the board has no Edge.Cuts segments."""
+    edge = B.get("edge")
+    if not edge:
+        bx = B["bbox"]
+        return inside(rect, (bx[0] + margin, bx[1] + margin, bx[2] - margin, bx[3] - margin))
+    bx = B["bbox"]
+    if not inside(rect, (bx[0] + margin - 1e-3, bx[1] + margin - 1e-3, bx[2] - margin + 1e-3, bx[3] - margin + 1e-3)):
+        return False
+    infl = (rect[0] - margin, rect[1] - margin, rect[2] + margin, rect[3] + margin)
+    for a, b in edge:
+        if seg_hits_rect(a, b, infl):
+            return False
+    return edge_has(edge, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)

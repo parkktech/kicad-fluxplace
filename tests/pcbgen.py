@@ -38,9 +38,9 @@ def two(ref, x, y, n1, n2, **kw):
     return fp(ref, x, y, [pad("1", -0.5, 0, n1, 0.5, 0.5), pad("2", 0.5, 0, n2, 0.5, 0.5)], **kw)
 
 
-def board(tmp_path, body, name="b.kicad_pcb", outline=(0, 0, 100, 80)):
+def board(tmp_path, body, name="b.kicad_pcb", outline=(0, 0, 100, 80), edge=None):
     x0, y0, x1, y1 = outline
-    edge = f'(gr_rect (start {x0} {y0}) (end {x1} {y1}) (layer "Edge.Cuts"))\n'
+    edge = edge or f'(gr_rect (start {x0} {y0}) (end {x1} {y1}) (layer "Edge.Cuts"))\n'
     p = tmp_path / name
     p.write_text(HEAD + edge + body + ")\n")
     return str(p)

@@ -256,7 +256,8 @@ def _outward(part, pin):
     return (0, 1 if dy >= 0 else -1)
 
 
-def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isolate=False):
+def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isolate=False, legal=None,
+         strict=False, left=None):
     """Re-seat the movable support parts of cluster `cl` around its (fixed) IC.
     Returns {ref: (x, y, angle)}. Rigid: each part keeps its footprint; only its
     origin and rotation change. Candidate positions are tried in order of
@@ -264,11 +265,16 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
     the IC counts as an obstacle, so the unit is laid out as a compact macro cell and
     placed among the other parts afterwards; the first
     one that stays out of every other courtyard, the IC's escape lanes, the
-    board edge and track-forbidding rule areas wins."""
+    board edge and track-forbidding rule areas wins. With `legal` (legality.Legal) a seat must
+    also add no violation there (same-side courtyards of through-hole parts, the real outline with its
+    rounded corners, named keep-outs and side regions, no-through-hole regions). With `strict` a seat
+    farther than the part's limit from its pin is refused: the part stays and is appended to `left`
+    as (ref, reason)."""
     parts = B["parts"]
     ic = cl["ic"]
     icp = parts[ic]
     occ = GM.Hash()
+    halo = _pitch(icp) <= 0.5
     for r, p in parts.items():
         if not isolate or r == ic:          # isolate: lay the unit out on its own (macro cell)
             occ.add(r, p["court"], p["side"])
@@ -312,16 +318,28 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                     continue
                 if zones and _in_zone(zones, part, court):
                     continue
+                if strict and math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) > s["limit"] + (
+                        HALO_MM if halo else 0.0):
+                    continue
+                if legal is not None and legal.part_issues(ref, court, pads):
+                    continue
                 pick, best = (cx, cy, ang, court, cost), cost
         if pick:
             cx, cy, ang, court, cost = pick
             moves[ref] = (round(cx, 4), round(cy, 4), ang)
             occ.add(ref, court, part["side"])
+            if legal is not None:
+                legal.hash.add(ref, court, "x")
             if log:
                 log(f"  {ref} -> ({cx:.2f}, {cy:.2f}) {ang:g} deg  "
                     f"{s['dist']:.1f} -> {cost:.1f} mm (pin {ic}.{s['pad']})")
-        elif log:
-            log(f"  {ref}: no free seat within {reach:g} mm of {ic}.{s['pad']} - left in place")
+        else:
+            why = (f"no legal seat within its {s['limit']:g} mm limit of {ic}.{s['pad']}" if strict
+                   else f"no free seat within {reach:g} mm of {ic}.{s['pad']}")
+            if left is not None:
+                left.append((ref, why))
+            if log:
+                log(f"  {ref}: {why} - left in place")
     return moves
 
 
@@ -332,7 +350,8 @@ def _in_zone(zones, part, court):
                for z in zones)
 
 
-def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None):
+def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None,
+           legal=None, strict=False, left=None):
     """Seat the far support parts of every cluster around their ICs (ICs never
     move). Mutates the board model B as it goes so later clusters see earlier
     moves. Parts already within their limit stay put unless `everything`;
@@ -346,9 +365,12 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
             continue
         if log:
             log(f"{c['ic']}: re-seating {len(sup)} part(s)")
-        m = seat(B, {"ic": c["ic"], "supports": sup}, bounds=bounds, log=log, isolate=isolate)
+        m = seat(B, {"ic": c["ic"], "supports": sup}, bounds=bounds, log=log, isolate=isolate,
+                 legal=legal, strict=strict, left=left)
         for ref, (x, y, a) in m.items():
             GM.place(B["parts"][ref], x, y, a)
+            if legal is not None:
+                legal.refresh(ref)
         allm.update(m)
     return allm
 

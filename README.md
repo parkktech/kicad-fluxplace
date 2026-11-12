@@ -593,6 +593,23 @@ every other courtyard, the IC's escape lanes (1.0 mm beyond fine-pitch pads), th
 board outline and track-forbidding rule areas. Existing copper is not updated:
 apply on an unrouted board.
 
+**Legal re-seat (round 2).** Every candidate seat also goes through `fluxplace/legality.py`
+(`Legal.part_issues`): same-side courtyard overlaps (a through-hole part counts on both sides),
+the real outline with rounded corners and cut-outs (Edge.Cuts arcs are flattened; before this only
+the bounding box was tested), named keep-outs and side regions, track-forbidding rule areas (a
+footprint's own rule areas are exempt), through-hole pads in no-through-hole regions, and locked /
+fixed parts never move. A part with no legal seat within its limit is LEFT IN PLACE and listed
+(`--best-effort` accepts a legal seat farther than the limit). After writing, `clusters --apply`
+re-checks the whole board and prints the new violations against the input (target: 0).
+
+    [placement.keepout.cm5_module]      # no part of side "B" (a through-hole part counts on both) inside
+    rect = [0, 5, 55, 45]               # x0, y0, x1, y1
+    side = "B"                          # "F" | "B" | "both"
+    allow = ["J10", "J11"]              # refs/globs exempt
+    reason = "CM5 body over the B-side sockets"
+    [placement.no_tht.vib_zone]         # no through-hole pad inside (checked by route-ready too)
+    rect = [10, 10, 20, 20]
+
 ### 3. Anchor orientation — `fluxplace anchor-check BOARD [--apply --out OUT]`
 
 Connectors, modules and sockets are auto-detected (J/P/CN/X refs with >= 6 pads,

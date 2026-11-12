@@ -66,8 +66,15 @@ def allowances(part, pads, court):
 
 
 def keepout_rects(B, cons):
-    """[(rect, sides, allow, max_height)] from [[keepout]]."""
+    """[(rect, sides, allow, max_height, name)] from [[keepout]] and from the named rectangles
+    `[placement.keepout.NAME] = {rect = [x0, y0, x1, y1], side = "B"|"F"|"both", allow = [refs],
+    reason = "..."}`: no part of that side (a through-hole part counts on both) inside the rectangle."""
     out = []
+    for name, k in sorted(((cons or {}).get("placement", {}) or {}).get("keepout", {}).items()):
+        if isinstance(k, dict) and k.get("rect"):
+            side = str(k.get("side", "both")).upper()
+            out.append((tuple(float(v) for v in k["rect"]), {"F", "B"} if side in ("BOTH", "") else {side[0]},
+                        list(k.get("allow", [])), None, name))
     for k in (cons or {}).get("keepout", []) or []:
         rect = k.get("rect")
         if not rect and k.get("around"):
@@ -80,7 +87,7 @@ def keepout_rects(B, cons):
         if rect:
             side = str(k.get("side", "both")).upper()
             out.append((tuple(rect), {"F", "B"} if side in ("BOTH", "") else {side[0]},
-                        list(k.get("allow", [])), k.get("max_height_mm")))
+                        list(k.get("allow", [])), k.get("max_height_mm"), k.get("name", "keepout")))
     return out
 
 
@@ -94,6 +101,11 @@ class _Model:
                        max(q[0] for q in z["pts"]), max(q[1] for q in z["pts"]), z)
                       for z in B["zones"] if z["keepout"] and z["no_tracks"] and z["pts"]]
         self._rel = {}
+        self.em = float(((cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3))
+
+    def in_outline(self, rect):
+        """Courtyard inside the real outline (rounded corners, cut-outs) with the edge clearance."""
+        return GM.in_outline(self.B, rect, self.em)
 
     def rel(self, ref, ang):
         """(inflated rect, bare court) relative to the origin, cached per angle."""
@@ -112,20 +124,25 @@ class _Model:
 
     def forbidden(self, ref, rect):
         """Rects this part must stay out of."""
+        return [r for _n, r in self.forbidden_named(ref)]
+
+    def forbidden_named(self, ref):
+        """[(name, rect)] this part must stay out of."""
         part = self.B["parts"][ref]
         sd = self.sides(ref)
         out = []
-        for r, ks, allow, mh in self.ko:
+        for r, ks, allow, mh, name in self.ko:
             if any(fnmatch.fnmatch(ref, g) for g in allow):
                 continue
             if (part["tht"] and sd & ks) or (not part["tht"] and sd & ks and mh is None):
-                out.append(r)
+                out.append((name, r))
         # track-forbidding rule areas: nothing can be routed to a pad inside one (the
         # area's own part, e.g. the antenna it is named after, is exempt)
         layer = "F.Cu" if part["side"] == "F.Cu" else "B.Cu"
         for x0, y0, x1, y1, z in self.zones:
-            if (layer in z["layers"] or part["tht"]) and ref.upper() not in z["name"].upper():
-                out.append((x0, y0, x1, y1))
+            if (layer in z["layers"] or part["tht"]) and ref.upper() not in z["name"].upper() \
+                    and z.get("owner") != ref:
+                out.append((z["name"] or "rule area", (x0, y0, x1, y1)))
         return out
 
 
@@ -319,7 +336,8 @@ def _stuck(c, tier):
     for k in tier:
         e = c.E[k]
         me = c.erect(k)
-        hit = not GM.inside(c.erect(k, False), c.bounds) or any(GM.overlap(me, f) for f in c.forb(k, me))
+        hit = not GM.inside(c.erect(k, False), c.bounds) or not c.M.in_outline(c.erect(k, False)) \
+            or any(GM.overlap(me, f) for f in c.forb(k, me))
         if not hit:
             hit = any(e.sides & c.sides_of(o) for o in c.static.hits(me, "x", 0.0)) or any(
                 e.sides & c.E[o].sides for o in dyn.hits(me, "x", 0.0, ignore=(k,)))
@@ -349,7 +367,7 @@ def _seat(c, stuck, tier, inflate=True, step=0.5, reach=80.0):
         done = False
         for _d, dx, dy in ring:
             x, y = x0 + dx, y0 + dy
-            if not GM.inside(_rect((x, y), e.bare), c.bounds):
+            if not GM.inside(_rect((x, y), e.bare), c.bounds) or not c.M.in_outline(_rect((x, y), e.bare)):
                 continue
             me = _rect((x, y), rel)
             if any(GM.overlap(me, f) for f in c.forb(k, me)):
@@ -385,7 +403,7 @@ def _clear_hot(c, hot, reach=6.0, step=0.5):
         for _, dx, dy in cands:
             x, y = e.pos[0] + dx, e.pos[1] + dy
             rc, ri = _rect((x, y), e.bare), _rect((x, y), e.infl)
-            if not GM.inside(rc, c.bounds) or in_hot(rc):
+            if not GM.inside(rc, c.bounds) or not c.M.in_outline(rc) or in_hot(rc):
                 continue
             if any(o != ("E", k) for o in c.static.hits(ri, "x")):
                 continue
@@ -403,7 +421,7 @@ def verify(B, M, res, bounds):
     court = {}
     for r, p in parts.items():
         court[r] = GM.moved(p, *res[r][:3])[1] if r in res else p["court"]
-    outside = [r for r in res if not GM.inside(court[r], bounds)]
+    outside = [r for r in res if not GM.inside(court[r], bounds) or not M.in_outline(court[r])]
     h = GM.Hash(5.0)
     for r, c in court.items():
         h.add(r, c, "x")

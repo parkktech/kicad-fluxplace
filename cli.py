@@ -1698,13 +1698,23 @@ def cmd_clusters(a):
         return
     if not a.out:
         raise SystemExit("clusters --apply needs --out (the input board is never overwritten)")
+    from fluxplace import legality as LGL, routable as RB
     x0, y0, x1, y1 = B["bbox"]
-    moves = CL.reseat(B, cl, everything=a.all, guess=a.guess,
-                      bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), log=print)
+    L = LGL.Legal(B, cons, RB._fixed_set(B, cons))
+    before = L.issues()
+    left = []
+    moves = CL.reseat(B, cl, everything=a.all, guess=a.guess, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2),
+                      log=print, legal=L, strict=not a.best_effort, left=left)
     BW.move_file(a.board, a.out, moves)
     cl2, _ = CL.build(B, cons, spec)
+    after = LGL.Legal(B, cons, RB._fixed_set(B, cons)).issues()
+    new = {k: sorted(set(after[k]) - set(before[k])) for k in after}
     print(f"clusters --apply: moved {len(moves)} part(s); beyond limit {len(far0)} -> "
           f"{len(CL.far_parts(cl2))}; wrote {a.out}")
+    for ref, why in left:
+        print(f"  left in place: {ref}: {why}")
+    print("legality (new violations vs the input): " + ", ".join(f"{k} {len(v)}" for k, v in new.items())
+          + (" -- " + "; ".join(f"{k}: {', '.join(v[:6])}" for k, v in new.items() if v) if LGL.count(new) else ""))
 
 
 def cmd_route_ready(a):
@@ -2764,6 +2774,8 @@ def build_parser():
     pcl.add_argument("--out", default=None)
     pcl.add_argument("--all", action="store_true", help="re-seat every support part, not only far ones")
     pcl.add_argument("--guess", action="store_true", help="also move parts whose owner is a guess")
+    pcl.add_argument("--best-effort", action="store_true",
+                     help="also accept a legal seat farther than the part's limit (default: leave such a part and report it)")
     pcl.set_defaults(fn=cmd_clusters)
 
     prv = sub.add_parser("review",

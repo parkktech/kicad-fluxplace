@@ -69,6 +69,24 @@ def _f(node, tag, n=2):
     return v[:n]
 
 
+def _edge_segments(g):
+    """Edge.Cuts graphic -> [((x0, y0), (x1, y1))]: arcs flattened to 24 chords, rectangles and
+    circles closed. The outline is the even-odd region these segments bound."""
+    tag = g[0][3:]
+    if tag == "circle":
+        P = lambda t: tuple((BF._nums(BF._first(g, t)) + [0.0, 0.0])[:2])
+        (cx, cy), (ex, ey) = P("center"), P("end")
+        r = math.hypot(ex - cx, ey - cy)
+        pts = [(cx + r * math.cos(2 * math.pi * i / 24), cy + r * math.sin(2 * math.pi * i / 24))
+               for i in range(25)]
+    else:
+        pts, _w = BF._shape_pts(g)
+        if tag in ("rect", "poly") and len(pts) > 2:
+            pts = pts + [pts[0]]
+    return [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)] if tag in (
+        "line", "arc", "rect", "poly", "circle", "curve") else []
+
+
 def load(path, track=None, clearance=None):
     root = BF.parse(open(path, errors="replace").read())
     copper = [a[1] for a in (BF._first(root, "layers") or [])[1:]
@@ -141,7 +159,7 @@ def load(path, track=None, clearance=None):
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
-            zones.append(zone_of(z))
+            zones.append(dict(zone_of(z), owner=ref))
         cy_pts = []
         for g in fp:
             if (isinstance(g, list) and g and g[0].startswith("fp_")
@@ -185,10 +203,11 @@ def load(path, track=None, clearance=None):
                          "w": _f(n, "width", 1)[0],
                          "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0]})
 
-    xs, ys = [], []
+    xs, ys, edge = [], [], []
     for g in root:
         if isinstance(g, list) and g and g[0].startswith("gr_") and (
                 BF._atoms(BF._first(g, "layer")) or [""])[0] == "Edge.Cuts":
+            edge += _edge_segments(g)
             for k in g:
                 if isinstance(k, list) and k and k[0] in ("start", "end", "mid", "center"):
                     v = BF._nums(k)
@@ -211,7 +230,7 @@ def load(path, track=None, clearance=None):
         except (KeyError, ValueError, TypeError):
             pass
     return {"pads": pads, "parts": parts, "zones": zones, "segs": segs,
-            "vias": vias, "copper": copper, "bbox": bbox,
+            "vias": vias, "copper": copper, "bbox": bbox, "edge": edge,
             "diag": math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]),
             "track": track if track is not None else dtrack,
             "clearance": clearance if clearance is not None else dclear}
