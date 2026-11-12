@@ -24,6 +24,7 @@ from . import legalise as LG
 from . import legality as LGL
 from . import netclass as NC
 from . import preroute as PR
+from . import templates as TP
 
 _MECH_PREFIX = ("MH", "MK", "FID", "TP", "H")
 XING_MM = 3.0       # one ratsnest crossing among a unit's own nets costs this much length
@@ -33,8 +34,9 @@ def _fixed_set(B, cons):
     return PR.fixed_parts(B, cons)
 
 
-def units(B, cl, fixed):
-    """{key: [refs]} — IC + confident support parts as one rigid unit, others alone."""
+def units(B, cl, fixed, groups=None):
+    """{key: [refs]} — IC + confident support parts as one rigid unit, others alone. `groups`
+    = {template name: [refs]} (templates.group_of): each is ONE unit, keyed by its first movable member."""
     out, taken = {}, set()
     for c in cl:
         if c["ic"] in fixed:
@@ -46,39 +48,96 @@ def units(B, cl, fixed):
     for r in sorted(B["parts"]):
         if r not in taken and r not in fixed:
             out[r] = [r]
+    for name, grp in sorted((groups or {}).items()):
+        grp = [r for r in grp if r not in fixed]
+        gs = set(grp)
+        for k in [k for k, ms in out.items() if set(ms) & gs]:
+            del out[k]
+        if grp:
+            out[grp[0]] = grp
     return out
 
 
+PASS_SHARE, PASS_RATIO, BUS_NODES = 0.6, 0.25, 4
+
+
 def chains(B, cls, fixed, unit_of):
-    """[[fixed_a, unit, unit, ..., fixed_b]] — paths over 2-pad non-rail nets whose
-    interior units each have exactly two such neighbours."""
-    nbr = defaultdict(set)
-    for net, ps in NC.net_pads(B).items():
-        info = cls.get(net)
-        if not info or info["class"] == "rail" or len(ps) != 2:
+    """[[end, unit, unit, ..., end]] - signal chains, ends fixed OR movable.
+
+    Graph: nodes are units (an IC with its support parts is one node); every non-rail net that
+    reaches 2..4 distinct nodes links them with the net's class weight (a bigger net is a bus, not a
+    link). A node is PASS-THROUGH when its two strongest neighbours carry >= 60 % of its total link
+    weight and the weaker of the two >= 25 % of the stronger; anything else (a hub with many
+    neighbours, a connector) ends a chain, and so does a node whose strong pair does not include the
+    previous node (a controller that is a pass-through of its SPI bus only). A chain is end, pass-through nodes..., end, found by
+    following each pass-through node's other strong neighbour.
+
+    The previous detector needed (a) both ends FIXED, (b) 2-pad nets only and (c) exactly two
+    neighbours per interior node; on the real board that missed audio U5 -> T500 -> K1 (neither end
+    fixed, and T500 has a net to U5 directly as well as through U5's DC-block C500) and
+    CAN controller -> isolated transceiver -> J400 (controller not fixed, CAN_H/L are 3-pad nets
+    with the ESD diode, the transceiver has supply/enable neighbours besides)."""
+    link = defaultdict(lambda: defaultdict(float))
+    sig = {n: ps for n, ps in NC.net_pads(B).items()
+           if cls.get(n) and cls[n]["class"] != "rail" and len(ps) >= 2}
+    nets_of = defaultdict(set)
+    node_of = lambda r: unit_of.get(r, r)
+    for n, ps in sig.items():
+        for p in ps:
+            nets_of[node_of(p["ref"])].add(n)
+    crowd = {n: len({node_of(p["ref"]) for p in ps}) for n, ps in sig.items()}
+    parts = B["parts"]
+
+    def shunt(node):
+        """A small non-IC part that only hangs on nets shared by 3+ nodes (TVS, pull-up, termination)."""
+        if node in fixed or node not in parts or NC.is_ic(node, parts[node]) or parts[node]["n_pads"] > 4:
+            return False
+        return all(crowd[n] >= 3 for n in nets_of[node]) or len(nets_of[node]) <= 1
+
+    for net, ps in sig.items():
+        info = cls[net]
+        # shunts are never links
+        nodes = sorted({node_of(p["ref"]) for p in ps if not shunt(node_of(p["ref"]))})
+        if not 2 <= len(nodes) <= BUS_NODES:
             continue
-        a, b = (unit_of.get(p["ref"], p["ref"]) for p in ps)
-        if a != b:
-            nbr[a].add(b)
-            nbr[b].add(a)
-    out, seen = [], set()
-    fixed_keys = {k for k in nbr if k in fixed}
-    for a in sorted(fixed_keys):
-        for first in sorted(nbr[a]):
-            if first in fixed or len(nbr[first]) != 2 or first in seen:
+        w = max(info["weight"], 1.0)
+        for i, a in enumerate(nodes):
+            for b in nodes[i + 1:]:
+                link[a][b] += w
+                link[b][a] += w
+
+    def strong(n):
+        return sorted(link[n].items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def through(n):
+        s = strong(n)
+        if n in fixed or len(s) < 2:
+            return None
+        tot = sum(w for _, w in s)
+        if (s[0][1] + s[1][1]) / tot >= PASS_SHARE and s[1][1] >= PASS_RATIO * s[0][1]:
+            return s[0][0], s[1][0]
+        return None
+
+    T = {n: through(n) for n in link}
+    out, used = [], set()
+    for a in sorted(n for n in link if not T[n]):
+        for first in (m for m, _ in strong(a)):
+            if not T.get(first) or a not in T[first] or first in used:
                 continue
             path, prev, cur = [a, first], a, first
-            while True:
-                nxt = [n for n in nbr[cur] if n != prev]
-                if len(nxt) != 1:
+            while T.get(cur) and prev in T[cur]:
+                nxt = T[cur][0] if T[cur][1] == prev else T[cur][1]
+                if nxt in path:
                     break
-                prev, cur = cur, nxt[0]
-                path.append(cur)
-                if cur in fixed or len(nbr[cur]) != 2 or cur in path[:-1]:
-                    break
-            if path[-1] in fixed and path[-1] != a and len(path) >= 3:
+                path.append(nxt)
+                prev, cur = cur, nxt
+            if len(path) >= 3 and path[0] != path[-1]:       # the last node ends the chain: a hub, or one that does not pass it on
+                if set(path[1:-1]) & used:
+                    continue
+                if [path[-1]] + path[1:-1][::-1] + [path[0]] in out:
+                    continue
                 out.append(path)
-                seen |= set(path[1:-1])
+                used |= set(path[1:-1])
     return out
 
 
@@ -93,6 +152,9 @@ class Placer:
         self.max_rounds = int(pl.get("max_rounds", 6))
         self.origin = self.snapshot()
         self.bad0 = self.issues()
+        self.templates = TP.load(B, self.cons)
+        self.groups = {}         # template name -> refs, rigid after the template is placed
+        self.reports = []
         self.best = None         # (score, snapshot)
         self.history = []
 
@@ -224,10 +286,37 @@ class Placer:
         self._nets()
         return cl
 
+    def apply_templates(self):
+        """Place every [placement.template.*], then keep each group rigid. A group containing a fixed
+        part is fixed as a whole."""
+        if not self.templates:
+            return
+        L = LGL.Legal(self.B, self.cons, self.fixed)
+        for t in self.templates:
+            mv, rep = TP.place(self.B, self.cons, self.spec, t, self.cls, self.fixed, log=self.log, legal=L)
+            self.moves.update(mv)
+            self._nets()
+            self.log(TP.format_report(rep))
+            self.reports.append(rep)
+            cl, _ = CL.build(self.B, self.cons, self.spec)
+            x0, y0, x1, y1 = self.B["bbox"]
+            mv2 = CL.reseat(self.B, [c for c in cl if c["ic"] in t["refs"] and c["ic"] not in self.fixed],
+                            everything=True, bounds=(x0 + .2, y0 + .2, x1 - .2, y1 - .2), legal=L)
+            self.moves.update(mv2)
+            self._nets()
+            grp = TP.group_of(self.B, self.cls, t, cl)
+            self.groups[t["name"]] = grp
+            if any(r in self.fixed for r in t["refs"]):
+                self.fixed |= set(grp)
+        self.rigid = {g[0] for g in (
+            [r for r in grp if r not in self.fixed] for grp in self.groups.values()) if g}
+
+    rigid = frozenset()
+
     def converge(self, cl, rounds=6, sweeps=25, tol=0.25):
         self._nets()
         P = self.B["parts"]
-        U = units(self.B, cl, self.fixed)
+        U = units(self.B, cl, self.fixed, self.groups)
         unit_of = {r: k for k, ms in U.items() for r in ms}
         ch = chains(self.B, self.cls, self.fixed, unit_of)
         self.log(f"{len(U)} movable unit(s), {len(ch)} signal chain(s)")
@@ -259,7 +348,7 @@ class Placer:
             turned = 0
             for k in order:
                 ms = U[k]
-                if k in self.fixed or P[k]["n_pads"] < 5:
+                if k in self.fixed or k in self.rigid or P[k]["n_pads"] < 5:
                     continue
                 base = self.cost(ms, k, 0, 0, 0.0)
                 best = min(((self.cost(ms, k, 0, 0, d), d) for d in (90.0, 180.0, 270.0)), default=(base, 0.0))
@@ -307,7 +396,8 @@ class Placer:
             hot = [(x - c / 2, y - c / 2, x + c / 2, y + c / 2) for _o, x, y in cg["worst"]]
         except Exception:
             pass
-        res, rep = LG.legalise(self.B, targets, fixed=self.fixed, cons=self.cons, hot=hot, strict=strict, units=U, escape=escape)
+        res, rep = LG.legalise(self.B, targets, fixed=self.fixed, cons=self.cons, hot=hot, strict=strict, units=U, escape=escape,
+                                rigid=self.rigid)
         for r, (x, y, a) in res.items():
             if (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"]) != (x, y, a):
                 self.commit(r, x, y, a)
@@ -321,6 +411,7 @@ class Placer:
         self.log(f"input board: score {sc0:.0f}")
         self.turn_anchors()
         cl = self.seat_support()
+        self.apply_templates()
         U = self.converge(cl, rounds)
         try:                                    # settle for real: with escape allowances, else without
             self.legalise(U)

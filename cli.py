@@ -1717,6 +1717,33 @@ def cmd_clusters(a):
           + (" -- " + "; ".join(f"{k}: {', '.join(v[:6])}" for k, v in new.items() if v) if LGL.count(new) else ""))
 
 
+def cmd_templates(a):
+    """[placement.template.*] structure templates (tree / chain): place them, print the lengths."""
+    from fluxplace import routediag as RD, templates as TP, legality as LGL, routable as RB, boardwrite as BW
+    cons, spec = _text_ctx(a)
+    B = RD.load(a.board)
+    try:
+        T = TP.load(B, cons)
+    except ValueError as e:
+        raise SystemExit(f"templates: {e}")
+    if not T:
+        raise SystemExit("templates: no [placement.template.*] in the constraints")
+    fixed = RB._fixed_set(B, cons)
+    L = LGL.Legal(B, cons, fixed)
+    before = L.issues()
+    moves = {}
+    for t in T:
+        mv, rep = TP.place(B, cons, spec, t, fixed=fixed, legal=L)
+        moves.update(mv)
+        print(TP.format_report(rep))
+    after = LGL.Legal(B, cons, fixed).issues()
+    new = {k: sorted(set(after[k]) - set(before[k])) for k in after}
+    print("legality (new violations vs the input): " + ", ".join(f"{k} {len(v)}" for k, v in new.items()))
+    if a.out:
+        BW.move_file(a.board, a.out, moves)
+        print(f"templates: moved {len(moves)} part(s); wrote {a.out}")
+
+
 def cmd_route_ready(a):
     """Pre-route gate scorecard; exit 1 when any FAIL-level check fails."""
     import json as _json
@@ -2777,6 +2804,14 @@ def build_parser():
     pcl.add_argument("--best-effort", action="store_true",
                      help="also accept a legal seat farther than the part's limit (default: leave such a part and report it)")
     pcl.set_defaults(fn=cmd_clusters)
+
+    ptp = sub.add_parser("templates", help="place [placement.template.NAME] structure templates "
+                                           "(kind = tree | chain) and report the net lengths achieved")
+    ptp.add_argument("board")
+    ptp.add_argument("--constraints", default=None)
+    ptp.add_argument("--spec", default=None)
+    ptp.add_argument("--out", default=None, help="write the board here (default: report only)")
+    ptp.set_defaults(fn=cmd_templates)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "

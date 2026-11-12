@@ -81,3 +81,19 @@ def test_cli_place_routable(tmp_path):
                         "routable", "--out", str(out)], capture_output=True, text=True)
     assert r.returncode == 0 and "BEFORE" in r.stdout and "AFTER" in r.stdout, r.stderr
     assert os.path.exists(out)
+
+
+def test_chain_detection_movable_ends_three_pad_nets_and_a_hub(tmp_path):
+    # controller U1 (hub: SPI to U9 and J9) -> transceiver U2 -> choke L1 -> fixed connector J1;
+    # the line pair is 3-pad (choke, connector, TVS D1); the transceiver also has a supply-enable net
+    b = g.ic("U1", 20, 20, ["TXD", "RXD", "SCK", "MOSI", "CS", "X"]) + g.ic("U9", 20, 50, ["SCK", "MOSI", "a", "b", "c", "d"])
+    b += g.fp("J9", 5, 50, [g.pad("1", 0, 0, "SCK"), g.pad("2", 1, 0, "MOSI"), g.pad("3", 2, 0, "CS")])
+    b += g.ic("U2", 50, 20, ["TXD", "RXD", "XH", "XL", "EN", "e"])
+    b += g.fp("L1", 70, 20, [g.pad("1", 0, 0, "XH"), g.pad("2", 1, 0, "XL"), g.pad("3", 0, 1, "CH"), g.pad("4", 1, 1, "CL")])
+    b += g.fp("J1", 95, 20, [g.pad("1", 0, 0, "CH"), g.pad("2", 1, 0, "CL")], locked=True)
+    b += g.fp("D1", 85, 30, [g.pad("1", 0, 0, "CH"), g.pad("2", 1, 0, "CL"), g.pad("3", 2, 0, "GND")])
+    B = RD.load(g.board(tmp_path, b))
+    cls = RB.NC.classify(B)
+    fixed = {"J1"}
+    ch = RB.chains(B, cls, fixed, {})
+    assert any(c[0] in ("U1", "J1") and set(c) >= {"U1", "U2", "L1", "J1"} for c in ch), ch

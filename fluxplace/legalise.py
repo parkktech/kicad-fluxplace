@@ -198,10 +198,10 @@ def check_outline(B, positions, bounds=None):
 
 
 def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400, log=None,
-             strict=True, units=None, escape=True):
+             strict=True, units=None, escape=True, rigid=()):
     """`targets` = {ref: (x, y, angle)} desired origins of the MOVABLE parts (every
     other part stays put). `units` = {key: [refs]} makes those parts move as one
-    rigid body (an IC with its support parts). -> ({ref: (x, y, angle)}, report).
+    rigid body (an IC with its support parts); keys in `rigid` (structure templates) are never split. -> ({ref: (x, y, angle)}, report).
     Raises PlacementError when a part cannot be kept inside the outline / out of
     overlap (strict=False returns the best effort and the report instead)."""
     bounds = bounds or B["bbox"]
@@ -213,7 +213,7 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
     groups, seen = [], set()
     for k, ms in (units or {}).items():
         ms = [m for m in ms if m in want]
-        if len(ms) > 1 and _sprawl(M, ms, want) > SPRAWL:
+        if len(ms) > 1 and k not in rigid and _sprawl(M, ms, want) > SPRAWL:
             continue                # too loose to move as one body: its parts move singly
         if ms:
             groups.append(ms)
