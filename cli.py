@@ -1872,12 +1872,7 @@ def cmd_silk(a):
     if a.fix:
         out = a.board if a.in_place else (a.out or os.path.splitext(a.board)[0] + ".silk.kicad_pcb")
         res = SK.fit(sc, cfg, before, side=a.side)
-        if res["plan"]:
-            SK.apply_plan(a.board, out, res["plan"])
-        elif out != a.board:
-            import shutil
-            shutil.copy(a.board, out)
-        shown = (SK.check(SK.load_scene(out), cfg, a.side) if res["plan"] else before) + res["findings"]
+        shown, _ = SK.apply_guarded(a.board, out, sc, cfg, before, res, a.side)
         label = out
     if a.json:
         print(_json.dumps({"board": label or a.board, "before": SK.counts(before), "after": SK.counts(shown),
@@ -1892,6 +1887,12 @@ def cmd_silk(a):
             for sd, ti in res["title"].items():
                 print(f"  TITLE {sd}: '{ti['text']}' at ({ti['x']}, {ti['y']}) height {ti['h']:g} mm, "
                       f"{'rotated 90, ' if ti['angle'] else ''}clearance margin {ti['margin_mm']} mm")
+            for r in res.get("reverted", []):
+                print(f"  REVERTED {r}: the fit made it worse; left where it was")
+            ug = SK.unfixable_graphics(shown)
+            if ug:
+                print("  NEEDS FOOTPRINT FIX (silk --fix cannot move footprint artwork): "
+                      + ", ".join(f"{r} {c.replace('SILK_', '')}" for r, c in ug))
             for r in res["hidden"]:
                 print(f"  HIDDEN {r}: no legal silkscreen spot; reference moved to the Fab layer")
             print(f"silk --fix: {len(res['moved'])} reference(s) re-placed ({len(res['shrunk'])} shrunk), "

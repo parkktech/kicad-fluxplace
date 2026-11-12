@@ -649,7 +649,7 @@ def check(sc, cfg, side="both"):
             what = {"SILK_OFF_BOARD": "outside the board or too close to Edge.Cuts",
                     "SILK_OVER_PAD": "over pad " + ", ".join(sorted(who)[:3]),
                     "SILK_OVER_HOLE": "over hole " + ", ".join(sorted(who)[:3])}[code]
-            out.append(_fnd(code, f"{own or 'board'} silk graphics {what}", [own] + [w.split(".")[0] for w in who]
+            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: edit the footprint, silk --fix only moves text]", [own] + [w.split(".")[0] for w in who]
                             if code != "SILK_OFF_BOARD" else [own]))
     # reference visibility / marks
     ref_on_silk = {t["owner"] for t in sc["texts"] if t["kind"] == "ref"}
@@ -1144,16 +1144,49 @@ def summary_line(findings, prefix="silk"):
             f"{c.get('SILK_OVERLAP', 0) + c.get('SILK_UNDER_PART', 0)} overlap/covered")
 
 
+def _hard_text_owners(findings):
+    """Owners whose reference TEXT has a FAIL-level finding."""
+    return {f["msg"].split()[0] for f in findings if f["level"] == FAIL and " ref text " in f["msg"]}
+
+
+def apply_guarded(board, out, sc, cfg, before, res, side="both", py=None):
+    """Write res['plan'] to `out` and re-check. FINAL GUARD: the fit must never end with more FAIL findings than it
+    started with; texts that were legal before and are hard-violating after are put back (plan entry dropped) and the
+    board is written again. -> (after findings, reverted owners)."""
+    plan, reverted = res["plan"], []
+    ok_before = _hard_text_owners(before)
+    for _ in range(3):
+        if plan:
+            apply_plan(board, out, plan, py)
+        elif os.path.abspath(board) != os.path.abspath(out):
+            import shutil
+            shutil.copy(board, out)
+        after = (check(load_scene(out, py), cfg, side) if plan else list(before))
+        if not plan or fails(after) <= fails(before):
+            break
+        bad = [o for o in _hard_text_owners(after) - ok_before if o in plan]
+        if not bad:
+            break
+        for o in bad:
+            plan.pop(o)
+            reverted.append(o)
+            for k in ("moved", "hidden", "shrunk", "kept"):
+                if o in res.get(k, []):
+                    res[k].remove(o)
+    res["reverted"] = reverted
+    return after + res.get("findings", []), reverted
+
+
+def unfixable_graphics(findings):
+    """FAIL findings on footprint artwork (the fit cannot touch these): [(ref, code)]."""
+    return sorted({(f["msg"].split()[0], f["code"]) for f in findings if f["level"] == FAIL and " silk graphics " in f["msg"]})
+
+
 def fix_board(board, out, cons=None, side="both", only=None, py=None, log=print, spec=None, title=None):
-    """check -> fit -> write `out` -> re-check. -> (before, after, result); the NO_ROOM findings are in after."""
+    """check -> fit -> guarded write `out` -> re-check. -> (before, after, result); the NO_ROOM findings are in after."""
     sc, cfg, before = run_check(board, cons, side, py, spec=spec, title=title)
     res = fit(sc, cfg, before, only=only, side=side, log=log)
-    if res["plan"]:
-        apply_plan(board, out, res["plan"], py)
-    elif os.path.abspath(board) != os.path.abspath(out):
-        import shutil
-        shutil.copy(board, out)
-    after = (check(load_scene(out, py), cfg, side) if res["plan"] else before) + res.get("findings", [])
+    after, _ = apply_guarded(board, out, sc, cfg, before, res, side, py)
     return before, after, res
 
 
