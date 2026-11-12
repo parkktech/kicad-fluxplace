@@ -127,15 +127,21 @@ def _guess_out(cmd):
 
 
 def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
-               log_path=None, every=STATUS_EVERY, stall_s=DEFAULT_STALL_S):
+               log_path=None, every=STATUS_EVERY, stall_s=DEFAULT_STALL_S,
+               status_path=None, extra=None, keep_open=False):
     """Drop-in for ``subprocess.run(cmd, capture_output=True, text=True, timeout=...)``
     that streams the router's output to a log file and keeps a status file current.
+
+    Batch routing (batchroute.py) runs many of these under ONE status file: `status_path`
+    names it, `extra` (a dict the caller keeps mutating) is merged over every write, and
+    `keep_open` leaves the state "running" (owned by the caller's pid) when the run ends,
+    so route-wait does not report "done" after the first batch.
 
     Returns CompletedProcess(stdout=<log text>); raises TimeoutExpired like run().
     """
     out = out or _guess_out(cmd) or os.path.join(cwd or ".", "router")
     out = os.fspath(out)
-    spath = status_path_for(out)
+    spath = status_path or status_path_for(out)
     lpath = log_path or out + ".router.log"
     parser = LogParser()
     t0 = time.time()
@@ -174,7 +180,12 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
                       "stalled_s": round(now - (parser.progress_ts or t0)),
                       "stall_limit_s": stall_s,
                       "checkpoint": ckpt["path"], "checkpoint_n": ckpt["n"]})
+        if extra:
+            state.update(extra)
         if final:
+            if keep_open:
+                state["pid"] = os.getpid()
+                final, rc = "running", None
             state["state"] = final
             state["rc"] = rc
         _atomic(spath, state)
@@ -212,14 +223,21 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
     return subprocess.CompletedProcess(cmd, rc, stdout=text, stderr="")
 
 
+KILL_WAIT = {"INT": 4.0, "TERM": 5.0}     # seconds to wait after each signal
+
+
 def _kill(proc):
+    """SIGINT (a router that handles Ctrl-C may flush what it has), then SIGTERM, then SIGKILL."""
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        for sig, key in ((signal.SIGINT, "INT"), (signal.SIGTERM, "TERM")):
+            os.killpg(proc.pid, sig)
+            try:
+                proc.wait(timeout=KILL_WAIT[key])
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -256,6 +274,9 @@ def one_line(st):
     n = st.get("nets_total")
     done = st.get("nets_routed", 0)
     bits = [f"route {st['state']}"]
+    if st.get("mode") == "batch":
+        bits.append(f"batch {st.get('batch', 0)}/{st.get('batches_total', '?')} ({st.get('batch_nets', 0)} nets"
+                    f"{', halved' if st.get('halvings') else ''})")
     if n:
         bits.append(f"{'reroute ' if st.get('phase') == 'reroute' else ''}{st.get('nets_done', 0)}/{n} nets ({st.get('nets_failed', 0)} failed"
                     + (f", {st['nets_ripped']} ripped" if st.get("nets_ripped") else "") + ")")
@@ -269,7 +290,10 @@ def one_line(st):
         bits.append(f"no progress {st['stalled_s']}s")
     if st.get("current") and st["state"] == "running":
         bits.append(f"on {st['current']}")
-    if st.get("checkpoint"):
+    if st.get("mode") == "batch":
+        bits.append(f"last good {os.path.basename(st.get('last_good') or '-')} "
+                    f"({st.get('last_good_unrouted', '?')} unrouted, {st.get('leftovers', 0)} leftover)")
+    elif st.get("checkpoint"):
         bits.append(f"ckpt {st['checkpoint']}")
     if st.get("rc") not in (None, 0):
         bits.append(f"rc={st['rc']}")

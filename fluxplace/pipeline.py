@@ -220,20 +220,22 @@ def st_route_ready(c, n, board):
             "next": nxt + [f"full list: {rj}"]}
 
 
-def _route_cmd(a, src, dst, only, power_nets=None):
+def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3):
     from . import adaptive
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"), src,
            "--output", dst, "--keep-input-copper", "--layers", *a.layers,
            "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.45", "--via-drill", "0.2", *adaptive.krt_extra(a.router_dir),
-           "--nets", *only]
-    return cmd
+           "--via-size", "0.45", "--via-drill", "0.2", *adaptive.krt_extra(a.router_dir)]
+    if limited:
+        cmd += ["--max-ripup", str(max_ripup)]       # batches: limited rip-up; the leftovers pass uses the default
+    return cmd + ["--nets", *only]
 
 
 def st_route(c, n, board):
-    """fanout (escape-first) + route, time-boxed by --route-budget, keep best-so-far, stall loop."""
-    import subprocess
-    from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC
+    """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
+    first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
+    stall loop. Time-boxed by --route-budget; the result is never less routed than the input."""
+    from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     a = c.a
     if not (os.path.exists(a.router_py) and os.path.exists(os.path.join(a.router_dir, "py_router", "route.py"))):
         return {"verdict": "na", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
@@ -244,7 +246,11 @@ def st_route(c, n, board):
     _sidecar(board, best)
     t0 = time.time()
     budget = float(a.route_budget)
-    status_hint = os.path.join(d, "routed.kicad_pcb.status.json")
+    spath = os.path.join(d, "routed.kicad_pcb.status.json")
+    S = BR.settings(c.cons)
+    extra = {}
+    run = BR.make_runner(lambda s, o, only, lim: _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"]),
+                         a.router_dir, extra, spath, S)
 
     def left():
         return max(1.0, budget - (time.time() - t0))
@@ -252,7 +258,7 @@ def st_route(c, n, board):
     def nfail(path):
         return len(RD.unrouted_nets(RD.load(path)))
 
-    state = {"best": nfail(best), "timeouts": 0}
+    state = {"best": nfail(best), "timeouts": 0, "halvings": 0, "ckpts": 0}
     state["start"] = state["best"]
 
     def keep(path):
@@ -265,38 +271,35 @@ def st_route(c, n, board):
                 _sidecar(board, best)
         return state["best"]
 
-    def krt(src, dst, only, timeout):
-        """-> True when the stage timed out."""
-        try:
-            RS.run_logged(_route_cmd(a, src, dst, only), cwd=a.router_dir,
-                          timeout=min(timeout, left()), out=dst, stage="route")
-            return False
-        except subprocess.TimeoutExpired:
-            state["timeouts"] += 1
-            return True
-
     B = RD.load(board)
     todo = RD.unrouted_nets(B)
     cls = NC.classify(B, c.cons, c.spec)
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
-    cur = board
-    if first:                                             # fanout: fine-pitch escapes first
-        esc = os.path.join(d, "escape.kicad_pcb")
-        krt(cur, esc, first, a.route_timeout)
-        if os.path.exists(esc):
-            keep(esc)
-            cur = esc
-    routed = os.path.join(d, "routed.kicad_pcb")
-    timed = krt(cur, routed, [x for x in todo if x not in first] or todo, a.route_timeout)
-    keep(routed)
+    res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
+                           total_budget=budget, status_path=spath, extra=extra, log=lambda m: None)
+    for k in ("timeouts", "halvings"):
+        state[k] += res[k]
+    state["ckpts"] += len(res["checkpoints"])
+    keep(res["board"])
     left_nets = RD.unrouted_nets(RD.load(best))
+    timed = bool(res["timeouts"]) and bool(left_nets)
     stall = None
     if (left_nets or timed) and a.stall_rounds > 0 and left() > 5:
+        k = [0]
+
         def again(b_in, b_out, only, timeout):
-            r = krt(b_in, b_out, only, timeout)
+            k[0] += 1
+            r = BR.route_batches(b_in, os.path.join(d, f"stall-batches-{k[0]}"), only, run, cons=c.cons,
+                                 spec=c.spec, total_budget=min(timeout, left()), status_path=spath,
+                                 extra=extra, log=lambda m: None)
+            shutil.copy(r["board"], b_out)
+            _sidecar(b_in, b_out)
+            state["timeouts"] += r["timeouts"]
+            state["halvings"] += r["halvings"]
+            state["ckpts"] += len(r["checkpoints"])
             keep(b_out)
-            return r
+            return bool(r["timeouts"]) and bool(r["leftovers"])
         stall = ST.stall_loop(best, d, again, c.cons, c.spec, rounds=a.stall_rounds,
                               replace=a.replace_on_stall, timeout=min(a.route_timeout, left()),
                               failed0=left_nets, timed_out0=timed, log=lambda m: None)
@@ -307,13 +310,16 @@ def st_route(c, n, board):
         from . import routestatus as RS2
         diag, _ = RS2.diagnose_result({"out": best}, c.cons or None, c.spec)
     el = round(time.time() - t0)
-    line = (f"{len(todo)} to route, {state['start']} -> {len(final)} unrouted in {el}s"
-            + (f", {state['timeouts']} stage timeout(s)" if state["timeouts"] else ""))
-    res = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
+    line = (f"{len(todo)} to route, {state['start']} -> {len(final)} unrouted in {el}s, "
+            f"{state['ckpts']} checkpoint(s)"
+            + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
+            + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else ""))
+    out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:
-        res["next"] = [f"{len(final)} unrouted net(s); first: {', '.join(final[:6])}",
-                       f"diagnosis (what to move): {diag}"]
-    return res
+        out["next"] = [f"{len(final)} unrouted net(s); first: {', '.join(final[:6])}",
+                       f"diagnosis (what to move): {diag}",
+                       f"leftovers list: {os.path.join(d, 'leftovers.json')}"]
+    return out
 
 
 def st_tune(c, n, board):

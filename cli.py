@@ -1007,7 +1007,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     """Stages [2]-[6] shared by `auto` and `compact`: OUTLINE -> PLANES ->
     ROUTE -> PLANE-FINALIZE/DFM -> FAB. Behavior identical to the original
     cmd_auto tail (extracted verbatim, v0.7.0)."""
-    import os, subprocess, time, json
+    import os, subprocess, time, json, shutil
     from fluxplace import fab, planes, adaptive
     import pcbnew
     placed = os.path.join(a.out, "placed.kicad_pcb")
@@ -1051,45 +1051,48 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     route_nets = [n for n in nets if n not in plane_nets]
     pw = _classify_power(nets, plane_nets, a.big_fanout)
 
-    def krt(src_in, dst, only, timeout, power=True):
+    # Batch routing with checkpoints (fluxplace/batchroute.py): never time-box a whole-board router call
+    # (py_router writes its output only when a whole pass incl. its retry phase finishes).
+    from fluxplace import batchroute as BR, routestatus as RS
+    S4 = BR.settings(cons4)
+
+    def build(src_in, dst, only, limited):
         cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
                src_in, "--output", dst, "--keep-input-copper", "--layers", *a.layers,
                "--track-width", str(a.track), "--clearance", str(a.clearance),
                "--via-size", "0.45", "--via-drill", "0.2",
-               *adaptive.krt_extra(a.router_dir), "--nets", *only]
-        pwn = {k: v for k, v in pw.items() if k in only} if power else {}
+               *adaptive.krt_extra(a.router_dir)]
+        if limited:
+            cmd += ["--max-ripup", str(S4["max_ripup"])]
+        cmd += ["--nets", *only]
+        pwn = {k: v for k, v in pw.items() if k in only}
         if pwn:
             cmd += ["--power-nets", *pwn.keys(), "--power-nets-widths", *[str(w) for w in pwn.values()]]
-        try:
-            from fluxplace import routestatus as RS
-            r = RS.run_logged(cmd, cwd=a.router_dir, timeout=timeout, out=dst, stage='route')
-        except subprocess.TimeoutExpired:
-            print(f"    ! router stage timed out after {timeout}s (stage_timeout_s) - stopping retries")
-            return None
-        return r
+        return cmd
 
+    extra4 = {}
+    spath4 = RS.status_path_for(routed)
+    run4 = BR.make_runner(build, a.router_dir, extra4, spath4, S4)
     first = []
+    Bp = RD.load(placed)
+    cls4 = NC.classify(Bp, cons4, spec4)
     if not getattr(a, "no_escape_first", False):
-        Bp = RD.load(placed)
-        first, _rest = ST.escape_first(Bp, NC.classify(Bp, cons4, spec4))
+        first, _rest = ST.escape_first(Bp, cls4)
         first = [n for n in first if n in route_nets]
-    timed_out = False
+        if first:
+            print(f"    escape-first: {len(first)} fine-pitch signal net(s) lead the batches")
+    todo4 = [n for n in route_nets if n in set(RD.unrouted_nets(Bp))] or list(route_nets)
+    br = BR.route_batches(placed, a.out, todo4, run4, cons=cons4, spec=spec4, B=Bp, cls=cls4, first=first,
+                          power=list(pw), status_path=spath4, extra=extra4,
+                          log=lambda m: print(m, flush=True))
+    print("    " + BR.format_result(br))
+    shutil.copy(br["board"], routed)
+    for ext in (".kicad_pro",):
+        sc = os.path.splitext(br["board"])[0] + ext
+        if os.path.exists(sc):
+            shutil.copy(sc, os.path.splitext(routed)[0] + ext)
+    timed_out = bool(br["timeouts"]) and bool(br["leftovers"])
     r = None
-    if first:
-        esc = os.path.join(a.out, "escape.kicad_pcb")
-        print(f"    escape-first: routing {len(first)} fine-pitch signal net(s) before the rest")
-        r1 = krt(placed, esc, first, tmo, power=False)
-        timed_out = r1 is None
-        r = r1
-        src_in = esc if os.path.exists(esc) else placed
-        r2 = krt(src_in, routed, [n for n in route_nets if n not in first], tmo) if not timed_out else None
-        timed_out = timed_out or r2 is None
-        r = r2 or r1
-        if timed_out and os.path.exists(esc) and not os.path.exists(routed):
-            import shutil as _sh; _sh.copy(esc, routed)
-    else:
-        r = krt(placed, routed, route_nets, tmo)
-        timed_out = r is None
     ok = os.path.exists(routed)
     _fit_paper(frep, routed)
     if not ok and r is not None:
@@ -1109,8 +1112,15 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     if ok:
         failed = RD.unrouted_nets(RD.load(routed))
         if failed or timed_out:
+            kk = [0]
+
             def again(b_in, b_out, only, timeout):
-                return krt(b_in, b_out, only, timeout) is None
+                kk[0] += 1
+                r2 = BR.route_batches(b_in, os.path.join(a.out, f"stall-batches-{kk[0]}"), only, run4,
+                                      cons=cons4, spec=spec4, total_budget=timeout, status_path=spath4,
+                                      extra=extra4, log=lambda m: print(m, flush=True))
+                shutil.copy(r2["board"], b_out)
+                return bool(r2["timeouts"]) and bool(r2["leftovers"])
             out = ST.stall_loop(routed, a.out, again, cons4, spec4,
                                 rounds=getattr(a, "stall_rounds", 3),
                                 replace=getattr(a, "replace_on_stall", False),

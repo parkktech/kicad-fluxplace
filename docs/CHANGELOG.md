@@ -1,5 +1,11 @@
 # Change log (moved from the README)
 
+## 2026-11-11 - batch routing with checkpoints; round-2 merge
+
+Routing (pipeline route stage, `auto`, `compact`, stall loop) now routes in batches with a checkpoint board
+after each (`docs/commands/route.md`). Round-2 commands `floorplan-check` and `templates` follow the compact-output,
+help-brief and MCP conventions; their long docs are `docs/commands/floorplan-check.md` and `templates.md`.
+
 ## What changed 2026-11-10 — spec-net, keep-out, lock and policy gates
 
 Four gates added to `review`, each a defect the utv-comms V1.5 board carried

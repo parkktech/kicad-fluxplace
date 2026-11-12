@@ -16,7 +16,7 @@ CMD_DOC = {
     "bom-opt": "bom-opt", "fit-sheet": "fit-sheet", "auto": "auto", "compact": "auto",
     "route-status": "route-wait", "route-wait": "route-wait", "drc-scope": "audit",
     "stackup": "audit", "stackup-define": "audit", "netlist": "audit",
-    "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "cli", "tournament": "cli",
+    "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "route", "tournament": "cli",
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli",
 }
 

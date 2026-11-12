@@ -13,7 +13,7 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 | 2 | `anchor-check` | rotates misoriented anchors (connectors) to their best option (`--apply`) | board.kicad_pcb |
 | 3 | `place` | `clusters --apply` (support parts to their ICs) then `place --strategy routable` | board.kicad_pcb |
 | 4 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`) | route-ready.json |
-| 5 | `route` | escape-first fanout, route, keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` | board.kicad_pcb, diagnosis |
+| 5 | `route` | batch routing (35 nets per router call, 240 s each, checkpoint `ck-NNN.kicad_pcb` after each, halving on timeout, leftovers pass), keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` (last good checkpoint) and `leftovers.json` | board.kicad_pcb, diagnosis |
 | 6 | `tune` | DRC-guarded diff-pair length tuning | board.kicad_pcb |
 | 7 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
 
@@ -29,7 +29,9 @@ table of at most 15 lines. A stage not implemented in this build reports `na` an
 2. **Never poll logs.** No `tail`, `grep`, `sleep` loops on router logs (one agent made 292 calls that way).
    Use `fluxplace route-status STATUS` (one line) or `fluxplace route-wait STATUS --timeout 900 [--until stall]`
    (blocks, one line plus the result and diagnosis paths). The `route` stage already waits internally.
-3. **Optimisers are time-boxed and keep best-so-far.** Always pass a budget (`--route-budget`, `--route-timeout`);
+3. **Never time-box a whole-board router call; use batch routing** (`docs/commands/route.md`): the router writes
+   nothing until a whole pass incl. its retry phase ends, so a kill loses all progress.
+   Optimisers are time-boxed and keep best-so-far.** Always pass a budget (`--route-budget`, `--route-timeout`);
    the route stage only replaces its best board with one that has fewer unrouted nets.
 4. **Do not start routing until `route-ready` passes**, or every remaining failure is justified: waive it with a
    reason (`--waive CODE:REGEX`) and say why in the report. Do not use `--force` silently.
