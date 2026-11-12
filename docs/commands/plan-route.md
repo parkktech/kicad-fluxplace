@@ -33,3 +33,31 @@ deterministic order), pairs as one 3-pitch demand (split -> `PLAN_PAIR_SPLIT`), 
 `route-ready` runs it too (`[route_ready] use_plan = true`, the default; `false` turns the PLAN_* gate off). Honest limits: the
 model is capacity-based; it cannot see what the router does to a pin through other nets' escape copper (that is why placement-only
 sealed pins of the real V1.6 board were mostly missed - see NEXT.md); cell quantisation (2 mm) smears local effects.
+
+## Second pass (codes, confidence, variants, calibration)
+
+New finding codes: `PLAN_ESCAPE_OVERSUBSCRIBED` (FAIL; per pin group = one row/side of a fine-pitch part: pins needed vs free fan-out
+tracks after through traffic + via slots), `PLAN_POWER_NO_PLANE` (a rail of >= 20 pads with neither plane nor pour; routed as a tree and
+charged to the cells it crosses; suggestion: pour on an inner signal layer), `PLAN_BUS_WEAVE` (nets of one bus mainly on different layers),
+`PLAN_PART_IN_CORRIDOR` (a <= 6-pad part inside a reserved corridor: >= 3 connected cells >= 80 % used), `PLAN_RETURN_PATH` (rf/pair/clock
+net changes between layers that reference different planes with no GND via/pour pad within 3 mm), `PLAN_ZONING` (switch-node part closer than
+`[zoning] keepaway_mm` (5) to an RF/audio part; `hot`/`sensitive` ref lists). Power pins carry `feed` (the plane/pour layer) in `escapes`.
+Every via charges 2 track units (`via_units`) on each layer it does not use in its cell (barrel + annulus + clearance ~ 0.7 mm). Inner
+layers with >= 20 tracks stay signal layers (mixed signal + pour). Layer direction: In2 east-west, In3 north-south (`[plan] layer_dir`, 1.5x
+wrong-way cost); a bus is kept on one layer or reported.
+
+`confidence` (0-100) = 100 x (0.4 U + 0.3 H + 0.3 S) - 15 x (sealed + oversubscribed) - min(40, 2 x overflow regions), U = 1 - (worst
+cell-layer utilisation - 0.5)/0.5, H = min over fine-pitch parts of free via slots/(2 x signal pins), S = min over budgeted nets of
+slack/(20 % of budget), each term clipped 0..1. It is 0 on any board that overflows badly.
+
+`--variant`: the same plan with `mixed` (as the board), `plane3v3` (one inner signal layer becomes a dedicated plane) and `8layer` (two more
+signal layers): table of score, confidence, sealed, overflow, vias, copper. `--swaps`: pads in `[swap.group.NAME] pads = ["J10.25", ...]` are
+swapped pairwise on the model and the plan re-run (4 negotiation iterations); gains listed, nothing is applied (schematic change).
+`--calibrate ROUTED_BOARD [--write-constants]`: default-mode plan on a routed board, hit/miss of its open nets (misses are logged in the map as
+planner errors), the share of the board's real track cell-directions above the modelled capacity for util 0.6-1.0 x jog 0.3-0.6, and with
+`--write-constants` the tightest pair holding 95 % written to `[plan]`. Constants in use: cell 2.0, util 0.8, jog_frac 0.5, via_units 2.0,
+lane 1.0, reach 1.6, plane radius 1.5, slot pitch 0.6, wrong-way 1.5 (on a0503fc 2.3 % of real cell-directions exceed them).
+`place --objective plan` starts with a rotation pass (A1: units with >= 6 pads or a finding, big first, the three other rotations; flip when
+`flip_cost` is set) and also proposes moves out of corridors and away from zoning conflicts.
+Not done: test-point access, rework clearance, silkscreen space (B3), thermal-via reservation, a decoupling-order INFO check, automatic
+swap groups (they must be named in `[swap]`).

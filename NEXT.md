@@ -1,5 +1,14 @@
 ## 2026-11-12 - plan-route (map, escape planner, global router): what it predicts and what it does not
 
+### Second pass (same day)
+
+Per-group escape check, via capacity on all layers, power-plane report, bus/corridor/return-path/zoning findings, confidence, variants,
+calibration. Old planner (cc49f11) vs final, same boards: 228a8ef placement-only PLAN_SCORE 888 -> 2190 (different weights, not comparable;
+stricter model), pre-R2 992 -> 3880; a0503fc default 4555 (16 sealed, 72 no-via-site, many on pads already connected) -> 1178 (6 / 8).
+V1 strict (<= 1.5 mm) hit of failed pads: stage E 13 % -> 42 % (lift 1.7 -> 1.6), stage G 16 % -> 59 % (2.1 -> 2.3). V3 pin level lift 2.7 -> 4.3 with
+98 -> 24 findings. PLAN_ESCAPE_OVERSUBSCRIBED never fires on J10/J11/U300/U400/U401 of 228a8ef: the geometry offers enough lanes and
+slots; the real failures there came from copper laid by the router.
+
 Validated against the UTV V1.6 routing history (`/var/kicad/utv-comms-bridge`, docs/V1.6-ROUTING-STATUS.md); ground truth = pad clusters
 left unjoined by text connectivity at stages E (4fe4ca0, 117 pads / 31 nets) and G (a0503fc, 44 pads / 21 nets).
 
