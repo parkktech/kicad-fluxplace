@@ -20,7 +20,7 @@ from . import placechecks as PCK
 from . import preroute as PR
 
 VERSION = 1
-SECTIONS = ["board", "parts", "relations", "groups", "nets", "escapes", "grid", "route", "channels", "verdict"]
+SECTIONS = ["board", "parts", "relations", "groups", "nets", "escapes", "grid", "route", "channels", "verdict", "modules"]
 _KIND = [("Y", "crystal"), ("X", "crystal"), ("L", "inductor"), ("FB", "ferrite"), ("D", "esd/diode"),
          ("C", "cap"), ("R", "res")]
 
@@ -222,7 +222,7 @@ def build(B, cons=None, spec=None, board_path=None, cls=None, state=None):
                         "fab_min_clearance": ((cons.get("fab") or {}).get("min_clearance_mm"))},
              "keepouts": ko, "height_regions": hr, "pours": EP.planned_pours(cons)}
     return {"fluxmap": VERSION, "board": board, "parts": plist, "relations": rel, "groups": gl, "nets": nl,
-            "escapes": {}, "grid": {}, "route": {}, "channels": [], "verdict": {}}
+            "escapes": {}, "grid": {}, "route": {}, "channels": [], "verdict": {}, "modules": []}
 
 
 def dumps(m):

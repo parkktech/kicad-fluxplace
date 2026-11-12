@@ -93,7 +93,8 @@ class Obs:
 
 
 class Model:
-    def __init__(self, board, job):
+    def __init__(self, board, job, refs=None):
+        self.refs = refs
         self.b = board
         self.job = job
         P = job["params"]
@@ -149,6 +150,8 @@ class Model:
         b = self.b
         for fp in b.GetFootprints():
             ref = fp.GetReference()
+            if self.refs is not None and ref not in self.refs:
+                continue
             for p in fp.Pads():
                 net = p.GetNetname()
                 bb = p.GetBoundingBox()
@@ -165,6 +168,11 @@ class Model:
                     hb = hs.BBox()
                     self._add(Obs((mmv(hb.GetLeft()), mmv(hb.GetTop()), mmv(hb.GetRight()), mmv(hb.GetBottom())), net, set(self.cu),
                                   {"*": hs}, f"{ref}.{p.GetNumber()} hole", "hole", hole=True))
+        if self.refs is not None:                    # isolated module: nothing but its own parts, no outline
+            self.outline = None
+            self.edge_chains = []
+            self.bbox = (-1e6, -1e6, 1e6, 1e6)
+            return
         for t in b.GetTracks():
             self.add_track(t)
         zs = list(b.Zones())
@@ -292,6 +300,8 @@ class Model:
         return None
 
     def inside(self, p):
+        if self.outline is None:
+            return True
         return self.outline.Contains(V2(nm(p[0]), nm(p[1])))
 
 
@@ -353,12 +363,12 @@ def poly_edge_dist(pt, poly):
 
 
 class Fan:
-    def __init__(self, board, job, log):
+    def __init__(self, board, job, log, refs=None):
         self.b = board
         self.job = job
         self.log = log
         self.P = job["params"]
-        self.M = Model(board, job)
+        self.M = Model(board, job, refs)
         self.pins = []
         self.t0 = time.time()
         self.thermal = []
@@ -871,9 +881,59 @@ def str_num(s):
         return (1, 0, str(s))
 
 
+def main_modules(job, board):
+    """job["modules"] = {name: {"refs": [...], "origin": [x, y]}}: the fan-out of each module in isolation (its own parts only),
+    returned as geometry relative to the module origin."""
+    res = {}
+    for name in sorted(job["modules"]):
+        m = job["modules"][name]
+        refs = set(m["refs"])
+        sub = dict(job)
+        sub["parts"] = {r: v for r, v in job["parts"].items() if r in refs}
+        F = Fan(board, sub, [], refs)
+        F.thermal_data = F.thermal_vias()
+        F.thermal_set = {(t["ref"], t["pin"]) for t in F.thermal_data}
+        F.collect()
+        F.build_domains()
+        F.link_pairs()
+        F.build_arcs()
+        banned = set()
+        sol = {}
+        for it in range(job["params"]["repairs"]):
+            sol = F.solve(banned)
+            bad = F.dynamic_lanes(sol)
+            if not bad:
+                break
+            for i in bad:
+                banned.add((i, sol[i]))
+        r = F.report(sol, banned, (0, 0, 0, 0, 0))
+        ox, oy = m["origin"]
+        pins = []
+        for d in r["pins"]:
+            e = {k: d[k] for k in ("ref", "pin", "net", "need", "ok")}
+            for k in ("kind", "layer", "w"):
+                if k in d:
+                    e[k] = d[k]
+            for k in ("end", "via"):
+                if d.get(k):
+                    e[k] = [round(d[k][0] - ox, 3), round(d[k][1] - oy, 3)]
+            if d.get("stub"):
+                e["stub"] = [[round(q[0] - ox, 3), round(q[1] - oy, 3)] for q in d["stub"]]
+            if d.get("lane"):
+                e["lane"] = d["lane"]
+            if not d["ok"]:
+                e["blocker"] = d.get("blocker")
+            pins.append(e)
+        res[name] = {"pins": pins, "thermal": [{"ref": t["ref"], "pin": t["pin"], "vias": [[round(x - ox, 3), round(y - oy, 3)] for x, y in t["vias"]]}
+                                                for t in F.thermal_data]}
+    print(MARK + json.dumps(res))
+
+
 def main():
     job = json.load(open(sys.argv[1]))
     board = pcbnew.LoadBoard(sys.argv[2])
+    if job.get("modules"):
+        return main_modules(job, board)
     out = sys.argv[3]
     log = []
     t0 = time.time()
