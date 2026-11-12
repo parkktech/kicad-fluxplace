@@ -317,6 +317,10 @@ class Placer:
         return rep
 
     def run(self, rounds=6):
+        sc0 = self.score()                      # the input board is the first candidate
+        self.best = (sc0, self.snapshot())
+        self.history.append(sc0)
+        self.log(f"input board: score {sc0:.0f}")
         self.turn_anchors()
         cl = self.seat_support()
         U = self.converge(cl, rounds)
@@ -324,7 +328,11 @@ class Placer:
             self.legalise(U)
         except LG.PlacementError:
             self.log("legalise with escape allowances failed; retrying without them")
-            self.legalise(U, escape=False)
+            try:
+                self.legalise(U, escape=False)
+            except LG.PlacementError as e:
+                self.log(f"legalise failed ({str(e)[:80]}...): falling back to the best legal state seen")
+                self.restore(self.best[1] if self.best else self.origin)
         # legalisation may have split a loose unit: put every support part that ended up
         # far from its IC back beside it (ICs stay; seats are free space only, so this
         # cannot create an overlap), then prove the whole board
