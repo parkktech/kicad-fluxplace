@@ -71,7 +71,19 @@ def router_env(limited, env=None):
     return e
 
 
-def order_nets(B, nets, cls=None, first=(), power=(), hint=None):
+def has_fanout(board):
+    """the board carries locked fan-out groups (fluxplace fanout): the escape-first group is unnecessary and the order is by class."""
+    try:
+        with open(board, errors="replace") as fh:
+            return '(group "fanout:' in fh.read()
+    except (OSError, TypeError):
+        return False
+
+
+CONTROLLED = {"pair": 0, "rf": 1, "clock": 2}
+
+
+def order_nets(B, nets, cls=None, first=(), power=(), hint=None, fanout=False):
     """Routing order: fan-out, power, critical classes, rest; inside a group the plan's rank first (`hint`: {net: rank},
     planroute.route_hint: nets through PLAN_OVERFLOW channels = 0, pairs = 1), then ascending estimated length."""
     cls = cls or {}
@@ -81,6 +93,13 @@ def order_nets(B, nets, cls=None, first=(), power=(), hint=None):
 
     def key(n):
         info = cls.get(n) or {}
+        if fanout:               # copper to every pin exists: controlled pairs, RF, clocks first, then plan criticality, then length
+            try:
+                ln = NC.net_length(B, n, pads.get(n))
+            except Exception:
+                ln = 0.0
+            c = CONTROLLED.get(info.get("class"))
+            return (0 if c is not None else 1, c if c is not None else 0, hint.get(n, 9), round(ln, 3), n)
         g = 0 if n in first else 1 if (n in power or info.get("class") == "rail") else 2 if info.get("class") in CRITICAL else 3
         try:
             ln = NC.net_length(B, n, pads.get(n))
@@ -166,7 +185,8 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     if pm and os.path.exists(pm):
         from . import planroute as PL
         hint = PL.route_hint(pm)        # order only: the router takes no per-net layer or corridor hints
-    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), first, power, hint)
+    fo = has_fanout(board)
+    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), () if fo else first, power, hint, fanout=fo)
     cur, cur_open = board, open0
     cur_B = B
     drc_base = [None]

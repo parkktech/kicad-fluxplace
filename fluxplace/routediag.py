@@ -87,6 +87,11 @@ def _edge_segments(g):
         "line", "arc", "rect", "poly", "circle", "curve") else []
 
 
+def _locked(n):
+    """a track/via node carrying `(locked yes)` (the fan-out copper is locked)."""
+    return any(k == "locked" or (isinstance(k, list) and k and k[0] == "locked" and (len(k) < 2 or k[1] != "no")) for k in n[1:])
+
+
 def load(path, track=None, clearance=None):
     root = BF.parse(open(path, errors="replace").read())
     copper = [a[1] for a in (BF._first(root, "layers") or [])[1:]
@@ -198,13 +203,13 @@ def load(path, track=None, clearance=None):
         if n[0] == "via":
             x, y = _f(n, "at")
             vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0], "drill": _f(n, "drill", 1)[0],
-                         "layers": set(BF._atoms(BF._first(n, "layers")))})
+                         "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n)})
         else:
             sx, sy = _f(n, "start")
             ex, ey = _f(n, "end")
             segs.append({"net": net, "a": (sx, sy), "b": (ex, ey),
                          "w": _f(n, "width", 1)[0],
-                         "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0]})
+                         "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0], "locked": _locked(n)})
 
     xs, ys, edge = [], [], []
     for g in root:

@@ -156,7 +156,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     B = B or RD.load(board)
     open0 = dict(conn(board))
     order = BR.order_nets(B, [n for n in dict.fromkeys(nets) if n in open0], cls or NC.classify(B, cons, spec),
-                          first, power)
+                          () if BR.has_fanout(board) else first, power, fanout=BR.has_fanout(board))
     rank = {n: i for i, n in enumerate(order)}
     cur, cur_open, cur_B, cks = board, open0, B, []
     total = lambda: sum(cur_open.values())

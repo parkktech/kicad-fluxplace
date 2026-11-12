@@ -191,6 +191,14 @@ def audit(base, new, R, new_only=None):
     def add(code, net, msg, x, y):
         out.append({"code": code, "net": net, "msg": msg, "x": round(x, 3), "y": round(y, 3)})
 
+    rs, rv = removed_copper(base, new)             # locked (fan-out) copper is never ripped
+    for s in rs:
+        if s.get("locked"):
+            add("FANOUT_RIPPED", s["net"], f"{s['net']} locked track {s['layer']} removed", *s["a"])
+    for v in rv:
+        if v.get("locked"):
+            add("FANOUT_RIPPED", v["net"], f"{v['net']} locked via removed", v["x"], v["y"])
+
     for s in segs:
         if R.get("min_track") and s["w"] < R["min_track"] - EPS:
             add("TRACK_WIDTH", s["net"], f"{s['net']} {s['layer']} {s['w']:g} mm < {R['min_track']:g}", *s["a"])

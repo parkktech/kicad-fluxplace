@@ -3306,8 +3306,11 @@ def build_parser():
     ppl.add_argument("--workdir", required=True, help="state.json and W/<n>-<stage>/ outputs")
     ppl.add_argument("--constraints", default=None)
     ppl.add_argument("--spec", default=None)
-    ppl.add_argument("--from", dest="from_stage", choices=PL.STAGES, default=None)
-    ppl.add_argument("--to", dest="to_stage", choices=PL.STAGES, default=None)
+    ppl.add_argument("--flow", choices=sorted(PL.FLOWS), default=None,
+                     help="constructive = modules, floorplan, fanout (gate FANOUT_OK), plan-route, route, tune, silk, review")
+    ppl.add_argument("--size", action="store_true", help="constructive flow: floorplan sizing loop (grow the outline until it passes)")
+    ppl.add_argument("--from", dest="from_stage", choices=PL.ALL_STAGES, default=None)
+    ppl.add_argument("--to", dest="to_stage", choices=PL.ALL_STAGES, default=None)
     ppl.add_argument("--status", action="store_true", help="print the stage table (<= 15 lines) and exit")
     ppl.add_argument("--waive", action="append", default=[], help="route-ready waiver CODE:REGEX")
     ppl.add_argument("--force", action="store_true", help="continue past a failing route-ready gate")

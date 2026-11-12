@@ -44,18 +44,29 @@ def _centre(part):
     return ((c[0] + c[2]) / 2, (c[1] + c[3]) / 2)
 
 
+def fixed_set(B, cons):
+    """Parts the floorplan holds: [placement] fixed, [lock.at], locked, mounting hardware and the detected anchors, minus
+    `[floorplan] movable = [refs]` (the owner lets those move)."""
+    from . import routable as RB
+    mv = set(((cons or {}).get("floorplan") or {}).get("movable", []))
+    return set(RB._fixed_set(B, cons)) - mv
+
+
+ATTACH_MM = 15.0                    # a support farther than this from its module's anchor is its own module
+
+
 def build(B, cons=None, spec=None, arrange=True, log=None):
     """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
     from . import clusters as CL, legality as LGL, netclass as NC, routable as RB
     cons = cons or {}
     parts = B["parts"]
-    fixed = RB._fixed_set(B, cons) | set(((cons.get("lock") or {}).get("at") or {}))
+    fixed = fixed_set(B, cons)
     cls = NC.classify(B, cons, spec)
     cl, links = CL.build(B, cons, spec)
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
-        CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=False, log=log)
+        CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log)
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
     pg = (cons.get("placement") or {}).get("group") or {}
@@ -105,6 +116,17 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             best = min(sorted(mod_c), key=lambda k: math.hypot(mod_c[k][0] - cx, mod_c[k][1] - cy))
         of[r] = best
         mods[best]["refs"].append(r)
+    # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone
+    for key in sorted(mods):
+        m = mods[key]
+        ax, ay = _centre(parts[m["anchor"]])
+        for r in list(m["refs"]):
+            if r == m["anchor"] or (m["group"] and r in groups):
+                continue
+            cx, cy = _centre(parts[r])
+            if math.hypot(cx - ax, cy - ay) > ATTACH_MM or (r in fixed and m["anchor"] not in fixed):
+                m["refs"].remove(r)
+                of.pop(r)
     # mechanical hardware: fixed single-part modules
     for r in sorted(parts):
         if r not in of:

@@ -24,6 +24,10 @@ import time
 from . import routeconn as RC
 
 STAGES = ["floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
+# the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
+CONSTRUCTIVE = ["modules", "floorplan", "fanout", "plan-route", "route", "tune", "silk", "review"]
+FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
+ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
 STATE_MAX = 2000
 VERDICTS = ("pass", "fail", "blocked", "na", "skipped")
 
@@ -72,7 +76,7 @@ def format_status(st):
     if not st:
         return "pipeline: no state.json (run `fluxplace pipeline BOARD --workdir W ...`)"
     out = [f"pipeline {st.get('verdict', '?')} at {st.get('stage', '?')}  board {st.get('board', '?')}"]
-    for i, name in enumerate(STAGES, 1):
+    for i, name in enumerate(FLOWS.get(st.get("flow", "classic"), STAGES), 1):
         s = st.get("stages", {}).get(name)
         out.append(f"  {i} {name:16s} {s['verdict'] if s else '-':8s} {s['line'] if s else ''}".rstrip())
     sc = st.get("scorecard")
@@ -234,6 +238,9 @@ def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R
            *RR.size_args(R), *adaptive.krt_extra(a.router_dir), *rflags]
     if limited:
         cmd += ["--max-ripup", str(max_ripup)]       # batches: limited rip-up; the leftovers pass uses the default
+    from . import batchroute as BR
+    if BR.has_fanout(src):
+        cmd += ["--no-stub-layer-swap"]              # the router may not re-layer the locked fan-out stubs
     return cmd + ["--nets", *only]
 
 
@@ -394,7 +401,42 @@ def st_review(c, n, board):
     return res
 
 
-FUNCS = {"floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
+def st_modules(c, n, board):
+    d = c.dir(n, "modules")
+    rc, text = _run_cli(["modules", board] + c.cs(), os.path.join(d, "stage.log"))
+    return {"verdict": "pass" if rc == 0 else "fail", "line": _last_line(text) if rc else next(
+        (l for l in text.splitlines() if l.startswith("modules:")), _last_line(text))[:160], "board": board}
+
+
+def st_floorplan(c, n, board):
+    d = c.dir(n, "floorplan")
+    out = os.path.join(d, "board.kicad_pcb")
+    argv = ["floorplan", board, "--out", out] + c.cs() + (["--size"] if getattr(c.a, "size", False) else [])
+    rc, text = _run_cli(argv, os.path.join(d, "stage.log"))
+    line = next((l for l in reversed(text.splitlines()) if l.startswith("floorplan:")), _last_line(text))
+    return {"verdict": "pass" if rc == 0 and os.path.exists(out) else "fail", "line": line, "board": out if os.path.exists(out) else board}
+
+
+def st_fanout(c, n, board):
+    d = c.dir(n, "fanout")
+    out = os.path.join(d, "board.kicad_pcb")
+    rc, text = _run_cli(["fanout", board, "--out", out] + c.cs(), os.path.join(d, "stage.log"))
+    line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
+    res = {"verdict": "pass" if rc == 0 else "fail", "line": line, "board": out if os.path.exists(out) else board}
+    if rc:
+        res["next"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_BLOCKED")][:5]
+    return res
+
+
+def st_plan_route(c, n, board):
+    """channels only: sealed pins cannot exist (the fan-out gate passed), so overflow is a WARN and never blocks."""
+    d = c.dir(n, "plan-route")
+    rc, text = _run_cli(["plan-route", board] + c.cs(), os.path.join(d, "stage.log"))
+    return {"verdict": "pass", "line": ("WARN " if rc else "") + _last_line(text), "board": board}
+
+
+FUNCS = {"modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
+         "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
 
@@ -407,15 +449,17 @@ def run(a):
     if a.status:
         print(format_status(st))
         return 0
-    first = a.from_stage or STAGES[0]
-    last = a.to_stage or STAGES[-1]
-    i0, i1 = STAGES.index(first), STAGES.index(last)
+    flow = getattr(a, "flow", None) or (st or {}).get("flow") or "classic"
+    STAGES_ = FLOWS[flow]
+    first = a.from_stage or STAGES_[0]
+    last = a.to_stage or STAGES_[-1]
+    i0, i1 = STAGES_.index(first), STAGES_.index(last)
     if i0 > i1:
         raise SystemExit(f"pipeline: --from {first} is after --to {last}")
     if i0 == 0:
         if not a.board:
             raise SystemExit("pipeline: BOARD is required when starting at the first stage")
-        st = {"schema": 1, "board0": os.path.abspath(a.board), "stages": {}, "paths": {
+        st = {"schema": 1, "flow": flow, "board0": os.path.abspath(a.board), "stages": {}, "paths": {
             "workdir": work, "constraints": a.constraints, "spec": a.spec}}
         board = os.path.abspath(a.board)
     else:
@@ -423,17 +467,17 @@ def run(a):
             if not a.board:
                 raise SystemExit(f"pipeline: --from {first} needs BOARD (or {state_path(work)} from the previous stage)")
             # no state yet: start the pipeline at this stage on BOARD (no hand-written state.json needed)
-            st = {"schema": 1, "board0": os.path.abspath(a.board), "board": os.path.abspath(a.board), "stages": {},
+            st = {"schema": 1, "flow": flow, "board0": os.path.abspath(a.board), "board": os.path.abspath(a.board), "stages": {},
                   "paths": {"workdir": work, "constraints": a.constraints, "spec": a.spec}}
         board = st["board"]
         if a.board:
             board = os.path.abspath(a.board)
-        for k in STAGES[i0:]:
+        for k in STAGES_[i0:]:
             st["stages"].pop(k, None)
     c = Ctx(a, work, board, st)
     rc = 0
     for i in range(i0, i1 + 1):
-        name = STAGES[i]
+        name = STAGES_[i]
         t = time.time()
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
@@ -450,7 +494,7 @@ def run(a):
             except Exception:
                 pass
         save_state(work, st)
-        print(f"[{i + 1}/{len(STAGES)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
+        print(f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
               f"({time.time() - t:.0f}s)", flush=True)
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
