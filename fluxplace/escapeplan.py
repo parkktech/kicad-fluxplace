@@ -506,9 +506,11 @@ def _suggest(B, pr, rec, part, ob):
     for d in exit_dirs(part, q, cx, cy):
         layers = frozenset(q["layers"]) if len(q["layers"]) < 3 else frozenset({part["side"]})
         f, why = lane_free(ob, B, pr, q, d, layers, pr["lane_len_mm"])
-        if best is None or f > best[0]:
-            best = (f, why, d)
-    f, why, d = best
+        other = bool(why) and not why.startswith(("keep-out", "board")) and why.split(".")[0] != rec["ref"]
+        # prefer a lane another part blocks (that part can move) over one the pin's own part closes
+        if best is None or (other, f) > (best[3], best[0]):
+            best = (f, why, d, other)
+    f, why, d, _o = best
     need = pr["lane_len_mm"] - f
     blocker = (why or "").split(".")[0] if why and not why.startswith(("keep-out", "board")) else None
     if blocker and blocker in B["parts"] and blocker != rec["ref"]:

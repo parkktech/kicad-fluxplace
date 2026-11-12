@@ -672,7 +672,7 @@ class GlobalRoute:
             if not hit:
                 break
             pres *= pres_mul
-            if it >= max(3, iters // 2):
+            if it >= 2:
                 for n in [n for n in hit if n in self.nets and self.nets[n]["pair"] and self._pair_pinched(n)]:
                     new = self.split_pair(n)
                     todo = [x for x in todo if x != n] + new
