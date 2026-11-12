@@ -362,7 +362,8 @@ def st_silk(c, n, board):
     """Silkscreen check + reference-text fit after routing (copper is never touched), before review/fab."""
     d = c.dir(n, "silk")
     out = os.path.join(d, "board.kicad_pcb")
-    rc, text = _run_cli(["silk", board, "--fix", "--out", out] + (["--constraints", c.cons_path] if c.cons_path else []),
+    rc, text = _run_cli(["silk", board, "--fix", "--out", out] + (["--constraints", c.cons_path] if c.cons_path else [])
+                        + (["--spec", c.spec_path] if c.spec_path else []),
                         os.path.join(d, "stage.log"))
     if not os.path.exists(out):
         return {"verdict": "fail", "line": _last_line(text) or f"exit {rc}", "board": board,
@@ -399,6 +400,22 @@ FUNCS = {"floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check,
 
 
 # ------------------------------------------------------------------ driver
+def _silk_version_line(c, board):
+    """A revision copy still carrying the old version on its silkscreen: say so before any stage runs."""
+    try:
+        from . import silk as SK
+        from . import constraints as C
+        cons = C.load(c.cons_path) if c.cons_path else {}
+        if not SK.settings(cons)["enabled"]:
+            return
+        sc, cfg, f = SK.run_check(board, cons, spec=c.spec)
+        for x in f:
+            if x["code"] in ("SILK_VERSION_STALE", "SILK_TITLE_MISSING"):
+                print(f"silk: {x['level']} {x['code']} {x['msg']}", flush=True)
+    except Exception:                                    # noqa: BLE001 - advisory
+        pass
+
+
 def run(a):
     """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked)."""
     work = os.path.abspath(a.workdir)
@@ -431,6 +448,8 @@ def run(a):
         for k in STAGES[i0:]:
             st["stages"].pop(k, None)
     c = Ctx(a, work, board, st)
+    if i0 == 0 or a.board:
+        _silk_version_line(c, board)
     rc = 0
     for i in range(i0, i1 + 1):
         name = STAGES[i]
