@@ -2261,6 +2261,14 @@ def cmd_route_wait(a):
     raise SystemExit({"done": 0, "checkpoint": 0, "stall": 0, "failed": 1, "timeout": 2}.get(reason, 3))
 
 
+def cmd_pipeline(a):
+    """Staged pipeline with file handoffs (W/state.json). See docs/AGENT-PIPELINE.md."""
+    from fluxplace import pipeline as PL
+    rc = PL.run(a)
+    if rc:
+        raise SystemExit(rc)
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -3092,6 +3100,32 @@ def build_parser():
     prw.add_argument("--constraints", default=None)
     prw.add_argument("--spec", default=None)
     prw.set_defaults(fn=cmd_route_wait)
+
+    from fluxplace import pipeline as PL
+    ppl = sub.add_parser("pipeline",
+                         help="staged pipeline, one stage per agent context, handing off via "
+                              "WORKDIR/state.json (floorplan-check, anchor-check, place, route-ready, "
+                              "route, tune, review)")
+    ppl.add_argument("board", nargs="?", default=None, help="input board (first stage only)")
+    ppl.add_argument("--workdir", required=True, help="state.json and W/<n>-<stage>/ outputs")
+    ppl.add_argument("--constraints", default=None)
+    ppl.add_argument("--spec", default=None)
+    ppl.add_argument("--from", dest="from_stage", choices=PL.STAGES, default=None)
+    ppl.add_argument("--to", dest="to_stage", choices=PL.STAGES, default=None)
+    ppl.add_argument("--status", action="store_true", help="print the stage table (<= 15 lines) and exit")
+    ppl.add_argument("--waive", action="append", default=[], help="route-ready waiver CODE:REGEX")
+    ppl.add_argument("--force", action="store_true", help="continue past a failing route-ready gate")
+    ppl.add_argument("--api", action="store_true", help="review with live DigiKey/Mouser data")
+    ppl.add_argument("--route-budget", type=float, default=1800, help="route stage wall-clock cap, s")
+    ppl.add_argument("--route-timeout", type=float, default=900, help="per router call cap, s")
+    ppl.add_argument("--stall-rounds", type=int, default=2)
+    ppl.add_argument("--replace-on-stall", action="store_true", help="let the stall loop move parts")
+    ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    ppl.add_argument("--track", type=float, default=0.2)
+    ppl.add_argument("--clearance", type=float, default=0.2)
+    ppl.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
+    ppl.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    ppl.set_defaults(fn=cmd_pipeline)
 
     from fluxplace import outputs as OUT
     OUT.add_flags(ap, sub)

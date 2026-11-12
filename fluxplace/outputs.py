@@ -173,7 +173,8 @@ def verdict_line(cmd, rc, parsed, raw):
     for l in raw.splitlines():
         if l.strip().lower().startswith(cmd) and re.search(r"\d", l):
             summ = l.strip()
-    summ = summ or parsed["summary"]
+    res = [l.strip() for l in raw.splitlines() if l.strip().startswith("RESULT:")]
+    summ = (res[-1] if res else None) or summ or parsed["summary"]
     if not summ:
         summ = next((l.strip() for l in raw.splitlines() if l.strip()), "")
     summ = _clip(_RE_PATH.sub(r"\1", summ), 160)
