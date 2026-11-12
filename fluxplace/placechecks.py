@@ -209,7 +209,7 @@ def height_regions(B, cons=None):
 # ------------------------------------------------------------------ side policy
 def side_policy(B, cons=None, spec=None):
     """`[placement.side]`: default = "F"|"B" (side movable parts belong on), `override` =
-    {ref-or-glob: side}, `flip_cost` (documented only: nothing here flips a part). WARN for
+    {ref-or-glob: side}, `flip_cost` (score units a flip must gain; flips go through pcbnew, see flip.py). WARN for
     every part off its side without an override, and for a support part on a different side
     than its IC unless it sits directly beneath one of the IC's pins (< 1 mm)."""
     from . import clusters as CL

@@ -787,10 +787,17 @@ starting area, or > 1 m, aborts with `REFUSED` and writes nothing.
   time_limit_s` (600) or `max_rounds` (6), and never returns a worse board than the best seen.
 * **Hard vs soft**: HARD classes pull 3x in the placer and cost 20 vs 3 per mm in the score; a
   round that breaks one is simply not the best state. (No per-move rejection.)
-* `[placement.side]` `default`, `override` (ref/glob -> side): `SIDE_POLICY` WARN for parts off
-  their side and for support parts on the other side of their IC unless within 1 mm of one of
-  its pins. `routable` never flips a part (the text writer cannot mirror a footprint), so it
-  cannot move parts to the other side; the flip cost is therefore not modelled.
+* `[placement.side]` `default`, `override` (ref/glob -> side), `flip_cost` (score units): `SIDE_POLICY` WARN
+  for parts off their side and for support parts on the other side of their IC unless within 1 mm of one of
+  its pins. The text writer cannot mirror a footprint, so side flips go through pcbnew (`fluxplace/flip.py`):
+  `geom.flip` is the same flip on the text model (left/right about the origin, angle -> 180 - angle,
+  pad layers swapped, courtyard mirrored), and when `place --strategy routable --refine` keeps a flip it hands
+  the refs to a helper (`flip_helper.py`, run by `/usr/bin/python3` where `pcbnew` lives; override with
+  `FLUXPLACE_KICAD_PYTHON`) that flips them with `Footprint.Flip` and splices only those `(footprint ...)` nodes
+  into the board text. A flip is tried only when `flip_cost` is set and is kept only when the gate score drops
+  by more than that; through-hole parts, parts matching `override`, and parts with > 4 pads are never flipped.
+  The CLI re-parses the result and prints the mismatches between the model, the file and pcbnew's own pads,
+  layers, angle and courtyard (0 on all 323 SMD parts of the 337-part test board; courtyard agrees to 0.05 mm).
   `[[placement.height_region]]` (`name`, `rect`, `side`, `max_height_mm`) + `[placement.heights]`
   (ref/glob -> mm): `HEIGHT_REGION` FAIL above the limit, WARN for unknown height. STEP bounding
   boxes are NOT read; heights must be given.

@@ -149,3 +149,22 @@ def in_outline(B, rect, margin=0.0):
         if seg_hits_rect(a, b, infl):
             return False
     return edge_has(edge, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+
+
+def flip(part):
+    """Flip a surface-mount part to the other side IN PLACE on the model, the way KiCad's Flip
+    (left/right, about the footprint origin) does: world x mirrored about the origin, pad layers
+    F.Cu <-> B.Cu, courtyard mirrored, footprint angle -> 180 - angle. Verified against pcbnew
+    (`fluxplace/flip.py verify`). Through-hole parts cannot be flipped (ValueError)."""
+    if part["tht"]:
+        raise ValueError("a through-hole part cannot be flipped")
+    ox, oy = part["pos"]
+    sw = {"F.Cu": "B.Cu", "B.Cu": "F.Cu"}
+    for q in part["pads"]:
+        q["x"] = 2 * ox - q["x"]
+        q["angle"] = (180.0 - q.get("angle", 0.0)) % 360.0
+        q["layers"] = {sw.get(l, l) for l in q["layers"]}
+    x0, y0, x1, y1 = part["court"]
+    part["court"] = (2 * ox - x1, y0, 2 * ox - x0, y1)
+    part["side"] = sw[part["side"]]
+    part["angle"] = (180.0 - part["angle"]) % 360.0

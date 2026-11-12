@@ -173,13 +173,24 @@ def _routable_place(a, board_in, board_out):
             mv, st = RF.refine(B, cons, spec, seed=a.seed, log=lambda m: print("  " + m, flush=True),
                                time_limit=a.time_limit)
             print(f"  refine: score {st['score_before']:.0f} -> {st['score_after']:.0f}, kept {st['kept']}", flush=True)
+            flips = st["flips"]
         else:
             mv = RB.place(B, cons, spec, log=lambda m: print("  " + m, flush=True))
+            flips = []
     except Exception as e:
         if e.__class__.__name__ == "PlacementError":
             raise SystemExit(f"place [routable] REFUSED: {e}")
         raise
-    BW.move_file(board_in, board_out, mv)
+    # flipped parts: write the pre-flip pose as text, then let pcbnew do the flip (text cannot mirror)
+    BW.move_file(board_in, board_out, {r: ((x, y, (180.0 - ang) % 360.0) if r in flips else (x, y, ang))
+                                       for r, (x, y, ang) in mv.items()})
+    if flips:
+        from fluxplace import flip as FL
+        pre = RD.load(board_out)
+        facts = FL.flip_file(board_out, board_out, flips)
+        bad = FL.verify(pre, board_out, flips, facts)
+        print(f"  flipped {len(flips)} part(s) with pcbnew: {', '.join(flips[:12])}; "
+              f"model vs pcbnew mismatches: {len(bad)}" + (f" ({bad[:3]})" if bad else ""))
     if getattr(a, "strip_stale", False):
         from fluxplace import placechecks as PCK
         text, n = PCK.strip_stale_text(open(board_out, errors="surrogateescape").read(), RD.load(board_out))

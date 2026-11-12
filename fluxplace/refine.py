@@ -9,6 +9,9 @@ score (preroute.score) improves AND no legality violation (legality.Legal) is ad
   slide    a support part along its IC's edge (tangent to the edge its pin is on), 0.5 / 1 / 2 mm
   swap     two same-footprint parts (same side), when each is pulled toward the other's seat
   swapc    two units of similar size (courtyard area within 25 %), same condition
+  flip     a surface-mount part to the other side (same origin), only with `[placement.side] flip_cost = N`
+           (score units): kept when the score gain exceeds N. The board file is written by pcbnew
+           (flip.py, a helper process under /usr/bin/python3); `Refiner.flips` lists the parts
 
 A cheap local filter (class-weighted length plus budget excess of the nets the move touches) discards
 hopeless candidates before the full score is computed. First improvement is taken; passes repeat until a
@@ -16,6 +19,7 @@ whole pass accepts nothing, `[placement] time_limit_s` (600) runs out or `max_pa
 Deterministic: candidates are visited in an order shuffled by `--seed` (default 0) from sorted keys.
 Fixed parts, locked parts and mounting hardware never move.
 """
+import fnmatch
 import math
 import random
 import time
@@ -63,6 +67,11 @@ class Refiner:
         self.score = PR.run(B, self.cons, spec)[1]["score"]
         self.score0 = self.score
         self.stats = defaultdict(int)
+        sp = (self.cons.get("placement") or {}).get("side") or {}
+        self.flip_cost = None if sp.get("flip_cost") is None else float(sp["flip_cost"])
+        self.pin_side = {r for r in B["parts"] for g, v in (sp.get("override") or {}).items()
+                         if fnmatch.fnmatch(r, g)}
+        self.flips = set()
 
     # ---- state ----------------------------------------------------------
     def _pose(self, r):
@@ -94,20 +103,28 @@ class Refiner:
                 t += (PR.W_HARD if info["class"] in PR.HARD else PR.W_SOFT) * (ln - lim)
         return t
 
-    def try_move(self, kind, poses, slack=0.5):
-        """Apply `poses`; keep when legal and the full score improves. True when kept."""
+    def try_move(self, kind, poses, slack=0.5, gain=0.0, flip=None):
+        """Apply `poses` (and flip `flip`); keep when legal and the full score improves by more than
+        `gain`. True when kept."""
         refs = list(poses)
         old = {r: self._pose(r) for r in refs}
         l0 = self.local(refs)
         self._apply(poses)
+        if flip:
+            GM.flip(self.B["parts"][flip])
+            self.legal.refresh(flip)
         ok = False
         if self._legal(refs) and self.local(refs) <= l0 + slack:
             sc = PR.run(self.B, self.cons, self.spec)[1]["score"]
-            if sc < self.score - EPS:
+            if sc < self.score - max(EPS, gain):
                 self.score, ok = sc, True
         if ok:
             self.stats[kind] += 1
+            if flip:
+                self.flips ^= {flip}
         else:
+            if flip:
+                GM.flip(self.B["parts"][flip])
             self._apply(old)
         return ok
 
@@ -179,6 +196,14 @@ class Refiner:
                     return True
         return False
 
+    def flip(self, ref):
+        """Move one SMD part to the other side at the same origin; kept only above `flip_cost`."""
+        P = self.B["parts"]
+        p = P[ref]
+        if self.flip_cost is None or p["tht"] or ref in self.pin_side or p["n_pads"] > 4:
+            return False
+        return self.try_move("flip", {ref: self._pose(ref)}, gain=self.flip_cost, flip=ref, slack=2.0)
+
     def _area(self, ms):
         r = [self.B["parts"][m]["court"] for m in ms]
         return (max(c[2] for c in r) - min(c[0] for c in r)) * (max(c[3] for c in r) - min(c[1] for c in r))
@@ -246,6 +271,9 @@ class Refiner:
                 for m in self.U[k]:
                     if m in self.sup and m not in self.fixed and not P[m].get("locked") and m != k:
                         self.slide(m)
+                        self.flip(m)
+                if len(self.U[k]) == 1:
+                    self.flip(k)
             else:
                 self.swaps()
             gained = sum(self.stats.values()) - acc0
@@ -257,6 +285,8 @@ class Refiner:
         norm = lambda a: (a + 180) % 360 - 180
         moves = {r: (round(x, 4), round(y, 4), a) for r, (x, y, a) in ((r, self._pose(r)) for r in P)
                  if abs(x - base[r][0]) > 1e-4 or abs(y - base[r][1]) > 1e-4 or abs(norm(a - base[r][2])) > 1e-6}
+        for r in self.flips:                            # a flip changes the angle even at the same origin
+            moves[r] = (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"])
         new = sorted(self._triples(P) - self.base)
         if new:
             raise RuntimeError(f"refine produced {len(new)} new legality violation(s): {new[:5]}")
@@ -267,4 +297,4 @@ def refine(B, cons=None, spec=None, seed=0, log=print, time_limit=None):
     """-> (moves {ref: (x, y, angle)}, stats dict). Mutates B."""
     r = Refiner(B, cons, spec, seed, log, time_limit)
     mv = r.run()
-    return mv, {"score_before": r.score0, "score_after": r.score, "kept": dict(r.stats)}
+    return mv, {"score_before": r.score0, "score_after": r.score, "kept": dict(r.stats), "flips": sorted(r.flips)}
