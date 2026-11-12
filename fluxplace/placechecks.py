@@ -253,16 +253,36 @@ def side_policy(B, cons=None, spec=None):
 
 # ------------------------------------------------------------------ block cohesion
 def blocks_of(B, spec=None, cons=None):
-    """{block: [refs]} from spec["blocks"] / a component "block" field, else (with
-    `[placement] block_refdes = true`) the reference-designator hundreds digit."""
+    """{block: [refs]} from `[placement.blocks]` (name = [refs or globs]), `[placement] blocks_dir`
+    (a folder of block JSONs like docs/v16-blocks: {"block": name, "add_components": [{"ref": ...}]}),
+    spec["blocks"] / a component "block" field, else (with `[placement] block_refdes = true`) the
+    reference-designator hundreds digit."""
+    import glob
+    import json
+    import os
     out = {}
-    if spec:
+    pl = (cons or {}).get("placement") or {}
+    for k, v in (pl.get("blocks") or {}).items():
+        if isinstance(v, list):
+            refs = [r for r in B["parts"] if any(fnmatch.fnmatch(r, g) for g in v)]
+            out.setdefault(k, []).extend(refs)
+    if pl.get("blocks_dir"):
+        for f in sorted(glob.glob(os.path.join(pl["blocks_dir"], "*.json"))):
+            try:
+                d = json.load(open(f))
+            except (OSError, ValueError):
+                continue
+            name = d.get("block") or os.path.splitext(os.path.basename(f))[0]
+            for c in list(d.get("add_components", [])) + list(d.get("modify_components", [])):
+                if isinstance(c, dict) and c.get("ref") in B["parts"] and c["ref"] not in out.get(name, []):
+                    out.setdefault(name, []).append(c["ref"])
+    if spec and not out:
         for k, v in (spec.get("blocks") or {}).items():
             out[k] = [r for r in v if r in B["parts"]]
         for c in spec.get("components", []):
             if c.get("block") and c["ref"] in B["parts"]:
                 out.setdefault(c["block"], []).append(c["ref"])
-    if not out and ((cons or {}).get("placement") or {}).get("block_refdes"):
+    if not out and pl.get("block_refdes"):
         from .clusters import block
         for r in B["parts"]:
             if block(r) and not r.startswith(("MH", "MK", "FID", "TP")):

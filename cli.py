@@ -1744,6 +1744,21 @@ def cmd_templates(a):
         print(f"templates: moved {len(moves)} part(s); wrote {a.out}")
 
 
+def cmd_floorplan_check(a):
+    """Area budget before placing: block demand vs the free area of its region/side."""
+    import json as _json
+    from fluxplace import routediag as RD, floorplan as FP
+    cons, spec = _text_ctx(a)
+    B = RD.load(a.board)
+    f, rows = FP.check(B, cons, spec)
+    print(FP.format_text(f, rows, a.board))
+    if a.json:
+        with open(a.json, "w") as fh:
+            _json.dump({"rows": rows, "findings": f}, fh, indent=1)
+    if any(x["level"] == "FAIL" for x in f):
+        raise SystemExit(1)
+
+
 def cmd_route_ready(a):
     """Pre-route gate scorecard; exit 1 when any FAIL-level check fails."""
     import json as _json
@@ -2804,6 +2819,14 @@ def build_parser():
     pcl.add_argument("--best-effort", action="store_true",
                      help="also accept a legal seat farther than the part's limit (default: leave such a part and report it)")
     pcl.set_defaults(fn=cmd_clusters)
+
+    pfc = sub.add_parser("floorplan-check", help="area budget before placing: per block and side, courtyard "
+                                                 "area + escape vs the free area of its region; REGION_OVERFULL")
+    pfc.add_argument("board")
+    pfc.add_argument("--constraints", default=None)
+    pfc.add_argument("--spec", default=None)
+    pfc.add_argument("--json", default=None)
+    pfc.set_defaults(fn=cmd_floorplan_check)
 
     ptp = sub.add_parser("templates", help="place [placement.template.NAME] structure templates "
                                            "(kind = tree | chain) and report the net lengths achieved")
