@@ -65,6 +65,8 @@ legal spot is hidden on silk (it stays on Fab) and listed as `HIDDEN <ref>`.
 Version, first hit wins: `[silk.title] version`; `[project] version` in the constraints; the spec JSON's
 `version` / `revision` (`--spec`, also under `board`); the board's title-block revision (`1.6`, `V1.6`, `rev 1.6`);
 a `-vNN` / `_vN.N` suffix of the board file name (`board-v16` = 1.6, a bare two-digit number reads as major.minor).
+A version is `v`/`V`/`rev`/`Rev` + digits(`.digits`)* as its own whitespace-delimited token. `3V3`, `1V8`, `5V`, `12V`, `+3.3V`, `V+`, `VBAT`, `VIN` never match; a lone `V1`/`V12` text is a net label and counts only when it matches the title template or contains the company string. Texts under 0.05 mm high (logo-footprint refs) are ignored. Without `[silk.title]` only `SILK_VERSION_STALE` can fire, and `silk` runs on any bare `.kicad_pcb`.
+
 With no source the stale check is silent. `{version}` needs one: without it `--fix` writes nothing and says so.
 
 `silk --fix` OWNS the title when `[silk.title]` exists or `--title "TEXT"` is given (a literal; a `V1.5` inside it is
@@ -83,3 +85,5 @@ Every command that moves footprints and writes a board (`place`, `clusters --app
 `auto_fit = true`, re-fits the moved parts' references and any text they now collide with. The `pipeline` has a
 `silk` stage after `tune`, before `review`. Needs pcbnew (run under `/usr/bin/python3`, `FLUXPLACE_KICAD_PYTHON` to
 override); without it the hooks print `silk: not run` and the write stands.
+
+Tests: `tests/test_silk_matrix.py` runs check + `--fix` (subprocess, 300 s timeout each) over the real boards found on the machine, asserting no crash, no more hard findings after, and identical parts/pads/tracks/vias/zones. Default: the two smallest boards; `FLUXPLACE_SILK_MATRIX=all` runs all.
