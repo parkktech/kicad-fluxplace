@@ -218,7 +218,7 @@ class Placer:
                     self._nets()
                     turned += 1
             self.log(f"round {rnd + 1}: {turned} unit(s) turned")
-            self.legalise(U)
+            self.legalise(U, strict=False)
         return U
 
     def _order_chains(self, chains_, U):
@@ -240,7 +240,7 @@ class Placer:
                         self.commit(r, x, y, ang)
             self._nets()
 
-    def legalise(self, U, strict=True):
+    def legalise(self, U, strict=True, escape=True):
         P = self.B["parts"]
         targets = {r: (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"])
                    for ms in U.values() for r in ms if r not in self.fixed}
@@ -252,7 +252,7 @@ class Placer:
             hot = [(x - c / 2, y - c / 2, x + c / 2, y + c / 2) for _o, x, y in cg["worst"]]
         except Exception:
             pass
-        res, rep = LG.legalise(self.B, targets, fixed=self.fixed, cons=self.cons, hot=hot, strict=strict, units=U)
+        res, rep = LG.legalise(self.B, targets, fixed=self.fixed, cons=self.cons, hot=hot, strict=strict, units=U, escape=escape)
         for r, (x, y, a) in res.items():
             if (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"]) != (x, y, a):
                 self.commit(r, x, y, a)
@@ -263,6 +263,11 @@ class Placer:
         self.turn_anchors()
         cl = self.seat_support()
         U = self.converge(cl, rounds)
+        try:                                    # settle for real: with escape allowances, else without
+            self.legalise(U)
+        except LG.PlacementError:
+            self.log("legalise with escape allowances failed; retrying without them")
+            self.legalise(U, escape=False)
         # legalisation may have split a loose unit: put every support part that ended up
         # far from its IC back beside it (ICs stay; seats are free space only, so this
         # cannot create an overlap), then prove the whole board

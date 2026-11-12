@@ -299,7 +299,7 @@ def _in_zone(zones, part, court):
                for z in zones)
 
 
-def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False):
+def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None):
     """Seat the far support parts of every cluster around their ICs (ICs never
     move). Mutates the board model B as it goes so later clusters see earlier
     moves. Parts already within their limit stay put unless `everything`;
@@ -307,7 +307,8 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
     allm = {}
     for c in cl:
         sup = [s for s in c["supports"]
-               if (everything or s["dist"] > s["limit"]) and (guess or s["sure"])]
+               if (everything or s["dist"] > s["limit"]) and (guess or s["sure"])
+               and (only is None or s["ref"] in only)]
         if not sup:
             continue
         if log:

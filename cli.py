@@ -524,7 +524,7 @@ def _cand_argv(a, k, outdir):
     if a.hub:
         v += ["--hub", a.hub]
     v += ["auto", "--board", a.board, "--out", outdir,
-          "--pad", str(a.pad), "--route-timeout", str(a.route_timeout),
+          "--pad", str(a.pad), "--route-timeout", str(a.route_timeout or 900),
           "--profile", a.profile, "--router-py", a.router_py,
           "--router-dir", a.router_dir, "--kicad-cli", a.kicad_cli,
           "--candidates", "1", "--jitter-seed", str(k), "--no-fab"]
@@ -1020,24 +1020,53 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
 
     # ---- [4] ROUTE — explicit net list (KRT routes NOTHING without --nets), --------
     # power nets first and wide, plane nets excluded (they are pours, not traces).
+    # Stage 7: per-stage wall-clock limit; escape-first net order; on timeout or failed
+    # nets, stop retrying and run route-diagnose (optionally re-place + re-route).
+    from fluxplace import stall as ST, routediag as RD, netclass as NC
+    cons4, spec4 = _text_ctx(a)
+    tmo = ST.stage_timeout(a.route_timeout, cons4)
     t0 = time.time()
     route_nets = [n for n in nets if n not in plane_nets]
     pw = _classify_power(nets, plane_nets, a.big_fanout)
-    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
-           placed, "--output", routed, "--keep-input-copper", "--layers", *a.layers,
-           "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.45", "--via-drill", "0.2",
-           *adaptive.krt_extra(a.router_dir), "--nets", *route_nets]
-    if pw:
-        cmd += ["--power-nets", *pw.keys(), "--power-nets-widths",
-                *[str(w) for w in pw.values()]]
-    try:
-        r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                           timeout=a.route_timeout)
-    except subprocess.TimeoutExpired:
-        r = None
-        print(f"    ! router timed out after {a.route_timeout}s — continuing "
-              "with whatever it saved")
+
+    def krt(src_in, dst, only, timeout, power=True):
+        cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
+               src_in, "--output", dst, "--keep-input-copper", "--layers", *a.layers,
+               "--track-width", str(a.track), "--clearance", str(a.clearance),
+               "--via-size", "0.45", "--via-drill", "0.2",
+               *adaptive.krt_extra(a.router_dir), "--nets", *only]
+        pwn = {k: v for k, v in pw.items() if k in only} if power else {}
+        if pwn:
+            cmd += ["--power-nets", *pwn.keys(), "--power-nets-widths", *[str(w) for w in pwn.values()]]
+        try:
+            r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"    ! router stage timed out after {timeout}s (stage_timeout_s) - stopping retries")
+            return None
+        return r
+
+    first = []
+    if not getattr(a, "no_escape_first", False):
+        Bp = RD.load(placed)
+        first, _rest = ST.escape_first(Bp, NC.classify(Bp, cons4, spec4))
+        first = [n for n in first if n in route_nets]
+    timed_out = False
+    r = None
+    if first:
+        esc = os.path.join(a.out, "escape.kicad_pcb")
+        print(f"    escape-first: routing {len(first)} fine-pitch signal net(s) before the rest")
+        r1 = krt(placed, esc, first, tmo, power=False)
+        timed_out = r1 is None
+        r = r1
+        src_in = esc if os.path.exists(esc) else placed
+        r2 = krt(src_in, routed, [n for n in route_nets if n not in first], tmo) if not timed_out else None
+        timed_out = timed_out or r2 is None
+        r = r2 or r1
+        if timed_out and os.path.exists(esc) and not os.path.exists(routed):
+            import shutil as _sh; _sh.copy(esc, routed)
+    else:
+        r = krt(placed, routed, route_nets, tmo)
+        timed_out = r is None
     ok = os.path.exists(routed)
     _fit_paper(frep, routed)
     if not ok and r is not None:
@@ -1054,6 +1083,21 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         except Exception:
             pass
     print(f"[4/{NSTAGE}] routed {len(route_nets)} nets{summ}{real}  ({time.time()-t0:.0f}s)")
+    if ok:
+        failed = RD.unrouted_nets(RD.load(routed))
+        if failed or timed_out:
+            def again(b_in, b_out, only, timeout):
+                return krt(b_in, b_out, only, timeout) is None
+            out = ST.stall_loop(routed, a.out, again, cons4, spec4,
+                                rounds=getattr(a, "stall_rounds", 3),
+                                replace=getattr(a, "replace_on_stall", False),
+                                plane_nets=plane_nets, timeout=tmo, failed0=failed,
+                                timed_out0=timed_out, log=lambda m: print(m, flush=True))
+            print(f"    stall: {out['rounds']} round(s), {len(out['failed'])} net(s) still unrouted, "
+                  f"{len(out['moved'])} part(s) moved: {', '.join(sorted(out['moved'])) or 'none'}")
+            if out["board"] != routed:
+                import shutil as _sh
+                _sh.copy(out["board"], routed)
     src = routed if ok else placed
 
     # ---- [5] PLANE FINALIZE + DFM — a pour alone connects nothing the fill can't ---
@@ -1068,9 +1112,9 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                "--max-ripup", "60"]
         try:
             subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                           timeout=a.route_timeout)
+                           timeout=tmo)
         except subprocess.TimeoutExpired:
-            print(f"    ! plane-finalize route timed out after {a.route_timeout}s"
+            print(f"    ! plane-finalize route timed out after {tmo}s"
                   " — proceeding to DFM/fab with the main-route board")
         src = finald if os.path.exists(finald) else routed
     _fit_paper(frep, src)
@@ -2472,7 +2516,7 @@ def build_parser():
                      help="bulk clearance mm (default: board's default netclass)")
     pau.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pau.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
-    pau.add_argument("--route-timeout", type=int, default=1800)
+    pau.add_argument("--route-timeout", type=int, default=None, help="per-routing-stage wall-clock limit s (default [route] stage_timeout_s, 900)")
     pau.add_argument("--floor", type=float, default=None,
                      help="fine-pitch escape floor mm (default: the fab profile's floor)")
     pau.add_argument("--constraints", default=None,
@@ -2518,6 +2562,13 @@ def build_parser():
     pau.add_argument("--pre-place", choices=["routable"], default=None,
                      help="place with the connection-driven placer (text, needs --constraints for "
                           "[placement]) instead of the route-aware builder")
+    pau.add_argument("--replace-on-stall", action="store_true",
+                     help="on a routing stall or failed nets: apply route-diagnose's move list to "
+                          "unlocked parts, rip up only the copper of the nets that touch them and "
+                          "re-route only those (<= --stall-rounds times)")
+    pau.add_argument("--stall-rounds", type=int, default=3)
+    pau.add_argument("--no-escape-first", action="store_true",
+                     help="don't route fine-pitch signal nets before the rest")
     pau.add_argument("--max-growth", type=float, default=6.0,
                      help="refuse a placement whose redrawn outline is more than this many times "
                           "the original board area")
@@ -2543,7 +2594,7 @@ def build_parser():
     pco.add_argument("--clearance", type=float, default=0.2)
     pco.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     pco.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
-    pco.add_argument("--route-timeout", type=int, default=1800)
+    pco.add_argument("--route-timeout", type=int, default=None, help="per-routing-stage wall-clock limit s (default [route] stage_timeout_s, 900)")
     pco.add_argument("--kicad-cli", default="kicad-cli")
     pco.add_argument("--margin", type=float, default=2.0,
                      help="Edge.Cuts margin around the shrink-wrapped placement (mm)")

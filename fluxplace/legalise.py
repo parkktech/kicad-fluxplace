@@ -85,8 +85,8 @@ def keepout_rects(B, cons):
 
 
 class _Model:
-    def __init__(self, B, cons, fixed, bounds):
-        self.B, self.cons, self.bounds = B, cons, bounds
+    def __init__(self, B, cons, fixed, bounds, escape=True):
+        self.B, self.cons, self.bounds, self.escape = B, cons, bounds, escape
         self.fixed = set(fixed) | {r for r, p in B["parts"].items() if p.get("locked")}
         self.fixed |= set(((cons or {}).get("lock") or {}).get("at", {}))
         self.ko = keepout_rects(B, cons)
@@ -101,7 +101,7 @@ class _Model:
         if k not in self._rel:
             part = self.B["parts"][ref]
             pads, court = GM.moved(part, 0.0, 0.0, ang)
-            a = allowances(part, pads, court) if NC.is_ic(ref, part, 3) or part["n_pads"] >= CONN_PADS \
+            a = allowances(part, pads, court) if self.escape and (NC.is_ic(ref, part, 3) or part["n_pads"] >= CONN_PADS) \
                 else (0.0,) * 4
             self._rel[k] = ((court[0] - a[0], court[1] - a[1], court[2] + a[2], court[3] + a[3]), court)
         return self._rel[k]
@@ -181,7 +181,7 @@ def check_outline(B, positions, bounds=None):
 
 
 def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400, log=None,
-             strict=True, units=None):
+             strict=True, units=None, escape=True):
     """`targets` = {ref: (x, y, angle)} desired origins of the MOVABLE parts (every
     other part stays put). `units` = {key: [refs]} makes those parts move as one
     rigid body (an IC with its support parts). -> ({ref: (x, y, angle)}, report).
@@ -190,7 +190,7 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
     bounds = bounds or B["bbox"]
     em = float(((cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3))
     bounds = (bounds[0] + em, bounds[1] + em, bounds[2] - em, bounds[3] - em)   # copper-to-edge
-    M = _Model(B, cons, fixed, bounds)
+    M = _Model(B, cons, fixed, bounds, escape)
     parts = B["parts"]
     want = {r: tuple(v) for r, v in targets.items() if r in parts and r not in M.fixed}
     groups, seen = [], set()

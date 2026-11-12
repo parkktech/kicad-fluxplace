@@ -110,3 +110,26 @@ def move_file(src, dst, moves):
     with open(dst, "w", errors="surrogateescape") as fh:
         fh.write(out)
     return done
+
+
+_NETNAME = re.compile(r'\(net\s+"([^"]*)"\)')
+
+
+def strip_nets(text, nets):
+    """Remove the track/arc/via nodes of the named nets (KiCad 10 net-name form).
+    Zones, pads and every other net's copper are untouched. -> (text, count)."""
+    nets = set(nets)
+    root_end = _end(text, text.index("("))
+    cut = []
+    for cs, ce in _children(text, 0, root_end):
+        if text.startswith(("(segment", "(arc", "(via"), cs):
+            m = _NETNAME.search(text, cs, ce)
+            if m and m.group(1) in nets:
+                cut.append((cs, ce))
+    for s, e in reversed(cut):
+        # swallow the line break/indent before the node so the file stays tidy
+        k = s
+        while k > 0 and text[k - 1] in " \t":
+            k -= 1
+        text = text[:k] + text[e:]
+    return text, len(cut)
