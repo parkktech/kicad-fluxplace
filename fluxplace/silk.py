@@ -227,7 +227,11 @@ def load_scene(board, py=None):
     return _prep(json.loads(r.stdout.split(MARK, 1)[1]))
 
 
+MIN_VISIBLE_H = 0.05      # a text this small is deliberately invisible (logo footprints use 0.001 mm refs)
+
+
 def _prep(sc):
+    sc["texts"] = [t for t in sc["texts"] if t["h"] >= MIN_VISIBLE_H]
     for i, t in enumerate(sc["texts"]):
         t["id"] = i
         t["aabb"] = _aabb(t["quad"])
@@ -395,7 +399,20 @@ class Layout:
 
 
 # ------------------------------------------------------------------ title / version text
-_VER_RE = re.compile(r"(?<![A-Za-z0-9.])(?:[vV]|[rR]ev\.?\s?)(\d+(?:\.\d+)*)(?![A-Za-z0-9])")
+# A version is v/V/rev/Rev/REV + digits(.digits)* as its own token (whitespace / start / end around it).
+# "3V3" "1V8" "5V" "12V" "+3.3V" "24V" "V+" "VBAT" "VIN" never match.
+_VER_RE = re.compile(r"(?<![^\s(\[,;:])(?:[vV]|[rR][eE][vV]\.?\s?)(\d+(?:\.\d+)*)(?![^\s)\],;:])")
+_NETLIKE_RE = re.compile(r"\s*[vV]\d+\s*")      # a lone "V1" / "V12": a test-point or rail label, ambiguous
+
+
+def version_tokens(text, company=None, is_title=False):
+    """Version numbers (strings) a board text really states; [] for voltage / net-style labels. A lone integer
+    'V<n>' is ambiguous (net label) and only counts when the text is the title or carries the company string."""
+    if _NETLIKE_RE.fullmatch(text) and not is_title and not (company and company.lower() in text.lower()):
+        return []
+    return [m.group(1) for m in _VER_RE.finditer(text)]
+
+
 _VER_ANY = r"(?:[vV]|[rR]ev\.?\s?)\s?\d+(?:\.\d+)*"
 TITLE_DEFAULTS = {"text": "{company}  V{version}", "company": "", "version": "", "side": "F", "height_mm": 1.5,
                   "required": True}
@@ -404,7 +421,7 @@ TITLE_MIN_H = 1.0
 
 def norm_version(tok):
     """'1.6' | '16' | 'V1.60' -> (1, 6): a bare two-digit number reads as major.minor (the file-name convention
-    utv-comms-v16 = 1.6); trailing zero components are dropped so 1.0 == 1."""
+    board-v16 = 1.6); trailing zero components are dropped so 1.0 == 1."""
     s = str(tok).strip().lstrip("vV").strip()
     if re.fullmatch(r"\d\d", s):
         s = s[0] + "." + s[1]
@@ -519,8 +536,8 @@ def _check_title(sc, cfg, side, out):
     bt = [x for x in sc["texts"] if x["kind"] == "board" and (side == "both" or x["side"] == side[0].upper())]
     seen = {}
     for x in bt:
-        for m in _VER_RE.finditer(x["text"]):
-            v = norm_version(m.group(1))
+        for tok in version_tokens(x["text"], (t or {}).get("company"), x.get("title")):
+            v = norm_version(tok)
             if v:
                 seen.setdefault(v, []).append(x)
     for v, xs in sorted(seen.items()):
@@ -1087,7 +1104,10 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, titl
     hidden, kept = [], []
     for i in pending:
         t = texts[i]
-        if bad[i] & set(HARD):
+        res = {}
+        if not bad[i] & set(HARD):                        # left where it was: unless texts placed meanwhile now cover it
+            res, _ = lay.probe(t["quad"], t["side"], t["owner"], "ref")
+        if bad[i] & set(HARD) or set(res) & set(HARD):
             plan[t["owner"]] = {"hide": True}
             hidden.append(t["owner"])
         else:

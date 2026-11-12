@@ -64,7 +64,7 @@ legal spot is hidden on silk (it stays on Fab) and listed as `HIDDEN <ref>`.
 
 Version, first hit wins: `[silk.title] version`; `[project] version` in the constraints; the spec JSON's
 `version` / `revision` (`--spec`, also under `board`); the board's title-block revision (`1.6`, `V1.6`, `rev 1.6`);
-a `-vNN` / `_vN.N` suffix of the board file name (`utv-comms-v16` = 1.6, a bare two-digit number reads as major.minor).
+a `-vNN` / `_vN.N` suffix of the board file name (`board-v16` = 1.6, a bare two-digit number reads as major.minor).
 With no source the stale check is silent. `{version}` needs one: without it `--fix` writes nothing and says so.
 
 `silk --fix` OWNS the title when `[silk.title]` exists or `--title "TEXT"` is given (a literal; a `V1.5` inside it is

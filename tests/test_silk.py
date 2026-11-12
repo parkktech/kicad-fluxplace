@@ -328,3 +328,33 @@ def test_post_write_hook_prints_the_stale_version(tmp_path, capsys):
     finally:
         BW.set_post_write(None)
     assert "SILK_VERSION_STALE" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("txt", ["3V3", "1V8", "5V", "12V", "+3.3V", "24V", "V+", "VBAT", "VIN", "-5V", "V1", "V12",
+                                 "3V3 5V", "VCC12", "REV", "Vref1"])
+def test_version_rule_ignores_voltage_and_net_labels(txt):
+    assert SK.version_tokens(txt) == []
+
+
+@pytest.mark.parametrize("txt,want", [("V1.6", ["1.6"]), ("Acme V1.6", ["1.6"]), ("rev 2", ["2"]), ("Rev1.0.1", ["1.0.1"]),
+                                      ("REV 3.1", ["3.1"]), ("Board v2", ["2"]), ("(V1.5)", ["1.5"])])
+def test_version_rule_matches_real_tokens(txt, want):
+    assert SK.version_tokens(txt) == want
+
+
+def test_lone_v_integer_counts_only_with_title_or_company():
+    assert SK.version_tokens("V1") == []
+    assert SK.version_tokens("V1", is_title=True) == ["1"]
+    assert SK.version_tokens("V1", company="V1") == ["1"]
+
+
+def test_net_labels_never_trigger_stale(tmp_path):
+    body = "".join(gtext(t, 5 + 5 * i, 8) for i, t in enumerate(["3V3", "1V8", "V1", "VBAT", "+3.3V", "24V"]))
+    p = tb(tmp_path, body)                                           # file name says 1.6
+    assert codes(p)[3]["SILK_VERSION_STALE"] == 0
+
+
+def test_bare_board_without_constraints_runs(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15) + gtext("Acme V1.5", 5, 5), name="plain.kicad_pcb")
+    sc, cfg, f, c = codes(p, None)
+    assert cfg["title"] is None and c["SILK_TITLE_MISSING"] == 0 and c["SILK_VERSION_STALE"] == 0
