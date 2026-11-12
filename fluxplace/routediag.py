@@ -121,6 +121,8 @@ def load(path, track=None, clearance=None):
                 "keepout": bool(keep),
                 "no_tracks": bool(keep) and any(
                     k[:2] == ["tracks", "not_allowed"] for k in keep if isinstance(k, list)),
+                "no_vias": bool(keep) and any(
+                    k[:2] == ["vias", "not_allowed"] for k in keep if isinstance(k, list)),
                 "name": (BF._atoms(BF._first(z, "name")) or [""])[0]}
 
     for fp in BF._kids(root, "footprint"):
@@ -177,7 +179,7 @@ def load(path, track=None, clearance=None):
                      max(q["x"] + q["ex"] for q in mine) + 0.25, max(q["y"] + q["ey"] for q in mine) + 0.25)
         else:
             court = (fx, fy, fx, fy)
-        parts[ref] = {"pos": (fx, fy), "pads": mine, "side": side,
+        parts[ref] = {"pos": (fx, fy), "pads": mine, "side": side, "sheet": props.get("Sheetname", ""),
                       "value": props.get("Value", ""), "angle": fang,
                       "tht": any(q["tht"] for q in mine),
                       "fp": (BF._atoms(fp) or [""])[0], "court": court, "court_layers": cy_sides,

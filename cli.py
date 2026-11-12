@@ -2908,6 +2908,8 @@ def build_parser():
     prr.add_argument("--track", type=float, default=None)
     prr.add_argument("--clearance", type=float, default=None)
     prr.set_defaults(fn=cmd_route_ready)
+    from fluxplace import plancli
+    plancli.add_parsers(sub)              # map, plan-route, plan-compare
 
     pcl = sub.add_parser("clusters",
                          help="IC support clusters (which 2-pin parts belong to which IC); "
