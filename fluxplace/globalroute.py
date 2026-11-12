@@ -109,6 +109,7 @@ class GlobalRoute:
         self.pref = [({"h": 0, "v": 1}.get(str(ld.get(l, "")).lower())) for l in self.layers]
         self.wrong = float((self.cons.get("plan") or {}).get("wrong_way", 1.5))
         self.lid = {l: k for k, l in enumerate(self.layers)}
+        self.outer_ids = {k for k, l in enumerate(self.layers) if l in (B["copper"][0], B["copper"][-1])}
         x0, y0, x1, y1 = B["bbox"]
         self.cell = float(self.pr["cell_mm"])
         self.x0, self.y0 = x0 - 0.5, y0 - 0.5
@@ -449,8 +450,10 @@ class GlobalRoute:
                     a = (min(r[2], cb[2]) - max(r[0], cb[0])) * (min(r[3], cb[3]) - max(r[1], cb[1]))
                     area += max(0.0, a)
             frac = min(1.0, area / (self.cell * self.cell))
-            full *= (1.0 - frac)
-        self.vcap[c] = max(0, int(full) - self.via_used[c])
+            full *= (1.0 - self.pr["via_pad_frac"] * frac)
+        # fitted to the copper of the V1.6 board (a0503fc, 1059 vias in 727 cells, <= 6 per cell): the old area-only model gave 0 sites in 300 of
+        # those cells; a floor of `via_min` (3) and half the pad blocking cover 98 % of the real via cells and 95 % of the vias
+        self.vcap[c] = max(1, max(int(self.pr["via_min"]), int(full)) - self.via_used[c])
 
     def build(self):
         t = time.time()
@@ -681,6 +684,8 @@ class GlobalRoute:
         capH, capV, uH, uV, hH, hV = self.capH, self.capV, self.uH, self.uV, self.hH, self.hV
         vcap, vu, hv = self.vcap, self.vu, self.hv
         pref, wrong, mult = self.pref, self.wrong, self.mult
+        outer = self.pr["outer_cost"]
+        outs = self.outer_ids
         dist, prev = {}, {}
         pq = []
         for s in srcs:
@@ -719,6 +724,8 @@ class GlobalRoute:
                     pf = pref[l]
                     if pf is not None and pf != dr:
                         step *= wrong
+                if l in outs:
+                    step *= outer
                 v = l * N + nc
                 nd = g + step
                 if nd < dist.get(v, 1e18):
@@ -835,6 +842,7 @@ class GlobalRoute:
             self.route_net(n, pres)
         best, best_state = self.total_overflow(), self._save(todo)
         stall = 0
+        self.trace = [round(best, 1)]
         for it in range(1, iters + 1):
             if best <= 1e-9 or (time_limit and time.time() - t0 > time_limit):
                 break
@@ -842,9 +850,9 @@ class GlobalRoute:
             vo = {c for c in range(self.N) if self.vu[c] > self.vcap[c]}
             for (l, c), (o, _d, _c) in ov.items():
                 if self.uH[l][c] > self.capH[l][c]:
-                    self.hH[l][c] += 0.3
+                    self.hH[l][c] += 0.5
                 if self.uV[l][c] > self.capV[l][c]:
-                    self.hV[l][c] += 0.3
+                    self.hV[l][c] += 0.5
             for c in vo:
                 self.hv[c] += 0.5
             bad = {c for (_l, c) in ov} | vo
@@ -866,12 +874,13 @@ class GlobalRoute:
             for n in [n for n in todo if n in hs]:
                 self.route_net(n, pres)
             cur = self.total_overflow()
+            self.trace.append(round(cur, 1))
             self.log(f"  iter {it}: overflow {cur:g}, {len(hit)} net(s) re-routed")
             if best_state is None or cur < best - 1e-9:
                 best, best_state, stall = cur, self._save(todo), 0
             else:
                 stall += 1
-                if stall >= 3:
+                if stall >= self.pr["stall"]:
                     break
         if best_state is not None:
             self._load(todo, best_state)

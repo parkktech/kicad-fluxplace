@@ -320,7 +320,7 @@ def evaluate(job):
            "no_via_site": v["components"]["no_via_site"], "counts": codes, "cost": round(cost, 1), "cost_pen": round(pen, 2),
            "layers": nlay, "subfloor": subfloor(rules, float((cons.get("plan") or {}).get("floor_mm", FLOOR))), "neck_violations": nv, "controlled": {k: list(x) for k, x in cm.items()},
            "return_path": codes.get("PLAN_RETURN_PATH", 0), "placed": placed, "moved": moved, "mean_move_mm": round(mean_d, 2),
-           "risk_frac": R["risk_frac"], "routable_pct": round(100 * (1 - R["risk_frac"])), "causes": R["causes"]["units"], "seconds": round(time.time() - t0, 1), "board": path}
+           "risk_frac": R["risk_frac"], "cell_mm": R["pr"]["cell_mm"], "routable_pct": round(100 * (1 - R["risk_frac"])), "causes": R["causes"]["units"], "seconds": round(time.time() - t0, 1), "board": path}
     m = FM.build(B, cons, spec, path, cls=R["cls"])
     m.update(PL.plan_section(R))
     FM.save(m, os.path.join(out, name + ".fluxmap.json"))
@@ -375,7 +375,7 @@ def perf_worse(res, base):
        - every controlled net of the baseline must be present in the option (missing = violation);
        - zero added vias on any controlled net;
        - planned length may exceed the baseline's only by what the option's geometry forces: the growth of the net's own ratsnest
-         (MST of its pads on the option board minus on the baseline board) plus 0.5 mm of grid rounding;
+         (MST of its pads on the option board minus on the baseline board) plus ONE grid cell (2 mm) of planning noise; smaller deltas read as 'no change';
        - no added return-path finding; no controlled/power net overflowing inside a neck-down."""
     why = []
     for n, (bl, bv, bm) in sorted(base["controlled"].items()):
@@ -385,9 +385,9 @@ def perf_worse(res, base):
             continue
         if o[1] > bv:
             why.append(f"{n}: vias {bv} -> {o[1]}")
-        allow = max(0.0, o[2] - bm) + 0.5
+        allow = max(0.0, o[2] - bm) + res.get("cell_mm", 2.0)       # growth of the ratsnest + one grid cell of planning noise
         if o[0] > bl + allow:
-            why.append(f"{n}: copper {bl:.1f} -> {o[0]:.1f} mm (allowed +{allow:.1f})")
+            why.append(f"{n}: copper {bl:.1f} -> {o[0]:.1f} mm (allowed +{allow:.1f}: one cell of noise)")
     if res["return_path"] > base["return_path"]:
         why.append(f"return-path findings {base['return_path']} -> {res['return_path']}")
     if res["neck_violations"]:

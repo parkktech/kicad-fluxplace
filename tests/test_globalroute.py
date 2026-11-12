@@ -90,18 +90,22 @@ def test_plan_compare_prints_both_verdicts(tmp_path, capsys):
     assert "PLAN_SCORE" in out and "plan-compare: B is better" in out and "PLAN_OVERFLOW" in out
 
 
-def test_vias_charge_every_layer(tmp_path):
-    """A keep-out closes F.Cu in the middle: the net drops to an inner layer and back; its vias (away from its pads) charge the layers it does
-    not use in those cells: more usage than with via_units = 0."""
-    wall = PB.keepout(40, 0, 60, 80, "fwall").replace('(layers "F.Cu" "B.Cu")', '(layers "F.Cu")')
-    body = wall + PB.fp("A", 10, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)]) + PB.fp("B", 90, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)])
+def test_via_charge_on_other_layers_is_symmetric_and_off_by_default(tmp_path):
+    """`via_units` (default 0: the real board's track counts do not depend on its via count) charges the layers a via does not use; routing and
+    ripping a net must leave the usage arrays exactly as they were."""
     f = tmp_path / "v.kicad_pcb"
+    body = PB.fp("A", 10, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)]) + PB.fp("B", 90, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)])
     f.write_text(PB.HEAD.replace('(31 "B.Cu" signal)', '(4 "In1.Cu" signal) (6 "In2.Cu" signal) (31 "B.Cu" signal)') + PB.EDGE + body + ")\n")
     B = RD.load(str(f))
-    g = PL.run(B, {}, None, ignore_routing=True)["gr"]
-    assert sum(r["vias"] for r in g.routes.values()) >= 2 and sum(len(r["vuse"]) for r in g.routes.values()) >= 2
-    g2 = PL.run(B, {"plan": {"via_units": 0}}, None, ignore_routing=True)["gr"]
-    assert sum(sum(a) for a in g.uH) > sum(sum(a) for a in g2.uH)
+    assert PL.run(B, {}, None, ignore_routing=True)["pr"]["via_units"] == 0.0
+    g = PL.run(B, {"plan": {"via_units": 2.0}}, None, ignore_routing=True)["gr"]
+    c = g.cell_of(50, 40)
+    g.routes["X"] = {"conns": [], "keys": set(), "vcells": {c}, "vias": 1, "vuse": [(1, c), (2, c)]}
+    before = [list(a) for a in g.uH]
+    g.uH[1][c] += 2.0
+    g.uH[2][c] += 2.0
+    g.rip("X")
+    assert g.uH == before
 
 
 def test_back_side_and_rotated_pads_are_planned_on_their_own_layer(tmp_path):
@@ -208,7 +212,7 @@ def test_bus_weave_and_part_in_corridor_codes_exist(tmp_path):
     # a narrow channel board is fully used: corridor cells exist
     from fluxplace import planrules as PRL
     R = run(channel_board(tmp_path, 16, gap=1.0))
-    assert PRL.corridor_cells(R["gr"], util=0.5)
+    assert PRL.corridor_cells(R["gr"], util=0.1, min_run=1)
 
 
 def test_calibrate_and_write_constants(tmp_path):

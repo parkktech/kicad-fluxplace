@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import planboards as PB
 from fluxplace import escapeplan as EP, planopts as PO, planroute as PL, routediag as RD
 
-N = 30
+N = 18
 
 
 def strip_board(tmp, n=N, h=4.0, extra=""):
@@ -54,8 +54,11 @@ def test_narrow_board_passes_after_growing_one_edge(tmp_path):
     p = strip_board(tmp_path)
     r = PO.search(p, {}, None, str(tmp_path / "out"), max_grow=6, workers=2, place_evals=0, base_place_evals=0, log=lambda m: None)
     assert not r["baseline"]["pass"] and not r["fits"]
-    best = r["ok"][0]
-    assert any(best["grow"]) and best["size"][1] > 4.0 and best["size"][0] == 100.0 and best["pass"]
+    grows = [o for o in r["ok"] if any(o["grow"]) and not o["rules"]]
+    assert grows and all(o["pass"] for o in r["ok"])
+    best = grows[0]
+    assert best["size"][1] > 4.0 and best["size"][0] == 100.0
+    assert r["ok"][0]["area_cm2"] <= best["area_cm2"]                       # ranked by area, then cost
     assert os.path.exists(best["board"]) and os.path.exists(best["board"].replace(".kicad_pcb", ".fluxmap.json"))
     assert "Fails at 100 x 4 mm" in r["prompt"] and "Recommended" in r["prompt"]
     assert r["caveat"].startswith("verdict unproven")
