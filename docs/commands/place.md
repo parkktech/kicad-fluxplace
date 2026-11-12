@@ -73,3 +73,13 @@ Everything is deterministic: same board in, byte-identical placement out.
   real autorouter agree on this board.
 
 Rotation: `ortho` (default, assembly-friendly) · `fine` (any angle, lowest wirelength) · `none`.
+
+## `--objective plan`
+
+`place --board B --strategy routable --objective plan --out O --constraints C [--time-limit S]` (or `[placement] objective = "plan"`):
+local moves from the input placement (shift, rotate 90/180/270, unit shift, same-footprint swap, flip when `flip_cost` is set), proposed
+from the `plan-route` findings (parts bordering overflow, blockers of sealed pins, neighbours of pads without a via site, ends of
+over-budget nets, support parts beyond their limit), accepted only when legal (the Refiner's legaliser) and PLAN_SCORE strictly
+drops. Fixed parts and anchors never move. Re-evaluation is incremental (escapes of the moved parts + 3 mm neighbours, only the touched
+cells, only the nets involved; snapshot restore on rejection); a full plan-route confirms and prints both numbers. Writes the board,
+`<out>.fluxmap.json`, `<out>.planmoves.json` and prints the move list (ref, old -> new, reason, score before -> after).

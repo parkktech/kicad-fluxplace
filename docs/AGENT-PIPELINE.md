@@ -9,10 +9,11 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 
 | # | stage | what it does | output (under `W/<n>-<stage>/`) |
 |---|-------|--------------|---------------------------------|
+| 0 | `map` | optional: `fluxplace map B --constraints C` writes `B.fluxmap.json`; agents read slices (`map --show parts --ref U5`) instead of the board | B.fluxmap.json |
 | 1 | `floorplan-check` | runs the `floorplan-check` command if this build has it, else `na` | stage.log |
 | 2 | `anchor-check` | rotates misoriented anchors (connectors) to their best option (`--apply`) | board.kicad_pcb |
-| 3 | `place` | `clusters --apply` (support parts to their ICs) then `place --strategy routable` | board.kicad_pcb |
-| 4 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`) | route-ready.json |
+| 3 | `place` | `clusters --apply` (support parts to their ICs) then `place --strategy routable` (`--objective plan` / `[placement] objective = "plan"`: local moves driven by the plan-route findings, kept only when PLAN_SCORE drops) | board.kicad_pcb |
+| 4 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`); with `[route_ready] use_plan` (default) it runs plan-route too: sealed pins and capacity overflow block | route-ready.json |
 | 5 | `route` | batch routing on OPEN CONNECTIONS (pcbnew connectivity; router gets the project's fab floors, no vias in pads; every batch audited, a violating one is discarded as `RULE_VIOLATION`; `[route] mode = "parallel"` = per-net jobs + merge) (35 nets per router call, 240 s each, checkpoint `ck-NNN.kicad_pcb` after each, halving on timeout, leftovers pass), keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` (last good checkpoint) and `leftovers.json` | board.kicad_pcb, diagnosis |
 | 6 | `tune` | DRC-guarded diff-pair length tuning | board.kicad_pcb |
 | 7 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
@@ -21,6 +22,11 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 `stages{name:{verdict,line,dir,board}}`, `scorecard{score,crossings,ratsnest_mm,overflow,fail,open}`,
 `next[]` (what the next stage must fix, worst first, numbers included), `paths`. `--status` prints it as a
 table of at most 15 lines. A stage not implemented in this build reports `na` and passes the board through.
+
+Pipeline order with the plan: `map` -> `place` (objective plan) -> `route-ready` (= plan-route gate) -> `route` -> audit (`review`).
+`fluxplace plan-route B --constraints C --ignore-routing` judges a placement before any copper exists (exit 1 = sealed pins or
+overflow; findings carry the part to move and the direction); `plan-compare A.fluxmap.json B.fluxmap.json` compares two. The batch router
+takes only an ORDER hint from the plan (`[route] plan_map`, docs/commands/route.md): it has no per-net layer/corridor interface.
 
 ## Rules (learned the expensive way)
 

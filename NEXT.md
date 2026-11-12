@@ -1,3 +1,29 @@
+## 2026-11-12 - plan-route (map, escape planner, global router): what it predicts and what it does not
+
+### Second pass (same day)
+
+Per-group escape check, via capacity on all layers, power-plane report, bus/corridor/return-path/zoning findings, confidence, variants,
+calibration. Old planner (cc49f11) vs final, same boards: 228a8ef placement-only PLAN_SCORE 888 -> 2190 (different weights, not comparable;
+stricter model), pre-R2 992 -> 3880; a0503fc default 4555 (16 sealed, 72 no-via-site, many on pads already connected) -> 1178 (6 / 8).
+V1 strict (<= 1.5 mm) hit of failed pads: stage E 13 % -> 42 % (lift 1.7 -> 1.6), stage G 16 % -> 59 % (2.1 -> 2.3). V3 pin level lift 2.7 -> 4.3 with
+98 -> 24 findings. PLAN_ESCAPE_OVERSUBSCRIBED never fires on J10/J11/U300/U400/U401 of 228a8ef: the geometry offers enough lanes and
+slots; the real failures there came from copper laid by the router.
+
+Validated against the UTV V1.6 routing history (`/var/kicad/utv-comms-bridge`, docs/V1.6-ROUTING-STATUS.md); ground truth = pad clusters
+left unjoined by text connectivity at stages E (4fe4ca0, 117 pads / 31 nets) and G (a0503fc, 44 pads / 21 nets).
+
+| check | result |
+|---|---|
+| V1 placement only (228a8ef, `--ignore-routing`) | 3 sealed, 3 no-via-site, 36 overflow regions. Within 1.5 mm of a failed pad: stage E 29/117 (25 %, lift 1.2x over the 22 % of pads any finding covers), stage G 18/44 (41 %, lift 2.1x); 19 / 24 findings with no failed pad nearby. J10 corridor pins 49/25/45: inside an overflow region, none flagged sealed; U400/U401 pins 11/12: U401 inside a region, U400 not; the eight +3V3 pads of the status doc: no PLAN_NO_VIA_SITE (at placement time every one still has 2-30 free sites; the router later used them), 5/8 near an overflow region. |
+| V2 worse placement (d662352 pre-R2, d3b41cb) | PLAN_SCORE 3417 / 4397 vs 1958 on 228a8ef (over-budget pair spans, overflow 78-80 vs 46, 18 vs 15 pair splits) |
+| V3 real copper (a0503fc, default mode) | 15 nets open: 11 flagged (+3V3 all 8 pads as PLAN_NO_VIA_SITE; 6 sealed pins, all on open nets; overflow on CM5_3V3, AVDD, ACC_STATE, PRTPWR1, U101_VCC, CAN2_CS), 4 missed (GND, HPL_PRI_N, HB_PWM_R, I2S_ADC), 2 flagged nets that routed (VMODEM, VBATT_IN) |
+
+Why V1 is weak: most sealed pins and via-site losses of the real run were made by the router's own copper (neighbouring escapes), which a
+placement-only plan cannot see; the model sees capacity, not routing order. V3 (copper present) is where it is trustworthy.
+Calibration done on a0503fc: with 0.8 util and obstacles that cover < 50 % of a cell along a track's run ignored, 95 % of the real
+cell-directions fit the modelled capacity. The class-weighted copper term and the hard-class over-budget weight (20/mm) were set
+after V2 showed the first weights (1 per mm, unweighted copper) separated the placements by only 12 %.
+
 ## 2026-09-08 — verify-models: three open items from the placement-rules audit
 
 `verify-models` gained posture/buried-mass/library-transform/mated-overlay/

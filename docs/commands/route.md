@@ -94,3 +94,10 @@ and re-queued for the next round; accepted tracks/vias are imported as text into
 the same net's new track), the merged board is audited and its open connections counted; it becomes `ck-NNN` only if clean
 and not worse. Repeat until a round reduces no open connection, then ONE serial pass over the ripped nets.
 Status: `mode: "parallel"`, `round`, `workers`, `rounds[]` with `merged/dropped/ripped/timeouts/violations/failed/open_before/open_after`.
+
+## Plan hints (`[route] plan_map`)
+
+`[route] plan_map = "<board>.fluxmap.json"` (a `plan-route` map): `batchroute.order_nets` routes the nets whose planned path crosses
+a `PLAN_OVERFLOW` channel first inside their group, then differential pairs, then by length. **The router takes no per-net layer or
+corridor hints** (KiCadRoutingTools has no such interface), so the plan can only order nets; planned layers and cell paths are not
+passed on. Read them with `map --show route --net N`.
