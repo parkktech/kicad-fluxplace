@@ -135,14 +135,35 @@ def load(path, track=None, clearance=None):
             ptype = a[1] if len(a) > 1 else ""
             p = {"ref": ref, "num": a[0], "x": fx + dx, "y": fy + dy,
                  "w": w, "h": h, "ex": ex, "ey": ey, "min": min(w, h),
-                 "layers": lay or {side}, "net": nm(BF._net(pad)),
+                 "layers": lay or {side}, "net": nm(BF._net(pad)), "angle": pa,
+                 "shape": a[2] if len(a) > 2 else "",
                  "tht": ptype in ("thru_hole", "np_thru_hole")}
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
             zones.append(zone_of(z, fx, fy, fang))
+        cy_pts = []
+        for g in fp:
+            if (isinstance(g, list) and g and g[0].startswith("fp_")
+                    and (BF._atoms(BF._first(g, "layer")) or [""])[0].endswith("CrtYd")):
+                pts, _hw = BF._shape_pts(g)
+                for px, py in pts:
+                    rx, ry = BF._rot(px, py, fang)
+                    cy_pts.append((fx + rx, fy + ry))
+        if cy_pts:
+            court = (min(q[0] for q in cy_pts), min(q[1] for q in cy_pts),
+                     max(q[0] for q in cy_pts), max(q[1] for q in cy_pts))
+        elif mine:
+            court = (min(q["x"] - q["ex"] for q in mine) - 0.25, min(q["y"] - q["ey"] for q in mine) - 0.25,
+                     max(q["x"] + q["ex"] for q in mine) + 0.25, max(q["y"] + q["ey"] for q in mine) + 0.25)
+        else:
+            court = (fx, fy, fx, fy)
         parts[ref] = {"pos": (fx, fy), "pads": mine, "side": side,
-                      "value": props.get("Value", ""),
+                      "value": props.get("Value", ""), "angle": fang,
+                      "fp": (BF._atoms(fp) or [""])[0], "court": court,
+                      "locked": any(k == "locked" or (isinstance(k, list) and k[:2] == ["locked", "yes"])
+                                    for k in fp if isinstance(k, (str, list)) and (
+                                        k == "locked" or (isinstance(k, list) and k and k[0] == "locked"))),
                       "n_pads": len({p["num"] for p in mine})}
     for z in BF._kids(root, "zone"):
         zones.append(zone_of(z))
