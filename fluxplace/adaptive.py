@@ -25,6 +25,7 @@ import re
 import subprocess
 
 from . import escape as E
+from . import routestatus as RS
 
 
 def drc_unrouted(board, kicad_cli="kicad-cli"):
@@ -127,7 +128,7 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
             cmd += ["--power-nets", *power_nets, "--power-nets-widths", *map(str, power_widths)]
         fn.timed_out = False       # per-call: did THIS rung get truncated?
         try:
-            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
+            RS.run_logged(cmd, cwd=krt_dir, timeout=timeout, out=outb, stage="route-fresh")
         except subprocess.TimeoutExpired:
             fn.timed_out = fn.any_timeout = True
             log(f"    route-fresh hit {timeout}s cap")
@@ -164,8 +165,7 @@ def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
                "--diff-pair-gap", str(gap), "--via-size", str(via_size),
                "--via-drill", str(via_drill), "--keep-input-copper"]
         try:
-            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True,
-                           timeout=timeout)
+            RS.run_logged(cmd, cwd=krt_dir, timeout=timeout, out=outb, stage="diff-pair")
         except subprocess.TimeoutExpired:
             log(f"    diff-pair pre-route hit {timeout}s cap")
         return outb if os.path.exists(outb) else board
@@ -195,8 +195,7 @@ def krt_length_match(krt_py, krt_dir, layers, pairs, base_w=0.2, base_c=0.2,
         for s, m in sorted(pairs.items()):
             cmd += ["--length-match-group", m, s]
         try:
-            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True,
-                           timeout=timeout)
+            RS.run_logged(cmd, cwd=krt_dir, timeout=timeout, out=outb, stage="length-match")
         except subprocess.TimeoutExpired:
             log(f"    length-match hit {timeout}s cap")
         return outb if os.path.exists(outb) else board
@@ -224,8 +223,8 @@ def freerouting_finish(jar, passes=6, timeout=1800):
                if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
         try:
             from .finish import freerouting_cmd
-            r = subprocess.run(freerouting_cmd(jar, dsn, ses, passes),
-                               capture_output=True, timeout=timeout, env=env, text=True)
+            r = RS.run_logged(freerouting_cmd(jar, dsn, ses, passes), timeout=timeout,
+                              env=env, out=ses, stage="freerouting")
             if r.returncode != 0:
                 log("    finisher: jar exited "
                     f"{r.returncode}: {(r.stderr or r.stdout or '').strip()[:160]}")
@@ -266,7 +265,7 @@ def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.4
             # made unrouted WORSE and keep-best had to throw the round away)
             cmd += ["--nets", *nets]
         try:
-            subprocess.run(cmd, cwd=krt_dir, capture_output=True, text=True, timeout=timeout)
+            RS.run_logged(cmd, cwd=krt_dir, timeout=timeout, out=outb, stage="fanout")
         except subprocess.TimeoutExpired:
             log(f"    fanout hit {timeout}s cap on {component}")
         return outb if os.path.exists(outb) else board

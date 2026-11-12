@@ -77,8 +77,9 @@ def route_nets(board_path, out_path, nets, planes=("In1.Cu", "In4.Cu"), jar=None
     SES.declare_power_planes(dsn, list(planes))
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
     try:
-        r = subprocess.run(freerouting_cmd(jar, dsn, ses, passes),
-                           capture_output=True, timeout=timeout, env=env, text=True)
+        from . import routestatus as RS
+        r = RS.run_logged(freerouting_cmd(jar, dsn, ses, passes), timeout=timeout,
+                          env=env, out=ses, stage="finish")
         if r.returncode != 0:
             log(f"    finish: freerouting exited {r.returncode}: "
                 f"{(r.stderr or r.stdout or '').strip()[-160:]}")

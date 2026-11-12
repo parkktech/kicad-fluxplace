@@ -1044,7 +1044,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         if pwn:
             cmd += ["--power-nets", *pwn.keys(), "--power-nets-widths", *[str(w) for w in pwn.values()]]
         try:
-            r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True, timeout=timeout)
+            from fluxplace import routestatus as RS
+            r = RS.run_logged(cmd, cwd=a.router_dir, timeout=timeout, out=dst, stage='route')
         except subprocess.TimeoutExpired:
             print(f"    ! router stage timed out after {timeout}s (stage_timeout_s) - stopping retries")
             return None
@@ -1116,8 +1117,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                *adaptive.krt_extra(a.router_dir), "--nets", *plane_nets,
                "--max-ripup", "60"]
         try:
-            subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                           timeout=tmo)
+            from fluxplace import routestatus as RS
+            RS.run_logged(cmd, cwd=a.router_dir, timeout=tmo, out=finald, stage="plane-finalize")
         except subprocess.TimeoutExpired:
             print(f"    ! plane-finalize route timed out after {tmo}s"
                   " — proceeding to DFM/fab with the main-route board")
@@ -2220,6 +2221,46 @@ def cmd_schematic(a):
         if a.json: print(_json.dumps(v, indent=2))
 
 
+def cmd_route_status(a):
+    """One line from a router run's status file. Exit 0 running/done, 1 failed, 3 none."""
+    from fluxplace import routestatus as RS
+    sp = RS.resolve(a.target)
+    st = RS.load(sp) if sp else None
+    if not st:
+        print(f"route-status: no status file for {a.target}")
+        raise SystemExit(3)
+    print(RS.one_line(st))
+    if st["state"] in ("failed", "timeout", "dead"):
+        raise SystemExit(1)
+
+
+def cmd_route_wait(a):
+    """Block until the router run is done/stalled/checkpointed; ONE summary line.
+    Exit 0 condition met, 1 run failed, 2 timeout, 3 no status file."""
+    from fluxplace import routestatus as RS
+    sp = RS.resolve(a.target)
+    if not sp:
+        print(f"route-wait: no status file for {a.target} (is a route running?)")
+        raise SystemExit(3)
+    reason, st = RS.wait(sp, a.timeout, until=a.until, stall_s=a.stall, poll=a.poll)
+    if st is None:
+        print(f"route-wait: status file {sp} unreadable")
+        raise SystemExit(3)
+    line = f"route-wait: {reason} - {RS.one_line(st)}"
+    if reason in ("done", "failed", "stall", "timeout") and not a.no_diagnose and st.get("out"):
+        try:
+            cons, spec = _text_ctx(a)
+            dpath, nf = RS.diagnose_result(st, cons or None, spec)
+            if dpath:
+                line += f"  | unrouted {nf}; diagnosis {dpath}"
+        except Exception as e:                      # a bad board must not hide the status
+            line += f"  | diagnosis skipped ({type(e).__name__})"
+    if st.get("out") and os.path.exists(st["out"]):
+        line += f"  | result {st['out']}"
+    print(line)
+    raise SystemExit({"done": 0, "checkpoint": 0, "stall": 0, "failed": 1, "timeout": 2}.get(reason, 3))
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -3032,6 +3073,25 @@ def build_parser():
     psc.add_argument("--kicad-cli", default="kicad-cli")
     psc.add_argument("--json", action="store_true")
     psc.set_defaults(fn=cmd_schematic)
+
+    prs = sub.add_parser("route-status",
+                         help="one line from a router run's <out>.status.json (never tail the log)")
+    prs.add_argument("target", help="board, router output, or .status.json")
+    prs.set_defaults(fn=cmd_route_status)
+
+    prw = sub.add_parser("route-wait",
+                         help="block until the router is done/stalled/checkpointed; one summary "
+                              "line + result/diagnosis path (one call instead of polling)")
+    prw.add_argument("target", help="board, router output, or .status.json")
+    prw.add_argument("--timeout", type=float, default=900, help="seconds to wait (default 900)")
+    prw.add_argument("--until", choices=["done", "stall", "checkpoint"], default="done")
+    prw.add_argument("--stall", type=float, default=None,
+                     help="seconds without progress that count as a stall (default 600)")
+    prw.add_argument("--poll", type=float, default=2.0)
+    prw.add_argument("--no-diagnose", action="store_true", help="skip the read-only diagnosis on finish")
+    prw.add_argument("--constraints", default=None)
+    prw.add_argument("--spec", default=None)
+    prw.set_defaults(fn=cmd_route_wait)
 
     from fluxplace import outputs as OUT
     OUT.add_flags(ap, sub)
