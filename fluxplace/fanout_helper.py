@@ -188,11 +188,11 @@ class Model:
 
     def add_track(self, t):
         net = t.GetNetname()
-        if t.Type() == pcbnew.PCB_VIA_T:
+        if t.GetClass() == "PCB_VIA":
             r = mmv(t.GetWidth(pcbnew.F_Cu)) / 2
             c = t.GetPosition()
             self._add(Obs((mmv(c.x) - r, mmv(c.y) - r, mmv(c.x) + r, mmv(c.y) + r), net, set(self.cu), {"*": t.GetEffectiveShape(pcbnew.F_Cu)}, "via", "via"))
-        elif t.Type() in (pcbnew.PCB_TRACK_T, pcbnew.PCB_ARC_T):
+        else:
             bb = t.GetBoundingBox()
             self._add(Obs((mmv(bb.GetLeft()), mmv(bb.GetTop()), mmv(bb.GetRight()), mmv(bb.GetBottom())), net,
                           {self.b.GetLayerName(t.GetLayer())}, {self.b.GetLayerName(t.GetLayer()): t.GetEffectiveShape()}, "track", "track"))
