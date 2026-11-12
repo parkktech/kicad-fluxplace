@@ -124,6 +124,30 @@ def cmd_plan_compare(a):
     print(f"findings only in A: {len(pa - pb)}, only in B: {len(pb - pa)}, shared: {len(pa & pb)}")
 
 
+def after_plan_place(a, board_in, board_out, cons, spec, st):
+    """`place --objective plan` epilogue: confirm with a full plan-route, write the map and the move list."""
+    from . import fluxmap as FM, routediag as RD, planroute as PL
+    B = RD.load(board_out)
+    R = PL.run(B, cons, spec, ignore_routing=True)
+    m = FM.build(B, cons, spec, board_out, cls=R["cls"])
+    m.update(PL.plan_section(R))
+    mp = FM.default_path(board_out)
+    FM.save(m, mp)
+    v = PL.verdict(R)
+    print(f"plan: confirmed by a full plan-route: PLAN_SCORE {st['score_before']:.1f} -> {v['score']:.1f} "
+          f"(incremental {st['score_after']:.1f}); sealed {st['components_before']['sealed']} -> {v['components']['sealed']}, "
+          f"overflow {st['components_before']['overflow']:g} -> {v['components']['overflow']:g}; map {mp}")
+    log = st.get("log", [])
+    print(f"plan: {len(log)} move(s) kept; move list (ref, old -> new, reason):")
+    for e in log[:40]:
+        for r in e["refs"][:3]:
+            fx, to = e["from"][r], e["to"][r]
+            print(f"  {r:6s} ({fx[0]:.2f}, {fx[1]:.2f}, {fx[2]:.0f}) -> ({to[0]:.2f}, {to[1]:.2f}, {to[2]:.0f})  {e['reason']}"
+                  f"  [{e['before']:.1f} -> {e['after']:.1f}]")
+    with open(os.path.splitext(board_out)[0] + ".planmoves.json", "w") as fh:
+        json.dump({"score_before": st["score_before"], "score_confirmed": v["score"], "moves": log}, fh, indent=1)
+
+
 # ------------------------------------------------------------------ parsers
 def add_parsers(sub):
     def common(p):

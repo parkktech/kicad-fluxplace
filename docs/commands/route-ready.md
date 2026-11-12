@@ -61,3 +61,10 @@ start routing on a failing placement unless `--force`.
 
     [preroute]
     cell_mm = 2.0   utilisation = 0.7   max_overflow = 0   signal_layers = 4
+
+### 9. PLAN_* (stricter, optional gate)
+
+With `[route_ready] use_plan = true` (default) the gate also runs `plan-route` in default mode (`docs/commands/plan-route.md`): FAIL
+for `PLAN_PIN_SEALED` and `PLAN_OVERFLOW`, WARN for `PLAN_NO_VIA_SITE`, `PLAN_NET_OVER_BUDGET`, `PLAN_PAIR_SPLIT`,
+`PLAN_RF_LAYER_CHANGES`, `PLAN_UNREACHABLE`; `card["plan"]` holds PLAN_SCORE and counts. Waive like any finding (`--waive PLAN_OVERFLOW:REGEX`).
+The optimisers (`routable`, `--refine`) call `preroute.run` per move without it (plan=False); `place --objective plan` uses the plan itself.

@@ -168,7 +168,14 @@ def _routable_place(a, board_in, board_out):
     f0, c0 = PR.run(B0, cons, spec)
     B = RD.load(board_in)
     try:
-        if getattr(a, "refine", False):
+        if getattr(a, "objective", None) == "plan" or (cons.get("placement") or {}).get("objective") == "plan":
+            from fluxplace import planplace as PP
+            mv, st = PP.plan_place(B, cons, spec, seed=a.seed, log=lambda m: print("  " + m, flush=True),
+                                   time_limit=a.time_limit)
+            a._plan_stats = st
+            print(f"  plan objective: PLAN_SCORE {st['score_before']:.1f} -> {st['score_after']:.1f}, kept {st['kept']}", flush=True)
+            flips = st["flips"]
+        elif getattr(a, "refine", False):
             from fluxplace import refine as RF
             mv, st = RF.refine(B, cons, spec, seed=a.seed, log=lambda m: print("  " + m, flush=True),
                                time_limit=a.time_limit)
@@ -197,6 +204,9 @@ def _routable_place(a, board_in, board_out):
         open(board_out, "w", errors="surrogateescape").write(text)
         print(f"  --strip-stale: removed {n} stale track/via item(s)")
     f1, c1 = PR.run(RD.load(board_out), cons, spec)
+    if getattr(a, "_plan_stats", None):
+        from fluxplace import plancli
+        plancli.after_plan_place(a, board_in, board_out, cons, spec, a._plan_stats)
     return mv, (f0, c0), (f1, c1)
 
 
@@ -1809,7 +1819,7 @@ def cmd_route_ready(a):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(a.board, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=a.waive)
+    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons))
     print(PR.format_text(f, card, a.board))
     if a.all:
         for x in f:
@@ -1852,7 +1862,7 @@ def _route_gate(a, board_path, stage="routing"):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(board_path, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()))
+    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()), plan=PR.use_plan(cons))
     print(PR.format_text(f, card, board_path), flush=True)
     if card["fail"]:
         if getattr(a, "force", False):
@@ -2469,6 +2479,9 @@ def build_parser():
     pp.add_argument("--refine", action="store_true",
                     help="with --strategy routable: only LOCAL moves from the input (nudge <= 3 mm, rotate 90, swap, "
                          "slide a support part), each kept only if the gate score improves and the result stays legal")
+    pp.add_argument("--objective", choices=["default", "plan"], default="default",
+                    help="routable: plan = local moves proposed from the plan-route findings, kept only when legal and "
+                         "PLAN_SCORE does not get worse (also [placement] objective = \"plan\"); writes <out>.fluxmap.json")
     pp.add_argument("--seed", type=int, default=0, help="--refine: visiting order seed (deterministic)")
     pp.add_argument("--time-limit", type=float, default=None, help="--refine: seconds (default [placement] time_limit_s, 600)")
     pp.add_argument("--spec", default=None, help="spec JSON (pin names) for routable")

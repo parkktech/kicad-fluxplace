@@ -390,22 +390,24 @@ def render(m, out, scale=9.0):
         for j in range(ny):
             for i in range(nx):
                 k = j * nx + i
-                tot = capsum = 0
+                tot = capsum = over = 0
                 for lay in side_layers:
                     for d in ("H", "V"):
                         a = grid["cap" + d][lay][k]
                         b = grid["use" + d][lay][k]
-                        capsum += 10 if a == "x" else int(a)
-                        tot += 10 if b == "x" else int(b)
+                        a = 10 if a == "x" else int(a)
+                        b = 10 if b == "x" else int(b)
+                        capsum += a
+                        tot += b
+                        over += max(0, b - a)
                 if capsum == 0 and tot == 0:
                     continue
                 box = (X(gx + i * cell), Y(gy + j * cell), X(gx + (i + 1) * cell), Y(gy + (j + 1) * cell))
                 if inner:
-                    f = min(1.0, tot / max(capsum, 1)) if capsum else (1.0 if tot else 0.0)
                     if tot:
-                        c.rect(box, fill=(40, 90, 220, int(30 + 150 * f)))
-                elif tot > capsum:
-                    c.rect(box, fill=(230, 30, 30, int(80 + min(150, 40 * (tot - capsum)))))
+                        c.rect(box, fill=(40, 90, 220, int(30 + 150 * min(1.0, tot / max(capsum, 1)))))
+                elif over:
+                    c.rect(box, fill=(230, 30, 30, min(230, 90 + 40 * over)))
                 elif capsum == 0:
                     c.rect(box, fill=(90, 90, 90, 60))
 
@@ -435,7 +437,7 @@ def render(m, out, scale=9.0):
                 c.rect((X(cb[0]), Y(cb[1]), X(cb[2]), Y(cb[3])), outline=(190, 190, 190))
         for r in m["relations"]:
             sp, ic = P.get(r["part"]), P.get(r["serves"].split(".")[0])
-            if not sp or not ic or (side and sp["side"] != side and ic["side"] != side):
+            if not sp or not ic or not r.get("sure") or (side and sp["side"] != side and ic["side"] != side):
                 continue
             bad = r["now"] > r["max"]
             c.line((X(sp["x"]), Y(sp["y"])), (X(ic["x"]), Y(ic["y"])), (220, 0, 0) if bad else (0, 140, 0), 2 if bad else 1)
@@ -443,9 +445,9 @@ def render(m, out, scale=9.0):
             part = P.get(ref)
             if not part or (side and part["side"] != side):
                 continue
-            for pad, rec in pins.items():
+            for pnum, rec in pins.items():
                 if rec[0] in ("s", "n"):
-                    pos = next((q for n in m["nets"] for q in n["pads"] if q[0] == f"{ref}.{pad}"), None)
+                    pos = next((q for n in m["nets"] for q in n["pads"] if q[0] == f"{ref}.{pnum}"), None)
                     if pos:
                         col = (255, 0, 0) if rec[0] == "s" else (200, 0, 200)
                         c.circle((X(pos[1]), Y(pos[2])), 5, outline=col)

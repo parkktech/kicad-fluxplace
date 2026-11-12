@@ -404,8 +404,16 @@ def congestion_findings(rep, cons=None):
 
 
 # ------------------------------------------------------------------ gate
-def run(B, cons=None, spec=None, waivers=(), anchors=True):
-    """-> (findings, scorecard). Findings already have waivers applied."""
+def use_plan(cons):
+    """`[route_ready] use_plan` (default true): the gate also runs plan-route (planroute.py) and fails on sealed pins and
+    overflow.  Only the gate entry points ask for it (plan=True); optimisers that call run() per move do not."""
+    v = ((cons or {}).get("route_ready") or {}).get("use_plan", True)
+    return bool(v)
+
+
+def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
+    """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
+    (escape planner + global router, copper of the board respected) and card["plan"]."""
     from . import review as R
     cons = cons or {}
     cls = NC.classify(B, cons, spec)
@@ -421,6 +429,16 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
     f += PCK.stale_copper(B)
     f += PCK.side_policy(B, cons, spec)
     f += LGL.findings(B, cons)
+    plan_v = None
+    if plan:
+        from . import planroute as PL
+        PRES = PL.run(B, cons, spec, ignore_routing=False, cls=cls)
+        plan_v = PL.verdict(PRES)
+        for x in PL.rank(PRES["findings"]):
+            f.append(_f(FAIL if x["code"] in PL.FAIL_CODES else WARN, x["code"],
+                        x["msg"] + (f" -> {x['suggestion']}" if x.get("suggestion") else ""),
+                        refs=[x["part"]] if x.get("part") else x.get("parts", []), value=x.get("value", x.get("overflow")),
+                        limit=x.get("limit", 0)))
     cg = congestion(B, cls, cons)
     f += congestion_findings(cg, cons)
     edges = routed_edges(B, cls)
@@ -436,6 +454,10 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
             "counts": {c: sum(1 for x in f if x["code"] == c) for c in CODES},
             "fail": sum(1 for x in f if x["level"] == FAIL),
             "warn": sum(1 for x in f if x["level"] == WARN)}
+    if plan_v is not None:
+        card["plan"] = plan_v
+        for k, c in plan_v["counts"].items():
+            card["counts"][k] = c
     card["overrides"] = [{"net": n, "mm": mm, "reason": r, "length": round(ln, 1), "ok": ok}
                          for n, mm, r, ln, ok in budget_overrides(B, cls)]
     card["block_mm"] = round(PCK.block_mm(B, spec, cons), 1)
@@ -501,6 +523,10 @@ def format_text(findings, card, title=""):
          f"{', '.join(card['congestion'].get('layer_names') or [])})"]
     for c in CODES:
         L.append(f"  {c:20s} {card['counts'][c]}")
+    if card.get("plan"):
+        p = card["plan"]
+        L.append(f"  plan-route                     : PLAN_SCORE {p['score']:g} {p['result']}  "
+                 + ", ".join(f"{k} {v}" for k, v in sorted(p["counts"].items())))
     if card.get("overrides"):
         L.append("  budget overrides in effect:")
         for o in card["overrides"]:

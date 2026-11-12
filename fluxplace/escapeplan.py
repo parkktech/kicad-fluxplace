@@ -33,7 +33,7 @@ DEFAULTS = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm"
             "fine_pitch_mm": 0.65, "fine_pads": 16, "pour_pads": 20, "thermal_pad_mm2": 2.0,
             "via_cost_mm": 3.0, "iterations": 10, "util": 0.8, "w_sealed": 100.0, "w_nosite": 40.0,
             "w_overflow": 5.0, "w_overbudget": 1.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
-            "w_len": 0.02, "jog_frac": 0.5}
+            "w_len": 0.05, "jog_frac": 0.5}
 SIDE_NAMES = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}      # KiCad y grows downward
 MECH = ("MH", "MK", "FID", "TP", "H")
 
@@ -157,6 +157,17 @@ class Obstacles:
             out.append((kind, r, n, ref, num))
         return out
 
+    def attached(self, q):
+        """Default mode: does same-net copper (a track end or a via) already touch pad q?"""
+        if not self.copper or not q["net"]:
+            return False
+        r = prect(q)
+        for k in self.h.hits(r, "x", 0.02):
+            kind, rc, n, ly, ref, num = self.items[k]
+            if kind in ("track", "via") and n == q["net"] and (ly & frozenset(q["layers"])) and GM.overlap(rc, r, 0.0):
+                return True
+        return False
+
     def keepout_hit(self, x, y, layers, vias=False):
         for z in (self.kv if vias else self.kt):
             if not (z["layers"] & layers):
@@ -273,7 +284,8 @@ class Plan:
         self.stats = {}
 
 
-def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs=None, skip_nets=(), routed_nets=()):
+def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs=None, skip_nets=(), routed_nets=(),
+                 phase=None, taken=(), pnets=None):
     """Plan every escape. `only_refs`: restrict the analysed parts (their pins still compete for shared sites
     only with each other). `routed_nets`: nets already complete on the board (default mode): not planned."""
     cons = cons or {}
@@ -281,7 +293,7 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
     cls = cls if cls is not None else NC.classify(B, cons, None)
     plan = Plan()
     ob = Obstacles(B, pr, ignore_routing)
-    pnets = plane_nets(B, cons, cls, pr)
+    pnets = pnets if pnets is not None else plane_nets(B, cons, cls, pr)
     plan.plane = pnets
     parts = B["parts"]
     refs = sorted(r for r in parts if (only_refs is None or r in only_refs) and not is_mech(r))
@@ -305,6 +317,10 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
             if not net or net in skip_nets or net in routed_nets:
                 continue
             key = (ref, q["num"])
+            if ob.attached(q):
+                plan.pins[key] = {"ref": ref, "pad": q["num"], "net": net, "x": round(q["x"], 2), "y": round(q["y"], 2),
+                                  "layer": sorted(q["layers"])[0], "fine": fine, "plane": net in pnets, "kind": "attached"}
+                continue
             layers = frozenset(q["layers"]) if len(q["layers"]) < 3 else out_layer
             rec = {"ref": ref, "pad": q["num"], "net": net, "x": round(q["x"], 2), "y": round(q["y"], 2),
                    "layer": sorted(layers)[0], "fine": fine, "plane": net in pnets}
@@ -379,7 +395,8 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
 
     cand = {}
     R_sig, R_pl = pr["reach_mm"], pr["plane_radius_mm"]
-    for ph in range(4):
+    phases = range(4) if phase is None else (phase,)
+    for ph in phases:
         for kind, key, q, part, layers, cx, cy in needs:
             R = R_pl if kind == "plane" else R_sig
             rc = prect(q)
@@ -389,6 +406,8 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
                                        pr["slot_mm"]):
                 gap = _rect_gap_pt(rc, x, y)
                 if gap > R + via_r:
+                    continue
+                if ij in taken:
                     continue
                 ok, owner = site_ok(ph, ij, (x, y))
                 if not ok:
@@ -418,8 +437,8 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
                 lst.append((gap, ij))
             lst.sort()
             cand[(ph, key)] = lst
-    best_ph, best_m, best_key = 0, {}, (-1, 0.0)
-    for ph in range(4):
+    best_ph, best_m, best_key = phases[0], {}, (-1, 0.0)
+    for ph in phases:
         order = sorted(needs, key=lambda n: (len(cand[(ph, n[1])]), n[1]))
         match, owner_of = {}, {}
 
@@ -457,7 +476,8 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
         ij = best_m.get(key)
         if ij:
             x, y = xyof[ij]
-            rec.update(kind="via", via=[round(x, 2), round(y, 2)], stub=round(_rect_gap_pt(prect(q), x, y), 2))
+            rec.update(kind="via", via=[round(x, 2), round(y, 2)], stub=round(_rect_gap_pt(prect(q), x, y), 2),
+                       cands=len(cand[(best_ph, key)]))
             plan.used[ij] = key
         else:
             rec["kind"] = "no_site" if kind == "plane" else "sealed"
@@ -466,6 +486,15 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
     _findings(B, pr, plan, parts, ob, fine_refs)
     _headroom(B, pr, plan, parts, ob, fine_refs, site_ok, best_ph)
     return plan
+
+
+def rebuild_findings(B, pr, plan, ignore_routing=True):
+    """Regenerate plan.findings from plan.pins (after an incremental update)."""
+    ob = Obstacles(B, pr, ignore_routing)
+    plan.findings = []
+    fine = {r for r, p in B["parts"].items() if is_fine(p, pr)}
+    _findings(B, pr, plan, B["parts"], ob, fine)
+    return plan.findings
 
 
 def _suggest(B, pr, rec, part, ob):

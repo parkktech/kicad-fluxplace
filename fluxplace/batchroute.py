@@ -71,10 +71,12 @@ def router_env(limited, env=None):
     return e
 
 
-def order_nets(B, nets, cls=None, first=(), power=()):
-    """Routing order: fan-out, power, critical classes, rest; ascending estimated length inside a group."""
+def order_nets(B, nets, cls=None, first=(), power=(), hint=None):
+    """Routing order: fan-out, power, critical classes, rest; inside a group the plan's rank first (`hint`: {net: rank},
+    planroute.route_hint: nets through PLAN_OVERFLOW channels = 0, pairs = 1), then ascending estimated length."""
     cls = cls or {}
     first, power = set(first), set(power)
+    hint = hint or {}
     pads = NC.net_pads(B)
 
     def key(n):
@@ -84,7 +86,7 @@ def order_nets(B, nets, cls=None, first=(), power=()):
             ln = NC.net_length(B, n, pads.get(n))
         except Exception:
             ln = 0.0
-        return (g, round(ln, 3), n)
+        return (g, hint.get(n, 9), round(ln, 3), n)
     return sorted(dict.fromkeys(nets), key=key)
 
 
@@ -159,7 +161,12 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     B = B or RD.load(board)
     open0 = dict(conn(board))
     nets = [n for n in dict.fromkeys(nets)]
-    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), first, power)
+    hint = None
+    pm = ((cons or {}).get("route") or {}).get("plan_map")
+    if pm and os.path.exists(pm):
+        from . import planroute as PL
+        hint = PL.route_hint(pm)        # order only: the router takes no per-net layer or corridor hints
+    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), first, power, hint)
     cur, cur_open = board, open0
     cur_B = B
     drc_base = [None]

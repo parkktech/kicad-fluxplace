@@ -2,7 +2,8 @@
 
 PLAN_SCORE = 100 x sealed pins + 40 x plane pins without a via site + 5 x overflow (track-cell sum, vias
 included) + 1 x mm of copper over budget + 30 x pair splits + 30 x RF layer changes + 200 x unreached
-connections + 0.02 x estimated copper mm (the tie-breaker that keeps a placer moving once nothing is wrong).
+connections + 0.05 x class-weighted estimated copper mm (pair 4, rf 6, clock 5, bypass 8, switch 10, signal 1, slow 1, rails 0.25: long
+high-speed spans cost, and a placer keeps moving once nothing is wrong).
 Lower is better; 0 violations -> the score is just 0.02 x copper length.  Weights: `[plan] w_*`.
 """
 import json
@@ -36,18 +37,19 @@ def open_state(B, board_path=None, method="text"):
     return nets, groups, routed
 
 
-def score_of(pr, findings, ns):
+def score_of(pr, findings, ns, cls=None):
     c = Counter(f["code"] for f in findings)
     over = sum(f.get("overflow", 0) for f in findings if f["code"] == "PLAN_OVERFLOW")
     ob = sum(max(0.0, f["value"] - f["limit"]) for f in findings if f["code"] == "PLAN_NET_OVER_BUDGET")
     unr = sum(f["value"] for f in findings if f["code"] == "PLAN_UNREACHABLE")
     ln = sum(v["len"] for v in ns.values())
+    wl = sum(v["len"] * max(0.25, (cls or {}).get(n, {}).get("weight", 1.0)) for n, v in ns.items())
     comp = {"sealed": c["PLAN_PIN_SEALED"], "no_via_site": c["PLAN_NO_VIA_SITE"], "overflow": round(over, 1),
             "over_budget_mm": round(ob, 1), "pair_split": c["PLAN_PAIR_SPLIT"], "rf_changes": c["PLAN_RF_LAYER_CHANGES"],
-            "unreached": unr, "copper_mm": round(ln, 1)}
+            "unreached": unr, "copper_mm": round(ln, 1), "weighted_copper": round(wl)}
     s = (pr["w_sealed"] * comp["sealed"] + pr["w_nosite"] * comp["no_via_site"] + pr["w_overflow"] * over +
          pr["w_overbudget"] * ob + pr["w_pair"] * comp["pair_split"] + pr["w_rf"] * comp["rf_changes"] +
-         pr["w_unreach"] * unr + pr["w_len"] * ln)
+         pr["w_unreach"] * unr + pr["w_len"] * wl)
     return round(s, 1), comp
 
 
@@ -72,7 +74,7 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
     t3 = time.time()
     ns = gr.net_stats()
     f = list(plan.findings) + GR.findings(gr, ns)
-    sc, comp = score_of(pr, f, ns)
+    sc, comp = score_of(pr, f, ns, cls)
     return {"pr": pr, "cls": cls, "plan": plan, "gr": gr, "ns": ns, "findings": f, "score": sc, "comp": comp, "state": state,
             "mode": "ignore-routing" if ignore_routing else "default",
             "timing": {"state_s": round(t1 - t0, 1), "escapes_s": round(t2 - t1, 1), "route_s": round(t3 - t2, 1),
@@ -197,3 +199,19 @@ def _b36(n):
         s = "0123456789abcdefghijklmnopqrstuvwxyz"[r] + s
         if not n:
             return s
+
+
+def route_hint(map_path):
+    """{net: rank} for the batch router's ordering: nets whose planned path crosses a PLAN_OVERFLOW channel = 0 (route them
+    first, while the channel is empty), differential pairs = 1.  `[route] plan_map = "<board>.fluxmap.json"`.  The router has no
+    interface for per-net layers or corridors, so the plan can only order the nets (docs/commands/plan-route.md)."""
+    m = json.load(open(map_path))
+    out = {}
+    for ch in m.get("channels", []):
+        for n in ch.get("nets", []):
+            out[n] = 0
+    for n, r in (m.get("route") or {}).items():
+        if r.get("pair"):
+            for mem in r["pair"]:
+                out.setdefault(mem, 1)
+    return out

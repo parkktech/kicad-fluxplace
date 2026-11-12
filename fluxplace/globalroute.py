@@ -198,6 +198,42 @@ class GlobalRoute:
         # planned via sites (escape plan): barrels through every layer
         if self.plan is not None:
             self._plan_vias()
+            self._lane_fields()
+
+    def _lane_fields(self):
+        """A run of fine-pitch pins that escape straight out forms a lane field on the pad's layer: through-traffic
+        cannot cross it, so its bounding rectangle is an obstacle (rows of pins closer than 1.2 mm join)."""
+        self.remove_tag("lanes")
+        rows = defaultdict(list)
+        P = self.B["parts"]
+        for (ref, num), rec in self.plan.pins.items():
+            if rec.get("kind") != "direct" or not rec.get("fine") or not rec.get("dir"):
+                continue
+            q = next((p for p in P[ref]["pads"] if p["num"] == num), None)
+            if q is None:
+                continue
+            d = {"E": (1, 0), "W": (-1, 0), "S": (0, 1), "N": (0, -1)}[rec["dir"]]
+            L = self.pr["lane_len_mm"]
+            sx, sy = q["x"] + d[0] * q["ex"], q["y"] + d[1] * q["ey"]
+            r = (min(sx, sx + d[0] * L), min(sy, sy + d[1] * L), max(sx, sx + d[0] * L), max(sy, sy + d[1] * L))
+            lay = rec["layer"]
+            rows[(ref, rec["dir"], lay, round(sx if d[1] else sy, 1))].append(r)
+        g = self.pr["clearance_mm"] + self.pr["track_mm"] / 2
+        for (ref, dr, lay, _k), rs in rows.items():
+            l = self.lid.get(lay)
+            if l is None:
+                continue
+            rs.sort(key=lambda r: (r[1], r[0]) if dr in "EW" else (r[0], r[1]))
+            cur = list(rs[0])
+            for r in rs[1:] + [None]:
+                join = r is not None and ((dr in "EW" and r[1] - cur[3] <= 1.2) or (dr in "NS" and r[0] - cur[2] <= 1.2))
+                if join:
+                    cur = [min(cur[0], r[0]), min(cur[1], r[1]), max(cur[2], r[2]), max(cur[3], r[3])]
+                else:
+                    if len(rs) >= 3:
+                        self._add_rect("lanes", tuple(cur), [l], g)
+                    if r is not None:
+                        cur = list(r)
 
     def _add_seg(self, l, s, g):
         (ax, ay), (bx, by) = s["a"], s["b"]
@@ -276,6 +312,7 @@ class GlobalRoute:
     # ------------------------------------------------------------------ nets
     def terminal(self, ref, num):
         """((layer ids allowed or None=all), cell, (x, y), kind) for one pad."""
+        self._fine = False
         q = next(p for p in self.B["parts"][ref]["pads"] if p["num"] == num)
         rec = self.plan.pins.get((ref, num)) if self.plan is not None else None
         part = self.B["parts"][ref]
@@ -285,10 +322,13 @@ class GlobalRoute:
         lay = [self.lid[l] for l in q["layers"] if l in self.lid]
         allowed = None if (q["tht"] or len(lay) > 1) else lay
         x, y = q["x"], q["y"]
+        self._fine = False
         if rec and rec.get("kind") == "direct" and rec.get("dir"):
             d = {"E": (1, 0), "W": (-1, 0), "S": (0, 1), "N": (0, -1)}[rec["dir"]]
             L = min(self.pr["lane_len_mm"], rec.get("lane") or self.pr["lane_len_mm"])
             x, y = q["x"] + d[0] * (q["ex"] + L), q["y"] + d[1] * (q["ey"] + L)
+            self._fine = bool(rec.get("fine"))
+            self._lane_dir = 0 if d[0] else 1
         return allowed, self.cell_of(x, y), (x, y), (rec or {}).get("kind", "direct")
 
     def _terms(self, ps):
@@ -299,8 +339,11 @@ class GlobalRoute:
             if key in seen:
                 continue
             seen.add(key)
-            terms.append({"pad": f"{p['ref']}.{p['num']}", "layers": al, "cell": c, "xy": xy, "kind": kind,
-                          "pxy": (p["x"], p["y"])})
+            t = {"pad": f"{p['ref']}.{p['num']}", "layers": al, "cell": c, "xy": xy, "kind": kind,
+                 "pxy": (p["x"], p["y"]), "free": (0, 1), "fine": False}
+            if self._fine:                # a fine-pitch lane: only its own direction is free, its via is charged
+                t["free"], t["fine"] = (self._lane_dir,), True
+            terms.append(t)
         return terms
 
     def split_pair(self, name):
@@ -395,11 +438,11 @@ class GlobalRoute:
         mine = set()                      # (l, c, dir) already carried by this net: free to reuse
         conns, vias, path_nodes = [], 0, []
         free = set()                      # a pad's own cell costs no capacity: the track starts inside it
-        tcells = {t["cell"] for t in terms}
+        tcells = {t["cell"] for t in terms if not t["fine"]}
         for t in terms:
             for l in (t["layers"] if t["layers"] is not None else range(nl)):
-                free.add((l, t["cell"], 0))
-                free.add((l, t["cell"], 1))
+                for d_ in t["free"]:
+                    free.add((l, t["cell"], d_))
         mine |= free
         first = terms[0]
         for l in (first["layers"] if first["layers"] is not None else range(nl)):
@@ -522,6 +565,46 @@ class GlobalRoute:
                     heapq.heappush(pq, (nd + hh, nd, v))
         return None
 
+    # ------------------------------------------------------------------ incremental update (placement loop)
+    def update_after_move(self, moved, redo_pins, pins_changed, iters=3):
+        """Parts `moved` changed pose; the escape plan of `redo_pins` (a set of refs) was recomputed.  Rebuild the
+        obstacles of those parts, the planned vias and lane fields, the capacity of every cell they touch, the
+        terminals of the nets with a pad on a part in `redo_pins`, and re-route those nets plus the nets crossing a
+        changed cell.  Returns the set of re-routed nets."""
+        dirty = set()
+        for ref in moved:
+            dirty |= self.tag_cells.get(ref, set())
+        for ref in moved:
+            self.add_part(ref)
+            dirty |= self.tag_cells.get(ref, set())
+        for tag in ("planvia", "lanes"):
+            dirty |= self.tag_cells.get(tag, set())
+        self.via_used = defaultdict(int)
+        self._plan_vias()
+        self._lane_fields()
+        for tag in ("planvia", "lanes"):
+            dirty |= self.tag_cells.get(tag, set())
+        for c in dirty:
+            self.cap_cell(c)
+        pads = NC.net_pads(self.B)
+        names = set()
+        for n, nt in list(self.nets.items()):
+            mem = nt["members"]
+            refs = {p["ref"] for m in mem for p in pads.get(m, [])}
+            r = self.routes.get(n)
+            if refs & redo_pins or (r and any(k[1] in dirty for k in r["keys"])) or (r and r["vcells"] & dirty):
+                names.add(n)
+        for n in names:
+            self.rip(n)
+            nt = self.nets[n]
+            nt["terms"] = self._terms([p for p in pads[nt["members"][0]] if not p.get("np")]) if not nt["pair"] else \
+                self._terms([p for p in pads[nt["members"][0]] if not p.get("np")])
+            if nt.get("split"):
+                nt["split"] = {m: self._terms([p for p in pads[m] if not p.get("np")]) for m in nt["members"]}
+        if names:
+            self.route_all(iters=iters, only=names)
+        return names
+
     def rip(self, name):
         r = self.routes.pop(name, None)
         if not r:
@@ -594,7 +677,7 @@ class GlobalRoute:
                     new = self.split_pair(n)
                     todo = [x for x in todo if x != n] + new
                     hit = [x for x in hit if x != n] + new
-                    self.order = [x for x in self.order]
+                    best, best_state = float("inf"), None          # the structure changed: restart the best-so-far
             hs = set(hit)
             for n in [n for n in todo if n in hs]:
                 self.rip(n)
@@ -602,14 +685,15 @@ class GlobalRoute:
                 self.route_net(n, pres)
             cur = self.total_overflow()
             self.log(f"  iter {it}: overflow {cur:g}, {len(hit)} net(s) re-routed")
-            if cur < best - 1e-9:
+            if best_state is None or cur < best - 1e-9:
                 best, best_state, stall = cur, self._save(todo), 0
             else:
                 stall += 1
                 if stall >= 3:
                     break
-        self._load(todo, best_state)
-        return best
+        if best_state is not None:
+            self._load(todo, best_state)
+        return self.total_overflow()
 
     def _pair_pinched(self, name):
         """A pair is split only when it crosses a cell-direction that cannot carry its demand even when empty."""
@@ -626,7 +710,7 @@ class GlobalRoute:
         for n in names:
             self.rip(n)
         for n, r in state.items():
-            if r is None:
+            if r is None or n not in self.nets:
                 continue
             self.routes[n] = r
             w = self.nets[n]["units"]
@@ -727,7 +811,8 @@ def findings(gr, ns, parts_near=None):
         out.append({"code": "PLAN_OVERFLOW", "at": [round(gr.xy_of(wc)[0], 1), round(gr.xy_of(wc)[1], 1)],
                     "layer": gr.layers[worst[2]], "demand": round(dem, 1), "capacity": cap,
                     "overflow": round(tot, 1), "cells": len(reg), "box": [round(v, 1) for v in bb],
-                    "nets": nm[:8], "n_nets": len(nm), "parts": near[:4],
+                    "nets": nm[:40], "n_nets": len(nm), "parts": near[:4],
+                    "cells_xy": [[round(gr.xy_of(c)[0], 1), round(gr.xy_of(c)[1], 1)] for c in reg[:40]],
                     "msg": f"{len(reg)} cell(s) over capacity near ({gr.xy_of(wc)[0]:.1f}, {gr.xy_of(wc)[1]:.1f}), worst "
                            f"{gr.layers[worst[2]]} demand {dem:g} / capacity {cap}; overflow {tot:.1f}; {len(nm)} net(s) "
                            f"({', '.join(nm[:5])}{'...' if len(nm) > 5 else ''}); bordering {', '.join(near[:4]) or 'no part'}",

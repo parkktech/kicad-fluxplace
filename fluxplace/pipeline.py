@@ -88,7 +88,7 @@ def format_status(st):
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR
     B = RD.load(board)
-    f, card = PR.run(B, cons, spec, waivers=list(waivers))
+    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons))
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
