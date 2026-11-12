@@ -2967,6 +2967,8 @@ def build_parser():
     prr.set_defaults(fn=cmd_route_ready)
     from fluxplace import plancli
     plancli.add_parsers(sub)              # map, plan-route, plan-compare
+    from fluxplace import fancli
+    fancli.add_parsers(sub)               # density, fanout, modules, floorplan (constructive flow)
 
     pcl = sub.add_parser("clusters",
                          help="IC support clusters (which 2-pin parts belong to which IC); "
