@@ -1,10 +1,10 @@
 """plan-route: map -> escapes -> global route -> one verdict (PLAN_SCORE).  See docs/commands/plan-route.md.
 
 PLAN_SCORE = 100 x sealed pins + 40 x plane pins without a via site + 5 x overflow (track-cell sum, vias
-included) + 1 x mm of copper over budget + 30 x pair splits + 30 x RF layer changes + 200 x unreached
+included) + 20 x mm over budget on rf/switch_node/bypass/pair nets, 3 x on the others (as preroute.score) + 30 x pair splits + 30 x RF layer changes + 200 x unreached
 connections + 0.05 x class-weighted estimated copper mm (pair 4, rf 6, clock 5, bypass 8, switch 10, signal 1, slow 1, rails 0.25: long
 high-speed spans cost, and a placer keeps moving once nothing is wrong).
-Lower is better; 0 violations -> the score is just 0.02 x copper length.  Weights: `[plan] w_*`.
+Lower is better; 0 violations -> the score is just the weighted copper length term.  The over_budget component counts hard-class mm (others scaled by 3/20).  Weights: `[plan] w_*`.
 """
 import json
 import math
@@ -40,7 +40,8 @@ def open_state(B, board_path=None, method="text"):
 def score_of(pr, findings, ns, cls=None):
     c = Counter(f["code"] for f in findings)
     over = sum(f.get("overflow", 0) for f in findings if f["code"] == "PLAN_OVERFLOW")
-    ob = sum(max(0.0, f["value"] - f["limit"]) for f in findings if f["code"] == "PLAN_NET_OVER_BUDGET")
+    ob = sum(max(0.0, f["value"] - f["limit"]) * (1.0 if f.get("cls") in GR.HARD else pr["w_overbudget"] / pr["w_overbudget_hard"])
+             for f in findings if f["code"] == "PLAN_NET_OVER_BUDGET")
     unr = sum(f["value"] for f in findings if f["code"] == "PLAN_UNREACHABLE")
     ln = sum(v["len"] for v in ns.values())
     wl = sum(v["len"] * max(0.25, (cls or {}).get(n, {}).get("weight", 1.0)) for n, v in ns.items())
@@ -48,7 +49,7 @@ def score_of(pr, findings, ns, cls=None):
             "over_budget_mm": round(ob, 1), "pair_split": c["PLAN_PAIR_SPLIT"], "rf_changes": c["PLAN_RF_LAYER_CHANGES"],
             "unreached": unr, "copper_mm": round(ln, 1), "weighted_copper": round(wl)}
     s = (pr["w_sealed"] * comp["sealed"] + pr["w_nosite"] * comp["no_via_site"] + pr["w_overflow"] * over +
-         pr["w_overbudget"] * ob + pr["w_pair"] * comp["pair_split"] + pr["w_rf"] * comp["rf_changes"] +
+         pr["w_overbudget_hard"] * ob + pr["w_pair"] * comp["pair_split"] + pr["w_rf"] * comp["rf_changes"] +
          pr["w_unreach"] * unr + pr["w_len"] * wl)
     return round(s, 1), comp
 

@@ -121,6 +121,26 @@ class PlanPlacer(RF.Refiner):
         self.comp0 = dict(self.ps.comp)
         self.moves_log = []
         self.key_of = {m: k for k, ms in self.U.items() for m in ms}
+        # support-part guard: a move may not push a support part further beyond its limit (SUPPORT_PART_FAR of the gate)
+        self.sup_lim = {s["ref"]: (c["ic"], s["pad"], s["via"], s["limit"]) for c in self.cl for s in c["supports"] if s["sure"]}
+        self.excess = self.support_excess()
+
+    def support_excess(self):
+        from . import clusters as CL
+        P, tot = self.B["parts"], 0.0
+        for ref, (ic, pad, via, lim) in self.sup_lim.items():
+            sp, icp = P.get(ref), P.get(ic)
+            if not sp or not icp:
+                continue
+            a = next((q for q in sp["pads"] if q["num"] == via), None)
+            b = next((q for q in icp["pads"] if q["num"] == pad), None)
+            if not a or not b:
+                continue
+            d = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+            if CL._pitch(icp) <= 0.5:
+                d = max(0.0, d - CL.HALO_MM)
+            tot += max(0.0, d - lim)
+        return tot
 
     # ---- the one place a move is judged
     def try_move(self, kind, poses, reason="", slack=0.0, gain=0.0, flip=None):
@@ -134,11 +154,16 @@ class PlanPlacer(RF.Refiner):
         if not self._legal(refs):
             self._undo(old, flip)
             return False
+        ex = self.support_excess()
+        if ex > self.excess + 1e-6:                       # would push a support part further beyond its limit
+            self._undo(old, flip)
+            return False
         snap = self.ps.snapshot()
         before = self.ps.score
         self.ps.update(set(refs), old_courts)
         if self.ps.score < before - 1e-6:
             self.score = self.ps.score
+            self.excess = ex
             self.stats[kind] += 1
             if flip:
                 self.flips ^= {flip}

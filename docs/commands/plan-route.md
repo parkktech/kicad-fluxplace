@@ -27,7 +27,7 @@ deterministic order), pairs as one 3-pitch demand (split -> `PLAN_PAIR_SPLIT`), 
 (`PLAN_RF_LAYER_CHANGES` above `[rf] max_vias`), estimated length = octile distance + detour (`PLAN_NET_OVER_BUDGET`),
 `PLAN_UNREACHABLE`, `PLAN_OVERFLOW` per region (nets, bordering parts, widen-the-gap suggestion).
 
-**PLAN_SCORE** = 100 sealed + 40 no-via-site + 5 overflow + 1 mm over budget + 30 pair split + 30 RF change + 200 unreached
+**PLAN_SCORE** = 100 sealed + 40 no-via-site + 5 overflow + 20 mm over budget (rf/switch_node/bypass/pair nets; 3 for the others) + 30 pair split + 30 RF change + 200 unreached
 + 0.05 x class-weighted copper mm. Lower is better.
 
 `route-ready` runs it too (`[route_ready] use_plan = true`, the default; `false` turns the PLAN_* gate off). Honest limits: the

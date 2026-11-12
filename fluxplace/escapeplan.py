@@ -32,7 +32,7 @@ DEFAULTS = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm"
             "lane_len_mm": 1.0, "reach_mm": 1.6, "plane_radius_mm": 1.5, "edge_clr_mm": 0.30,
             "fine_pitch_mm": 0.65, "fine_pads": 16, "pour_pads": 20, "thermal_pad_mm2": 2.0,
             "via_cost_mm": 3.0, "iterations": 10, "util": 0.8, "w_sealed": 100.0, "w_nosite": 40.0,
-            "w_overflow": 5.0, "w_overbudget": 1.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
+            "w_overflow": 5.0, "w_overbudget": 3.0, "w_overbudget_hard": 20.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
             "w_len": 0.05, "jog_frac": 0.5}
 SIDE_NAMES = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}      # KiCad y grows downward
 MECH = ("MH", "MK", "FID", "TP", "H")
