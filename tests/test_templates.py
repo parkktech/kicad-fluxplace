@@ -84,3 +84,32 @@ def test_placer_keeps_a_templated_group_rigid(tmp_path):
     assert all(rep["after"][n] < 16.0 for n in ("L1_RF", "L2_RF", "L3_RF", "L4_RF"))
     NCls = NC.classify(B, CONS)
     assert LGL.count(LGL.Legal(B, CONS, pl.fixed).issues()) == 0
+
+
+def test_cli_compact_floorplan_check_and_templates(tmp_path, capsys):
+    """Round-2 commands go through the compact reporter: verdict line, report file, --full, -q."""
+    import cli
+    b = tree_board(tmp_path)
+    cp = tmp_path / "c.toml"
+    cp.write_text('[placement]\nfixed = ["U0"]\n[placement.template.t]\nkind = "tree"\n'
+                  'leaves = ["U1","U2","U3","U4"]\ncombiners = ["C1","C2","C3"]\nroot = "U0"\n')
+    for cmd in ("templates", "floorplan-check"):
+        capsys.readouterr()
+        rc = 0
+        try:
+            cli.main([cmd, b, "--constraints", str(cp)])
+        except SystemExit as e:
+            rc = e.code or 0
+        out = capsys.readouterr().out
+        assert out.startswith(f"{cmd}: "), out
+        assert len(out.encode()) <= 3000
+        try:
+            cli.main([cmd, b, "--constraints", str(cp), "-q"])
+        except SystemExit:
+            pass
+        assert len(capsys.readouterr().out.strip().splitlines()) == 1
+        try:
+            cli.main(["--full", cmd, b, "--constraints", str(cp)])
+        except SystemExit:
+            pass
+        assert capsys.readouterr().out

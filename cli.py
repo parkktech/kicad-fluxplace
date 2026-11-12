@@ -1061,7 +1061,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         if pwn:
             cmd += ["--power-nets", *pwn.keys(), "--power-nets-widths", *[str(w) for w in pwn.values()]]
         try:
-            r = subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True, timeout=timeout)
+            from fluxplace import routestatus as RS
+            r = RS.run_logged(cmd, cwd=a.router_dir, timeout=timeout, out=dst, stage='route')
         except subprocess.TimeoutExpired:
             print(f"    ! router stage timed out after {timeout}s (stage_timeout_s) - stopping retries")
             return None
@@ -1133,8 +1134,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                *adaptive.krt_extra(a.router_dir), "--nets", *plane_nets,
                "--max-ripup", "60"]
         try:
-            subprocess.run(cmd, cwd=a.router_dir, capture_output=True, text=True,
-                           timeout=tmo)
+            from fluxplace import routestatus as RS
+            RS.run_logged(cmd, cwd=a.router_dir, timeout=tmo, out=finald, stage="plane-finalize")
         except subprocess.TimeoutExpired:
             print(f"    ! plane-finalize route timed out after {tmo}s"
                   " — proceeding to DFM/fab with the main-route board")
@@ -2289,6 +2290,60 @@ def cmd_schematic(a):
         if a.json: print(_json.dumps(v, indent=2))
 
 
+def cmd_route_status(a):
+    """One line from a router run's status file. Exit 0 running/done, 1 failed, 3 none."""
+    from fluxplace import routestatus as RS
+    sp = RS.resolve(a.target)
+    st = RS.load(sp) if sp else None
+    if not st:
+        print(f"route-status: no status file for {a.target}")
+        raise SystemExit(3)
+    print(RS.one_line(st))
+    if st["state"] in ("failed", "timeout", "dead"):
+        raise SystemExit(1)
+
+
+def cmd_route_wait(a):
+    """Block until the router run is done/stalled/checkpointed; ONE summary line.
+    Exit 0 condition met, 1 run failed, 2 timeout, 3 no status file."""
+    from fluxplace import routestatus as RS
+    sp = RS.resolve(a.target)
+    if not sp:
+        print(f"route-wait: no status file for {a.target} (is a route running?)")
+        raise SystemExit(3)
+    reason, st = RS.wait(sp, a.timeout, until=a.until, stall_s=a.stall, poll=a.poll)
+    if st is None:
+        print(f"route-wait: status file {sp} unreadable")
+        raise SystemExit(3)
+    line = f"route-wait: {reason} - {RS.one_line(st)}"
+    if reason in ("done", "failed", "stall", "timeout") and not a.no_diagnose and st.get("out"):
+        try:
+            cons, spec = _text_ctx(a)
+            dpath, nf = RS.diagnose_result(st, cons or None, spec)
+            if dpath:
+                line += f"  | unrouted {nf}; diagnosis {dpath}"
+        except Exception as e:                      # a bad board must not hide the status
+            line += f"  | diagnosis skipped ({type(e).__name__})"
+    if st.get("out") and os.path.exists(st["out"]):
+        line += f"  | result {st['out']}"
+    print(line)
+    raise SystemExit({"done": 0, "checkpoint": 0, "stall": 0, "failed": 1, "timeout": 2}.get(reason, 3))
+
+
+def cmd_pipeline(a):
+    """Staged pipeline with file handoffs (W/state.json). See docs/AGENT-PIPELINE.md."""
+    from fluxplace import pipeline as PL
+    rc = PL.run(a)
+    if rc:
+        raise SystemExit(rc)
+
+
+def cmd_help_brief(a):
+    """<= 15 lines per command from the live parser (all commands: one line each)."""
+    from fluxplace import helpbrief as HB
+    print(HB.main_text(a.command))
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -3125,13 +3180,79 @@ def build_parser():
     psc.add_argument("--json", action="store_true")
     psc.set_defaults(fn=cmd_schematic)
 
+    prs = sub.add_parser("route-status",
+                         help="one line from a router run's <out>.status.json (never tail the log)")
+    prs.add_argument("target", help="board, router output, or .status.json")
+    prs.set_defaults(fn=cmd_route_status)
+
+    prw = sub.add_parser("route-wait",
+                         help="block until the router is done/stalled/checkpointed; one summary "
+                              "line + result/diagnosis path (one call instead of polling)")
+    prw.add_argument("target", help="board, router output, or .status.json")
+    prw.add_argument("--timeout", type=float, default=900, help="seconds to wait (default 900)")
+    prw.add_argument("--until", choices=["done", "stall", "checkpoint"], default="done")
+    prw.add_argument("--stall", type=float, default=None,
+                     help="seconds without progress that count as a stall (default 600)")
+    prw.add_argument("--poll", type=float, default=2.0)
+    prw.add_argument("--no-diagnose", action="store_true", help="skip the read-only diagnosis on finish")
+    prw.add_argument("--constraints", default=None)
+    prw.add_argument("--spec", default=None)
+    prw.set_defaults(fn=cmd_route_wait)
+
+    from fluxplace import pipeline as PL
+    ppl = sub.add_parser("pipeline",
+                         help="staged pipeline, one stage per agent context, handing off via "
+                              "WORKDIR/state.json (floorplan-check, anchor-check, place, route-ready, "
+                              "route, tune, review)")
+    ppl.add_argument("board", nargs="?", default=None, help="input board (first stage only)")
+    ppl.add_argument("--workdir", required=True, help="state.json and W/<n>-<stage>/ outputs")
+    ppl.add_argument("--constraints", default=None)
+    ppl.add_argument("--spec", default=None)
+    ppl.add_argument("--from", dest="from_stage", choices=PL.STAGES, default=None)
+    ppl.add_argument("--to", dest="to_stage", choices=PL.STAGES, default=None)
+    ppl.add_argument("--status", action="store_true", help="print the stage table (<= 15 lines) and exit")
+    ppl.add_argument("--waive", action="append", default=[], help="route-ready waiver CODE:REGEX")
+    ppl.add_argument("--force", action="store_true", help="continue past a failing route-ready gate")
+    ppl.add_argument("--api", action="store_true", help="review with live DigiKey/Mouser data")
+    ppl.add_argument("--route-budget", type=float, default=1800, help="route stage wall-clock cap, s")
+    ppl.add_argument("--route-timeout", type=float, default=900, help="per router call cap, s")
+    ppl.add_argument("--stall-rounds", type=int, default=2)
+    ppl.add_argument("--replace-on-stall", action="store_true", help="let the stall loop move parts")
+    ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    ppl.add_argument("--track", type=float, default=0.2)
+    ppl.add_argument("--clearance", type=float, default=0.2)
+    ppl.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
+    ppl.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    ppl.set_defaults(fn=cmd_pipeline)
+
+    phb = sub.add_parser("help-brief",
+                         help="at most 15 lines on one command (none: one line per command); "
+                              "use instead of README/-h")
+    phb.add_argument("command", nargs="?", default=None)
+    phb.set_defaults(fn=cmd_help_brief)
+
+    sub.choices["doctor"].add_argument(
+        "--context", action="store_true",
+        help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
+
+    from fluxplace import outputs as OUT
+    OUT.add_flags(ap, sub)
     return ap
 
 
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
-    a.fn(a)
+    from fluxplace import outputs as OUT
+    if a.cmd == "doctor" and getattr(a, "context", False):
+        from fluxplace import context_check as CC
+        text, ok = CC.report()
+        print(text)
+        raise SystemExit(0 if ok else 1)
+    if a.cmd in OUT.COMPACT_CMDS:
+        OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
+    else:
+        a.fn(a)
     if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
         _sheet_hint(getattr(a, "out", None) or a.board)
 
