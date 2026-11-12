@@ -30,13 +30,7 @@ XING_MM = 3.0       # one ratsnest crossing among a unit's own nets costs this m
 
 
 def _fixed_set(B, cons):
-    fixed = {r for r, p in B["parts"].items() if p.get("locked")}
-    fixed |= set(((cons or {}).get("lock") or {}).get("at", {}))
-    fixed |= {r for r in B["parts"] if r.startswith(_MECH_PREFIX) and r[len(r.rstrip("0123456789")):].isdigit()
-              and r.rstrip("0123456789") in _MECH_PREFIX}
-    fixed |= {r for a in AN.detect(B, cons) for r in a["refs"]}
-    fixed |= set(((cons or {}).get("placement") or {}).get("fixed", []))
-    return fixed
+    return PR.fixed_parts(B, cons)
 
 
 def units(B, cl, fixed):

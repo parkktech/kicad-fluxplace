@@ -55,33 +55,67 @@ def explicit_fixed(B, cons):
 
 
 # ------------------------------------------------------------------ checks
+def fixed_parts(B, cons):
+    """Parts the placer will not move: locked, [lock.at], [placement] fixed, mounting hardware, and
+    the detected anchors (connectors, modules, rotating groups)."""
+    import re
+    mech = ("MH", "MK", "FID", "TP", "H")
+    fx = set(explicit_fixed(B, cons))
+    fx |= {r for r in B["parts"] if r.rstrip("0123456789") in mech and r[len(r.rstrip("0123456789")):].isdigit()}
+    fx |= {r for a in AN.detect(B, cons) for r in a["refs"]}
+    return fx
+
+
 def net_over_budget(B, cls, cons=None):
+    """FAIL when a net is over budget and moving parts could fix it. ANCHOR_SPACING (WARN) when the
+    fixed parts alone already break the budget: the floor is the MST over the pads of fixed parts
+    (a sub-tree of the net that no placement move can shorten), so a multi-pad net with only some
+    pads fixed is judged on that sub-tree. A net whose length exceeds both its budget and 1.15 x
+    its floor + 1 mm still FAILs for the excess the movable parts add."""
     out = []
-    fixed = explicit_fixed(B, cons)
+    fixed = fixed_parts(B, cons)
     pads = NC.net_pads(B)
     for net, info in sorted(cls.items()):
         lim = NC.effective_budget(info)
         if lim is None:
             continue
         ln = NC.mst_length([NC.pad_xy(p) for p in pads[net]])
-        if ln > lim:
-            far = max(pads[net], key=lambda p: max(math.hypot(p["x"] - q["x"], p["y"] - q["y"])
-                                                  for q in pads[net]))
-            ends = sorted({p["ref"] for p in pads[net]})
-            pr = f" (pair with {info['partner']})" if info["partner"] else ""
-            if set(ends) <= fixed:
-                # both ends are fixed: no placement move can meet this budget
-                out.append(_f(WARN, "ANCHOR_SPACING",
-                              f"{net} [{info['class']}]{pr}: {' and '.join(ends[:4])} are fixed "
-                              f"{ln:.1f} mm apart (minimum achievable {ln:.1f} mm, budget {lim:g} mm); "
-                              f"move an anchor or raise the budget", refs=ends, value=round(ln, 2),
-                              limit=lim, cls=info["class"]))
+        if ln <= lim:
+            continue
+        ends = sorted({p["ref"] for p in pads[net]})
+        pr = f" (pair with {info['partner']})" if info["partner"] else ""
+        why = f"; override: {info['override_reason']}" if info.get("override_reason") else ""
+        fx = [p for p in pads[net] if p["ref"] in fixed]
+        floor = NC.mst_length([NC.pad_xy(p) for p in fx]) if len(fx) >= 2 else 0.0
+        if floor > lim:
+            fr = sorted({p["ref"] for p in fx})
+            out.append(_f(WARN, "ANCHOR_SPACING",
+                          f"{net} [{info['class']}]{pr}: fixed {', '.join(fr[:4])} are {floor:.1f} mm apart "
+                          f"(minimum achievable {floor:.1f} mm, budget {lim:g} mm, now {ln:.1f} mm); "
+                          f"move an anchor or raise the budget{why}", refs=fr, value=round(floor, 2),
+                          limit=lim, cls=info["class"]))
+            if ln <= 1.15 * floor + 1.0:
                 continue
-            out.append(_f(FAIL, "NET_OVER_BUDGET",
-                          f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm "
-                          f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''})",
-                          refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]))
+            lim = floor                      # the rest of the excess is placement's
+        out.append(_f(FAIL, "NET_OVER_BUDGET",
+                      f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm"
+                      f"{f' (the fixed parts alone need {floor:.1f})' if floor > 0 and lim == floor else ''} "
+                      f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''}){why}",
+                      refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]))
     return out
+
+
+def budget_overrides(B, cls):
+    """[(net, mm, reason, length mm, ok)] for every net with a [placement.budget."NET"] or
+    [placement.net.NET] budget override, so the reasons are always printed."""
+    pads = NC.net_pads(B)
+    rows = []
+    for net, info in sorted(cls.items()):
+        if info.get("override") and net in pads:
+            ln = NC.mst_length([NC.pad_xy(p) for p in pads[net]])
+            lim = NC.effective_budget(info)
+            rows.append((net, info["budget"], info.get("override_reason", ""), ln, lim is None or ln <= lim))
+    return rows
 
 
 def support_far(B, cons, spec):
@@ -402,6 +436,8 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
             "counts": {c: sum(1 for x in f if x["code"] == c) for c in CODES},
             "fail": sum(1 for x in f if x["level"] == FAIL),
             "warn": sum(1 for x in f if x["level"] == WARN)}
+    card["overrides"] = [{"net": n, "mm": mm, "reason": r, "length": round(ln, 1), "ok": ok}
+                         for n, mm, r, ln, ok in budget_overrides(B, cls)]
     card["block_mm"] = round(PCK.block_mm(B, spec, cons), 1)
     card["score"] = score(f, card)
     return f, card
@@ -465,6 +501,11 @@ def format_text(findings, card, title=""):
          f"{', '.join(card['congestion'].get('layer_names') or [])})"]
     for c in CODES:
         L.append(f"  {c:20s} {card['counts'][c]}")
+    if card.get("overrides"):
+        L.append("  budget overrides in effect:")
+        for o in card["overrides"]:
+            L.append(f"    {o['net']:18s} {('none' if o['mm'] is None else format(o['mm'], 'g') + ' mm'):>8s}  now {o['length']:.1f} mm "
+                     f"{'ok' if o['ok'] else 'OVER'}  - {o['reason'] or '(no reason given)'}")
     L.append("  worst 10:")
     for x in worst(findings):
         L.append(f"    {x['code']:19s} {x['msg']}")

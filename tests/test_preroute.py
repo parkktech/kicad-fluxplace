@@ -21,7 +21,7 @@ def test_net_over_budget_and_waiver(tmp_path):
     f, card = run(p)
     assert "NET_OVER_BUDGET" in codes(f) and card["fail"] >= 1
     msg = [x for x in f if x["code"] == "NET_OVER_BUDGET"][0]
-    assert msg["value"] > msg["limit"] == 30.0
+    assert msg["value"] > msg["limit"] == 60.0
     f2, card2 = run(p, {"review": {"waive": ["NET_OVER_BUDGET:^N1 "]}})
     assert "NET_OVER_BUDGET" not in codes(f2)
     f3, _ = run(p, {"placement": {"budget": {"signal": 100}}})
