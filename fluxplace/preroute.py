@@ -435,7 +435,8 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
         PRES = PL.run(B, cons, spec, ignore_routing=False, cls=cls)
         plan_v = PL.verdict(PRES)
         for x in PL.rank(PRES["findings"]):
-            f.append(_f(FAIL if x["code"] in PL.FAIL_CODES else WARN, x["code"],
+            lvl = FAIL if (x["code"] in PL.FAIL_CODES and (x["code"] != "PLAN_OVERFLOW" or x.get("risky"))) else WARN
+            f.append(_f(lvl, x["code"],
                         x["msg"] + (f" -> {x['suggestion']}" if x.get("suggestion") else ""),
                         refs=[x["part"]] if x.get("part") else x.get("parts", []), value=x.get("value", x.get("overflow")),
                         limit=x.get("limit", 0)))

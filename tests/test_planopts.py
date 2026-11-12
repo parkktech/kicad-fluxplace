@@ -99,13 +99,15 @@ def test_neck_down_never_thins_an_ethernet_pair(tmp_path):
     assert not ok and sub and "never recommended" in sub[0]["impact"]
 
 
-def test_option_that_lengthens_a_controlled_pair_ranks_below_an_equal_one():
+def test_option_that_lengthens_a_controlled_pair_is_never_recommended():
     base = {"controlled": {"ETH_P0_P": [50.0, 2]}, "return_path": 0}
-    mk = lambda name, ln, rp=0: {"name": name, "pass": True, "rules": {}, "area_cm2": 50.0, "cost": 50.0, "confidence": 50, "score": 1, "overflow": 0,
-                                 "sealed": 0, "no_via_site": 0, "subfloor": False, "neck_violations": [], "grow": [0] * 4, "size": [1, 1],
-                                 "controlled": {"ETH_P0_P": [ln, 2]}, "return_path": rp}
+    mk = lambda name, ln, rp=0, vias=2: {"name": name, "pass": True, "rules": {}, "area_cm2": 50.0, "cost": 50.0, "confidence": 50, "score": 1,
+                                         "overflow": 0, "sealed": 0, "no_via_site": 0, "subfloor": False, "neck_violations": [], "grow": [0] * 4,
+                                         "size": [1, 1], "controlled": {"ETH_P0_P": [ln, vias]}, "return_path": rp}
     longer, same = mk("longer", 62.0), mk("same", 50.5)
-    ok, _s, _m = PO.rank([longer, same], base)
-    assert [r["name"] for r in ok] == ["same", "longer"] and "worse" in ok[1]["impact"]
-    ok, _s, _m = PO.rank([mk("rp", 50.0, rp=3), same], base)
-    assert ok[0]["name"] == "same"
+    ok, sub, _m = PO.rank([longer, same], base)
+    assert [r["name"] for r in ok] == ["same"] and [r["name"] for r in sub] == ["longer"] and "worse" in sub[0]["impact"]
+    ok, sub, _m = PO.rank([mk("rp", 50.0, rp=3), mk("vias", 50.0, vias=9), same], base)
+    assert [r["name"] for r in ok] == ["same"] and {r["name"] for r in sub} == {"rp", "vias"}
+    ok, sub, _m = PO.rank([mk("small", 51.0, vias=3)], base)     # within the tolerance: still recommended
+    assert [r["name"] for r in ok] == ["small"]

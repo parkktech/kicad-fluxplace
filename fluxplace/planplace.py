@@ -146,7 +146,7 @@ class PlanPlacer(RF.Refiner):
         return tot
 
     # ---- the one place a move is judged
-    def try_move(self, kind, poses, reason="", slack=0.0, gain=0.0, flip=None):
+    def try_move(self, kind, poses, reason="", slack=0.0, gain=0.0, flip=None, allow_equal=False):
         refs = list(poses)
         old = {r: self._pose(r) for r in refs}
         old_courts = {r: self.B["parts"][r]["court"] for r in refs}
@@ -164,7 +164,7 @@ class PlanPlacer(RF.Refiner):
         snap = self.ps.snapshot()
         before = self.ps.score
         self.ps.update(set(refs), old_courts)
-        if self.ps.score < before - 1e-6:
+        if self.ps.score < before - 1e-6 or (allow_equal and self.ps.score <= before + 1e-9):
             self.score = self.ps.score
             self.excess = ex
             self.stats[kind] += 1
@@ -317,6 +317,28 @@ class PlanPlacer(RF.Refiner):
                     out.append(g[i])
         return out
 
+    def spread_pass(self, grow):
+        """Board grown by grow = (l, r, t, b): re-seat the movable units along the new room, in proportion to their distance from the
+        opposite edge (units next to the grown edge move most), each kept when legal and PLAN_SCORE does not get worse."""
+        gl, gr_, gt, gb = grow
+        x0, y0, x1, y1 = self.B["bbox"]
+        W, H = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+        P = self.B["parts"]
+        n, tot = 0, 0.0
+        for k in sorted((k for k in self.U if self._movable(k)), key=lambda k: P[k]["pos"][0] + P[k]["pos"][1]):
+            if time.time() > self.t_end:
+                break
+            x, y = P[k]["pos"]
+            dx = -gl * (x1 - x) / W + gr_ * (x - x0) / W
+            dy = -gt * (y1 - y) / H + gb * (y - y0) / H
+            if abs(dx) < 0.05 and abs(dy) < 0.05:
+                continue
+            poses = self._shift(k, dx, dy)
+            if poses and self.try_move("spread", poses, f"spread into the new room: {k} by ({dx:+.1f}, {dy:+.1f})", allow_equal=True):
+                n += 1
+                tot += math.hypot(dx, dy)
+        return n, tot
+
     def rotation_pass(self, min_pads=6):
         """A1: for every movable unit with >= 6 pads, or any part with a finding on it, big first: try the other three rotations (and the
         other side when `[placement.side] flip_cost` allows) and keep each that lowers PLAN_SCORE (the score carries pin direction,
@@ -339,6 +361,9 @@ class PlanPlacer(RF.Refiner):
 
     def run(self):
         P = self.B["parts"]
+        if getattr(self, "spread", None):
+            n, tot = self.spread_pass(self.spread)
+            self.log(f"spread pass: {n} unit(s) re-seated, mean {tot / max(n, 1):.1f} mm")
         if getattr(self, "do_rotation_pass", True):
             self.log(f"A1 rotation pass: {self.rotation_pass()} rotation(s) kept, PLAN_SCORE {self.score:.1f}")
         self.log(f"plan objective: PLAN_SCORE {self.score:.1f}, {len(self.U)} unit(s), {len(self.fixed)} fixed")
@@ -369,10 +394,11 @@ class PlanPlacer(RF.Refiner):
         return moves
 
 
-def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True):
+def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True, spread=None):
     """-> (moves {ref: (x, y, angle)}, stats).  Mutates B."""
     r = PlanPlacer(B, cons, spec, seed, log, time_limit)
     r.do_rotation_pass = rotation
+    r.spread = spread
     mv = r.run()
     return mv, {"score_before": r.score0, "score_after": r.score, "components_before": r.comp0,
                 "components_after": r.ps.comp, "kept": dict(r.stats), "flips": sorted(r.flips), "reverted": r.reverted,

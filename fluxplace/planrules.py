@@ -132,3 +132,46 @@ def zoning(B, cls, cons):
                             "msg": f"hot-loop part {h} is {d:.1f} mm from {s} (RF/audio), keep-away {keep:g} mm",
                             "suggestion": f"move {h} or {s} so they are >= {keep:g} mm apart"})
     return sorted(out, key=lambda f: -f["value"])[:30]
+
+
+def overflow_causes(gr, B, pr):
+    """Split the overflow (track units over capacity, summed over cell-layer-directions) by where it sits:
+    courtyard  = the cell centre lies inside a part courtyard on that layer's side (pads cover the cell: the escape planner's business),
+    fanout     = within 2 mm of a fine-pitch part's courtyard,
+    channel    = open channel between parts.   -> {cause: units, 'cells': {cause: n}} and the per-net list of at-risk (channel/fanout) nets."""
+    from . import escapeplan as EP
+    P = B["parts"]
+    fine = [(p["court"], p["side"]) for r, p in P.items() if EP.is_fine(p, pr) and not EP.is_mech(r)]
+    allp = [(p["court"], p["side"]) for r, p in P.items() if not EP.is_mech(r) and p["n_pads"] >= 1]
+    out = {"courtyard": 0.0, "fanout": 0.0, "channel": 0.0}
+    cells = {"courtyard": 0, "fanout": 0, "channel": 0}
+    kind = {}
+    for l in range(gr.nl):
+        side = "F.Cu" if gr.layers[l] == "F.Cu" else ("B.Cu" if gr.layers[l] == "B.Cu" else None)
+        for c in range(gr.N):
+            o = max(0.0, gr.uH[l][c] - gr.capH[l][c]) + max(0.0, gr.uV[l][c] - gr.capV[l][c])
+            if o <= 0:
+                continue
+            x, y = gr.xy_of(c)
+            inside = any(cb[0] <= x <= cb[2] and cb[1] <= y <= cb[3] and (side is None or sd == side) for cb, sd in allp)
+            if inside:
+                k = "courtyard"
+            elif any(cb[0] - 2 <= x <= cb[2] + 2 and cb[1] - 2 <= y <= cb[3] + 2 and (side is None or sd == side) for cb, sd in fine):
+                k = "fanout"
+            else:
+                k = "channel"
+            out[k] += o
+            cells[k] += 1
+            kind[(l, c)] = k
+    return {"units": {k: round(v, 1) for k, v in out.items()}, "cells": cells}, kind
+
+
+def risk_nets(gr, kind):
+    """Nets whose planned path crosses an over-capacity cell-direction that is NOT inside a part courtyard."""
+    risk = set()
+    for n, r in gr.routes.items():
+        for (l, c, d) in r["keys"]:
+            if kind.get((l, c)) in ("fanout", "channel") and (gr.uH if d == 0 else gr.uV)[l][c] > (gr.capH if d == 0 else gr.capV)[l][c]:
+                risk.add(n)
+                break
+    return risk

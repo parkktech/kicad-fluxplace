@@ -331,7 +331,7 @@ class GlobalRoute:
             self.capV[l][c] = int(max(0.0, fx) / pitch * util + 1e-6)
         # via sites: free fraction of the cell (all layers' pad/keep-out/via blockers) on a 0.6 mm lattice
         d = self.vobs.get(c)
-        full = (self.cell / self.pr["slot_mm"]) ** 2 * 0.5
+        full = (self.cell / self.pr["slot_mm"]) ** 2 * self.pr["via_density"]
         if d:
             blocked = 0.0
             ivy = []
@@ -867,6 +867,8 @@ def findings(gr, ns, parts_near=None):
                     seen.add(v)
                     stack.append(v)
         regions.append(reg)
+    from . import planrules as PRL
+    _cz, kind = PRL.overflow_causes(gr, B, pr) if ov else ({}, {})
     through = defaultdict(set)
     for n, r in gr.routes.items():
         for (l, c, d) in r["keys"]:
@@ -888,8 +890,10 @@ def findings(gr, ns, parts_near=None):
         dem, cap = _d[k], cpv[k]
         mem = sorted(involved)
         nm = [x for n in mem for x in gr.nets[n]["members"]]
+        eff = sum(o * (0.2 if kind.get((l, c)) == "courtyard" else 1.0) for c in reg for l, (o, _d, _c) in cells[c].items())
+        risky = any(kind.get((l, c)) in ("fanout", "channel") for c in reg for l in cells[c])
         out.append({"code": "PLAN_OVERFLOW", "at": [round(gr.xy_of(wc)[0], 1), round(gr.xy_of(wc)[1], 1)],
-                    "layer": gr.layers[worst[2]], "demand": round(dem, 1), "capacity": cap,
+                    "layer": gr.layers[worst[2]], "demand": round(dem, 1), "capacity": cap, "eff": round(eff, 1), "risky": risky,
                     "overflow": round(tot, 1), "cells": len(reg), "box": [round(v, 1) for v in bb],
                     "nets": nm[:40], "n_nets": len(nm), "parts": near[:4],
                     "cells_xy": [[round(gr.xy_of(c)[0], 1), round(gr.xy_of(c)[1], 1)] for c in reg[:40]],
@@ -924,6 +928,7 @@ def findings(gr, ns, parts_near=None):
             x, y = gr.xy_of(c)
             out.append({"code": "PLAN_OVERFLOW", "at": [round(x, 1), round(y, 1)], "layer": "via",
                         "demand": round(gr.vu[c], 1), "capacity": gr.vcap[c], "overflow": round(gr.vu[c] - gr.vcap[c], 1),
+                        "eff": round(gr.vu[c] - gr.vcap[c], 1), "risky": True,
                         "cells": 1, "nets": [], "n_nets": 0, "parts": _bordering(B, (x - 1, y - 1, x + 1, y + 1), 1.0)[:4],
                         "msg": f"via capacity at ({x:.1f}, {y:.1f}): {gr.vu[c]:g} via(s) for {gr.vcap[c]} free site(s)",
                         "suggestion": "spread the parts around the cell: via sites are all taken by pads and planned escapes"})

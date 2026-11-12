@@ -185,8 +185,10 @@ def relative_cost(area_cm2, rules, layers, cons, base_layers=4):
 
 # ------------------------------------------------------------------ one option (worker)
 def passes(R):
+    """PASS = no sealed or oversubscribed pins, no plane pin without a via site, nothing unreachable, and the share of planned nets whose
+    path crosses an over-capacity cell outside the part courtyards is within `[plan] max_risk_frac` (0.06: the V1.6 board routed 94 %)."""
     c = R["comp"]
-    return not (c["sealed"] or c["oversub"] or c["no_via_site"] or c["overflow"] or c["unreached"])
+    return not (c["sealed"] or c["oversub"] or c["no_via_site"] or c["unreached"]) and R["risk_frac"] <= R["pr"]["max_risk_frac"]
 
 
 def controlled_metrics(R):
@@ -228,15 +230,23 @@ def evaluate(job):
     open(path, "w", errors="surrogateescape").write(text)
     B = RD.load(path)
     R = PL.run(B, cons, spec, ignore_routing=True)
-    placed = False
+    placed, moved, mean_d = False, 0, 0.0
     if job["place_time"] > 0 and (any(grow) or not passes(R)):
-        mv, st = PP.plan_place(B, cons, spec, log=lambda m: None, time_limit=job["place_time"], rotation=job.get("rotation", False))
+        mv, st = PP.plan_place(B, cons, spec, log=lambda m: None, time_limit=job["place_time"], rotation=job.get("rotation", False),
+                               spread=grow if any(grow) else None)
         if mv:
-            text, _done = BW.apply_moves(text, {r: v for r, v in mv.items() if r not in st["flips"]})
-            open(path, "w", errors="surrogateescape").write(text)
-            B = RD.load(path)
-            R = PL.run(B, cons, spec, ignore_routing=True)
-            placed = True
+            text2, _done = BW.apply_moves(text, {r: v for r, v in mv.items() if r not in st["flips"]})
+            path2 = path + ".placed"
+            open(path2, "w", errors="surrogateescape").write(text2)
+            B2 = RD.load(path2)
+            R2 = PL.run(B2, cons, spec, ignore_routing=True)
+            os.remove(path2)
+            if R2["score"] <= R["score"]:                      # best-so-far, confirmed by a full plan: never end worse than the input
+                text, B, R, placed = text2, B2, R2, True
+                moved = len(mv)
+                mean_d = sum(math.hypot(x - B0["parts"][r]["pos"][0], y - B0["parts"][r]["pos"][1]) for r, (x, y, a) in mv.items()
+                             if r in B0["parts"]) / max(1, len(mv))
+                open(path, "w", errors="surrogateescape").write(text)
     R["cons"] = cons
     v = PL.verdict(R)
     W, H = board_size(path)
@@ -251,7 +261,8 @@ def evaluate(job):
            "sealed": v["components"]["sealed"] + v["components"]["oversub"], "overflow": v["components"]["overflow"],
            "no_via_site": v["components"]["no_via_site"], "counts": codes, "cost": round(cost, 1), "cost_pen": round(pen, 2),
            "layers": nlay, "subfloor": subfloor(rules), "neck_violations": nv, "controlled": {k: list(x) for k, x in cm.items()},
-           "return_path": codes.get("PLAN_RETURN_PATH", 0), "placed": placed, "seconds": round(time.time() - t0, 1), "board": path}
+           "return_path": codes.get("PLAN_RETURN_PATH", 0), "placed": placed, "moved": moved, "mean_move_mm": round(mean_d, 2),
+           "risk_frac": R["risk_frac"], "routable_pct": round(100 * (1 - R["risk_frac"])), "causes": R["causes"]["units"], "seconds": round(time.time() - t0, 1), "board": path}
     m = FM.build(B, cons, spec, path, cls=R["cls"])
     m.update(PL.plan_section(R))
     FM.save(m, os.path.join(out, name + ".fluxmap.json"))
@@ -285,7 +296,7 @@ def perf_worse(res, base):
     why = []
     if ol > bl * 1.02 + 2.0:
         why.append(f"controlled copper {bl:.0f} -> {ol:.0f} mm")
-    if ov > bv + 1:
+    if ov > bv * 1.05 + 2:
         why.append(f"controlled vias {bv} -> {ov}")
     if res["return_path"] > base["return_path"]:
         why.append(f"return-path findings {base['return_path']} -> {res['return_path']}")
@@ -312,8 +323,11 @@ def rank(results, base):
         r["impact"] = impact(r, r["rules"], why)
         r["never"] = bool(r["neck_violations"]) or r["subfloor"]
         rows.append(r)
-    ok = [r for r in rows if r["pass"] and not r["never"]]
-    ok.sort(key=lambda r: (bool(r["perf_why"]), r["area_cm2"], r["cost"], -r["confidence"], r["score"]))
+    ok = [r for r in rows if r["pass"] and not r["never"] and not r["perf_why"]]
+    ok.sort(key=lambda r: (r["area_cm2"], r["cost"], -r["confidence"], r["score"]))
+    worse = [r for r in rows if r["pass"] and not r["never"] and r["perf_why"]]
+    for r in worse:
+        r["never"] = True                                  # a pass that costs controlled-net performance is never recommended
     sub = [r for r in rows if r["pass"] and r["never"]]
     sub.sort(key=lambda r: (r["area_cm2"], r["cost"]))
     miss = [r for r in rows if not r["pass"]]
@@ -350,7 +364,7 @@ def format_table(base, ok, sub, miss, limit=12):
         for r in rows[:limit]:
             mv = f"{r['moved']} part(s) moved" if "moved" in r else ""
             L.append(f"{describe(r, bs)[:44]:44s} {r['size'][0]:6.1f}x{r['size'][1]:<6.1f} {r['score']:7.0f} {r['confidence']:4d} {r['sealed']:6d} "
-                     f"{r['overflow']:5.0f} {100 * r['cost'] / base['cost']:5.0f}%  [{tag}] {r['impact']}")
+                     f"{r['overflow']:5.0f} {100 * r['cost'] / base['cost']:5.0f}%  [{tag}] routable~{r['routable_pct']}% moved {r.get('moved', 0)}@{r.get('mean_move_mm', 0)}mm {r['impact']}")
     return "\n".join(L)
 
 
@@ -474,11 +488,12 @@ def search(board, cons, spec, outdir, max_grow=6, workers=None, place_time=30.0,
     ok, sub, miss = rank(opts, base)
     caveat = None
     if calib is not None:
-        rate = len(calib["hit"]) / max(1, len(calib["actual_open"]))
+        rate = calib["placement_rate"]
         if rate < hit_min:
-            caveat = f"verdict unproven: the planner flagged only {100 * rate:.0f}% of the open nets of the calibration board (< {100 * hit_min:.0f}%)"
+            caveat = (f"verdict unproven (placement-only calibration {100 * rate:.0f}%: {calib['placement_hit']} of {calib['placement_failed']} "
+                      f"pads that routing left open lie near a risky finding; threshold {100 * hit_min:.0f}%)")
     else:
-        caveat = "verdict unproven: no calibration board given (--calibrate-board ROUTED_BOARD)"
+        caveat = "verdict unproven (placement-only calibration: none, no --calibrate-board given)"
     out = {"baseline": base, "ok": ok, "sub": sub, "miss": miss, "prompt": prompt_text(base, ok, sub, miss),
            "table": format_table(base, ok, sub, miss), "fits": False, "caveat": caveat, "seconds": round(time.time() - t0, 1)}
     with open(os.path.join(outdir, "plan-options.json"), "w") as fh:

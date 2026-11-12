@@ -168,17 +168,19 @@ def cmd_plan_options(a):
     out = a.out_dir or (os.path.splitext(a.board)[0] + ".plan-options")
     calib = None
     if a.calibrate_board:
-        calib = PL.calibrate(RD.load(a.calibrate_board), cons, spec, a.calibrate_board, grid_scan=False)
+        Bc = RD.load(a.calibrate_board)
+        calib = PL.calibrate(Bc, cons, spec, a.calibrate_board, grid_scan=False)
         calib.pop("result", None)
+        calib["placement_rate"], calib["placement_failed"], calib["placement_hit"] = PL.calibrate_placement(Bc, cons, spec)
     r = PO.search(a.board, cons, spec, out, max_grow=a.max_grow, workers=a.workers, place_time=a.place_time,
                   log=(print if a.verbose else (lambda m: None)), calib=calib)
     if a.json:
         json.dump({k: v for k, v in r.items() if k != "baseline"}, open(a.json, "w"), indent=1, default=str)
+    if r.get("caveat"):
+        print("WARNING " + r["caveat"])
     print(r["prompt"])
     if r.get("table"):
         print(r["table"])
-    if r.get("caveat"):
-        print("caveat: " + r["caveat"])
     print(f"plan-options: {'fits as is' if r['fits'] else str(len(r['ok'])) + ' recommended option(s), ' + str(len(r['sub'])) + ' need an owner rule change, ' + str(len(r['miss'])) + ' fail'}; "
           f"{r['seconds']:g} s; candidates in {out}")
 

@@ -40,7 +40,7 @@ def open_state(B, board_path=None, method="text"):
 
 def score_of(pr, findings, ns, cls=None):
     c = Counter(f["code"] for f in findings)
-    over = sum(f.get("overflow", 0) for f in findings if f["code"] == "PLAN_OVERFLOW")
+    over = sum(f.get("eff", f.get("overflow", 0)) for f in findings if f["code"] == "PLAN_OVERFLOW")
     ob = sum(max(0.0, f["value"] - f["limit"]) * (1.0 if f.get("cls") in GR.HARD else pr["w_overbudget"] / pr["w_overbudget_hard"])
              for f in findings if f["code"] == "PLAN_NET_OVER_BUDGET")
     unr = sum(f["value"] for f in findings if f["code"] == "PLAN_UNREACHABLE")
@@ -80,25 +80,23 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
     from . import planrules as PRL
     f += PRL.part_in_corridor(gr, B) + PRL.return_path(gr, plan, B, cons) + PRL.zoning(B, cls, cons)
     sc, comp = score_of(pr, f, ns, cls)
-    return {"pr": pr, "cls": cls, "plan": plan, "gr": gr, "ns": ns, "findings": f, "score": sc, "comp": comp, "state": state,
+    from . import planrules as PRL
+    cz, kind = PRL.overflow_causes(gr, B, pr)
+    risk = PRL.risk_nets(gr, kind)
+    comp["risk_nets"] = len(risk)
+    nplan = max(1, len(gr.nets))
+    return {"causes": cz, "risk": sorted(risk), "risk_frac": round(len(risk) / nplan, 3), "pr": pr, "cls": cls, "plan": plan, "gr": gr, "ns": ns, "findings": f, "score": sc, "comp": comp, "state": state,
             "mode": "ignore-routing" if ignore_routing else "default",
             "timing": {"state_s": round(t1 - t0, 1), "escapes_s": round(t2 - t1, 1), "route_s": round(t3 - t2, 1),
                        "total_s": round(time.time() - t0, 1)}}
 
 
 def confidence(R):
-    """Routability confidence 0-100 from margins (docs/commands/plan-route.md):
-       100 x (0.4 U + 0.3 H + 0.3 S) - 15 x (sealed + oversubscribed pins) - min(40, 2 x overflow regions), clipped to 0..100, where
-       U = 1 - (worst cell-layer utilisation - 0.5) / 0.5, H = min over fine-pitch parts of free via slots / (2 x signal pins),
-       S = min over budgeted nets of slack / (20 % of budget); each term clipped to 0..1."""
-    gr = R["gr"]
-    worst = 0.0
-    for l in range(gr.nl):
-        for c in range(gr.N):
-            for use, cap in ((gr.uH[l][c], gr.capH[l][c]), (gr.uV[l][c], gr.capV[l][c])):
-                if use > 0:
-                    worst = max(worst, use / cap if cap > 0 else 1.5)
-    U = min(1.0, max(0.0, 1.0 - (worst - 0.5) / 0.5))
+    """Routability confidence 0-100 (docs/commands/plan-route.md): 100 x (0.6 A + 0.2 H + 0.2 S) - 15 x (sealed + oversubscribed pins, at most 45),
+       A = 1 - risk_frac / 0.20 (risk_frac = share of planned nets whose path crosses an over-capacity cell outside part courtyards),
+       H = min over fine-pitch parts of free via slots / (2 x signal pins), S = min over budgeted nets of slack / (20 % of budget); each clipped 0..1.
+       Scale: the V1.6 board routed 94 % of its nets (risk_frac 0.06) -> A = 0.7."""
+    A = min(1.0, max(0.0, 1.0 - R["risk_frac"] / 0.20))
     hs = [h["free_total"] / max(1.0, 2.0 * sum(v for k, v in h["pins"].items() if k in ("direct", "via", "sealed")))
           for h in R["plan"].headroom.values() if sum(h["pins"].values()) >= 6]
     H = min(1.0, max(0.0, min(hs))) if hs else 1.0
@@ -109,16 +107,18 @@ def confidence(R):
             sl.append((lim - R["ns"][n]["len"]) / (0.2 * lim))
     S = min(1.0, max(0.0, min(sl))) if sl else 1.0
     c = Counter(f["code"] for f in R["findings"])
-    v = 100 * (0.4 * U + 0.3 * H + 0.3 * S) - 15 * (c["PLAN_PIN_SEALED"] + c["PLAN_ESCAPE_OVERSUBSCRIBED"]) - min(40, 2 * c["PLAN_OVERFLOW"])
-    return round(min(100.0, max(0.0, v))), {"util": round(U, 2), "headroom": round(H, 2), "slack": round(S, 2), "worst_util": round(worst, 2)}
+    v = 100 * (0.6 * A + 0.2 * H + 0.2 * S) - min(45, 15 * (c["PLAN_PIN_SEALED"] + c["PLAN_ESCAPE_OVERSUBSCRIBED"]))
+    return round(min(100.0, max(0.0, v))), {"routable_share": A, "headroom": round(H, 2), "slack": round(S, 2), "risk_frac": R["risk_frac"]}
 
 
 def verdict(R):
     f = R["findings"]
     c = Counter(x["code"] for x in f)
-    fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_OVERFLOW"] or c["PLAN_ESCAPE_OVERSUBSCRIBED"])
+    thr = float(((R["pr"].get("max_risk_frac")) if "max_risk_frac" in R["pr"] else 0.06))
+    fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_ESCAPE_OVERSUBSCRIBED"] or R["risk_frac"] > thr)
     conf, parts = confidence(R)
-    return {"score": R["score"], "confidence": conf, "conf_terms": parts, "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
+    return {"risk_frac": R["risk_frac"], "predicted_routable": round(1 - R["risk_frac"], 3), "causes": R["causes"], "max_risk_frac": thr,
+            "score": R["score"], "confidence": conf, "conf_terms": parts, "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
             "components": R["comp"], "mode": R["mode"], "nets_planned": len(R["gr"].nets),
             "overflow_total": R["gr"].summary()["overflow"], "timing": R["timing"]}
 
@@ -140,7 +140,9 @@ def format_text(R, top=10, title=""):
          f"  PLAN_SCORE {v['score']:g}   confidence {v['confidence']}   {v['result']}   ({v['timing']['total_s']:g} s: state {v['timing']['state_s']:g}, "
          f"escapes {v['timing']['escapes_s']:g}, route {v['timing']['route_s']:g})",
          "  components: " + ", ".join(f"{k} {c:g}" for k, c in v["components"].items()),
-         f"  nets planned {v['nets_planned']}, overflow {v['overflow_total']:g}"]
+         f"  nets planned {v['nets_planned']}, overflow {v['overflow_total']:g} (courtyard {v['causes']['units']['courtyard']:g}, fan-out "
+         f"{v['causes']['units']['fanout']:g}, channel {v['causes']['units']['channel']:g}); at-risk nets {R['comp']['risk_nets']} = "
+         f"{100 * v['risk_frac']:.0f}% -> predicted routable {100 * v['predicted_routable']:.0f}% (limit {100 * v['max_risk_frac']:.0f}% at risk)"]
     for k in CODES:
         if k in v["counts"]:
             L.append(f"  {k:22s} {v['counts'][k]}")
@@ -222,7 +224,7 @@ def plan_section(R):
     return {"corridors": corr, "escapes": {"pins": dict(esc), "headroom": plan.headroom,
                         "legend": "d=direct [dir,lane mm], v=via slot [x,y,stub], p=pour, s=sealed [blocker], n=no via site"},
             "grid": grid, "route": nets, "channels": channels,
-            "verdict": {"score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
+            "verdict": {"risk_frac": v["risk_frac"], "predicted_routable": v["predicted_routable"], "causes": v["causes"], "score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
                         "counts": v["counts"], "timing": v["timing"],
                         "findings": rank(R["findings"])[:60], "floors": {k: R["pr"][k] for k in (
                             "track_mm", "clearance_mm", "via_mm", "drill_mm", "cell_mm")}}}
@@ -377,3 +379,26 @@ def swap_candidates(B, cons, spec, max_eval=24):
             a["net"], b["net"] = b["net"], a["net"]
         n_eval += 1
     return sorted(out, key=lambda r: -r["gain"]), base["score"]
+
+
+def calibrate_placement(B, cons, spec, radius=1.5):
+    """Placement-only hit rate: plan the routed board's placement with all copper ignored and ask what share of the pads it left
+    unjoined (text connectivity) lies within `radius` mm of a risky finding (sealed pin, oversubscribed group, over-capacity cell outside
+    courtyards).  -> (rate, failed pads, hits)."""
+    from . import routeconn as RC
+    groups = {}
+    RC.text_open(B, groups)
+    failed = []
+    for n, cl in groups.items():
+        for c in sorted(cl, key=lambda c: -len(c))[1:]:
+            failed += [(p["x"], p["y"]) for p in c]
+    R = run(B, cons, spec, ignore_routing=True)
+    pts = []
+    for f in R["findings"]:
+        if f["code"] in ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_NO_VIA_SITE"):
+            pts.append(tuple(f["at"]))
+        elif f["code"] == "PLAN_OVERFLOW" and f.get("risky"):
+            pts += [tuple(c) for c in f.get("cells_xy", [])]
+    hit = sum(1 for x, y in failed if any(abs(x - px) <= radius + 1.0 and abs(y - py) <= radius + 1.0 and math.hypot(x - px, y - py) <= radius + 1.0
+                                          for px, py in pts))
+    return (hit / len(failed) if failed else 1.0), len(failed), hit

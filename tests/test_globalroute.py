@@ -112,7 +112,7 @@ def _bus_board(tmp):
 def test_confidence_and_variants(tmp_path):
     R = run(channel_board(tmp_path, 4, gap=30.0, walls=False))
     v = PL.verdict(R)
-    assert 0 <= v["confidence"] <= 100 and set(v["conf_terms"]) == {"util", "headroom", "slack", "worst_util"}
+    assert 0 <= v["confidence"] <= 100 and set(v["conf_terms"]) == {"routable_share", "headroom", "slack", "risk_frac"}
     R2 = run(channel_board(tmp_path, 16, gap=1.0))
     assert PL.verdict(R2)["confidence"] < v["confidence"]
     rows = PL.run_variants(RD.load(channel_board(tmp_path, 16, gap=1.0)), {}, None, True)
