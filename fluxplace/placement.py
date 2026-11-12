@@ -1114,7 +1114,12 @@ def pack(parts, graph, topo, center=None, pad=0.8, iters=600, refine=0):
     # connected clusters land adjacent. Far better than force-directing big+small blocks.
     hub_grp = group_of.get(topo.hub) if topo.hub else None
     bpos = _arrange_blocks(blocks, cedge, hub_grp, cx, cy)
+    shelf = {k: list(v) for k, v in bpos.items()}
     _compact_blocks(blocks, bpos, cedge, gap=2.0, iters=500)
+    # a compaction that ends up with a bigger footprint than the shelf layout it
+    # started from has failed: keep the shelf layout
+    if _blocks_area(blocks, bpos) > 1.25 * _blocks_area(blocks, shelf):
+        bpos = shelf
 
     # expand blocks -> part positions (the organized seed)
     pos = {}
@@ -1130,6 +1135,14 @@ def pack(parts, graph, topo, center=None, pad=0.8, iters=600, refine=0):
         pos = flux(parts, graph, topo, iters=refine, center=(cx, cy), pad=pad,
                    seed=pos, sheet_cohesion=0.35, compaction=0.08)
     return pos
+
+
+def _blocks_area(blocks, bpos):
+    x0 = min(bpos[s][0] - blocks[s]["W"] / 2 for s in blocks)
+    x1 = max(bpos[s][0] + blocks[s]["W"] / 2 for s in blocks)
+    y0 = min(bpos[s][1] - blocks[s]["H"] / 2 for s in blocks)
+    y1 = max(bpos[s][1] + blocks[s]["H"] / 2 for s in blocks)
+    return (x1 - x0) * (y1 - y0)
 
 
 def _bfs_cluster_order(blocks, cedge, hub_sheet):
@@ -1190,6 +1203,22 @@ def _compact_blocks(blocks, bpos, cedge, gap=2.0, iters=500):
     for (a, b), w in cedge.items():
         nbr[a][b] = w; nbr[b][a] = w
     names = list(blocks)
+    # translation anchor: the pull and the asymmetric overlap pushes below have no
+    # fixed point, so the whole arrangement walked ~4 mm per sweep (measured: a
+    # 12-block, 337-part board ended 2 m from its seed). Hold the area-weighted
+    # centroid where the shelf layout put it.
+    area = {s: blocks[s]["W"] * blocks[s]["H"] for s in names}
+    atot = sum(area.values()) or 1.0
+    ax = sum(bpos[s][0] * area[s] for s in names) / atot
+    ay = sum(bpos[s][1] * area[s] for s in names) / atot
+
+    def hold():
+        dx = ax - sum(bpos[s][0] * area[s] for s in names) / atot
+        dy = ay - sum(bpos[s][1] * area[s] for s in names) / atot
+        for s in names:
+            bpos[s][0] += dx
+            bpos[s][1] += dy
+
     for it in range(iters):
         gxc = sum(bpos[s][0] for s in names) / len(names)
         gyc = sum(bpos[s][1] for s in names) / len(names)
@@ -1201,7 +1230,9 @@ def _compact_blocks(blocks, bpos, cedge, gap=2.0, iters=500):
             bpos[s][0] += (0.6 * tx + 0.4 * gxc - bpos[s][0]) * 0.08
             bpos[s][1] += (0.6 * ty + 0.4 * gyc - bpos[s][1]) * 0.08
         _legalize_blocks(blocks, bpos, gap=gap, iters=40)
+        hold()
     _legalize_blocks(blocks, bpos, gap=gap, iters=200)
+    hold()
 
 
 def _seed_blocks(blocks, cx, cy):
@@ -1465,6 +1496,46 @@ def legalize(parts, pos, pad, iters=400, angles=None, frozen=None, bounds=None,
                     pos[b][1] += s * sb * sgn; pos[a][1] -= s * sa * sgn
         if not moved:
             break
+
+
+class PlacementError(RuntimeError):
+    """A placement that must not be written: parts outside the outline, or a
+    board that grew far beyond the one it started from."""
+
+
+def check_extent(parts, pos, angles, outline=None, redraw=False, max_growth=4.0):
+    """The hard guarantee behind every strategy: never hand back a placement with
+    a part outside the outline. `outline` = (x0, y0, x1, y1) of the board before
+    placement. With a FIXED outline (redraw=False) every body must lie inside it;
+    when the caller redraws the outline around the parts (the default of `place`),
+    the result may not be bigger than `max_growth` x the area it started with.
+    Raises PlacementError, names the offenders, writes nothing."""
+    boxes = {}
+    for r, (x, y) in pos.items():
+        if r.startswith("__") or r not in parts:
+            continue
+        w, h = eff_size(parts, r, angles.get(r, 0.0) if angles else 0.0, 0.0)
+        boxes[r] = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+    if not boxes:
+        return
+    x0, y0 = min(b[0] for b in boxes.values()), min(b[1] for b in boxes.values())
+    x1, y1 = max(b[2] for b in boxes.values()), max(b[3] for b in boxes.values())
+    if outline and not redraw:
+        out = [r for r, b in boxes.items() if b[0] < outline[0] - 1e-6 or b[1] < outline[1] - 1e-6
+               or b[2] > outline[2] + 1e-6 or b[3] > outline[3] + 1e-6]
+        if out:
+            raise PlacementError(f"{len(out)} part(s) would land outside the board outline "
+                                 f"({', '.join(sorted(out)[:8])}); nothing written")
+    if outline:
+        a0 = max(1.0, (outline[2] - outline[0]) * (outline[3] - outline[1]))
+        a1 = (x1 - x0) * (y1 - y0)
+        if a1 > max_growth * a0 and redraw:
+            raise PlacementError(
+                f"placement is {x1 - x0:.0f} x {y1 - y0:.0f} mm, {a1 / a0:.1f}x the area of the "
+                f"{outline[2] - outline[0]:.0f} x {outline[3] - outline[1]:.0f} mm board it started "
+                f"from (limit {max_growth:g}x); nothing written. Use another strategy or a fixed outline.")
+    if max(x1 - x0, y1 - y0) > 1000.0:
+        raise PlacementError(f"placement spans {max(x1 - x0, y1 - y0):.0f} mm (> 1 m); nothing written")
 
 
 def hpwl(parts, graph, pos):

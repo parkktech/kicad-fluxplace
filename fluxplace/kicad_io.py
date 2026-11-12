@@ -293,6 +293,14 @@ def lock_net_copper(path, netnames):
     return n
 
 
+def outline_bbox(board):
+    """(x0, y0, x1, y1) mm of Edge.Cuts, or None when the board has no outline."""
+    bb = board.GetBoardEdgesBoundingBox()
+    if bb.GetWidth() <= 0 or bb.GetHeight() <= 0:
+        return None
+    return (_mm(bb.GetX()), _mm(bb.GetY()), _mm(bb.GetX() + bb.GetWidth()), _mm(bb.GetY() + bb.GetHeight()))
+
+
 def board_center(board):
     bb = board.GetBoundingBox()
     return _mm(bb.GetCenter().x), _mm(bb.GetCenter().y)

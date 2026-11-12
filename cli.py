@@ -166,6 +166,10 @@ def cmd_place(a):
     cg = G.build(parts, nets, a.big_fanout)
     topo = T.analyze(cg, prefer_hub=a.hub)
     center = IO.board_center(board) if a.center_board else (0.0, 0.0)
+    if not a.center_board and any(p.get("locked") for p in parts.values()):
+        # locked parts keep their real coordinates, so a strategy seeded at (0, 0)
+        # was assembling the rest of the board far from them
+        center = IO.board_center(board)
     rep = None
     if a.strategy == "build":
         from fluxplace import route as R
@@ -178,6 +182,11 @@ def cmd_place(a):
                            center=center, pad=a.pad, iters=a.iters)
     before = P.hpwl(parts, cg, {r: (parts[r]["x"], parts[r]["y"]) for r in parts})
     after = P.hpwl(parts, cg, pos)
+    try:        # hard guarantee: never write a part outside the outline / a board that exploded
+        P.check_extent(parts, {r: v for r, v in pos.items() if not parts[r].get("locked") or a.move_locked},
+                       rot, IO.outline_bbox(board), redraw=not a.no_outline, max_growth=a.max_growth)
+    except P.PlacementError as e:
+        raise SystemExit(f"place [{a.strategy}] REFUSED: {e}")
     IO.apply_orientations(board, rot, skip_locked=not a.move_locked)   # rotate first
     IO.apply_positions(board, pos, parts, skip_locked=not a.move_locked)  # then center
     dims = None
@@ -905,6 +914,11 @@ def cmd_auto(a):
     cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
     t0 = time.time()
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board), pad=a.pad)
+    try:
+        P.check_extent(parts, {r: v for r, v in pos.items() if not parts[r].get("locked")}, rot,
+                       IO.outline_bbox(board), redraw=True, max_growth=getattr(a, "max_growth", 6.0))
+    except P.PlacementError as e:
+        raise SystemExit(f"auto REFUSED after placement: {e}")
     nudged = _legalize_bboxes(parts, pos, rot)
     for ref in phantoms:
         pos.pop(ref, None); rot.pop(ref, None); parts.pop(ref, None)
@@ -2198,6 +2212,9 @@ def build_parser():
     pp.add_argument("--pad", type=float, default=0.8, help="courtyard margin mm")
     pp.add_argument("--margin", type=float, default=2.0, help="board edge margin mm")
     pp.add_argument("--no-outline", action="store_true", help="don't redraw Edge.Cuts")
+    pp.add_argument("--max-growth", type=float, default=4.0,
+                    help="refuse a result whose redrawn outline is more than this many times the "
+                         "original board area (the pack > 1 m fault)")
     pp.add_argument("--center-board", action="store_true")
     pp.add_argument("--free-connectors", action="store_true")
     pp.add_argument("--move-locked", action="store_true")
@@ -2438,6 +2455,9 @@ def build_parser():
                      help="don't translate the board onto the drawing sheet "
                           "(also rewrites --constraints' absolute coordinates when it does)")
     _add_gate_args(pau)
+    pau.add_argument("--max-growth", type=float, default=6.0,
+                     help="refuse a placement whose redrawn outline is more than this many times "
+                          "the original board area")
     pau.set_defaults(fn=cmd_auto)
 
     pco = sub.add_parser("compact",

@@ -160,6 +160,7 @@ def load(path, track=None, clearance=None):
             court = (fx, fy, fx, fy)
         parts[ref] = {"pos": (fx, fy), "pads": mine, "side": side,
                       "value": props.get("Value", ""), "angle": fang,
+                      "tht": any(q["tht"] for q in mine),
                       "fp": (BF._atoms(fp) or [""])[0], "court": court,
                       "locked": any(k == "locked" or (isinstance(k, list) and k[:2] == ["locked", "yes"])
                                     for k in fp if isinstance(k, (str, list)) and (
