@@ -8,6 +8,7 @@ Lower is better; 0 violations -> the score is just the weighted copper length te
 """
 import json
 import math
+from collections import defaultdict
 import os
 import time
 from collections import Counter, defaultdict
@@ -84,11 +85,39 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
                        "total_s": round(time.time() - t0, 1)}}
 
 
+def confidence(R):
+    """Routability confidence 0-100 from margins (docs/commands/plan-route.md):
+       100 x (0.4 U + 0.3 H + 0.3 S) - 15 x (sealed + oversubscribed pins) - min(40, 2 x overflow regions), clipped to 0..100, where
+       U = 1 - (worst cell-layer utilisation - 0.5) / 0.5, H = min over fine-pitch parts of free via slots / (2 x signal pins),
+       S = min over budgeted nets of slack / (20 % of budget); each term clipped to 0..1."""
+    gr = R["gr"]
+    worst = 0.0
+    for l in range(gr.nl):
+        for c in range(gr.N):
+            for use, cap in ((gr.uH[l][c], gr.capH[l][c]), (gr.uV[l][c], gr.capV[l][c])):
+                if use > 0:
+                    worst = max(worst, use / cap if cap > 0 else 1.5)
+    U = min(1.0, max(0.0, 1.0 - (worst - 0.5) / 0.5))
+    hs = [h["free_total"] / max(1.0, 2.0 * sum(v for k, v in h["pins"].items() if k in ("direct", "via", "sealed")))
+          for h in R["plan"].headroom.values() if sum(h["pins"].values()) >= 6]
+    H = min(1.0, max(0.0, min(hs))) if hs else 1.0
+    sl = []
+    for n, nt in R["gr"].nets.items():
+        lim = NC.effective_budget(nt["info"])
+        if lim:
+            sl.append((lim - R["ns"][n]["len"]) / (0.2 * lim))
+    S = min(1.0, max(0.0, min(sl))) if sl else 1.0
+    c = Counter(f["code"] for f in R["findings"])
+    v = 100 * (0.4 * U + 0.3 * H + 0.3 * S) - 15 * (c["PLAN_PIN_SEALED"] + c["PLAN_ESCAPE_OVERSUBSCRIBED"]) - min(40, 2 * c["PLAN_OVERFLOW"])
+    return round(min(100.0, max(0.0, v))), {"util": round(U, 2), "headroom": round(H, 2), "slack": round(S, 2), "worst_util": round(worst, 2)}
+
+
 def verdict(R):
     f = R["findings"]
     c = Counter(x["code"] for x in f)
     fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_OVERFLOW"] or c["PLAN_ESCAPE_OVERSUBSCRIBED"])
-    return {"score": R["score"], "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
+    conf, parts = confidence(R)
+    return {"score": R["score"], "confidence": conf, "conf_terms": parts, "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
             "components": R["comp"], "mode": R["mode"], "nets_planned": len(R["gr"].nets),
             "overflow_total": R["gr"].summary()["overflow"], "timing": R["timing"]}
 
@@ -107,7 +136,7 @@ def rank(findings):
 def format_text(R, top=10, title=""):
     v = verdict(R)
     L = [f"PLAN-ROUTE {title} [{R['mode']}]".rstrip(),
-         f"  PLAN_SCORE {v['score']:g}   {v['result']}   ({v['timing']['total_s']:g} s: state {v['timing']['state_s']:g}, "
+         f"  PLAN_SCORE {v['score']:g}   confidence {v['confidence']}   {v['result']}   ({v['timing']['total_s']:g} s: state {v['timing']['state_s']:g}, "
          f"escapes {v['timing']['escapes_s']:g}, route {v['timing']['route_s']:g})",
          "  components: " + ", ".join(f"{k} {c:g}" for k, c in v["components"].items()),
          f"  nets planned {v['nets_planned']}, overflow {v['overflow_total']:g}"]
@@ -186,10 +215,13 @@ def plan_section(R):
     channels = [{"box": f["box"], "layer": f["layer"], "demand": f["demand"], "cap": f["capacity"],
                  "overflow": f["overflow"], "nets": f["nets"][:6], "parts": f["parts"]} for f in ov if "box" in f]
     v = verdict(R)
-    return {"escapes": {"pins": dict(esc), "headroom": plan.headroom,
+    from . import planrules as PRL
+    corr = [[round(gr.x0 + (c % gr.nx) * gr.cell, 2), round(gr.y0 + (c // gr.nx) * gr.cell, 2),
+             round(gr.x0 + (c % gr.nx + 1) * gr.cell, 2), round(gr.y0 + (c // gr.nx + 1) * gr.cell, 2)] for c in sorted(PRL.corridor_cells(gr))]
+    return {"corridors": corr, "escapes": {"pins": dict(esc), "headroom": plan.headroom,
                         "legend": "d=direct [dir,lane mm], v=via slot [x,y,stub], p=pour, s=sealed [blocker], n=no via site"},
             "grid": grid, "route": nets, "channels": channels,
-            "verdict": {"score": v["score"], "result": v["result"], "mode": v["mode"], "components": v["components"],
+            "verdict": {"score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
                         "counts": v["counts"], "timing": v["timing"],
                         "findings": rank(R["findings"])[:60], "floors": {k: R["pr"][k] for k in (
                             "track_mm", "clearance_mm", "via_mm", "drill_mm", "cell_mm")}}}
@@ -218,3 +250,126 @@ def route_hint(map_path):
             for mem in r["pair"]:
                 out.setdefault(mem, 1)
     return out
+
+
+def run_variants(B, cons, spec, ignore_routing, cell=None, board_path=None, base=None):
+    """Same plan, alternative layer roles: mixed (as the board), plane3v3 (one inner signal layer becomes a dedicated plane),
+    8layer (two more signal layers).  -> [{variant, layers, score, confidence, sealed, overflow, vias, copper}]"""
+    rows = []
+    for v in ("mixed", "plane3v3", "8layer"):
+        R = base if (v == "mixed" and base) else run(B, cons, spec, ignore_routing, cell=cell, board_path=board_path,
+                                                     variant=None if v == "mixed" else v)
+        ver = verdict(R)
+        rows.append({"variant": v, "layers": len(R["gr"].layers), "score": ver["score"], "confidence": ver["confidence"],
+                     "sealed": ver["components"]["sealed"] + ver["components"]["oversub"], "overflow": ver["components"]["overflow"],
+                     "vias": sum(x["vias"] for x in R["ns"].values()), "copper_mm": ver["components"]["copper_mm"]})
+    return rows
+
+
+def calibrate(B, cons, spec, board_path):
+    """Predicted vs actual on a routed board: (a) open nets the plan flagged / missed (default mode), (b) the capacity constants:
+    for a grid of (util, jog_frac) the share of the board's real track cell-directions that exceed the modelled capacity.
+    -> dict with hit/miss/false lists, the errors (open but predicted clear) and the best constants."""
+    from . import routeconn as RC
+    import math as _m
+    R = run(B, cons, spec, ignore_routing=False, board_path=board_path)
+    groups = {}
+    actual = set(RC.text_open(B, groups))
+    pred = set()
+    for f in R["findings"]:
+        if f["code"] in ("PLAN_PIN_SEALED", "PLAN_NO_VIA_SITE", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_UNREACHABLE", "PLAN_NET_OVER_BUDGET") and f.get("net"):
+            pred.add(f["net"])
+        elif f["code"] == "PLAN_OVERFLOW":
+            pred |= set(f.get("nets", []))
+    planned = set(R["gr"].nets)
+    grid = []
+    padc = defaultdict(set)
+    for util in (0.6, 0.7, 0.8, 0.9, 1.0):
+        for jog in (0.3, 0.4, 0.5, 0.6):
+            pr = EP.plan_params(cons, util=util, jog_frac=jog)
+            g = GR.GlobalRoute(B, cons, R["cls"], pr, None, True)
+            g.build()
+            if not padc:
+                for q in B["pads"]:
+                    if q["net"]:
+                        for c in g._cells_of_rect(EP.prect(q)):
+                            padc[q["net"]].add(c)
+            use, over = defaultdict(set), 0
+            for sg in B["segs"]:
+                l = g.lid.get(sg["layer"])
+                if l is None:
+                    continue
+                (ax, ay), (bx, by) = sg["a"], sg["b"]
+                n = max(1, int(_m.hypot(bx - ax, by - ay) / 0.25))
+                for k in range(n + 1):
+                    c = g.cell_of(ax + (bx - ax) * k / n, ay + (by - ay) * k / n)
+                    if c in padc[sg["net"]]:
+                        continue
+                    use[(l, c, 0 if abs(bx - ax) >= abs(by - ay) else 1)].add(sg["net"])
+            for (l, c, d), nets in use.items():
+                if len(nets) > (g.capH if d == 0 else g.capV)[l][c]:
+                    over += 1
+            grid.append({"util": util, "jog_frac": jog, "over_share": round(over / max(1, len(use)), 3)})
+    ok = [g for g in grid if g["over_share"] <= 0.05]
+    best = max(ok, key=lambda g: (-g["util"] * 0 + (1.0 - g["util"]) * -1, -g["jog_frac"])) if ok else min(grid, key=lambda g: g["over_share"])
+    # tightest model that still holds 95 % of the real usage: smallest util, then largest jog
+    best = min(ok, key=lambda g: (g["util"], -g["jog_frac"])) if ok else best
+    return {"actual_open": sorted(actual), "predicted": sorted(pred & (planned | actual)), "hit": sorted(actual & pred),
+            "miss": sorted(actual - pred), "false_alarm": sorted((pred & planned) - actual), "planned": len(planned),
+            "grid": grid, "best": best, "score": R["score"], "result": R}
+
+
+def write_constants(path, best):
+    """Replace/append util and jog_frac in the `[plan]` table of a constraints TOML (text edit, other keys kept)."""
+    import re as _re
+    txt = open(path).read()
+    kv = {"util": best["util"], "jog_frac": best["jog_frac"]}
+    m = _re.search(r"^\[plan\][^\n]*\n", txt, _re.M)
+    if not m:
+        txt = txt.rstrip("\n") + "\n\n[plan]   # tuned by plan-route --calibrate\n" + "".join(f"{k} = {v}\n" for k, v in kv.items())
+    else:
+        end = _re.search(r"^\[", txt[m.end():], _re.M)
+        stop = m.end() + (end.start() if end else len(txt) - m.end())
+        body = txt[m.end():stop]
+        for k, v in kv.items():
+            if _re.search(rf"^{k}\s*=", body, _re.M):
+                body = _re.sub(rf"^{k}\s*=.*$", f"{k} = {v}", body, flags=_re.M)
+            else:
+                body = f"{k} = {v}\n" + body
+        txt = txt[:m.end()] + body + txt[stop:]
+    open(path, "w").write(txt)
+
+
+def swap_candidates(B, cons, spec, max_eval=24):
+    """`[swap.group.NAME] pads = ["J10.25", "J10.45", ...]`: pins whose functions may be exchanged (a schematic change, never applied
+    here).  Every pair of pads in a group is tried (net names exchanged on the model), the plan re-run; -> [{group, a, b, nets, gain}]
+    best first.  Pairs are ordered by how far each net's other pins lie from the other pad (most promising first)."""
+    sw = ((cons.get("swap") or {}).get("group") or {})
+    base = run(B, cons, spec, ignore_routing=True, iterations=4)
+    out, n_eval = [], 0
+    pads = {f"{q['ref']}.{q['num']}": q for q in B["pads"]}
+    pn = NC.net_pads(B)
+    cand = []
+    for gname, g in sorted(sw.items()):
+        ps = [p for p in g.get("pads", []) if p in pads and pads[p]["net"]]
+        for i in range(len(ps)):
+            for j in range(i + 1, len(ps)):
+                a, b = pads[ps[i]], pads[ps[j]]
+                if a["net"] == b["net"]:
+                    continue
+                def far(q, other):
+                    o = [x for x in pn[q["net"]] if x is not q]
+                    return min((math.hypot(x["x"] - other["x"], x["y"] - other["y"]) for x in o), default=0) - \
+                        min((math.hypot(x["x"] - q["x"], x["y"] - q["y"]) for x in o), default=0)
+                cand.append((-(far(a, b) + far(b, a)), gname, ps[i], ps[j]))
+    for _k, gname, pa, pb in sorted(cand)[:max_eval]:
+        a, b = pads[pa], pads[pb]
+        a["net"], b["net"] = b["net"], a["net"]
+        try:
+            R = run(B, cons, spec, ignore_routing=True, iterations=4)
+            out.append({"group": gname, "a": pa, "b": pb, "nets": [b["net"], a["net"]], "gain": round(base["score"] - R["score"], 1),
+                        "score": R["score"]})
+        finally:
+            a["net"], b["net"] = b["net"], a["net"]
+        n_eval += 1
+    return sorted(out, key=lambda r: -r["gain"]), base["score"]

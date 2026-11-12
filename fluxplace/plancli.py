@@ -69,6 +69,8 @@ def cmd_plan_route(a):
     from . import fluxmap as FM, routediag as RD, planroute as PL
     cons, spec = _ctx(a)
     B = RD.load(a.board)
+    if getattr(a, "calibrate", None):
+        return _calibrate(a, cons, spec)
     R = PL.run(B, cons, spec, ignore_routing=a.ignore_routing, cell=a.cell, board_path=a.board,
                open_method="pcbnew" if getattr(a, "pcbnew", False) else "text",
                log=(print if getattr(a, "verbose", False) else None))
@@ -88,13 +90,49 @@ def cmd_plan_route(a):
         json.dump({"verdict": v, "findings": ranked}, open(a.json, "w"), indent=1, default=str)
     counts = "counts: " + (", ".join(f"{k} {c}" for k, c in sorted(v["counts"].items(), key=lambda kv: -kv[1])) or "none")
     comp = v["components"]
-    line = (f"plan-route: {v['result']} (exit {1 if v['result'] == 'FAIL' else 0}) - PLAN_SCORE {v['score']:g} [{v['mode']}] "
+    line = (f"plan-route: {v['result']} (exit {1 if v['result'] == 'FAIL' else 0}) - PLAN_SCORE {v['score']:g} conf {v['confidence']} [{v['mode']}] "
             f"sealed {comp['sealed']}, no-via-site {comp['no_via_site']}, overflow {comp['overflow']:g}, "
             f"over-budget {comp['over_budget_mm']:g} mm; {v['nets_planned']} nets, {v['timing']['total_s']:g} s; map {mp} ({size / 1024:.0f} kB)")
     worst = [f"  {x['code']:20s} {x['msg']}\n      -> {x.get('suggestion', '')}" for x in ranked]
     _emit(a, line, counts, worst, rep + ".txt")
+    if getattr(a, "variant", False):
+        rows = PL.run_variants(B, cons, spec, a.ignore_routing, cell=a.cell, board_path=a.board, base=R)
+        print(f"{'variant':10s} {'layers':>6s} {'score':>8s} {'conf':>5s} {'sealed':>6s} {'overflow':>8s} {'vias':>5s} {'copper_mm':>9s}")
+        for r in rows:
+            print(f"{r['variant']:10s} {r['layers']:6d} {r['score']:8.1f} {r['confidence']:5d} {r['sealed']:6d} {r['overflow']:8.1f} {r['vias']:5d} {r['copper_mm']:9.1f}")
+    if getattr(a, "swaps", False):
+        sw, base = PL.swap_candidates(B, cons, spec)
+        print(f"swap proposals (schematic change, not applied; base PLAN_SCORE {base:g}): {len(sw)} evaluated")
+        for r in sw[:10]:
+            print(f"  {r['group']}: {r['a']} <-> {r['b']} ({r['nets'][0]} / {r['nets'][1]}) gain {r['gain']:+g}")
     if v["result"] == "FAIL":
         raise SystemExit(1)
+
+
+def _calibrate(a, cons, spec):
+    from . import fluxmap as FM, routediag as RD, planroute as PL
+    B = RD.load(a.calibrate)
+    c = PL.calibrate(B, cons, spec, a.calibrate)
+    R = c.pop("result")
+    mp = FM.default_path(a.calibrate)
+    m = FM.build(B, cons, spec, a.calibrate, cls=R["cls"])
+    m.update(PL.plan_section(R))
+    m["calibration"] = {k: c[k] for k in ("hit", "miss", "false_alarm", "best", "planned")}
+    m["calibration"]["errors"] = [{"net": n, "why": "open on the routed board, plan predicted clear"} for n in c["miss"]]
+    FM.save(m, mp)
+    print(f"calibrate {a.calibrate}: {len(c['actual_open'])} nets open; plan flagged {len(c['hit'])} (hit), missed {len(c['miss'])}, "
+          f"flagged-but-routed {len(c['false_alarm'])} (of {c['planned']} planned); PLAN_SCORE {c['score']:g}")
+    print(f"  missed (planner errors, logged in {mp}): {', '.join(c['miss'][:12])}")
+    print("  capacity constants: share of real cell-directions over the modelled capacity")
+    for u in (0.6, 0.8, 1.0):
+        print("   util %.1f: " % u + "  ".join(f"jog {g['jog_frac']:.1f} {100 * g['over_share']:.1f}%" for g in c["grid"] if g["util"] == u))
+    b = c["best"]
+    print(f"  tightest constants holding 95 %: util {b['util']}, jog_frac {b['jog_frac']} ({100 * b['over_share']:.1f}% over)")
+    if getattr(a, "write_constants", False):
+        if not a.constraints:
+            raise SystemExit("--write-constants needs --constraints")
+        PL.write_constants(a.constraints, b)
+        print(f"  wrote util/jog_frac to [plan] in {a.constraints}")
 
 
 # ------------------------------------------------------------------ plan-compare
@@ -181,6 +219,11 @@ def add_parsers(sub):
     pp.add_argument("--json", default=None, help="also write verdict + findings here")
     pp.add_argument("--pcbnew", action="store_true", help="open/routed state from pcbnew connectivity (zones filled)")
     pp.add_argument("--verbose", action="store_true")
+    pp.add_argument("--variant", action="store_true", help="also run alternative layer roles (plane3v3, 8layer) and print a table")
+    pp.add_argument("--swaps", action="store_true", help="list `[swap.group.*]` pad swaps that lower PLAN_SCORE (schematic change)")
+    pp.add_argument("--calibrate", default=None, metavar="ROUTED_BOARD",
+                    help="predicted vs actual open nets and capacity constants on a routed board")
+    pp.add_argument("--write-constants", action="store_true", help="with --calibrate: write util/jog_frac to [plan] in --constraints")
     common(pp)
     pp.set_defaults(fn=cmd_plan_route)
 

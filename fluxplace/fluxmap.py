@@ -367,7 +367,7 @@ PALETTE = [(120, 170, 235), (240, 170, 90), (130, 200, 130), (200, 130, 200), (2
 
 def render(m, out, scale=9.0):
     """One picture per board side (parts, groups, relation lines, overflow heat, sealed pins) and one of the
-    inner-layer demand.  `out` is OUT.png or OUT.svg; files OUT_F, OUT_B, OUT_inner are written."""
+    inner-layer demand.  `out` is OUT.png or OUT.svg; files OUT_<layer> per signal layer and OUT_overview are written."""
     base, ext = os.path.splitext(out)
     ext = ext.lower() or ".png"
     Canvas = _SVG if ext == ".svg" else _PNG
@@ -411,23 +411,31 @@ def render(m, out, scale=9.0):
                 elif capsum == 0:
                     c.rect(box, fill=(90, 90, 90, 60))
 
-    for tag, side in (("F", "F"), ("B", "B"), ("inner", None)):
+    lays = grid.get("layers") or ["F.Cu", "B.Cu"]
+    pages = [(l.replace(".Cu", ""), l) for l in lays] + [("overview", None)]
+    for tag, lay in pages:
+        side = None if lay is None else ("F" if lay.startswith("F") else ("B" if lay.startswith("B") else "in"))
         c = Canvas(W, H)
         c.text((pad, 6), f"{os.path.basename(m['board'].get('file', ''))}  side {tag}   fluxmap v{m['fluxmap']}   "
                          f"PLAN_SCORE {(m.get('verdict') or {}).get('score', '-')}", (0, 0, 0))
         poly = [(X(a), Y(b)) for a, b in m["board"]["outline"]]
         if len(poly) > 2:
             c.poly(poly, (0, 0, 0), 2)
-        if side is None:
-            heat(c, [grid["layers"][k] for k in range(len(grid.get("layers", []))) if 0 < k < len(grid["layers"]) - 1]
-                 if grid else [], inner=True)
+        if lay is None:
+            heat(c, list(grid.get("layers", [])), inner=True)
         else:
-            sl = [l for l in grid.get("layers", []) if l.startswith(side)] if grid else []
-            heat(c, sl)
+            heat(c, [lay] if grid else [])
+        for cb in m.get("corridors", []):                       # reserved bus corridors
+            c.rect((X(cb[0]), Y(cb[1]), X(cb[2]), Y(cb[3])), outline=(30, 60, 200))
+        if lay is None:
+            for g in m["groups"]:
+                if g["src"] in ("placement.group", "blocks", "sheet") and len(g["members"]) >= 3:
+                    c.rect((X(g["box"][0]), Y(g["box"][1]), X(g["box"][2]), Y(g["box"][3])), outline=(120, 0, 120))
+                    c.text((X(g["box"][0]) + 2, Y(g["box"][1]) + 2), g["name"][:16], (120, 0, 120))
         for p in m["parts"]:
             cb = p["court"]
             col = PALETTE[gl[p["group"]] % len(PALETTE)] if p["group"] in gl else (200, 200, 200)
-            on = side is None or p["side"] == side
+            on = side in (None, "in") or p["side"] == side
             if on:
                 c.rect((X(cb[0]), Y(cb[1]), X(cb[2]), Y(cb[3])), fill=col + (110,),
                        outline=(0, 0, 0) if p["mode"] != "movable" else (80, 80, 80))
@@ -437,13 +445,13 @@ def render(m, out, scale=9.0):
                 c.rect((X(cb[0]), Y(cb[1]), X(cb[2]), Y(cb[3])), outline=(190, 190, 190))
         for r in m["relations"]:
             sp, ic = P.get(r["part"]), P.get(r["serves"].split(".")[0])
-            if not sp or not ic or not r.get("sure") or (side and sp["side"] != side and ic["side"] != side):
+            if not sp or not ic or not r.get("sure") or (side in ("F", "B") and sp["side"] != side and ic["side"] != side):
                 continue
             bad = r["now"] > r["max"]
             c.line((X(sp["x"]), Y(sp["y"])), (X(ic["x"]), Y(ic["y"])), (220, 0, 0) if bad else (0, 140, 0), 2 if bad else 1)
         for ref, pins in esc.items():
             part = P.get(ref)
-            if not part or (side and part["side"] != side):
+            if not part or (side in ("F", "B") and part["side"] != side):
                 continue
             for pnum, rec in pins.items():
                 if rec[0] in ("s", "n"):
@@ -454,7 +462,7 @@ def render(m, out, scale=9.0):
                         c.line((X(pos[1]) - 5, Y(pos[2]) - 5), (X(pos[1]) + 5, Y(pos[2]) + 5), col, 2)
         for f in ov:
             b = f.get("box")
-            if b and side is not None:
+            if b and lay is not None:
                 c.rect((X(b[0]), Y(b[1]), X(b[2]), Y(b[3])), outline=(230, 0, 0))
         path = f"{base}_{tag}{ext}"
         c.save(path)

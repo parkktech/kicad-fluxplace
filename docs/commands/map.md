@@ -9,4 +9,4 @@ Builds `<board>.fluxmap.json` (schema: `docs/fluxmap.md`): outline, layers with 
 mode and group, support-part relations with max/current distance, groups, nets with class, budget and state. Deterministic.
 `--state` adds routed/open per net (text connectivity). `--show` prints one slice (<= 6 kB): `--show parts --ref U5` gives the
 part, its relations, escapes and nets; `--show nets --net PCIE_TX_P` gives the net, its planned route and findings that name it.
-`--render` writes OUT_F, OUT_B and OUT_inner pictures. `plan-route` fills the planner sections of the same file.
+`--render` writes one page per signal layer (OUT_F, OUT_B, OUT_In2 ...) and OUT_overview (blocks, reserved corridors, overflow, sealed pins, relations). `plan-route` fills the planner sections of the same file.

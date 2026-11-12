@@ -22,4 +22,4 @@ Without a planner run the last five sections are empty (`{}` / `[]`).
 
 `fluxplace map --render OUT.png|OUT.svg` writes OUT_F, OUT_B (parts coloured by group, courtyard box, support-part lines green/red =
 within/over limit, red cells = capacity overflow, grey = capacity 0, red cross = sealed pin, magenta cross = no via site) and
-OUT_inner (blue = inner-layer demand/capacity).
+OUT_overview (blue = demand on all layers, blue outlines = reserved corridors, purple = blocks).

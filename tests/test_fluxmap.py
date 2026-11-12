@@ -60,7 +60,7 @@ def test_map_with_plan_sections_and_render(tmp_path):
     assert any(v[0] == "s" for v in m["escapes"]["pins"]["U1"].values())
     assert m["grid"]["cell"] == 2.0 and len(m["grid"]["capH"]["F.Cu"]) == m["grid"]["nx"] * m["grid"]["ny"]
     files = FM.render(m, str(tmp_path / "out.png"))
-    assert [os.path.basename(f) for f in files] == ["out_F.png", "out_B.png", "out_inner.png"]
+    assert [os.path.basename(f) for f in files] == ["out_F.png", "out_B.png", "out_overview.png"]
     assert all(os.path.getsize(f) > 1000 for f in files)
     files = FM.render(m, str(tmp_path / "out.svg"))
     assert open(files[0]).read().startswith("<svg")

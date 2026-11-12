@@ -102,3 +102,65 @@ def test_vias_charge_every_layer(tmp_path):
     assert n_v == sum(r["vias"] for r in g.routes.values()) * 0 + n_v      # structure present
     g2 = PL.run(B, {"plan": {"via_units": 0}}, None, ignore_routing=True)["gr"]
     assert sum(sum(a) for a in g.uH) >= sum(sum(a) for a in g2.uH)
+
+
+def _bus_board(tmp):
+    """Eight 2-pad nets of one bus; a wall forces them through a channel."""
+    return channel_board(tmp, 8, gap=14.0, walls=False)
+
+
+def test_confidence_and_variants(tmp_path):
+    R = run(channel_board(tmp_path, 4, gap=30.0, walls=False))
+    v = PL.verdict(R)
+    assert 0 <= v["confidence"] <= 100 and set(v["conf_terms"]) == {"util", "headroom", "slack", "worst_util"}
+    R2 = run(channel_board(tmp_path, 16, gap=1.0))
+    assert PL.verdict(R2)["confidence"] < v["confidence"]
+    rows = PL.run_variants(RD.load(channel_board(tmp_path, 16, gap=1.0)), {}, None, True)
+    assert [r["variant"] for r in rows] == ["mixed", "plane3v3", "8layer"] and rows[2]["layers"] == rows[0]["layers"] + 2
+
+
+def test_return_path_and_zoning_and_corridor(tmp_path):
+    from fluxplace import planrules as PRL
+    # an rf net whose ends are on opposite sides of a 2-layer board changes layer without a GND via -> PLAN_RETURN_PATH needs planes;
+    # here no plane layer exists, so no reference change is reported
+    R = run(channel_board(tmp_path, 4, gap=30.0, walls=False))
+    assert not [f for f in R["findings"] if f["code"] == "PLAN_RETURN_PATH"]
+    # zoning: a switch-node inductor 2 mm from an RF part
+    body = (PB.fp("U1", 20, 40, [PB.pad("1", 0, 0, "U1_SW", 0.8, 0.8), PB.pad("2", 2, 0, "VIN", 0.8, 0.8), PB.pad("3", 4, 0, "FB", 0.8, 0.8), PB.pad("4", 6, 0, "EN", 0.8, 0.8), PB.pad("5", 8, 0, "GND", 0.8, 0.8)])
+            + PB.fp("L1", 25, 40, [PB.pad("1", 0, 0, "U1_SW", 1, 1), PB.pad("2", 3, 0, "VOUT", 1, 1)])
+            + PB.fp("A1", 33, 40, [PB.pad("1", 0, 0, "RF_ANT", 1, 1), PB.pad("2", 3, 0, "RF_OUT", 1, 1)])
+            + PB.fp("A2", 70, 40, [PB.pad("1", 0, 0, "RF_ANT", 1, 1), PB.pad("2", 3, 0, "RF_OUT", 1, 1)]))
+    B = RD.load(PB.write(tmp_path, body, "z.kicad_pcb"))
+    from fluxplace import netclass as NC2
+    cls = NC2.classify(B, {}, None)
+    z = PRL.zoning(B, cls, {})
+    assert z and z[0]["code"] == "PLAN_ZONING" and "keep-away" in z[0]["msg"]
+    assert not PRL.zoning(B, cls, {"zoning": {"keepaway_mm": 0.5}})
+
+
+def test_bus_weave_and_part_in_corridor_codes_exist(tmp_path):
+    assert {"PLAN_BUS_WEAVE", "PLAN_PART_IN_CORRIDOR", "PLAN_RETURN_PATH", "PLAN_ZONING", "PLAN_ESCAPE_OVERSUBSCRIBED",
+            "PLAN_POWER_NO_PLANE"} <= set(PL.CODES)
+    # a narrow channel board is fully used: corridor cells exist
+    from fluxplace import planrules as PRL
+    R = run(channel_board(tmp_path, 16, gap=1.0))
+    assert PRL.corridor_cells(R["gr"], util=0.5)
+
+
+def test_calibrate_and_write_constants(tmp_path):
+    p = channel_board(tmp_path, 4, gap=30.0, walls=False)
+    c = PL.calibrate(RD.load(p), {}, None, p)
+    assert c["best"]["util"] in (0.6, 0.7, 0.8, 0.9, 1.0) and "hit" in c and "miss" in c
+    t = tmp_path / "c.toml"
+    t.write_text("[plan]\nutil = 0.8\ncell_mm = 2.0\n\n[fab]\nmin_track_mm = 0.1\n")
+    PL.write_constants(str(t), {"util": 0.6, "jog_frac": 0.4})
+    txt = t.read_text()
+    assert "util = 0.6" in txt and "jog_frac = 0.4" in txt and "cell_mm = 2.0" in txt and "[fab]" in txt
+
+
+def test_swap_candidates_listed_not_applied(tmp_path):
+    p = channel_board(tmp_path, 4, gap=30.0, walls=False)
+    B = RD.load(p)
+    cons = {"swap": {"group": {"g": {"pads": ["L0.1", "L3.1"]}}}}
+    sw, base = PL.swap_candidates(B, cons, None)
+    assert sw and sw[0]["group"] == "g" and {q["net"] for q in B["pads"] if q["ref"] == "L0"} == {"SIG0"}

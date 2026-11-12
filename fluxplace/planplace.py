@@ -271,6 +271,17 @@ class PlanPlacer(RF.Refiner):
                         pull, _c, _t = self._pull(self.U[k])
                         if pull:
                             add(r, pull[0] * 1.0, pull[1] * 1.0, 0.0, f"overflow at ({cx:.0f}, {cy:.0f}): {r} toward its partners")
+            elif c in ("PLAN_PART_IN_CORRIDOR", "PLAN_ZONING") and f.get("part"):
+                r = f["part"]
+                cx, cy = (f["cells_xy"][0] if f.get("cells_xy") else f["at"])
+                for d in (1.0, 2.0, 3.0):
+                    dx, dy = away(cx, cy, P[r]["pos"][0], P[r]["pos"][1], d)
+                    add(r, dx, dy, 0.0, f"{c[5:].lower()} at ({cx:.0f}, {cy:.0f}): {r} steps {d:g} mm out")
+                if f.get("other") and f["other"] in P:
+                    o = f["other"]
+                    for d in (2.0, 4.0):
+                        dx, dy = away(P[r]["pos"][0], P[r]["pos"][1], P[o]["pos"][0], P[o]["pos"][1], -d)
+                        add(r, dx, dy, 0.0, f"zoning: {r} steps {d:g} mm away from {o}")
             elif c == "PLAN_NET_OVER_BUDGET":
                 nt = next((p for p in self.ps.gr.nets.values() if f["net"] in p["members"]), None)
                 if nt:
@@ -306,8 +317,30 @@ class PlanPlacer(RF.Refiner):
                     out.append(g[i])
         return out
 
+    def rotation_pass(self, min_pads=6):
+        """A1: for every movable unit with >= 6 pads, or any part with a finding on it, big first: try the other three rotations (and the
+        other side when `[placement.side] flip_cost` allows) and keep each that lowers PLAN_SCORE (the score carries pin direction,
+        escape headroom and the budget terms)."""
+        P = self.B["parts"]
+        hit = {f.get("part") for f in self.ps.findings if f.get("part")}
+        order = sorted((k for k, ms in self.U.items() if self._movable(k) and (P[k]["n_pads"] >= min_pads or k in hit)),
+                       key=lambda k: (-P[k]["n_pads"], k))
+        n = 0
+        for k in order:
+            if time.time() > self.t_end:
+                break
+            for rot in (90.0, 180.0, 270.0):
+                poses = self._shift(k, 0.0, 0.0, rot)
+                if poses and self.try_move("rotate", poses, f"A1 rotation: {k} by {rot:g} (pin direction / escape headroom)"):
+                    n += 1
+            if self.flip_cost is not None:
+                self.flip(k)
+        return n
+
     def run(self):
         P = self.B["parts"]
+        if getattr(self, "do_rotation_pass", True):
+            self.log(f"A1 rotation pass: {self.rotation_pass()} rotation(s) kept, PLAN_SCORE {self.score:.1f}")
         self.log(f"plan objective: PLAN_SCORE {self.score:.1f}, {len(self.U)} unit(s), {len(self.fixed)} fixed")
         t_end = self.t_end
         rounds = 0
