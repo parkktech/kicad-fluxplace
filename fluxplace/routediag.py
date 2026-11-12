@@ -155,15 +155,16 @@ def load(path, track=None, clearance=None):
                  "w": w, "h": h, "ex": ex, "ey": ey, "min": min(w, h),
                  "layers": lay or {side}, "net": nm(BF._net(pad)), "angle": pa,
                  "shape": a[2] if len(a) > 2 else "",
-                 "tht": ptype in ("thru_hole", "np_thru_hole")}
+                 "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole"}
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
             zones.append(dict(zone_of(z), owner=ref))
-        cy_pts = []
+        cy_pts, cy_sides = [], set()
         for g in fp:
             if (isinstance(g, list) and g and g[0].startswith("fp_")
                     and (BF._atoms(BF._first(g, "layer")) or [""])[0].endswith("CrtYd")):
+                cy_sides.add((BF._atoms(BF._first(g, "layer")) or [""])[0][0])
                 pts, _hw = BF._shape_pts(g)
                 for px, py in pts:
                     rx, ry = BF._rot(px, py, fang)
@@ -179,7 +180,7 @@ def load(path, track=None, clearance=None):
         parts[ref] = {"pos": (fx, fy), "pads": mine, "side": side,
                       "value": props.get("Value", ""), "angle": fang,
                       "tht": any(q["tht"] for q in mine),
-                      "fp": (BF._atoms(fp) or [""])[0], "court": court,
+                      "fp": (BF._atoms(fp) or [""])[0], "court": court, "court_layers": cy_sides,
                       "locked": any(k == "locked" or (isinstance(k, list) and k[:2] == ["locked", "yes"])
                                     for k in fp if isinstance(k, (str, list)) and (
                                         k == "locked" or (isinstance(k, list) and k and k[0] == "locked"))),

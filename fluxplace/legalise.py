@@ -68,7 +68,9 @@ def allowances(part, pads, court):
 def keepout_rects(B, cons):
     """[(rect, sides, allow, max_height, name)] from [[keepout]] and from the named rectangles
     `[placement.keepout.NAME] = {rect = [x0, y0, x1, y1], side = "B"|"F"|"both", allow = [refs],
-    reason = "..."}`: no part of that side (a through-hole part counts on both) inside the rectangle."""
+    reason = "..."}`: no part BODY of that side inside the rectangle. A body is on the side its courtyard is on (the
+    placement layer); through-hole pads do not count on the other side (the no_tht rectangles govern
+    them) and mounting holes (no pads or only NPTH pads) are never bodies."""
     out = []
     for name, k in sorted(((cons or {}).get("placement", {}) or {}).get("keepout", {}).items()):
         if isinstance(k, dict) and k.get("rect"):
@@ -119,8 +121,24 @@ class _Model:
         return self._rel[k]
 
     def sides(self, ref):
+        """Sides a part OCCUPIES for the courtyard-overlap test: through-hole = both; otherwise its own
+        side plus every side it has a courtyard on or SMD copper on (an edge-launch connector has pads
+        and a courtyard on both, KiCad checks each layer's courtyards)."""
         p = self.B["parts"][ref]
-        return {"F", "B"} if p["tht"] else {"F" if p["side"] == "F.Cu" else "B"}
+        if p["tht"]:
+            return {"F", "B"}
+        s = {"F" if p["side"] == "F.Cu" else "B"} | set(p.get("court_layers", ()))
+        for q in p["pads"]:
+            s |= {"F" if l == "F.Cu" else "B" for l in q["layers"] if l in ("F.Cu", "B.Cu")}
+        return s
+
+    def body_side(self, ref):
+        """Side of a part's BODY (keep-out sides): the side its courtyard is on = its placement layer,
+        whatever its through-hole pads do. Mounting holes (no pads, or only NPTH) are no body: set()."""
+        p = self.B["parts"][ref]
+        if not any(not q.get("np") for q in p["pads"]):
+            return set()
+        return {"F" if p["side"] == "F.Cu" else "B"}
 
     def forbidden(self, ref, rect):
         """Rects this part must stay out of."""
@@ -129,12 +147,12 @@ class _Model:
     def forbidden_named(self, ref):
         """[(name, rect)] this part must stay out of."""
         part = self.B["parts"][ref]
-        sd = self.sides(ref)
+        sd = self.body_side(ref)
         out = []
         for r, ks, allow, mh, name in self.ko:
             if any(fnmatch.fnmatch(ref, g) for g in allow):
                 continue
-            if (part["tht"] and sd & ks) or (not part["tht"] and sd & ks and mh is None):
+            if sd & ks and (part["tht"] or mh is None):
                 out.append((name, r))
         # track-forbidding rule areas: nothing can be routed to a pad inside one (the
         # area's own part, e.g. the antenna it is named after, is exempt)

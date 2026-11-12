@@ -1730,9 +1730,14 @@ def cmd_clusters(a):
     x0, y0, x1, y1 = B["bbox"]
     L = LGL.Legal(B, cons, RB._fixed_set(B, cons))
     before = L.issues()
+    fx = RB._fixed_set(B, cons)
+    iss0, org = LGL.issue_set(B, cons, fx), LGL.origin_of(B)
     left = []
     moves = CL.reseat(B, cl, everything=a.all, guess=a.guess, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2),
                       log=print, legal=L, strict=not a.best_effort, left=left)
+    rev, whole = LGL.self_audit(B, cons, fx, iss0, org, log=print)
+    if rev:
+        moves = LGL.moves_since(B, org)
     BW.move_file(a.board, a.out, moves)
     cl2, _ = CL.build(B, cons, spec)
     after = LGL.Legal(B, cons, RB._fixed_set(B, cons)).issues()
@@ -1759,11 +1764,15 @@ def cmd_templates(a):
     fixed = RB._fixed_set(B, cons)
     L = LGL.Legal(B, cons, fixed)
     before = L.issues()
+    iss0, org = LGL.issue_set(B, cons, fixed), LGL.origin_of(B)
     moves = {}
     for t in T:
         mv, rep = TP.place(B, cons, spec, t, fixed=fixed, legal=L)
         moves.update(mv)
         print(TP.format_report(rep))
+    rev, whole = LGL.self_audit(B, cons, fixed, iss0, org, log=print)
+    if rev:
+        moves = LGL.moves_since(B, org)
     after = LGL.Legal(B, cons, fixed).issues()
     new = {k: sorted(set(after[k]) - set(before[k])) for k in after}
     print("legality (new violations vs the input): " + ", ".join(f"{k} {len(v)}" for k, v in new.items()))

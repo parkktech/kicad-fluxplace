@@ -129,6 +129,16 @@ def seat(B, legal, cost, ref, tx, ty, skip=(), angles=None, reach=30.0, step=0.5
     return None if best is None else (round(best[1], 4), round(best[2], 4), best[3])
 
 
+def _issue_set(B, cons, fixed):
+    from . import legality as LGL
+    return {f"{k}:{x}" for k, v in LGL.Legal(B, cons, fixed).issues().items() for x in v}
+
+
+def _gate_score(B, cons, spec):
+    from . import preroute as PR
+    return PR.run(B, cons, spec)[1]["score"]
+
+
 def _put(B, legal, ref, pose):
     GM.place(B["parts"][ref], *pose)
     legal.refresh(ref)
@@ -193,13 +203,20 @@ def place(B, cons, spec, t, cls=None, fixed=(), log=None, legal=None):
     """Place one template on the live board model B (mutated). -> (moves, report) where
     moves = {ref: (x, y, angle)} for every part that moved and report has the group, the nets, their
     lengths before/after and (chain) whether the order is monotonic. Parts that cannot be seated
-    legally stay and are listed under report["unplaced"]."""
+    legally stay and are listed under report["unplaced"].
+
+    ATOMIC: the members' current positions are one candidate. When the constructed layout leaves a member
+    without a legal seat, adds a legality violation, makes the listed nets' worst length longer or the
+    gate score (preroute.score) worse than the input, every member goes back to where it was, moves is {}
+    and report["rejected"] says why ("template rejected: ...", with the numbers)."""
     from . import legality as LGL
     log = log or (lambda m: None)
     cls = cls or NC.classify(B, cons, spec)
     legal = legal or LGL.Legal(B, cons, fixed)
     P = B["parts"]
     start = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in P.items()}
+    iss0 = _issue_set(B, cons, fixed)
+    sc0 = _gate_score(B, cons, spec)
     members = list(t["refs"])
     pas = passengers(B, members, cls, fixed)
     group = members + pas
@@ -305,6 +322,32 @@ def place(B, cons, spec, t, cls=None, fixed=(), log=None, legal=None):
     for r in group:
         legal.refresh(r)
     after = {n: round(NC.mst_length([(q["x"], q["y"]) for q in pads[n]]), 2) for n in nets}
+    why = []
+    if unplaced:
+        why.append(f"no legal seat for {', '.join(unplaced)}")
+    new_iss = sorted(_issue_set(B, cons, fixed) - iss0)
+    if new_iss:
+        why.append(f"{len(new_iss)} new legality violation(s): {', '.join(new_iss[:4])}")
+    if before and max(after.values()) > max(before.values()) + 0.05:
+        wb = max(before, key=before.get)
+        wa = max(after, key=after.get)
+        why.append(f"worst net {wa} {after[wa]:.1f} mm > input worst {wb} {before[wb]:.1f} mm")
+    sc1 = _gate_score(B, cons, spec) if not why else None
+    if sc1 is not None and sc1 > sc0 + 0.5:
+        why.append(f"gate score {sc0:.0f} -> {sc1:.0f}")
+    if why:
+        for r in set(group) | set(members):
+            _put(B, legal, r, start[r])
+        for r, (x, y, a) in start.items():              # nothing outside the group may have moved either
+            if (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"]) != (x, y, a):
+                _put(B, legal, r, (x, y, a))
+        worse = {n: round(NC.mst_length([(q["x"], q["y"]) for q in pads[n]]), 2) for n in nets}
+        rep_rej = ("template rejected: " + "; ".join(why) + " (candidate nets: " +
+                   ", ".join(f"{n} {before[n]:.1f}->{after[n]:.1f}" for n in nets) + ")")
+        log(rep_rej)
+        after_c = after
+        after = worse
+        unplaced = []
     moves = {r: (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"]) for r in group
              if abs(P[r]["pos"][0] - start[r][0]) > 1e-4 or abs(P[r]["pos"][1] - start[r][1]) > 1e-4
              or abs((P[r]["angle"] - start[r][2] + 180) % 360 - 180) > 1e-6}
@@ -312,6 +355,9 @@ def place(B, cons, spec, t, cls=None, fixed=(), log=None, legal=None):
            "nets": nets, "before": before, "after": after, "unplaced": unplaced,
            "weighted_before": round(sum(before[n] * max(cls.get(n, {}).get("weight", 1.0), 1.0) for n in nets), 1),
            "weighted_after": round(sum(after[n] * max(cls.get(n, {}).get("weight", 1.0), 1.0) for n in nets), 1)}
+    if why:
+        rep["rejected"] = rep_rej
+        rep["candidate"] = after_c
     if t["kind"] == "chain":
         refs = t["refs"]
         a = P[refs[0]]["pos"]
@@ -345,6 +391,8 @@ def format_report(rep):
     L.append(f"  class-weighted length {rep['weighted_before']:.1f} -> {rep['weighted_after']:.1f} mm")
     if "monotonic" in rep:
         L.append(f"  monotonic along the line: {rep['monotonic']}")
+    if rep.get("rejected"):
+        L.append("  " + rep["rejected"])
     if rep["unplaced"]:
         L.append(f"  no legal seat (left in place): {', '.join(rep['unplaced'])}")
     return "\n".join(L)

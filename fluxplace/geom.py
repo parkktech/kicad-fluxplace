@@ -48,6 +48,11 @@ def overlap(a, b, gap=0.0):
     return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
 
 
+def rect_gap(a, b):
+    """Euclidean gap between two rectangles (0 when they touch or overlap)."""
+    return math.hypot(max(0.0, a[0] - b[2], b[0] - a[2]), max(0.0, a[1] - b[3], b[1] - a[3]))
+
+
 def inside(r, outer, eps=1e-3):
     return (r[0] >= outer[0] - eps and r[1] >= outer[1] - eps
             and r[2] <= outer[2] + eps and r[3] <= outer[3] + eps)
@@ -167,4 +172,5 @@ def flip(part):
     x0, y0, x1, y1 = part["court"]
     part["court"] = (2 * ox - x1, y0, 2 * ox - x0, y1)
     part["side"] = sw[part["side"]]
+    part["court_layers"] = {"F" if s == "B" else "B" for s in part.get("court_layers", ())}
     part["angle"] = (180.0 - part["angle"]) % 360.0

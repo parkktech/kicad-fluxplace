@@ -86,7 +86,7 @@ def test_reseat_stays_clear_of_a_through_hole_courtyard_and_the_outline_arc(tmp_
 
 def test_gate_fails_placement_illegal_and_allow_overlap_clears_it(tmp_path):
     from fluxplace import preroute as PR
-    body = g.two("C1", 20, 20, "A", "B", court=(-1, -1, 1, 1)) + g.two("C2", 20.5, 20, "A", "B", court=(-1, -1, 1, 1))
+    body = g.two("C1", 20, 20, "A", "B", court=(-2, -1, 2, 1)) + g.two("C2", 22, 20, "A", "B", court=(-2, -1, 2, 1))
     B = RD.load(g.board(tmp_path, body))
     f, card = PR.run(B, {})
     bad = [x for x in f if x["code"] == "PLACEMENT_ILLEGAL"]

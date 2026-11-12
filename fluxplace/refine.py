@@ -64,6 +64,9 @@ class Refiner:
             for s in c["supports"]:
                 self.sup[s["ref"]] = (c["ic"], s["pad"])
         self.origin = {r: self._pose(r) for r in B["parts"]}
+        self.origin_full = LGL.origin_of(B)
+        self.input_issues = LGL.issue_set(B, self.cons, self.fixed)
+        self.reverted = []
         self.score = PR.run(B, self.cons, spec)[1]["score"]
         self.score0 = self.score
         self.stats = defaultdict(int)
@@ -281,15 +284,19 @@ class Refiner:
                      f"({', '.join(f'{k} {v}' for k, v in sorted(self.stats.items()))})")
             if not gained or time.time() > self.t_end:
                 break
+        self.reverted, whole = LGL.self_audit(self.B, self.cons, self.fixed, self.input_issues,
+                                              self.origin_full, self.log)
+        if self.reverted:
+            self.flips = {r for r in P if P[r]["side"] != self.origin_full[r][3]}
+            self.score = PR.run(self.B, self.cons, self.spec)[1]["score"]
+            self.log(f"self-audit: reverted {'the whole result' if whole else ', '.join(self.reverted)}; "
+                     f"score now {self.score:.0f}")
         base = self.origin
         norm = lambda a: (a + 180) % 360 - 180
         moves = {r: (round(x, 4), round(y, 4), a) for r, (x, y, a) in ((r, self._pose(r)) for r in P)
                  if abs(x - base[r][0]) > 1e-4 or abs(y - base[r][1]) > 1e-4 or abs(norm(a - base[r][2])) > 1e-6}
         for r in self.flips:                            # a flip changes the angle even at the same origin
             moves[r] = (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"])
-        new = sorted(self._triples(P) - self.base)
-        if new:
-            raise RuntimeError(f"refine produced {len(new)} new legality violation(s): {new[:5]}")
         return moves
 
 
@@ -297,4 +304,5 @@ def refine(B, cons=None, spec=None, seed=0, log=print, time_limit=None):
     """-> (moves {ref: (x, y, angle)}, stats dict). Mutates B."""
     r = Refiner(B, cons, spec, seed, log, time_limit)
     mv = r.run()
-    return mv, {"score_before": r.score0, "score_after": r.score, "kept": dict(r.stats), "flips": sorted(r.flips)}
+    return mv, {"score_before": r.score0, "score_after": r.score, "kept": dict(r.stats), "flips": sorted(r.flips),
+                 "reverted": r.reverted}

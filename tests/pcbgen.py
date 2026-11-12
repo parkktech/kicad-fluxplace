@@ -18,6 +18,8 @@ def fp(ref, x, y, pads, angle=0.0, name="X", side="F", locked=False, court=None)
               f' (layer "{side}.CrtYd"))')
     # pad angle in the file is absolute: add the footprint rotation
     pads = [p.replace(" 0.0) (size", f" {angle}) (size") if angle else p for p in pads]
+    if side == "B":                                   # a bottom footprint has its copper on B.Cu
+        pads = [p.replace('(layers "F.Cu")', '(layers "B.Cu")') for p in pads]
     return (f'(footprint "{name}" (layer "{side}.Cu"){lk} (at {x} {y} {angle}) '
             f'(property "Reference" "{ref}") {cy} {" ".join(pads)})\n')
 
