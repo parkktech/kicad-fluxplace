@@ -383,9 +383,9 @@ def rank(results, base):
     worse = [r for r in rows if r["pass"] and not r["never"] and r["perf_why"]]
     for r in worse:
         r["never"] = True                                  # a pass that costs controlled-net performance is never recommended
-    sub = [r for r in rows if r["pass"] and r["never"]]
-    sub.sort(key=lambda r: (r["area_cm2"], r["cost"]))
-    miss = [r for r in rows if not r["pass"]]
+    sub = [r for r in rows if (r["never"] or r["subfloor"])]              # never offered: perf-worse, invalid neck-down, below the owner floor
+    sub.sort(key=lambda r: (not r["pass"], r["area_cm2"], r["cost"]))
+    miss = [r for r in rows if not r["pass"] and not r["never"] and not r["subfloor"]]
     miss.sort(key=lambda r: (r["overflow"] + 100 * r["sealed"] + 40 * r["no_via_site"], bool(r["perf_why"]), r["area_cm2"]))
     return ok, sub, miss
 

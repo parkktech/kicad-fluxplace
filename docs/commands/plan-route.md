@@ -61,3 +61,20 @@ lane 1.0, reach 1.6, plane radius 1.5, slot pitch 0.6, wrong-way 1.5 (on a0503fc
 `flip_cost` is set) and also proposes moves out of corridors and away from zoning conflicts.
 Not done: test-point access, rework clearance, silkscreen space (B3), thermal-via reservation, a decoupling-order INFO check, automatic
 swap groups (they must be named in `[swap]`).
+
+## Review-fix notes (2026-11-12)
+
+- `route-ready` runs the plan only with `[route_ready] use_plan = true` (default FALSE: the placement-only calibration is 10-41 %); its findings are WARN
+  unless `[route_ready] plan_gate = "fail"`.
+- ONE verdict predicate (`planroute.predicate`) drives the exit code, plan-options and the gate: FAIL on sealed pin, oversubscribed group, unreachable
+  connection, no via site, RF layer change over the limit, rail without plane (`fail_on_power_no_plane`), hard-class over-budget net (both legs of a pair),
+  risk_frac > `max_risk_frac` (0.06) or more than `max_risk_nets` (10) nets at risk. Confidence is < 50 whenever it fails.
+- `[plan] floor_mm` (0.127) is enforced: a lower `track_mm`/`clearance_mm` is raised to it and reported (`floor_clamped`); sub-floor plan-options candidates
+  run with `allow_subfloor` and are only listed on a separate "not offered" line.
+- Controlled nets come from the constraints (class, `[nets.X] impedance`, `[rf] nets`, `[pairs.*]`, `[plan] controlled_nets`, `controlled_names` fallback).
+  Inner-layer directions alternate along the stack (`[plan] layer_dir` overrides). Obstacles: pad rows with gaps below track + 2 clearance merge into one wall;
+  cells outside the outline / in cut-outs and the copper-to-edge strip carry no capacity; thin keep-outs are intersected exactly; dog-bone stubs are checked
+  against each other. The courtyard class of overflow applies only to the layers a part's pads block.
+- `place --objective plan` accepts moves on (FAIL flag, hard failures, risk_frac, score), is bounded by evaluations (`[placement] max_evals`, 400), and runs a fresh
+  full plan at the end: if that is worse than the input's full plan, every move is reverted. `plan-options --place-evals`.
+- `calibrate --write-constants` keeps `<constraints>.bak`.
