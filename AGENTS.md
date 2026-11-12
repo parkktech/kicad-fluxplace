@@ -14,11 +14,11 @@ Context is scarce: commands answer with results; read nothing else. Unsure: `flu
 | task | command | flags that matter |
 |---|---|---|
 | whole flow | `pipeline BOARD --workdir W` | `--constraints C --spec S --from/--to STAGE --status --route-budget S` |
-| board map (read it, not the .kicad_pcb) | `map BOARD` | `--constraints --show SEC --ref/--net/--group --render O.png` |
-| can it route? | `plan-route BOARD` | `--constraints --spec --ignore-routing`; `plan-compare`, `plan-options` |
+| board map (read it, not the board) | `map BOARD` | `--constraints --show SEC --ref/--net/--group --render O.png` |
+| can it route? | `plan-route BOARD` | `--ignore-routing`; `plan-compare`, `plan-options` |
 | ready to route | `route-ready BOARD` | `--constraints --spec --waive CODE:REGEX --all` (+PLAN_*) |
 | area budget | `floorplan-check BOARD` | `--constraints --spec` |
-| silkscreen check/fit | `silk BOARD` | `--fix --out O --constraints` |
+| silkscreen | `silk BOARD` | `--fix --out O` |
 | tree/chain templates | `templates BOARD` | `--constraints --spec --out O` |
 | rotate connectors | `anchor-check BOARD` | `--apply --out OUT` |
 | support parts to ICs | `clusters BOARD` | `--apply --out OUT` |
