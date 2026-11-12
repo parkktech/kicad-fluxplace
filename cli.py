@@ -3033,13 +3033,19 @@ def build_parser():
     psc.add_argument("--json", action="store_true")
     psc.set_defaults(fn=cmd_schematic)
 
+    from fluxplace import outputs as OUT
+    OUT.add_flags(ap, sub)
     return ap
 
 
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
-    a.fn(a)
+    from fluxplace import outputs as OUT
+    if a.cmd in OUT.COMPACT_CMDS:
+        OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
+    else:
+        a.fn(a)
     if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
         _sheet_hint(getattr(a, "out", None) or a.board)
 
