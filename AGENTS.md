@@ -18,6 +18,7 @@ Context is scarce: commands answer with results; read nothing else. Unsure: `flu
 | can it route? | `plan-route BOARD` | `--constraints --spec --ignore-routing`; `plan-compare`, `plan-options` |
 | ready to route | `route-ready BOARD` | `--constraints --spec --waive CODE:REGEX --all` (+PLAN_*) |
 | area budget | `floorplan-check BOARD` | `--constraints --spec` |
+| silkscreen check/fit | `silk BOARD` | `--fix --out O --constraints` |
 | tree/chain templates | `templates BOARD` | `--constraints --spec --out O` |
 | rotate connectors | `anchor-check BOARD` | `--apply --out OUT` |
 | support parts to ICs | `clusters BOARD` | `--apply --out OUT` |

@@ -190,7 +190,7 @@ def _routable_place(a, board_in, board_out):
         raise
     # flipped parts: write the pre-flip pose as text, then let pcbnew do the flip (text cannot mirror)
     BW.move_file(board_in, board_out, {r: ((x, y, (180.0 - ang) % 360.0) if r in flips else (x, y, ang))
-                                       for r, (x, y, ang) in mv.items()})
+                                       for r, (x, y, ang) in mv.items()}, post=not flips)
     if flips:
         from fluxplace import flip as FL
         pre = RD.load(board_out)
@@ -1374,6 +1374,7 @@ def _review_gate(a, stage="review", hard=True):
         print(f"    review gate: no --board given, nothing to review before {stage}")
         return []
     facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None))
+    facts.setdefault("board_path", board)
     spec = None
     spec_path = getattr(a, "spec", None)
     if spec_path:
@@ -1854,6 +1855,49 @@ def cmd_anchor_check(a):
         mv = AN.moves_for_best(B, res, cons, spec, tol)
         BW.move_file(a.board, a.out, mv)
         print(f"anchor-check --apply: rotated {', '.join(sorted(mv)) or 'nothing'}; wrote {a.out}")
+
+
+def cmd_silk(a):
+    """Silkscreen check; --fix re-fits the reference texts (never moves a footprint, track, via or zone)."""
+    import json as _json
+    from fluxplace import silk as SK
+    cons, _ = _text_ctx(a)
+    try:
+        sc, cfg, before = SK.run_check(a.board, cons, a.side)
+    except RuntimeError as e:
+        raise SystemExit(f"silk: cannot run: {e}")
+    order = {"FAIL": 0, "WARN": 1, "INFO": 2}
+    shown, label = before, ""
+    res = None
+    if a.fix:
+        out = a.board if a.in_place else (a.out or os.path.splitext(a.board)[0] + ".silk.kicad_pcb")
+        res = SK.fit(sc, cfg, before, side=a.side)
+        if res["plan"]:
+            SK.apply_plan(a.board, out, res["plan"])
+        elif out != a.board:
+            import shutil
+            shutil.copy(a.board, out)
+        shown = SK.check(SK.load_scene(out), cfg, a.side) if res["plan"] else before
+        label = out
+    if a.json:
+        print(_json.dumps({"board": label or a.board, "before": SK.counts(before), "after": SK.counts(shown),
+                           "fit": None if res is None else {k: v for k, v in res.items() if k != "plan"},
+                           "findings": [{k: v for k, v in f.items() if k not in ("tid",)} for f in shown]}, indent=1))
+    else:
+        for f in shown:
+            print(f"  {f['level']:4s} {f['code']} {f['msg']}")
+        if res is not None:
+            b, c2 = SK.counts(before), SK.counts(shown)
+            print("silk --fix: " + "  ".join(f"{k} {b.get(k, 0)}->{c2.get(k, 0)}" for k in SK.CODES if b.get(k) or c2.get(k)))
+            for r in res["hidden"]:
+                print(f"  HIDDEN {r}: no legal silkscreen spot; reference moved to the Fab layer")
+            print(f"silk --fix: {len(res['moved'])} reference(s) re-placed ({len(res['shrunk'])} shrunk), "
+                  f"{len(res['hidden'])} hidden on silk, {len(res['kept'])} left (no better spot); wrote {label}")
+        n = {l: sum(f["level"] == l for f in shown) for l in order}
+        print(f"silk: {n['FAIL']} FAIL, {n['WARN']} WARN, {n['INFO']} INFO"
+              + ("" if res is None else " (after fix)"))
+    if SK.fails(shown):
+        raise SystemExit(1)
 
 
 def _route_gate(a, board_path, stage="routing"):
@@ -2954,6 +2998,17 @@ def build_parser():
     ptp.add_argument("--out", default=None, help="write the board here (default: report only)")
     ptp.set_defaults(fn=cmd_templates)
 
+    psk = sub.add_parser("silk", help="silkscreen check (off board, over pads/holes, overlaps, covered, too small, "
+                                      "far, hidden refs); --fix re-fits the reference texts as a set")
+    psk.add_argument("board")
+    psk.add_argument("--constraints", default=None, help="constraints TOML; [silk] holds the limits")
+    psk.add_argument("--fix", action="store_true", help="re-place reference texts, write --out, re-check")
+    psk.add_argument("--out", default=None, help="with --fix: output board (default <board>.silk.kicad_pcb)")
+    psk.add_argument("--in-place", action="store_true", help="with --fix: overwrite the input board")
+    psk.add_argument("--side", choices=["F", "B", "both"], default="both")
+    psk.add_argument("--json", action="store_true", help="print machine-readable JSON instead of the compact report")
+    psk.set_defaults(fn=cmd_silk)
+
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "
                               "skew, per-layer RF impedance, distributor "
@@ -3281,6 +3336,26 @@ def build_parser():
     return ap
 
 
+_SILK_HOOK_CMDS = ("place", "clusters", "templates", "anchor-check", "fit-sheet", "repair", "auto", "refine",
+                   "route", "stall")
+
+
+def _silk_hook(a):
+    """Register the silkscreen summary/auto-fit on every board write that moves footprints (boardwrite.move_file,
+    flip_file, stall rounds). `[silk] enabled = false` in the constraints turns it off."""
+    from fluxplace import boardwrite as BW
+    BW.set_post_write(None)
+    if a.cmd not in _SILK_HOOK_CMDS:
+        return
+    try:
+        from fluxplace import constraints as C
+        cons = C.load(getattr(a, "constraints", None))
+    except Exception:                                    # noqa: BLE001
+        cons = {}
+    from fluxplace import silk as SK
+    BW.set_post_write(lambda path, refs: SK.after_write(path, refs, cons))
+
+
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
@@ -3290,6 +3365,7 @@ def main(argv=None):
         text, ok = CC.report()
         print(text)
         raise SystemExit(0 if ok else 1)
+    _silk_hook(a)
     if a.cmd in OUT.COMPACT_CMDS:
         OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
     else:

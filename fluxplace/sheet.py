@@ -337,6 +337,8 @@ def fit_file(path, out=None, paper="auto", log=print, dry_run=False, refill=Fals
         if refill:
             pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         pcbnew.SaveBoard(out or path, board)
+        from . import boardwrite as _BW
+        _BW.run_post_write(out or path, [f.GetReference() for f in board.GetFootprints()])
     elif out and out != path:
         import shutil
         shutil.copyfile(path, out)

@@ -70,4 +70,4 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `[power."<RAIL>"]` (`holdup_ms` …), `[protection]`, `[fab]` (`blind_vias`,
 `buried_vias`, `microvias`, `min_track_mm`, `min_clearance_mm`,
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
-`profile`).
+`profile`), `[silk]` (see `silk.md`).

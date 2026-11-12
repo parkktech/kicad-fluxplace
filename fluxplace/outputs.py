@@ -44,7 +44,7 @@ HEAD_KEEP = {"bom-opt": 5, "route-ready": 5}     # fact lines worth keeping verb
 COMPACT_CMDS = (
     "review", "route-ready", "route-diagnose", "clusters", "anchor-check",
     "floorplan-check", "templates", "bom-opt", "lint", "verify-models", "sourcing",
-    "datasheets", "spec-check", "drc-scope", "eval",
+    "datasheets", "spec-check", "drc-scope", "eval", "silk",
 )
 
 _LEVELS = {"FAIL": 0, "ERROR": 0, "WARN": 1, "WARNING": 1, "INFO": 2}
@@ -325,7 +325,7 @@ def run_compact(cmd, a, fn):
     full = getattr(a, "full_output", False) or getattr(a, "raw", False)
     if full:
         return fn(a)
-    if cmd == "drc-scope" and getattr(a, "json", False):
+    if cmd in ("drc-scope", "silk") and getattr(a, "json", False):
         return fn(a)                          # machine JSON requested
     quiet = getattr(a, "quiet", False)
     top = getattr(a, "top", None) or DEFAULT_TOP

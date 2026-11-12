@@ -3,7 +3,7 @@
     fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--to STAGE] [--status]
 
 Stages, in order:  floorplan-check -> anchor-check -> place -> route-ready ->
-route (fanout + time-boxed route + stall loop) -> tune -> review.
+route (fanout + time-boxed route + stall loop) -> tune -> silk -> review.
 
 Each stage reads ONLY the previous stage's board file and ``W/state.json`` (a
 handoff under 2 KB: stage, verdict, scorecard numbers, paths, what to fix
@@ -23,7 +23,7 @@ import time
 
 from . import routeconn as RC
 
-STAGES = ["floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "review"]
+STAGES = ["floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 STATE_MAX = 2000
 VERDICTS = ("pass", "fail", "blocked", "na", "skipped")
 
@@ -358,6 +358,22 @@ def st_tune(c, n, board):
             "next": [_clip(l.strip(), 100) for l in over[:3]]}
 
 
+def st_silk(c, n, board):
+    """Silkscreen check + reference-text fit after routing (copper is never touched), before review/fab."""
+    d = c.dir(n, "silk")
+    out = os.path.join(d, "board.kicad_pcb")
+    rc, text = _run_cli(["silk", board, "--fix", "--out", out] + (["--constraints", c.cons_path] if c.cons_path else []),
+                        os.path.join(d, "stage.log"))
+    if not os.path.exists(out):
+        return {"verdict": "fail", "line": _last_line(text) or f"exit {rc}", "board": board,
+                "next": ["silk failed: " + os.path.join(d, "stage.log")]}
+    _sidecar(board, out)
+    summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
+    return {"verdict": "pass" if rc == 0 else "fail", "line": summ, "board": out,
+            "next": [] if rc == 0 else ["FAIL-level silk findings left (footprint graphics / board texts): "
+                                        + os.path.join(d, "stage.log")]}
+
+
 def st_review(c, n, board):
     d = c.dir(n, "review")
     argv = ["review", "--board", board] + c.cs() + ["--json", os.path.join(d, "review.json")]
@@ -379,7 +395,7 @@ def st_review(c, n, board):
 
 
 FUNCS = {"floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
-         "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "review": st_review}
+         "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
 
 # ------------------------------------------------------------------ driver
