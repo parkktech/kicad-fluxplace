@@ -348,6 +348,7 @@ def cmd_comprehend(a):
 
 def cmd_route(a):
     from fluxplace import route as R
+    _route_gate(a, a.board, "route")
     board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout)
     pos = {r: (parts[r]["x"], parts[r]["y"]) for r in parts}
@@ -507,6 +508,9 @@ def _cand_argv(a, k, outdir):
         v += ["--no-pairs"]
     if a.bypass_csv:
         v += ["--bypass-csv", a.bypass_csv]
+    v += ["--force"]          # the candidate run picks the best routed result; gating happens per child as a report
+    if getattr(a, "spec", None):
+        v += ["--spec", a.spec]
     return v
 
 
@@ -946,6 +950,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         print(f"[3/{NSTAGE}] planes: skipped (--no-planes)")
     IO.save(board, placed)
     _fit_paper(frep, placed)
+    _route_gate(a, placed, "routing")
 
     # ---- [4] ROUTE — explicit net list (KRT routes NOTHING without --nets), --------
     # power nets first and wide, plane nets excluded (they are pours, not traces).
@@ -1587,6 +1592,51 @@ def cmd_clusters(a):
           f"{len(CL.far_parts(cl2))}; wrote {a.out}")
 
 
+def cmd_route_ready(a):
+    """Pre-route gate scorecard; exit 1 when any FAIL-level check fails."""
+    import json as _json
+    from fluxplace import routediag as RD, preroute as PR
+    cons, spec = _text_ctx(a)
+    B = RD.load(a.board, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
+    f, card = PR.run(B, cons, spec, waivers=a.waive)
+    print(PR.format_text(f, card, a.board))
+    if a.all:
+        for x in f:
+            print(f"  {x['level']:4s} {x['code']:19s} {x['msg']}")
+    if a.json:
+        with open(a.json, "w") as fh:
+            _json.dump({"scorecard": card, "findings": f}, fh, indent=1)
+        print(f"route-ready: wrote {a.json}")
+    if card["fail"]:
+        raise SystemExit(1)
+
+
+def _route_gate(a, board_path, stage="routing"):
+    """Refuse to start routing on a placement route-ready rejects, unless --force.
+    Prints the scorecard either way."""
+    from fluxplace import routediag as RD, preroute as PR
+    cons, spec = _text_ctx(a)
+    B = RD.load(board_path, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
+    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()))
+    print(PR.format_text(f, card, board_path), flush=True)
+    if card["fail"]:
+        if getattr(a, "force", False):
+            print(f"    route-ready FAILED ({card['fail']}) - continuing to {stage} (--force)")
+        else:
+            raise SystemExit(f"ABORT before {stage}: route-ready failed ({card['fail']} FAIL). "
+                             f"Fix the placement, waive with [review] waive, or pass --force.")
+    return f, card
+
+
+def _add_gate_args(p):
+    p.add_argument("--spec", default=None, help="spec JSON (pin names) for the pre-route gate")
+    p.add_argument("--force", action="store_true",
+                   help="route even though route-ready failed (scorecard still printed)")
+    if not any(o.dest == "constraints" for o in p._actions):
+        p.add_argument("--constraints", default=None, help="constraints TOML ([placement], [preroute], [review] waive)")
+    p.add_argument("--waive", action="append", default=[], help="pre-route CODE:REGEX, repeatable")
+
+
 def _add_review_args(p, gate=False):
     p.add_argument("--spec", default=None,
                    help="netlist/board spec JSON (board size, layers, "
@@ -2157,6 +2207,7 @@ def build_parser():
     pr.add_argument("--out", default=None)
     pr.add_argument("--guides", action="store_true",
                     help="draw the corridors on Eco1.User and save the board")
+    _add_gate_args(pr)
     pr.set_defaults(fn=cmd_route)
 
     pfs = sub.add_parser("fit-sheet",
@@ -2368,6 +2419,7 @@ def build_parser():
     pau.add_argument("--no-fit-sheet", action="store_true",
                      help="don't translate the board onto the drawing sheet "
                           "(also rewrites --constraints' absolute coordinates when it does)")
+    _add_gate_args(pau)
     pau.set_defaults(fn=cmd_auto)
 
     pco = sub.add_parser("compact",
@@ -2432,6 +2484,7 @@ def build_parser():
                           "elements, crystal clusters walked to their anchor)")
     pco.add_argument("--no-fit-sheet", action="store_true",
                      help="don't translate the board onto the drawing sheet")
+    _add_gate_args(pco)
     pco.set_defaults(fn=cmd_compact)
 
     pli = sub.add_parser("lint",
@@ -2509,6 +2562,19 @@ def build_parser():
     prd.add_argument("--constraints", default=None, help="constraints TOML (net classes, support ownership)")
     prd.add_argument("--spec", default=None, help="spec JSON (pin names)")
     prd.set_defaults(fn=cmd_route_diagnose)
+
+    prr = sub.add_parser("route-ready",
+                         help="pre-route gate: net budgets, support parts, anchors, pin escape, "
+                              "keep-outs, congestion, ratsnest crossings; exit 1 on FAIL")
+    prr.add_argument("board")
+    prr.add_argument("--constraints", default=None)
+    prr.add_argument("--spec", default=None)
+    prr.add_argument("--json", default=None, help="write scorecard + findings as JSON")
+    prr.add_argument("--all", action="store_true", help="list every finding")
+    prr.add_argument("--waive", action="append", default=[], help="CODE:REGEX, repeatable")
+    prr.add_argument("--track", type=float, default=None)
+    prr.add_argument("--clearance", type=float, default=None)
+    prr.set_defaults(fn=cmd_route_ready)
 
     pcl = sub.add_parser("clusters",
                          help="IC support clusters (which 2-pin parts belong to which IC); "

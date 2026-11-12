@@ -21,7 +21,7 @@ Defaults (mm / weight), overridable in constraints TOML:
     [placement.weight]   pair = 6
     [placement.net.PCIE_TX_P]  budget = 45  weight = 8  class = "pair"
 
-Multi-drop nets are judged on MST length with budget * (1 + 0.5 * (pads-2)).
+Multi-drop nets are judged on MST length with budget * (1 + 0.5 * (parts-2)), parts = distinct references on the net.
 """
 import math
 import re
@@ -54,6 +54,15 @@ def is_ic(ref, part, min_pads=5):
 
 def is_cap(ref, part):
     return bool(re.match(r"^C\d", ref)) and part["n_pads"] == 2
+
+
+def _only_caps_besides(ps, ics, parts):
+    """Every non-IC pad on the net is a capacitor whose other pad is ground."""
+    rest = [p for p in ps if p not in ics]
+    return bool(rest) and all(
+        is_cap(p["ref"], parts[p["ref"]]) and any(
+            q["num"] != p["num"] and is_ground(q["net"]) for q in parts[p["ref"]]["pads"])
+        for p in rest)
 
 
 def pad_xy(p):
@@ -159,10 +168,7 @@ def classify(B, cons=None, spec=None):
                 cls = "clock"
                 why = "crystal/oscillator" if any(re.match(r"^(Y|X|XO|OSC)\d", r) for r in refs) \
                     and len(ps) <= 3 else "clock-named"
-            elif len(ics) == 1 and len(ps) <= 4 and any(
-                    is_cap(p["ref"], parts[p["ref"]]) and any(
-                        q["num"] != p["num"] and is_ground(q["net"]) for q in parts[p["ref"]]["pads"])
-                    for p in ps):
+            elif len(ics) == 1 and len(ps) <= 4 and _only_caps_besides(ps, ics, parts):
                 cls, why = "bypass", "IC pin to cap to ground"
         budget = bd.get("crystal") if why == "crystal/oscillator" else bd.get(cls)
         weight = wt[cls]
@@ -175,7 +181,7 @@ def classify(B, cons=None, spec=None):
         if "budget" in o:
             budget = float(o["budget"])
         out[net] = {"class": cls, "weight": weight, "budget": budget, "reason": why,
-                    "partner": pair_of.get(net), "pads": len(ps)}
+                    "partner": pair_of.get(net), "pads": len(ps), "drops": len(set(refs))}
     return out
 
 
@@ -188,7 +194,7 @@ def effective_budget(info):
     b = info["budget"]
     if b is None:
         return None
-    return b * (1 + 0.5 * max(0, info["pads"] - 2))
+    return b * (1 + 0.5 * max(0, info.get("drops", info["pads"]) - 2))
 
 
 def format_text(cls):

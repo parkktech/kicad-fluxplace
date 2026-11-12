@@ -1287,6 +1287,25 @@ def _height_mm(data):
     return None
 
 
+def check_preroute(facts, spec, cons):
+    """The pre-route gate (preroute.py) as review FAILs: NET_OVER_BUDGET,
+    SUPPORT_PART_FAR, ANCHOR_MISORIENTED, PIN_ESCAPE_BLOCKED, KEEPOUT_TRAPPED,
+    CONGESTION (+ RATSNEST_CROSSINGS WARN). Waivable with `[review] waive`.
+    Off with `[preroute] enabled = false`; skipped when the board file is
+    not readable (synthetic facts)."""
+    path = facts.get("board_path") or facts.get("board")
+    if not isinstance(path, str) or not os.path.isfile(path) or (
+            (cons or {}).get("preroute", {}) or {}).get("enabled", True) is False:
+        return []
+    from . import routediag as RD
+    from . import preroute as PR
+    try:
+        found, _ = PR.run(RD.load(path), cons, spec, waivers=())
+    except Exception as e:           # a gate that cannot run must say so, not crash the review
+        return [_f(WARN, "PREROUTE_UNAVAILABLE", f"pre-route checks could not run: {e}")]
+    return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in found]
+
+
 def check_keepouts(facts, cons):
     """[[keepout]] regions: no component body on the named side, or none
     taller than max_height_mm. Born from utv-comms V1.5, where 25 parts sat
@@ -1551,6 +1570,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_power(facts, cons)
     out += check_spec_nets(facts, spec)
     out += check_keepouts(facts, cons)
+    out += check_preroute(facts, spec, cons)
     out += check_locks(facts, cons)
     out += check_sheet(facts, cons)
     out += check_policy(facts, cons)

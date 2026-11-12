@@ -566,7 +566,7 @@ rf > pair > switch_node > clock > rail > bypass > signal.
 | signal | 30 | 1 | the rest |
 | rail | none | 0 | ground, `[power.*]` nets, nets with >= 8 pads; never pulled |
 
-Multi-drop nets use MST length against `budget * (1 + 0.5 * (pads - 2))`.
+Multi-drop nets use MST length against `budget * (1 + 0.5 * (parts - 2))` (distinct references).
 Override in the constraints TOML:
 
     [placement.budget]  switch_node = 5
@@ -592,6 +592,27 @@ ranked by pad-to-pin distance (caps add a ground-return term) and must stay out 
 every other courtyard, the IC's escape lanes (1.0 mm beyond fine-pitch pads), the
 board outline and track-forbidding rule areas. Existing copper is not updated:
 apply on an unrouted board.
+
+### 6. Pre-route gate — `fluxplace route-ready BOARD [--constraints TOML] [--spec JSON] [--json OUT] [--all]`
+
+One-screen scorecard (class-weighted ratsnest length, counts per code, worst 10),
+exit 1 on any FAIL. Same checks run inside `review` as FAIL codes
+(`[preroute] enabled = false` turns that off) and `[review] waive = ["CODE:REGEX"]`
+waives them. `route`, `auto` and `compact` print the scorecard and refuse to
+start routing on a failing placement unless `--force`.
+
+| code | level | number vs threshold |
+|---|---|---|
+| NET_OVER_BUDGET | FAIL | MST length of a net vs its class budget (pairs judged per net) |
+| SUPPORT_PART_FAR | FAIL | confidently-owned support part pad-to-pin vs limit (clusters) |
+| ANCHOR_MISORIENTED | FAIL | anchor > `anchor_tolerance_pct` (15) worse than its best rotation |
+| PIN_ESCAPE_BLOCKED | FAIL | fine-pitch (<= 0.5 mm) pin with a foreign pad / courtyard / rule area / copper in its outward lane, lane = track wide and track + clearance long (project net class) |
+| KEEPOUT_TRAPPED | FAIL | pad inside a track-forbidding rule area (a rule area named after the part, e.g. an antenna's own, is skipped) |
+| CONGESTION | FAIL | coarse global route: 2 mm cells, each non-rail net's MST as L-shapes on the signal layers (layers without a plane pour; override `signal_layers`), capacity = layers x track slots x `utilisation` 0.7, derated by pads and rule areas; overflow > `max_overflow` (0) |
+| RATSNEST_CROSSINGS | WARN | MST edges of different nets that cross |
+
+    [preroute]
+    cell_mm = 2.0   utilisation = 0.7   max_overflow = 0   signal_layers = 4
 
 ## Board on the sheet — `fit-sheet`
 
