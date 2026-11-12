@@ -210,3 +210,151 @@ def test_cli_exit_code_and_report(tmp_path):
     o = str(tmp_path / "fixed.kicad_pcb")
     r = subprocess.run([sys.executable, cli, "silk", p, "--fix", "--out", o], capture_output=True, text=True)
     assert r.returncode == 0 and os.path.exists(o), r.stdout + r.stderr
+
+
+# ------------------------------------------------------------------ title / version text
+def gtext(txt, x, y, side="F", h=1.5):
+    mir = " (justify mirror)" if side == "B" else ""
+    return (f'(gr_text "{txt}" (at {x} {y} 0) (layer "{side}.SilkS") '
+            f'(effects (font (size {h} {h}) (thickness 0.18)){mir}))\n')
+
+
+TITLE = {"silk": {"title": {"company": "Parkktech.com"}}}
+
+
+def tb(tmp, body, name="demo-v16.kicad_pcb", outline=(0, 0, 40, 30)):
+    return brd(tmp, body, name=name, outline=outline)
+
+
+def titles(sc, side="F"):
+    return [t for t in sc["texts"] if t["kind"] == "board" and t["side"] == side]
+
+
+def test_version_sources_and_stale(tmp_path):
+    body = gtext("Parkktech.com v1.5", 20, 8)
+    p = tb(tmp_path, body)                                           # file name demo-v16 -> 1.6
+    _, cfg, f, c = codes(p)
+    assert c["SILK_VERSION_STALE"] == 1 and cfg["_version"][1] == "board file name"
+    assert "V1.5" in f[0]["msg"] and "V1.6" in f[0]["msg"] and "file name" in f[0]["msg"]
+    p2 = tb(tmp_path, body, name="plain.kicad_pcb")                  # no version anywhere: silent
+    assert codes(p2)[3]["SILK_VERSION_STALE"] == 0
+    cons = {"silk": {"title": {"version": "1.5"}}}                   # explicit [silk.title] version wins over the name
+    _, cfg, f, c = codes(p, cons)
+    assert c["SILK_VERSION_STALE"] == 0 and cfg["_version"][1] == "[silk.title] version"
+    _, cfg, f, c = codes(p, {"project": {"version": "1.7"}})
+    assert c["SILK_VERSION_STALE"] == 1 and "[project]" in cfg["_version"][1]
+    sc, cfg = SK.prepare(p2, {}, {"name": "x", "version": "V1.4"})
+    assert cfg["_version"][0] == (1, 4) and "spec" in cfg["_version"][1]
+    assert any(x["code"] == "SILK_VERSION_STALE" for x in SK.check(sc, cfg))
+
+
+def test_two_board_texts_disagree(tmp_path):
+    p = tb(tmp_path, gtext("Acme V1.6", 10, 8) + gtext("Acme v1.5", 10, 20), name="plain.kicad_pcb")
+    f = codes(p)[2]
+    assert [x["code"] for x in f].count("SILK_VERSION_STALE") == 1 and "disagree" in f[0]["msg"]
+
+
+def test_title_missing_is_fail_when_required(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, pads=False))
+    f = codes(p, TITLE)[2]
+    m = [x for x in f if x["code"] == "SILK_TITLE_MISSING"]
+    assert len(m) == 1 and m[0]["level"] == "FAIL"
+    cons = {"silk": {"title": {"company": "Parkktech.com", "required": False}}}
+    assert [x for x in codes(p, cons)[2] if x["code"] == "SILK_TITLE_MISSING"][0]["level"] == "WARN"
+
+
+def test_no_title_table_and_no_version_text_is_silent(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, pads=False) + gtext("hello", 20, 5), name="plain.kicad_pcb")
+    f = codes(p)[2]
+    assert not [x for x in f if x["code"] in ("SILK_VERSION_STALE", "SILK_TITLE_MISSING", "SILK_TITLE_NO_ROOM")]
+
+
+def test_title_is_named_in_overlap_findings(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 0), pads=True) + gtext("Parkktech.com V1.6", 20, 15))
+    f = codes(p, TITLE)[2]
+    assert any("title text" in x["msg"] and "TITLE" in x["refs"] for x in f if x["code"] in ("SILK_OVER_PAD", "SILK_OVERLAP"))
+
+
+def test_fix_rewrites_and_moves_the_title(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 3)) + gtext("Parkktech.com v1.5", 20, 15))   # on R1's pads
+    out = str(tmp_path / "o.kicad_pcb")
+    b, a, res = SK.fix_board(p, out, cons=TITLE)
+    assert any(x["code"] == "SILK_VERSION_STALE" for x in b) and not [x for x in a if x["level"] == "FAIL"], a
+    sc = SK.load_scene(out)
+    ts = titles(sc)
+    assert [t["text"] for t in ts] == ["Parkktech.com  V1.6"]
+    assert res["title"]["F"]["h"] >= 1.0 and res["title"]["F"]["margin_mm"] > 0
+    assert (SK.counts(a).get("SILK_OVER_PAD", 0) == 0 and SK.counts(a).get("SILK_OVERLAP", 0) == 0)
+
+
+def test_fix_creates_a_missing_title_and_is_deterministic(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 3)))
+    o1, o2 = str(tmp_path / "1.kicad_pcb"), str(tmp_path / "2.kicad_pcb")
+    SK.fix_board(p, o1, cons=TITLE)
+    SK.fix_board(p, o2, cons=TITLE)
+    key = lambda o: sorted((t["text"], t["pos"], t["angle"], t["h"]) for t in titles(SK.load_scene(o)))
+    assert key(o1) == key(o2) and key(o1)[0][0] == "Parkktech.com  V1.6"
+    assert not [x for x in SK.run_check(o1, TITLE)[2] if x["level"] == "FAIL"]
+
+
+def test_title_no_room(tmp_path):
+    # a 40 x 6 board cannot hold a 1.0 mm title that is 60 chars long in either direction
+    p = tb(tmp_path, "", outline=(0, 0, 8, 6))
+    cons = {"silk": {"title": {"company": "A very long company name that cannot possibly fit"}}}
+    out = str(tmp_path / "o.kicad_pcb")
+    b, a, res = SK.fix_board(p, out, cons=cons)
+    nr = [x for x in a if x["code"] == "SILK_TITLE_NO_ROOM"]
+    assert len(nr) == 1 and nr[0]["level"] == "FAIL" and "largest free rectangle" in nr[0]["msg"]
+    assert not titles(SK.load_scene(out))                              # nothing shrunk below the minimum, nothing written
+
+
+def test_title_on_the_back_is_mirrored(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 3), side="B"))
+    cons = {"silk": {"title": {"company": "Parkktech.com", "side": "B"}}}
+    out = str(tmp_path / "o.kicad_pcb")
+    b, a, res = SK.fix_board(p, out, cons=cons)
+    t = titles(SK.load_scene(out), "B")
+    assert len(t) == 1 and t[0]["mirror"] is True and t[0]["text"] == "Parkktech.com  V1.6"
+    assert not [x for x in a if x["level"] == "FAIL"], a
+    assert not titles(SK.load_scene(out), "F")
+
+
+def test_post_write_hook_prints_the_stale_version(tmp_path, capsys):
+    p = tb(tmp_path, part("R1", 20, 15, pads=False) + gtext("Parkktech.com v1.5", 20, 5))
+    out = str(tmp_path / "demo-v16-moved.kicad_pcb")
+    BW.set_post_write(lambda path, refs: SK.after_write(path, refs, {}))
+    try:
+        BW.move_file(p, out, {"R1": (22, 15, 0)})
+    finally:
+        BW.set_post_write(None)
+    assert "SILK_VERSION_STALE" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("txt", ["3V3", "1V8", "5V", "12V", "+3.3V", "24V", "V+", "VBAT", "VIN", "-5V", "V1", "V12",
+                                 "3V3 5V", "VCC12", "REV", "Vref1"])
+def test_version_rule_ignores_voltage_and_net_labels(txt):
+    assert SK.version_tokens(txt) == []
+
+
+@pytest.mark.parametrize("txt,want", [("V1.6", ["1.6"]), ("Acme V1.6", ["1.6"]), ("rev 2", ["2"]), ("Rev1.0.1", ["1.0.1"]),
+                                      ("REV 3.1", ["3.1"]), ("Board v2", ["2"]), ("(V1.5)", ["1.5"])])
+def test_version_rule_matches_real_tokens(txt, want):
+    assert SK.version_tokens(txt) == want
+
+
+def test_lone_v_integer_counts_only_with_title_or_company():
+    assert SK.version_tokens("V1") == []
+    assert SK.version_tokens("V1", is_title=True) == ["1"]
+    assert SK.version_tokens("V1", company="V1") == ["1"]
+
+
+def test_net_labels_never_trigger_stale(tmp_path):
+    body = "".join(gtext(t, 5 + 5 * i, 8) for i, t in enumerate(["3V3", "1V8", "V1", "VBAT", "+3.3V", "24V"]))
+    p = tb(tmp_path, body)                                           # file name says 1.6
+    assert codes(p)[3]["SILK_VERSION_STALE"] == 0
+
+
+def test_bare_board_without_constraints_runs(tmp_path):
+    p = tb(tmp_path, part("R1", 20, 15) + gtext("Acme V1.5", 5, 5), name="plain.kicad_pcb")
+    sc, cfg, f, c = codes(p, None)
+    assert cfg["title"] is None and c["SILK_TITLE_MISSING"] == 0 and c["SILK_VERSION_STALE"] == 0
