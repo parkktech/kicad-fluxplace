@@ -195,7 +195,7 @@ def load(path, track=None, clearance=None):
         net = nm(BF._net(n))
         if n[0] == "via":
             x, y = _f(n, "at")
-            vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0],
+            vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0], "drill": _f(n, "drill", 1)[0],
                          "layers": set(BF._atoms(BF._first(n, "layers")))})
         else:
             sx, sy = _f(n, "start")

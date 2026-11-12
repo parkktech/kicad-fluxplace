@@ -8,7 +8,7 @@ Use the interpreter with pcbnew: `fluxplace CMD ...`. Unsure: `fluxplace doctor`
   report (`<board stem>.<cmd>.txt/.json`). Read that file only if needed. `--full` = everything, `-q` = verdict line.
 - Exit: 0 ok, 1 FAIL. `route-wait`: 2 timeout, 3 no status file.
 - `fluxplace help-brief CMD` = 15 lines on any command (alone: one line each). Do not read README or docs/commands.
-- Never time-box a whole-board router call: use batch routing (`docs/commands/route.md`). Never tail router logs. `fluxplace route-status X` (1 line) / `fluxplace route-wait X --timeout 900` (blocks).
+- Never time-box a whole-board router call: use batch routing (`docs/commands/route.md`; open connections, project rules, audited, `mode="parallel"`).
 - Never overwrite the input board (`--out`). One agent owns a board/workdir.
 
 ## Commands by task

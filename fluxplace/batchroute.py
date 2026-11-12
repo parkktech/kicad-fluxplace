@@ -30,6 +30,8 @@ import time
 from collections import deque
 
 from . import netclass as NC
+from . import routeaudit as RA
+from . import routeconn as RC
 from . import routediag as RD
 from . import routestatus as RS
 
@@ -52,6 +54,7 @@ def settings(cons, **over):
          "batch_timeout_s": float(r.get("batch_timeout_s", DEFAULT_BATCH_TIMEOUT_S)),
          "max_ripup": int(r.get("batch_max_ripup", 3)),
          "total_budget_s": r.get("total_budget_s"),
+         "conn_fill": bool(r.get("conn_fill", True)), "conn_method": str(r.get("conn_method", "auto")),
          "env": dict(BATCH_ENV, **{k: str(v) for k, v in (r.get("batch_env") or {}).items()})
          if "batch_env" not in r or r["batch_env"] else {}}
     for k, v in over.items():
@@ -95,15 +98,19 @@ def _sidecar(src, dst):
         shutil.copy(a, b)
 
 
-def _read_unrouted(path):
-    """Nets without copper on the board at `path`; None when the file is not a usable board."""
+def _read_open(path, conn):
+    """{net: open connections} of the board at `path`; None when the file is not a usable board."""
     try:
         with open(path, errors="surrogateescape") as fh:
             if not fh.read().rstrip().endswith(")"):
                 return None
-        return set(RD.unrouted_nets(RD.load(path)))
+        return dict(conn(path))
     except Exception:
         return None
+
+
+def default_conn(S):
+    return lambda path: RC.open_by_net(path, fill=S["conn_fill"], method=S["conn_method"])
 
 
 class Result:
@@ -127,46 +134,64 @@ def make_runner(build_cmd, cwd, extra, status_path, settings_=None, env_limited=
             return Result(True, None)
     return run
 
-
 def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cls=None, first=(),
                   power=(), batch_nets=None, batch_timeout=None, total_budget=None,
-                  leftover_timeout=None, status_path=None, extra=None, log=print, min_slice=5.0):
-    """Route `nets` onto copies of `board` in batches. `run` as from make_runner.
+                  leftover_timeout=None, status_path=None, extra=None, log=print, min_slice=5.0,
+                  rules=None, conn=None, drc_cli="kicad-cli"):
+    """Route the OPEN CONNECTIONS of `nets` onto copies of `board` in batches. `run` as from make_runner.
 
-    -> {board: last good board, checkpoints: [paths], leftovers: [nets still unrouted], reasons,
-        attempts, halvings, timeouts, start_unrouted, unrouted, elapsed}"""
+    The work list is real connectivity (routeconn: pads still not joined by copper/pour), so a net with
+    some copper but unjoined pads is still routed.  `rules` (routerules.rules) switches on the post-batch
+    audit: a batch whose new copper has a via in a pad, a track/via below the floors, clearance below the
+    floor (or, with rules["audit_drc"], a new KiCad DRC error type) is DISCARDED, halved and retried; a
+    single net that still violates is a leftover with reason RULE_VIOLATION.
+
+    -> {board: last good board, checkpoints: [paths], leftovers: [nets still open], reasons,
+        attempts, halvings, timeouts, violations, start_open, open (connections), open_nets,
+        start_open_nets, elapsed}"""
     S = settings(cons, batch_nets=batch_nets, batch_timeout_s=batch_timeout, total_budget_s=total_budget)
     size, tmo = S["batch_nets"], float(S["batch_timeout_s"])
+    conn = conn or default_conn(S)
     os.makedirs(workdir, exist_ok=True)
     t0 = time.time()
     budget = S["total_budget_s"]
     deadline = t0 + float(budget) if budget is not None else None
     B = B or RD.load(board)
-    todo0 = set(RD.unrouted_nets(B))
+    open0 = dict(conn(board))
     nets = [n for n in dict.fromkeys(nets)]
-    order = order_nets(B, nets, cls or NC.classify(B, cons, spec), first, power)
-    cur, cur_un = board, todo0
+    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), first, power)
+    cur, cur_open = board, open0
+    cur_B = B
+    drc_base = [None]
     extra = extra if extra is not None else {}
     cks, reasons = [], {}
-    stats = {"attempts": 0, "halvings": 0, "timeouts": 0}
+    stats = {"attempts": 0, "halvings": 0, "timeouts": 0, "violations": 0}
     queue = deque(chunks(order, size))
+    total = lambda: sum(cur_open.values())
     extra.update({"mode": "batch", "batch": 0, "batches_total": len(queue), "batch_nets": 0, "halvings": 0,
-                  "last_good": board, "last_good_unrouted": len(cur_un), "leftovers": 0, "out": board})
+                  "last_good": board, "last_good_open": total(), "last_good_open_nets": len(cur_open),
+                  "start_open": total(), "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0})
 
     def push_status(state="running"):
         extra.update(batches_total=extra["batch"] + len(queue), halvings=stats["halvings"],
-                     leftovers=len(reasons), last_good=cur, last_good_unrouted=len(cur_un), out=cur)
+                     leftovers=len(reasons), last_good=cur, last_good_open=total(),
+                     last_good_open_nets=len(cur_open), out=cur, rule_violations=stats["violations"])
         if cks:
             extra.update(checkpoint=cks[-1], checkpoint_n=len(cks))
         if status_path:
             _status_write(status_path, extra, state)
 
+    def note_round(batch, before, after, result):
+        extra["rounds"] = (extra["rounds"] + [{"round": extra["batch"], "nets": len(batch), "open_before": before,
+                                               "open_after": after, "result": result}])[-30:]
+
     def attempt(batch, limited, timeout):
-        """one router call -> (accepted, timed_out). Never touches `cur` unless it improves."""
-        nonlocal cur, cur_un
+        """one router call -> (accepted, timed_out, why). Never touches `cur` unless it improves and audits clean."""
+        nonlocal cur, cur_open, cur_B
         stats["attempts"] += 1
         extra["batch"] += 1
         extra["batch_nets"] = len(batch)
+        before = total()
         tmp = os.path.join(workdir, f"_batch-{stats['attempts']:03d}.kicad_pcb")
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -174,23 +199,43 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         res = run(cur, tmp, batch, timeout, limited)
         if res.timed_out:
             stats["timeouts"] += 1
-        un = _read_unrouted(tmp) if os.path.exists(tmp) else None
-        if un is None or len(un) > len(cur_un):          # nothing, garbage, or worse than we had
+        un = _read_open(tmp, conn) if os.path.exists(tmp) else None
+        ripped = [n for n in (un or {}) if n not in batch and un[n] > cur_open.get(n, 0)] if un else []
+        if un is None or sum(un.values()) > before or ripped:   # nothing, garbage, worse, or it ripped other nets open
             if os.path.exists(tmp):
                 os.remove(tmp)
-            return False, res.timed_out
+            why = "timeout" if res.timed_out else "no output"
+            note_round(batch, before, before, why)
+            return False, res.timed_out, why
+        if rules:
+            viol = []
+            try:
+                viol = RA.audit(cur_B, tmp, rules) if rules.get("audit", True) else []
+                if rules.get("audit_drc") and not viol:
+                    viol, drc_base[0] = RA.new_drc_types(cur, tmp, drc_cli, drc_base[0])
+            except Exception as e:                       # an audit that cannot run must not pass silently
+                viol = [{"code": "AUDIT_ERROR", "net": "", "msg": str(e)[:120], "x": 0, "y": 0}]
+            if viol:
+                stats["violations"] += 1
+                os.remove(tmp)
+                log(f"    batch {extra['batch']}: RULE_VIOLATION, discarded: {RA.summarize(viol)}")
+                note_round(batch, before, before, "RULE_VIOLATION " + RA.summarize(viol, 0))
+                return False, res.timed_out, "RULE_VIOLATION"
         ck = os.path.join(workdir, f"ck-{len(cks) + 1:03d}.kicad_pcb")
         os.replace(tmp, ck)
         _sidecar(board, ck)
         cks.append(ck)
-        cur, cur_un = ck, un
-        log(f"    batch {extra['batch']}: {len(batch)} net(s), {len(batch) - len([n for n in batch if n in un])} "
-            f"routed, {len(un)} unrouted board-wide -> {os.path.basename(ck)}"
+        cur, cur_open = ck, un
+        cur_B = RD.load(ck)
+        drc_base[0] = None
+        log(f"    batch {extra['batch']}: {len(batch)} net(s), open connections {before} -> {total()} "
+            f"({len(cur_open)} net(s) open) -> {os.path.basename(ck)}"
             + (" (timed out, partial output kept)" if res.timed_out else ""))
-        return True, res.timed_out
+        note_round(batch, before, total(), "timeout, partial kept" if res.timed_out else "ok")
+        return True, res.timed_out, "ok"
 
     while queue:
-        batch = [n for n in queue.popleft() if n in cur_un]      # earlier batches may have connected some
+        batch = [n for n in queue.popleft() if n in cur_open]    # earlier batches may have connected some
         if not batch:
             continue
         remaining = (deadline - time.time()) if deadline else None
@@ -203,21 +248,21 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
             queue.clear()
             break
         timeout = tmo if remaining is None else min(tmo, remaining)
-        ok, timed = attempt(batch, True, timeout)
+        ok, timed, why = attempt(batch, True, timeout)
         if ok and not timed:
             for n in batch:
-                if n in cur_un:
+                if n in cur_open:
                     reasons[n] = "failed"
         elif ok:                                               # partial output: retry the rest smaller
-            rest = [n for n in batch if n in cur_un]
+            rest = [n for n in batch if n in cur_open]
             _requeue(queue, rest, stats, reasons, "timeout")
         else:
-            _requeue(queue, batch, stats, reasons, "timeout" if timed else "no output")
+            _requeue(queue, batch, stats, reasons, why)
         push_status()
 
-    # one leftovers pass, full retry phase on
-    left = [n for n in order if n in cur_un and n in reasons]
-    left += [n for n in order if n in cur_un and n not in reasons]
+    # one leftovers pass, full retry phase on (nets that violated the rules are not retried)
+    left = [n for n in order if n in cur_open and n in reasons and reasons[n] != "RULE_VIOLATION"]
+    left += [n for n in order if n in cur_open and n not in reasons]
     left = list(dict.fromkeys(left))
     if left:
         remaining = (deadline - time.time()) if deadline else None
@@ -225,33 +270,44 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         if remaining is None or remaining >= min_slice:
             log(f"    leftovers pass: {len(left)} net(s), router retry phase on")
             extra["batch_nets"] = len(left)
-            ok, timed = attempt(left, False, lt if remaining is None else min(lt, remaining))
+            ok, timed, why = attempt(left, False, lt if remaining is None else min(lt, remaining))
             for n in left:
-                if n not in cur_un:
+                if n not in cur_open:
                     reasons.pop(n, None)
                 elif ok and not timed:
                     reasons[n] = "failed"
                 elif timed:
                     reasons[n] = "timeout"
+                elif why == "RULE_VIOLATION":
+                    reasons[n] = "RULE_VIOLATION"
         else:
             for n in left:
                 reasons.setdefault(n, "budget")
-    final_left = [n for n in order if n in cur_un]
-    for n in list(reasons):
-        if n not in cur_un:
-            del reasons[n]
+    out = finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
     push_status("done")
+    write_leftovers(workdir, out)
+    return out
+
+
+def finish(order, cur, cur_open, cks, reasons, stats, open0, t0):
+    """The result dict shared by the serial and the parallel driver."""
+    final_left = [n for n in order if n in cur_open]
+    reasons = {n: reasons.get(n, "failed") for n in final_left}
+    return {"board": cur, "checkpoints": cks, "leftovers": final_left, "reasons": reasons,
+            "attempts": stats["attempts"], "halvings": stats["halvings"], "timeouts": stats["timeouts"],
+            "violations": stats["violations"], "start_open": sum(open0.values()), "start_open_nets": len(open0),
+            "open": sum(cur_open.values()), "open_nets": len(cur_open), "elapsed": round(time.time() - t0)}
+
+
+def write_leftovers(workdir, r):
     try:
         import json
         with open(os.path.join(workdir, "leftovers.json"), "w") as fh:
-            json.dump({"board": cur, "checkpoints": cks, "leftovers": final_left,
-                       "reasons": {n: reasons.get(n, "failed") for n in final_left}}, fh, indent=1)
+            json.dump({"board": r["board"], "checkpoints": r["checkpoints"], "leftovers": r["leftovers"],
+                       "reasons": r["reasons"], "open_connections": r["open"], "open_nets": r["open_nets"]},
+                      fh, indent=1)
     except OSError:
         pass
-    return {"board": cur, "checkpoints": cks, "leftovers": final_left,
-            "reasons": {n: reasons.get(n, "failed") for n in final_left}, "attempts": stats["attempts"],
-            "halvings": stats["halvings"], "timeouts": stats["timeouts"], "start_unrouted": len(todo0),
-            "unrouted": len(cur_un), "elapsed": round(time.time() - t0)}
 
 
 def _requeue(queue, nets, stats, reasons, why):
@@ -280,10 +336,12 @@ def _status_write(path, extra, state):
 
 
 def format_result(r):
-    return (f"batch routing: {r['start_unrouted']} -> {r['unrouted']} unrouted in {r['elapsed']}s, "
+    return (f"batch routing: {r['start_open']} -> {r['open']} open connection(s) ({r['start_open_nets']} -> "
+            f"{r['open_nets']} nets) in {r['elapsed']}s, "
             f"{r['attempts']} router call(s), {len(r['checkpoints'])} checkpoint(s)"
             + (f", {r['halvings']} halving(s)" if r["halvings"] else "")
             + (f", {r['timeouts']} timeout(s)" if r["timeouts"] else "")
+            + (f", {r['violations']} RULE_VIOLATION batch(es) discarded" if r.get("violations") else "")
             + f"; last good {os.path.basename(r['board'])}"
             + (f"; leftovers ({len(r['leftovers'])}): {', '.join(r['leftovers'][:12])}"
                f"{' ...' if len(r['leftovers']) > 12 else ''}" if r["leftovers"] else ""))

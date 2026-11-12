@@ -21,6 +21,8 @@ import shutil
 import sys
 import time
 
+from . import routeconn as RC
+
 STAGES = ["floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "review"]
 STATE_MAX = 2000
 VERDICTS = ("pass", "fail", "blocked", "na", "skipped")
@@ -94,7 +96,8 @@ def _scorecard(board, cons, spec, waivers=()):
     sc = {"score": card.get("score"), "crossings": card.get("crossings"),
           "ratsnest_mm": card.get("weighted_ratsnest_mm"),
           "overflow": (card.get("congestion") or {}).get("overflow"),
-          "fail": card.get("fail"), "unrouted": len(RD.unrouted_nets(B))}
+          "fail": card.get("fail"),
+          "open": sum(RC.text_open(B).values())}
     sc = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in sc.items() if v is not None}
     return sc, f, codes
 
@@ -220,12 +223,15 @@ def st_route_ready(c, n, board):
             "next": nxt + [f"full list: {rj}"]}
 
 
-def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3):
+def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=()):
+    """One py_router call. `R` (routerules.rules) and `rflags` (routerules.flags) carry the project's rules:
+    fab-overrides floors, --same-net-pad-clearance (no vias in pads), grid step."""
     from . import adaptive
+    from . import routerules as RR
+    R = R or RR.rules(None, src, a.track, a.clearance)
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"), src,
            "--output", dst, "--keep-input-copper", "--layers", *a.layers,
-           "--track-width", str(a.track), "--clearance", str(a.clearance),
-           "--via-size", "0.45", "--via-drill", "0.2", *adaptive.krt_extra(a.router_dir)]
+           *RR.size_args(R), *adaptive.krt_extra(a.router_dir), *rflags]
     if limited:
         cmd += ["--max-ripup", str(max_ripup)]       # batches: limited rip-up; the leftovers pass uses the default
     return cmd + ["--nets", *only]
@@ -236,6 +242,7 @@ def st_route(c, n, board):
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
     stall loop. Time-boxed by --route-budget; the result is never less routed than the input."""
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
+    from . import routerules as RR, routepar as RP
     a = c.a
     if not (os.path.exists(a.router_py) and os.path.exists(os.path.join(a.router_dir, "py_router", "route.py"))):
         return {"verdict": "na", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
@@ -248,15 +255,19 @@ def st_route(c, n, board):
     budget = float(a.route_budget)
     spath = os.path.join(d, "routed.kicad_pcb.status.json")
     S = BR.settings(c.cons)
+    R = RR.rules(c.cons, board, a.track, a.clearance)
+    rflags = RR.flags(R, a.router_dir, d)
+    conn = BR.default_conn(S)
     extra = {}
-    run = BR.make_runner(lambda s, o, only, lim: _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"]),
-                         a.router_dir, extra, spath, S)
+    build = lambda s, o, only, lim: _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R,
+                                               rflags=rflags)
+    run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
     def left():
         return max(1.0, budget - (time.time() - t0))
 
     def nfail(path):
-        return len(RD.unrouted_nets(RD.load(path)))
+        return sum(conn(path).values())            # open connections (real connectivity), not "nets without copper"
 
     state = {"best": nfail(best), "timeouts": 0, "halvings": 0, "ckpts": 0}
     state["start"] = state["best"]
@@ -272,17 +283,23 @@ def st_route(c, n, board):
         return state["best"]
 
     B = RD.load(board)
-    todo = RD.unrouted_nets(B)
+    todo = sorted(conn(board))
     cls = NC.classify(B, c.cons, c.spec)
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
-    res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
-                           total_budget=budget, status_path=spath, extra=extra, log=lambda m: None)
+    if R["mode"] == "parallel":
+        res = RP.route_parallel(board, d, todo, build, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
+                                rules=R, total_budget=budget, status_path=spath, extra=extra,
+                                log=lambda m: None, conn=conn, cwd=a.router_dir)
+    else:
+        res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
+                               total_budget=budget, status_path=spath, extra=extra, log=lambda m: None,
+                               rules=R, conn=conn)
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
     state["ckpts"] += len(res["checkpoints"])
     keep(res["board"])
-    left_nets = RD.unrouted_nets(RD.load(best))
+    left_nets = sorted(conn(best))
     timed = bool(res["timeouts"]) and bool(left_nets)
     stall = None
     if (left_nets or timed) and a.stall_rounds > 0 and left() > 5:
@@ -292,7 +309,7 @@ def st_route(c, n, board):
             k[0] += 1
             r = BR.route_batches(b_in, os.path.join(d, f"stall-batches-{k[0]}"), only, run, cons=c.cons,
                                  spec=c.spec, total_budget=min(timeout, left()), status_path=spath,
-                                 extra=extra, log=lambda m: None)
+                                 extra=extra, log=lambda m: None, rules=R, conn=conn)
             shutil.copy(r["board"], b_out)
             _sidecar(b_in, b_out)
             state["timeouts"] += r["timeouts"]
@@ -304,19 +321,22 @@ def st_route(c, n, board):
                               replace=a.replace_on_stall, timeout=min(a.route_timeout, left()),
                               failed0=left_nets, timed_out0=timed, log=lambda m: None)
         keep(stall["board"])
-    final = RD.unrouted_nets(RD.load(best))
+    final_open = conn(best)
+    final = sorted(final_open)
     diag = None
     if final:
         from . import routestatus as RS2
         diag, _ = RS2.diagnose_result({"out": best}, c.cons or None, c.spec)
     el = round(time.time() - t0)
-    line = (f"{len(todo)} to route, {state['start']} -> {len(final)} unrouted in {el}s, "
+    line = (f"{len(todo)} open net(s), open connections {state['start']} -> {sum(final_open.values())} "
+            f"({len(final)} net(s)) in {el}s, "
             f"{state['ckpts']} checkpoint(s)"
             + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
-            + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else ""))
+            + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else "")
+            + (f", {res['violations']} RULE_VIOLATION discarded" if res.get("violations") else ""))
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:
-        out["next"] = [f"{len(final)} unrouted net(s); first: {', '.join(final[:6])}",
+        out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
                        f"diagnosis (what to move): {diag}",
                        f"leftovers list: {os.path.join(d, 'leftovers.json')}"]
     return out
@@ -384,7 +404,11 @@ def run(a):
         board = os.path.abspath(a.board)
     else:
         if not st:
-            raise SystemExit(f"pipeline: --from {first} needs {state_path(work)} from the previous stage")
+            if not a.board:
+                raise SystemExit(f"pipeline: --from {first} needs BOARD (or {state_path(work)} from the previous stage)")
+            # no state yet: start the pipeline at this stage on BOARD (no hand-written state.json needed)
+            st = {"schema": 1, "board0": os.path.abspath(a.board), "board": os.path.abspath(a.board), "stages": {},
+                  "paths": {"workdir": work, "constraints": a.constraints, "spec": a.spec}}
         board = st["board"]
         if a.board:
             board = os.path.abspath(a.board)

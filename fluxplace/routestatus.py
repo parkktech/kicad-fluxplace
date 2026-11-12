@@ -274,7 +274,10 @@ def one_line(st):
     n = st.get("nets_total")
     done = st.get("nets_routed", 0)
     bits = [f"route {st['state']}"]
-    if st.get("mode") == "batch":
+    if st.get("mode") == "parallel":
+        bits.append(f"parallel round {st.get('round', 0)} ({st.get('jobs_running', 0)} jobs, "
+                    f"{st.get('workers', '?')} workers)")
+    elif st.get("mode") == "batch":
         bits.append(f"batch {st.get('batch', 0)}/{st.get('batches_total', '?')} ({st.get('batch_nets', 0)} nets"
                     f"{', halved' if st.get('halvings') else ''})")
     if n:
@@ -290,9 +293,14 @@ def one_line(st):
         bits.append(f"no progress {st['stalled_s']}s")
     if st.get("current") and st["state"] == "running":
         bits.append(f"on {st['current']}")
-    if st.get("mode") == "batch":
+    if st.get("mode") in ("batch", "parallel"):
         bits.append(f"last good {os.path.basename(st.get('last_good') or '-')} "
-                    f"({st.get('last_good_unrouted', '?')} unrouted, {st.get('leftovers', 0)} leftover)")
+                    f"({st.get('last_good_open', '?')} open connections in {st.get('last_good_open_nets', '?')} nets, "
+                    f"{st.get('leftovers', 0)} leftover"
+                    + (f", {st['rule_violations']} RULE_VIOLATION" if st.get("rule_violations") else "") + ")")
+        rd = (st.get("rounds") or [None])[-1]
+        if rd:
+            bits.append(f"last round open {rd.get('open_before')} -> {rd.get('open_after')}")
     elif st.get("checkpoint"):
         bits.append(f"ckpt {st['checkpoint']}")
     if st.get("rc") not in (None, 0):

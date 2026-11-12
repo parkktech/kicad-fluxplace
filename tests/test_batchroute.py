@@ -3,7 +3,9 @@ import json, os, sys, time
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pcbgen as G
-from fluxplace import batchroute as BR, routediag as RD, routestatus as RS
+from fluxplace import batchroute as BR, routediag as RD, routestatus as RS, routeconn as RC
+
+RC.PY = "/nonexistent/python3"       # no pcbnew helper in tests: the text connectivity answers
 
 # argv: src --output dst [--max-ripup N] --nets a b c ; behaviour from $FAKE_CFG (json)
 FAKE = r'''
@@ -27,11 +29,26 @@ txt = open(src).read().rstrip()
 if cfg.get("corrupt"):
     open(out, "w").write(txt[: len(txt) // 2]); sys.exit(0)
 add = ""
-for i, n in enumerate(nets):
+for k in cfg.get("rip", {}).get(nets[0], []) if len(nets) == 1 else []:       # a job that rips another net's copper
+    txt = "\n".join(l for l in txt.split("\n") if not (l.startswith("(segment") and '(net "%s")' % k in l))
+for n in nets:
+    i = int(n[1:])
     print("[%d/%d] Routing %s (id=%d)" % (i + 1, len(nets), n, i), flush=True)
     if n in cfg.get("fail", []):
         print("  FAILED: Could not find route", flush=True); continue
-    add += '(segment (start 1 %d) (end 5 %d) (width 0.15) (layer "F.Cu") (net "%s"))\n' % (i, i, n)
+    y = 8 + 8 * i
+    row = y + 1
+    if n in cfg.get("conflict_row", {}) and '(layer "F.Cu") (net "N0"))' not in txt:
+        row = cfg["conflict_row"][n]                       # runs beside N0's future track (first round only)
+    w = 0.05 if n in cfg.get("thin", []) else 0.15
+    mid = [(9.5, row), (20, row), (29.5, row)] if n in cfg.get("snap", []) else [(9.5, row), (29.5, row)]
+    pts = [(9.5, y)] + mid + [(29.5, y)]              # detour above the (foreign) second pad of the left part
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        add += '(segment (start %g %g) (end %g %g) (width %g) (layer "F.Cu") (net "%s"))\n' % (x0, y0, x1, y1, w, n)
+    if n in cfg.get("snap", []):
+        add += '(via (at 20.01 %g) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "%s"))\n' % (row, n)
+    if n in cfg.get("via_in_pad", []):
+        add += '(via (at 9.5 %g) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "%s"))\n' % (y, n)
     print("  SUCCESS: 1 segments", flush=True)
 open(out, "w").write(txt[:-1] + add + ")\n")
 '''
@@ -74,7 +91,8 @@ def go(tmp_path, n=8, batch=4, timeout=1.5, **cfg):
 
 
 def routed(path):
-    return {n for n in (f"N{i}" for i in range(8)) if n not in RD.unrouted_nets(RD.load(path))}
+    op = RC.open_by_net(path, method="text")
+    return {n for n in (f"N{i}" for i in range(8)) if n not in op}
 
 
 def test_checkpoint_after_every_batch_and_exact_leftovers(tmp_path):
@@ -86,7 +104,7 @@ def test_checkpoint_after_every_batch_and_exact_leftovers(tmp_path):
     sets = [routed(c) for c in cks]
     assert sets[0] == {"N0", "N1", "N2", "N3"} and all(a <= b for a, b in zip(sets, sets[1:]))
     assert r["board"] == cks[-1] and routed(r["board"]) == {f"N{i}" for i in range(8)} - {"N5"}
-    assert r["leftovers"] == ["N5"] and r["unrouted"] == 1 and r["start_unrouted"] == 8
+    assert r["leftovers"] == ["N5"] and r["open"] == 1 and r["start_open"] == 8
     assert json.load(open(os.path.join(W, "leftovers.json")))["leftovers"] == ["N5"]
     # the batches ran with the retry phase limited and --max-ripup; the leftovers pass with it on
     cs = calls(tmp_path)
@@ -124,7 +142,7 @@ def test_router_that_writes_nothing_is_halved_and_a_hanging_net_is_a_leftover(tm
 
 def test_never_worse_than_the_input(tmp_path):
     board, W, r, spath = go(tmp_path, corrupt=True)              # every call writes a truncated board
-    assert r["board"] == board and r["checkpoints"] == [] and r["unrouted"] == r["start_unrouted"] == 8
+    assert r["board"] == board and r["checkpoints"] == [] and r["open"] == r["start_open"] == 8
     assert r["leftovers"] == [f"N{i}" for i in range(8)]
     assert not [f for f in os.listdir(W) if f.startswith("ck-")]
 

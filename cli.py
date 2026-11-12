@@ -1054,14 +1054,16 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     # Batch routing with checkpoints (fluxplace/batchroute.py): never time-box a whole-board router call
     # (py_router writes its output only when a whole pass incl. its retry phase finishes).
     from fluxplace import batchroute as BR, routestatus as RS
+    from fluxplace import routerules as RR, routepar as RP
     S4 = BR.settings(cons4)
+    R4 = RR.rules(cons4, placed, a.track, a.clearance)       # project floors, grid, no vias in pads
+    rflags4 = RR.flags(R4, a.router_dir, a.out)
+    conn4 = BR.default_conn(S4)
 
     def build(src_in, dst, only, limited):
         cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
                src_in, "--output", dst, "--keep-input-copper", "--layers", *a.layers,
-               "--track-width", str(a.track), "--clearance", str(a.clearance),
-               "--via-size", "0.45", "--via-drill", "0.2",
-               *adaptive.krt_extra(a.router_dir)]
+               *RR.size_args(R4), *adaptive.krt_extra(a.router_dir), *rflags4]
         if limited:
             cmd += ["--max-ripup", str(S4["max_ripup"])]
         cmd += ["--nets", *only]
@@ -1081,10 +1083,16 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         first = [n for n in first if n in route_nets]
         if first:
             print(f"    escape-first: {len(first)} fine-pitch signal net(s) lead the batches")
-    todo4 = [n for n in route_nets if n in set(RD.unrouted_nets(Bp))] or list(route_nets)
-    br = BR.route_batches(placed, a.out, todo4, run4, cons=cons4, spec=spec4, B=Bp, cls=cls4, first=first,
-                          power=list(pw), status_path=spath4, extra=extra4,
-                          log=lambda m: print(m, flush=True))
+    open4 = conn4(placed)                                    # open connections, not "nets without copper"
+    todo4 = [n for n in route_nets if n in open4]
+    if R4["mode"] == "parallel":
+        br = RP.route_parallel(placed, a.out, todo4, build, run4, cons=cons4, spec=spec4, B=Bp, cls=cls4,
+                               first=first, power=list(pw), rules=R4, status_path=spath4, extra=extra4,
+                               log=lambda m: print(m, flush=True), conn=conn4, cwd=a.router_dir)
+    else:
+        br = BR.route_batches(placed, a.out, todo4, run4, cons=cons4, spec=spec4, B=Bp, cls=cls4, first=first,
+                              power=list(pw), status_path=spath4, extra=extra4,
+                              log=lambda m: print(m, flush=True), rules=R4, conn=conn4)
     print("    " + BR.format_result(br))
     shutil.copy(br["board"], routed)
     for ext in (".kicad_pro",):
@@ -1110,7 +1118,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
             pass
     print(f"[4/{NSTAGE}] routed {len(route_nets)} nets{summ}{real}  ({time.time()-t0:.0f}s)")
     if ok:
-        failed = RD.unrouted_nets(RD.load(routed))
+        failed = sorted(conn4(routed))
         if failed or timed_out:
             kk = [0]
 
@@ -1118,7 +1126,7 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
                 kk[0] += 1
                 r2 = BR.route_batches(b_in, os.path.join(a.out, f"stall-batches-{kk[0]}"), only, run4,
                                       cons=cons4, spec=spec4, total_budget=timeout, status_path=spath4,
-                                      extra=extra4, log=lambda m: print(m, flush=True))
+                                      extra=extra4, log=lambda m: print(m, flush=True), rules=R4, conn=conn4)
                 shutil.copy(r2["board"], b_out)
                 return bool(r2["timeouts"]) and bool(r2["leftovers"])
             out = ST.stall_loop(routed, a.out, again, cons4, spec4,
@@ -1139,9 +1147,8 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
     if plane_nets and ok:
         cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"),
                routed, "--output", finald, "--keep-input-copper", "--layers", *a.layers,
-               "--track-width", str(a.track), "--clearance", str(max(a.clearance, 0.12)),
-               "--via-size", "0.45", "--via-drill", "0.2",
-               *adaptive.krt_extra(a.router_dir), "--nets", *plane_nets,
+               *RR.size_args(dict(R4, clearance=max(R4["clearance"], 0.12))),
+               *adaptive.krt_extra(a.router_dir), *rflags4, "--nets", *plane_nets,
                "--max-ripup", "60"]
         try:
             from fluxplace import routestatus as RS

@@ -109,7 +109,7 @@ def krt_summary(stdout):
 
 
 def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.6,
-                    via_drill=0.3, grid=0.1, power_nets=None, power_widths=None, timeout=1200):
+                    via_drill=0.3, grid=0.1, power_nets=None, power_widths=None, timeout=1200, rflags=()):
     """route_fresh_fn backed by KiCadRoutingTools: rip prior signal copper, keep planes,
     route ALL nets at (base_w, base_c); `fine` = {net: clearance} necks only those nets."""
     route_py = os.path.join(krt_dir, "py_router", "route.py")
@@ -119,7 +119,7 @@ def krt_route_fresh(krt_py, krt_dir, layers, base_w=0.2, base_c=0.2, via_size=0.
                "--rip-existing-nets", "*", "--layers", *layers,
                "--track-width", str(base_w), "--clearance", str(base_c),
                "--via-size", str(via_size), "--via-drill", str(via_drill),
-               "--grid-step", str(grid), *krt_extra(krt_dir)]
+               "--grid-step", str(grid), *krt_extra(krt_dir), *rflags]
         if fine:
             fpath = outb + ".netclr.json"          # KRT --net-clearances takes a FILE path
             json.dump(fine, open(fpath, "w"))
@@ -146,7 +146,7 @@ def pick_best(rows):
 
 
 def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
-                   gap=0.15, via_size=0.45, via_drill=0.25, timeout=900):
+                   gap=0.15, via_size=0.45, via_drill=0.25, timeout=900, rflags=()):
     """Pairs-first pre-route via KRT route_diff.py: P and N routed TOGETHER at a
     fixed gap, so coupling is by construction, not luck (the 'uncoupled spacing'
     physics failure is a single-ended router treating the pair as two unrelated
@@ -163,7 +163,7 @@ def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
                "--nets", *netnames, "--layers", *layers,
                "--track-width", str(track_w), "--clearance", str(clearance),
                "--diff-pair-gap", str(gap), "--via-size", str(via_size),
-               "--via-drill", str(via_drill), "--keep-input-copper"]
+               "--via-drill", str(via_drill), "--keep-input-copper", *rflags]
         try:
             RS.run_logged(cmd, cwd=krt_dir, timeout=timeout, out=outb, stage="diff-pair")
         except subprocess.TimeoutExpired:
@@ -174,7 +174,7 @@ def krt_route_diff(krt_py, krt_dir, layers, pairs, track_w=0.2, clearance=0.2,
 
 def krt_length_match(krt_py, krt_dir, layers, pairs, base_w=0.2, base_c=0.2,
                      tolerance=0.5, via_size=0.6, via_drill=0.3, grid=0.1,
-                     timeout=1200):
+                     timeout=1200, rflags=()):
     """Skew repair: force-reroute the (still-unlocked) diff pairs as LENGTH-MATCHED
     groups with meanders. KRT's --force-reroute restores the original copper if a
     net fails, and never touches KiCad-locked copper — so coupled pairs from the
@@ -191,7 +191,7 @@ def krt_length_match(krt_py, krt_dir, layers, pairs, base_w=0.2, base_c=0.2,
                "--layers", *layers, "--track-width", str(base_w),
                "--clearance", str(base_c), "--via-size", str(via_size),
                "--via-drill", str(via_drill), "--grid-step", str(grid),
-               "--length-match-tolerance", str(tolerance), *krt_extra(krt_dir)]
+               "--length-match-tolerance", str(tolerance), *krt_extra(krt_dir), *rflags]
         for s, m in sorted(pairs.items()):
             cmd += ["--length-match-group", m, s]
         try:
@@ -249,7 +249,7 @@ def freerouting_finish(jar, passes=6, timeout=1800):
 
 
 def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.45,
-               via_drill=0.25, method="auto", timeout=600):
+               via_drill=0.25, method="auto", timeout=600, rflags=()):
     """fanout_fn backed by KRT bga_fanout: generate escape vias (dogbone/underpad) for a
     fine-pitch component so its pins reach an inner layer where they can route."""
     fo_py = os.path.join(krt_dir, "py_router", "bga_fanout.py")
@@ -258,7 +258,7 @@ def krt_fanout(krt_py, krt_dir, layers, track_w=0.1, clearance=0.1, via_size=0.4
         cmd = [krt_py, fo_py, board, "--output", outb, "--component", component,
                "--layers", *layers, "--track-width", str(track_w),
                "--clearance", str(clearance), "--via-size", str(via_size),
-               "--via-drill", str(via_drill), "--escape-method", method]
+               "--via-drill", str(via_drill), "--escape-method", method, *rflags]
         if nets:
             # fan out ONLY the stuck nets: blanket fanout of every pin plants a via
             # picket fence the next route-fresh must dodge (measured on CM5: fanout
