@@ -159,7 +159,7 @@ def test_connector_opening_inference(tmp_path):
     # declared z beats a Horizontal name; declared direction stays FAIL
     z = {"placement": {"connectors": {"J1": {"opening": "z"}}}}
     assert not _cb(run(h, z)[0])
-    d = {"placement": {"connectors": {"J1": {"opening": "+y"}}}}
+    d = {"placement": {"connectors": {"J1": {"opening": "-y"}}}}
     assert _cb(run(h, d)[0])[0]["level"] == "FAIL"
 
 
