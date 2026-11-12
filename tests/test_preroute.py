@@ -47,6 +47,23 @@ def test_keepout_trapped_names_the_part_not_the_zone_owner(tmp_path):
     assert [x["refs"] for x in kt] == [["L1"]]
 
 
+def _owned_zone(layer):
+    # zone owned by a moved + rotated footprint; KiCad stores its polygon in ABSOLUTE board coordinates
+    z = (f'(zone (net 0) (net_name "") (layers "{layer}") (name "") '
+         '(keepout (tracks not_allowed) (vias not_allowed) (pads allowed)) '
+         '(polygon (pts (xy 10 10) (xy 14 10) (xy 14 14) (xy 10 14))))')
+    return (f'(footprint "H" (layer "F.Cu") (at 50 20 90) (property "Reference" "J9") {z})\n')
+
+
+def test_footprint_owned_zone_is_absolute_and_layer_checked(tmp_path):
+    kt = lambda b, n: [x["refs"] for x in run(g.board(tmp_path, b, name=n))[0] if x["code"] == "KEEPOUT_TRAPPED"]
+    # F.Cu keep-out: a cap at its absolute position is trapped; one where a double transform would put it is not
+    assert kt(_owned_zone("F.Cu") + g.two("C5", 12, 12, "A", "B"), "a.kicad_pcb") == [["C5"]]
+    assert kt(_owned_zone("F.Cu") + g.two("C6", 38, 32, "A", "B"), "b.kicad_pcb") == []
+    # a B.Cu keep-out does not trap an F.Cu pad
+    assert kt(_owned_zone("B.Cu") + g.two("C5", 12, 12, "A", "B"), "c.kicad_pcb") == []
+
+
 def test_pin_escape_blocked_by_neighbour_courtyard_and_copper(tmp_path):
     # fine-pitch IC, left pad row; a part 0.1 mm off the pad row blocks the lane
     ic = g.ic("U1", 20, 20, ["A", "B", "C", "D", "E", "F"], pitch=0.4)

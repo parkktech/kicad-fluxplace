@@ -116,9 +116,9 @@ def test_support_distance_measured_from_halo_edge(tmp_path):
 
 
 # (g) mating direction -----------------------------------------------------------------
-def conn(ref, x, y, angle=0.0):
+def conn(ref, x, y, angle=0.0, name="X"):
     # pads biased to +y (the pad row) with the courtyard reaching 4 mm further in -y: opening "-y"
-    return g.fp(ref, x, y, [g.pad("1", -2, 1, "N%s1" % ref), g.pad("2", 2, 1, "N%s2" % ref)], angle=angle,
+    return g.fp(ref, x, y, [g.pad("1", -2, 1, "N%s1" % ref), g.pad("2", 2, 1, "N%s2" % ref)], angle=angle, name=name,
                 court=(-4, -5, 4, 2))
 
 
@@ -138,6 +138,29 @@ def test_connector_blocked_and_wrong_way(tmp_path):
     f = run(blk, cons)[0]
     hit = [x for x in f if x["code"] == "CONNECTOR_BLOCKED"]
     assert hit and hit[0]["level"] == "FAIL" and "R9" in hit[0]["msg"]
+
+
+def _cb(fs):
+    return [x for x in fs if x["code"] == "CONNECTOR_BLOCKED"]
+
+
+def test_connector_opening_inference(tmp_path):
+    wrong = lambda **k: conn("J1", 50, 3, angle=180.0, **k) + g.two("R1", 20, 40, "A", "B")
+    # vertical name: mates along z, no in-plane keep-out, no finding
+    v = g.board(tmp_path, wrong(name="Molex_CLIK-Mate_1x14_P1.25mm_Vertical"), name="v.kicad_pcb")
+    assert not _cb(run(v)[0])
+    # horizontal at the edge facing inward: inferred WARN
+    h = g.board(tmp_path, wrong(name="USB_C_Receptacle_TopMnt_Horizontal"), name="h.kicad_pcb")
+    f = _cb(run(h, {"placement": {"connectors": {"J1": {}}}})[0])
+    assert f and f[0]["level"] == "WARN" and "inferred" in f[0]["msg"]
+    # unnamed, strong asymmetry but mid-board: not inferred
+    m = g.board(tmp_path, conn("J1", 50, 40, angle=180.0), name="m.kicad_pcb")
+    assert not _cb(run(m)[0])
+    # declared z beats a Horizontal name; declared direction stays FAIL
+    z = {"placement": {"connectors": {"J1": {"opening": "z"}}}}
+    assert not _cb(run(h, z)[0])
+    d = {"placement": {"connectors": {"J1": {"opening": "+y"}}}}
+    assert _cb(run(h, d)[0])[0]["level"] == "FAIL"
 
 
 # (h) stale copper ---------------------------------------------------------------------

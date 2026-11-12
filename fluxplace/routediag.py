@@ -82,7 +82,8 @@ def load(path, track=None, clearance=None):
 
     pads, parts, zones = [], {}, []
 
-    def zone_of(z, fx=0.0, fy=0.0, fang=0.0):
+    def zone_of(z):
+        # footprint-owned zones are stored in ABSOLUTE board coordinates (KiCad 8+/10): no transform
         keep = BF._first(z, "keepout")
         ls = BF._atoms(BF._first(z, "layers")) + BF._atoms(BF._first(z, "layer"))
         lay = set()
@@ -97,8 +98,7 @@ def load(path, track=None, clearance=None):
         pts = []
         for xy in BF._kids(poly, "xy"):
             x, y = BF._nums(xy)[:2]
-            rx, ry = BF._rot(x, y, fang)
-            pts.append((fx + rx, fy + ry))
+            pts.append((x, y))
         return {"net": nm(BF._net(z)), "layers": lay, "pts": pts,
                 "keepout": bool(keep),
                 "no_tracks": bool(keep) and any(
@@ -141,7 +141,7 @@ def load(path, track=None, clearance=None):
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
-            zones.append(zone_of(z, fx, fy, fang))
+            zones.append(zone_of(z))
         cy_pts = []
         for g in fp:
             if (isinstance(g, list) and g and g[0].startswith("fp_")

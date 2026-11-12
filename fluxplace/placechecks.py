@@ -2,11 +2,14 @@
 Pure text (routediag model). Findings use preroute's shape."""
 import fnmatch
 import math
+import re
 
 from . import geom as GM
 from . import netclass as NC
 
 PLUG_MM = 15.0
+_HORIZ = re.compile(r"horizontal|right.?angle|angled|edge|_RA_|_H_|sideentry|side.?entry", re.I)
+_VERT = re.compile(r"vertical|_V_|top.?entry|topentry|_Vert", re.I)
 _DIRS = {"+x": (1, 0), "-x": (-1, 0), "+y": (0, 1), "-y": (0, -1)}
 
 
@@ -99,11 +102,16 @@ def opening(B, ref, cons):
     where the courtyard extends > 1 mm beyond the pad bounding box."""
     part = B["parts"][ref]
     decl = (((cons or {}).get("placement") or {}).get("connectors") or {}).get(ref, {}).get("opening")
+    if decl == "z":
+        return None, "declared"          # mates along z: no in-plane plug keep-out
     if decl in _DIRS:
         lx, ly = _DIRS[decl]
         dx, dy = GM.rot(lx, ly, part["angle"])
         return (round(dx, 6), round(dy, 6)), "declared"
-    pads, court = GM.moved(part, 0.0, 0.0, 0.0), None
+    name = str(part.get("fp", ""))
+    horiz = bool(_HORIZ.search(name))
+    if not horiz and _VERT.search(name):
+        return None, "vertical"          # footprint name says it mates along z
     pads = [(p["x"] - part["pos"][0], p["y"] - part["pos"][1], p["ex"], p["ey"]) for p in part["pads"]]
     # undo the footprint rotation to work in footprint coordinates
     loc = [GM.rot(x, y, -part["angle"]) + (ex, ey) for x, y, ex, ey in pads]
@@ -115,6 +123,10 @@ def opening(B, ref, cons):
     k, v = max(slack.items(), key=lambda kv: kv[1])
     if v < 1.0 or sorted(slack.values())[-2] > 0.6 * v:
         return None, "ambiguous"
+    if not horiz:   # name is silent: the asymmetry must be strong AND the part at a board edge
+        bx0, by0, bx1, by1 = B["bbox"]
+        if v < 2.0 or min(cx0 - bx0, cy0 - by0, bx1 - cx1, by1 - cy1) >= 1.5:
+            return None, "ambiguous"
     dx, dy = GM.rot(*_DIRS[k], part["angle"])
     return (round(dx, 6), round(dy, 6)), "inferred"
 
