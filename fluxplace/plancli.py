@@ -172,7 +172,7 @@ def cmd_plan_options(a):
         calib = PL.calibrate(Bc, cons, spec, a.calibrate_board, grid_scan=False)
         calib.pop("result", None)
         calib["placement_rate"], calib["placement_failed"], calib["placement_hit"] = PL.calibrate_placement(Bc, cons, spec)
-    r = PO.search(a.board, cons, spec, out, max_grow=a.max_grow, workers=a.workers, place_time=a.place_time,
+    r = PO.search(a.board, cons, spec, out, max_grow=a.max_grow, workers=a.workers, place_evals=a.place_evals,
                   log=(print if a.verbose else (lambda m: None)), calib=calib)
     if a.json:
         json.dump({k: v for k, v in r.items() if k != "baseline"}, open(a.json, "w"), indent=1, default=str)
@@ -195,8 +195,8 @@ def after_plan_place(a, board_in, board_out, cons, spec, st):
     mp = FM.default_path(board_out)
     FM.save(m, mp)
     v = PL.verdict(R)
-    print(f"plan: confirmed by a full plan-route: PLAN_SCORE {st['score_before']:.1f} -> {v['score']:.1f} "
-          f"(incremental {st['score_after']:.1f}); sealed {st['components_before']['sealed']} -> {v['components']['sealed']}, "
+    print(f"plan: {'REVERTED to the input (the full plan after the moves was worse)' if st.get('reverted_to_input') else 'confirmed by a full plan-route'}: "
+          f"PLAN_SCORE {st['score_before']:.1f} -> {v['score']:.1f} (incremental {st['score_after']:.1f}); sealed {st['components_before']['sealed']} -> {v['components']['sealed']}, "
           f"overflow {st['components_before']['overflow']:g} -> {v['components']['overflow']:g}; map {mp}")
     log = st.get("log", [])
     print(f"plan: {len(log)} move(s) kept; move list (ref, old -> new, reason):")
@@ -256,7 +256,7 @@ def add_parsers(sub):
     po.add_argument("--spec", default=None)
     po.add_argument("--max-grow", type=int, default=6, help="largest edge growth tried, mm (default 6)")
     po.add_argument("--out-dir", default=None, help="candidate boards/maps/constraints (default <board>.plan-options/)")
-    po.add_argument("--place-time", type=float, default=30.0, help="seconds of --objective plan placement per option")
+    po.add_argument("--place-evals", type=int, default=120, help="plan evaluations of --objective plan placement per option (deterministic bound)")
     po.add_argument("--workers", type=int, default=None)
     po.add_argument("--calibrate-board", default=None, help="routed board used to judge whether the verdict is proven")
     po.add_argument("--json", default=None)

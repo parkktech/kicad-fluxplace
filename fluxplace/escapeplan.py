@@ -34,7 +34,7 @@ DEFAULTS = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm"
             "fine_pitch_mm": 0.65, "fine_pads": 16, "pour_pads": 20, "thermal_pad_mm2": 2.0,
             "via_cost_mm": 3.0, "iterations": 10, "util": 0.8, "w_sealed": 100.0, "w_nosite": 40.0,
             "w_overflow": 5.0, "w_overbudget": 3.0, "w_overbudget_hard": 20.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
-            "w_len": 0.05, "jog_frac": 0.5, "via_units": 2.0, "via_density": 0.5, "max_risk_frac": 0.06, "design_track_mm": 0.0, "design_clearance_mm": 0.0}
+            "w_len": 0.05, "jog_frac": 0.5, "via_units": 2.0, "via_density": 0.5, "max_risk_frac": 0.06, "max_risk_nets": 10.0, "design_track_mm": 0.0, "design_clearance_mm": 0.0}
 SIDE_NAMES = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}      # KiCad y grows downward
 MECH = ("MH", "MK", "FID", "TP", "H")
 
@@ -51,6 +51,15 @@ def plan_params(cons=None, **over):
             pr[k] = float(v)
     pr["track_mm"] = max(pr["track_mm"], float((((cons or {}).get("fab")) or {}).get("min_track_mm", 0)))
     pr["clearance_mm"] = max(pr["clearance_mm"], float((((cons or {}).get("fab")) or {}).get("min_clearance_mm", 0)))
+    # the owner's floor (`[plan] floor_mm`, default 0.127): a lower [plan] value is raised to it and recorded, unless the caller is
+    # deliberately evaluating a sub-floor option (`[plan] allow_subfloor = true`, plan-options only; such results are never offered)
+    pr["floor_mm"] = float(pc.get("floor_mm", 0.127))
+    pr["floor_clamped"] = []
+    if not pc.get("allow_subfloor"):
+        for k in ("track_mm", "clearance_mm", "design_track_mm", "design_clearance_mm"):
+            if 0 < pr[k] < pr["floor_mm"] - 1e-9:
+                pr["floor_clamped"].append(f"{k} {pr[k]:g} -> {pr['floor_mm']:g}")
+                pr[k] = pr["floor_mm"]
     pr["pitch_mm"] = pr["track_mm"] + pr["clearance_mm"]
     # geometry the controlled-impedance and power nets keep whatever the low-speed rule is (0 = the rule itself)
     pr["design_pitch_mm"] = (pr["design_track_mm"] or pr["track_mm"]) + (pr["design_clearance_mm"] or pr["clearance_mm"])
@@ -519,6 +528,7 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
         else:
             rec["kind"] = "no_site" if kind == "plane" else "sealed"
             rec["cands"] = len(cand[(best_ph, key)])
+    _stub_conflicts(plan, needs, pr)
     plan.stats = {"phase": best_ph, "sites_tested": len(site_cache), "needs": len(needs)}
     _findings(B, pr, plan, parts, ob, fine_refs)
     _oversubscribed(B, pr, plan, parts, ob, fine_refs, site_ok, best_ph)
@@ -612,6 +622,51 @@ def _oversubscribed(B, pr, plan, parts, ob, fine_refs, site_ok, phase):
 def ok_site(site_ok, ph, ij, x, y):
     ok, owner = site_ok(ph, ij, (x, y))
     return ok and not owner
+
+
+def _seg_seg_gap(a, b, c, d):
+    """Distance between segments ab and cd."""
+    def cross(o, p, q):
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+    if (cross(a, b, c) * cross(a, b, d) < 0) and (cross(c, d, a) * cross(c, d, b) < 0):
+        return 0.0
+    return min(RD_seg_dist(a, c, d), RD_seg_dist(b, c, d), RD_seg_dist(c, a, b), RD_seg_dist(d, a, b))
+
+
+def _stub_conflicts(plan, needs, pr):
+    """Dog-bone stubs are checked against each other and against the other pins' vias: two stubs of different nets closer than track + clearance,
+    or a via closer than via radius + clearance + half a track to another pin's stub, cannot both be built.  The later pin loses its slot and is
+    reported sealed ('stub of REF.PAD')."""
+    stubs = []
+    for kind, key, q, part, layers, cx, cy in needs:
+        rec = plan.pins.get(key)
+        if rec and rec.get("kind") == "via" and not q["tht"]:
+            rc = prect(q)
+            v = rec["via"]
+            stubs.append((key, rec["net"], (min(max(v[0], rc[0]), rc[2]), min(max(v[1], rc[1]), rc[3])), tuple(v), frozenset(layers)))
+    stubs.sort(key=lambda t: t[0])
+    need = pr["track_mm"] + pr["clearance_mm"]
+    vr = pr["via_mm"] / 2 + pr["clearance_mm"] + pr["track_mm"] / 2
+    dead = set()
+    for i in range(len(stubs)):
+        ki, ni, ai, bi, li = stubs[i]
+        if ki in dead:
+            continue
+        for j in range(i + 1, len(stubs)):
+            kj, nj, aj, bj, lj = stubs[j]
+            if kj in dead or ni == nj or not (li & lj):
+                continue
+            if abs(bi[0] - bj[0]) > 4 or abs(bi[1] - bj[1]) > 4:
+                continue
+            if _seg_seg_gap(ai, bi, aj, bj) < need - 1e-9 or RD_seg_dist(bj, ai, bi) < vr - 1e-9 or RD_seg_dist(bi, aj, bj) < vr - 1e-9:
+                dead.add(kj)
+    for k in dead:
+        rec = plan.pins[k]
+        for ij, kk in list(plan.used.items()):
+            if kk == k:
+                del plan.used[ij]
+        rec.update(kind="sealed", blocker="stub conflict", cands=0)
+        rec.pop("via", None)
 
 
 def rebuild_findings(B, pr, plan, ignore_routing=True):

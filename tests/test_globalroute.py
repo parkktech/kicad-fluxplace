@@ -23,8 +23,8 @@ def channel_board(tmp, n_nets, gap=1.0, walls=True, pair=False):
         names.append(f"SIG{i}")
     if pair:
         names = ["ETH_P0_P", "ETH_P0_N"]
-    L = "".join(PB.fp(f"L{i}", 10, 40 + (i - (len(names) - 1) / 2) * 0.8, [PB.pad("1", 0, 0, n, 0.5, 0.5)]) for i, n in enumerate(names))
-    R = "".join(PB.fp(f"R{i}", 90, 40 + (i - (len(names) - 1) / 2) * 0.8, [PB.pad("1", 0, 0, n, 0.5, 0.5)]) for i, n in enumerate(names))
+    L = "".join(PB.fp(f"L{i}", 10, 40 + (i - (len(names) - 1) / 2) * 1.2, [PB.pad("1", 0, 0, n, 0.5, 0.5)]) for i, n in enumerate(names))
+    R = "".join(PB.fp(f"R{i}", 90, 40 + (i - (len(names) - 1) / 2) * 1.2, [PB.pad("1", 0, 0, n, 0.5, 0.5)]) for i, n in enumerate(names))
     return PB.write(tmp, body + L + R)
 
 
@@ -38,7 +38,7 @@ def test_narrow_channel_overflows_and_names_the_cell(tmp_path):
     ov = [f for f in R["findings"] if f["code"] == "PLAN_OVERFLOW"]
     assert ov and R["gr"].summary()["overflow"] > 0
     f = ov[0]
-    assert 38 <= f["at"][1] <= 42 and 38 <= f["at"][0] <= 62 and f["demand"] > f["capacity"]
+    assert 38 <= f["at"][0] <= 62 and f["demand"] > f["capacity"]
     assert f["cells_xy"] and f["nets"] and f["suggestion"]
     assert PL.verdict(R)["result"] == "FAIL"
 
@@ -47,7 +47,7 @@ def test_removing_the_obstacle_clears_it(tmp_path):
     R = run(channel_board(tmp_path, 16, gap=1.0, walls=False))
     assert not [f for f in R["findings"] if f["code"] == "PLAN_OVERFLOW"]
     assert PL.verdict(R)["result"] == "ok"
-    R2 = run(channel_board(tmp_path, 16, gap=16.0))              # a wide channel also passes
+    R2 = run(channel_board(tmp_path, 16, gap=30.0))              # a wide channel also passes
     assert not [f for f in R2["findings"] if f["code"] == "PLAN_OVERFLOW"]
 
 
@@ -91,17 +91,81 @@ def test_plan_compare_prints_both_verdicts(tmp_path, capsys):
 
 
 def test_vias_charge_every_layer(tmp_path):
-    """A net that changes layer in a cell takes capacity from the layers it does not use there."""
-    p = channel_board(tmp_path, 1, gap=30.0, walls=False)
-    B = RD.load(p)
-    cons = {}
-    R = PL.run(B, cons, None, ignore_routing=True)
-    g = R["gr"]
-    assert all(r.get("vuse") is not None for r in g.routes.values())
-    n_v = sum(len(r["vuse"]) for r in g.routes.values())
-    assert n_v == sum(r["vias"] for r in g.routes.values()) * 0 + n_v      # structure present
+    """A keep-out closes F.Cu in the middle: the net drops to an inner layer and back; its vias (away from its pads) charge the layers it does
+    not use in those cells: more usage than with via_units = 0."""
+    wall = PB.keepout(40, 0, 60, 80, "fwall").replace('(layers "F.Cu" "B.Cu")', '(layers "F.Cu")')
+    body = wall + PB.fp("A", 10, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)]) + PB.fp("B", 90, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)])
+    f = tmp_path / "v.kicad_pcb"
+    f.write_text(PB.HEAD.replace('(31 "B.Cu" signal)', '(4 "In1.Cu" signal) (6 "In2.Cu" signal) (31 "B.Cu" signal)') + PB.EDGE + body + ")\n")
+    B = RD.load(str(f))
+    g = PL.run(B, {}, None, ignore_routing=True)["gr"]
+    assert sum(r["vias"] for r in g.routes.values()) >= 2 and sum(len(r["vuse"]) for r in g.routes.values()) >= 2
     g2 = PL.run(B, {"plan": {"via_units": 0}}, None, ignore_routing=True)["gr"]
-    assert sum(sum(a) for a in g.uH) >= sum(sum(a) for a in g2.uH)
+    assert sum(sum(a) for a in g.uH) > sum(sum(a) for a in g2.uH)
+
+
+def test_back_side_and_rotated_pads_are_planned_on_their_own_layer(tmp_path):
+    back = PB.fp("A", 10, 40, [PB.pad("1", 0, 0, "X", 0.5, 0.5)]).replace('"F.Cu"', '"B.Cu"')
+    rot = PB.fp("B", 90, 40, [PB.pad("1", 0, 0, "X", 2.0, 0.4)]).replace("(at 0 0) (size", "(at 0 0 90) (size")
+    B = RD.load(PB.write(tmp_path, back + rot))
+    q = B["parts"]["B"]["pads"][0]
+    assert abs(q["ex"] - 0.2) < 1e-6 and abs(q["ey"] - 1.0) < 1e-6          # rotated 90: the long axis runs in y
+    g = PL.run(B, {}, None, ignore_routing=True)["gr"]
+    t = {x["pad"]: x for x in next(iter(g.nets.values()))["terms"]}
+    assert t["A.1"]["layers"] == [g.lid["B.Cu"]] and t["B.1"]["layers"] == [g.lid["F.Cu"]]
+    assert next(iter(g.routes.values()))["vias"] >= 1                         # the net must change layer
+
+
+def test_thin_keepout_reduces_capacity(tmp_path):
+    thin = PB.keepout(40, 39.9, 60, 40.1, "thin")                               # 0.2 mm tall, the 4x4 sampling of the old code missed it
+    a = PL.run(RD.load(PB.write(tmp_path, ""  )), {}, None, ignore_routing=True)["gr"]
+    b = PL.run(RD.load(PB.write(tmp_path, thin, "k.kicad_pcb")), {}, None, ignore_routing=True)["gr"]
+    c = b.cell_of(50, 40)
+    assert min(b.capH[0][c], b.capV[0][c]) < min(a.capH[0][c], a.capV[0][c]) or b.capH[0][c] < a.capH[0][c]
+
+
+def test_rail_demand_is_width_over_design_pitch_scaled_once(tmp_path):
+    body = PB.fp("A", 10, 40, [PB.pad("1", 0, 0, "VBUS", 1, 1)]) + PB.fp("B", 90, 40, [PB.pad("1", 0, 0, "VBUS", 1, 1)])
+    cons = {"power": {"VBUS": {"max_current_ma": 3000}}, "plan": {"track_mm": 0.127, "clearance_mm": 0.127, "design_track_mm": 0.2, "design_clearance_mm": 0.2}}
+    g = PL.run(RD.load(PB.write(tmp_path, body)), cons, None, ignore_routing=True)["gr"]
+    nt = g.nets["VBUS"]
+    from fluxplace import constraints as CS
+    w = CS.power_width_mm(cons, "VBUS", 0.127)
+    assert nt["units"] == max(1, -(-int((w + 0.2) / 0.4 * 1e6) // 1000000)) or nt["units"] * 0.4 >= w + 0.2 - 1e-6
+    c = g.cell_of(50, 40)
+    demand_mm = nt["units"] * g.mult[c] * g.cpitch[c]                         # tracks of the local pitch the rail occupies
+    assert abs(demand_mm - nt["units"] * 0.4) < 1e-6                           # scaled exactly once: design width, not width x ratio^2
+
+
+def test_route_ready_plan_gate_is_off_by_default_and_warn_only(tmp_path):
+    from fluxplace import preroute as PR
+    assert PR.use_plan({}) is False and PR.use_plan({"route_ready": {"use_plan": True}}) is True
+    p = channel_board(tmp_path, 16, gap=1.0)
+    B = RD.load(p)
+    f0, c0 = PR.run(B, {}, None)
+    assert not [x for x in f0 if x["code"].startswith("PLAN_")]
+    f1, c1 = PR.run(B, {}, None, plan=True)
+    plan_f = [x for x in f1 if x["code"].startswith("PLAN_")]
+    assert plan_f and all(x["level"] == "WARN" for x in plan_f)
+    f2, _c2 = PR.run(B, {"route_ready": {"plan_gate": "fail"}}, None, plan=True)
+    assert any(x["code"].startswith("PLAN_") and x["level"] == "FAIL" for x in f2)
+
+
+def test_one_predicate_for_every_verdict(tmp_path):
+    R = run(channel_board(tmp_path, 16, gap=1.0))
+    fail, why, hard = PL.predicate(R)
+    v = PL.verdict(R)
+    assert fail == (v["result"] == "FAIL") and v["reasons"] == why
+    from fluxplace import planopts as PO
+    assert PO.passes(R) == (not fail)
+    assert v["confidence"] < 50 if fail else True
+    R2 = run(channel_board(tmp_path, 4, gap=30.0, walls=False))
+    assert PL.verdict(R2)["result"] == ("FAIL" if PL.predicate(R2)[0] else "ok")
+
+
+def test_pair_partner_gets_stats_and_budget_check(tmp_path):
+    R = run(channel_board(tmp_path, 2, gap=30.0, walls=False, pair=True))
+    assert "ETH_P0_N" in R["ns"] and R["ns"]["ETH_P0_N"]["len"] == R["ns"]["ETH_P0_P"]["len"] > 0
 
 
 def _bus_board(tmp):

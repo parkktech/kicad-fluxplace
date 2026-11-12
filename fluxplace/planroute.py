@@ -19,7 +19,7 @@ from . import netclass as NC
 
 CODES = ["PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_POWER_NO_PLANE", "PLAN_NO_VIA_SITE", "PLAN_OVERFLOW", "PLAN_NET_OVER_BUDGET", "PLAN_PAIR_SPLIT",
          "PLAN_RF_LAYER_CHANGES", "PLAN_UNREACHABLE", "PLAN_BUS_WEAVE", "PLAN_PART_IN_CORRIDOR", "PLAN_RETURN_PATH", "PLAN_ZONING"]
-FAIL_CODES = ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_OVERFLOW")
+FAIL_CODES = ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_OVERFLOW")   # kept for importers; the predicate is is_hard_failure
 
 
 def open_state(B, board_path=None, method="text"):
@@ -57,8 +57,8 @@ def score_of(pr, findings, ns, cls=None):
 
 def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=None, log=None, iterations=None,
         open_method="text", cls=None, variant=None):
-    variant = variant or ((cons or {}).get("plan") or {}).get("variant")
     """-> result dict {pr, cls, plan, gr, ns, findings, score, comp, state, timing, mode}."""
+    variant = variant or ((cons or {}).get("plan") or {}).get("variant")
     log = log or (lambda m: None)
     cons = cons or {}
     t0 = time.time()
@@ -91,6 +91,45 @@ def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=Non
                        "total_s": round(time.time() - t0, 1)}}
 
 
+HARD_CODES = ("PLAN_PIN_SEALED", "PLAN_ESCAPE_OVERSUBSCRIBED", "PLAN_UNREACHABLE", "PLAN_NO_VIA_SITE", "PLAN_RF_LAYER_CHANGES")
+
+
+def is_hard_failure(x, pr=None):
+    """One finding that fails the verdict by itself (the single PASS predicate, see `predicate`)."""
+    c = x["code"]
+    if c in HARD_CODES:
+        return True
+    if c == "PLAN_POWER_NO_PLANE":
+        return bool((pr or {}).get("fail_on_power_no_plane", True))
+    if c == "PLAN_NET_OVER_BUDGET":
+        return x.get("cls") in GR.HARD
+    if c == "PLAN_OVERFLOW":
+        return bool(x.get("risky"))        # over capacity somewhere outside the part courtyards: counted through risk_frac / risk_nets below
+    return False
+
+
+def predicate(R):
+    """THE verdict predicate used by plan-route (exit code), the route-ready gate and plan-options: FAIL when any of: sealed pin, oversubscribed
+    pin group, unreachable connection, plane pin without via site, RF net over its layer-change limit, rail without plane/pour
+    (`[plan] fail_on_power_no_plane`, default true), a hard-class net over budget (rf, switch_node, bypass, pair), the share of planned nets at risk above
+    `max_risk_frac` (0.06), or more than `max_risk_nets` (10) nets at risk.  -> (fail, [reasons], hard failure count)."""
+    pr = R["pr"]
+    hard = [x for x in R["findings"] if x["code"] != "PLAN_OVERFLOW" and is_hard_failure(x, pr)]
+    why = sorted({x["code"] for x in hard})
+    nrisk = R["comp"]["risk_nets"]
+    if R["risk_frac"] > pr["max_risk_frac"]:
+        why.append(f"risk_frac {R['risk_frac']:.3f} > {pr['max_risk_frac']:g}")
+    if nrisk > pr["max_risk_nets"]:
+        why.append(f"{nrisk} nets at risk > {pr['max_risk_nets']:g}")
+    return bool(why), why, len(hard)
+
+
+def rank_key(R):
+    """Lexicographic quality of a plan, lower is better: (FAIL flag, hard failure count, risk_frac, PLAN_SCORE)."""
+    fail, _why, hard = predicate(R)
+    return (int(fail), hard, R["risk_frac"], R["score"])
+
+
 def confidence(R):
     """Routability confidence 0-100 (docs/commands/plan-route.md): 100 x (0.6 A + 0.2 H + 0.2 S) - 15 x (sealed + oversubscribed pins, at most 45),
        A = 1 - risk_frac / 0.20 (risk_frac = share of planned nets whose path crosses an over-capacity cell outside part courtyards),
@@ -108,17 +147,21 @@ def confidence(R):
     S = min(1.0, max(0.0, min(sl))) if sl else 1.0
     c = Counter(f["code"] for f in R["findings"])
     v = 100 * (0.6 * A + 0.2 * H + 0.2 * S) - min(45, 15 * (c["PLAN_PIN_SEALED"] + c["PLAN_ESCAPE_OVERSUBSCRIBED"]))
+    v -= min(20, 10 * c["PLAN_UNREACHABLE"]) + min(20, 5 * c["PLAN_NO_VIA_SITE"]) + min(20, 5 * sum(
+        1 for f in R["findings"] if f["code"] == "PLAN_NET_OVER_BUDGET" and f.get("cls") in GR.HARD))
+    if predicate(R)[0]:
+        v = min(v, 49)                                  # a failing verdict never reads as confident
     return round(min(100.0, max(0.0, v))), {"routable_share": A, "headroom": round(H, 2), "slack": round(S, 2), "risk_frac": R["risk_frac"]}
 
 
 def verdict(R):
     f = R["findings"]
     c = Counter(x["code"] for x in f)
-    thr = float(((R["pr"].get("max_risk_frac")) if "max_risk_frac" in R["pr"] else 0.06))
-    fail = bool(c["PLAN_PIN_SEALED"] or c["PLAN_ESCAPE_OVERSUBSCRIBED"] or R["risk_frac"] > thr)
+    thr = float(R["pr"]["max_risk_frac"])
+    fail, why, _hard = predicate(R)
     conf, parts = confidence(R)
     return {"risk_frac": R["risk_frac"], "predicted_routable": round(1 - R["risk_frac"], 3), "causes": R["causes"], "max_risk_frac": thr,
-            "score": R["score"], "confidence": conf, "conf_terms": parts, "result": "FAIL" if fail else "ok", "counts": {k: c[k] for k in CODES if c[k]},
+            "score": R["score"], "confidence": conf, "conf_terms": parts, "result": "FAIL" if fail else "ok", "reasons": why, "counts": {k: c[k] for k in CODES if c[k]},
             "components": R["comp"], "mode": R["mode"], "nets_planned": len(R["gr"].nets),
             "overflow_total": R["gr"].summary()["overflow"], "timing": R["timing"]}
 
@@ -225,7 +268,7 @@ def plan_section(R):
                         "legend": "d=direct [dir,lane mm], v=via slot [x,y,stub], p=pour, s=sealed [blocker], n=no via site"},
             "grid": grid, "route": nets, "channels": channels,
             "verdict": {"risk_frac": v["risk_frac"], "predicted_routable": v["predicted_routable"], "causes": v["causes"], "score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "result": v["result"], "mode": v["mode"], "components": v["components"],
-                        "counts": v["counts"], "timing": v["timing"],
+                        "counts": v["counts"], "reasons": v["reasons"],
                         "findings": rank(R["findings"])[:60], "floors": {k: R["pr"][k] for k in (
                             "track_mm", "clearance_mm", "via_mm", "drill_mm", "cell_mm")}}}
 
@@ -328,6 +371,8 @@ def calibrate(B, cons, spec, board_path, grid_scan=True):
 def write_constants(path, best):
     """Replace/append util and jog_frac in the `[plan]` table of a constraints TOML (text edit, other keys kept)."""
     import re as _re
+    import shutil
+    shutil.copyfile(path, path + ".bak")                       # never rewrite a constraints file without a backup
     txt = open(path).read()
     kv = {"util": best["util"], "jog_frac": best["jog_frac"]}
     m = _re.search(r"^\[plan\][^\n]*\n", txt, _re.M)

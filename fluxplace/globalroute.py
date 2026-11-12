@@ -47,13 +47,26 @@ def _union_len(iv, lo, hi):
     return tot + max(0.0, cur_b - cur_a)
 
 
-CTRL_NAMES = re.compile(r"^(ETH_|USB|PCIE|MIC_|SPK_|HP[LR]_|LINE|HDMI|CSI|DSI|CLK|RF_)", re.I)
+DEFAULT_CTRL_NAMES = [r"^(ETH|USB|PCIE|HDMI|MIPI|CSI|DSI|SATA|LVDS|JESD)[_0-9]"]
 
 
 def is_controlled(name, info, cons=None):
-    """A net with a designed width/gap/reference: pair, rf and clock classes, Ethernet/USB/PCIe/audio names, `[nets.X] impedance`."""
-    n = ((cons or {}).get("nets") or {}).get(name) or {}
-    return info["class"] in ("pair", "rf", "clock") or bool(CTRL_NAMES.match(name)) or any("imped" in k for k in n)
+    """A net with a designed width/gap/reference.  From the project, in this order: the net class (pair, rf, clock), `[nets.X]` with an
+    impedance key, `[rf] nets`, a `[pairs.PREFIX]` family, `[plan] controlled_nets` (globs); only as a fallback the generic interface-name
+    patterns of `[plan] controlled_names` (default: ETH/USB/PCIE/HDMI/MIPI/CSI/DSI/SATA/LVDS/JESD)."""
+    import fnmatch
+    c = cons or {}
+    if info["class"] in ("pair", "rf", "clock"):
+        return True
+    n = (c.get("nets") or {}).get(name) or {}
+    if any("imped" in k for k in n) or name in ((c.get("rf") or {}).get("nets") or []):
+        return True
+    if any(name.startswith(pfx) for pfx in (c.get("pairs") or {})):
+        return True
+    pl = c.get("plan") or {}
+    if any(fnmatch.fnmatch(name, g) for g in pl.get("controlled_nets", [])):
+        return True
+    return any(re.search(rx, name, re.I) for rx in pl.get("controlled_names", DEFAULT_CTRL_NAMES))
 
 
 def is_fixed_width(name, info, cons=None):
@@ -88,10 +101,10 @@ class GlobalRoute:
             self.layers += ["In5.Cu", "In6.Cu"]
         self.planes = planes
         self.nl = len(self.layers)
-        # preferred direction per layer: `[plan] layer_dir = {"In2.Cu" = "h", "In3.Cu" = "v"}` (default In2 east-west, In3 north-south)
-        ld = {"In2.Cu": "h", "In3.Cu": "v"}
-        if variant == "dirswap":
-            ld = {"In2.Cu": "v", "In3.Cu": "h"}
+        # preferred direction per inner signal layer: alternating east-west / north-south along the stack, `[plan] layer_dir` overrides; outer layers are local
+        inner = [l for l in self.layers if l not in (B["copper"][0], B["copper"][-1])]
+        first = "v" if variant == "dirswap" else "h"
+        ld = {l: (first if k % 2 == 0 else ("v" if first == "h" else "h")) for k, l in enumerate(inner)}    # alternate along the stack
         ld.update(((self.cons.get("plan") or {}).get("layer_dir") or {}))
         self.pref = [({"h": 0, "v": 1}.get(str(ld.get(l, "")).lower())) for l in self.layers]
         self.wrong = float((self.cons.get("plan") or {}).get("wrong_way", 1.5))
@@ -171,17 +184,51 @@ class GlobalRoute:
         self.remove_tag(ref)
         g = self.pr["clearance_mm"] + self.pr["track_mm"] / 2
         vg = self.pr["clearance_mm"] + self.pr["via_mm"] / 2
-        for q in self.B["parts"][ref]["pads"]:
+        pads = self.B["parts"][ref]["pads"]
+        thr = self.pr["track_mm"] + 2 * self.pr["clearance_mm"]
+        for ids, rect in self._pad_obstacles(pads, thr):
+            self._add_rect(ref, rect, ids, g)
+        for q in pads:
             r = EP.prect(q)
-            ids = [self.lid[l] for l in q["layers"] if l in self.lid]
-            if q["tht"]:
-                ids += [self.lid[l] for l in self.layers if l not in self.real]
-            if ids:
-                self._add_rect(ref, r, ids, g)
             vr = (r[0] - vg, r[1] - vg, r[2] + vg, r[3] + vg)
             for c in self._cells_of_rect(vr):
                 self.vobs[c][ref].append(vr)
                 self.tag_cells[ref].add(c)
+
+    def _pad_obstacles(self, pads, thr):
+        """[(layer ids, rect)]: pads of one layer set whose gaps are below track + 2 x clearance (no track fits between them) merge
+        into ONE obstacle, so a 0.4-0.5 mm pitch row is a wall and not a row of slivers the jog rule would ignore."""
+        by = defaultdict(list)
+        for q in pads:
+            ids = [self.lid[l] for l in q["layers"] if l in self.lid]
+            if q["tht"]:
+                ids += [self.lid[l] for l in self.layers if l not in self.real]
+            if ids:
+                by[tuple(sorted(ids))].append(EP.prect(q))
+        out = []
+        for ids, rs in by.items():
+            par = list(range(len(rs)))
+
+            def find(i):
+                while par[i] != i:
+                    par[i] = par[par[i]]
+                    i = par[i]
+                return i
+            for i in range(len(rs)):
+                for j in range(i + 1, len(rs)):
+                    a, b = rs[i], rs[j]
+                    if max(a[0] - b[2], b[0] - a[2], 0) < thr and max(a[1] - b[3], b[1] - a[3], 0) < thr and \
+                            math.hypot(max(a[0] - b[2], b[0] - a[2], 0), max(a[1] - b[3], b[1] - a[3], 0)) < thr:
+                        par[find(i)] = find(j)
+            comp = defaultdict(list)
+            for i, r in enumerate(rs):
+                comp[find(i)].append(r)
+            for grp in comp.values():
+                if len(grp) >= 3:
+                    out.append((list(ids), (min(r[0] for r in grp), min(r[1] for r in grp), max(r[2] for r in grp), max(r[3] for r in grp))))
+                else:
+                    out += [(list(ids), r) for r in grp]
+        return out
 
     def remove_tag(self, tag):
         for c in self.tag_cells.pop(tag, ()):
@@ -204,25 +251,33 @@ class GlobalRoute:
             if not (z["keepout"] and z["pts"]) or not (z["no_tracks"] or z.get("no_vias")):
                 continue
             ids = [self.lid[l] for l in z["layers"] if l in self.lid]
+            if set(self.B["copper"]) <= set(z["layers"]):                    # a keep-out through the whole stack also closes the extra layers
+                ids += [self.lid[l] for l in self.layers if l not in self.real]
             xs, ys = [p[0] for p in z["pts"]], [p[1] for p in z["pts"]]
             bb = (min(xs), min(ys), max(xs), max(ys))
             from . import geom as GM
+            rect_poly = len(set(xs)) <= 2 and len(set(ys)) <= 2             # axis-aligned rectangle: exact intersection, however thin
             for c in self._cells_of_rect(bb):
                 cb = self._cell_box(c)
-                n = 0
-                for a in range(4):
-                    for b in range(4):
-                        if GM.poly_has(z["pts"], cb[0] + (a + .5) * self.cell / 4, cb[1] + (b + .5) * self.cell / 4):
-                            n += 1
-                if n == 0:
-                    continue
-                f = n / 16.0
-                full = (cb[0], cb[1], cb[2], cb[3])
-                if f > 0.9:
-                    rects = [full]
-                else:        # a thin sliver: block the covered share of the width, both directions
-                    w = f * self.cell
-                    rects = [(cb[0], cb[1], cb[0] + w, cb[3]), (cb[0], cb[1], cb[2], cb[1] + w)]
+                if rect_poly:
+                    r = (max(cb[0], bb[0]), max(cb[1], bb[1]), min(cb[2], bb[2]), min(cb[3], bb[3]))
+                    if r[2] <= r[0] or r[3] <= r[1]:
+                        continue
+                    rects = [r]
+                else:
+                    n, m = 0, 12
+                    for a in range(m):
+                        for b in range(m):
+                            if GM.poly_has(z["pts"], cb[0] + (a + .5) * self.cell / m, cb[1] + (b + .5) * self.cell / m):
+                                n += 1
+                    if n == 0:
+                        continue
+                    f = n / float(m * m)
+                    if f > 0.9:
+                        rects = [cb]
+                    else:        # a sliver: block the covered share of the width, both directions
+                        w = f * self.cell
+                        rects = [(cb[0], cb[1], cb[0] + w, cb[3]), (cb[0], cb[1], cb[2], cb[1] + w)]
                 if z["no_tracks"]:
                     for l in ids:
                         for r in rects:
@@ -232,6 +287,7 @@ class GlobalRoute:
                     for r in rects:
                         self.vobs[c][f"ko{k}"].append(r)
                     self.tag_cells[f"ko{k}"].add(c)
+        self._outline_cells(allids)
         if not self.ignore_routing:
             for s in B["segs"]:
                 l = self.lid.get(s["layer"])
@@ -285,6 +341,43 @@ class GlobalRoute:
                         self._add_rect("lanes", tuple(cur), [l], g)
                     if r is not None:
                         cur = list(r)
+
+    def _outline_cells(self, allids):
+        """Cells outside the board outline, in cut-outs or inside the copper-to-edge strip carry no tracks or vias: the grid is built from the
+        bounding box, so without this the area around an L-shaped or notched board would count as free capacity."""
+        edge = self.B.get("edge")
+        if not edge:
+            return
+        from . import geom as GM
+        from . import routediag as RD
+        m = self.pr["edge_clr_mm"]
+        bbs = [(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]), a, b) for a, b in edge]
+        for c in range(self.N):
+            cb = self._cell_box(c)
+            near = [t for t in bbs if t[0] < cb[2] + m and cb[0] - m < t[2] and t[1] < cb[3] + m and cb[1] - m < t[3]]
+            cxy = ((cb[0] + cb[2]) / 2, (cb[1] + cb[3]) / 2)
+            if not near:
+                f_ok = 1.0 if GM.edge_has(edge, *cxy) else 0.0
+            else:
+                ok, n = 0, 6
+                for a in range(n):
+                    for b in range(n):
+                        x, y = cb[0] + (a + .5) * self.cell / n, cb[1] + (b + .5) * self.cell / n
+                        if GM.edge_has(edge, x, y) and all(RD._seg_dist(x, y, t[4][0], t[4][1], t[5][0], t[5][1]) >= m for t in near):
+                            ok += 1
+                f_ok = ok / float(n * n)
+            if f_ok >= 0.999:
+                continue
+            if f_ok < 0.1:
+                rects = [cb]
+            else:
+                w = (1.0 - f_ok) * self.cell
+                rects = [(cb[0], cb[1], cb[0] + w, cb[3]), (cb[0], cb[1], cb[2], cb[1] + w)]
+            for r in rects:
+                for l in allids:
+                    self.obs[(l, c)]["outline"].append(r)
+                self.vobs[c]["outline"].append(r)
+            self.tag_cells["outline"].add(c)
 
     def _add_seg(self, l, s, g):
         (ax, ay), (bx, by) = s["a"], s["b"]
@@ -814,6 +907,8 @@ class GlobalRoute:
             r = self.routes.get(name)
             if not r:
                 out[name] = {"len": 0.0, "vias": 0, "layers": [], "unreached": len(nt["terms"]) - 1, "cells": 0}
+                for m in nt["members"][1:]:
+                    out[m] = dict(out[name])
                 continue
             ln, un, lays, cells = 0.0, 0, set(), 0
             hist = {}
@@ -833,6 +928,8 @@ class GlobalRoute:
                 cells += len(p)
             out[name] = {"len": round(ln, 2), "vias": r["vias"], "layers": sorted(lays), "unreached": un, "cells": cells,
                          "dom": max(hist, key=lambda k: (hist[k], k)) if hist else ""}
+            for m in nt["members"][1:]:                  # a pair routes as one demand: both legs carry the same copper
+                out[m] = dict(out[name])
         return out
 
     def summary(self):
@@ -935,13 +1032,15 @@ def findings(gr, ns, parts_near=None):
     for name, nt in gr.nets.items():
         st = ns[name]
         info = nt["info"]
-        lim = NC.effective_budget(info)
-        if lim is not None and st["len"] > lim + 1e-6 and not st["unreached"]:
-            ends = sorted({t["pad"].split(".")[0] for t in nt["terms"]})
-            out.append({"code": "PLAN_NET_OVER_BUDGET", "net": name, "value": st["len"], "limit": round(lim, 1), "cls": info["class"],
-                        "msg": f"{name} ({info['class']}) estimated copper {st['len']:.1f} mm > budget {lim:.1f} mm "
-                               f"(parts {', '.join(ends[:4])})",
-                        "suggestion": f"bring {' and '.join(ends[:2])} closer by {st['len'] - lim:.1f} mm"})
+        for m in nt["members"]:                         # both legs of a pair are checked against their own budget
+            minfo = gr.cls.get(m, info)
+            lim = NC.effective_budget(minfo)
+            if lim is not None and ns[m]["len"] > lim + 1e-6 and not st["unreached"]:
+                ends = sorted({t["pad"].split(".")[0] for t in nt["terms"]})
+                out.append({"code": "PLAN_NET_OVER_BUDGET", "net": m, "value": ns[m]["len"], "limit": round(lim, 1), "cls": minfo["class"],
+                            "msg": f"{m} ({minfo['class']}) estimated copper {ns[m]['len']:.1f} mm > budget {lim:.1f} mm "
+                                   f"(parts {', '.join(ends[:4])})",
+                            "suggestion": f"bring {' and '.join(ends[:2])} closer by {ns[m]['len'] - lim:.1f} mm"})
         if st["unreached"]:
             out.append({"code": "PLAN_UNREACHABLE", "net": name, "value": st["unreached"],
                         "msg": f"{name}: {st['unreached']} connection(s) found no path (every route is walled by capacity-0 cells)",

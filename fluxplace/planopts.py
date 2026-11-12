@@ -51,21 +51,57 @@ def _shift(node, fx, fy):
     return _PT.sub(f, node)
 
 
-def edge_parts(B, margin=1.5):
-    """{ref: (left, right, top, bottom)} for parts whose courtyard touches an outline edge: they travel with that edge."""
+def edge_parts(B, cons=None):
+    """{ref: (left, right, top, bottom)}: the parts that travel with an edge when it grows.  Explicit list first: `[plan] edge_parts = [refs]`
+    (each goes with its nearest edge, however far it is set back); plus the edge-mounted connectors of legality.edge_mounted; plus, as a
+    heuristic fallback, parts whose courtyard is within `[plan] edge_margin_mm` (1.5) of an edge."""
+    from . import legality as LGL
+    pl = (cons or {}).get("plan") or {}
+    margin = float(pl.get("edge_margin_mm", 1.5))
     x0, y0, x1, y1 = B["bbox"]
     out = {}
+    explicit = set(pl.get("edge_parts", [])) | set(LGL.edge_mounted(B, cons or {}))
     for ref, p in B["parts"].items():
         c = p["court"]
-        e = (c[0] <= x0 + margin, c[2] >= x1 - margin, c[1] <= y0 + margin, c[3] >= y1 - margin)
+        d = (c[0] - x0, x1 - c[2], c[1] - y0, y1 - c[3])
+        if ref in explicit:
+            k = min(range(4), key=lambda i: d[i])
+            out[ref] = tuple(i == k for i in range(4))
+            continue
+        e = tuple(v <= margin for v in d)
         if any(e) and not (e[0] and e[1]) and not (e[2] and e[3]):
             out[ref] = e
     return out
 
 
-def grow_text(text, B, grow):
-    """Move the outline's left/right/top/bottom edges out by grow = (l, r, t, b) mm.  Edge graphics and full-board pours follow the edge
-    by the half-plane rule; parts touching an edge (and their own keep-outs) and small keep-outs at an edge shift with it; the rest stays."""
+def _outer_loop_items(text, B, nodes):
+    """Edge.Cuts items that belong to a loop touching the outline's bounding box (the outer outline); interior loops (cut-outs) are not."""
+    pts = {i: [(round(float(a), 2), round(float(b), 2)) for _k, a, b in _PT.findall(text[s:e])] for i, (s, e) in enumerate(nodes)}
+    par = list(range(len(nodes)))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    where = {}
+    for i, ps in pts.items():
+        for q in ps:
+            j = where.setdefault(q, i)
+            par[find(i)] = find(j)
+    x0, y0, x1, y1 = B["bbox"]
+    outer = set()
+    for i, ps in pts.items():
+        if any(abs(x - x0) < 0.02 or abs(x - x1) < 0.02 or abs(y - y0) < 0.02 or abs(y - y1) < 0.02 for x, y in ps):
+            outer.add(find(i))
+    return {i for i in pts if find(i) in outer}
+
+
+def grow_text(text, B, grow, cons=None):
+    """Move the OUTER outline's left/right/top/bottom edges out by grow = (l, r, t, b) mm.  Only Edge.Cuts items of the loop that touches the
+    bounding box move (half-plane rule for its points); interior cut-outs stay where they are.  Full-board pours follow the same rule; the parts of
+    `edge_parts` (explicit list, edge-mounted connectors, margin heuristic) travel with their edge together with their own keep-outs and small
+    keep-outs hugging an edge; everything else stays."""
     gl, gr_, gt, gb = grow
     x0, y0, x1, y1 = B["bbox"]
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -73,13 +109,17 @@ def grow_text(text, B, grow):
     half_y = lambda y: y - gt if y < cy else y + gb
     root_end = BW._end(text, text.index("("))
     edits = []
-    ep = edge_parts(B)
-    for s, e in BW._children(text, 0, root_end):
+    ep = edge_parts(B, cons)
+    kids = BW._children(text, 0, root_end)
+    edge_nodes = [(s, e) for s, e in kids if text[s + 1:s + 12].split()[0].rstrip(")").startswith("gr_") and '"Edge.Cuts"' in text[s:e]]
+    outer = _outer_loop_items(text, B, edge_nodes)
+    for i, (s, e) in enumerate(edge_nodes):
+        if i in outer:
+            edits.append((s, e, _shift(text[s:e], half_x, half_y)))
+    for s, e in kids:
         tag = text[s + 1:s + 12].split()[0].rstrip(")")
         node = text[s:e]
-        if tag.startswith("gr_") and '"Edge.Cuts"' in node:
-            edits.append((s, e, _shift(node, half_x, half_y)))
-        elif tag == "zone":
+        if tag == "zone":
             pts = [(float(a), float(b)) for _k, a, b in _PT.findall(node)]
             if not pts:
                 continue
@@ -126,6 +166,8 @@ def scratch_cons(cons, rules, base_track=BASE_TRACK):
     """Constraints dict for an option: the standard class (0.15 / 0.15) unless the option changes it."""
     c = copy.deepcopy(cons)
     pl = c.setdefault("plan", {})
+    if subfloor(rules, float(pl.get("floor_mm", FLOOR))):
+        pl["allow_subfloor"] = True
     pl.setdefault("track_mm", base_track)
     pl.setdefault("clearance_mm", base_track)
     pl.setdefault("design_track_mm", pl["track_mm"])
@@ -161,6 +203,7 @@ def toml_text(rules):
 
 
 def subfloor(rules, floor=FLOOR):
+    """Any track/clearance (global or neck-down) below the owner's floor (`[plan] floor_mm`, default 0.127)."""
     vals = [rules.get("track_mm"), rules.get("clearance_mm")] + [v for n in rules.get("neck", {}).values() for v in (n["track_mm"], n["clearance_mm"])]
     return any(v is not None and v < floor - 1e-9 for v in vals)
 
@@ -170,7 +213,7 @@ def relative_cost(area_cm2, rules, layers, cons, base_layers=4):
     pen = 0.0
     if layers > base_layers:
         pen += c["layer_pair"] * (layers - base_layers) / 2.0
-    if subfloor(rules):
+    if subfloor(rules, float(((cons.get("plan") or {}).get("floor_mm", FLOOR)))):
         pen += c["track_subfloor"]
     elif rules.get("track_mm") is not None and rules["track_mm"] < BASE_TRACK - 1e-9:
         pen += c["track_tight"]
@@ -185,18 +228,23 @@ def relative_cost(area_cm2, rules, layers, cons, base_layers=4):
 
 # ------------------------------------------------------------------ one option (worker)
 def passes(R):
-    """PASS = no sealed or oversubscribed pins, no plane pin without a via site, nothing unreachable, and the share of planned nets whose
-    path crosses an over-capacity cell outside the part courtyards is within `[plan] max_risk_frac` (0.06: the V1.6 board routed 94 %)."""
-    c = R["comp"]
-    return not (c["sealed"] or c["oversub"] or c["no_via_site"] or c["unreached"]) and R["risk_frac"] <= R["pr"]["max_risk_frac"]
+    """PASS = the single plan predicate (planroute.predicate): no sealed/oversubscribed pin, no missing via site, nothing unreachable, no
+    hard-class over-budget net, no rail without plane, and the at-risk nets within `max_risk_frac` and `max_risk_nets`."""
+    from . import planroute as PL
+    return not PL.predicate(R)[0]
 
 
 def controlled_metrics(R):
+    """{net: (planned length mm, vias, ratsnest MST mm)} for EVERY controlled net, both legs of a pair included."""
     gr, ns = R["gr"], R["ns"]
+    pads = NC.net_pads(gr.B)
     m = {}
     for n, nt in gr.nets.items():
-        if GR.is_controlled(n, nt["info"], R.get("cons")) or nt["cls"] in ("pair", "rf", "clock"):
-            m[n] = (ns[n]["len"], ns[n]["vias"])
+        for leg in nt["members"]:
+            info = gr.cls.get(leg, nt["info"])
+            if GR.is_controlled(leg, info, R.get("cons")):
+                ps = [(p["x"], p["y"]) for p in pads.get(leg, [])]
+                m[leg] = (ns[leg]["len"], ns[leg]["vias"], round(NC.mst_length(ps), 2))
     return m
 
 
@@ -225,14 +273,14 @@ def evaluate(job):
     text = open(job["base_board"], errors="surrogateescape").read()
     B0 = RD.load(job["base_board"])
     if any(grow):
-        text = grow_text(text, B0, grow)
+        text = grow_text(text, B0, grow, cons)
     path = os.path.join(out, name + ".kicad_pcb")
     open(path, "w", errors="surrogateescape").write(text)
     B = RD.load(path)
     R = PL.run(B, cons, spec, ignore_routing=True)
     placed, moved, mean_d = False, 0, 0.0
-    if job["place_time"] > 0 and (any(grow) or not passes(R)):
-        mv, st = PP.plan_place(B, cons, spec, log=lambda m: None, time_limit=job["place_time"], rotation=job.get("rotation", False),
+    if job["place_evals"] > 0 and (any(grow) or not passes(R)):
+        mv, st = PP.plan_place(B, cons, spec, log=lambda m: None, max_evals=job["place_evals"], rotation=job.get("rotation", False),
                                spread=grow if any(grow) else None)
         if mv:
             text2, _done = BW.apply_moves(text, {r: v for r, v in mv.items() if r not in st["flips"]})
@@ -241,7 +289,7 @@ def evaluate(job):
             B2 = RD.load(path2)
             R2 = PL.run(B2, cons, spec, ignore_routing=True)
             os.remove(path2)
-            if R2["score"] <= R["score"]:                      # best-so-far, confirmed by a full plan: never end worse than the input
+            if not (PL.rank_key(R) < PL.rank_key(R2)):         # confirmed by a full plan on the predicate key: never end worse than the input
                 text, B, R, placed = text2, B2, R2, True
                 moved = len(mv)
                 mean_d = sum(math.hypot(x - B0["parts"][r]["pos"][0], y - B0["parts"][r]["pos"][1]) for r, (x, y, a) in mv.items()
@@ -260,7 +308,7 @@ def evaluate(job):
            "score": v["score"], "confidence": v["confidence"], "conf_terms": v["conf_terms"], "pass": passes(R),
            "sealed": v["components"]["sealed"] + v["components"]["oversub"], "overflow": v["components"]["overflow"],
            "no_via_site": v["components"]["no_via_site"], "counts": codes, "cost": round(cost, 1), "cost_pen": round(pen, 2),
-           "layers": nlay, "subfloor": subfloor(rules), "neck_violations": nv, "controlled": {k: list(x) for k, x in cm.items()},
+           "layers": nlay, "subfloor": subfloor(rules, float((cons.get("plan") or {}).get("floor_mm", FLOOR))), "neck_violations": nv, "controlled": {k: list(x) for k, x in cm.items()},
            "return_path": codes.get("PLAN_RETURN_PATH", 0), "placed": placed, "moved": moved, "mean_move_mm": round(mean_d, 2),
            "risk_frac": R["risk_frac"], "routable_pct": round(100 * (1 - R["risk_frac"])), "causes": R["causes"]["units"], "seconds": round(time.time() - t0, 1), "board": path}
     m = FM.build(B, cons, spec, path, cls=R["cls"])
@@ -288,16 +336,23 @@ def neck_rules(base, track, clr, margin=4.0):
 
 
 def perf_worse(res, base):
-    """Does the option lengthen/via-add controlled nets, add return-path findings, or leave a neck-down net without its geometry?"""
-    bl = sum(v[0] for v in base["controlled"].values())
-    ol = sum(res["controlled"].get(k, v)[0] for k, v in base["controlled"].items())
-    bv = sum(v[1] for v in base["controlled"].values())
-    ov = sum(res["controlled"].get(k, v)[1] for k, v in base["controlled"].items())
+    """The controlled-net rule, PER NET, fail closed:
+       - every controlled net of the baseline must be present in the option (missing = violation);
+       - zero added vias on any controlled net;
+       - planned length may exceed the baseline's only by what the option's geometry forces: the growth of the net's own ratsnest
+         (MST of its pads on the option board minus on the baseline board) plus 0.5 mm of grid rounding;
+       - no added return-path finding; no controlled/power net overflowing inside a neck-down."""
     why = []
-    if ol > bl * 1.02 + 2.0:
-        why.append(f"controlled copper {bl:.0f} -> {ol:.0f} mm")
-    if ov > bv * 1.05 + 2:
-        why.append(f"controlled vias {bv} -> {ov}")
+    for n, (bl, bv, bm) in sorted(base["controlled"].items()):
+        o = res["controlled"].get(n)
+        if o is None:
+            why.append(f"{n}: not planned in the option (fail closed)")
+            continue
+        if o[1] > bv:
+            why.append(f"{n}: vias {bv} -> {o[1]}")
+        allow = max(0.0, o[2] - bm) + 0.5
+        if o[0] > bl + allow:
+            why.append(f"{n}: copper {bl:.1f} -> {o[0]:.1f} mm (allowed +{allow:.1f})")
     if res["return_path"] > base["return_path"]:
         why.append(f"return-path findings {base['return_path']} -> {res['return_path']}")
     if res["neck_violations"]:
@@ -360,15 +415,20 @@ def describe(r, base_size):
 def format_table(base, ok, sub, miss, limit=12):
     L = [f"{'option':44s} {'size mm':>13s} {'score':>7s} {'conf':>4s} {'sealed':>6s} {'ovfl':>5s} {'cost':>6s}  performance impact / what moves"]
     bs = base["size"]
-    for tag, rows in (("PASS", ok), ("PASS-NOT-RECOMMENDED", sub), ("NEAREST MISS", miss[:5])):
+    off = [r for r in sub if r["subfloor"]]
+    for tag, rows in (("PASS", ok), ("PASS-NOT-RECOMMENDED", [r for r in sub if not r["subfloor"]]), ("NEAREST MISS", miss[:5])):
         for r in rows[:limit]:
             mv = f"{r['moved']} part(s) moved" if "moved" in r else ""
             L.append(f"{describe(r, bs)[:44]:44s} {r['size'][0]:6.1f}x{r['size'][1]:<6.1f} {r['score']:7.0f} {r['confidence']:4d} {r['sealed']:6d} "
                      f"{r['overflow']:5.0f} {100 * r['cost'] / base['cost']:5.0f}%  [{tag}] routable~{r['routable_pct']}% moved {r.get('moved', 0)}@{r.get('mean_move_mm', 0)}mm {r['impact']}")
+    if off:
+        L.append("not offered: below owner floor (needs an owner rule change): " + "; ".join(
+            f"{describe(r, bs)} -> {'passes' if r['pass'] else 'still fails'}, score {r['score']:.0f}" for r in off[:3]))
     return "\n".join(L)
 
 
 def prompt_text(base, ok, sub, miss):
+    """The one-line owner prompt.  Options below the owner's floor are NOT offered here: they are listed on a separate line."""
     W, H = base["size"]
     if base["pass"]:
         return f"Fits as is at {W:g} x {H:g} mm (PLAN_SCORE {base['score']:g})."
@@ -382,15 +442,16 @@ def prompt_text(base, ok, sub, miss):
         s += f"Recommended: {describe(best, base['size'])}."
     else:
         s += "No option within the limits passes. "
-        if sub:
-            s += f"Only with an owner rule change: {describe(sub[0], base['size'])}. "
         if miss:
             m = miss[0]
             s += f"Nearest miss: {describe(m, base['size'])} (overflow {m['overflow']:g}, sealed {m['sealed']})."
+    off = [r for r in sub if r["subfloor"] and not r["neck_violations"] and not r["perf_why"]]
+    if off:
+        s += f" Not offered (below the owner floor, would need an owner rule change): {'; '.join(describe(r, base['size']) for r in off[:2])}."
     return s
 
 
-def search(board, cons, spec, outdir, max_grow=6, workers=None, place_time=30.0, base_place_time=60.0, log=print, calib=None, hit_min=0.6):
+def search(board, cons, spec, outdir, max_grow=6, workers=None, place_evals=120, base_place_evals=250, log=print, calib=None, hit_min=0.6):
     """-> dict(baseline, ok, sub, miss, prompt, table, seconds, caveat)."""
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
@@ -400,7 +461,7 @@ def search(board, cons, spec, outdir, max_grow=6, workers=None, place_time=30.0,
 
     def run_jobs(jobs):
         for j in jobs:
-            j.update(outdir=outdir, cons=cons, spec=spec, place_time=j.get("place_time", place_time))
+            j.update(outdir=outdir, cons=cons, spec=spec, place_evals=j.get("place_evals", place_evals))
         with cf.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
             res = list(ex.map(evaluate, jobs))
         for r in res:
@@ -409,7 +470,7 @@ def search(board, cons, spec, outdir, max_grow=6, workers=None, place_time=30.0,
                 f"{'PASS' if r['pass'] else 'fail'} ({r['seconds']:.0f} s)")
         return res
 
-    base = run_jobs([{"name": "baseline", "grow": (0, 0, 0, 0), "rules": {}, "base_board": board, "place_time": base_place_time,
+    base = run_jobs([{"name": "baseline", "grow": (0, 0, 0, 0), "rules": {}, "base_board": board, "place_evals": base_place_evals,
                       "rotation": True}])[0]
     from . import routediag as RD, planroute as PL
     if base["pass"]:
@@ -426,16 +487,18 @@ def search(board, cons, spec, outdir, max_grow=6, workers=None, place_time=30.0,
     fab = (cons.get("fab") or {})
     sub_t = float(fab.get("min_track_mm", 0.10))
     sub_c = float(fab.get("min_clearance_mm", 0.10))
+    sub_ok = min(sub_t, sub_c) < fl - 1e-9              # sub-floor options exist only when the fab minimum is below the owner floor
     via_min = float(fab.get("min_via_dia_mm", 0.40))
     drill_min = float(fab.get("min_drill_mm", 0.20))
     jobs = []
     for e, g in zip(EDGES, ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))):
         jobs.append(dict(bl, name=f"grow_{e}_{max_grow}", grow=tuple(v * max_grow for v in g), rules={}))
     nl = neck_rules(base_view, fl, fl)
+    if sub_ok:
+        jobs += [dict(bl, name="neck_100", grow=(0,) * 4, rules=neck_rules(base_view, sub_t, sub_c)),
+                 dict(bl, name="global_100", grow=(0,) * 4, rules={"track_mm": sub_t, "clearance_mm": sub_c})]
     jobs += [dict(bl, name="neck_127", grow=(0,) * 4, rules=nl),
              dict(bl, name="global_127", grow=(0,) * 4, rules={"track_mm": fl, "clearance_mm": fl}),
-             dict(bl, name="neck_100", grow=(0,) * 4, rules=neck_rules(base_view, sub_t, sub_c)),
-             dict(bl, name="global_100", grow=(0,) * 4, rules={"track_mm": sub_t, "clearance_mm": sub_c}),
              dict(bl, name="via_min", grow=(0,) * 4, rules={"via_mm": via_min, "drill_mm": drill_min}),
              dict(bl, name="via_in_pad", grow=(0,) * 4, rules={"via_in_pad": [r for r in nl["neck"]["fanout"]["refs"]] or ["U*"]}),
              dict(bl, name="plane3v3", grow=(0,) * 4, rules={"variant": "plane3v3"}),

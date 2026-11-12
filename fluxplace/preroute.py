@@ -405,10 +405,15 @@ def congestion_findings(rep, cons=None):
 
 # ------------------------------------------------------------------ gate
 def use_plan(cons):
-    """`[route_ready] use_plan` (default true): the gate also runs plan-route (planroute.py) and fails on sealed pins and
-    overflow.  Only the gate entry points ask for it (plan=True); optimisers that call run() per move do not."""
-    v = ((cons or {}).get("route_ready") or {}).get("use_plan", True)
+    """`[route_ready] use_plan` (default FALSE: placement-only calibration of the plan is 10-41 %): the gate also runs plan-route
+    (planroute.py).  Its findings are WARN unless `[route_ready] plan_gate = "fail"` (then the plan verdict predicate blocks).  Only the gate
+    entry points ask for it (plan=True); optimisers that call run() per move do not."""
+    v = ((cons or {}).get("route_ready") or {}).get("use_plan", False)
     return bool(v)
+
+
+def plan_gate_fail(cons):
+    return str(((cons or {}).get("route_ready") or {}).get("plan_gate", "warn")).lower() == "fail"
 
 
 def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
@@ -435,7 +440,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
         PRES = PL.run(B, cons, spec, ignore_routing=False, cls=cls)
         plan_v = PL.verdict(PRES)
         for x in PL.rank(PRES["findings"]):
-            lvl = FAIL if (x["code"] in PL.FAIL_CODES and (x["code"] != "PLAN_OVERFLOW" or x.get("risky"))) else WARN
+            lvl = FAIL if (plan_gate_fail(cons) and PL.is_hard_failure(x, PRES["pr"])) else WARN
             f.append(_f(lvl, x["code"],
                         x["msg"] + (f" -> {x['suggestion']}" if x.get("suggestion") else ""),
                         refs=[x["part"]] if x.get("part") else x.get("parts", []), value=x.get("value", x.get("overflow")),

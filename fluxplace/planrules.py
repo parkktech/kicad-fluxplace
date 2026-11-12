@@ -136,27 +136,28 @@ def zoning(B, cls, cons):
 
 def overflow_causes(gr, B, pr):
     """Split the overflow (track units over capacity, summed over cell-layer-directions) by where it sits:
-    courtyard  = the cell centre lies inside a part courtyard on that layer's side (pads cover the cell: the escape planner's business),
-    fanout     = within 2 mm of a fine-pitch part's courtyard,
-    channel    = open channel between parts.   -> {cause: units, 'cells': {cause: n}} and the per-net list of at-risk (channel/fanout) nets."""
+    courtyard  = the cell centre lies under a part's courtyard ON A LAYER THE PART'S PADS BLOCK (an SMD part blocks only its own side, a part with
+                 through-hole pads blocks every layer): the pads cover the cell, the escape planner's business;
+    fanout     = within 2 mm of a fine-pitch part's courtyard on any side/layer, and every inner-layer cell under an SMD part (real fan-out congestion);
+    channel    = open channel between parts.   -> ({units, cells} per cause, {(layer id, cell): cause})."""
     from . import escapeplan as EP
     P = B["parts"]
-    fine = [(p["court"], p["side"]) for r, p in P.items() if EP.is_fine(p, pr) and not EP.is_mech(r)]
-    allp = [(p["court"], p["side"]) for r, p in P.items() if not EP.is_mech(r) and p["n_pads"] >= 1]
+    fine = [p["court"] for r, p in P.items() if EP.is_fine(p, pr) and not EP.is_mech(r)]
+    allp = [(p["court"], p["side"], p["tht"]) for r, p in P.items() if not EP.is_mech(r) and p["n_pads"] >= 1]
     out = {"courtyard": 0.0, "fanout": 0.0, "channel": 0.0}
     cells = {"courtyard": 0, "fanout": 0, "channel": 0}
     kind = {}
     for l in range(gr.nl):
-        side = "F.Cu" if gr.layers[l] == "F.Cu" else ("B.Cu" if gr.layers[l] == "B.Cu" else None)
+        lname = gr.layers[l]
         for c in range(gr.N):
             o = max(0.0, gr.uH[l][c] - gr.capH[l][c]) + max(0.0, gr.uV[l][c] - gr.capV[l][c])
             if o <= 0:
                 continue
             x, y = gr.xy_of(c)
-            inside = any(cb[0] <= x <= cb[2] and cb[1] <= y <= cb[3] and (side is None or sd == side) for cb, sd in allp)
-            if inside:
+            under = [(sd, tht) for cb, sd, tht in allp if cb[0] <= x <= cb[2] and cb[1] <= y <= cb[3]]
+            if any(tht or sd == lname for sd, tht in under):
                 k = "courtyard"
-            elif any(cb[0] - 2 <= x <= cb[2] + 2 and cb[1] - 2 <= y <= cb[3] + 2 and (side is None or sd == side) for cb, sd in fine):
+            elif under or any(cb[0] - 2 <= x <= cb[2] + 2 and cb[1] - 2 <= y <= cb[3] + 2 for cb in fine):
                 k = "fanout"
             else:
                 k = "channel"

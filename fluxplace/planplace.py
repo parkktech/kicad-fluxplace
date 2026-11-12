@@ -56,6 +56,11 @@ class PlanState:
         self.ns = self.gr.net_stats()
         self.findings = list(self.plan.findings) + GR.findings(self.gr, self.ns)
         self.score, self.comp = PL.score_of(self.pr, self.findings, self.ns, self.cls)
+        from . import planrules as PRL
+        _cz, kind = PRL.overflow_causes(self.gr, self.B, self.pr)
+        self.comp["risk_nets"] = len(PRL.risk_nets(self.gr, kind))
+        self.risk_frac = round(self.comp["risk_nets"] / max(1, len(self.gr.nets)), 3)
+        self.key = PL.rank_key({"pr": self.pr, "findings": self.findings, "comp": self.comp, "risk_frac": self.risk_frac, "score": self.score})
 
     def snapshot(self):
         g = self.gr
@@ -63,7 +68,7 @@ class PlanState:
                 "gr": g.snapshot(), "nets": {n: (nt["terms"], nt.get("split")) for n, nt in g.nets.items()},
                 "netset": dict(g.nets), "order": list(g.order), "capH": [list(a) for a in g.capH],
                 "capV": [list(a) for a in g.capV], "vcap": list(g.vcap), "split": (set(g.split_pairs), dict(g.pair_origin)),
-                "score": (self.score, self.comp, self.findings, self.ns)}
+                "score": (self.score, self.comp, self.findings, self.ns, self.risk_frac, self.key)}
 
     def restore(self, s, moved):
         g = self.gr
@@ -83,7 +88,7 @@ class PlanState:
         g._lane_fields()
         g.capH, g.capV, g.vcap = [list(a) for a in s["capH"]], [list(a) for a in s["capV"]], list(s["vcap"])
         g.restore(s["gr"])
-        self.score, self.comp, self.findings, self.ns = s["score"]
+        self.score, self.comp, self.findings, self.ns, self.risk_frac, self.key = s["score"]
 
     def update(self, moved, old_courts):
         """`moved` parts changed pose (B already updated); `old_courts` {ref: court before the move}."""
@@ -114,9 +119,23 @@ class PlanState:
         return A
 
 
+def key_less(a, b, eq=False):
+    """Lexicographic (FAIL flag, hard failures, risk_frac, PLAN_SCORE) comparison with tolerances; eq: `a <= b`."""
+    for x, y, tol in zip(a, b, (0.5, 0.5, 1e-9, 1e-6)):
+        if x < y - tol:
+            return True
+        if x > y + tol:
+            return False
+    return eq
+
+
 class PlanPlacer(RF.Refiner):
-    def __init__(self, B, cons=None, spec=None, seed=0, log=None, time_limit=None, max_try=150, max_rounds=80):
+    def __init__(self, B, cons=None, spec=None, seed=0, log=None, time_limit=None, max_try=150, max_rounds=80, max_evals=400):
         super().__init__(B, cons, spec, seed, log, time_limit)
+        # bounded by evaluations, not by the clock (deterministic); a wall-clock limit applies only when one is given explicitly
+        self.max_evals, self.evals = int(max_evals), 0
+        if time_limit is None:
+            self.t_end = float("inf")
         self.max_try, self.max_rounds_ = max_try, max_rounds
         self.ps = PlanState(B, self.cons, spec, cls=self.cls, log=log)
         self.score0 = self.ps.score
@@ -146,6 +165,9 @@ class PlanPlacer(RF.Refiner):
         return tot
 
     # ---- the one place a move is judged
+    def out_of_budget(self):
+        return self.evals >= self.max_evals or time.time() > self.t_end
+
     def try_move(self, kind, poses, reason="", slack=0.0, gain=0.0, flip=None, allow_equal=False):
         refs = list(poses)
         old = {r: self._pose(r) for r in refs}
@@ -163,14 +185,17 @@ class PlanPlacer(RF.Refiner):
             return False
         snap = self.ps.snapshot()
         before = self.ps.score
+        before_key = self.ps.key
+        self.evals += 1
         self.ps.update(set(refs), old_courts)
-        if self.ps.score < before - 1e-6 or (allow_equal and self.ps.score <= before + 1e-9):
+        if key_less(self.ps.key, before_key, eq=allow_equal):
             self.score = self.ps.score
             self.excess = ex
             self.stats[kind] += 1
             if flip:
                 self.flips ^= {flip}
             self.moves_log.append({"refs": refs, "kind": kind, "reason": reason, "before": before, "after": self.ps.score,
+                                   "key_before": list(before_key), "key_after": list(self.ps.key),
                                    "from": {r: [round(v, 3) for v in old[r]] for r in refs},
                                    "to": {r: [round(v, 3) for v in self._pose(r)] for r in refs}})
             return True
@@ -326,7 +351,7 @@ class PlanPlacer(RF.Refiner):
         P = self.B["parts"]
         n, tot = 0, 0.0
         for k in sorted((k for k in self.U if self._movable(k)), key=lambda k: P[k]["pos"][0] + P[k]["pos"][1]):
-            if time.time() > self.t_end:
+            if self.out_of_budget():
                 break
             x, y = P[k]["pos"]
             dx = -gl * (x1 - x) / W + gr_ * (x - x0) / W
@@ -349,7 +374,7 @@ class PlanPlacer(RF.Refiner):
                        key=lambda k: (-P[k]["n_pads"], k))
         n = 0
         for k in order:
-            if time.time() > self.t_end:
+            if self.out_of_budget():
                 break
             for rot in (90.0, 180.0, 270.0):
                 poses = self._shift(k, 0.0, 0.0, rot)
@@ -367,14 +392,13 @@ class PlanPlacer(RF.Refiner):
         if getattr(self, "do_rotation_pass", True):
             self.log(f"A1 rotation pass: {self.rotation_pass()} rotation(s) kept, PLAN_SCORE {self.score:.1f}")
         self.log(f"plan objective: PLAN_SCORE {self.score:.1f}, {len(self.U)} unit(s), {len(self.fixed)} fixed")
-        t_end = self.t_end
         rounds = 0
-        while rounds < self.max_rounds_ and time.time() < t_end:
+        while rounds < self.max_rounds_ and not self.out_of_budget():
             rounds += 1
             props = self.proposals()
             acc = False
             for _i, kind, poses, reason in props[:self.max_try]:
-                if time.time() > t_end:
+                if self.out_of_budget():
                     break
                 if self.try_move(kind, poses, reason):
                     acc = True
@@ -394,12 +418,26 @@ class PlanPlacer(RF.Refiner):
         return moves
 
 
-def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True, spread=None):
-    """-> (moves {ref: (x, y, angle)}, stats).  Mutates B."""
-    r = PlanPlacer(B, cons, spec, seed, log, time_limit)
+def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True, spread=None, max_evals=None):
+    """-> (moves {ref: (x, y, angle)}, stats).  Mutates B.  Moves are accepted on the incremental lexicographic key; afterwards a fresh FULL
+    plan is run and, if it is worse than the full plan of the input, EVERYTHING is reverted (moves = {}, stats["reverted_to_input"])."""
+    cons = cons or {}
+    pl = cons.get("placement") or {}
+    R0 = PL.run(B, cons, spec, ignore_routing=True)
+    r = PlanPlacer(B, cons, spec, seed, log, time_limit, max_evals=int(max_evals if max_evals is not None else pl.get("max_evals", 400)))
     r.do_rotation_pass = rotation
     r.spread = spread
     mv = r.run()
-    return mv, {"score_before": r.score0, "score_after": r.score, "components_before": r.comp0,
-                "components_after": r.ps.comp, "kept": dict(r.stats), "flips": sorted(r.flips), "reverted": r.reverted,
-                "log": r.moves_log}
+    R1 = PL.run(B, cons, spec, ignore_routing=True)
+    k0, k1 = PL.rank_key(R0), PL.rank_key(R1)
+    reverted = key_less(k0, k1)
+    if reverted:
+        for ref in sorted(r.flips):
+            GM.flip(B["parts"][ref])
+        r._apply(r.origin)
+        mv, r.flips = {}, set()
+        log(f"full plan after the moves is worse than the input ({k1} vs {k0}): reverted to the input")
+    return mv, {"score_before": R0["score"], "score_after": r.score, "score_confirmed": R0["score"] if reverted else R1["score"],
+                "key_input": list(k0), "key_final_full": list(k1), "reverted_to_input": reverted, "evals": r.evals,
+                "components_before": R0["comp"], "components_after": R0["comp"] if reverted else R1["comp"], "kept": dict(r.stats),
+                "flips": sorted(r.flips), "reverted": r.reverted, "log": [] if reverted else r.moves_log}

@@ -66,16 +66,57 @@ def test_map_with_plan_sections_and_render(tmp_path):
     assert open(files[0]).read().startswith("<svg")
 
 
-def test_plan_objective_moves_the_blocker_and_never_accepts_worse(tmp_path):
+def test_map_with_plan_sections_is_byte_identical_and_has_no_clock(tmp_path):
+    def build():
+        B = RD.load(TE.board(tmp_path, 0.35))
+        R = PL.run(B, CONS, None, ignore_routing=True)
+        m = FM.build(B, CONS, None, "x.kicad_pcb", cls=R["cls"])
+        m.update(PL.plan_section(R))
+        return FM.dumps(m)
+    a, b = build(), build()
+    assert a == b and "timing" not in a and "seconds" not in a
+
+
+def test_lexicographic_key_rejects_a_hard_failure_for_a_better_score():
+    from fluxplace.planplace import key_less
+    assert not key_less((0, 1, 0.0, 50.0), (0, 0, 0.0, 900.0))          # one more hard failure never pays for a lower score
+    assert key_less((0, 0, 0.0, 900.0), (0, 1, 0.0, 50.0))
+    assert key_less((0, 0, 0.02, 500.0), (0, 0, 0.05, 100.0))           # lower risk_frac beats a lower score
+    assert key_less((0, 0, 0.0, 10.0), (1, 0, 0.0, 10.0)) and not key_less((0, 0, 0.0, 10.0), (0, 0, 0.0, 10.0))
+    assert key_less((0, 0, 0.0, 10.0), (0, 0, 0.0, 10.0), eq=True)
+
+
+def test_plan_objective_moves_the_blocker_and_keeps_the_key_monotone(tmp_path):
     B = RD.load(TE.board(tmp_path, 0.35))
-    mv, st = PP.plan_place(B, CONS, None, log=lambda m: None, time_limit=60)
-    assert st["score_after"] < st["score_before"]
+    mv, st = PP.plan_place(B, CONS, None, log=lambda m: None, max_evals=200)
+    assert not st["reverted_to_input"] and st["score_confirmed"] < st["score_before"]
     assert st["components_before"]["sealed"] == 8 and st["components_after"]["sealed"] == 0
-    assert "R1" in mv and "U1" not in mv                      # the blocker moved, the fixed IC did not
-    assert st["log"] and all(e["after"] < e["before"] for e in st["log"])
-    prev = None
-    for e in st["log"]:                                       # the score only goes down, move after move
-        assert prev is None or e["before"] <= prev + 1e-6
-        prev = e["after"]
-    R = PL.run(RD.load(TE.board(tmp_path, 0.35)), CONS, None, ignore_routing=True)
-    assert st["score_before"] == R["score"]                   # the incremental state starts from the full plan
+    assert "R1" in mv and "U1" not in mv and "J1" not in mv and "J2" not in mv        # the blocker moved; fixed parts never
+    assert st["log"] and all(PP.key_less(e["key_after"], e["key_before"]) for e in st["log"])
+
+
+def test_incremental_state_agrees_with_a_fresh_full_plan_after_moves(tmp_path):
+    B = RD.load(TE.board(tmp_path, 0.35))
+    pp = PP.PlanPlacer(B, CONS, None, max_evals=40)
+    pp.do_rotation_pass = False
+    pp.run()
+    R = PL.run(B, CONS, None, ignore_routing=True)
+    assert pp.evals > 0 and pp.ps.comp["sealed"] == R["comp"]["sealed"] and pp.ps.comp["oversub"] == R["comp"]["oversub"]
+    assert abs(pp.ps.score - R["score"]) <= 0.10 * R["score"] + 5
+
+
+def test_a_worse_full_plan_reverts_the_whole_placement(tmp_path, monkeypatch):
+    B = RD.load(TE.board(tmp_path, 0.35))
+    calls = {"n": 0}
+    orig = PL.run
+
+    def fake(*a, **k):
+        R = orig(*a, **k)
+        calls["n"] += 1
+        if calls["n"] == 2:                      # the confirming full plan after the moves shows many more hard failures
+            R["findings"] = R["findings"] + [{"code": "PLAN_PIN_SEALED", "part": "U1", "pin": "1", "net": "x", "at": [0, 0], "msg": "", "suggestion": ""}] * 30
+        return R
+    monkeypatch.setattr(PL, "run", fake)
+    before = {r: p["pos"] for r, p in B["parts"].items()}
+    mv, st = PP.plan_place(B, CONS, None, log=lambda m: None, max_evals=60)
+    assert st["reverted_to_input"] and mv == {} and all(B["parts"][r]["pos"] == before[r] for r in before)
