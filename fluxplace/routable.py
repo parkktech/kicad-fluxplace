@@ -21,6 +21,7 @@ from . import anchors as AN
 from . import clusters as CL
 from . import geom as GM
 from . import legalise as LG
+from . import legality as LGL
 from . import netclass as NC
 from . import preroute as PR
 
@@ -97,6 +98,7 @@ class Placer:
         self.t_end = time.time() + float(pl.get("time_limit_s", 600))
         self.max_rounds = int(pl.get("max_rounds", 6))
         self.origin = self.snapshot()
+        self.bad0 = self.issues()
         self.best = None         # (score, snapshot)
         self.history = []
 
@@ -115,13 +117,15 @@ class Placer:
         f, card = PR.run(self.B, self.cons, self.spec)
         return card["score"]
 
+    def issues(self):
+        """Every legality violation on the live model, as a set of strings."""
+        res = LGL.Legal(self.B, self.cons, self.fixed).issues()
+        return {f"{k}:{x}" for k, v in res.items() for x in v}
+
     def valid(self):
-        M = LG._Model(self.B, self.cons, self.fixed, self.B["bbox"])
-        P = self.B["parts"]
-        rep = LG.verify(self.B, M, {r: (*P[r]["pos"], P[r]["angle"]) for r in P
-                                    if (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"]) != self.origin[r]},
-                        self.B["bbox"])
-        return not rep["outside"] and not rep["overlaps"]
+        """No violation beyond the ones the input board already had (legality.py: same-side
+        courtyards, the real outline, forbidden regions, no-through-hole regions)."""
+        return self.issues() <= self.bad0
 
     def consider(self, label):
         """Keep the best valid state seen; True when the search should stop (plateau/time)."""
@@ -360,11 +364,9 @@ class Placer:
                       or abs(norm(a - base[r][2])) > 1e-6}
         if not self.moves:
             self.log("no state beat the input board: nothing moved")
-        M = LG._Model(self.B, self.cons, self.fixed, self.B["bbox"])
-        rep = LG.verify(self.B, M, dict(self.moves), self.B["bbox"])
-        if rep["outside"] or rep["overlaps"]:
-            raise LG.PlacementError(f"routable: {len(rep['outside'])} outside the outline, "
-                                    f"{len(rep['overlaps'])} overlap(s): {(rep['outside'] + rep['overlaps'])[:6]}")
+        new = sorted(self.issues() - self.bad0)
+        if new:
+            raise LG.PlacementError(f"routable: {len(new)} new legality violation(s): {new[:6]}")
         return self.moves
 
 

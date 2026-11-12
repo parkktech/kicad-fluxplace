@@ -729,7 +729,7 @@ starting area, or > 1 m, aborts with `REFUSED` and writes nothing.
 
 ### 6. Pre-route gate — `fluxplace route-ready BOARD [--constraints TOML] [--spec JSON] [--json OUT] [--all]`
 
-One-screen scorecard (class-weighted ratsnest length, counts per code, worst 10),
+One-screen scorecard (class-weighted ratsnest length, counts per code, worst 10); `route-ready` alone answers "is this placement legal and ready to route" (legality is `PLACEMENT_ILLEGAL`),
 exit 1 on any FAIL. Same checks run inside `review` as FAIL codes
 (`[preroute] enabled = false` turns that off) and `[review] waive = ["CODE:REGEX"]`
 waives them. `route`, `auto` and `compact` print the scorecard and refuse to
@@ -743,6 +743,7 @@ start routing on a failing placement unless `--force`.
 | PIN_ESCAPE_BLOCKED | FAIL | fine-pitch (<= 0.5 mm) pin with a foreign pad / courtyard / rule area / copper in its outward lane, lane = track wide and track + clearance long (project net class) |
 | KEEPOUT_TRAPPED | FAIL | pad inside a track-forbidding rule area (a rule area named after the part, e.g. an antenna's own, is skipped) |
 | CONGESTION | FAIL | coarse global route: 2 mm cells, each non-rail net's MST as L-shapes on the signal layers (layers without a plane pour; override `signal_layers`), capacity = layers x track slots x `utilisation` 0.7, derated by pads and rule areas; overflow > `max_overflow` (0) |
+| PLACEMENT_ILLEGAL | FAIL | one finding per kind: same-side courtyard overlap (`[placement] allow_overlap = [["H200","MH1"]]` for intentional ones; a through-hole part counts on both sides), courtyard outside the real outline (rounded corners; edge connectors from `[placement] edge_mounted`, `[placement.connectors]` or a J/P/CN/X part touching the outline may overhang by their mating side only, their pads must be inside), part in a forbidden region (`[placement.keepout.NAME]`, `[[keepout]]`, rule areas), through-hole pad in `[placement.no_tht.NAME]`. Scores 500 per violation. |
 | RATSNEST_CROSSINGS | WARN | MST edges of different nets that cross |
 
     [preroute]

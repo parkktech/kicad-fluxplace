@@ -12,6 +12,9 @@ exactly like review findings (same matcher).
   KEEPOUT_TRAPPED      FAIL  pad inside a track-forbidding rule area
   CONGESTION           FAIL  coarse global route: demand > capacity (2 mm cells)
   RATSNEST_CROSSINGS   WARN  crossings between MST edges of different signal nets
+  PLACEMENT_ILLEGAL    FAIL  same-side courtyard overlap, part outside the outline (edge connectors
+                             may overhang by their mating side), part in a forbidden region, through-hole
+                             pad in a no-through-hole region (legality.py)
 
     [preroute]
     cell_mm = 2.0            # congestion grid
@@ -27,12 +30,13 @@ from . import anchors as AN
 from . import clusters as CL
 from . import geom as GM
 from . import netclass as NC
+from . import legality as LGL
 from . import placechecks as PCK
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
-         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY"]
+         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL"]
 
 
 def _f(level, code, msg, refs=(), value=None, limit=None, cls=None):
@@ -382,6 +386,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True):
     f += PCK.height_regions(B, cons)
     f += PCK.stale_copper(B)
     f += PCK.side_policy(B, cons, spec)
+    f += LGL.findings(B, cons)
     cg = congestion(B, cls, cons)
     f += congestion_findings(cg, cons)
     edges = routed_edges(B, cls)
@@ -411,7 +416,7 @@ def score(findings, card):
              + 20  x mm over budget of rf/switch_node/bypass/pair nets      (HARD)
              +  3  x mm over budget of other nets                           (soft)
              +  5  x mm support parts sit beyond their limit
-             + 500 x (PIN_ESCAPE_BLOCKED + KEEPOUT_TRAPPED + CONNECTOR_BLOCKED + HEIGHT_REGION FAILs)
+             + 500 x (PIN_ESCAPE_BLOCKED + KEEPOUT_TRAPPED + CONNECTOR_BLOCKED + HEIGHT_REGION FAILs + each PLACEMENT_ILLEGAL violation)
              + 25  x congestion overflow (track-cells)
              + 0.05 x ratsnest crossings
              + 300 x ANCHOR_MISORIENTED
@@ -425,6 +430,8 @@ def score(findings, card):
             t += (W_HARD if x.get("cls") in HARD else W_SOFT) * over
         elif c == "SUPPORT_PART_FAR":
             t += W_SUPPORT * over
+        elif c == "PLACEMENT_ILLEGAL":
+            t += W_STRUCT * (x["value"] or 1)
         elif c in ("PIN_ESCAPE_BLOCKED", "KEEPOUT_TRAPPED", "CONNECTOR_BLOCKED") or (
                 c == "HEIGHT_REGION" and x["level"] == FAIL):
             t += W_STRUCT
