@@ -358,3 +358,23 @@ def test_bare_board_without_constraints_runs(tmp_path):
     p = tb(tmp_path, part("R1", 20, 15) + gtext("Acme V1.5", 5, 5), name="plain.kicad_pcb")
     sc, cfg, f, c = codes(p, None)
     assert cfg["title"] is None and c["SILK_TITLE_MISSING"] == 0 and c["SILK_VERSION_STALE"] == 0
+
+
+def test_final_guard_reverts_a_fit_that_makes_things_worse(tmp_path):
+    p = brd(tmp_path, part("R1", 20, 15, ref_at=(0, -2)) + part("R2", 30, 15, ref_at=(0, -2)))
+    sc, cfg, before = SK.run_check(p)
+    assert not SK.fails(before)
+    res = {"plan": {"R1": {"x": 0.0, "y": 0.0, "angle": 0, "h": 1.0, "w": 1.0, "t": 0.15}},
+           "moved": ["R1"], "hidden": [], "shrunk": [], "kept": [], "findings": []}
+    out = str(tmp_path / "o.kicad_pcb")
+    after, rev = SK.apply_guarded(p, out, sc, cfg, before, res)
+    assert rev == ["R1"] and not SK.fails(after) and res["moved"] == []
+
+
+def test_unfixable_graphics_are_named(tmp_path):
+    g = '(fp_line (start -1 0) (end -1 -40) (stroke (width 0.15) (type solid)) (layer "F.SilkS"))'
+    p = brd(tmp_path, part("U9", 20, 5, extra=g))
+    out = str(tmp_path / "o.kicad_pcb")
+    _, a, _ = SK.fix_board(p, out)
+    assert SK.unfixable_graphics(a) == [("U9", "SILK_OFF_BOARD")]
+    assert "edit the footprint" in [f["msg"] for f in a if f["code"] == "SILK_OFF_BOARD"][0]

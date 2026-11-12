@@ -36,15 +36,16 @@ pytestmark = pytest.mark.skipif(not (BOARDS and _have_pcbnew()), reason="no samp
 
 
 def _silk(*args):
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "cli.py"), "silk", *args], capture_output=True, text=True,
-                       timeout=TIMEOUT)
+    """--json: the REAL per-code totals (the compact text report only lists the worst few)."""
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "cli.py"), "silk", *args, "--json"], capture_output=True,
+                       text=True, timeout=TIMEOUT)
     assert r.returncode in (0, 1), r.stderr[-500:]                  # 0 clean, 1 findings; anything else is a crash
-    assert "Traceback" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-800:]
-    return r.stdout + r.stderr
+    assert "Traceback" not in r.stderr, r.stderr[-800:]
+    return json.loads(r.stdout)
 
 
-def _counts(txt):
-    return {c: len(re.findall(r"\b" + c + r"\b", txt)) for c in SK.CODES}
+def _fails(d):
+    return sum(1 for f in d["findings"] if f["level"] == "FAIL")
 
 
 def _sig(p):
@@ -57,10 +58,11 @@ def test_check_and_fix_on_real_boards(src, tmp_path):
     b = str(tmp_path / "in.kicad_pcb")
     out = str(tmp_path / "out.kicad_pcb")
     shutil.copy(src, b)
-    before = _counts(_silk(b))
-    _silk(b, "--fix", "--out", out)
+    before = _silk(b)
+    fixed = _silk(b, "--fix", "--out", out)
     assert os.path.exists(out)
-    after = _counts(_silk(out))
-    hard = lambda c: sum(c[k] for k in HARD_REF)
-    assert hard(after) <= hard(before)
+    after = _silk(out)
+    assert _fails(after) <= _fails(before)                           # the fit never adds FAIL findings
+    hard = lambda c: sum(c.get(k, 0) for k in HARD_REF)
+    assert hard(after["before"]) <= hard(before["before"])
     assert _sig(b) == _sig(out)                                      # only silk texts moved/hidden: parts, pads, tracks, vias, zones identical

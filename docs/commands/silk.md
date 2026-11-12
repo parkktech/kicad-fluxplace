@@ -87,3 +87,5 @@ Every command that moves footprints and writes a board (`place`, `clusters --app
 override); without it the hooks print `silk: not run` and the write stands.
 
 Tests: `tests/test_silk_matrix.py` runs check + `--fix` (subprocess, 300 s timeout each) over the real boards found on the machine, asserting no crash, no more hard findings after, and identical parts/pads/tracks/vias/zones. Default: the two smallest boards; `FLUXPLACE_SILK_MATRIX=all` runs all.
+
+`--fix` ends with a guard: it never leaves more FAIL findings than it started with (a text that was legal before and is hard-violating after is put back, listed as `REVERTED`). FAIL findings on footprint artwork (`<ref> silk graphics ...`) cannot be fixed by moving text; they are tagged "edit the footprint" and listed on a `NEEDS FOOTPRINT FIX` line. The compact report's `counts by code` are real totals; the listed examples are capped (`--top`, `--full`); use `--json` for scripting.
