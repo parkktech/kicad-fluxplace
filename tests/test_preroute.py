@@ -112,3 +112,27 @@ def test_route_refuses_unless_forced(tmp_path):
     assert "NOT READY" in r.stdout          # the scorecard is printed before refusing
     r = subprocess.run([sys.executable, cli, "route", "--board", bad, "--force"], capture_output=True, text=True)
     assert "continuing to route (--force)" in r.stdout
+
+
+def test_signal_layers_exclude_inner_planes_not_outer_pours(tmp_path):
+    z = lambda net, lay: (f'(zone (net 1) (net_name "{net}") (layers "{lay}") '
+                          '(polygon (pts (xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n')
+    body = z("GND", "F.Cu") + z("GND", "In1.Cu") + g.two("R1", 10, 10, "A", "B")
+    B = RD.load(g.board(tmp_path, body))          # layers: F.Cu In1.Cu B.Cu
+    sig, plane = PR.layer_split(B)
+    assert sig == ["F.Cu", "B.Cu"] and plane == ["In1.Cu"]
+    assert PR.layer_split(B, {"preroute": {"signal_layers": ["F.Cu", "In1.Cu"]}})[0] == ["F.Cu", "In1.Cu"]
+
+
+def test_rail_cap_near_any_pin_or_bulk_is_not_far(tmp_path):
+    from fluxplace import clusters as CL
+    def val(ref, x, y, v, a, b):
+        return g.fp(ref, x, y, [g.pad("1", -0.5, 0, a), g.pad("2", 0.5, 0, b)]).replace(
+            f'(property "Reference" "{ref}")', f'(property "Reference" "{ref}") (property "Value" "{v}")')
+    b = g.ic("U501", 20, 20, ["VDD", "a", "b", "c", "d"]) + g.ic("U502", 80, 20, ["VDD", "e", "f", "g", "h"])
+    b += val("C509", 16, 20, "100nF", "VDD", "GND")     # block 5 owner U501... but sits next to nothing else
+    b += val("C510", 76, 20, "100nF", "VDD", "GND")     # right beside U502 pin: serves U502 although numbered 5xx
+    b += val("C511", 50, 50, "47uF", "VDD", "GND")      # bulk: not per-pin bypass
+    cl, _ = CL.build(RD.load(g.board(tmp_path, b)))
+    far = {s["ref"] for _, s in CL.far_parts(cl)}
+    assert "C510" not in far and "C511" not in far

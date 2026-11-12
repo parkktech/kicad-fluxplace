@@ -17,7 +17,7 @@ exactly like review findings (same matcher).
     cell_mm = 2.0            # congestion grid
     utilisation = 0.7        # usable fraction of a cell's track slots
     max_overflow = 0         # tolerated total overflow (track-cells)
-    signal_layers = 4        # override the stackup-derived count
+    signal_layers = 4        # count, or a list of names ["F.Cu", "In2.Cu", ...]; or plane_layers = [...]
     anchor_tolerance_pct = 15
 """
 import math
@@ -235,20 +235,34 @@ def ratsnest_crossings(edges):
 
 
 # ------------------------------------------------------------------ congestion
+def layer_split(B, cons=None):
+    """(signal layers, plane layers) as counted by the congestion model. Override with
+    `[preroute] signal_layers = ["F.Cu", ...]` (names) or `plane_layers = [...]`.
+    Default: an INNER layer is a plane when a pour zone with a net covers >= 60 % of
+    the outline there (a pour on an outer layer is routable copper, not a plane)."""
+    pc = (cons or {}).get("preroute", {})
+    cu = list(B["copper"])
+    if isinstance(pc.get("signal_layers"), list):
+        sig = [l for l in cu if l in pc["signal_layers"]]
+        return sig, [l for l in cu if l not in sig]
+    if isinstance(pc.get("plane_layers"), list):
+        return [l for l in cu if l not in pc["plane_layers"]], [l for l in cu if l in pc["plane_layers"]]
+    x0, y0, x1, y1 = B["bbox"]
+    board = max((x1 - x0) * (y1 - y0), 1e-6)
+    plane = set()
+    for z in B["zones"]:
+        if z["net"] and not z["keepout"] and z["pts"]:
+            xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
+            if (max(xs) - min(xs)) * (max(ys) - min(ys)) >= 0.6 * board:
+                plane |= {l for l in z["layers"] if l in cu[1:-1]}
+    return [l for l in cu if l not in plane], [l for l in cu if l in plane]
+
+
 def signal_layer_count(B, cons=None):
     pc = (cons or {}).get("preroute", {})
-    if "signal_layers" in pc:
+    if isinstance(pc.get("signal_layers"), int):
         return int(pc["signal_layers"])
-    plane = set()
-    seglen = defaultdict(float)
-    for s in B["segs"]:
-        seglen[s["layer"]] += math.hypot(s["a"][0] - s["b"][0], s["a"][1] - s["b"][1])
-    for z in B["zones"]:
-        if z["net"] and not z["keepout"]:
-            for l in z["layers"]:
-                if seglen[l] <= 200.0:
-                    plane.add(l)
-    return max(2, len(B["copper"]) - len(plane))
+    return max(2, len(layer_split(B, cons)[0]))
 
 
 def congestion(B, cls, cons=None):
@@ -311,7 +325,8 @@ def congestion(B, cls, cons=None):
         o = max(0.0, H[c] - cap[c]) + max(0.0, V[c] - cap[c])
         if o > 0:
             over[c] = o
-    return {"cells": len(cap), "cell_mm": cell, "layers": nl, "overflow_cells": len(over),
+    return {"cells": len(cap), "cell_mm": cell, "layers": nl,
+            "layer_names": layer_split(B, cons)[0] if not isinstance(pc.get("signal_layers"), int) else [], "overflow_cells": len(over),
             "overflow": round(sum(over.values()), 1), "demand": len(edges),
             "worst": sorted(((round(o, 1), round(x0 + (i + .5) * cell, 1), round(y0 + (j + .5) * cell, 1))
                              for (i, j), o in over.items()), reverse=True)[:10]}
@@ -324,7 +339,7 @@ def congestion_findings(rep, cons=None):
     w = rep["worst"][0] if rep["worst"] else None
     return [_f(FAIL, "CONGESTION",
                f"coarse route over capacity: {rep['overflow_cells']} of {rep['cells']} cells "
-               f"({rep['cell_mm']:g} mm, {rep['layers']} signal layers), overflow {rep['overflow']:g} "
+               f"({rep['cell_mm']:g} mm cells, {rep['layers']} signal layers: {', '.join(rep.get('layer_names') or [])}), overflow {rep['overflow']:g} "
                f"track-cells > {lim:g}; worst {w[0]:g} at ({w[1]}, {w[2]})" if w else "over capacity",
                value=rep["overflow"], limit=lim)]
 
@@ -379,7 +394,8 @@ def format_text(findings, card, title=""):
          f"  class-weighted ratsnest length : {card['weighted_ratsnest_mm']:.0f} mm",
          f"  ratsnest crossings             : {card['crossings']}",
          f"  congestion                     : overflow {card['congestion']['overflow']:g} in "
-         f"{card['congestion']['overflow_cells']} cell(s) ({card['congestion']['layers']} signal layers)"]
+         f"{card['congestion']['overflow_cells']} cell(s) ({card['congestion']['layers']} signal layers: "
+         f"{', '.join(card['congestion'].get('layer_names') or [])})"]
     for c in CODES:
         L.append(f"  {c:20s} {card['counts'][c]}")
     L.append("  worst 10:")

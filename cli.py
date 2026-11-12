@@ -160,7 +160,38 @@ def cmd_pcbway(a):
     pcbway.write(a.out_dir, facts, zip_name=a.zip_name, docx=not a.no_docx)
 
 
+def _routable_place(a, board_in, board_out):
+    """Connection-driven placement on the text model; returns (moves, before, after)."""
+    from fluxplace import routediag as RD, routable as RB, boardwrite as BW, preroute as PR
+    cons, spec = _text_ctx(a)
+    B0 = RD.load(board_in)
+    f0, c0 = PR.run(B0, cons, spec)
+    B = RD.load(board_in)
+    try:
+        mv = RB.place(B, cons, spec, log=lambda m: print("  " + m, flush=True))
+    except Exception as e:
+        if e.__class__.__name__ == "PlacementError":
+            raise SystemExit(f"place [routable] REFUSED: {e}")
+        raise
+    BW.move_file(board_in, board_out, mv)
+    f1, c1 = PR.run(RD.load(board_out), cons, spec)
+    return mv, (f0, c0), (f1, c1)
+
+
+def _routable_report(mv, before, after, out):
+    from fluxplace import preroute as PR
+    print(f"routable: moved/turned {len(mv)} part(s); saved {out}")
+    print("BEFORE"); print(PR.format_text(*before))
+    print("AFTER"); print(PR.format_text(*after))
+    print("note: existing copper is not moved with the parts; place on an unrouted board")
+
+
 def cmd_place(a):
+    if a.strategy == "routable":
+        out = a.out or a.board
+        mv, b, c = _routable_place(a, a.board, out)
+        _routable_report(mv, b, c, out)
+        return
     _sourcing_preflight(a, "placement")
     board, parts, nets, IO = _load(a.board)
     cg = G.build(parts, nets, a.big_fanout)
@@ -450,6 +481,12 @@ def cmd_tournament(a):
         print("need --jar or $FREEROUTING_JAR (freerouting 2.3.0+; "
               "2.2.4 dies silently headless)")
         return
+    if getattr(a, "pre_place", None) == "routable":
+        os.makedirs(a.workdir, exist_ok=True)
+        pre = os.path.join(a.workdir, "pre_routable.kicad_pcb")
+        mv, b0, b1 = _routable_place(a, a.board, pre)
+        _routable_report(mv, b0, b1, pre)
+        a.board = pre
     grid = TN.parse_compact_grid(a.compact_grid) if a.compact_grid else None
     planes = None
     if a.plane_nets:
@@ -913,6 +950,21 @@ def cmd_auto(a):
         phantoms.append(ref)
     cg = G.build(parts, nets, a.big_fanout); topo = T.analyze(cg, prefer_hub=a.hub)
     t0 = time.time()
+    if getattr(a, "pre_place", None) == "routable":
+        pre = os.path.join(a.out, "pre_routable.kicad_pcb")
+        mv, b0, b1 = _routable_place(a, a.board, pre)
+        _routable_report(mv, b0, b1, pre)
+        board, parts, nets, IO = _load(pre)         # the routable placement IS the placement
+        pos = {r: (p["x"], p["y"]) for r, p in parts.items()}
+        rot = {r: p.get("angle0", 0.0) for r, p in parts.items()}
+        rep = {"overflow": 0.0}
+        for ref in phantoms:
+            parts.pop(ref, None)
+        phantoms = []
+        nudged = 0
+        print(f"[1/{NSTAGE}] placed by routable ({len(mv)} parts moved)  ({time.time()-t0:.0f}s)")
+        _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO")
+        return
     pos, rot, rep = P.place_routed(parts, cg, topo, center=IO.board_center(board), pad=a.pad)
     try:
         P.check_extent(parts, {r: v for r, v in pos.items() if not parts[r].get("locked")}, rot,
@@ -2204,8 +2256,12 @@ def build_parser():
     pp = sub.add_parser("place")
     pp.add_argument("--board", required=True)
     pp.add_argument("--out", default=None)
-    pp.add_argument("--strategy", choices=["radial", "flux", "pack", "quad", "build"], default="pack",
-                    help="pack=hierarchical (organized+compact, default); flux=force-directed; radial")
+    pp.add_argument("--strategy", choices=["radial", "flux", "pack", "quad", "build", "routable"], default="pack",
+                    help="pack=hierarchical (organized+compact, default); flux=force-directed; radial; "
+                         "routable=connection-driven (net classes, support clusters, anchor rotation, "
+                         "chains, channel-aware legalise; text-only, keeps locked parts and anchors)")
+    pp.add_argument("--constraints", default=None, help="constraints TOML ([placement], [lock], [keepout]) for routable")
+    pp.add_argument("--spec", default=None, help="spec JSON (pin names) for routable")
     pp.add_argument("--rotate", choices=["none", "ortho", "fine"], default="ortho",
                     help="ortho=snap 0/90/180/270 (assembly-friendly); fine=any angle")
     pp.add_argument("--iters", type=int, default=260)
@@ -2274,6 +2330,10 @@ def build_parser():
     pt.add_argument("--passes", type=int, default=25)
     pt.add_argument("--jobs", type=int, default=3)
     pt.add_argument("--apply-winner", action="store_true")
+    pt.add_argument("--pre-place", choices=["routable"], default=None,
+                    help="place the input board with the connection-driven placer first")
+    pt.add_argument("--constraints", default=None, help="constraints TOML for --pre-place routable")
+    pt.add_argument("--spec", default=None, help="spec JSON for --pre-place routable")
     pt.add_argument("--resume", action="store_true",
                     help="reuse existing candidate boards/sessions; adopt live JVMs")
     pt.add_argument("--oit", type=float, default=None,
@@ -2455,6 +2515,9 @@ def build_parser():
                      help="don't translate the board onto the drawing sheet "
                           "(also rewrites --constraints' absolute coordinates when it does)")
     _add_gate_args(pau)
+    pau.add_argument("--pre-place", choices=["routable"], default=None,
+                     help="place with the connection-driven placer (text, needs --constraints for "
+                          "[placement]) instead of the route-aware builder")
     pau.add_argument("--max-growth", type=float, default=6.0,
                      help="refuse a placement whose redrawn outline is more than this many times "
                           "the original board area")

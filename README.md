@@ -616,6 +616,23 @@ feasible one. `--apply` turns them one at a time (re-scoring in between).
 
 Side flips are not evaluated (the text writer cannot mirror a footprint).
 
+### 4. Connection-driven placement — `place --strategy routable`
+
+    fluxplace place --board B.kicad_pcb --strategy routable --constraints C.toml --spec S.json --out OUT
+
+Text-only (no pcbnew). Fixed: locked parts, `[lock.at]`, mounting hardware, detected
+anchors, `[placement] fixed`. Misoriented anchors are first turned to their best
+rotation (`[placement] fixed` anchors excepted; give a group `rotations = [0, 180]`).
+Every confident support part is laid out beside its own IC as a macro cell, so a unit
+(IC + support) moves as one rigid body (units whose box is > 2.5x their parts' area
+move piecewise). Units go to the class-weighted centroid of their external nets (rails
+excluded), are rotated 0/90/180/270 when that cuts weighted length plus crossings
+among their own nets by > 8 %, and parts in a chain of 2-pad nets between two fixed
+anchors are ordered monotonically along the line between them; 3 rounds of
+{25 sweeps, rotate, legalise (stage 5)}. Prints the route-ready scorecard before and
+after. Result is deterministic. `auto --pre-place routable` and
+`tournament --pre-place routable` run it first. Existing copper is not moved.
+
 ### 5. Legalise with channels — `fluxplace/legalise.py`; the `pack` fault
 
 `legalise(B, targets, fixed, cons, hot)` removes overlaps by pushing movable parts

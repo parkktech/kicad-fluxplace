@@ -48,8 +48,9 @@ def overlap(a, b, gap=0.0):
     return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
 
 
-def inside(r, outer):
-    return r[0] >= outer[0] and r[1] >= outer[1] and r[2] <= outer[2] and r[3] <= outer[3]
+def inside(r, outer, eps=1e-3):
+    return (r[0] >= outer[0] - eps and r[1] >= outer[1] - eps
+            and r[2] <= outer[2] + eps and r[3] <= outer[3] + eps)
 
 
 def poly_has(pts, x, y):
@@ -91,7 +92,7 @@ class Hash:
         g = (rect[0] - gap, rect[1] - gap, rect[2] + gap, rect[3] + gap)
         seen = set()
         for c in self._cells(g):
-            for k in self.g.get(c, ()):
+            for k in sorted(self.g.get(c, ()), key=str):      # deterministic: no set-order dependence
                 if k in seen or k in ignore:
                     continue
                 seen.add(k)

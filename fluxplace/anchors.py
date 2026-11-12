@@ -173,15 +173,17 @@ def findings(B, cons=None, spec=None, cls=None):
     return out
 
 
-def moves_for_best(B, results=None, cons=None, spec=None, tol=15.0, limit=20):
+def moves_for_best(B, results=None, cons=None, spec=None, tol=15.0, limit=20, skip=()):
     """{ref: (x, y, angle)}: rotate misoriented anchors one at a time, the most
     improved first, re-scoring after each so two anchors that could each fix the
-    same crossing are not both turned. MUTATES the board model B."""
+    same crossing are not both turned. Anchors whose refs are all in `skip` are
+    never turned. MUTATES the board model B."""
     out = {}
     for _ in range(limit):
         res = results if results is not None else evaluate(B, cons, spec)
         results = None
-        bad = [r for r in res if r["worse_pct"] > tol and r["best"]["delta"] % 360 != 0]
+        bad = [r for r in res if r["worse_pct"] > tol and r["best"]["delta"] % 360 != 0
+               and not set(r["refs"]) <= set(skip)]
         if not bad:
             break
         r = max(bad, key=lambda r: r["current"]["cost"] - r["best"]["cost"])

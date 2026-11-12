@@ -124,6 +124,17 @@ def support_limit(info):
     return LIMIT_DEFAULT
 
 
+_CAPV = re.compile(r"([\d.]+)\s*([pnuµm]?)F", re.I)
+BULK_UF = 4.7
+
+
+def cap_uf(value):
+    m = _CAPV.search(value or "")
+    if not m:
+        return None
+    return float(m.group(1)) * {"p": 1e-6, "n": 1e-3, "u": 1.0, "µ": 1.0, "m": 1e3, "": 1.0}[m.group(2).lower()]
+
+
 def build(B, cons=None, spec=None):
     """[{ic, supports: [{ref, net, pad, cls, weight, dist, limit}]}], ordered:
     switch-node parts first, then by class weight, then by distance."""
@@ -136,12 +147,22 @@ def build(B, cons=None, spec=None):
         sp = next(p for p in part["pads"] if p["num"] == o["via"])
         pin = next(p for p in parts[o["ic"]]["pads"] if p["num"] == o["pad"])
         info = cls.get(o["net"])
-        by[o["ic"]].append({
-            "ref": ref, "net": o["net"], "pad": o["pad"], "via": o["via"], "how": o["how"],
-            "sure": o["how"] != "spread",
+        lim = support_limit(info)
+        sure, how, ic_, pad_, dist = o["how"] != "spread", o["how"], o["ic"], o["pad"], math.hypot(
+            sp["x"] - pin["x"], sp["y"] - pin["y"])
+        if o["how"] != "net" and o["how"] != "spread" or o["how"] == "spread":
+            # shared rail: a cap already within its limit of ANY IC pin on the rail serves that pin
+            best = min(((math.hypot(q["x"] - sp["x"], q["y"] - sp["y"]), q) for q in NC.net_pads(B)[o["net"]]
+                        if NC.is_ic(q["ref"], parts[q["ref"]])), key=lambda t: t[0], default=None)
+            if best and best[0] <= lim:
+                ic_, pad_, dist, sure, how = best[1]["ref"], best[1]["num"], best[0], True, "near"
+            elif (cap_uf(part["value"]) or 0) > BULK_UF:
+                sure, how = False, "bulk"          # bulk storage is not per-pin bypass
+        by[ic_].append({
+            "ref": ref, "net": o["net"], "pad": pad_, "via": o["via"], "how": how,
+            "sure": sure,
             "cls": info["class"] if info else "signal", "weight": info["weight"] if info else 1.0,
-            "dist": math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]),
-            "limit": support_limit(info)})
+            "dist": dist, "limit": lim})
     out = []
     for ic in sorted(by):
         sup = sorted(by[ic], key=lambda s: (-s["weight"], s["dist"], s["ref"]))
@@ -202,11 +223,13 @@ def _outward(part, pin):
     return (0, 1 if dy >= 0 else -1)
 
 
-def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True):
+def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isolate=False):
     """Re-seat the movable support parts of cluster `cl` around its (fixed) IC.
     Returns {ref: (x, y, angle)}. Rigid: each part keeps its footprint; only its
     origin and rotation change. Candidate positions are tried in order of
-    served-pad-to-pin distance (plus a ground-return term for caps); the first
+    served-pad-to-pin distance (plus a ground-return term for caps); with `isolate` only
+    the IC counts as an obstacle, so the unit is laid out as a compact macro cell and
+    placed among the other parts afterwards; the first
     one that stays out of every other courtyard, the IC's escape lanes, the
     board edge and track-forbidding rule areas wins."""
     parts = B["parts"]
@@ -214,7 +237,8 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True):
     icp = parts[ic]
     occ = GM.Hash()
     for r, p in parts.items():
-        occ.add(r, p["court"], p["side"])
+        if not isolate or r == ic:          # isolate: lay the unit out on its own (macro cell)
+            occ.add(r, p["court"], p["side"])
     lanes = _lanes(B, ic)
     zones = [z for z in B["zones"] if z["keepout"] and z["no_tracks"] and z["pts"]] if keepouts else []
     moves = {}
@@ -275,7 +299,7 @@ def _in_zone(zones, part, court):
                for z in zones)
 
 
-def reseat(B, cl, everything=False, guess=False, bounds=None, log=None):
+def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False):
     """Seat the far support parts of every cluster around their ICs (ICs never
     move). Mutates the board model B as it goes so later clusters see earlier
     moves. Parts already within their limit stay put unless `everything`;
@@ -288,7 +312,7 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None):
             continue
         if log:
             log(f"{c['ic']}: re-seating {len(sup)} part(s)")
-        m = seat(B, {"ic": c["ic"], "supports": sup}, bounds=bounds, log=log)
+        m = seat(B, {"ic": c["ic"], "supports": sup}, bounds=bounds, log=log, isolate=isolate)
         for ref, (x, y, a) in m.items():
             GM.place(B["parts"][ref], x, y, a)
         allm.update(m)
