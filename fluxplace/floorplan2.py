@@ -875,6 +875,15 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     return res, P, Bn
 
 
+def plan_summary(path, cons, spec):
+    """plan-route's calibrated global router on a placement (no copper considered): score, overflow, over-budget, return path."""
+    from . import planroute as PL, routediag as RD
+    R = PL.run(RD.load(path), cons, spec, ignore_routing=True, cell=None, board_path=path, open_method="text", log=None)
+    c = R["comp"]
+    return {"score": round(R["score"]), "overflow": c["overflow"], "over_budget_mm": c["over_budget_mm"], "sealed": c["sealed"],
+            "pair_split": c["pair_split"], "return_path": c["return_path"]}
+
+
 def first_failure(res):
     if res["construct_failed"]:
         return f"no legal pose for {', '.join(res['construct_failed'][:4])}"
@@ -947,6 +956,12 @@ def cmd_floorplan(a):
     json.dump({"history": [{k: v for k, v in h.items() if k != "blocked"} for h in history], "final": best["tag"]}, open(rp, "w"), indent=1, default=str)
     print(f"floorplan: {'PASS' if passes(best) else 'FAIL'} at grow {best['grow']}; wrote {out}; report {rp}; total {time.time() - t0:.0f} s")
     print(f"  metrics: RF_EXT {best['metrics'].get('RF_EXT')} mm; pair spans {span_summary(best['metrics']['pair_spans'])}")
+    try:
+        a0, a1 = plan_summary(a.board, cons, spec), plan_summary(out, cons, spec)
+        print(f"  plan-route channels (WARN only), source -> result: {a0} -> {a1}")
+        best["plan_route"] = {"source": a0, "result": a1}
+    except Exception as e:                  # the report must never fail the floorplan
+        print(f"  plan-route summary unavailable: {e}")
     print(f"  legality new: {best['legality_new']}")
     return 0 if passes(best) else 1
 
