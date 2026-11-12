@@ -2269,6 +2269,12 @@ def cmd_pipeline(a):
         raise SystemExit(rc)
 
 
+def cmd_help_brief(a):
+    """<= 15 lines per command from the live parser (all commands: one line each)."""
+    from fluxplace import helpbrief as HB
+    print(HB.main_text(a.command))
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -3126,6 +3132,12 @@ def build_parser():
     ppl.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     ppl.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
     ppl.set_defaults(fn=cmd_pipeline)
+
+    phb = sub.add_parser("help-brief",
+                         help="at most 15 lines on one command (none: one line per command); "
+                              "use instead of README/-h")
+    phb.add_argument("command", nargs="?", default=None)
+    phb.set_defaults(fn=cmd_help_brief)
 
     from fluxplace import outputs as OUT
     OUT.add_flags(ap, sub)
