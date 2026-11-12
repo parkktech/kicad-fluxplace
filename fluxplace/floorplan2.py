@@ -324,17 +324,26 @@ class Plan:
         return self.claims_ok(i)
 
     def claims_ok(self, i):
+        """module i's fan-out copper (claims) clear of every other module's PADS, and its pads clear of their claims."""
         mem = set(self.mods[i]["members"])
         P = self.B["parts"]
         mine = {(i, k, sd) for k in range(len(self.claims_rel.get(i, ())) + 8) for sd in ("F", "B")}
         for r in mem:
-            c = P[r]["court"]
-            for sd in self.L.M.sides(r):
-                if next(self.chash.hits(c, sd, 0.0, ignore=mine), None) is not None:
-                    return False
+            for q in P[r]["pads"]:
+                if q.get("np"):
+                    continue
+                rect = (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"])
+                sides = [("F" if l == "F.Cu" else "B") for l in q["layers"] if l in ("F.Cu", "B.Cu")] or ["F", "B"]
+                for sd in sides:
+                    if next(self.chash.hits(rect, sd, 0.0, ignore=mine), None) is not None:
+                        return False
         for rect, sides in self.claims_world(i):
-            for k in self.L.hash.hits(rect, "x", 0.0, ignore=mem):
-                if self.L.M.sides(k) & set(sides):
+            for (o, j) in self.L.phash.hits(rect, "x", 0.0, ignore=()):
+                if o in mem:
+                    continue
+                q = P[o]["pads"][j]
+                ps = {("F" if l == "F.Cu" else "B") for l in q["layers"] if l in ("F.Cu", "B.Cu")}
+                if ps & set(sides):
                     return False
         return True
 
@@ -380,7 +389,19 @@ def reseat_module(P, i, step=1.0):
     return False
 
 
-def claims_from(mods, clr=0.15, lane=1.0):
+def repair_claims(P, step=1.0):
+    """the source poses ignore the modules' escape copper: every movable module that sits on another's claim (or whose
+    claim sits on another's courtyard) is re-seated at the nearest legal pose. -> refs of the modules moved."""
+    moved = []
+    for i in range(P.n):
+        if P.fixed[i] or P.claims_ok(i):
+            continue
+        if reseat_module(P, i, step=step):
+            moved.append(P.mods[i]["name"])
+    return moved
+
+
+def claims_from(mods, clr=0.10, lane=0.0):
     """{module index: [(rect rel to anchor, [sides])]} from the isolated fan-out geometry of each module."""
     out = {}
     for i, m in enumerate(mods):
@@ -393,12 +414,16 @@ def claims_from(mods, clr=0.15, lane=1.0):
             if pin.get("stub") and side(pin.get("layer")):
                 (x0, y0), (x1, y1) = pin["stub"]
                 h = w / 2 + clr
-                rel.append(((min(x0, x1) - h, min(y0, y1) - h, max(x0, x1) + h, max(y0, y1) + h), side(pin["layer"])))
+                n = max(1, int(math.ceil(math.hypot(x1 - x0, y1 - y0) / 0.4)))
+                for k in range(n):                      # a diagonal stub as a few small boxes, not one big one
+                    ax, ay = x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n
+                    bx, by = x0 + (x1 - x0) * (k + 1) / n, y0 + (y1 - y0) * (k + 1) / n
+                    rel.append(((min(ax, bx) - h, min(ay, by) - h, max(ax, bx) + h, max(ay, by) + h), side(pin["layer"])))
             if pin.get("via"):
                 vx, vy = pin["via"]
                 h = 0.225 + clr
                 rel.append(((vx - h, vy - h, vx + h, vy + h), ["F", "B"]))
-            ln = pin.get("lane")
+            ln = pin.get("lane") if lane else None
             if ln and side(ln[1]) and pin.get("end"):
                 ex, ey = pin["end"]
                 ax = ex + lane * math.cos(math.radians(ln[0]))
@@ -759,7 +784,26 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     P = Plan(B, cons, spec, M, log=log)
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)
-    MD.fanouts(path_g, cons, spec, M["modules"], fa)
+    # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
+    # neighbours), as geometry relative to each module. (Using the isolated solution for the pins it could not escape was
+    # tried and made the result worse: RN400.7/.8 and U302.2 came back.)
+    from . import fanout as FO0
+    _B0, fres0 = FO0.run(path_g, cons, spec, None, fa, None)
+    whole = defaultdict(list)
+    okpins = set()
+    for pin in fres0["pins"]:
+        if pin.get("ok") and pin["ref"] in M["of"]:
+            okpins.add((pin["ref"], pin["pin"]))
+            m = M["modules"][P.idx[M["of"][pin["ref"]]]]
+            ox, oy = m["pos"]
+            e = {"ok": True, "w": pin.get("w", 0.15), "layer": pin.get("layer")}
+            if pin.get("stub"):
+                e["stub"] = [[q[0] - ox, q[1] - oy] for q in pin["stub"]]
+            if pin.get("via"):
+                e["via"] = [pin["via"][0] - ox, pin["via"][1] - oy]
+            whole[m["name"]].append(e)
+    for m in M["modules"]:
+        m["fanout"] = {"pins": whole.get(m["name"], [])}
     P.set_claims(claims_from(M["modules"]))
     P.freeze_baseline()
     src = P.cost_parts()
@@ -767,6 +811,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         failed = construct(P, seed=args.seed, step=args.step)
     else:
         failed = []
+        rep = repair_claims(P, step=args.step)
+        print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
     init = P.cost_parts()
     acc, best = anneal(P, iters=args.iters, seed=args.seed)
     cur = P.cost_parts()
