@@ -120,3 +120,29 @@ def test_a_worse_full_plan_reverts_the_whole_placement(tmp_path, monkeypatch):
     before = {r: p["pos"] for r, p in B["parts"].items()}
     mv, st = PP.plan_place(B, CONS, None, log=lambda m: None, max_evals=60)
     assert st["reverted_to_input"] and mv == {} and all(B["parts"][r]["pos"] == before[r] for r in before)
+
+
+def test_oversubscribed_group_is_resolved_and_reported(tmp_path):
+    B = RD.load(TE.board(tmp_path, 0.35))
+    mv, st = PP.plan_place(B, CONS, None, log=lambda m: None, max_evals=200)
+    assert any("U1/W" in e.get("resolved_oversub", []) for e in st["log"])           # the move that opened the fan-out names the group it fixed
+
+
+def test_group_moves_pull_a_movable_group_to_a_fixed_part(tmp_path):
+    ic = PB.fp("UA", 80, 60, [PB.pad("1", 0, 0, "RF_X", 0.8, 0.8), PB.pad("2", 1.5, 0, "VCC", 0.8, 0.8), PB.pad("3", 3, 0, "GND", 0.8, 0.8),
+                              PB.pad("4", 4.5, 0, "EN", 0.8, 0.8), PB.pad("5", 6, 0, "OUT", 0.8, 0.8)])
+    caps = PB.fp("C1", 83, 62, [PB.pad("1", 0, 0, "VCC", 0.8, 0.8), PB.pad("2", 1.2, 0, "GND", 0.8, 0.8)])
+    far = PB.fp("J1", 10, 10, [PB.pad("1", 0, 0, "RF_X", 1.5, 1.5), PB.pad("2", 4, 0, "OUT", 1.5, 1.5), PB.pad("3", 8, 0, "EN", 1.5, 1.5),
+                              PB.pad("4", 12, 0, "VCC", 1.5, 1.5), PB.pad("5", 16, 0, "GND", 1.5, 1.5)])
+    cons = {"placement": {"fixed": ["J1"]}, "plan": {"group": {"blk": {"refs": ["UA", "C1"]}}}}
+    B = RD.load(PB.write(tmp_path, ic + caps + far))
+    R0 = PL.run(B, cons, None, ignore_routing=True)
+    assert [f for f in R0["findings"] if f["code"] == "PLAN_NET_OVER_BUDGET" and f["net"] == "RF_X"]
+    j1 = B["parts"]["J1"]["pos"]
+    mv, st = PP.plan_place(B, cons, None, log=lambda m: None, max_evals=120)
+    assert not st["reverted_to_input"] and "J1" not in mv and {"UA", "C1"} <= set(mv)
+    assert any(e["kind"] == "group" for e in st["log"])
+    rel = (B["parts"]["C1"]["pos"][0] - B["parts"]["UA"]["pos"][0], B["parts"]["C1"]["pos"][1] - B["parts"]["UA"]["pos"][1])
+    assert abs(abs(rel[0]) + abs(rel[1]) - 5.0) < 1e-6                                # internal relative placement kept (rotated rigidly)
+    R1 = PL.run(B, cons, None, ignore_routing=True)
+    assert not [f for f in R1["findings"] if f["code"] == "PLAN_NET_OVER_BUDGET" and f["net"] == "RF_X"] and B["parts"]["J1"]["pos"] == j1

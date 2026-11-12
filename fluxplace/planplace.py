@@ -143,6 +143,8 @@ class PlanPlacer(RF.Refiner):
         self.comp0 = dict(self.ps.comp)
         self.moves_log = []
         self.key_of = {m: k for k, ms in self.U.items() for m in ms}
+        self.flip_wanted = set()
+        self.groups = {n: list(g.get("refs", [])) for n, g in (((self.cons.get("plan") or {}).get("group")) or {}).items()}
         # support-part guard: a move may not push a support part further beyond its limit (SUPPORT_PART_FAR of the gate)
         self.sup_lim = {s["ref"]: (c["ic"], s["pad"], s["via"], s["limit"]) for c in self.cl for s in c["supports"] if s["sure"]}
         self.excess = self.support_excess()
@@ -186,6 +188,7 @@ class PlanPlacer(RF.Refiner):
         snap = self.ps.snapshot()
         before = self.ps.score
         before_key = self.ps.key
+        ov_before = {(f["part"], f["side"]) for f in self.ps.findings if f["code"] == "PLAN_ESCAPE_OVERSUBSCRIBED"}
         self.evals += 1
         self.ps.update(set(refs), old_courts)
         if key_less(self.ps.key, before_key, eq=allow_equal):
@@ -196,6 +199,8 @@ class PlanPlacer(RF.Refiner):
                 self.flips ^= {flip}
             self.moves_log.append({"refs": refs, "kind": kind, "reason": reason, "before": before, "after": self.ps.score,
                                    "key_before": list(before_key), "key_after": list(self.ps.key),
+                                   "resolved_oversub": sorted(f"{a}/{b}" for a, b in ov_before - {(f["part"], f["side"]) for f in self.ps.findings
+                                                                                              if f["code"] == "PLAN_ESCAPE_OVERSUBSCRIBED"}),
                                    "from": {r: [round(v, 3) for v in old[r]] for r in refs},
                                    "to": {r: [round(v, 3) for v in self._pose(r)] for r in refs}})
             return True
@@ -296,6 +301,25 @@ class PlanPlacer(RF.Refiner):
                         pull, _c, _t = self._pull(self.U[k])
                         if pull:
                             add(r, pull[0] * 1.0, pull[1] * 1.0, 0.0, f"overflow at ({cx:.0f}, {cy:.0f}): {r} toward its partners")
+            elif c == "PLAN_ESCAPE_OVERSUBSCRIBED":
+                part, side = f["part"], f["side"]
+                for r in (90.0, 180.0, 270.0):
+                    add(part, 0.0, 0.0, r, f"oversubscribed {part}/{side}: rotate {part} by {r:g}")
+                if self.flip_cost is not None:
+                    self.flip_wanted.add(part)
+                g = next((g for g in self.ps.plan.groups if g["ref"] == part and g["side"] == side), None)
+                if g:
+                    xs, ys = [e[0] for e in g["edge"]], [e[1] for e in g["edge"]]
+                    box = (min(xs) - 1.0, min(ys) - 1.0, max(xs) + 1.0, max(ys) + 1.0)
+                    cx0, cy0 = P[part]["pos"]
+                    for r, p in sorted(P.items()):
+                        if r == part or EP.is_mech(r):
+                            continue
+                        cb = p["court"]
+                        if cb[0] < box[2] and box[0] < cb[2] and cb[1] < box[3] and box[1] < cb[3]:
+                            for d in (1.0, 2.0):
+                                dx, dy = away(cx0, cy0, p["pos"][0], p["pos"][1], d)
+                                add(r, dx, dy, 0.0, f"oversubscribed {part}/{side}: blocker {r} steps {d:g} mm out of the fan-out")
             elif c in ("PLAN_PART_IN_CORRIDOR", "PLAN_ZONING") and f.get("part"):
                 r = f["part"]
                 cx, cy = (f["cells_xy"][0] if f.get("cells_xy") else f["at"])
@@ -364,6 +388,103 @@ class PlanPlacer(RF.Refiner):
                 tot += math.hypot(dx, dy)
         return n, tot
 
+    # ---- rigid group moves ------------------------------------------------------------------------------------------
+    def group_of(self, ref):
+        """The rigid group of a part: an explicit `[plan.group.NAME] refs = [...]`, else its unit (IC + support parts), else the part alone."""
+        for n, refs in self.groups.items():
+            if ref in refs:
+                return sorted(r for r in refs if r in self.B["parts"])
+        k = self.key_of.get(ref, ref)
+        return sorted(self.U.get(k, [ref])) if ref in self.U.get(k, []) else [ref]
+
+    def rigid(self, refs, anchor, new_xy, d):
+        """Poses of the whole group translated so `anchor` lands on new_xy and rotated by d about it (relative placement kept)."""
+        P = self.B["parts"]
+        ax, ay = P[anchor]["pos"]
+        out = {}
+        for r in refs:
+            x, y = P[r]["pos"]
+            rx, ry = GM.rot(x - ax, y - ay, d)
+            out[r] = (new_xy[0] + rx, new_xy[1] + ry, P[r]["angle"] + d)
+        return out
+
+    def group_candidates(self, f):
+        """Re-seat candidates for an over-budget net: pull the movable end group next to the (possibly fixed) other end; when both ends can move,
+        also move both to free sites along the board edge.  -> [(poses, reason)] best first (closest to the target first)."""
+        nt = next((n for n in self.ps.gr.nets.values() if f["net"] in n["members"]), None)
+        if not nt:
+            return
+        P = self.B["parts"]
+        ends = []
+        for t in nt["terms"]:
+            r = t["pad"].split(".")[0]
+            if r in P and r not in ends:
+                ends.append(r)
+        groups = []
+        for r in ends:
+            g = tuple(self.group_of(r))
+            if g not in [x[0] for x in groups]:
+                groups.append((g, r))
+        if len(groups) < 2:
+            return
+        out = []
+        movable = lambda g: all(self._movable(m) for m in g)
+        sizes = {g: len(g) for g, _r in groups}
+        for (ga, ra) in groups:
+            if not movable(ga) or sizes[ga] > 12:
+                continue
+            for (gb, rb) in groups:
+                if gb == ga:
+                    continue
+                tx, ty = P[rb]["pos"]
+                x0, y0, x1, y1 = self.B["bbox"]
+                # every grid site of the board (2 mm), nearest to the other end first: the legaliser finds the free areas
+                gx = [x0 + 2 + 2.0 * i for i in range(int((x1 - x0 - 4) / 2.0) + 1)]
+                gy = [y0 + 2 + 2.0 * j for j in range(int((y1 - y0 - 4) / 2.0) + 1)]
+                for x in gx:
+                    for y in gy:
+                        dist = math.hypot(x - tx, y - ty)
+                        if 2.0 < dist <= 40.0:
+                            for d in (0.0, 90.0, 180.0, 270.0):
+                                out.append((dist, (ga, ra, x, y, d, rb), None))
+        # both ends movable: the pair goes to a free site along the board edge
+        if len(groups) == 2 and all(movable(g) and sizes[g] <= 12 for g, _r in groups):
+            (ga, ra), (gb, rb) = groups
+            x0, y0, x1, y1 = self.B["bbox"]
+            inset = 5.0
+            sites = []
+            for t in range(int((x1 - x0) // 6) + 1):
+                sites += [(x0 + inset + 6 * t, y0 + inset), (x0 + inset + 6 * t, y1 - inset)]
+            for t in range(int((y1 - y0) // 6) + 1):
+                sites += [(x0 + inset, y0 + inset + 6 * t), (x1 - inset, y0 + inset + 6 * t)]
+            for si, (sx, sy) in enumerate(sorted(set(sites))):
+                for d in (0.0, 90.0, 180.0, 270.0):
+                    for rr, ang in ((7.0, 0), (7.0, 90), (7.0, 180), (7.0, 270)):
+                        a = math.radians(ang)
+                        poses = self.rigid(list(ga), ra, (sx, sy), d)
+                        poses.update(self.rigid(list(gb), rb, (sx + rr * math.cos(a), sy + rr * math.sin(a)), 0.0))
+                        out.append((rr + 100.0, poses, f"group pair move: {ra} group and {rb} group to the edge site ({sx:.0f}, {sy:.0f})"))
+        out.sort(key=lambda t: t[0])
+        for _k, p, r in out:
+            if r is None:
+                ga, ra, x, y, d, rb = p
+                yield self.rigid(list(ga), ra, (x, y), d), f"group move: {','.join(ga[:4])}{'...' if len(ga) > 4 else ''} re-seated at ({x:.0f}, {y:.0f}) rot {d:g}, {math.hypot(x - P[rb]['pos'][0], y - P[rb]['pos'][1]):.0f} mm from {rb} (net {f['net']} over budget)"
+            else:
+                yield p, r
+
+    def try_groups(self, findings, max_eval=30):
+        """Try the re-seat candidates of every hard over-budget net; plan evaluations are bounded (`max_eval`), illegal sites cost only a legality test."""
+        start = self.evals
+        for f in findings:
+            if f["code"] != "PLAN_NET_OVER_BUDGET" or f.get("cls") not in GR.HARD or self.out_of_budget():
+                continue
+            for poses, reason in self.group_candidates(f):
+                if self.evals - start >= max_eval or self.out_of_budget():
+                    break
+                if self.try_move("group", poses, reason):
+                    return True
+        return False
+
     def rotation_pass(self, min_pads=6):
         """A1: for every movable unit with >= 6 pads, or any part with a finding on it, big first: try the other three rotations (and the
         other side when `[placement.side] flip_cost` allows) and keep each that lowers PLAN_SCORE (the score carries pin direction,
@@ -386,6 +507,10 @@ class PlanPlacer(RF.Refiner):
 
     def run(self):
         P = self.B["parts"]
+        for _ in range(3):                                   # rigid group re-seats first: they are the moves that change a hard failure
+            if not self.try_groups(PL.rank(self.ps.findings)):
+                break
+            self.log(f"group move kept, PLAN_SCORE {self.score:.1f}")
         if getattr(self, "spread", None):
             n, tot = self.spread_pass(self.spread)
             self.log(f"spread pass: {n} unit(s) re-seated, mean {tot / max(n, 1):.1f} mm")
@@ -395,8 +520,14 @@ class PlanPlacer(RF.Refiner):
         rounds = 0
         while rounds < self.max_rounds_ and not self.out_of_budget():
             rounds += 1
+            for fr in sorted(self.flip_wanted):                       # oversubscribed group: the other side, when the side policy allows
+                self.flip(fr)
+            self.flip_wanted = set()
             props = self.proposals()
             acc = False
+            if self.try_groups(PL.rank(self.ps.findings)):
+                self.log(f"  round {rounds}: group move -> PLAN_SCORE {self.score:.1f}")
+                continue
             for _i, kind, poses, reason in props[:self.max_try]:
                 if self.out_of_budget():
                     break

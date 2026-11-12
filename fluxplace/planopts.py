@@ -28,7 +28,7 @@ from . import globalroute as GR
 from . import netclass as NC
 
 COST = {"per_cm2": 1.0, "layer_pair": 0.40, "track_tight": 0.08, "track_subfloor": 0.30, "via_small": 0.06, "via_in_pad": 0.20,
-        "neck_local": 0.04}
+        "neck_local": 0.04, "pour_inner": 0.02, "pour_local": 0.01}
 BASE_TRACK = 0.15
 FLOOR = 0.127
 EDGES = ("L", "R", "T", "B")
@@ -177,6 +177,8 @@ def scratch_cons(cons, rules, base_track=BASE_TRACK):
             pl[k] = rules[k]
     if "neck" in rules:
         pl["neck"] = rules["neck"]
+    if "pour" in rules:
+        pl["pour"] = list(pl.get("pour", [])) + rules["pour"]
     for k in ("via_in_pad", "variant", "layer_dir"):
         if k in rules:
             pl[k] = rules[k]
@@ -194,6 +196,12 @@ def toml_text(rules):
             L.append(f'{k} = "{rules[k]}"')
     if "via_in_pad" in rules:
         L.append("via_in_pad = [" + ", ".join(f'"{g}"' for g in rules["via_in_pad"]) + "]")
+    for z in rules.get("pour", []):
+        L.append("[[plan.pour]]")
+        L.append(f'net = "{z["net"]}"')
+        L.append("layers = [" + ", ".join(f'"{x}"' for x in z["layers"]) + "]")
+        L.append(f"region = {json.dumps(z['region'])}")
+        L.append(f"share = {z.get('share', 0.5)}")
     for name, n in sorted(rules.get("neck", {}).items()):
         L.append(f"[plan.neck.{name}]")
         L.append("refs = [" + ", ".join(f'"{r}"' for r in n["refs"]) + "]")
@@ -223,6 +231,8 @@ def relative_cost(area_cm2, rules, layers, cons, base_layers=4):
         pen += c["via_small"]
     if rules.get("via_in_pad"):
         pen += c["via_in_pad"]
+    for z in rules.get("pour", []):
+        pen += c["pour_local"] if z["region"] != "board" and not isinstance(z["region"], str) and len(z["region"]) == 4 and z["layers"][0] in ("F.Cu", "B.Cu") else c["pour_inner"]
     return area_cm2 * c["per_cm2"] * (1.0 + pen), pen
 
 
@@ -335,6 +345,31 @@ def neck_rules(base, track, clr, margin=4.0):
     return {"neck": {"fanout": {"refs": refs[:12], "track_mm": track, "clearance_mm": clr, "margin_mm": margin}}}
 
 
+def pour_rules(B, base_findings, inner, kind):
+    """Pour axes for every PLAN_POWER_NO_PLANE net: rails of >= 60 pins get a board-wide pour on In2 / In3 / split between them; smaller rails
+    (and the `local` axis) get a local pour on the outer layer of most of their pins over the pins' bounding box + 3 mm."""
+    pads = NC.net_pads(B)
+    x0, y0, x1, y1 = B["bbox"]
+    out = []
+    for f in base_findings:
+        if f["code"] != "PLAN_POWER_NO_PLANE":
+            continue
+        n = f["net"]
+        ps = pads.get(n, [])
+        big = len(ps) >= 60 and kind != "local"
+        if big and kind in ("In2", "In3") and kind in [l[:-3] for l in inner]:
+            out.append({"net": n, "layers": [kind + ".Cu"], "region": "board", "share": 0.5})
+        elif big and kind == "split" and len(inner) >= 2:
+            xm = (x0 + x1) / 2
+            out.append({"net": n, "layers": [inner[0]], "region": [x0 - 1, y0 - 1, xm, y1 + 1], "share": 0.5})
+            out.append({"net": n, "layers": [inner[1]], "region": [xm, y0 - 1, x1 + 1, y1 + 1], "share": 0.5})
+        elif not big:
+            side = "B.Cu" if sum(1 for p in ps if B["parts"][p["ref"]]["side"] == "B.Cu") * 2 > len(ps) else "F.Cu"
+            xs, ys = [p["x"] for p in ps], [p["y"] for p in ps]
+            out.append({"net": n, "layers": [side], "region": [min(xs) - 3, min(ys) - 3, max(xs) + 3, max(ys) + 3], "share": 0.5})
+    return out
+
+
 def perf_worse(res, base):
     """The controlled-net rule, PER NET, fail closed:
        - every controlled net of the baseline must be present in the option (missing = violation);
@@ -363,6 +398,8 @@ def perf_worse(res, base):
 def impact(res, rules, why):
     if res["neck_violations"] or res["subfloor"]:
         lab = "touches controlled-impedance nets (never recommended)" if res["neck_violations"] else "none to controlled nets; sub-floor rule"
+    elif rules.get("pour") and not (rules.get("track_mm") or rules.get("neck")):
+        lab = "none (pour takes signal capacity)"
     elif rules.get("track_mm") is not None or rules.get("neck") or rules.get("via_mm") is not None or rules.get("via_in_pad"):
         lab = "low-speed only"
     else:
@@ -407,6 +444,8 @@ def describe(r, base_size):
         parts.append(f"via {rl['via_mm']:g}/{rl['drill_mm']:g}")
     if rl.get("via_in_pad"):
         parts.append("via-in-pad " + ",".join(rl["via_in_pad"][:2]))
+    if rl.get("pour"):
+        parts.append("pour " + ", ".join(f"{z['net']} on {'/'.join(l[:-3] for l in z['layers'])}{'' if z['region'] == 'board' else ' (local)' if len(z['region']) == 4 and not isinstance(z['region'][0], list) else ' (half)'}" for z in rl["pour"][:3]))
     if rl.get("variant"):
         parts.append({"plane3v3": "dedicated +3V3 plane layer", "dirswap": "layer directions swapped", "8layer": "8 layers"}.get(rl["variant"], rl["variant"]))
     return " + ".join(parts) or "as is"
@@ -504,6 +543,13 @@ def search(board, cons, spec, outdir, max_grow=6, workers=None, place_evals=120,
              dict(bl, name="plane3v3", grow=(0,) * 4, rules={"variant": "plane3v3"}),
              dict(bl, name="dirswap", grow=(0,) * 4, rules={"variant": "dirswap"}),
              dict(bl, name="layers8", grow=(0,) * 4, rules={"variant": "8layer"})]
+    nopour = [f for f in R0["findings"] if f["code"] == "PLAN_POWER_NO_PLANE"]
+    if nopour:
+        inner = [l for l in B["copper"] if l in EP.plan_layers(B, cons)[0] and l not in (B["copper"][0], B["copper"][-1])]
+        for kind in ("In2", "In3", "split", "local"):
+            pr_ = pour_rules(B, R0["findings"], inner, kind)
+            if pr_:
+                jobs.append(dict(bl, name=f"pour_{kind}", grow=(0,) * 4, rules={"pour": pr_}))
     log(f"round 1: {len(jobs)} option(s) in parallel")
     r1 = run_jobs(jobs)
     # bisection per edge that passes at the probe size

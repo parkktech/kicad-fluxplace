@@ -78,3 +78,15 @@ swap groups (they must be named in `[swap]`).
 - `place --objective plan` accepts moves on (FAIL flag, hard failures, risk_frac, score), is bounded by evaluations (`[placement] max_evals`, 400), and runs a fresh
   full plan at the end: if that is worse than the input's full plan, every move is reverted. `plan-options --place-evals`.
 - `calibrate --write-constants` keeps `<constraints>.bak`.
+
+## Planned pours, rigid group moves, oversubscribed groups
+
+`[[plan.pour]]` (`net`, `layers`, `region` = "board" | [x0,y0,x1,y1] | [[x,y],...], `share` 0.5): copper the owner intends to add. The planner treats it as existing
+for that net (no PLAN_POWER_NO_PLANE; pins need a via site, feed layer reported; a pour on the pad's layer serves pads with a free lane), charges
+`1 - share` of the signal capacity of the layers under it, and uses a board-wide pour layer as a return-path reference. The map carries it in `board.pours`.
+`plan-options` adds pour axes (`pour_In2`, `pour_In3`, `pour_split`, `pour_local`) for every PLAN_POWER_NO_PLANE net (rails of >= 60 pins board-wide, smaller
+rails a local pour over their pin bounding box + 3 mm).
+`[plan.group.NAME] refs = [...]` (else the IC + support unit) are moved as rigid groups by `place --objective plan`: for a hard over-budget net the group of one end is
+re-seated on any legal 2 mm grid site within 40 mm of the other end (4 rotations), or both groups go to free edge sites; group moves run before the other passes.
+A group must contain every part tied to its members by the support-part limit (e.g. the bias inductor's regulator cluster) or the guard rejects the move.
+PLAN_ESCAPE_OVERSUBSCRIBED groups get rotations of the part, the other side when `flip_cost` allows, and moves of the parts blocking the fan-out; the move log names the groups it resolved.

@@ -401,13 +401,27 @@ class GlobalRoute:
                 self.via_used[self.cell_of(v[0], v[1])] += 1
 
     # ------------------------------------------------------------------ capacity
+    def _pour_factors(self):
+        """Planned pours (`[[plan.pour]]`) take signal capacity: under a pour on a signal layer only `share` of the tracks fit (the pour must
+        keep its copper connected); the factor is applied in cap_cell."""
+        self.pour_f = {}
+        for pz in EP.planned_pours(self.cons):
+            for ln in pz["layers"]:
+                l = self.lid.get(ln)
+                if l is None:
+                    continue
+                for c in range(self.N):
+                    x, y = self.xy_of(c)
+                    if EP.pour_covers(pz, x, y):
+                        self.pour_f[(l, c)] = min(self.pour_f.get((l, c), 1.0), pz["share"])
+
     def cap_cell(self, c):
         pitch, util = self.cpitch[c], self.pr["util"]
         cb = self._cell_box(c)
         for l in range(self.nl):
             d = self.obs.get((l, c))
             if not d:
-                self.capH[l][c] = self.capV[l][c] = int(self.cell / pitch * util + 1e-6)
+                self.capH[l][c] = self.capV[l][c] = int(self.cell / pitch * util * self.pour_f.get((l, c), 1.0) + 1e-6)
                 continue
             ivy, ivx = [], []
             jog = self.pr["jog_frac"] * self.cell
@@ -420,8 +434,9 @@ class GlobalRoute:
                         ivx.append((r[0], r[2]))
             fy = self.cell - _union_len(ivy, cb[1], cb[3])
             fx = self.cell - _union_len(ivx, cb[0], cb[2])
-            self.capH[l][c] = int(max(0.0, fy) / pitch * util + 1e-6)
-            self.capV[l][c] = int(max(0.0, fx) / pitch * util + 1e-6)
+            pf = self.pour_f.get((l, c), 1.0)
+            self.capH[l][c] = int(max(0.0, fy) / pitch * util * pf + 1e-6)
+            self.capV[l][c] = int(max(0.0, fx) / pitch * util * pf + 1e-6)
         # via sites: free fraction of the cell (all layers' pad/keep-out/via blockers) on a 0.6 mm lattice
         d = self.vobs.get(c)
         full = (self.cell / self.pr["slot_mm"]) ** 2 * self.pr["via_density"]
@@ -440,6 +455,7 @@ class GlobalRoute:
     def build(self):
         t = time.time()
         self.via_used = defaultdict(int)
+        self._pour_factors()
         self.build_obstacles()
         for c in range(self.N):
             self.cap_cell(c)

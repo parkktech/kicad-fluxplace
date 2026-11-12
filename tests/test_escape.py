@@ -105,3 +105,21 @@ def test_power_pin_names_its_feeding_layer(tmp_path):
     body += PB.fp("C2", 60, 30, [PB.pad("1", 0, 0, "+5V", 0.8, 0.8), PB.pad("2", 5, 0, "X", 0.8, 0.8)])
     B, pl = plan(PB.write(tmp_path, body), ignore_routing=True)
     assert pl.pins[("C1", "1")]["kind"] == "via" and "B.Cu" in pl.pins[("C1", "1")]["feed"]
+
+
+def test_planned_pour_serves_a_rail_and_charges_signal_capacity(tmp_path):
+    body = "".join(PB.fp(f"C{i}", 10 + 3 * i, 30, [PB.pad("1", 0, 0, "+3V3", 0.8, 0.8), PB.pad("2", 0, 1.5, "GND", 0.8, 0.8)]) for i in range(22))
+    p = PB.write(tmp_path, body)
+    B, pl = plan(p, ignore_routing=True)
+    assert [f for f in pl.findings if f["code"] == "PLAN_POWER_NO_PLANE"]
+    cons = {"plan": {"pour": [{"net": "+3V3", "layers": ["B.Cu"], "region": "board", "share": 0.5}]}}
+    B = RD.load(p)
+    cls = NC.classify(B, cons, None)
+    pl = EP.plan_escapes(B, cons, cls, EP.plan_params(cons), ignore_routing=True)
+    assert not [f for f in pl.findings if f["code"] == "PLAN_POWER_NO_PLANE"]
+    assert pl.pins[("C0", "1")]["kind"] in ("via", "pour") and "B.Cu" in pl.pins[("C0", "1")]["feed"]
+    from fluxplace import globalroute as GR, planroute as PL
+    g0 = PL.run(B, {}, None, ignore_routing=True)["gr"]
+    g1 = PL.run(B, cons, None, ignore_routing=True)["gr"]
+    c = g1.cell_of(50, 20)
+    assert g1.capH[1][c] < g0.capH[1][c] and g1.capH[0][c] == g0.capH[0][c]          # B.Cu loses capacity under the pour, F.Cu does not

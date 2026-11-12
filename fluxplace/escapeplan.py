@@ -113,6 +113,10 @@ def plane_nets(B, cons, cls, pr):
             out.setdefault(n, {"kind": "pour", "layers": set()})
     for n in (((cons or {}).get("plan") or {}).get("plane_nets") or []):
         out.setdefault(n, {"kind": "pour", "layers": set()})
+    for pz in planned_pours(cons):                     # `[[plan.pour]]`: copper the owner intends to add; the planner treats it as existing
+        e = out.setdefault(pz["net"], {"kind": "pour", "layers": set()})
+        e["layers"] |= set(pz["layers"])
+        e["planned"] = True
     pads = NC.net_pads(B)
     for n, info in cls.items():
         if n not in out and NC.is_ground(n):
@@ -121,6 +125,26 @@ def plane_nets(B, cons, cls, pr):
         if NC.is_ground(n) and n not in out:
             out[n] = {"kind": "pour", "layers": set()}
     return out
+
+
+def planned_pours(cons):
+    """`[[plan.pour]]` entries as dicts: net, layers [names], region ("board" | [x0, y0, x1, y1] | [[x, y], ...]), priority, share (fraction of a
+    signal layer's capacity left under the pour, default 0.5)."""
+    out = []
+    for z in (((cons or {}).get("plan") or {}).get("pour") or []):
+        lay = z.get("layers") or ([z["layer"]] if z.get("layer") else [])
+        out.append({"net": z["net"], "layers": list(lay), "region": z.get("region", "board"), "priority": int(z.get("priority", 0)),
+                    "share": float(z.get("share", 0.5))})
+    return out
+
+
+def pour_covers(pz, x, y, B=None):
+    r = pz["region"]
+    if r == "board":
+        return True
+    if r and isinstance(r[0], (int, float)):
+        return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+    return GM.poly_has([tuple(p) for p in r], x, y)
 
 
 def power_no_plane(B, cons, cls, pr, pnets):
@@ -371,6 +395,7 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
             if net in pnets:
                 pour = [z for z in B["zones"] if z["net"] == net and not z["keepout"] and (z["layers"] & layers)
                         and z["pts"] and GM.poly_has(z["pts"], q["x"], q["y"])]
+                pour += [z for z in planned_pours(cons) if z["net"] == net and (set(z["layers"]) & set(layers)) and pour_covers(z, q["x"], q["y"])]
                 if pour:
                     best = max((lane_free(ob, B, pr, q, d, layers, lane_len)[0] for d in exit_dirs(part, q, cx, cy)),
                                default=0.0)

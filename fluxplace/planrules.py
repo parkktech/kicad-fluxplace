@@ -72,6 +72,7 @@ def return_path(gr, plan, B, cons):
     from . import escapeplan as EP
     cu = B["copper"]
     _sig, planes = EP.plan_layers(B, cons)
+    planes = list(planes) + [l for pz in EP.planned_pours(cons) if pz["region"] == "board" for l in pz["layers"] if l not in planes]   # planned pours are references
     refs = {}
     for l in gr.layers:
         k = cu.index(l) if l in cu else 0

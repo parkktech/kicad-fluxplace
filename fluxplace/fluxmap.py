@@ -220,7 +220,7 @@ def build(B, cons=None, spec=None, board_path=None, cls=None, state=None):
              "floors": {"track": pr["track_mm"], "clearance": pr["clearance_mm"], "via": pr["via_mm"],
                         "drill": pr["drill_mm"], "fab_min_track": ((cons.get("fab") or {}).get("min_track_mm")),
                         "fab_min_clearance": ((cons.get("fab") or {}).get("min_clearance_mm"))},
-             "keepouts": ko, "height_regions": hr}
+             "keepouts": ko, "height_regions": hr, "pours": EP.planned_pours(cons)}
     return {"fluxmap": VERSION, "board": board, "parts": plist, "relations": rel, "groups": gl, "nets": nl,
             "escapes": {}, "grid": {}, "route": {}, "channels": [], "verdict": {}}
 
