@@ -168,7 +168,13 @@ def _routable_place(a, board_in, board_out):
     f0, c0 = PR.run(B0, cons, spec)
     B = RD.load(board_in)
     try:
-        mv = RB.place(B, cons, spec, log=lambda m: print("  " + m, flush=True))
+        if getattr(a, "refine", False):
+            from fluxplace import refine as RF
+            mv, st = RF.refine(B, cons, spec, seed=a.seed, log=lambda m: print("  " + m, flush=True),
+                               time_limit=a.time_limit)
+            print(f"  refine: score {st['score_before']:.0f} -> {st['score_after']:.0f}, kept {st['kept']}", flush=True)
+        else:
+            mv = RB.place(B, cons, spec, log=lambda m: print("  " + m, flush=True))
     except Exception as e:
         if e.__class__.__name__ == "PlacementError":
             raise SystemExit(f"place [routable] REFUSED: {e}")
@@ -2368,6 +2374,11 @@ def build_parser():
                          "routable=connection-driven (net classes, support clusters, anchor rotation, "
                          "chains, channel-aware legalise; text-only, keeps locked parts and anchors)")
     pp.add_argument("--constraints", default=None, help="constraints TOML ([placement], [lock], [keepout]) for routable")
+    pp.add_argument("--refine", action="store_true",
+                    help="with --strategy routable: only LOCAL moves from the input (nudge <= 3 mm, rotate 90, swap, "
+                         "slide a support part), each kept only if the gate score improves and the result stays legal")
+    pp.add_argument("--seed", type=int, default=0, help="--refine: visiting order seed (deterministic)")
+    pp.add_argument("--time-limit", type=float, default=None, help="--refine: seconds (default [placement] time_limit_s, 600)")
     pp.add_argument("--spec", default=None, help="spec JSON (pin names) for routable")
     pp.add_argument("--strip-stale", action="store_true",
                     help="routable: remove tracks/vias left dangling by the move")

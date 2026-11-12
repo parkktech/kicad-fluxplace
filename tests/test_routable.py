@@ -97,3 +97,21 @@ def test_chain_detection_movable_ends_three_pad_nets_and_a_hub(tmp_path):
     fixed = {"J1"}
     ch = RB.chains(B, cls, fixed, {})
     assert any(c[0] in ("U1", "J1") and set(c) >= {"U1", "U2", "L1", "J1"} for c in ch), ch
+
+
+def test_refine_is_local_legal_deterministic_and_improves(tmp_path):
+    from fluxplace import refine as RF, legality as LGL
+    p = mk(tmp_path)
+    cons = {"placement": {"fixed": ["J1", "J2"]}}
+    out = []
+    for i in range(2):
+        B = RD.load(p)
+        sc0 = PR.run(B, cons)[1]["score"]
+        base = {r: tuple(B["parts"][r]["pos"]) for r in B["parts"]}
+        mv, st = RF.refine(B, cons, None, seed=3, log=lambda m: None, time_limit=30)
+        assert st["score_after"] <= sc0
+        assert set(st["kept"]) <= {"nudge", "rotate", "slide", "swap", "swapc"} and st["kept"]
+        assert "J1" not in mv and "J2" not in mv                  # fixed parts never move
+        assert LGL.count(LGL.Legal(B, cons).issues()) == 0
+        out.append(sorted(mv.items()))
+    assert out[0] == out[1]

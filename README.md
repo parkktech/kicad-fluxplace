@@ -716,6 +716,20 @@ max_utilisation` (0.7) and when a big part (>= 25 mm2) has no free rectangle its
 `block` field, or `block_refdes = true`. Regions: `[placement.region.NAME] rect, side, blocks`. Pure text,
 sub-second on a 337-part board (0.5 mm grid, `cell_mm`).
 
+### 4d. Local refinement - `place --strategy routable --refine [--seed N] [--time-limit S]`
+
+For an already good, dense placement the global rounds of `routable` can score worse than the input and
+change nothing. `--refine` (`fluxplace/refine.py`) starts FROM the input and only makes local moves, each kept
+only when the gate score (`preroute.score`, the single objective) improves and `legality.Legal` finds no
+violation the input did not already have: nudge a unit (IC + support parts, or a single part) <= 3 mm
+(toward its weighted pull first, then 8 compass directions; 3 / 1.5 / 0.75 mm), rotate a unit +-90 degrees,
+slide a support part along its IC's edge (0.5 / 1 / 2 mm), swap two same-footprint parts, swap two units of
+similar size (area within 25 %) - the swaps only when each side is pulled toward the other's seat. A cheap local filter
+(class-weighted length + budget excess of the touched nets) discards hopeless candidates before the full
+score is computed (~0.09 s on 337 parts). Passes repeat until one keeps nothing, `[placement] time_limit_s`
+(600) or `max_passes` (30). Deterministic for a given `--seed` (visiting order); fixed/locked parts never
+move. Sequences of kept nudges can add up to more than 3 mm per unit.
+
 ### 5. Legalise with channels — `fluxplace/legalise.py`; the `pack` fault
 
 `legalise(B, targets, fixed, cons, hot)` removes overlaps by pushing movable parts
