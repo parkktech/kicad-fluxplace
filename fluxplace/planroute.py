@@ -57,6 +57,7 @@ def score_of(pr, findings, ns, cls=None):
 
 def run(B, cons=None, spec=None, ignore_routing=False, cell=None, board_path=None, log=None, iterations=None,
         open_method="text", cls=None, variant=None):
+    variant = variant or ((cons or {}).get("plan") or {}).get("variant")
     """-> result dict {pr, cls, plan, gr, ns, findings, score, comp, state, timing, mode}."""
     log = log or (lambda m: None)
     cons = cons or {}
@@ -266,7 +267,7 @@ def run_variants(B, cons, spec, ignore_routing, cell=None, board_path=None, base
     return rows
 
 
-def calibrate(B, cons, spec, board_path):
+def calibrate(B, cons, spec, board_path, grid_scan=True):
     """Predicted vs actual on a routed board: (a) open nets the plan flagged / missed (default mode), (b) the capacity constants:
     for a grid of (util, jog_frac) the share of the board's real track cell-directions that exceed the modelled capacity.
     -> dict with hit/miss/false lists, the errors (open but predicted clear) and the best constants."""
@@ -284,7 +285,7 @@ def calibrate(B, cons, spec, board_path):
     planned = set(R["gr"].nets)
     grid = []
     padc = defaultdict(set)
-    for util in (0.6, 0.7, 0.8, 0.9, 1.0):
+    for util in ((0.6, 0.7, 0.8, 0.9, 1.0) if grid_scan else ()):
         for jog in (0.3, 0.4, 0.5, 0.6):
             pr = EP.plan_params(cons, util=util, jog_frac=jog)
             g = GR.GlobalRoute(B, cons, R["cls"], pr, None, True)
@@ -311,6 +312,9 @@ def calibrate(B, cons, spec, board_path):
                     over += 1
             grid.append({"util": util, "jog_frac": jog, "over_share": round(over / max(1, len(use)), 3)})
     ok = [g for g in grid if g["over_share"] <= 0.05]
+    if not grid:
+        return {"actual_open": sorted(actual), "hit": sorted(actual & pred), "miss": sorted(actual - pred), "planned": len(planned),
+                "false_alarm": sorted((pred & planned) - actual), "grid": [], "best": None, "score": R["score"], "result": R}
     best = max(ok, key=lambda g: (-g["util"] * 0 + (1.0 - g["util"]) * -1, -g["jog_frac"])) if ok else min(grid, key=lambda g: g["over_share"])
     # tightest model that still holds 95 % of the real usage: smallest util, then largest jog
     best = min(ok, key=lambda g: (g["util"], -g["jog_frac"])) if ok else best

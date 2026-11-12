@@ -15,7 +15,7 @@ Context is scarce: commands answer with results; read nothing else. Unsure: `flu
 |---|---|---|
 | whole flow | `pipeline BOARD --workdir W` | `--constraints C --spec S --from/--to STAGE --status --route-budget S` |
 | board map (read it, not the .kicad_pcb) | `map BOARD` | `--constraints --show SEC --ref/--net/--group --render O.png` |
-| can it route? | `plan-route BOARD` | `--constraints --spec --ignore-routing`; `plan-compare MAPA MAPB` |
+| can it route? | `plan-route BOARD` | `--constraints --spec --ignore-routing`; `plan-compare`, `plan-options` |
 | ready to route | `route-ready BOARD` | `--constraints --spec --waive CODE:REGEX --all` (+PLAN_*) |
 | area budget | `floorplan-check BOARD` | `--constraints --spec` |
 | tree/chain templates | `templates BOARD` | `--constraints --spec --out O` |

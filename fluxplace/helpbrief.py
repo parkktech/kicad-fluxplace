@@ -18,7 +18,7 @@ CMD_DOC = {
     "stackup": "audit", "stackup-define": "audit", "netlist": "audit",
     "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "route", "tournament": "cli",
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli",
-    "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare",
+    "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
 }
 
 

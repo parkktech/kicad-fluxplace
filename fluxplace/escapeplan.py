@@ -21,6 +21,7 @@ and a free lane counts as served by the pour ("pour").
 Floors come from `[plan]` in the constraints (track_mm, clearance_mm, via_mm, drill_mm, ...) and default to
 0.127 / 0.127 / 0.45 / 0.20.
 """
+import fnmatch
 import math
 import re
 from collections import Counter, defaultdict
@@ -33,7 +34,7 @@ DEFAULTS = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm"
             "fine_pitch_mm": 0.65, "fine_pads": 16, "pour_pads": 20, "thermal_pad_mm2": 2.0,
             "via_cost_mm": 3.0, "iterations": 10, "util": 0.8, "w_sealed": 100.0, "w_nosite": 40.0,
             "w_overflow": 5.0, "w_overbudget": 3.0, "w_overbudget_hard": 20.0, "w_pair": 30.0, "w_rf": 30.0, "w_unreach": 200.0,
-            "w_len": 0.05, "jog_frac": 0.5, "via_units": 2.0}
+            "w_len": 0.05, "jog_frac": 0.5, "via_units": 2.0, "design_track_mm": 0.0, "design_clearance_mm": 0.0}
 SIDE_NAMES = {(1, 0): "E", (-1, 0): "W", (0, 1): "S", (0, -1): "N"}      # KiCad y grows downward
 MECH = ("MH", "MK", "FID", "TP", "H")
 
@@ -51,6 +52,9 @@ def plan_params(cons=None, **over):
     pr["track_mm"] = max(pr["track_mm"], float((((cons or {}).get("fab")) or {}).get("min_track_mm", 0)))
     pr["clearance_mm"] = max(pr["clearance_mm"], float((((cons or {}).get("fab")) or {}).get("min_clearance_mm", 0)))
     pr["pitch_mm"] = pr["track_mm"] + pr["clearance_mm"]
+    # geometry the controlled-impedance and power nets keep whatever the low-speed rule is (0 = the rule itself)
+    pr["design_pitch_mm"] = (pr["design_track_mm"] or pr["track_mm"]) + (pr["design_clearance_mm"] or pr["clearance_mm"])
+    pr["design_pitch_mm"] = max(pr["design_pitch_mm"], pr["pitch_mm"])
     pr["slot_mm"] = round(pr["via_mm"] + pr["clearance_mm"] + 0.02, 3)
     return pr
 
@@ -309,6 +313,7 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
     cons = cons or {}
     pr = pr or plan_params(cons)
     cls = cls if cls is not None else NC.classify(B, cons, None)
+    VIP = list(((cons or {}).get("plan") or {}).get("via_in_pad") or [])
     plan = Plan()
     ob = Obstacles(B, pr, ignore_routing)
     pnets = pnets if pnets is not None else plane_nets(B, cons, cls, pr)
@@ -412,6 +417,9 @@ def plan_escapes(B, cons=None, cls=None, pr=None, ignore_routing=True, only_refs
                     pad = next((p for p in parts[ref_]["pads"] if p["num"] == num), None)
                     big = pad is not None and 4 * pad["ex"] * pad["ey"] >= pr["thermal_pad_mm2"] and (
                         pad["net"] in pnets) and not pad["tht"]
+                    if not big and pad is not None and VIP and any(fnmatch.fnmatch(ref_, g) for g in VIP) and \
+                            2 * min(pad["ex"], pad["ey"]) >= pr["via_mm"] + 0.1 and not pad["tht"]:
+                        big = True                          # via-in-pad allowed for this part class (`[plan] via_in_pad`)
                     inside = rc[0] + via_r + 0.1 <= x <= rc[2] - via_r - 0.1 and rc[1] + via_r + 0.1 <= y <= rc[3] - via_r - 0.1
                     if big and inside:
                         owner = (ref_, num)

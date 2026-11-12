@@ -47,6 +47,20 @@ def _union_len(iv, lo, hi):
     return tot + max(0.0, cur_b - cur_a)
 
 
+CTRL_NAMES = re.compile(r"^(ETH_|USB|PCIE|MIC_|SPK_|HP[LR]_|LINE|HDMI|CSI|DSI|CLK|RF_)", re.I)
+
+
+def is_controlled(name, info, cons=None):
+    """A net with a designed width/gap/reference: pair, rf and clock classes, Ethernet/USB/PCIe/audio names, `[nets.X] impedance`."""
+    n = ((cons or {}).get("nets") or {}).get(name) or {}
+    return info["class"] in ("pair", "rf", "clock") or bool(CTRL_NAMES.match(name)) or any("imped" in k for k in n)
+
+
+def is_fixed_width(name, info, cons=None):
+    """Controlled nets and rails (width from current) are never thinned by a relaxation."""
+    return is_controlled(name, info, cons) or info["class"] == "rail"
+
+
 def octile(dx, dy):
     dx, dy = abs(dx), abs(dy)
     return max(dx, dy) + 0.41421356 * min(dx, dy)
@@ -76,6 +90,8 @@ class GlobalRoute:
         self.nl = len(self.layers)
         # preferred direction per layer: `[plan] layer_dir = {"In2.Cu" = "h", "In3.Cu" = "v"}` (default In2 east-west, In3 north-south)
         ld = {"In2.Cu": "h", "In3.Cu": "v"}
+        if variant == "dirswap":
+            ld = {"In2.Cu": "v", "In3.Cu": "h"}
         ld.update(((self.cons.get("plan") or {}).get("layer_dir") or {}))
         self.pref = [({"h": 0, "v": 1}.get(str(ld.get(l, "")).lower())) for l in self.layers]
         self.wrong = float((self.cons.get("plan") or {}).get("wrong_way", 1.5))
@@ -93,12 +109,33 @@ class GlobalRoute:
         self.capV = [[0] * self.N for _ in range(self.nl)]
         self.vcap = [0] * self.N
         self.plane_nets = plan.plane if plan is not None else EP.plane_nets(B, self.cons, self.cls, self.pr)
+        self.cpitch = [self.pr["pitch_mm"]] * self.N          # local track pitch (neck-down regions are finer)
+        self.mult = [max(1.0, self.pr["design_pitch_mm"] / self.pr["pitch_mm"])] * self.N   # fixed-width nets' demand factor
+        self.neck_cells = {}
+        self._neck()
         self.routes = {}
         self.nets = {}
         self.split_pairs = set()
         self.pair_origin = {}
         self.t_build = 0.0
         self.built = False
+
+    def _neck(self):
+        """`[plan.neck.NAME] refs = [...], track_mm, clearance_mm, margin_mm`: a local rule area around those parts' courtyards.
+        Low-speed nets get the finer pitch there; controlled-impedance and power nets keep their designed width (mult)."""
+        for name, n in sorted((((self.cons.get("plan") or {}).get("neck")) or {}).items()):
+            tr = float(n.get("track_mm", self.pr["track_mm"]))
+            cl = float(n.get("clearance_mm", self.pr["clearance_mm"]))
+            mg = float(n.get("margin_mm", 4.0))
+            for ref in n.get("refs", []):
+                if ref not in self.B["parts"]:
+                    continue
+                c = self.B["parts"][ref]["court"]
+                for ci in self._cells_of_rect((c[0] - mg, c[1] - mg, c[2] + mg, c[3] + mg)):
+                    if tr + cl < self.cpitch[ci]:
+                        self.cpitch[ci] = tr + cl
+                        self.mult[ci] = max(1.0, self.pr["design_pitch_mm"] / self.cpitch[ci])
+                        self.neck_cells[ci] = name
 
     # ------------------------------------------------------------------ grid helpers
     def cell_of(self, x, y):
@@ -272,7 +309,7 @@ class GlobalRoute:
 
     # ------------------------------------------------------------------ capacity
     def cap_cell(self, c):
-        pitch, util = self.pr["pitch_mm"], self.pr["util"]
+        pitch, util = self.cpitch[c], self.pr["util"]
         cb = self._cell_box(c)
         for l in range(self.nl):
             d = self.obs.get((l, c))
@@ -414,7 +451,7 @@ class GlobalRoute:
                 ps = [p for p in pads[net] if not p.get("np")]
             elif info["class"] == "rail":
                 w = CS.power_width_mm(self.cons, net, pr["track_mm"])
-                units = max(1.0, math.ceil((w + pr["clearance_mm"]) / pr["pitch_mm"] - 1e-9))
+                units = max(1.0, math.ceil((w + pr["clearance_mm"]) / pr["design_pitch_mm"] - 1e-9))
             terms = self._terms(ps)
             if len(terms) < 2:
                 continue
@@ -422,6 +459,7 @@ class GlobalRoute:
             if info["class"] == "rf":
                 lay = None
             nets[net] = {"name": net, "members": members, "units": units, "terms": terms, "cls": info["class"],
+                         "fixedw": is_fixed_width(net, info, self.cons),
                          "info": info, "rf": info["class"] == "rf", "pair": len(members) > 1,
                          "max_vias": int(rfc.get("max_vias", 1))}
             if len(members) > 1:
@@ -474,7 +512,7 @@ class GlobalRoute:
             for attempt in (0, 1):
                 if attempt:
                     lo_x, hi_x, lo_y, hi_y = 0, nx - 1, 0, self.ny - 1
-                res = self._dij(srcs, tree, mine, w, pres, via_cost, (lo_x, hi_x, lo_y, hi_y), (bx0, bx1, by0, by1))
+                res = self._dij(srcs, tree, mine, w, pres, via_cost, nt.get("fixedw"), (lo_x, hi_x, lo_y, hi_y), (bx0, bx1, by0, by1))
                 if res:
                     break
             if not res:
@@ -490,8 +528,9 @@ class GlobalRoute:
             self._mark(path, mine)
         # commit usage of this net
         keys = mine - free
+        fx, mu = nt.get("fixedw"), self.mult
         for (l, c, d) in keys:
-            (self.uH if d == 0 else self.uV)[l][c] += w
+            (self.uH if d == 0 else self.uV)[l][c] += w * (mu[c] if fx else 1.0)
         vcells = set()
         for cn in conns:
             p = cn.get("path")
@@ -526,13 +565,13 @@ class GlobalRoute:
             mine.add((la, ca, d))
             mine.add((la, cb, d))
 
-    def _dij(self, srcs, tree, mine, w, pres, via_cost, box, tbox):
+    def _dij(self, srcs, tree, mine, w, pres, via_cost, fx, box, tbox):
         nx, ny, N, nl, cell = self.nx, self.ny, self.N, self.nl, self.cell
         lo_x, hi_x, lo_y, hi_y = box
         tx0, tx1, ty0, ty1 = tbox
         capH, capV, uH, uV, hH, hV = self.capH, self.capV, self.uH, self.uV, self.hH, self.hV
         vcap, vu, hv = self.vcap, self.vu, self.hv
-        pref, wrong = self.pref, self.wrong
+        pref, wrong, mult = self.pref, self.wrong, self.mult
         dist, prev = {}, {}
         pq = []
         for s in srcs:
@@ -566,7 +605,7 @@ class GlobalRoute:
                 if key in mine:
                     step = cell
                 else:
-                    over = use + w - cap
+                    over = use + (w * mult[nc] if fx else w) - cap
                     step = cell * (1.0 + hist) + (pres * cell * over if over > 0 else 0.0)
                     pf = pref[l]
                     if pf is not None and pf != dr:
@@ -639,8 +678,9 @@ class GlobalRoute:
         if not r:
             return
         w = self.nets[name]["units"]
+        fx = self.nets[name].get("fixedw")
         for (l, c, d) in r["keys"]:
-            (self.uH if d == 0 else self.uV)[l][c] -= w
+            (self.uH if d == 0 else self.uV)[l][c] -= w * (self.mult[c] if fx else 1.0)
         for c in r["vcells"]:
             self.vu[c] -= w if not self.nets[name]["pair"] else 2.0
         vb = self.pr["via_units"]
@@ -747,8 +787,9 @@ class GlobalRoute:
                 continue
             self.routes[n] = r
             w = self.nets[n]["units"]
+            fx = self.nets[n].get("fixedw")
             for (l, c, d) in r["keys"]:
-                (self.uH if d == 0 else self.uV)[l][c] += w
+                (self.uH if d == 0 else self.uV)[l][c] += w * (self.mult[c] if fx else 1.0)
             for c in r["vcells"]:
                 self.vu[c] += w if not self.nets[n]["pair"] else 2.0
             for (l, c) in r.get("vuse", ()):
@@ -867,7 +908,7 @@ def findings(gr, ns, parts_near=None):
         sup = 0.0
         for c in cs:
             use = (gr.uH if g["dir"] == 0 else gr.uV)[l][c]
-            mine = sum(gr.nets[n]["units"] for n in own if n in gr.routes and (l, c, g["dir"]) in gr.routes[n]["keys"])
+            mine = sum(gr.nets[n]["units"] * (gr.mult[c] if gr.nets[n].get("fixedw") else 1.0) for n in own if n in gr.routes and (l, c, g["dir"]) in gr.routes[n]["keys"])
             cap = (gr.capH if g["dir"] == 0 else gr.capV)[l][c]
             sup += max(0.0, cap - (use - mine))
         supply = int(sup) + g["slots"]

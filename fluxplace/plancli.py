@@ -162,6 +162,27 @@ def cmd_plan_compare(a):
     print(f"findings only in A: {len(pa - pb)}, only in B: {len(pb - pa)}, shared: {len(pa & pb)}")
 
 
+def cmd_plan_options(a):
+    from . import planopts as PO, routediag as RD, planroute as PL
+    cons, spec = _ctx(a)
+    out = a.out_dir or (os.path.splitext(a.board)[0] + ".plan-options")
+    calib = None
+    if a.calibrate_board:
+        calib = PL.calibrate(RD.load(a.calibrate_board), cons, spec, a.calibrate_board, grid_scan=False)
+        calib.pop("result", None)
+    r = PO.search(a.board, cons, spec, out, max_grow=a.max_grow, workers=a.workers, place_time=a.place_time,
+                  log=(print if a.verbose else (lambda m: None)), calib=calib)
+    if a.json:
+        json.dump({k: v for k, v in r.items() if k != "baseline"}, open(a.json, "w"), indent=1, default=str)
+    print(r["prompt"])
+    if r.get("table"):
+        print(r["table"])
+    if r.get("caveat"):
+        print("caveat: " + r["caveat"])
+    print(f"plan-options: {'fits as is' if r['fits'] else str(len(r['ok'])) + ' recommended option(s), ' + str(len(r['sub'])) + ' need an owner rule change, ' + str(len(r['miss'])) + ' fail'}; "
+          f"{r['seconds']:g} s; candidates in {out}")
+
+
 def after_plan_place(a, board_in, board_out, cons, spec, st):
     """`place --objective plan` epilogue: confirm with a full plan-route, write the map and the move list."""
     from . import fluxmap as FM, routediag as RD, planroute as PL
@@ -226,6 +247,19 @@ def add_parsers(sub):
     pp.add_argument("--write-constants", action="store_true", help="with --calibrate: write util/jog_frac to [plan] in --constraints")
     common(pp)
     pp.set_defaults(fn=cmd_plan_route)
+
+    po = sub.add_parser("plan-options", help="what-if recommender: the smallest board/rule change that makes plan-route pass")
+    po.add_argument("board")
+    po.add_argument("--constraints", default=None)
+    po.add_argument("--spec", default=None)
+    po.add_argument("--max-grow", type=int, default=6, help="largest edge growth tried, mm (default 6)")
+    po.add_argument("--out-dir", default=None, help="candidate boards/maps/constraints (default <board>.plan-options/)")
+    po.add_argument("--place-time", type=float, default=30.0, help="seconds of --objective plan placement per option")
+    po.add_argument("--workers", type=int, default=None)
+    po.add_argument("--calibrate-board", default=None, help="routed board used to judge whether the verdict is proven")
+    po.add_argument("--json", default=None)
+    po.add_argument("--verbose", action="store_true")
+    po.set_defaults(fn=cmd_plan_options)
 
     pc = sub.add_parser("plan-compare", help="two maps' plan verdicts side by side")
     pc.add_argument("map_a")

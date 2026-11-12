@@ -47,7 +47,7 @@ class PlanState:
         B = self.B
         self.plan = EP.plan_escapes(B, self.cons, self.cls, self.pr, ignore_routing=True)
         self.phase = self.plan.stats.get("phase", 0)
-        self.gr = GR.GlobalRoute(B, self.cons, self.cls, self.pr, self.plan, True)
+        self.gr = GR.GlobalRoute(B, self.cons, self.cls, self.pr, self.plan, True, variant=(self.cons.get("plan") or {}).get("variant"))
         self.gr.build()
         self.gr.route_all()
         self._measure()
@@ -369,9 +369,10 @@ class PlanPlacer(RF.Refiner):
         return moves
 
 
-def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None):
+def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True):
     """-> (moves {ref: (x, y, angle)}, stats).  Mutates B."""
     r = PlanPlacer(B, cons, spec, seed, log, time_limit)
+    r.do_rotation_pass = rotation
     mv = r.run()
     return mv, {"score_before": r.score0, "score_after": r.score, "components_before": r.comp0,
                 "components_after": r.ps.comp, "kept": dict(r.stats), "flips": sorted(r.flips), "reverted": r.reverted,
