@@ -349,16 +349,17 @@ class Placer:
             self._nets()
         if self.valid():
             self.consider("final")
-        if self.best is None or self.score() > self.best[0]:
-            # never return a worse board than the best one seen (the input counts)
-            if self.best:
-                self.restore(self.best[1])
-            else:
-                self.restore(self.origin)
+        # the result is the best state seen (the input board is the first candidate), never
+        # the live state: moves are the difference between that snapshot and the input
+        snap = self.best[1]
+        self.restore(snap)
         base = self.origin
-        P = self.B["parts"]
-        self.moves = {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in P.items()
-                      if (p["pos"][0], p["pos"][1], p["angle"]) != base[r]}
+        norm = lambda a: (a + 180) % 360 - 180
+        self.moves = {r: (round(x, 4), round(y, 4), a) for r, (x, y, a) in snap.items()
+                      if abs(x - base[r][0]) > 1e-4 or abs(y - base[r][1]) > 1e-4
+                      or abs(norm(a - base[r][2])) > 1e-6}
+        if not self.moves:
+            self.log("no state beat the input board: nothing moved")
         M = LG._Model(self.B, self.cons, self.fixed, self.B["bbox"])
         rep = LG.verify(self.B, M, dict(self.moves), self.B["bbox"])
         if rep["outside"] or rep["overlaps"]:
