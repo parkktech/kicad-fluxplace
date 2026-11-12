@@ -90,3 +90,10 @@ rails a local pour over their pin bounding box + 3 mm).
 re-seated on any legal 2 mm grid site within 40 mm of the other end (4 rotations), or both groups go to free edge sites; group moves run before the other passes.
 A group must contain every part tied to its members by the support-part limit (e.g. the bias inductor's regulator cluster) or the guard rejects the move.
 PLAN_ESCAPE_OVERSUBSCRIBED groups get rotations of the part, the other side when `flip_cost` allows, and moves of the parts blocking the fan-out; the move log names the groups it resolved.
+
+## Router calibration against measured copper (a0503fc, 2026-11-12)
+
+Fitted to the real board's copper, not to a pass: via capacity per 2 mm cell = max(`via_min` 3, sites x (1 - 0.5 x pad cover)) (the old area-only model gave
+0 sites in 300 of the 727 cells that hold real vias; the fit covers 98 % of those cells and 95 % of the 1059 vias); `via_units` 0 (tracks per cell-direction do not
+depend on the cell's via count: median 1, p90 2-3 for 0..4 vias); PathFinder up to 30 iterations, stall 8, history +0.5, present factor x1.7 per iteration;
+`outer_cost` 1.15 (F/B steps cost 15 % more): plan track share F .36 B .13 In2 .28 In3 .23 vs the real F .29 B .21 In2 .29 In3 .21 (max error 0.08; 1.0 gives 84 % outer).
