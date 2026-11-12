@@ -1611,6 +1611,24 @@ def cmd_route_ready(a):
         raise SystemExit(1)
 
 
+def cmd_anchor_check(a):
+    """Per-anchor rotation table; --apply rotates the misoriented ones to their best option."""
+    from fluxplace import routediag as RD, anchors as AN, boardwrite as BW
+    cons, spec = _text_ctx(a)
+    B = RD.load(a.board)
+    res = AN.evaluate(B, cons, spec)
+    tol = float((cons.get("preroute") or {}).get("anchor_tolerance_pct", 15.0))
+    print(AN.format_text(res, tol))
+    bad = [r for r in res if r["worse_pct"] > tol and r["best"]["delta"] % 360 != 0]
+    print(f"anchor-check: {len(res)} anchor(s), {len(bad)} ANCHOR_MISORIENTED (> {tol:g}% worse than best)")
+    if a.apply:
+        if not a.out:
+            raise SystemExit("anchor-check --apply needs --out")
+        mv = AN.moves_for_best(B, res, cons, spec, tol)
+        BW.move_file(a.board, a.out, mv)
+        print(f"anchor-check --apply: rotated {', '.join(sorted(mv)) or 'nothing'}; wrote {a.out}")
+
+
 def _route_gate(a, board_path, stage="routing"):
     """Refuse to start routing on a placement route-ready rejects, unless --force.
     Prints the scorecard either way."""
@@ -2562,6 +2580,16 @@ def build_parser():
     prd.add_argument("--constraints", default=None, help="constraints TOML (net classes, support ownership)")
     prd.add_argument("--spec", default=None, help="spec JSON (pin names)")
     prd.set_defaults(fn=cmd_route_diagnose)
+
+    pac = sub.add_parser("anchor-check",
+                         help="evaluate every allowed rotation of each connector/module/socket "
+                              "and flag ANCHOR_MISORIENTED")
+    pac.add_argument("board")
+    pac.add_argument("--constraints", default=None)
+    pac.add_argument("--spec", default=None)
+    pac.add_argument("--apply", action="store_true", help="rotate misoriented anchors to their best option")
+    pac.add_argument("--out", default=None)
+    pac.set_defaults(fn=cmd_anchor_check)
 
     prr = sub.add_parser("route-ready",
                          help="pre-route gate: net budgets, support parts, anchors, pin escape, "

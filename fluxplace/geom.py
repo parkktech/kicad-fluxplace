@@ -39,7 +39,8 @@ def moved(part, x, y, ang):
 def place(part, x, y, ang):
     """Commit a move on the board model in place (pads and courtyard follow)."""
     pads, court = moved(part, x, y, ang)
-    part["pads"][:] = pads
+    for old, new in zip(part["pads"], pads):      # in place: B["pads"] shares these dicts
+        old.update(new)
     part["court"], part["pos"], part["angle"] = court, (x, y), ang
 
 
