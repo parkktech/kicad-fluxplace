@@ -21,15 +21,19 @@ CLI = os.path.join(REPO, "cli.py")
 PY = sys.executable
 
 
+def board_roots():
+    """Directories searched for real boards: the KiCad demo boards, plus any directory named in the
+    FLUXPLACE_BOARD_DIRS environment variable (os.pathsep-separated). Nothing machine-specific is built in."""
+    extra = [d for d in os.environ.get("FLUXPLACE_BOARD_DIRS", "").split(os.pathsep) if d]
+    return extra + ["/usr/share/kicad/demos", "/usr/local/share/kicad/demos"]
+
+
 def default_boards():
     out = []
-    for root in ("/var/kicad/utv-comms-bridge/hardware/utv-comms", "/var/www/html/razor-cm5-board/hardware/razor-cm5",
-                 "/var/www/html/razor-detector-board/hardware", "/usr/share/kicad/demos"):
+    for root in board_roots():
         for dp, _dn, fn in os.walk(root):
             for f in fn:
                 if f.endswith(".kicad_pcb") and not re.search(r"-backups|\.fanout|\.floorplan|-bak", dp + f):
-                    if root.startswith("/var/kicad") and not re.search(r"v1[356]\.kicad_pcb$", f):
-                        continue
                     out.append(os.path.join(dp, f))
     return sorted(set(out))
 

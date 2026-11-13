@@ -8,11 +8,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 from fluxplace import silk as SK
 
-CANDIDATES = sorted(set(
-    glob.glob("/var/kicad/utv-comms-bridge/hardware/utv-comms/utv-comms-v1[356].kicad_pcb")
-    + glob.glob("/var/www/html/razor-cm5-board/hardware/razor-cm5/razor-cm5.kicad_pcb")
-    + glob.glob("/var/www/html/razor-detector-board/hardware/*/*.kicad_pcb")
-    + sorted(glob.glob("/usr/share/kicad/demos/*/*.kicad_pcb"))[:4]), key=os.path.getsize)
+from fluxplace import boardmatrix as BM
+CANDIDATES = sorted(BM.default_boards(), key=os.path.getsize)[:12]
 BOARDS = CANDIDATES if os.environ.get("FLUXPLACE_SILK_MATRIX") == "all" else CANDIDATES[:2]
 TIMEOUT = 300
 HARD_REF = ("SILK_OFF_BOARD", "SILK_OVER_PAD", "SILK_OVER_HOLE", "SILK_OVERLAP", "SILK_UNDER_PART")
