@@ -220,6 +220,9 @@ def _routable_report(mv, before, after, out):
 
 
 def cmd_place(a):
+    if getattr(a, "spec", None):
+        from fluxplace import parts as _PT, constraints as _C
+        _PT.autogate(a.spec, _C.load(getattr(a, "constraints", None)), a.board, "place")
     if a.strategy == "routable":
         out = a.out or a.board
         mv, b, c = _routable_place(a, a.board, out)
@@ -2366,6 +2369,9 @@ def cmd_schematic(a):
     prove it by exporting its netlist and diffing against the source."""
     from fluxplace import schematic as SC
     import json as _json
+    if a.spec:
+        from fluxplace import parts as _PT, constraints as _C
+        _PT.autogate(a.spec, _C.load(getattr(a, "constraints", None)), a.board, "schematic", a.datasheets, a.mpn_map)
     if a.spec and a.datasheets and not a.undocumented:
         from fluxplace import partdocs as PD2
         mpn_map = {}
@@ -2998,6 +3004,8 @@ def build_parser():
     plancli.add_parsers(sub)              # map, plan-route, plan-compare
     from fluxplace import fancli
     fancli.add_parsers(sub)               # density, fanout, modules, floorplan (constructive flow)
+    from fluxplace import partscli
+    partscli.add_parsers(sub)             # parts, ready, pin-groups, part-diff
 
     pcl = sub.add_parser("clusters",
                          help="IC support clusters (which 2-pin parts belong to which IC); "
@@ -3310,6 +3318,7 @@ def build_parser():
                      help="datasheet dir: refuse to generate from a spec whose "
                           "parts are not documented (spec-check)")
     psc.add_argument("--mpn-map", default=None)
+    psc.add_argument("--constraints", default=None, help="constraints TOML ([parts] enforce stops on a part-entry FAIL)")
     psc.add_argument("--undocumented", action="store_true",
                      help="generate anyway (recorded in the output)")
     psc.add_argument("--kicad-cli", default="kicad-cli")

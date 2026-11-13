@@ -1269,6 +1269,15 @@ def check_spec_nets(facts, spec):
     return out
 
 
+def check_part_entry(facts, spec, cons, partdata, ds_dir):
+    """The part-entry gate (parts.py): MPN in value text, manufacturer, pinmap_source, package vs footprint, generic passives."""
+    if not spec:
+        return []
+    from . import parts as P
+    ds_dir = P.resolve_dir(ds_dir, [facts.get("board_path")])
+    return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in P.review_findings(spec, cons, facts, ds_dir, partdata)]
+
+
 def check_magnetics(facts, spec, cons=None):
     """LAN magnetics channels against the datasheet pin table (magnetics.py)."""
     from . import magnetics as MG
@@ -1593,6 +1602,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_power(facts, cons)
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
+    out += check_part_entry(facts, spec, cons, partdata, ds_dir)
     out += check_keepouts(facts, cons)
     out += check_preroute(facts, spec, cons)
     out += check_locks(facts, cons)
