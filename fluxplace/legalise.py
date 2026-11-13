@@ -104,6 +104,9 @@ class _Model:
                       for z in B["zones"] if z["keepout"] and z["no_tracks"] and z["pts"]]
         self._rel = {}
         self.em = float(((cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3))
+        # --- intent (intent.py): regions, swept areas, clear fronts, hard away distances from the held parts
+        from . import intent as IT
+        self.intent = IT.Zones(B, cons, held=self.fixed)
 
     def in_outline(self, rect):
         """Courtyard inside the real outline (rounded corners, cut-outs) with the edge clearance."""
@@ -161,6 +164,7 @@ class _Model:
             if (layer in z["layers"] or part["tht"]) and ref.upper() not in z["name"].upper() \
                     and z.get("owner") != ref:
                 out.append((z["name"] or "rule area", (x0, y0, x1, y1)))
+        out += self.intent.for_ref(ref)                      # --- intent (intent.py)
         return out
 
 

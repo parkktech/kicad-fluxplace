@@ -586,7 +586,10 @@ def st_floorplan(c, n, board):
     if q:
         return q
     line = next((l for l in reversed(text.splitlines()) if l.startswith("floorplan:")), _last_line(text))
-    return {"verdict": "pass" if rc == 0 and os.path.exists(out) else "fail", "line": line, "board": out if os.path.exists(out) else board}
+    # a floorplan / fan-out / INTENT FAIL fails the stage; `[floorplan] waive_fail = "reason"` is the only (recorded) way past it
+    bad = rc != 0 or not os.path.exists(out) or line.startswith("floorplan: FAIL") or any(
+        l.startswith("INTENT: FAIL") for l in text.splitlines())
+    return {"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}
 
 
 def st_fanout(c, n, board):

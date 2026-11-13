@@ -55,6 +55,8 @@ def edge_mounted(B, cons=None):
     from . import placechecks as PCK
     pl = (cons or {}).get("placement") or {}
     refs = set(pl.get("edge_mounted", []) or []) | set((pl.get("connectors") or {}))
+    from . import intent as IT
+    refs |= IT.overhang_refs(B, cons)                        # --- intent: [[intent.edge]] overhang_mm
     bx0, by0, bx1, by1 = B["bbox"]
     for ref, p in B["parts"].items():
         if _CONN.match(ref) and p["n_pads"] >= 2:

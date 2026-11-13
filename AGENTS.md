@@ -1,6 +1,6 @@
 # fluxplace for AI agents (read only this)
 
-Context is scarce. Unsure: `fluxplace doctor`.
+Unsure: `fluxplace doctor`.
 
 ## Output rules
 - Analysis commands print a verdict line, counts, worst 10 (`--top N`) and the full-report path
@@ -17,7 +17,7 @@ Context is scarce. Unsure: `fluxplace doctor`.
 | whole flow | `pipeline BOARD --workdir W` | `--constraints --spec --flow --from/--to --status --route-budget` |
 | board map | `map BOARD` | `--constraints --show SEC --ref/--net/--group --render` |
 | can it route? | `plan-route BOARD` | `--ignore-routing`; `plan-compare`, `plan-options` |
-| room, blocks, escapes | `density`, `modules`, `fanout`, `floorplan` | docs/FLOW.md |
+| room, blocks, escapes, intent | `density`, `modules`, `fanout`, `floorplan`, `intent` | docs/FLOW.md, INTENT.md |
 | ready to route | `route-ready BOARD` | `--waive CODE:REGEX --all` (+PLAN_*) |
 | area budget | `floorplan-check BOARD` | `--constraints --spec` |
 | silk | `silk BOARD` | `--fix --out O` |
@@ -34,7 +34,7 @@ Context is scarce. Unsure: `fluxplace doctor`.
 | docs/sourcing | `spec-check`, `sourcing`, `datasheets` | `--no-api` offline |
 | gates | `ready`, `parts`, `closure`, `part-diff`, `magnetics` | docs |
 | fab package | `fab`, `deliver`, `pcbway` | after `review` |
-| toolchain, context budgets | `doctor`, `doctor --context` | |
+| toolchain, context | `doctor`, `doctor --context` | |
 
 `--constraints` TOML, `--spec` JSON. Global flags (`--no-sourcing`, `--full`, `-q`, `--top`) precede the subcommand
 (the last three also follow it).
