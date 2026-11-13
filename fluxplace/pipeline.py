@@ -28,7 +28,7 @@ STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "r
 CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
-STATE_MAX = 2000
+STATE_MAX = 2400   # router + engine records joined the stage entries
 VERDICTS = ("pass", "fail", "blocked", "na", "skipped")
 
 
