@@ -74,8 +74,18 @@ def questions_of(path):
     return json.loads(m.group(1)) if m else [("error", (r.stderr or "")[-200:])]
 
 
-def one(src, outdir, timeout):
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(src)[:-10])
+def unique_names(boards):
+    """{path: name}: the file stem, prefixed with its folder when two boards share a stem."""
+    stems = [os.path.basename(b)[:-10] for b in boards]
+    out = {}
+    for b, st in zip(boards, stems):
+        nm = st if stems.count(st) == 1 else os.path.basename(os.path.dirname(b)) + "__" + st
+        out[b] = re.sub(r"[^A-Za-z0-9_.-]", "_", nm)
+    return out
+
+
+def one(src, outdir, timeout, name=None):
+    name = name or re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(src)[:-10])
     d = os.path.join(outdir, name)
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
@@ -143,8 +153,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     boards = a.boards or default_boards()
     os.makedirs(a.outdir, exist_ok=True)
+    names = unique_names(boards)
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
-        rows = list(ex.map(lambda b: one(b, a.outdir, a.timeout), boards))
+        rows = list(ex.map(lambda b: one(b, a.outdir, a.timeout, names[b]), boards))
     json.dump(rows, open(os.path.join(a.outdir, "matrix.json"), "w"), indent=1)
     print(table(rows))
     return 0

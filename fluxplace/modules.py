@@ -212,7 +212,7 @@ def fanouts(board, cons, spec, mods, a):
     from . import fanout as FO, routediag as RD
     B = RD.load(board)
     pol = FO.policy(B, cons, spec)
-    job = {"params": FO.params(a, pol["pr"]), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
+    job = {"params": FO.params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": True,
            "modules": {m["name"]: {"refs": sorted(m["members"]), "origin": m["pos"]} for m in mods
                        if any(pol["parts"].get(r, {}).get("mode") not in (None, "skip") for r in m["members"])}}

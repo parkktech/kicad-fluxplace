@@ -79,7 +79,20 @@ def policy(B, cons, spec, refs=None):
             "signal_layers": EP.plan_layers(B, cons)[0], "pr": pr}
 
 
-def params(a, pr):
+def params(a, pr, board=None):
+    """Fan-out geometry: the planner floors (or the command line), never below the board's own design rules (.kicad_pro)."""
+    P = _params(a, pr)
+    if board:
+        from . import routerules as RR
+        rr = RR._pro_rules(board)
+        for k, ks in (("track", "min_track_width"), ("clear", "min_clearance"), ("via", "min_via_diameter"),
+                      ("drill", "min_through_hole_diameter")):
+            if rr.get(ks) and P[k] < float(rr[ks]):
+                P[k] = float(rr[ks])
+    return P
+
+
+def _params(a, pr):
     P = {"track": a.track or max(pr["track_mm"], 0.15 if pr["track_mm"] < 0.15 else pr["track_mm"]),
          "clear": a.clearance or max(pr["clearance_mm"], 0.15 if pr["clearance_mm"] < 0.15 else pr["clearance_mm"]),
          "via": a.via or pr["via_mm"], "drill": a.drill or pr["drill_mm"], "via_pad_gap": a.via_pad_gap, "reach": a.reach, "lane": a.lane,
@@ -102,7 +115,7 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     from . import routediag as RD
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
-    job = {"params": params(a, pol["pr"]), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
+    job = {"params": params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
     if getattr(a, "nets", None):
         job["only_nets"] = [n for n in a.nets.split(",") if n]
