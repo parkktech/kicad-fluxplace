@@ -36,53 +36,7 @@ from . import routedrops as DR
 from . import routediag as RD
 from . import routestatus as RS
 
-_START = re.compile(r"^[ \t]?\((segment|arc|via)[ \t\n]", re.M)
-_NUM = r"(-?\d+(?:\.\d+)?)"
-
-
-def blocks(text):
-    """{raw key: block text} for the top-level (segment|arc|via ...) forms of a board file."""
-    out = {}
-    for m in _START.finditer(text):
-        i = m.start() + (m.group(0).index("("))
-        depth, j, instr = 0, i, False
-        while j < len(text):
-            c = text[j]
-            if instr:
-                if c == "\\":
-                    j += 1
-                elif c == '"':
-                    instr = False
-            elif c == '"':
-                instr = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        blk = text[i:j + 1]
-        out[_key(m.group(1), blk)] = blk
-    return out
-
-
-def _num2(blk, tag):
-    m = re.search(r"\(%s %s %s\)" % (tag, _NUM, _NUM), blk)
-    return (float(m.group(1)), float(m.group(2))) if m else (0.0, 0.0)
-
-
-def _key(kind, blk):
-    net = re.search(r'\(net ("[^"]*"|\d+)\)', blk)
-    net = net.group(1) if net else ""
-    if kind == "via":
-        x, y = _num2(blk, "at")
-        sz = re.search(r"\(size %s\)" % _NUM, blk)
-        return ("v", round(x, 4), round(y, 4), sz.group(1) if sz else "", net)
-    a, b = sorted((tuple(round(v, 4) for v in _num2(blk, "start")), tuple(round(v, 4) for v in _num2(blk, "end"))))
-    w = re.search(r"\(width %s\)" % _NUM, blk)
-    ly = re.search(r'\(layer "([^"]*)"\)', blk)
-    return ("s", a, b, w.group(1) if w else "", ly.group(1) if ly else "", net)
+from .boardtext import blocks, _num2, _NUM, key_of as _key   # noqa: E402,F401  (kept importable from here)
 
 
 def snap_vias(new):
