@@ -149,7 +149,7 @@ def coarse_dist(free, viaok, goals, f, step, via_cost):
     return d
 
 
-def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost, via_cost, budget, lcost=None):
+def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost, via_cost, budget, lcost=None, ccost=None, cunit=0.1):
     """seeds [(cost, li, j, i, d, pol)], goals {cell * nl + li: {d * 2 + pol: cost}}, H {pol: coarse_dist} -> (states | None, info).
     Moves: one cell straight; a 45 degree turn followed by K cells straight; a via pair followed by K cells straight; the
     first move from a gate is K cells straight.  A state is (li, j, i, d); the path lists them from seed to goal."""
@@ -166,15 +166,21 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         v = Hl[pol][li][min(j // f, cjm)][min(i // f, cim)]
         return BIG if v > BIG else (v - slack if v > slack else 0.0)
 
+    CC = ccost                                           # negotiation: bytes per layer, extra cost (x cunit mm) of entering a cell
+
     def run(li, j, i, d, n):
         di, dj = DIRS[d]
         a = A[li]
+        x = 0
+        cc = CC[li] if CC else None
         for _k in range(n):
             i += di
             j += dj
             if i < 0 or j < 0 or i >= nx or j >= ny or not a[j * nx + i]:
                 return None
-        return j, i
+            if cc:
+                x += cc[j * nx + i]
+        return j, i, x * cunit
     lc = list(lcost) if lcost else [1.0] * nl             # length factor per layer (outer layers preferred when free)
     Gc, par, heap = {}, {}, []
     for c, li, j, i, d, pol in seeds:
@@ -221,21 +227,21 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         if fresh:
             e = run(li, j, i, d, K)
             if e:
-                push(g + K * DLEN[d] * step * lc[li], li, e[0], e[1], d, pol, key, False)
+                push(g + K * DLEN[d] * step * lc[li] + e[2], li, e[0], e[1], d, pol, key, False)
             continue
         e = run(li, j, i, d, 1)
         if e:
-            push(g + DLEN[d] * step * lc[li], li, e[0], e[1], d, pol, key, False)
+            push(g + DLEN[d] * step * lc[li] + e[2], li, e[0], e[1], d, pol, key, False)
         for nd in ((d + 1) & 7, (d - 1) & 7):
             e = run(li, j, i, nd, K)
             if e:
-                push(g + K * DLEN[nd] * step * lc[li] + turn_cost, li, e[0], e[1], nd, pol, key, False)
+                push(g + K * DLEN[nd] * step * lc[li] + turn_cost + e[2], li, e[0], e[1], nd, pol, key, False)
         if V is not None and V[d % 4][cell]:
             for l2 in range(nl):
                 if l2 != li and A[l2][cell]:
                     e = run(l2, j, i, d, K)
                     if e:
-                        push(g + via_cost + K * DLEN[d] * step * lc[l2], l2, e[0], e[1], d, pol, key, True)
+                        push(g + via_cost + K * DLEN[d] * step * lc[l2] + e[2], l2, e[0], e[1], d, pol, key, True)
     if best[1] is not None:
         return _finish(best, par, nl, nx, pops)
     return None, {"reason": "no path", "near": near[1], "pops": pops}

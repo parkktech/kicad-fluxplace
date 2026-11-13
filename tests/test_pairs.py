@@ -257,8 +257,45 @@ def test_pair_leaves_through_its_fan_out_via_pair(tmp_path):
     assert {(18.8, 20.0), (21.7, 20.0)} <= kept                    # the fan-out vias and stubs stay: the pair leaves through them
     assert sum(1 for s in B["segs"] if s["net"] == "D_P" and s["layer"] == "F.Cu" and s["a"][1] == s["b"][1] == 20.0) >= 1
     assert clean(B, {"D_P", "D_N"}) >= CLR
-    off = PR.run(PB.write(tmp_path, body, name="x.kicad_pcb"), {"pairlay": {"via_exit": False}}, None, str(tmp_path / "x.o.kicad_pcb"))
+    off = PR.run(PB.write(tmp_path, body, name="x.kicad_pcb"), {"pairlay": {"via_exit": False, "dogbone": False}}, None, str(tmp_path / "x.o.kicad_pcb"))
     assert off["complete"] == 0 and off["pairs"][0]["why"]
+
+
+def test_boxed_in_pins_get_a_new_dog_bone_via_pair(tmp_path):
+    # no fan-out copper yet (pairs before fan-out): the stage makes its own matched via pair next to the pads
+    bars = PB.fp("W1", 20.25, 19.15, [PB.pad("1", 0, 0, "X1", 2.4, 0.3)]) + PB.fp("W2", 20.25, 20.85, [PB.pad("1", 0, 0, "X2", 2.4, 0.3)]) + \
+        PB.fp("W3", 20.25, 17.2, [PB.pad("1", 0, 0, "X3", 9.0, 0.3)]) + PB.fp("W4", 20.25, 22.8, [PB.pad("1", 0, 0, "X4", 9.0, 0.3)]) + \
+        PB.fp("W5", 15.6, 20.0, [PB.pad("1", 0, 0, "X5", 0.3, 5.9)]) + PB.fp("W6", 24.9, 20.0, [PB.pad("1", 0, 0, "X6", 0.3, 5.9)])
+    body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 50, 40, "D_P", "D_N", layer="B.Cu") + bars
+    rep, B, _ = lay(tmp_path, body, {"pairlay": {"ring_mm": 0.6}})
+    r = rep["pairs"][0]
+    assert r["status"] == "complete" and clean(B, {"D_P", "D_N"}) >= CLR and r["skew"] <= r["limit"]
+    vp = [v for v in B["vias"] if v["net"] == "D_P"]
+    vn = [v for v in B["vias"] if v["net"] == "D_N"]
+    assert len(vp) == len(vn) >= 1 and all(v["locked"] for v in vp + vn)
+
+
+def test_terminal_with_pads_on_two_layers_gets_a_via_on_the_odd_pad(tmp_path):
+    odd = PB.fp("FB1", 20, 20, [PB.pad("1", 0, 0, "D_P", 0.6, 0.6)]) + \
+        PB.fp("FB2", 21.2, 20, [PB.pad("1", 0, 0, "D_N", 0.6, 0.6).replace('(layers "F.Cu")', '(layers "B.Cu")')])
+    rep, B, _ = lay(tmp_path, odd + duo("J1", 20, 40, "D_P", "D_N"))
+    r = rep["pairs"][0]
+    # connected and clean; the audit still says mismatch (the legs cannot have one layer sequence), so it is not counted complete
+    assert r["open"] == [0, 0] and r["status"] == "mismatch" and any("via-on" in x for x in r["via_exit"])
+    assert len([v for v in B["vias"] if v["net"] in ("D_P", "D_N")]) >= 1 and clean(B, {"D_P", "D_N"}) >= CLR
+
+
+def test_negotiation_gives_each_pair_its_corridor(tmp_path):
+    # three pairs through one wall with three one-pair gaps: alone, all three pick the middle gap
+    cons = {"preroute": {"signal_layers": ["F.Cu"]}, "pairlay": {"workers": 2}}
+    wall = PB.keepout(30, 0, 30.5, 34.4) + PB.keepout(30, 35.6, 30.5, 39.4) + PB.keepout(30, 40.6, 30.5, 44.4) + PB.keepout(30, 45.6, 30.5, 80)
+    body = wall + "".join(duo(f"U{k}", 20, y, f"A{k}_P", f"A{k}_N") + duo(f"J{k}", 40, y, f"A{k}_P", f"A{k}_N") for k, y in enumerate((38.0, 40.0, 42.0)))
+    rep, B, _ = lay(tmp_path, body, cons)
+    assert rep["complete"] == 3 and rep["negotiation"]["sections"] == 3 and rep["negotiation"]["passes"] >= 1
+    assert not rep["negotiation"]["unresolved"]
+    assert clean(B, {n for p in rep["pairs"] for n in p["pair"]}) >= CLR
+    seq = PR.run(PB.write(tmp_path, body, name="s.kicad_pcb"), dict(cons, pairlay={"negotiate": False}), None, str(tmp_path / "s.o.kicad_pcb"))
+    assert seq["negotiation"] is None
 
 
 def test_blocked_pair_goes_first_and_the_blocker_is_laid_again(tmp_path):
@@ -268,12 +305,14 @@ def test_blocked_pair_goes_first_and_the_blocker_is_laid_again(tmp_path):
         PB.keepout(36, 37.5, 36.5, 42.5)
     body = duo("U1", 29.05, 20, "PCIE_TX_P", "PCIE_TX_N") + duo("U2", 29.05, 60, "PCIE_TX_P", "PCIE_TX_N") + \
         duo("U3", 20, 40, "MIC_P", "MIC_N") + duo("U4", 33.5, 40, "MIC_P", "MIC_N") + wall
-    one = PR.run(PB.write(tmp_path, body), dict(cons, pairlay={"passes": 0}), None, str(tmp_path / "a.kicad_pcb"))
+    one = PR.run(PB.write(tmp_path, body), dict(cons, pairlay={"passes": 0, "negotiate": False}), None, str(tmp_path / "a.kicad_pcb"))
     assert one["complete"] == 1 and one["order"][0].startswith("PCIE")
     bad = [r for r in one["pairs"] if r["status"] != "complete"][0]
     assert bad["pair"][0].startswith("MIC") and any("PCIE_TX" in b for b in bad["blockers"])
-    two = PR.run(PB.write(tmp_path, body, name="b2.kicad_pcb"), cons, None, str(tmp_path / "b.kicad_pcb"))
+    two = PR.run(PB.write(tmp_path, body, name="b2.kicad_pcb"), dict(cons, pairlay={"passes": 3, "negotiate": False}), None, str(tmp_path / "b.kicad_pcb"))
     assert two["complete"] == 2 and two["passes"] >= 1 and two["order"][0].startswith("MIC")
+    neg = PR.run(PB.write(tmp_path, body, name="b3.kicad_pcb"), cons, None, str(tmp_path / "c.kicad_pcb"))        # negotiation: same result, no re-lay
+    assert neg["complete"] == 2 and neg["passes"] == 0 and neg["negotiation"]["passes"] >= 1
     assert clean(RD.load(str(tmp_path / "b.kicad_pcb")), {"PCIE_TX_P", "PCIE_TX_N", "MIC_P", "MIC_N"}) >= CLR
 
 
