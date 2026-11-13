@@ -164,6 +164,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     dead_edges = {}                       # rail net -> {edge key}
     rail_done = {}                        # rail net -> merged edges
     pair_events = {}                      # (p, n) -> "half-removed" | "failed"
+    pair_causes = {}                      # why pair results were not merged: half / layers / vias / skew -> count
     stats = {"attempts": 0, "halvings": 0, "timeouts": 0, "violations": 0}
     extra = extra if extra is not None else {}
     gap = (rules or {}).get("min_clearance") or (rules or {}).get("clearance") or 0.1
@@ -203,6 +204,8 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                      leftovers=len(dead), rule_violations=stats["violations"], dropped=tally.totals())
         if rails:
             extra["rails"] = rails_status()
+        if pair_causes:
+            extra["pair_causes"] = dict(pair_causes)
         if cks:
             extra.update(checkpoint=cks[-1], checkpoint_n=len(cks))
         if status_path:
@@ -361,6 +364,8 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 stt, why = _pair_state(Jb, u.nets[0], u.nets[1], cons, jo)
                 if stt != "complete":
                     log(f"    pair {u.id}: {stt} ({why}); result removed")
+                    for c_ in ([w.split()[0] for w in why.split("; ")] if why else [stt]):
+                        pair_causes[c_] = pair_causes.get(c_, 0) + 1
                     pair_events[tuple(u.nets)] = "half-removed" if stt == "half" else "failed"
                     drop(u, "no-path" if stt in ("half", "open") else "other", f"pair {stt}")
                     continue
@@ -492,6 +497,8 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     out["pairs"] = pairs_status() if pair_of else None
     if out["pairs"]:
         extra["pairs"] = {k: v for k, v in out["pairs"].items()}
+        extra["pair_causes"] = dict(pair_causes)
+        out["pair_causes"] = dict(pair_causes)
     push("done")
     BR.write_leftovers(workdir, out)
     return out
