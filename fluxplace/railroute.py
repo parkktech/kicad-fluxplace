@@ -38,14 +38,35 @@ def rail_nets(B, cons, cls=None, nets=None, plain=()):
     return rails, poured
 
 
-def clusters(B, nets):
-    """{net: [[pad dicts of one connected cluster], ...]} for the nets of `nets` that are open (text connectivity)."""
+def clusters(B, nets, members=None):
+    """{net: [[pad dicts of one connected cluster], ...]} for the nets of `nets` that are open (text connectivity).
+    `members` (dict) gets {net: [(pads, segs, vias) per cluster]}."""
     S = set(nets)
     B2 = dict(B, pads=[p for p in B["pads"] if p["net"] in S], segs=[s for s in B["segs"] if s["net"] in S],
               vias=[v for v in B["vias"] if v["net"] in S], zones=[z for z in B["zones"] if z["net"] in S])
     groups = {}
-    RC.text_open(B2, groups)
+    RC.text_open(B2, groups, members)
     return groups
+
+
+def _rk(v):
+    return round(v, 4)
+
+
+def job_text(text, B, net, edge, members):
+    """Router input for ONE edge of a rail: the net is taken off every pad outside the two clusters AND off the copper (fan-out
+    stubs, earlier pieces) of the other clusters, so the router sees exactly the two clusters."""
+    from . import boardtext as BT
+    t = BT.strip_pad_nets(text, net, edge["keep"])
+    keep_segs, keep_vias = set(), set()
+    for pads, segs, vias in members.get(net, []):
+        if any((p["ref"], p["num"]) in edge["keep"] for p in pads):
+            for s in segs:
+                a, b = sorted(((_rk(s["a"][0]), _rk(s["a"][1])), (_rk(s["b"][0]), _rk(s["b"][1]))))
+                keep_segs.add((a, b, s["layer"]))
+            for v in vias:
+                keep_vias.add((_rk(v["x"]), _rk(v["y"])))
+    return BT.unnet_copper(t, net, keep_segs, keep_vias)
 
 
 def sig(cluster):
@@ -103,10 +124,11 @@ def plan(B, cons, rails, dead_edges=None, per_round=None):
     """-> ({net: [edge, ...]}, {net: clusters left}) for the rails that are still open: at most `per_round` edges per rail."""
     per_round = per_round or edges_per_round(cons)
     dead_edges = dead_edges or {}
-    cl = clusters(B, rails)
+    mem = {}
+    cl = clusters(B, rails, mem)
     out = {}
     for n, groups in cl.items():
         es = tree_edges(groups, dead_edges.get(n, ()))
         if es:
             out[n] = es[:per_round]
-    return out, {n: len(g) for n, g in cl.items()}
+    return out, {n: len(g) for n, g in cl.items()}, mem

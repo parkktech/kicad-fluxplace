@@ -167,3 +167,24 @@ def test_plain_copper_net_is_routed_first_and_verified(tmp_path):
     assert [c["nets"] for c in calls(tmp_path / "a")][0] == ["PL"] and r["open"] == 0
     board, r, R, spath = go(tmp_path / "b", body, ["N0", "PL"], cons, via=["PL"])
     assert r["leftovers"] == ["PL"] and r["reasons"] == {"PL": "plain copper violated"} and r["dropped"] == {"other": 1}
+
+
+def test_rail_job_input_has_only_the_two_clusters_copper(tmp_path):
+    stub = '(segment (start 35 20) (end 35 22) (width 0.15) (layer "F.Cu") (net "VX"))\n' + \
+        '(via (at 35 22) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "VX"))\n'                      # pad P5's fan-out stub
+    p = G.board(tmp_path, rail_body() + stub, outline=(0, 0, 100, 100))
+    B = RD.load(p)
+    mem = {}
+    cl = RL.clusters(B, ["VX"], mem)["VX"]
+    assert len(cl) == 6 and sum(len(m[1]) for m in mem["VX"]) == 1
+    edge = next(e for e in RL.tree_edges(cl) if ("P0", "1") in e["keep"])
+    t = RL.job_text(open(p).read(), B, "VX", edge, mem)
+    q = tmp_path / "j.kicad_pcb"
+    q.write_text(t)
+    J = RD.load(str(q))
+    assert sorted((x["ref"]) for x in J["pads"] if x["net"] == "VX") == sorted(r for r, _n in edge["keep"])
+    assert all(s["net"] == "" for s in J["segs"]) and all(v["net"] == "" for v in J["vias"])                 # the other cluster's stub is an obstacle
+    far = next(e for e in RL.tree_edges(cl) if ("P5", "1") in e["keep"])
+    q.write_text(RL.job_text(open(p).read(), B, "VX", far, mem))
+    J2 = RD.load(str(q))
+    assert [s["net"] for s in J2["segs"]] == ["VX"] and [v["net"] for v in J2["vias"]] == ["VX"]            # the stub of a kept cluster stays

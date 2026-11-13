@@ -251,10 +251,10 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
             used.update(u.nets)
             if u.id not in dead:
                 units.append(u)
-        runits = []
+        runits, rmem = [], {}
         if rails:
             open_rails = [n for n in rails if n in cur_open]
-            rp, _left = RL.plan(cur_B, cons, open_rails, dead_edges)
+            rp, _left, rmem = RL.plan(cur_B, cons, open_rails, dead_edges)
             for n in open_rails:
                 for e in rp.get(n, []):
                     runits.append(Unit("rail", [n], edge=e, net=n, width=RL.width_mm(cons, n)))
@@ -284,7 +284,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
             dst = os.path.join(jd, f"{k:02d}-out.kicad_pcb")
             if u.kind == "rail":
                 with open(src, "w", errors="surrogateescape") as fh:
-                    fh.write(BT.strip_pad_nets(base_text, u.net, u.edge["keep"]))
+                    fh.write(RL.job_text(base_text, cur_B, u.net, u.edge, rmem))
             else:
                 shutil.copy(cur, src)
             BR._sidecar(cur, src)
@@ -329,6 +329,10 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 drop(u, "other", "no output")
                 continue
             Jb["pads"] = cur_B["pads"]               # a rail job's pads were taken off the net: audit against the true ones
+            if u.kind == "rail":                     # ... and so was the copper of its other clusters: it is the rail's again
+                for x in Jb["segs"] + Jb["vias"]:
+                    if not x["net"]:
+                        x["net"] = u.net
             new = RA.new_copper(cur_B, Jb)
             rem = RA.removed_copper(cur_B, Jb)
             aff = RIP.affected(rem, set(u.nets))
@@ -365,7 +369,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 drop(u, "other", "plain copper violated")
                 continue
             jb = blocks(txt)
-            nb = {k: b for k, b in jb.items() if k not in base_blocks}
+            nb = {k: b for k, b in jb.items() if k not in base_blocks and (u.kind != "rail" or BT.net_name(b))}
             rk = [k for k in base_blocks if k not in jb] if aff else []
             c = (u, new, nb, rk, aff, rem)
             (rip_cands if aff else cands).append(c)

@@ -133,3 +133,27 @@ def strip_pad_nets(text, net, keep):
         last = j + 1
     out.append(text[last:])
     return "".join(out)
+
+
+def unnet_copper(text, net, keep_segs, keep_vias):
+    """Take `net` off the tracks and vias of that net that are NOT in `keep_segs` ({(a, b, layer)} rounded to 4 dp, ends sorted)
+    / `keep_vias` ({(x, y)} rounded): copper of other clusters stays as an obstacle with no net."""
+    tag = '(net "%s")' % net
+    out, last = [], 0
+    for i, j, _k, blk in scan(text):
+        if tag not in blk:
+            continue
+        if blk.startswith("(via"):
+            key = tuple(round(v, 4) for v in _num2(blk, "at"))
+            hold = key in keep_vias
+        else:
+            a, b = sorted((tuple(round(v, 4) for v in _num2(blk, "start")), tuple(round(v, 4) for v in _num2(blk, "end"))))
+            ly = re.search(r'\(layer "([^"]*)"\)', blk)
+            hold = (a, b, ly.group(1) if ly else "") in keep_segs
+        if hold:
+            continue
+        out.append(text[last:i])
+        out.append(re.sub(r"[ \t]*" + re.escape(tag), "", blk, count=1))
+        last = j + 1
+    out.append(text[last:])
+    return "".join(out)
