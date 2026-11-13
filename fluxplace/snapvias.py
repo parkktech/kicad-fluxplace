@@ -28,8 +28,8 @@ def _fmt(v):
     return f"{v:.6f}".rstrip("0").rstrip(".")
 
 
-def snap_text(text):
-    """-> (new text, number of track ends moved, number of vias involved)."""
+def _scan(text):
+    """-> (vias, segs, via_at) of a board text; via_at(point, net, layer) = the same-net via whose copper holds the point."""
     copper = _COPPER.findall(text[:20000])
     items = BT.scan(text)
     vias = []
@@ -47,7 +47,7 @@ def snap_text(text):
             segs.append({"i": i, "j": j, "blk": blk, "a": a, "b": b, "layer": ly.group(1) if ly else "",
                          "net": BT.net_name(blk), "locked": BT.is_locked(blk)})
     if not vias or not segs:
-        return text, 0, 0
+        return vias, segs, None
     cell = {}
     for v in vias:
         for cx in range(int((v["x"] - v["r"]) // 1.0), int((v["x"] + v["r"]) // 1.0) + 1):
@@ -59,6 +59,35 @@ def snap_text(text):
             if v["net"] == net and layer in v["layers"] and math.hypot(p[0] - v["x"], p[1] - v["y"]) < v["r"] - 1e-3:
                 return v
         return None
+    return vias, segs, via_at
+
+
+def off_centre(text):
+    """Track ends (locked or not) inside a same-net via's copper, off its centre, with no same-net track end on that layer at the
+    via centre (a through-joint is fine) -> [(net, layer, x, y, locked)].  Approximates KiCad's track_not_centered_on_via."""
+    vias, segs, via_at = _scan(text)
+    if via_at is None:
+        return []
+    cen = set()
+    for s in segs:
+        for p in (s["a"], s["b"]):
+            v = via_at(p, s["net"], s["layer"])
+            if v and math.hypot(p[0] - v["x"], p[1] - v["y"]) <= 1e-3:
+                cen.add((id(v), s["layer"]))
+    out = []
+    for s in segs:
+        for p in (s["a"], s["b"]):
+            v = via_at(p, s["net"], s["layer"])
+            if v and math.hypot(p[0] - v["x"], p[1] - v["y"]) > 1e-3 and (id(v), s["layer"]) not in cen:
+                out.append((s["net"], s["layer"], round(p[0], 3), round(p[1], 3), s["locked"]))
+    return out
+
+
+def snap_text(text):
+    """-> (new text, number of track ends moved, number of vias involved)."""
+    vias, segs, via_at = _scan(text)
+    if via_at is None:
+        return text, 0, 0
     # moved ends: {(seg idx, 0|1): via}
     move = {}
     for k, s in enumerate(segs):

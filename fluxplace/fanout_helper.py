@@ -257,7 +257,12 @@ class Model:
                 continue
             o = self.obs[i]
             same = o.net == net and net
-            if same and o.kind in ("track", "via", "hole"):
+            if same and o.kind == "via":            # same-net vias may merge, but no via centre inside another's copper:
+                ob = o.bb                           # KiCad flags the track end that sits on it (track_not_centered_on_via)
+                if math.hypot((ob[0] + ob[2]) / 2 - p[0], (ob[1] + ob[3]) / 2 - p[1]) < r + 0.01:
+                    return (o.what, o.kind, i)
+                continue
+            if same and o.kind in ("track", "hole"):
                 continue
             if same and i in own_ok:
                 continue
@@ -931,9 +936,38 @@ def main_modules(job, board):
     print(MARK + json.dumps(res))
 
 
+def main_claims(job, board):
+    """job["claims"] = reserved escapes (escres): which ones put copper in a keep-out / rule area or too near the board edge?
+    -> {index: reason}.  Reservations are planned on a raster that knows pads, tracks and vias only."""
+    M = Model(board, job)
+    bad = {}
+    for k, r in enumerate(job["claims"]):
+        pts = [r["pad_xy"]] + r["lane"]
+        for a, b in zip(pts, pts[1:]):
+            if math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-4:
+                continue
+            sh = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(r["width"]))
+            w = r["width"]
+            bb = (min(a[0], b[0]) - w / 2, min(a[1], b[1]) - w / 2, max(a[0], b[0]) + w / 2, max(a[1], b[1]) + w / 2)
+            h = M._keep_edge(r["net"], r["layer"], sh, bb, w, False, (a, b))
+            if h:
+                bad[k] = h[0]
+                break
+        else:
+            x, y = r["site"]
+            d = r["via"]
+            sh = pcbnew.SHAPE_SEGMENT(V2(nm(x), nm(y)), V2(nm(x), nm(y)), nm(d))
+            h = M._keep_edge(r["net"], None, sh, (x - d / 2, y - d / 2, x + d / 2, y + d / 2), d, True, ((x, y),))
+            if h:
+                bad[k] = h[0]
+    print(MARK + json.dumps({"bad": {str(k): v for k, v in bad.items()}}))
+
+
 def main():
     job = json.load(open(sys.argv[1]))
     board = pcbnew.LoadBoard(sys.argv[2])
+    if "claims" in job:
+        return main_claims(job, board)
     if job.get("modules"):
         return main_modules(job, board)
     out = sys.argv[3]

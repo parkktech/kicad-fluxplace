@@ -112,6 +112,36 @@ def drc_counts(board, workdir, timeout=900):
     return c, len(d.get("unconnected_items", [])), time.time() - t0
 
 
+def _drop_illegal_claims(board, job, claimed, wd, log):
+    """reserved escapes whose via or stub lies in a keep-out / rule area (board or footprint) or inside the board-edge clearance
+    are dropped (those pins escape through the normal, fully checked fan-out); the reason is logged."""
+    jp = os.path.join(wd, "claims.json")
+    json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed}, open(jp, "w"))
+    r = subprocess.run(["/usr/bin/python3", HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
+    line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
+    if not line:
+        log("fanout: reserved-escape legality check failed: " + (r.stderr or r.stdout)[-200:])
+        return claimed
+    bad = json.loads(line[-1][len(MARK):])["bad"]
+    for k, why in sorted(bad.items(), key=lambda kv: int(kv[0])):
+        c = claimed[int(k)]
+        log(f"fanout: reserved escape {c['ref']}.{c['pin']} dropped ({why})")
+    out = []
+    for i, c in enumerate(claimed):
+        if str(i) in bad:
+            continue
+        c = dict(c)
+        lane = [list(q) for q in c["lane"]]
+        # the stub must END at the via centre (KiCad: track_not_centered_on_via); the raster lane stops a cell short of it
+        if lane and 0 < ((lane[-1][0] - c["site"][0]) ** 2 + (lane[-1][1] - c["site"][1]) ** 2) ** 0.5 < c["via"] / 2:
+            lane[-1] = list(c["site"])
+        elif lane and lane[-1] != list(c["site"]) and ((lane[-1][0] - c["site"][0]) ** 2 + (lane[-1][1] - c["site"][1]) ** 2) ** 0.5 >= c["via"] / 2:
+            lane.append(list(c["site"]))
+        c["lane"] = lane
+        out.append(c)
+    return out
+
+
 def run(board, cons, spec, out, a, refs=None, log=print):
     from . import routediag as RD
     B = RD.load(board)
@@ -131,6 +161,8 @@ def run(board, cons, spec, out, a, refs=None, log=print):
             claimed = ER.plan(B, cons, spec)["reserved"] if ER.params(cons)["enabled"] else []
         except Exception as e:
             log(f"fanout: escape reservation skipped: {e}")
+        if claimed:
+            claimed = _drop_illegal_claims(board, job, claimed, wd, log)
         if claimed:
             src = os.path.join(wd, "claimed.kicad_pcb")
             txt, _n = ER.claim_text(open(board, errors="surrogateescape").read(), claimed)

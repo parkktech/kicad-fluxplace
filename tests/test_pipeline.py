@@ -77,13 +77,55 @@ def test_range_and_handoff_through_state_json(tmp_path):
     assert len(open(PL.state_path(a.workdir)).read()) <= PL.STATE_MAX
 
 
-def test_route_na_without_router(tmp_path):
+def test_route_without_router_fails_loudly(tmp_path):
     b = _board(tmp_path)
     a = _args(tmp_path, b, to_stage="anchor-check")
     PL.run(a)
     a2 = _args(tmp_path, None, from_stage="route", to_stage="route", router_dir=str(tmp_path / "nope"))
-    assert PL.run(a2) == 0
-    assert PL.load_state(a.workdir)["stages"]["route"]["verdict"] == "na"
+    with pytest.raises(SystemExit) as e:
+        PL.run(a2)
+    assert str(tmp_path / "nope") in str(e.value)
+
+
+def test_router_resolution_order(tmp_path, monkeypatch):
+    from fluxplace import routerloc as RL
+    def mk(n):
+        d = tmp_path / n
+        (d / "py_router").mkdir(parents=True)
+        (d / "py_router" / "route.py").write_text("")
+        (d / "VERSION").write_text("1.2.3\n")
+        return str(d)
+    flag, envd = mk("flag"), mk("env")
+    r = RL.resolve(flag, sys.executable, env={RL.ENV_DIR: envd})
+    assert r["dir"] == flag and r["source"] == "flag" and r["version"] == "1.2.3"
+    assert RL.resolve(None, sys.executable, env={RL.ENV_DIR: envd})["dir"] == envd
+    with pytest.raises(RuntimeError) as e:                 # an explicit bad choice does not fall through
+        RL.resolve(str(tmp_path / "bad"), sys.executable, env={RL.ENV_DIR: envd})
+    assert str(tmp_path / "bad") in str(e.value)
+    home = tmp_path / "home"
+    (home / "tools").mkdir(parents=True)
+    for n in ("KiCadRoutingTools", "KiCadRoutingTools-latest"):
+        (home / "tools" / n / "py_router").mkdir(parents=True)
+        (home / "tools" / n / "py_router" / "route.py").write_text("")
+    monkeypatch.setenv("HOME", str(home))
+    assert RL.resolve(None, sys.executable, env={})["dir"].endswith("KiCadRoutingTools-latest")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    with pytest.raises(RuntimeError) as e:
+        RL.resolve(None, sys.executable, env={})
+    assert "KiCadRoutingTools-latest" in str(e.value)
+
+
+def test_route_rerun_on_existing_workdir_and_router_record(tmp_path):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b, to_stage="anchor-check")
+    PL.run(a)
+    a2 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
+    PL.run(a2)
+    rec = PL.load_state(a.workdir)["stages"]["route"]
+    assert rec["router"]["dir"] == str(tmp_path / "krt") and rec["router"]["source"] == "flag"
+    a3 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
+    PL.run(a3)                                              # board == the stage's own output: no SameFileError
+    assert os.path.exists(os.path.join(a.workdir, "6-route", "board.kicad_pcb"))
 
 
 def test_cli_status_and_missing_state(tmp_path, capsys):

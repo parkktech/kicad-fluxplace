@@ -4,6 +4,7 @@ import importlib
 
 MODULES = ("density", "fanout", "modules", "floorplan2", "snapvias")
 MODULES += ("closure",)
+MODULES += ("joingaps",)
 
 
 def add_parsers(sub):

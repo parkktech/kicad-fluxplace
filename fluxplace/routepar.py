@@ -127,7 +127,7 @@ def _pair_state(Jb, p, n, cons, open_set):
 def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, spec=None, B=None, cls=None,
                    first=(), power=(), rules=None, workers=None, job_timeout=None, round_jobs=None,
                    total_budget=None, status_path=None, extra=None, log=print, conn=None,
-                   drc_cli="kicad-cli", cwd=None, min_slice=5.0, keep_jobs=False):
+                   drc_cli="kicad-cli", cwd=None, min_slice=5.0, keep_jobs=False, post=None):
     """Parallel per-net routing with merge rounds (see module doc).  `build_cmd(src, dst, only, limited)` as for
     batchroute.make_runner; `serial_run` = batchroute runner for the optional serial pass (`allow_rip = "any"`).
     Units: a net, a differential pair (both legs as one job), one edge of a rail's tree (railroute), plain-copper nets first."""
@@ -234,6 +234,8 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
         """`path` becomes the new checkpoint."""
         nonlocal cur, cur_open, cur_B
         cks.append(path)
+        if post:                                                  # e.g. join small gaps: edits the checkpoint in place
+            post(path)
         cur, cur_B = path, RD.load(path)
         cur_open = dict(conn(path))
 
