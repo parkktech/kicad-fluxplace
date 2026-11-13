@@ -37,7 +37,7 @@ def params(cons):
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
             "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)),
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
-            "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", True) is not False,
+            "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
             "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
             "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1)))}
 

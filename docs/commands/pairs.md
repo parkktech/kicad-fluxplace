@@ -39,8 +39,20 @@ Skew limit (`constraints.skew_limit_source`, shown per pair): `[pairs.FAMILY] sk
 (audio) pairs `[si] audio_skew_mm` (10) > `[si] default_skew_mm` (1).  P and N pads up to `pad_max_mm` apart form one terminal
 (uncoupled stubs to a merge point).  Search budget = `max_nodes` + `nodes_per_mm` x span; `-v` prints time per pair.
 
+Sequencing (round 3).  `fanout` is pair-aware: it first plans every pair on the placement (`pairs.reserve_for_fanout`), leaves
+the pads of every planned pair to this stage (no generic stub / via) and treats the planned exits as copper (both corridor ends
+for `reserve_mm`, the via pairs near them, new dog-bone exits); Opt-in: `[pairlay] reserve_exits = true` (default false: the generic fan-out, which escapes more non-pair pins beside pair pins).
+A net that is complete with locked copper is never fanned out (`fanout.owned_nets`).
+Negotiation (`pairneg.py`): every section is searched alone in `workers` processes, overlapping paths are negotiated with
+present + history cost (only the pairs in a conflict are searched again, the most constrained keeps its path), then the pairs
+are emitted one by one, each seeing the corridors of the pairs still to come.  A failed-alone search gets one retry at 4x budget.
+Exits: pads without a coupled exit get a new dog-bone via pair (`dogbone`); a terminal with its pads on two layers gets one
+via on the odd pad (connected, but reported as a mismatch: the legs cannot have one layer sequence).  A pad without a partner
+pad is a question (`pair-pads:<net>`, exit 3 after the board is written), not a silent failure.
+
     [pairlay]
-    inner_cost = 1.15   passes = 3   via_exit = true   nodes_per_mm = 25000   pad_max_mm = 16
+    negotiate = true   negotiate_passes = 8   workers = 8   dogbone = true   reserve_exits = false   reserve_mm = 3.0
+    inner_cost = 1.15   passes = 0   via_exit = true   nodes_per_mm = 25000   pad_max_mm = 16
     enabled = true   step_mm = 0.1   clearance_mm = 0.13   via_cost_mm = 20   turn_cost_mm = 0.4   max_nodes = 400000
     ring_mm = 1.0
 
