@@ -417,7 +417,7 @@ def plan_gate_fail(cons):
     return str(((cons or {}).get("route_ready") or {}).get("plan_gate", "warn")).lower() == "fail"
 
 
-def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
+def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True):
     """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
     (escape planner + global router, copper of the board respected) and card["plan"]."""
     from . import review as R
@@ -448,7 +448,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
                         limit=x.get("limit", 0)))
     try:
         from . import escres as ER
-        f += ER.findings(B, cons, spec, cls)
+        f += ER.findings(B, cons, spec, cls) if escape else []      # escape=False: the same score, seconds faster (wlrefine.py)
     except Exception as e:           # a gate that cannot run says so
         f.append(_f(WARN, "PLACE_ESCAPE_UNRESERVED", f"escape reservation could not run: {e}"))
     cg = congestion(B, cls, cons)

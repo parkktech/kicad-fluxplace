@@ -92,6 +92,14 @@ class PlanState:
 
     def update(self, moved, old_courts):
         """`moved` parts changed pose (B already updated); `old_courts` {ref: court before the move}."""
+        A = self.escapes(moved, old_courts)
+        self.gr.update_after_move(set(moved), A, True)
+        self._measure()
+        return A
+
+    def escapes(self, moved, old_courts):
+        """the escape half of `update` (about 10 ms): re-plan the moved parts and their neighbours; the global route is NOT
+        touched (wlrefine.py checks every candidate with this and routes once per batch). -> the re-planned refs."""
         B = self.B
         A = set(moved)
         boxes = [old_courts[r] for r in moved] + [B["parts"][r]["court"] for r in moved]
@@ -114,8 +122,6 @@ class PlanState:
         plan.extra = [e for e in plan.extra if e.get("part") not in A] + [e for e in sub.extra if e.get("part") in A]
         plan.groups = [g for g in plan.groups if g["ref"] not in A] + [g for g in sub.groups if g["ref"] in A]
         EP.rebuild_findings(B, self.pr, plan, True)
-        self.gr.update_after_move(set(moved), A, True)
-        self._measure()
         return A
 
 

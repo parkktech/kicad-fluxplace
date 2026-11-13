@@ -266,6 +266,9 @@ def cmd_place(a):
         out = a.out or a.board
         mv, b, c = _routable_place(a, a.board, out)
         _routable_report(mv, b, c, out)
+        if not getattr(a, "_plan_stats", None) and not getattr(a, "refine", False):     # --- wire length (wlrefine.py)
+            from fluxplace import wlrefine as WL
+            WL.stage_step(out, getattr(a, "_intent_cons", None) or _text_ctx(a)[0], _text_ctx(a)[1])
         if getattr(a, "_intent_cons", None):        # --- INTENT gate: unmet hard intent fails the placement
             from fluxplace import intent as IT
             if IT.gate(out, a._intent_cons, _text_ctx(a)[1]):

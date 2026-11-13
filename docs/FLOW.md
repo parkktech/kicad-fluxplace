@@ -16,6 +16,8 @@ every pin gets real, DRC-clean escape copper before routing, and that copper is 
 | audit / silk / review | | unchanged |
 
 Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> plan-route -> route -> audit -> silk -> review.
+With `[placement.wl] enabled = true` the floorplan (and `place --strategy routable`) ends with `wl-refine`: shorter wires where fan-out, plan-route and intent stay
+at least as good as before ([commands/wl-refine.md](commands/wl-refine.md)).
 What it does not prove: that the channels between the end points are wide enough (that is `plan-route`'s job, and routing's).
 A fan-out that passes in isolation can still fail at the site: the floorplan therefore claims each module's escape copper and
 re-runs the whole-board fan-out after every search.
