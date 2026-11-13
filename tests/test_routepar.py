@@ -174,11 +174,13 @@ def test_partly_routed_net_is_in_the_work_list(tmp_path):
 
 
 # ---------------------------------------------------------------- parallel
-def par(tmp_path, n=8, workers=4, **cfg):
+def par(tmp_path, n=8, workers=4, cons_route=None, **cfg):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     board, W, run, extra, spath, build = mk(tmp_path, n, **cfg)
     R = rules(board)
     r = RP.route_parallel(board, W, [f"N{i}" for i in range(n)], build, run, rules=R, workers=workers, job_timeout=3,
-                          status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path), cons=None)
+                          status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path),
+                          cons={"route": cons_route} if cons_route else None)
     return board, W, r, spath, R
 
 
@@ -203,15 +205,32 @@ def test_parallel_conflicting_pair_keeps_first_and_requeues_the_other(tmp_path):
     assert RA.audit(board, r["board"], R) == []
 
 
-def test_parallel_job_that_rips_goes_to_the_final_serial_pass(tmp_path):
-    # N1's job deletes N0's copper whenever it runs on a board where N0 is routed (round 2, serial pass)
+def test_parallel_job_that_rips_and_leaves_the_net_open_is_dropped(tmp_path):
+    # N1's job deletes N0's copper whenever it runs on a board where N0 is routed: open count not lower -> dropped
     board, W, r, spath, R = par(tmp_path, n=2, workers=1, rip={"N1": ["N0"]})
     ns = [c["nets"] for c in T.calls(tmp_path)]
-    assert ns[0] == ["N0"] and ns[1] == ["N1"]                   # round 1: N0 merged; round 2: N1 job ripped N0
+    assert ns == [["N0"], ["N1"]]                                 # round 1: N0 merged; round 2: N1 job ripped N0, dropped
     st = RS.load(spath)
-    assert st["rounds"][1]["ripped"] == 1 and st["rounds"][1]["merged"] == 0
-    assert ns[2:] and all(c == ["N1"] for c in ns[2:])           # serial pass tried N1 (the fake rips there too)
-    assert rt(r["board"], 2) >= {"N0"} and "N1" in r["leftovers"]
+    assert st["rounds"][1]["ripped"] == 1 and st["rounds"][1]["merged"] == 0 and st["dropped"] == {"rips-other-net": 1}
+    assert rt(r["board"], 2) == {"N0"} and r["leftovers"] == ["N1"] and r["reasons"] == {"N1": "rips-other-net"}
+
+
+def test_rip_adopted_when_the_ripped_net_is_routed_again_and_open_count_drops(tmp_path):
+    board, W, r, spath, R = par(tmp_path, n=2, workers=1, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0", "N1"} and r["dropped"] == {} and r["leftovers"] == []
+    assert RA.audit(board, r["board"], R) == []
+
+
+def test_rip_policy_never_and_controlled(tmp_path):
+    board, W, r, spath, R = par(tmp_path, n=2, workers=1, cons_route={"allow_rip": "never"}, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0"} and r["dropped"] == {"rips-other-net": 1}
+    board, W, r, spath, R = par(tmp_path / "c", n=2, workers=1, cons_route={"controlled": ["N0"]}, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0"} and r["dropped"] == {"rips-other-net": 1}
+    from fluxplace import ripolicy as RIP
+    assert RIP.policy({"route": {"allow_rip": "bogus"}}) == "low-speed" and RIP.policy({}) == "low-speed"
+    cm = RIP.controlled_nets({"A": {"class": "pair"}, "B": {"class": "signal"}}, {"nets": {"S": {"straight": True}}, "route": {"controlled_patterns": ["^CLK"]}},
+                             names=["CLK1", "B"])
+    assert set(cm) == {"A", "S", "CLK1"}
 
 
 def test_parallel_hanging_job_is_a_timeout_leftover_and_the_rest_merge(tmp_path, monkeypatch):

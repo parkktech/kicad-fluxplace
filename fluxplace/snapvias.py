@@ -45,7 +45,7 @@ def snap_text(text):
             b = BT._num2(blk, "end")
             ly = re.search(r'\(layer "([^"]*)"\)', blk)
             segs.append({"i": i, "j": j, "blk": blk, "a": a, "b": b, "layer": ly.group(1) if ly else "",
-                         "net": BT.net_name(blk)})
+                         "net": BT.net_name(blk), "locked": BT.is_locked(blk)})
     if not vias or not segs:
         return text, 0, 0
     cell = {}
@@ -62,6 +62,8 @@ def snap_text(text):
     # moved ends: {(seg idx, 0|1): via}
     move = {}
     for k, s in enumerate(segs):
+        if s["locked"]:                      # locked (fan-out) copper is never edited
+            continue
         for e, p in ((0, s["a"]), (1, s["b"])):
             v = via_at(p, s["net"], s["layer"])
             if v and math.hypot(p[0] - v["x"], p[1] - v["y"]) > 1e-6:
@@ -77,11 +79,15 @@ def snap_text(text):
         p = segs[k]["a"] if e == 0 else segs[k]["b"]
         s = segs[k]
         gx, gy = round(p[0] / 0.01), round(p[1] / 0.01)
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for k2, e2, p2 in ends.get((s["net"], s["layer"], gx + dx, gy + dy), ()):
-                    if (k2, e2) not in move and math.hypot(p2[0] - p[0], p2[1] - p[1]) <= COINCIDENT:
-                        move[(k2, e2)] = v
+        mates = [(k2, e2) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                 for k2, e2, p2 in ends.get((s["net"], s["layer"], gx + dx, gy + dy), ())
+                 if (k2, e2) != (k, e) and math.hypot(p2[0] - p[0], p2[1] - p[1]) <= COINCIDENT]
+        if any(segs[k2]["locked"] for k2, _e2 in mates):         # a joint with locked copper stays as it is
+            del move[(k, e)]
+            continue
+        for k2, e2 in mates:
+            if (k2, e2) not in move:
+                move[(k2, e2)] = v
     out, last, n = [], 0, 0
     by_seg = {}
     for (k, e), v in move.items():
@@ -146,7 +152,7 @@ def cmd_snap(a):
 
 
 def add_parser(sub):
-    p = sub.add_parser("snap-vias", help="move track ends inside a via's copper (same net) to the via centre; connectivity unchanged")
+    p = sub.add_parser("snap-vias", help="track ends in a via go to its centre")
     p.add_argument("board")
     p.add_argument("--out", required=True)
     p.add_argument("--no-check", action="store_true", help="skip the open-connection comparison")

@@ -51,6 +51,9 @@ checkpoint. `route-wait` prints the last good board as the result.
     min_track_mm / min_clearance_mm / min_via_mm / min_drill_mm / hole_to_hole_mm   # extra floors (else [fab] and .kicad_pro)
     clearance_margin_mm = 0.1  # asked of the router on top of the default clearance when a floor is set (default one grid step); the audit keeps the floor
     escalation = "off"       # router --escalation (off|board|fab); strict_sizes = true -> --strict-sizes
+    rail_min_pads = 8        # >= this many pads and no plane/pour: routed as a tree of two-cluster jobs (parallel mode); rail_edges_per_round = 3
+    allow_rip = "low-speed"  # "never" | "low-speed" | "any": see Rip policy;  controlled = [nets], controlled_patterns = [regex]
+    pair_audit = true        # a pair is routed only when both legs are complete and match; else removed and retried as a pair
     audit = true             # post-batch audit; audit_drc = false (true: kicad-cli DRC, new error types vs the input)
     conn_fill = true         # refill zones before counting open connections;  conn_method = "auto" | "pcbnew" | "text"
 
@@ -107,3 +110,16 @@ passed on. Read them with `map --show route --net N`.
 ## Dropped results by reason
 Status JSON `dropped` (total) and per round `dropped_by`; the compact line prints "dropped ...": under-floor, rips-other-net,
 via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`routedrops.py`).
+
+## Rails, rip policy, pairs, plain copper (parallel mode, `routepar.py`)
+- **Rails** (`railroute.py`): a net with >= `rail_min_pads` pads and no zone / `[[plan.pour]]` / ground-by-name is never one job.
+  MST over its pad clusters, one job per edge (nearest connected cluster first, the net taken off the other pads), merged round by
+  round; width from `[power."NET"] max_current_ma`. Poured rails: `fanout --add-zones` writes the zone. Status `rails`.
+- **Rip policy** (`ripolicy.py`): a result that removes other nets' copper is adopted only when none is controlled (pair, rf, clock,
+  switch node, `[nets.X]` rules, `controlled*`), none locked, and a trial merge (pcbnew, zones refilled) lowers the total open count
+  with every affected net still joined; else dropped as `rips-other-net`. "never" drops all; "any" skips the class test.
+- **Pairs** (`pairaudit.py`): one two-net job. Complete = both legs closed, same layer sequence, same via count, skew <=
+  `[pairs.*] skew_mm` / `[si] default_skew_mm`. A half or mismatched result is not merged; a half pair in the input is stripped
+  (unlocked copper) first. Status `pairs`: complete / mismatch / half-removed / failed.
+- **Plain copper** (`[nets.X] straight = true`): routed first, rejected when it changes layer beyond what its pads force, never ripped.
+- After every merge `snapvias` moves track ends inside a via to its centre (`docs/commands/snap-vias.md`).

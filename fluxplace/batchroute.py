@@ -187,7 +187,10 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         from . import planroute as PL
         hint = PL.route_hint(pm)        # order only: the router takes no per-net layer or corridor hints
     fo = has_fanout(board)
-    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), () if fo else first, power, hint, fanout=fo)
+    cls = cls or NC.classify(B, cons, spec)
+    from . import railroute as RL
+    rails = set(RL.rail_nets(B, cons, cls, [n for n in nets if n in open0])[0])    # a rail is never one batch job: parallel mode routes it as a tree
+    order = order_nets(B, [n for n in nets if n in open0 and n not in rails], cls, () if fo else first, power, hint, fanout=fo)
     cur, cur_open = board, open0
     cur_B = B
     drc_base = [None]
@@ -315,7 +318,8 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         else:
             for n in left:
                 reasons.setdefault(n, "budget")
-    out = finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
+    rl = sorted(n for n in rails if n in cur_open)
+    out = finish(order + rl, cur, cur_open, cks, dict(reasons, **{n: 'rail: set [route] mode = "parallel" (tree routing)' for n in rl}), stats, open0, t0)
     out["dropped"] = tally.totals()
     push_status("done")
     write_leftovers(workdir, out)
