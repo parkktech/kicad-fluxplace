@@ -367,7 +367,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 stt, why = _pair_state(Jb, u.nets[0], u.nets[1], cons, jo)
                 if stt != "complete":
                     log(f"    pair {u.id}: {stt} ({why}); result removed")
-                    for c_ in ([w.split()[0] for w in why.split("; ")] if why else [stt]):
+                    for c_ in ([w.split()[0] for w in why.split("; ")] if stt == "mismatch" and why else [stt]):
                         pair_causes[c_] = pair_causes.get(c_, 0) + 1
                     pair_events[tuple(u.nets)] = "half-removed" if stt == "half" else "failed"
                     drop(u, "no-path" if stt in ("half", "open") else "other", f"pair {stt}")
