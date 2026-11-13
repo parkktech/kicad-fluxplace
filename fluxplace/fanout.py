@@ -15,6 +15,7 @@ Self-check: kicad-cli pcb drc on input and output; the fan-out must add no error
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -123,17 +124,36 @@ def run(board, cons, spec, out, a, refs=None, log=print):
         from . import escapeplan as EP
         job["pours"] = [z for z in EP.planned_pours(cons)]
     wd = tempfile.mkdtemp(prefix="fanout-")
+    claimed = []
+    if not a.check_only and not refs:                   # reserved escapes are claimed FIRST: locked stub + via copper in the input
+        from . import escres as ER
+        try:
+            claimed = ER.plan(B, cons, spec)["reserved"] if ER.params(cons)["enabled"] else []
+        except Exception as e:
+            log(f"fanout: escape reservation skipped: {e}")
+        if claimed:
+            src = os.path.join(wd, "claimed.kicad_pcb")
+            txt, _n = ER.claim_text(open(board, errors="surrogateescape").read(), claimed)
+            with open(src, "w", errors="surrogateescape") as fh:
+                fh.write(txt)
+            for ext in (".kicad_pro", ".kicad_dru"):
+                side = os.path.splitext(board)[0] + ext
+                if os.path.exists(side):
+                    shutil.copy(side, os.path.splitext(src)[0] + ext)
+            board_in = src
+    board_in = locals().get("board_in", board)
     jp = os.path.join(wd, "job.json")
     json.dump(job, open(jp, "w"))
     t0 = time.time()
     tmp_out = out or os.path.join(wd, "out.kicad_pcb")
-    r = subprocess.run(["/usr/bin/python3", HELPER, jp, board, tmp_out], capture_output=True, text=True)
+    r = subprocess.run(["/usr/bin/python3", HELPER, jp, board_in, tmp_out], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
     if not line:
         raise SystemExit("fanout: helper failed:\n" + (r.stderr or r.stdout)[-1500:])
     res = json.loads(line[-1][len(MARK):])
     res["runtime_s"] = round(time.time() - t0, 1)
     res["params"] = job["params"]
+    res["escapes"] = claimed
     return B, res
 
 
@@ -156,14 +176,15 @@ def summarise(B, res):
     return per
 
 
-def _record(out, cons, spec, B, per, req, ok, blocked):
+def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None):
     """write the derived facts back to the map next to the output board: planned pours, fan-out groups, which source decided what."""
     from . import escapeplan as EP, facts as FA
     try:
         FA.record(out, pours=EP.planned_pours(cons), sources=FA.resolve(out, B, cons, spec),
                   fanout={"groups": FA.fanout_groups(out), "required": req, "escaped": ok,
                           "parts": {r: [v["ok"], v["req"]] for r, v in sorted(per.items())},
-                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60]})
+                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60]},
+                  escapes=escapes or [])
     except OSError:
         pass
 
@@ -214,7 +235,7 @@ def cmd_fanout(a):
     print(f"full report: {rp}")
     if out:
         S.mark(out)
-        _record(out, cons, spec, B, per, req, ok, blocked)
+        _record(out, cons, spec, B, per, req, ok, blocked, res.get("escapes"))
         print(f"wrote {out}")
     return 0 if verdict == "FANOUT_OK" else 1
 

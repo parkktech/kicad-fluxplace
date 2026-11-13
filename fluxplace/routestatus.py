@@ -293,6 +293,11 @@ def one_line(st):
         bits.append(f"no progress {st['stalled_s']}s")
     if st.get("current") and st["state"] == "running":
         bits.append(f"on {st['current']}")
+    nd = st.get("not_done") or {}
+    if nd.get("count"):
+        bits.append(f"NOT DONE {nd['count']} (pairs {len(nd.get('pairs', []))}, rf {len(nd.get('rf', []))}; routed {st.get('nets_routed', '?')}/{st.get('nets_open0', '?')})")
+    if st.get("order") and st.get("state") == "running" and st.get("round", st.get("batch", 0)) <= 1:
+        bits.append("order " + ">".join(f"{o['phase']}:{o['nets']}" for o in st["order"]))
     if st.get("mode") in ("batch", "parallel"):
         bits.append(f"last good {os.path.basename(st.get('last_good') or '-')} "
                     f"({st.get('last_good_open', '?')} open connections in {st.get('last_good_open_nets', '?')} nets, "

@@ -148,9 +148,12 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     plain = RIP.plain_nets(cons)
     rails, poured = RL.rail_nets(B, cons, cls, want, plain)
     railset = set(rails)
-    order = BR.order_nets(B, [n for n in want if n not in railset], cls, () if fo else first, power, fanout=fo)
-    order = sorted(order, key=lambda n: n not in plain)            # plain copper first
-    rank = {n: i for i, n in enumerate(order)}
+    first_eff = () if fo else first
+    ph = BR.phase_map(B, want, cls, cons, first_eff, power, BR.escape_nets_of(board, cons), rails=railset)
+    full = BR.order_nets(B, want, cls, first_eff, power, fanout=fo, phases=ph)     # escape, plain, power pins, rails, controlled, rest
+    order = [n for n in full if n not in railset]
+    rank = {n: i for i, n in enumerate(full)}                        # rails rank by their phase too, not last
+    order_info = BR.order_summary(full, ph)
     pair_of = {}
     if r.get("pair_audit", True):
         for p_, n_ in PA.pair_list(cls):
@@ -174,7 +177,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     extra.update({"mode": "parallel", "round": 0, "workers": workers, "jobs_running": 0, "last_good": board,
                   "last_good_open": total(), "last_good_open_nets": len(cur_open), "start_open": total(),
                   "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "dropped": {}, "batch": 0,
-                  "batches_total": 0, "batch_nets": 1})
+                  "batches_total": 0, "batch_nets": 1, "order": order_info})
 
     def rails_status():
         left = {n: cur_open.get(n, 0) for n in rails}
@@ -200,7 +203,22 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 out["half-removed"].append(k)
         return out
 
+    qa = {"ctx": None, "path": None}
+
+    def quality():
+        """pair / RF quality of the checkpoint (qualaudit): out-of-tolerance nets are NOT DONE, not routed."""
+        if qa["path"] != cur:
+            try:
+                from . import qualaudit as QA
+                qa["ctx"] = qa["ctx"] or QA._ctx(board, cur_B, cons)
+                extra.update(QA.status_fields(cur_B, cls, cons, cur_open, open0, qa["ctx"]))
+            except Exception as e:                       # never let the audit stop routing; say so
+                extra["not_done"] = {"error": str(e)[:100]}
+            qa["path"] = cur
+        return extra.get("not_done")
+
     def push(state="running"):
+        quality()
         extra.update(last_good=cur, last_good_open=total(), last_good_open_nets=len(cur_open), out=cur,
                      leftovers=len(dead), rule_violations=stats["violations"], dropped=tally.totals())
         if rails:
@@ -271,8 +289,16 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
             break
         rnd += 1
         tally.new_round()
-        nr = min(len(runits), max(1, size // 2) if units else size)
-        jobs = units[:max(0, size - nr)] + runits[:nr]
+        cap = max(1, size // 2) if units else size                  # rail edges take at most half the slots while other nets wait
+        jobs, nr = [], 0
+        for u in sorted(units + runits, key=lambda u: min(rank.get(n, 10 ** 6) for n in u.nets)):   # the routing order, rails included
+            if len(jobs) >= size:
+                break
+            if u.kind == "rail":
+                if nr >= cap:
+                    continue
+                nr += 1
+            jobs.append(u)
         before = total()
         dstate0 = (len(dead), sum(len(v) for v in dead_edges.values()))
         extra.update(round=rnd, jobs_running=len(jobs), batch=rnd, batch_nets=len(jobs))

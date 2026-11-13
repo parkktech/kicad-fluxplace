@@ -432,6 +432,24 @@ def st_route(c, n, board):
         line += f", rails {res['rails']['complete']}/{res['rails']['total']} complete"
     if res.get("pairs"):
         line += ", pairs " + " ".join(f"{k} {len(v)}" for k, v in res["pairs"].items() if v)
+    tuned = None
+    try:
+        from . import qualaudit as QA
+        tuned = QA.autotune(best, c.cons, conn)        # pairs failing ONLY on skew: bounded tune, re-audit
+    except Exception as e:
+        tuned = {"error": str(e)[:80]}
+    from . import opengate as OG
+    OG.refill(best)                                    # a routed board is saved with fresh zone fills
+    try:
+        from . import qualaudit as QA2
+        Bq = RD.load(best)
+        qf = QA2.status_fields(Bq, cls, c.cons, set(conn(best)), set(conn(board)), board=best)
+        extra.update(qf, tuned=tuned)
+        BR._status_write(spath, extra, "done")
+        if qf["not_done"]["count"]:
+            line += f", NOT DONE {qf['not_done']['count']} pair/RF net(s) out of tolerance (routed {qf['nets_routed']}/{qf['nets_open0']})"
+    except Exception:
+        pass
     qsess.mark(best)
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:

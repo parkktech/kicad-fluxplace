@@ -111,13 +111,18 @@ def audit(B, pairs, cons, open_nets):
             pp, pn = profile(B, p), profile(B, n)
             e.update(p=pp, n=pn)
             lim = C.skew_limit_mm(cons or {}, p)
-            why = []
+            why, causes = [], []
             if pp["layers"] != pn["layers"]:
                 why.append(f"layers {'>'.join(x[:-3] for x in pp['layers'])} vs {'>'.join(x[:-3] for x in pn['layers'])}")
+                causes.append("layers")
             if pp["vias"] != pn["vias"]:
                 why.append(f"vias {pp['vias']} vs {pn['vias']}")
-            if abs(pp["length"] - pn["length"]) > lim:
-                why.append(f"skew {abs(pp['length'] - pn['length']):.2f} > {lim:g} mm")
+                causes.append("vias")
+            skew = abs(pp["length"] - pn["length"])
+            if skew > lim:
+                why.append(f"skew {skew:.2f} > {lim:g} mm")
+                causes.append("skew")
+            e.update(causes=causes, skew=round(skew, 3), limit=lim)
             e["status"], e["why"] = ("mismatch", "; ".join(why)) if why else ("complete", "")
         elif po != no:
             e["status"], e["why"] = "half", f"{p if no else n} routed, {p if po else n} open"
