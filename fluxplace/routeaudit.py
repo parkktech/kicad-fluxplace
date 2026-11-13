@@ -199,6 +199,14 @@ def audit(base, new, R, new_only=None):
         if v.get("locked"):
             add("FANOUT_RIPPED", v["net"], f"{v['net']} locked via removed", v["x"], v["y"])
 
+    edge = new.get("edge") or []
+    if edge and R.get("audit_edge", True):
+        for s in segs:
+            if any(seg_seg(s["a"], s["b"], e0, e1) < s["w"] / 2 - EPS for e0, e1 in edge):
+                add("OFF_BOARD", s["net"], f"{s['net']} {s['layer']} track crosses the board outline", *s["a"])
+        for v in vias:
+            if any(seg_seg((v["x"], v["y"]), (v["x"], v["y"]), e0, e1) < v["d"] / 2 - EPS for e0, e1 in edge):
+                add("OFF_BOARD", v["net"], f"{v['net']} via crosses the board outline", v["x"], v["y"])
     for s in segs:
         if R.get("min_track") and s["w"] < R["min_track"] - EPS:
             add("TRACK_WIDTH", s["net"], f"{s['net']} {s['layer']} {s['w']:g} mm < {R['min_track']:g}", *s["a"])

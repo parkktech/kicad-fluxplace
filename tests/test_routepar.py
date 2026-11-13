@@ -55,7 +55,7 @@ def test_pipeline_route_cmd_carries_the_rules(tmp_path):
     cmd = PL._route_cmd(a, board, "o.kicad_pcb", ["A"], limited=True, R=R, rflags=RR.flags(R, str(krt), str(tmp_path)))
     j = " ".join(cmd)
     assert "--fab-overrides" in j and "--same-net-pad-clearance=0.2" in j and "--track-width 0.127" in j
-    assert cmd[cmd.index("--clearance") + 1] == "0.127" and cmd[-2:] == ["--nets", "A"]
+    assert float(cmd[cmd.index("--clearance") + 1]) == round(0.127 + R["grid"], 6) and cmd[-2:] == ["--nets", "A"]
 
 
 # ---------------------------------------------------------------- audit
@@ -263,3 +263,45 @@ def test_pcbnew_helper_counts_open_connections_on_a_real_board(monkeypatch):
     assert m["method"] == "pcbnew" and not m["approx"] and m["total"] == 20      # KiCad's own unconnected count
     t = RC.measure(sample, method="text")
     assert t["approx"] and t["total"] > 0
+
+
+# ---------------------------------------------------------------- item 1: clearance request margin, dropped-by-reason
+def test_clearance_margin_requested_floor_kept(tmp_path):
+    board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
+    R = RR.rules(CONS, board, 0.15, 0.2)
+    assert R["clearance_margin"] == R["grid"] and R["min_clearance"] == 0.127
+    assert abs(RR.request_clearance(R) - (0.2 + R["grid"])) < 1e-9                  # default clearance + one grid step
+    assert RR.size_args(R)[3] == f"{0.2 + R['grid']:g}"
+    R2 = RR.rules(dict(CONS, route={"clearance_margin_mm": 0.03}), board, 0.15, 0.2)
+    assert abs(RR.request_clearance(R2) - 0.23) < 1e-9 and R2["min_clearance"] == 0.127   # the audit floor is unchanged
+    assert RR.rules({}, board, 0.15, 0.2)["clearance_margin"] == 0.0                # no floor, no margin
+    krt = tmp_path / "krt"
+    (krt / "py_router").mkdir(parents=True)
+    (krt / "py_router" / "route.py").write_text('"--escalation" "--strict-sizes"')
+    fl = RR.flags(R, str(krt), str(tmp_path))
+    assert fl[fl.index("--escalation") + 1] == "off" and "--strict-sizes" in fl
+    assert "--strict-sizes" not in RR.flags(RR.rules(dict(CONS, route={"strict_sizes": False}), board), str(krt), str(tmp_path))
+
+
+def test_dropped_by_reason_in_status(tmp_path):
+    from fluxplace import routedrops as DR
+    assert DR.reason_of([{"code": "VIA_IN_PAD"}]) == "via-in-pad"
+    assert DR.reason_of([{"code": "CLEARANCE"}, {"code": "CLEARANCE"}, {"code": "TRACK_WIDTH"}]) == "under-floor"
+    assert DR.reason_of([{"code": "OFF_BOARD"}]) == "off-board" and DR.reason_of([{"code": "FANOUT_RIPPED"}]) == "rips-other-net"
+    t = DR.Tally()
+    t.add("under-floor"); t.add("under-floor"); t.new_round(); t.add("timeout")
+    assert t.totals() == {"under-floor": 2, "timeout": 1} and t.this_round() == {"timeout": 1}
+    board, W, run, extra, spath, build = mk(tmp_path, 6, thin=["N1", "N4"])
+    r = RP.route_parallel(board, W, [f"N{i}" for i in range(6)], build, run, B=None, rules=rules(board), workers=3,
+                          job_timeout=10, status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path))
+    assert r["dropped"].get("under-floor") == 2
+    st = RS.load(spath)
+    assert st["dropped"]["under-floor"] == 2 and "dropped under-floor 2" in RS.one_line(st)
+    assert any(x.get("dropped_by") for x in st["rounds"])
+
+
+def test_audit_off_board(tmp_path):
+    base = board_with(tmp_path, "", "base.kicad_pcb")
+    out = '(segment (start 95 50) (end 105 50) (width 0.15) (layer "F.Cu") (net "N0"))\n'
+    v = RA.audit(base, board_with(tmp_path, out, "o.kicad_pcb"), rules(base))
+    assert "OFF_BOARD" in {x["code"] for x in v}

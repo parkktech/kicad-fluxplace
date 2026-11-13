@@ -49,6 +49,8 @@ checkpoint. `route-wait` prints the last good board as the result.
     same_net_pad_clearance_mm = 0.2
     grid_mm = 0.05           # default 0.05 when any part has pitch <= 0.5 mm, else 0.1
     min_track_mm / min_clearance_mm / min_via_mm / min_drill_mm / hole_to_hole_mm   # extra floors (else [fab] and .kicad_pro)
+    clearance_margin_mm = 0.1  # asked of the router on top of the default clearance when a floor is set (default one grid step); the audit keeps the floor
+    escalation = "off"       # router --escalation (off|board|fab); strict_sizes = true -> --strict-sizes
     audit = true             # post-batch audit; audit_drc = false (true: kicad-cli DRC, new error types vs the input)
     conn_fill = true         # refill zones before counting open connections;  conn_method = "auto" | "pcbnew" | "text"
 
@@ -101,3 +103,7 @@ Status: `mode: "parallel"`, `round`, `workers`, `rounds[]` with `merged/dropped/
 a `PLAN_OVERFLOW` channel first inside their group, then differential pairs, then by length. **The router takes no per-net layer or
 corridor hints** (KiCadRoutingTools has no such interface), so the plan can only order nets; planned layers and cell paths are not
 passed on. Read them with `map --show route --net N`.
+
+## Dropped results by reason
+Status JSON `dropped` (total) and per round `dropped_by`; the compact line prints "dropped ...": under-floor, rips-other-net,
+via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`routedrops.py`).

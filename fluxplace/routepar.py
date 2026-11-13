@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from . import batchroute as BR
 from . import netclass as NC
 from . import routeaudit as RA
+from . import routedrops as DR
 from . import routediag as RD
 from . import routestatus as RS
 
@@ -163,16 +164,17 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     dead, ripped = {}, []
     stats = {"attempts": 0, "halvings": 0, "timeouts": 0, "violations": 0}
     extra = extra if extra is not None else {}
-    gap = (rules or {}).get("clearance") or (rules or {}).get("min_clearance") or 0.1
+    gap = (rules or {}).get("min_clearance") or (rules or {}).get("clearance") or 0.1
+    tally = DR.Tally()
     env = BR.router_env(True, S["env"])
     extra.update({"mode": "parallel", "round": 0, "workers": workers, "jobs_running": 0, "last_good": board,
                   "last_good_open": total(), "last_good_open_nets": len(cur_open), "start_open": total(),
-                  "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "batch": 0,
+                  "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "dropped": {}, "batch": 0,
                   "batches_total": 0, "batch_nets": 1})
 
     def push(state="running"):
         extra.update(last_good=cur, last_good_open=total(), last_good_open_nets=len(cur_open), out=cur,
-                     leftovers=len(dead) + len(ripped), rule_violations=stats["violations"])
+                     leftovers=len(dead) + len(ripped), rule_violations=stats["violations"], dropped=tally.totals())
         if cks:
             extra.update(checkpoint=cks[-1], checkpoint_n=len(cks))
         if status_path:
@@ -188,6 +190,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 dead[n] = "budget"
             break
         rnd += 1
+        tally.new_round()
         jobs = work[:size]
         before = total()
         extra.update(round=rnd, jobs_running=len(jobs), batch=rnd, batch_nets=len(jobs))
@@ -218,33 +221,39 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 stats["timeouts"] += 1
                 rec["timeouts"] += 1
                 dead[net] = "timeout"
+                tally.add("timeout")
                 continue
             txt = open(dst, errors="surrogateescape").read() if os.path.exists(dst) else ""
             if not txt.rstrip().endswith(")"):
                 dead[net] = "no output"
                 rec["failed"] += 1
+                tally.add("no-path")
                 continue
             try:
                 Jb = RD.load(dst)
             except Exception:
                 dead[net] = "no output"
                 rec["failed"] += 1
+                tally.add("other")
                 continue
             new = RA.new_copper(cur_B, Jb)
             rem = RA.removed_copper(cur_B, Jb)
             if any(x["net"] != net for x in rem[0] + rem[1]):
                 ripped.append(net)
                 rec["ripped"] += 1
+                tally.add("rips-other-net")
                 continue
             if not new[0] and not new[1]:
                 dead[net] = "failed"
                 rec["failed"] += 1
+                tally.add("no-path")
                 continue
             viol = RA.audit(cur_B, Jb, rules, new_only=new) if rules and rules.get("audit", True) else []
             if viol:
                 stats["violations"] += 1
                 rec["violations"] += 1
                 dead[net] = "RULE_VIOLATION"
+                tally.add(DR.reason_of(viol))
                 log(f"    parallel job {net}: RULE_VIOLATION, discarded: {RA.summarize(viol)}")
                 continue
             nb = {k: b for k, b in blocks(txt).items() if k not in base_blocks}
@@ -294,6 +303,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
             if not (cks and cks[-1] == ck) and os.path.exists(ck):
                 os.remove(ck)
         rec["open_after"] = total()
+        rec["dropped_by"] = tally.this_round()
         extra["rounds"] = (extra["rounds"] + [rec])[-30:]
         extra["jobs_running"] = 0
         log(f"    parallel round {rnd}: {len(jobs)} job(s), {rec['merged']} merged, {rec['dropped']} dropped "
@@ -333,6 +343,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
             reasons[n] = "failed"
     out = BR.finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
     out["rounds"] = extra["rounds"]
+    out["dropped"] = tally.totals()
     push("done")
     BR.write_leftovers(workdir, out)
     return out
