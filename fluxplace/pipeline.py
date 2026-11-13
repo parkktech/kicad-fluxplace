@@ -125,6 +125,15 @@ def _run_cli(argv, logpath):
     return rc, text
 
 
+def _questions_result(rc, text, board):
+    """exit code 3 from a stage = open questions: the pipeline stops, the agent relays them to the user."""
+    if rc != 3:
+        return None
+    lines = [l for l in text.splitlines() if l.strip()]
+    return {"verdict": "questions", "line": next((l for l in lines if "question" in l), lines[0] if lines else "questions open")[:160],
+            "board": board, "next": lines[:40]}
+
+
 def _sidecar(src, dst):
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
@@ -150,6 +159,12 @@ class Ctx:
         self.a, self.work, self.board_in, self.state = a, work, board_in, state
         from . import constraints as C
         self.cons_path, self.spec_path = a.constraints, a.spec
+        from . import questions as QS
+        self.answers = dict((state or {}).get("answers") or {})
+        self.answers.update(QS.parse_answers(getattr(a, "answer", None)))
+        self.assume = bool(getattr(a, "assume_defaults", False))
+        if state is not None:
+            state["answers"] = self.answers
         self.cons = C.load(a.constraints)
         self.spec = json.load(open(a.spec)) if a.spec else None
 
@@ -165,6 +180,13 @@ class Ctx:
         if self.spec_path:
             v += ["--spec", self.spec_path]
         return v
+
+    def qs(self):
+        """question flags for the stages that can raise questions (fanout, modules, floorplan)."""
+        v = []
+        for k, x in sorted(self.answers.items()):
+            v += ["--answer", f"{k}={x}"]
+        return v + (["--assume-defaults"] if self.assume else [])
 
 
 # ------------------------------------------------------------------ stages
@@ -255,6 +277,17 @@ def st_route(c, n, board):
         return {"verdict": "na", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
                 "board": board}
     d = c.dir(n, "route")
+    from . import questions as QS
+    import types
+    qa = types.SimpleNamespace(answer=[f"{k}={v}" for k, v in c.answers.items()], assume_defaults=c.assume, qjson=False)
+    try:
+        qsess, c_cons, c_spec = QS.guard(qa, "route", board, c.cons, c.spec)
+    except SystemExit as e:
+        if e.code == QS.EXIT:
+            return {"verdict": "questions", "line": f"questions open: {QS.questions_path(board)}", "board": board,
+                    "next": [QS.questions_path(board)]}
+        raise
+    c.cons, c.spec = c_cons, c_spec
     best = os.path.join(d, "board.kicad_pcb")
     shutil.copy(board, best)
     _sidecar(board, best)
@@ -341,6 +374,13 @@ def st_route(c, n, board):
             + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
             + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else "")
             + (f", {res['violations']} RULE_VIOLATION discarded" if res.get("violations") else ""))
+    if res.get("dropped"):
+        line += ", dropped " + ", ".join(f"{k} {v}" for k, v in res["dropped"].items())
+    if res.get("rails"):
+        line += f", rails {res['rails']['complete']}/{res['rails']['total']} complete"
+    if res.get("pairs"):
+        line += ", pairs " + " ".join(f"{k} {len(v)}" for k, v in res["pairs"].items() if v)
+    qsess.mark(best)
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
@@ -404,7 +444,10 @@ def st_review(c, n, board):
 
 def st_modules(c, n, board):
     d = c.dir(n, "modules")
-    rc, text = _run_cli(["modules", board] + c.cs(), os.path.join(d, "stage.log"))
+    rc, text = _run_cli(["modules", board] + c.cs() + c.qs(), os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     return {"verdict": "pass" if rc == 0 else "fail", "line": _last_line(text) if rc else next(
         (l for l in text.splitlines() if l.startswith("modules:")), _last_line(text))[:160], "board": board}
 
@@ -413,7 +456,10 @@ def st_floorplan(c, n, board):
     d = c.dir(n, "floorplan")
     out = os.path.join(d, "board.kicad_pcb")
     argv = ["floorplan", board, "--out", out] + c.cs() + (["--size"] if getattr(c.a, "size", False) else [])
-    rc, text = _run_cli(argv, os.path.join(d, "stage.log"))
+    rc, text = _run_cli(argv + c.qs(), os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     line = next((l for l in reversed(text.splitlines()) if l.startswith("floorplan:")), _last_line(text))
     return {"verdict": "pass" if rc == 0 and os.path.exists(out) else "fail", "line": line, "board": out if os.path.exists(out) else board}
 
@@ -421,7 +467,10 @@ def st_floorplan(c, n, board):
 def st_fanout(c, n, board):
     d = c.dir(n, "fanout")
     out = os.path.join(d, "board.kicad_pcb")
-    rc, text = _run_cli(["fanout", board, "--out", out] + c.cs(), os.path.join(d, "stage.log"))
+    rc, text = _run_cli(["fanout", board, "--out", out] + c.cs() + c.qs(), os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
     res = {"verdict": "pass" if rc == 0 else "fail", "line": line, "board": out if os.path.exists(out) else board}
     if rc:
@@ -498,8 +547,12 @@ def run(a):
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
+        prev = board
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
+        if res.get("board") and res["board"] != prev:
+            from . import questions as QS
+            QS.inherit(prev, res["board"])
         board = res.get("board", board)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
@@ -515,6 +568,12 @@ def run(a):
         save_state(work, st)
         print(f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
               f"({time.time() - t:.0f}s)", flush=True)
+        if res["verdict"] == "questions":
+            rc = 3
+            for l in res.get("next", [])[:40]:
+                print(l)
+            print("pipeline: questions are open; relay them to the user, then re-run with --answer ID=CHOICE (never answer them yourself)")
+            break
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break

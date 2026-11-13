@@ -147,6 +147,8 @@ def cmd_fanout(a):
     from . import constraints as C
     spec = json.load(open(a.spec)) if a.spec else None
     cons = C.load(a.constraints)
+    from . import questions as QS
+    S, cons, spec = QS.guard(a, "fanout", a.board, cons, spec)
     refs = set(x.strip() for x in a.parts.split(",") if x.strip()) if a.parts else None
     out = None if a.check_only else (a.out or os.path.splitext(a.board)[0] + ".fanout.kicad_pcb")
     if out and os.path.abspath(out) == os.path.abspath(a.board):
@@ -186,6 +188,7 @@ def cmd_fanout(a):
                "runtime_s": res["runtime_s"], "params": res["params"]}, open(rp, "w"), indent=1)
     print(f"full report: {rp}")
     if out:
+        S.mark(out)
         print(f"wrote {out}")
     return 0 if verdict == "FANOUT_OK" else 1
 
@@ -216,4 +219,6 @@ def add_parser(sub):
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
+    from . import questions as QS
+    QS.add_args(p)
     p.set_defaults(fn=cmd_fanout)

@@ -262,6 +262,8 @@ def cmd_modules(a):
     from . import fanout as FO
     spec = json.load(open(a.spec)) if a.spec else None
     cons = C.load(a.constraints)
+    from . import questions as QS
+    S, cons, spec = QS.guard(a, "modules", a.board, cons, spec)
     if not hasattr(a, "reach"):
         a.reach = 2.2
     t0 = time.time()
@@ -269,6 +271,7 @@ def cmd_modules(a):
     mods = M["modules"]
     path = a.map or os.path.splitext(a.board)[0] + ".fluxmap.json"
     store(path, M)
+    S.mark(path)
     nm = len(mods)
     nfix = sum(1 for m in mods if m["fixed"])
     multi = sorted((m for m in mods if len(m["members"]) > 1), key=lambda m: -m["area"])
@@ -309,4 +312,6 @@ def add_parser(sub):
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
+    from . import questions as QS
+    QS.add_args(p)
     p.set_defaults(fn=cmd_modules)

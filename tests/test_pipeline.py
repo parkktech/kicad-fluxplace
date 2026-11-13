@@ -65,6 +65,9 @@ def test_range_and_handoff_through_state_json(tmp_path):
     assert os.path.exists(st["board"]) and "3-place" in st["board"]
     # a later stage starts from state.json alone (no BOARD argument)
     a2 = _args(tmp_path, None, from_stage="route", to_stage="route")
+    assert PL.run(a2) == 3                       # a board with no records: the floors are a question, nothing routed
+    assert PL.load_state(a.workdir)["stages"]["route"]["verdict"] == "questions"
+    a2 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
     assert PL.run(a2) == 1                       # STUCK stays unrouted -> fail, with numbers
     st = PL.load_state(a.workdir)
     r = st["stages"]["route"]
