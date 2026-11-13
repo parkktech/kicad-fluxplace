@@ -149,6 +149,21 @@ class Field:
                 i = self._add("edge", None, "", "board edge")
                 self._put(self.copper, sl, seg_sdf(a, b, 0.0, self.X[sl], self.Y[sl]) - (edge_clr - self.clr), i)
 
+    def block_via(self, x, y, d, net=""):
+        """a via reserved/claimed elsewhere: foreign to everything but its own net (all copper layers)."""
+        if net in self.own:
+            return
+        sl = self._sl(x, y, x, y)
+        if sl:
+            self._put(self.copper, sl, np.hypot(self.X[sl] - x, self.Y[sl] - y) - d / 2, self._add("via", None, net, "reserved"))
+
+    def block_seg(self, a, b, w, layer, net=""):
+        if net in self.own:
+            return
+        sl = self._sl(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+        if sl:
+            self._put([layer], sl, seg_sdf(a, b, w, self.X[sl], self.Y[sl]), self._add("seg", None, net, "reserved"))
+
     # -- queries
     def cell(self, x, y):
         return int((y - self.y0) / self.step), int((x - self.x0) / self.step)

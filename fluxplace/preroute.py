@@ -12,6 +12,7 @@ exactly like review findings (same matcher).
   KEEPOUT_TRAPPED      FAIL  pad inside a track-forbidding rule area
   CONGESTION           FAIL  coarse global route: demand > capacity (2 mm cells)
   RATSNEST_CROSSINGS   WARN  crossings between MST edges of different signal nets
+  PLACE_ESCAPE_UNRESERVED FAIL  a power pin / a passive crowded by a controlled pair cannot own a via site + lane (escres.py)
   PLACEMENT_ILLEGAL    FAIL  same-side courtyard overlap, part outside the outline (edge connectors
                              may overhang by their mating side), part in a forbidden region, through-hole
                              pad in a no-through-hole region (legality.py)
@@ -36,7 +37,7 @@ from . import placechecks as PCK
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
-         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL"]
+         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED"]
 
 
 def _f(level, code, msg, refs=(), value=None, limit=None, cls=None):
@@ -445,6 +446,11 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False):
                         x["msg"] + (f" -> {x['suggestion']}" if x.get("suggestion") else ""),
                         refs=[x["part"]] if x.get("part") else x.get("parts", []), value=x.get("value", x.get("overflow")),
                         limit=x.get("limit", 0)))
+    try:
+        from . import escres as ER
+        f += ER.findings(B, cons, spec, cls)
+    except Exception as e:           # a gate that cannot run says so
+        f.append(_f(WARN, "PLACE_ESCAPE_UNRESERVED", f"escape reservation could not run: {e}"))
     cg = congestion(B, cls, cons)
     f += congestion_findings(cg, cons)
     edges = routed_edges(B, cls)
