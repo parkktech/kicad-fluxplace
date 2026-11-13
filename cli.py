@@ -240,8 +240,8 @@ def _engine_place(a):
         if e.__class__.__name__ == "PlacementError":
             raise SystemExit(f"place [cypress] REFUSED: {e}")
         raise
-    if rep is None:
-        PC.builtin_record(out, a.strategy)
+    if isinstance(rep, str):
+        PC.builtin_record(out, a.strategy, fallback=rep)
         return False
     print(PC.format_report(rep))
     print(f"cypress: moved/turned {rep['moved']} part(s); saved {out}")

@@ -192,3 +192,21 @@ def targets(model, B, placed):
         part = B["parts"][c["ref"]]
         out[c["ref"]] = (round(cx - dx, 4), round(cy - dy, 4), (part["angle"] + th) % 360.0)
     return out
+
+
+def utilisation(model):
+    """Movable cell area over the free area (grid minus fixed cells, overlaps counted once per 1/8 grid), worst side."""
+    W, H = model["size"]
+    k = max(1, min(W, H) // 256)
+    worst = 0.0
+    for side in ("F", "B"):
+        gw, gh = W // k + 1, H // k + 1
+        occ = bytearray(gw * gh)
+        for c in model["cells"]:
+            if c["fixed"] and c["side"] == side:
+                for j in range(max(0, int(c["y"]) // k), min(gh, int(c["y"] + c["h"]) // k + 1)):
+                    i0, i1 = max(0, int(c["x"]) // k), min(gw, int(c["x"] + c["w"]) // k + 1)
+                    occ[j * gw + i0:j * gw + i1] = b"\x01" * max(0, i1 - i0)
+        free = max(1.0, float(W * H) - sum(occ) * k * k)
+        worst = max(worst, sum(c["w"] * c["h"] for c in model["cells"] if not c["fixed"] and c["side"] == side) / free)
+    return worst

@@ -146,6 +146,7 @@ def test_place_with_fake_tool_is_legal_and_keeps_fixed_parts(tmp_path):
     B = RD.load(p)
     mv, rep = PC.place(B, CONS, None, str(tmp_path / "w"), fake_home(tmp_path), sys.executable, log=lambda m: None)
     assert rep["engine"] == "cypress" and rep["version"] and rep["tool_hpwl"] == 123.0
+    assert len(rep["trials"]) == 4 and rep["score"] == min(t["score"] for t in rep["trials"])
     assert rep["overlaps"] == 0 and rep["outside"] == 0 and rep["fixed_moved"] == []
     assert rep["legaliser_moved"] >= 1                                # the pile had to be spread
     assert "J1" not in mv and "MH1" not in mv and {"U1", "U2"} <= set(mv)
@@ -198,3 +199,28 @@ def test_pipeline_records_the_engine(tmp_path, monkeypatch):
     d2 = dict(d, workdir=str(tmp_path / "W2"), constraints=None)
     assert PL.run(argparse.Namespace(**d2)) == 0
     assert PL.load_state(d2["workdir"])["stages"]["place"]["engine"].startswith("builtin ")
+
+
+def test_a_run_that_did_not_converge_is_not_used(tmp_path):
+    # Cypress writes the START positions when it diverges: that must never be taken for a placement
+    h = fake_home(tmp_path)
+    pl = os.path.join(h, "dreamplace", "Placer.py")
+    open(pl, "w").write(FAKE.replace("'hpwl': 123.0", "'hpwl': inf") + 'print("placement failed")\n')
+    B = RD.load(mk(tmp_path))
+    with pytest.raises(PC.Unavailable, match="no Cypress trial gave a legal placement.*did not converge"):
+        PC.place(B, CONS, None, str(tmp_path / "w"), h, sys.executable, log=lambda m: None)
+    assert B["parts"]["U1"]["pos"] == (80, 70)
+
+
+def test_constructive_flow_uses_the_engine_in_the_floorplan_stage(tmp_path, monkeypatch):
+    b = mk(tmp_path)
+    monkeypatch.setenv("CYPRESS_HOME", fake_home(tmp_path))
+    monkeypatch.setenv("CYPRESS_PYTHON", sys.executable)
+    cons = tmp_path / "c.toml"
+    cons.write_text('[placement]\nengine = "cypress"\nfixed = ["J1"]\n')
+    d = dict(board=b, workdir=str(tmp_path / "W"), constraints=str(cons), spec=None, from_stage="floorplan",
+             to_stage="floorplan", flow="constructive", status=False, waive=[], force=True, api=False)
+    PL.run(argparse.Namespace(**d))
+    st = PL.load_state(d["workdir"])["stages"]["floorplan"]
+    assert st["verdict"] == "pass" and st["engine"].startswith("cypress ") and st["line"].startswith("cypress:")
+    assert RD.load(st["board"])["parts"]["J1"]["pos"] == (5, 40)
