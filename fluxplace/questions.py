@@ -40,7 +40,22 @@ def assumed_ids(board):
         return []
 
 
+def notready_path(board):
+    return board + ".notready.json"
+
+
+def notready_reasons(board):
+    """reasons a board (and the boards it was made from) carries from `ready --allow-incomplete`."""
+    try:
+        return list(json.load(open(notready_path(board))).get("reasons", []))
+    except (OSError, ValueError):
+        return []
+
+
 def refuse_assumed(board, what="fab/deliver"):
+    nr = notready_reasons(board)
+    if nr:
+        raise SystemExit(f"{what} refused: NOT READY: {'; '.join(nr)[:300]} (made with `ready --allow-incomplete`; fix the readiness blockers and re-run the stages)")
     ids = assumed_ids(board)
     if ids:
         raise SystemExit(f"{what} refused: {os.path.basename(board)} was made with assumed answers (ASSUMED: {', '.join(ids)}). "
@@ -173,6 +188,13 @@ class Session:
 
 def inherit(src, dst):
     """a board made from `src` carries its assumed answers."""
+    nr = notready_reasons(src)
+    if nr and os.path.exists(dst):
+        try:
+            with open(notready_path(dst), "w") as fh:
+                json.dump({"reasons": nr, "command": "inherited"}, fh)
+        except OSError:
+            pass
     ids = sorted(set(assumed_ids(src)) | set(assumed_ids(dst)))
     if ids and os.path.exists(dst):
         try:

@@ -62,7 +62,7 @@ def test_range_and_handoff_through_state_json(tmp_path):
     st = PL.load_state(a.workdir)
     assert st["stages"]["floorplan-check"]["verdict"] == "pass"
     assert st["stages"]["anchor-check"]["verdict"] == "pass" and st["stage"] == "place"
-    assert os.path.exists(st["board"]) and "3-place" in st["board"]
+    assert os.path.exists(st["board"]) and "4-place" in st["board"]
     # a later stage starts from state.json alone (no BOARD argument)
     a2 = _args(tmp_path, None, from_stage="route", to_stage="route")
     assert PL.run(a2) == 3                       # a board with no records: the floors are a question, nothing routed
@@ -72,8 +72,8 @@ def test_range_and_handoff_through_state_json(tmp_path):
     st = PL.load_state(a.workdir)
     r = st["stages"]["route"]
     assert r["verdict"] == "fail" and "STUCK" in " ".join(st["next"])   # unrouted net reported with numbers
-    assert os.path.exists(os.path.join(a.workdir, "5-route", "board.kicad_pcb"))
-    assert os.path.exists(os.path.join(a.workdir, "5-route", "routed.kicad_pcb.status.json"))
+    assert os.path.exists(os.path.join(a.workdir, "6-route", "board.kicad_pcb"))
+    assert os.path.exists(os.path.join(a.workdir, "6-route", "routed.kicad_pcb.status.json"))
     assert len(open(PL.state_path(a.workdir)).read()) <= PL.STATE_MAX
 
 

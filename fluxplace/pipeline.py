@@ -23,9 +23,9 @@ import time
 
 from . import routeconn as RC
 
-STAGES = ["floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
+STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["modules", "floorplan", "fanout", "plan-route", "route", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
 STATE_MAX = 2000
@@ -76,6 +76,8 @@ def format_status(st):
     if not st:
         return "pipeline: no state.json (run `fluxplace pipeline BOARD --workdir W ...`)"
     out = [f"pipeline {st.get('verdict', '?')} at {st.get('stage', '?')}  board {st.get('board', '?')}"]
+    if st.get("not_ready"):
+        out.append("  NOT READY: " + _clip(st["not_ready"], 120))
     for i, name in enumerate(FLOWS.get(st.get("flow", "classic"), STAGES), 1):
         s = st.get("stages", {}).get(name)
         out.append(f"  {i} {name:16s} {s['verdict'] if s else '-':8s} {s['line'] if s else ''}".rstrip())
@@ -193,6 +195,25 @@ class Ctx:
 
 
 # ------------------------------------------------------------------ stages
+def st_ready(c, n, board):
+    """readiness gate (docs/commands/ready.md): parts, stackup-computed impedance geometry, rails, anchors, outline, floors."""
+    if not c.spec_path:
+        return {"verdict": "na", "line": "no --spec: readiness (parts, impedance geometry) not checked", "board": board}
+    d = c.dir(n, "ready")
+    argv = ["ready", c.spec_path, "--board", board] + (["--constraints", c.cons_path] if c.cons_path else []) + c.qs()
+    argv += [] if getattr(c.a, "api", False) else ["--no-api"]
+    argv += ["--allow-incomplete"] if getattr(c.a, "allow_incomplete", False) else []
+    rc, text = _run_cli(argv, os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
+    line = next((l for l in text.splitlines() if l.startswith(("ready:", "NOT READY"))), _last_line(text))
+    if rc:
+        return {"verdict": "blocked", "line": line, "board": board,
+                "next": [l.strip()[2:] for l in text.splitlines() if l.startswith("  - ")][:5] + [os.path.join(d, "stage.log")]}
+    return {"verdict": "pass", "line": next((l for l in text.splitlines() if l.startswith("NOT READY")), line), "board": board}
+
+
 def st_floorplan_check(c, n, board):
     d = c.dir(n, "floorplan-check")
     rc, text = _run_cli(["floorplan-check", board] + c.cs(), os.path.join(d, "stage.log"))
@@ -518,7 +539,7 @@ def st_plan_route(c, n, board):
     return {"verdict": "pass", "line": ("WARN " if rc else "") + _last_line(text), "board": board}
 
 
-FUNCS = {"modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
+FUNCS = {"ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
@@ -538,6 +559,18 @@ def _silk_version_line(c, board):
                 print(f"silk: {x['level']} {x['code']} {x['msg']}", flush=True)
     except Exception:                                    # noqa: BLE001 - advisory
         pass
+
+
+def _stamp_not_ready(stage_dir, reasons):
+    """every status file of a stage run on a NOT READY board says so."""
+    import glob
+    for p in glob.glob(os.path.join(stage_dir, "*.status.json")):
+        try:
+            d = json.load(open(p))
+            d["not_ready"] = reasons
+            json.dump(d, open(p, "w"))
+        except (OSError, ValueError):
+            pass
 
 
 def run(a):
@@ -598,8 +631,15 @@ def run(a):
                 st["scorecard"] = _scorecard(board, c.cons, c.spec, a.waive or [])[0]
             except Exception:
                 pass
+        from . import questions as QS
+        nr = QS.notready_reasons(board)
+        if nr:
+            st["not_ready"] = "; ".join(nr)
+            _stamp_not_ready(os.path.join(work, f"{i + 1}-{name}"), st["not_ready"])
+        else:
+            st.pop("not_ready", None)
         save_state(work, st)
-        print(f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
+        print(("NOT READY " if nr else "") + f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
               f"({time.time() - t:.0f}s)", flush=True)
         if res["verdict"] == "questions":
             rc = 3

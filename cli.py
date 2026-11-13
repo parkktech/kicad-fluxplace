@@ -3361,7 +3361,9 @@ def build_parser():
     ppl.add_argument("--status", action="store_true", help="print the stage table (<= 15 lines) and exit")
     ppl.add_argument("--waive", action="append", default=[], help="route-ready waiver CODE:REGEX")
     ppl.add_argument("--force", action="store_true", help="continue past a failing route-ready gate")
-    ppl.add_argument("--api", action="store_true", help="review with live DigiKey/Mouser data")
+    ppl.add_argument("--api", action="store_true", help="review and the ready stage with live DigiKey/Mouser data")
+    ppl.add_argument("--allow-incomplete", dest="allow_incomplete", action="store_true",
+                     help="continue past a failing ready stage; every later output is stamped NOT READY, fab/deliver refuse")
     ppl.add_argument("--route-budget", type=float, default=1800, help="route stage wall-clock cap, s")
     ppl.add_argument("--route-timeout", type=float, default=900, help="per router call cap, s")
     ppl.add_argument("--stall-rounds", type=int, default=2)

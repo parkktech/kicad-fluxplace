@@ -10,21 +10,22 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 | # | stage | what it does | output (under `W/<n>-<stage>/`) |
 |---|-------|--------------|---------------------------------|
 | 0 | `map` | optional: `fluxplace map B --constraints C` writes `B.fluxmap.json`; agents read slices (`map --show parts --ref U5`) instead of the board | B.fluxmap.json |
-| 1 | `floorplan-check` | runs the `floorplan-check` command if this build has it, else `na` | stage.log |
-| 2 | `anchor-check` | rotates misoriented anchors (connectors) to their best option (`--apply`) | board.kicad_pcb |
-| 3 | `place` | `clusters --apply` (support parts to their ICs) then `place --strategy routable` (`--objective plan` / `[placement] objective = "plan"`: local moves driven by the plan-route findings, kept only when PLAN_SCORE drops) | board.kicad_pcb |
-| 4 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`); with `[route_ready] use_plan` (default) it runs plan-route too: sealed pins and capacity overflow block | route-ready.json |
-| 5 | `route` | batch routing on OPEN CONNECTIONS (pcbnew connectivity; router gets the project's fab floors, no vias in pads; every batch audited, a violating one is discarded as `RULE_VIOLATION`; `[route] mode = "parallel"` = per-net jobs + merge) (35 nets per router call, 240 s each, checkpoint `ck-NNN.kicad_pcb` after each, halving on timeout, leftovers pass), keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` (last good checkpoint) and `leftovers.json` | board.kicad_pcb, diagnosis |
-| 6 | `tune` | DRC-guarded diff-pair length tuning | board.kicad_pcb |
-| 7 | `silk` | `silk --fix`: re-places reference texts so the silkscreen is on the board, off pads/holes, not stacked; copper and footprints untouched (`docs/commands/silk.md`) | board.kicad_pcb, stage.log |
-| 8 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
+| 1 | `ready` | the readiness gate (`docs/commands/ready.md`): parts complete (MPN, mfr, datasheet, pinmap source, package vs footprint), stackup-computed width/gap/layer for every controlled class, rails with a plane/pour or an answer, anchors, outline, floors. Needs `--spec` (else `na`). `blocked` on a FAIL, `questions` (exit 3) on an open decision; `--allow-incomplete` continues with every later output stamped `NOT READY`, `fab`/`deliver` refusing | ready.json beside the board, stage.log |
+| 2 | `floorplan-check` | runs the `floorplan-check` command if this build has it, else `na` | stage.log |
+| 3 | `anchor-check` | rotates misoriented anchors (connectors) to their best option (`--apply`) | board.kicad_pcb |
+| 4 | `place` | `clusters --apply` (support parts to their ICs) then `place --strategy routable` (`--objective plan` / `[placement] objective = "plan"`: local moves driven by the plan-route findings, kept only when PLAN_SCORE drops) | board.kicad_pcb |
+| 5 | `route-ready` | the gate: `blocked` on any FAIL not waived (`--waive CODE:REGEX`, `--force`); with `[route_ready] use_plan` (default) it runs plan-route too: sealed pins and capacity overflow block | route-ready.json |
+| 6 | `route` | batch routing on OPEN CONNECTIONS (pcbnew connectivity; router gets the project's fab floors, no vias in pads; every batch audited, a violating one is discarded as `RULE_VIOLATION`; `[route] mode = "parallel"` = per-net jobs + merge) (35 nets per router call, 240 s each, checkpoint `ck-NNN.kicad_pcb` after each, halving on timeout, leftovers pass), keep-best, stall loop, all inside `--route-budget`; writes `routed.kicad_pcb.status.json` (last good checkpoint) and `leftovers.json` | board.kicad_pcb, diagnosis |
+| 7 | `tune` | DRC-guarded diff-pair length tuning | board.kicad_pcb |
+| 8 | `silk` | `silk --fix`: re-places reference texts so the silkscreen is on the board, off pads/holes, not stacked; copper and footprints untouched (`docs/commands/silk.md`) | board.kicad_pcb, stage.log |
+| 9 | `review` | design-review gate (`--api` adds live distributor data) | review.json |
 
 `state.json` fields: `stage`, `verdict` (`pass|fail|blocked|na`), `board` (the file the next stage reads),
 `stages{name:{verdict,line,dir,board}}`, `scorecard{score,crossings,ratsnest_mm,overflow,fail,open}`,
 `next[]` (what the next stage must fix, worst first, numbers included), `paths`. `--status` prints it as a
 table of at most 15 lines. A stage not implemented in this build reports `na` and passes the board through.
 
-Pipeline order with the plan: `map` -> `place` (objective plan) -> `route-ready` (= plan-route gate) -> `route` -> audit (`review`).
+Pipeline order: `ready` first (nothing is placed or routed on an incomplete spec), then `map` -> `place` (objective plan) -> `route-ready` (= plan-route gate) -> `route` -> audit (`review`).
 `fluxplace plan-route B --constraints C --ignore-routing` judges a placement before any copper exists (exit 1 = sealed pins or
 overflow; findings carry the part to move and the direction); `plan-compare A.fluxmap.json B.fluxmap.json` compares two. The batch router
 takes only an ORDER hint from the plan (`[route] plan_map`, docs/commands/route.md): it has no per-net layer/corridor interface.
@@ -52,6 +53,7 @@ takes only an ORDER hint from the plan (`[route] plan_map`, docs/commands/route.
 - `route-ready` stays `blocked` after one `place` re-run and the remaining FAILs are geometric (budgets over by more
   than 2x, board too small, congestion overflow persists): the floorplan or outline needs a human decision.
 - `route` ends `fail` with the same unrouted count twice in a row (no progress), or `na` (router missing).
+- `ready` is `blocked` (part entry, impedance geometry, outline) or `questions`: a part/stackup/rail decision belongs to the owner.
 - `review` reports a FAIL that needs a part, datasheet or fab decision (MPN_MISSING, LANDPATTERN_*, FAB_*).
 - Anything needing a waiver the constraints file does not already allow.
 

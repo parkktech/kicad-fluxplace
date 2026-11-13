@@ -33,7 +33,7 @@ def load(a, need_board=False):
     board = getattr(a, "board", None)
     if need_board and not board:
         raise SystemExit(f"{a.cmd}: --board is required")
-    facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None)) if board else None
+    facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None), backend="file") if board else None
     mm = (facts or {}).get("mpn_map") or {}
     if not mm and not board:
         path = getattr(a, "mpn_map", None) or S.find_map(a.spec)
@@ -96,7 +96,7 @@ def add_parsers(sub):
     p.add_argument("--out", default=None, help="with --fix: output spec")
     p.set_defaults(fn=cmd_parts)
     import importlib
-    for name in ("readycmd", "pingroups", "partdiff"):
+    for name in ("ready", "pingroups", "partdiff"):
         try:
             m = importlib.import_module(f"fluxplace.{name}")
         except ModuleNotFoundError as e:
