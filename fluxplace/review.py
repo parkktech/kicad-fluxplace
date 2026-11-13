@@ -1280,8 +1280,8 @@ def check_part_entry(facts, spec, cons, partdata, ds_dir):
 
 def check_magnetics(facts, spec, cons=None):
     """LAN magnetics channels against the datasheet pin table (magnetics.py)."""
-    from . import magnetics as MG
-    return MG.check(facts["parts"], facts.get("net_pads") or {}, spec, cons)
+    from . import pingroups as PG
+    return PG.check(facts["parts"], facts.get("net_pads") or {}, spec, cons)     # magnetics profile + generic pin_groups
 
 
 # ==========================================================================
