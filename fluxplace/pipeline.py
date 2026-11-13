@@ -252,21 +252,45 @@ def st_route_ready(c, n, board):
             "next": nxt + [f"full list: {rj}"]}
 
 
-def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=()):
+def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=(), pair=False, gap=None,
+               dflags=()):
     """One py_router call. `R` (routerules.rules) and `rflags` (routerules.flags) carry the project's rules:
-    fab-overrides floors, --same-net-pad-clearance (no vias in pads), grid step."""
+    fab-overrides floors, --same-net-pad-clearance (no vias in pads), grid step.  `pair`: the two nets are the legs of a
+    differential pair and go to route_diff.py (coupled P and N); `dflags` = the rule flags that script accepts."""
     from . import adaptive
     from . import routerules as RR
     R = R or RR.rules(None, src, a.track, a.clearance)
-    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"), src,
+    script = "route_diff.py" if pair else "route.py"
+    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", script), src,
            "--output", dst, "--keep-input-copper", "--layers", *a.layers,
-           *RR.size_args(R), *adaptive.krt_extra(a.router_dir), *rflags]
+           *RR.size_args(R), *adaptive.krt_extra(a.router_dir, script), *(dflags if pair else rflags)]
+    if pair and gap:
+        cmd += ["--diff-pair-gap", f"{gap:g}"]
     if limited:
         cmd += ["--max-ripup", str(max_ripup)]       # batches: limited rip-up; the leftovers pass uses the default
     from . import batchroute as BR
     if BR.has_fanout(src):
         cmd += ["--no-stub-layer-swap"]              # the router may not re-layer the locked fan-out stubs
     return cmd + ["--nets", *only]
+
+
+def diff_named(p, n):
+    """route_diff.py finds pairs by suffix only: _P/_N, -P/-N, P/N, +/-."""
+    for a, b in (("_P", "_N"), ("-P", "-N"), ("P", "N"), ("+", "-")):
+        for x, y in ((p, n), (n, p)):
+            if x.endswith(a) and y == x[:-len(a)] + b:
+                return True
+    return False
+
+
+def pair_gap(cons, p):
+    """Gap P-N the constraints imply for pair `p` ([pairs.FAMILY] impedance_diff via PAIR_GEOM_BY_Z); None = the router's own default."""
+    from . import constraints as C
+    best = None
+    for fam, v in ((cons or {}).get("pairs") or {}).items():
+        if p.startswith(fam) and "impedance_diff" in v and (best is None or len(fam) > best[0]):
+            best = (len(fam), C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), C.PAIR_GEOM_BY_Z[100])[1])
+    return best[1] if best else None
 
 
 def st_route(c, n, board):
@@ -302,8 +326,12 @@ def st_route(c, n, board):
     rflags = RR.flags(R, a.router_dir, d)
     conn = BR.default_conn(S)
     extra = {}
-    build = lambda s, o, only, lim: _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R,
-                                               rflags=rflags)
+    dflags = RR.flags(R, a.router_dir, d, script="route_diff.py")
+
+    def build(s, o, only, lim, pair=False):
+        pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
+        return _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+                          gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
     run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
     def left():

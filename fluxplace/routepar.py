@@ -292,7 +292,10 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                 shutil.copy(cur, src)
             BR._sidecar(cur, src)
             stats["attempts"] += 1
-            cmd = build_cmd(src, dst, u.nets, True)
+            try:
+                cmd = build_cmd(src, dst, u.nets, True, pair=True) if u.kind == "pair" else build_cmd(src, dst, u.nets, True)
+            except TypeError:                                  # a builder without a pair mode: the legs go to the same router
+                cmd = build_cmd(src, dst, u.nets, True)
             if u.width:
                 cmd = list(cmd) + ["--power-nets", u.net, "--power-nets-widths", f"{u.width:g}"]
             st = run_job(cmd, cwd, dst, jt if remaining is None else min(jt, remaining), env)

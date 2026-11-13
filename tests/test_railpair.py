@@ -194,3 +194,29 @@ def test_reasons_keep_net_names_with_a_plus_sign(tmp_path):
     body = sp("RC", 10, 20, "+PL") + sp("RD", 30, 20, "+PL")
     board, r, R, spath = go(tmp_path, body, ["+PL"], {"nets": {"+PL": {"straight": True}}}, via=["+PL"], workers=1)
     assert r["leftovers"] == ["+PL"] and r["reasons"] == {"+PL": "plain copper violated"}
+
+
+def test_pair_job_goes_to_route_diff_with_the_constraints_gap(tmp_path):
+    import argparse
+    from fluxplace import pipeline as PL
+    krt = tmp_path / "krt"
+    (krt / "py_router").mkdir(parents=True)
+    (krt / "py_router" / "route.py").write_text('"--fab-overrides" "--grid-step"')
+    (krt / "py_router" / "route_diff.py").write_text('"--grid-step" "--diff-pair-gap"')
+    a = argparse.Namespace(router_py="py", router_dir=str(krt), layers=["F.Cu", "B.Cu"], track=0.15, clearance=0.15)
+    board = G.board(tmp_path, pair_body())
+    R = RR.rules(CONS, board, 0.15, 0.15)
+    dfl = RR.flags(R, str(krt), str(tmp_path), script="route_diff.py")
+    assert "--grid-step" in dfl
+    g = PL.pair_gap({"pairs": {"D": {"impedance_diff": 90}}}, "D_P")
+    assert g == 0.127 and PL.pair_gap({}, "D_P") is None
+    cmd = PL._route_cmd(a, board, "o.kicad_pcb", ["D_P", "D_N"], limited=True, R=R, pair=True, gap=g, dflags=dfl)
+    assert cmd[1].endswith("route_diff.py") and cmd[cmd.index("--diff-pair-gap") + 1] == "0.127" and cmd[-3:] == ["--nets", "D_P", "D_N"]
+    single = PL._route_cmd(a, board, "o.kicad_pcb", ["N0"], limited=True, R=R)
+    assert single[1].endswith("route.py") and "--diff-pair-gap" not in single
+
+
+def test_route_diff_only_for_suffix_named_pairs():
+    from fluxplace import pipeline as PL
+    assert PL.diff_named("USB_P", "USB_N") and PL.diff_named("X_N", "X_P") and PL.diff_named("D+", "D-") and PL.diff_named("CLKP", "CLKN")
+    assert not PL.diff_named("USB_DP", "USB_DM") and not PL.diff_named("A_P", "B_N")
