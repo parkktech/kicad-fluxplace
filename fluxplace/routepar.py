@@ -104,7 +104,7 @@ class Unit:
 
     def __init__(self, kind, nets, edge=None, net=None, width=None):
         self.kind, self.nets, self.edge, self.net, self.width = kind, list(nets), edge, net, width
-        self.id = "+".join(nets) if kind != "rail" else f"{net}@{edge['key'][0][0]}.{edge['key'][0][1]}-{edge['key'][1][0]}.{edge['key'][1][1]}"
+        self.id = "\t".join(nets) if kind != "rail" else f"{net}@{edge['key'][0][0]}.{edge['key'][0][1]}-{edge['key'][1][0]}.{edge['key'][1][1]}"
 
 
 def _plain_ok(Jb, net, cu):
@@ -228,7 +228,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
         for p_, n_ in half:
             txt, k = PA.strip_legs(txt, [p_, n_])
             pair_events[(p_, n_)] = "half-removed"
-            dead.pop("+".join((p_, n_)), None)
+            dead.pop("\t".join((p_, n_)), None)
             log(f"    pair {p_}/{n_}: half-routed, {k} track/via(s) removed ({tag})")
         ck = os.path.join(workdir, f"ck-{len(cks) + 1:03d}.kicad_pcb")
         with open(ck, "w", errors="surrogateescape") as fh:
@@ -477,7 +477,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     pair_pass("final")
     reasons = {}
     for k, v in dead.items():
-        for n in k.split("+") if not k.startswith("rail:") else [k[5:]]:
+        for n in k.split("\t") if not k.startswith("rail:") else [k[5:]]:
             reasons[n] = v
     for n in rails:
         if n in cur_open:

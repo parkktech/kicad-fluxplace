@@ -188,3 +188,9 @@ def test_rail_job_input_has_only_the_two_clusters_copper(tmp_path):
     q.write_text(RL.job_text(open(p).read(), B, "VX", far, mem))
     J2 = RD.load(str(q))
     assert [s["net"] for s in J2["segs"]] == ["VX"] and [v["net"] for v in J2["vias"]] == ["VX"]            # the stub of a kept cluster stays
+
+
+def test_reasons_keep_net_names_with_a_plus_sign(tmp_path):
+    body = sp("RC", 10, 20, "+PL") + sp("RD", 30, 20, "+PL")
+    board, r, R, spath = go(tmp_path, body, ["+PL"], {"nets": {"+PL": {"straight": True}}}, via=["+PL"], workers=1)
+    assert r["leftovers"] == ["+PL"] and r["reasons"] == {"+PL": "plain copper violated"}
