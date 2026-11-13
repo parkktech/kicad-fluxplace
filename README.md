@@ -108,6 +108,6 @@ help-brief        at most 15 lines on one command (none: one...
 ## More
 
 [docs/commands/cli.md](docs/commands/cli.md) CLI reference and placement rules, [docs/INTENT.md](docs/INTENT.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/CHANGELOG.md](docs/CHANGELOG.md) (history moved out of the README), [NEXT.md](NEXT.md).
+[docs/CHANGELOG.md](docs/CHANGELOG.md), [NEXT.md](NEXT.md).
 
 MIT (c) 2026 Jason Ratzlaff
