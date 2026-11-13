@@ -170,3 +170,20 @@ def test_fanout_keeps_board_edge_clearance(tmp_path):
     for m in re.finditer(r"\(via\s+\(at ([-\d.]+) ([-\d.]+)\)", open(out).read()):
         x, y = float(m.group(1)), float(m.group(2))
         assert y - 0.225 >= 0.25 - 1e-6 and x - 0.225 >= 0.25 - 1e-6        # copper to edge >= the helper's edge floor
+
+
+def test_reserved_escapes_in_keepout_or_edge_band_are_dropped(tmp_path):
+    """escres plans on a raster that knows no keep-outs or edge: fanout.py must drop what it cannot legally claim."""
+    body = _caps(n=1) + PB.keepout(40, 40, 44, 44) + PB.fp("K1", 90, 10, [PB.pad("1", 0, 0, "Z", 1, 1), PB.keepout(50, 20, 54, 24)])
+
+    def claim(pin, x, y, lane_end=None):
+        return {"ref": "C0", "pin": pin, "net": "GND", "layer": "F.Cu", "pad_xy": [x - 1.0, y], "site": [x, y],
+                "lane": [[lane_end[0], lane_end[1]] if lane_end else [x, y]], "width": 0.15, "via": 0.45}
+    claims = [claim("1", 42, 42), claim("2", 52, 22), claim("3", 0.3, 40), claim("4", 70, 60, (70.1, 60.0)), claim("5", 20, 50)]
+    path = PB.write(tmp_path, body)
+    logs = []
+    job = {"params": FO.params(args(), __import__("fluxplace.escapeplan", fromlist=["x"]).plan_params({}), path), "signal_layers": ["F.Cu", "B.Cu"]}
+    kept = FO._drop_illegal_claims(path, job, claims, str(tmp_path), logs.append)
+    assert [c["pin"] for c in kept] == ["4", "5"]
+    assert len(logs) == 3 and any("keepout" in l for l in logs) and any("edge" in l for l in logs)
+    assert kept[0]["lane"][-1] == [70, 60]                      # the stub ends at the via centre
