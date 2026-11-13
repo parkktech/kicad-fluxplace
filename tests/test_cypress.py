@@ -228,3 +228,215 @@ def test_constructive_flow_uses_the_engine_in_the_floorplan_stage(tmp_path, monk
     st = PL.load_state(d["workdir"])["stages"]["floorplan"]
     assert st["verdict"] == "pass" and st["engine"].startswith("cypress ") and st["line"].startswith("cypress:")
     assert RD.load(st["board"])["parts"]["J1"]["pos"] == (5, 40)
+
+
+# ------------------------------------------------------------------ intent-aware flow (docs/CYPRESS.md "With an intent")
+from fluxplace import intent as IT, modules as MD, clusters as CL, constraints as C
+
+
+def _fixed(B, cons):
+    M = LG._Model(B, cons, MD.fixed_set(B, cons), B["bbox"])
+    return M, set(M.fixed)
+
+
+def test_a_macro_is_one_cell_with_every_member_pin_and_turns_as_one_body(tmp_path):
+    B = RD.load(mk(tmp_path))
+    cl = [{"ic": "U1", "supports": [{"ref": "C2", "via": "1", "pad": "6", "weight": 1.0}, {"ref": "C1", "via": "1", "pad": "4", "weight": 1.0}]}]
+    m = model(B, clusters=cl, macros={"U1": ["U1", "C2"]}, gap=0.0)
+    cell = next(c for c in m["cells"] if c.get("macro") == "U1")
+    assert set(cell["members"]) == {"U1", "C2"} and not cell["fixed"] and cell["side"] == "F"
+    assert not [c for c in m["cells"] if c["ref"] == "C2" and c is not cell]            # no cell of its own
+    u, c2 = B["parts"]["U1"]["court"], B["parts"]["C2"]["court"]
+    assert cell["w"] == round((max(u[2], c2[2]) - min(u[0], c2[0])) / 0.1) and cell["h"] == round((max(u[3], c2[3]) - min(u[1], c2[1])) / 0.1)
+    nets = {n["net"]: n for n in m["nets"]}
+    assert "support:C2" not in nets and "support:C1" in nets                            # inside the macro there is nothing to pull
+    assert "Z1" in nets and {t[0] for t in nets["Z1"]["pins"]} == {cell["name"], next(c["name"] for c in m["cells"] if c["ref"] == "R1")}
+    d0 = (B["parts"]["C2"]["pos"][0] - B["parts"]["U1"]["pos"][0], B["parts"]["C2"]["pos"][1] - B["parts"]["U1"]["pos"][1])
+    for o, th in (("N", 0), ("W", 90), ("S", 180)):
+        tg = IO.targets(m, B, {cell["name"]: (cell["x"] + 50, cell["y"], o)})
+        rx, ry = GM.rot(d0[0], d0[1], th)
+        assert tg["U1"][2] == th and tg["C2"][2] == th
+        assert abs(tg["C2"][0] - tg["U1"][0] - rx) < 1e-3 and abs(tg["C2"][1] - tg["U1"][1] - ry) < 1e-3
+
+
+def test_links_and_net_weight_overrides_reach_the_weights_file(tmp_path):
+    B = RD.load(mk(tmp_path))
+    links = [{"name": "intent/x/0", "pads": [("R1", "1"), ("U2", "1")], "weight": 24.0},
+             {"name": "intent/held/0", "pads": [("J1", "1"), ("MH1", "1")], "weight": 9.0}]
+    m = model(B, links=links, net_weights={"A": 7.5})
+    nets = {n["net"]: n for n in m["nets"]}
+    assert nets["intent/x/0"]["weight"] == 24.0 and len(nets["intent/x/0"]["pins"]) == 2
+    assert "intent/held/0" not in nets and nets["A"]["weight"] == 7.5
+    aux = IO.write_bookshelf(m, str(tmp_path / "bs"))
+    assert f"{nets['intent/x/0']['name']} 24\n" in open(os.path.join(os.path.dirname(aux), "board.wts")).read()
+
+
+def test_held_group_swept_area_region_and_front_become_fixed_cells_and_blockages(tmp_path):
+    hole = lambda ref, x, y: g.fp(ref, x, y, [g.pad("", 0, 0, typ="np_thru_hole")], name="Standoff", court=(-1.5, -1.5, 1.5, 1.5))
+    body = (g.fp("J9", 30, 40, [g.pad(str(i + 1), 0, i - 3.5, f"S{i}", 0.6, 0.6) for i in range(8)], name="CardSocket_M2", court=(-2, -6, 2, 6))
+            + hole("H1", 60, 40) + g.ic("U1", 80, 20, ["S0", "S1", "S2", "S3"], pitch=1.27, court=(-3, -3, 3, 3))
+            + val("R1", 70, 60, "S4", "S5") + val("R2", 75, 60, "S6", "S7") + val("R3", 20, 70, "S0", "S7", side="B"))
+    cons = {"intent": {"group": [{"name": "card", "refs": ["J9", "H1"], "swept": "all", "swept_side": "F"}],
+                       "region": [{"name": "all-out", "rect": [0, 0, 20, 20], "side": "both"},
+                                  {"name": "one-part", "rect": [80, 60, 100, 80], "refs": ["R1"]}]}}
+    B = RD.load(g.board(tmp_path, body))
+    S = IT.Seater(B, cons).run()
+    run = S.cons_out()
+    M, fixed = _fixed(B, run)
+    assert {"J9", "H1"} <= fixed                                       # the rigid group is held: fixed cells
+    blocks, post = PC.zone_blocks(B, M, fixed)
+    swept = IT.swept_rect(B, IT.items(B, run)["group"][0])
+    assert (swept, {"F"}) in blocks                                    # the card area, on its side only
+    assert ((0.0, 0.0, 20.0, 20.0), {"F"}) in blocks and ((0.0, 0.0, 20.0, 20.0), {"B"}) in blocks
+    assert post == ["one-part"]                                        # concerns one part: the legaliser and the gate keep it
+    m = IO.build_model(B, fixed, NC.classify(B, run, None), keepouts=blocks)
+    by = {c["ref"]: c for c in m["cells"] if c["ref"]}
+    assert by["J9"]["fixed"] and by["H1"]["fixed"] and not by["U1"]["fixed"]
+    k = [c for c in m["cells"] if c["name"].startswith("k")]
+    assert len(k) == 3 and all(c["fixed"] and not c["ref"] for c in k)
+    assert not any(c["name"] in {x["name"] for x in k} for n in m["nets"] for c in [{"name": t[0]} for t in n["pins"]])   # pinless
+    # an `away` halo concerns the offending set only: left to the legaliser, unless that set is most of what moves on the side
+    for a, blocked in ((["R1"], False), (["U1"], True)):
+        away = {"intent": {"away": [{"name": "noise", "a": a, "b": ["J9"], "min_mm": 10}]}, "placement": {"fixed": ["J9"]}}
+        M2, f2 = _fixed(B, away)
+        b2, p2 = PC.zone_blocks(B, M2, f2)
+        c = B["parts"]["J9"]["court"]
+        assert (b2 == [((c[0] - 10, c[1] - 10, c[2] + 10, c[3] + 10), {"F"})]) is blocked and any("noise" in n for n in p2) is not blocked
+        assert any("noise" in n for n, _r in M2.forbidden_named(a[0]))
+
+
+def test_relations_become_weighted_nets_scaled_from_the_budget(tmp_path):
+    body = (g.ic("U1", 20, 20, ["D_P", "D_N", "A", "B"], pitch=1.27) + g.ic("U2", 70, 60, ["E_P", "E_N", "A", "B"], pitch=1.27)
+            + val("C1", 40, 20, "D_P", "E_P", name="C_0402") + val("C2", 40, 60, "D_N", "E_N", name="C_0402")
+            + val("R1", 60, 20, "A", "X") + val("R2", 80, 20, "B", "Y"))
+    B = RD.load(g.board(tmp_path, body))
+    cons = {"intent": {"near": [{"name": "tight", "refs": ["R1"], "to": "U1", "max_mm": 4.0},
+                                {"name": "loose", "refs": ["R2"], "to": "U1", "max_mm": 60.0}]}}
+    cls = NC.classify(B, cons, None)
+    assert cls["D_P"]["partner"] == "D_N"
+    links, weights = PC.relation_links(B, cons, cls, PC.settings(cons))
+    by = {l["name"]: l for l in links}
+    assert by["intent/tight/0"]["weight"] > by["intent/loose/0"]["weight"] >= 3.0        # the tighter budget pulls harder
+    assert by["intent/tight/0"]["pads"][0][0] == "R1" and by["intent/tight/0"]["pads"][1][0] == "U1"
+    pair = [l for l in links if l["name"].startswith("pair/")]
+    assert len(pair) == 1 and {r for r, _p in pair[0]["pads"]} == {"C1", "C2"}          # series parts of the two halves, side by side
+    assert weights["D_P"] == cls["D_P"]["weight"] * 2.0 and weights["E_N"] == cls["E_N"]["weight"] * 2.0 and "A" not in weights
+    m = IO.build_model(B, set(), cls, links=links, net_weights=weights)
+    nets = {n["net"]: n for n in m["nets"]}
+    assert nets["D_P"]["weight"] == weights["D_P"] and nets[pair[0]["name"]]["weight"] == pair[0]["weight"]
+
+
+def test_support_macro_is_laid_out_by_the_support_seating_and_escape_room_is_reserved(tmp_path):
+    body = (g.ic("U410", 40, 40, ["VDD", "A1", "D410", "GND", "A2", "A3"], pitch=0.5, court=(-3, -2, 3, 2))
+            + g.fp("C411", 80, 70, [g.pad("1", -0.5, 0, "D410"), g.pad("2", 0.5, 0, "GND")], name="C_0402_1005Metric", court=(-1, -0.5, 1, 0.5))
+            + g.fp("C412", 10, 10, [g.pad("1", -0.5, 0, "VDD"), g.pad("2", 0.5, 0, "GND")], name="C_0402_1005Metric", court=(-1, -0.5, 1, 0.5))
+            + g.ic("U2", 70, 20, ["A1", "A2", "A3", "GND"], pitch=1.27, court=(-3, -3, 3, 3)))
+    B = RD.load(g.board(tmp_path, body))
+    cl = CL.build(B, {}, None)[0]
+    own = {s["ref"] for c in cl if c["ic"] == "U410" for s in c["supports"] if s["sure"]}
+    assert own
+    macros, rigid = PC.build_macros(B, {}, set(), cl)
+    assert macros["U410"][0] == "U410" and set(macros["U410"][1:]) == own and rigid == []
+    for r in own:                                                      # laid out at the IC, no overlap inside the cell
+        assert GM.rect_gap(B["parts"]["U410"]["court"], B["parts"][r]["court"]) < 3.0
+        assert not GM.overlap(B["parts"]["U410"]["court"], B["parts"][r]["court"], -0.001)
+    assert PC.build_macros(B, {}, {"U410"}, CL.build(B, {}, None)[0])[0] == {}           # a held IC is no macro
+    grp = {"placement": {"group": {"intent:body": {"refs": ["U2", "C411"]}}}}
+    GM.place(B["parts"]["C411"], 74.5, 20, 0)
+    macros, rigid = PC.build_macros(B, grp, set(), [], support=False)
+    assert macros == {"group:intent:body": ["U2", "C411"]} and rigid == ["group:intent:body"]
+    pw = {"power": {"VDD": {}}}
+    res = PC.escape_reserve(B, pw, None, NC.classify(B, pw, None))
+    assert 0 < res["U410"] <= 1.0 and "C412" not in res              # the IC's supply pin must own a via site; passives get none
+    assert PC.escape_reserve(B, dict(pw, escape={"enabled": False}), None, NC.classify(B, pw, None)) == {}
+
+
+def test_feedback_inflates_crowded_parts_and_blocks_beside_fixed_ones(tmp_path):
+    B = RD.load(mk(tmp_path))
+    S = dict(PC.settings({}), inflate_share=1.0)
+    infl, blocks = {}, []
+    blocked = [{"ref": "U1", "pin": "3", "blocker": "escape of C2.1 (GND)", "blame": [["R1.1", 90], ["U1.2", 50]]},
+               {"ref": "J1", "pin": "2", "blocker": "U2.1"}]
+    find = [{"code": "PLAN_OVERFLOW", "eff": 2.0, "parts": ["U2", "J1"], "box": [6, 38, 8, 40], "layer": "F.Cu"},
+            {"code": "PLAN_OVERFLOW", "eff": 1.0, "parts": ["U2", "C1"], "box": [30, 30, 32, 32], "layer": "In1.Cu"},
+            {"code": "PLAN_PIN_SEALED", "parts": ["R2"]}]
+    n, nb = PC.feedback(B, {"J1", "MH1"}, find, blocked, infl, blocks, S)
+    assert n == len(infl) and set(infl) == {"U1", "U2", "C1"} and "J1" not in infl and "R2" not in infl
+    assert infl["U1"] == 0.4 and infl["C1"] == 0.4 and infl["U2"] == 0.8      # R1, C2: one blame alone is not enough
+    few = {}
+    PC.feedback(B, {"J1", "MH1"}, find, blocked, few, [], dict(S, inflate_share=0.2))
+    assert set(few) == {"U2"}                                          # the hottest first when the share is small
+    pin = next(q for q in B["parts"]["J1"]["pads"] if q["num"] == "2")
+    halo = ((pin["x"] - 1.5, pin["y"] - 1.5, pin["x"] + 1.5, pin["y"] + 1.5), {"F", "B"})
+    # the blocked pin of the held connector gets a halo; of the overflows only the one that borders a fixed part is blocked
+    assert nb == 2 and blocks == [halo, ((6.0, 38.0, 8.0, 40.0), {"F"})]
+    for _ in range(9):
+        PC.feedback(B, {"J1", "MH1"}, find, blocked, infl, blocks, S)
+    assert max(infl.values()) == S["inflate_max_mm"] and len(blocks) == 2
+    # a held part's cell carries its allowance in the intent-aware model
+    a = lambda ref, part: (1.0, 0.0, 0.5, 0.0) if ref == "J1" else (0.0,) * 4
+    m0, m1 = model(B, allowance=a, gap=0.0), model(B, allowance=a, gap=0.0, fixed_allowance=True)
+    w = lambda m: next(c for c in m["cells"] if c["ref"] == "J1")["w"]
+    assert w(m0) == 20 and w(m1) == 35
+
+
+INTENT = {"placement": {"fixed": ["J1"], "cypress": {"trials": 3, "macros": "auto"}},
+          "intent": {"near": [{"name": "r1-u2", "refs": ["R1"], "to": "U2", "max_mm": 30.0}],
+                     "region": [{"name": "corner", "rect": [80, 60, 100, 80]}], "support": {"decap_hard": False}}}
+
+
+def test_intent_flow_scores_every_trial_with_the_gate_and_records_it(tmp_path):
+    p = mk(tmp_path)
+    B = RD.load(p)
+    said = []
+    mv, rep = PC.place(B, INTENT, None, str(tmp_path / "w"), fake_home(tmp_path), sys.executable, log=said.append, board=p)
+    assert rep["flow"] == "intent" and len(rep["trials"]) == 3 and rep["rejected"] == 0
+    for t in rep["trials"]:
+        assert {"plan", "overflow", "risk_nets", "blocked", "required", "hpwl", "intent", "macros", "inflated", "blocks"} <= set(t)
+        assert t["intent"]["hard_unmet"] == 0 and t["score"] >= t["plan"]     # (pcbnew cannot open this synthetic file: no fan-out count)
+    assert rep["score"] == min(t["score"] for t in rep["trials"]) and rep["zone_blockages"] == 2 and rep["links"] >= 1
+    assert rep["trials"][0]["macros"] >= 1 and rep["trials"][1]["macros"] == 0          # "auto": with, then without
+    assert rep["params"]["target_density"] and "trial" in rep["summary"] and rep["gate"]["plan"] is not None
+    assert rep["overlaps"] == 0 and rep["fixed_moved"] == [] and "J1" not in mv
+    corner = (80, 60, 100, 80)
+    assert not any(GM.overlap(q["court"], corner) for q in B["parts"].values())
+    assert os.path.exists(tmp_path / "w" / "trial0" / "bookshelf" / "board.aux")       # one design per trial (feedback changes it)
+    assert "k" in open(tmp_path / "w" / "trial0" / "bookshelf" / "board.nodes").read()
+
+
+def test_a_trial_with_unmet_hard_intent_is_rejected(tmp_path):
+    p = mk(tmp_path)
+    B = RD.load(p)
+    cons = {"placement": {"fixed": ["J1"], "cypress": {"trials": 2}},
+            "intent": {"away": [{"name": "apart", "a": ["U1"], "b": ["U2"], "min_mm": 60.0}], "support": {"decap_hard": False}}}
+    said, h = [], fake_home(tmp_path)
+    with pytest.raises(PC.Unavailable, match="hard intent unmet: away apart"):
+        PC.place(B, cons, None, str(tmp_path / "w"), h, sys.executable, log=said.append, board=p)
+    assert sum("REJECTED" in m for m in said) == 2 and any("NOT MET hard away apart" in m for m in said)
+    assert B["parts"]["U1"]["pos"] == (80, 70)                         # nothing was taken from a rejected trial
+    r = PC.place_file(p, str(tmp_path / "o.kicad_pcb"), cons, None, h, sys.executable, log=said.append)
+    assert isinstance(r, str) and "hard intent unmet" in r and not os.path.exists(tmp_path / "o.kicad_pcb")
+
+
+def test_cli_and_pipeline_run_the_intent_flow_and_finish_with_the_gate(tmp_path, monkeypatch):
+    p, out = mk(tmp_path), str(tmp_path / "o.kicad_pcb")
+    cons = tmp_path / "c.toml"
+    cons.write_text('[placement]\nfixed = ["J1"]\n[placement.cypress]\ntrials = 3\nmacros = "auto"\n[intent.support]\ndecap_hard = false\n'
+                    '[[intent.near]]\nname = "r1-u2"\nrefs = ["R1"]\nto = "U2"\nmax_mm = 30.0\n'
+                    '[[intent.region]]\nname = "corner"\nrect = [80, 60, 100, 80]\n')
+    assert C.load(str(cons))["intent"] == INTENT["intent"]
+    h = fake_home(tmp_path)
+    r = _cli("place", "--board", p, "--strategy", "routable", "--engine", "cypress", "--cypress-home", h,
+             "--cypress-python", sys.executable, "--constraints", str(cons), "--out", out)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "intent flow: trial" in r.stdout and "INTENT: " in r.stdout and "INTENT: FAIL" not in r.stdout
+    rec = PC.read_record(out)
+    assert rec["engine"] == "cypress" and rec["flow"] == "intent" and rec["intent"]["gate"].startswith("INTENT:")
+    assert [t["score"] for t in rec["trials"]] and rec["params"] and os.path.exists(os.path.splitext(out)[0] + ".intent.json")
+    monkeypatch.setenv("CYPRESS_HOME", h)
+    monkeypatch.setenv("CYPRESS_PYTHON", sys.executable)
+    d = dict(board=p, workdir=str(tmp_path / "W"), constraints=str(cons), spec=None, from_stage="floorplan", engine="cypress",
+             to_stage="floorplan", flow="constructive", status=False, waive=[], force=True, api=False)
+    PL.run(argparse.Namespace(**d))
+    st = PL.load_state(d["workdir"])["stages"]["floorplan"]
+    assert st["verdict"] == "pass" and st["engine"].startswith("cypress ") and "kept" in st["engine"] and "score" in st["engine"]
