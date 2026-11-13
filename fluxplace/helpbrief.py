@@ -13,7 +13,7 @@ CMD_DOC = {
     "pipeline": "../AGENT-PIPELINE",
     "review": "review", "route-ready": "route-ready", "route-diagnose": "route-diagnose",
     "clusters": "clusters", "floorplan-check": "floorplan-check", "templates": "templates", "anchor-check": "anchor-check", "place": "place",
-    "bom-opt": "bom-opt", "fit-sheet": "fit-sheet", "auto": "auto", "compact": "auto",
+    "bom-opt": "bom-opt", "magnetics": "magnetics", "fit-sheet": "fit-sheet", "auto": "auto", "compact": "auto",
     "route-status": "route-wait", "route-wait": "route-wait", "drc-scope": "audit",
     "stackup": "audit", "stackup-define": "audit", "netlist": "audit",
     "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "route", "tournament": "cli",

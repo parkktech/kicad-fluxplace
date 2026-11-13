@@ -1904,6 +1904,29 @@ def cmd_silk(a):
         raise SystemExit(1)
 
 
+def cmd_magnetics(a):
+    """LAN magnetics wiring vs the datasheet pin table declared in the spec; exit 1 on a FAIL."""
+    import json as _json
+    from fluxplace import review as R, magnetics as MG
+    cons, spec = _text_ctx(a)
+    if not spec:
+        raise SystemExit("magnetics: --spec is required (parts declare their channels there)")
+    facts = R.facts_from_board(a.board)
+    findings = MG.check(facts["parts"], facts.get("net_pads") or {}, spec, cons)
+    order = {"FAIL": 0, "WARN": 1, "INFO": 2}
+    findings.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
+    n = MG.summary(findings)
+    chans = sum(len(c.get("channels") or []) for c in spec.get("components", []) if isinstance(c, dict))
+    if a.json:
+        print(_json.dumps({"board": a.board, "channels": chans, "counts": n, "findings": findings}, indent=1))
+    else:
+        for f in findings:
+            print(f"  {f['level']:4s} {f['code']} {f['msg']}")
+        print(f"magnetics: {n['FAIL']} FAIL, {n['WARN']} WARN, {n['INFO']} INFO ({chans} declared channel(s))")
+    if n["FAIL"]:
+        raise SystemExit(1)
+
+
 def _route_gate(a, board_path, stage="routing"):
     """Refuse to start routing on a placement route-ready rejects, unless --force.
     Prints the scorecard either way."""
@@ -3016,6 +3039,13 @@ def build_parser():
     psk.add_argument("--title", default=None, help="owned title text (literal); [silk.title] holds the template")
     psk.add_argument("--json", action="store_true", help="print machine-readable JSON instead of the compact report")
     psk.set_defaults(fn=cmd_silk)
+
+    pmg = sub.add_parser("magnetics", help="LAN magnetics wiring check vs datasheet pins")
+    pmg.add_argument("board")
+    pmg.add_argument("--spec", default=None, help="spec JSON; parts declare `channels` + pinmap_source")
+    pmg.add_argument("--constraints", default=None, help="constraints TOML; [magnetics] polarity/chip_ct/line_ct")
+    pmg.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    pmg.set_defaults(fn=cmd_magnetics)
 
     prv = sub.add_parser("review",
                          help="design-review gate: spec net rules, diff-pair "
