@@ -81,7 +81,7 @@ from .comprehend import parse_value
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
            "packages_agree", "lib_index", "lib_pins", "pin_role",
            "check_via_types", "check_fab_capability", "check_spec_nets",
-           "check_keepouts", "check_locks", "check_sheet", "check_policy", "check_bom",
+           "check_keepouts", "check_locks", "check_sheet", "check_title_block", "check_policy", "check_bom",
            "lock_toml",
            "board_backend"]
 
@@ -1430,6 +1430,18 @@ def check_sheet(facts, cons):
                f"— run `fluxplace fit-sheet`")]
 
 
+def check_title_block(facts, cons, spec=None, stage="review"):
+    """TITLEBLOCK_EMPTY (title or revision missing; WARN, FAIL at fab/deliver/pcbway) and
+    TITLEBLOCK_REV_STALE (revision disagrees with the resolved board version; FAIL). Silent
+    without a title block in the facts. Fix: `fluxplace title-block`. See titleblock.py."""
+    from . import titleblock as TB
+    tb = facts.get("title_block")
+    if tb is None:
+        return []
+    return [_f(f["level"], f["code"], f["msg"]) for f in
+            TB.findings(tb, facts.get("board_path"), cons, spec, stage)]
+
+
 def lock_toml(facts, patterns):
     """A [lock.at] block for the footprints matching `patterns`, from the
     board as it stands — the baseline a later revision must keep."""
@@ -1567,7 +1579,7 @@ def _waived(fnd, waivers):
 
 
 def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
-        ds_dir=None):
+        ds_dir=None, stage="review"):
     facts = dict(facts)
     facts["partdata"] = partdata or {}
     docs = (cons or {}).get("docs", {})
@@ -1597,6 +1609,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_preroute(facts, spec, cons)
     out += check_locks(facts, cons)
     out += check_sheet(facts, cons)
+    out += check_title_block(facts, cons, spec, stage)
     out += check_policy(facts, cons)
     out += check_bom(facts, cons, spec)
     out += check_silk(facts, cons, spec)
@@ -1827,6 +1840,7 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "size_mm": (pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())),
         "outline_bbox": [round(v, 4) for v in ob] if ob else None,
         "page": SH.read_paper(board_path),
+        "title_block": __import__("fluxplace.titleblock", fromlist=["x"]).read(board_path),
         "copper_layers": board.GetCopperLayerCount(),
         "parts": parts,
         "net_pads": dict(net_pads),
