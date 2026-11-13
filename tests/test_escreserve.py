@@ -76,3 +76,18 @@ def test_pair_corridor_becomes_a_soft_reservation(tmp_path):
 def test_reserve_off_in_constraints(tmp_path):
     B = load(tmp_path, conn("J1", 50, 40, locked=True) + G.two("C1", 50, 42.3, "A", "B", **CAP))
     assert ES.for_legalise(B, {"escape": {"reserve": False}}, None, movable={"C1"}) == {"rects": [], "inflate": {}}
+
+
+def test_intent_region_and_escape_band_apply_in_the_same_legalise_call(tmp_path):
+    """e2e-intent's regions/held parts and e2e-pairs' `reserve=` are both live in one pass: a part is kept out of both."""
+    B = load(tmp_path, conn("J1", 50, 40, locked=True) + G.two("C1", 50, 42.3, "A", "B", **CAP))
+    rsv = ES.for_legalise(B, {}, None, movable={"C1"})
+    band = [r for r in rsv["rects"] if r["hard"] and r["owner"] == "J1"][0]["rect"]
+    reg = [44, band[3], 56, band[3] + 3.0]                      # a keep-out region right below the reserved band
+    cons = {"intent": {"region": [{"name": "noc", "rect": reg, "keep": "out", "refs": ["C1"]}]}}
+    res, rep = LG.legalise(B, {"C1": (50, 42.3, 0.0)}, fixed={"J1"}, cons=cons, reserve=rsv)
+    court = GM.moved(B["parts"]["C1"], *res["C1"])[1]
+    assert not GM.overlap(court, band) and not GM.overlap(court, tuple(reg)), (res["C1"], band, reg)
+    assert rep["in_keepout"] == []
+    only_reserve, _ = LG.legalise(B, {"C1": (50, 42.3, 0.0)}, fixed={"J1"}, reserve=rsv)
+    assert GM.overlap(GM.moved(B["parts"]["C1"], *only_reserve["C1"])[1], tuple(reg))      # the region is what moved it further

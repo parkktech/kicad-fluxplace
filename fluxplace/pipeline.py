@@ -29,7 +29,7 @@ CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pairs", "plan-route"
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
 STATE_MAX = 2400   # router + engine records joined the stage entries
-VERDICTS = ("pass", "fail", "blocked", "na", "skipped")
+VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped")   # warn: ran, its own gate line says FAIL, does not block
 
 
 # ------------------------------------------------------------------ state
@@ -632,8 +632,10 @@ def st_fanout(c, n, board):
     if q:
         return q
     line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
-    res = {"verdict": "pass" if rc == 0 else "fail", "line": line, "board": out if os.path.exists(out) else board}
-    if rc:
+    # the gate line decides too: `fanout` returns its verdict code without exiting, so rc alone reads 0 on FANOUT_FAIL
+    bad = rc != 0 or any(l.startswith(("fanout: FANOUT_FAIL", "fanout: FANOUT_DRC")) for l in text.splitlines())
+    res = {"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}
+    if bad:
         res["next"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_BLOCKED")][:5]
     return res
 
@@ -642,7 +644,9 @@ def st_plan_route(c, n, board):
     """channels only: sealed pins cannot exist (the fan-out gate passed), so overflow is a WARN and never blocks."""
     d = c.dir(n, "plan-route")
     rc, text = _run_cli(["plan-route", board] + c.cs(), os.path.join(d, "stage.log"))
-    return {"verdict": "pass", "line": ("WARN " if rc else "") + _last_line(text), "board": board}
+    last = _last_line(text)
+    bad = bool(rc) or "FAIL" in last
+    return {"verdict": "warn" if bad else "pass", "line": ("WARN " if bad and not last.startswith("WARN") else "") + last, "board": board}
 
 
 def st_pairs(c, n, board):
