@@ -63,6 +63,7 @@ def save_state(work, st):
     else:                                   # pathological paths: keep only what handoff needs
         for k, v in st.get("stages", {}).items():
             v.pop("board", None)
+            (v.get("fr") or {}).pop("curve", None)
             v["line"] = _clip(v.get("line", ""), 24)
         st["next"] = st["next"][:2]
         txt = json.dumps(st, separators=(",", ":"))
@@ -367,7 +368,13 @@ def st_route(c, n, board):
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     from . import routerules as RR, routepar as RP
     a = c.a
-    if not (os.path.exists(a.router_py) and os.path.exists(os.path.join(a.router_dir, "py_router", "route.py"))):
+    rname = getattr(a, "router_name", None) or "krt"
+    fr_loc = getattr(a, "fr_loc", None)
+    have_krt = bool(a.router_py and a.router_dir and os.path.exists(a.router_py)
+                    and os.path.exists(os.path.join(a.router_dir, "py_router", "route.py")))
+    if rname == "freerouting" and not fr_loc:
+        return {"verdict": "fail", "line": "Freerouting not located; pass --freerouting-jar/--java", "board": board}
+    if not have_krt and rname != "freerouting":
         return {"verdict": "fail", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
                 "board": board}
     d = c.dir(n, "route")
@@ -390,10 +397,10 @@ def st_route(c, n, board):
     spath = os.path.join(d, "routed.kicad_pcb.status.json")
     S = BR.settings(c.cons)
     R = RR.rules(c.cons, board, a.track, a.clearance)
-    rflags = RR.flags(R, a.router_dir, d)
+    rflags = RR.flags(R, a.router_dir, d) if have_krt else []
     conn = BR.default_conn(S)
     extra = {}
-    dflags = RR.flags(R, a.router_dir, d, script="route_diff.py")
+    dflags = RR.flags(R, a.router_dir, d, script="route_diff.py") if have_krt else []
 
     def build(s, o, only, lim, pair=False):
         pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
@@ -405,17 +412,24 @@ def st_route(c, n, board):
         return max(1.0, budget - (time.time() - t0))
     # the rounds and the stall loop stop at (1 - frac) of the budget so the escalation ladder always gets its share;
     # `[route] ladder_reserve_frac = 0` hands everything to the rounds (the ladder then only runs when they end early)
-    reserve = budget * min(0.9, max(0.0, float(((c.cons or {}).get("route") or {}).get("ladder_reserve_frac", 0.25))))
+    rc_ = (c.cons or {}).get("route") or {}
+    reserve = budget * min(0.9, max(0.0, float(rc_.get("ladder_reserve_frac", 0.25))))
     rounds_budget = budget - reserve
-
-    def left_rounds():
-        return max(1.0, rounds_budget - (time.time() - t0))
+    # the ladder's guaranteed slice: whatever the rounds, their audits and post-steps overran, it still gets this long
+    ladder_min = float(rc_.get("ladder_min_s", min(reserve, max(60.0, 0.1 * budget))))
 
     def nfail(path):
         return sum(conn(path).values())            # open connections (real connectivity), not "nets without copper"
 
+    tm = time.time()
     state = {"best": nfail(best), "timeouts": 0, "halvings": 0, "ckpts": 0}
     state["start"] = state["best"]
+    # what one audit of this board costs: a round is followed by a merge, a post-step and a connectivity count that
+    # no router timeout covers, so the rounds stop that much earlier (charged to their budget, not to the ladder's)
+    overhead = min(0.25 * rounds_budget, 3.0 * (time.time() - tm))
+
+    def left_rounds():
+        return max(1.0, rounds_budget - overhead - (time.time() - t0))
 
     def keep(path):
         """keep-best: only a board with fewer unrouted nets replaces the best-so-far."""
@@ -443,13 +457,25 @@ def st_route(c, n, board):
     cls = NC.classify(B, c.cons, c.spec)
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
-    if R["mode"] == "parallel":
-        res = RP.route_parallel(board, d, todo, build, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
-                                rules=R, total_budget=rounds_budget, status_path=spath, extra=extra,
+    frrec = None
+    if rname == "freerouting" and todo:
+        frrec = _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath,
+                             lambda: budget - ladder_min - (time.time() - t0), budget)
+        if frrec.get("ok"):
+            b0 = state["best"]
+            frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
+    start_board = best if frrec else board             # hybrid finish: what Freerouting left goes to the per-net router
+    rtodo = sorted(conn(best)) if frrec else todo
+    res = {"timeouts": 0, "halvings": 0, "checkpoints": [], "board": None, "leftovers": rtodo}
+    if not have_krt or not rtodo:
+        pass
+    elif R["mode"] == "parallel":
+        res = RP.route_parallel(start_board, d, rtodo, build, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
+                                rules=R, total_budget=left_rounds(), status_path=spath, extra=extra,
                                 log=lambda m: None, conn=conn, cwd=a.router_dir, post=post_round)
     else:
-        res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
-                               total_budget=rounds_budget, status_path=spath, extra=extra, log=lambda m: None,
+        res = BR.route_batches(start_board, d, rtodo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
+                               total_budget=left_rounds(), status_path=spath, extra=extra, log=lambda m: None,
                                rules=R, conn=conn)
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
@@ -458,7 +484,7 @@ def st_route(c, n, board):
     left_nets = sorted(conn(best))
     timed = bool(res["timeouts"]) and bool(left_nets)
     stall = None
-    if (left_nets or timed) and a.stall_rounds > 0 and left_rounds() > 5:
+    if have_krt and (left_nets or timed) and a.stall_rounds > 0 and left_rounds() > 5:
         k = [0]
 
         def again(b_in, b_out, only, timeout):
@@ -478,8 +504,11 @@ def st_route(c, n, board):
                               failed0=left_nets, timed_out0=timed, log=lambda m: None)
         keep(stall["board"])
     ladder = None
-    if conn(best) and left() > 15:                    # a flat round is not the end: escalate (docs/commands/route.md)
-        from . import routeladder as RLD
+    from . import routeladder as RLD
+    lleft = RLD.clock(budget, t0, ladder_min)         # budget left, never less than the guaranteed slice from now
+    times = {"budget": round(budget), "reserve": round(reserve), "ladder_min": round(ladder_min), "overhead": round(overhead, 1),
+             "rounds_end": round(time.time() - t0), "ladder_left": round(lleft())}
+    if have_krt and conn(best) and lleft() > 15:      # a flat round is not the end: escalate (docs/commands/route.md)
         import copy
 
         def run_for(layers):
@@ -491,10 +520,12 @@ def st_route(c, n, board):
                 return _route_cmd(a2, s_, o_, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
                                   gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
             return BR.make_runner(build2, a.router_dir, extra, spath, S)
-        lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, left, B, c.cons, c.spec, cls, a.layers,
+        lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, lleft, B, c.cons, c.spec, cls, a.layers,
                          trial_s=min(a.route_timeout, 180), post=post_round, log=lambda m: None)
         ladder = lad.climb()
         ladder["line"] = RLD.summary(ladder)
+    from . import routefr as FR_
+    times["ladder_end"] = round(time.time() - t0)
     post_round(best)                                   # the board as it ends: snapped, gaps joined
     final_open = conn(best)
     final = sorted(final_open)
@@ -503,7 +534,7 @@ def st_route(c, n, board):
         from . import routestatus as RS2
         diag, _ = RS2.diagnose_result({"out": best}, c.cons or None, c.spec)
     el = round(time.time() - t0)
-    line = (f"{len(todo)} open net(s), open connections {state['start']} -> {sum(final_open.values())} "
+    line = ((FR_.summary(frrec) + "; " if frrec else "") + f"{len(todo)} open net(s), open connections {state['start']} -> {sum(final_open.values())} "
             f"({len(final)} net(s)) in {el}s, "
             f"{state['ckpts']} checkpoint(s)"
             + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
@@ -542,7 +573,26 @@ def st_route(c, n, board):
     warn = RPO2.gate_line(post_info)
     if warn:
         line += "; " + warn.split(" (")[0]
-    out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
+    out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
+    with open(os.path.join(d, "result.json"), "w") as fh:
+        json.dump({"line": line, "router": rname, "times": times, "open_start": state["start"], "open_end": sum(final_open.values()),
+                   "freerouting": {k: v for k, v in (frrec or {}).items() if k != "passes"} or None,
+                   "ladder": ladder["rungs"] if ladder else None}, fh, indent=1)
+    if not have_krt:
+        out.setdefault("next", []).append("per-net router (KiCadRoutingTools) not found: no hybrid finish, no ladder; pass --router-dir")
+    if frrec:
+        out["fr"] = FR_.state_record(frrec)
+        if not frrec.get("ok"):
+            out.setdefault("next", []).append("Freerouting: " + frrec.get("error", "?"))
+        sf = (frrec.get("subfloor") or {}).get("failed") or []
+        if sf and frrec.get("adopted"):
+            out["verdict"] = "fail"                     # never deliver copper below the floor
+            out.setdefault("next", []).insert(0, f"SUB-FLOOR COPPER: {len(sf)} track(s) below {R['min_track']:g} mm could not be widened: " +
+                                               "; ".join(f"{x['net']} {x['layer']} {x['at'][0]:g},{x['at'][1]:g} w {x['from']:g} ({x['blocked_by']})"
+                                                         for x in sf[:6]) + f" (all: {os.path.join(d, 'freerouting.json')})")
+        if frrec.get("adopted") and (not frrec.get("locked_same", True) or frrec.get("plane_tracks_added")):
+            out["verdict"] = "fail"
+            out.setdefault("next", []).insert(0, "Freerouting changed locked copper or routed on a plane layer; see freerouting.json")
     if ladder:
         out["ladder"] = ladder["rungs"]
         with open(os.path.join(d, "ladder.json"), "w") as fh:
@@ -556,6 +606,47 @@ def st_route(c, n, board):
     if ladder:
         out.setdefault("next", []).append(f"ladder record (which rung closed what): {os.path.join(d, 'ladder.json')}")
     return out
+
+
+def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
+    """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
+    from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
+    a = c.a
+    try:
+        FS = FR.settings(c.cons, threads=getattr(a, "freerouting_threads", None))
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "version": a.fr_loc["version"]}
+    # planes = the copper layers the route stage may not use: `--layers` lists the signal layers for BOTH routers of
+    # the stage (the per-net finish routes on exactly these).  A pour on a signal layer is no plane: it is stripped
+    # from the DSN copy and refilled around the new copper.
+    planes = [l for l in B["copper"] if l not in a.layers]
+    ctl = RIP.controlled_nets(cls, c.cons, names=todo)
+    skip = [n for n in todo if n in ctl] if FS["pairs"] == "exclude" else []
+    want = getattr(a, "freerouting_budget", None) or FS["budget_s"]
+    fb = max(10.0, min(float(want) if want else budget * FS["budget_frac"], cap() - 30.0))
+
+    def tick(log, el):
+        ps = log["passes"]
+        extra.update(router="freerouting", fr_min=round(el / 60, 1), fr_pass=ps[-1]["pass"] if ps else 0,
+                     fr_unrouted=ps[-1]["unrouted"] if ps else log["start_unrouted"])
+        BR._status_write(spath, extra, "running")
+    out = os.path.join(d, "freerouting.kicad_pcb")
+    rec = FR.route_board(board, out, os.path.join(d, "freerouting"), loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
+                         floor_clearance=R["min_clearance"], budget_s=fb, S=FS, cons=c.cons, skip_nets=skip,
+                         has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick)
+    rec["out"] = out
+    rec["open_before"] = sum(conn(board).values())
+    if rec.get("ok") and FS["pairs"] == "route":         # pairs Freerouting routed itself are never reported good unaudited
+        try:
+            now = set(conn(out))
+            pairs = [p for p in PA.pair_list(cls) if (p[0] in todo or p[1] in todo)]
+            au = PA.summary(PA.audit(RD.load(out), pairs, c.cons, now))
+            rec["pairs_audit"] = {k: (v if k != "complete" else len(v)) for k, v in au.items() if v}
+        except Exception as e:                           # noqa: BLE001
+            rec["pairs_audit"] = {"error": str(e)[:100]}
+    with open(os.path.join(d, "freerouting.json"), "w") as fh:
+        json.dump(rec, fh, indent=1)
+    return rec
 
 
 def st_tune(c, n, board):
@@ -723,12 +814,27 @@ def run(a):
         raise SystemExit(f"pipeline: --from {first} is after --to {last}")
     router = None
     if "route" in STAGES_[i0:i1 + 1]:
-        from . import routerloc as RL
+        from . import routerloc as RL, routefr as FR, constraints as C_
+        want = getattr(a, "router", None)
+        if not want:
+            try:
+                want = ((C_.load(a.constraints) or {}).get("route") or {}).get("router") if a.constraints else None
+            except Exception:                           # noqa: BLE001 - the stage reports a bad constraints file
+                want = None
+        try:
+            a.router_name, a.fr_loc, note = FR.choose(want or "krt", getattr(a, "freerouting_jar", None), getattr(a, "java", None))
+        except (RuntimeError, ValueError) as e:
+            raise SystemExit(f"pipeline: {e}")
+        if note:
+            print("pipeline: " + note, flush=True)
         try:
             router = RL.resolve(getattr(a, "router_dir", None), getattr(a, "router_py", None))
+            a.router_dir, a.router_py = router["dir"], router["py"]
         except RuntimeError as e:
-            raise SystemExit(f"pipeline: {e}")
-        a.router_dir, a.router_py = router["dir"], router["py"]
+            if a.router_name != "freerouting":
+                raise SystemExit(f"pipeline: {e}")
+            print(f"pipeline: {e} -- Freerouting only: no hybrid finish, no escalation ladder", flush=True)
+            a.router_dir = a.router_py = None
     if i0 == 0:
         if not a.board:
             raise SystemExit("pipeline: BOARD is required when starting at the first stage")
@@ -765,6 +871,10 @@ def run(a):
                               "dir": f"{i + 1}-{name}", "board": board}
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
+        if name == "route":
+            st["stages"][name].setdefault("router", {})["name"] = getattr(a, "router_name", "krt")
+            if res.get("fr"):
+                st["stages"][name]["fr"] = res["fr"]
         if res.get("engine"):
             st["stages"][name]["engine"] = res["engine"]
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board

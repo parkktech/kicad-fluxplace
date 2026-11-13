@@ -1,5 +1,13 @@
 # Change log (moved from the README)
 
+## 2026-11-13 - Freerouting as a route stage; exit codes
+
+`pipeline --router krt|freerouting|auto` (`[route] router`, `fluxplace/routefr.py`, `docs/commands/route.md`): one whole-board
+Freerouting 2.5.0+ run with fan-out and scripted pairs fixed, planes declared, signal pours stripped and re-poured, sub-floor
+tracks widened (the stage fails on the ones it cannot widen), then the per-net router and the ladder on what is left. The
+ladder has a guaranteed slice (`[route] ladder_min_s`); the rounds are charged their audit overhead. A command that returns
+its verdict code (`fanout`, `pairs`, `snap-vias`) now exits with it; `fluxplace --help` renders again.
+
 ## 2026-11-13 - wl-refine: wire-length refinement under the gate
 
 `fluxplace wl-refine` (`fluxplace/wlrefine.py`, `docs/commands/wl-refine.md`): incremental class-weighted HPWL + decap/support

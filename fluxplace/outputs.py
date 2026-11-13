@@ -333,7 +333,9 @@ def run_compact(cmd, a, fn):
     rc, err_msg = 0, None
     with _quiet_stderr_noise(), contextlib.redirect_stdout(buf):
         try:
-            fn(a)
+            r = fn(a)
+            if type(r) is int and r:              # a command that returns its verdict code
+                rc = r
         except SystemExit as e:
             if e.code is None or e.code == 0:
                 rc = 0

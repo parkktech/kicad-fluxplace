@@ -136,3 +136,50 @@ via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`r
   width per layer / impedance, layer changes <= limit) out of tolerance is NOT DONE: not counted in `nets_routed`, listed with its cause in status `not_done`,
   `route-status` and the route stage line. At the end of the route stage pairs failing ONLY on skew go through `tune` (`[route] tune_rounds` 3, `tune_pairs` 8);
   the result is kept when no connection opens and the skew falls.
+
+## Freerouting as the route stage (`--router freerouting|auto`, `routefr.py`)
+
+`pipeline --router krt|freerouting|auto` (or `[route] router = "..."`; default `krt`). `freerouting` = one whole-board
+Freerouting run, then the per-net router and the escalation ladder on what is left (hybrid finish). `auto` = Freerouting
+when a supported jar and a Java runtime are found, else `krt` (the reason is printed). Asked for by name and missing or
+too old = the pipeline stops with the paths tried.
+
+Tools: jar from `--freerouting-jar`, `$FLUXPLACE_FREEROUTING_JAR`, else the newest `~/tools/freerouting*.jar`; Java from
+`--java`, `$FLUXPLACE_JAVA`, `$JAVA_HOME`, `~/tools/jdk*/bin/java`, `PATH`. **2.5.0 or newer only**: 2.3.0 hangs at the job
+timeout and loses the session. Without KiCadRoutingTools the stage still runs, without hybrid finish or ladder (said in `next`).
+
+What one run does (each step is in `W/<n>-route/freerouting.json`):
+
+| Step | What | Why |
+|---|---|---|
+| DSN copy | pours on signal layers removed from the copy; plane layers (every copper layer not in `--layers`, the same signal-layer list the per-net router gets) declared `(type power)`; rule widths and untyped clearances raised to the floors; every existing wire and via `(type fix)` | KiCad exports every layer as signal and every pour as an obstacle; fixed copper is how fan-out and scripted pairs survive untouched. A plane that cannot be declared stops the run |
+| JVM | `-de -do --router.autorouter.max_passes --gui.enabled=false -mt --router.job_timeout`, own `java.io.tmpdir`, `-XX:ActiveProcessorCount` = threads, analytics off | Freerouting writes the session when its job timeout fires; a watchdog kills that PID after `grace_s` (or 30 s after the session is on disk) and the session is still used |
+| fan-out | `fanout = "auto"`: `--router.fanout.enabled=false` when the board already has fan-out (Freerouting's own stage cost 15-35 min on a 339-part board and escaped 54 %) | `on` / `off` force it |
+| necks | `--router.automatic_neckdown=false` (`neckdown = true` re-enables) | pad-entry necks came out below the minimum track width |
+| import | session copper ADDED to the board's own (`ses.import_into(replace=False)`, duplicates skipped), zones refilled | the board keeps its pours and its locked copper |
+| sub-floor repair | every unlocked track below `min_track` is widened to its net-class width, else to the floor, where clearance to other-net copper and pads allows | **the ones that cannot be widened fail the stage**, each listed with net, layer, position, width and blocker. Locked sub-floor tracks are counted, not changed |
+| post | snap + join gaps, refill; open connections from pcbnew (after refill) and from `kicad-cli pcb drc` on the saved fills | both counts are in the record (`open`, `open_cli`) |
+
+Pairs and other controlled nets (`ripolicy.controlled_nets`: pairs, RF, clocks, switch nodes, plain copper): Freerouting
+has no true differential-pair routing and misses skew badly. Complete locked pairs are fixed copper. `pairs = "exclude"`
+(default): a controlled net that is still open has its pins taken off the net in the DSN copy (Freerouting has nothing to
+connect and keeps clear of the pads; anything the session still holds for it is not imported); the net stays open for the
+per-net router (`route_diff.py`) and the ladder. `pairs = "route"`: it is imported and the pair audit runs on it
+(`pairs_audit` in the record); the stage's NOT DONE audit covers both cases, so a Freerouting pair is never reported good unaudited.
+
+`[route.freerouting]`: `threads` (min(8, cores/2)), `passes` (100), `budget_s` or `budget_frac` (0.6 of `--route-budget`;
+`--freerouting-budget` wins), `fanout`, `pairs`, `neckdown`, `grace_s` (180), `analytics` (false).
+
+Stage record (`state.json`, `stages.route`): `router.name`, `fr.jar`, `fr.v`, `fr.flags`, `fr.curve` = up to 5 points
+`[pass, minutes, unrouted, violations]` (all passes: `freerouting.json`), `fr.open` = `[before, after pcbnew, after kicad-cli]`,
+`fr.subfloor` = `[found, widened, not fixable]`, `fr.locked_same`. The stage FAILS when locked copper changed or a track
+landed on a plane layer. `--from route` re-runs it; checkpoints of the hybrid finish are as before.
+
+## Time budget and the ladder's slice
+
+`--route-budget` is wall clock for the whole stage. The rounds stop at `(1 - ladder_reserve_frac)` of it minus the measured
+cost of one audit (connectivity count x 3, at most a quarter of their share): merge, post-step and audit after a round
+are not covered by any router timeout and used to eat the ladder's reserve. The ladder then gets what is left, and never
+less than `[route] ladder_min_s` (default `min(reserve, max(60, 10 % of the budget))`) counted from its start, even when the
+rounds overran. `W/<n>-route/result.json` `times` = `budget, reserve, ladder_min, overhead, rounds_end, ladder_left, ladder_end`.
+

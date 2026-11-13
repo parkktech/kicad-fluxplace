@@ -59,6 +59,18 @@ def signal_layers_unused(B, cons, used):
     return [l for l in B["copper"] if l in sig and l not in planes and l not in used]
 
 
+def clock(budget, t0, min_slice=0.0, now=time.time):
+    """-> left(): seconds the ladder may still use = what is left of `budget` (started at `t0`), but never less than
+    `min_slice` counted from this call.  The rounds, their audits and post-steps can overrun their share; the ladder's
+    slice is not theirs to spend."""
+    t1 = now()
+
+    def left():
+        t = now()
+        return max(budget - (t - t0), min_slice - (t - t1), 0.0)
+    return left
+
+
 class Ladder:
     def __init__(self, best, workdir, run, run_for, conn, keep, left, B, cons, spec, cls, used_layers, trial_s=120,
                  post=None, log=lambda m: None):
