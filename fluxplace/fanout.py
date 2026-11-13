@@ -104,6 +104,8 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     pol = policy(B, cons, spec, refs)
     job = {"params": params(a, pol["pr"]), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
+    if getattr(a, "nets", None):
+        job["only_nets"] = [n for n in a.nets.split(",") if n]
     if getattr(a, "add_zones", False):
         from . import escapeplan as EP
         job["pours"] = [z for z in EP.planned_pours(cons)]
@@ -197,6 +199,7 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.fanout.kicad_pcb)")
     p.add_argument("--parts", default=None, help="comma-separated refs (default every part)")
     p.add_argument("--check-only", action="store_true", help="report only; write nothing")
+    p.add_argument("--nets", default=None, help="comma-separated nets: escape only the pins of these nets")
     p.add_argument("--no-drc", action="store_true", help="skip the kicad-cli DRC self-check")
     p.add_argument("--add-zones", dest="add_zones", action="store_true",
                    help="also write the declared pours (`[[plan.pour]]`) as zones (priority 0, clearance 0.2, solid connection)")
