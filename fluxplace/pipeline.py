@@ -403,6 +403,13 @@ def st_route(c, n, board):
 
     def left():
         return max(1.0, budget - (time.time() - t0))
+    # the rounds and the stall loop stop at (1 - frac) of the budget so the escalation ladder always gets its share;
+    # `[route] ladder_reserve_frac = 0` hands everything to the rounds (the ladder then only runs when they end early)
+    reserve = budget * min(0.9, max(0.0, float(((c.cons or {}).get("route") or {}).get("ladder_reserve_frac", 0.25))))
+    rounds_budget = budget - reserve
+
+    def left_rounds():
+        return max(1.0, rounds_budget - (time.time() - t0))
 
     def nfail(path):
         return sum(conn(path).values())            # open connections (real connectivity), not "nets without copper"
@@ -438,11 +445,11 @@ def st_route(c, n, board):
     first = [x for x in first if x in todo]
     if R["mode"] == "parallel":
         res = RP.route_parallel(board, d, todo, build, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
-                                rules=R, total_budget=budget, status_path=spath, extra=extra,
+                                rules=R, total_budget=rounds_budget, status_path=spath, extra=extra,
                                 log=lambda m: None, conn=conn, cwd=a.router_dir, post=post_round)
     else:
         res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
-                               total_budget=budget, status_path=spath, extra=extra, log=lambda m: None,
+                               total_budget=rounds_budget, status_path=spath, extra=extra, log=lambda m: None,
                                rules=R, conn=conn)
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
@@ -451,13 +458,13 @@ def st_route(c, n, board):
     left_nets = sorted(conn(best))
     timed = bool(res["timeouts"]) and bool(left_nets)
     stall = None
-    if (left_nets or timed) and a.stall_rounds > 0 and left() > 5:
+    if (left_nets or timed) and a.stall_rounds > 0 and left_rounds() > 5:
         k = [0]
 
         def again(b_in, b_out, only, timeout):
             k[0] += 1
             r = BR.route_batches(b_in, os.path.join(d, f"stall-batches-{k[0]}"), only, run, cons=c.cons,
-                                 spec=c.spec, total_budget=min(timeout, left()), status_path=spath,
+                                 spec=c.spec, total_budget=min(timeout, left_rounds()), status_path=spath,
                                  extra=extra, log=lambda m: None, rules=R, conn=conn)
             shutil.copy(r["board"], b_out)
             _sidecar(b_in, b_out)
@@ -467,7 +474,7 @@ def st_route(c, n, board):
             keep(b_out)
             return bool(r["timeouts"]) and bool(r["leftovers"])
         stall = ST.stall_loop(best, d, again, c.cons, c.spec, rounds=a.stall_rounds,
-                              replace=a.replace_on_stall, timeout=min(a.route_timeout, left()),
+                              replace=a.replace_on_stall, timeout=min(a.route_timeout, left_rounds()),
                               failed0=left_nets, timed_out0=timed, log=lambda m: None)
         keep(stall["board"])
     ladder = None

@@ -53,6 +53,7 @@ checkpoint. `route-wait` prints the last good board as the result.
     escalation = "off"       # router --escalation (off|board|fab); strict_sizes = true -> --strict-sizes
     rail_min_pads = 8        # >= this many pads and no plane/pour: routed as a tree of two-cluster jobs (parallel mode); rail_edges_per_round = 3
     allow_rip = "low-speed"  # "never" | "low-speed" | "any": see Rip policy;  controlled = [nets], controlled_patterns = [regex]
+    ladder_reserve_frac = 0.25  # share of --route-budget kept back for the escalation ladder (0 = rounds may use it all)
     pair_audit = true        # a pair is routed only when both legs are complete and match; else removed and retried as a pair
     audit = true             # post-batch audit; audit_drc = false (true: kicad-cli DRC, new error types vs the input)
     conn_fill = true         # refill zones before counting open connections;  conn_method = "auto" | "pcbnew" | "text"
