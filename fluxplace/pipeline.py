@@ -383,6 +383,17 @@ def st_route(c, n, board):
                 _sidecar(board, best)
         return state["best"]
 
+    from . import routepost as RPO
+    jgap = float(((c.cons or {}).get("route") or {}).get("join_gap_mm", 0.3))
+    post_info = {"snapped": 0, "joined": 0, "off_centre": []}
+
+    def post_round(path):
+        """after every round: snap track ends into via centres, join small same-net gaps (never worse than before)."""
+        r = RPO.post_round(path, conn, jgap)
+        post_info["snapped"] += r["snapped"]
+        post_info["joined"] += r["joined"]
+        post_info["off_centre"] = r["off_centre"]
+        return r
     B = RD.load(board)
     todo = sorted(conn(board))
     cls = NC.classify(B, c.cons, c.spec)
@@ -391,7 +402,7 @@ def st_route(c, n, board):
     if R["mode"] == "parallel":
         res = RP.route_parallel(board, d, todo, build, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                 rules=R, total_budget=budget, status_path=spath, extra=extra,
-                                log=lambda m: None, conn=conn, cwd=a.router_dir)
+                                log=lambda m: None, conn=conn, cwd=a.router_dir, post=post_round)
     else:
         res = BR.route_batches(board, d, todo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                total_budget=budget, status_path=spath, extra=extra, log=lambda m: None,
@@ -422,6 +433,25 @@ def st_route(c, n, board):
                               replace=a.replace_on_stall, timeout=min(a.route_timeout, left()),
                               failed0=left_nets, timed_out0=timed, log=lambda m: None)
         keep(stall["board"])
+    ladder = None
+    if conn(best) and left() > 15:                    # a flat round is not the end: escalate (docs/commands/route.md)
+        from . import routeladder as RLD
+        import copy
+
+        def run_for(layers):
+            a2 = copy.copy(a)
+            a2.layers = list(layers)
+
+            def build2(s_, o_, only, lim, pair=False):
+                pair = pair and len(only) == 2 and diff_named(*only)
+                return _route_cmd(a2, s_, o_, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+                                  gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
+            return BR.make_runner(build2, a.router_dir, extra, spath, S)
+        lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, left, B, c.cons, c.spec, cls, a.layers,
+                         trial_s=min(a.route_timeout, 180), post=post_round, log=lambda m: None)
+        ladder = lad.climb()
+        ladder["line"] = RLD.summary(ladder)
+    post_round(best)                                   # the board as it ends: snapped, gaps joined
     final_open = conn(best)
     final = sorted(final_open)
     diag = None
@@ -435,6 +465,10 @@ def st_route(c, n, board):
             + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
             + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else "")
             + (f", {res['violations']} RULE_VIOLATION discarded" if res.get("violations") else ""))
+    if ladder:
+        line += ", " + ladder["line"]
+    if post_info["joined"] or post_info["snapped"]:
+        line += f", post-step: {post_info['joined']} gap(s) joined, {post_info['snapped']} via end(s) snapped"
     if res.get("dropped"):
         line += ", dropped " + ", ".join(f"{k} {v}" for k, v in res["dropped"].items())
     if res.get("rails"):
@@ -460,11 +494,23 @@ def st_route(c, n, board):
     except Exception:
         pass
     qsess.mark(best)
+    from . import routepost as RPO2
+    warn = RPO2.gate_line(post_info)
+    if warn:
+        line += "; " + warn.split(" (")[0]
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
+    if ladder:
+        out["ladder"] = ladder["rungs"]
+        with open(os.path.join(d, "ladder.json"), "w") as fh:
+            json.dump(ladder, fh, indent=1)
     if final:
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
                        f"diagnosis (what to move): {diag}",
                        f"leftovers list: {os.path.join(d, 'leftovers.json')}"]
+    if warn:
+        out.setdefault("next", []).append(warn)
+    if ladder:
+        out.setdefault("next", []).append(f"ladder record (which rung closed what): {os.path.join(d, 'ladder.json')}")
     return out
 
 
