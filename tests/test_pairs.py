@@ -346,3 +346,25 @@ def test_unpaired_pad_is_a_question_not_a_silent_failure(tmp_path):
     assert {o["choice"] for o in S.open[0]["options"]} == {"single-ended", "netlist"}
     S2 = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {"answers": {"pair-pads:D_N": "single-ended"}})
     assert not S2.open and rep["pairs"][0]["answer"] == "single-ended"
+
+
+def test_fanout_alternative_routes_a_blocked_pin_to_a_via_site(tmp_path):
+    from fluxplace import fanalt as FA
+    # a pin whose straight ways out are walled by foreign pads on three sides: a routed stub reaches a via site
+    body = PB.fp("U1", 20, 20, [PB.pad("1", 0, 0, "SIG", 0.3, 0.8)]) + PB.fp("J1", 60, 60, [PB.pad("1", 0, 0, "SIG", 1, 1)]) + \
+        PB.fp("W1", 20, 18.9, [PB.pad("1", 0, 0, "X1", 3.0, 0.4)]) + PB.fp("W2", 18.9, 20, [PB.pad("1", 0, 0, "X2", 0.4, 2.6)]) + \
+        PB.fp("W3", 21.1, 20, [PB.pad("1", 0, 0, "X3", 0.4, 2.6)])
+    b = PB.write(tmp_path, body)
+    res = {"pins": [{"ref": "U1", "pin": "1", "net": "SIG", "need": "signal", "ok": False, "blocker": "W1.1"}],
+           "params": {"track": 0.15, "clear": 0.15, "via": 0.45, "drill": 0.2, "via_pad_gap": 0.2, "lane": 1.0}}
+    st = FA.rescue(b, res, {}, None)
+    assert st == {"tried": 1, "via": 1, "share": 0, "pour": 0, "small-via": 0, "left": 0}
+    pin = res["pins"][0]
+    assert pin["ok"] and pin["kind"] == "alt-via" and "blocker" not in pin
+    B = RD.load(b)
+    v = [x for x in B["vias"] if x["net"] == "SIG"]
+    assert len(v) == 1 and v[0]["locked"] and v[0]["y"] > 20.4 + 0.2            # outside the pad, with the via-to-pad gap, on the open side
+    assert G.length([tuple(q) for q in pin["stub"]]) <= 2.5 + 0.4
+    assert clean(B, {"SIG"}) >= 0.15 - 1e-6
+    off = {"pins": [{"ref": "U1", "pin": "1", "net": "SIG", "ok": False}], "params": res["params"]}
+    assert FA.rescue(b, off, {"escape": {"alternatives": False}}, None)["left"] == 1

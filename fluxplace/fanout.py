@@ -174,10 +174,17 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     t0 = time.time()
     tmp_out = out or os.path.join(wd, "out.kicad_pcb")
     r = subprocess.run(["/usr/bin/python3", HELPER, jp, board_in, tmp_out], capture_output=True, text=True)
-    line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
+    line = [l[l.index(MARK):] for l in r.stdout.splitlines() if MARK in l]      # pcbnew may print on the same line first
     if not line:
         raise SystemExit("fanout: helper failed:\n" + (r.stderr or r.stdout)[-1500:])
     res = json.loads(line[-1][len(MARK):])
+    if out and not a.check_only:                         # blocked pins: routed stub to another via site, shared via, pour, smaller via (fanalt.py)
+        try:
+            from . import fanalt as FALT
+            res["params"] = job["params"]
+            res["alternatives"] = FALT.rescue(tmp_out, res, cons, spec)
+        except Exception as e:                           # noqa: BLE001 - the solver's result stands
+            log(f"fanout: alternatives skipped: {type(e).__name__}: {e}")
     if rsv:
         if out:
             PRS.strip_reservations(tmp_out, rsv[1])
@@ -248,6 +255,10 @@ def cmd_fanout(a):
     print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked; "
           f"{sum(len(t['vias']) for t in res.get('thermal', []))} thermal vias; {res['runtime_s']} s "
           f"(domains {res['time']['domains']}, arcs {res['time']['arcs']}, solve {res['time']['solve']}, repairs {res['repairs']})")
+    if res.get("alternatives") and res["alternatives"]["tried"]:
+        al = res["alternatives"]
+        print(f"fanout: alternatives for {al['tried']} blocked pin(s): routed via {al['via']}, shared via {al['share']}, pour {al['pour']}, "
+              f"small via {al['small-via']}, left {al['left']}")
     if drc:
         print(f"fanout: DRC errors before {sum(drc['before'].values())} after {sum(drc['after'].values())}; added {drc['delta'] or 'none'} ({drc['secs']} s)")
     lim = len(per) if a.full_output else min(len(per), 12 if not a.top else a.top)
