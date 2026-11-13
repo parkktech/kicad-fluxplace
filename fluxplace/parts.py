@@ -36,8 +36,9 @@ _MECH_FP = re.compile(r"MountingHole|Fiducial|TestPoint|Logo|Symbol:|NetTie|Moun
 _PASSIVE_REF = re.compile(r"^(R|C|L|FB|RN)\d", re.I)
 
 # Vendor series codes that embed the chip size: (regex on the MPN, group -> imperial size or a metric/other code, table)
-_METRIC = {"0402": "01005", "0603": "0201", "1005": "0402", "1608": "0603", "2012": "0805", "2520": "1008", "3216": "1206",
+_METRIC = {"1005": "0402", "1608": "0603", "2012": "0805", "2520": "1008", "3216": "1206",
            "3225": "1210", "4532": "1812", "4520": "1808", "5025": "2010", "6332": "2512", "1005M": "0402"}
+_IMPERIAL = {"0201", "0402", "0603", "0805", "1206", "1210", "1812", "2220"}
 _MURATA = {"03": "0201", "15": "0402", "18": "0603", "21": "0805", "31": "1206", "32": "1210", "43": "1812", "55": "2220"}
 _KOA = {"1E": "0402", "1J": "0603", "2A": "0805", "2B": "1206", "2E": "1210", "3A": "2010", "3B": "2512"}
 _PANA = {"2": "0402", "3": "0603", "6": "0805", "8": "1206", "14": "1210", "12": "2010", "1": "2512"}
@@ -48,7 +49,8 @@ CHIP_SERIES = [
     (re.compile(r"^(?:CRCW|TNPW|CRG|CRHV|MCS|MCT|MCW|ERA-?|RGH)(\d{4})", re.I), lambda m: m.group(1), "Vishay/Panasonic series code"),
     (re.compile(r"^G[RCJ][MJQ]?(\d{2})\d", re.I), lambda m: _MURATA.get(m.group(1)), "Murata size code"),
     (re.compile(r"^CL(\d{2})[A-Z]", re.I), lambda m: _SAMSUNG.get(m.group(1)), "Samsung size code"),
-    (re.compile(r"^C(\d{4})[A-Z]\d", re.I), lambda m: _METRIC.get(m.group(1)), "TDK metric size code"),
+    (re.compile(r"^C(\d{4})(?:X\d[A-Z]|C0G|NP0|JB|CH)", re.I), lambda m: _METRIC.get(m.group(1)), "TDK metric size code"),
+    (re.compile(r"^C(\d{4})[CPXUZ]\d{3}", re.I), lambda m: m.group(1) if m.group(1) in _IMPERIAL else None, "KEMET size code"),
     (re.compile(r"^RK73[A-Z]\d([A-Z]{1,2})", re.I), lambda m: _KOA.get(m.group(1).upper()[:2]), "KOA size code"),
     (re.compile(r"^ERJ-?(\d{1,2})", re.I), lambda m: _PANA.get(m.group(1)), "Panasonic size code"),
 ]
@@ -105,6 +107,19 @@ def mpn_in_value(value):
 
 def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+
+
+def _value_conflict(tok, mpn):
+    """True when the part number written in the value text is a different part from the MPN on record.  A suffix variant
+    ('TPS628502-Q1' for TPS628502QDRLRQ1) is the same part: the leading stem of an alphanumeric token may prefix the MPN."""
+    t, m = _norm(tok), _norm(mpn)
+    if t in m or m in t:
+        return False
+    if re.search(r"[A-Za-z]", tok):
+        stem = _norm(re.split(r"-", tok)[0])
+        if len(stem) >= 5 and (m.startswith(stem) or stem.startswith(m)):
+            return False
+    return True
 
 
 def _ref_prefix(ref):
@@ -277,7 +292,7 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
         else:
             # value text names a different part number than the MPN on record
             for t in value_tokens(value):
-                if mpn_like(t) and _norm(t) not in _norm(mpn) and _norm(mpn) not in _norm(t):
+                if mpn_like(t) and _value_conflict(t, mpn):
                     out.append(_f(WARN, "PART_MPN_VALUE_CONFLICT",
                                   f"{ref}: value text names {t} but the MPN on record is {mpn}", refs=[ref]))
                     break
@@ -346,7 +361,7 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
                 want = (R._pins_from_pkg(c["package"]), "declared package")
             if want and npins:
                 n, src = want
-                ep = re.search(r"(?<![A-Za-z])EP(?![a-z])|PAD|THERMAL|EXPOSED|QFN|DFN|SON|LGA|PowerPAK|HSOP|HTSSOP|HVSSOP", fp, re.I)
+                ep = re.search(r"(?<![A-Za-z])EP(?![a-z])|PAD|THERMAL|EXPOSED|QFN|DFN|SON|LGA|MLP|MLF|LFCSP|PowerPAK|HSOP|HTSSOP|HVSSOP", fp, re.I)
                 if npins not in ((n, n + 1) if ep else (n,)):   # an exposed pad is one extra pad on the IC families that have one
                     out.append(_f(FAIL, "PART_PINCOUNT_MISMATCH",
                                   f"{ref} {mpn}: {src} says {n} but the footprint {fp} has {npins} pads ({nsrc})", refs=[ref]))

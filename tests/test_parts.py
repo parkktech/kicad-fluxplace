@@ -51,10 +51,12 @@ def test_chip_size_from_vendor_series_code_vs_footprint():
     s = spec(comp("C36", "1uF", "C_0603_1608Metric", mpn="CC0805KKX7R6BB106"),
              comp("R11", "10R", "R_1206_3216Metric", mpn="RC0603FR-0710RL"),
              comp("C1", "100nF", "C_0402_1005Metric", mpn="GCM155R71H104KE02D"),
-             comp("C2", "10uF", "C_1206_3216Metric", mpn="C3216X7R1E106K"))
+             comp("C2", "10uF", "C_1206_3216Metric", mpn="C3216X7R1E106K"),
+             comp("C3", "100pF", "C_0402_1005Metric", mpn="C0402C101J5GACTU"),          # KEMET: 0402 is imperial here
+             comp("C4", "1uF", "C_0603_1608Metric", mpn="C1005X5R1C104K"))              # TDK: 1005 is metric = 0402
     c = codes(P.run(s, {}), "FAIL")
     assert ("PART_PACKAGE_MISMATCH", "C36") in c and ("PART_PACKAGE_MISMATCH", "R11") in c
-    assert not [x for x in c if x == ("PART_PACKAGE_MISMATCH", "C1") or x == ("PART_PACKAGE_MISMATCH", "C2")]
+    assert not [x for x in c if x[1] in ("C1", "C2", "C3") and x[0] == "PART_PACKAGE_MISMATCH"] and ("PART_PACKAGE_MISMATCH", "C4") in c
 
 
 def test_distributor_package_and_pincount():
@@ -102,6 +104,9 @@ def test_value_text_naming_another_part_is_flagged():
              comp("U1", "LM61460 5V", "VQFN-12", mpn="LM61460AASQRJRRQ1"))
     c = codes(P.run(s, {}), "WARN")
     assert ("PART_MPN_VALUE_CONFLICT", "J3") in c and ("PART_MPN_VALUE_CONFLICT", "U1") not in c
+    s = spec(comp("U2", "TPS628502-Q1", "SOT-583", mpn="TPS628502QDRLRQ1"), comp("U3", "NX3008NBK", "SOT-23", mpn="MMBT3904LT1G"))
+    c = codes(P.run(s, {}), "WARN")
+    assert ("PART_MPN_VALUE_CONFLICT", "U3") in c and ("PART_MPN_VALUE_CONFLICT", "U2") not in c
 
 
 def test_fix_writes_only_the_unambiguous_and_asks_the_rest(tmp_path):
