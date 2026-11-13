@@ -131,7 +131,7 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
     nl = len(layers)
     A = [allowed[l].tobytes() for l in layers]
     V = {ax: m.tobytes() for ax, m in vmask.items()} if vmask and nl > 1 else None
-    w = 1.1
+    w = 1.2
     slack = 2.0 * f * step
     Hl = {pol: [[row.tolist() for row in a] for a in arr] for pol, arr in H.items()}
     cjm, cim = (len(next(iter(Hl.values()))[0]) - 1, len(next(iter(Hl.values()))[0][0]) - 1) if Hl else (0, 0)
@@ -156,7 +156,7 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         hh = h(j, i, li, pol)
         if hh < BIG and c < Gc.get(key, 1e18):
             Gc[key] = c
-            heapq.heappush(heap, (c + w * hh, c, key))
+            heapq.heappush(heap, (c + w * hh, -c, key))
     pops, near = 0, (1e18, None)
 
     def push(g, li, j, i, d, pol, parent, via):
@@ -167,10 +167,11 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         if g < Gc.get(nk, 1e18):
             Gc[nk] = g
             par[nk] = (parent, via)
-            heapq.heappush(heap, (g + w * hh, g, nk))
-    best = (1e18, None)
+            heapq.heappush(heap, (g + w * hh, -g, nk))
+    best, seen = (1e18, None), None
     while heap:
-        _f, g, key = heapq.heappop(heap)
+        _f, g, key = heapq.heappop(heap)             # ties: the deeper state first (heap holds -g)
+        g = -g
         if g > Gc.get(key, 1e18):
             continue
         pol = key & 1
@@ -181,7 +182,9 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         gg = goals.get(cl)
         if gg is not None and (d * 2 + pol) in gg and g + gg[d * 2 + pol] < best[0]:
             best = (g + gg[d * 2 + pol], key)                    # the gate nearest the pads wins, not the first one reached
-        if best[1] is not None and (_f >= best[0] or pops > budget):
+            if seen is None:
+                seen = pops
+        if best[1] is not None and (_f >= best[0] or pops > budget or pops > 1.5 * seen + 5000):
             return _finish(best, par, nl, nx, pops)
         pops += 1
         if pops > budget:
@@ -346,8 +349,17 @@ def stub(B, items, base_n, ignore, pad, e, layer, w, net, clr, skip_old, step=0.
             out.append(b)
     out.append(pts[-1])
     out = G.clean(out[::-1], 1e-4)
-    pcs = [("seg", layer, a, b, w) for a, b in zip(out, out[1:])]
-    return out if pcs and check(items, pcs, net, clr, skip_old)[0] >= clr - 1e-6 else None
+    if len(out) < 2:
+        return None
+    c, dx, dy = out[-2], e[0] - out[-2][0], e[1] - out[-2][1]
+    k = min(abs(dx), abs(dy))
+    dg = (math.copysign(k, dx), math.copysign(k, dy))
+    for m in ((c[0] + dg[0], c[1] + dg[1]), (c[0] + dx - dg[0], c[1] + dy - dg[1]), None):      # the last hop off the grid as a 45 degree dog-leg
+        pts = G.clean(out[:-1] + ([m] if m else []) + [e], 1e-4)
+        pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
+        if pcs and check(items, pcs, net, clr, skip_old)[0] >= clr - 1e-6:
+            return pts
+    return None
 
 
 def _eff(pts, pad):

@@ -107,32 +107,33 @@ def tree(terms):
 
 
 def _gates(grid, allowed, li_list, term, R, outward, lat=0.3):
-    """{(li, j, i): [(d, pol, cost)]} gate cells around a terminal; outward=True for the start (leaving), False = arriving."""
+    """{(li, j, i): [(d, pol, cost)]} gate cells around a terminal; outward=True for the start (leaving), False = arriving.
+    A gate with travel direction v is ahead of both pads (behind them when arriving), sees them side by side (never along
+    the pad axis) and sits between their two lines of travel (+- lat): the break-outs are short and cannot cross."""
     cx, cy = term["c"]
-    ux, uy = G.unit((term["n"]["x"], term["n"]["y"]), (term["p"]["x"], term["p"]["y"]))        # N -> P
+    px, py, qx, qy = term["p"]["x"], term["p"]["y"], term["n"]["x"], term["n"]["y"]
+    sep = term["sep"]
     j0, i0 = grid.cell(cx - R, cy - R)
     j1, i1 = grid.cell(cx + R, cy + R)
     j0, i0, j1, i1 = max(0, j0), max(0, i0), min(grid.ny - 1, j1), min(grid.nx - 1, i1)
-    out = {}
+    sg = 1.0 if outward else -1.0
     dirs = []
     for d, (vx, vy) in enumerate(PL.DVEC):
-        cr = vx * uy - vy * ux                         # cross(travel, P - N): > 0 = P on the left
-        if abs(cr) >= PL.SIN_MIN:
-            dirs.append((d, vx, vy, 1 if cr > 0 else 0))
+        cr = vx * (py - qy) - vy * (px - qx)           # cross(travel, P - N): > 0 = P on the left
+        if abs(cr) >= PL.SIN_MIN * sep:
+            dirs.append((d, vx, vy, 1 if cr > 0 else 0, abs(cr) / 2 + lat))
+    out = {}
     for li in li_list:
         m = allowed[grid.sig[li]][j0:j1 + 1, i0:i1 + 1]
         for jj, ii in np.argwhere(m):
             j, i = int(jj) + j0, int(ii) + i0
             x, y = grid.xy(j, i)
-            ox, oy = x - cx, y - cy
-            r = math.hypot(ox, oy)
+            r = math.hypot(x - cx, y - cy)
             if r > R:
                 continue
-            if not outward:
-                ox, oy = -ox, -oy
-            if abs(ox * ux + oy * uy) > term["sep"] / 2 + lat:          # a gate stays in front of the pad span
-                continue
-            lst = [(d, pol, 1.5 * r) for d, vx, vy, pol in dirs if vx * ox + vy * oy >= (0.5 * r if r > 0.2 else -0.05)]
+            lst = [(d, pol, 1.5 * r) for d, vx, vy, pol, half in dirs
+                   if abs(-vy * (x - cx) + vx * (y - cy)) <= half
+                   and sg * (vx * (x - px) + vy * (y - py)) >= -0.05 and sg * (vx * (x - qx) + vy * (y - qy)) >= -0.05]
             if lst:
                 out[(li, j, i)] = lst
     return out
@@ -248,6 +249,10 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None):
                 cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, ctx["skip"], 0, len(cp))
         Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
         items.rollback(mark)
+        if left_mm > ctx["limit"](nets[0]):                 # out of tolerance copper is not locked in: the router keeps the pair
+            reason, blockers = f"skew {left_mm:.2f} mm over the {ctx['limit'](nets[0]):g} mm limit after compensation (break-outs of unequal length, no room for bumps)", []
+            banned |= _ban(states[0], grid, 0.3) | _ban(states[-1], grid, 0.3)
+            continue
         _claim(items, Pp, nets[0])
         _claim(items, Np, nets[1])
         return {"ok": True, "P": Pp, "N": Np, "vias": len(vias), "layers": [r["layer"] for r in runs],
@@ -293,6 +298,9 @@ def direct_section(ctx, ta, tb, rule, nets):
         if not done:
             items.rollback(mark)
             return None
+    if abs(PL.piece_len(out[0]) - PL.piece_len(out[1])) > ctx["limit"](nets[0]):
+        items.rollback(mark)
+        return None
     return {"ok": True, "P": out[0], "N": out[1], "vias": 0, "layers": [out[0][0][1]], "lenP": PL.piece_len(out[0]), "lenN": PL.piece_len(out[1]),
             "direct": True, "uncompensated": 0.0}
 
@@ -305,6 +313,11 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     cons = cons or {}
     P = params(cons)
     B = B or RD.load(board)
+    if board:                                              # holes without a pad number are obstacles too
+        try:
+            B = dict(B, pads=B["pads"] + G.holes(board, B["copper"]))
+        except (OSError, ValueError, IndexError):
+            pass
     cls = NC.classify(B, cons, spec)
     pl = [pr for pr in PA.pair_list(cls) if not only or pr[0] in only or pr[1] in only]
     R = RR.rules(cons, board, B=B)
@@ -323,6 +336,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     items = G.Items.of_board(B, old_nets=pair_nets, edge_extra=max(0.0, edge - clr))
     ctx = {"grid": grid, "items": items, "P": P, "base_n": items.mark(), "skip": pair_nets,
            "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
+           "limit": lambda net: C.skew_limit_mm(cons, net),
            "tol": lambda net: min(0.25 * C.skew_limit_mm(cons, net), 0.25)}
     span = {}
     todo = []
@@ -394,12 +408,15 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 items.retire(nets=set(pr))
         log(f"pairs: {pr[0]}/{pr[1]} {e['status']} ({e.get('secs', 0)} s)")
     # fan-out copper of the pairs that keep theirs: only what the new copper does not foul stays (the rest would be a DRC error)
-    lim = min(clr, B["clearance"]) - 0.005
-    for net, lst in grid.old.items():
-        for kind, o in lst:
-            pc = ("seg", o["layer"], o["a"], o["b"], o["w"]) if kind == "seg" else ("via", o["x"], o["y"], o["d"])
-            if not plan_only and res["laid"] and PL.check(items, [pc], net, lim, pair_nets)[0] < lim:
-                res["kill"].append((kind, o))
+    if res["laid"] and not plan_only:
+        new = G.Items(B["copper"])
+        for net, pcs in res["laid"].items():
+            _claim(new, pcs, net)
+        for net, lst in grid.old.items():
+            for kind, o in lst:
+                pc = ("seg", o["layer"], o["a"], o["b"], o["w"]) if kind == "seg" else ("via", o["x"], o["y"], o["d"])
+                if PL.check(new, [pc], net, clr, ())[0] < clr - 1e-6:
+                    res["kill"].append((kind, o))
     res["secs"] = round(time.time() - t0, 1)
     return res
 
@@ -476,6 +493,20 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
         B2 = RD.load(out)
     opn = RC.text_open(B2)
     aud = PA.audit(B2, [tuple(e["pair"]) for e in res["pairs"]], cons, {n for n, k in opn.items() if k})
+    bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch"] if out and not plan_only else []
+    if bad:                                                 # the audit on the written board is the judge: out-of-tolerance copper is taken back
+        for e in bad:
+            for n in e["pair"]:
+                res["laid"].pop(n, None)
+                if n in res["strip"]:
+                    res["strip"].remove(n)
+            e["status"], e["why"] = "not-laid", f"taken back: pair audit says {aud[tuple(e['pair'])]['why']}"
+        res["kill"] = [(k, o) for k, o in res["kill"] if o["net"] not in {n for e in bad for n in e["pair"]}]
+        added, removed = write(board, out, res, lambda net: rules_for(board, res["B"], cons, R, net, P, proj)["drill"])
+        rep.update(added=added, removed=removed, taken_back=["/".join(e["pair"]) for e in bad])
+        B2 = RD.load(out)
+        opn = RC.text_open(B2)
+        aud = PA.audit(B2, [tuple(e["pair"]) for e in res["pairs"]], cons, {n for n, k in opn.items() if k})
     for e in res["pairs"]:
         pr = tuple(e["pair"])
         a = aud[pr]
@@ -531,7 +562,7 @@ def cmd_pairs(a):
     rp = os.path.splitext(out or a.board)[0] + (".pairs.plan.json" if a.plan_only else ".pairs.json")
     json.dump(rep, open(rp, "w"), indent=1)
     q = getattr(a, "quiet", False)
-    txt = format_text(rep, None if getattr(a, "full_output", False) else (a.top or 12))
+    txt = format_text(rep, None if (getattr(a, "full_output", False) or getattr(a, "full", False)) else (a.top or 12))
     print(txt.splitlines()[0] if q else txt)
     print(f"full report: {rp}")
     if out:

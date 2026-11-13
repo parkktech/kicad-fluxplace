@@ -151,6 +151,9 @@ def test_width_and_gap_come_from_the_project_net_class(tmp_path):
 def test_laid_copper_passes_kicad_drc(tmp_path):
     body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 40, 30, "D_P", "D_N", layer="B.Cu") + PB.wall("W1", 30, 25, 12)
     b = PB.write(tmp_path, body)
+    json.dump({"board": {"design_settings": {"rules": {"min_clearance": 0.127}}}, "net_settings": {"classes": [
+        {"name": "Default", "clearance": 0.15, "track_width": 0.15, "diff_pair_width": 0.15, "diff_pair_gap": 0.2, "via_diameter": 0.45,
+         "via_drill": 0.2}]}}, open(str(tmp_path / "b.kicad_pro"), "w"))            # the DRC and the lay use the same project clearance
     out = str(tmp_path / "o.kicad_pcb")
     assert PR.run(b, {}, None, out)["complete"] == 1
     rp = str(tmp_path / "drc.json")
@@ -181,3 +184,11 @@ def test_pipeline_stage_sits_between_fanout_and_plan_route_and_route_skips_laid_
     assert all(s["locked"] for s in B["segs"] if s["net"] in ("D_P", "D_N"))
     off = types.SimpleNamespace(cons={"pairlay": {"enabled": False}}, spec=None, dir=c.dir)
     assert PP.FUNCS["pairs"](off, 5, b)["verdict"] == "skipped"
+
+
+def test_unnamed_drilled_hole_is_an_obstacle(tmp_path):
+    hole = '(footprint "H" (layer "F.Cu") (at 20.25 30) (property "Reference" "H1") (pad "" np_thru_hole circle (at 0 0) (size 2 2) (drill 2) (layers "*.Cu")))\n'
+    rep, B, _ = lay(tmp_path, duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 20, 40, "D_P", "D_N") + hole)
+    assert rep["complete"] == 1
+    d = min(G.pt_seg((20.25, 30), s["a"], s["b"]) - s["w"] / 2 for s in B["segs"] if s["net"] in ("D_P", "D_N"))
+    assert d >= 1.0 + CLR                                   # copper edge to hole edge

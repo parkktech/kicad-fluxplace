@@ -86,6 +86,27 @@ def offset(pts, s, t0=None):
     return out
 
 
+def holes(path, copper):
+    """unnamed drilled pads (mounting / locating holes: routediag.load leaves pads without a number out) as pad-like
+    obstacles on every copper layer -> [pad dicts]."""
+    from . import boardfile as BF
+    root = BF.parse(open(path, errors="replace").read())
+    out = []
+    for fp in BF._kids(root, "footprint"):
+        at = BF._nums(BF._first(fp, "at")) + [0.0, 0.0, 0.0]
+        ref = next((BF._atoms(pr)[1] for pr in BF._kids(fp, "property") if BF._atoms(pr)[:1] == ["Reference"] and len(BF._atoms(pr)) > 1), "")
+        for pad in BF._kids(fp, "pad"):
+            a = BF._atoms(pad)
+            if (a and a[0]) or len(a) < 2 or a[1] not in ("thru_hole", "np_thru_hole"):
+                continue
+            pat = BF._nums(BF._first(pad, "at")) + [0.0, 0.0]
+            d = max(BF._nums(BF._first(pad, "size")) + BF._nums(BF._first(pad, "drill")) + [0.0])
+            dx, dy = BF._rot(pat[0], pat[1], at[2])
+            out.append({"ref": ref, "num": "hole", "x": at[0] + dx, "y": at[1] + dy, "w": d, "h": d, "ex": d / 2, "ey": d / 2, "min": d,
+                        "layers": set(copper), "net": "", "angle": 0.0, "shape": "circle", "tht": True, "np": True})
+    return out
+
+
 class Items:
     def __init__(self, copper, cell=1.0):
         self.copper, self.cell, self.it, self.h = list(copper), cell, [], {}
