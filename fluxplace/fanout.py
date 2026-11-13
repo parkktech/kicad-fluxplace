@@ -80,6 +80,21 @@ def policy(B, cons, spec, refs=None):
             "signal_layers": EP.plan_layers(B, cons)[0], "pr": pr}
 
 
+def owned_nets(B):
+    """nets another stage already finished: every connection closed and all of their copper locked (pairs laid before the
+    fan-out).  Their pins get no generic stub or via; their copper is an obstacle like any other."""
+    from . import routeconn as RC
+    opn = RC.text_open(B)
+    cu = {}
+    for s in B["segs"]:
+        cu.setdefault(s["net"], []).append(s["locked"])
+    npads = {}
+    for p in B["pads"]:
+        if p["net"] and not p.get("np"):
+            npads[p["net"]] = npads.get(p["net"], 0) + 1
+    return sorted(n for n, lk in cu.items() if n and all(lk) and npads.get(n, 0) >= 2 and not opn.get(n))
+
+
 def params(a, pr, board=None):
     """Fan-out geometry: the planner floors (or the command line), never below the board's own design rules (.kicad_pro)."""
     P = _params(a, pr)
@@ -150,6 +165,7 @@ def run(board, cons, spec, out, a, refs=None, log=print):
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
     if getattr(a, "nets", None):
         job["only_nets"] = [n for n in a.nets.split(",") if n]
+    job["skip_nets"] = owned_nets(B)
     if getattr(a, "add_zones", False):
         from . import escapeplan as EP
         job["pours"] = [z for z in EP.planned_pours(cons)]
@@ -174,15 +190,37 @@ def run(board, cons, spec, out, a, refs=None, log=print):
                     shutil.copy(side, os.path.splitext(src)[0] + ext)
             board_in = src
     board_in = locals().get("board_in", board)
+    rsv = None
+    if not a.check_only and not refs and not job.get("only_nets"):
+        # pair-aware: the pairs stage owns the pads of every pair it can plan; its exits (corridor ends, via-pair sites) are reserved copper here
+        try:
+            from . import pairs as PRS
+            rsv = PRS.reserve_for_fanout(board, board_in, cons, spec, wd)
+        except Exception as e:                           # noqa: BLE001 - without a plan the fan-out is the generic one
+            log(f"fanout: pair exits not reserved: {type(e).__name__}: {e}")
+        if rsv:
+            board_in = rsv[0]
+            job["skip_nets"] = sorted(set(job["skip_nets"]) | set(rsv[2]))
     jp = os.path.join(wd, "job.json")
     json.dump(job, open(jp, "w"))
     t0 = time.time()
     tmp_out = out or os.path.join(wd, "out.kicad_pcb")
     r = subprocess.run(["/usr/bin/python3", HELPER, jp, board_in, tmp_out], capture_output=True, text=True)
-    line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
+    line = [l[l.index(MARK):] for l in r.stdout.splitlines() if MARK in l]      # pcbnew may print on the same line first
     if not line:
         raise SystemExit("fanout: helper failed:\n" + (r.stderr or r.stdout)[-1500:])
     res = json.loads(line[-1][len(MARK):])
+    if out and not a.check_only:                         # blocked pins: routed stub to another via site, shared via, pour, smaller via (fanalt.py)
+        try:
+            from . import fanalt as FALT
+            res["params"] = job["params"]
+            res["alternatives"] = FALT.rescue(tmp_out, res, cons, spec)
+        except Exception as e:                           # noqa: BLE001 - the solver's result stands
+            log(f"fanout: alternatives skipped: {type(e).__name__}: {e}")
+    if rsv:
+        if out:
+            PRS.strip_reservations(tmp_out, rsv[1])
+        res["pair_reservations"] = {"items": len(rsv[1]), "nets": len(rsv[2]), "secs": rsv[3]}
     res["runtime_s"] = round(time.time() - t0, 1)
     res["params"] = job["params"]
     res["escapes"] = claimed
@@ -249,6 +287,10 @@ def cmd_fanout(a):
     print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked; "
           f"{sum(len(t['vias']) for t in res.get('thermal', []))} thermal vias; {res['runtime_s']} s "
           f"(domains {res['time']['domains']}, arcs {res['time']['arcs']}, solve {res['time']['solve']}, repairs {res['repairs']})")
+    if res.get("alternatives") and res["alternatives"]["tried"]:
+        al = res["alternatives"]
+        print(f"fanout: alternatives for {al['tried']} blocked pin(s): routed via {al['via']}, shared via {al['share']}, pour {al['pour']}, "
+              f"small via {al['small-via']}, left {al['left']}")
     if drc:
         print(f"fanout: DRC errors before {sum(drc['before'].values())} after {sum(drc['after'].values())}; added {drc['delta'] or 'none'} ({drc['secs']} s)")
     lim = len(per) if a.full_output else min(len(per), 12 if not a.top else a.top)

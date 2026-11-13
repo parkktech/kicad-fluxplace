@@ -17,7 +17,7 @@ Unsure: `fluxplace doctor`.
 | whole flow | `pipeline BOARD --workdir W` | `--constraints --spec --flow --from/--to --status --route-budget` |
 | board map | `map BOARD` | `--constraints --show SEC --ref/--net/--group --render` |
 | can it route? | `plan-route BOARD` | `--ignore-routing`; `plan-compare`, `plan-options` |
-| room, blocks, escapes, intent | `density`, `modules`, `fanout`, `floorplan`, `intent` | docs/FLOW.md, INTENT.md |
+| room, blocks, escapes, intent | `density`, `modules`, `fanout`, `pairs`, `floorplan`, `intent` | FLOW.md, INTENT.md |
 | ready to route | `route-ready BOARD` | `--waive CODE:REGEX --all` (+PLAN_*) |
 | area budget | `floorplan-check BOARD` | `--constraints --spec` |
 | silk | `silk BOARD` | `--fix --out O` |
@@ -42,7 +42,7 @@ Unsure: `fluxplace doctor`.
 ## Pipeline
 `docs/AGENT-PIPELINE.md`: one subagent per stage, exact commands, briefs, stop conditions.
 Stages: floorplan-check, anchor-check, place (`--objective plan`), route-ready (gate, runs plan-route), route, tune, review.
-Order: map, place, plan-route gate, route, audit; `--flow constructive`: modules, floorplan, fanout (gate), route. Hand off `W/state.json` (<2 KB) + the stage command; read map slices. Route only after the gate passes.
+Order: map, place, plan-route gate, route, audit; `--flow constructive`: modules, floorplan, fanout (gate), pairs, route. Hand off `W/state.json` (<2 KB) + the stage command; read map slices. Route after the gate.
 
 ## MCP
 Tools mirror the commands (`fluxplace_<cmd>`); `fluxplace_run` runs any other by name.

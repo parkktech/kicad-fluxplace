@@ -1,4 +1,4 @@
-# The constructive flow: modules -> floorplan -> fan-out -> route
+# The constructive flow: modules -> floorplan -> fan-out -> pairs -> route
 
 Why. A statistical planner (`plan-route`) predicted routing from a placement and was right 7-27 % of the time on the real
 board: the failures were local and order dependent (fine-pitch pins that could not escape, power pins with no via site, pins
@@ -11,11 +11,12 @@ every pin gets real, DRC-clean escape copper before routing, and that copper is 
 | modules | `modules` | every IC has its supports as one rigid block; ports per side; each block's own fan-out exists in isolation |
 | floorplan | `floorplan` | blocks are legal and none sits on another's escape copper; wire length / crossings; fan-out re-proved on the whole board; minimal outline with `--size` |
 | fan-out | `fanout` | FANOUT_OK: every required pin has stub/via and a free lane; DRC added nothing; items locked; reserved escapes (power pins, passives crowded by a pair) claimed first (`escres.py`, map `escapes`); `route-ready` FAILs PLACE_ESCAPE_UNRESERVED |
+| pairs | `pairs` | differential pairs laid coupled and LOCKED before routing (centre-line search, matched via pairs, skew by construction); PAIRS n/total; an unlaid pair is reported with its blockers and stays with the router (WARN, `docs/commands/pairs.md`) |
 | plan-route | `plan-route` | channels only (WARN): overflow between the ports |
 | route | `pipeline` route stage | starts every net at its fan-out end point; locked copper is never ripped; order: escapes, plain copper, power pins, rails, controlled pairs / RF / clocks, rest; every batch audited; pair / RF out of tolerance = NOT DONE |
 | audit / silk / review | | unchanged |
 
-Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> plan-route -> route -> audit -> silk -> review.
+Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> pairs -> plan-route -> route -> audit -> silk -> review.
 What it does not prove: that the channels between the end points are wide enough (that is `plan-route`'s job, and routing's).
 A fan-out that passes in isolation can still fail at the site: the floorplan therefore claims each module's escape copper and
 re-runs the whole-board fan-out after every search.

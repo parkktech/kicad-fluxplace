@@ -3,7 +3,7 @@ Each module owns its parser: it exposes `add_parser(sub)` and sets `fn` through 
 import importlib
 
 MODULES = ("density", "fanout", "modules", "floorplan2", "snapvias")
-MODULES += ("closure",)
+MODULES += ("closure", "pairs")
 MODULES += ("joingaps",)
 MODULES += ("intent", "intentdraft")          # placement intent: gate + draft (docs/INTENT.md)
 

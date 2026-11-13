@@ -25,7 +25,7 @@ from . import routeconn as RC
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "plan-route", "route", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pairs", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -645,7 +645,13 @@ def st_plan_route(c, n, board):
     return {"verdict": "pass", "line": ("WARN " if rc else "") + _last_line(text), "board": board}
 
 
-FUNCS = {"ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
+def st_pairs(c, n, board):
+    """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
+    from . import pairs as PR
+    return PR.stage(c, n, board)
+
+
+FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 

@@ -13,18 +13,18 @@ wirelength, 28% less area.
     pip install -e .            # numpy only; pcbnew comes from KiCad's own python
     fluxplace doctor            # names every missing dependency (KiCad, router, API keys)
 
-Full requirements, the interpreter trap (pcbnew needs KiCad's python) and the wider toolchain:
+Requirements, the interpreter trap (pcbnew needs KiCad's python), toolchain:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Pipeline
 
 `fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages, each reading only the
-previous board and `W/state.json` (under 2 KB), so each can run in its own agent context:
+previous board and `W/state.json`, so each can run in its own agent context:
 floorplan-check, anchor-check, place (clusters + routable), route-ready gate, route (fanout, time-boxed,
 stall loop; `route-wait` instead of log polling), tune, review. `--from/--to/--status` select and inspect.
-Guide, rules and subagent briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+Guide and subagent briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-Analysis commands print a compact report by default (verdict, counts, worst N, report path);
+Analysis commands print a compact report (verdict, counts, worst N, path);
 `--full` restores everything, `-q` prints the verdict only ([docs/commands/output.md](docs/commands/output.md)).
 
 ## Commands
@@ -71,6 +71,7 @@ modules           group ICs/connectors with their support...
 floorplan         place modules as rigid blocks (construct +...
 snap-vias         track ends in a via go to its centre
 closure           open connections: pocket, walls, via sites...
+pairs             lay the differential pairs by construction...
 join-gaps         close small same-net copper gaps (track...
 intent            INTENT gate: every placement-intent item...
 intent-draft      propose an [intent] section from the board...
