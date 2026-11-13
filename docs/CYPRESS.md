@@ -44,6 +44,33 @@ After Cypress: `legalise.legalise` (courtyards, real outline, keep-outs, escape 
 seats only, then a check that refuses the board unless there are 0 overlaps, nothing outside and no fixed part moved.
 A Cypress result is a global placement with overlaps left in it, so the legaliser always has work.
 
+## Measured (2026-11-13)
+A 337-part, 270-net, 6-layer two-sided board, 26 fixed parts, copper stripped. (b) and (c) start from the same random
+scramble of the 311 movable parts; every number comes from the same fluxplace code (`plan-route --ignore-routing`,
+`fanout --check-only`, `preroute.run`, `clusters.build`, `legalise.verify`).
+
+| metric | (a) hand placement | (b) builtin `routable` | (c) cypress + legaliser |
+|---|---|---|---|
+| HPWL all nets / class-weighted, mm | 6601 / 12313 | 8028 / 13892 | 7214 / 12975 |
+| courtyard overlaps, parts outside, fixed parts moved | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
+| moved by the legaliser | - | (inside the placer) | 197 parts, max 22.5 mm, mean 3.8 mm |
+| fan-out: required pins blocked (of 826) | 7 | 12 | 37 |
+| plan-route PLAN_SCORE / overflow / risk nets | 2038 / 19.8 / 21 | 2688 / 24.2 / 17 | 3346 / 56.8 / 41 |
+| 70 pair nets: total / longest, mm | 1537 / 80.2 | 1664 / 69.1 | 1596 / 69.2 |
+| 97 decoupling caps to IC pin: mean mm / over limit | 6.2 / 15 | 18.3 / 41 | 5.7 / 25 |
+| support parts beyond their limit (gate) | 2 | 0 | 27 |
+| gate score (lower is better) / ratsnest crossings | 15887 / 1565 | 17677 / 1847 | 19256 / 2017 |
+| run time | - | 219 s, one CPU core | 166 s wall; GPU 51 s for 4 trials |
+
+Two KiCad demo boards, no constraints, same method (gate score, HPWL mm): `video` builtin 67182, 32276 against
+cypress 83866, 39263; `kit-dev-coldfire` builtin 26178, 6629 against cypress 21921, 7027. `StickHub` (16 x 40 mm,
+full): no legal result from either engine.
+
+Reading: Cypress gives shorter wires than the built-in placer on the main board and puts decoupling caps closer on
+average, but it knows nothing about escapes or channels: three times the blocked fan-out pins and twice the planned
+overflow. Its speed is not an advantage at this size (12 to 16 GPU seconds a run, and several runs are needed).
+A built-in pass after Cypress changed little (gate 19256 to 18894).
+
 ## Limits found
 - Cypress has no keep-outs, regions, groups, pairs, non-rectangular outlines or side choice; fixed cells are in the
   file format but the released code crashed on the first one (no shipped benchmark has any).

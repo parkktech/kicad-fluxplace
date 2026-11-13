@@ -11,6 +11,21 @@ index 374418b..385099a 100644
  
                      update_orient_cond = (
                          iteration >= 500 and iteration % 100 == 0
+diff --git a/dreamplace/PlaceDB.py b/dreamplace/PlaceDB.py
+index 3eacb53..706012b 100644
+--- a/dreamplace/PlaceDB.py
++++ b/dreamplace/PlaceDB.py
+@@ -1014,8 +1014,8 @@ class PlaceDB(object):
+         self.num_btm_phy_nodes = self.num_btm_movable_nodes + self.num_btm_fixed_nodes
+         self.top_fixed_nodes_idx = np.where(self.top_nodes_idx >= self.num_movable_nodes)[0]
+         self.btm_fixed_nodes_idx = np.where(self.btm_nodes_idx >= self.num_movable_nodes)[0]
+-        self.top_movable_macro_mask = self.movable_macro_mask[self.top_nodes_idx]
+-        self.btm_movable_macro_mask = self.movable_macro_mask[self.btm_nodes_idx]
++        self.top_movable_macro_mask = self.movable_macro_mask[self.top_nodes_idx[self.top_nodes_idx < self.num_movable_nodes]]
++        self.btm_movable_macro_mask = self.movable_macro_mask[self.btm_nodes_idx[self.btm_nodes_idx < self.num_movable_nodes]]
+ 
+     def initialize(self, params):
+         """
 diff --git a/dreamplace/ops/global_swap/src/global_swap_cuda.cpp b/dreamplace/ops/global_swap/src/global_swap_cuda.cpp
 index 8a03e1d..e16a94d 100644
 --- a/dreamplace/ops/global_swap/src/global_swap_cuda.cpp
