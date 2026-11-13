@@ -429,7 +429,12 @@ def guard(a, cmd, board, cons, spec, topics=None, B=None):
     """Raise the command's questions before it writes anything.  -> (Session, constraints, spec) with the answers applied;
     SystemExit(3) when a question is open."""
     from . import routediag as RD
+    from . import facts as FA
+    m = FA.load_map(board)
+    cons, used = FA.apply_map(cons, m)                         # records of the map stand in for missing constraints
     S = Session(board, cons, parse_answers(getattr(a, "answer", None)), bool(getattr(a, "assume_defaults", False)), cmd)
+    if used:
+        S.inferred(f"{', '.join(used)} taken from {os.path.basename(FA.FM.default_path(board))}", "the constraints declare none and the map recorded them")
     B = B or RD.load(board)
     cls = NC.classify(B, cons, spec)
     for t in topics or TOPICS.get(cmd, ()):

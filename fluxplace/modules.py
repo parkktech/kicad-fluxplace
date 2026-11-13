@@ -271,6 +271,13 @@ def cmd_modules(a):
     mods = M["modules"]
     path = a.map or os.path.splitext(a.board)[0] + ".fluxmap.json"
     store(path, M)
+    try:
+        from . import facts as FA
+        from . import routediag as RD
+        if not a.map:
+            FA.record(a.board, sources=FA.resolve(a.board, RD.load(a.board), cons, spec))
+    except Exception:                                 # the record is advisory
+        pass
     S.mark(path)
     nm = len(mods)
     nfix = sum(1 for m in mods if m["fixed"])

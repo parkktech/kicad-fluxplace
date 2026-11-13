@@ -123,3 +123,28 @@ def test_rip_existing_and_ambiguous_layer_role(tmp_path):
     assert "rip-existing" in q and "layer-role:In1.Cu" in q and "30 %" in q["layer-role:In1.Cu"]["found"]
     S, cons, _ = QS.guard(args(answer=["rip-existing=low-speed", "layer-role:In1.Cu=plane"]), "route", b, FLOORS, None)
     assert cons["route"]["allow_rip"] == "low-speed" and cons["preroute"]["plane_layers"] == ["In1.Cu"]
+
+
+def test_artefact_first_sources_and_map_writeback(tmp_path):
+    from fluxplace import facts as FA, fluxmap as FM
+    b = bare_board(tmp_path)
+    B = RD.load(b)
+    r = FA.resolve(b, B, {}, None)
+    assert r["net_classes"]["source"] == "board-inferred" and r["pours"]["source"] == "none" and r["pin_roles"]["source"] == "none"
+    cons = {"pairs": {"X": {}}, "placement": {"fixed": ["R1"], "group": {"g": {"refs": ["R1", "R2"]}}},
+            "plan": {"pour": [{"net": "A", "layers": ["In1.Cu"]}]}}
+    spec = {"components": [{"ref": "R1", "pinmap": {"A": "1"}}]}
+    r = FA.resolve(b, B, cons, spec)
+    assert {k: v["source"] for k, v in r.items()} == {"groups": "constraints", "net_classes": "constraints", "fixed_parts": "constraints",
+                                                       "pours": "constraints", "pin_roles": "spec"}
+    path = FA.record(b, pours=[{"net": "A", "layers": ["In1.Cu"], "region": "board"}], sources=r)
+    m = FM.load(path)
+    assert m["pours"][0]["net"] == "A" and m["sources"]["pours"]["source"] == "constraints"
+    c2, used = FA.apply_map({}, m)                                           # constraints silent: the map's recorded pour stands in
+    assert c2["plan"]["pour"][0]["net"] == "A" and used
+    assert FA.apply_map(cons, m)[1] == []                                    # constraints win
+    assert FA.resolve(b, B, {}, None, m)["pours"]["source"] == "map"
+    S, c3, _ = QS.guard(args(answer=["rule-floors=standard"]), "route", b, {}, None)
+    assert c3["plan"]["pour"][0]["net"] == "A"
+    FM.save({"fluxmap": 1, "nets": []}, path)                                # a rebuilt map keeps the recorded answers
+    assert json.load(open(path))["answers"] == {"rule-floors": "standard"}

@@ -143,6 +143,18 @@ def summarise(B, res):
     return per
 
 
+def _record(out, cons, spec, B, per, req, ok, blocked):
+    """write the derived facts back to the map next to the output board: planned pours, fan-out groups, which source decided what."""
+    from . import escapeplan as EP, facts as FA
+    try:
+        FA.record(out, pours=EP.planned_pours(cons), sources=FA.resolve(out, B, cons, spec),
+                  fanout={"groups": FA.fanout_groups(out), "required": req, "escaped": ok,
+                          "parts": {r: [v["ok"], v["req"]] for r, v in sorted(per.items())},
+                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60]})
+    except OSError:
+        pass
+
+
 def cmd_fanout(a):
     from . import constraints as C
     spec = json.load(open(a.spec)) if a.spec else None
@@ -189,6 +201,7 @@ def cmd_fanout(a):
     print(f"full report: {rp}")
     if out:
         S.mark(out)
+        _record(out, cons, spec, B, per, req, ok, blocked)
         print(f"wrote {out}")
     return 0 if verdict == "FANOUT_OK" else 1
 
