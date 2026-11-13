@@ -792,7 +792,9 @@ def cmd_pairs(a):
     if out and os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
     only = set(x.strip() for x in a.nets.split(",") if x.strip()) if a.nets else None
-    rep = run(a.board, cons, spec, out, plan_only=a.plan_only, only=only)
+    import sys
+    rep = run(a.board, cons, spec, out, plan_only=a.plan_only, only=only,
+              log=(lambda m: print(m, file=sys.stderr, flush=True)) if getattr(a, "verbose", False) else (lambda m: None))
     rp = os.path.splitext(out or a.board)[0] + (".pairs.plan.json" if a.plan_only else ".pairs.json")
     json.dump(rep, open(rp, "w"), indent=1)
     q = getattr(a, "quiet", False)
@@ -841,6 +843,7 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.pairs.kicad_pcb)")
     p.add_argument("--plan-only", dest="plan_only", action="store_true", help="centre-line corridors only; writes no copper")
     p.add_argument("--nets", default=None, help="comma-separated nets: only the pairs of these nets")
+    p.add_argument("-v", "--verbose", action="store_true", help="one line per pair and re-order pass on stderr")
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)

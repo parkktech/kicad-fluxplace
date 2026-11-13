@@ -1,7 +1,7 @@
 # `pairs` - differential pairs laid by construction, locked, before routing
 
 ```
-fluxplace pairs BOARD --constraints C [--spec S] --out O [--plan-only] [--nets A,B] [--full] [-q] [--top N]
+fluxplace pairs BOARD --constraints C [--spec S] --out O [--plan-only] [--nets A,B] [-v] [--full] [-q] [--top N]
 ```
 Constructive flow, after `fanout`, before `plan-route` / route (`pipeline` stage `pairs`; it never blocks: WARN).
 Which pairs: the net classes' partner links (`netclass`: `_P/_N`, `DP/DM`, `[pairs.FAMILY]`).  Order: project net-class
@@ -25,9 +25,24 @@ the router (never dropped).  `<out>.pairs.json` holds every section.  Exit 0 = P
 `--plan-only` writes no copper: `<board>.pairs.plan.json` holds the centre-line corridors (`escreserve.py` turns them into
 soft placement reservations with `[escape] reserve_pairs = true`).
 
+Layers: outer layers and every inner SIGNAL layer (`pairs.pair_layers`: an inner layer is a plane when one netted zone covers
+the whole board, >= 90 % of the outline; a partial fill leaves it a signal layer; `[preroute] signal_layers / plane_layers`
+override).  An inner layer costs `inner_cost` x length, so short pairs stay outside and a blocked pair goes inside through
+matched via pairs.  Geometry per layer: the class width / gap; on an inner layer, with `[pairs.FAMILY] impedance_diff` and a
+stackup in the board, the width `impedance.py` solves for the class gap (never thinner than the class).  No target = class
+geometry on every layer (the report's `geometry` says which applied).
+Exits: a terminal whose pads have fan-out stub + via copper may leave through that via pair on any signal layer when the pads
+have no coupled exit (`via_exit`; the stub and via are kept).  Necks are not used: full class width everywhere.
+Order: a pair that fails on copper this stage laid is moved ahead of the pair that laid it and the order is laid again
+(`passes`, prefix results reused); the best result (pairs complete, then total skew) is kept, so a pair is never ripped for nothing.
+Skew limit (`constraints.skew_limit_source`, shown per pair): `[pairs.FAMILY] skew_mm` > `[si] skew_mm_by_kind` > low-speed
+(audio) pairs `[si] audio_skew_mm` (10) > `[si] default_skew_mm` (1).  P and N pads up to `pad_max_mm` apart form one terminal
+(uncoupled stubs to a merge point).  Search budget = `max_nodes` + `nodes_per_mm` x span; `-v` prints time per pair.
+
     [pairlay]
+    inner_cost = 1.15   passes = 3   via_exit = true   nodes_per_mm = 25000   pad_max_mm = 16
     enabled = true   step_mm = 0.1   clearance_mm = 0.13   via_cost_mm = 20   turn_cost_mm = 0.4   max_nodes = 400000
-    pad_max_mm = 8.0   ring_mm = 1.0
+    ring_mm = 1.0
 
 The route stage routes open connections only, and never rips locked copper: a complete pair is not routed again.
 
