@@ -20,13 +20,15 @@ def _f(v):
     return f"{v:.6f}".rstrip("0").rstrip(".")
 
 
-def plan(board, gap=GAP, extra=0.0, timeout=900):
+def plan(board, gap=GAP, extra=0.0, timeout=900, nets=None):
     """-> {add, skipped, gap, candidates} (board not touched)."""
-    r = subprocess.run([RC.PY, HELPER, board, "--gap", str(gap), "--extra-clearance", str(extra)],
+    r = subprocess.run([RC.PY, HELPER, board, "--gap", str(gap), "--extra-clearance", str(extra)] +
+                       (["--nets", ",".join(nets)] if nets else []),
                        capture_output=True, text=True, timeout=timeout)
     lines = [l for l in r.stdout.splitlines() if l.startswith("{")]
     if r.returncode != 0 or not lines:
-        raise RuntimeError("join-gaps helper failed: " + (r.stderr or r.stdout)[-300:])
+        err = "\n".join(l for l in (r.stderr or r.stdout).splitlines() if "m_choices" not in l)
+        raise RuntimeError("join-gaps helper failed: " + err[-300:])
     return json.loads(lines[-1])
 
 
@@ -36,9 +38,9 @@ def segment_block(s):
                                          s["layer"], s["net"].replace('"', '\\"'), uuid.uuid4()))
 
 
-def run(board, out=None, gap=GAP, extra=0.0):
+def run(board, out=None, gap=GAP, extra=0.0, nets=None):
     """Join the gaps of `board`; written to `out` (default in place) when anything closed. -> report dict."""
-    rep = plan(board, gap, extra)
+    rep = plan(board, gap, extra, nets=nets)
     if rep["add"]:
         text = open(board, errors="surrogateescape").read()
         text = BT.append_blocks(text, [segment_block(s) for s in rep["add"]])
