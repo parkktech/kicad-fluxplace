@@ -230,6 +230,13 @@ def dumps(m):
 
 
 def save(m, path):
+    if "answers" not in m and os.path.exists(path):          # answers to open questions (questions.py) survive a rebuild
+        try:
+            old = json.load(open(path)).get("answers")
+        except (OSError, ValueError):
+            old = None
+        if old:
+            m = dict(m, answers=old)
     with open(path, "w") as fh:
         fh.write(dumps(m))
     return os.path.getsize(path)

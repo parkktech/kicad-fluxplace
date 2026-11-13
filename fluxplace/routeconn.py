@@ -51,9 +51,10 @@ def _in_poly(pts, x, y):
     return ins
 
 
-def text_open(B, groups=None):
+def text_open(B, groups=None, members=None):
     """{net: open connections} from the parsed board B (routediag.load). `groups` (a dict) is filled
-    with {net: [[pad dicts of one connected cluster], ...]} for the nets that are open."""
+    with {net: [[pad dicts of one connected cluster], ...]} for the nets that are open.  `members` (a dict) is filled with
+    {net: [(pads, segs, vias) of one cluster, ...]}: the copper of each cluster too."""
     out, _gout = {}, groups
     pads_by = {}
     for p in B["pads"]:
@@ -152,6 +153,12 @@ def text_open(B, groups=None):
                     if it[0] == "pad":
                         cl.setdefault(find(i), []).append(it[1])
                 _gout[net] = sorted(cl.values(), key=lambda g: (g[0]["ref"], g[0]["num"]))
+            if members is not None:
+                mm = {}
+                for i, (k, o) in enumerate(items):
+                    if k in ("pad", "seg", "via"):
+                        mm.setdefault(find(i), ([], [], []))[("pad", "seg", "via").index(k)].append(o)
+                members[net] = [m for m in mm.values() if m[0]]
     return out
 
 

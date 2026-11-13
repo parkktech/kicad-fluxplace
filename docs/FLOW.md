@@ -19,3 +19,19 @@ Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> plan-rou
 What it does not prove: that the channels between the end points are wide enough (that is `plan-route`'s job, and routing's).
 A fan-out that passes in isolation can still fail at the site: the floorplan therefore claims each module's escape copper and
 re-runs the whole-board fan-out after every search.
+
+## Which source wins (artefact first; `facts.py`)
+The owner's records decide; the bare board is inferred from only when they are silent. A disagreement between a record and the
+board is a question (`docs/commands/questions.md`), not a guess.
+
+| fact | order, first present wins |
+|---|---|
+| groups | constraints `[placement.group]` > constraints/spec blocks > map (recorded) > schematic sheets / support clusters |
+| net classes | constraints `[pairs]` `[rf]` `[power]` `[placement.net]` > `.kicad_pro` net classes > map > name patterns |
+| fixed parts | constraints `[placement] fixed` / `[lock.at]` > locked in the board > map > mounting hardware, edge connectors by shape |
+| pours | constraints `[[plan.pour]]` / `[power.X] pour` > map `pours` > zones on the board |
+| pin roles | spec pinmaps (never guessed) |
+| answers | `--answer` > constraints `[answers]` > map `answers` |
+
+Written back to `<board>.fluxmap.json`: `modules` + ports (modules), `fanout` (groups, per-part escaped/required, blocked pins), `pours`
+(planned pours), `sources` (the winner per fact above), `answers`. The pipeline copies the map with each stage board.

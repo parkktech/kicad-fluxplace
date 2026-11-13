@@ -79,7 +79,20 @@ def policy(B, cons, spec, refs=None):
             "signal_layers": EP.plan_layers(B, cons)[0], "pr": pr}
 
 
-def params(a, pr):
+def params(a, pr, board=None):
+    """Fan-out geometry: the planner floors (or the command line), never below the board's own design rules (.kicad_pro)."""
+    P = _params(a, pr)
+    if board:
+        from . import routerules as RR
+        rr = RR._pro_rules(board)
+        for k, ks in (("track", "min_track_width"), ("clear", "min_clearance"), ("via", "min_via_diameter"),
+                      ("drill", "min_through_hole_diameter")):
+            if rr.get(ks) and P[k] < float(rr[ks]):
+                P[k] = float(rr[ks])
+    return P
+
+
+def _params(a, pr):
     P = {"track": a.track or max(pr["track_mm"], 0.15 if pr["track_mm"] < 0.15 else pr["track_mm"]),
          "clear": a.clearance or max(pr["clearance_mm"], 0.15 if pr["clearance_mm"] < 0.15 else pr["clearance_mm"]),
          "via": a.via or pr["via_mm"], "drill": a.drill or pr["drill_mm"], "via_pad_gap": a.via_pad_gap, "reach": a.reach, "lane": a.lane,
@@ -102,8 +115,10 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     from . import routediag as RD
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
-    job = {"params": params(a, pol["pr"]), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
+    job = {"params": params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
+    if getattr(a, "nets", None):
+        job["only_nets"] = [n for n in a.nets.split(",") if n]
     if getattr(a, "add_zones", False):
         from . import escapeplan as EP
         job["pours"] = [z for z in EP.planned_pours(cons)]
@@ -141,10 +156,24 @@ def summarise(B, res):
     return per
 
 
+def _record(out, cons, spec, B, per, req, ok, blocked):
+    """write the derived facts back to the map next to the output board: planned pours, fan-out groups, which source decided what."""
+    from . import escapeplan as EP, facts as FA
+    try:
+        FA.record(out, pours=EP.planned_pours(cons), sources=FA.resolve(out, B, cons, spec),
+                  fanout={"groups": FA.fanout_groups(out), "required": req, "escaped": ok,
+                          "parts": {r: [v["ok"], v["req"]] for r, v in sorted(per.items())},
+                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60]})
+    except OSError:
+        pass
+
+
 def cmd_fanout(a):
     from . import constraints as C
     spec = json.load(open(a.spec)) if a.spec else None
     cons = C.load(a.constraints)
+    from . import questions as QS
+    S, cons, spec = QS.guard(a, "fanout", a.board, cons, spec)
     refs = set(x.strip() for x in a.parts.split(",") if x.strip()) if a.parts else None
     out = None if a.check_only else (a.out or os.path.splitext(a.board)[0] + ".fanout.kicad_pcb")
     if out and os.path.abspath(out) == os.path.abspath(a.board):
@@ -184,6 +213,8 @@ def cmd_fanout(a):
                "runtime_s": res["runtime_s"], "params": res["params"]}, open(rp, "w"), indent=1)
     print(f"full report: {rp}")
     if out:
+        S.mark(out)
+        _record(out, cons, spec, B, per, req, ok, blocked)
         print(f"wrote {out}")
     return 0 if verdict == "FANOUT_OK" else 1
 
@@ -197,6 +228,7 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.fanout.kicad_pcb)")
     p.add_argument("--parts", default=None, help="comma-separated refs (default every part)")
     p.add_argument("--check-only", action="store_true", help="report only; write nothing")
+    p.add_argument("--nets", default=None, help="comma-separated nets: escape only the pins of these nets")
     p.add_argument("--no-drc", action="store_true", help="skip the kicad-cli DRC self-check")
     p.add_argument("--add-zones", dest="add_zones", action="store_true",
                    help="also write the declared pours (`[[plan.pour]]`) as zones (priority 0, clearance 0.2, solid connection)")
@@ -213,4 +245,6 @@ def add_parser(sub):
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
+    from . import questions as QS
+    QS.add_args(p)
     p.set_defaults(fn=cmd_fanout)

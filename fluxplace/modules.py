@@ -212,7 +212,7 @@ def fanouts(board, cons, spec, mods, a):
     from . import fanout as FO, routediag as RD
     B = RD.load(board)
     pol = FO.policy(B, cons, spec)
-    job = {"params": FO.params(a, pol["pr"]), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
+    job = {"params": FO.params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": True,
            "modules": {m["name"]: {"refs": sorted(m["members"]), "origin": m["pos"]} for m in mods
                        if any(pol["parts"].get(r, {}).get("mode") not in (None, "skip") for r in m["members"])}}
@@ -262,6 +262,8 @@ def cmd_modules(a):
     from . import fanout as FO
     spec = json.load(open(a.spec)) if a.spec else None
     cons = C.load(a.constraints)
+    from . import questions as QS
+    S, cons, spec = QS.guard(a, "modules", a.board, cons, spec)
     if not hasattr(a, "reach"):
         a.reach = 2.2
     t0 = time.time()
@@ -269,6 +271,14 @@ def cmd_modules(a):
     mods = M["modules"]
     path = a.map or os.path.splitext(a.board)[0] + ".fluxmap.json"
     store(path, M)
+    try:
+        from . import facts as FA
+        from . import routediag as RD
+        if not a.map:
+            FA.record(a.board, sources=FA.resolve(a.board, RD.load(a.board), cons, spec))
+    except Exception:                                 # the record is advisory
+        pass
+    S.mark(path)
     nm = len(mods)
     nfix = sum(1 for m in mods if m["fixed"])
     multi = sorted((m for m in mods if len(m["members"]) > 1), key=lambda m: -m["area"])
@@ -309,4 +319,6 @@ def add_parser(sub):
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
+    from . import questions as QS
+    QS.add_args(p)
     p.set_defaults(fn=cmd_modules)

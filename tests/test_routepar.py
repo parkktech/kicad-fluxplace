@@ -55,7 +55,7 @@ def test_pipeline_route_cmd_carries_the_rules(tmp_path):
     cmd = PL._route_cmd(a, board, "o.kicad_pcb", ["A"], limited=True, R=R, rflags=RR.flags(R, str(krt), str(tmp_path)))
     j = " ".join(cmd)
     assert "--fab-overrides" in j and "--same-net-pad-clearance=0.2" in j and "--track-width 0.127" in j
-    assert cmd[cmd.index("--clearance") + 1] == "0.127" and cmd[-2:] == ["--nets", "A"]
+    assert float(cmd[cmd.index("--clearance") + 1]) == round(0.127 + R["grid"], 6) and cmd[-2:] == ["--nets", "A"]
 
 
 # ---------------------------------------------------------------- audit
@@ -174,11 +174,13 @@ def test_partly_routed_net_is_in_the_work_list(tmp_path):
 
 
 # ---------------------------------------------------------------- parallel
-def par(tmp_path, n=8, workers=4, **cfg):
+def par(tmp_path, n=8, workers=4, cons_route=None, **cfg):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     board, W, run, extra, spath, build = mk(tmp_path, n, **cfg)
     R = rules(board)
     r = RP.route_parallel(board, W, [f"N{i}" for i in range(n)], build, run, rules=R, workers=workers, job_timeout=3,
-                          status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path), cons=None)
+                          status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path),
+                          cons={"route": cons_route} if cons_route else None)
     return board, W, r, spath, R
 
 
@@ -203,15 +205,32 @@ def test_parallel_conflicting_pair_keeps_first_and_requeues_the_other(tmp_path):
     assert RA.audit(board, r["board"], R) == []
 
 
-def test_parallel_job_that_rips_goes_to_the_final_serial_pass(tmp_path):
-    # N1's job deletes N0's copper whenever it runs on a board where N0 is routed (round 2, serial pass)
+def test_parallel_job_that_rips_and_leaves_the_net_open_is_dropped(tmp_path):
+    # N1's job deletes N0's copper whenever it runs on a board where N0 is routed: open count not lower -> dropped
     board, W, r, spath, R = par(tmp_path, n=2, workers=1, rip={"N1": ["N0"]})
     ns = [c["nets"] for c in T.calls(tmp_path)]
-    assert ns[0] == ["N0"] and ns[1] == ["N1"]                   # round 1: N0 merged; round 2: N1 job ripped N0
+    assert ns == [["N0"], ["N1"]]                                 # round 1: N0 merged; round 2: N1 job ripped N0, dropped
     st = RS.load(spath)
-    assert st["rounds"][1]["ripped"] == 1 and st["rounds"][1]["merged"] == 0
-    assert ns[2:] and all(c == ["N1"] for c in ns[2:])           # serial pass tried N1 (the fake rips there too)
-    assert rt(r["board"], 2) >= {"N0"} and "N1" in r["leftovers"]
+    assert st["rounds"][1]["ripped"] == 1 and st["rounds"][1]["merged"] == 0 and st["dropped"] == {"rips-other-net": 1}
+    assert rt(r["board"], 2) == {"N0"} and r["leftovers"] == ["N1"] and r["reasons"] == {"N1": "rips-other-net"}
+
+
+def test_rip_adopted_when_the_ripped_net_is_routed_again_and_open_count_drops(tmp_path):
+    board, W, r, spath, R = par(tmp_path, n=2, workers=1, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0", "N1"} and r["dropped"] == {} and r["leftovers"] == []
+    assert RA.audit(board, r["board"], R) == []
+
+
+def test_rip_policy_never_and_controlled(tmp_path):
+    board, W, r, spath, R = par(tmp_path, n=2, workers=1, cons_route={"allow_rip": "never"}, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0"} and r["dropped"] == {"rips-other-net": 1}
+    board, W, r, spath, R = par(tmp_path / "c", n=2, workers=1, cons_route={"controlled": ["N0"]}, rip_reroute={"N1": ["N0"]})
+    assert rt(r["board"], 2) == {"N0"} and r["dropped"] == {"rips-other-net": 1}
+    from fluxplace import ripolicy as RIP
+    assert RIP.policy({"route": {"allow_rip": "bogus"}}) == "low-speed" and RIP.policy({}) == "low-speed"
+    cm = RIP.controlled_nets({"A": {"class": "pair"}, "B": {"class": "signal"}}, {"nets": {"S": {"straight": True}}, "route": {"controlled_patterns": ["^CLK"]}},
+                             names=["CLK1", "B"])
+    assert set(cm) == {"A", "S", "CLK1"}
 
 
 def test_parallel_hanging_job_is_a_timeout_leftover_and_the_rest_merge(tmp_path, monkeypatch):
@@ -263,3 +282,45 @@ def test_pcbnew_helper_counts_open_connections_on_a_real_board(monkeypatch):
     assert m["method"] == "pcbnew" and not m["approx"] and m["total"] == 20      # KiCad's own unconnected count
     t = RC.measure(sample, method="text")
     assert t["approx"] and t["total"] > 0
+
+
+# ---------------------------------------------------------------- item 1: clearance request margin, dropped-by-reason
+def test_clearance_margin_requested_floor_kept(tmp_path):
+    board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
+    R = RR.rules(CONS, board, 0.15, 0.2)
+    assert R["clearance_margin"] == R["grid"] and R["min_clearance"] == 0.127
+    assert abs(RR.request_clearance(R) - (0.2 + R["grid"])) < 1e-9                  # default clearance + one grid step
+    assert RR.size_args(R)[3] == f"{0.2 + R['grid']:g}"
+    R2 = RR.rules(dict(CONS, route={"clearance_margin_mm": 0.03}), board, 0.15, 0.2)
+    assert abs(RR.request_clearance(R2) - 0.23) < 1e-9 and R2["min_clearance"] == 0.127   # the audit floor is unchanged
+    assert RR.rules({}, board, 0.15, 0.2)["clearance_margin"] == 0.0                # no floor, no margin
+    krt = tmp_path / "krt"
+    (krt / "py_router").mkdir(parents=True)
+    (krt / "py_router" / "route.py").write_text('"--escalation" "--strict-sizes"')
+    fl = RR.flags(R, str(krt), str(tmp_path))
+    assert fl[fl.index("--escalation") + 1] == "off" and "--strict-sizes" in fl
+    assert "--strict-sizes" not in RR.flags(RR.rules(dict(CONS, route={"strict_sizes": False}), board), str(krt), str(tmp_path))
+
+
+def test_dropped_by_reason_in_status(tmp_path):
+    from fluxplace import routedrops as DR
+    assert DR.reason_of([{"code": "VIA_IN_PAD"}]) == "via-in-pad"
+    assert DR.reason_of([{"code": "CLEARANCE"}, {"code": "CLEARANCE"}, {"code": "TRACK_WIDTH"}]) == "under-floor"
+    assert DR.reason_of([{"code": "OFF_BOARD"}]) == "off-board" and DR.reason_of([{"code": "FANOUT_RIPPED"}]) == "rips-other-net"
+    t = DR.Tally()
+    t.add("under-floor"); t.add("under-floor"); t.new_round(); t.add("timeout")
+    assert t.totals() == {"under-floor": 2, "timeout": 1} and t.this_round() == {"timeout": 1}
+    board, W, run, extra, spath, build = mk(tmp_path, 6, thin=["N1", "N4"])
+    r = RP.route_parallel(board, W, [f"N{i}" for i in range(6)], build, run, B=None, rules=rules(board), workers=3,
+                          job_timeout=10, status_path=spath, extra=extra, log=lambda m: None, cwd=str(tmp_path))
+    assert r["dropped"].get("under-floor") == 2
+    st = RS.load(spath)
+    assert st["dropped"]["under-floor"] == 2 and "dropped under-floor 2" in RS.one_line(st)
+    assert any(x.get("dropped_by") for x in st["rounds"])
+
+
+def test_audit_off_board(tmp_path):
+    base = board_with(tmp_path, "", "base.kicad_pcb")
+    out = '(segment (start 95 50) (end 105 50) (width 0.15) (layer "F.Cu") (net "N0"))\n'
+    v = RA.audit(base, board_with(tmp_path, out, "o.kicad_pcb"), rules(base))
+    assert "OFF_BOARD" in {x["code"] for x in v}

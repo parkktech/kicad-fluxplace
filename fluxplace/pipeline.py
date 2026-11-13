@@ -125,10 +125,22 @@ def _run_cli(argv, logpath):
     return rc, text
 
 
+def _questions_result(rc, text, board):
+    """exit code 3 from a stage = open questions: the pipeline stops, the agent relays them to the user."""
+    if rc != 3:
+        return None
+    lines = [l for l in text.splitlines() if l.strip()]
+    return {"verdict": "questions", "line": next((l for l in lines if "question" in l), lines[0] if lines else "questions open")[:160],
+            "board": board, "next": lines[:40]}
+
+
 def _sidecar(src, dst):
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
+    m = os.path.splitext(src)[0] + ".fluxmap.json"        # the map (answers, pours, fan-out record) travels with the board
+    if os.path.exists(m) and not os.path.exists(os.path.splitext(dst)[0] + ".fluxmap.json"):
+        shutil.copy(m, os.path.splitext(dst)[0] + ".fluxmap.json")
 
 
 def _last_line(text):
@@ -150,6 +162,12 @@ class Ctx:
         self.a, self.work, self.board_in, self.state = a, work, board_in, state
         from . import constraints as C
         self.cons_path, self.spec_path = a.constraints, a.spec
+        from . import questions as QS
+        self.answers = dict((state or {}).get("answers") or {})
+        self.answers.update(QS.parse_answers(getattr(a, "answer", None)))
+        self.assume = bool(getattr(a, "assume_defaults", False))
+        if state is not None:
+            state["answers"] = self.answers
         self.cons = C.load(a.constraints)
         self.spec = json.load(open(a.spec)) if a.spec else None
 
@@ -165,6 +183,13 @@ class Ctx:
         if self.spec_path:
             v += ["--spec", self.spec_path]
         return v
+
+    def qs(self):
+        """question flags for the stages that can raise questions (fanout, modules, floorplan)."""
+        v = []
+        for k, x in sorted(self.answers.items()):
+            v += ["--answer", f"{k}={x}"]
+        return v + (["--assume-defaults"] if self.assume else [])
 
 
 # ------------------------------------------------------------------ stages
@@ -227,21 +252,45 @@ def st_route_ready(c, n, board):
             "next": nxt + [f"full list: {rj}"]}
 
 
-def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=()):
+def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R=None, rflags=(), pair=False, gap=None,
+               dflags=()):
     """One py_router call. `R` (routerules.rules) and `rflags` (routerules.flags) carry the project's rules:
-    fab-overrides floors, --same-net-pad-clearance (no vias in pads), grid step."""
+    fab-overrides floors, --same-net-pad-clearance (no vias in pads), grid step.  `pair`: the two nets are the legs of a
+    differential pair and go to route_diff.py (coupled P and N); `dflags` = the rule flags that script accepts."""
     from . import adaptive
     from . import routerules as RR
     R = R or RR.rules(None, src, a.track, a.clearance)
-    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", "route.py"), src,
+    script = "route_diff.py" if pair else "route.py"
+    cmd = [a.router_py, os.path.join(a.router_dir, "py_router", script), src,
            "--output", dst, "--keep-input-copper", "--layers", *a.layers,
-           *RR.size_args(R), *adaptive.krt_extra(a.router_dir), *rflags]
+           *RR.size_args(R), *adaptive.krt_extra(a.router_dir, script), *(dflags if pair else rflags)]
+    if pair and gap:
+        cmd += ["--diff-pair-gap", f"{gap:g}"]
     if limited:
         cmd += ["--max-ripup", str(max_ripup)]       # batches: limited rip-up; the leftovers pass uses the default
     from . import batchroute as BR
     if BR.has_fanout(src):
         cmd += ["--no-stub-layer-swap"]              # the router may not re-layer the locked fan-out stubs
     return cmd + ["--nets", *only]
+
+
+def diff_named(p, n):
+    """route_diff.py finds pairs by suffix only: _P/_N, -P/-N, P/N, +/-."""
+    for a, b in (("_P", "_N"), ("-P", "-N"), ("P", "N"), ("+", "-")):
+        for x, y in ((p, n), (n, p)):
+            if x.endswith(a) and y == x[:-len(a)] + b:
+                return True
+    return False
+
+
+def pair_gap(cons, p):
+    """Gap P-N the constraints imply for pair `p` ([pairs.FAMILY] impedance_diff via PAIR_GEOM_BY_Z); None = the router's own default."""
+    from . import constraints as C
+    best = None
+    for fam, v in ((cons or {}).get("pairs") or {}).items():
+        if p.startswith(fam) and "impedance_diff" in v and (best is None or len(fam) > best[0]):
+            best = (len(fam), C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), C.PAIR_GEOM_BY_Z[100])[1])
+    return best[1] if best else None
 
 
 def st_route(c, n, board):
@@ -255,6 +304,17 @@ def st_route(c, n, board):
         return {"verdict": "na", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
                 "board": board}
     d = c.dir(n, "route")
+    from . import questions as QS
+    import types
+    qa = types.SimpleNamespace(answer=[f"{k}={v}" for k, v in c.answers.items()], assume_defaults=c.assume, qjson=False)
+    try:
+        qsess, c_cons, c_spec = QS.guard(qa, "route", board, c.cons, c.spec)
+    except SystemExit as e:
+        if e.code == QS.EXIT:
+            return {"verdict": "questions", "line": f"questions open: {QS.questions_path(board)}", "board": board,
+                    "next": [QS.questions_path(board)]}
+        raise
+    c.cons, c.spec = c_cons, c_spec
     best = os.path.join(d, "board.kicad_pcb")
     shutil.copy(board, best)
     _sidecar(board, best)
@@ -266,8 +326,12 @@ def st_route(c, n, board):
     rflags = RR.flags(R, a.router_dir, d)
     conn = BR.default_conn(S)
     extra = {}
-    build = lambda s, o, only, lim: _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R,
-                                               rflags=rflags)
+    dflags = RR.flags(R, a.router_dir, d, script="route_diff.py")
+
+    def build(s, o, only, lim, pair=False):
+        pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
+        return _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+                          gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
     run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
     def left():
@@ -341,6 +405,13 @@ def st_route(c, n, board):
             + (f", {state['halvings']} batch halving(s)" if state["halvings"] else "")
             + (f", {state['timeouts']} batch timeout(s)" if state["timeouts"] else "")
             + (f", {res['violations']} RULE_VIOLATION discarded" if res.get("violations") else ""))
+    if res.get("dropped"):
+        line += ", dropped " + ", ".join(f"{k} {v}" for k, v in res["dropped"].items())
+    if res.get("rails"):
+        line += f", rails {res['rails']['complete']}/{res['rails']['total']} complete"
+    if res.get("pairs"):
+        line += ", pairs " + " ".join(f"{k} {len(v)}" for k, v in res["pairs"].items() if v)
+    qsess.mark(best)
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
@@ -404,7 +475,10 @@ def st_review(c, n, board):
 
 def st_modules(c, n, board):
     d = c.dir(n, "modules")
-    rc, text = _run_cli(["modules", board] + c.cs(), os.path.join(d, "stage.log"))
+    rc, text = _run_cli(["modules", board] + c.cs() + c.qs(), os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     return {"verdict": "pass" if rc == 0 else "fail", "line": _last_line(text) if rc else next(
         (l for l in text.splitlines() if l.startswith("modules:")), _last_line(text))[:160], "board": board}
 
@@ -413,7 +487,10 @@ def st_floorplan(c, n, board):
     d = c.dir(n, "floorplan")
     out = os.path.join(d, "board.kicad_pcb")
     argv = ["floorplan", board, "--out", out] + c.cs() + (["--size"] if getattr(c.a, "size", False) else [])
-    rc, text = _run_cli(argv, os.path.join(d, "stage.log"))
+    rc, text = _run_cli(argv + c.qs(), os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     line = next((l for l in reversed(text.splitlines()) if l.startswith("floorplan:")), _last_line(text))
     return {"verdict": "pass" if rc == 0 and os.path.exists(out) else "fail", "line": line, "board": out if os.path.exists(out) else board}
 
@@ -421,7 +498,12 @@ def st_floorplan(c, n, board):
 def st_fanout(c, n, board):
     d = c.dir(n, "fanout")
     out = os.path.join(d, "board.kicad_pcb")
-    rc, text = _run_cli(["fanout", board, "--out", out] + c.cs(), os.path.join(d, "stage.log"))
+    pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
+    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + c.cs() + c.qs(),
+                        os.path.join(d, "stage.log"))
+    q = _questions_result(rc, text, board)
+    if q:
+        return q
     line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
     res = {"verdict": "pass" if rc == 0 else "fail", "line": line, "board": out if os.path.exists(out) else board}
     if rc:
@@ -498,8 +580,12 @@ def run(a):
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
+        prev = board
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
+        if res.get("board") and res["board"] != prev:
+            from . import questions as QS
+            QS.inherit(prev, res["board"])
         board = res.get("board", board)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
@@ -515,6 +601,12 @@ def run(a):
         save_state(work, st)
         print(f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
               f"({time.time() - t:.0f}s)", flush=True)
+        if res["verdict"] == "questions":
+            rc = 3
+            for l in res.get("next", [])[:40]:
+                print(l)
+            print("pipeline: questions are open; relay them to the user, then re-run with --answer ID=CHOICE (never answer them yourself)")
+            break
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break

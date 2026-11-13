@@ -32,6 +32,7 @@ from collections import deque
 from . import netclass as NC
 from . import routeaudit as RA
 from . import routeconn as RC
+from . import routedrops as DR
 from . import routediag as RD
 from . import routestatus as RS
 
@@ -186,23 +187,28 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         from . import planroute as PL
         hint = PL.route_hint(pm)        # order only: the router takes no per-net layer or corridor hints
     fo = has_fanout(board)
-    order = order_nets(B, [n for n in nets if n in open0], cls or NC.classify(B, cons, spec), () if fo else first, power, hint, fanout=fo)
+    cls = cls or NC.classify(B, cons, spec)
+    from . import railroute as RL
+    rails = set(RL.rail_nets(B, cons, cls, [n for n in nets if n in open0])[0])    # a rail is never one batch job: parallel mode routes it as a tree
+    order = order_nets(B, [n for n in nets if n in open0 and n not in rails], cls, () if fo else first, power, hint, fanout=fo)
     cur, cur_open = board, open0
     cur_B = B
     drc_base = [None]
     extra = extra if extra is not None else {}
     cks, reasons = [], {}
+    tally = DR.Tally()
     stats = {"attempts": 0, "halvings": 0, "timeouts": 0, "violations": 0}
     queue = deque(chunks(order, size))
     total = lambda: sum(cur_open.values())
     extra.update({"mode": "batch", "batch": 0, "batches_total": len(queue), "batch_nets": 0, "halvings": 0,
                   "last_good": board, "last_good_open": total(), "last_good_open_nets": len(cur_open),
-                  "start_open": total(), "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0})
+                  "start_open": total(), "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "dropped": {}})
 
     def push_status(state="running"):
         extra.update(batches_total=extra["batch"] + len(queue), halvings=stats["halvings"],
                      leftovers=len(reasons), last_good=cur, last_good_open=total(),
-                     last_good_open_nets=len(cur_open), out=cur, rule_violations=stats["violations"])
+                     last_good_open_nets=len(cur_open), out=cur, rule_violations=stats["violations"],
+                     dropped=tally.totals())
         if cks:
             extra.update(checkpoint=cks[-1], checkpoint_n=len(cks))
         if status_path:
@@ -232,6 +238,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
             if os.path.exists(tmp):
                 os.remove(tmp)
             why = "timeout" if res.timed_out else "no output"
+            tally.add("rips-other-net" if ripped else "timeout" if res.timed_out else "no-path" if un is None else "other")
             note_round(batch, before, before, why)
             return False, res.timed_out, why
         if rules:
@@ -244,6 +251,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
                 viol = [{"code": "AUDIT_ERROR", "net": "", "msg": str(e)[:120], "x": 0, "y": 0}]
             if viol:
                 stats["violations"] += 1
+                tally.add(DR.reason_of(viol))
                 os.remove(tmp)
                 log(f"    batch {extra['batch']}: RULE_VIOLATION, discarded: {RA.summarize(viol)}")
                 note_round(batch, before, before, "RULE_VIOLATION " + RA.summarize(viol, 0))
@@ -310,7 +318,9 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         else:
             for n in left:
                 reasons.setdefault(n, "budget")
-    out = finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
+    rl = sorted(n for n in rails if n in cur_open)
+    out = finish(order + rl, cur, cur_open, cks, dict(reasons, **{n: 'rail: set [route] mode = "parallel" (tree routing)' for n in rl}), stats, open0, t0)
+    out["dropped"] = tally.totals()
     push_status("done")
     write_leftovers(workdir, out)
     return out

@@ -94,7 +94,8 @@ def cmd_sourcing(a):
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
-    from fluxplace import fab as F, fabdoc
+    from fluxplace import fab as F, fabdoc, questions as QS
+    QS.refuse_assumed(a.board, "deliver")
     _review_gate(a, stage="deliver")
     docs = list(a.doc or [])
     if a.brief:
@@ -540,7 +541,8 @@ def cmd_tournament(a):
 
 def cmd_fab(a):
     """Emit a build-quality manufacturing package (gerbers/drill/place/DRC) for review."""
-    from fluxplace import fab
+    from fluxplace import fab, questions as QS
+    QS.refuse_assumed(a.board, "fab")
     _review_gate(a, stage="fab")
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
     print(f"DRC {res['drc']}; package at {res['out']}")
@@ -3360,6 +3362,8 @@ def build_parser():
     ppl.add_argument("--clearance", type=float, default=0.2)
     ppl.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
     ppl.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    from fluxplace import questions as QS
+    QS.add_args(ppl, json_flag=False)
     ppl.set_defaults(fn=cmd_pipeline)
 
     phb = sub.add_parser("help-brief",

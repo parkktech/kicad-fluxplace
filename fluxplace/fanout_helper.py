@@ -393,6 +393,8 @@ class Fan:
             pads = [p for p in fp.Pads() if p.GetNetname() and p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_PTH)]
             for p in pads:
                 net = p.GetNetname()
+                if job.get("only_nets") and net not in job["only_nets"]:
+                    continue
                 ni = nets.get(net, {})
                 c = p.GetPosition()
                 cm = (mmv(c.x), mmv(c.y))
@@ -1113,7 +1115,7 @@ def _add_zone(self, z):
         zone = pcbnew.ZONE(b)
         zone.SetLayer(self.M.lid[ln])
         zone.SetNet(net)
-        zone.SetAssignedPriority(0)
+        zone.SetAssignedPriority(int(z.get("priority", 0)))
         zone.SetLocalClearance(nm(max(self.M.C, 0.2)))
         zone.SetMinThickness(nm(0.15))
         zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)

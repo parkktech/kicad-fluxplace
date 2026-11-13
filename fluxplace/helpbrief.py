@@ -64,7 +64,7 @@ def index_lines(ap=None):
     return [f"{c:18s} {h}" for c, h in index(ap)]
 
 
-def readme_index(ap=None, width=54):
+def readme_index(ap=None, width=44):
     """The README command index (kept in sync by a test)."""
     rows = []
     for c, h in index(ap):

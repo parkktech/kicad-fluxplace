@@ -118,3 +118,8 @@ run stage-group brief -> read its report + `fluxplace pipeline --workdir W --sta
   fail    -> stop at the first fail, forward the `next` items (with numbers) to the human
 ```
 Give each subagent only its brief and `W`; do not forward earlier stages' transcripts.
+
+## Exit code 3 = open questions
+A stage (or `pipeline`) that exits 3 has questions in `<board>.questions.json` and wrote nothing. Relay them to the user and wait;
+re-run with `--answer ID=CHOICE` only with the user's answers. Never answer them yourself; never `--assume-defaults` for a
+deliverable (`fab`/`deliver` refuse assumed boards). `docs/commands/questions.md`.

@@ -918,6 +918,8 @@ def cmd_floorplan(a):
     from . import constraints as C, routediag as RD
     spec = json.load(open(a.spec)) if a.spec else None
     cons = C.load(a.constraints)
+    from . import questions as QS
+    S, cons, spec = QS.guard(a, "floorplan", a.board, cons, spec)
     out = a.out or os.path.splitext(a.board)[0] + ".floorplan.kicad_pcb"
     if os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("floorplan: --out must differ from the input board")
@@ -952,6 +954,7 @@ def cmd_floorplan(a):
     import shutil
     shutil.copyfile(best["board"], out)
     _pro(a.board, out)
+    S.mark(out)
     rp = os.path.splitext(out)[0] + ".floorplan.json"
     json.dump({"history": [{k: v for k, v in h.items() if k != "blocked"} for h in history], "final": best["tag"]}, open(rp, "w"), indent=1, default=str)
     print(f"floorplan: {'PASS' if passes(best) else 'FAIL'} at grow {best['grow']}; wrote {out}; report {rp}; total {time.time() - t0:.0f} s")
@@ -984,4 +987,6 @@ def add_parser(sub):
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
+    from . import questions as QS
+    QS.add_args(p)
     p.set_defaults(fn=cmd_floorplan)

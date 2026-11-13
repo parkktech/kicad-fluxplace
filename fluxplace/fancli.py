@@ -2,7 +2,7 @@
 Each module owns its parser: it exposes `add_parser(sub)` and sets `fn` through `set_defaults`."""
 import importlib
 
-MODULES = ("density", "fanout", "modules", "floorplan2")
+MODULES = ("density", "fanout", "modules", "floorplan2", "snapvias")
 
 
 def add_parsers(sub):

@@ -31,6 +31,12 @@ if cfg.get("corrupt"):
 add = ""
 for k in cfg.get("rip", {}).get(nets[0], []) if len(nets) == 1 else []:       # a job that rips another net's copper
     txt = "\n".join(l for l in txt.split("\n") if not (l.startswith("(segment") and '(net "%s")' % k in l))
+rr = cfg.get("rip_reroute", {}).get(nets[0], []) if len(nets) == 1 else []
+for k in rr:                                                                 # rips k's copper and lays it again 2.5 mm higher
+    txt = "\n".join(l for l in txt.split("\n") if not (l.startswith("(segment") and '(net "%s")' % k in l))
+    yk = 8 + 8 * int(k[1:])
+    for (x0, y0), (x1, y1) in zip([(9.5, yk), (9.5, yk + 2.5), (29.5, yk + 2.5)], [(9.5, yk + 2.5), (29.5, yk + 2.5), (29.5, yk)]):
+        add += '(segment (start %g %g) (end %g %g) (width 0.15) (layer "F.Cu") (net "%s"))\n' % (x0, y0, x1, y1, k)
 for n in nets:
     i = int(n[1:])
     print("[%d/%d] Routing %s (id=%d)" % (i + 1, len(nets), n, i), flush=True)

@@ -75,6 +75,9 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
             R["grid"] = 0.05 if fine_pitch(B) else 0.1
         except Exception:
             R["grid"] = 0.1
+    R["clearance_margin"] = float(r.get("clearance_margin_mm", R["grid"])) if R["min_clearance"] else 0.0
+    R["escalation"] = str(r.get("escalation", "off"))
+    R["strict_sizes"] = bool(r.get("strict_sizes", True))
     R["mode"] = str(r.get("mode", "serial")).lower()
     cpu = os.cpu_count() or 2
     R["workers"] = max(1, min(16, int(r.get("workers", max(1, cpu // 2)))))
@@ -114,9 +117,19 @@ def flags(R, krt_dir, workdir, script="route.py"):
         out += [f"--same-net-pad-clearance={-1 if R['via_in_pad'] else R['snpc']:g}"]
     if "--grid-step" in have:
         out += ["--grid-step", f"{R['grid']:g}"]
+    if "--escalation" in have and R.get("escalation") in ("off", "board", "fab"):
+        out += ["--escalation", R["escalation"]]
+    if "--strict-sizes" in have and R.get("strict_sizes", True):
+        out += ["--strict-sizes"]
     return out
 
 
+def request_clearance(R):
+    """Clearance asked of the router: default clearance + `[route] clearance_margin_mm` (default one grid step) when a
+    floor is set. The router lands up to a grid step closer to copper than asked; the audit keeps the floor unchanged."""
+    return R["clearance"] + (R.get("clearance_margin") or 0.0)
+
+
 def size_args(R):
-    return ["--track-width", f"{R['track']:g}", "--clearance", f"{R['clearance']:g}",
+    return ["--track-width", f"{R['track']:g}", "--clearance", f"{request_clearance(R):g}",
             "--via-size", f"{R['via']:g}", "--via-drill", f"{R['drill']:g}"]

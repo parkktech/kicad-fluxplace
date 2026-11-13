@@ -298,6 +298,8 @@ def one_line(st):
                     f"({st.get('last_good_open', '?')} open connections in {st.get('last_good_open_nets', '?')} nets, "
                     f"{st.get('leftovers', 0)} leftover"
                     + (f", {st['rule_violations']} RULE_VIOLATION" if st.get("rule_violations") else "") + ")")
+        if st.get("dropped"):
+            bits.append("dropped " + ", ".join(f"{k} {v}" for k, v in st["dropped"].items()))
         rd = (st.get("rounds") or [None])[-1]
         if rd:
             bits.append(f"last round open {rd.get('open_before')} -> {rd.get('open_after')}")
