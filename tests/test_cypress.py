@@ -207,9 +207,13 @@ def test_a_run_that_did_not_converge_is_not_used(tmp_path):
     pl = os.path.join(h, "dreamplace", "Placer.py")
     open(pl, "w").write(FAKE.replace("'hpwl': 123.0", "'hpwl': inf") + 'print("placement failed")\n')
     B = RD.load(mk(tmp_path))
+    said = []
     with pytest.raises(PC.Unavailable, match="no Cypress trial gave a legal placement.*did not converge"):
-        PC.place(B, CONS, None, str(tmp_path / "w"), h, sys.executable, log=lambda m: None)
+        PC.place(B, CONS, None, str(tmp_path / "w"), h, sys.executable, log=said.append)
     assert B["parts"]["U1"]["pos"] == (80, 70)
+    # it settled at overflow 0.05: each trial was repeated once with that level accepted
+    assert sum("once more with stop_overflow 0.07" in m for m in said) == 4
+    assert json.load(open(tmp_path / "w" / "trial0r" / "cypress.json"))["stop_overflow"] == 0.07
 
 
 def test_constructive_flow_uses_the_engine_in_the_floorplan_stage(tmp_path, monkeypatch):

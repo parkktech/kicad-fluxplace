@@ -57,6 +57,11 @@ class Unavailable(RuntimeError):
     """Cypress is not installed / not usable here; the message says what is missing."""
 
 
+class NotConverged(Unavailable):
+    """The run ended above its overflow target (`overflow` = where it ended); Cypress then keeps the start positions."""
+    overflow = None
+
+
 def engine_of(cons, flag=None):
     """The selected engine: the flag, else `[placement] engine`, else builtin."""
     e = flag or ((cons or {}).get("placement") or {}).get("engine") or "builtin"
@@ -132,7 +137,9 @@ def run_tool(tool, aux, workdir, params, timeout=900, threads=8):
     num = lambda rx: (lambda m: float(m[-1]) if m else None)(re.findall(rx, text))
     ovf = num(r"'overflow': ([0-9.eE+-]+)")
     if "placement failed" in text or num(r"'hpwl': ([0-9.eE+]+)") is None:       # it then writes the START positions
-        raise Unavailable(f"Cypress did not converge (overflow {ovf}; {logp})")
+        e = NotConverged(f"Cypress did not converge (overflow {ovf}; {logp})")
+        e.overflow = ovf
+        raise e
     return pl, {"seconds": round(dt, 2), "place_s": num(r"non-linear placement takes ([0-9.]+) seconds"),
                 "hpwl": num(r"'hpwl': ([0-9.eE+]+)"), "overflow": ovf, "iterations": num(r"'iteration': ([0-9]+)"), "log": logp}
 
@@ -233,8 +240,17 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
         prm.update(user)
         Bk = copy.deepcopy(B)
         try:
-            pl, st = run_tool(tool, aux, os.path.join(workdir, f"trial{k}"), prm, timeout=float(S["timeout_s"]),
-                              threads=int(S["threads"]))
+            try:
+                pl, st = run_tool(tool, aux, os.path.join(workdir, f"trial{k}"), prm, timeout=float(S["timeout_s"]),
+                                  threads=int(S["threads"]))
+            except NotConverged as e:
+                # a dense board settles above the overflow target: accept that level once (the legaliser does the rest)
+                if e.overflow is None or not 0 < e.overflow < 0.3 or "stop_overflow" in user:
+                    raise
+                prm["stop_overflow"] = round(e.overflow + 0.02, 3)
+                log(f"cypress trial {k}: settled at overflow {e.overflow:.3f}; once more with stop_overflow {prm['stop_overflow']}")
+                pl, st = run_tool(tool, aux, os.path.join(workdir, f"trial{k}r"), prm, timeout=float(S["timeout_s"]),
+                                  threads=int(S["threads"]))
             gpu += st["place_s"] or 0.0
             final, facts = _finish(Bk, cons, spec, fixed, IO.targets(model, Bk, IO.read_pl(pl)), S, log)
         except (Unavailable, LG.PlacementError) as e:
