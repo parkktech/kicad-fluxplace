@@ -9,6 +9,10 @@ board text: the tool never edits those). The fit never moves a footprint, track,
 graphic; the only edits are a reference's position, angle, size/stroke, or (last resort) its layer to Fab.
 Deterministic. Compact output: verdict, counts per code, worst 10, full report path (`--full`, `--top N`, `-q`).
 
+Board-independent: no constraints file is needed (defaults apply), any layer count, parts on either side, any
+outline (arcs, cut-outs), any part rotation. A reference text under 0.05 mm high is deliberately invisible (logo
+footprints) and counts as not on silk. No company, ref or coordinate is built in.
+
 Checked on F.SilkS/B.SilkS: footprint references, visible values, footprint user texts, board texts (real rotated
 text box incl. stroke) and footprint silkscreen graphics.
 
