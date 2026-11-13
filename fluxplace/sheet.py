@@ -26,7 +26,7 @@ import re
 
 __all__ = ["PAPERS", "plan", "overlaps_title_block", "usable", "fit", "fit_file",
            "outline_bbox_swig", "read_paper", "page_from_tree", "set_paper_text", "page_dims",
-           "rewrite_constraints", "off_sheet", "BORDER_MM", "CLEAR_MM",
+           "rewrite_constraints", "shift_text", "verify_shift", "ConstraintsShiftError", "off_sheet", "BORDER_MM", "CLEAR_MM",
            "TB_W_MM", "TB_H_MM", "FRAME_MM"]
 
 # landscape (w, h) mm, KiCad PAGE_INFO sizes (US sizes: 11x8.5, 17x11, 22x17,
@@ -323,12 +323,22 @@ def fit(board, paper="auto", current=None, snap_check=True):
     return rep
 
 
-def fit_file(path, out=None, paper="auto", log=print, dry_run=False, refill=False):
+def fit_file(path, out=None, paper="auto", log=print, dry_run=False, refill=False,
+             constraints=None, date=None):
     """Load, fit, save (to `out` or in place), patch the paper. Returns the
-    report. Used by the CLI and by the build commands."""
+    report. Used by the CLI and by the build commands. With `constraints` (a
+    path) the same offset is applied to every registered coordinate key; the
+    shift is computed and self-checked BEFORE anything is written, so a failure
+    (ConstraintsShiftError) leaves board and constraints untouched. The new
+    text is in rep["constraints_text"] / rep["constraints_rows"]; it is written
+    to `constraints` after the board is saved (not on dry_run)."""
     import pcbnew
     board = pcbnew.LoadBoard(path)
     rep = fit(board, paper)
+    if constraints and rep["offset"] != (0, 0):
+        ob, oa = rep["bbox_before"], rep["bbox_after"]
+        rep["constraints_text"], rep["constraints_rows"] = rewrite_constraints(
+            open(constraints).read(), *rep["offset"], date=date, origin=((ob[0], ob[1]), (oa[0], oa[1])))
     if dry_run:
         if rep["status"] == "fitted":
             rep["status"] = "would fit"
@@ -344,6 +354,9 @@ def fit_file(path, out=None, paper="auto", log=print, dry_run=False, refill=Fals
         shutil.copyfile(path, out)
     if rep["paper_changed"]:
         set_paper_text(out or path, rep["paper"])
+    if rep.get("constraints_text") is not None:
+        with open(constraints, "w") as fh:
+            fh.write(rep["constraints_text"])
     return rep
 
 
@@ -391,49 +404,215 @@ def summary(rep, dry_run=False):
 # --------------------------------------------------------------------------
 # constraints file: shift absolute coordinates textually
 # --------------------------------------------------------------------------
-_NUM = r"[-+]?\d+(?:\.\d+)?"
-_AT_RE = re.compile(rf"^(\s*[\w.\"-]+\s*=\s*\[\s*)({_NUM})(\s*,\s*)({_NUM})(.*)$")
-_RECT_RE = re.compile(rf"^(\s*rect\s*=\s*\[\s*)({_NUM})(\s*,\s*)({_NUM})(\s*,\s*)({_NUM})(\s*,\s*)({_NUM})(.*)$")
+# The coordinate-bearing keys come from ONE registry (constraints.COORD_KEYS); this is
+# a comment-preserving TOML scanner that finds the number tokens of those keys and
+# rewrites only them. Multi-line arrays, inline tables, dotted keys and quoted names
+# are followed. Nothing is written unless the before/after self-check passes.
+_NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+
+
+class ConstraintsShiftError(ValueError):
+    """The shift cannot be proven complete; nothing was written."""
 
 
 def _shift(tok, d):
-    dec = len(tok.split(".")[1]) if "." in tok else 0
+    dec = len(tok.split(".")[1].split("e")[0]) if "." in tok else 0
+    dec = max(dec, len(repr(float(d)).split(".")[1].rstrip("0")) if "." in repr(float(d)) else 0)
     v = round(float(tok) + d, 6)
     s = f"{v:.{dec}f}"
     return s.lstrip("-") if float(s) == 0 else s
 
 
-def rewrite_constraints(text, dx, dy, date=None):
-    """(new_text, n_changed). Shifts `[lock.at]` REF = [x, y, ...] rows and
-    `rect = [x0, y0, x1, y1]` rows inside `[[keepout]]` tables, in place; all
-    other bytes (comments, spacing, ordering) are untouched. A closing comment
-    line records the shift."""
-    import datetime
-    date = date or datetime.date.today().isoformat()
-    lines, table, n = text.split("\n"), "", 0
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if s.startswith("["):
-            table = s.split("#")[0].strip()
+class _Scan:
+    """Walks TOML text once; collects (key path, [(start, end, token)]) for every value."""
+
+    def __init__(self, text):
+        self.t, self.i, self.n = text, 0, len(text)
+        self.vals = []
+
+    def ws(self, nl=True):
+        t = self.t
+        while self.i < self.n:
+            c = t[self.i]
+            if c in " \t\r" or (nl and c == "\n"):
+                self.i += 1
+            elif c == "#":
+                while self.i < self.n and t[self.i] != "\n":
+                    self.i += 1
+            else:
+                break
+
+    def string(self):
+        t, q = self.t, self.t[self.i]
+        if t.startswith(q * 3, self.i):
+            j = t.find(q * 3, self.i + 3)
+            if j < 0:
+                raise ConstraintsShiftError("unterminated multi-line string")
+            self.i = j + 3
+            return
+        j = self.i + 1
+        while j < self.n and t[j] != q and t[j] != "\n":
+            j += 2 if (q == '"' and t[j] == "\\") else 1
+        self.i = j + 1
+
+    def key(self):
+        """dotted key up to '=' -> [segments]"""
+        segs, t = [], self.t
+        while True:
+            self.ws(False)
+            if t[self.i] in "\"'":
+                a = self.i
+                self.string()
+                segs.append(t[a + 1:self.i - 1])
+            else:
+                a = self.i
+                while self.i < self.n and (t[self.i].isalnum() or t[self.i] in "_-"):
+                    self.i += 1
+                if a == self.i:
+                    raise ConstraintsShiftError(f"cannot parse a key at offset {a}")
+                segs.append(t[a:self.i])
+            self.ws(False)
+            if self.i < self.n and t[self.i] == ".":
+                self.i += 1
+                continue
+            return segs
+
+    def value(self, path, toks):
+        """parse one value; numbers under it append to `toks`; inline-table members register themselves."""
+        self.ws()
+        t, c = self.t, self.t[self.i]
+        if c in "\"'":
+            self.string()
+        elif c == "[":
+            self.i += 1
+            while True:
+                self.ws()
+                if t[self.i] == "]":
+                    self.i += 1
+                    return
+                self.value(path, toks)
+                self.ws()
+                if t[self.i] == ",":
+                    self.i += 1
+        elif c == "{":
+            self.i += 1
+            while True:
+                self.ws()
+                if t[self.i] == "}":
+                    self.i += 1
+                    return
+                seg = self.key()
+                self.ws(False)
+                self.i += 1                                  # '='
+                sub = []
+                self.value(tuple(path) + tuple(seg), sub)
+                self.vals.append((tuple(path) + tuple(seg), sub))
+                self.ws()
+                if t[self.i] == ",":
+                    self.i += 1
+        else:
+            a = self.i
+            while self.i < self.n and t[self.i] not in ",]}#\n \t\r":
+                self.i += 1
+            tok = t[a:self.i]
+            if _NUM_RE.fullmatch(tok):
+                toks.append((a, self.i, tok))
+
+    def run(self):
+        t, table = self.t, []
+        while True:
+            self.ws()
+            if self.i >= self.n:
+                return
+            if t[self.i] == "[":
+                dbl = t.startswith("[[", self.i)
+                self.i += 2 if dbl else 1
+                table = self.key()
+                self.ws(False)
+                self.i += 2 if dbl else 1
+                continue
+            seg = self.key()
+            self.ws(False)
+            if self.i >= self.n or t[self.i] != "=":
+                raise ConstraintsShiftError(f"expected '=' after key {'.'.join(seg)!r}")
+            self.i += 1
+            toks = []
+            self.value(tuple(table) + tuple(seg), toks)
+            self.vals.append((tuple(table) + tuple(seg), toks))
+
+
+def shift_text(text, dx, dy):
+    """(new_text, n_keys): every number of every registered coordinate key shifted; all other bytes kept."""
+    from . import constraints as C
+    sc = _Scan(text)
+    sc.run()
+    edits, nkeys = [], 0
+    for path, toks in sc.vals:
+        kind = C.coord_kind(path)
+        if not kind or not toks:
             continue
-        if table == "[lock.at]":
-            m = _AT_RE.match(ln)
-            if m:
-                lines[i] = (m.group(1) + _shift(m.group(2), dx) + m.group(3) +
-                            _shift(m.group(4), dy) + m.group(5))
-                n += 1
-        elif table == "[[keepout]]" and re.match(r"\s*rect\s*=", ln):
-            m = _RECT_RE.match(ln)
-            if not m:
-                raise ValueError(f"line {i + 1}: multi-line or unparsable keepout rect; "
-                                 f"shift it by hand")
-            g = m.groups()
-            lines[i] = (g[0] + _shift(g[1], dx) + g[2] + _shift(g[3], dy) + g[4] +
-                        _shift(g[5], dx) + g[6] + _shift(g[7], dy) + g[8])
-            n += 1
-    out = "\n".join(lines)
-    if not out.endswith("\n"):
-        out += "\n"
-    out += (f"# fit-sheet {date}: all absolute coordinates shifted by "
+        if kind == "xy2":
+            toks = toks[:2]
+        nkeys += 1
+        for k, (a, b, tok) in enumerate(toks):
+            edits.append((a, b, _shift(tok, dx if k % 2 == 0 else dy)))
+    out = text
+    for a, b, new in sorted(edits, reverse=True):
+        out = out[:a] + new + out[b:]
+    return out, nkeys
+
+
+def verify_shift(before, after, dx, dy, origin_before=None, origin_after=None, tol=1e-6):
+    """Self-check on two PARSED constraints dicts: every coordinate key keeps its offset from the
+    board-outline origin (origin_after - origin_before = (dx, dy) is itself asserted). Raises
+    ConstraintsShiftError on the first mismatch."""
+    from . import constraints as C
+    ob = origin_before or (0.0, 0.0)
+    oa = origin_after or (ob[0] + dx, ob[1] + dy)
+    if abs(oa[0] - ob[0] - dx) > 1e-3 or abs(oa[1] - ob[1] - dy) > 1e-3:
+        raise ConstraintsShiftError(
+            f"board outline origin moved by ({oa[0] - ob[0]:+g}, {oa[1] - ob[1]:+g}) mm, not the "
+            f"({dx:+g}, {dy:+g}) mm the constraints were shifted by")
+    a, b = C.coord_items(before), C.coord_items(after)
+    if [k for k, _ in a] != [k for k, _ in b]:
+        raise ConstraintsShiftError(f"coordinate keys differ after the shift ({len(a)} before, {len(b)} after)")
+    for (k, (x0, y0)), (_, (x1, y1)) in zip(a, b):
+        if abs((x1 - oa[0]) - (x0 - ob[0])) > tol or abs((y1 - oa[1]) - (y0 - ob[1])) > tol:
+            raise ConstraintsShiftError(
+                f"{k}: ({x0:g}, {y0:g}) -> ({x1:g}, {y1:g}) does not keep its offset from the board origin")
+    return len(a)
+
+
+def rewrite_constraints(text, dx, dy, date=None, origin=None):
+    """(new_text, n_changed). Shifts every coordinate key of constraints.COORD_KEYS by (dx, dy) in
+    place (comments, spacing, ordering untouched) and appends a closing comment line recording the
+    shift. `origin` = (board outline origin before, after) for the offset check. A zero shift returns
+    the text unchanged. Raises ConstraintsShiftError — writing nothing — when a coordinate-looking key is
+    not in the registry or the before/after self-check fails."""
+    import datetime
+    import tomllib
+    from . import constraints as C
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConstraintsShiftError(f"constraints do not parse: {e}")
+    bad = C.unregistered_coords(before)
+    if bad:
+        raise ConstraintsShiftError(
+            "coordinate-looking key(s) not in constraints.COORD_KEYS, so a shift cannot move them: "
+            + ", ".join(bad) + " — register them (or rename), nothing written")
+    new, n = shift_text(text, dx, dy)
+    if (dx, dy) == (0, 0):
+        return text, n
+    try:
+        after = tomllib.loads(new)
+    except tomllib.TOMLDecodeError as e:
+        raise ConstraintsShiftError(f"shifted constraints do not parse: {e}")
+    ob, oa = origin if origin else (None, None)
+    verify_shift(before, after, dx, dy, ob, oa)
+    date = date or datetime.date.today().isoformat()
+    if not new.endswith("\n"):
+        new += "\n"
+    new += (f"# fit-sheet {date}: all absolute coordinates shifted by "
             f"({dx:+g}, {dy:+g}) mm\n")
-    return out, n
+    return new, n

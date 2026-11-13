@@ -261,3 +261,92 @@ def inject_netclasses(pro_path, cons, log=print):
     log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
         f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes")
     return len(classes)
+
+
+# ---------------------------------------------------------------------------
+# Board coordinates in the constraints — ONE registry
+# ---------------------------------------------------------------------------
+# Every constraints key whose value is a position on the board (mm, board
+# frame) is listed here, and nowhere else. `fit-sheet` (sheet.rewrite_constraints)
+# shifts exactly these; `coord_items` reads them from a parsed file for the
+# before/after self-check; `unregistered_coords` finds coordinate-looking keys
+# the registry does not know, so a new coordinate key cannot ship without being
+# shifted (the shift refuses to run). Path segments are table / key names (list
+# indexes are not segments); `*` matches one segment.
+#   kind "xy"  : the numbers alternate x, y, x, y ... (a point, a rect, a polygon)
+#   kind "xy2" : only the first two numbers are a point (a `[lock.at]` row's third item is the side)
+# Keys that look like coordinates but are not (zoning, [plan.neck], [silk.title]) carry
+# none: they take refs, globs, or distances.
+COORD_KEYS = (
+    ("lock.at.*", "xy2", "[lock.at] REF = [x, y, side]"),
+    ("keepout.rect", "xy", "[[keepout]] rect = [x0, y0, x1, y1]"),
+    ("placement.keepout.*.rect", "xy", "[placement.keepout.NAME] rect"),
+    ("placement.region.*.rect", "xy", "[placement.region.NAME] rect"),
+    ("placement.no_tht.*.rect", "xy", "[placement.no_tht.NAME] rect"),
+    ("placement.height_region.rect", "xy", "[[placement.height_region]] rect"),
+    ("placement.group.*.centre", "xy", "[placement.group.NAME] centre = [x, y]"),
+    ("plan.pour.region", "xy", "[[plan.pour]] region = [x0, y0, x1, y1] | [[x, y], ...]"),
+)
+
+# key names that mean "a position" when they hold numbers; anything with one of
+# these names that the registry does not cover is refused by the shift.
+COORD_NAME_HINTS = frozenset({
+    "rect", "centre", "center", "at", "pos", "position", "poly", "polygon", "pts", "points",
+    "xy", "origin", "bbox", "box", "region", "coords", "corner", "corners", "outline", "area"})
+
+
+def coord_kind(path):
+    """The registry kind ("xy" | "xy2") of a key path (tuple of segments), or None."""
+    for pat, kind, _doc in COORD_KEYS:
+        ps = pat.split(".")
+        if len(ps) == len(path) and all(p == "*" or p == s for p, s in zip(ps, path)):
+            return kind
+    return None
+
+
+def _numbers(v):
+    """Every number under a parsed value, document order (bools are not numbers)."""
+    if isinstance(v, bool):
+        return []
+    if isinstance(v, (int, float)):
+        return [float(v)]
+    if isinstance(v, (list, tuple)):
+        return [n for x in v for n in _numbers(x)]
+    return []
+
+
+def _walk(node, path=()):
+    """(path, value) for every leaf-ish entry of a parsed TOML dict; lists of tables are walked
+    without an index segment; a list of numbers/lists is one value."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _walk(v, path + (str(k),))
+    elif isinstance(node, list) and node and all(isinstance(x, dict) for x in node):
+        for x in node:
+            yield from _walk(x, path)
+    else:
+        yield path, node
+
+
+def coord_items(cons):
+    """[(dotted path, (x, y))] for every registered coordinate in a parsed constraints dict
+    (one entry per point), in file order. The self-check compares two of these."""
+    out = []
+    for path, v in _walk(cons or {}):
+        kind = coord_kind(path)
+        if not kind:
+            continue
+        nums = _numbers(v)
+        if kind == "xy2":
+            nums = nums[:2]
+        out += [(".".join(path), (nums[i], nums[i + 1])) for i in range(0, len(nums) - 1, 2)]
+    return out
+
+
+def unregistered_coords(cons):
+    """[dotted path] of keys named like a coordinate that hold numbers but are not in COORD_KEYS."""
+    out = []
+    for path, v in _walk(cons or {}):
+        if path and path[-1].lower() in COORD_NAME_HINTS and _numbers(v) and not coord_kind(path):
+            out.append(".".join(path))
+    return out
