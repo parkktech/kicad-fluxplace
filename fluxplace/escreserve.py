@@ -9,7 +9,8 @@ neighbours are placed or legalised.
              pair), as soft rectangles
   corridors  pair centre lines of `pairs --plan-only` (pairs.plan), as soft rectangles on their outer layer
 
-`for_legalise(B, cons, spec, movable)` -> {"rects": [{rect, sides, hard, cost, owner, why}], "inflate": {ref: (l, t, r, b)}}:
+`for_legalise(B, cons, spec, movable, pins=False)` (bands only: every pass of the placer; pin sites and, with
+`[escape] reserve_pairs = true`, pair corridors are added on its final pass) -> {"rects": [{rect, sides, hard, cost, owner, why}], "inflate": {ref: (l, t, r, b)}}:
 bands of parts that stay put are absolute rectangles; a movable owner carries its hard band as inflation.
 legalise.legalise(reserve=...) applies it; `[escape] reserve = false` turns it off."""
 import math
@@ -118,10 +119,14 @@ def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None
     track, clr, via = max(R["track"], B["track"]), max(R["clearance"], B["clearance"]), R["via"]
     d1, drow = via + 2 * clr + track, via + clr
     movable = set(movable)
+    cache = B.setdefault("_escreserve", {})               # bands per part pose: the placer calls this in a loop
     for ref, part in B["parts"].items():
         if EP.is_mech(ref) or part["n_pads"] < 6:
             continue
-        bands = part_bands(part, part["pads"], part["court"], d1, drow, P["fine"])
+        key = (ref, round(part["pos"][0], 3), round(part["pos"][1], 3), part["angle"], d1, drow, P["fine"])
+        if key not in cache:
+            cache[key] = part_bands(part, part["pads"], part["court"], d1, drow, P["fine"])
+        bands = cache[key]
         if not bands:
             continue
         if ref in movable:
@@ -137,10 +142,13 @@ def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None
             if soft > 0:
                 out["rects"].append({"rect": _band_rect(part["court"], k, lo, hi, hard, hard + soft), "sides": sd, "hard": False, "cost": P["cost"],
                                      "owner": ref, "why": f"escape rows of {ref}"})
-    if P["pins"] if pins is None else pins:
+    if P["pins"] and pins is not False:
         out["rects"] += pin_sites(B, cons, spec, movable, P["cost"])
-    if corridors is None and P["pairs"] and board:
-        corridors = pair_corridors(board, B, cons, spec)
+    if corridors is None and P["pairs"] and pins is not False:
+        try:
+            corridors = pair_corridors(board, B, cons, spec)
+        except Exception:                                # noqa: BLE001 - advisory
+            corridors = None
     if corridors:
         out["rects"] += corridor_rects(corridors, B["copper"], P["cost"])
     return out

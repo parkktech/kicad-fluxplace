@@ -42,7 +42,7 @@ def project_classes(board):
     """(classes by name, patterns, assignments) of the board's .kicad_pro; empty when there is none."""
     try:
         ns = json.load(open(os.path.splitext(board)[0] + ".kicad_pro")).get("net_settings", {})
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return {}, [], {}
     return ({c.get("name"): c for c in ns.get("classes") or []}, ns.get("netclass_patterns") or [], ns.get("netclass_assignments") or {})
 
@@ -317,7 +317,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         res["secs"] = round(time.time() - t0, 1)
         return res
     clr = max(r["clr"] for r in rules.values())
-    edge = max(float(RR._pro_rules(board).get("min_copper_edge_clearance") or 0.0), 0.3)
+    edge = max(float((RR._pro_rules(board) if board else {}).get("min_copper_edge_clearance") or 0.0), 0.3)
     pair_nets = {n for pr in pl for n in pr}
     grid = PL.Grid(B, sig, clr, edge, P["step"], pair_nets)
     items = G.Items.of_board(B, old_nets=pair_nets, edge_extra=max(0.0, edge - clr))

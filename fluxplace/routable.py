@@ -396,8 +396,15 @@ class Placer:
             hot = [(x - c / 2, y - c / 2, x + c / 2, y + c / 2) for _o, x, y in cg["worst"]]
         except Exception:
             pass
+        rsv = None
+        if escape:                                       # escape reservations (escreserve.py): bands always, pin sites / pair corridors on the final pass
+            try:
+                from . import escreserve as ES
+                rsv = ES.for_legalise(self.B, self.cons, getattr(self, "spec", None), movable=set(targets), pins=None if strict else False)
+            except Exception:                            # noqa: BLE001 - a reservation never stops a placement
+                rsv = None
         res, rep = LG.legalise(self.B, targets, fixed=self.fixed, cons=self.cons, hot=hot, strict=strict, units=U, escape=escape,
-                                rigid=self.rigid)
+                                rigid=self.rigid, reserve=rsv)
         for r, (x, y, a) in res.items():
             if (round(P[r]["pos"][0], 4), round(P[r]["pos"][1], 4), P[r]["angle"]) != (x, y, a):
                 self.commit(r, x, y, a)
