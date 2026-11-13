@@ -1,0 +1,106 @@
+diff --git a/dreamplace/NonLinearPlace.py b/dreamplace/NonLinearPlace.py
+index 374418b..385099a 100644
+--- a/dreamplace/NonLinearPlace.py
++++ b/dreamplace/NonLinearPlace.py
+@@ -396,7 +396,7 @@ class NonLinearPlace(BasicPlace.BasicPlace):
+                             % (model.macro_overlap_weight.data)
+                         )
+ 
+-                    optimizer.zero_grad()
++                    optimizer.zero_grad(set_to_none=False)
+ 
+                     update_orient_cond = (
+                         iteration >= 500 and iteration % 100 == 0
+diff --git a/dreamplace/PlaceDB.py b/dreamplace/PlaceDB.py
+index 3eacb53..706012b 100644
+--- a/dreamplace/PlaceDB.py
++++ b/dreamplace/PlaceDB.py
+@@ -1014,8 +1014,8 @@ class PlaceDB(object):
+         self.num_btm_phy_nodes = self.num_btm_movable_nodes + self.num_btm_fixed_nodes
+         self.top_fixed_nodes_idx = np.where(self.top_nodes_idx >= self.num_movable_nodes)[0]
+         self.btm_fixed_nodes_idx = np.where(self.btm_nodes_idx >= self.num_movable_nodes)[0]
+-        self.top_movable_macro_mask = self.movable_macro_mask[self.top_nodes_idx]
+-        self.btm_movable_macro_mask = self.movable_macro_mask[self.btm_nodes_idx]
++        self.top_movable_macro_mask = self.movable_macro_mask[self.top_nodes_idx[self.top_nodes_idx < self.num_movable_nodes]]
++        self.btm_movable_macro_mask = self.movable_macro_mask[self.btm_nodes_idx[self.btm_nodes_idx < self.num_movable_nodes]]
+ 
+     def initialize(self, params):
+         """
+diff --git a/dreamplace/ops/global_swap/src/global_swap_cuda.cpp b/dreamplace/ops/global_swap/src/global_swap_cuda.cpp
+index 8a03e1d..e16a94d 100644
+--- a/dreamplace/ops/global_swap/src/global_swap_cuda.cpp
++++ b/dreamplace/ops/global_swap/src/global_swap_cuda.cpp
+@@ -27,10 +27,11 @@ int globalSwapCUDALauncher(DetailedPlaceDB<T> db, int batch_size, int max_iters,
+ #if TORCH_MAJOR_VERSION > 1 || (TORCH_MAJOR_VERSION == 1 && TORCH_MINOR_VERSION >= 8)
+ #define DISPATCH_CUSTOM_TYPES(TYPE, NAME, ...)                              \
+   [&] {                                                                     \
++    constexpr const char* at_dispatch_name = NAME; (void)at_dispatch_name;  \
+     switch (TYPE) {                                                         \
+-      AT_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Float, float, __VA_ARGS__)       \
+-      AT_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Double, double, __VA_ARGS__)     \
+-      AT_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Int, int, __VA_ARGS__)           \
++      DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Float, float, __VA_ARGS__)       \
++      DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Double, double, __VA_ARGS__)     \
++      DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Int, int, __VA_ARGS__)           \
+       default:                                                              \
+         AT_ERROR(#NAME, " not implemented for '", at::toString(TYPE), "'"); \
+     }                                                                       \
+diff --git a/dreamplace/ops/independent_set_matching/CMakeLists.txt b/dreamplace/ops/independent_set_matching/CMakeLists.txt
+index a428c03..0937da0 100644
+--- a/dreamplace/ops/independent_set_matching/CMakeLists.txt
++++ b/dreamplace/ops/independent_set_matching/CMakeLists.txt
+@@ -51,7 +51,7 @@ add_pytorch_extension(${TARGET_NAME}_cuda
+   src/independent_set_matching_cuda.cpp
+   src/independent_set_matching_cuda_kernel.cu
+   EXTRA_INCLUDE_DIRS ${INCLUDE_DIRS}
+-  EXTRA_LINK_LIBRARIES ${LINK_LIBS}
++  EXTRA_LINK_LIBRARIES ${LINK_LIBS} ${CUDA_curand_LIBRARY}
+   EXTRA_DEFINITIONS DRAWPLACE=${DRAWPLACE})
+ install(TARGETS 
+   ${TARGET_NAME}_cuda 
+diff --git a/dreamplace/ops/utility/src/torch.h b/dreamplace/ops/utility/src/torch.h
+index 6fcc941..42c75e2 100644
+--- a/dreamplace/ops/utility/src/torch.h
++++ b/dreamplace/ops/utility/src/torch.h
+@@ -26,7 +26,12 @@
+ 
+ #endif
+ 
+-#if TORCH_MAJOR_VERSION > 1 || (TORCH_MAJOR_VERSION == 1 && TORCH_MINOR_VERSION >= 8)
++#if TORCH_MAJOR_VERSION > 1 || (TORCH_MAJOR_VERSION == 1 && TORCH_MINOR_VERSION >= 13)
++
++#define DREAMPLACE_PRIVATE_CASE_TYPE(NAME, enum_type, type, ...) \
++  AT_PRIVATE_CASE_TYPE_USING_HINT(enum_type, scalar_t, __VA_ARGS__)
++
++#elif TORCH_MAJOR_VERSION > 1 || (TORCH_MAJOR_VERSION == 1 && TORCH_MINOR_VERSION >= 8)
+ 
+ #define DREAMPLACE_PRIVATE_CASE_TYPE(NAME, enum_type, type, ...) \
+   AT_PRIVATE_CASE_TYPE(NAME, enum_type, type, __VA_ARGS__)
+@@ -70,6 +75,7 @@
+ #define DREAMPLACE_DISPATCH_FLOATING_TYPES(TENSOR, NAME, ...)                         \
+   [&] {                                                                               \
+     at::ScalarType _st = DREAMPLACE_TENSOR_SCALARTYPE(TENSOR);                        \
++    constexpr const char* at_dispatch_name = NAME; (void)at_dispatch_name;            \
+     switch (_st) {                                                                    \
+       DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Double, double, __VA_ARGS__) \
+       DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Float, float, __VA_ARGS__)   \
+@@ -83,6 +89,7 @@
+ #define DREAMPLACE_DISPATCH_INT_FLOAT_TYPES(TENSOR, NAME, ...)                        \
+   [&] {                                                                               \
+     at::ScalarType _st = DREAMPLACE_TENSOR_SCALARTYPE(TENSOR);                        \
++    constexpr const char* at_dispatch_name = NAME; (void)at_dispatch_name;            \
+     switch (_st) {                                                                    \
+       DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Float, float, __VA_ARGS__)   \
+       DREAMPLACE_PRIVATE_CASE_TYPE(NAME, at::ScalarType::Double, double, __VA_ARGS__) \
+diff --git a/dreamplace/ops/utility/src/utils_cub.cuh b/dreamplace/ops/utility/src/utils_cub.cuh
+index d21915c..b8cbed7 100644
+--- a/dreamplace/ops/utility/src/utils_cub.cuh
++++ b/dreamplace/ops/utility/src/utils_cub.cuh
+@@ -14,6 +14,7 @@
+ // include cub in a safe manner
+ #define CUB_NS_PREFIX namespace DREAMPLACE_NAMESPACE {
+ #define CUB_NS_POSTFIX }
++#define CUB_NS_QUALIFIER ::DREAMPLACE_NAMESPACE::cub
+ #include "cub/cub.cuh"
+ #undef CUB_NS_POSTFIX
+ #undef CUB_NS_PREFIX

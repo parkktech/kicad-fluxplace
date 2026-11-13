@@ -232,10 +232,36 @@ def _routable_report(mv, before, after, out):
     print("note: existing copper is not moved with the parts; place on an unrouted board")
 
 
+def _engine_place(a):
+    """Placement engine hook (docs/CYPRESS.md): --engine, else `[placement] engine`. True when an external engine
+    wrote the board; False -> the built-in placer runs (also when the engine is not installed)."""
+    from fluxplace import placer_cypress as PC
+    cons, spec = _text_ctx(a)
+    out = a.out or a.board
+    if PC.engine_of(cons, getattr(a, "engine", None)) != "cypress":
+        PC.builtin_record(out, a.strategy)
+        return False
+    try:
+        rep = PC.place_file(a.board, out, cons, spec, home=a.cypress_home, python=a.cypress_python,
+                            log=lambda m: print("  " + m, flush=True))
+    except Exception as e:
+        if e.__class__.__name__ == "PlacementError":
+            raise SystemExit(f"place [cypress] REFUSED: {e}")
+        raise
+    if isinstance(rep, str):
+        PC.builtin_record(out, a.strategy, fallback=rep)
+        return False
+    print(PC.format_report(rep))
+    print(f"cypress: moved/turned {rep['moved']} part(s); saved {out}")
+    return True
+
+
 def cmd_place(a):
     if getattr(a, "spec", None):
         from fluxplace import parts as _PT, constraints as _C
         _PT.autogate(a.spec, _C.load(getattr(a, "constraints", None)), a.board, "place")
+    if _engine_place(a):
+        return
     if a.strategy == "routable":
         out = a.out or a.board
         mv, b, c = _routable_place(a, a.board, out)
@@ -2649,6 +2675,11 @@ def build_parser():
                     help="draw the global-route corridors on Eco1.User (build strategy)")
     pp.add_argument("--no-fit-sheet", action="store_true",
                     help="don't translate the board onto the drawing sheet")
+    pp.add_argument("--engine", choices=["builtin", "cypress"], default=None,
+                    help="placement engine (default [placement] engine, else builtin); cypress = NVIDIA Cypress on the GPU, "
+                         "then the fluxplace legaliser; falls back to builtin when it is not installed (docs/CYPRESS.md)")
+    pp.add_argument("--cypress-home", default=None, help="Cypress checkout (else $CYPRESS_HOME, else ~/tools/Cypress*)")
+    pp.add_argument("--cypress-python", default=None, help="Python of the Cypress environment (else $CYPRESS_PYTHON)")
     pp.set_defaults(fn=cmd_place)
 
     pl = sub.add_parser("plan", help="gather info + write a detailed placement plan")
@@ -3433,6 +3464,8 @@ def build_parser():
     ppl.add_argument("--spec", default=None)
     ppl.add_argument("--flow", choices=sorted(PL.FLOWS), default=None,
                      help="constructive = modules, floorplan, fanout (gate FANOUT_OK), plan-route, route, tune, silk, review")
+    ppl.add_argument("--engine", choices=["builtin", "cypress"], default=None,
+                     help="placement engine of the place / floorplan stage (default [placement] engine; docs/CYPRESS.md)")
     ppl.add_argument("--size", action="store_true", help="constructive flow: floorplan sizing loop (grow the outline until it passes)")
     ppl.add_argument("--from", dest="from_stage", choices=PL.ALL_STAGES, default=None)
     ppl.add_argument("--to", dest="to_stage", choices=PL.ALL_STAGES, default=None)
