@@ -54,6 +54,15 @@ optional; anything not stated keeps the heuristic default. Schema:
     clamp_v = 38.9          # optional; distributor data fills it when absent
     min_margin_pct = 15
 
+    [parts]                 # part-entry gate (docs/commands/parts.md)
+    generic_passives = false  # true: passives by value/tolerance/package are acceptable
+    pinmap_exempt = ["J*"]; passive_datasheet = "warn"; package = "required"; enforce = true; waive = ["CODE:REGEX"]
+
+    [stackup]               # readiness gate (docs/commands/ready.md): impedance is COMPUTED from this
+    planes = ["In1.Cu"]     # reference layers; [[stackup.layers]] name/type/thickness/epsilon_r, or profile = "name"
+    [ready]
+    min_feature_mm = 0.127  # smallest width/gap the computed geometry may use
+
     [fab]                   # what the quoted fab process can actually build
     blind_vias = false      # default false: a blind/buried/micro via on the
     buried_vias = false     # board is a VIA_TYPE review FAIL unless the

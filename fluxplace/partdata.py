@@ -163,6 +163,8 @@ def _dk_details(mpn, creds, tok, on_token=None):
             "description": (p.get("Description") or {}).get("ProductDescription", "")
             if isinstance(p.get("Description"), dict) else (p.get("Description") or ""),
             "matched": p.get("ManufacturerProductNumber", ""),
+            "manufacturer": ((p.get("Manufacturer") or {}).get("Name", "") if isinstance(p.get("Manufacturer"), dict)
+                             else (p.get("Manufacturer") or "")),
             "source": "digikey", "raw_params": params,
         })
         if exact:
@@ -209,6 +211,7 @@ def _mouser_details(mpn, creds):
                         "datasheet": p.get("DataSheetUrl") or "",
                         "description": p.get("Description") or "",
                         "matched": p.get("ManufacturerPartNumber", ""),
+                        "manufacturer": p.get("Manufacturer") or "",
                         "source": "mouser", "raw_params": params})
             return row
     return None

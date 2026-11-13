@@ -36,5 +36,7 @@ Optional constraints:
     chip_ct  = "common"     # "any": chip centre taps may sit on different nets
     line_ct  = "resistor"   # "any": skip the own-resistor / shared-net rule (LINE_ON_CT still applies)
 
+Generalised by [pin-groups.md](pin-groups.md) (same checks for any multi-channel part); `review` runs both.
+
 Not checked: which PHY pair must land on which connector pair (the board's own spec owns that), PoE, and
 whether a declared pin table matches the datasheet (the declaration is the human-verified input).
