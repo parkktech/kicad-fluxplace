@@ -3437,8 +3437,8 @@ def build_parser():
     ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
     ppl.add_argument("--track", type=float, default=0.2)
     ppl.add_argument("--clearance", type=float, default=0.2)
-    ppl.add_argument("--router-py", default=os.path.expanduser("~/tools/router-venv/bin/python"))
-    ppl.add_argument("--router-dir", default=os.path.expanduser("~/tools/KiCadRoutingTools"))
+    ppl.add_argument("--router-py", default=None, help="router python (else $FLUXPLACE_ROUTER_PY, else ~/tools/router-venv)")
+    ppl.add_argument("--router-dir", default=None, help="router dir (else $FLUXPLACE_ROUTER_DIR, else newest ~/tools/KiCadRoutingTools*)")
     from fluxplace import questions as QS
     QS.add_args(ppl, json_flag=False)
     ppl.set_defaults(fn=cmd_pipeline)

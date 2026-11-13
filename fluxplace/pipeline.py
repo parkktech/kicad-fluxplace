@@ -136,7 +136,16 @@ def _questions_result(rc, text, board):
             "board": board, "next": lines[:40]}
 
 
+def _copy(src, dst):
+    """shutil.copy that tolerates src == dst (a stage re-run on its own output)."""
+    if os.path.exists(dst) and os.path.samefile(src, dst):
+        return
+    shutil.copy(src, dst)
+
+
 def _sidecar(src, dst):
+    if os.path.exists(dst) and os.path.exists(src) and os.path.samefile(src, dst):
+        return
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
@@ -322,7 +331,7 @@ def st_route(c, n, board):
     from . import routerules as RR, routepar as RP
     a = c.a
     if not (os.path.exists(a.router_py) and os.path.exists(os.path.join(a.router_dir, "py_router", "route.py"))):
-        return {"verdict": "na", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
+        return {"verdict": "fail", "line": f"router not found ({a.router_dir}); pass --router-py/--router-dir",
                 "board": board}
     d = c.dir(n, "route")
     from . import questions as QS
@@ -337,7 +346,7 @@ def st_route(c, n, board):
         raise
     c.cons, c.spec = c_cons, c_spec
     best = os.path.join(d, "board.kicad_pcb")
-    shutil.copy(board, best)
+    _copy(board, best)
     _sidecar(board, best)
     t0 = time.time()
     budget = float(a.route_budget)
@@ -462,7 +471,7 @@ def st_route(c, n, board):
 def st_tune(c, n, board):
     d = c.dir(n, "tune")
     out = os.path.join(d, "board.kicad_pcb")
-    shutil.copy(board, out)
+    _copy(board, out)
     _sidecar(board, out)
     rc, text = _run_cli(["tune", "--board", out, "--out", out] + (["--constraints", c.cons_path] if c.cons_path else []),
                         os.path.join(d, "stage.log"))
@@ -606,6 +615,14 @@ def run(a):
     i0, i1 = STAGES_.index(first), STAGES_.index(last)
     if i0 > i1:
         raise SystemExit(f"pipeline: --from {first} is after --to {last}")
+    router = None
+    if "route" in STAGES_[i0:i1 + 1]:
+        from . import routerloc as RL
+        try:
+            router = RL.resolve(getattr(a, "router_dir", None), getattr(a, "router_py", None))
+        except RuntimeError as e:
+            raise SystemExit(f"pipeline: {e}")
+        a.router_dir, a.router_py = router["dir"], router["py"]
     if i0 == 0:
         if not a.board:
             raise SystemExit("pipeline: BOARD is required when starting at the first stage")
@@ -640,6 +657,8 @@ def run(a):
         board = res.get("board", board)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
+        if name == "route" and router:
+            st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board
         st["next"] = res.get("next", [])
         if res.get("scorecard"):
