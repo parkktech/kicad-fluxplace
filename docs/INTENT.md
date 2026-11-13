@@ -11,6 +11,8 @@ open the tool asks (exit 3, `[answers]`, `--assume-defaults`; see [commands/ques
 
 Code: `fluxplace/intent.py` (keys, zones, gate, seating engine, floorplan hooks), `fluxplace/connectors.py` (entry
 direction), `fluxplace/intentdraft.py` (the draft). Tests: `tests/test_intent.py`.
+With `--engine cypress` the same intent is seated first and then given to Cypress as fixed cells, blockages, weighted nets and
+macros, and every trial is judged by this gate: [CYPRESS.md](CYPRESS.md), section "With an `[intent]` table".
 
 ## Keys
 

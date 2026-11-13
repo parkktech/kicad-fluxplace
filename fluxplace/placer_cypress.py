@@ -39,8 +39,8 @@ DEFAULTS = {"unit_mm": 0.1, "gap_mm": 0.2, "cluster_weight": 8.0, "rail_weight":
             "timeout_s": 900, "threads": 8, "reseat": True, "escape": True, "trials": 4,
             # intent-aware flow (an [intent] table, or feedback = true); `trials` defaults to INTENT_TRIALS there
             "feedback": None,          # None = on with an [intent] table: the gate scores each trial and inflates what is crowded
-            "macros": "auto",          # an IC + its support parts as one cell: true | false | "auto" (try both, keep the better)
-            "near_weight": 1.0, "pair_weight": 2.0, "block_share": 0.5, "reserve_gain": 1.0,
+            "macros": True,            # an IC + its support parts as one cell: true | false | "auto" (try both, keep the better)
+            "near_weight": 1.0, "pair_weight": 2.0, "block_share": 0.5, "reserve_gain": 1.0, "fanout_room": False,
             "inflate_step_mm": 0.4, "inflate_max_mm": 1.6, "inflate_share": 0.12, "pin_halo_mm": 1.5, "max_blockages": 48, "blocked_pin_cost": 40.0, "soft_intent_cost": 20.0}
 INTENT_TRIALS = 6
 # Cypress/DREAMPlace parameters; the Cypress authors tune these per board with a Bayesian search.
@@ -421,6 +421,35 @@ def escape_reserve(B, cons, spec, cls, gain=1.0, cap=1.0):
     return out
 
 
+def fanout_room(src, B, cons, spec, log, cap=3.0, min_pads=3):
+    """{ref: (left, top, right, bottom) mm}: how far the escape copper of a part's pins (stub + via, from the fan-out
+    check on the board as it stands) reaches beyond its courtyard. Cells get that room, held parts included, so Cypress
+    does not seat a neighbour on a pin's way out. Pins the check could not escape here contribute nothing. {} when the
+    check cannot run."""
+    from . import fanout as FO, routerules as RR
+    try:
+        _Bn, fres = FO.run(src, cons, spec, None, _fanargs(), None)
+    except (Exception, SystemExit) as e:
+        log(f"fan-out room unavailable: {str(e).strip().splitlines()[0][:120] if str(e).strip() else type(e).__name__}")
+        return {}
+    R = RR.rules(cons, None, B=B)
+    half = float(R["via"]) / 2.0 + max(float(R["clearance"]), float(B["clearance"]))
+    ext = {}
+    for pin in fres.get("pins", ()):
+        part = B["parts"].get(pin.get("ref"))
+        if not pin.get("ok") or part is None or part["n_pads"] < min_pads:
+            continue
+        pts = [(q[0], q[1], float(pin.get("w") or R["track"]) / 2.0) for q in pin.get("stub") or ()]
+        if pin.get("via"):
+            pts.append((pin["via"][0], pin["via"][1], half))
+        c = part["court"]
+        e = ext.setdefault(pin["ref"], [0.0, 0.0, 0.0, 0.0])
+        for x, y, r in pts:
+            e[0], e[1] = max(e[0], c[0] - (x - r)), max(e[1], c[1] - (y - r))
+            e[2], e[3] = max(e[2], (x + r) - c[2]), max(e[3], (y + r) - c[3])
+    return {r: tuple(round(min(cap, v), 3) for v in e) for r, e in ext.items() if max(e) > 0}
+
+
 def _compact(parts, refs):
     cs = [parts[r]["court"] for r in refs]
     box = (max(c[2] for c in cs) - min(c[0] for c in cs)) * (max(c[3] for c in cs) - min(c[1] for c in cs))
@@ -587,12 +616,14 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
     changed = lambda final: {r: f for r, f in final.items() if abs(f[0] - origin[r][0]) > 1e-4 or abs(f[1] - origin[r][1]) > 1e-4
                              or abs(norm(f[2] - origin[r][2])) > 1e-6}
     reserve = escape_reserve(B, cons, spec, cls, float(S["reserve_gain"])) if aware and S["escape"] else {}
+    fan = fanout_room(board, B, cons, spec, log) if aware and S["escape"] and S["fanout_room"] and board else {}
     infl, fb_blocks = {}, []
 
     def allowance(ref, part):
         big, court = M.rel(ref, part["angle"])
-        e, g = reserve.get(ref, 0.0), infl.get(ref, 0.0)
-        return tuple(max(v, e) + g for v in (court[0] - big[0], court[1] - big[1], big[2] - court[2], big[3] - court[3]))
+        e, g, f = reserve.get(ref, 0.0), infl.get(ref, 0.0), fan.get(ref, (0.0,) * 4)
+        return tuple(max(v, e, f[i]) + g for i, v in enumerate((court[0] - big[0], court[1] - big[1], big[2] - court[2],
+                                                                big[3] - court[3])))
 
     zb, post = zone_blocks(B, M, fixed, float(S["block_share"])) if intent else ([], [])
     links, weights = relation_links(B, cons, cls, S) if aware else ([], None)
@@ -697,7 +728,7 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
     if aware:
         rep.update({"rejected": sum(1 for t in runs if "rejected" in t), "failed": sum(1 for t in runs if "failed" in t),
                     "zone_blockages": len(zb), "zones_left_to_legaliser": post, "feedback_blockages": len(fb_blocks),
-                    "links": len(links), "escape_reserved": len(reserve), "inflated": dict(sorted(infl.items())),
+                    "links": len(links), "escape_reserved": len(reserve), "fanout_room": len(fan), "inflated": dict(sorted(infl.items())),
                     "gate": {q: v for q, v in next(t for t in ok if t["trial"] == rep["trial"]).items()
                              if q in ("plan", "overflow", "risk_nets", "blocked", "required", "hpwl", "intent", "macros")}})
     rep["summary"] = (f"trial {rep['trial']} of {len(runs)} kept ({len(ok)} legal), score {score:.0f}, GPU {rep['gpu_s_all_trials']} s"

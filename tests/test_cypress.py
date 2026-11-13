@@ -380,7 +380,7 @@ def test_feedback_inflates_crowded_parts_and_blocks_beside_fixed_ones(tmp_path):
     assert w(m0) == 20 and w(m1) == 35
 
 
-INTENT = {"placement": {"fixed": ["J1"], "cypress": {"trials": 3}},
+INTENT = {"placement": {"fixed": ["J1"], "cypress": {"trials": 3, "macros": "auto"}},
           "intent": {"near": [{"name": "r1-u2", "refs": ["R1"], "to": "U2", "max_mm": 30.0}],
                      "region": [{"name": "corner", "rect": [80, 60, 100, 80]}], "support": {"decap_hard": False}}}
 
@@ -421,7 +421,7 @@ def test_a_trial_with_unmet_hard_intent_is_rejected(tmp_path):
 def test_cli_and_pipeline_run_the_intent_flow_and_finish_with_the_gate(tmp_path, monkeypatch):
     p, out = mk(tmp_path), str(tmp_path / "o.kicad_pcb")
     cons = tmp_path / "c.toml"
-    cons.write_text('[placement]\nfixed = ["J1"]\n[placement.cypress]\ntrials = 3\n[intent.support]\ndecap_hard = false\n'
+    cons.write_text('[placement]\nfixed = ["J1"]\n[placement.cypress]\ntrials = 3\nmacros = "auto"\n[intent.support]\ndecap_hard = false\n'
                     '[[intent.near]]\nname = "r1-u2"\nrefs = ["R1"]\nto = "U2"\nmax_mm = 30.0\n'
                     '[[intent.region]]\nname = "corner"\nrect = [80, 60, 100, 80]\n')
     assert C.load(str(cons))["intent"] == INTENT["intent"]

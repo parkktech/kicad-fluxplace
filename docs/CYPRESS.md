@@ -21,7 +21,7 @@ or in the constraints, which `place` and `pipeline` both read:
     timeout_s = 900
     params = { net_crossing_weight = 0.1 }     # any Cypress/DREAMPlace parameter
     # intent-aware flow only (an [intent] table is present; section "With an [intent] table"):
-    macros = "auto"               # an IC + its support parts as ONE cell: true | false | "auto" (trial 0 with, trial 1 without, then the better)
+    macros = true                 # an IC + its support parts as ONE cell: true | false | "auto" (trial 0 with, trial 1 without, then the better)
     feedback = true               # judge every trial with the gate and inflate what is crowded for the next one
     near_weight = 1.0             # x the `near` item's weight x a factor from its budget
     pair_weight = 2.0             # x the class weight of both nets of a pair, and of the partner-part ties
@@ -47,7 +47,7 @@ The engine and its version are written to `<out>.place.json` and to the stage re
 | keep-outs, rule areas, non-rectangular outline | fixed cells without pins |
 | net classes | `netclass.classify` weights as net weights; weight-0 rails are left out |
 | IC support clusters | one extra 2-pin net per support part to its IC pin (`cluster_weight`) |
-| pairs, groups, templates, height regions | not expressed; pairs only through the weight of their two nets |
+| pairs, groups, templates, height regions | not expressed; pairs only through the weight of their two nets (with an `[intent]` table: next section) |
 
 ## With an `[intent]` table (docs/INTENT.md)
 
@@ -103,6 +103,38 @@ Reading: Cypress gives shorter wires than the built-in placer on the main board 
 average, but it knows nothing about escapes or channels: three times the blocked fan-out pins and twice the planned
 overflow. Its speed is not an advantage at this size (12 to 16 GPU seconds a run, and several runs are needed).
 A built-in pass after Cypress changed little (gate 19256 to 18894).
+
+## Measured with an `[intent]` table (2026-11-13)
+A 339-part two-sided 6-layer board, 29 intent rows (edge modules, a rigid card group, RF `near` chains, an `away`, regions,
+hard decoupling), 33 parts seated and held by the intent, same seed board and constraints for both engines, same
+measuring code (`intent`, `fanout --check-only`, `plan-route --ignore-routing`, map relations).
+
+| metric | builtin (`floorplan`) + intent | cypress + intent, best of 6 trials | cypress + intent, then `floorplan --start source` |
+|---|---|---|---|
+| courtyard overlaps / outside | 0 / 0 | 0 / 0 | 0 / 0 |
+| INTENT rows met / soft unmet / hard unmet | 29 / 0 / 0 | 29 / 0 / 0 | 29 / 0 / 0 |
+| fan-out: required pins blocked (of 875) | 3 | 4 | 4 |
+| plan-route PLAN_SCORE / overflow / over-budget mm | 4129 / 12.2 / 135.8 | 4213 / 21.8 / 142.9 | 4241 / 14.2 / 137.8 |
+| HPWL all nets / class-weighted, mm | 7583 / 11890 | 8983 / 13650 | 8319 / 12721 |
+| 76 decoupling caps: mean mm / over limit (bulk caps included) | 7.7 / 10 | 5.9 / 15 | 6.3 / 15 |
+| pair nets, total span mm | 1816 | 2043 | 1922 |
+| run time | 555 s, one core | 286 s wall, GPU 93 s | + 226 s |
+
+The cypress column is the best of five 6-trial runs. Their kept trial scores (PLAN_SCORE + 40 x blocked pins + 20 x soft
+rows): 4373, 4480, 4848, 4883, 5020; one 10-trial run: 4514. The built-in result scores 4249. First trial of a run (no
+feedback yet): 5114 to 7097; the feedback brings a run down by 15 to 35 %, and stops helping after about five trials.
+46 trials: Cypress converged in all (3 after one re-run at the overflow it settled at), 3 were rejected by the INTENT gate
+(a decoupling cap beyond its limit that the repair could not seat).
+
+Two KiCad demo boards, copper stripped, `intent-draft` constraints as written (only `[intent.support]` survives a draft that
+is not edited): DEMO_ROWS
+
+Reading: with the intent the Cypress flow is legal, meets every hard row and lands within 3 % (best run) to 18 % (worst)
+of the built-in floorplan on the gate score, but it does not beat it on this board: wires are 12 to 18 % longer, planned
+overflow is higher, and the result differs from run to run. Global placement itself is about as short as the built-in
+result (7.5 to 7.7 m before legalising against 7.6 m final); the legaliser and the support repair then add 0.5 to 1.5 m.
+No intent zone of this board became a Cypress blockage (each concerns a few parts only); they were all kept by the legaliser.
+The default engine stays `builtin`.
 
 ## Limits found
 - Cypress has no keep-outs, regions, groups, pairs, non-rectangular outlines or side choice; fixed cells are in the
