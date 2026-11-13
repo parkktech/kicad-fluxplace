@@ -138,9 +138,11 @@ def test_pair_is_one_job_and_complete_only_when_both_legs_match(tmp_path):
     # one leg fails: the half result is not merged, never left half
     board, r, R, spath = go(tmp_path / "half", pair_body(), ["D_P", "D_N"], {}, fail=["D_N"])
     assert r["open"] == 2 and r["pairs"]["half-removed"] == ["D_N/D_P"] and not RD.load(r["board"])["segs"]
-    # both legs closed but N takes a via: mismatch, not merged
+    # both legs closed but N takes a via: mismatch; merged and reported (not counted as routed), or dropped with pair_mismatch = "drop"
     board, r, R, spath = go(tmp_path / "mm", pair_body(), ["D_P", "D_N"], {}, via=["D_N"])
-    assert r["open"] == 2 and not RD.load(r["board"])["segs"] and r["dropped"]
+    assert r["open"] == 0 and r["pairs"]["mismatch"] == ["D_N/D_P"] and r["pairs"]["complete"] == [] and r["pair_causes"]["layers"] == 1
+    board, r, R, spath = go(tmp_path / "mmd", pair_body(), ["D_P", "D_N"], {"route": {"pair_mismatch": "drop"}}, via=["D_N"])
+    assert r["open"] == 2 and not RD.load(r["board"])["segs"] and r["dropped"] and r["pairs"]["failed"] == ["D_N/D_P"]
 
 
 def test_half_pair_in_the_input_is_removed_first(tmp_path):

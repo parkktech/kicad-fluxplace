@@ -158,6 +158,7 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
     controlled = RIP.controlled_nets(cls, cons, names=[p["net"] for p in B["pads"] if p["net"]])
     pol = RIP.policy(cons)
     rip_trials = int(r.get("rip_trials_per_round", 3))
+    pair_mismatch = str(r.get("pair_mismatch", "keep")).lower()      # "keep": merged, reported as mismatch; "drop": not merged
     cur, cur_open, cur_B, cks = board, open0, B, []
     total = lambda: sum(cur_open.values())
     dead = {}                             # unit id -> reason
@@ -362,16 +363,20 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
                     viol = [v for v in viol if v["code"] != "FANOUT_RIPPED"] or viol
                 drop(u, DR.reason_of(viol), "RULE_VIOLATION")
                 continue
-            if u.kind == "pair":                                  # both legs closed, same layers, same vias, within skew
+            if u.kind == "pair":                                  # a half-routed pair is never merged
                 jo = dict(RC.text_open(dict(Jb, pads=[x for x in Jb["pads"] if x["net"] in u.nets])))
                 stt, why = _pair_state(Jb, u.nets[0], u.nets[1], cons, jo)
-                if stt != "complete":
+                got = {x["net"] for x in list(new[0]) + list(new[1])}
+                if stt == "half" or (stt == "open" and not set(u.nets) <= got) or (stt == "mismatch" and pair_mismatch == "drop"):
                     log(f"    pair {u.id}: {stt} ({why}); result removed")
                     for c_ in ([w.split()[0] for w in why.split("; ")] if stt == "mismatch" and why else [stt]):
                         pair_causes[c_] = pair_causes.get(c_, 0) + 1
-                    pair_events[tuple(u.nets)] = "half-removed" if stt == "half" else "failed"
+                    pair_events[tuple(u.nets)] = "half-removed" if stt in ("half", "open") else "failed"
                     drop(u, "no-path" if stt in ("half", "open") else "other", f"pair {stt}")
                     continue
+                if stt == "mismatch":                             # merged, but not counted as routed: status `mismatch`
+                    for c_ in [w.split()[0] for w in why.split("; ")]:
+                        pair_causes[c_] = pair_causes.get(c_, 0) + 1
             if u.nets[0] in plain and u.kind == "net" and not _plain_ok(Jb, u.nets[0], Jb["copper"]):
                 log(f"    plain-copper net {u.id}: the result changes layer; discarded")
                 drop(u, "other", "plain copper violated")
