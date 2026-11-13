@@ -66,10 +66,15 @@ class Plan:
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
         self.claims_rel = {}
         self.chash = GM.Hash(3.0)
+        from . import intent as IT
+        self.intent = IT.PlanTerms(self)                      # --- intent: away penalty / legality
 
     # -- nets
     def _nets(self, NC):
-        pads = NC.net_pads(self.B)
+        from . import intent as IT
+        pads = dict(NC.net_pads(self.B))
+        links, link_info = IT.plan_links(self.B, self.cons)   # --- intent: `near` items as two-pin nets with a budget
+        pads.update(links)
         pm, px, py, pn = [], [], [], []
         self.net_name, self.net_w, self.net_budget = [], [], []
         ports = defaultdict(lambda: defaultdict(list))
@@ -80,7 +85,7 @@ class Plan:
             mi = {self.idx[self.of[q["ref"]]] for q in ps}
             if len(mi) < 2:
                 continue
-            c = self.cls.get(net, {})
+            c = self.cls.get(net) or link_info.get(net, {})
             ni = len(self.net_name)
             self.net_name.append(net)
             self.net_w.append(float(c.get("weight", 1.0)))
@@ -134,10 +139,10 @@ class Plan:
             bx = float(np.ptp(self.X[mov])) + float(np.ptp(self.Y[mov]))
         else:
             bx = 0.0
-        return {"wl": wl, "over": over, "cross": cr, "compact": bx}
+        return {"wl": wl, "over": over, "cross": cr, "compact": bx, "intent": self.intent.penalty() if self.intent.items else 0.0}
 
     def total(self, p, w_cross=4.0):
-        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"]
+        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("intent", 0.0)
 
     def crossings(self):
         """port-to-port crossing count: ports of one net chained by x, edges of different nets that intersect."""
@@ -321,7 +326,7 @@ class Plan:
                     continue
                 if kind in ("outside", "forbidden", "no_tht", "pad_short"):
                     return False
-        return self.claims_ok(i)
+        return self.claims_ok(i) and self.intent.ok(i)
 
     def claims_ok(self, i):
         """module i's fan-out copper (claims) clear of every other module's PADS, and its pads clear of their claims."""
@@ -925,6 +930,9 @@ def cmd_floorplan(a):
         raise SystemExit("floorplan: --out must differ from the input board")
     wd = os.path.splitext(out)[0] + ".work"
     os.makedirs(wd, exist_ok=True)
+    from . import intent as IT
+    src_board = a.board
+    a.board, cons, seated = IT.prepare(a.board, cons, spec, wd)        # --- intent: hard items seated and held before the search
     text_in = open(a.board, errors="surrogateescape").read()
     B0 = RD.load(a.board)
     grow = tuple(float(v) for v in a.grow.split(",")) if a.grow else (0, 0, 0, 0)
@@ -953,7 +961,7 @@ def cmd_floorplan(a):
     best = history[-1]
     import shutil
     shutil.copyfile(best["board"], out)
-    _pro(a.board, out)
+    _pro(src_board, out)
     S.mark(out)
     rp = os.path.splitext(out)[0] + ".floorplan.json"
     json.dump({"history": [{k: v for k, v in h.items() if k != "blocked"} for h in history], "final": best["tag"]}, open(rp, "w"), indent=1, default=str)
@@ -966,7 +974,13 @@ def cmd_floorplan(a):
     except Exception as e:                  # the report must never fail the floorplan
         print(f"  plan-route summary unavailable: {e}")
     print(f"  legality new: {best['legality_new']}")
-    return 0 if passes(best) else 1
+    irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
+    waive = (cons.get("floorplan") or {}).get("waive_fail")
+    if not passes(best) and waive:
+        print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
+    if (not passes(best) and not waive) or irc:
+        raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
+    return 0
 
 
 def add_parser(sub):

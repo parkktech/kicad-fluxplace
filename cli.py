@@ -172,6 +172,14 @@ def _routable_place(a, board_in, board_out):
     cons, spec = _text_ctx(a)
     B0 = RD.load(board_in)
     f0, c0 = PR.run(B0, cons, spec)
+    from fluxplace import intent as IT              # --- intent: hard items seated and held before the placer runs
+    src_in, pre_moves = board_in, {}
+    if IT.section(cons):
+        import tempfile
+        board_in, cons, seated = IT.prepare(board_in, cons, spec, tempfile.mkdtemp(prefix="intent-"),
+                                            log=lambda m: print("  " + m, flush=True))
+        pre_moves = seated.moves
+        a._intent_cons = cons
     B = RD.load(board_in)
     try:
         if getattr(a, "objective", None) == "plan" or (cons.get("placement") or {}).get("objective") == "plan":
@@ -232,6 +240,10 @@ def cmd_place(a):
         out = a.out or a.board
         mv, b, c = _routable_place(a, a.board, out)
         _routable_report(mv, b, c, out)
+        if getattr(a, "_intent_cons", None):        # --- INTENT gate: unmet hard intent fails the placement
+            from fluxplace import intent as IT
+            if IT.gate(out, a._intent_cons, _text_ctx(a)[1]):
+                raise SystemExit(1)
         return
     _sourcing_preflight(a, "placement")
     board, parts, nets, IO = _load(a.board)

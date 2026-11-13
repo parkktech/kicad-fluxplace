@@ -441,9 +441,17 @@ def check_spec_board(S, B, cons, spec=None, **_):
 
 CHECKS = {"layer-roles": check_layer_roles, "controlled": check_controlled, "rip-existing": check_rip_existing,
           "fixed-parts": check_fixed_parts, "rail-pour": check_rail_pour, "floors": check_floors, "spec-board": check_spec_board}
+def check_connector_entry(S, B, cons, **_):
+    """connectors whose entry direction cannot be derived (asked only when the constraints carry `[intent]`)."""
+    from . import connectors as CN, intent as IT
+    if IT.enabled(cons):
+        CN.ask(S, B, cons)
+
+
+CHECKS["connector-entry"] = check_connector_entry
 TOPICS = {"fanout": ("spec-board", "layer-roles", "controlled", "floors", "rail-pour"),
           "modules": ("spec-board", "fixed-parts", "layer-roles", "controlled"),
-          "floorplan": ("spec-board", "fixed-parts", "layer-roles", "controlled"),
+          "floorplan": ("spec-board", "fixed-parts", "layer-roles", "controlled", "connector-entry"),
           "route": ("spec-board", "rip-existing", "layer-roles", "controlled", "floors", "rail-pour")}
 
 

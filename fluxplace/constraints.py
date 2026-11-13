@@ -301,6 +301,7 @@ COORD_KEYS = (
     ("placement.no_tht.*.rect", "xy", "[placement.no_tht.NAME] rect"),
     ("placement.height_region.rect", "xy", "[[placement.height_region]] rect"),
     ("placement.group.*.centre", "xy", "[placement.group.NAME] centre = [x, y]"),
+    ("intent.region.rect", "xy", "[[intent.region]] rect = [x0, y0, x1, y1]"),
     ("plan.pour.region", "xy", "[[plan.pour]] region = [x0, y0, x1, y1] | [[x, y], ...]"),
 )
 

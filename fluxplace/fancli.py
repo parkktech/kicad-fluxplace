@@ -4,6 +4,7 @@ import importlib
 
 MODULES = ("density", "fanout", "modules", "floorplan2", "snapvias")
 MODULES += ("closure",)
+MODULES += ("intent", "intentdraft")          # placement intent: gate + draft (docs/INTENT.md)
 
 
 def add_parsers(sub):
