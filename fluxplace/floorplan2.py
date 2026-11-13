@@ -886,6 +886,15 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     return res, P, Bn
 
 
+def fanout_blocked(path, cons, spec):
+    """pins the whole-board fan-out cannot escape on the board at `path` (check only, nothing written)."""
+    from . import routediag as RD, fanout as FO
+    a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
+                           nodes=200000, repairs=12, check_only=True)
+    Bn, fres = FO.run(path, cons, spec, None, a, None)
+    return sum(len(v["blocked"]) for v in FO.summarise(Bn, fres).values())
+
+
 def plan_summary(path, cons, spec):
     """plan-route's calibrated global router on a placement (no copper considered): score, overflow, over-budget, return path."""
     from . import planroute as PL, routediag as RD
@@ -969,6 +978,10 @@ def cmd_floorplan(a):
     shutil.copyfile(best["board"], out)
     _pro(src_board, out)
     S.mark(out)
+    from . import wlrefine as WL                    # --- wire length: shorter where the fan-out, the plan and the intent allow it
+    wl = WL.stage_step(out, cons, spec, check=lambda p: fanout_blocked(p, cons, spec))
+    if wl and wl["moved"]:
+        Bn = RD.load(out)
     rp = os.path.splitext(out)[0] + ".floorplan.json"
     json.dump({"history": [{k: v for k, v in h.items() if k != "blocked"} for h in history], "final": best["tag"]}, open(rp, "w"), indent=1, default=str)
     print(f"floorplan: {'PASS' if passes(best) else 'FAIL'} at grow {best['grow']}; wrote {out}; report {rp}; total {time.time() - t0:.0f} s")

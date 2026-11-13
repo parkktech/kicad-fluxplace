@@ -258,7 +258,17 @@ def st_place(c, n, board):
                 "board": mid, "next": ["routable place refused/failed: " + log]}
     _sidecar(board, out)
     moved = next((l.strip() for l in text.splitlines() if l.startswith(("routable:", "cypress:"))), "placed")
-    return {"verdict": "pass", "line": moved, "board": out, "engine": _engine_record(out)}
+    return dict({"verdict": "pass", "line": moved, "board": out, "engine": _engine_record(out)}, **_wl_record(out))
+
+
+def _wl_record(board):
+    """{"wl": before>after numbers} when the wire-length pass ran on the stage board (wlrefine.py; full record beside it)."""
+    from . import wlrefine as WL
+    p = os.path.splitext(board)[0] + ".wl-refine.json"
+    try:
+        return {"wl": WL.short(json.load(open(p)))} if os.path.exists(p) else {}
+    except Exception:
+        return {}
 
 
 def _engine(c):
@@ -619,7 +629,7 @@ def st_floorplan(c, n, board):
     # a floorplan / fan-out / INTENT FAIL fails the stage; `[floorplan] waive_fail = "reason"` is the only (recorded) way past it
     bad = rc != 0 or not os.path.exists(out) or line.startswith("floorplan: FAIL") or any(
         l.startswith("INTENT: FAIL") for l in text.splitlines())
-    return {"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}
+    return dict({"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}, **_wl_record(out))
 
 
 def st_fanout(c, n, board):

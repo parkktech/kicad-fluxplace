@@ -20,16 +20,16 @@ Requirements, the interpreter trap (pcbnew needs KiCad's python), toolchain:
 
 `fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages, each reading only the
 previous board and `W/state.json`, so each can run in its own agent context:
-floorplan-check, anchor-check, place (clusters + routable), route-ready gate, route (fanout, time-boxed,
+floorplan-check, anchor-check, place (clusters, routable), route-ready gate, route (fanout, time-boxed,
 stall loop; `route-wait` instead of log polling), tune, review. `--from/--to/--status` select and inspect.
-Guide and subagent briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+Subagent briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
 Analysis commands print a compact report (verdict, counts, worst N, path);
-`--full` restores everything, `-q` prints the verdict only ([docs/commands/output.md](docs/commands/output.md)).
+`--full` restores everything, `-q` verdict only ([docs/commands/output.md](docs/commands/output.md)).
 
 ## Commands
 
-Details: `fluxplace help-brief CMD` (15 lines) or [docs/commands/](docs/commands/).
+Details: `fluxplace help-brief CMD` or [docs/commands/](docs/commands/).
 
 <!-- index:start -->
 deliver           split a fab package: CAM-only zip + loose...
@@ -75,6 +75,7 @@ pairs             lay the differential pairs by construction...
 join-gaps         close small same-net copper gaps (track...
 intent            INTENT gate: every placement-intent item...
 intent-draft      propose an [intent] section from the board...
+wl-refine         shorten wire length
 parts             part-entry gate...
 ready             readiness gate before place/route: parts...
 pin-groups        functional pin groups of multi-channel...

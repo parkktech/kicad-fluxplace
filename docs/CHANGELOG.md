@@ -1,5 +1,12 @@
 # Change log (moved from the README)
 
+## 2026-11-13 - wl-refine: wire-length refinement under the gate
+
+`fluxplace wl-refine` (`fluxplace/wlrefine.py`, `docs/commands/wl-refine.md`): incremental class-weighted HPWL + decap/support
+proximity, moves kept only when legality, pin lanes, intent, routing demand, escapes, plan-route and the gate score are not
+worse than the input. Optional last step of `place --strategy routable` and `floorplan` (`[placement.wl] enabled = true`).
+`preroute.run(escape=False)` skips the escape reservation (same score); `PlanState.escapes` is the escape half of `update`.
+
 ## 2026-11-11 - batch routing with checkpoints; round-2 merge
 
 Routing (pipeline route stage, `auto`, `compact`, stall loop) now routes in batches with a checkpoint board

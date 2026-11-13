@@ -145,3 +145,25 @@ def test_route_ready_gate_blocks_unless_forced(tmp_path):
     # either the synthetic board passes the gate or it is blocked; a block must stop the run
     if st["stages"]["route-ready"]["verdict"] == "blocked":
         assert rc == 1 and st["next"]
+
+
+def test_constraints_intent_pairlay_and_wl_tables_load_together(tmp_path):
+    from fluxplace import constraints as C, intent as IT, pairs as PR, wlrefine as WR
+    p = tmp_path / "c.toml"
+    p.write_text('[intent]\n[[intent.region]]\nname = "r"\nrect = [0, 0, 5, 5]\nkeep = "out"\nrefs = ["C1"]\n'
+                 '[pairlay]\nreserve_exits = true\n[placement.wl]\nenabled = true\n')
+    cons = C.load(str(p))
+    assert IT.section(cons)["region"][0]["name"] == "r" and PR.params(cons)["reserve_exits"] is True and WR.enabled(cons)
+
+
+def test_fanout_and_plan_route_stages_do_not_say_pass_on_their_own_fail(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    outs = {"fanout": (0, "fanout: FANOUT_FAIL - 1/2 required pins escaped\nFANOUT_PIN_BLOCKED U1.1 N x\n"),
+            "plan-route": (1, "PLAN_SCORE 9 FAIL\n")}
+    monkeypatch.setattr(PL, "_run_cli", lambda argv, log: outs[argv[0]])
+    r = PL.st_fanout(c, 4, b)
+    assert r["verdict"] == "fail" and "FANOUT_PIN_BLOCKED" in " ".join(r["next"])
+    r = PL.st_plan_route(c, 5, b)
+    assert r["verdict"] == "warn" and r["line"].startswith("WARN")
