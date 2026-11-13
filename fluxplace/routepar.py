@@ -476,6 +476,8 @@ def route_parallel(board, workdir, nets, build_cmd, serial_run, *, cons=None, sp
         push()
         if not keep_jobs:
             shutil.rmtree(jd, ignore_errors=True)
+        if ok and not shrunk:
+            size = min(rj, size * 2)                 # a round that improved the board earns its jobs back
         if not (ok or shrunk or (len(dead), sum(len(v) for v in dead_edges.values())) != dstate0):
             break
 
