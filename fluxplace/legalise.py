@@ -94,8 +94,9 @@ def keepout_rects(B, cons):
 
 
 class _Model:
-    def __init__(self, B, cons, fixed, bounds, escape=True):
+    def __init__(self, B, cons, fixed, bounds, escape=True, reserve=None):
         self.B, self.cons, self.bounds, self.escape = B, cons, bounds, escape
+        self.reserve = reserve if (reserve and escape) else {"rects": [], "inflate": {}}      # escreserve.for_legalise
         self.fixed = set(fixed) | {r for r, p in B["parts"].items() if p.get("locked")}
         self.fixed |= set(((cons or {}).get("lock") or {}).get("at", {}))
         self.ko = keepout_rects(B, cons)
@@ -117,6 +118,9 @@ class _Model:
             pads, court = GM.moved(part, 0.0, 0.0, ang)
             a = allowances(part, pads, court) if self.escape and (NC.is_ic(ref, part, 3) or part["n_pads"] >= CONN_PADS) \
                 else (0.0,) * 4
+            x = self.reserve["inflate"].get(ref)
+            if x:                                        # a movable fine-pitch / multi-row part carries its first escape row
+                a = tuple(max(u, v) for u, v in zip(a, _turn(x, ang - part["angle"])))
             self._rel[k] = ((court[0] - a[0], court[1] - a[1], court[2] + a[2], court[3] + a[3]), court)
         return self._rel[k]
 
@@ -154,6 +158,9 @@ class _Model:
                 continue
             if sd & ks and (part["tht"] or mh is None):
                 out.append((name, r))
+        for r in self.reserve["rects"]:                  # the first escape row of another part: hard
+            if r["hard"] and r["owner"] != ref and sd & r["sides"]:
+                out.append((r["why"], r["rect"]))
         # track-forbidding rule areas: nothing can be routed to a pad inside one (the
         # area's own part, e.g. the antenna it is named after, is exempt)
         layer = "F.Cu" if part["side"] == "F.Cu" else "B.Cu"
@@ -203,6 +210,15 @@ def _union(rs):
     return (min(r[0] for r in rs), min(r[1] for r in rs), max(r[2] for r in rs), max(r[3] for r in rs))
 
 
+def _turn(a, deg):
+    """(left, top, right, bottom) allowances of a part turned by a multiple of 90 degrees (other angles: the largest on every side)."""
+    q = (deg % 360) / 90.0
+    if abs(q - round(q)) > 1e-6:
+        return (max(a),) * 4
+    k = int(round(q)) % 4
+    return tuple(a[(i + k) % 4] for i in range(4))
+
+
 def check_outline(B, positions, bounds=None):
     """{ref: (x, y, ang)} -> list of refs whose courtyard leaves `bounds`
     (default the board's Edge.Cuts box)."""
@@ -216,7 +232,7 @@ def check_outline(B, positions, bounds=None):
 
 
 def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400, log=None,
-             strict=True, units=None, escape=True, rigid=()):
+             strict=True, units=None, escape=True, rigid=(), reserve=None):
     """`targets` = {ref: (x, y, angle)} desired origins of the MOVABLE parts (every
     other part stays put). `units` = {key: [refs]} makes those parts move as one
     rigid body (an IC with its support parts); keys in `rigid` (structure templates) are never split. -> ({ref: (x, y, angle)}, report).
@@ -225,7 +241,7 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
     bounds = bounds or B["bbox"]
     em = float(((cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3))
     bounds = (bounds[0] + em, bounds[1] + em, bounds[2] - em, bounds[3] - em)   # copper-to-edge
-    M = _Model(B, cons, fixed, bounds, escape)
+    M = _Model(B, cons, fixed, bounds, escape, reserve)
     parts = B["parts"]
     want = {r: tuple(v) for r, v in targets.items() if r in parts and r not in M.fixed}
     groups, seen = [], set()
@@ -321,6 +337,7 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
     it = iters - 1
     if hot:
         _clear_hot(ctx, hot)
+    soft = _clear_soft(ctx, [r for r in M.reserve["rects"] if not r["hard"]]) if M.reserve["rects"] else None
     res = {}
     for e in E.values():
         for m in e.members:
@@ -333,6 +350,8 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
             f"overlap(s), {len(rep['in_keepout'])} in keep-outs "
             f"(e.g. {(rep['outside'] + [o for o in rep['overlaps']] + rep['in_keepout'])[:4]})")
     rep["iterations"] = it + 1
+    if soft is not None:
+        rep["reserved"] = dict(soft, hard=sum(1 for r in M.reserve["rects"] if r["hard"]))
     return res, rep
 
 
@@ -431,6 +450,42 @@ def _clear_hot(c, hot, reach=6.0, step=0.5):
                 continue
             e.pos[0], e.pos[1] = x, y
             break
+
+
+def _clear_soft(c, soft, step=0.25):
+    """Soft reservations (escape rows, pin escapes, pair corridors): a single part sitting in one that is not its own is
+    moved to the nearest legal seat outside every reservation, when one exists within the reservation's cost (mm).
+    -> {soft, moved: [refs], left: [refs still inside]}."""
+    moved, left = [], []
+    for k in sorted(c.E):
+        e = c.E[k]
+        if len(e.members) != 1:
+            continue
+        mine = [r for r in soft if r["owner"] != k and e.sides & r["sides"]]
+        hit = [r for r in mine if GM.overlap(_rect(e.pos, e.bare), r["rect"])]
+        if not hit:
+            continue
+        reach = max(r["cost"] or 0.0 for r in hit)
+        n = int(reach / step)
+        done = False
+        for _d, dx, dy in sorted((math.hypot(i * step, j * step), i * step, j * step) for i in range(-n, n + 1) for j in range(-n, n + 1)):
+            if _d > reach or not _d:
+                continue
+            x, y = e.pos[0] + dx, e.pos[1] + dy
+            rc, ri = _rect((x, y), e.bare), _rect((x, y), e.infl)
+            if not GM.inside(rc, c.bounds) or not c.M.in_outline(rc) or any(GM.overlap(rc, r["rect"]) for r in mine):
+                continue
+            if any(o != ("E", k) and e.sides & c.sides_of(o) for o in c.static.hits(ri, "x")):
+                continue
+            if any(o != k and GM.overlap(ri, c.erect(o)) and (e.sides & c.E[o].sides) for o in c.E):
+                continue
+            if any(GM.overlap(rc, f) for f in c.forb(k, rc)):
+                continue
+            e.pos[0], e.pos[1] = x, y
+            done = True
+            break
+        (moved if done else left).append(k)
+    return {"soft": len(soft), "moved": moved, "left": left}
 
 
 def verify(B, M, res, bounds):

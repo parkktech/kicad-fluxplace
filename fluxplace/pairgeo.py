@@ -109,19 +109,26 @@ class Items:
                 self.h[b] = [k for k in self.h[b] if k < mark]
         del self.it[mark:]
 
+    def retire(self, nets=None, which=None):
+        """old (fan-out) copper that leaves the board stops being an obstacle: all of `nets`, or the routediag items in `which`."""
+        ids = {id(o) for o in which} if which is not None else None
+        for it in self.it:
+            if it["old"] and ((nets and it["net"] in nets) or (ids and id(it.get("src")) in ids)):
+                it["dead"] = True
+
     def pad(self, p):
         r = math.hypot(p["w"], p["h"]) / 2
         self._add({"k": "pad", "p": p, "net": p["net"], "layers": frozenset(self.copper if p.get("np") else p["layers"]), "old": False,
                    "label": f"pad {p['ref']}.{p['num']}" + (f" ({p['net']})" if p["net"] else "")},
                   p["x"] - r, p["y"] - r, p["x"] + r, p["y"] + r)
 
-    def seg(self, a, b, w, layer, net, old=False, extra=0.0, label=None):
-        return self._add({"k": "seg", "a": a, "b": b, "w": w, "net": net, "layers": frozenset([layer]) if layer else frozenset(self.copper),
+    def seg(self, a, b, w, layer, net, old=False, extra=0.0, label=None, src=None):
+        return self._add({"k": "seg", "a": a, "b": b, "w": w, "net": net, "src": src, "layers": frozenset([layer]) if layer else frozenset(self.copper),
                           "old": old, "extra": extra, "label": label or f"track {net} {layer}"},
                          min(a[0], b[0]) - w / 2, min(a[1], b[1]) - w / 2, max(a[0], b[0]) + w / 2, max(a[1], b[1]) + w / 2)
 
-    def via(self, x, y, d, net, old=False, layers=None):
-        return self._add({"k": "via", "c": (x, y), "d": d, "net": net, "layers": frozenset(layers or self.copper), "old": old,
+    def via(self, x, y, d, net, old=False, layers=None, src=None):
+        return self._add({"k": "via", "c": (x, y), "d": d, "net": net, "src": src, "layers": frozenset(layers or self.copper), "old": old,
                           "label": f"via {net}"}, x - d / 2, y - d / 2, x + d / 2, y + d / 2)
 
     def poly(self, pts, layers, label):
@@ -136,9 +143,9 @@ class Items:
         for p in B["pads"]:
             I.pad(p)
         for s in B["segs"]:
-            I.seg(s["a"], s["b"], s["w"], s["layer"], s["net"], old=s["net"] in old_nets)
+            I.seg(s["a"], s["b"], s["w"], s["layer"], s["net"], old=s["net"] in old_nets, src=s)
         for v in B["vias"]:
-            I.via(v["x"], v["y"], v["d"], v["net"], old=v["net"] in old_nets, layers=RA._expand_layers(v, B["copper"]))
+            I.via(v["x"], v["y"], v["d"], v["net"], old=v["net"] in old_nets, layers=RA._expand_layers(v, B["copper"]), src=v)
         for z in B["zones"]:
             if z["keepout"] and z["no_tracks"] and len(z["pts"]) >= 3:
                 I.poly(z["pts"], [l for l in z["layers"] if l in B["copper"]], f"rule area {z.get('name') or z.get('owner') or ''}".strip())
@@ -184,7 +191,7 @@ class Items:
         r = w / 2 + need + 0.6
         best, who = 1e9, None
         for it in self._near(min(a[0], b[0]) - r, min(a[1], b[1]) - r, max(a[0], b[0]) + r, max(a[1], b[1]) + r):
-            if layer not in it["layers"] or (it["net"] and it["net"] == net) or (it["old"] and it["net"] in skip_old):
+            if layer not in it["layers"] or (it["net"] and it["net"] == net) or (it["old"] and (it["net"] in skip_old or it.get("dead"))):
                 continue
             g = self._dist(it, a, b) - w / 2
             if g < best:
@@ -195,7 +202,7 @@ class Items:
         r = d / 2 + need + 0.6
         best, who = 1e9, None
         for it in self._near(x - r, y - r, x + r, y + r):
-            if (it["net"] and it["net"] == net) or (it["old"] and it["net"] in skip_old):
+            if (it["net"] and it["net"] == net) or (it["old"] and (it["net"] in skip_old or it.get("dead"))):
                 continue
             g = self._dist(it, (x, y), (x, y)) - d / 2
             if g < best:

@@ -138,7 +138,7 @@ def _gates(grid, allowed, li_list, term, R, outward, lat=0.3):
     return out
 
 
-def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
+def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
     sig, step = grid.sig, grid.step
@@ -160,7 +160,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
         margin = P["margin"] + 0.05 * (attempt // 2 if attempt < 4 else 2)
         thr = clr + env / 2 + margin
         allowed = {l: D[l] >= thr for l in sig}
-        Rs = [t["sep"] / 2 + max(t["p"]["w"], t["p"]["h"], t["n"]["w"], t["n"]["h"]) / 2 + env / 2 + clr + P["ring"] for t in (ta, tb)]
+        Rs = [t["sep"] / 2 + max(t["p"]["w"], t["p"]["h"], t["n"]["w"], t["n"]["h"]) / 2 + env / 2 + clr + (ring or P["ring"]) for t in (ta, tb)]
         ga = {k: v for k, v in _gates(grid, allowed, lays[0], ta, Rs[0], True, dist).items() if k not in banned}
         gb = {k: v for k, v in _gates(grid, allowed, lays[1], tb, Rs[1], False, dist).items() if k not in banned}
         for t, g, R in ((ta, ga, Rs[0]), (tb, gb, Rs[1])):
@@ -211,8 +211,8 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
                                              for r in runs], "vias": len(vias), "layers": [r["layer"] for r in runs]}
         cp, p0, p1 = PL.legs(runs, vias, dist, hv, w, rule["via"], pol)
         cn, n0, n1 = PL.legs(runs, vias, dist, hv, w, rule["via"], -pol)
-        g1, it1 = PL.check(items, cp, nets[0], clr, nets)
-        g2, it2 = PL.check(items, cn, nets[1], clr, nets)
+        g1, it1 = PL.check(items, cp, nets[0], clr, ctx["skip"])
+        g2, it2 = PL.check(items, cn, nets[1], clr, ctx["skip"])
         if min(g1, g2) < clr - 1e-6:
             it = it1 if g1 <= g2 else it2
             reason, blockers = f"coupled path {min(g1, g2):.3f} mm from {it['label']} (exact check)", [it["label"]]
@@ -222,7 +222,8 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
         _claim(items, cn, nets[1])
         t0, t1 = runs[0]["t0"], runs[-1]["t1"]
         skew = PL.piece_len(cp) - PL.piece_len(cn)
-        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], w, nets, clr, nets, bias=skew)
+        fb = lambda pad, e, layer, net: PL.stub(grid.B, items, ctx["base_n"], ctx["ign"], pad, e, layer, w, net, clr, ctx["skip"])
+        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], w, nets, clr, ctx["skip"], bias=skew, fallback=fb)
         if ba[0] is None:
             items.rollback(mark)
             reason, blockers = ba[1], [ba[2]["label"]] if ba[2] else []
@@ -230,7 +231,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
             continue
         _claim(items, ba[0], nets[0])
         _claim(items, ba[1], nets[1])
-        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], w, nets, clr, nets, bias=skew + ba[2])
+        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], w, nets, clr, ctx["skip"], bias=skew + ba[2], fallback=fb)
         if bb[0] is None:
             items.rollback(mark)
             reason, blockers = bb[1], [bb[2]["label"]] if bb[2] else []
@@ -242,9 +243,9 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False):
         left_mm = 0.0
         if abs(skew) > ctx["tol"](nets[0]):
             if skew > 0:
-                cn, left_mm = PL.bump(items, cn, nets[1], skew, -pol, clr, nets, 0, len(cn))
+                cn, left_mm = PL.bump(items, cn, nets[1], skew, -pol, clr, ctx["skip"], 0, len(cn))
             else:
-                cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, nets, 0, len(cp))
+                cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, ctx["skip"], 0, len(cp))
         Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
         items.rollback(mark)
         _claim(items, Pp, nets[0])
@@ -261,23 +262,6 @@ def _claim(items, pieces, net):
             items.seg(p[2], p[3], p[4], p[1], net)
         else:
             items.via(p[1], p[2], p[3], net)
-
-
-def _fouls(kind, o, pieces, clr):
-    """an old fan-out item of one net closer than the clearance to the new copper of its partner."""
-    for p in pieces:
-        if kind == "seg" and p[0] == "seg":
-            if p[1] == o["layer"] and G.seg_seg(o["a"], o["b"], p[2], p[3]) - (o["w"] + p[4]) / 2 < clr:
-                return True
-        elif kind == "seg":
-            if G.pt_seg((p[1], p[2]), o["a"], o["b"]) - (o["w"] + p[3]) / 2 < clr:
-                return True
-        elif p[0] == "seg":
-            if G.pt_seg((o["x"], o["y"]), p[2], p[3]) - (o["d"] + p[4]) / 2 < clr:
-                return True
-        elif math.hypot(o["x"] - p[1], o["y"] - p[2]) - (o["d"] + p[3]) / 2 < clr:
-            return True
-    return False
 
 
 def _ban(state, grid, r):
@@ -299,7 +283,7 @@ def direct_section(ctx, ta, tb, rule, nets):
             u = G.unit((a["x"], a["y"]), (b["x"], b["y"]))
             for pts in PL.doglegs((a["x"], a["y"]), (b["x"], b["y"]), (-u[0], -u[1]), exts=(0.0,)) + [[(a["x"], a["y"]), (b["x"], b["y"])]]:
                 pcs = [("seg", l, x, y, w) for x, y in zip(pts, pts[1:])]
-                if PL.check(items, pcs, net, clr, nets)[0] >= clr - 1e-6:
+                if PL.check(items, pcs, net, clr, ctx["skip"])[0] >= clr - 1e-6:
                     _claim(items, pcs, net)
                     out.append(pcs)
                     done = True
@@ -337,7 +321,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     pair_nets = {n for pr in pl for n in pr}
     grid = PL.Grid(B, sig, clr, edge, P["step"], pair_nets)
     items = G.Items.of_board(B, old_nets=pair_nets, edge_extra=max(0.0, edge - clr))
-    ctx = {"grid": grid, "items": items, "P": P,
+    ctx = {"grid": grid, "items": items, "P": P, "base_n": items.mark(), "skip": pair_nets,
+           "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
            "tol": lambda net: min(0.25 * C.skew_limit_mm(cons, net), 0.25)}
     span = {}
     todo = []
@@ -360,7 +345,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         if rule["gap"] + 1e-9 < R.get("min_clearance", 0.0):
             e["status"], e["why"] = "not-laid", f"class gap {rule['gap']} below the clearance floor"
             continue
-        D, O = grid.view(set(pr))
+        D, O = grid.view()
         pcs = {pr[0]: [], pr[1]: []}
         nok = 0
         tp = time.time()
@@ -372,6 +357,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 r = direct_section(ctx, ta, tb, rule, pr)
             if r is None:
                 r = lay_section(ctx, D, O, ta, tb, rule, pr, plan_only)
+                if not r["ok"] and "search budget" not in r["reason"]:          # a longer uncoupled break-out: gates further out
+                    r2 = lay_section(ctx, D, O, ta, tb, rule, pr, plan_only, ring=3 * P["ring"])
+                    r = r2 if r2["ok"] else r
             if not r["ok"] and d < 3.0 and not plan_only:
                 r = direct_section(ctx, ta, tb, rule, pr) or r
             s = {"from": ta["name"], "to": tb["name"], "ok": r["ok"], "mm": round(d, 2)}
@@ -386,9 +374,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                          uncompensated=r.get("uncompensated", 0.0))
                 grid.claim(r["P"], pr[0])
                 grid.claim(r["N"], pr[1])
-                for l in D:                                # the next section of this pair sees this one
-                    D[l] = None
-                D, O = grid.view(set(pr))
+                D, O = grid.view()                         # the next section of this pair sees this one
             else:
                 s.update(reason=r["reason"], blockers=r.get("blockers", []))
             e["sections"].append(s)
@@ -405,10 +391,15 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             if full:
                 res["strip"] += list(pr)
                 grid.drop_old(pr)
-            else:                                           # the fan-out copper that the new copper of the partner net fouls goes
-                for net, other in ((pr[0], pr[1]), (pr[1], pr[0])):
-                    res["kill"] += [(kind, o) for kind, o in grid.old.get(net, []) if _fouls(kind, o, pcs[other], rule["clr"])]
+                items.retire(nets=set(pr))
         log(f"pairs: {pr[0]}/{pr[1]} {e['status']} ({e.get('secs', 0)} s)")
+    # fan-out copper of the pairs that keep theirs: only what the new copper does not foul stays (the rest would be a DRC error)
+    lim = min(clr, B["clearance"]) - 0.005
+    for net, lst in grid.old.items():
+        for kind, o in lst:
+            pc = ("seg", o["layer"], o["a"], o["b"], o["w"]) if kind == "seg" else ("via", o["x"], o["y"], o["d"])
+            if not plan_only and res["laid"] and PL.check(items, [pc], net, lim, pair_nets)[0] < lim:
+                res["kill"].append((kind, o))
     res["secs"] = round(time.time() - t0, 1)
     return res
 

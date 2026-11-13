@@ -46,29 +46,10 @@ class Grid:
     def xy(self, j, i):
         return self.F.xy(j, i)
 
-    def view(self, own):
-        """per-pair distance arrays: the base field plus the fan-out copper of the OTHER pairs (their own is replaced)."""
-        F = self.F
-        D = {l: F.dist[l].copy() for l in F.copper}
-        O = {l: F.owner[l].copy() for l in F.copper}
-        for net, items in self.old.items():
-            if net in own:
-                continue
-            for kind, o in items:
-                if kind == "seg":
-                    sl = F._sl(min(o["a"][0], o["b"][0]), min(o["a"][1], o["b"][1]), max(o["a"][0], o["b"][0]), max(o["a"][1], o["b"][1]))
-                    sdf, ls = (PK.seg_sdf(o["a"], o["b"], o["w"], F.X[sl], F.Y[sl]), [o["layer"]]) if sl else (None, [])
-                else:
-                    sl = F._sl(o["x"], o["y"], o["x"], o["y"])
-                    sdf, ls = (np.hypot(F.X[sl] - o["x"], F.Y[sl] - o["y"]) - o["d"] / 2, F.copper) if sl else (None, [])
-                if sl:
-                    idx = F._add(kind, None, net, "fan-out")
-                    for l in ls:
-                        if l in D:
-                            m = sdf < D[l][sl]
-                            D[l][sl][m] = sdf[m]
-                            O[l][sl][m] = idx
-        return D, O
+    def view(self):
+        """per-pair distance arrays (a copy of the base field).  The fan-out copper of pair nets is not in it: a laid pair
+        replaces its own, and what an unlaid pair keeps is decided at the end (pairs.plan: only what the new copper does not foul)."""
+        return {l: a.copy() for l, a in self.F.dist.items()}, {l: a.copy() for l, a in self.F.owner.items()}
 
     def drop_old(self, nets):
         for n in nets:
@@ -333,23 +314,64 @@ def doglegs(q, e, t, exts=(0.0, 0.15, 0.3, 0.5, 0.8, 1.2)):
     return out
 
 
-def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0):
-    """dog-legs for both legs at one terminal -> ([pieces P], [pieces N], length P - length N) | (None, reason, item).
-    pads = (pad P, pad N), ends = (leg end P, leg end N); the pair of candidates with the least |skew + bias| wins."""
-    cands = []
-    worst = (None, None)
-    for pad, e, net in zip(pads, ends, nets):
-        ok = []
-        for pts in doglegs((pad["x"], pad["y"]), e, t):
+def stub(B, items, base_n, ignore, pad, e, layer, w, net, clr, skip_old, step=0.05):
+    """grid-routed single track from pad to the leg end e (the dog-legs did not fit) -> (pts pad -> e) | None."""
+    half = max(abs(e[0] - pad["x"]), abs(e[1] - pad["y"])) / 2 + 1.5
+    F = PK.Field(B, ((pad["x"] + e[0]) / 2, (pad["y"] + e[1]) / 2), half, step, own={net}, ignore=ignore, clearance=clr)
+    for it in items.it[base_n:]:
+        if it["net"] == net:
+            continue
+        for l in it["layers"]:
+            if it["k"] == "seg" and l == layer:
+                F.block_seg(it["a"], it["b"], it["w"], l, it["net"] or "")
+        if it["k"] == "via":
+            F.block_via(it["c"][0], it["c"][1], it["d"], it["net"] or "")
+    seeds = F.shape_mask(pad)
+    d = PK.dist(F.free(layer, w + 0.04) | seeds, seeds, step)
+    j, i = F.cell(*e)
+    if not (0 <= j < F.ny and 0 <= i < F.nx) or d[j, i] >= PK.INF / 2:
+        return None
+    pts = [e]
+    while d[j, i] > 0:
+        v, j2, i2 = min((d[j + a, i + b], j + a, i + b) for a in (-1, 0, 1) for b in (-1, 0, 1)
+                        if (a or b) and 0 <= j + a < F.ny and 0 <= i + b < F.nx)
+        if v >= d[j, i]:
+            return None
+        j, i = j2, i2
+        pts.append(F.xy(j, i))
+    out = [pts[0]]
+    for k in range(1, len(pts) - 1):                      # corners only
+        a, b, c = out[-1], pts[k], pts[k + 1]
+        if abs((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])) > 1e-7 and k > 1:
+            out.append(b)
+    out.append(pts[-1])
+    out = G.clean(out[::-1], 1e-4)
+    pcs = [("seg", layer, a, b, w) for a, b in zip(out, out[1:])]
+    return out if pcs and check(items, pcs, net, clr, skip_old)[0] >= clr - 1e-6 else None
+
+
+def _eff(pts, pad):
+    inside = [k for k, q in enumerate(pts) if RC._in_pad(pad, q[0], q[1], 0.02)]      # the audit measures from the last joint in the pad
+    return G.length(pts[max(inside, default=0):])
+
+
+def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fallback=None):
+    """break-outs of both legs at one terminal -> ([pieces P], [pieces N], length P - length N) | (None, reason, item).
+    pads = (pad P, pad N), ends = (leg end P, leg end N).  Dog-legs first (the pair of candidates with the least
+    |skew + bias| wins); `fallback(pad, e, net)` grid-routes a leg the dog-legs cannot reach."""
+    def dog(k):
+        ok, worst = [], (None, None)
+        for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t):
             pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
-            g, it = check(items, pcs, net, clr, skip_old)
+            g, it = check(items, pcs, nets[k], clr, skip_old)
             if g >= clr - 1e-6:
-                inside = [k for k, q in enumerate(pts) if RC._in_pad(pad, q[0], q[1], 0.02)]      # the audit measures from the last joint in the pad
-                ok.append((pts, pcs, G.length(pts[max(inside, default=0):])))
+                ok.append((pts, pcs, _eff(pts, pads[k])))
             elif worst[0] is None or g > worst[0]:
                 worst = (g, it)
-        if not ok:
-            return None, f"no clear break-out for {pad['ref']}.{pad['num']}", worst[1]
+        return ok, worst[1]
+    cands, why = [], [None, None]
+    for k in (0, 1):
+        ok, why[k] = dog(k)
         cands.append(ok)
     best = None
     for a in cands[0]:
@@ -359,47 +381,68 @@ def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0):
             key = (round(abs(a[2] - b[2] + bias), 3), a[2] + b[2])
             if best is None or key < best[0]:
                 best = (key, a, b)
-    if best is None:
-        return None, f"break-outs at {pads[0]['ref']} foul each other", None
-    return best[1][1], best[2][1], best[1][2] - best[2][2]
+    if best is not None:
+        return best[1][1], best[2][1], best[1][2] - best[2][2]
+    if fallback:
+        for first in (0, 1):                               # one leg at a time; the second sees the first
+            mark = items.mark()
+            got = {}
+            for k in (first, 1 - first):
+                ok, _w = dog(k)
+                c = min(ok, key=lambda x: x[2]) if ok else None
+                if c is None:
+                    pts = fallback(pads[k], ends[k], layer, nets[k])
+                    c = (pts, [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])], _eff(pts, pads[k])) if pts else None
+                if c is None:
+                    break
+                got[k] = c
+                for p in c[1]:
+                    items.seg(p[2], p[3], p[4], p[1], nets[k])
+            items.rollback(mark)
+            if len(got) == 2:
+                return got[0][1], got[1][1], got[0][2] - got[1][2]
+    bad = 0 if not cands[0] else 1
+    if not cands[bad]:
+        return None, f"no clear break-out for {pads[bad]['ref']}.{pads[bad]['num']}", why[bad]
+    return None, f"break-outs at {pads[0]['ref']} foul each other", None
 
 
 def bump(items, pieces, net, extra, side, clr, skip_old, lo, hi, hmax=0.6, flat=0.3, lead=0.15):
-    """lengthen `pieces[lo:hi]` (the coupled part of the short leg) by `extra` mm with trapezoids on the side away from the
-    partner (`side` = +1 left of travel).  -> (pieces, mm still missing)."""
+    """lengthen `pieces[lo:hi]` (the coupled part of the short leg) by `extra` mm with 45 degree trapezoids on the side
+    away from the partner (`side` = +1 left of travel), nearest the ends first.  -> (pieces, mm still missing)."""
     out = list(pieces)
     k2 = 2 * (math.sqrt(2) - 1)
-    order = sorted(range(lo, hi), key=lambda k: min(k - lo, hi - 1 - k))
-    done = set()
-    while extra > 0.02:
-        placed = False
-        hgt = min(hmax, extra / k2)
-        for k in order:
-            p = out[k]
-            if k in done or p[0] != "seg":
-                continue
-            a, b = p[2], p[3]
-            L = math.hypot(b[0] - a[0], b[1] - a[1])
-            if L < 2 * hgt + flat + 2 * lead:
-                continue
-            u = G.unit(a, b)
-            n = G.left(u)
-            o = (n[0] * side, n[1] * side)
-            s0 = lead if (k - lo) <= (hi - 1 - k) else L - lead - 2 * hgt - flat
+    for k in sorted(range(lo, hi), key=lambda k: min(k - lo, hi - 1 - k)):
+        p = out[k]
+        if extra <= 0.02:
+            break
+        if p[0] != "seg":
+            continue
+        a, b = p[2], p[3]
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        u = G.unit(a, b)
+        n = G.left(u)
+        o = (n[0] * side, n[1] * side)
+        new, s0 = [], lead
+        prev = a
+        while extra > 0.02:
+            hgt = min(hmax, extra / k2)
+            if s0 + 2 * hgt + flat + lead > L:
+                break
             p1 = (a[0] + u[0] * s0, a[1] + u[1] * s0)
             p2 = (p1[0] + (u[0] + o[0]) * hgt, p1[1] + (u[1] + o[1]) * hgt)
             p3 = (p2[0] + u[0] * flat, p2[1] + u[1] * flat)
             p4 = (p3[0] + (u[0] - o[0]) * hgt, p3[1] + (u[1] - o[1]) * hgt)
-            new = [("seg", p[1], x, y, p[4]) for x, y in zip(G.clean([a, p1, p2, p3, p4, b], 1e-4), G.clean([a, p1, p2, p3, p4, b], 1e-4)[1:])]
-            if check(items, new[1:-1] if len(new) == 5 else new, net, clr, skip_old)[0] < clr - 1e-6:
-                continue
-            out[k] = new
-            done.add(k)
-            extra -= hgt * k2
-            placed = True
-            break
-        if not placed:
-            break
+            trap = [("seg", p[1], x, y, p[4]) for x, y in ((p1, p2), (p2, p3), (p3, p4))]
+            if check(items, trap, net, clr, skip_old)[0] >= clr - 1e-6:
+                new += [("seg", p[1], prev, p1, p[4])] + trap
+                prev = p4
+                extra -= hgt * k2
+                s0 += 2 * hgt + flat + 2 * lead
+            else:
+                s0 += 0.4
+        if new:
+            out[k] = new + [("seg", p[1], prev, b, p[4])]
     flat_out = []
     for p in out:
         flat_out += p if isinstance(p, list) else [p]
