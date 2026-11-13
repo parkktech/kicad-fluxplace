@@ -243,13 +243,40 @@ def st_place(c, n, board):
         return {"verdict": "fail", "line": "clusters --apply: " + (_last_line(text) or f"exit {rc}"),
                 "board": board, "next": ["clusters failed: " + log]}
     _sidecar(board, mid)
-    rc, text = _run_cli(["place", "--board", mid, "--strategy", "routable", "--out", out] + c.cs(), log)
+    rc, text = _run_cli(["place", "--board", mid, "--strategy", "routable", "--out", out] + _engine(c) + c.cs(), log)
     if rc != 0 or not os.path.exists(out):
         return {"verdict": "fail", "line": "place routable: " + (_last_line(text) or f"exit {rc}"),
                 "board": mid, "next": ["routable place refused/failed: " + log]}
     _sidecar(board, out)
-    moved = next((l.strip() for l in text.splitlines() if l.startswith("routable:")), "placed")
-    return {"verdict": "pass", "line": moved, "board": out}
+    moved = next((l.strip() for l in text.splitlines() if l.startswith(("routable:", "cypress:"))), "placed")
+    return {"verdict": "pass", "line": moved, "board": out, "engine": _engine_record(out)}
+
+
+def _engine(c):
+    """Placement engine hook (docs/CYPRESS.md): --engine, else `[placement] engine`; [] = the built-in placer."""
+    from . import placer_cypress as PC
+    e = PC.engine_of(c.cons, getattr(c.a, "engine", None))
+    return ["--engine", e] if e != "builtin" else []
+
+
+def _engine_record(board):
+    from . import placer_cypress as PC
+    r = PC.read_record(board)
+    return f"{r.get('engine', 'builtin')} {r.get('version', '')}".strip()
+
+
+def _engine_floorplan(c, d, board, out):
+    """Constructive flow with an external engine: it places the board instead of `floorplan`. -> result or None
+    (engine not selected, not installed, or it refused: the floorplan stage runs as usual)."""
+    if not _engine(c):
+        return None
+    rc, text = _run_cli(["place", "--board", board, "--strategy", "routable", "--out", out] + _engine(c) + c.cs(),
+                        os.path.join(d, "stage.log"))
+    line = next((l.strip() for l in text.splitlines() if l.startswith("cypress:")), None)
+    if rc != 0 or not line or not os.path.exists(out):
+        return None
+    _sidecar(board, out)
+    return {"verdict": "pass", "line": line, "board": out, "engine": _engine_record(out)}
 
 
 def st_route_ready(c, n, board):
@@ -525,6 +552,9 @@ def st_modules(c, n, board):
 def st_floorplan(c, n, board):
     d = c.dir(n, "floorplan")
     out = os.path.join(d, "board.kicad_pcb")
+    res = _engine_floorplan(c, d, board, out)
+    if res:
+        return res
     argv = ["floorplan", board, "--out", out] + c.cs() + (["--size"] if getattr(c.a, "size", False) else [])
     rc, text = _run_cli(argv + c.qs(), os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
@@ -640,6 +670,8 @@ def run(a):
         board = res.get("board", board)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
+        if res.get("engine"):
+            st["stages"][name]["engine"] = res["engine"]
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board
         st["next"] = res.get("next", [])
         if res.get("scorecard"):
