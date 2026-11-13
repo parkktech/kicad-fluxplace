@@ -152,7 +152,7 @@ What one run does (each step is in `W/<n>-route/freerouting.json`):
 
 | Step | What | Why |
 |---|---|---|
-| DSN copy | pours on signal layers removed from the copy; plane layers (copper not in `--layers`, or `[preroute] plane_layers`) declared `(type power)`; rule widths and untyped clearances raised to the floors; every existing wire and via `(type fix)` | KiCad exports every layer as signal and every pour as an obstacle; fixed copper is how fan-out and scripted pairs survive untouched. A plane that cannot be declared stops the run |
+| DSN copy | pours on signal layers removed from the copy; plane layers (every copper layer not in `--layers`, the same signal-layer list the per-net router gets) declared `(type power)`; rule widths and untyped clearances raised to the floors; every existing wire and via `(type fix)` | KiCad exports every layer as signal and every pour as an obstacle; fixed copper is how fan-out and scripted pairs survive untouched. A plane that cannot be declared stops the run |
 | JVM | `-de -do --router.autorouter.max_passes --gui.enabled=false -mt --router.job_timeout`, own `java.io.tmpdir`, `-XX:ActiveProcessorCount` = threads, analytics off | Freerouting writes the session when its job timeout fires; a watchdog kills that PID after `grace_s` (or 30 s after the session is on disk) and the session is still used |
 | fan-out | `fanout = "auto"`: `--router.fanout.enabled=false` when the board already has fan-out (Freerouting's own stage cost 15-35 min on a 339-part board and escaped 54 %) | `on` / `off` force it |
 | necks | `--router.automatic_neckdown=false` (`neckdown = true` re-enables) | pad-entry necks came out below the minimum track width |

@@ -610,19 +610,16 @@ def st_route(c, n, board):
 
 def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
-    from . import routefr as FR, ripolicy as RIP, preroute as PRE, batchroute as BR, pairaudit as PA, routediag as RD
+    from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
     a = c.a
     try:
         FS = FR.settings(c.cons, threads=getattr(a, "freerouting_threads", None))
     except ValueError as e:
         return {"ok": False, "error": str(e), "version": a.fr_loc["version"]}
-    # planes = the copper layers the route stage may not use (--layers lists the signal layers, as for the per-net
-    # router); an explicit `[preroute] plane_layers / signal_layers` list wins.  A pour on a signal layer is no plane.
-    pc = (c.cons or {}).get("preroute") or {}
-    if isinstance(pc.get("plane_layers"), list) or isinstance(pc.get("signal_layers"), list):
-        planes = PRE.layer_split(B, c.cons)[1]
-    else:
-        planes = [l for l in B["copper"] if l not in a.layers]
+    # planes = the copper layers the route stage may not use: `--layers` lists the signal layers for BOTH routers of
+    # the stage (the per-net finish routes on exactly these).  A pour on a signal layer is no plane: it is stripped
+    # from the DSN copy and refilled around the new copper.
+    planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     skip = [n for n in todo if n in ctl] if FS["pairs"] == "exclude" else []
     want = getattr(a, "freerouting_budget", None) or FS["budget_s"]
