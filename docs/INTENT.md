@@ -21,6 +21,7 @@ Names below are examples.
 [intent]                 # the table's presence switches the gate on for `floorplan` and `place --strategy routable`
 edge_gap_mm = 1.0        # how far from the outline still counts as "on the edge"
 plug_mm = 5.0            # default depth kept clear in front of a part that faces out
+lead_protrusion_mm = 1.5 # how far through-hole leads reach into a height-limited region on the OTHER side
 
 [[intent.edge]]          # part(s) on an outline edge
 name = "radio-modules"
@@ -85,7 +86,8 @@ edge = false             # a side-entry connector that is NOT meant to sit on an
 overhang_mm = 0.5
 ```
 
-Part heights for `max_height_mm`: `[placement.heights]` (`"U2*" = 2.3`, first match wins), else an estimate for chip passives
+Part heights for `max_height_mm`: `[placement.heights]` (`"U2*" = 2.3` by reference or `"C_1210*" = 2.7` by footprint
+name, first match wins), else an estimate for chip passives
 from the size code in the footprint name, else **unknown = treated as tall** (the gate prints "height unknown").
 `[[intent.region]] rect` is a registered coordinate (`fit-sheet` shifts it).
 

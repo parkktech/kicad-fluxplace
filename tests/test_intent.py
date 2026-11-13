@@ -132,6 +132,15 @@ def test_region_height_side_keepin_and_legaliser(tmp_path):
     assert LGL.Legal(B, cons).issues()["forbidden"] == ["C2 in under", "U5 in under"]          # C1 is low, C3 is on F
     c2 = {"intent": {"region": [reg]}, "placement": {"heights": {"U*": 0.9}}}
     assert rows(B, c2, "region")[0]["value"] == 1
+    c3 = {"intent": {"region": [reg]}, "placement": {"heights": {"C_1210*": 0.8, "QFN": 3.0}}}       # by footprint name
+    assert rows(B, c3, "region")[0]["refs"] == ["U5"]
+    # a through-hole part on the other side reaches in by its leads only
+    th = g.fp("J7", 30, 30, [g.pad("1", 0, 0, "A", typ="thru_hole"), g.pad("2", 2, 0, "B", typ="thru_hole")], name="Hdr",
+              court=(-1, -1, 3, 1))
+    Bt = load(tmp_path, th, name="th.kicad_pcb")
+    assert rows(Bt, cons, "region")[0]["refs"] == ["J7"]                    # leads 1.5 mm > the 1.0 mm limit
+    low = {"intent": {"region": [reg], "lead_protrusion_mm": 0.8}}
+    assert rows(Bt, low, "region")[0]["met"] is True
     nothing = {"intent": {"region": [dict(reg, max_height_mm=None, allow=["C1"])]}}
     nothing["intent"]["region"][0].pop("max_height_mm")
     assert LGL.Legal(B, nothing).issues()["forbidden"] == ["C2 in under", "U5 in under"]
@@ -418,3 +427,23 @@ def test_floorplan_command_exits_nonzero_on_fail_and_records_a_waiver(tmp_path, 
         cli.main(["floorplan", board, "--out", out, "--constraints", str(ci), "--assume-defaults"])
     o = capsys.readouterr().out
     assert e.value.code == 1 and "floorplan: PASS" in o and "INTENT: FAIL" in o
+
+
+def test_routable_placer_seats_holds_and_gates(tmp_path, capsys):
+    body = (module("U1", 50, 40) + _ic_with_caps() + cap("C1", 20, 20, "U1_N0", "D410") +
+            conn("J1", 60, 60, "USB_C_Receptacle_Horizontal", court=(-2, -2, 5, 2)))
+    path = g.board(tmp_path, body)
+    cf = tmp_path / "c.toml"
+    cf.write_text('[[intent.edge]]\nrefs = ["U1"]\nside = "left"\nfacing = "out"\nfront = "+x"\n')
+    out = str(tmp_path / "o.kicad_pcb")
+    cli.main(["place", "--board", path, "--strategy", "routable", "--out", out, "--constraints", str(cf)])
+    assert "INTENT: OK" in capsys.readouterr().out
+    B = RD.load(out)
+    cons = tomllib.load(open(cf, "rb"))
+    assert B["parts"]["U1"]["court"][0] - B["bbox"][0] <= 1.0                 # the placer kept the seated part on its edge
+    e = [r for r in IT.check(B, dict(cons, intent=dict(cons["intent"], _front={"U1": "+x", "J1": "+x"}))) if r["kind"] == "edge"]
+    assert len(e) == 2 and all(r["met"] for r in e)                          # the side-entry connector went to an edge too
+    cf.write_text('[[intent.away]]\na = ["U1"]\nb = ["U410"]\nmin_mm = 300\n')
+    with pytest.raises(SystemExit) as ex:                                    # unmet hard intent fails the placement
+        cli.main(["place", "--board", path, "--strategy", "routable", "--out", out, "--constraints", str(cf)])
+    assert ex.value.code == 1 and "INTENT: FAIL" in capsys.readouterr().out

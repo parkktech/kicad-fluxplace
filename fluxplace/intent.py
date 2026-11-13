@@ -18,9 +18,10 @@ Full reference with examples: docs/INTENT.md. Keys (all under `[intent]`; every 
   [intent.support]   follow = true (an IC's support parts move with it), decap_hard = true (a decoupling cap beyond its
                      limit fails the gate), hard = false (same for the other support parts), waive = [refs]
   [intent.connectors] REF = {entry = "side"|"top", opening = "+x", edge = false}; see connectors.py
-  [intent]           edge_gap_mm = 1.0, plug_mm = 5.0 (default clear depth of a facing part), enabled = true
+  [intent]           edge_gap_mm = 1.0, plug_mm = 5.0 (default clear depth of a facing part), enabled = true,
+                     lead_protrusion_mm = 1.5 (how far through-hole leads reach into a region on the other side)
 
-Sides are board axes on screen: left = min x, top = min y. Part heights: `[placement.heights]` (ref glob -> mm), else an
+Sides are board axes on screen: left = min x, top = min y. Part heights: `[placement.heights]` (ref or footprint glob -> mm), else an
 estimate for chip passives from the footprint size code, else unknown = treated as tall.
 
 How it is honoured: HARD intent is seated first and then HELD (`prepare`): rigid groups, edge parts (with their support
@@ -71,11 +72,13 @@ def match(parts, globs):
 
 
 def height(B, cons, ref):
-    """part height in mm, or None: [placement.heights], else the chip-size estimate."""
+    """part height in mm, or None: [placement.heights] (key = ref glob or footprint-name glob, first match wins), else
+    the chip-size estimate."""
+    fp = str(B["parts"][ref].get("fp", ""))
     for g, v in (((cons or {}).get("placement") or {}).get("heights") or {}).items():
-        if fnmatch.fnmatch(ref, g):
+        if fnmatch.fnmatch(ref, g) or fnmatch.fnmatch(fp.split(":")[-1], g):
             return float(v)
-    m = _CHIP.search(str(B["parts"][ref].get("fp", "")))
+    m = _CHIP.search(fp)
     if m:
         return _CHIP_H.get(m.group(1), {}).get(m.group(2))
     return None
@@ -265,6 +268,7 @@ class Zones:
         self.B, self.cons = B, cons
         self.z = []
         self._h, self._for = {}, {}
+        self.lead = float(section(cons).get("lead_protrusion_mm", 1.5))
         if not section(cons):
             self.top = set()
             return
@@ -324,8 +328,11 @@ class Zones:
         body = any(not q.get("np") for q in part["pads"])
         if (not body or _MECH.match(ref)) and (not z["holes"] or z["max_h"] is not None):
             return False                           # mounting hardware has no height: it counts only where nothing may be
-        if not (part["tht"] or part["side"][0] in z["sides"]):
-            return False
+        if part["side"][0] not in z["sides"]:
+            # from the other side only through-hole leads reach in, by `[intent] lead_protrusion_mm` (1.5)
+            if not part["tht"] or (body and z["max_h"] is not None and self.lead <= float(z["max_h"])):
+                return False
+            return True
         if z["max_h"] is not None and ref not in self.top and body:
             hh = self.h(ref)
             if hh is not None and hh <= float(z["max_h"]) and part["side"][0] in z["sides"]:
