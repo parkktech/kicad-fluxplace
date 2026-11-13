@@ -403,6 +403,8 @@ def _section(ctx, D, O, ta, tb, rule, pr, plan_only):
     for k, (a, b) in enumerate(variants):
         keep = a.get("keep", []) + b.get("keep", [])
         D2, O2, mark = D, O, items.mark()
+        if keep and any(PL.check(items, pcs, net, rule["clr"], ctx["skip"])[0] < rule["clr"] - 1e-6 for net, pcs in _old_pieces(keep).items()):
+            continue                                        # copper laid earlier already fouls this fan-out stub / via: no exit through it
         if keep:
             D2, O2 = {l: x.copy() for l, x in D.items()}, {l: x.copy() for l, x in O.items()}
             for net, pcs in _old_pieces(keep).items():
