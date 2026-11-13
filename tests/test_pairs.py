@@ -192,3 +192,106 @@ def test_unnamed_drilled_hole_is_an_obstacle(tmp_path):
     assert rep["complete"] == 1
     d = min(G.pt_seg((20.25, 30), s["a"], s["b"]) - s["w"] / 2 for s in B["segs"] if s["net"] in ("D_P", "D_N"))
     assert d >= 1.0 + CLR                                   # copper edge to hole edge
+
+
+# ---------------------------------------------------------------- round 2: inner layers, via exits, negotiated order, limits
+import pcbgen as PG
+
+
+def gduo(ref, x, y, p, n, pitch=0.5, **kw):
+    return PG.fp(ref, x, y, [PG.pad("1", 0, 0, p, 0.3, 0.8), PG.pad("2", pitch, 0, n, 0.3, 0.8)], **kw)
+
+
+def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
+    cage = PB.keepout(15, 15, 25.5, 16) + PB.keepout(15, 24, 25.5, 24.5) + PB.keepout(15, 15, 15.5, 24.5) + PB.keepout(25, 15, 25.5, 24.5)
+    b = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N") + cage)      # F / In1 / B; the rule areas are on F and B
+    out = str(tmp_path / "o.kicad_pcb")
+    rep = PR.run(b, {}, None, out)
+    r = rep["pairs"][0]
+    assert rep["signal_layers"] == ["F.Cu", "In1.Cu", "B.Cu"]
+    assert r["status"] == "complete" and r["layers"] == ["F.Cu", "In1.Cu", "F.Cu"] and r["vias"] == 2 and r["skew"] <= 0.3
+    # with nothing in the way the pair stays on the outer layer (an inner layer costs more)
+    b2 = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N"), name="c.kicad_pcb")
+    assert PR.run(b2, {}, None, str(tmp_path / "o2.kicad_pcb"))["pairs"][0]["layers"] == ["F.Cu"]
+
+
+def test_full_board_zone_makes_an_inner_layer_a_plane(tmp_path):
+    z = ('(zone (net 1) (net_name "GND") (layer "In1.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n')
+    part = ('(zone (net 2) (net_name "VCC") (layer "In1.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 60 0) (xy 60 80) (xy 0 80))))\n')
+    body = gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N")
+    assert PR.pair_layers(RD.load(PG.board(tmp_path, body + z)), {}) == (["F.Cu", "B.Cu"], ["In1.Cu"])
+    assert PR.pair_layers(RD.load(PG.board(tmp_path, body + part, name="p.kicad_pcb")), {})[0] == ["F.Cu", "In1.Cu", "B.Cu"]       # a partial fill: still a signal layer
+    assert PR.pair_layers(RD.load(PG.board(tmp_path, body + part, name="q.kicad_pcb")), {"preroute": {"plane_layers": ["In1.Cu"]}})[1] == ["In1.Cu"]
+
+
+def test_inner_layer_width_follows_the_impedance_target(tmp_path):
+    stackup = [{"type": "copper", "name": "F.Cu", "thickness": 0.035}, {"type": "prepreg", "thickness": 0.1, "epsilon_r": 4.1},
+               {"type": "copper", "name": "In1.Cu", "thickness": 0.015}, {"type": "core", "thickness": 0.2, "epsilon_r": 4.5},
+               {"type": "copper", "name": "In2.Cu", "thickness": 0.015}, {"type": "prepreg", "thickness": 0.6, "epsilon_r": 4.4},
+               {"type": "copper", "name": "B.Cu", "thickness": 0.035}]
+    cu = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    rule = {"w": 0.15, "gap": 0.25, "target": 100}
+    geo = PR.layer_geometry(rule, ["F.Cu", "In2.Cu", "B.Cu"], ["In1.Cu"], cu, stackup, 0.1)
+    assert geo["F.Cu"] == (0.15, 0.25, "class") and geo["B.Cu"][2] == "class"
+    assert geo["In2.Cu"][0] >= 0.15 and geo["In2.Cu"][1] == 0.25 and "100 ohm" in geo["In2.Cu"][2]
+    # no target, or no stackup: the class geometry everywhere
+    assert PR.layer_geometry(dict(rule, target=None), ["F.Cu", "In2.Cu"], ["In1.Cu"], cu, stackup, 0.1)["In2.Cu"][2] == "class"
+    assert PR.layer_geometry(rule, ["F.Cu", "In2.Cu"], ["In1.Cu"], cu, [], 0.1)["In2.Cu"][2] == "class"
+
+
+def _stub(net, x, y, vx, vy):
+    return (f'(segment (start {x} {y}) (end {vx} {vy}) (width 0.15) (locked yes) (layer "F.Cu") (net "{net}"))\n'
+            f'(via (at {vx} {vy}) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (locked yes) (net "{net}"))\n')
+
+
+def test_pair_leaves_through_its_fan_out_via_pair(tmp_path):
+    # U1's pins are boxed in on F.Cu; the fan-out stage left a stub + via per leg inside the box
+    bars = "".join(PB.fp(f"W{k}", x, y, [PB.pad("1", 0, 0, f"X{k}", w, h)]) for k, (x, y, w, h) in enumerate(
+        [(20.25, 19.15, 4.5, 0.3), (20.25, 20.85, 4.5, 0.3), (18.2, 20.0, 0.3, 2.0), (22.3, 20.0, 0.3, 2.0)]))
+    fan = _stub("D_P", 20.0, 20.0, 18.8, 20.0) + _stub("D_N", 20.5, 20.0, 21.7, 20.0)
+    body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 50, 40, "D_P", "D_N", layer="B.Cu") + bars + fan
+    rep, B, txt = lay(tmp_path, body)
+    r = rep["pairs"][0]
+    assert r["status"] == "complete" and r["via_exit"] == ["U1@via"] and r["skew"] <= 0.3
+    kept = {(v["x"], v["y"]) for v in B["vias"] if v["net"] in ("D_P", "D_N")}
+    assert {(18.8, 20.0), (21.7, 20.0)} <= kept                    # the fan-out vias and stubs stay: the pair leaves through them
+    assert sum(1 for s in B["segs"] if s["net"] == "D_P" and s["layer"] == "F.Cu" and s["a"][1] == s["b"][1] == 20.0) >= 1
+    assert clean(B, {"D_P", "D_N"}) >= CLR
+    off = PR.run(PB.write(tmp_path, body, name="x.kicad_pcb"), {"pairlay": {"via_exit": False}}, None, str(tmp_path / "x.o.kicad_pcb"))
+    assert off["complete"] == 0 and off["pairs"][0]["why"]
+
+
+def test_blocked_pair_goes_first_and_the_blocker_is_laid_again(tmp_path):
+    # one signal layer; PCIE (laid first by kind) runs straight down in front of the only gap the audio pair can use
+    cons = {"preroute": {"signal_layers": ["F.Cu"]}}
+    wall = PB.keepout(30, 0, 30.5, 39.4) + PB.keepout(30, 40.6, 30.5, 80) + PB.keepout(30.5, 37, 36.5, 37.5) + PB.keepout(30.5, 42.5, 36.5, 43) + \
+        PB.keepout(36, 37.5, 36.5, 42.5)
+    body = duo("U1", 29.05, 20, "PCIE_TX_P", "PCIE_TX_N") + duo("U2", 29.05, 60, "PCIE_TX_P", "PCIE_TX_N") + \
+        duo("U3", 20, 40, "MIC_P", "MIC_N") + duo("U4", 33.5, 40, "MIC_P", "MIC_N") + wall
+    one = PR.run(PB.write(tmp_path, body), dict(cons, pairlay={"passes": 0}), None, str(tmp_path / "a.kicad_pcb"))
+    assert one["complete"] == 1 and one["order"][0].startswith("PCIE")
+    bad = [r for r in one["pairs"] if r["status"] != "complete"][0]
+    assert bad["pair"][0].startswith("MIC") and any("PCIE_TX" in b for b in bad["blockers"])
+    two = PR.run(PB.write(tmp_path, body, name="b2.kicad_pcb"), cons, None, str(tmp_path / "b.kicad_pcb"))
+    assert two["complete"] == 2 and two["passes"] >= 1 and two["order"][0].startswith("MIC")
+    assert clean(RD.load(str(tmp_path / "b.kicad_pcb")), {"PCIE_TX_P", "PCIE_TX_N", "MIC_P", "MIC_N"}) >= CLR
+
+
+def test_skew_limit_per_family_then_kind(tmp_path):
+    from fluxplace import constraints as C
+    cons = {"pairs": {"ETH_": {"skew_mm": 0.5}}, "si": {"default_skew_mm": 1.0}}
+    assert C.skew_limit_source(cons, "ETH_L0_N") == (0.5, "[pairs.ETH_] skew_mm")
+    assert C.skew_limit_source(cons, "PCIE_RX_N") == (1.0, "[si] default_skew_mm")
+    assert C.skew_limit_source(cons, "MIC_SEC_N")[0] == 10.0 and "low-speed" in C.skew_limit_source(cons, "MIC_SEC_N")[1]
+    assert C.skew_limit_mm({"si": {"audio_skew_mm": 4.0}}, "SPK_COMM_N") == 4.0
+    assert C.skew_limit_mm({"si": {"skew_mm_by_kind": {"usb2": 2.5}}}, "USB_DM") == 2.5
+
+
+def test_pads_far_apart_merge_into_a_coupled_run(tmp_path):
+    # P and N land on two parts 6 mm apart at both ends: uncoupled stubs to a merge point, coupled in between
+    body = "".join(PB.fp(r, x, y, [PB.pad("1", 0, 0, n, 0.6, 0.6)]) for r, x, y, n in
+                   [("R1", 20, 20, "D_P"), ("R2", 26, 20, "D_N"), ("R3", 20, 50, "D_P"), ("R4", 26, 50, "D_N")])
+    rep, B, _ = lay(tmp_path, body)
+    r = rep["pairs"][0]
+    assert r["status"] == "complete" and r["skew"] <= r["limit"] and clean(B, {"D_P", "D_N"}) >= CLR
+    assert coupled_share(B, "D_P", "D_N", W + GAP) > 0.5

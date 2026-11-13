@@ -176,17 +176,34 @@ def pour_nets(cons):
     return {n for n, p in cons.get("power", {}).items() if p.get("pour")}
 
 
-def skew_limit_mm(cons, master):
-    """SI-lite intra-pair skew limit for the pair whose master net is `master`:
-    the longest matching [pairs.*] prefix wins, else [si].default_skew_mm."""
+SLOW_PAIR_SKEW_MM = 10.0      # audio-rate differential nets: a skew limit in the mm range has no meaning
+
+
+def skew_limit_source(cons, master):
+    """(limit mm, where it comes from) for the pair whose master net is `master`: the longest matching [pairs.FAMILY] skew_mm,
+    else `[si] skew_mm_by_kind = {audio = .., usb2 = ..}` for the pair's kind (netclass.pair_kind), else low-speed (audio)
+    pairs get `[si] audio_skew_mm` (10), everything else `[si] default_skew_mm` (1)."""
     best = None
     for fam, p in cons.get("pairs", {}).items():
-        if master.startswith(fam) and "skew_mm" in p:
+        if master.startswith(fam) and isinstance(p, dict) and "skew_mm" in p:
             if best is None or len(fam) > best[0]:
-                best = (len(fam), float(p["skew_mm"]))
+                best = (len(fam), float(p["skew_mm"]), f"[pairs.{fam}] skew_mm")
     if best:
-        return best[1]
-    return float(cons.get("si", {}).get("default_skew_mm", 1.0))
+        return best[1], best[2]
+    si = cons.get("si", {}) or {}
+    from . import netclass as NC
+    kind = NC.pair_kind(master)
+    by = si.get("skew_mm_by_kind") or {}
+    if kind in by:
+        return float(by[kind]), f"[si] skew_mm_by_kind.{kind}"
+    if kind == "audio":
+        return float(si.get("audio_skew_mm", SLOW_PAIR_SKEW_MM)), "[si] audio_skew_mm (low-speed pair)"
+    return float(si.get("default_skew_mm", 1.0)), "[si] default_skew_mm"
+
+
+def skew_limit_mm(cons, master):
+    """SI-lite intra-pair skew limit (mm): see skew_limit_source."""
+    return skew_limit_source(cons, master)[0]
 
 
 def env_profile(cons):

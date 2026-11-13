@@ -32,6 +32,13 @@ class Grid:
         ign = {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets}
         ign |= {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets}
         self.F = PK.Field(B, ((x0 + x1) / 2, (y0 + y1) / 2), half, step, ignore=ign, clearance=clr, edge_clearance=edge_clr)
+        for z in B["zones"]:                              # pocket.Field knows a rule area only as inside / outside: give it an edge distance
+            if z["keepout"] and z["no_tracks"] and len(z["pts"]) >= 3:
+                for a, b in zip(z["pts"], z["pts"][1:] + z["pts"][:1]):
+                    for l in (z["layers"] or B["copper"]):
+                        if l in self.F.dist:
+                            self.F.block_seg(a, b, 0.0, l, "")
+                            self.F.items[-1] = ("keepout", z.get("name") or "rule area", "", "rule area " + (z.get("name") or ""))
         self.B, self.sig, self.clr, self.step = B, [l for l in B["copper"] if l in sig], clr, step
         self.nx, self.ny = self.F.nx, self.F.ny
         self.old = {}
@@ -50,6 +57,24 @@ class Grid:
         """per-pair distance arrays (a copy of the base field).  The fan-out copper of pair nets is not in it: a laid pair
         replaces its own, and what an unlaid pair keeps is decided at the end (pairs.plan: only what the new copper does not foul)."""
         return {l: a.copy() for l, a in self.F.dist.items()}, {l: a.copy() for l, a in self.F.owner.items()}
+
+    def put(self, D, O, pieces, net, label="escape"):
+        """extra obstacles (a terminal's kept fan-out stub + via) in a view."""
+        F = self.F
+        for p in pieces:
+            if p[0] == "seg":
+                sl = F._sl(min(p[2][0], p[3][0]), min(p[2][1], p[3][1]), max(p[2][0], p[3][0]), max(p[2][1], p[3][1]))
+                sdf, ls = (PK.seg_sdf(p[2], p[3], p[4], F.X[sl], F.Y[sl]), [p[1]]) if sl else (None, [])
+            else:
+                sl = F._sl(p[1], p[2], p[1], p[2])
+                sdf, ls = (np.hypot(F.X[sl] - p[1], F.Y[sl] - p[2]) - p[3] / 2, F.copper) if sl else (None, [])
+            if sl:
+                idx = F._add("seg" if p[0] == "seg" else "via", None, net, label)
+                for l in ls:
+                    if l in D:
+                        m = sdf < D[l][sl]
+                        D[l][sl][m] = sdf[m]
+                        O[l][sl][m] = idx
 
     def drop_old(self, nets):
         for n in nets:
@@ -124,7 +149,7 @@ def coarse_dist(free, viaok, goals, f, step, via_cost):
     return d
 
 
-def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost, via_cost, budget):
+def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost, via_cost, budget, lcost=None):
     """seeds [(cost, li, j, i, d, pol)], goals {cell * nl + li: {d * 2 + pol: cost}}, H {pol: coarse_dist} -> (states | None, info).
     Moves: one cell straight; a 45 degree turn followed by K cells straight; a via pair followed by K cells straight; the
     first move from a gate is K cells straight.  A state is (li, j, i, d); the path lists them from seed to goal."""
@@ -150,6 +175,7 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
             if i < 0 or j < 0 or i >= nx or j >= ny or not a[j * nx + i]:
                 return None
         return j, i
+    lc = list(lcost) if lcost else [1.0] * nl             # length factor per layer (outer layers preferred when free)
     Gc, par, heap = {}, {}, []
     for c, li, j, i, d, pol in seeds:
         key = ((((j * nx + i) * nl + li) * 8 + d) * 2 + 1) * 2 + pol
@@ -195,21 +221,21 @@ def astar(nx, ny, layers, allowed, vmask, seeds, goals, H, f, K, step, turn_cost
         if fresh:
             e = run(li, j, i, d, K)
             if e:
-                push(g + K * DLEN[d] * step, li, e[0], e[1], d, pol, key, False)
+                push(g + K * DLEN[d] * step * lc[li], li, e[0], e[1], d, pol, key, False)
             continue
         e = run(li, j, i, d, 1)
         if e:
-            push(g + DLEN[d] * step, li, e[0], e[1], d, pol, key, False)
+            push(g + DLEN[d] * step * lc[li], li, e[0], e[1], d, pol, key, False)
         for nd in ((d + 1) & 7, (d - 1) & 7):
             e = run(li, j, i, nd, K)
             if e:
-                push(g + K * DLEN[nd] * step + turn_cost, li, e[0], e[1], nd, pol, key, False)
+                push(g + K * DLEN[nd] * step * lc[li] + turn_cost, li, e[0], e[1], nd, pol, key, False)
         if V is not None and V[d % 4][cell]:
             for l2 in range(nl):
                 if l2 != li and A[l2][cell]:
                     e = run(l2, j, i, d, K)
                     if e:
-                        push(g + via_cost + K * DLEN[d] * step, l2, e[0], e[1], d, pol, key, True)
+                        push(g + via_cost + K * DLEN[d] * step * lc[l2], l2, e[0], e[1], d, pol, key, True)
     if best[1] is not None:
         return _finish(best, par, nl, nx, pops)
     return None, {"reason": "no path", "near": near[1], "pops": pops}
@@ -256,29 +282,31 @@ def runs_of(states, layers, xy):
 
 
 def legs(runs, vias, dist, hv, w, via_d, sign):
-    """one leg (sign +1 = left of travel) -> pieces [("seg", layer, a, b, w) | ("via", x, y, d)], start point, end point."""
-    out, pts_prev = [], None
+    """one leg (sign +1 = left of travel) -> pieces [("seg", layer, a, b, w) | ("via", x, y, d)], start point, end point.
+    dist / w = {layer: half pitch / track width} (a pair may have another geometry on an inner layer)."""
+    out = []
     first = last = None
     for k, r in enumerate(runs):
-        pts = G.offset(r["pts"], sign * dist, r["t0"])
+        dl = dist[r["layer"]]
+        pts = G.offset(r["pts"], sign * dl, r["t0"])
         if k > 0:                                       # leaves a via: fan back in to the coupled offset
             v = vias[k - 1]
             n, t = G.left(v["t"]), v["t"]
-            a = hv[v["d"]] - dist
+            a = abs(hv[v["d"]] - dl)
             vp = (v["at"][0] + n[0] * sign * hv[v["d"]], v["at"][1] + n[1] * sign * hv[v["d"]])
-            pts = [vp, (v["at"][0] + t[0] * a + n[0] * sign * dist, v["at"][1] + t[1] * a + n[1] * sign * dist)] + pts[1:]
+            pts = [vp, (v["at"][0] + t[0] * a + n[0] * sign * dl, v["at"][1] + t[1] * a + n[1] * sign * dl)] + pts[1:]
         if k < len(runs) - 1:                           # enters a via: fan out
             v = vias[k]
             n, t = G.left(v["t"]), v["t"]
-            a = hv[v["d"]] - dist
+            a = abs(hv[v["d"]] - dl)
             vp = (v["at"][0] + n[0] * sign * hv[v["d"]], v["at"][1] + n[1] * sign * hv[v["d"]])
-            pts = pts[:-1] + [(v["at"][0] - t[0] * a + n[0] * sign * dist, v["at"][1] - t[1] * a + n[1] * sign * dist), vp]
+            pts = pts[:-1] + [(v["at"][0] - t[0] * a + n[0] * sign * dl, v["at"][1] - t[1] * a + n[1] * sign * dl), vp]
         pts = G.clean(pts)
         if first is None:
             first = pts[0]
         last = pts[-1]
         for a_, b_ in zip(pts, pts[1:]):
-            out.append(("seg", r["layer"], a_, b_, w))
+            out.append(("seg", r["layer"], a_, b_, w[r["layer"]]))
         if k < len(runs) - 1:
             out.append(("via", pts[-1][0], pts[-1][1], via_d))
     return out, first, last
