@@ -334,3 +334,15 @@ def test_pads_far_apart_merge_into_a_coupled_run(tmp_path):
     r = rep["pairs"][0]
     assert r["status"] == "complete" and r["skew"] <= r["limit"] and clean(B, {"D_P", "D_N"}) >= CLR
     assert coupled_share(B, "D_P", "D_N", W + GAP) > 0.5
+
+
+def test_unpaired_pad_is_a_question_not_a_silent_failure(tmp_path):
+    body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 20, 40, "D_P", "D_N") + PB.fp("R9", 60, 60, [PB.pad("1", 0, 0, "D_P", 0.6, 0.6)])
+    rep, B, _ = lay(tmp_path, body)
+    r = rep["pairs"][0]
+    assert r["unpaired"] == ["R9.1"] and r["status"] != "complete"
+    S = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {})
+    assert [q["id"] for q in S.open] == ["pair-pads:D_N"] and "R9.1" in S.open[0]["found"]
+    assert {o["choice"] for o in S.open[0]["options"]} == {"single-ended", "netlist"}
+    S2 = PR.pad_questions(rep, str(tmp_path / "o.kicad_pcb"), {"answers": {"pair-pads:D_N": "single-ended"}})
+    assert not S2.open and rep["pairs"][0]["answer"] == "single-ended"

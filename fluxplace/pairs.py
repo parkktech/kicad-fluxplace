@@ -37,7 +37,8 @@ def params(cons):
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
             "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)),
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
-            "dogbone": e.get("dogbone", True) is not False, "negotiate": e.get("negotiate", True) is not False,
+            "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", True) is not False,
+            "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
             "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1)))}
 
 
@@ -218,13 +219,34 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             return {"ok": False, "reason": reason, "blockers": blockers}
         pol = info["pol"]
         runs, vias = PL.runs_of(states, sig, grid.xy)
+        if _self_cross(runs, dl, wl, clr):                  # a turn-around loop: the legs of the pair would cross each other
+            reason, blockers = "the coupled centre line can only turn round by crossing itself here", []
+            banned |= _ban(states[0], grid, 0.3) | _ban(states[-1], grid, 0.3)
+            continue
         if search_only:
             fp = [("seg", r["layer"], a, b, envl[r["layer"]]) for r in runs for a, b in zip(r["pts"], r["pts"][1:])]
             fp += [("via", v["at"][0], v["at"][1], 2 * hv[v["d"]] + rule["via"]) for v in vias]
             return {"ok": True, "states": states, "pol": pol, "fp": fp, "gates": len(ga) + len(gb), "vias": len(vias),
                     "layers": [r["layer"] for r in runs], "cost": info.get("cost", 0.0)}
         if plan_only:
-            return {"ok": True, "corridor": [{"layer": r["layer"], "pts": [[round(x, 3), round(y, 3)] for x, y in r["pts"]], "width": round(envl[r["layer"]] + 2 * clr, 3)}
+            keepfree = []                                   # what the fan-out must leave free: both ends of the corridor and the via pairs near them
+            for r, t, rev in ((runs[0], ta, False), (runs[-1], tb, True)):
+                pts = r["pts"][::-1] if rev else list(r["pts"])
+                keepfree.append(("seg", r["layer"], t["c"], pts[0], envl[r["layer"]]))
+                left_mm = P["reserve_mm"]
+                for a_, b_ in zip(pts, pts[1:]):
+                    L = math.hypot(b_[0] - a_[0], b_[1] - a_[1])
+                    if L > left_mm:
+                        b_ = (a_[0] + (b_[0] - a_[0]) * left_mm / L, a_[1] + (b_[1] - a_[1]) * left_mm / L)
+                    keepfree.append(("seg", r["layer"], a_, b_, envl[r["layer"]]))
+                    left_mm -= L
+                    if left_mm <= 0:
+                        break
+            for v in vias:
+                if min(math.hypot(v["at"][0] - t["c"][0], v["at"][1] - t["c"][1]) for t in (ta, tb)) <= P["reserve_mm"] + max(Rs):
+                    n = G.left(v["t"])
+                    keepfree += [("via", v["at"][0] + n[0] * sg * hv[v["d"]], v["at"][1] + n[1] * sg * hv[v["d"]], rule["via"]) for sg in (1, -1)]
+            return {"ok": True, "keepfree": keepfree, "corridor": [{"layer": r["layer"], "pts": [[round(x, 3), round(y, 3)] for x, y in r["pts"]], "width": round(envl[r["layer"]] + 2 * clr, 3)}
                                              for r in runs], "vias": len(vias), "layers": [r["layer"] for r in runs]}
         cp, p0, p1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], pol)
         cn, n0, n1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], -pol)
@@ -275,6 +297,24 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
                 "lenP": PL.piece_len(Pp), "lenN": PL.piece_len(Np), "skew": round(abs(skew) if abs(skew) <= ctx["tol"](nets[0]) else left_mm, 3),
                 "uncompensated": round(left_mm, 3)}
     return {"ok": False, "reason": reason, "blockers": blockers}
+
+
+def _self_cross(runs, dl, wl, clr):
+    """True when two parts of one centre line on a layer come closer than the pair needs to pass itself."""
+    by = {}
+    k = 0
+    for r in runs:
+        for a, b in zip(r["pts"], r["pts"][1:]):
+            by.setdefault(r["layer"], []).append((k, a, b))
+            k += 1
+        k += 3                                              # a via between two runs: not neighbours
+    for l, segs in by.items():
+        need = 2 * dl[l] + wl[l] + clr
+        for i, (ka, a, b) in enumerate(segs):
+            for kb, c, d in segs[i + 1:]:
+                if kb - ka >= 3 and G.seg_seg(a, b, c, d) < need:
+                    return True
+    return False
 
 
 def _claim(items, pieces, net):
@@ -612,7 +652,9 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
         r = _section(ctx, D, O, ta, tb, rule, pr, plan_only, ctx.get("preset", {}).get((pr, a, b)))
         s = {"from": ta["name"], "to": tb["name"], "ok": r["ok"], "mm": round(math.hypot(ta["c"][0] - tb["c"][0], ta["c"][1] - tb["c"][1]), 2)}
         if r["ok"] and plan_only:
-            s.update(corridor=r["corridor"], vias=r["vias"], layers=r["layers"])
+            s.update(corridor=r["corridor"], vias=r["vias"], layers=r["layers"], via_exit=r.get("exit", []),
+                     keepfree=[list(p) for p in r.get("keepfree", [])],
+                     exits=[{net: [list(p) for p in pcs] for net, pcs in parts.items()} for _of, parts in r.get("newparts", [])])
             out["nok"] += 1
         elif r["ok"]:
             out["nok"] += 1
@@ -841,6 +883,73 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     return res
 
 
+def reserve_for_fanout(board, board_in, cons, spec, workdir):
+    """pair-aware fan-out: plan every pair on the placement (no copper written), then give the fan-out a copy of its input
+    board in which the planned exits are real locked copper - the first `reserve_mm` of both corridor ends at envelope
+    width, the via pairs near them, new dog-bone exits.  -> (board with reservations, keys to strip, nets the pairs stage
+    owns, seconds) | None.  `[pairlay] reserve_exits = false` keeps the generic fan-out."""
+    from . import boardtext as BT
+    P = params(cons)
+    if not P["enabled"] or not P["reserve_exits"]:
+        return None
+    t0 = time.time()
+    res = plan(board, cons, spec, plan_only=True)
+    blks, keys, nets = [], set(), []
+    u = lambda: str(uuid.uuid4())
+    cu = res["B"]["copper"]
+
+    def add(p, net):
+        if p[0] == "seg":
+            a, b = (round(p[2][0], 4), round(p[2][1], 4)), (round(p[3][0], 4), round(p[3][1], 4))
+            if a == b:
+                return
+            keys.add(("s", tuple(sorted((a, b))), p[1], net))
+            blks.append(f'\t(segment\n\t\t(start {_fmt(a[0])} {_fmt(a[1])})\n\t\t(end {_fmt(b[0])} {_fmt(b[1])})\n\t\t(width {_fmt(p[4])})\n'
+                        f'\t\t(locked yes)\n\t\t(layer "{p[1]}")\n\t\t(net "{net}")\n\t\t(uuid "{u()}")\n\t)')
+        else:
+            x, y = round(p[1], 4), round(p[2], 4)
+            keys.add(("v", x, y, net))
+            blks.append(f'\t(via\n\t\t(at {_fmt(x)} {_fmt(y)})\n\t\t(size {_fmt(p[3])})\n\t\t(drill 0.2)\n'
+                        f'\t\t(layers "{cu[0]}" "{cu[-1]}")\n\t\t(locked yes)\n\t\t(net "{net}")\n\t\t(uuid "{u()}")\n\t)')
+    for e in res["pairs"]:
+        if e.get("status") != "planned":
+            continue                                        # a pair without a plan keeps the generic fan-out on its pins
+        nets += e["pair"]
+        for s in e["sections"]:
+            for p in s.get("keepfree", []):
+                add(p, e["pair"][0])
+            for parts in s.get("exits", []):
+                for net, pcs in parts.items():
+                    for p in pcs:
+                        add(p, net)
+    if not nets:
+        return None
+    dst = os.path.join(workdir, "pair-exits.kicad_pcb")
+    with open(dst, "w", errors="surrogateescape") as fh:
+        fh.write(BT.append_blocks(open(board_in, errors="surrogateescape").read(), blks))
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(board_in)[0] + ext
+        if os.path.exists(side):
+            import shutil
+            shutil.copy(side, os.path.splitext(dst)[0] + ext)
+    return dst, keys, nets, round(time.time() - t0, 1)
+
+
+def strip_reservations(path, keys):
+    """the fan-out result without the reservation copper of reserve_for_fanout -> items removed."""
+    from . import boardtext as BT
+    text = open(path, errors="surrogateescape").read()
+    kill = []
+    for _i, _j, key, blk in BT.scan(text):
+        net = BT.net_name(blk)
+        if (key[0] == "s" and ("s", tuple(sorted((key[1], key[2]))), key[4], net) in keys) or (key[0] == "v" and ("v", key[1], key[2], net) in keys):
+            kill.append(key)
+    if kill:
+        with open(path, "w", errors="surrogateescape") as fh:
+            fh.write(BT.remove_blocks(text, kill))
+    return len(kill)
+
+
 def _fmt(v):
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
@@ -942,7 +1051,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
         a = aud[pr]
         row = {"pair": e["pair"], "class": e["class"], "width": e["width"], "gap": e["gap"], "span": e["span"], "plan": e["status"],
                "why": e.get("why", ""), "blockers": e.get("blockers", []), "sections": e["sections"], "secs": e.get("secs", 0),
-               "limit": C.skew_limit_mm(cons, pr[0]), "limit_from": C.skew_limit_source(cons, pr[0])[1], "geometry": e.get("geometry", {}),
+               "unpaired": e.get("unpaired", []), "limit": C.skew_limit_mm(cons, pr[0]), "limit_from": C.skew_limit_source(cons, pr[0])[1], "geometry": e.get("geometry", {}),
                "via_exit": sorted({x for s in e["sections"] for x in s.get("via_exit", [])}), "open": [opn.get(pr[0], 0), opn.get(pr[1], 0)]}
         if rep["plan_only"]:
             row["status"] = "planned" if e["status"] in ("planned", "kept") else "not-planned"
@@ -986,6 +1095,22 @@ def format_text(rep, top=None):
     return "\n".join(out)
 
 
+def pad_questions(rep, board, cons, answers=None, assume=False):
+    """a pair pad without a partner pad is a netlist / spec question, not a silent failure -> questions.Session (may be open)."""
+    from . import questions as QS
+    S = QS.Session(board, cons, answers=answers, assume=assume, cmd="pairs")
+    for r in rep["pairs"]:
+        lone = sorted({x for x in (r.get("unpaired") or [])})
+        if lone and r["status"] != "complete":
+            r["question"] = f"pair-pads:{r['pair'][0]}"
+            r["answer"] = S.ask(r["question"], "pairs", f"{'/'.join(r['pair'])}: pad(s) {', '.join(lone)} have no partner pad of the other leg nearby "
+                                f"(one leg has a drop the other has not)",
+                                {"single-ended": "these pads are tied in as single-ended drops by the router; the coupled sections stay as laid",
+                                 "netlist": "the netlist or spec is wrong / incomplete here: fix it and run again (the pair stays open)"},
+                                "single-ended", "an [answers] entry, or the missing part / net in the schematic")
+    return S
+
+
 def cmd_pairs(a):
     from . import constraints as C
     cons = C.load(a.constraints)
@@ -998,6 +1123,8 @@ def cmd_pairs(a):
     rep = run(a.board, cons, spec, out, plan_only=a.plan_only, only=only,
               log=(lambda m: print(m, file=sys.stderr, flush=True)) if getattr(a, "verbose", False) else (lambda m: None))
     rp = os.path.splitext(out or a.board)[0] + (".pairs.plan.json" if a.plan_only else ".pairs.json")
+    from . import questions as QS
+    S = pad_questions(rep, a.board, cons, QS.parse_answers(getattr(a, "answer", None)), getattr(a, "assume_defaults", False))
     json.dump(rep, open(rp, "w"), indent=1)
     q = getattr(a, "quiet", False)
     txt = format_text(rep, None if (getattr(a, "full_output", False) or getattr(a, "full", False)) else (a.top or 12))
@@ -1010,6 +1137,10 @@ def cmd_pairs(a):
         except Exception:                                   # noqa: BLE001 - the answers file is optional
             pass
         print(f"wrote {out}")
+    if S.open:                                              # the board is written; the questions go to the user (exit 3)
+        S.cmd = "pairs (board written)"
+        return S.gate(out=print)
+    S.persist()
     return 0 if rep["verdict"] == "PAIRS_OK" else 1
 
 
@@ -1033,7 +1164,9 @@ def stage(c, n, board):
     line = format_text(rep).splitlines()[0]
     res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out}
     if rep["verdict"] != "PAIRS_OK":
-        res["next"] = [l for l in format_text(rep).splitlines() if l.startswith("PAIR_NOT_LAID")][:5]
+        S = pad_questions(rep, out, c.cons, getattr(c, "answers", None), getattr(c, "assume", False))
+        res["next"] = [f"question {q['id']}: {q['found']}" for q in S.open][:3] + \
+            [l for l in format_text(rep).splitlines() if l.startswith("PAIR_NOT_LAID")][:5]
     return res
 
 
@@ -1045,6 +1178,8 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.pairs.kicad_pcb)")
     p.add_argument("--plan-only", dest="plan_only", action="store_true", help="centre-line corridors only; writes no copper")
     p.add_argument("--nets", default=None, help="comma-separated nets: only the pairs of these nets")
+    from . import questions as QS
+    QS.add_args(p, json_flag=False)
     p.add_argument("-v", "--verbose", action="store_true", help="one line per pair and re-order pass on stderr")
     p.add_argument("--full", dest="full_output", action="store_true")
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")

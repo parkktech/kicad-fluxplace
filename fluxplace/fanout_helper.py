@@ -393,7 +393,7 @@ class Fan:
             pads = [p for p in fp.Pads() if p.GetNetname() and p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_PTH)]
             for p in pads:
                 net = p.GetNetname()
-                if job.get("only_nets") and net not in job["only_nets"]:
+                if (job.get("only_nets") and net not in job["only_nets"]) or net in job.get("skip_nets", ()):
                     continue
                 ni = nets.get(net, {})
                 c = p.GetPosition()
