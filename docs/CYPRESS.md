@@ -120,14 +120,21 @@ measuring code (`intent`, `fanout --check-only`, `plan-route --ignore-routing`, 
 | pair nets, total span mm | 1816 | 2043 | 1922 |
 | run time | 555 s, one core | 286 s wall, GPU 93 s | + 226 s |
 
-The cypress column is the best of five 6-trial runs. Their kept trial scores (PLAN_SCORE + 40 x blocked pins + 20 x soft
-rows): 4373, 4480, 4848, 4883, 5020; one 10-trial run: 4514. The built-in result scores 4249. First trial of a run (no
-feedback yet): 5114 to 7097; the feedback brings a run down by 15 to 35 %, and stops helping after about five trials.
-46 trials: Cypress converged in all (3 after one re-run at the overflow it settled at), 3 were rejected by the INTENT gate
-(a decoupling cap beyond its limit that the repair could not seat).
+The cypress column is the best of six 6-trial runs. Their kept trial scores (PLAN_SCORE + 40 x blocked pins + 20 x soft
+rows): 4373, 4480, 4787 (through `pipeline --flow constructive`), 4848, 4883, 5020; one 10-trial run: 4514. The built-in
+result scores 4249. First trial of a run (no feedback yet): 5114 to 7097; the feedback brings a run down by 15 to 35 %, and
+stops helping after about five trials. 52 trials: Cypress converged in all (3 after one re-run at the overflow it settled
+at), 3 were rejected by the INTENT gate (a decoupling cap beyond its limit that the repair could not seat).
 
 Two KiCad demo boards, copper stripped, `intent-draft` constraints as written (only `[intent.support]` survives a draft that
-is not edited): DEMO_ROWS
+is not edited), PLAN_SCORE / overflow / fan-out pins escaped / HPWL mm:
+- `kit-dev-coldfire`: builtin `place` 906 / 11.0 / 351 of 469 / 8121 (8 legality issues); builtin `floorplan`
+  673 / 15.0 / 352 / 6398; cypress 586 / 10.6 / 352 / 6086 (0 legality issues; 4 of 6 trials accepted, 1 rejected by the
+  gate, 1 not legal after the legaliser; one run). INTENT: no hard row unmet with any of them.
+- `video` (dense, through-hole): no Cypress trial was accepted (5 not legal after the legaliser, 1 rejected by the gate), so
+  the built-in placer ran; its result fails the INTENT gate as well (decoupling caps beyond their limit, as on the input
+  board): 17866 / 158.4 / 823 of 1352 / 31825; builtin `floorplan` 18190 / 155.6 / 820 / 31803,
+  the same gate failure.
 
 Reading: with the intent the Cypress flow is legal, meets every hard row and lands within 3 % (best run) to 18 % (worst)
 of the built-in floorplan on the gate score, but it does not beat it on this board: wires are 12 to 18 % longer, planned
