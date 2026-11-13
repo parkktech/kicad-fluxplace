@@ -470,7 +470,9 @@ def st_floorplan(c, n, board):
 def st_fanout(c, n, board):
     d = c.dir(n, "fanout")
     out = os.path.join(d, "board.kicad_pcb")
-    rc, text = _run_cli(["fanout", board, "--out", out] + c.cs() + c.qs(), os.path.join(d, "stage.log"))
+    pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
+    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + c.cs() + c.qs(),
+                        os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
     if q:
         return q

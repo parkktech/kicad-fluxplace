@@ -1,3 +1,14 @@
+## 2026-11-12 - routing-flow work (branch fan-flow, second agent)
+
+Done (all with tests; docs/commands/route.md, snap-vias.md, questions.md, FLOW.md): clearance request margin + escalation off / strict sizes;
+dropped results by reason; rails as MST trees of two-cluster jobs (`railroute.py`); rip policy (`ripolicy.py`); whole-pair audit and plain
+copper (`pairaudit.py`); via-centre snap (`snapvias.py`, runs after every merge); questions facility (`questions.py`, exit 3);
+artefact-first (`facts.py`, map write-back); multi-board matrix (`boardmatrix.py`).
+Open: rail width only from `[power.X] max_current_ma` (no net-class width); `straight` only from constraints (no net-class flag); pair
+mismatch (layers / vias / skew) drops the whole job, no second attempt with a different board state beyond the next round; rip trials
+cost one pcbnew open-count each (`[route] rip_trials_per_round`, default 3); the serial stall loop of the pipeline still uses
+`batchroute` without the rip policy.
+
 ## 2026-11-12 - constructive flow: modules -> floorplan -> fan-out -> route (branch fan-flow)
 
 Built because `plan-route` predicted the real board's routing only 7-27 % of the time before copper (failures were local and order
