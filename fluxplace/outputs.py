@@ -44,7 +44,7 @@ HEAD_KEEP = {"bom-opt": 5, "route-ready": 5}     # fact lines worth keeping verb
 COMPACT_CMDS = (
     "review", "route-ready", "route-diagnose", "clusters", "anchor-check",
     "floorplan-check", "templates", "bom-opt", "lint", "verify-models", "sourcing",
-    "datasheets", "spec-check", "drc-scope", "eval", "silk",
+    "datasheets", "spec-check", "drc-scope", "eval", "silk", "magnetics",
 )
 
 _LEVELS = {"FAIL": 0, "ERROR": 0, "WARN": 1, "WARNING": 1, "INFO": 2}

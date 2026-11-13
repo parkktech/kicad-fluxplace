@@ -1269,6 +1269,12 @@ def check_spec_nets(facts, spec):
     return out
 
 
+def check_magnetics(facts, spec, cons=None):
+    """LAN magnetics channels against the datasheet pin table (magnetics.py)."""
+    from . import magnetics as MG
+    return MG.check(facts["parts"], facts.get("net_pads") or {}, spec, cons)
+
+
 # ==========================================================================
 # 10. Mechanical contracts: keep-outs and locked positions
 # ==========================================================================
@@ -1586,6 +1592,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_models(facts)
     out += check_power(facts, cons)
     out += check_spec_nets(facts, spec)
+    out += check_magnetics(facts, spec, cons)
     out += check_keepouts(facts, cons)
     out += check_preroute(facts, spec, cons)
     out += check_locks(facts, cons)
