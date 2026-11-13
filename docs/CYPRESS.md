@@ -20,6 +20,15 @@ or in the constraints, which `place` and `pipeline` both read:
     cluster_weight = 8.0          # weight of the IC <-> support part nets
     timeout_s = 900
     params = { net_crossing_weight = 0.1 }     # any Cypress/DREAMPlace parameter
+    # intent-aware flow only (an [intent] table is present; section "With an [intent] table"):
+    macros = "auto"               # an IC + its support parts as ONE cell: true | false | "auto" (trial 0 with, trial 1 without, then the better)
+    feedback = true               # judge every trial with the gate and inflate what is crowded for the next one
+    near_weight = 1.0             # x the `near` item's weight x a factor from its budget
+    pair_weight = 2.0             # x the class weight of both nets of a pair, and of the partner-part ties
+    block_share = 0.5             # a zone is a blockage when it concerns at least this share of the movable area on a side
+    reserve_gain = 1.0            # x the escape-reservation margin of fine-pitch parts
+    inflate_step_mm = 0.4   inflate_max_mm = 1.6   inflate_share = 0.12      # feedback: per round, cap, share of the parts
+    blocked_pin_cost = 40.0   soft_intent_cost = 20.0                        # the trial score beside PLAN_SCORE
 
 The tool is found from `--cypress-home`, then `$CYPRESS_HOME`, then `~/tools/Cypress*` (a checkout with a built
 `install/dreamplace`); its interpreter from `--cypress-python`, `$CYPRESS_PYTHON`, `<home>/env`, `<home>/.venv` or
@@ -39,6 +48,30 @@ The engine and its version are written to `<out>.place.json` and to the stage re
 | net classes | `netclass.classify` weights as net weights; weight-0 rails are left out |
 | IC support clusters | one extra 2-pin net per support part to its IC pin (`cluster_weight`) |
 | pairs, groups, templates, height regions | not expressed; pairs only through the weight of their two nets |
+
+## With an `[intent]` table (docs/INTENT.md)
+
+`trials` defaults to 6 here. Nothing board specific: every item comes from the constraints, the spec and the board.
+
+| intent / rule | how Cypress gets it |
+|---|---|
+| hard items (edge parts, rigid groups, hard `near` chains from a held part) | `intent.prepare` seats and holds them first: fixed cells. What is held is the owner's list (`modules.fixed_set`), as in `floorplan` |
+| `region`, swept card area, clear depth in front of an edge part, hard `away` halo of a held part | a pinless fixed blockage on the side it concerns, when it concerns at least `block_share` of the movable area there; a zone for a few parts only (height limit, `refs`, the `away` offenders) cannot be said to Cypress: the legaliser keeps it per part and the gate checks it |
+| `near` (chain links, refs + to) | a two-pin net per link, weight = item weight x min(8, board diagonal / (4 x budget per link)) |
+| support parts | `macros`: the IC is laid out with its sure same-side support parts by the support seating (`clusters.seat`, isolate) and the cell moves and turns as one body; the others get the two-pin net, weight x min(4, 5 mm / limit) |
+| rigid `[placement.group]` of movable parts (intent bodies) | one macro, never split by the legaliser |
+| pairs | both nets x `pair_weight`; the two-pad parts in series on the two halves (same footprint) tied pad to pad |
+| escape reservations (`escres.needy`) | fine-pitch parts and ICs get the margin whose ring holds one via site per pin that must own an escape |
+
+After each trial: legaliser (macros as rigid units), support re-seat, **support repair** (an IC whose decoupling cap found no
+legal seat is laid out with all its support parts as one cell and the legaliser makes the neighbours give way), then the
+gate: INTENT rows (a hard row unmet = the trial is **rejected**), `fanout` check, `plan-route`. Score = PLAN_SCORE +
+`blocked_pin_cost` x blocked pins + `soft_intent_cost` x unmet soft rows. **Feedback**: parts with a blocked pin, the parts
+blamed for it and the parts bordering a plan-route overflow get `inflate_step_mm` more room in the next trial; an overflow
+beside a fixed part becomes a blockage. The best accepted trial is written, the INTENT gate runs on the file, and
+`<out>.place.json` records `flow`, `params`, every trial (`score`, `plan`, `overflow`, `risk_nets`, `blocked`, `hpwl`,
+`intent`, `rejected` / `failed`), GPU seconds; the pipeline stage record carries `engine: "cypress <commit>; trial N of M kept ..."`.
+No accepted trial: one line says why and the built-in placer runs.
 
 After Cypress: `legalise.legalise` (courtyards, real outline, keep-outs, escape allowances), `clusters.reseat` on legal
 seats only, then a check that refuses the board unless there are 0 overlaps, nothing outside and no fixed part moved.

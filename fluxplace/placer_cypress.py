@@ -41,7 +41,7 @@ DEFAULTS = {"unit_mm": 0.1, "gap_mm": 0.2, "cluster_weight": 8.0, "rail_weight":
             "feedback": None,          # None = on with an [intent] table: the gate scores each trial and inflates what is crowded
             "macros": "auto",          # an IC + its support parts as one cell: true | false | "auto" (try both, keep the better)
             "near_weight": 1.0, "pair_weight": 2.0, "block_share": 0.5, "reserve_gain": 1.0,
-            "inflate_step_mm": 0.4, "inflate_max_mm": 1.6, "blocked_pin_cost": 40.0, "soft_intent_cost": 20.0}
+            "inflate_step_mm": 0.4, "inflate_max_mm": 1.6, "inflate_share": 0.12, "pin_halo_mm": 1.5, "max_blockages": 48, "blocked_pin_cost": 40.0, "soft_intent_cost": 20.0}
 INTENT_TRIALS = 6
 # Cypress/DREAMPlace parameters; the Cypress authors tune these per board with a Bayesian search.
 PARAMS = {
@@ -183,27 +183,47 @@ def _legalise(B, tg, fixed, cons, escape, log, units=None, rigid=(), loose=True)
     raise LG.PlacementError("cypress: the legaliser found no legal placement")
 
 
+def _reseat_far(B, cons, spec, fixed):
+    """Support parts beyond their limit go back beside their IC pin, on legal seats within the limit only. -> parts moved."""
+    x0, y0, x1, y1 = B["bbox"]
+    em = float((cons.get("placement") or {}).get("edge_clearance_mm", 0.3))
+    bounds, n = (x0 + em, y0 + em, x1 - em, y1 - em), 0
+    legal = LGL.Legal(B, cons, fixed)
+    for _ in range(3):
+        cl = [c for c in CL.build(B, cons, spec)[0] if c["ic"] not in fixed]
+        if not [1 for c in cl for s in c["supports"] if s["sure"] and s["dist"] > s["limit"]]:
+            break
+        n += len(CL.reseat(B, cl, bounds=bounds, legal=legal, strict=True))
+    if _intent(cons):                    # as the intent seating does: rail caps near no IC pin go to the pin they are assigned to
+        cl = CL.build(B, cons, spec)[0]
+        spread = {s["ref"] for c in cl for s in c["supports"] if s["how"] == "spread" and s["dist"] > s["limit"]
+                  and s["ref"] not in fixed}
+        if spread:
+            n += len(CL.reseat(B, cl, guess=True, only=spread, bounds=bounds, legal=legal, strict=True))
+    return n
+
+
 def repair_support(B, cons, spec, fixed, escape, log):
     """Support parts the gate still finds beyond their limit (no legal seat among today's neighbours): their IC is laid
     out with ALL its support parts on its own (clusters.seat, isolate), that cell is one rigid unit, and the legaliser
-    runs again from the present poses so the neighbours make room. Around a fixed IC the support parts are seated the
-    same way and held while the others are pushed away. Mutates B; reverts when the result is not legal. -> parts repaired."""
+    runs again from the present poses so the neighbours make room - first with the neighbours free (their support parts
+    are re-seated afterwards; least wire length lost), then with every other IC rigid with the support parts it has at
+    its pins. Around a fixed IC the
+    support parts are seated the same way and held while the others are pushed away. Mutates B; a round that does not
+    reduce the count is undone. -> parts repaired."""
     parts = B["parts"]
     snap = lambda: {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in parts.items()}
     bad = lambda: {r for row in IT.support_rows(B, cons, spec) if row["met"] is False and row["hard"] for r in row["refs"]}
-    todo = bad()
-    n0 = len(todo)
-    for _ in range(4):
-        if not todo:
-            break
-        before, units, hold, taken = snap(), {}, set(), set()
-        stat = [(r, parts[r]) for r in fixed if r in parts]
+    stat = [parts[r] for r in fixed if r in parts]
+
+    def attempt(todo, rigid_neighbours):
+        units, hold, taken = {}, set(), set()
         for c in CL.build(B, cons, spec)[0]:
             ic = c["ic"]
             if not any(s["ref"] in todo for s in c["supports"]):
                 # a neighbour that is pushed aside keeps the support parts it has at its pins
                 ok = [s["ref"] for s in c["supports"] if s["sure"] and s["dist"] <= s["limit"] and s["ref"] not in fixed
-                      and s["ref"] not in taken and ic not in taken]
+                      and s["ref"] not in taken and ic not in taken] if rigid_neighbours else []
                 if ic in fixed:
                     hold |= set(ok)
                 elif ok:
@@ -213,6 +233,7 @@ def repair_support(B, cons, spec, fixed, escape, log):
             sup = [s for s in c["supports"] if (s["sure"] or s["how"] == "spread") and s["ref"] not in fixed
                    and s["ref"] not in taken and not parts[s["ref"]].get("locked") and (ic not in fixed or s["ref"] in todo)]
             taken |= {s["ref"] for s in sup} | {ic}
+            was = {s["ref"]: (parts[s["ref"]]["pos"][0], parts[s["ref"]]["pos"][1], parts[s["ref"]]["angle"]) for s in sup}
             mv = CL.seat(B, {"ic": ic, "supports": sup}, isolate=True)
             for r, (x, y, a) in mv.items():
                 GM.place(parts[r], x, y, a)
@@ -220,8 +241,8 @@ def repair_support(B, cons, spec, fixed, escape, log):
                 for r in mv:
                     q = parts[r]
                     if any(o is not parts[ic] and (o["side"] == q["side"] or o["tht"]) and GM.overlap(q["court"], o["court"])
-                           for _n, o in stat) or not GM.inside(q["court"], B["bbox"]):
-                        GM.place(q, *before[r])
+                           for o in stat) or not GM.inside(q["court"], B["bbox"]):
+                        GM.place(q, *was[r])
                     else:
                         hold.add(r)
             elif mv:
@@ -230,18 +251,29 @@ def repair_support(B, cons, spec, fixed, escape, log):
         try:
             res, _kw = _legalise(B, tg, set(fixed) | hold, cons, escape, lambda m: None, units, list(units), loose=False)
         except LG.PlacementError:
-            res = None
-        if res is not None:
-            for r, (x, y, a) in res.items():
-                GM.place(parts[r], x, y, a)
-        left = bad() if res is not None else todo
-        if os.environ.get("FLUXPLACE_CYPRESS_DEBUG"):
-            log(f"  repair round: todo {sorted(todo)}, {len(units)} units, held {sorted(hold)}, legal {res is not None}, left {sorted(left)}")
-            for row in IT.support_rows(B, cons, spec):
-                log("   " + str(row.get("detail"))[:300])
-        if res is None or len(left) >= len(todo):
+            return None
+        for r, (x, y, a) in res.items():
+            GM.place(parts[r], x, y, a)
+        if not rigid_neighbours:
+            _reseat_far(B, cons, spec, fixed)
+        return bad()
+
+    todo = bad()
+    n0 = len(todo)
+    for _ in range(4):
+        if not todo:
+            break
+        before = snap()
+        for rigid_neighbours in (False, True):
+            left = attempt(todo, rigid_neighbours)
+            if os.environ.get("FLUXPLACE_CYPRESS_DEBUG"):
+                log(f"  repair: todo {sorted(todo)}, neighbours rigid {rigid_neighbours}, left "
+                    f"{'no legal result' if left is None else sorted(left)}, HPWL {hpwl(B):.0f}")
+            if left is not None and len(left) < len(todo):
+                break
             for r, (x, y, a) in before.items():
                 GM.place(parts[r], x, y, a)
+        else:
             break
         todo = left
     if n0:
@@ -255,27 +287,25 @@ def _finish(B, cons, spec, fixed, tg, S, log, units=None, rigid=()):
     x0, y0, x1, y1 = B["bbox"]
     M = LG._Model(B, cons, fixed, (x0, y0, x1, y1), escape=bool(S["escape"]))
     origin = {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in B["parts"].items()}
+    dbg = os.environ.get("FLUXPLACE_CYPRESS_DEBUG")
+    if dbg:
+        import copy as _c
+        B0 = _c.deepcopy(B)
+        for r, (x, y, a) in tg.items():
+            GM.place(B0["parts"][r], x, y, a)
+        log(f"  finish: HPWL as Cypress left it {hpwl(B0):.0f}")
     res, how = _legalise(B, tg, fixed, cons, bool(S["escape"]), log, units, rigid)
     for r, (x, y, a) in res.items():
         GM.place(B["parts"][r], x, y, a)
+    if dbg:
+        log(f"  finish: HPWL after the legaliser {hpwl(B):.0f}")
     d = [math.hypot(res[r][0] - tg[r][0], res[r][1] - tg[r][1]) for r in tg if r in res]
     snap = lambda: {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in B["parts"].items()}
     final, reseated = snap(), 0
     if S["reseat"]:                      # support parts the legaliser pushed away go back beside their IC, legal seats only
-        em = float((cons.get("placement") or {}).get("edge_clearance_mm", 0.3))
-        legal = LGL.Legal(B, cons, fixed)
-        for _ in range(3):
-            cl = [c for c in CL.build(B, cons, spec)[0] if c["ic"] not in fixed]
-            if not [1 for c in cl for s in c["supports"] if s["sure"] and s["dist"] > s["limit"]]:
-                break
-            reseated += len(CL.reseat(B, cl, bounds=(x0 + em, y0 + em, x1 - em, y1 - em), legal=legal, strict=True))
-        if _intent(cons):                # as the intent seating does: rail caps near no IC pin go to the pin they are assigned to
-            cl = CL.build(B, cons, spec)[0]
-            spread = {s["ref"] for c in cl for s in c["supports"] if s["how"] == "spread" and s["dist"] > s["limit"]
-                      and s["ref"] not in fixed}
-            if spread:
-                reseated += len(CL.reseat(B, cl, guess=True, only=spread, bounds=(x0 + em, y0 + em, x1 - em, y1 - em),
-                                          legal=legal, strict=True))
+        reseated += _reseat_far(B, cons, spec, fixed)
+        if dbg:
+            log(f"  finish: HPWL after re-seating {hpwl(B):.0f}")
         if _intent(cons):
             reseated += repair_support(B, cons, spec, fixed, bool(S["escape"]), log)
         after = snap()
@@ -294,8 +324,8 @@ def _finish(B, cons, spec, fixed, tg, S, log, units=None, rigid=()):
              "legaliser_mean_mm": round(sum(d) / len(d), 3) if d else 0.0, "reseated": reseated,
              "overlaps": len(v["overlaps"]), "outside": len(v["outside"]), "in_keepout": len(v["in_keepout"]),
              "fixed_moved": broken}
-    if os.environ.get("FLUXPLACE_CYPRESS_DEBUG"):
-        log(f"  finish: legalise {how}, in keep-out {v['in_keepout']}, reseated {reseated}")
+    if dbg:
+        log(f"  finish: legalise {how}, in keep-out {v['in_keepout']}, reseated {reseated}, HPWL {hpwl(B):.0f}")
     if v["overlaps"] or v["outside"] or broken:
         raise LG.PlacementError(f"cypress: result not legal after legalisation: {len(v['overlaps'])} overlap(s) "
                                 f"{v['overlaps'][:4]}, {len(v['outside'])} outside {v['outside'][:4]}, fixed moved {broken[:4]}")
@@ -479,19 +509,35 @@ def assess(B, cons, spec, src, moves, wd, S, log):
 def feedback(B, fixed, findings, blocked, infl, blocks, S):
     """Congestion-driven inflation for the next trial. A part with a blocked fan-out pin, the parts blamed for it and the
     parts bordering a plan-route overflow get `inflate_step_mm` more room (up to `inflate_max_mm`); an overflow that
-    borders a fixed part becomes a blockage there (a fixed part does not move between trials). Mutates `infl` {ref: mm}
+    borders a fixed part becomes a blockage there, and so does `pin_halo_mm` around a blocked pin of a fixed part (a fixed
+    part does not move between trials; at most `max_blockages`). A part needs a heat of 1
+    (one blocked pin of its own, two blames, or overflow 1.0 at its border) to be inflated. Mutates `infl` {ref: mm}
     and `blocks` [(rect, sides)]. -> (parts given more room, blockages added)."""
     parts, hot = B["parts"], {}
     add = lambda r, v: hot.__setitem__(r, hot.get(r, 0.0) + v) if r in parts else None
+    nb, seen = 0, {tuple(round(v, 1) for v in r) for r, _s in blocks}
+
+    def block(box, sides):
+        nonlocal nb
+        k = tuple(round(v, 1) for v in box)
+        if len(blocks) < int(S["max_blockages"]) and k not in seen:
+            blocks.append((tuple(float(v) for v in box), sides))
+            seen.add(k)
+            nb += 1
+
     for p in blocked or ():
         add(p["ref"], 1.0)
+        q = parts.get(p["ref"])
+        pad = next((d for d in q["pads"] if d["num"] == str(p.get("pin"))), None) if q and p["ref"] in fixed else None
+        if pad:                            # a held part's pin: nothing may sit within `pin_halo_mm` of it next time
+            h = float(S["pin_halo_mm"])
+            block((pad["x"] - h, pad["y"] - h, pad["x"] + h, pad["y"] + h), {"F", "B"} if q["tht"] else {q["side"][0]})
         for name, _n in (p.get("blame") or [])[:3]:
             if str(name).split(".")[0] != p["ref"]:
                 add(str(name).split(".")[0], 0.5)
         m = re.search(r"([A-Za-z]+\d+\w*)\.", str(p.get("blocker") or ""))
         if m and m.group(1) != p["ref"]:
             add(m.group(1), 0.5)
-    nb, seen = 0, {tuple(round(v, 1) for v in r) for r, _s in blocks}
     for f in findings or ():
         e = float(f.get("eff", f.get("overflow", 0)) or 0) if f.get("code") == "PLAN_OVERFLOW" else 0.0
         if e <= 0:
@@ -500,14 +546,15 @@ def feedback(B, fixed, findings, blocked, infl, blocks, S):
         for r in near:
             add(r, min(1.0, e))
         box = f.get("box")
-        if box and any(r in fixed for r in near) and len(blocks) < 24 and tuple(round(v, 1) for v in box) not in seen:
-            blocks.append((tuple(float(v) for v in box), {"F.Cu": {"F"}, "B.Cu": {"B"}}.get(f.get("layer"), {"F", "B"})))
-            seen.add(tuple(round(v, 1) for v in box))
-            nb += 1
+        if box and any(r in fixed for r in near):
+            block(box, {"F.Cu": {"F"}, "B.Cu": {"B"}}.get(f.get("layer"), {"F", "B"}))
+    # only what is clearly crowded, and never more than `inflate_share` of the movable parts: inflating everything is just a
+    # bigger board for Cypress and longer wires for nothing
     step, cap, n = float(S["inflate_step_mm"]), float(S["inflate_max_mm"]), 0
-    for r, v in hot.items():
-        new = round(min(cap, infl.get(r, 0.0) + step * min(2.0, max(0.5, v))), 3)
-        if r not in fixed and new > infl.get(r, 0.0):
+    cand = sorted(((v, r) for r, v in hot.items() if r not in fixed and v >= 1.0), reverse=True)
+    for v, r in cand[:max(1, int(float(S["inflate_share"]) * sum(1 for q in parts if q not in fixed)))]:
+        new = round(min(cap, infl.get(r, 0.0) + step * min(2.0, v)), 3)
+        if new > infl.get(r, 0.0):
             infl[r] = new
             n += 1
     return n, nb
@@ -580,7 +627,7 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
         model = IO.build_model(Bv, fixed, cls, clusters=cl, keepouts=_keepouts(M) + zb + fb_blocks, allowance=allowance,
                                unit=float(S["unit_mm"]), gap=float(S["gap_mm"]), cluster_weight=float(S["cluster_weight"]),
                                rail_weight=float(S["rail_weight"]), max_degree=int(S["max_degree"]), macros=macros,
-                               links=links, net_weights=weights)
+                               links=links, net_weights=weights, fixed_allowance=aware)
         mov = [c for c in model["cells"] if not c["fixed"]]
         if not mov:
             return {}, {"engine": "cypress", "version": tool["commit"], "note": "nothing movable"}

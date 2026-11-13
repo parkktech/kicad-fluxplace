@@ -353,19 +353,31 @@ def test_support_macro_is_laid_out_by_the_support_seating_and_escape_room_is_res
 
 def test_feedback_inflates_crowded_parts_and_blocks_beside_fixed_ones(tmp_path):
     B = RD.load(mk(tmp_path))
-    S = PC.settings({})
+    S = dict(PC.settings({}), inflate_share=1.0)
     infl, blocks = {}, []
-    blocked = [{"ref": "U1", "pin": "3", "blocker": "escape of C2.1 (GND)", "blame": [["R1.1", 90], ["U1.2", 50]]}]
+    blocked = [{"ref": "U1", "pin": "3", "blocker": "escape of C2.1 (GND)", "blame": [["R1.1", 90], ["U1.2", 50]]},
+               {"ref": "J1", "pin": "2", "blocker": "U2.1"}]
     find = [{"code": "PLAN_OVERFLOW", "eff": 2.0, "parts": ["U2", "J1"], "box": [6, 38, 8, 40], "layer": "F.Cu"},
             {"code": "PLAN_OVERFLOW", "eff": 1.0, "parts": ["U2", "C1"], "box": [30, 30, 32, 32], "layer": "In1.Cu"},
             {"code": "PLAN_PIN_SEALED", "parts": ["R2"]}]
     n, nb = PC.feedback(B, {"J1", "MH1"}, find, blocked, infl, blocks, S)
-    assert n == len(infl) and set(infl) == {"U1", "C2", "R1", "U2", "C1"} and "J1" not in infl and "R2" not in infl
-    assert infl["U1"] == 0.4 and infl["C2"] == 0.2 and infl["U2"] == 0.8
-    assert nb == 1 and blocks == [((6.0, 38.0, 8.0, 40.0), {"F"})]     # only the overflow that borders a fixed part
+    assert n == len(infl) and set(infl) == {"U1", "U2", "C1"} and "J1" not in infl and "R2" not in infl
+    assert infl["U1"] == 0.4 and infl["C1"] == 0.4 and infl["U2"] == 0.8      # R1, C2: one blame alone is not enough
+    few = {}
+    PC.feedback(B, {"J1", "MH1"}, find, blocked, few, [], dict(S, inflate_share=0.2))
+    assert set(few) == {"U2"}                                          # the hottest first when the share is small
+    pin = next(q for q in B["parts"]["J1"]["pads"] if q["num"] == "2")
+    halo = ((pin["x"] - 1.5, pin["y"] - 1.5, pin["x"] + 1.5, pin["y"] + 1.5), {"F", "B"})
+    # the blocked pin of the held connector gets a halo; of the overflows only the one that borders a fixed part is blocked
+    assert nb == 2 and blocks == [halo, ((6.0, 38.0, 8.0, 40.0), {"F"})]
     for _ in range(9):
         PC.feedback(B, {"J1", "MH1"}, find, blocked, infl, blocks, S)
-    assert max(infl.values()) == S["inflate_max_mm"] and len(blocks) == 1
+    assert max(infl.values()) == S["inflate_max_mm"] and len(blocks) == 2
+    # a held part's cell carries its allowance in the intent-aware model
+    a = lambda ref, part: (1.0, 0.0, 0.5, 0.0) if ref == "J1" else (0.0,) * 4
+    m0, m1 = model(B, allowance=a, gap=0.0), model(B, allowance=a, gap=0.0, fixed_allowance=True)
+    w = lambda m: next(c for c in m["cells"] if c["ref"] == "J1")["w"]
+    assert w(m0) == 20 and w(m1) == 35
 
 
 INTENT = {"placement": {"fixed": ["J1"], "cypress": {"trials": 3}},

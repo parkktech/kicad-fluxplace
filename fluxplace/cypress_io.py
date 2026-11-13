@@ -49,14 +49,16 @@ def outline_blocks(B, step=1.0):
 
 
 def build_model(B, fixed, cls, clusters=(), keepouts=(), allowance=None, unit=UNIT_MM, gap=0.2,
-                cluster_weight=8.0, rail_weight=0.0, max_degree=40, macros=None, links=(), net_weights=None):
+                cluster_weight=8.0, rail_weight=0.0, max_degree=40, macros=None, links=(), net_weights=None,
+                fixed_allowance=False):
     """-> model dict: {unit, size (W, H), cells [{name, ref, members, w, h, x, y, side, fixed, off}], nets [{name, weight, pins}]}.
     Cell x, y = lower-left in grid units; `off` = cell centre minus the part origin (mm, at the part's current angle);
     `members` = {ref: off} (one entry, or every part of a macro).
     `keepouts` = [(rect mm, sides {"F","B"})]; `allowance(ref, part)` -> (left, top, right, bottom) mm of extra room.
     `macros` = {key: [refs]}: movable parts that are ONE cell (the union of their rectangles, on the side of the first ref).
     `links` = [{name, pads: [(ref, pad number), ...], weight}] extra nets; `net_weights` = {net: weight} overrides the class weight;
-    a cluster entry may carry its own `link_weight`."""
+    a cluster entry may carry its own `link_weight`. `fixed_allowance`: a fixed part's cell includes its allowance too
+    (the escape room of a held fine-pitch part is not offered to Cypress)."""
     x0, y0, x1, y1 = B["bbox"]
     W, H = int(math.ceil((x1 - x0) / unit)), int(math.ceil((y1 - y0) / unit))
     cells, where = [], {}
@@ -71,11 +73,10 @@ def build_model(B, fixed, cls, clusters=(), keepouts=(), allowance=None, unit=UN
         cells.append(c)
         return c
 
-    def room(ref):
+    def room(ref, g=gap / 2.0):
         p = B["parts"][ref]
         c = p["court"]
         a = allowance(ref, p) if allowance else (0.0,) * 4
-        g = gap / 2.0
         return (c[0] - a[0] - g, c[1] - a[1] - g, c[2] + a[2] + g, c[3] + a[3] + g)
 
     n = 0
@@ -103,7 +104,7 @@ def build_model(B, fixed, cls, clusters=(), keepouts=(), allowance=None, unit=UN
         if ref in fixed:
             sides = {"F", "B"} if p["tht"] else ({_side(p)} | set(p.get("court_layers", ())))
             first = _side(p) if _side(p) in sides else sorted(sides)[0]
-            where[ref] = add(f"f{n}", c, first, True, ref, p["pos"])
+            where[ref] = add(f"f{n}", room(ref, 0.0) if fixed_allowance else c, first, True, ref, p["pos"])
             for s in sorted(sides - {first}):                     # the other side is occupied too
                 add(f"f{n}x", c, s, True)
         else:
