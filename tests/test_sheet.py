@@ -158,9 +158,9 @@ def test_constraints_rewrite_negative_offset_and_zero_crossing():
     assert 'MK1 = [0, 0.0, "F"]' in new.split("\n")
 
 
-def test_constraints_multiline_rect_is_refused():
-    with pytest.raises(ValueError):
-        SH.rewrite_constraints("[[keepout]]\nrect = [\n1,2,3,4]\n", 1, 1)
+def test_constraints_multiline_rect_is_shifted():
+    new, n = SH.rewrite_constraints("[[keepout]]\nrect = [\n  1, 2,  # x0 y0\n3,4]\n", 1, 10, date="d")
+    assert n == 1 and "rect = [\n  2, 12,  # x0 y0\n4,14]" in new
 
 
 # ------------------------------------------------------------- review gate
@@ -332,3 +332,140 @@ def test_swig_and_file_backends_agree_on_the_new_facts(tmp_path):
     assert a["page"] == f["page"]
     assert a["outline_bbox"] == pytest.approx(f["outline_bbox"], abs=0.1)
     assert [x for x in a["outline_bbox"]] == pytest.approx([-10.05, -8.05, 40.05, 22.05], abs=0.01)
+
+
+# ----------------------------------------------- the coordinate registry
+ALL = '''# top
+[project]
+name = "demo"
+[lock.at]
+MH1 = [10, 20, "F"]
+"J1A" = [1.5, 2.5, "B", 90]
+[[keepout]]
+name = "a"
+rect = [1, 2, 3, 4]
+[[keepout]]
+around = ["MK1"]
+[placement.keepout.cm5]
+rect = [5, 6, 7, 8]    # named keep-out
+[placement.keepout]
+INLINE = {rect = [9, 10, 11, 12], side = "B"}
+[placement.region.rf]
+rect = [13.5, 14, 15, 16]
+[placement.no_tht.top]
+rect = [17, 18, 19, 20]
+[[placement.height_region]]
+name = "h"
+rect = [21, 22, 23, 24]
+max_height_mm = 3
+[placement.group.cm5]
+refs = ["U1"]
+centre = [141.5, 92]
+rotations = [0, 180]
+[[plan.pour]]
+net = "GND"
+region = [25, 26, 27, 28]
+[[plan.pour]]
+net = "GND"
+region = "board"
+[[plan.pour]]
+net = "+5V"
+region = [[30, 31], [32, 33], [34, 35]]
+[plan.neck.x]
+refs = ["U1"]
+margin_mm = 4.0
+[zoning]
+keepaway_mm = 5
+[silk.title]
+company = "X"
+height_mm = 1.5
+'''
+
+
+def _pts(text):
+    import tomllib
+    from fluxplace import constraints as C
+    return dict((k + f"#{i}", v) for i, (k, v) in enumerate(C.coord_items(tomllib.loads(text))))
+
+
+@pytest.mark.parametrize("dx,dy", [(114, 67), (-3.25, 8), (0.5, -0.5)])
+def test_every_registered_key_type_is_shifted(dx, dy):
+    new, n = SH.rewrite_constraints(ALL, dx, dy, date="d")
+    a, b = _pts(ALL), _pts(new)
+    assert n == 11 and len(a) == len(b) == 20
+    keys = {k.split("#")[0] for k in a}
+    assert keys == {"lock.at.MH1", "lock.at.J1A", "keepout.rect", "placement.keepout.cm5.rect",
+                    "placement.keepout.INLINE.rect", "placement.region.rf.rect", "placement.no_tht.top.rect",
+                    "placement.height_region.rect", "placement.group.cm5.centre", "plan.pour.region"}
+    for k in a:
+        assert b[k][0] == pytest.approx(a[k][0] + dx) and b[k][1] == pytest.approx(a[k][1] + dy), k
+    # lock row: third item untouched; non-coordinates untouched; comments kept
+    L = new.split("\n")
+    assert dx != 114 or 'MH1 = [124, 87, "F"]' in L
+    assert "rotations = [0, 180]" in L and 'around = ["MK1"]' in L and "max_height_mm = 3" in L
+    assert 'region = "board"' in L and "# top" in L and "keepaway_mm = 5" in L and "margin_mm = 4.0" in L
+    assert any("# named keep-out" in x for x in L)
+    assert [l for l in L if l.strip()][:-1] != [l for l in ALL.split("\n") if l.strip()]
+
+
+def test_group_centre_case_from_the_field():
+    new, _ = SH.rewrite_constraints("[placement.group.cm5]\nrefs = [\"U1\"]\ncentre = [27.5, 25]\n", 114, 67, date="d")
+    assert "centre = [141.5, 92]" in new.split("\n")
+
+
+def test_zero_shift_is_a_noop_and_a_second_pass_adds_nothing():
+    new, n = SH.rewrite_constraints(ALL, 0, 0)
+    assert new == ALL and n == 11
+    once, _ = SH.rewrite_constraints(ALL, 114, 67, date="d")
+    twice, _ = SH.rewrite_constraints(once, 0, 0)              # fit-sheet's second run: offset (0, 0)
+    assert twice == once and once.count("fit-sheet d:") == 1
+
+
+def test_unregistered_coordinate_key_trips_the_self_check(monkeypatch):
+    from fluxplace import constraints as C
+    monkeypatch.setattr(C, "COORD_KEYS", tuple(k for k in C.COORD_KEYS if k[0] != "placement.group.*.centre"))
+    with pytest.raises(SH.ConstraintsShiftError, match="placement.group.cm5.centre"):
+        SH.rewrite_constraints(ALL, 1, 1)
+    # a brand-new coordinate-looking key is refused the same way
+    with pytest.raises(SH.ConstraintsShiftError, match="mystery.pos"):
+        SH.rewrite_constraints("[mystery]\npos = [1, 2]\n", 1, 1)
+
+
+def test_self_check_catches_a_wrong_shift():
+    import tomllib
+    a = tomllib.loads("[lock.at]\nMH1 = [1, 2, \"F\"]\n")
+    b = tomllib.loads("[lock.at]\nMH1 = [2, 2, \"F\"]\n")
+    with pytest.raises(SH.ConstraintsShiftError, match="offset"):
+        SH.verify_shift(a, b, 1, 1)
+    with pytest.raises(SH.ConstraintsShiftError, match="origin"):
+        SH.verify_shift(a, a, 1, 1, (0, 0), (5, 5))
+
+
+def test_fit_file_writes_nothing_when_constraints_cannot_be_shifted(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    p = _build(pcbnew, str(tmp_path / "s.kicad_pcb"))
+    c = tmp_path / "c.toml"
+    c.write_text("[mystery]\npos = [1, 2]\n")
+    raw = open(p).read()
+    with pytest.raises(SH.ConstraintsShiftError):
+        SH.fit_file(p, constraints=str(c))
+    assert open(p).read() == raw and c.read_text() == "[mystery]\npos = [1, 2]\n"
+
+
+def test_fit_file_shifts_board_and_constraints_together_and_is_idempotent(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    p = _build(pcbnew, str(tmp_path / "s.kicad_pcb"))
+    c = tmp_path / "c.toml"
+    c.write_text("[placement.group.g]\nrefs=[\"R1\"]\ncentre = [5, 5]\n[lock.at]\nR2 = [20.25, 12.5, \"F\"]\n")
+    rep = SH.fit_file(p, constraints=str(c), date="2026-01-02")
+    dx, dy = rep["offset"]
+    assert (dx, dy) != (0, 0) and rep["constraints_rows"] == 2
+    import tomllib
+    d = tomllib.loads(c.read_text())
+    assert d["placement"]["group"]["g"]["centre"] == [5 + dx, 5 + dy]
+    b = pcbnew.LoadBoard(p)
+    r1 = [f for f in b.GetFootprints() if f.GetReference() == "R1"][0].GetPosition()
+    assert (pcbnew.ToMM(r1.x), pcbnew.ToMM(r1.y)) == pytest.approx((5 + dx, 5 + dy))     # part and constraint moved together
+    again = SH.fit_file(p, constraints=str(c))
+    assert again["offset"] == (0, 0) and "constraints_text" not in again
+    assert tomllib.loads(c.read_text()) == d

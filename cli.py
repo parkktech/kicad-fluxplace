@@ -154,7 +154,10 @@ def cmd_deliver(a):
 def cmd_pcbway(a):
     """The PCBWay quote form, answered from the board file wherever the design
     already decides the answer."""
-    from fluxplace import pcbway
+    from fluxplace import pcbway, titleblock as TB
+    bad = [f for f in TB.findings(TB.read(a.board), a.board, stage="pcbway") if f["level"] == "FAIL"]
+    if bad:
+        raise SystemExit("ABORT before pcbway: " + "; ".join(f"{f['code']}: {f['msg']}" for f in bad))
     facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=(a.bom or []),
                            sourcing=a.sourcing_json, quantity=a.quantity,
                            name=a.name)
@@ -295,11 +298,11 @@ def _fit_sheet(a, board, cons_path=None, label="fit-sheet"):
         return None
     print("    " + SH.summary_line(rep, label))
     if rep["moved"] and cons_path and os.path.exists(cons_path):
-        n = SH.rewrite_constraints(open(cons_path).read(), 0, 0)[1]
+        n = SH.shift_text(open(cons_path).read(), 0, 0)[1]
         if n:
             dx, dy = rep["offset"]
             print(f"    {label}: {cons_path} has {n} absolute coordinate row(s) "
-                  f"([lock.at]/keepout rect) — NOT rewritten; shift them with "
+                  f"(`[lock.at]`, keep-outs, group centres ...) — NOT rewritten; shift them with "
                   f"`fluxplace fit-sheet --board <x> --constraints {cons_path} "
                   f"--shift {dx:g},{dy:g}`")
     return rep
@@ -329,19 +332,54 @@ def cmd_fit_sheet(a):
     if a.shift:                                  # constraints only, board untouched
         if not a.constraints:
             raise SystemExit("--shift needs --constraints")
-        rep = {"offset": tuple(float(v) for v in a.shift.split(","))}
-    else:
-        rep = SH.fit_file(a.board, out=a.out, paper=a.paper, dry_run=a.dry_run,
-                          refill=a.refill)
-        print("\n".join(SH.summary(rep, dry_run=a.dry_run)))
-    if a.constraints and rep["offset"] != (0, 0):
-        txt = open(a.constraints).read()
-        new, n = SH.rewrite_constraints(txt, *rep["offset"])
-        if a.dry_run:
-            print(f"constraints: {n} coordinate row(s) in {a.constraints} would shift")
-        else:
+        off = tuple(float(v) for v in a.shift.split(","))
+        try:
+            new, n = SH.rewrite_constraints(open(a.constraints).read(), *off)
+        except SH.ConstraintsShiftError as e:
+            raise SystemExit(f"fit-sheet: NOTHING WRITTEN: {e}")
+        if off != (0, 0) and not a.dry_run:
             open(a.constraints, "w").write(new)
-            print(f"constraints: {n} coordinate row(s) in {a.constraints} shifted")
+        print(f"constraints: {n} coordinate key(s) in {a.constraints} "
+              f"{'would shift' if a.dry_run else 'shifted'} by {off}; self-check passed")
+        return
+    try:
+        rep = SH.fit_file(a.board, out=a.out, paper=a.paper, dry_run=a.dry_run,
+                          refill=a.refill, constraints=a.constraints)
+    except SH.ConstraintsShiftError as e:
+        raise SystemExit(f"fit-sheet: NOTHING WRITTEN: {e}")
+    print("\n".join(SH.summary(rep, dry_run=a.dry_run)))
+    if a.constraints and rep.get("constraints_text") is not None:
+        print(f"constraints: {rep['constraints_rows']} coordinate key(s) in {a.constraints} "
+              f"{'would shift' if a.dry_run else 'shifted'}; self-check passed")
+    _fill_tb(a, rep)
+
+
+def _fill_tb(a, rep=None):
+    """fit-sheet / title-block summary line; `--fill-title-block` fills it (see titleblock.py)."""
+    import json as _json
+    from fluxplace import constraints as C, titleblock as TB, questions as Q
+    path = getattr(a, "out", None) if (rep is not None and getattr(a, "out", None)
+                                       and os.path.exists(a.out)) else a.board
+    cons = C.load(getattr(a, "constraints", None))
+    spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
+    if getattr(a, "fill_title_block", False) and not getattr(a, "dry_run", False):
+        S = Q.Session(path, cons, Q.parse_answers(getattr(a, "answer", None)),
+                      bool(getattr(a, "assume_defaults", False)), "title-block")
+        r = TB.fill(path, None, cons, spec, session=S)
+        print(f"title block filled: {r['after']['title']!r} rev {r['after']['rev']!r} "
+              f"date {r['after']['date']!r} company {r['after']['company']!r}"
+              + (f"; not filled: {', '.join(r['missing'])}" if r["missing"] else ""))
+    print(TB.summary_line(path, cons, spec))
+
+
+def cmd_title_block(a):
+    """Fill the board's drawing-sheet title block (revision, date, company, title)."""
+    a.fill_title_block = True
+    if a.out:
+        import shutil
+        shutil.copyfile(a.board, a.out)
+        a.board, a.out = a.out, None
+    _fill_tb(a)
 
 
 def cmd_plan(a):
@@ -1401,7 +1439,7 @@ def _review_gate(a, stage="review", hard=True):
         ds_dir = next((os.path.normpath(c) for c in cand if os.path.isdir(c)),
                       os.path.normpath(cand[0]))
     findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
-                     waivers=waivers, ds_dir=ds_dir)
+                     waivers=waivers, ds_dir=ds_dir, stage=stage)
     print(f"REVIEW ({stage}) — {board}")
     n = R.summarize(findings, log=lambda m: print(m, flush=True))
     if getattr(a, "json", None) and stage == "review":
@@ -2616,7 +2654,20 @@ def build_parser():
     pfs.add_argument("--dry-run", action="store_true", help="plan only, write nothing")
     pfs.add_argument("--refill", action="store_true",
                      help="refill zones after the move (a translation does not need it)")
+    pfs.add_argument("--fill-title-block", action="store_true",
+                     help="also fill the drawing-sheet title block (title, revision, date, company)")
+    pfs.add_argument("--spec", default=None, help="spec JSON (project name / version for the title block)")
+    from fluxplace import questions as _Q
+    _Q.add_args(pfs)
     pfs.set_defaults(fn=cmd_fit_sheet)
+
+    ptb = sub.add_parser("title-block", help="fill the drawing-sheet title block (title, revision, date, company)")
+    ptb.add_argument("board")
+    ptb.add_argument("--out", default=None, help="write a copy here instead of in place")
+    ptb.add_argument("--constraints", default=None)
+    ptb.add_argument("--spec", default=None)
+    _Q.add_args(ptb)
+    ptb.set_defaults(fn=cmd_title_block)
 
     pt = sub.add_parser("tournament",
                         help="N placements -> gate filter -> freerouting judges -> winner")

@@ -25,7 +25,18 @@ by exactly the offset or nothing is saved. A second run reports "already fitted"
   `board is off the sheet — run \`fluxplace fit-sheet\`` when it is.
 - **Review.** `SHEET_OFF_PAGE` (WARN; FAIL with `[sheet] enforce = true`): outline
   outside the usable area or on the title block. Facts: `page`, `outline_bbox`.
-- **Constraints.** `--constraints C.toml` shifts `[lock.at]` rows and `[[keepout]]`
-  `rect = [...]` in place (text edit, comments kept) and appends a
-  `# fit-sheet <date>: ... shifted by (+dx, +dy) mm` line. Build commands only
-  print the offset; apply it with `--constraints C --shift DX,DY`.
+- **Constraints.** `--constraints C.toml` shifts EVERY coordinate key in place (text edit, comments kept)
+  and appends a `# fit-sheet <date>: ... shifted by (+dx, +dy) mm` line. The keys come from one registry,
+  `constraints.COORD_KEYS`: `[lock.at]` rows, `[[keepout]]`, `[placement.keepout.*]`, `[placement.region.*]`,
+  `[placement.no_tht.*]`, `[[placement.height_region]]` (all `rect`), `[placement.group.*] centre`,
+  `[[plan.pour]] region` (rect or polygon). Multi-line arrays and inline tables are followed. Before anything
+  is written the constraints are parsed before and after: every coordinate must keep its offset from the board
+  outline origin, and a coordinate-looking key (`rect`, `centre`, `pos`, `poly`, `region`, ...) that is not in
+  the registry stops the run. Failure = "NOTHING WRITTEN" (board and constraints untouched). A second run is a
+  no-op (offset 0, 0). Build commands only print the offset; apply it with `--constraints C --shift DX,DY`.
+- **Title block.** `review`: `TITLEBLOCK_EMPTY` (no title or no revision; WARN, FAIL at fab/deliver/pcbway) and
+  `TITLEBLOCK_REV_STALE` (revision differs from the resolved board version, silk's resolution; FAIL).
+  `fit-sheet ... --fill-title-block` or `fluxplace title-block BOARD [--out O] [--constraints C --spec S]` writes
+  title (`[project] name`, else spec `name`; neither: question `title-block-name`, exit 3, nothing written),
+  revision (resolved version), date (ISO, today) and company (ONLY `[project] company` / `[silk.title] company`).
+  Only the `(title_block ...)` token changes. fit-sheet's summary ends with the title-block state.

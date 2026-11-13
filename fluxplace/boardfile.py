@@ -379,6 +379,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "board_path": board_path, "board": board_path, "backend": "file",
         "size_mm": size,
         "outline_bbox": outline_bbox, "page": page,
+        "title_block": __import__("fluxplace.titleblock", fromlist=["x"]).read(board_path),
         "copper_layers": len(copper),
         "parts": parts,
         "net_pads": dict(net_pads),
