@@ -130,6 +130,9 @@ def test_fix_dsn_declares_planes_raises_rules_and_fixes_wiring():
     assert rep["clearances_raised"] == 1 and "(clearance 31.75 (type smd_smd))" in out      # typed clearances are KiCad's own
     assert rep["fixed"] == 3 and "(type route)" not in out
     assert "(path F.Cu 90 " in out                                                            # existing copper is not rewritten
+    dsn2 = dsn.replace("(network\n", '(network\n    (net A\n      (pins R1-1 R2-1)\n    )\n    (net "B 1"\n      (pins R1-2 R2-2)\n    )\n')
+    out2, rep2 = FR.fix_dsn(dsn2, [], 0, 0, skip_nets=["B 1", "ZZ"])
+    assert rep2["nets_excluded"] == 1 and "(pins R1-1 R2-1)" in out2 and "R1-2" not in out2   # the excluded net has nothing to connect
 
 
 def test_log_parse_gives_the_pass_curve():
@@ -245,6 +248,9 @@ def test_skip_nets_are_not_imported_and_fanout_switch(tmp_path, fake):
     rec, _b, out, base = run(tmp_path, fake, [N1, N2], skip_nets=["N2"], has_fanout=True)
     assert rec["ok"] and rec["import"]["tracks_added"] == 3 and rec["import"]["skipped_items"] == 1
     assert rec["open"] == 1 and rec["fanout"] == "off"
+    seen = open(base["dsn_copy"]).read()
+    assert rec["dsn"]["nets_excluded"] == 1                                                # N2 has no pins in the DSN
+    assert "R3-2" not in seen[seen.index("(network"):seen.index("(wiring")].split("(class")[0]
     assert "--router.fanout.enabled=false" in json.load(open(base["argv_out"]))
 
 

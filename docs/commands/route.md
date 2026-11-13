@@ -162,7 +162,8 @@ What one run does (each step is in `W/<n>-route/freerouting.json`):
 
 Pairs and other controlled nets (`ripolicy.controlled_nets`: pairs, RF, clocks, switch nodes, plain copper): Freerouting
 has no true differential-pair routing and misses skew badly. Complete locked pairs are fixed copper. `pairs = "exclude"`
-(default): what Freerouting drew for a controlled net that was still open is not imported; the net stays open for the
+(default): a controlled net that is still open has its pins taken off the net in the DSN copy (Freerouting has nothing to
+connect and keeps clear of the pads; anything the session still holds for it is not imported); the net stays open for the
 per-net router (`route_diff.py`) and the ladder. `pairs = "route"`: it is imported and the pair audit runs on it
 (`pairs_audit` in the record); the stage's NOT DONE audit covers both cases, so a Freerouting pair is never reported good unaudited.
 

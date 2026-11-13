@@ -8,7 +8,8 @@
              wire and via marked `(type fix)` so fan-out and scripted pairs are not touched
   JVM        threads / passes / job timeout from `[route.freerouting]`, its own java.io.tmpdir, a watchdog that
              kills that one PID and still takes the session when it is on disk
-  import     session copper ADDED to the board's own (ses.import_into replace=False), nets in `skip_nets` left out
+  import     session copper ADDED to the board's own (ses.import_into replace=False); `skip_nets` have no pins in
+             the DSN (nothing to route) and anything the session still holds for them is left out
   repair     unlocked tracks below the floor are widened to the net-class width where clearance allows; the ones
              that cannot be widened are listed and fail the run (`subfloor.failed`)
   post       caller's post-step (snap + join gaps), refill, open connections from pcbnew and from kicad-cli DRC
@@ -184,10 +185,15 @@ def _section(text, key):
     return None
 
 
-def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0):
+def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0, skip_nets=()):
     """-> (text, report): planes declared power, rule widths / untyped clearances raised to the floors (mm),
-    every wire and via of the wiring section `(type fix)`."""
-    rep = {"planes": [], "planes_missed": [], "widths_raised": 0, "clearances_raised": 0, "fixed": 0, "already_fixed": 0}
+    every wire and via of the wiring section `(type fix)`, the pins of `skip_nets` taken off their nets (the router
+    then has nothing to connect there and treats the pads as obstacles; the nets stay open for the caller)."""
+    rep = {"planes": [], "planes_missed": [], "widths_raised": 0, "clearances_raised": 0, "fixed": 0, "already_fixed": 0,
+           "nets_excluded": 0}
+    for name in skip_nets:
+        text, k = re.subn(r'(\(net\s+"?%s"?\s*)\(pins[^)]*\)(\s*\))' % re.escape(name), r"\1\2", text, count=1)
+        rep["nets_excluded"] += k
     for lay in planes:
         pat = r"(\(layer\s+\"?%s\"?\s*\(type\s+)signal(\s*\))" % re.escape(lay)
         new, n = re.subn(pat, r"\1power\2", text, count=1)
@@ -390,7 +396,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
         if not ex.get("ok"):
             raise RuntimeError("Specctra DSN export failed")
         with open(dsn, errors="surrogateescape") as fh:
-            text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance)
+            text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
         if rep["planes_missed"]:
             raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
         with open(dsn, "w", errors="surrogateescape") as fh:
