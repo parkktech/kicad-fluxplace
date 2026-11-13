@@ -271,7 +271,7 @@ def _engine(c):
 def _engine_record(board):
     from . import placer_cypress as PC
     r = PC.read_record(board)
-    return f"{r.get('engine', 'builtin')} {r.get('version', '')}".strip()
+    return f"{r.get('engine', 'builtin')} {r.get('version', '')}".strip() + (f"; {r['summary']}" if r.get("summary") else "")
 
 
 def _engine_floorplan(c, d, board, out):
