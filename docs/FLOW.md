@@ -10,9 +10,9 @@ every pin gets real, DRC-clean escape copper before routing, and that copper is 
 | density | `density` | there is room: utilisation per side/region, growth needed for a target (monotonic in growth) |
 | modules | `modules` | every IC has its supports as one rigid block; ports per side; each block's own fan-out exists in isolation |
 | floorplan | `floorplan` | blocks are legal and none sits on another's escape copper; wire length / crossings; fan-out re-proved on the whole board; minimal outline with `--size` |
-| fan-out | `fanout` | FANOUT_OK: every required pin has stub/via and a free lane; DRC added nothing; items locked |
+| fan-out | `fanout` | FANOUT_OK: every required pin has stub/via and a free lane; DRC added nothing; items locked; reserved escapes (power pins, passives crowded by a pair) claimed first (`escres.py`, map `escapes`); `route-ready` FAILs PLACE_ESCAPE_UNRESERVED |
 | plan-route | `plan-route` | channels only (WARN): overflow between the ports |
-| route | `pipeline` route stage | starts every net at its fan-out end point; locked copper is never ripped; order: controlled pairs, RF, clocks, then the rest; every batch audited |
+| route | `pipeline` route stage | starts every net at its fan-out end point; locked copper is never ripped; order: escapes, plain copper, power pins, rails, controlled pairs / RF / clocks, rest; every batch audited; pair / RF out of tolerance = NOT DONE |
 | audit / silk / review | | unchanged |
 
 Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> plan-route -> route -> audit -> silk -> review.
@@ -35,3 +35,5 @@ board is a question (`docs/commands/questions.md`), not a guess.
 
 Written back to `<board>.fluxmap.json`: `modules` + ports (modules), `fanout` (groups, per-part escaped/required, blocked pins), `pours`
 (planned pours), `sources` (the winner per fact above), `answers`. The pipeline copies the map with each stage board.
+
+Open connections at the end are a gate failure (`review`: UNROUTED, STALE_FILL); `closure BOARD` explains each one (pocket, walls, via sites, ranked options).

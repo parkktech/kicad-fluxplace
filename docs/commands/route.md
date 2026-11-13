@@ -123,3 +123,15 @@ via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`r
   (unlocked copper) first. Status `pairs`: complete / mismatch / half-removed / failed.
 - **Plain copper** (`[nets.X] straight = true`): routed first, rejected when it changes layer beyond what its pads force, never ripped.
 - After every merge `snapvias` moves track ends inside a via to its centre (`docs/commands/snap-vias.md`).
+
+## Routing order, escape reservations, quality gates
+- **Order** (batch and parallel; status `order`): escape (fan-out + reserved escapes, `first`), plain copper, power pins and boxed-in passives (nets that own a
+  reserved escape, the map's `escapes`), rails (tree / pour), controlled pairs / RF / clocks, the rest; inside a phase plan criticality, then length. Parallel jobs
+  are taken in this order (rail edges at most half the slots while other nets wait); merge conflicts go to the earlier phase. Reservations are small locked stubs
+  and vias, not corridor blocks; the router still takes no per-net layer hint, so a pair routed after them chooses its own layer.
+- **Reservations** (`escres.py`, `docs/FLOW.md`): `route-ready` FAILs `PLACE_ESCAPE_UNRESERVED` naming the pin and what crowds it; `fanout` writes them as locked
+  stub + via copper before its own search and records them in the map (`escapes`). `[escape] near_mm lane_mm window_mm radius_mm enabled`.
+- **Quality** (`qualaudit.py`): after every merge the checkpoint is audited; a pair (both legs, same layers, same vias, skew <= limit) or RF net (declared
+  width per layer / impedance, layer changes <= limit) out of tolerance is NOT DONE: not counted in `nets_routed`, listed with its cause in status `not_done`,
+  `route-status` and the route stage line. At the end of the route stage pairs failing ONLY on skew go through `tune` (`[route] tune_rounds` 3, `tune_pairs` 8);
+  the result is kept when no connection opens and the skew falls.

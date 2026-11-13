@@ -163,7 +163,41 @@ def _real_layers(track, min_mm=2.0):
     return {l for l, mm in track.get("layers", {}).items() if mm >= min_mm}
 
 
+def _pairs_from_audit(facts, cons):
+    """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
+    path = facts.get("board_path") or facts.get("board")
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return None
+    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC
+    try:
+        B = RD.load(path)
+        cls = NC.classify(B, cons or {})
+        try:
+            opn = set(RC.open_by_net(path))
+        except Exception:
+            opn = set(RC.text_open(B))
+        rows = QA.pair_rows(B, cls, cons or {}, opn)
+    except Exception:
+        return None
+    fams = tuple((cons or {}).get("pairs", {}))
+    gated = lambda m: m.startswith(fams) or m.upper().split("_")[0] in _HS_FAMILIES
+    out = []
+    for r in rows:
+        if r["status"] != "mismatch" or not gated(r["p"]):
+            continue
+        if "skew" in r["causes"]:
+            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit"))
+        if "layers" in r["causes"]:
+            out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
+        if "vias" in r["causes"]:
+            out.append(_f(WARN, "PAIR_VIA_MISMATCH", f"{r['p']}/{r['n']}: {r['why']}"))
+    return out
+
+
 def check_pairs(facts, cons):
+    audited = _pairs_from_audit(facts, cons)
+    if audited is not None:
+        return audited
     tracks = facts.get("net_tracks", {})
     pairs = G.diff_pairs(list(facts["net_pads"]))
     if not pairs:
@@ -281,38 +315,21 @@ def check_rf(facts, cons):
                       "RF nets present but the board defines no stackup — "
                       "impedance cannot be verified"))
         return out
-    per_net_rules = (cons or {}).get("nets", {})
+    from . import qualaudit as QA
+    fmap = None
+    path = facts.get("board_path") or facts.get("board")
+    if isinstance(path, str) and os.path.isfile(path):
+        try:
+            from . import fluxmap as FM
+            fmap = FM.load(FM.default_path(path))
+        except (OSError, ValueError):
+            fmap = None
     for net in sorted(names):
         tr = facts["net_tracks"].get(net)
         if not tr:
             continue
-        lim = int(per_net_rules.get(net, {}).get("max_vias", max_vias))
-        if tr.get("vias", 0) > lim:
-            out.append(_f(FAIL if net in per_net_rules else WARN, "RF_VIA_COUNT",
-                          f"{net}: {tr['vias']} vias (limit {lim}) — every layer "
-                          f"transition is an impedance discontinuity"))
-        worst = None
-        for layer, w, mm in tr.get("segments", []):
-            if mm < min_seg or mm <= neck_max:
-                continue
-            geom = layer_geometry(stackup, planes, layer)
-            if geom is None:
-                continue
-            z, model = z0_on_layer(w, geom)
-            if z is None:
-                out.append(_f(WARN, "RF_NO_REFERENCE",
-                              f"{net}: {mm:.1f}mm on {layer} with no reference "
-                              f"plane on either side"))
-                continue
-            err = 100.0 * (z - target) / target
-            if abs(err) > tol and (worst is None or abs(err) > abs(worst[0])):
-                worst = (err, layer, w, mm, z, model)
-        if worst:
-            err, layer, w, mm, z, model = worst
-            out.append(_f(FAIL, "RF_IMPEDANCE_OFF",
-                          f"{net}: {mm:.1f}mm of {w:.3f}mm trace on {layer} is "
-                          f"~{z:.0f} ohm ({model}, {err:+.0f}% of {target:.0f}) — "
-                          f"the width is right for an outer layer, not this one"))
+        for f in QA.rf_grade(net, tr, stackup, planes, cons, fmap):
+            out.append(_f(f["level"], f["code"], f["msg"]))
     return out
 
 

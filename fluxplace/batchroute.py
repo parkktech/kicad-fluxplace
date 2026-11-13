@@ -84,16 +84,70 @@ def has_fanout(board):
 CONTROLLED = {"pair": 0, "rf": 1, "clock": 2}
 
 
-def order_nets(B, nets, cls=None, first=(), power=(), hint=None, fanout=False):
+PHASES = ("escape", "plain", "power_pins", "rails", "controlled", "rest")
+
+
+def phase_map(B, nets, cls=None, cons=None, first=(), power=(), escape_nets=(), rails=()):
+    """{net: phase} for the routing order: escape (fan-out + reserved escapes, `first`), plain copper, power pins and boxed-in
+    passives (nets that own a reserved escape, `power`), rails (tree / pour), controlled pairs / RF / clocks, the rest."""
+    from . import ripolicy as RIP
+    cls = cls or {}
+    plain = RIP.plain_nets(cons)
+    out = {}
+    for n in nets:
+        info = cls.get(n) or {}
+        if n in set(first):
+            out[n] = "escape"
+        elif n in plain:
+            out[n] = "plain"
+        elif n in set(escape_nets) or n in set(power):
+            out[n] = "power_pins"
+        elif n in set(rails) or info.get("class") == "rail":
+            out[n] = "rails"
+        elif info.get("class") in CONTROLLED:
+            out[n] = "controlled"
+        else:
+            out[n] = "rest"
+    return out
+
+
+def escape_nets_of(board, cons=None):
+    """nets that own a reserved escape (the map's `escapes`, written by the fan-out stage)."""
+    try:
+        from . import fluxmap as FM
+        m = FM.load(FM.default_path(board))
+        return {e["net"] for e in m.get("escapes", []) if e.get("net")}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return set()
+
+
+def order_summary(order, phases):
+    out = []
+    for ph in PHASES:
+        ns = [n for n in order if phases.get(n) == ph]
+        if ns:
+            out.append({"phase": ph, "nets": len(ns), "first": ns[:6]})
+    return out
+
+
+def order_nets(B, nets, cls=None, first=(), power=(), hint=None, fanout=False, phases=None):
     """Routing order: fan-out, power, critical classes, rest; inside a group the plan's rank first (`hint`: {net: rank},
     planroute.route_hint: nets through PLAN_OVERFLOW channels = 0, pairs = 1), then ascending estimated length."""
     cls = cls or {}
     first, power = set(first), set(power)
     hint = hint or {}
     pads = NC.net_pads(B)
+    prank = {p: i for i, p in enumerate(PHASES)}
 
     def key(n):
         info = cls.get(n) or {}
+        if phases is not None:                     # explicit phase order (phase_map), then plan criticality, then length
+            try:
+                ln = NC.net_length(B, n, pads.get(n))
+            except Exception:
+                ln = 0.0
+            c = CONTROLLED.get(info.get("class"))
+            return (prank.get(phases.get(n), 9), c if c is not None else 0, hint.get(n, 9), round(ln, 3), n)
         if fanout:               # copper to every pin exists: controlled pairs, RF, clocks first, then plan criticality, then length
             try:
                 ln = NC.net_length(B, n, pads.get(n))
@@ -190,7 +244,10 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     cls = cls or NC.classify(B, cons, spec)
     from . import railroute as RL
     rails = set(RL.rail_nets(B, cons, cls, [n for n in nets if n in open0])[0])    # a rail is never one batch job: parallel mode routes it as a tree
-    order = order_nets(B, [n for n in nets if n in open0 and n not in rails], cls, () if fo else first, power, hint, fanout=fo)
+    first_eff = () if fo else first
+    ph = phase_map(B, [n for n in nets if n in open0 and n not in rails], cls, cons, first_eff, power, escape_nets_of(board, cons))
+    order = order_nets(B, [n for n in nets if n in open0 and n not in rails], cls, first_eff, power, hint, fanout=fo, phases=ph)
+    order_info = order_summary(order, ph)
     cur, cur_open = board, open0
     cur_B = B
     drc_base = [None]
@@ -202,9 +259,23 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     total = lambda: sum(cur_open.values())
     extra.update({"mode": "batch", "batch": 0, "batches_total": len(queue), "batch_nets": 0, "halvings": 0,
                   "last_good": board, "last_good_open": total(), "last_good_open_nets": len(cur_open),
-                  "start_open": total(), "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "dropped": {}})
+                  "start_open": total(), "leftovers": 0, "out": board, "rounds": [], "rule_violations": 0, "dropped": {},
+                  "order": order_info})
+
+    qa = {"ctx": None, "path": None}
+
+    def quality():
+        if qa["path"] != cur:
+            try:
+                from . import qualaudit as QA
+                qa["ctx"] = qa["ctx"] or QA._ctx(board, cur_B, cons)
+                extra.update(QA.status_fields(cur_B, cls, cons, cur_open, open0, qa["ctx"]))
+            except Exception as e:
+                extra["not_done"] = {"error": str(e)[:100]}
+            qa["path"] = cur
 
     def push_status(state="running"):
+        quality()
         extra.update(batches_total=extra["batch"] + len(queue), halvings=stats["halvings"],
                      leftovers=len(reasons), last_good=cur, last_good_open=total(),
                      last_good_open_nets=len(cur_open), out=cur, rule_violations=stats["violations"],

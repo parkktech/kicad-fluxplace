@@ -71,3 +71,13 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `buried_vias`, `microvias`, `min_track_mm`, `min_clearance_mm`,
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
 `profile`), `[silk]` (see `silk.md`).
+
+## Open connections, stale fills, pair and RF quality
+- `UNROUTED` (FAIL, one per open connection: net, both pads, distance): pcbnew counts after a FRESH zone fill, cross-checked with
+  `kicad-cli pcb drc` (`opengate.py`). `STALE_FILL` (FAIL): the saved fills disagree (pcbnew saved vs refilled, kicad-cli saved vs
+  `--refill-zones`, DRC clearance errors against zones). Waive per net: `[review] waive = ["UNROUTED:^\\+3V3$"]` with a reason comment;
+  off: `[review] open_gate = false`. `fab`, `deliver` and `pcbway` refuse while either remains (not skipped by `--no-review`).
+  Every command that writes a routed board (route stage, tune) saves it with fresh fills (`opengate.refill`). What to do: `closure BOARD`.
+- `PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH` and `RF_IMPEDANCE_OFF / RF_WIDTH_OFF / RF_VIA_COUNT` come from the routing audit
+  (`qualaudit.py`, `pairaudit.py`): one implementation. RF width: `[nets.X] width_mm`, the map's `rf_geometry`, `[rf] width_mm` (a width or
+  per-layer table; tolerance `width_tol_mm` 0.02), else the impedance computed from the stackup (`target_z`, `tolerance_pct`).

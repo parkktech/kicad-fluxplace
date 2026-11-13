@@ -13,7 +13,7 @@ of the pocket).  Findings: PLACE_ESCAPE_UNRESERVED (FAIL) in route-ready.  `clai
 stub + via copper (the fan-out stage), so no later routing can consume it.  The map keeps them under `escapes`.
 
     [escape]
-    near_mm = 2.0   lane_mm = 1.5   window_mm = 4.0   radius_mm = 2.5   enabled = true"""
+    near_mm = 2.0   lane_mm = 1.5   window_mm = 4.0   radius_mm = 2.5   enabled = true   power_pins = true"""
 import math
 import uuid
 
@@ -30,7 +30,7 @@ CONTROLLED = ("pair", "rf", "clock")
 
 def params(cons):
     e = dict((cons or {}).get("escape") or {})
-    return {"enabled": e.get("enabled", True) is not False, "near": float(e.get("near_mm", 2.0)), "lane": float(e.get("lane_mm", 1.5)),
+    return {"enabled": e.get("enabled", True) is not False, "near": float(e.get("near_mm", 2.0)), "power": e.get("power_pins", True) is not False, "lane": float(e.get("lane_mm", 1.5)),
             "window": float(e.get("window_mm", 4.0)), "radius": float(e.get("radius_mm", 2.5))}
 
 
@@ -70,7 +70,7 @@ def needy(B, cons, spec, cls=None):
                 continue
             info = cls.get(n) or {}
             why = None
-            if info.get("class") == "rail" or n in pw:           # a plane under the board is not UNDER the pad: a via site is needed
+            if (info.get("class") == "rail" or n in pw) and ep["power"]:           # a plane under the board is not UNDER the pad: a via site is needed
                 why = "power-pin" + ("" if n in pn else "-no-plane")
             elif n in pn:
                 continue
