@@ -3485,6 +3485,13 @@ def build_parser():
     ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
     ppl.add_argument("--track", type=float, default=0.2)
     ppl.add_argument("--clearance", type=float, default=0.2)
+    ppl.add_argument("--router", choices=["krt", "freerouting", "auto"], default=None,
+                     help="route stage: krt = KiCadRoutingTools, freerouting = whole-board Freerouting then krt on what is left, "
+                          "auto = freerouting when a 2.5.0+ jar and Java are found (default [route] router, else krt)")
+    ppl.add_argument("--freerouting-jar", default=None, help="Freerouting jar (else $FLUXPLACE_FREEROUTING_JAR, else newest ~/tools/freerouting*.jar)")
+    ppl.add_argument("--java", default=None, help="Java runtime for Freerouting (else $FLUXPLACE_JAVA, $JAVA_HOME, ~/tools/jdk*, PATH)")
+    ppl.add_argument("--freerouting-budget", type=float, default=None, help="Freerouting job timeout, s (default [route.freerouting] budget_s, else budget_frac of --route-budget)")
+    ppl.add_argument("--freerouting-threads", type=int, default=None, help="Freerouting threads (default [route.freerouting] threads)")
     ppl.add_argument("--router-py", default=None, help="router python (else $FLUXPLACE_ROUTER_PY, else ~/tools/router-venv)")
     ppl.add_argument("--router-dir", default=None, help="router dir (else $FLUXPLACE_ROUTER_DIR, else newest ~/tools/KiCadRoutingTools*)")
     from fluxplace import questions as QS
@@ -3537,11 +3544,13 @@ def main(argv=None):
         raise SystemExit(0 if ok else 1)
     _silk_hook(a)
     if a.cmd in OUT.COMPACT_CMDS:
-        OUT.run_compact(a.cmd, a, a.fn)         # compact-by-default wrapper (one place)
+        rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
     else:
-        a.fn(a)
+        rc = a.fn(a)
     if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
         _sheet_hint(getattr(a, "out", None) or a.board)
+    if type(rc) is int and rc:                  # a command that RETURNS its verdict code (fanout, pairs, snap-vias ...)
+        raise SystemExit(rc)                    # exits with it; None / data return values stay exit 0
 
 
 if __name__ == "__main__":

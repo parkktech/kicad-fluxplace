@@ -316,7 +316,7 @@ def cmd_fanout(a):
 
 def add_parser(sub):
     p = sub.add_parser("fanout", help="real, locked escape copper for every pin that must leave its footprint; "
-                                      "FANOUT_OK only when 100 % of the required pins have an end point in open space")
+                                      "FANOUT_OK only when every one of the required pins have an end point in open space")
     p.add_argument("board")
     p.add_argument("--constraints", default=None)
     p.add_argument("--spec", default=None)

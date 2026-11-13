@@ -13,7 +13,7 @@ every pin gets real, DRC-clean escape copper before routing, and that copper is 
 | fan-out | `fanout` | FANOUT_OK: every required pin has stub/via and a free lane; DRC added nothing; items locked; reserved escapes (power pins, passives crowded by a pair) claimed first (`escres.py`, map `escapes`); `route-ready` FAILs PLACE_ESCAPE_UNRESERVED |
 | pairs | `pairs` | differential pairs laid coupled and LOCKED before routing (centre-line search, matched via pairs, skew by construction); PAIRS n/total; an unlaid pair is reported with its blockers and stays with the router (WARN, `docs/commands/pairs.md`) |
 | plan-route | `plan-route` | channels only (WARN): overflow between the ports |
-| route | `pipeline` route stage | starts every net at its fan-out end point; locked copper is never ripped; order: escapes, plain copper, power pins, rails, controlled pairs / RF / clocks, rest; every batch audited; pair / RF out of tolerance = NOT DONE |
+| route | `pipeline` route stage | starts every net at its fan-out end point; locked copper is never ripped; order: escapes, plain copper, power pins, rails, controlled pairs / RF / clocks, rest; every batch audited; pair / RF out of tolerance = NOT DONE. `--router freerouting|auto`: whole-board Freerouting (2.5.0+) on the unlocked rest with fan-out and pairs fixed, sub-floor repair, then the per-net router and ladder on what is left (`docs/commands/route.md`) |
 | audit / silk / review | | unchanged |
 
 Order in `pipeline`: modules -> floorplan -> fanout (gate FANOUT_OK) -> pairs -> plan-route -> route -> audit -> silk -> review.
