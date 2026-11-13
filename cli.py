@@ -97,6 +97,7 @@ def cmd_deliver(a):
     from fluxplace import fab as F, fabdoc, questions as QS
     QS.refuse_assumed(a.board, "deliver")
     _review_gate(a, stage="deliver")
+    _open_gate(a)
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -155,6 +156,7 @@ def cmd_pcbway(a):
     """The PCBWay quote form, answered from the board file wherever the design
     already decides the answer."""
     from fluxplace import pcbway
+    _open_gate(a)
     facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=(a.bom or []),
                            sourcing=a.sourcing_json, quantity=a.quantity,
                            name=a.name)
@@ -544,6 +546,7 @@ def cmd_fab(a):
     from fluxplace import fab, questions as QS
     QS.refuse_assumed(a.board, "fab")
     _review_gate(a, stage="fab")
+    _open_gate(a)
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
     print(f"DRC {res['drc']}; package at {res['out']}")
     if a.upload_out:
@@ -1360,6 +1363,14 @@ def cmd_lint(a):
         raise SystemExit(1)
 
 
+def _open_gate(a):
+    """fab / deliver / pcbway refuse while a connection is open or the saved fills are stale (not skipped by --no-review)."""
+    from fluxplace import opengate as OG, constraints as C
+    board = getattr(a, "board", None)
+    if board and os.path.isfile(board):
+        OG.refuse(board, C.load(getattr(a, "constraints", None)), getattr(a, "waive", None))
+
+
 def _review_gate(a, stage="review", hard=True):
     """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
     distributor package/pin/temperature data, pinmap vs the official symbol,
@@ -1584,6 +1595,8 @@ def cmd_tune(a):
     rep = TU.tune_pairs(a.board, a.out or a.board, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds,
                         log=lambda m: print(m, flush=True))
+    from fluxplace import opengate as OG
+    OG.refill(a.out or a.board)                      # a routed board is saved with fresh zone fills
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
@@ -2524,6 +2537,8 @@ def build_parser():
     pw.add_argument("--zip-name", help="the CAM zip the buyer uploads")
     pw.add_argument("--out-dir", required=True)
     pw.add_argument("--no-docx", action="store_true")
+    pw.add_argument("--constraints", help="TOML ([review] waive for UNROUTED)")
+    pw.add_argument("--waive", action="append", help="CODE:REGEX (UNROUTED:^NET$)")
     pw.set_defaults(fn=cmd_pcbway)
 
     ps = sub.add_parser("sourcing",

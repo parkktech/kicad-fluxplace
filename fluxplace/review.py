@@ -8,6 +8,8 @@ because each tool checked the board against ITSELF (schematic vs copper,
 netclass vs track) and none checked it against the SPEC, the DATASHEET or the
 ENVIRONMENT. This module does that:
 
+  UNROUTED / STALE_FILL  an open connection (FAIL each; pcbnew after a fresh fill, cross-checked with kicad-cli) / zone fills
+                         in the saved file that no longer match the copper (opengate.py)
   NET_STRAIGHT_COPPER    a spec-protected net has a component on it
   PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH
                          diff pair P and N routed differently
@@ -1312,6 +1314,19 @@ def check_preroute(facts, spec, cons):
     return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in found]
 
 
+def check_open(facts, cons):
+    """UNROUTED (FAIL per open connection) and STALE_FILL (FAIL): opengate.py. Off with `[review] open_gate = false`;
+    skipped when the board file is not readable (synthetic facts)."""
+    path = facts.get("board_path") or facts.get("board")
+    if not isinstance(path, str) or not os.path.isfile(path) or ((cons or {}).get("review", {}) or {}).get("open_gate", True) is False:
+        return []
+    from . import opengate as OG
+    try:
+        return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in OG.findings(OG.measure(path))]
+    except Exception as e:
+        return [_f(WARN, "UNROUTED_UNAVAILABLE", f"open-connection check could not run: {e}")]
+
+
 def check_keepouts(facts, cons):
     """[[keepout]] regions: no component body on the named side, or none
     taller than max_height_mm. Born from utv-comms V1.5, where 25 parts sat
@@ -1595,6 +1610,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_magnetics(facts, spec, cons)
     out += check_keepouts(facts, cons)
     out += check_preroute(facts, spec, cons)
+    out += check_open(facts, cons)
     out += check_locks(facts, cons)
     out += check_sheet(facts, cons)
     out += check_policy(facts, cons)

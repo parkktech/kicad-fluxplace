@@ -411,6 +411,8 @@ def st_route(c, n, board):
         line += f", rails {res['rails']['complete']}/{res['rails']['total']} complete"
     if res.get("pairs"):
         line += ", pairs " + " ".join(f"{k} {len(v)}" for k, v in res["pairs"].items() if v)
+    from . import opengate as OG
+    OG.refill(best)                                    # a routed board is saved with fresh zone fills
     qsess.mark(best)
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best}
     if final:
