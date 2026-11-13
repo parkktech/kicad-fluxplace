@@ -32,7 +32,7 @@ Context is scarce. Unsure: `fluxplace doctor`.
 | diff-pair tuning | `tune --board B --out O` | `--constraints` |
 | part count | `bom-opt --spec S` | `--constraints` |
 | docs/sourcing | `spec-check`, `sourcing`, `datasheets` | `--no-api` offline |
-| LAN magnetics | `magnetics BOARD --spec S` | in `review` |
+| gates | `ready`, `parts`, `closure`, `part-diff`, `magnetics` | docs/commands |
 | fab package | `fab`, `deliver`, `pcbway` | after `review` |
 | toolchain, context budgets | `doctor`, `doctor --context` | |
 
