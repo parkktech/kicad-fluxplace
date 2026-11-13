@@ -16,6 +16,11 @@ HAVE = os.path.exists("/usr/bin/python3") and subprocess.run(
 pytestmark = pytest.mark.skipif(not HAVE, reason="pcbnew not available")
 
 
+@pytest.fixture(autouse=True)
+def _real_pcbnew(monkeypatch):
+    monkeypatch.setattr(RC, "PY", "/usr/bin/python3")      # other test modules point RC.PY at a dead path
+
+
 def two(ref, x, y, n1, n2):
     return PB.fp(ref, x, y, [PB.pad("1", -0.5, 0, n1), PB.pad("2", 0.5, 0, n2)])
 
