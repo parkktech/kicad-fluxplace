@@ -215,6 +215,12 @@ class Plan:
                 continue
             for sd in (("F", "B") if p["tht"] else (p["side"][0],)):
                 self._fill(occ[sd], p["court"])
+        if skip_mod >= 0:                       # --- intent: the zones the module's own members may not enter (prefilter)
+            P = self.B["parts"]
+            for r in self.mods[skip_mod]["members"]:
+                for _name, rect in self.L.M.intent.for_ref(r):
+                    for sd in (("F", "B") if P[r]["tht"] else (P[r]["side"][0],)):
+                        self._fill(occ[sd], rect)
         return occ
 
     def free_mask(self, i, occ, gx, gy, th, halo):

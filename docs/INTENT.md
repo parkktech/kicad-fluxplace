@@ -22,6 +22,7 @@ Names below are examples.
 edge_gap_mm = 1.0        # how far from the outline still counts as "on the edge"
 plug_mm = 5.0            # default depth kept clear in front of a part that faces out
 lead_protrusion_mm = 1.5 # how far through-hole leads reach into a height-limited region on the OTHER side
+near_gap_mm = 1.5        # pad-to-pad room left when an IC is seated next to its hard `near` partner (escape room)
 
 [[intent.edge]]          # part(s) on an outline edge
 name = "radio-modules"
@@ -93,11 +94,12 @@ from the size code in the footprint name, else **unknown = treated as tall** (th
 
 ## Connectors
 
-`connectors.py` reads the entry direction of every connector (reference J/P/CN/CON/X/USB or a `Connector*` library):
+`connectors.py` reads the entry direction of every connector (reference J/P/CN/CON/X/USB or a `Connector*` library;
+crystals, test points and mounting hardware are not connectors):
 
 | entry | from | consequence |
 |---|---|---|
-| `side` | name: Horizontal, RightAngle, EdgeMount, EdgeLaunch, `_RA_`; or a courtyard that reaches >= 2 mm beyond the pads on one side only | implicit hard `edge` item: on an edge, opening out, `plug_mm` clear; an edge-launch footprint may overhang as drawn |
+| `side` | name: Horizontal, RightAngle, EdgeMount, EdgeLaunch, `_RA_`; or a courtyard that reaches >= 2 mm beyond the pads on one side only | implicit hard `edge` item: on an edge, opening out, `plug_mm` clear. The gate accepts any overhang that keeps the pads on the board; the seat is flush unless the name says edge launch or `overhang_mm` is given |
 | `top` | name: Vertical, Straight, TopEntry, coax snap-on families; or an SMD pad grid in a symmetric courtyard | never under a height-limited region or a swept area, whatever its own height |
 | `card` | name: M.2, NGFF, mPCIe, SIM, SD | no edge rule; the card area is a group's swept area |
 | `unknown` | nothing decides | **asked**: `connector-entry:<footprint>` = `side` \| `top` (one question per footprint) |

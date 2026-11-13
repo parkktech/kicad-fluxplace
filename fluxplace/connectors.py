@@ -25,13 +25,14 @@ TOP = re.compile(r"vertical|straight|top[-_ ]?entry|(^|_)ST(_|$)|upright|mezzani
                  r"|U\.?FL|MHF\d|IPEX|W\.FL|MMCX", re.I)
 CARD = re.compile(r"M\.?2(_|$)|NGFF|mPCIe|mini[-_ ]?PCI|card[-_ ]?edge|SIM|SD[-_ ]?card|microSD", re.I)
 EDGE_LAUNCH = re.compile(r"edge[-_ ]?(mount|launch)", re.I)
+NOT_CONN = re.compile(r"crystal|oscillator|resonator|xtal|testpoint|test[-_ ]?point|mounting|fiducial", re.I)
 DIRS = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}
 ASYM_MM, ASYM_RATIO = 2.0, 0.5
 
 
 def is_connector(ref, part):
     """a part people plug something into: connector reference or a connector footprint library, two pads or more."""
-    if part["n_pads"] < 2 or not any(not q.get("np") for q in part["pads"]):
+    if part["n_pads"] < 2 or not any(not q.get("np") for q in part["pads"]) or NOT_CONN.search(str(part.get("fp", ""))):
         return False
     return bool(CONN_REF.match(ref) or CONN_LIB.search(str(part.get("fp", ""))))
 
@@ -154,6 +155,12 @@ def overhang(part, key, edge_clearance=0.3):
     if not key or not EDGE_LAUNCH.search(str(part.get("fp", ""))):
         return 0.0
     return max(0.0, local_slack(part)[key] - edge_clearance)
+
+
+def overhang_max(part, key, edge_clearance=0.3):
+    """the most a side-entry footprint can pass the outline with its pads still on the board: the courtyard beyond the
+    pads on the opening side, less the edge clearance."""
+    return max(0.0, local_slack(part)[key] - edge_clearance) if key else 0.0
 
 
 def format_table(rows):

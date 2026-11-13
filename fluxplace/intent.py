@@ -19,7 +19,8 @@ Full reference with examples: docs/INTENT.md. Keys (all under `[intent]`; every 
                      limit fails the gate), hard = false (same for the other support parts), waive = [refs]
   [intent.connectors] REF = {entry = "side"|"top", opening = "+x", edge = false}; see connectors.py
   [intent]           edge_gap_mm = 1.0, plug_mm = 5.0 (default clear depth of a facing part), enabled = true,
-                     lead_protrusion_mm = 1.5 (how far through-hole leads reach into a region on the other side)
+                     lead_protrusion_mm = 1.5 (how far through-hole leads reach into a region on the other side),
+                     near_gap_mm = 1.5 (pad-to-pad room left when an IC is seated next to its `near` partner)
 
 Sides are board axes on screen: left = min x, top = min y. Part heights: `[placement.heights]` (ref or footprint glob -> mm), else an
 estimate for chip passives from the footprint size code, else unknown = treated as tall.
@@ -114,14 +115,16 @@ def items(B, cons):
                      "facing": str(e.get("facing", "")).lower() == "out", "front": e.get("front"),
                      "clear": float(e.get("clear_mm", plug0 if str(e.get("facing", "")).lower() == "out" else 0.0)),
                      "overhang": float(e.get("overhang_mm", 0.0)), "gap": float(e.get("gap_mm", gap0)),
-                     "hard": bool(e.get("hard", True)), "src": "declared"})
+                     "over_max": {}, "hard": bool(e.get("hard", True)), "src": "declared"})
     conn = CN.table(B, cons, CN.answers_of(cons))
     for row in conn:
         d = CN.declared(cons, row["ref"])
         if row["entry"] == "side" and row["ref"] not in covered and d.get("edge", True) is not False:
             edge.append({"name": f"connector {row['ref']}", "refs": [row["ref"]], "sides": list(SIDES), "facing": True,
                          "front": row["key"], "clear": plug0, "gap": gap0, "hard": True, "src": "connector",
-                         "overhang": float(d["overhang_mm"]) if "overhang_mm" in d else CN.overhang(parts[row["ref"]], row["key"], em0)})
+                         "overhang": float(d["overhang_mm"]) if "overhang_mm" in d else CN.overhang(parts[row["ref"]], row["key"], em0),
+                         # the gate accepts any overhang the footprint allows (pads stay on the board); the seat uses `overhang`
+                         "over_max": {} if "overhang_mm" in d else {row["ref"]: CN.overhang_max(parts[row["ref"]], row["key"], em0)}})
     near = []
     for i, e in enumerate(sec.get("near", []) or []):
         n = {"name": e.get("name") or f"near{i + 1}", "max": float(e["max_mm"]), "hard": bool(e.get("hard", False)),
@@ -185,7 +188,7 @@ def overhang_refs(B, cons):
             out.add(ref)
     if section(cons):
         for row in CN.table(B, cons, CN.answers_of(cons)):
-            if row["entry"] == "side" and CN.overhang(B["parts"][row["ref"]], row["key"]) > 0:
+            if row["entry"] == "side" and row["key"]:      # a side-entry connector may pass the outline by its mating side
                 out.add(row["ref"])
     return out
 
@@ -235,7 +238,7 @@ def edge_state(B, cons, ref, item):
     f = front_vec(B, cons, ref, item) if item["facing"] else None
     cands = []
     for s in item["sides"]:
-        on = -item["overhang"] - 0.02 <= g[s] <= item["gap"] + 1e-6
+        on = -max(item["overhang"], item.get("over_max", {}).get(ref, 0.0)) - 0.02 <= g[s] <= item["gap"] + 1e-6
         face = None if not item["facing"] else (f is not None and f[0] * NORMAL[s][0] + f[1] * NORMAL[s][1] >= 0.7)
         cands.append((0 if on and face is not False else 1 if on else 2, abs(g[s]), s, on, face))
     if not cands:
@@ -770,10 +773,15 @@ class Seater:
         lx, ly = pb["x"] - p["pos"][0], pb["y"] - p["pos"][1]
         wires = self.wires(unit, b)
         R = max(6.0, min(budget, 25.0))
+        # room to escape: an IC is not seated pad on pad (`[intent] near_gap_mm`, default 1.5 for ICs, 0.5 for passives)
+        ic = self.parts[b]["n_pads"] >= 5 or self.parts[a]["n_pads"] >= 5
+        gap = float(section(self.cons).get("near_gap_mm", 1.5)) if ic else 0.5
         cands = []
         for dth in (0, 90, 180, 270):
             rx, ry = GM.rot(lx, ly, dth)
             for dx, dy in _spiral(R, 0.5):
+                if math.hypot(dx, dy) < gap:
+                    continue
                 cands.append((math.hypot(dx, dy) + 0.02 * self.wire_cost(wires, pa["x"] + dx - rx, pa["y"] + dy - ry, dth) / max(1, len(wires)),
                               pa["x"] + dx - rx, pa["y"] + dy - ry, dth))
         if not self.take(unit, b, cands, limit=20000):
@@ -912,7 +920,41 @@ class Seater:
                 mv.update(CL.reseat(self.B, cl, guess=True, only=spread, bounds=bounds, legal=self.L, strict=True))
             if mv:
                 self.notes.append(f"{len(mv)} support part(s) re-seated at their pins")
+            self.cells()
         return self
+
+    def cells(self):
+        """a movable IC that still has support parts beyond their limit (no free seat among today's neighbours): the IC and
+        all its support parts are laid out as one cell on their own, then the cell takes the nearest legal pose. The
+        floorplan moves it as one block from there."""
+        from . import clusters as CL
+        cl, _ = CL.build(self.B, self.cons, self.spec)
+        claimed = self.claimed()
+        graded = lambda s: (s["sure"] or s["how"] == "spread") and s["ref"] not in claimed and s["ref"] not in self.near_refs \
+            and not self.parts[s["ref"]].get("locked")
+        n_cells, n_parts, stuck = 0, 0, []
+        for c in cl:
+            ic = c["ic"]
+            if ic in claimed or not any(graded(s) and s["dist"] > s["limit"] for s in c["supports"]):
+                continue
+            sup = [s for s in c["supports"] if graded(s)]
+            mv = CL.seat(self.B, {"ic": ic, "supports": sup}, isolate=True)
+            if not mv:
+                continue
+            self.apply(mv)
+            unit = [ic] + sorted(mv)
+            a = self.parts[ic]
+            if not self.legal(unit, self.poses(unit, ic, a["pos"][0], a["pos"][1], 0), ghosts=False):
+                x0, y0 = a["pos"]
+                cands = [(math.hypot(dx, dy) + (1.0 if dth else 0.0), x0 + dx, y0 + dy, dth) for dth in (0, 90, 180, 270)
+                         for dx, dy in _spiral(min(self.B["diag"], 60.0), 1.0)]
+                if not self.take(unit, ic, cands, kinds=("away", "region", "group"), limit=6000, ghosts=False):
+                    stuck.append(ic)
+            n_cells += 1
+            n_parts += len(mv)
+        if n_cells:
+            self.notes.append(f"{n_cells} IC(s) laid out with their {n_parts} support part(s) as one cell each"
+                              + (f"; no free pose yet for the cell of {', '.join(stuck[:8])} (the floorplan places it)" if stuck else ""))
 
     @property
     def moves(self):
