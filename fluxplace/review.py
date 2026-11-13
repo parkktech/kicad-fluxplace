@@ -1532,7 +1532,7 @@ def check_policy(facts, cons):
 # ==========================================================================
 # run / summarize
 # ==========================================================================
-def check_silk(facts, cons):
+def check_silk(facts, cons, spec=None):
     """SILK_* findings (see fluxplace/silk.py). Skipped without a board path, with `[silk] enabled = false`,
     or when pcbnew is unavailable (one INFO). Waive with `[review] waive`."""
     path = facts.get("board_path") or facts.get("board")
@@ -1543,7 +1543,7 @@ def check_silk(facts, cons):
     if not cfg["enabled"]:
         return []
     try:
-        sc = SK.load_scene(path)
+        sc, cfg = SK.prepare(path, cons, spec)
     except (RuntimeError, OSError, ValueError) as e:
         return [_f(INFO, "SILK_SKIPPED", f"silkscreen check not run: {e}")]
     return [_f(f["level"], f["code"], f["msg"], f["refs"]) for f in SK.check(sc, cfg)]
@@ -1592,7 +1592,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_sheet(facts, cons)
     out += check_policy(facts, cons)
     out += check_bom(facts, cons, spec)
-    out += check_silk(facts, cons)
+    out += check_silk(facts, cons, spec)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))

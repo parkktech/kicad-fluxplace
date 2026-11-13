@@ -172,7 +172,8 @@ def scene(path):
             poly = [[round(mm(c.x) + r * math.cos(k * math.pi / 8), 4),
                      round(mm(c.y) + r * math.sin(k * math.pi / 8), 4)] for k in range(16)]
             out["holes"].append({"owner": "", "kind": "via", "sides": sides, "poly": poly})
-    for d in b.GetDrawings():
+    out["title_rev"] = b.GetTitleBlock().GetRevision()
+    for bi, d in enumerate(b.GetDrawings()):
         lay = silk.get(d.GetLayer())
         if not lay:
             continue
@@ -181,6 +182,7 @@ def scene(path):
             if d.IsVisible() and d.GetText().strip():
                 x = _text(d, "board", "", lay)
                 if x:
+                    x["bidx"] = bi
                     out["texts"].append(x)
         else:
             try:
@@ -193,10 +195,60 @@ def scene(path):
     return out
 
 
+def measure(spec):
+    """{text, mirror, sizes: [[h, thickness], ...]} -> [{h, t, w, hh, cx, cy}]: ink box of the text (centre-justified,
+    angle 0, incl. stroke) per size: width, height and the ink-centre offset from the text position."""
+    b = pcbnew.BOARD()
+    out = []
+    for h, th in spec["sizes"]:
+        t = pcbnew.PCB_TEXT(b)
+        t.SetText(spec["text"])
+        t.SetLayer(pcbnew.B_SilkS if spec.get("mirror") else pcbnew.F_SilkS)
+        t.SetMirrored(bool(spec.get("mirror")))
+        t.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_CENTER)
+        t.SetVertJustify(pcbnew.GR_TEXT_V_ALIGN_CENTER)
+        t.SetTextSize(pcbnew.VECTOR2I(pcbnew.FromMM(h), pcbnew.FromMM(h)))
+        t.SetTextThickness(pcbnew.FromMM(th))
+        t.SetPosition(pcbnew.VECTOR2I(0, 0))
+        k = _ink(t)
+        if k is None:
+            out.append(None)
+            continue
+        out.append({"h": h, "t": th, "w": k[2] - k[0], "hh": k[3] - k[1], "cx": (k[0] + k[2]) / 2.0,
+                    "cy": (k[1] + k[3]) / 2.0})
+    return out
+
+
+def _apply_title(b, drawings, p):
+    side = p["side"]
+    back = side == "B"
+    for bi in p.get("drop", []):
+        b.Remove(drawings[bi])
+    if p.get("bidx") is not None:
+        t = pcbnew.Cast_to_PCB_TEXT(drawings[p["bidx"]])
+    else:
+        t = pcbnew.PCB_TEXT(b)
+        b.Add(t)
+    t.SetText(p["text"])
+    t.SetLayer(pcbnew.B_SilkS if back else pcbnew.F_SilkS)
+    t.SetVisible(True)
+    t.SetMirrored(back)
+    t.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_CENTER)
+    t.SetVertJustify(pcbnew.GR_TEXT_V_ALIGN_CENTER)
+    t.SetTextSize(pcbnew.VECTOR2I(pcbnew.FromMM(p["h"]), pcbnew.FromMM(p["h"])))
+    t.SetTextThickness(pcbnew.FromMM(p["t"]))
+    t.SetTextAngleDegrees(p["angle"])
+    t.SetPosition(pcbnew.VECTOR2I(int(round(p["x"] * 1e6)), int(round(p["y"] * 1e6))))
+
+
 def apply(path, dst, plan):
     b = pcbnew.LoadBoard(path)
-    n = {"moved": 0, "hidden": 0, "missing": 0}
-    for ref, p in sorted(plan.items()):
+    n = {"moved": 0, "hidden": 0, "missing": 0, "title": 0}
+    drawings = list(b.GetDrawings())
+    for key in sorted(k for k in plan if k.startswith("@title")):
+        _apply_title(b, drawings, plan[key])
+        n["title"] += 1
+    for ref, p in sorted((k, v) for k, v in plan.items() if not k.startswith("@")):
         fp = b.FindFootprintByReference(ref)
         if fp is None:
             n["missing"] += 1
@@ -227,6 +279,8 @@ def main():
     cmd = sys.argv[1]
     if cmd == "scene":
         res = scene(sys.argv[2])
+    elif cmd == "measure":
+        res = measure(json.load(open(sys.argv[2])))
     elif cmd == "apply":
         res = apply(sys.argv[2], sys.argv[3], json.load(open(sys.argv[4])))
     else:

@@ -21,7 +21,7 @@ HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "silk_helper.p
 MARK = "@@SILK@@"
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
-LEVEL = {"SILK_OFF_BOARD": FAIL, "SILK_OVER_PAD": FAIL, "SILK_OVER_HOLE": FAIL, "SILK_OVERLAP": WARN,
+LEVEL = {"SILK_VERSION_STALE": FAIL, "SILK_TITLE_MISSING": WARN, "SILK_TITLE_NO_ROOM": FAIL, "SILK_OFF_BOARD": FAIL, "SILK_OVER_PAD": FAIL, "SILK_OVER_HOLE": FAIL, "SILK_OVERLAP": WARN,
          "SILK_UNDER_PART": WARN, "SILK_TOO_SMALL": WARN, "SILK_FAR_FROM_PART": WARN,
          "SILK_REF_HIDDEN": INFO, "SILK_MISSING_MARK": INFO}
 CODES = tuple(LEVEL)
@@ -227,7 +227,11 @@ def load_scene(board, py=None):
     return _prep(json.loads(r.stdout.split(MARK, 1)[1]))
 
 
+MIN_VISIBLE_H = 0.05      # a text this small is deliberately invisible (logo footprints use 0.001 mm refs)
+
+
 def _prep(sc):
+    sc["texts"] = [t for t in sc["texts"] if t["h"] >= MIN_VISIBLE_H]
     for i, t in enumerate(sc["texts"]):
         t["id"] = i
         t["aabb"] = _aabb(t["quad"])
@@ -394,6 +398,168 @@ class Layout:
         return res, soft
 
 
+# ------------------------------------------------------------------ title / version text
+# A version is v/V/rev/Rev/REV + digits(.digits)* as its own token (whitespace / start / end around it).
+# "3V3" "1V8" "5V" "12V" "+3.3V" "24V" "V+" "VBAT" "VIN" never match.
+_VER_RE = re.compile(r"(?<![^\s(\[,;:])(?:[vV]|[rR][eE][vV]\.?\s?)(\d+(?:\.\d+)*)(?![^\s)\],;:])")
+_NETLIKE_RE = re.compile(r"\s*[vV]\d+\s*")      # a lone "V1" / "V12": a test-point or rail label, ambiguous
+
+
+def version_tokens(text, company=None, is_title=False):
+    """Version numbers (strings) a board text really states; [] for voltage / net-style labels. A lone integer
+    'V<n>' is ambiguous (net label) and only counts when the text is the title or carries the company string."""
+    if _NETLIKE_RE.fullmatch(text) and not is_title and not (company and company.lower() in text.lower()):
+        return []
+    return [m.group(1) for m in _VER_RE.finditer(text)]
+
+
+_VER_ANY = r"(?:[vV]|[rR]ev\.?\s?)\s?\d+(?:\.\d+)*"
+TITLE_DEFAULTS = {"text": "{company}  V{version}", "company": "", "version": "", "side": "F", "height_mm": 1.5,
+                  "required": True}
+TITLE_MIN_H = 1.0
+
+
+def norm_version(tok):
+    """'1.6' | '16' | 'V1.60' -> (1, 6): a bare two-digit number reads as major.minor (the file-name convention
+    board-v16 = 1.6); trailing zero components are dropped so 1.0 == 1."""
+    s = str(tok).strip().lstrip("vV").strip()
+    if re.fullmatch(r"\d\d", s):
+        s = s[0] + "." + s[1]
+    try:
+        v = [int(x) for x in s.split(".")]
+    except ValueError:
+        return None
+    while len(v) > 1 and v[-1] == 0:
+        v.pop()
+    return tuple(v)
+
+
+def _vshow(v):
+    return ".".join(str(x) for x in v) if len(v) > 1 else f"{v[0]}.0"
+
+
+def title_settings(cons, title_text=None):
+    """cfg['title'] from `[silk.title]` (or the CLI --title literal), else None."""
+    tb = ((cons or {}).get("silk") or {}).get("title")
+    if tb is None and title_text is None:
+        return None
+    t = dict(TITLE_DEFAULTS)
+    t.update({k: v for k, v in (tb or {}).items() if k in TITLE_DEFAULTS})
+    if title_text is not None:
+        t["text"] = title_text
+        t["cli"] = True
+    t["side"] = str(t["side"]).upper()[:1] if str(t["side"]).lower() != "both" else "both"
+    if t["side"] not in ("F", "B", "both"):
+        t["side"] = "F"
+    t["height_mm"] = max(TITLE_MIN_H, float(t["height_mm"]))
+    t["required"] = bool(t["required"])
+    t["sides"] = ["F", "B"] if t["side"] == "both" else [t["side"]]
+    return t
+
+
+def resolve_version(cfg, cons, spec, sc, board):
+    """-> (version tuple, source text) or None. Order: [silk.title] version, [project] version (constraints),
+    the spec JSON's version/revision (needs --spec), the board's title-block revision, a -vNN / _vN.N suffix
+    in the board file name."""
+    t = cfg.get("title") or {}
+    if t.get("version"):
+        v = norm_version(t["version"])
+        if v:
+            return v, "[silk.title] version"
+    pv = ((cons or {}).get("project") or {}).get("version")
+    if pv and norm_version(pv):
+        return norm_version(pv), "[project] version in the constraints"
+    if spec:
+        for d, nm in ((spec, "spec"), (spec.get("board") if isinstance(spec.get("board"), dict) else {}, "spec board")):
+            for k in ("version", "revision"):
+                if d.get(k) and norm_version(re.sub(r"(?i)^rev\s*", "", str(d[k]))):
+                    return norm_version(re.sub(r"(?i)^rev\s*", "", str(d[k]))), f"{nm} {k}"
+    rev = (sc or {}).get("title_rev") or ""
+    m = re.fullmatch(r"\s*(?:[vV]|[rR]ev\.?\s?)?(\d+(?:\.\d+)*)\s*", rev)
+    if m and norm_version(m.group(1)):
+        return norm_version(m.group(1)), "board title-block revision"
+    stem = os.path.basename(board or "")
+    stem = stem[:-len(".kicad_pcb")] if stem.endswith(".kicad_pcb") else stem
+    ms = list(re.finditer(r"(?:^|[-_])[vV](\d+(?:\.\d+)?)(?=$|[-_.])", stem))
+    if ms and norm_version(ms[-1].group(1)):
+        return norm_version(ms[-1].group(1)), "board file name"
+    return None
+
+
+def title_regex(t):
+    """Regex matching any board text that is this title with ANY version."""
+    tpl = t["text"]
+    parts = re.split(r"(\{company\}|\{version\})", tpl)
+    rx = ""
+    for p in parts:
+        if p == "{company}":
+            rx += re.escape(t["company"]).replace(r"\ ", r"\s+") if t["company"] else r".*?"
+        elif p == "{version}":
+            rx += r"\d+(?:\.\d+)*"
+        else:
+            segs = _VER_RE.split(p) if False else re.split(r"((?:[vV]|[rR]ev\.?\s?)\d+(?:\.\d+)*)", p)
+            for i, sg in enumerate(segs):
+                rx += _VER_ANY if re.fullmatch(r"(?:[vV]|[rR]ev\.?\s?)\d+(?:\.\d+)*", sg or "!") and i % 2 else \
+                    re.sub(r"(\\ )+", r"\\s+", re.escape(sg))
+    return re.compile(r"^\s*" + rx + r"\s*$", re.I | re.S)
+
+
+def render_title(t, ver):
+    """The title text for version `ver` (None when the template needs a version that cannot be resolved)."""
+    if "{version}" in t["text"] and ver is None:
+        return None
+    return t["text"].format(company=t["company"], version=_vshow(ver) if ver else "")
+
+
+def mark_title(sc, cfg):
+    """Flag the board texts that are the title (t['title'] = True) for this cfg."""
+    t = cfg.get("title")
+    rx = title_regex(t) if t else None
+    for x in sc["texts"]:
+        x["title"] = bool(rx and x["kind"] == "board" and rx.match(x["text"]))
+    return sc
+
+
+def prepare(board, cons=None, spec=None, title=None, py=None, sc=None):
+    """(scene, cfg) with the title settings, resolved version and title texts marked."""
+    cfg = settings(cons)
+    cfg["title"] = title_settings(cons, title)
+    sc = sc or load_scene(board, py)
+    cfg["_version"] = resolve_version(cfg, cons, spec, sc, board)
+    mark_title(sc, cfg)
+    return sc, cfg
+
+
+def _check_title(sc, cfg, side, out):
+    ver = cfg.get("_version")
+    t = cfg.get("title")
+    bt = [x for x in sc["texts"] if x["kind"] == "board" and (side == "both" or x["side"] == side[0].upper())]
+    seen = {}
+    for x in bt:
+        for tok in version_tokens(x["text"], (t or {}).get("company"), x.get("title")):
+            v = norm_version(tok)
+            if v:
+                seen.setdefault(v, []).append(x)
+    for v, xs in sorted(seen.items()):
+        if ver and v != ver[0]:
+            for x in xs:
+                out.append(_fnd("SILK_VERSION_STALE", f"{_txt_label(x)} {x['side']} ({x['pos'][0]:.1f}, {x['pos'][1]:.1f}) "
+                                f"says V{_vshow(v)} but this board is V{_vshow(ver[0])} (from {ver[1]})", ["TITLE"] if x.get("title") else [],
+                                x["id"], x["pos"][0], x["pos"][1]))
+    if len(seen) > 1:
+        lst = "; ".join(f"V{_vshow(v)} in " + ", ".join(f"'{x['text'][:20]}'" for x in xs[:2]) for v, xs in sorted(seen.items()))
+        out.append(_fnd("SILK_VERSION_STALE", f"board texts disagree with each other: {lst}", ["TITLE"]))
+    if t:
+        for s in t["sides"]:
+            if side != "both" and s != side[0].upper():
+                continue
+            if not any(x["title"] and x["side"] == s for x in bt):
+                why = "" if render_title(t, ver[0] if ver else None) else " (and no version could be resolved for the template)"
+                f = _fnd("SILK_TITLE_MISSING", f"no title text on {s}.SilkS matching '{t['text']}'{why}", ["TITLE"])
+                f["level"] = FAIL if t["required"] else WARN
+                out.append(f)
+
+
 # ------------------------------------------------------------------ check
 def _txt_label(t):
     if t["kind"] == "ref":
@@ -402,6 +568,8 @@ def _txt_label(t):
         return f"{t['owner']} value text"
     if t["kind"] == "fptext":
         return f"{t['owner']} text '{t['text'][:16]}'"
+    if t.get("title"):
+        return f"title text '{t['text'][:28]}'"
     return f"board text '{t['text'][:16]}'"
 
 
@@ -413,6 +581,7 @@ def _fnd(code, msg, refs, tid=None, x=None, y=None):
 def check(sc, cfg, side="both"):
     """All silkscreen findings for the scene, worst first."""
     lay = Layout(sc, cfg)
+    mark_title(sc, cfg)
     for t in sc["texts"]:
         lay.add_text(t)
     out = []
@@ -480,7 +649,7 @@ def check(sc, cfg, side="both"):
             what = {"SILK_OFF_BOARD": "outside the board or too close to Edge.Cuts",
                     "SILK_OVER_PAD": "over pad " + ", ".join(sorted(who)[:3]),
                     "SILK_OVER_HOLE": "over hole " + ", ".join(sorted(who)[:3])}[code]
-            out.append(_fnd(code, f"{own or 'board'} silk graphics {what}", [own] + [w.split(".")[0] for w in who]
+            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: edit the footprint, silk --fix only moves text]", [own] + [w.split(".")[0] for w in who]
                             if code != "SILK_OFF_BOARD" else [own]))
     # reference visibility / marks
     ref_on_silk = {t["owner"] for t in sc["texts"] if t["kind"] == "ref"}
@@ -498,6 +667,10 @@ def check(sc, cfg, side="both"):
         if cls & {"polar", "ic"} and part["silk_gfx"] == 0 and part["n_pads"] >= 2 and not cls & {"testpoint"}:
             out.append(_fnd("SILK_MISSING_MARK", f"{ref} ({'/'.join(sorted(cls & {'polar', 'ic'}))}) has no silkscreen "
                             f"graphics, so no pin-1/polarity mark", [ref]))
+    _check_title(sc, cfg, side, out)
+    for f in out:
+        if f.get("tid") is not None and sc["texts"][f["tid"]].get("title") and "TITLE" not in f["refs"]:
+            f["refs"] = sorted(set(f["refs"]) | {"TITLE"})
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
     return out
@@ -525,6 +698,217 @@ def counts(findings):
 
 def fails(findings):
     return sum(1 for f in findings if f["level"] == FAIL)
+
+
+# ------------------------------------------------------------------ title placement
+def measure_text(text, sizes, mirror, cfg, py=None):
+    """pcbnew ink boxes of `text` for each (h, stroke): [{h, t, w, hh, cx, cy}] (centre-justified, angle 0)."""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump({"text": text, "mirror": mirror, "sizes": sizes}, fh)
+        pf = fh.name
+    try:
+        r = subprocess.run([py or PY, HELPER, "measure", pf], capture_output=True, text=True, timeout=120)
+    finally:
+        os.unlink(pf)
+    if MARK not in r.stdout:
+        raise RuntimeError("silk measure failed: " + (r.stderr.strip().splitlines() or ["no output"])[-1][:200])
+    return json.loads(r.stdout.split(MARK, 1)[1])
+
+
+def _wmin(rows, k):
+    """Sliding minimum of width k along each row (doubling); -> rows of len(row) - k + 1."""
+    out = []
+    for row in rows:
+        cur, span = row, 1
+        while span * 2 <= k:
+            cur = [a if a < b else b for a, b in zip(cur, cur[span:])]
+            span *= 2
+        if k > span:
+            cur = [a if a < b else b for a, b in zip(cur, cur[k - span:])]
+        out.append(cur)
+    return out
+
+
+def _free_map(lay, side, c):
+    """Occupancy of the side at c mm resolution: -> (ox, oy, nx, ny, dist rows [mm to nearest obstacle cell])."""
+    xs = [p[0] for r in lay.rings for p in r]
+    ys = [p[1] for r in lay.rings for p in r]
+    ox, oy = math.floor(min(xs) / 0.5) * 0.5, math.floor(min(ys) / 0.5) * 0.5
+    nx, ny = int(math.ceil((max(xs) - ox) / c)) + 1, int(math.ceil((max(ys) - oy) / c)) + 1
+    occ = [bytearray(nx) for _ in range(ny)]
+    for j in range(ny):                                   # outside the outline (even-odd scanline)
+        y = oy + (j + 0.5) * c
+        xc = []
+        for a, b in lay.edges:
+            if (a[1] > y) != (b[1] > y):
+                xc.append(a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]))
+        xc.sort()
+        inside = bytearray(nx)
+        for k in range(0, len(xc) - 1, 2):
+            i0 = max(0, int(math.ceil((xc[k] - ox) / c - 0.5)))
+            i1 = min(nx - 1, int(math.floor((xc[k + 1] - ox) / c - 0.5)))
+            for i in range(i0, i1 + 1):
+                inside[i] = 1
+        row = occ[j]
+        for i in range(nx):
+            if not inside[i]:
+                row[i] = 1
+
+    def mark(bb):
+        i0, i1 = max(0, int(math.floor((bb[0] - ox) / c))), min(nx - 1, int(math.floor((bb[2] - ox) / c)))
+        j0, j1 = max(0, int(math.floor((bb[1] - oy) / c))), min(ny - 1, int(math.floor((bb[3] - oy) / c)))
+        for j in range(j0, j1 + 1):
+            row = occ[j]
+            for i in range(i0, i1 + 1):
+                row[i] = 1
+    for grid in (lay.pads[side], lay.holes[side], lay.courts[side], lay.gfx[side], lay.texts[side]):
+        for bb, _ in grid.items.values():
+            mark(bb)
+    big = 1e9
+    d = [[0.0 if row[i] else big for i in range(nx)] for row in occ]
+    dg = 1.4142 * c
+    for j in range(ny):                                   # two-pass chamfer distance (mm)
+        r0, r1 = d[j], d[j - 1] if j else None
+        for i in range(nx):
+            v = r0[i]
+            if v == 0.0:
+                continue
+            if i and r0[i - 1] + c < v:
+                v = r0[i - 1] + c
+            if r1:
+                if r1[i] + c < v:
+                    v = r1[i] + c
+                if i and r1[i - 1] + dg < v:
+                    v = r1[i - 1] + dg
+                if i + 1 < nx and r1[i + 1] + dg < v:
+                    v = r1[i + 1] + dg
+            r0[i] = v
+    for j in range(ny - 1, -1, -1):
+        r0, r1 = d[j], d[j + 1] if j + 1 < ny else None
+        for i in range(nx - 1, -1, -1):
+            v = r0[i]
+            if v == 0.0:
+                continue
+            if i + 1 < nx and r0[i + 1] + c < v:
+                v = r0[i + 1] + c
+            if r1:
+                if r1[i] + c < v:
+                    v = r1[i] + c
+                if i and r1[i - 1] + dg < v:
+                    v = r1[i - 1] + dg
+                if i + 1 < nx and r1[i + 1] + dg < v:
+                    v = r1[i + 1] + dg
+            r0[i] = v
+    return ox, oy, nx, ny, d
+
+
+def _largest_free_rect(d, c, need, ox, oy):
+    """Largest axis-aligned rectangle of cells with distance >= need: (w_mm, h_mm, x_mm, y_mm)."""
+    ny, nx = len(d), len(d[0])
+    h = [0] * nx
+    best = (0, 0, 0, 0, 0)
+    for j in range(ny):
+        row = d[j]
+        for i in range(nx):
+            h[i] = h[i] + 1 if row[i] >= need else 0
+        st = []
+        for i in range(nx + 1):
+            cur = h[i] if i < nx else 0
+            start = i
+            while st and st[-1][1] >= cur:
+                s0, hh = st.pop()
+                area = hh * (i - s0)
+                if area > best[0]:
+                    best = (area, i - s0, hh, s0, j - hh + 1)
+                start = s0
+            st.append((start, cur))
+    _, w, hh, i0, j0 = best
+    return w * c, hh * c, ox + i0 * c, oy + j0 * c
+
+
+def _fit_title(sc, cfg, lay, plan, side, py=None):
+    """Place the title text on `side` in the clearest legal spot. -> (info dict | None, finding | None)."""
+    t = cfg["title"]
+    ver = cfg["_version"][0] if cfg.get("_version") else None
+    text = render_title(t, ver)
+    if text is None:
+        return None, _fnd("SILK_TITLE_NO_ROOM", "title text not written: the template needs a version and none could "
+                          "be resolved (set [silk.title] version or [project] version)", ["TITLE"])
+    mine = [x for x in sc["texts"] if x.get("title") and x["side"] == side]
+    mine.sort(key=lambda x: x["id"])
+    if not lay.rings:
+        return None, None
+    hs, h = [], t["height_mm"]
+    while h >= TITLE_MIN_H - 1e-9:
+        hs.append(round(h, 3))
+        h -= cfg["size_step_mm"]
+    if hs[-1] > TITLE_MIN_H + 1e-9:
+        hs.append(TITLE_MIN_H)
+    sizes = [[s, max(cfg["min_stroke_mm"], round(0.15 * s, 3))] for s in hs]
+    dims = measure_text(text, sizes, side == "B", cfg, py)
+    c = 0.25
+    ox, oy, nx, ny, dist = _free_map(lay, side, c)
+    clear = max(cfg["edge_clearance_mm"], cfg["pad_clearance_mm"], cfg["hole_clearance_mm"]) + FIT_MARGIN
+    best = None
+    for s, (h_, tk), m in zip(hs, sizes, dims):
+        if m is None:
+            continue
+        cands = []
+        for va in (0, 90):
+            bw, bh = (m["w"], m["hh"]) if va == 0 else (m["hh"], m["w"])
+            kw, kh = int(math.ceil(bw / c)), int(math.ceil(bh / c))
+            if kw > nx or kh > ny:
+                continue
+            rows = _wmin(dist, kw)                                   # along x
+            cols = _wmin([list(r) for r in zip(*rows)], kh)          # along y: cols[i][j]
+            for i in range(0, len(cols), 2):
+                col = cols[i]
+                for j in range(0, len(col), 2):
+                    mg = col[j]
+                    if mg >= clear + c:
+                        cands.append((-mg, va != 0, oy + j * c, ox + i * c, va, i, j, kw, kh, bw, bh))
+        cands.sort()
+        for cand in cands[:400]:
+            _, _, _, _, va, i, j, kw, kh, bw, bh = cand
+            cx, cy = ox + (i + kw / 2.0) * c, oy + (j + kh / 2.0) * c
+            q = rect(cx, cy, bw / 2.0, bh / 2.0, 0.0)
+            res, _soft = lay.probe(q, side, "", "title", margin=FIT_MARGIN)
+            if res:
+                continue
+            qb = _aabb(q)
+            if any(_quad_poly(q, poly, qb) for _, (co, poly) in lay.courts[side].query(qb)):
+                continue                                              # never under a part body
+            mg = 0.0
+            while mg < 6.0:                                           # exact clearance margin by probing
+                r2, _ = lay.probe(q, side, "", "title", margin=mg + 0.1)
+                if r2 or any(_quad_poly(inflate(q, mg + 0.1), poly) for _, (co, poly) in
+                             lay.courts[side].query(_aabb(inflate(q, mg + 0.1)))):
+                    break
+                mg += 0.1
+            best = (s, tk, va, cx, cy, q, m, round(mg, 2))
+            break
+        if best:
+            break
+    if not best:
+        need = clear + c
+        w, hh, fx, fy = _largest_free_rect(dist, c, need, ox, oy)
+        m0 = dims[0]
+        return None, _fnd("SILK_TITLE_NO_ROOM", f"no room for the title '{text}' on {side}.SilkS at {TITLE_MIN_H:g} mm "
+                          f"(needs {m0['w']:.1f} x {m0['hh']:.1f} mm clear of pads, holes, texts, courtyards and the edge); "
+                          f"largest free rectangle {w:.1f} x {hh:.1f} mm at ({fx:.1f}, {fy:.1f})", ["TITLE"], None, fx, fy)
+    s, tk, va, cx, cy, q, m, mg = best
+    ang = _stored_angle(va, side)
+    a = math.radians(ang)
+    ox_, oy_ = m["cx"], m["cy"]
+    px, py_ = cx - (ox_ * math.cos(a) + oy_ * math.sin(a)), cy - (-ox_ * math.sin(a) + oy_ * math.cos(a))
+    plan["@title:" + side] = {"text": text, "side": side, "x": round(px, 4), "y": round(py_, 4), "angle": ang,
+                              "h": s, "w": s, "t": tk, "bidx": mine[0]["bidx"] if mine else None,
+                              "drop": [x["bidx"] for x in mine[1:]]}
+    nt = {"id": 10 ** 6 + len(plan), "side": side, "quad": q, "title": True, "kind": "board", "owner": ""}
+    lay.add_text(nt, q)
+    return {"side": side, "text": text, "x": round(cx, 2), "y": round(cy, 2), "h": s, "angle": va,
+            "margin_mm": mg, "size": [round(m["w"], 2), round(m["hh"], 2)]}, None
 
 
 # ------------------------------------------------------------------ fit
@@ -624,7 +1008,7 @@ def _candidates(t, spec, part, s, tk, va, cfg, stage, pref):
     return sorted(out.values(), key=lambda c: (c[0], c[2], c[1], c[3]))
 
 
-def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None):
+def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, title=True, py=None):
     """Re-place reference texts so the check passes. -> {"plan", "moved", "shrunk", "hidden", "failed", "kept"}.
     `only`: set of footprint refs; just offenders involving one of them are touched (write hooks)."""
     findings = findings if findings is not None else check(sc, cfg)
@@ -645,8 +1029,9 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None):
                     continue
                 bad.setdefault(i, set()).add(f["code"])
     lay = Layout(sc, cfg)
+    own_title = bool(title and cfg.get("title"))
     for t in texts:
-        if t["id"] not in bad:
+        if t["id"] not in bad and not (own_title and t.get("title")):
             lay.add_text(t)
     refs_va = {t["owner"]: _view_angle(t["angle"]) for t in texts if t["kind"] == "ref" and t["id"] not in bad}
 
@@ -719,14 +1104,28 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None):
     hidden, kept = [], []
     for i in pending:
         t = texts[i]
-        if bad[i] & set(HARD):
+        res = {}
+        if not bad[i] & set(HARD):                        # left where it was: unless texts placed meanwhile now cover it
+            res, _ = lay.probe(t["quad"], t["side"], t["owner"], "ref")
+        if bad[i] & set(HARD) or set(res) & set(HARD):
             plan[t["owner"]] = {"hide": True}
             hidden.append(t["owner"])
         else:
             kept.append(t["owner"])
             lay.add_text(t)
-    return {"plan": plan, "moved": sorted(r for r in plan if "hide" not in plan[r]), "shrunk": sorted(shrunk),
-            "hidden": sorted(hidden), "kept": sorted(kept), "offenders": len(bad)}
+    tinfo, tfind = {}, []
+    if own_title:                                        # AFTER the references: it sees their final places
+        for sd in cfg["title"]["sides"]:
+            if side != "both" and sd != side[0].upper():
+                continue
+            info, fnd = _fit_title(sc, cfg, lay, plan, sd, py)
+            if info:
+                tinfo[sd] = info
+            if fnd:
+                tfind.append(fnd)
+    return {"plan": plan, "moved": sorted(r for r in plan if not r.startswith("@") and "hide" not in plan[r]),
+            "shrunk": sorted(shrunk), "hidden": sorted(hidden), "kept": sorted(kept), "offenders": len(bad),
+            "title": tinfo, "findings": tfind}
 
 
 def _touches(a, b):
@@ -734,9 +1133,8 @@ def _touches(a, b):
 
 
 # ------------------------------------------------------------------ driver
-def run_check(board, cons=None, side="both", py=None, sc=None):
-    cfg = settings(cons)
-    sc = sc or load_scene(board, py)
+def run_check(board, cons=None, side="both", py=None, sc=None, spec=None, title=None):
+    sc, cfg = prepare(board, cons, spec, title, py, sc)
     return sc, cfg, check(sc, cfg, side)
 
 
@@ -746,16 +1144,49 @@ def summary_line(findings, prefix="silk"):
             f"{c.get('SILK_OVERLAP', 0) + c.get('SILK_UNDER_PART', 0)} overlap/covered")
 
 
-def fix_board(board, out, cons=None, side="both", only=None, py=None, log=print):
-    """check -> fit -> write `out` -> re-check. -> (before, after, result)."""
-    sc, cfg, before = run_check(board, cons, side, py)
+def _hard_text_owners(findings):
+    """Owners whose reference TEXT has a FAIL-level finding."""
+    return {f["msg"].split()[0] for f in findings if f["level"] == FAIL and " ref text " in f["msg"]}
+
+
+def apply_guarded(board, out, sc, cfg, before, res, side="both", py=None):
+    """Write res['plan'] to `out` and re-check. FINAL GUARD: the fit must never end with more FAIL findings than it
+    started with; texts that were legal before and are hard-violating after are put back (plan entry dropped) and the
+    board is written again. -> (after findings, reverted owners)."""
+    plan, reverted = res["plan"], []
+    ok_before = _hard_text_owners(before)
+    for _ in range(3):
+        if plan:
+            apply_plan(board, out, plan, py)
+        elif os.path.abspath(board) != os.path.abspath(out):
+            import shutil
+            shutil.copy(board, out)
+        after = (check(load_scene(out, py), cfg, side) if plan else list(before))
+        if not plan or fails(after) <= fails(before):
+            break
+        bad = [o for o in _hard_text_owners(after) - ok_before if o in plan]
+        if not bad:
+            break
+        for o in bad:
+            plan.pop(o)
+            reverted.append(o)
+            for k in ("moved", "hidden", "shrunk", "kept"):
+                if o in res.get(k, []):
+                    res[k].remove(o)
+    res["reverted"] = reverted
+    return after + res.get("findings", []), reverted
+
+
+def unfixable_graphics(findings):
+    """FAIL findings on footprint artwork (the fit cannot touch these): [(ref, code)]."""
+    return sorted({(f["msg"].split()[0], f["code"]) for f in findings if f["level"] == FAIL and " silk graphics " in f["msg"]})
+
+
+def fix_board(board, out, cons=None, side="both", only=None, py=None, log=print, spec=None, title=None):
+    """check -> fit -> guarded write `out` -> re-check. -> (before, after, result); the NO_ROOM findings are in after."""
+    sc, cfg, before = run_check(board, cons, side, py, spec=spec, title=title)
     res = fit(sc, cfg, before, only=only, side=side, log=log)
-    if res["plan"]:
-        apply_plan(board, out, res["plan"], py)
-    elif os.path.abspath(board) != os.path.abspath(out):
-        import shutil
-        shutil.copy(board, out)
-    after = check(load_scene(out, py), cfg, side) if res["plan"] else before
+    after, _ = apply_guarded(board, out, sc, cfg, before, res, side, py)
     return before, after, res
 
 
@@ -768,8 +1199,11 @@ def after_write(board, moved, cons=None, log=print, py=None):
         return None
     moved = sorted(set(moved or ()))
     try:
-        sc = load_scene(board, py)
+        sc, cfg = prepare(board, cons, None, None, py)
         before = check(sc, cfg)
+        for f in before:                                  # a revision copy still carrying the old version
+            if f["code"] == "SILK_VERSION_STALE":
+                log(f"silk: {f['level']} {f['code']} {f['msg']}")
         if not cfg["auto_fit"]:
             log(summary_line(before) + " (auto_fit off)")
             return before
@@ -777,12 +1211,12 @@ def after_write(board, moved, cons=None, log=print, py=None):
         for f in before:                                  # texts of other parts now colliding with a moved one
             if set(f["refs"]) & set(moved):
                 near |= set(f["refs"])
-        res = fit(sc, cfg, before, only=near)
+        res = fit(sc, cfg, before, only=near, title=False)
         if not res["plan"]:
             log(summary_line(before))
             return before
         apply_plan(board, board, res["plan"], py)
-        after = check(load_scene(board, py), cfg)
+        after = check(prepare(board, cons, None, None, py)[0], cfg)
         log(summary_line(before) + " -> " + summary_line(after, "").strip(": ").strip()
             + f" ({len(res['moved'])} ref(s) re-placed, {len(res['hidden'])} hidden"
             + (": " + ", ".join(res["hidden"][:6]) if res["hidden"] else "") + ")")
