@@ -71,3 +71,5 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `buried_vias`, `microvias`, `min_track_mm`, `min_clearance_mm`,
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
 `profile`), `[silk]` (see `silk.md`).
+
+`review` also runs the part-entry gate (`PART_*`, [parts.md](parts.md): offline unless the review fetched distributor data; waive like any code) and the pin-group checks (`MAG_*`, `PINGRP_*`, [pin-groups.md](pin-groups.md)).
