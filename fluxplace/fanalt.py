@@ -63,6 +63,7 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
     small = max(R.get("min_via", 0.0), R.get("min_drill", 0.0) + 2 * ann)
     small = (small, max(R.get("min_drill", 0.0), 0.1)) if 0 < small < vd - 1e-6 else None
     h2h = max(R.get("hole_to_hole", 0.0), float((RR._pro_rules(path) or {}).get("min_hole_to_hole") or 0.0))
+    snv = RR.same_net_via_spacing(cons, None) if "same_net_via" not in P else P["same_net_via"]
     cls = NC.classify(B, cons, spec)
     pn = EP.plane_nets(B, cons, cls, EP.plan_params(cons))
     items = G.Items.of_board(B)
@@ -78,7 +79,7 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
                 return False
         if via and items.gap_via(via[0], via[1], via[2], net, clr)[0] < clr - 1e-6:
             return False
-        if via and any(math.hypot(v["x"] - via[0], v["y"] - via[1]) < max((via[3] + v["drill"]) / 2 + h2h, (via[2] + v["d"]) / 2 + clr) - 1e-6 for v in B["vias"]):   # drilled holes keep hole-to-hole even on one net
+        if via and any(math.hypot(v["x"] - via[0], v["y"] - via[1]) < max((via[3] + v["drill"]) / 2 + h2h, ((via[2] + v["d"]) / 2 + clr) if snv == "freerouting" else 0.0) - 1e-6 for v in B["vias"]):   # drilled holes keep hole-to-hole even on one net
             return False
         for a, b in segs:
             items.seg(a, b, w, layer, net)
@@ -126,10 +127,7 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
                     if tr and commit(pin, kind, [(pad["x"], pad["y"])] + tr[::-1], layer, F.xy(j, i) + (dia, drl), net):
                         return True
                 return False
-            if via_try(vd, drill, "via"):
-                done = True
-                break
-            if plane:
+            if plane:                                       # reuse a via of the net first: no new drill
                 best = None
                 for v in B["vias"]:                          # an existing via of the net within reach
                     if v["net"] == net and F.inside(v["x"], v["y"]):
@@ -141,6 +139,10 @@ def rescue(path, res, cons=None, spec=None, log=lambda m: None):
                     if tr and commit(pin, "share", [(pad["x"], pad["y"])] + tr[::-1] + [(best[3]["x"], best[3]["y"])], layer, None, net):
                         done = True
                         break
+            if via_try(vd, drill, "via"):
+                done = True
+                break
+            if plane:
                 zone = any(z["net"] == net and not z["keepout"] and layer in z["layers"] and len(z["pts"]) > 2
                            and PK.poly_mask(z["pts"], np.array([[pad["x"]]]), np.array([[pad["y"]]]))[0, 0] for z in B["zones"])
                 if zone:

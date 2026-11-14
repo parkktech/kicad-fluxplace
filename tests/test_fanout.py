@@ -189,17 +189,64 @@ def test_reserved_escapes_in_keepout_or_edge_band_are_dropped(tmp_path):
     assert kept[0]["lane"][-1] == [70, 60]                      # the stub ends at the via centre
 
 
-def test_same_net_vias_keep_hole_to_hole(tmp_path):
-    """two vias of one net are two drilled holes: the board's hole-to-hole rule holds between them (a warning in KiCad, a fab reject in life)."""
-    via = '(via (at 50 40) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "00000000-0000-0000-0000-000000000001"))\n'
+def _hit_row(tmp_path, snv, extra=""):
+    via = '(via (at 50 40) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "GND") (uuid "00000000-0000-0000-0000-000000000001"))\n'
     path = PB.write(tmp_path, PB.fp("J1", 20, 20, [PB.pad("1", 0, 0, "GND", 1, 1)]) + PB.fp("J2", 80, 60, [PB.pad("1", 0, 0, "GND", 1, 1)]) + via)
     json.dump({"board": {"design_settings": {"rules": {"min_hole_to_hole": 0.3}}}}, open(os.path.splitext(path)[0] + ".kicad_pro", "w"))
-    job = {"params": FO._params(args(), {"track_mm": 0.15, "clearance_mm": 0.15, "via_mm": 0.45, "drill_mm": 0.2}),
-           "signal_layers": ["F.Cu", "B.Cu"], "nets": {}, "parts": {}}
+    P = FO._params(args(), {"track_mm": 0.15, "clearance_mm": 0.15, "via_mm": 0.45, "drill_mm": 0.2})
+    P["same_net_via"] = snv
+    job = {"params": P, "signal_layers": ["F.Cu", "B.Cu"], "nets": {}, "parts": {}}
     code = ("import sys,json,pcbnew;sys.path.insert(0,sys.argv[1]);import fluxplace.fanout_helper as H\n"
             "b=pcbnew.LoadBoard(sys.argv[2]);M=H.Model(b,json.loads(sys.argv[3]))\n"
-            "print('R',[bool(M.hit_via('GND',(50+d,40),0.45)) for d in (0.25,0.45,0.55,0.65)])")
+            "print('R',json.dumps([bool(M.hit_via('GND',(50+d,40),0.45)) for d in (0.25,0.45,0.55,0.65)]))")
     r = subprocess.run(["/usr/bin/python3", "-c", code, os.path.join(os.path.dirname(__file__), ".."), path, json.dumps(job)], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith("R ")]
     assert line, r.stderr[-800:]
-    assert json.loads(line[0][2:].replace("True", "true").replace("False", "false")) == [True, True, True, False]   # max(0.2 drill + 0.3 rule, 0.45 via + 0.15 clearance) = 0.6 centre to centre
+    return json.loads(line[0][2:])
+
+
+def test_same_net_vias_keep_hole_to_hole(tmp_path):
+    """hole-to-hole holds between vias of ONE net in both settings (0.2 drill + 0.3 rule = 0.5 centre to centre)."""
+    assert _hit_row(tmp_path, "hole") == [True, True, False, False]
+
+
+def test_same_net_via_spacing_freerouting_adds_via_clearance(tmp_path):
+    """the "freerouting" setting also keeps via + clearance (0.45 + 0.15 = 0.6): KiCad does not need it, Freerouting counts less as a violation."""
+    assert _hit_row(tmp_path, "freerouting") == [True, True, True, False]
+
+
+def test_setting_resolution():
+    from fluxplace import routerules as RR
+    assert RR.same_net_via_spacing({}, None) == "hole"
+    assert RR.same_net_via_spacing({}, "freerouting") == "freerouting"
+    assert RR.same_net_via_spacing({"route": {"router": "freerouting"}}) == "freerouting"
+    assert RR.same_net_via_spacing({"route": {"router": "krt"}}, "freerouting") == "freerouting"
+    assert RR.same_net_via_spacing({"route": {"same_net_via_spacing": "hole"}}, "freerouting") == "hole"
+    assert RR.same_net_via_spacing({"route": {"same_net_via_spacing": "bogus", "router": "krt"}}) == "hole"
+
+
+def test_plane_pin_shares_a_via_of_its_net_instead_of_a_new_one(tmp_path):
+    """a power/ground pin with a via of its net within share_reach_mm gets a stub to it, not a via of its own."""
+    via = '(via (at 33 30) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "GND") (uuid "00000000-0000-0000-0000-000000000002"))\n'
+    caps = PB.fp("C0", 30, 30, [PB.pad("1", -0.5, 0, "VX", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)])
+    caps += PB.fp("J1", 60, 60, [PB.pad("1", 0, 0, "VX", 1, 1), PB.pad("2", 3, 0, "GND", 1, 1)]) + via
+    path = PB.write(tmp_path, caps)
+    out = str(tmp_path / "out.kicad_pcb")
+    B, res = FO.run(path, {"escape": {"share_reach_mm": 3.0}}, None, out, args(), None)
+    gnd = [p for p in res["pins"] if p["net"] == "GND" and p["ref"] == "C0"][0]
+    assert gnd["ok"] and gnd["kind"] == "share" and gnd["via"] is None and gnd["stub"][-1] == [33.0, 30.0]
+    B, res = FO.run(path, {"escape": {"share_reach_mm": 0}}, None, str(tmp_path / "o2.kicad_pcb"), args(), None)
+    assert [p for p in res["pins"] if p["net"] == "GND" and p["ref"] == "C0"][0]["via"]       # off: it gets its own via
+
+
+def test_fanalt_reuses_a_via_of_the_net_before_adding_one(tmp_path):
+    from fluxplace import fanalt as FALT
+    via = '(via (at 33 30) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net "GND") (uuid "00000000-0000-0000-0000-000000000003"))\n'
+    caps = PB.fp("C0", 30, 30, [PB.pad("1", -0.5, 0, "VX", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)])
+    caps += PB.fp("J1", 60, 60, [PB.pad("1", 0, 0, "VX", 1, 1), PB.pad("2", 3, 0, "GND", 1, 1)]) + via
+    path = PB.write(tmp_path, caps)
+    P = FO._params(args(), {"track_mm": 0.15, "clearance_mm": 0.15, "via_mm": 0.45, "drill_mm": 0.2})
+    pin = {"ref": "C0", "pin": "2", "net": "GND", "ok": False}
+    st = FALT.rescue(path, {"pins": [pin], "params": P}, {}, None)
+    assert st["share"] == 1 and st["via"] == 0 and pin["kind"] == "alt-share" and pin["via"] is None
+    assert open(path).read().count("(via") == 1                      # no new drill
