@@ -737,7 +737,9 @@ def st_fanout(c, n, board):
     d = c.dir(n, "fanout")
     out = os.path.join(d, "board.kicad_pcb")
     pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
-    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + c.cs() + c.qs(),
+    from . import routerules as RR
+    snv = ["--same-net-via-spacing", RR.same_net_via_spacing(c.cons, getattr(c.a, "router_name", None))]     # [route] same_net_via_spacing, else by the router
+    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + snv + c.cs() + c.qs(),
                         os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
     if q:

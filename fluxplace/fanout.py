@@ -162,8 +162,11 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     from . import routediag as RD
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
+    from . import routerules as RR
     job = {"params": params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
+    job["params"]["share_reach"] = float(((cons or {}).get("escape") or {}).get("share_reach_mm", 1.5))
+    job["params"]["same_net_via"] = getattr(a, "same_net_via_spacing", None) or RR.same_net_via_spacing(cons)
     if getattr(a, "nets", None):
         job["only_nets"] = [n for n in a.nets.split(",") if n]
     job["skip_nets"] = owned_nets(B)
@@ -175,7 +178,7 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     if not a.check_only and not refs:                   # reserved escapes are claimed FIRST: locked stub + via copper in the input
         from . import escres as ER, routerules as RR
         try:
-            claimed = ER.plan(B, cons, spec, h2h=float((RR._pro_rules(board) or {}).get("min_hole_to_hole") or 0.0))["reserved"] if ER.params(cons)["enabled"] else []
+            claimed = ER.plan(B, cons, spec, snv=job["params"]["same_net_via"], h2h=float((RR._pro_rules(board) or {}).get("min_hole_to_hole") or 0.0))["reserved"] if ER.params(cons)["enabled"] else []
         except Exception as e:
             log(f"fanout: escape reservation skipped: {e}")
         if claimed:
@@ -332,6 +335,8 @@ def add_parser(sub):
     p.add_argument("--clearance", type=float, default=None)
     p.add_argument("--via", type=float, default=None)
     p.add_argument("--drill", type=float, default=None)
+    p.add_argument("--same-net-via-spacing", dest="same_net_via_spacing", choices=["freerouting", "hole"], default=None,
+                   help="same-net via spacing: freerouting = via + clearance, hole = hole-to-hole only (default: [route] same_net_via_spacing, else by router)")
     p.add_argument("--via-pad-gap", dest="via_pad_gap", type=float, default=0.2, help="copper gap between a via and its own pad (default 0.2)")
     p.add_argument("--reach", type=float, default=2.2, help="largest stub length mm (default 2.2)")
     p.add_argument("--lane", type=float, default=1.0, help="free lane length mm leaving every end point (default 1.0)")

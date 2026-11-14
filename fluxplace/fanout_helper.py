@@ -108,6 +108,7 @@ class Model:
         self.edge = max(P.get("edge", 0.0), mmv(ds.m_CopperEdgeClearance))
         self.hole_clr = P.get("hole_clr", P["clear"])
         self.h2h = max(P.get("hole_to_hole", 0.0), mmv(ds.m_HoleToHoleMin))
+        self.snv_router = P.get("same_net_via") == "freerouting"    # [route] same_net_via_spacing
         self.cu = [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()]
         self.lid = {board.GetLayerName(l): l for l in board.GetEnabledLayers().CuStack()}
         self.sig = [l for l in job["signal_layers"] if l in self.lid]
@@ -262,7 +263,7 @@ class Model:
                 ob = o.bb
                 ob_r = (ob[2] - ob[0]) / 2          # no via centre inside another's copper: KiCad flags the track end that sits on it (track_not_centered_on_via)
                 d = math.hypot((ob[0] + ob[2]) / 2 - p[0], (ob[1] + ob[3]) / 2 - p[1])
-                if d < r + 0.01 or d < self.VDR + self.h2h - 1e-6 or d < dia / 2 + ob_r + cl - 1e-6:   # hole-to-hole applies to same-net vias too; so does the router's via clearance
+                if d < r + 0.01 or d < self.VDR + self.h2h - 1e-6 or (self.snv_router and d < dia / 2 + ob_r + cl - 1e-6):   # hole-to-hole applies to same-net vias too; so does the router's via clearance
                     return (o.what, o.kind, i)
                 continue
             if same and o.kind in ("track", "hole"):
@@ -484,6 +485,22 @@ class Fan:
                             pen = 0.6 * max(0.0, dx * cap[0] + dy * cap[1])
                         c = Cand("via", layer0, ((cx, cy), v), v, w, rho + P["via_cost"] + pen, ia, rho)
                         cands.append(c)
+        if pin.need == "plane" and not pin.tht and P.get("share_reach", 0) > 0:
+            # reuse a via of the net that is already there (claimed escape, earlier stage): a short stub, no drill of our own
+            sr = P["share_reach"]
+            have = []
+            for i in M.near((cx - sr, cy - sr, cx + sr, cy + sr), 0.0):
+                o = M.obs[i]
+                if o.kind == "via" and o.net == pin.net:
+                    vc = ((o.bb[0] + o.bb[2]) / 2, (o.bb[1] + o.bb[3]) / 2)
+                    dd = math.hypot(vc[0] - cx, vc[1] - cy)
+                    if 0 < dd <= sr:
+                        have.append((dd, vc))
+            for dd, vc in sorted(have)[:3]:
+                if M.hit_seg(pin.net, layer0, (cx, cy), vc, w, ignore=pin.pad_obs):
+                    continue
+                ia = min(range(len(DIRS)), key=lambda k: math.hypot(DIRS[k][0] - (vc[0] - cx) / dd, DIRS[k][1] - (vc[1] - cy) / dd))
+                cands.append(Cand("share", layer0, ((cx, cy), vc), None, w, dd * 0.5, ia, dd))
         if pin.need == "signal":
             # direct pad-out candidates: leave the courtyard
             for ia, (dx, dy) in enumerate(DIRS):

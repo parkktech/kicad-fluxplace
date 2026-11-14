@@ -35,7 +35,7 @@ optional; anything not stated keeps the heuristic default. Schema:
     [review]                # waive = ["UNROUTED:^\\+3V3$"] waives one open net; open_gate = false switches UNROUTED/STALE_FILL off
     [closure]               # window_mm radius_mm step_mm nudge_max_mm max_trials track_mm clearance_mm via_mm (docs/commands/closure.md)
     [escape]                # near_mm 2.0, lane_mm 1.5, window_mm 4.0, radius_mm 2.5, enabled, power_pins (escape reservation, escres.py)
-    [route]                 # tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
+    [route]                 # same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
 
     [power."+5V"]           # (in addition to the ampacity fields above)
     holdup_ms = 20          # ride-through the spec promises ...

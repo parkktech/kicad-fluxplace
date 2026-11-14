@@ -49,6 +49,10 @@ checkpoint. `route-wait` prints the last good board as the result.
     same_net_pad_clearance_mm = 0.2
     grid_mm = 0.05           # default 0.05 when any part has pitch <= 0.5 mm, else 0.1
     min_track_mm / min_clearance_mm / min_via_mm / min_drill_mm / hole_to_hole_mm   # extra floors (else [fab] and .kicad_pro)
+    same_net_via_spacing = "hole"  # "freerouting" | "hole": how far apart two vias of ONE net are placed (fan-out, escape reservation, alternatives).
+                             # hole = hole-to-hole only (KiCad DRC; always kept).  freerouting = also via + clearance centre to centre:
+                             # KiCad does not need it, Freerouting counts less as a pre-existing clearance violation (~400 on a dense board).
+                             # Default: "freerouting" when the route stage uses Freerouting ([route] router or --router), else "hole"
     clearance_margin_mm = 0.1  # asked of the router on top of the default clearance when a floor is set (default one grid step); the audit keeps the floor
     escalation = "off"       # router --escalation (off|board|fab); strict_sizes = true -> --strict-sizes
     rail_min_pads = 8        # >= this many pads and no plane/pour: routed as a tree of two-cluster jobs (parallel mode); rail_edges_per_round = 3

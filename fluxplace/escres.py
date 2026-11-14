@@ -84,7 +84,7 @@ def needy(B, cons, spec, cls=None):
     return out
 
 
-def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0):
+def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0, snv="hole"):
     """-> {reserved: [...], unreserved: [{ref, pin, net, why, crowd}], needy: n}.  `h2h` = the board's hole-to-hole rule (wall to wall):
     two reserved vias of ONE net are still two drilled holes, so their sites keep drill + h2h centre to centre."""
     cls = cls or NC.classify(B, cons, spec)
@@ -103,7 +103,9 @@ def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0):
     for t in todo:
         pad, net = t["pad"], t["net"]
         F = PK.Field(B, (pad["x"], pad["y"]), ep["window"], step, own={net}, clearance=R["clearance"])
-        hpitch = max(R["drill"] + max(R.get("hole_to_hole", 0.0), h2h), vd + R["clearance"])   # a router keeps its via clearance between same-net vias too
+        hpitch = R["drill"] + max(R.get("hole_to_hole", 0.0), h2h)
+        if snv == "freerouting":                        # Freerouting keeps its via clearance between same-net vias too
+            hpitch = max(hpitch, vd + R["clearance"])
         hole_block = np.zeros((F.ny, F.nx), bool)
         for r in res:
             if r["net"] == net and hpitch > 0 and abs(r["site"][0] - pad["x"]) < ep["window"] + 1 and abs(r["site"][1] - pad["y"]) < ep["window"] + 1:

@@ -44,6 +44,16 @@ def fine_pitch(B, limit=0.5):
     return False
 
 
+def same_net_via_spacing(cons, router=None):
+    """"freerouting": two vias of one net keep via + clearance centre to centre (Freerouting counts less as a clearance violation, KiCad does
+    not); "hole": only hole-to-hole (always kept).  [route] same_net_via_spacing wins; else the router in use (arg, then [route] router)."""
+    r = dict((cons or {}).get("route") or {})
+    v = str(r.get("same_net_via_spacing") or "").lower()
+    if v in ("freerouting", "hole"):
+        return v
+    return "freerouting" if str(router or r.get("router") or "").lower() == "freerouting" else "hole"
+
+
 def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=None):
     """-> the rule dict (floors, requested sizes, via_in_pad, grid, mode, workers, audit_drc)."""
     from . import constraints as C
