@@ -120,10 +120,11 @@ def _params(a, pr):
 def drc_counts(board, workdir, timeout=900):
     out = os.path.join(workdir, os.path.basename(board) + ".drc.json")
     t0 = time.time()
-    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-error", "--all-track-errors", "--refill-zones", "-o", out, board],
+    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--all-track-errors", "--refill-zones", "-o", out, board],
                    capture_output=True, text=True, timeout=timeout)
     d = json.load(open(out))
-    c = Counter(v["type"] for v in d.get("violations", []))
+    # errors, plus hole_to_hole: a board often keeps it a warning (it is a fab rule all the same - drills break into each other)
+    c = Counter(v["type"] for v in d.get("violations", []) if v.get("severity") == "error" or v["type"] == "hole_to_hole")
     return c, len(d.get("unconnected_items", [])), time.time() - t0
 
 
