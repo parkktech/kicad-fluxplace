@@ -86,7 +86,7 @@ rotated rect); pads of the same footprint are never tested against each other (m
 | courtyard_overlap | placement | project `courtyards_overlap` |
 | hole_in_courtyard (PTH / NPTH in another part's courtyard) | placement | project `pth_/npth_inside_courtyard` |
 | hole_clearance (hole to another part's copper < project `min_hole_clearance`) | manufacturing | project `hole_clearance` |
-| pour_island (a filled piece touching no pad / via / track of its net; needs fills in the file) | electrical | project `isolated_copper` |
+| pour_island (a filled piece touching no pad / via / track of its net; needs fills in the file) | electrical | WARN by default; `[review] pour_island = "fail"` makes it FAIL (project `isolated_copper` is then used) |
 
 Project severity `error` = FAIL, `warning` = WARN, `ignore` = INFO. Waive with `COLLISION:REGEX` (matches the pair text, e.g.
 `J1 x U1`). Not covered: tracks and vias against other copper (routed copper: DRC, `route-diagnose`), a footprint's own pads

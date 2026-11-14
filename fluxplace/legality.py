@@ -305,6 +305,7 @@ KINDS = {
     "hole_in_courtyard": ("pth_inside_courtyard", "placement", False, "a hole inside another part's courtyard"),
     "hole_clearance":    ("hole_clearance", "manufacturing", False, "a hole closer than the hole clearance to another part's copper"),
     "pour_island":       ("isolated_copper", "electrical", False, "a filled pour piece touches nothing of its net"),
+    "unnetted_overlap":  ("shorting_items", "electrical", False, "unnetted copper overlaps"),
 }
 RELEVANCE = ("placement", "routing", "manufacturing", "electrical")
 _LEVEL = {"error": "FAIL", "warning": "WARN", "ignore": "INFO"}
@@ -375,7 +376,9 @@ def collisions(B, cons=None, relevance=None):
                 continue
             g = GM.shape_gap(s, shp[id(o)])
             ex = f"{q['ref']}.{q['num']}[{q['net'] or '-'}]/{o['ref']}.{o['num']}[{o['net'] or '-'}] gap {g:.3f}"
-            if g <= 1e-6:
+            if g <= 1e-6 and not q["net"] and not o["net"]:
+                hit(pair(q["ref"], o["ref"]), "unnetted_overlap", ex)     # neither pad has a net: nothing shorts
+            elif g <= 1e-6:
                 hit(pair(q["ref"], o["ref"]), "copper_overlap", ex)
             elif g < clr - 1e-6:
                 hit(pair(q["ref"], o["ref"]), "copper_clearance", ex)
@@ -446,34 +449,54 @@ def collisions(B, cons=None, relevance=None):
             continue                                       # rule areas: handled above on true shapes
         hit((ref, "@" + name), "keepout", f"{ref} in keep-out {name}")
 
-    # 5. pour islands: a filled piece touching no pad / via / track end of its net (needs filled zones in the file)
-    for z in B["zones"]:
-        if z["keepout"] or not z["net"] or not z.get("fills"):
-            continue
+    # 5. pour islands: a filled piece touching no pad / via / track end of its net (needs filled zones in the file).
+    # Candidates come from spatial hashes built once per board (not a scan of every pad/via/segment per piece).
+    pours = [z for z in B["zones"] if not z["keepout"] and z["net"] and z.get("fills")]
+    if pours:
+        pad_h, via_h, seg_h = GM.Hash(2.0), GM.Hash(2.0), GM.Hash(2.0)
+        for i, q in enumerate(B["pads"]):
+            r = max(q["ex"], q["ey"])
+            pad_h.add(i, (q["x"] - r, q["y"] - r, q["x"] + r, q["y"] + r), "x")
+        for i, v in enumerate(B["vias"]):
+            r = v["d"] / 2
+            via_h.add(i, (v["x"] - r, v["y"] - r, v["x"] + r, v["y"] + r), "x")
+        for i, sg in enumerate(B["segs"]):
+            seg_h.add(i, _bbox([sg["a"], sg["b"]], sg["w"] / 2), "x")
+    for z in pours:
         for layer, pts in z["fills"]:
             if len(pts) < 3:
                 continue
             fb = _bbox(pts)
             ok = False
-            for q in B["pads"]:
-                if q["net"] == z["net"] and layer in q["layers"] and GM.overlap(_bbox([(q["x"], q["y"])], max(q["ex"], q["ey"])), fb):
-                    s = shp.get(id(q)) or GM.pad_shape(q)
-                    if _poly_hits_shape(pts, s, 0.01):
+            for i in pad_h.hits(fb, "x"):
+                q = B["pads"][i]
+                if q["net"] == z["net"] and layer in q["layers"]:
+                    s_ = shp.get(id(q)) or GM.pad_shape(q)
+                    if _poly_hits_shape(pts, s_, 0.01):
                         ok = True
                         break
             if not ok:                                   # vias / tracks: true shapes (they sit in thermal cut-outs)
-                ok = any(v["net"] == z["net"] and
-                         GM.overlap(_bbox([(v["x"], v["y"])], v["d"] / 2), fb) and
-                         _poly_hits_shape(pts, ([(v["x"], v["y"])], v["d"] / 2), 0.01) for v in B["vias"]) or any(
-                    s["net"] == z["net"] and s["layer"] == layer and GM.overlap(_bbox([s["a"], s["b"]], s["w"] / 2), fb) and
-                    _poly_hits_shape(pts, ([s["a"], s["b"]], s["w"] / 2), 0.01) for s in B["segs"])
+                ok = any(B["vias"][i]["net"] == z["net"] and
+                         _poly_hits_shape(pts, ([(B["vias"][i]["x"], B["vias"][i]["y"])], B["vias"][i]["d"] / 2), 0.01)
+                         for i in via_h.hits(fb, "x"))
+            if not ok:
+                ok = any(B["segs"][i]["net"] == z["net"] and B["segs"][i]["layer"] == layer and
+                         _poly_hits_shape(pts, ([B["segs"][i]["a"], B["segs"][i]["b"]], B["segs"][i]["w"] / 2), 0.01)
+                         for i in seg_h.hits(fb, "x"))
             if not ok:
                 hit((f"{z['net']}@{layer}",), "pour_island",
                     f"{z['net']} fill piece on {layer} near ({(fb[0] + fb[2]) / 2:.1f}, {(fb[1] + fb[3]) / 2:.1f})")
 
     out = []
+    # a pour island is a WARN unless the constraints say `[review] pour_island = "fail"` (project severity ignored);
+    # an unnetted-pad overlap is a WARN too (no net on either side, so nothing shorts)
+    pour_fail = str(((cons.get("review") or {}).get("pour_island", ""))).lower() == "fail"
     for key, kinds in hits.items():
         lv = {k: _kind_level(k, sev) for k in kinds}
+        if "pour_island" in lv and not pour_fail:
+            lv["pour_island"] = "WARN"
+        if "unnetted_overlap" in lv:
+            lv["unnetted_overlap"] = "WARN"
         if kinds.keys() & {"hole_in_courtyard"}:
             npth = all(e.startswith("NPTH") for e in kinds["hole_in_courtyard"])
             lv["hole_in_courtyard"] = _LEVEL.get(sev.get("npth_inside_courtyard" if npth else "pth_inside_courtyard", "error"), "FAIL")
