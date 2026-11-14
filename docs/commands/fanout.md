@@ -44,6 +44,17 @@ the verdict is `FANOUT_WARN` (exit 0, stage WARN, the pipeline continues), the p
 modules fan-out check and the floorplan gate. Until the net has copper on that pin, `route-ready` and `review` report
 `FANOUT_PIN_WAIVED` as WARN (`preroute.waived_pin_findings`). A pin not named by a waiver still FAILS.
 
+**Reserved escapes are released when they block.** The escape reservation (`escres`) claims copper before the solve. When a pin
+ends blocked and a claim of another pin lies within 2.5 mm of it, those claims are released and the solve runs again (at most two
+rounds; log line `released reserved escape(s) ...`). Measured on the V1.6 board: U5.13 was sealed by the FB5.1 (+3V3) reservation
+only; with it released, 811/811 escape and DRC errors are unchanged.
+
+**Sealed or surface-only.** Each blocked component is measured: the longest free same-layer run from its pad in 8 directions
+(against static copper and this run's copper). `SURFACE_ONLY` when that run is at least `[escape] surface_exit_mm` (default
+1.0 mm), else `SEALED`. Verdict: sealed pins -> `FANOUT_FAIL` (`FANOUT_PIN_BLOCKED ... [SEALED, free run X mm]`); surface-only pins
+only -> `FANOUT_WARN` (`FANOUT_PIN_SURFACE_ONLY REF.PIN NET free run X mm - left for the router`). With `--allow-incomplete` the
+pipeline continues past a FAIL that is only sealed pins (no DRC increase, no crash); the ledger records it.
+
 Output: `FANOUT_OK` / `FANOUT_WARN` / `FANOUT_FAIL`, escaped / required per part, one `FANOUT_PIN_BLOCKED part.pin net blocker distance` line per
 failed pin (blocker = the pad, board edge, keep-out or the neighbour whose escape took the room), the kicad-cli DRC (zones refilled)
 before and after: the fan-out must add no error (`hole_to_hole` counts even when the board makes it a warning). `--check-only` writes nothing. `<out>.fanout.json` holds every pin (kind, layer,

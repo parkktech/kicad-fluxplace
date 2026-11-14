@@ -843,6 +843,58 @@ class Fan:
         return dict(best["asg"])
 
     # -- lanes after the search --------------------------------------------
+    def clear_of_chosen(self, net, layer, a, b, w, chosen, clr=None):
+        """a track a-b (width w, net, layer) keeps `clr` (default the net's clearance) from the copper chosen in this run."""
+        M = self.M
+        sh = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(w))
+        for (n2, cd2) in chosen:
+            if n2 == net:
+                continue
+            c2 = M.net_rules(n2)[1] if clr is None else clr
+            for (ly, a2, b2, r) in self.caps(None, cd2):
+                if ly is not None and ly != layer:
+                    continue
+                s2 = pcbnew.SHAPE_SEGMENT(V2(nm(a2[0]), nm(a2[1])), V2(nm(b2[0]), nm(b2[1])), nm(r * 2))
+                if sh.Collide(s2, nm(c2)):
+                    return False
+        return True
+
+    def free_run(self, pin, layer, chosen, step=0.05, limit=5.0):
+        """longest free same-layer run (mm) from each piece of `pin` outward in 8 directions, against static copper and the
+        copper chosen in this run. -> (mm, direction index) of the best one."""
+        M = self.M
+        w, _cl = M.net_rules(pin.net)
+        best = (0.0, None)
+        for (cx, cy) in (pin.piece_c or [pin.c]):
+            for ia, (dx, dy) in enumerate(DIRS):
+                run = 0.0
+                while run < limit:
+                    nxt = run + step
+                    b = (cx + dx * nxt, cy + dy * nxt)
+                    if not M.inside(b):
+                        break
+                    if M.hit_seg(pin.net, layer, (cx, cy), b, w, ignore=pin.pad_obs):
+                        break
+                    if not self.clear_of_chosen(pin.net, layer, (cx, cy), b, w, chosen):
+                        break
+                    run = nxt
+                if run > best[0]:
+                    best = (run, ia)
+        return round(best[0], 2), best[1]
+
+    def classify_blocked(self, sol, exit_mm):
+        """every blocked component: SURFACE_ONLY when a free same-layer run of >= exit_mm leaves its pad (the router can still
+        reach it on the surface), else SEALED (no via site and no free outward path). -> {pin index: (class, free mm)}."""
+        chosen = [(self.pins[i].net, self.pins[i].cands[k]) for i, k in sol.items()]
+        out = {}
+        for i, p in enumerate(self.pins):
+            if i in sol or p.tht:
+                continue
+            layer0 = self.M.cu[0] if p.side == "F" else self.M.cu[-1]
+            mm, _ia = self.free_run(p, layer0, chosen)
+            out[i] = ("SURFACE_ONLY" if mm >= exit_mm else "SEALED", mm)
+        return out
+
     def link_same_net(self, sol, reach=LINK_REACH):
         """a pin (or one of its copper pieces) that found no escape gets a short SAME-NET track to a pad of its net that IS
         escaped: a sibling piece of its own pin, or a same-net pad of its footprint or a neighbour within `reach` mm.
@@ -877,22 +929,7 @@ class Fan:
                     continue
                 if M.hit_seg(p.net, layer0, pc, tc, w, ignore=p.pad_obs | self.pins[j].pad_obs):
                     continue
-                sh = pcbnew.SHAPE_SEGMENT(V2(nm(pc[0]), nm(pc[1])), V2(nm(tc[0]), nm(tc[1])), nm(w))
-                clash = False
-                for (n2, cd2) in chosen:
-                    if n2 == p.net:
-                        continue
-                    clr = M.net_rules(n2)[1]
-                    for (ly, a, b, r) in self.caps(None, cd2):
-                        if ly is not None and ly != layer0:
-                            continue
-                        s2 = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(r * 2))
-                        if sh.Collide(s2, nm(clr)):
-                            clash = True
-                            break
-                    if clash:
-                        break
-                if clash:
+                if not self.clear_of_chosen(p.net, layer0, pc, tc, w, chosen):
                     continue
                 done = (pc, tc, j, _d)
                 break
@@ -1136,6 +1173,7 @@ def main():
         for i in bad:
             banned.add((i, sol[i]))
     links = F.link_same_net(sol)
+    F.blocked_class = F.classify_blocked(sol, job["params"].get("surface_exit", 1.0))
     res = F.report(sol, banned, (t0, tc, td, ta, time.time()))
     res["links"] = links
     if not job.get("check_only"):
@@ -1161,6 +1199,8 @@ def _report(self, sol, banned, tm):
                 d["lane"] = [round(math.degrees(math.atan2(DIRS[lane[0]][1], DIRS[lane[0]][0])), 1), lane[1]]
         else:
             d["blocker"], d["dist"] = self.blame_of(i, sol)
+            if i in getattr(self, "blocked_class", {}):
+                d["class"], d["free_mm"] = self.blocked_class[i]
             d["blame"] = sorted(p.blame.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
             d["nstatic"] = len(p.cands)
         pins.append(d)

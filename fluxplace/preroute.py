@@ -429,7 +429,7 @@ def waived_pin_findings(B, cons):
     `[floorplan] waive_fail` names) stays a WARN here until its net has copper on the pin: a segment end or a via of the
     net inside the pad (grown by half the track width). Pieces of one pin count together."""
     from . import fanout as FO
-    pats, _notes = FO.waivers(cons)
+    pats, _names = FO.waivers(cons)
     if not pats:
         return []
     keys = {}

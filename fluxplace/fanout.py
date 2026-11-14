@@ -14,6 +14,7 @@ track lane >= --lane mm leaves its end point on a signal layer. Items are groupe
 Self-check: kicad-cli pcb drc on input and output; the fan-out must add no error.
 """
 import json
+import math
 import os
 import re
 import shutil
@@ -159,7 +160,7 @@ def _drop_illegal_claims(board, job, claimed, wd, log):
     return out
 
 
-def run(board, cons, spec, out, a, refs=None, log=print):
+def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _depth=0):
     from . import routediag as RD
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
@@ -167,6 +168,7 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     job = {"params": params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
     job["params"]["share_reach"] = float(((cons or {}).get("escape") or {}).get("share_reach_mm", 1.5))
+    job["params"]["surface_exit"] = float(((cons or {}).get("escape") or {}).get("surface_exit_mm", 1.0))
     job["params"]["same_net_via"] = getattr(a, "same_net_via_spacing", None) or RR.same_net_via_spacing(cons)
     if getattr(a, "nets", None):
         job["only_nets"] = [n for n in a.nets.split(",") if n]
@@ -184,6 +186,7 @@ def run(board, cons, spec, out, a, refs=None, log=print):
             log(f"fanout: escape reservation skipped: {e}")
         if claimed:
             claimed = _drop_illegal_claims(board, job, claimed, wd, log)
+        claimed = [c for c in claimed if (c["ref"], str(c["pin"])) not in _drop]
         if claimed:
             src = os.path.join(wd, "claimed.kicad_pcb")
             txt, _n = ER.claim_text(open(board, errors="surrogateescape").read(), claimed)
@@ -215,6 +218,12 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     if not line:
         raise SystemExit("fanout: helper failed:\n" + (r.stderr or r.stdout)[-1500:])
     res = json.loads(line[-1][len(MARK):])
+    near = _claims_near_blocked(B, res, claimed) if (claimed and not a.check_only and not refs and _depth < 2) else set()
+    if near:
+        # a reserved escape of another pin (the escape reservation, claimed before the solve) takes the only exit of a blocked
+        # pin: release the reservations within reach of the blocked pins and solve again (the owners solve like any pin)
+        log("fanout: released reserved escape(s) " + ", ".join(sorted(f"{r}.{q}" for r, q in near)) + " next to blocked pins; re-solving")
+        return run(board, cons, spec, out, a, refs, log, _drop=frozenset(_drop) | near, _depth=_depth + 1)
     if out and not a.check_only:                         # blocked pins: routed stub to another via site, shared via, pour, smaller via (fanalt.py)
         try:
             from . import fanalt as FALT
@@ -229,22 +238,40 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     res["runtime_s"] = round(time.time() - t0, 1)
     res["params"] = job["params"]
     res["escapes"] = claimed
-    res["waive"], notes = waivers(cons)
-    for n in notes:
-        log(n)
+    res["waive"], res["waive_fail"] = waivers(cons)
     return B, res
 
 
+def _claims_near_blocked(B, res, claimed, reach=2.5):
+    """keys (ref, pin) of reserved escapes within `reach` mm of a blocked pin of another pin (an exit the solver lacks)."""
+    blocked = {(p["ref"], str(p["pin"])) for p in res["pins"] if not p["ok"]}
+    if not blocked:
+        return set()
+    centres = {}
+    for q in B["pads"]:
+        k = (q["ref"], str(q["num"]))
+        if k in blocked:
+            centres.setdefault(k, []).append((q["x"], q["y"]))
+    out = set()
+    for c in claimed:
+        k = (c["ref"], str(c["pin"]))
+        sx, sy = c["site"]
+        for bk, cs in centres.items():
+            if bk == k:
+                continue
+            if any(math.hypot(sx - x, sy - y) <= reach for x, y in cs):
+                out.add(k)
+    return out
+
+
 def waivers(cons):
-    """-> (patterns, notes). `[fanout] waive = ["REF.PIN: reason", ...]` (regex on REF.PIN). Every REF.PIN that `[floorplan]
-    waive_fail` names is waived here too (one notice line each): the same pin must not pass one stage and fail the next."""
+    """-> (patterns, names). `[fanout] waive = ["REF.PIN: reason", ...]` (regex on REF.PIN). Every REF.PIN that `[floorplan]
+    waive_fail` names is waived here too: the same pin must not pass one stage and fail the next. `names` = those REF.PINs
+    (the caller prints the notice only for a pin that is actually waived)."""
     pats = [w.split(":", 1)[0].strip() for w in ((cons or {}).get("fanout") or {}).get("waive", []) or [] if w.split(":", 1)[0].strip()]
-    notes = []
-    fw = ((cons or {}).get("floorplan") or {}).get("waive_fail") or ""
-    for name in sorted(set(re.findall(r"(?<![\w.])([A-Za-z][A-Za-z0-9_]*\.\d+)(?![\w.])", fw))):
-        pats.append(re.escape(name))
-        notes.append(f"fanout: [floorplan] waive_fail names {name}: applied to the fan-out stage (WAIVED, left for the router)")
-    return pats, notes
+    names = sorted(set(re.findall(r"(?<![\w.])([A-Za-z][A-Za-z0-9_]*\.\d+)(?![\w.])", ((cons or {}).get("floorplan") or {}).get("waive_fail") or "")))
+    pats += [re.escape(n) for n in names]
+    return pats, names
 
 
 def is_waived(ref, num, pats):
@@ -261,17 +288,19 @@ def summarise(B, res):
     for p in res["pins"]:
         keys.setdefault((p["ref"], str(p["pin"])), []).append(p)
     for (ref, num), comps in sorted(keys.items()):
-        e = per.setdefault(ref, {"req": 0, "ok": 0, "blocked": [], "waived": []})
+        e = per.setdefault(ref, {"req": 0, "ok": 0, "blocked": [], "waived": [], "surface": []})
         e["req"] += 1
         bad = [c for c in comps if not c["ok"]]
         if not bad:
             e["ok"] += 1
         elif is_waived(ref, num, pats):
             e["waived"].append(dict(bad[0], waived=True))
+        elif all(c.get("class") == "SURFACE_ONLY" for c in bad):
+            e["surface"].append(dict(bad[0], surface=True))       # no via site, but a free surface run leaves the pad
         else:
-            e["blocked"].append(bad[0])
+            e["blocked"].append(next((c for c in bad if c.get("class") != "SURFACE_ONLY"), bad[0]))
     for t in res.get("thermal", []):
-        e = per.setdefault(t["ref"], {"req": 0, "ok": 0, "blocked": [], "waived": []})
+        e = per.setdefault(t["ref"], {"req": 0, "ok": 0, "blocked": [], "waived": [], "surface": []})
         e["req"] += 1
         if t["vias"]:
             e["ok"] += 1
@@ -280,7 +309,7 @@ def summarise(B, res):
     return per
 
 
-def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None, waived=()):
+def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None, waived=(), surface=()):
     """write the derived facts back to the map next to the output board: planned pours, fan-out groups, which source decided what."""
     from . import escapeplan as EP, facts as FA
     try:
@@ -288,7 +317,8 @@ def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None, waived=()):
                   fanout={"groups": FA.fanout_groups(out), "required": req, "escaped": ok,
                           "parts": {r: [v["ok"], v["req"]] for r, v in sorted(per.items())},
                           "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60],
-                          "waived": [f"{p['ref']}.{p['pin']} WAIVED - left for the router" for p in waived][:60]},
+                          "waived": [f"{p['ref']}.{p['pin']} WAIVED - left for the router" for p in waived][:60],
+                          "surface_only": [f"{p['ref']}.{p['pin']} SURFACE_ONLY - left for the router" for p in surface][:60]},
                   escapes=escapes or [])
     except OSError:
         pass
@@ -317,10 +347,14 @@ def cmd_fanout(a):
         added = {k: c1.get(k, 0) - c0.get(k, 0) for k in set(c0) | set(c1) if c1.get(k, 0) != c0.get(k, 0)}
         drc = {"before": dict(c0), "after": dict(c1), "delta": added, "secs": round(t0 + t1, 1)}
     waived = [p for v in per.values() for p in v["waived"]]
+    surface = [p for v in per.values() for p in v["surface"]]
+    for p in waived:
+        if f"{p['ref']}.{p['pin']}" in res.get("waive_fail", []):
+            print(f"fanout: [floorplan] waive_fail names {p['ref']}.{p['pin']}: applied to the fan-out stage (WAIVED, left for the router)")
     fail_drc = bool(drc and any(v > 0 for v in drc["delta"].values()))
-    verdict = ("FANOUT_FAIL" if blocked else "FANOUT_DRC" if fail_drc else "FANOUT_WARN" if waived else "FANOUT_OK")
+    verdict = ("FANOUT_FAIL" if blocked else "FANOUT_DRC" if fail_drc else "FANOUT_WARN" if (waived or surface) else "FANOUT_OK")
     nitems = sum(1 for p in res["pins"] if p["ok"]) + sum(1 for p in res["pins"] if p["ok"] and p.get("via"))
-    print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked, {len(waived)} waived; "
+    print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked, {len(waived)} waived, {len(surface)} surface-only; "
           f"{sum(len(t['vias']) for t in res.get('thermal', []))} thermal vias; {res['runtime_s']} s "
           f"(domains {res['time']['domains']}, arcs {res['time']['arcs']}, solve {res['time']['solve']}, repairs {res['repairs']})")
     if res.get("alternatives") and res["alternatives"]["tried"]:
@@ -336,21 +370,30 @@ def cmd_fanout(a):
             print(f"  {ref}: {v['ok']}/{v['req']}")
     for p in blocked[: (len(blocked) if a.full_output else 30)]:
         d = "" if p.get("dist") is None else f" {p['dist']} mm"
-        print(f"FANOUT_PIN_BLOCKED {p['ref']}.{p['pin']} {p['net']} {p.get('blocker', '?')}{d}")
+        print(f"FANOUT_PIN_BLOCKED {p['ref']}.{p['pin']} {p['net']} {p.get('blocker', '?')}{d} [{p.get('class', '?')}, free run {p.get('free_mm', 0)} mm]")
     for p in waived:
         d = "" if p.get("dist") is None else f" {p['dist']} mm"
         print(f"FANOUT_PIN_WAIVED {p['ref']}.{p['pin']} {p['net']} {p.get('blocker', '?')}{d} - WAIVED - left for the router")
+    for p in surface:
+        print(f"FANOUT_PIN_SURFACE_ONLY {p['ref']}.{p['pin']} {p['net']} free run {p.get('free_mm')} mm - left for the router")
     rp = (out or a.board)
     rp = os.path.splitext(rp)[0] + ".fanout.json"
     json.dump({"verdict": verdict, "required": req, "escaped": ok, "per_part": {k: {"req": v["req"], "ok": v["ok"]} for k, v in per.items()},
-               "blocked": blocked, "waived": waived, "pins": res["pins"], "thermal": res["thermal"], "drc": drc, "time": res["time"],
+               "blocked": blocked, "waived": waived, "surface": surface, "pins": res["pins"], "thermal": res["thermal"], "drc": drc, "time": res["time"],
                "runtime_s": res["runtime_s"], "params": res["params"]}, open(rp, "w"), indent=1)
     print(f"full report: {rp}")
     if out:
         S.mark(out)
-        _record(out, cons, spec, B, per, req, ok, blocked, res.get("escapes"), waived)
+        _record(out, cons, spec, B, per, req, ok, blocked, res.get("escapes"), waived, surface)
         print(f"wrote {out}")
     return 0 if verdict in ("FANOUT_OK", "FANOUT_WARN") else 1
+
+
+def is_blocked_only(text):
+    """True when a fanout run FAILed only on pins it could not escape (no DRC increase, no crash)."""
+    lines = text.splitlines()
+    return any(l.startswith("fanout: FANOUT_FAIL") for l in lines) and not any(
+        l.startswith("fanout: FANOUT_DRC") or "Traceback" in l for l in lines)
 
 
 def add_parser(sub):
