@@ -64,7 +64,7 @@ packages = ["fluxplace"]
 py-modules = ["cli"]
 
 [tool.setuptools.package-data]
-fluxplace = ["sample/*"]
+fluxplace = ["sample/*", "data/*.json"]
 
 # ---------------------------------------------------------------------------
 # Requirements that pip cannot install. `fluxplace doctor` checks every one of

@@ -39,98 +39,31 @@ import re
 # exactly why the profile is recorded in the board and in the fab brief.
 # --------------------------------------------------------------------------
 
-PROFILES = {
-    "jlcpcb-4l-1.6": {
-        "description": "JLCPCB standard 4-layer 1.6 mm (JLC7628), 1 oz outer / 0.5 oz inner",
-        "vendor": "JLCPCB",
-        "reference_layers": ["In1.Cu"],
-        "layers": [
-            {"type": "copper",     "name": "F.Cu",   "thickness": 0.035},
-            {"type": "prepreg",    "material": "7628", "thickness": 0.2104,
-             "epsilon_r": 4.4, "loss_tangent": 0.02},
-            {"type": "copper",     "name": "In1.Cu", "thickness": 0.0152},
-            {"type": "core",       "material": "FR4", "thickness": 1.065,
-             "epsilon_r": 4.6, "loss_tangent": 0.02},
-            {"type": "copper",     "name": "In2.Cu", "thickness": 0.0152},
-            {"type": "prepreg",    "material": "7628", "thickness": 0.2104,
-             "epsilon_r": 4.4, "loss_tangent": 0.02},
-            {"type": "copper",     "name": "B.Cu",   "thickness": 0.035},
-        ],
-    },
-    "pcbway-4l-1.6": {
-        "description": "PCBWay standard 4-layer 1.6 mm, 1 oz outer / 0.5 oz inner",
-        "vendor": "PCBWay",
-        "reference_layers": ["In1.Cu"],
-        "layers": [
-            {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
-            {"type": "prepreg", "material": "7628", "thickness": 0.2,
-             "epsilon_r": 4.4, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In1.Cu", "thickness": 0.0152},
-            {"type": "core",    "material": "FR4", "thickness": 1.08,
-             "epsilon_r": 4.6, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
-            {"type": "prepreg", "material": "7628", "thickness": 0.2,
-             "epsilon_r": 4.4, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
-        ],
-    },
-    "jlcpcb-6l-1.6": {
-        "description": "JLCPCB standard 6-layer 1.6 mm — Sig/GND/Sig/Sig/PWR/Sig",
-        "vendor": "JLCPCB",
-        "reference_layers": ["In1.Cu", "In4.Cu"],
-        "layers": [
-            {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
-            {"type": "prepreg", "material": "3313", "thickness": 0.0994,
-             "epsilon_r": 4.05, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In1.Cu", "thickness": 0.0152},
-            {"type": "core",    "material": "FR4", "thickness": 0.15,
-             "epsilon_r": 4.5, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
-            {"type": "prepreg", "material": "2116", "thickness": 0.9704,
-             "epsilon_r": 4.3, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In3.Cu", "thickness": 0.0152},
-            {"type": "core",    "material": "FR4", "thickness": 0.15,
-             "epsilon_r": 4.5, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In4.Cu", "thickness": 0.0152},
-            {"type": "prepreg", "material": "3313", "thickness": 0.0994,
-             "epsilon_r": 4.05, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
-        ],
-    },
-    "pcbway-6l-1.6": {
-        "description": "PCBWay standard 6-layer 1.6 mm — Sig/GND/Sig/Sig/PWR/Sig",
-        "vendor": "PCBWay",
-        "reference_layers": ["In1.Cu", "In4.Cu"],
-        "layers": [
-            {"type": "copper",  "name": "F.Cu",   "thickness": 0.035},
-            {"type": "prepreg", "material": "1080", "thickness": 0.1,
-             "epsilon_r": 4.1, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In1.Cu", "thickness": 0.0152},
-            {"type": "core",    "material": "FR4", "thickness": 0.2,
-             "epsilon_r": 4.5, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In2.Cu", "thickness": 0.0152},
-            {"type": "prepreg", "material": "7628", "thickness": 0.8692,
-             "epsilon_r": 4.4, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In3.Cu", "thickness": 0.0152},
-            {"type": "core",    "material": "FR4", "thickness": 0.2,
-             "epsilon_r": 4.5, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "In4.Cu", "thickness": 0.0152},
-            {"type": "prepreg", "material": "1080", "thickness": 0.1,
-             "epsilon_r": 4.1, "loss_tangent": 0.02},
-            {"type": "copper",  "name": "B.Cu",   "thickness": 0.035},
-        ],
-    },
-    "generic-2l-1.6": {
-        "description": "Generic 2-layer 1.6 mm FR4",
-        "vendor": "generic",
-        "layers": [
-            {"type": "copper", "name": "F.Cu", "thickness": 0.035},
-            {"type": "core",   "material": "FR4", "thickness": 1.51,
-             "epsilon_r": 4.5, "loss_tangent": 0.02},
-            {"type": "copper", "name": "B.Cu", "thickness": 0.035},
-        ],
-    },
-}
+# The catalog lives in data/stackup_templates.json so templates are data, not
+# code. PROFILES keeps its old name and shape for every existing caller.
+TEMPLATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "data", "stackup_templates.json")
+
+
+def load_templates(path=TEMPLATE_FILE):
+    with open(path) as fh:
+        return json.load(fh)["templates"]
+
+
+PROFILES = load_templates()
+
+
+def resolve_template(name=None, constraints=None):
+    """Explicit name wins; else [fab] stackup_template in the constraints TOML;
+    else None. An unknown name is an error, never a silent default."""
+    if not name and constraints:
+        with open(constraints, "rb") as fh:
+            import tomllib
+            name = (tomllib.load(fh).get("fab") or {}).get("stackup_template")
+    if name and name not in PROFILES:
+        raise ValueError("unknown stackup template %r (have: %s)"
+                         % (name, ", ".join(profile_names())))
+    return name or None
 
 
 def profile_names():

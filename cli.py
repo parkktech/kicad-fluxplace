@@ -2334,11 +2334,50 @@ def cmd_netlist(a):
         print(text)
 
 
+def _list_stackup_templates(detail, as_json):
+    """Named stackup templates (data/stackup_templates.json); --detail adds the
+    standard impedance cases computed from each template's own layers."""
+    import json as _json
+    from fluxplace import stackup as ST, impedance as IM
+    rows = []
+    for n in ST.profile_names():
+        p = ST.PROFILES[n]
+        row = {"name": n, "kind": p.get("kind", "fab"), "vendor": p["vendor"],
+               "layers": sum(1 for l in p["layers"] if l["type"] == "copper"),
+               "thickness_mm": ST.total_thickness(n), "source": p.get("source", ""),
+               "description": p["description"]}
+        if detail:
+            row["impedance"] = IM.template_report(n)
+        rows.append(row)
+    if as_json:
+        print(_json.dumps(rows, indent=2)); return
+    for r in rows:
+        print("%-16s %-8s %dL %5.2f mm  %s" % (r["name"], r["kind"], r["layers"],
+                                              r["thickness_mm"], r["description"]))
+        print("    source: %s" % r["source"])
+        if detail:
+            i = r["impedance"]
+            if not i["model"]:
+                print("    impedance: no reference plane, not computed")
+                continue
+            se, d90, d100 = i["se50"], i["diff90"], i["diff100"]
+            fmt = lambda o: ("%.3f mm" % o["width_mm"] + (" / gap %.3f" % o["gap_mm"] if o["gap_mm"] else "")
+                             if o else "not reachable")
+            print("    L1 (F.Cu, %s, h %.4f mm, Er %.2f): 50 ohm %s | 90 ohm diff %s | 100 ohm diff %s"
+                  % (i["model"], i["h_mm"], i["er"], fmt(se), fmt(d90), fmt(d100)))
+    print()
+    print("Closed-form IPC-2141 estimates (+-10%): a fab field solver signs off controlled impedance.")
+
+
 def cmd_stackup(a):
     """Report the layer stack, plane assignment and netclass geometry — and say
     plainly whether controlled impedance can be verified from these files."""
-    from fluxplace import audit
     import json as _json
+    if a.list_templates:
+        return _list_stackup_templates(a.detail, a.json)
+    if not a.board:
+        raise SystemExit("stackup: --board is required (or --list-templates)")
+    from fluxplace import audit
     res = audit.stackup(a.board)
     if a.json:
         print(_json.dumps(res, indent=2)); return
@@ -2392,8 +2431,9 @@ def cmd_stackup_apply(a):
                   % (n, p["vendor"], ST.total_thickness(n), p["description"]))
         return
 
+    a.profile = ST.resolve_template(a.profile or a.template, a.constraints)
     if not a.profile:
-        print("need --profile (or --list-profiles). Available: %s"
+        print("need --profile / --template (or --list-profiles). Available: %s"
               % ", ".join(ST.profile_names()))
         return
 
@@ -3415,8 +3455,12 @@ def build_parser():
     pst = sub.add_parser("stackup",
                          help="layer stack, plane assignment, netclass geometry, "
                               "and whether impedance is verifiable at all")
-    pst.add_argument("--board", required=True)
+    pst.add_argument("--board", default=None)
     pst.add_argument("--json", action="store_true")
+    pst.add_argument("--list-templates", action="store_true",
+                     help="list the named stackup templates (no board needed)")
+    pst.add_argument("--detail", action="store_true",
+                     help="with --list-templates: 50/90/100 ohm cases per template")
     pst.set_defaults(fn=cmd_stackup)
 
     psa = sub.add_parser("stackup-define",
@@ -3424,6 +3468,11 @@ def build_parser():
                               "solve the trace geometry it implies")
     psa.add_argument("--board", required=True)
     psa.add_argument("--profile", default=None, help="fab stackup profile name")
+    psa.add_argument("--template", default=None,
+                     help="named stackup template (same as --profile; see "
+                          "`stackup --list-templates`)")
+    psa.add_argument("--constraints", default=None,
+                     help="constraints TOML; [fab] stackup_template is the default")
     psa.add_argument("--list-profiles", action="store_true")
     psa.add_argument("--apply", action="store_true",
                      help="write the stackup into the .kicad_pcb")
