@@ -84,8 +84,9 @@ def needy(B, cons, spec, cls=None):
     return out
 
 
-def plan(B, cons, spec, cls=None, log=lambda m: None):
-    """-> {reserved: [...], unreserved: [{ref, pin, net, why, crowd}], needy: n}."""
+def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0):
+    """-> {reserved: [...], unreserved: [{ref, pin, net, why, crowd}], needy: n}.  `h2h` = the board's hole-to-hole rule (wall to wall):
+    two reserved vias of ONE net are still two drilled holes, so their sites keep drill + h2h centre to centre."""
     cls = cls or NC.classify(B, cons, spec)
     ep = params(cons)
     R = RR.rules(cons, None, B=B)
@@ -102,7 +103,11 @@ def plan(B, cons, spec, cls=None, log=lambda m: None):
     for t in todo:
         pad, net = t["pad"], t["net"]
         F = PK.Field(B, (pad["x"], pad["y"]), ep["window"], step, own={net}, clearance=R["clearance"])
+        hpitch = max(R["drill"] + max(R.get("hole_to_hole", 0.0), h2h), vd + R["clearance"])   # a router keeps its via clearance between same-net vias too
+        hole_block = np.zeros((F.ny, F.nx), bool)
         for r in res:
+            if r["net"] == net and hpitch > 0 and abs(r["site"][0] - pad["x"]) < ep["window"] + 1 and abs(r["site"][1] - pad["y"]) < ep["window"] + 1:
+                hole_block |= np.hypot(F.X - r["site"][0], F.Y - r["site"][1]) < hpitch - 1e-6
             if r["net"] != net and abs(r["site"][0] - pad["x"]) < ep["window"] + 1 and abs(r["site"][1] - pad["y"]) < ep["window"] + 1:
                 F.block_via(r["site"][0], r["site"][1], vd, r["net"])
                 pts = [r["pad_xy"]] + r["lane"]
@@ -113,6 +118,7 @@ def plan(B, cons, spec, cls=None, log=lambda m: None):
         seeds = F.shape_mask(pad)
         ok = F.via_ok(vd) & ~F.shape_mask(pad, vd / 2 + F.clr) & ~CL._own_pad_zone(ctx, F, net, vd / 2 + F.clr)
         ok &= np.hypot(F.X - pad["x"], F.Y - pad["y"]) <= ep["radius"]
+        ok &= ~hole_block
         best = None
         for l in pl:
             d = PK.dist(F.free(l, tw) | seeds, seeds, step)

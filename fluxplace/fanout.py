@@ -172,9 +172,9 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     wd = tempfile.mkdtemp(prefix="fanout-")
     claimed = []
     if not a.check_only and not refs:                   # reserved escapes are claimed FIRST: locked stub + via copper in the input
-        from . import escres as ER
+        from . import escres as ER, routerules as RR
         try:
-            claimed = ER.plan(B, cons, spec)["reserved"] if ER.params(cons)["enabled"] else []
+            claimed = ER.plan(B, cons, spec, h2h=float((RR._pro_rules(board) or {}).get("min_hole_to_hole") or 0.0))["reserved"] if ER.params(cons)["enabled"] else []
         except Exception as e:
             log(f"fanout: escape reservation skipped: {e}")
         if claimed:

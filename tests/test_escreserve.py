@@ -91,3 +91,17 @@ def test_intent_region_and_escape_band_apply_in_the_same_legalise_call(tmp_path)
     assert rep["in_keepout"] == []
     only_reserve, _ = LG.legalise(B, {"C1": (50, 42.3, 0.0)}, fixed={"J1"}, reserve=rsv)
     assert GM.overlap(GM.moved(B["parts"]["C1"], *only_reserve["C1"])[1], tuple(reg))      # the region is what moved it further
+
+
+def test_reserved_vias_of_one_net_keep_hole_to_hole(tmp_path):
+    """the sites reserved for same-net pins are drilled holes too: with a hole-to-hole rule they keep drill + rule centre to centre."""
+    import math
+    from fluxplace import escres as ER
+    caps = "".join(G.two(f"C{i}", 50 + 3.0 * i, 40, "VX", "VX") for i in range(6))
+    B = load(tmp_path, caps + conn("J1", 60, 60))
+    gap = {}
+    for h2h in (0.0, 1.0):
+        r = ER.plan(B, {"power": {"VX": {}}}, None, h2h=h2h)["reserved"]
+        sites = [c["site"] for c in r if c["net"] == "VX"]
+        gap[h2h] = min((math.hypot(a[0] - b[0], a[1] - b[1]) for i, a in enumerate(sites) for b in sites[i + 1:]), default=9.0)
+    assert gap[0.0] < 1.2 < 9.0 and gap[0.0] < gap[1.0] and gap[1.0] >= 0.2 + 1.0 - 1e-6
