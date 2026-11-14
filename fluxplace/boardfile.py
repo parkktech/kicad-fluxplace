@@ -273,6 +273,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
 
     tracks, layer_len = {}, defaultdict(float)
     vias, via_type_counts, track_geom = [], defaultdict(int), []
+    track_segs = []
 
     def entry(n):
         return tracks.setdefault(n, {"length": 0.0, "layers": defaultdict(float),
@@ -320,6 +321,10 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
                            "x": round((s[0] + e[0]) / 2, 4),
                            "y": round((s[1] + e[1]) / 2, 4),
                            "kind": "arc" if tag == "arc" else "track"})
+        if tag == "segment":
+            track_segs.append({"net": n, "layer": lname, "kind": "track",
+                               "x1": round(s[0], 4), "y1": round(s[1], 4),
+                               "x2": round(e[0], 4), "y2": round(e[1], 4)})
         if tag != "segment":
             continue
         ln = math.hypot(e[0] - s[0], e[1] - s[1])
@@ -395,6 +400,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "dup_bare_pads": sorted(dup_bare),
         "vias": vias, "via_type_counts": dict(via_type_counts),
         "track_geom": track_geom,
+        "track_segs": track_segs,
         "pth_pads": pth_pads,
         "design_min": design_min,
     }

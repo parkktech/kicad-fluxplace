@@ -1041,6 +1041,50 @@ def check_china(facts, cons, cache_path=None, log=lambda m: None):
 # ==========================================================================
 # 5. Spec <-> board sync
 # ==========================================================================
+def check_acid_traps(facts, cons):
+    """ACID_TRAP: same-net track junctions acuter than [fab] acid_trap_deg (default
+    60). Reads facts["track_segs"]. Junctions of 3+ tracks and track-into-pad
+    wedges are not graded (see acidtrap.py)."""
+    from fluxplace import acidtrap as AT
+    segs = facts.get("track_segs")
+    if not segs:
+        return []
+    deg = C.fab_profile(cons)["acid_trap_deg"]
+    juncs = AT.acute_junctions(segs, min_deg=deg)
+    if not juncs:
+        return []
+    worst = min(j["deg"] for j in juncs)
+    return [_f(WARN, "ACID_TRAP",
+               f"{len(juncs)} acute same-net junction(s) < {deg:g} deg, worst {worst:g} deg; "
+               f"first {juncs[0]['net']} {juncs[0]['layer']} at ({juncs[0]['x']:.3f},"
+               f"{juncs[0]['y']:.3f}). `drc-fix --acid-traps` chamfers the bare ones",
+               refs=[j["net"] for j in juncs[:10]])]
+
+
+def check_slivers(facts, cons):
+    """SLIVER: filled-zone copper narrower than [fab] min_track_mm (a neck the etch
+    cannot hold). Off unless [review] slivers = true. Reads facts["zone_polys"]
+    (pcbnew backend); the file backend reports INFO "not evaluated"."""
+    from fluxplace import acidtrap as AT
+    if not ((cons or {}).get("review") or {}).get("slivers"):
+        return []                     # off by default: ~17 s per review on a 6-layer board
+    if "zone_polys" not in facts:
+        return [_f(INFO, "SLIVER",
+                   "not evaluated: this fact backend carries no zone outlines "
+                   "(the file backend); use the pcbnew backend to grade slivers")]
+    polys = facts["zone_polys"]
+    if not polys:
+        return []
+    mn = C.fab_profile(cons)["min_track_mm"]
+    sl = AT.slivers(polys, mn)
+    if not sl:
+        return []
+    return [_f(WARN, "SLIVER",
+               f"{len(sl)} copper sliver/neck(s) in zone fill narrower than {mn:g} mm; "
+               f"first {sl[0]['net']} {sl[0]['layer']} at ({sl[0]['x']:.3f},{sl[0]['y']:.3f})",
+               refs=[x["net"] for x in sl[:10]])]
+
+
 def check_pads(facts):
     """Twin pads (two pads, one number) where only one twin got a net: the
     generator netted the first and left the other floating. SW1 on V1.4 had
@@ -1741,6 +1785,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_pads(facts)
     out += check_via_types(facts, cons)
     out += check_fab_capability(facts, cons)
+    out += check_acid_traps(facts, cons)
+    out += check_slivers(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
     out += check_spec_nets(facts, spec)
@@ -1833,6 +1879,26 @@ def facts_from_board(board_path, mpn_map=None, plane_track_max_mm=200.0,
                        plane_track_max_mm=plane_track_max_mm)
 
 
+def _zone_polys(board, pcbnew):
+    """Filled zone outlines (mm) per layer and net, for check_slivers."""
+    out = []
+    for z in board.Zones():
+        for layer in z.GetLayerSet().Seq():
+            polys = z.GetFilledPolysList(layer)
+            for i in range(polys.OutlineCount()):
+                ol = polys.Outline(i)
+                outline = [(round(pcbnew.ToMM(ol.CPoint(k).x), 4),
+                            round(pcbnew.ToMM(ol.CPoint(k).y), 4)) for k in range(ol.PointCount())]
+                holes = []
+                for h in range(polys.HoleCount(i)):
+                    hl = polys.Hole(i, h)
+                    holes.append([(round(pcbnew.ToMM(hl.CPoint(k).x), 4),
+                                   round(pcbnew.ToMM(hl.CPoint(k).y), 4)) for k in range(hl.PointCount())])
+                out.append({"layer": board.GetLayerName(layer), "net": z.GetNetname(),
+                            "outline": outline, "holes": holes})
+    return out
+
+
 def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
     import pcbnew
     from collections import defaultdict
@@ -1894,7 +1960,7 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
     layer_len = defaultdict(float)
     vias = []
     via_type_counts = defaultdict(int)
-    track_geom = []
+    track_geom, track_segs = [], []
     for t in board.GetTracks():
         n = t.GetNetname()
         if not n:
@@ -1950,6 +2016,10 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "y": round(pcbnew.ToMM((s.y + e.y) / 2), 4),
             "kind": "arc" if cls == "PCB_ARC" else "track",
         })
+        if cls == "PCB_TRACK":
+            track_segs.append({"net": n, "layer": lname, "kind": "track",
+                               "x1": round(pcbnew.ToMM(s.x), 4), "y1": round(pcbnew.ToMM(s.y), 4),
+                               "x2": round(pcbnew.ToMM(e.x), 4), "y2": round(pcbnew.ToMM(e.y), 4)})
         if cls != "PCB_TRACK":
             continue
         ln = pcbnew.ToMM(t.GetLength())
@@ -2003,6 +2073,8 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "vias": vias,
         "via_type_counts": dict(via_type_counts),
         "track_geom": track_geom,
+        "track_segs": track_segs,
+        "zone_polys": _zone_polys(board, pcbnew),
         "pth_pads": pth_pads,
         "design_min": design_min,
     }

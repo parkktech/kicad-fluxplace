@@ -653,13 +653,19 @@ def cmd_tournament(a):
 
 def cmd_fab(a):
     """Emit a build-quality manufacturing package (gerbers/drill/place/DRC) for review."""
-    from fluxplace import fab, questions as QS
+    from fluxplace import fab, questions as QS, constraints as C, gerbercheck as GC
+    if a.check_only:
+        r = GC.check_package(a.check_only, board=a.board, cons=C.load(a.constraints))
+        print(GC.format_report(r))
+        raise SystemExit(1 if r["status"] == "FAIL" else 0)
+    if not (a.board and a.out):
+        raise SystemExit("fab: --board and --out are required (or --check-only FAB_DIR)")
     QS.refuse_assumed(a.board, "fab")
     _review_gate(a, stage="fab")
     _open_gate(a)
     from fluxplace import constraints as C
-    fmts = C.load(a.constraints).get("fab", {}).get("formats")
-    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, formats=fmts)
+    cons = C.load(a.constraints)
+    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, formats=cons.get("fab", {}).get("formats"), cons=cons)
     print(f"DRC {res['drc']}; package at {res['out']}")
     if res["xcheck"]:
         raise SystemExit(1)
@@ -1707,9 +1713,17 @@ def cmd_drcfix(a):
     silkscreen reference collisions), looping DRC until it stops falling."""
     from fluxplace import drcfix as DF, constraints as C
     cons = C.load(a.constraints)   # [fab] floors the RF neck-fallback width
-    hist, d = DF.loop(a.board, a.out or a.board, kicad_cli=a.kicad_cli,
+    out = a.out or a.board
+    hist, d = DF.loop(a.board, out, kicad_cli=a.kicad_cli,
                       rounds=a.rounds, islands=a.island_vias, cons=cons,
                       log=lambda m: print(m, flush=True))
+    if a.acid_traps:
+        from fluxplace import acidtrap as AT
+        if AT.fix_junctions(out, kicad_cli=a.kicad_cli,
+                            min_deg=C.fab_profile(cons)["acid_trap_deg"],
+                            log=lambda m: print(m, flush=True)):
+            hist, d = DF.loop(out, out, kicad_cli=a.kicad_cli, rounds=1, cons=cons,
+                              log=lambda m: print(m, flush=True))
     import collections
     c = collections.Counter(v.get("type") for v in d.get("violations", []))
     if c:
@@ -2909,8 +2923,11 @@ def build_parser():
     pt.set_defaults(fn=cmd_tournament)
 
     pf = sub.add_parser("fab", help="emit gerbers/drill/place/DRC package for review")
-    pf.add_argument("--board", required=True)
-    pf.add_argument("--out", required=True)
+    pf.add_argument("--board", default=None)
+    pf.add_argument("--out", default=None)
+    pf.add_argument("--check-only", metavar="FAB_DIR", default=None,
+                    help="do not export: re-check an existing fab package's Gerbers "
+                         "and drill files (gerbercheck); --constraints sets the [fab] floors")
     pf.add_argument("--kicad-cli", default="kicad-cli")
     pf.add_argument("--upload-out", default=None,
                     help="also assemble the ECAD upload set (board + pro + dru "
@@ -3413,6 +3430,9 @@ def build_parser():
     pdf.add_argument("--island-vias", action="store_true",
                      help="DRC-guarded via into each outer-layer plane island "
                           "that has no via (kept only if DRC does not worsen)")
+    pdf.add_argument("--acid-traps", action="store_true",
+                     help="chamfer bare acute same-net track junctions (ACID_TRAP), "
+                          "kept only if DRC violations and unconnected items do not rise")
     pdf.add_argument("--kicad-cli", default="kicad-cli")
     pdf.add_argument("--constraints", default=None,
                      help="[fab] min_track_mm floors the RF clearance-neck fallback")

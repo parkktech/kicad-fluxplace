@@ -42,6 +42,7 @@ def supported_formats(kicad_cli="kicad-cli"):
         return set()
     subs = set(re.findall(r"^\s+(\w+)\s{2,}", (r.stdout or "") + (r.stderr or ""), re.M))
     return {f for f, (sub, _, _) in FORMATS.items() if sub in subs}
+from . import gerbercheck as GC
 
 
 def _run(args, log):
@@ -73,7 +74,7 @@ def _listfiles(d):
     return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
 
 
-def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None):
+def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None, cons=None):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
     the failure in the manifest so the engineer sees exactly what did and didn't emit."""
@@ -92,6 +93,9 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
                          "--output", ddir + os.sep, "--format", "excellon",
                          "--drill-origin", "plot", "--excellon-separate-th",
                          "--generate-map", "--map-format", "gerberx2", board], log)
+    # independent re-read of the exported copper + drill (gerbercheck.py)
+    done["gerbercheck"] = GC.emit_stage(out, board, cons=cons)
+
     # pick-and-place, both sides, CSV, mm. --exclude-dnp because this file is a
     # BUILD INSTRUCTION: a part flagged do-not-populate must not be handed to the
     # machine, and an assembler who fits one is following our own data.
