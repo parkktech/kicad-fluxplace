@@ -25,6 +25,13 @@ fluxplace pipeline BOARD --constraints C --spec S --workdir W [--from STAGE] [--
 `next[]` (what the next stage must fix, worst first, numbers included), `paths`. `--status` prints it as a
 table of at most 15 lines. A stage not implemented in this build reports `na` and passes the board through.
 
+Connectivity invariant (audit.py): every stage, and every fluxplace command that writes a board, compares pad -> net and
+footprint ref/value/footprint before and after; an undeclared change FAILs the stage with the exact diff (`sync-nets` and
+`replace-footprint` declare theirs). Each stage writes `W/<n>-<stage>/ledger.{json,txt}` (moved refs, nets touched, open
+connections and collision FAILs before -> after) and a line in `W/LEDGER.txt`; a run that ends before the flow's last stage
+ends `LEDGER.txt` and `state.json incomplete` with `INCOMPLETE - do not treat as done; remaining: ...`. The `route` stage
+first runs the collision gate (`route-ready --collisions-only`, seconds) and is blocked on a FAIL unless `--force`.
+
 Pipeline order: `ready` first (nothing is placed or routed on an incomplete spec), then `map` -> `place` (objective plan) -> `route-ready` (= plan-route gate) -> `route` -> audit (`review`).
 `fluxplace plan-route B --constraints C --ignore-routing` judges a placement before any copper exists (exit 1 = sealed pins or
 overflow; findings carry the part to move and the direction); `plan-compare A.fluxmap.json B.fluxmap.json` compares two. The batch router
