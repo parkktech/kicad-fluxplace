@@ -16,6 +16,14 @@ def pad_extent(w, h, ang):
             abs(w * math.sin(r)) / 2 + abs(h * math.cos(r)) / 2)
 
 
+def pad_size(q):
+    """(w, h) of a pad's bounding rectangle: a trapezoid's rect_delta widens the box by |delta| per axis."""
+    w, h = q["w"], q["h"]
+    if q.get("shape") == "trapezoid" and q.get("delta"):
+        w, h = w + abs(q["delta"][1]), h + abs(q["delta"][0])
+    return w, h
+
+
 def moved(part, x, y, ang):
     """(pads, court) of `part` as if its origin were at (x, y) with footprint
     angle `ang`. Pads are copies; the original part is untouched."""
@@ -27,7 +35,7 @@ def moved(part, x, y, ang):
         q = dict(p)
         q["x"], q["y"] = x + rx, y + ry
         q["angle"] = p.get("angle", 0.0) + d
-        q["ex"], q["ey"] = pad_extent(p["w"], p["h"], q["angle"])
+        q["ex"], q["ey"] = pad_extent(*pad_size(q), q["angle"])
         pads.append(q)
     x0, y0, x1, y1 = part["court"]
     cs = [rot(cx - px, cy - py, d) for cx, cy in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
@@ -190,6 +198,14 @@ def pad_shape(q):
     a = q.get("angle", 0.0)
     if sh == "circle":
         return [(q["x"], q["y"])], w / 2
+    if sh == "trapezoid" and q.get("delta"):
+        # KiCad trapezoid: rect_delta (dx, dy) moves the top/bottom edges by dx/2 and the left/right edges by dy/2,
+        # in opposite directions (verified against pcbnew GetEffectivePolygon: size 2x1, delta 0.4 0.2 -> corners
+        # (-1.1,0.7) (1.1,0.3) (0.9,-0.3) (-0.9,-0.7))
+        DX, DY = q["delta"][0] / 2, q["delta"][1] / 2
+        hx, hy = w / 2, h / 2
+        pts = [(-hx - DY, hy + DX), (hx + DY, hy - DX), (hx - DY, -hy + DX), (-hx + DY, -hy - DX)]
+        return [(q["x"] + px, q["y"] + py) for px, py in (rot(x, y, a) for x, y in pts)], 0.0
     if sh == "oval":
         r = min(w, h) / 2
         hx, hy = (w / 2 - r, 0.0) if w >= h else (0.0, h / 2 - r)

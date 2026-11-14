@@ -164,8 +164,10 @@ def load(path, track=None, clearance=None, project=None):
             dx, dy = BF._rot(px, py, fang)
             w, h = _f(pad, "size")
             rad = math.radians(pa)
-            ex = abs(w * math.cos(rad)) / 2 + abs(h * math.sin(rad)) / 2
-            ey = abs(w * math.sin(rad)) / 2 + abs(h * math.cos(rad)) / 2
+            dl = BF._nums(BF._first(pad, "rect_delta") or [])          # trapezoid: widens the bounding box
+            ew, eh = (w + abs(dl[1]), h + abs(dl[0])) if len(dl) >= 2 and a[2:3] == ["trapezoid"] else (w, h)
+            ex = abs(ew * math.cos(rad)) / 2 + abs(eh * math.sin(rad)) / 2
+            ey = abs(ew * math.sin(rad)) / 2 + abs(eh * math.cos(rad)) / 2
             ls = BF._atoms(BF._first(pad, "layers"))
             lay = set()
             for l in ls:
@@ -179,6 +181,7 @@ def load(path, track=None, clearance=None, project=None):
                  "w": w, "h": h, "ex": ex, "ey": ey, "min": min(w, h),
                  "layers": lay or {side}, "net": nm(BF._net(pad)), "angle": pa,
                  "shape": a[2] if len(a) > 2 else "",
+                 "delta": (dl[0], dl[1]) if len(dl) >= 2 else (0.0, 0.0),
                  "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole",
                  "drill": min(dr) if dr else 0.0,
                  "rr": (BF._nums(BF._first(pad, "roundrect_rratio") or []) or [0.25])[0]}
