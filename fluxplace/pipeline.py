@@ -797,6 +797,25 @@ def _stamp_not_ready(stage_dir, reasons):
             pass
 
 
+def _apply_lock_at(a, work, board):
+    from . import lockat as LA, constraints as C_
+    cons = C_.load(a.constraints)
+    if not LA.rows(cons):
+        return board
+    out = os.path.join(work, "0-lock", "board.kicad_pcb")
+    try:
+        moved = LA.apply(board, out, cons)
+    except LA.LockError as e:
+        raise SystemExit(f"pipeline: {e}")
+    if not moved:
+        return board
+    _sidecar(board, out)
+    print("pipeline: [lock.at] moved " + ", ".join(f"{r} ({x0:.2f},{y0:.2f})->({x1:.2f},{y1:.2f})" for r, (x0, y0), (x1, y1) in moved), flush=True)
+    from . import questions as QS
+    QS.inherit(board, out)
+    return out
+
+
 def run(a):
     """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked)."""
     work = os.path.abspath(a.workdir)
@@ -853,6 +872,9 @@ def run(a):
             board = os.path.abspath(a.board)
         for k in STAGES_[i0:]:
             st["stages"].pop(k, None)
+    if STAGES_[i0] in ("ready", "modules", "floorplan") and a.constraints:
+        board = _apply_lock_at(a, work, board)         # [lock.at] is authoritative before any placement stage
+        st["board"] = board
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
