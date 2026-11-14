@@ -26,6 +26,8 @@ One hierarchical sheet per functional block, drafted rather than labelled pin by
 
 ## Gate (always, unless --no-verify)
 
+`--no-verify` gives verdict `NOT_VERIFIED` (text and JSON), never `PASS`. Block layout then exits 1 unless `--allow-unverified` is given. Flat layout keeps its old exit 0.
+
 1. **netlist**: kicad-cli exports the root netlist; every net's pin set must equal the spec's (pinmap resolved: the
    spec's pin names become footprint pad numbers), every component present with the spec's value and footprint, single
    pin `unconnected-` nets only for declared no-connects. Any difference = FAIL.

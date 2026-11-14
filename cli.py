@@ -2834,6 +2834,9 @@ def cmd_schematic(a):
     print("  %d components, %d nets, %d pins, %.0f x %.0f mm, %d column(s)"
           % (res["components"], res["nets"], res["pins"],
              res["sheet_mm"][0], res["sheet_mm"][1], res["columns"]))
+    if a.spec and a.no_verify:
+        print()
+        print("  VERIFY: NOT_VERIFIED (--no-verify: the netlist was not compared with the spec)")
     if a.spec and not a.no_verify:
         v = SC.verify(a.out, a.spec, kicad_cli=a.kicad_cli)
         print()
@@ -2868,7 +2871,8 @@ def _schematic_blocks(a):
     nl = g.get("netlist", {})
     lg = g.get("legibility", {"counts": {}, "total": 0})
     er = g.get("erc", {})
-    verdict = "FAIL" if (not a.no_verify and not nl.get("ok")) else ("WARN" if lg.get("total") else "PASS")
+    verdict, code = _schematic_verdict(a.no_verify, nl.get("ok"), lg.get("total", 0),
+                                       getattr(a, "allow_unverified", False))
     rep = {"verdict": verdict, "generate": st, "gate": g}
     with open(stem + ".schematic.json", "w") as fh:
         _json.dump(rep, fh, indent=1, default=str)
@@ -2895,8 +2899,17 @@ def _schematic_blocks(a):
     with open(stem + ".schematic.txt", "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print("\n".join(lines))
-    if verdict == "FAIL":
-        raise SystemExit(1)
+    if code:
+        raise SystemExit(code)
+
+
+def _schematic_verdict(no_verify, nl_ok, legibility_total, allow_unverified=False):
+    """-> (verdict, exit code). --no-verify is NOT_VERIFIED, never PASS; it exits 0 only with --allow-unverified."""
+    if no_verify:
+        return "NOT_VERIFIED", (0 if allow_unverified else 1)
+    if not nl_ok:
+        return "FAIL", 1
+    return ("WARN" if legibility_total else "PASS"), 0
 
 
 def cmd_route_status(a):
@@ -3882,7 +3895,10 @@ def build_parser():
                      help="blocks (default): one drafted sheet per functional block ([schematic] in the constraints); "
                           "flat: the old single net-label sheet")
     psc.add_argument("--title", default=None)
-    psc.add_argument("--no-verify", action="store_true")
+    psc.add_argument("--no-verify", action="store_true",
+                     help="skip the netlist/ERC gate: verdict NOT_VERIFIED (block layout exits non-zero)")
+    psc.add_argument("--allow-unverified", action="store_true",
+                     help="with --no-verify, exit 0 anyway (the verdict stays NOT_VERIFIED)")
     psc.add_argument("--datasheets", default=None,
                      help="datasheet dir: refuse to generate from a spec whose "
                           "parts are not documented (spec-check)")
