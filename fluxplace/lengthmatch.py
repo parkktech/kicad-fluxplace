@@ -15,6 +15,7 @@ ps = sum over layers of mm x that layer's propagation delay (impedance.route_del
 Track length is the total copper of the net: router loops count (repair.redundant_copper removes them
 in the pipeline before review/tune run).
 """
+import math
 import re
 
 from . import impedance as IM
@@ -88,11 +89,46 @@ def via_mm(stackup, top, bottom):
     return sum(float(r.get("thickness") or 0.0) for r in stackup[i:j + 1])
 
 
+def _pad_counts(board, want):
+    cnt = {n: 0 for n in want}
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            n = pad.GetNetname()
+            if n in cnt:
+                cnt[n] += 1
+    return cnt
+
+
+def _pad_to_pad(board, net, stackup):
+    """(by_layer mm, vias, via mm) along the shortest copper path between the net's two pads, or None.
+    Stubs and loops are not on that path, so they are excluded."""
+    from . import tune as TU
+    ni = board.FindNet(net)
+    if ni is None:
+        return None
+    path = TU._ordered_path(board, ni.GetNetCode())
+    if not path or len(path) < 2:
+        return None
+    by, vias, vmm = {}, 0, 0.0
+    for (a, _), (b, _item) in zip(path, path[1:]):
+        if not (isinstance(a[0], float) and isinstance(b[0], float)):
+            continue                                  # pad <-> copper: zero length
+        if a[2] != b[2]:                              # a via hop (same x, y)
+            vias += 1
+            vmm += via_mm(stackup, board.GetLayerName(a[2]), board.GetLayerName(b[2])) or 0.0
+            continue
+        lyr = board.GetLayerName(a[2])
+        by[lyr] = by.get(lyr, 0.0) + math.hypot(a[0] - b[0], a[1] - b[1])
+    return by, vias, vmm
+
+
 def lengths_from_board(board, nets, stackup, planes, include_vias=False):
-    """{net: {"mm", "ps" (None when a layer delay is unknown), "by_layer", "vias", "via_mm"}} from a loaded
-    pcbnew board. Nets with no copper are present with zeros."""
+    """{net: {"mm", "ps" (None when a layer delay is unknown), "by_layer", "vias", "via_mm", "basis"}}.
+    basis "pad-to-pad": a net with exactly two pads, measured along its shortest copper path between them.
+    basis "total": any other net (multi-drop, or no path found), measured as the total copper of the net."""
     lp = layer_ps(stackup, planes)
     want = set(nets)
+    counts = _pad_counts(board, want)
     acc = {n: {"by_layer": {}, "vias": 0, "via_list": []} for n in want}
     for t in board.GetTracks():
         n = t.GetNetname()
@@ -106,21 +142,33 @@ def lengths_from_board(board, nets, stackup, planes, include_vias=False):
             acc[n]["by_layer"][lyr] = acc[n]["by_layer"].get(lyr, 0.0) + t.GetLength() / 1e6
     out = {}
     for n, a in acc.items():
-        mm = sum(a["by_layer"].values())
-        unknown = [l for l in a["by_layer"] if l not in lp]
-        ps = None if unknown else sum(v * lp[l] for l, v in a["by_layer"].items())
-        vmm = 0.0
-        for top, bot in a["via_list"]:
-            v = via_mm(stackup, top, bot) if include_vias else None
-            if include_vias and v is None:
-                unknown.append(f"via {top}-{bot}")
-            vmm += v or 0.0
+        basis = "total"
+        by, nvias, via_list = a["by_layer"], a["vias"], a["via_list"]
+        if counts.get(n) == 2:
+            p2p = _pad_to_pad(board, n, stackup)
+            if p2p is not None:
+                basis = "pad-to-pad"
+                by, nvias = p2p[0], p2p[1]
+                via_list = []
+                pv = p2p[2]
+        unknown = [l for l in by if l not in lp]
+        mm = sum(by.values())
+        ps = None if unknown else sum(v * lp[l] for l, v in by.items())
+        if basis == "pad-to-pad":
+            vmm = pv if include_vias else 0.0
+        else:
+            vmm = 0.0
+            for top, bot in via_list:
+                v = via_mm(stackup, top, bot) if include_vias else None
+                if include_vias and v is None:
+                    unknown.append(f"via {top}-{bot}")
+                vmm += v or 0.0
         if include_vias and vmm and ps is not None and mm > 0:
             ps += vmm * ps / mm                       # via barrel at the net's average delay
         if include_vias:
             mm += vmm
         out[n] = {"mm": mm, "ps": None if (unknown or ps is None) else ps,
-                  "by_layer": a["by_layer"], "vias": a["vias"], "via_mm": vmm,
+                  "by_layer": by, "vias": nvias, "via_mm": vmm, "basis": basis,
                   "unknown": sorted(set(unknown))}
     return out
 

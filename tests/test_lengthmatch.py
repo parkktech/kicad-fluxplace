@@ -170,3 +170,88 @@ def test_review_codes_positive_and_negative(tmp_path, monkeypatch):
     monkeypatch.setattr(RC, "open_by_net", lambda p, **k: {"DATA_3": 2})
     un = RV.check_match_groups(_facts(src, NAMES), cons)
     assert [f["code"] for f in un] == ["MATCH_UNROUTED"] and un[0]["level"] == "WARN"
+
+
+# ------------------------------------------------- pad-to-pad basis, ps branch, default spacing
+def _stack_planes():
+    from test_timing import STACK, PLANES
+    return STACK, PLANES
+
+
+def test_pad_to_pad_excludes_stub_and_total_is_marked(tmp_path):
+    pytest.importorskip("pcbnew")
+    import pcbnew
+    src = build_board(tmp_path / "in.kicad_pcb")
+    b = pcbnew.LoadBoard(src)
+    # a 3 mm stub hanging off the middle of DATA_0's 40 mm row (a T-junction, not on the pad-to-pad path)
+    t = pcbnew.PCB_TRACK(b)
+    t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(20.0), pcbnew.FromMM(10.0)))
+    t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20.0), pcbnew.FromMM(13.0)))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetWidth(pcbnew.FromMM(0.2))
+    t.SetNet(b.FindNet("DATA_0"))
+    b.Add(t)
+    stub = str(tmp_path / "stub.kicad_pcb")
+    b.Save(stub)
+    l = _lens(stub, ["DATA_0"])["DATA_0"]
+    assert l["basis"] == "pad-to-pad"
+    assert l["mm"] == pytest.approx(40.0, abs=0.01)           # total copper would be 43.0
+    # the same net, total copper: the report says so
+    m = _lens(build_board(tmp_path / "plain.kicad_pcb"), ["DATA_7"])["DATA_7"]
+    assert m["basis"] == "pad-to-pad" and m["mm"] == pytest.approx(61.0, abs=0.01)
+
+
+def test_multidrop_net_is_total_and_review_says_total(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    import test_timing as TT
+    from fluxplace import routeconn as RC
+    import pcbnew
+    path = TT.build(tmp_path / "md.kicad_pcb", {"CK": [("U1", 10, 10), ("D1", 30, 10), ("D2", 50, 10)]})
+    b = pcbnew.LoadBoard(path)
+    l = LM.lengths_from_board(b, ["CK"], TT.STACK, TT.PLANES)["CK"]
+    assert l["basis"] == "total" and l["mm"] == pytest.approx(40.0, abs=0.01)
+    monkeypatch.setattr(RC, "open_by_net", lambda p, **k: {})
+    cons = {"match": {"CK": {"nets": ["CK"], "target_mm": 30.0, "tolerance_mm": 0.5}}}
+    f = RV.check_match_groups({"board_path": path, "net_pads": {"CK": []}, "stackup": TT.STACK,
+                               "plane_layers": TT.PLANES}, cons)
+    assert len(f) == 1 and f[0]["code"] == "MATCH_GROUP_SKEW" and "CK 40.00 mm total" in f[0]["msg"]
+
+
+def test_tune_match_ps_target_branch(tmp_path):
+    pytest.importorskip("pcbnew")
+    from fluxplace import impedance as IM
+    STACK, PLANES = _stack_planes()
+    src = build_board(tmp_path / "in.kicad_pcb")
+    names = ["DATA_5", "DATA_6", "DATA_7"]                  # 55, 58, 61 mm
+    k = IM.route_delay_ps_per_mm(STACK, set(PLANES), {"F.Cu": 1.0})
+    f = lambda b, gg: LM.lengths_from_board(b, LM.members(gg, names), STACK, PLANES, False)
+    g = LM.groups({"match": {"P": {"nets": ["DATA_[567]"], "tolerance_ps": 2.0}}})[0]
+    tgt = max(v["ps"] for v in f(LM_board(src), g).values())
+    assert tgt == pytest.approx(61.0 * k, rel=1e-6)           # hand value: longest member x k ps/mm
+    out = str(tmp_path / "out.kicad_pcb")
+    rep = TU.tune_match(src, out, [g], f, {"P": (tgt, 2.0)}, log=lambda m: None)
+    assert [r["status"] for r in rep] == ["ok", "ok", "ok"], rep
+    assert all(r["unit"] == "ps" for r in rep)
+    after = f(LM_board(out), g)
+    for n in names:
+        assert abs(after[n]["ps"] - tgt) <= 2.0 + 1e-6, (n, after[n]["ps"], tgt)
+
+
+def LM_board(path):
+    import pcbnew
+    return pcbnew.LoadBoard(path)
+
+
+def test_default_spacing_is_three_times_max_width_or_clearance(tmp_path):
+    pytest.importorskip("pcbnew")
+    src = build_board(tmp_path / "in.kicad_pcb")
+    g = LM.groups({"match": {"S": {"nets": ["DATA_0"], "tolerance_mm": 0.5}}})[0]
+    f = lambda b, gg: LM.lengths_from_board(b, ["DATA_0"], _stackup(), [], False)
+    out = str(tmp_path / "out.kicad_pcb")
+    # width 0.2 mm, clearance 0.5 mm -> spacing 3 x 0.5 = 1.5 mm; target 42 mm (2 mm of bumps)
+    rep = TU.tune_match(src, out, [g], f, {"S": (42.0, 0.5)}, clearance_of=lambda n: 0.5, log=lambda m: None)
+    assert rep[0]["spacing_mm"] == pytest.approx(1.5) and rep[0]["status"] == "ok"
+    # no clearance above the width: spacing 3 x 0.2 = 0.6 mm
+    rep2 = TU.tune_match(src, str(tmp_path / "o2.kicad_pcb"), [g], f, {"S": (42.0, 0.5)},
+                         clearance_of=lambda n: 0.1, log=lambda m: None)
+    assert rep2[0]["spacing_mm"] == pytest.approx(0.6)
