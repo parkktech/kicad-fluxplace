@@ -123,3 +123,5 @@ Runs on the spec netlist when `--spec` is given (else the board's), pin names fr
 Skew limits accept `_ps` spellings (`[pairs.FAMILY] skew_ps`, `[si] default_skew_ps`, `audio_skew_ps`, `skew_ps_by_kind`);
 they convert to mm by the delay of the layers the net runs on (`impedance.delay_ps_per_mm`). Pair findings print ps beside mm.
 A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never converted by a guess.
+
+`BLOCK_SCATTERED` (INFO; WARN with `[placement] use_blocks = true`): a functional block split across regions with another block's part between them, `blocks.py: check`. Details in `docs/commands/blocks.md`.

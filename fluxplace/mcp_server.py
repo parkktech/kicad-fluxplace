@@ -156,6 +156,7 @@ POLICY = {
     "patch":             ("long",  "Regional rip-up and reroute for walled copper islands."),
     "launder":           ("long",  "DRC-driven copper launder pass."),
     "calibrate":         ("long",  "Calibrate placement scoring against router ground truth."),
+    "blocks":            ("write", "Functional-block inventory; --check per-block spread; --write Functional Group field to --out."),
     "sync-nets":         ("long",  "Synchronise nets onto the board."),
     "replace-footprint": ("long",  "Swap a footprint across the board."),
 }
@@ -164,6 +165,7 @@ POLICY = {
 # through fluxplace_run (listed in its description). Unlisted flags still work when passed.
 LISTED = {
     "doctor": ["problems_only", "context"],
+    "blocks": ["board", "spec", "constraints", "check", "write", "out", "json"],
     "help-brief": ["command"],
     "review": ["board", "spec", "constraints", "no_api", "waive", "fail_on", "top", "full_output"],
     "route-ready": ["board", "constraints", "spec", "waive", "all", "collisions_only", "relevance", "top", "full_output"],
