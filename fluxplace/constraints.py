@@ -118,6 +118,9 @@ def power_width_mm(cons, net, default_mm):
 _FAB_DEFAULTS = {
     "min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_drill_mm": 0.2,
     "min_annular_mm": 0.1, "min_via_dia_mm": 0.4, "min_silk_width_mm": 0.15,
+    # acid trap: junction angle below this (deg) is an ACID_TRAP; the profile
+    # does not state one, so the default is 60 (acidtrap.DEFAULT_ACID_DEG)
+    "acid_trap_deg": 60.0,
 }
 
 
