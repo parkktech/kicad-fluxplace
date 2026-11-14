@@ -347,6 +347,25 @@ def check_match_groups(facts, cons):
     return out
 
 
+def check_timing(facts, cons):
+    """[timing.*] flight-time budgets (TIMING_SKEW, TIMING_FLYBY_ORDER: FAIL; TIMING_UNROUTED, TIMING_DELAY_UNKNOWN: WARN)."""
+    from . import timing as TM
+    try:
+        if not TM.groups(cons or {}):
+            return []
+    except ValueError as e:
+        return [_f(FAIL, "TIMING_CONFIG", str(e))]
+    path = facts.get("board_path") or facts.get("board")
+    try:
+        import pcbnew
+        from . import routeconn as RC
+        board = pcbnew.LoadBoard(path)
+        open_nets = {n for n, k in RC.open_by_net(path).items() if k > 0}
+    except Exception as e:
+        return [_f(WARN, "TIMING_NOT_EVALUATED", f"timing budget not evaluated: {type(e).__name__}: {e}")]
+    return TM.check(board, facts, cons, open_nets)
+
+
 def check_erc(facts, spec, cons):
     """Schematic-level electrical checks (ercnet): decoupling per IC rail, I2C pull-ups,
     passive values, nets with no driver. The spec's netlist when given, else the board's."""
@@ -1781,6 +1800,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
     out += check_match_groups(facts, cons)
+    out += check_timing(facts, cons)
     out += check_erc(facts, spec, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)
