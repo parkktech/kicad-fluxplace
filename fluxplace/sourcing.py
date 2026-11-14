@@ -476,12 +476,15 @@ def alternates(report, cache, cache_dir, limit=3):
         if r["verdict"] not in ("LEAD", "RISK", "NONE") or mpn not in pool:
             continue
         target = pool[mpn]
-        found = []
+        found, stale = [], 0
         for cand, cdata in pool.items():
             if cand == mpn or cand in report or not same_spec(target, cdata):
                 continue
             hit = cache.get(cand)
             if not hit:
+                continue
+            if time.time() - hit.get("_t", 0) >= CACHE_TTL:   # same TTL rule as the main lookup
+                stale += 1
                 continue
             dk, mo = hit.get("dk"), hit.get("mo")
             verdict, stock = grade(dk, mo, r["required"])
@@ -495,6 +498,7 @@ def alternates(report, cache, cache_dir, limit=3):
                           "status": "candidate - pinout/datasheet not verified"})
         found.sort(key=lambda c: (c["ext"] is None, c["ext"] or 0, -c["stock"]))
         r["alternates"] = found[:limit]
+        r["alternates_stale"] = stale                  # rows older than CACHE_TTL: stale, not used
 
 
 def summary(report, counts, need, log=print, show_ok=False):
