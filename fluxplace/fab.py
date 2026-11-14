@@ -334,7 +334,7 @@ def upload_package(board, out, project_dir=None, log=print):
         try:
             from . import constraints as CONS
             cons = CONS.load(ctoml)
-            CONS.inject_netclasses(pro, cons, log=log)
+            CONS.inject_netclasses(pro, cons, log=log, board=os.path.join(project_dir, stem + ".kicad_pcb"))
             quilter_csvs(cons, out, log=log)
         except Exception as e:
             log(f"  netclass injection failed ({e}) — package unchanged")

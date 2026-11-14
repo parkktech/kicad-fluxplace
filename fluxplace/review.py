@@ -121,21 +121,27 @@ def is_mechanical(ref, footprint, pads):
 def check_net_rules(facts, cons):
     """[nets."PTT_THRU"] straight_copper = ["J1A:1", "J2A:1"] — the net may
     touch ONLY those pads. Anything else on it is a component in a path the
-    spec says must survive the board being dead."""
+    spec says must survive the board being dead. `straight_copper` resolves
+    through rules.resolve, so a `[[rule]]` selector sets it too."""
+    from . import rules as RU
     out = []
-    rules = (cons or {}).get("nets", {})
-    for net, rule in rules.items():
-        allowed = rule.get("straight_copper")
-        if allowed is None:
+    try:
+        rs = RU.load(cons)
+    except RU.RuleError:
+        return out          # reported once, by check_rule_selectors
+    legacy_nets = set((cons or {}).get("nets", {}))
+    for net in sorted(set(facts["net_pads"]) | legacy_nets):
+        allowed_list, prov = rs.resolve({"net": net}, "straight_copper")
+        if allowed_list is None:
             continue
-        allowed = {tuple(a.split(":", 1)) if ":" in a else (a, None)
-                   for a in allowed}
-        allowed_refs = {a[0] for a in allowed}
         pads = facts["net_pads"].get(net)
         if pads is None:
             out.append(_f(WARN, "NET_RULE_UNKNOWN_NET",
                           f"{net}: straight_copper rule but no such net on the board"))
             continue
+        allowed = {tuple(a.split(":", 1)) if ":" in a else (a, None)
+                   for a in allowed_list}
+        allowed_refs = {a[0] for a in allowed}
         bad = [(r, p) for r, p in pads
                if (r, p) not in allowed and (r, None) not in allowed]
         if bad:
@@ -150,6 +156,18 @@ def check_net_rules(facts, cons):
                           f"{net}: not all required pads are on the net "
                           f"({len(pads)} of {len(allowed)})"))
     return out
+
+
+def check_rule_selectors(facts, cons):
+    """[[rule]] validation: unknown keys / bad regex / bad values FAIL (RULE_*); a net or ref
+    selector that matches nothing on this board WARNs (RULE_MATCHES_NOTHING)."""
+    from . import rules as RU
+    try:
+        rs = RU.load(cons)
+    except RU.RuleError as e:
+        return [_f(FAIL, e.code, str(e))]
+    return [_f(WARN, "RULE_MATCHES_NOTHING", msg)
+            for _r, msg in RU.check_matches(rs, nets=list(facts["net_pads"]), refs=list(facts["parts"]))]
 
 
 # ==========================================================================
@@ -1633,6 +1651,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
         out += check_landpattern(facts, spec, ds_dir or "",
                                  project_libs=docs.get("project_libs", ()), strict=strict)
     out += check_net_rules(facts, cons)
+    out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)

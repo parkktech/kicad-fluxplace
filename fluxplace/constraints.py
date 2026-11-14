@@ -37,6 +37,10 @@ optional; anything not stated keeps the heuristic default. Schema:
     [escape]                # near_mm 2.0, lane_mm 1.5, window_mm 4.0, radius_mm 2.5, enabled, power_pins (escape reservation, escres.py)
     [route]                 # same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
 
+    [[rule]]                # selector rules over the same keys (fluxplace/rules.py, docs/commands/rules.md)
+    select = { net = "^USB_.*" }   # ref | net | netclass | type | layer | prop | pair (AND)
+    set = { width_mm = 0.15 }      # width_mm gap_mm clearance_mm skew_mm impedance_diff straight_copper max_vias pour
+
     [power."+5V"]           # (in addition to the ampacity fields above)
     holdup_ms = 20          # ride-through the spec promises ...
     nominal_v = 5.0         # ... from this rail voltage ...
@@ -91,6 +95,7 @@ Width rule: conservative 1oz external copper, ~0.5 mm per amp with a 0.3 mm
 floor — wide enough for a 10C rise at the stated current, narrow enough not to
 eat the board. The engineer can always state width_mm directly instead.
 """
+import re
 import tomllib
 
 
@@ -180,16 +185,14 @@ SLOW_PAIR_SKEW_MM = 10.0      # audio-rate differential nets: a skew limit in th
 
 
 def skew_limit_source(cons, master):
-    """(limit mm, where it comes from) for the pair whose master net is `master`: the longest matching [pairs.FAMILY] skew_mm,
-    else `[si] skew_mm_by_kind = {audio = .., usb2 = ..}` for the pair's kind (netclass.pair_kind), else low-speed (audio)
-    pairs get `[si] audio_skew_mm` (10), everything else `[si] default_skew_mm` (1)."""
-    best = None
-    for fam, p in cons.get("pairs", {}).items():
-        if master.startswith(fam) and isinstance(p, dict) and "skew_mm" in p:
-            if best is None or len(fam) > best[0]:
-                best = (len(fam), float(p["skew_mm"]), f"[pairs.{fam}] skew_mm")
-    if best:
-        return best[1], best[2]
+    """(limit mm, where it comes from) for the pair whose master net is `master`. Resolved through
+    rules.resolve: the longest matching [pairs.FAMILY] skew_mm, or a `[[rule]]` that sets skew_mm;
+    else `[si] skew_mm_by_kind = {audio = .., usb2 = ..}` for the pair's kind (netclass.pair_kind),
+    else low-speed (audio) pairs get `[si] audio_skew_mm` (10), everything else `[si] default_skew_mm` (1)."""
+    from . import rules as RU
+    v, prov = RU.load(cons).resolve({"net": master}, "skew_mm")
+    if v is not None:
+        return float(v), f"{prov} skew_mm"
     si = cons.get("si", {}) or {}
     from . import netclass as NC
     kind = NC.pair_kind(master)
@@ -252,7 +255,44 @@ def rail_width_mm(ma):
     return 0.3
 
 
-def inject_netclasses(pro_path, cons, log=print):
+def _rule_netclasses(board, cons, classes, patterns, log):
+    """One RULE_<name> class per `[[rule]]` that wins width_mm or clearance_mm on a board net, pattern = the
+    net name. Legacy-block winners are not emitted (their classes already exist above), so a file without
+    `[[rule]]` entries writes exactly what it always did. Returns the number of classes added."""
+    if not board or not any(isinstance(r, dict) for r in (cons or {}).get("rule") or []):
+        return 0
+    from . import rules as RU
+    try:
+        rs = RU.load(cons)
+        nets, _fps = RU.board_objects(board)
+    except (RU.RuleError, OSError, RuntimeError, ImportError) as e:
+        log(f"  rule netclasses skipped ({e})")
+        return 0
+    groups = {}
+    for n in nets:
+        obj = {"net": n["net"], "netclass": n.get("netclass")}
+        win = {}
+        for key in ("width_mm", "clearance_mm"):
+            hits = rs.cascade(obj, key)
+            if hits and not hits[0][0].legacy:
+                win[key] = (hits[0][0], hits[0][1])
+        if win:
+            rule = next(iter(win.values()))[0]
+            vals = {k: v for k, (_r, v) in win.items()}
+            groups.setdefault(id(rule), (rule, vals, []))[2].append(n["net"])
+    for rule, vals, names in groups.values():
+        name = "RULE_" + re.sub(r"\W+", "_", rule.name or f"r{rule.order}").strip("_")
+        cls = {"name": name}
+        if "clearance_mm" in vals:
+            cls["clearance"] = float(vals["clearance_mm"])
+        if "width_mm" in vals:
+            cls["track_width"] = float(vals["width_mm"])
+        classes.append(cls)
+        patterns += [{"netclass": name, "pattern": nm} for nm in sorted(names)]
+    return len(groups)
+
+
+def inject_netclasses(pro_path, cons, log=print, board=None):
     """Write the engineering constraints INTO the project file as KiCad net
     classes, so any ECAD parser (Quilter's 'ECAD PARSED CONSTRAINTS', the
     KiCad router, a human) sees the intent instead of guessing defaults
@@ -263,9 +303,9 @@ def inject_netclasses(pro_path, cons, log=print):
     d = json.load(open(pro_path))
     ns = d.setdefault("net_settings", {})
     classes = [c for c in ns.get("classes", [])
-               if not (c.get("name", "").startswith(("DP_", "PWR_")))]
+               if not (c.get("name", "").startswith(("DP_", "PWR_", "RULE_")))]
     patterns = [p for p in ns.get("netclass_patterns", [])
-                if not p.get("netclass", "").startswith(("DP_", "PWR_"))]
+                if not p.get("netclass", "").startswith(("DP_", "PWR_", "RULE_"))]
     for group, p in sorted((cons or {}).get("pairs", {}).items()):
         z = int(p.get("impedance_diff", 100))
         w, g = PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])
@@ -288,11 +328,13 @@ def inject_netclasses(pro_path, cons, log=print):
             "via_diameter": 0.6, "via_drill": 0.3,
         })
         patterns.append({"netclass": name, "pattern": net})
+    n_rule = _rule_netclasses(board, cons, classes, patterns, log)
     ns["classes"] = classes
     ns["netclass_patterns"] = patterns
     json.dump(d, open(pro_path, "w"), indent=2)
     log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
-        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes")
+        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes, "
+        f"{n_rule} rule classes")
     return len(classes)
 
 
