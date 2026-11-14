@@ -95,3 +95,13 @@ def test_chamfer_fix_removes_the_acid_trap_and_keeps_drc_not_worse(tmp_path):
     # connectivity: the chamfer keeps the wedge's two tracks joined on net N1
     segs = BF.facts_from_file(path)["track_segs"]
     assert len(segs) == 3 and all(s["net"] == "N1" for s in segs)
+
+
+def test_sliver_is_off_by_default_and_says_not_evaluated_on_file_backend():
+    from fluxplace import review as R
+    poly = [{"layer": "F.Cu", "net": "GND", "outline": _square(0, 0, 10, 10), "holes": []}]
+    on = {"review": {"slivers": True}}
+    assert R.check_slivers({"zone_polys": poly}, None) == []          # off by default
+    assert R.check_slivers({"zone_polys": poly}, on) == []            # wide pour: clean
+    info = R.check_slivers({"track_segs": []}, on)                    # file backend
+    assert [f["level"] for f in info] == [R.INFO] and "not evaluated" in info[0]["msg"]

@@ -50,7 +50,7 @@ def _listfiles(d):
     return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
 
 
-def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
+def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, cons=None):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
     the failure in the manifest so the engineer sees exactly what did and didn't emit."""
@@ -70,7 +70,7 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
                          "--drill-origin", "plot", "--excellon-separate-th",
                          "--generate-map", "--map-format", "gerberx2", board], log)
     # independent re-read of the exported copper + drill (gerbercheck.py)
-    done["gerbercheck"] = GC.emit_stage(out, board)
+    done["gerbercheck"] = GC.emit_stage(out, board, cons=cons)
 
     # pick-and-place, both sides, CSV, mm. --exclude-dnp because this file is a
     # BUILD INSTRUCTION: a part flagged do-not-populate must not be handed to the

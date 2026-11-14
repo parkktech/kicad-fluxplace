@@ -625,11 +625,17 @@ def cmd_tournament(a):
 
 def cmd_fab(a):
     """Emit a build-quality manufacturing package (gerbers/drill/place/DRC) for review."""
-    from fluxplace import fab, questions as QS
+    from fluxplace import fab, questions as QS, constraints as C, gerbercheck as GC
+    if a.check_only:
+        r = GC.check_package(a.check_only, board=a.board, cons=C.load(a.constraints))
+        print(GC.format_report(r))
+        raise SystemExit(1 if r["status"] == "FAIL" else 0)
+    if not (a.board and a.out):
+        raise SystemExit("fab: --board and --out are required (or --check-only FAB_DIR)")
     QS.refuse_assumed(a.board, "fab")
     _review_gate(a, stage="fab")
     _open_gate(a)
-    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
+    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, cons=C.load(a.constraints))
     print(f"DRC {res['drc']}; package at {res['out']}")
     if a.upload_out:
         fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)
@@ -2777,8 +2783,11 @@ def build_parser():
     pt.set_defaults(fn=cmd_tournament)
 
     pf = sub.add_parser("fab", help="emit gerbers/drill/place/DRC package for review")
-    pf.add_argument("--board", required=True)
-    pf.add_argument("--out", required=True)
+    pf.add_argument("--board", default=None)
+    pf.add_argument("--out", default=None)
+    pf.add_argument("--check-only", metavar="FAB_DIR", default=None,
+                    help="do not export: re-check an existing fab package's Gerbers "
+                         "and drill files (gerbercheck); --constraints sets the [fab] floors")
     pf.add_argument("--kicad-cli", default="kicad-cli")
     pf.add_argument("--upload-out", default=None,
                     help="also assemble the ECAD upload set (board + pro + dru "

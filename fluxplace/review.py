@@ -978,10 +978,16 @@ def check_acid_traps(facts, cons):
 
 def check_slivers(facts, cons):
     """SLIVER: filled-zone copper narrower than [fab] min_track_mm (a neck the etch
-    cannot hold). Reads facts["zone_polys"], which only the pcbnew fact backend
-    fills; with the file backend this check has nothing to grade and says nothing."""
+    cannot hold). Off unless [review] slivers = true. Reads facts["zone_polys"]
+    (pcbnew backend); the file backend reports INFO "not evaluated"."""
     from fluxplace import acidtrap as AT
-    polys = facts.get("zone_polys")
+    if not ((cons or {}).get("review") or {}).get("slivers"):
+        return []                     # off by default: ~17 s per review on a 6-layer board
+    if "zone_polys" not in facts:
+        return [_f(INFO, "SLIVER",
+                   "not evaluated: this fact backend carries no zone outlines "
+                   "(the file backend); use the pcbnew backend to grade slivers")]
+    polys = facts["zone_polys"]
     if not polys:
         return []
     mn = C.fab_profile(cons)["min_track_mm"]

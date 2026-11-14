@@ -24,7 +24,6 @@ import shutil
 from collections import defaultdict
 
 import numpy as np
-from PIL import Image, ImageDraw
 
 from fluxplace import gerbercheck as GC
 
@@ -101,16 +100,10 @@ def slivers(polys, min_mm, res_mm=None):
         x0, y0 = min(xs) - 2 * res, min(ys) - 2 * res
         W = int(math.ceil((max(xs) - x0) / res)) + 4
         H = int(math.ceil((max(ys) - y0) / res)) + 4
-        im = Image.new("L", (W, H), 0)
-        d = ImageDraw.Draw(im)
         tr = lambda pts: [((x - x0) / res, (y - y0) / res) for x, y in pts]
-        for p in plist:
-            if len(p["outline"]) >= 3:
-                d.polygon(tr(p["outline"]), fill=255)
-            for h in p.get("holes", []):
-                if len(h) >= 3:
-                    d.polygon(tr(h), fill=0)
-        mask = np.asarray(im) > 0
+        # outlines and holes together: even-odd, so a hole subtracts
+        mask = GC.scan_mask(H, W, [tr(p["outline"]) for p in plist if len(p["outline"]) >= 3]
+                            + [tr(h) for p in plist for h in p.get("holes", []) if len(h) >= 3])
         thin = opening_thin(mask, k)
         lab, n = GC._label8(thin)
         for i in range(1, n + 1):

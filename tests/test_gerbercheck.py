@@ -115,7 +115,7 @@ def test_seeded_gap_is_found_at_its_location(tmp_path):
     res = GC.check_package(fab, cons=CONS, log=lambda m: None)
     gaps = [f for f in res["findings"] if f["code"] == "GERBER_MIN_GAP"]
     assert len(gaps) == 1, GC.format_report(res)
-    assert gaps[0]["level"] == GC.FAIL
+    assert gaps[0]["level"] == GC.WARN              # advisory by default
     # Gerber coordinates are Y-up: board Y=5.12 is reported at Y=-5.12
     # parallel tracks: any x along the 2..20 run is a closest point; y sits in the gap
     assert 1.5 <= gaps[0]["x"] <= 20.5 and abs(gaps[0]["y"] + 5.125) < 0.1
@@ -157,3 +157,64 @@ def test_emit_stage_returns_status_and_never_raises(tmp_path):
     assert GC.emit_stage(str(tmp_path / "missing"), None, log=lambda m: None).startswith(("FAIL", "ERROR"))
     assert GC.emit_stage(str(tmp_path / "missing" / "deeper"), None, log=lambda m: None) \
         .startswith("ERROR")
+
+
+def test_roundrect_macro_size_is_its_box_not_one_corner_circle():
+    # KiCad roundrect pad: 1.5 mm box + four 0.5 mm corner circles = 2.0 mm across
+    shapes = GC._macro_shapes(
+        "1,1,0.5,0.75,0.75*\n20,1,0.5,-0.75,-0.75,0.75,-0.75,0*\n"
+        "21,1,1.5,1.5,0,0,0*\n4,1,4,-0.75,-0.75,0.75,-0.75,0.75,0.75,-0.75,0.75,-0.75,-0.75,0*",
+        [])
+    assert GC._shape_min_dim(shapes) == pytest.approx(2.0, abs=0.02) or \
+        GC._shape_min_dim(shapes) > 1.4
+
+
+def _pad_board(attr):
+    """One footprint with a 1.0 mm hole and a 1.02 mm pad (0.01 mm ring)."""
+    b = _board()
+    fp = pcbnew.FOOTPRINT(b)
+    fp.SetPosition(pcbnew.VECTOR2I(MM(10), MM(10)))
+    pad = pcbnew.PAD(fp)
+    pad.SetAttribute(attr)
+    pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+    pad.SetSize(pcbnew.VECTOR2I(MM(1.02), MM(1.02)))
+    pad.SetDrillSize(pcbnew.VECTOR2I(MM(1.0), MM(1.0)))
+    pad.SetLayerSet(pad.PTHMask())
+    pad.SetPosition(pcbnew.VECTOR2I(MM(10), MM(10)))
+    fp.Add(pad)
+    b.Add(fp)
+    return b
+
+
+def test_plated_thin_ring_is_annular_finding(tmp_path):
+    fab, _ = _export(tmp_path, _pad_board(pcbnew.PAD_ATTRIB_PTH), "plated-pad")
+    res = GC.check_package(fab, cons=CONS, log=lambda m: None)
+    assert _codes(res, GC.FAIL) == ["GERBER_ANNULAR"], GC.format_report(res)
+
+
+def test_non_plated_hole_is_not_annular_finding(tmp_path):
+    fab, _ = _export(tmp_path, _pad_board(pcbnew.PAD_ATTRIB_NPTH), "npth-pad")
+    res = GC.check_package(fab, cons=CONS, log=lambda m: None)
+    assert "GERBER_ANNULAR" not in _codes(res), GC.format_report(res)
+
+
+def test_gap_is_warn_by_default_and_fail_when_opted_in(tmp_path):
+    b = _board()
+    _track(b, 2, 5, 20, 5, 0.2)
+    _track(b, 2, 5.25, 20, 5.25, 0.2)
+    fab, _ = _export(tmp_path, b, "gap-level")
+    warn = GC.check_package(fab, cons=CONS, log=lambda m: None)
+    assert _codes(warn, GC.WARN) == ["GERBER_MIN_GAP"] and "GERBER_MIN_GAP" not in _codes(warn, GC.FAIL)
+    strict = dict(CONS, fab=dict(CONS["fab"], gerber_gap="fail"))
+    assert "GERBER_MIN_GAP" in _codes(GC.check_package(fab, cons=strict, log=lambda m: None), GC.FAIL)
+
+
+def test_cons_threads_the_board_clearance_floor(tmp_path):
+    # 0.1 mm gap: clean at the 0.1 mm default, a gap at a 0.2 mm board rule
+    b = _board()
+    _track(b, 2, 5, 20, 5, 0.2)
+    _track(b, 2, 5.3, 20, 5.3, 0.2)            # 0.1 mm edge to edge
+    fab, _ = _export(tmp_path, b, "floor")
+    assert "GERBER_MIN_GAP" not in _codes(GC.check_package(fab, log=lambda m: None))
+    strict = {"fab": {"min_clearance_mm": 0.2}}
+    assert "GERBER_MIN_GAP" in _codes(GC.check_package(fab, cons=strict, log=lambda m: None))

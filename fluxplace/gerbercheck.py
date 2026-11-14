@@ -4,7 +4,8 @@
 re-reads those files and checks what the fab will actually receive:
 
   GERBER_MIN_GAP     copper of two different connected regions on one layer closer
-                     than [fab] min_clearance_mm (rasterized, see RESOLUTION)
+                     than [fab] min_clearance_mm (rasterized, see RESOLUTION).
+                     WARN by default; FAIL with [fab] gerber_gap = "fail"
   GERBER_MIN_WIDTH   drawn trace aperture narrower than [fab] min_track_mm (exact)
   GERBER_ANNULAR     plated hole whose outer-layer copper ring is below
                      [fab] min_annular_mm (exact, from flash apertures)
@@ -38,7 +39,6 @@ import re
 import time
 
 import numpy as np
-from PIL import Image, ImageDraw
 
 FAIL, WARN = "FAIL", "WARN"
 RESOLUTION_MM = 0.02
@@ -137,15 +137,21 @@ def _macro_shapes(body, params):
 
 
 def _shape_min_dim(shapes):
-    dims = []
+    """Smaller side of the bounding box of the WHOLE aperture (all primitives
+    united). A roundrect pad is a 1.5 mm box plus corner circles of 0.5 mm: the
+    box is 2.0 mm across, so 2.0 is its size, not the 0.5 of one corner circle."""
+    xs, ys = [], []
     for s in shapes:
         if s[0] == "circle":
-            dims.append(s[1])
+            d, cx, cy = s[1], s[2], s[3]
+            xs += [cx - d / 2, cx + d / 2]
+            ys += [cy - d / 2, cy + d / 2]
         else:
-            xs = [p[0] for p in s[1]]
-            ys = [p[1] for p in s[1]]
-            dims.append(min(max(xs) - min(xs), max(ys) - min(ys)))
-    return min(dims) if dims else 0.0
+            xs += [p[0] for p in s[1]]
+            ys += [p[1] for p in s[1]]
+    if not xs:
+        return 0.0
+    return min(max(xs) - min(xs), max(ys) - min(ys))
 
 
 def _obround(w, h, n=24):
@@ -314,6 +320,65 @@ def parse_gerber_or_empty(path):
 
 
 # ---------------------------------------------------------------- raster
+def scan_mask(H, W, contours):
+    """Even-odd fill of closed polylines on an H x W pixel grid (local px coords,
+    pixel (j, i) has centre (i + 0.5, j + 0.5)). Pure numpy: rasterization does
+    not depend on any imaging library's version. All contours are filled together,
+    so overlapping contours toggle (even-odd, as Gerber regions)."""
+    out = np.zeros((H, W), bool)
+    edges = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        P = np.asarray(c, float)
+        Q = np.roll(P, -1, axis=0)
+        edges.append(np.hstack([P, Q]))
+    if not edges:
+        return out
+    E = np.vstack(edges)
+    x1, y1, x2, y2 = E[:, 0], E[:, 1], E[:, 2], E[:, 3]
+    keep = y1 != y2
+    x1, y1, x2, y2 = x1[keep], y1[keep], x2[keep], y2[keep]
+    if x1.size == 0:
+        return out
+    lo, hi = np.minimum(y1, y2), np.maximum(y1, y2)
+    r0 = max(0, int(math.floor(lo.min() - 0.5)))
+    r1 = min(H, int(math.ceil(hi.max() - 0.5)) + 1)
+    if r1 <= r0:
+        return out
+    rows = np.arange(r0, r1) + 0.5
+    cross = (rows[:, None] >= lo[None, :]) & (rows[:, None] < hi[None, :])
+    t = (rows[:, None] - y1[None, :]) / (y2 - y1)[None, :]
+    xi = np.where(cross, x1[None, :] + t * (x2 - x1)[None, :], np.inf)
+    xi.sort(axis=1)
+    cnt = cross.sum(axis=1)
+    nr = r1 - r0
+    diff = np.zeros((nr, W + 1), np.int32)
+    ridx = np.arange(nr)
+    for k in range(0, xi.shape[1] - 1, 2):
+        ok = (k + 1) < cnt
+        if not ok.any():
+            break
+        a = np.clip(np.ceil(xi[:, k] - 0.5), 0, W).astype(np.int64)
+        b = np.clip(np.ceil(xi[:, k + 1] - 0.5), 0, W).astype(np.int64)
+        np.add.at(diff, (ridx[ok], a[ok]), 1)
+        np.add.at(diff, (ridx[ok], b[ok]), -1)
+    out[r0:r1] = (np.cumsum(diff[:, :W], axis=1) % 2) == 1
+    return out
+
+
+def _disk_mask(H, W, cx, cy, r):
+    x0, x1 = max(0, int(math.floor(cx - r)) - 1), min(W, int(math.ceil(cx + r)) + 2)
+    y0, y1 = max(0, int(math.floor(cy - r)) - 1), min(H, int(math.ceil(cy + r)) + 2)
+    out = np.zeros((H, W), bool)
+    if x1 <= x0 or y1 <= y0:
+        return out
+    yy = (np.arange(y0, y1) + 0.5)[:, None]
+    xx = (np.arange(x0, x1) + 0.5)[None, :]
+    out[y0:y1, x0:x1] = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    return out
+
+
 class _Canvas:
     def __init__(self, bbox, res):
         (x0, y0, x1, y1) = bbox
@@ -340,14 +405,13 @@ class _Canvas:
         bx1, by1 = min(self.W, int(math.ceil(max(xs))) + 3), min(self.H, int(math.ceil(max(ys))) + 3)
         if bx1 <= bx0 or by1 <= by0:
             return
-        im = Image.new("L", (bx1 - bx0, by1 - by0), 0)
-        d = ImageDraw.Draw(im)
+        h, w = by1 - by0, bx1 - bx0
+        m = np.zeros((h, w), bool)
         for pl in polys:
             if len(pl) >= 3:
-                d.polygon([(p[0] - bx0, p[1] - by0) for p in pl], fill=255)
+                m |= scan_mask(h, w, [[(p[0] - bx0, p[1] - by0) for p in pl]])
         for cx, cy, r in circles:
-            d.ellipse([cx - bx0 - r, cy - by0 - r, cx - bx0 + r, cy - by0 + r], fill=255)
-        m = np.asarray(im) > 0
+            m |= _disk_mask(h, w, cx - bx0, cy - by0, r)
         self.a[by0:by1, bx0:bx1][m] = val
 
     def shape_px(self, ap, x, y):
@@ -384,12 +448,11 @@ class _Canvas:
         ys = [p[1] for c in pts for p in c]
         bx0, by0 = max(0, int(min(xs)) - 2), max(0, int(min(ys)) - 2)
         bx1, by1 = min(self.W, int(max(xs)) + 3), min(self.H, int(max(ys)) + 3)
-        acc = np.zeros((by1 - by0, bx1 - bx0), bool)
-        for c in pts:                       # even-odd: contours toggle
-            im = Image.new("L", acc.shape[::-1], 0)
-            ImageDraw.Draw(im).polygon([(p[0] - bx0, p[1] - by0) for p in c], fill=255)
-            acc ^= np.asarray(im) > 0
-        self.a[by0:by1, bx0:bx1][acc] = val
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        m = scan_mask(by1 - by0, bx1 - bx0,
+                      [[(p[0] - bx0, p[1] - by0) for p in c] for c in pts])   # even-odd
+        self.a[by0:by1, bx0:bx1][m] = val
 
     def paint(self, objs):
         for o in objs:
@@ -518,7 +581,7 @@ def _min_gaps(lab, min_mm, res):
     return out
 
 
-def _check_copper(objs, layer, prof, bbox, res, findings, log):
+def _check_copper(objs, layer, prof, bbox, res, findings, log, gap_level=WARN):
     # exact: aperture width of drawn tracks
     thin = [o for o in objs if o[0] == "draw" and _ap_w(o[2]) < prof["min_track_mm"] - 1e-6]
     if thin:
@@ -533,12 +596,12 @@ def _check_copper(objs, layer, prof, bbox, res, findings, log):
     lab, n = _label8(cv.a > 0)
     gaps = _min_gaps(lab, prof["min_clearance_mm"], res)
     for gap, a, b, x, y in sorted(gaps)[:50]:
-        findings.append(_f(FAIL, "GERBER_MIN_GAP",
+        findings.append(_f(gap_level, "GERBER_MIN_GAP",
                            f"regions {a} and {b} (different connected copper) "
                            f"{gap:.3f} mm apart (raster {res} mm); min_clearance "
                            f"{prof['min_clearance_mm']:g} mm", layer, bbox[0] + x, bbox[1] + y))
     if len(gaps) > 50:
-        findings.append(_f(WARN, "GERBER_MIN_GAP", f"{len(gaps)} gap pairs total; first 50 listed", layer))
+        findings.append(_f(gap_level, "GERBER_MIN_GAP", f"{len(gaps)} gap pairs total; first 50 listed", layer))
     log(f"  {layer}: {n} connected regions, {len(gaps)} gap pair(s) < min_clearance")
     return cv.a > 0
 
@@ -609,6 +672,8 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     seconds, resolution_mm). status: 'PASS' | 'WARN' | 'FAIL'."""
     t0 = time.time()
     prof = _profile(cons)
+    # Gap is a raster estimate (see RESOLUTION): advisory unless the project opts in.
+    gap_level = FAIL if str(((cons or {}).get("fab") or {}).get("gerber_gap", "warn")).lower() == "fail" else WARN
     gdir = os.path.join(fab_dir, "gerbers")
     ddir = os.path.join(fab_dir, "drill")
     findings = []
@@ -661,7 +726,7 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     if gbox is None:
         gbox = (0, 0, 1, 1)
     for l in sorted(cu_objs, key=lambda s: (s not in ("F_Cu",), s not in ("B_Cu",), s)):
-        mask = _check_copper(cu_objs[l], l, prof, gbox, res_mm, findings, log)
+        mask = _check_copper(cu_objs[l], l, prof, gbox, res_mm, findings, log, gap_level)
         if l in ("F_Cu", "B_Cu"):
             for o in cu_objs[l]:
                 if o[0] == "flash":
