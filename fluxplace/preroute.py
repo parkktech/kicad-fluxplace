@@ -424,6 +424,42 @@ def plan_gate_fail(cons):
     return str(((cons or {}).get("route_ready") or {}).get("plan_gate", "warn")).lower() == "fail"
 
 
+def waived_pin_findings(B, cons):
+    """FANOUT_PIN_WAIVED (WARN): a pin the user accepted as un-escapable (`[fanout] waive`, or the REF.PIN that
+    `[floorplan] waive_fail` names) stays a WARN here until its net has copper on the pin: a segment end or a via of the
+    net inside the pad (grown by half the track width). Pieces of one pin count together."""
+    from . import fanout as FO
+    pats, _notes = FO.waivers(cons)
+    if not pats:
+        return []
+    keys = {}
+    for q in B["pads"]:
+        if q["net"] and FO.is_waived(q["ref"], q["num"], pats):
+            keys.setdefault((q["ref"], str(q["num"])), []).append(q)
+    out = []
+    for (ref, num), ps in sorted(keys.items()):
+        net = ps[0]["net"]
+        if any(_on_pad(B, q, net) for q in ps):
+            continue
+        out.append(_f(WARN, "FANOUT_PIN_WAIVED",
+                      f"{ref}.{num} {net}: WAIVED - left for the router (the net has no copper on this pin yet)", refs=[ref]))
+    return out
+
+
+def _on_pad(B, q, net):
+    for s in B["segs"]:
+        if s["net"] != net:
+            continue
+        h = s["w"] / 2
+        for x, y in (s["a"], s["b"]):
+            if abs(x - q["x"]) <= q["ex"] + h and abs(y - q["y"]) <= q["ey"] + h:
+                return True
+    for v in B["vias"]:
+        if v["net"] == net and abs(v["x"] - q["x"]) <= q["ex"] + v["d"] / 2 and abs(v["y"] - q["y"]) <= q["ey"] + v["d"] / 2:
+            return True
+    return False
+
+
 def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False):
     """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
     (escape planner + global router, copper of the board respected) and card["plan"].  collide=True adds the
@@ -438,6 +474,7 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
         f += AN.findings(B, cons, spec, cls)
     f += pin_escape_blocked(B)
     f += keepout_trapped(B)
+    f += waived_pin_findings(B, cons)
     f += PCK.connector_blocked(B, cons)
     f += PCK.height_regions(B, cons)
     f += PCK.stale_copper(B)

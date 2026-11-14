@@ -26,7 +26,25 @@ that, Freerouting counts less as a pre-existing clearance violation. Default: `"
 `[escape] share_reach_mm` (default 1.5, 0 = off; the escape reservation and the board's own vias count) gets a short stub to it
 (`kind: share`) before a via of its own is tried; the alternatives pass (`fanalt`) does the same first.
 
-Output: `FANOUT_OK` / `FANOUT_FAIL`, escaped / required per part, one `FANOUT_PIN_BLOCKED part.pin net blocker distance` line per
+**Pins, not pads.** All pads of one footprint that share a pad number AND a net are one pin. Pieces that touch or overlap are one
+copper component; pieces that do not touch are separate components, and a pin is escaped only when every component is escaped
+(so `FANOUT_OK` counts pin numbers: `U312: 6/6`, not 7 pieces). Each component gets its own candidates: via sites and stubs leave
+from any piece (the centre, and the edge of a long thin piece that faces the target).
+
+**Same-net link.** A component with no legal escape of its own gets a short track (its layer, width = the net's track) to a
+same-net pad that IS escaped: a sibling component of its own pin, or a same-net pad of its footprint or a neighbour within 2.0 mm
+(`LINK_REACH`). The track must clear every other net's copper (clearance) and every copper chosen in this run. Tried after the
+solver, so it never displaces an escape. Not done yet: pour-connect (`[[plan.pour]]`, verified against the filled zone) and via-in-pad
+for power pins beyond the existing small-via path.
+
+**Waivers.** `[fanout] waive = ["REF.PIN: reason", ...]` (regex on `REF.PIN`, fully matched) accepts a pin as un-escapable. Every
+`REF.PIN` named in `[floorplan] waive_fail` is waived here too (one notice line each). A waived blocked pin is not a blocked pin:
+the verdict is `FANOUT_WARN` (exit 0, stage WARN, the pipeline continues), the pin is printed as
+`FANOUT_PIN_WAIVED REF.PIN NET ... - WAIVED - left for the router`, and the ledger lists it. The same waiver is honoured by the
+modules fan-out check and the floorplan gate. Until the net has copper on that pin, `route-ready` and `review` report
+`FANOUT_PIN_WAIVED` as WARN (`preroute.waived_pin_findings`). A pin not named by a waiver still FAILS.
+
+Output: `FANOUT_OK` / `FANOUT_WARN` / `FANOUT_FAIL`, escaped / required per part, one `FANOUT_PIN_BLOCKED part.pin net blocker distance` line per
 failed pin (blocker = the pad, board edge, keep-out or the neighbour whose escape took the room), the kicad-cli DRC (zones refilled)
 before and after: the fan-out must add no error (`hole_to_hole` counts even when the board makes it a warning). `--check-only` writes nothing. `<out>.fanout.json` holds every pin (kind, layer,
 stub, via, end point, lane direction/layer: the router's start points and layer hint).

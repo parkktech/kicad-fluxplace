@@ -19,6 +19,7 @@ import numpy as np
 import pcbnew
 
 MARK = "@@FANOUT@@"
+LINK_REACH = 2.0          # mm: largest same-net link track to a neighbour's escaped pad
 import os
 TRACE = os.environ.get("FANOUT_TRACE")
 V2 = pcbnew.VECTOR2I
@@ -315,6 +316,41 @@ class Model:
 
 
 # ---------------------------------------------------------------- candidates
+def bb_mm(pad):
+    b = pad.GetBoundingBox()
+    return (mmv(b.GetLeft()), mmv(b.GetTop()), mmv(b.GetRight()), mmv(b.GetBottom()))
+
+
+def pin_components(pads, tol=1000):
+    """pads of one footprint that share a pad number AND net are one pin. Returns the connected components (pads that touch
+    or overlap, bounding boxes in nm + tolerance) so that a pin's pieces which do NOT touch stay separate and each must be reached."""
+    groups = {}
+    for p in pads:
+        groups.setdefault((str(p.GetNumber()), p.GetNetname()), []).append(p)
+    out = []
+    for key in sorted(groups):
+        ps = groups[key]
+        par = list(range(len(ps)))
+
+        def f(i):
+            while par[i] != i:
+                par[i] = par[par[i]]
+                i = par[i]
+            return i
+        bbs = [p.GetBoundingBox() for p in ps]
+        for i in range(len(ps)):
+            for j in range(i + 1, len(ps)):
+                a, b = bbs[i], bbs[j]
+                if not (a.GetRight() + tol < b.GetLeft() or b.GetRight() + tol < a.GetLeft() or
+                        a.GetBottom() + tol < b.GetTop() or b.GetBottom() + tol < a.GetTop()):
+                    par[f(i)] = f(j)
+        comp = {}
+        for i, p in enumerate(ps):
+            comp.setdefault(f(i), []).append(p)
+        out += [comp[k] for k in sorted(comp)]
+    return out
+
+
 class Cand:
     __slots__ = ("kind", "layer", "stub", "via", "w", "cost", "ang", "slen", "cap", "items", "lanes", "end")
 
@@ -323,6 +359,17 @@ class Cand:
         self.cap = None
         self.lanes = None
         self.end = via if via is not None else stub[1]
+
+
+def _starts(p, toward):
+    """where a link track may leave a pin toward `toward` (mm): each piece's centre, and the point of its box nearest to
+    `toward` (a long thin piece leaves from the edge that faces the target, clear of the neighbours beside it)."""
+    out = []
+    for k, c in enumerate(p.piece_c):
+        out.append(c)
+        x0, y0, x1, y1 = p.piece_bb[k]
+        out.append((min(max(toward[0], x0), x1), min(max(toward[1], y0), y1)))
+    return out
 
 
 class Pin:
@@ -338,6 +385,8 @@ class Pin:
         self.status = None
         self.pick = None
         self.pad_obs = None
+        self.piece_c = None          # centres of every copper piece of this pin (multi-piece pins: one pin, several pads)
+        self.piece_bb = None         # their bounding boxes (x0, y0, x1, y1) mm
 
 
 def pad_poly_pts(pad, layer):
@@ -400,7 +449,8 @@ class Fan:
             fp = fps[ref]
             side = "B" if fp.IsFlipped() else "F"
             pads = [p for p in fp.Pads() if p.GetNetname() and p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_PTH)]
-            for p in pads:
+            for comp in pin_components(pads):
+                p = comp[0]
                 net = p.GetNetname()
                 if (job.get("only_nets") and net not in job["only_nets"]) or net in job.get("skip_nets", ()):
                     continue
@@ -425,6 +475,8 @@ class Fan:
                     continue
                 pin = Pin(ref, p.GetNumber(), net, p, cm, side, need)
                 pin.tht = tht
+                pin.piece_c = [(mmv(q.GetPosition().x), mmv(q.GetPosition().y)) for q in comp]
+                pin.piece_bb = [bb_mm(q) for q in comp]
                 self.pins.append(pin)
         self.pins.sort(key=lambda q: (q.ref, str_num(q.num)))
 
@@ -442,15 +494,22 @@ class Fan:
         return (mmv(bb.GetLeft()), mmv(bb.GetTop()), mmv(bb.GetRight()), mmv(bb.GetBottom()))
 
     def gen(self, pin):
+        """candidates of every copper piece of the pin (a pin is escaped when any piece is escaped)."""
+        pin.pad_obs = set()
+        cands, blame = [], {}
+        for cx, cy in (pin.piece_c or [pin.c]):
+            cands += self._gen_at(pin, cx, cy, blame)
+        pin.blame = blame
+        return cands
+
+    def _gen_at(self, pin, cx, cy, blame):
         M, P = self.M, self.P
         w, cl = M.net_rules(pin.net)
         court = self.part_court(pin.ref)
-        cx, cy = pin.c
         layer0 = M.cu[0] if pin.side == "F" else M.cu[-1]
         pad_ids = [i for i in M.near((cx, cy, cx, cy), 0.6) if M.obs[i].what == f"{pin.ref}.{pin.num}" and M.obs[i].kind == "pad"]
-        pin.pad_obs = set(pad_ids)
+        pin.pad_obs |= set(pad_ids)
         cands = []
-        blame = {}
         reach = P["reach"]
         layers = [layer0] if not pin.tht else list(M.sig)
         coupled = self.job["coupling"].get(f"{pin.ref}.{pin.num}") if "coupling" in self.job else None
@@ -518,7 +577,6 @@ class Fan:
                             blame[h[0]] = blame.get(h[0], 0) + 1
                             continue
                         cands.append(Cand("direct", L, ((cx, cy), e), None, w, ln * 0.5, ia, ln))
-        pin.blame = blame
         return cands
 
     def lanes_static(self, pin, cd, limit=None):
@@ -785,6 +843,70 @@ class Fan:
         return dict(best["asg"])
 
     # -- lanes after the search --------------------------------------------
+    def link_same_net(self, sol, reach=LINK_REACH):
+        """a pin (or one of its copper pieces) that found no escape gets a short SAME-NET track to a pad of its net that IS
+        escaped: a sibling piece of its own pin, or a same-net pad of its footprint or a neighbour within `reach` mm.
+        The track is legal against every static obstacle of other nets (clearance) and every copper chosen in this run.
+        Returns the links added: [(pin key, pad centre, target key)]."""
+        M = self.M
+        added = []
+        chosen = []                                    # (net, layer, capsule shapes) of everything decided so far
+        for i, k in sol.items():
+            q, cd = self.pins[i], self.pins[i].cands[k]
+            chosen.append((q.net, cd))
+        for i, p in enumerate(self.pins):
+            if i in sol or p.tht or p.need == "none":
+                continue
+            layer0 = M.cu[0] if p.side == "F" else M.cu[-1]
+            w, _cl = M.net_rules(p.net)
+            targets = []
+            for j, q in sorted(sol.items()):
+                t = self.pins[j]
+                if t.net != p.net or t.key == p.key and t is p:
+                    continue
+                if t.ref != p.ref and math.hypot(t.c[0] - p.c[0], t.c[1] - p.c[1]) > reach:
+                    continue
+                if t.side != p.side:
+                    continue
+                for tc in (t.piece_c or [t.c]):
+                    for pc in _starts(p, tc):
+                        targets.append((math.hypot(tc[0] - pc[0], tc[1] - pc[1]), pc, tc, j))
+            done = None
+            for _d, pc, tc, j in sorted(targets, key=lambda x: (x[0], x[3])):
+                if _d > reach or _d < 1e-6:
+                    continue
+                if M.hit_seg(p.net, layer0, pc, tc, w, ignore=p.pad_obs | self.pins[j].pad_obs):
+                    continue
+                sh = pcbnew.SHAPE_SEGMENT(V2(nm(pc[0]), nm(pc[1])), V2(nm(tc[0]), nm(tc[1])), nm(w))
+                clash = False
+                for (n2, cd2) in chosen:
+                    if n2 == p.net:
+                        continue
+                    clr = M.net_rules(n2)[1]
+                    for (ly, a, b, r) in self.caps(None, cd2):
+                        if ly is not None and ly != layer0:
+                            continue
+                        s2 = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(r * 2))
+                        if sh.Collide(s2, nm(clr)):
+                            clash = True
+                            break
+                    if clash:
+                        break
+                if clash:
+                    continue
+                done = (pc, tc, j, _d)
+                break
+            if done is None:
+                continue
+            pc, tc, j, dl = done
+            cd = Cand("link", layer0, (pc, tc), None, w, 0.0, 0, dl)
+            cd.lanes = None
+            p.cands.append(cd)
+            sol[i] = len(p.cands) - 1
+            chosen.append((p.net, cd))
+            added.append((p.key, [round(pc[0], 3), round(pc[1], 3)], self.pins[j].key))
+        return added
+
     def dynamic_lanes(self, sol):
         """returns pins index list whose chosen candidate has no free lane given the other choices."""
         M, P = self.M, self.P
@@ -1013,7 +1135,9 @@ def main():
             break
         for i in bad:
             banned.add((i, sol[i]))
+    links = F.link_same_net(sol)
     res = F.report(sol, banned, (t0, tc, td, ta, time.time()))
+    res["links"] = links
     if not job.get("check_only"):
         F.write(sol, out)
         res["written"] = out
@@ -1029,7 +1153,7 @@ def _report(self, sol, banned, tm):
         if k is not None:
             cd = p.cands[k]
             lane = cd.lanes if cd.lanes else None
-            ok = p.need == "plane" or lane is not None
+            ok = p.need == "plane" or lane is not None or cd.kind == "link"
             d.update({"ok": ok, "kind": cd.kind, "layer": cd.layer, "stub": [list(map(lambda v: round(v, 4), q)) for q in cd.stub],
                       "via": [round(cd.via[0], 4), round(cd.via[1], 4)] if cd.via else None, "w": cd.w,
                       "end": [round(cd.end[0], 4), round(cd.end[1], 4)]})
@@ -1101,7 +1225,7 @@ def _write(self, sol, out):
     for i, k in sorted(sol.items()):
         p = self.pins[i]
         cd = p.cands[k]
-        if p.need == "signal" and cd.lanes is None:
+        if p.need == "signal" and cd.lanes is None and cd.kind != "link":
             continue
         g = groups.get(p.ref)
         if g is None:

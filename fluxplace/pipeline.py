@@ -773,9 +773,12 @@ def st_fanout(c, n, board):
     line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
     # the gate line decides too: `fanout` returns its verdict code without exiting, so rc alone reads 0 on FANOUT_FAIL
     bad = rc != 0 or any(l.startswith(("fanout: FANOUT_FAIL", "fanout: FANOUT_DRC")) for l in text.splitlines())
-    res = {"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}
+    warn = any(l.startswith("fanout: FANOUT_WARN") for l in text.splitlines())      # blocked pins named by a waiver: left for the router
+    res = {"verdict": "fail" if bad else "warn" if warn else "pass", "line": line, "board": out if os.path.exists(out) else board}
     if bad:
         res["next"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_BLOCKED")][:5]
+    if warn:
+        res["waived"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_WAIVED")][:20]
     return res
 
 

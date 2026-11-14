@@ -15,6 +15,7 @@ Self-check: kicad-cli pcb drc on input and output; the fan-out must add no error
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -228,20 +229,49 @@ def run(board, cons, spec, out, a, refs=None, log=print):
     res["runtime_s"] = round(time.time() - t0, 1)
     res["params"] = job["params"]
     res["escapes"] = claimed
+    res["waive"], notes = waivers(cons)
+    for n in notes:
+        log(n)
     return B, res
 
 
+def waivers(cons):
+    """-> (patterns, notes). `[fanout] waive = ["REF.PIN: reason", ...]` (regex on REF.PIN). Every REF.PIN that `[floorplan]
+    waive_fail` names is waived here too (one notice line each): the same pin must not pass one stage and fail the next."""
+    pats = [w.split(":", 1)[0].strip() for w in ((cons or {}).get("fanout") or {}).get("waive", []) or [] if w.split(":", 1)[0].strip()]
+    notes = []
+    fw = ((cons or {}).get("floorplan") or {}).get("waive_fail") or ""
+    for name in sorted(set(re.findall(r"(?<![\w.])([A-Za-z][A-Za-z0-9_]*\.\d+)(?![\w.])", fw))):
+        pats.append(re.escape(name))
+        notes.append(f"fanout: [floorplan] waive_fail names {name}: applied to the fan-out stage (WAIVED, left for the router)")
+    return pats, notes
+
+
+def is_waived(ref, num, pats):
+    key = f"{ref}.{num}"
+    return any(re.fullmatch(p, key) for p in pats)
+
+
 def summarise(B, res):
+    """per part: a PIN (ref + pad number) is escaped when every one of its copper components is; the count is of pins.
+    A blocked pin named by a waiver (res["waive"]) is `waived`, not `blocked`: it is WARN, not FAIL."""
     per = {}
+    keys = {}
+    pats = res.get("waive") or []
     for p in res["pins"]:
-        e = per.setdefault(p["ref"], {"req": 0, "ok": 0, "blocked": []})
+        keys.setdefault((p["ref"], str(p["pin"])), []).append(p)
+    for (ref, num), comps in sorted(keys.items()):
+        e = per.setdefault(ref, {"req": 0, "ok": 0, "blocked": [], "waived": []})
         e["req"] += 1
-        if p["ok"]:
+        bad = [c for c in comps if not c["ok"]]
+        if not bad:
             e["ok"] += 1
+        elif is_waived(ref, num, pats):
+            e["waived"].append(dict(bad[0], waived=True))
         else:
-            e["blocked"].append(p)
+            e["blocked"].append(bad[0])
     for t in res.get("thermal", []):
-        e = per.setdefault(t["ref"], {"req": 0, "ok": 0, "blocked": []})
+        e = per.setdefault(t["ref"], {"req": 0, "ok": 0, "blocked": [], "waived": []})
         e["req"] += 1
         if t["vias"]:
             e["ok"] += 1
@@ -250,14 +280,15 @@ def summarise(B, res):
     return per
 
 
-def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None):
+def _record(out, cons, spec, B, per, req, ok, blocked, escapes=None, waived=()):
     """write the derived facts back to the map next to the output board: planned pours, fan-out groups, which source decided what."""
     from . import escapeplan as EP, facts as FA
     try:
         FA.record(out, pours=EP.planned_pours(cons), sources=FA.resolve(out, B, cons, spec),
                   fanout={"groups": FA.fanout_groups(out), "required": req, "escaped": ok,
                           "parts": {r: [v["ok"], v["req"]] for r, v in sorted(per.items())},
-                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60]},
+                          "blocked": [f"{p['ref']}.{p['pin']}" for p in blocked][:60],
+                          "waived": [f"{p['ref']}.{p['pin']} WAIVED - left for the router" for p in waived][:60]},
                   escapes=escapes or [])
     except OSError:
         pass
@@ -285,10 +316,11 @@ def cmd_fanout(a):
         c1, u1, t1 = drc_counts(out, wd)
         added = {k: c1.get(k, 0) - c0.get(k, 0) for k in set(c0) | set(c1) if c1.get(k, 0) != c0.get(k, 0)}
         drc = {"before": dict(c0), "after": dict(c1), "delta": added, "secs": round(t0 + t1, 1)}
+    waived = [p for v in per.values() for p in v["waived"]]
     fail_drc = bool(drc and any(v > 0 for v in drc["delta"].values()))
-    verdict = "FANOUT_OK" if not blocked and not fail_drc else ("FANOUT_DRC" if not blocked else "FANOUT_FAIL")
+    verdict = ("FANOUT_FAIL" if blocked else "FANOUT_DRC" if fail_drc else "FANOUT_WARN" if waived else "FANOUT_OK")
     nitems = sum(1 for p in res["pins"] if p["ok"]) + sum(1 for p in res["pins"] if p["ok"] and p.get("via"))
-    print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked; "
+    print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked, {len(waived)} waived; "
           f"{sum(len(t['vias']) for t in res.get('thermal', []))} thermal vias; {res['runtime_s']} s "
           f"(domains {res['time']['domains']}, arcs {res['time']['arcs']}, solve {res['time']['solve']}, repairs {res['repairs']})")
     if res.get("alternatives") and res["alternatives"]["tried"]:
@@ -305,17 +337,20 @@ def cmd_fanout(a):
     for p in blocked[: (len(blocked) if a.full_output else 30)]:
         d = "" if p.get("dist") is None else f" {p['dist']} mm"
         print(f"FANOUT_PIN_BLOCKED {p['ref']}.{p['pin']} {p['net']} {p.get('blocker', '?')}{d}")
+    for p in waived:
+        d = "" if p.get("dist") is None else f" {p['dist']} mm"
+        print(f"FANOUT_PIN_WAIVED {p['ref']}.{p['pin']} {p['net']} {p.get('blocker', '?')}{d} - WAIVED - left for the router")
     rp = (out or a.board)
     rp = os.path.splitext(rp)[0] + ".fanout.json"
     json.dump({"verdict": verdict, "required": req, "escaped": ok, "per_part": {k: {"req": v["req"], "ok": v["ok"]} for k, v in per.items()},
-               "blocked": blocked, "pins": res["pins"], "thermal": res["thermal"], "drc": drc, "time": res["time"],
+               "blocked": blocked, "waived": waived, "pins": res["pins"], "thermal": res["thermal"], "drc": drc, "time": res["time"],
                "runtime_s": res["runtime_s"], "params": res["params"]}, open(rp, "w"), indent=1)
     print(f"full report: {rp}")
     if out:
         S.mark(out)
-        _record(out, cons, spec, B, per, req, ok, blocked, res.get("escapes"))
+        _record(out, cons, spec, B, per, req, ok, blocked, res.get("escapes"), waived)
         print(f"wrote {out}")
-    return 0 if verdict == "FANOUT_OK" else 1
+    return 0 if verdict in ("FANOUT_OK", "FANOUT_WARN") else 1
 
 
 def add_parser(sub):
