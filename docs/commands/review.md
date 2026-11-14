@@ -120,6 +120,10 @@ Runs on the spec netlist when `--spec` is given (else the board's), pin names fr
 | PASSIVE_VALUE | WARN / INFO | R/C/L value does not parse to number + unit; INFO for a pull resistor outside `[erc] pull_min_ohm`..`pull_max_ohm` (1k..100k) |
 | NET_NO_DRIVER | INFO | every pin is an input by official symbol pin type (needs the symbol) |
 
+Skew precedence (one rule, `constraints.skew_limit_source`): every `skew_mm` / `skew_ps` entry (`[pairs.FAMILY]`, and
+`[[rule]]` with `skew_mm` or `skew_ps`) is a rule; the best-ranked hit wins (explicit rule, then longest pair family,
+regardless of unit). Only when no rule matches do `[si]` kind defaults apply. ps values need the layer delay; without it
+the pair is reported `PAIR_DELAY_UNKNOWN` and not graded.
 Skew limits accept `_ps` spellings (`[pairs.FAMILY] skew_ps`, `[si] default_skew_ps`, `audio_skew_ps`, `skew_ps_by_kind`);
 they convert to mm by the delay of the layers the net runs on (`impedance.delay_ps_per_mm`). Pair findings print ps beside mm.
 A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never converted by a guess.

@@ -215,16 +215,20 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     everything else `[si] default_skew_mm` (or default_skew_ps, 1 mm). ps values convert with `ps_per_mm`
     (float, or callable(master) giving the ps/mm on the layers the net runs on)."""
     from . import rules as RU
-    v, prov = RU.load(cons).resolve({"net": master}, "skew_mm")
-    if v is not None:
-        return float(v), f"{prov} skew_mm"
-    best = None
-    for fam, p in cons.get("pairs", {}).items():
-        if master.startswith(fam) and isinstance(p, dict) and "skew_ps" in p:
-            if best is None or len(fam) > best[0]:
-                best = (len(fam), float(p["skew_ps"]), f"[pairs.{fam}] skew_ps")
-    if best:
-        return _to_mm(best[1], "ps", best[2], ps_per_mm, master), best[2]
+    # one precedence: every skew entry (legacy [pairs.F] skew_mm / skew_ps, explicit [[rule]] skew_mm / skew_ps)
+    # is a rule; the best-ranked hit wins (explicit rule / longest pair family), whatever its unit.
+    rs = RU.load(cons)
+    obj = {"net": master}
+    cands = []
+    for key in ("skew_mm", "skew_ps"):
+        hits = rs.cascade(obj, key)
+        if hits:
+            r, v = hits[0]
+            cands.append((r.rank(), key, float(v), r))
+    if cands:
+        _rk, key, v, r = max(cands, key=lambda c: c[0])
+        unit = "mm" if key == "skew_mm" else "ps"
+        return _to_mm(v, unit, f"{r.label} {key}", ps_per_mm, master), f"{r.label} {key}"
     si = cons.get("si", {}) or {}
     from . import netclass as NC
     kind = NC.pair_kind(master)

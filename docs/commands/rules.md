@@ -31,7 +31,7 @@ important = false
 | `pair` | net name starts with the family (`pair = "USB_"`) | prefix |
 
 `set` keys use the same names as the blocks they replace: `width_mm`, `gap_mm`, `clearance_mm`,
-`skew_mm`, `impedance_diff`, `straight_copper`, `max_vias`, `pour`, and the `[route]` floors
+`skew_mm`, `skew_ps`, `impedance_diff`, `straight_copper`, `max_vias`, `pour`, and the `[route]` floors
 `min_track_mm` / `min_clearance_mm`.
 
 ## Precedence
