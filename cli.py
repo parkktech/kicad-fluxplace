@@ -789,8 +789,11 @@ def cmd_auto_candidates(a):
     json.dump({"winner": win, "candidates": [
         {"cand": k, "unrouted": u, "violations": v} for k, u, v in rows]},
         open(os.path.join(a.out, "candidates.json"), "w"), indent=1)
+    from fluxplace import constraints as _C
+    _cons = _C.load(a.constraints) if getattr(a, "constraints", None) else None
     res = fab.emit(os.path.join(a.out, "routed.kicad_pcb"),
-                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli,
+                   formats=(_cons or {}).get("fab", {}).get("formats"), cons=_cons)
     from fluxplace import profiles as PROF
     fchecks, fsummary = PROF.check_board(os.path.join(a.out, "routed.kicad_pcb"),
                                          PROF.get(a.profile))
@@ -1325,7 +1328,10 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         print(f"    ! via at ({gx:.2f},{gy:.2f}) still grazes a pad ({gap} mm air) — review")
 
     # ---- [6] FAB -------------------------------------------------------------------
-    res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    from fluxplace import constraints as _C
+    _cons = _C.load(getattr(a, "constraints", None)) if getattr(a, "constraints", None) else None
+    res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli,
+                   formats=(_cons or {}).get("fab", {}).get("formats"), cons=_cons)
     verdict = res["drc"]
     print(f"[6/{NSTAGE}] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
