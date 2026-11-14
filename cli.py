@@ -3976,11 +3976,29 @@ def _silk_hook(a):
     BW.set_post_write(lambda path, refs: SK.after_write(path, refs, cons))
 
 
+# commands that never write a board: no connectivity snapshot is taken for them
+_GUARD_READ_ONLY = {"lint", "review", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
+                    "floorplan-check", "rules", "analyze", "comprehend"}
+
+
+def _guard_ledger_on(a):
+    """`[guard] ledger = false` in the constraints turns the *.ledger.json sidecar off (default on)."""
+    try:
+        from fluxplace import constraints as C
+        return bool((C.load(getattr(a, "constraints", None)).get("guard") or {}).get("ledger", True))
+    except Exception:                                    # noqa: BLE001 - an unreadable constraints file: default on
+        return True
+
+
 def _guard_begin(a):
     """Connectivity invariant (audit.snapshot): every command that writes a .kicad_pcb from an input board is
-    checked pad -> net and footprint identity before / after. Off with FLUXPLACE_GUARD=0."""
+    checked pad -> net and footprint identity before / after. Off with FLUXPLACE_GUARD=0. Read-only commands
+    (_GUARD_READ_ONLY) take no snapshot. An input the model cannot snapshot is not silently unguarded: it prints
+    `guard: UNCHECKED - <reason>`, and a run that then writes a board fails."""
     import os as _os
-    if _os.environ.get("FLUXPLACE_GUARD", "1") == "0" or a.cmd == "pipeline":
+    writes_board = isinstance(getattr(a, "out", None), str) and a.out.endswith(".kicad_pcb")
+    if _os.environ.get("FLUXPLACE_GUARD", "1") == "0" or a.cmd == "pipeline" or \
+            (a.cmd in _GUARD_READ_ONLY and not writes_board):
         return None
     src = getattr(a, "board", None)
     if not (isinstance(src, str) and src.endswith(".kicad_pcb") and _os.path.isfile(src)):
@@ -3990,12 +4008,14 @@ def _guard_begin(a):
     st = lambda p: (_os.stat(p).st_mtime_ns, _os.stat(p).st_size) if _os.path.exists(p) else None
     from fluxplace import audit as AU
     pro = _os.path.splitext(src)[0] + ".kicad_pro"       # the rules of record: the source's project, for both snapshots
-    try:
-        snap = AU.snapshot(src, project=pro)
-    except Exception:                                    # noqa: BLE001 - a board the model cannot read: no guard
-        return None
-    return {"src": src, "out": out, "stat": st(out), "snap": snap, "st": st, "pro": pro,
+    base = {"src": src, "out": out, "stat": st(out), "st": st, "pro": pro,
             "orig": open(src, "rb").read() if _os.path.abspath(out) == _os.path.abspath(src) else None}
+    try:
+        base["snap"] = AU.snapshot(src, project=pro)
+    except Exception as e:                               # noqa: BLE001 - recorded, not silently dropped
+        base["unchecked"] = f"input board {src} cannot be snapshotted: {type(e).__name__}: {e}"
+        _gp(f"guard: UNCHECKED - {base['unchecked']}")
+    return base
 
 
 def _gp(*x):
@@ -4004,25 +4024,47 @@ def _gp(*x):
     print(*x, file=_sys.stderr)
 
 
-def _guard_end(g, a):
-    """-> True when the written board passes the invariant (or nothing was written)."""
-    import os as _os, json as _json, shutil as _sh
-    if not g or not _os.path.exists(g["out"]) or g["st"](g["out"]) == g["stat"]:
-        return True
-    from fluxplace import audit as AU
-    try:
-        after = AU.snapshot(g["out"], project=g.get("pro"))
-    except Exception as e:                               # noqa: BLE001
-        _gp(f"guard: FAIL cannot read the written board {g['out']}: {e}")
-        return False
-    d = AU.connectivity_diff(g["snap"], after, AU.EXPECT.get(a.cmd, ()))
-    rec, line = AU.ledger(a.cmd, g["snap"], after, d)
+def _write_ledger(g, rec):
+    """The *.ledger.json sidecar next to the output (`[guard] ledger = false` turns it off)."""
+    import os as _os, json as _json
     lp = _os.path.splitext(g["out"])[0] + ".ledger.json"
     try:
         with open(lp, "w") as fh:
             _json.dump(rec, fh, indent=1)
+        return lp
     except OSError:
-        lp = None
+        return None
+
+
+def _guard_end(g, a, raised=False):
+    """-> True when the written board passes the invariant (or nothing was written). `raised`: the command raised
+    after it started; a board it wrote IN PLACE is restored to the input (a partial write is never kept)."""
+    import os as _os, shutil as _sh
+    if not g or not _os.path.exists(g["out"]) or g["st"](g["out"]) == g["stat"]:
+        return True
+    if raised:
+        if g["orig"] is not None:
+            with open(g["out"], "wb") as fh:
+                fh.write(g["orig"])
+            _gp(f"guard: {a.cmd} raised after writing {g['out']} in place - input board restored")
+        else:
+            _gp(f"guard: {a.cmd} raised; output {g['out']} may be partial")
+        return False
+    if g.get("unchecked"):                               # a board was written but its input was never snapshotted
+        _gp(f"guard: UNCHECKED - {g['unchecked']}; output not verified")
+        _write_ledger(g, {"command": a.cmd, "unchecked": g["unchecked"], "ok": False}) if _guard_ledger_on(a) else None
+        return False
+    from fluxplace import audit as AU
+    try:
+        after = AU.snapshot(g["out"], project=g.get("pro"))
+    except Exception as e:                               # noqa: BLE001
+        reason = f"output board {g['out']} cannot be snapshotted: {type(e).__name__}: {e}"
+        _gp(f"guard: UNCHECKED - {reason}")
+        _write_ledger(g, {"command": a.cmd, "unchecked": reason, "ok": False}) if _guard_ledger_on(a) else None
+        return False
+    d = AU.connectivity_diff(g["snap"], after, AU.EXPECT.get(a.cmd, ()))
+    rec, line = AU.ledger(a.cmd, g["snap"], after, d)
+    lp = _write_ledger(g, rec) if _guard_ledger_on(a) else None
     _gp("guard: " + line + (f"  ledger {lp}" if lp else ""))
     if d["ok"]:
         return True
@@ -4059,6 +4101,14 @@ def main(argv=None):
     except SystemExit as e:
         if not _guard_end(guard, a) and not e.code:
             raise SystemExit(1)
+        raise
+    except BaseException:
+        # the command raised: the guard still runs (an in-place board is restored); the ORIGINAL error is
+        # re-raised whatever the guard does
+        try:
+            _guard_end(guard, a, raised=True)
+        except Exception as ge:                          # noqa: BLE001
+            _gp(f"guard: end-check failed: {type(ge).__name__}: {ge}")
         raise
     if not _guard_end(guard, a):
         raise SystemExit(1)

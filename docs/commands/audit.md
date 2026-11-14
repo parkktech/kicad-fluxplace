@@ -27,4 +27,9 @@ pad -> net (pins with several copper pieces sharing a number compare as a multis
 An undeclared change exits 1 with the diff on stderr, moves the result to `<out>.rejected.kicad_pcb` (an in-place write
 gets its input back) and writes `<out>.ledger.json` (moved refs with deltas, nets touched, open connections and collision
 FAILs before -> after). Declared changes: `sync-nets` (nets), `replace-footprint` (footprints). `FLUXPLACE_GUARD=0` = off.
+Read-only commands (`lint`, `review`, `route-status`, `route-wait`, `route-diagnose`, `doctor`, `help-brief`, `floorplan-check`, `rules`,
+`analyze`, `comprehend`) take no snapshot unless they write a `.kicad_pcb` (`--out`).
+An input the guard cannot snapshot prints `guard: UNCHECKED - <reason>` (never silently unguarded). A command that raises after
+writing in place gets its input back (the original error is re-raised).
+Constraints: `[guard] ledger = false` turns the `<out>.ledger.json` sidecar off (default on).
 The pipeline applies the same check per stage (`W/LEDGER.txt`, `docs/AGENT-PIPELINE.md`).

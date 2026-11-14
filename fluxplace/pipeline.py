@@ -824,25 +824,41 @@ class _Ledger:
 
     def before(self, board):
         try:
-            self.b, self.bpath = self._snap(board), board
-        except Exception as e:                               # noqa: BLE001 - unreadable input: no invariant
-            self.b, self.bpath, self.err = None, board, str(e)
+            self.b, self.bpath, self.err = self._snap(board), board, None
+        except Exception as e:                               # noqa: BLE001 - unreadable input: the stage cannot pass
+            self.b, self.bpath, self.err = None, board, f"{type(e).__name__}: {e}"
+            print(f"guard: UNCHECKED - input board unreadable ({board}): {self.err}", file=sys.stderr)
 
     def after(self, name, n, res):
         from . import audit as AU
         out = res.get("board") or self.bpath
         d = os.path.join(self.work, f"{n}-{name}")
         os.makedirs(d, exist_ok=True)
-        if self.b is None or not out or not os.path.exists(out):
-            rec, line = {"step": name, "ok": None, "note": "no board snapshot"}, f"{name}: no board snapshot"
+        if not out or not os.path.exists(out):
+            rec, line = {"step": name, "ok": None, "note": "no board output"}, f"{name}: no board output"
         else:
-            a = self._snap(out)
-            diff = AU.connectivity_diff(self.b, a, STAGE_EXPECT.get(name, ()))
-            rec, line = AU.ledger(name, self.b, a, diff, {"verdict": res["verdict"]})
-            if not diff["ok"] and res["verdict"] not in ("fail", "blocked"):
+            # an unreadable input or output means the invariant was NOT checked: recorded, and the stage fails
+            reason = None
+            if self.b is None:
+                reason = f"input board unreadable: {self.err}"
+            else:
+                try:
+                    a = self._snap(out)
+                except Exception as e:                       # noqa: BLE001
+                    reason = f"output board unreadable ({out}): {type(e).__name__}: {e}"
+            if reason:
+                rec, line = {"step": name, "ok": False, "unchecked": reason}, f"{name}: guard: UNCHECKED - {reason}"
                 res["verdict"] = "fail"
-                res["line"] = f"connectivity changed ({len(diff['violations'])}): " + "; ".join(diff["violations"][:2])
-                res["next"] = diff["violations"][:5] + [os.path.join(d, "ledger.json")]
+                res["line"] = f"guard UNCHECKED: {reason}"
+                res["next"] = [reason, os.path.join(d, "ledger.json")]
+                print(f"guard: UNCHECKED - {reason}", file=sys.stderr)
+            else:
+                diff = AU.connectivity_diff(self.b, a, STAGE_EXPECT.get(name, ()))
+                rec, line = AU.ledger(name, self.b, a, diff, {"verdict": res["verdict"]})
+                if not diff["ok"] and res["verdict"] not in ("fail", "blocked"):
+                    res["verdict"] = "fail"
+                    res["line"] = f"connectivity changed ({len(diff['violations'])}): " + "; ".join(diff["violations"][:2])
+                    res["next"] = diff["violations"][:5] + [os.path.join(d, "ledger.json")]
             line = f"{line}  verdict {res['verdict']}"
         with open(os.path.join(d, "ledger.json"), "w") as fh:
             json.dump(rec, fh, indent=1)
