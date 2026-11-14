@@ -72,6 +72,21 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
 `profile`), `[silk]` (see `silk.md`).
 
+`HOLE_TO_HOLE` (FAIL, `holes.py`): edge-to-edge distance between every pair of drilled holes (vias, PTH and NPTH pads;
+same pad skipped). The minimum is the `[fab] profile`'s `hole_to_hole` (profiles.py) when it names one, else the board's
+`.kicad_pro` `min_hole_to_hole`; with neither the check reports `HOLE_TO_HOLE_UNDEFINED` (INFO) and guesses nothing.
+
+`SWLOOP` (INFO) / `SWLOOP_LARGE` (WARN, or FAIL against `[placement] hot_loop_max_mm` / `sw_node_max_mm`), `swloop.py`: each switching
+regulator's hot loop (input-cap rail pad, IC input pin, IC ground pin, input-cap ground pad) perimeter and area, and the switch-node
+extent (largest pad-pair span on the SW net). WARN past 3 x the IC body diagonal. Works on a placed, unrouted board. The existing
+`[placement.budget] switch_node` is an MST net budget graded by route-ready and is not reused.
+
+`REF_PLANE_GAP` (WARN; FAIL with `[review] return_path = "fail"`), `RETURN_VIA_MISSING` and `EDGE_TRACE` (WARN), `returnpath.py`: for controlled nets (diff pairs, RF
+nets, and `[review] return_path_nets = ["regex", ...]`): a track run with no filled plane under it on either adjacent reference layer
+longer than `[review] plane_gap_mm` (1.0), where the first/last `plane_gap_mm` of a track that starts or ends on a same-net pad or via are exempt (antipad); a layer change between layers with different reference planes and no via on the reference
+net within `[review] return_via_mm` (2.0); a track within `[review] edge_trace_mm` (0.5) of the outline. Reads the saved zone fills
+of the board file. No findings on a board without tracks.
+
 `review` also runs the part-entry gate (`PART_*`, [parts.md](parts.md): offline unless the review fetched distributor data; waive like any code) and the pin-group checks (`MAG_*`, `PINGRP_*`, [pin-groups.md](pin-groups.md)).
 ## Open connections, stale fills, pair and RF quality
 - `UNROUTED` (FAIL, one per open connection: net, both pads, distance): pcbnew counts after a FRESH zone fill, cross-checked with

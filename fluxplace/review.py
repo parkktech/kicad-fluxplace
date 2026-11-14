@@ -62,6 +62,17 @@ ENVIRONMENT. This module does that:
   POLICY_NOT_AEC / POLICY_DIELECTRIC / POLICY_PASSIVE_SIZE
                          [policy] part-selection rules: automotive grade,
                          allowed MLCC dielectrics, largest default chip size
+  HOLE_TO_HOLE           edge-to-edge spacing of two drilled holes (vias, PTH,
+                         NPTH) under the fab's minimum (holes.py)
+  SWLOOP / SWLOOP_LARGE  switching regulator hot loop (input cap - IC - GND) and
+                         switch-node extent; WARN past 3 x IC diagonal, FAIL past
+                         [placement] hot_loop_max_mm / sw_node_max_mm (swloop.py)
+  REF_PLANE_GAP          controlled net (diff pair, RF, [review] return_path_nets)
+                         with no filled plane under a run longer than
+                         [review] plane_gap_mm; WARN, FAIL with [review] return_path = "fail" (returnpath.py)
+  RETURN_VIA_MISSING     layer change between layers with different reference
+                         planes, no return via within [review] return_via_mm; WARN
+  EDGE_TRACE             controlled track within [review] edge_trace_mm of the outline; WARN
 
 Pure logic runs on a `facts` dict so it is testable without pcbnew;
 `facts_from_board()` at the bottom is the only pcbnew consumer. Findings are
@@ -78,6 +89,9 @@ from . import constraints as C
 from . import graph as G
 from . import si as SI
 from . import stackup as ST
+from . import holes as HO
+from . import swloop as SW
+from . import returnpath as RP
 from .comprehend import parse_value
 
 __all__ = ["run", "summarize", "facts_from_board", "package_key",
@@ -1742,6 +1756,9 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_policy(facts, cons)
     out += check_bom(facts, cons, spec)
     out += check_silk(facts, cons, spec)
+    out += HO.check_hole_spacing(facts, cons)
+    out += SW.check_switch_loops(facts, cons, spec)
+    out += RP.check_return_path(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
