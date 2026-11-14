@@ -232,6 +232,24 @@ def check_pairs(facts, cons):
     return out
 
 
+def check_erc(facts, spec, cons):
+    """Schematic-level electrical checks (ercnet): decoupling per IC rail, I2C pull-ups,
+    passive values, nets with no driver. The spec's netlist when given, else the board's."""
+    from . import ercnet as EN
+    if spec and spec.get("nets"):
+        src = spec
+    else:
+        parts = facts.get("parts", {})
+        pads = [dict(ref=ref, footprint=parts.get(ref, {}).get("footprint", ""),
+                     value=parts.get(ref, {}).get("value", ""), pad=num, net=net)
+                for net, rows in (facts.get("net_pads") or {}).items() for ref, num in rows]
+        src = pads
+    out = []
+    for f in EN.run(src, cons or {}, board_facts=facts):
+        out.append(_f(WARN if f["severity"] == "warning" else INFO, f["code"], f["msg"], f["refs"]))
+    return out
+
+
 # ==========================================================================
 # 3. RF impedance on the layer the copper is actually on
 # ==========================================================================
@@ -1634,6 +1652,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
                                  project_libs=docs.get("project_libs", ()), strict=strict)
     out += check_net_rules(facts, cons)
     out += check_pairs(facts, cons)
+    out += check_erc(facts, spec, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)
     out += check_spec_sync(facts, spec)
@@ -1781,6 +1800,9 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "models": [m.m_Filename for m in fp.Models()],
             "pad_geom": [(pad.GetNumber(), pad.GetFPRelativePosition().x / 1e6, pad.GetFPRelativePosition().y / 1e6,
                           pad.GetSize().x / 1e6, pad.GetSize().y / 1e6) for pad in fp.Pads()],
+            "pad_abs": {pad.GetNumber(): (round(pcbnew.ToMM(pad.GetPosition().x), 4),
+                                          round(pcbnew.ToMM(pad.GetPosition().y), 4))
+                        for pad in fp.Pads() if pad.GetNumber()},
             "mech": is_mechanical(ref, footprint_name, pads),
             "tht": any(p.GetDrillSize().x > 0 for p in fp.Pads()),
         }

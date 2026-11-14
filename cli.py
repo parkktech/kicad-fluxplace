@@ -1432,8 +1432,26 @@ def cmd_lint(a):
     import json as _json
     from fluxplace import lint as L
     from fluxplace import kicad_io as IO
+    from fluxplace import ercnet as EN
     board = IO.load(a.board)
-    findings = L.run(L.pads_from_board(board), waivers=a.waive)
+    pads = L.pads_from_board(board)
+    findings = L.run(pads, waivers=a.waive)
+    # schematic-level checks: the spec's netlist (pin names, values) + placed pad positions
+    spec = None
+    if getattr(a, "spec", None):
+        with open(a.spec, encoding="utf-8") as fh:
+            spec = _json.load(fh)
+    cons = {}
+    if getattr(a, "constraints", None):
+        from fluxplace import constraints as C
+        cons = C.load(a.constraints)
+    facts = {"parts": {}}
+    for fp in board.GetFootprints():
+        facts["parts"][fp.GetReference()] = {"pad_abs": {
+            pd.GetNumber(): (pcbnew_mm(pd.GetPosition().x), pcbnew_mm(pd.GetPosition().y))
+            for pd in fp.Pads() if pd.GetNumber()}}
+    erc = EN.run(spec if spec and spec.get("nets") else pads, cons, board_facts=facts)
+    findings += EN.waive(erc, a.waive)
     n = L.summarize(findings)
     if a.json:
         with open(a.json, "w") as fh:
@@ -1443,6 +1461,10 @@ def cmd_lint(a):
         raise SystemExit(1)
     if a.fail_on == "error" and n["error"]:
         raise SystemExit(1)
+
+
+def pcbnew_mm(nm):
+    return round(nm / 1e6, 4)
 
 
 def _open_gate(a):
@@ -3016,6 +3038,11 @@ def build_parser():
                               "wiring, dead-end nets, non-latching connectors")
     pli.add_argument("--board", required=True)
     pli.add_argument("--json", default=None, help="also write findings as JSON")
+    pli.add_argument("--spec", default=None,
+                     help="spec JSON: schematic checks (decoupling, I2C pull-ups, passive "
+                          "values, drivers) use its netlist and pin names")
+    pli.add_argument("--constraints", default=None,
+                     help="constraints TOML: [lint] decap_mm, [erc] pull_min_ohm/pull_max_ohm")
     pli.add_argument("--waive", action="append", default=[],
                      help="suppress findings: CODE:REGEX (matches msg or refs), "
                           "repeatable — e.g. dead-end-net:^ETH_ for a de-scoped "
