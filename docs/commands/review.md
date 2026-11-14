@@ -76,6 +76,11 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 same pad skipped). The minimum is the `[fab] profile`'s `hole_to_hole` (profiles.py) when it names one, else the board's
 `.kicad_pro` `min_hole_to_hole`; with neither the check reports `HOLE_TO_HOLE_UNDEFINED` (INFO) and guesses nothing.
 
+`SWLOOP` (INFO) / `SWLOOP_LARGE` (WARN, or FAIL against `[placement] hot_loop_max_mm` / `sw_node_max_mm`), `swloop.py`: each switching
+regulator's hot loop (input-cap rail pad, IC input pin, IC ground pin, input-cap ground pad) perimeter and area, and the switch-node
+extent (largest pad-pair span on the SW net). WARN past 3 x the IC body diagonal. Works on a placed, unrouted board. The existing
+`[placement.budget] switch_node` is an MST net budget graded by route-ready and is not reused.
+
 `review` also runs the part-entry gate (`PART_*`, [parts.md](parts.md): offline unless the review fetched distributor data; waive like any code) and the pin-group checks (`MAG_*`, `PINGRP_*`, [pin-groups.md](pin-groups.md)).
 ## Open connections, stale fills, pair and RF quality
 - `UNROUTED` (FAIL, one per open connection: net, both pads, distance): pcbnew counts after a FRESH zone fill, cross-checked with
