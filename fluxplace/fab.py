@@ -19,6 +19,8 @@ import re
 import shutil
 import subprocess
 
+from . import fabxcheck
+
 
 # Extra manufacturing exports. name -> (kicad-cli subcommand, subfolder, file name
 # for a stem). Subfolders are fluxplace-owned like gerbers/ and are wiped on every
@@ -97,6 +99,20 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
                          "--output", os.path.join(pdir, "pos.csv"),
                          "--format", "csv", "--units", "mm", "--side", "both",
                           "--exclude-dnp", board], log)
+    # FAB_BOM_POS_MISMATCH: every on-board footprint that is not DNP/excluded
+    # must be in the .pos exactly once, with matching side and rotation.
+    # Uses the position file this run just wrote, so it can never check stale data.
+    pos_path = os.path.join(pdir, "pos.csv")
+    if os.path.isfile(pos_path):
+        try:
+            xcheck = fabxcheck.check(board, pos=pos_path)
+        except Exception as e:      # a parse failure is a FAIL, not a crash
+            xcheck = [f"{fabxcheck.CODE}: cross-check could not run: {e}"]
+    else:
+        xcheck = [f"{fabxcheck.CODE}: no position file was produced"]
+    for m in xcheck:
+        log("FAIL " + m)
+
     # extra formats (ODB++, IPC-2581, IPC-D-356). formats=None -> every format
     # this kicad-cli supports. A format that fails is a FAIL line, never silent.
     fmt_files, fmt_status = {}, {}
@@ -174,6 +190,10 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
         f.write("stages       : " + ", ".join(f"{k}={'ok' if v is True or v=='PASS' else v}"
                                                for k, v in done.items()) + "\n")
         f.write("layout       : gerbers/  drill/  place/  drc.json\n")
+        f.write("checks       : " + (f"{fabxcheck.CODE}=PASS\n" if not xcheck else
+                f"{fabxcheck.CODE}=FAIL ({len(xcheck)})\n"))
+        for m in xcheck:
+            f.write(f"              - {m}\n")
         f.write("fab target   : JLCPCB 4/6-layer standard (0.09mm min trace/space)\n")
         f.write("NOTE         : engineer review pass expected before release — "
                 "check DRC, silk legibility, and any fine-pitch escape zones.\n")
@@ -192,7 +212,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
     log(f"fab package -> {out}  (DRC {verdict})")
     files.update(fmt_files)
     return {"out": out, "drc": verdict, "violations": nviol,
-            "unconnected": nunc, "stages": done, "files": files}
+            "unconnected": nunc, "stages": done, "files": files,
+            "xcheck": xcheck}
 
 
 # --------------------------------------------------------------- delivery

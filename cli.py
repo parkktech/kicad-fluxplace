@@ -91,6 +91,30 @@ def cmd_sourcing(a):
     raise SystemExit(1 if blockers else 0)
 
 
+def _deliver_xcheck(a, bom):
+    """FAB_BOM_POS_MISMATCH before anything ships: the BOM and the .pos in the fab
+    package must match the board. Exits 1 on any FAIL. bom=None checks pos only."""
+    from fluxplace import fabxcheck as X
+    if not a.board:
+        print("    ! cross-check skipped: no --board", flush=True)
+        return
+    pos = os.path.join(a.fab_dir, "place", "pos.csv")
+    msgs = []
+    if not os.path.isfile(pos):
+        msgs.append(f"{X.CODE}: no position file in {a.fab_dir}/place")
+    else:
+        msgs += X.check(a.board, pos=pos)
+    if bom:
+        msgs += X.check(a.board, bom=bom)
+    if not bom:
+        print("    ! BOM cross-check skipped: no board BOM among --bom", flush=True)
+    for m in dict.fromkeys(msgs):
+        print("FAIL " + m, flush=True)
+    if msgs:
+        raise SystemExit(1)
+    print(f"    {X.CODE}=PASS (pos{' + BOM' if bom else ''})", flush=True)
+
+
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
@@ -115,6 +139,7 @@ def cmd_deliver(a):
     from fluxplace import constraints as C
     inc = tuple(C.load(a.constraints).get("deliver", {}).get("include_formats", ()))
     if a.no_pcbway:
+        _deliver_xcheck(a, bom=(a.bom or [None])[0])
         F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
                   log=lambda m: print(m, flush=True), include_formats=inc)
         return
@@ -136,6 +161,7 @@ def cmd_deliver(a):
                       if os.path.basename(b) in (facts.get("bom_files") or [])), None)
     for b in boms:
         extras.append((b, slots["slot_bom"]) if b == board_bom else b)
+    _deliver_xcheck(a, bom=board_bom)
     F.deliver(a.fab_dir, a.out, os.path.splitext(slots["slot_gerbers"])[0],
               docs=docs, extras=extras, centroid_name=slots["slot_centroid"],
               log=lambda m: print(m, flush=True), include_formats=inc)
@@ -635,6 +661,8 @@ def cmd_fab(a):
     fmts = C.load(a.constraints).get("fab", {}).get("formats")
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, formats=fmts)
     print(f"DRC {res['drc']}; package at {res['out']}")
+    if res["xcheck"]:
+        raise SystemExit(1)
     if a.upload_out:
         fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)
 
