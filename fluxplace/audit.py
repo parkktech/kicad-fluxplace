@@ -380,3 +380,114 @@ def stackup(board_path):
         out["impedance_note"] = ("Stackup and dielectric are defined; impedance "
                                  "can be computed from these files.")
     return out
+
+
+# --------------------------------------------------------------------------
+# Connectivity invariant + stage ledger
+# --------------------------------------------------------------------------
+# A placement / routing / repair step that silently re-nets a pad, drops a footprint or swaps a value
+# produces a board that still opens, still passes most gates, and is wrong. Every command that writes a
+# board (cli.main) and every pipeline stage snapshots pad -> net membership and footprint identity before
+# and after, and FAILS on any change it did not declare (sync-nets declares net changes,
+# replace-footprint declares footprint changes).
+
+EXPECT = {"sync-nets": ("nets",), "replace-footprint": ("footprints", "nets")}   # declared, legitimate changes
+
+
+def snapshot(board_path, checks=True):
+    """Pad -> net membership, footprint identity and pose, per-net copper signature, and two cheap checks.
+    Pins with several copper pieces sharing a number (a QFN's split pad) keep every piece: their nets are
+    compared as a multiset, so the pieces may be listed in any order."""
+    from collections import defaultdict
+    from . import routediag as RD
+    B = RD.load(board_path)
+    pads = defaultdict(list)
+    for q in B["pads"]:
+        pads[f"{q['ref']}.{q['num']}"].append(q["net"] or "")
+    fps, pos, seen = {}, {}, defaultdict(int)
+    for ref, p in B["parts"].items():
+        fps[ref] = [p["value"], p["fp"], p["side"]]
+        pos[ref] = [round(p["pos"][0], 4), round(p["pos"][1], 4), round(p["angle"] % 360, 3)]
+    cu = defaultdict(lambda: [0, 0, 0.0])
+    for s in B["segs"]:
+        c = cu[s["net"]]
+        c[0] += 1
+        c[2] += ((s["a"][0] - s["b"][0]) ** 2 + (s["a"][1] - s["b"][1]) ** 2) ** 0.5
+    for v in B["vias"]:
+        cu[v["net"]][1] += 1
+    snap = {"board": board_path, "pads": {k: sorted(v) for k, v in pads.items()}, "fps": fps, "pos": pos,
+            "copper": {n: [c[0], c[1], round(c[2], 3)] for n, c in cu.items()}, "checks": {}}
+    if checks:
+        from . import routeconn as RC, legality as LGL
+        snap["checks"]["open"] = sum(RC.text_open(B).values())
+        snap["checks"]["collision_fail"] = sum(1 for x in LGL.collisions(B) if x["level"] == "FAIL")
+    return snap
+
+
+def connectivity_diff(before, after, expect=()):
+    """-> {ok, violations [text], expected [text], moved {ref: [dx, dy, dangle]}, nets_touched [..]}.
+    `expect` = the changes this step declared: "nets" (pad net assignments), "footprints" (added / removed /
+    changed value or footprint, with their pads)."""
+    viol, exp = [], []
+    fa, fb = before["fps"], after["fps"]
+
+    def put(kind, text):
+        (exp if kind in expect else viol).append(text)
+
+    for r in sorted(fa.keys() - fb.keys()):
+        put("footprints", f"footprint removed: {r} ({fa[r][0]}, {fa[r][1]})")
+    for r in sorted(fb.keys() - fa.keys()):
+        put("footprints", f"footprint added: {r} ({fb[r][0]}, {fb[r][1]})")
+    for r in sorted(fa.keys() & fb.keys()):
+        for i, what in ((0, "value"), (1, "footprint")):
+            if fa[r][i] != fb[r][i]:
+                put("footprints", f"{what} changed: {r} {fa[r][i]!r} -> {fb[r][i]!r}")
+    pa, pb = before["pads"], after["pads"]
+    gone = set(fa) - set(fb)
+    new = set(fb) - set(fa)
+    touched = set()
+    for k in sorted(pa.keys() | pb.keys()):
+        x, y = pa.get(k), pb.get(k)
+        if x == y:
+            continue
+        ref = k.rsplit(".", 1)[0]
+        touched |= set(x or ()) | set(y or ())
+        if ref in new or ref in gone:                    # the footprint line above says it
+            continue
+        if x is None:
+            put("pads", f"pad added: {k} [{','.join(y)}]")
+        elif y is None:
+            put("pads", f"pad removed: {k} [{','.join(x)}]")
+        elif len(x) != len(y):
+            put("pads", f"pad pieces changed: {k} {len(x)} -> {len(y)} ({','.join(x)} -> {','.join(y)})")
+        else:
+            put("nets", f"net changed: {k} {','.join(n or '(none)' for n in x)} -> {','.join(n or '(none)' for n in y)}")
+    ca, cb = before.get("copper", {}), after.get("copper", {})
+    touched |= {n for n in ca.keys() | cb.keys() if ca.get(n) != cb.get(n)}
+    moved = {}
+    for r in sorted(set(before["pos"]) & set(after["pos"])):
+        a, b = before["pos"][r], after["pos"][r]
+        d = [round(b[0] - a[0], 4), round(b[1] - a[1], 4), round((b[2] - a[2] + 180) % 360 - 180, 3)]
+        if any(abs(v) > 1e-4 for v in d) or fa[r][2] != fb.get(r, fa[r])[2]:
+            moved[r] = d + ([fa[r][2] + "->" + fb[r][2]] if fa[r][2] != fb.get(r, fa[r])[2] else [])
+    return {"ok": not viol, "violations": viol, "expected": exp, "moved": moved,
+            "nets_touched": sorted(n for n in touched if n)}
+
+
+def ledger(step, before, after, diff, extra=None):
+    """-> (record dict, one-line text) for one board-writing step."""
+    mv = diff["moved"]
+    far = max((abs(complex(d[0], d[1])) for d in mv.values()), default=0.0)
+    cb, ca = before.get("checks", {}), after.get("checks", {})
+    chk = {k: [cb.get(k), ca.get(k)] for k in sorted(set(cb) | set(ca))}
+    rec = {"step": step, "ok": diff["ok"], "board_in": before["board"], "board_out": after["board"],
+           "violations": diff["violations"], "expected_changes": diff["expected"],
+           "moved": mv, "moved_count": len(mv), "max_move_mm": round(far, 3),
+           "nets_touched": diff["nets_touched"], "checks": chk}
+    rec.update(extra or {})
+    head = "OK" if diff["ok"] else f"FAIL connectivity ({len(diff['violations'])}: {'; '.join(diff['violations'][:3])})"
+    line = (f"{step}: {head}  moved {len(mv)}" + (f" (max {far:.2f} mm)" if mv else "") +
+            f"  nets touched {len(diff['nets_touched'])}" +
+            (f"  declared {len(diff['expected'])}" if diff["expected"] else "") +
+            "".join(f"  {k} {v[0]}->{v[1]}" for k, v in chk.items()))
+    return rec, line

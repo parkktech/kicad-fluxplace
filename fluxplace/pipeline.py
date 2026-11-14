@@ -794,6 +794,70 @@ FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
 
+# ------------------------------------------------------------------ connectivity invariant + ledger
+STAGE_EXPECT = {}          # stage -> declared connectivity changes (audit.connectivity_diff); no pipeline stage re-nets
+
+
+class _Ledger:
+    """Per stage: pad -> net / footprint identity invariant on the stage's board (FAIL on an undeclared change), and a
+    ledger W/<n>-<stage>/ledger.{json,txt} + one line per stage in W/LEDGER.txt. A run that ends before the last stage of
+    its flow gets an explicit INCOMPLETE marker with the remaining stages."""
+
+    def __init__(self, work, stages, i0):
+        self.work, self.stages, self.i0 = work, stages, i0
+        self.path = os.path.join(work, "LEDGER.txt")
+        self.cache = {}
+        with open(self.path, "a") as fh:
+            fh.write(f"--- run {time.strftime('%Y-%m-%d %H:%M:%S')} from {stages[i0]}\n")
+
+    def _snap(self, board):
+        from . import audit as AU
+        key = (os.path.abspath(board), os.stat(board).st_mtime_ns, os.stat(board).st_size)
+        if key not in self.cache:
+            self.cache = {key: AU.snapshot(board)}          # keep one: the next stage's "before"
+        return self.cache[key]
+
+    def before(self, board):
+        try:
+            self.b, self.bpath = self._snap(board), board
+        except Exception as e:                               # noqa: BLE001 - unreadable input: no invariant
+            self.b, self.bpath, self.err = None, board, str(e)
+
+    def after(self, name, n, res):
+        from . import audit as AU
+        out = res.get("board") or self.bpath
+        d = os.path.join(self.work, f"{n}-{name}")
+        os.makedirs(d, exist_ok=True)
+        if self.b is None or not out or not os.path.exists(out):
+            rec, line = {"step": name, "ok": None, "note": "no board snapshot"}, f"{name}: no board snapshot"
+        else:
+            a = self._snap(out)
+            diff = AU.connectivity_diff(self.b, a, STAGE_EXPECT.get(name, ()))
+            rec, line = AU.ledger(name, self.b, a, diff, {"verdict": res["verdict"]})
+            if not diff["ok"] and res["verdict"] not in ("fail", "blocked"):
+                res["verdict"] = "fail"
+                res["line"] = f"connectivity changed ({len(diff['violations'])}): " + "; ".join(diff["violations"][:2])
+                res["next"] = diff["violations"][:5] + [os.path.join(d, "ledger.json")]
+            line = f"{line}  verdict {res['verdict']}"
+        with open(os.path.join(d, "ledger.json"), "w") as fh:
+            json.dump(rec, fh, indent=1)
+        with open(os.path.join(d, "ledger.txt"), "w") as fh:
+            fh.write(line + "\n")
+        with open(self.path, "a") as fh:
+            fh.write(f"[{n}] {line}\n")
+
+    def finish(self, done):
+        """`done` = index of the last stage that completed. -> INCOMPLETE text or ''."""
+        rest = self.stages[done + 1:]
+        if not rest:
+            msg = "COMPLETE: every stage of the flow ran"
+        else:
+            msg = "INCOMPLETE - do not treat as done; remaining: " + ", ".join(rest)
+        with open(self.path, "a") as fh:
+            fh.write(msg + "\n")
+        return "" if not rest else msg
+
+
 # ------------------------------------------------------------------ driver
 def _silk_version_line(c, board):
     """A revision copy still carrying the old version on its silkscreen: say so before any stage runs."""
@@ -883,12 +947,16 @@ def run(a):
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
     rc = 0
+    led = _Ledger(work, STAGES_, i0)
+    done = i0 - 1
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
         prev = board
+        led.before(prev)
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
+        led.after(name, i + 1, res)
         if res.get("board") and res["board"] != prev:
             from . import questions as QS
             QS.inherit(prev, res["board"])
@@ -931,5 +999,14 @@ def run(a):
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break
+        done = i
+    inc = led.finish(done)
+    if inc:
+        st["incomplete"] = _clip(inc, 160)
+    else:
+        st.pop("incomplete", None)
+    save_state(work, st)
+    if inc:
+        print(inc)
     print(f"pipeline: {st['verdict']} at {st['stage']}; state {state_path(work)}")
     return rc

@@ -3555,6 +3555,69 @@ def _silk_hook(a):
     BW.set_post_write(lambda path, refs: SK.after_write(path, refs, cons))
 
 
+def _guard_begin(a):
+    """Connectivity invariant (audit.snapshot): every command that writes a .kicad_pcb from an input board is
+    checked pad -> net and footprint identity before / after. Off with FLUXPLACE_GUARD=0."""
+    import os as _os
+    if _os.environ.get("FLUXPLACE_GUARD", "1") == "0" or a.cmd == "pipeline":
+        return None
+    src = getattr(a, "board", None)
+    if not (isinstance(src, str) and src.endswith(".kicad_pcb") and _os.path.isfile(src)):
+        return None
+    out = getattr(a, "out", None)
+    out = out if isinstance(out, str) and out.endswith(".kicad_pcb") else src
+    st = lambda p: (_os.stat(p).st_mtime_ns, _os.stat(p).st_size) if _os.path.exists(p) else None
+    from fluxplace import audit as AU
+    try:
+        snap = AU.snapshot(src)
+    except Exception:                                    # noqa: BLE001 - a board the model cannot read: no guard
+        return None
+    return {"src": src, "out": out, "stat": st(out), "snap": snap, "st": st,
+            "orig": open(src, "rb").read() if _os.path.abspath(out) == _os.path.abspath(src) else None}
+
+
+def _gp(*x):
+    """guard lines go to stderr: stdout may be a command's machine output (--json)."""
+    import sys as _sys
+    print(*x, file=_sys.stderr)
+
+
+def _guard_end(g, a):
+    """-> True when the written board passes the invariant (or nothing was written)."""
+    import os as _os, json as _json, shutil as _sh
+    if not g or not _os.path.exists(g["out"]) or g["st"](g["out"]) == g["stat"]:
+        return True
+    from fluxplace import audit as AU
+    try:
+        after = AU.snapshot(g["out"])
+    except Exception as e:                               # noqa: BLE001
+        _gp(f"guard: FAIL cannot read the written board {g['out']}: {e}")
+        return False
+    d = AU.connectivity_diff(g["snap"], after, AU.EXPECT.get(a.cmd, ()))
+    rec, line = AU.ledger(a.cmd, g["snap"], after, d)
+    lp = _os.path.splitext(g["out"])[0] + ".ledger.json"
+    try:
+        with open(lp, "w") as fh:
+            _json.dump(rec, fh, indent=1)
+    except OSError:
+        lp = None
+    _gp("guard: " + line + (f"  ledger {lp}" if lp else ""))
+    if d["ok"]:
+        return True
+    for v in d["violations"][:40]:
+        _gp("  guard: " + v)
+    bad = _os.path.splitext(g["out"])[0] + ".rejected.kicad_pcb"
+    _sh.copy(g["out"], bad)
+    if g["orig"] is not None:                            # written in place: put the input back
+        with open(g["out"], "wb") as fh:
+            fh.write(g["orig"])
+    else:
+        _os.remove(g["out"])
+    _gp(f"guard: unintended connectivity change - result moved to {bad}"
+          + ("; input restored" if g["orig"] is not None else "; no output written"))
+    return False
+
+
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
@@ -3565,10 +3628,18 @@ def main(argv=None):
         print(text)
         raise SystemExit(0 if ok else 1)
     _silk_hook(a)
-    if a.cmd in OUT.COMPACT_CMDS:
-        rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
-    else:
-        rc = a.fn(a)
+    guard = _guard_begin(a)
+    try:
+        if a.cmd in OUT.COMPACT_CMDS:
+            rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
+        else:
+            rc = a.fn(a)
+    except SystemExit as e:
+        if not _guard_end(guard, a) and not e.code:
+            raise SystemExit(1)
+        raise
+    if not _guard_end(guard, a):
+        raise SystemExit(1)
     if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
         _sheet_hint(getattr(a, "out", None) or a.board)
     if type(rc) is int and rc:                  # a command that RETURNS its verdict code (fanout, pairs, snap-vias ...)
