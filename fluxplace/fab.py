@@ -15,8 +15,31 @@ surfaced in the manifest so the engineer can see exactly what was assumed.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
+
+
+# Extra manufacturing exports. name -> (kicad-cli subcommand, subfolder, file name
+# for a stem). Subfolders are fluxplace-owned like gerbers/ and are wiped on every
+# cut; deliver() never zips them (see [deliver] include_formats).
+FORMATS = {
+    "odb":     ("odb",     "odb",     "{stem}_odb.zip"),
+    "ipc2581": ("ipc2581", "ipc2581", "{stem}.xml"),
+    "ipcd356": ("ipcd356", "netlist", "{stem}.d356"),
+}
+DEFAULT_FORMATS = tuple(FORMATS)
+
+
+def supported_formats(kicad_cli="kicad-cli"):
+    """The FORMATS keys this kicad-cli advertises under `pcb export --help`."""
+    try:
+        r = subprocess.run([kicad_cli, "pcb", "export", "--help"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    subs = set(re.findall(r"^\s+(\w+)\s{2,}", (r.stdout or "") + (r.stderr or ""), re.M))
+    return {f for f, (sub, _, _) in FORMATS.items() if sub in subs}
 
 
 def _run(args, log):
@@ -48,7 +71,7 @@ def _listfiles(d):
     return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
 
 
-def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
+def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
     the failure in the manifest so the engineer sees exactly what did and didn't emit."""
@@ -74,6 +97,34 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
                          "--output", os.path.join(pdir, "pos.csv"),
                          "--format", "csv", "--units", "mm", "--side", "both",
                           "--exclude-dnp", board], log)
+    # extra formats (ODB++, IPC-2581, IPC-D-356). formats=None -> every format
+    # this kicad-cli supports. A format that fails is a FAIL line, never silent.
+    fmt_files, fmt_status = {}, {}
+    supported = supported_formats(kicad_cli)
+    if formats is None:
+        formats = [f for f in DEFAULT_FORMATS if f in supported]
+    stem = os.path.splitext(os.path.basename(board))[0]
+    for name in formats:
+        if name not in FORMATS:
+            fmt_status[name] = "FAIL (unknown format)"
+            log(f"FAIL fab format {name}: unknown format (known: {', '.join(FORMATS)})")
+            continue
+        if name not in supported:
+            fmt_status[name] = "FAIL (not in this kicad-cli)"
+            log(f"FAIL fab format {name}: kicad-cli {kicad_cli} has no `pcb export {FORMATS[name][0]}`")
+            continue
+        sub, sdir, pattern = FORMATS[name]
+        fdir = os.path.join(out, sdir); _reset_dir(fdir)
+        target = os.path.join(fdir, pattern.format(stem=stem))
+        ok = _run([kicad_cli, "pcb", "export", sub, "--output", target, board], log)
+        if ok and os.path.isfile(target) and os.path.getsize(target) > 0:
+            fmt_status[name] = "ok"
+            fmt_files[sdir] = _listfiles(fdir)
+        else:
+            fmt_status[name] = "FAIL"
+            log(f"FAIL fab format {name}: export produced no output")
+    done.update(fmt_status)
+
     # DRC — the go/no-go the engineer checks first
     drc_path = os.path.join(out, "drc.json")
     _run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
@@ -132,7 +183,14 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
         for section in ("gerbers", "drill", "place"):
             for name in files[section]:
                 f.write(f"FILE         : {section}/{name}\n")
+        # extra formats: every file with its size, so a reviewer sees what each
+        # export actually produced (and deliver() can pick them up by section)
+        for sdir, names in sorted(fmt_files.items()):
+            for name in names:
+                size = os.path.getsize(os.path.join(out, sdir, name))
+                f.write(f"FILE         : {sdir}/{name}  ({size} bytes)\n")
     log(f"fab package -> {out}  (DRC {verdict})")
+    files.update(fmt_files)
     return {"out": out, "drc": verdict, "violations": nviol,
             "unconnected": nunc, "stages": done, "files": files}
 
@@ -170,15 +228,19 @@ def _manifest_files(fab_dir):
         if not line.startswith("FILE"):
             continue
         _, _, rel = line.partition(":")
-        rel = rel.strip()
+        rel = rel.split("  (")[0].strip()
         section, sep, name = rel.partition("/")
         if sep:
             out.setdefault(section, []).append(name)
     return out
 
 
+# Section folders the extra formats live in (see FORMATS). Loose by default.
+FORMAT_SECTIONS = tuple(sdir for _, sdir, _ in FORMATS.values())
+
+
 def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
-            log=print):
+            log=print, include_formats=()):
     """Split a fab package into `out_dir`: a CAM-only zip plus loose files.
 
     fab_dir       : an emit() output directory
@@ -188,6 +250,9 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
                     the upload slot wants a specific filename
     centroid_name : filename to copy place/pos.csv out under, for the separate
                     centroid upload. None keeps the old single-zip behaviour.
+    include_formats : format folders (odb, ipc2581, netlist) to put INSIDE the
+                    zip. Default none: they are copied loose into out_dir/<folder>/
+                    beside the zip, never inside it.
     """
     import tempfile
     import zipfile
@@ -200,6 +265,7 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
         os.makedirs(root)
         packed = []
         items = list(CAM_ONLY) if centroid_name else list(CAM_ONLY) + ["place"]
+        items += [s for s in include_formats if s in FORMAT_SECTIONS]
         for item in items:
             src = os.path.join(fab_dir, item)
             if not os.path.exists(src):
@@ -233,6 +299,16 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
             shutil.copy2(src, centroid)
 
     loose = []
+    for sec in FORMAT_SECTIONS:
+        if sec in include_formats or sec not in manifest:
+            continue
+        ldir = os.path.join(out_dir, sec)
+        os.makedirs(ldir, exist_ok=True)
+        for fname in manifest[sec]:
+            fsrc = os.path.join(fab_dir, sec, fname)
+            if os.path.isfile(fsrc):
+                shutil.copy2(fsrc, os.path.join(ldir, fname))
+        loose.append(sec + "/")
     for f in list(docs) + list(extras):
         rename = None
         if isinstance(f, (tuple, list)):

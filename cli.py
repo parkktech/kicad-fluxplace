@@ -112,9 +112,11 @@ def cmd_deliver(a):
                 print(f"    brief -> {made}")
             else:
                 print("    python-docx unavailable — markdown brief only")
+    from fluxplace import constraints as C
+    inc = tuple(C.load(a.constraints).get("deliver", {}).get("include_formats", ()))
     if a.no_pcbway:
         F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
-                  log=lambda m: print(m, flush=True))
+                  log=lambda m: print(m, flush=True), include_formats=inc)
         return
 
     # PCBWay's assembly page takes FOUR separate uploads — gerbers, BOM,
@@ -136,7 +138,7 @@ def cmd_deliver(a):
         extras.append((b, slots["slot_bom"]) if b == board_bom else b)
     F.deliver(a.fab_dir, a.out, os.path.splitext(slots["slot_gerbers"])[0],
               docs=docs, extras=extras, centroid_name=slots["slot_centroid"],
-              log=lambda m: print(m, flush=True))
+              log=lambda m: print(m, flush=True), include_formats=inc)
     notes = ""
     if a.assembly_notes and os.path.exists(a.assembly_notes):
         notes = open(a.assembly_notes, encoding="utf-8").read()
@@ -629,7 +631,9 @@ def cmd_fab(a):
     QS.refuse_assumed(a.board, "fab")
     _review_gate(a, stage="fab")
     _open_gate(a)
-    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli)
+    from fluxplace import constraints as C
+    fmts = C.load(a.constraints).get("fab", {}).get("formats")
+    res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, formats=fmts)
     print(f"DRC {res['drc']}; package at {res['out']}")
     if a.upload_out:
         fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)
