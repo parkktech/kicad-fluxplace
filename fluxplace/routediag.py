@@ -128,6 +128,13 @@ def load(path, track=None, clearance=None):
                     k[:2] == ["tracks", "not_allowed"] for k in keep if isinstance(k, list)),
                 "no_vias": bool(keep) and any(
                     k[:2] == ["vias", "not_allowed"] for k in keep if isinstance(k, list)),
+                "no_pads": bool(keep) and any(
+                    k[:2] == ["pads", "not_allowed"] for k in keep if isinstance(k, list)),
+                "no_footprints": bool(keep) and any(
+                    k[:2] == ["footprints", "not_allowed"] for k in keep if isinstance(k, list)),
+                "fills": [((BF._atoms(BF._first(fz, "layer")) or [""])[0],
+                           [tuple(BF._nums(xy)[:2]) for xy in BF._kids(BF._first(fz, "pts") or [], "xy")])
+                          for fz in BF._kids(z, "filled_polygon")],
                 "name": (BF._atoms(BF._first(z, "name")) or [""])[0]}
 
     for fp in BF._kids(root, "footprint"):
@@ -140,8 +147,17 @@ def load(path, track=None, clearance=None):
         fx, fy, fang = (_f(fp, "at", 3))
         side = "B.Cu" if (BF._atoms(BF._first(fp, "layer")) or ["F.Cu"])[0] == "B.Cu" else "F.Cu"
         mine = []
+        holes = []                                  # unnumbered NPTH (mechanical holes): kept apart from pads
         for pad in BF._kids(fp, "pad"):
             a = BF._atoms(pad)
+            if a and not a[0] and len(a) > 1 and a[1] == "np_thru_hole":
+                px, py, _pa = _f(pad, "at", 3)
+                dx, dy = BF._rot(px, py, fang)
+                dr = [v for v in BF._nums(BF._first(pad, "drill") or []) if v > 0]
+                if dr:
+                    holes.append({"ref": ref, "num": "", "x": fx + dx, "y": fy + dy, "drill": min(dr), "np": True, "tht": True,
+                                  "net": "", "layers": set()})
+                continue
             if not a or not a[0]:
                 continue
             px, py, pa = _f(pad, "at", 3)
@@ -158,11 +174,14 @@ def load(path, track=None, clearance=None):
                 elif l.endswith(".Cu"):
                     lay.add(l)
             ptype = a[1] if len(a) > 1 else ""
+            dr = [v for v in BF._nums(BF._first(pad, "drill") or []) if v > 0]
             p = {"ref": ref, "num": a[0], "x": fx + dx, "y": fy + dy,
                  "w": w, "h": h, "ex": ex, "ey": ey, "min": min(w, h),
                  "layers": lay or {side}, "net": nm(BF._net(pad)), "angle": pa,
                  "shape": a[2] if len(a) > 2 else "",
-                 "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole"}
+                 "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole",
+                 "drill": min(dr) if dr else 0.0,
+                 "rr": (BF._nums(BF._first(pad, "roundrect_rratio") or []) or [0.25])[0]}
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
@@ -191,7 +210,7 @@ def load(path, track=None, clearance=None):
                       "locked": any(k == "locked" or (isinstance(k, list) and k[:2] == ["locked", "yes"])
                                     for k in fp if isinstance(k, (str, list)) and (
                                         k == "locked" or (isinstance(k, list) and k and k[0] == "locked"))),
-                      "n_pads": len({p["num"] for p in mine})}
+                      "n_pads": len({p["num"] for p in mine}), "holes": holes}
     for z in BF._kids(root, "zone"):
         zones.append(zone_of(z))
 
@@ -228,8 +247,15 @@ def load(path, track=None, clearance=None):
     bbox = (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 1, 1)
 
     dtrack, dclear = 0.15, 0.14
+    sev, hclear = {}, 0.25                     # DRC rule severities + hole clearance (collision gate, legality.collisions)
     pro = os.path.splitext(path)[0] + ".kicad_pro"
     if os.path.exists(pro):
+        try:
+            ds = json.load(open(pro)).get("board", {}).get("design_settings", {})
+            sev = dict(ds.get("rule_severities") or {})
+            hclear = float((ds.get("rules") or {}).get("min_hole_clearance", hclear))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
         try:
             for c in json.load(open(pro))["net_settings"]["classes"]:
                 if c.get("name") == "Default":
@@ -241,7 +267,8 @@ def load(path, track=None, clearance=None):
             "vias": vias, "copper": copper, "bbox": bbox, "edge": edge,
             "diag": math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]),
             "track": track if track is not None else dtrack,
-            "clearance": clearance if clearance is not None else dclear}
+            "clearance": clearance if clearance is not None else dclear,
+            "severities": sev, "hole_clearance": hclear}
 
 
 def unrouted_nets(B):

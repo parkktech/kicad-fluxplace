@@ -27,6 +27,7 @@ Violations, per part (`Legal.part_issues`):
 """
 import fnmatch
 import re
+from collections import defaultdict
 
 from . import geom as GM
 from . import legalise as LG
@@ -290,3 +291,220 @@ def moves_since(B, origin):
     return {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"]) for r, p in B["parts"].items()
             if abs(p["pos"][0] - origin[r][0]) > 1e-4 or abs(p["pos"][1] - origin[r][1]) > 1e-4
             or abs((p["angle"] - origin[r][2] + 180) % 360 - 180) > 1e-6}
+
+
+# ---- copper-collision gate: true pad shapes, grouped by footprint pair, severity + relevance ------------------------
+# kind: (KiCad DRC rule whose project severity sets the level, relevance, hard = always FAIL, text)
+KINDS = {
+    "copper_overlap":    ("shorting_items", "electrical", True, "copper of different nets overlaps"),
+    "copper_clearance":  ("clearance", "manufacturing", False, "copper of different nets inside the clearance"),
+    "keepout":           ("items_not_allowed", "placement", True, "inside a rule area that forbids it"),
+    "keepout_trapped":   ("items_not_allowed", "routing", True, "connected pad inside a track-forbidding rule area"),
+    "keepout_own":       ("items_not_allowed", "manufacturing", False, "the footprint's own hole inside its own pad-forbidding rule area"),
+    "courtyard_overlap": ("courtyards_overlap", "placement", False, "courtyards overlap on the same side"),
+    "hole_in_courtyard": ("pth_inside_courtyard", "placement", False, "a hole inside another part's courtyard"),
+    "hole_clearance":    ("hole_clearance", "manufacturing", False, "a hole closer than the hole clearance to another part's copper"),
+    "pour_island":       ("isolated_copper", "electrical", False, "a filled pour piece touches nothing of its net"),
+}
+RELEVANCE = ("placement", "routing", "manufacturing", "electrical")
+_LEVEL = {"error": "FAIL", "warning": "WARN", "ignore": "INFO"}
+_RANK = {"FAIL": 0, "WARN": 1, "INFO": 2}
+
+
+def _kind_level(kind, sev):
+    rule, _rel, hard, _t = KINDS[kind]
+    if hard:
+        return "FAIL"
+    return _LEVEL.get((sev or {}).get(rule, "error"), "FAIL")
+
+
+def _hole_shape(q):
+    return [(q["x"], q["y"])], q["drill"] / 2
+
+
+def _poly_hits_shape(pts, shape, margin=1e-6):
+    """Does a (possibly concave) polygon touch a pad shape (core, r) closer than `margin`?"""
+    core, r = shape
+    return GM.core_gap(core, pts) - r < margin
+
+
+def _bbox(pts, r=0.0):
+    return (min(p[0] for p in pts) - r, min(p[1] for p in pts) - r, max(p[0] for p in pts) + r, max(p[1] for p in pts) + r)
+
+
+def collisions(B, cons=None, relevance=None):
+    """Fast geometric pre-route collision check (no DRC run). -> [finding] grouped by footprint pair:
+    {level FAIL|WARN|INFO, code COLLISION, pair, kinds {kind: n}, relevance [tags], examples, msg, refs}.
+
+    Pads use their true shapes (circle / oval / roundrect / rect, rotated). Pads of the same footprint are never
+    tested against each other (a part's multi-piece pins sharing a number are one part's copper). Levels follow the
+    board project's DRC severities (`rule_severities`), except a different-net copper overlap and a keep-out
+    violation, which always FAIL. `relevance` = an iterable of tags to keep (placement / routing / manufacturing /
+    electrical); None keeps all. [placement] pad_clearance_mm overrides the board clearance (as for PLACEMENT_ILLEGAL)."""
+    cons = cons or {}
+    sev = B.get("severities") or {}
+    clr = float((cons.get("placement") or {}).get("pad_clearance_mm", B.get("clearance", 0.1)))
+    hclr = float(B.get("hole_clearance", 0.25))
+    P = B["parts"]
+    hits = defaultdict(lambda: defaultdict(list))         # key -> kind -> [example]
+
+    def hit(key, kind, ex):
+        hits[key][kind].append(ex)
+
+    def pair(a, b):
+        return tuple(sorted((a, b)))
+
+    cu = [q for q in B["pads"] if not q.get("np") and q["layers"]]
+    shp = {id(q): GM.pad_shape(q) for q in cu}
+    H = GM.Hash(2.0)
+    for i, q in enumerate(cu):
+        H.add(i, _bbox(shp[id(q)][0], shp[id(q)][1]), "x")
+    pad_by_ref = defaultdict(list)
+    for i, q in enumerate(cu):
+        pad_by_ref[q["ref"]].append(i)
+
+    # 1. pad-to-pad copper
+    reach = max(clr, hclr)
+    for i, q in enumerate(cu):
+        s = shp[id(q)]
+        for j in H.hits(_bbox(s[0], s[1]), "x", reach):
+            if j <= i:
+                continue
+            o = cu[j]
+            if o["ref"] == q["ref"] or (q["net"] and q["net"] == o["net"]) or not (q["layers"] & o["layers"]):
+                continue
+            g = GM.shape_gap(s, shp[id(o)])
+            ex = f"{q['ref']}.{q['num']}[{q['net'] or '-'}]/{o['ref']}.{o['num']}[{o['net'] or '-'}] gap {g:.3f}"
+            if g <= 1e-6:
+                hit(pair(q["ref"], o["ref"]), "copper_overlap", ex)
+            elif g < clr - 1e-6:
+                hit(pair(q["ref"], o["ref"]), "copper_clearance", ex)
+
+    # 2. holes: inside another part's courtyard, too close to another part's copper
+    allow = _pairs(cons)
+    holes = [q for q in B["pads"] if q.get("tht") and q.get("drill", 0) > 0] + \
+        [h for p in P.values() for h in p.get("holes", ())]
+    for q in holes:
+        hs = _hole_shape(q)
+        hb = _bbox(hs[0], hs[1])
+        for ref, p in P.items():
+            if ref == q["ref"] or frozenset((ref, q["ref"])) in allow or not p.get("court_layers"):
+                continue
+            if GM.overlap(hb, p["court"], -1e-3):
+                hit(pair(q["ref"], ref), "hole_in_courtyard",
+                    f"{'NPTH' if q.get('np') else 'PTH'} {q['ref']}.{q['num'] or '-'} in {ref} courtyard")
+        for j in H.hits(hb, "x", hclr):
+            o = cu[j]
+            if o["ref"] == q["ref"] or (q["net"] and q["net"] == o["net"]):
+                continue
+            g = GM.shape_gap(hs, shp[id(o)])
+            if g < hclr - 1e-6:
+                hit(pair(q["ref"], o["ref"]), "hole_clearance",
+                    f"hole {q['ref']}.{q['num'] or '-'} / {o['ref']}.{o['num']}[{o['net'] or '-'}] gap {g:.3f}")
+
+    # 3. rule areas (KiCad keep-outs; footprint-owned ones exempt their owner and the part they are named after)
+    allpads = [q for q in B["pads"] if q["layers"] or q.get("np")] + [h for p in P.values() for h in p.get("holes", ())]
+    for z in B["zones"]:
+        if not (z["keepout"] and len(z["pts"]) > 2 and (z.get("no_pads") or z.get("no_footprints") or z["no_tracks"])):
+            continue
+        zb = _bbox(z["pts"])
+        area = f"{z.get('owner') + ' ' if z.get('owner') else ''}rule area{(' ' + z['name']) if z['name'] else ''}".strip()
+        for q in allpads:
+            if not (q["np"] or q["layers"] & z["layers"]):
+                continue
+            s = _hole_shape(q) if q.get("np") else shp.get(id(q)) or GM.pad_shape(q)
+            if not GM.overlap(_bbox(s[0], s[1]), zb) or not _poly_hits_shape(z["pts"], s):
+                continue
+            own = z.get("owner") == q["ref"] or (q["ref"].upper() in (z["name"] or "").upper())
+            key = (q["ref"], "@" + area)
+            if own:
+                if q.get("np") and z.get("no_pads"):
+                    hit(key, "keepout_own", f"NPTH {q['ref']} in its own {area}")
+                continue
+            if z.get("no_pads"):
+                hit(key, "keepout", f"pad {q['ref']}.{q['num'] or '-'}[{q['net'] or '-'}] in {area} (pads not allowed)")
+            elif z["no_tracks"] and q["net"] and not q.get("np"):
+                hit(key, "keepout_trapped", f"pad {q['ref']}.{q['num']}[{q['net']}] in {area} (tracks not allowed)")
+        if z.get("no_footprints"):
+            for ref, p in P.items():
+                if ref == z.get("owner") or ref.upper() in (z["name"] or "").upper():
+                    continue
+                c = p["court"]
+                cp = [(c[0], c[1]), (c[2], c[1]), (c[2], c[3]), (c[0], c[3])]
+                if GM.overlap(c, zb) and _poly_hits_shape(z["pts"], (cp, 0.0)):
+                    hit((ref, "@" + area), "keepout", f"{ref} courtyard in {area} (footprints not allowed)")
+
+    # 4. constraint keep-outs and courtyard overlaps: the PLACEMENT_ILLEGAL model, re-keyed by pair
+    L = Legal(B, cons)
+    res = L.issues()
+    for x in res["overlap"]:
+        a, b = x.split("/")
+        hit(pair(a, b), "courtyard_overlap", f"{a}/{b} courtyards")
+    for x in res["forbidden"]:
+        ref, name = x.split(" in ", 1)
+        if name == "rule area" or any(name == (z["name"] or "rule area") for z in B["zones"] if z["keepout"]):
+            continue                                       # rule areas: handled above on true shapes
+        hit((ref, "@" + name), "keepout", f"{ref} in keep-out {name}")
+
+    # 5. pour islands: a filled piece touching no pad / via / track end of its net (needs filled zones in the file)
+    for z in B["zones"]:
+        if z["keepout"] or not z["net"] or not z.get("fills"):
+            continue
+        for layer, pts in z["fills"]:
+            if len(pts) < 3:
+                continue
+            fb = _bbox(pts)
+            ok = False
+            for q in B["pads"]:
+                if q["net"] == z["net"] and layer in q["layers"] and GM.overlap(_bbox([(q["x"], q["y"])], max(q["ex"], q["ey"])), fb):
+                    s = shp.get(id(q)) or GM.pad_shape(q)
+                    if _poly_hits_shape(pts, s, 0.01):
+                        ok = True
+                        break
+            if not ok:                                   # vias / tracks: true shapes (they sit in thermal cut-outs)
+                ok = any(v["net"] == z["net"] and
+                         GM.overlap(_bbox([(v["x"], v["y"])], v["d"] / 2), fb) and
+                         _poly_hits_shape(pts, ([(v["x"], v["y"])], v["d"] / 2), 0.01) for v in B["vias"]) or any(
+                    s["net"] == z["net"] and s["layer"] == layer and GM.overlap(_bbox([s["a"], s["b"]], s["w"] / 2), fb) and
+                    _poly_hits_shape(pts, ([s["a"], s["b"]], s["w"] / 2), 0.01) for s in B["segs"])
+            if not ok:
+                hit((f"{z['net']}@{layer}",), "pour_island",
+                    f"{z['net']} fill piece on {layer} near ({(fb[0] + fb[2]) / 2:.1f}, {(fb[1] + fb[3]) / 2:.1f})")
+
+    out = []
+    for key, kinds in hits.items():
+        lv = {k: _kind_level(k, sev) for k in kinds}
+        if kinds.keys() & {"hole_in_courtyard"}:
+            npth = all(e.startswith("NPTH") for e in kinds["hole_in_courtyard"])
+            lv["hole_in_courtyard"] = _LEVEL.get(sev.get("npth_inside_courtyard" if npth else "pth_inside_courtyard", "error"), "FAIL")
+        rel = sorted({KINDS[k][1] for k in kinds}, key=RELEVANCE.index)
+        if relevance is not None and not (set(rel) & set(relevance)):
+            continue
+        level = min(lv.values(), key=_RANK.get)
+        order = sorted(kinds, key=lambda k: (_RANK[lv[k]], k))
+        refs = [k for k in key if not k.startswith("@") and "@" not in k] if len(key) else []
+        name = " x ".join(k.lstrip("@") for k in key)
+        msg = f"{name}: " + "; ".join(f"{KINDS[k][3]} x{len(kinds[k])} ({lv[k]}, {KINDS[k][1]})" for k in order)
+        msg += " e.g. " + ", ".join(kinds[order[0]][:3])
+        out.append({"level": level, "code": "COLLISION", "msg": msg, "refs": sorted(refs), "pair": list(key),
+                    "kinds": {k: len(v) for k, v in kinds.items()}, "levels": lv, "relevance": rel,
+                    "examples": {k: v[:6] for k, v in kinds.items()}, "value": sum(len(v) for v in kinds.values()),
+                    "limit": 0, "cls": None})
+    out.sort(key=lambda f: (_RANK[f["level"]], f["pair"]))
+    return out
+
+
+def collision_gate(B, cons=None):
+    """-> (ok, findings): ok is False when any COLLISION finding is FAIL (route-ready, pipeline route stage)."""
+    f = collisions(B, cons)
+    return not any(x["level"] == "FAIL" for x in f), f
+
+
+def format_collisions(findings, title="", top=None):
+    from collections import Counter
+    n = Counter(x["level"] for x in findings)
+    L = [f"COLLISIONS {title}".rstrip() + f": {n['FAIL']} FAIL, {n['WARN']} WARN, {n['INFO']} INFO "
+         f"({len(findings)} footprint pair(s)/area(s))"]
+    for x in findings[:top] if top else findings:
+        L.append(f"  {x['level']:4s} [{','.join(x['relevance'])}] {x['msg']}")
+    return "\n".join(L)

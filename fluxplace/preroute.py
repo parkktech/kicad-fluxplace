@@ -16,6 +16,12 @@ exactly like review findings (same matcher).
   PLACEMENT_ILLEGAL    FAIL  same-side courtyard overlap, part outside the outline (edge connectors
                              may overhang by their mating side), part in a forbidden region, through-hole
                              pad in a no-through-hole region (legality.py)
+  COLLISION            FAIL/WARN/INFO  one finding per footprint pair (or part x rule area, or pour piece): true-shape
+                             copper overlap / clearance of different nets, keep-out (KiCad rule areas, constraint
+                             keep-outs), hole in another courtyard, hole clearance, courtyard overlap, pour island;
+                             each with a relevance tag (placement / routing / manufacturing / electrical).
+                             Levels follow the project's DRC severities; copper overlap + keep-out always FAIL.
+                             Seconds, no DRC (legality.collisions). Run by the gates only (collide=True).
 
     [preroute]
     cell_mm = 2.0            # congestion grid
@@ -37,7 +43,8 @@ from . import placechecks as PCK
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 CODES = ["NET_OVER_BUDGET", "SUPPORT_PART_FAR", "ANCHOR_MISORIENTED", "PIN_ESCAPE_BLOCKED",
          "KEEPOUT_TRAPPED", "CONGESTION", "RATSNEST_CROSSINGS", "ANCHOR_SPACING",
-         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED"]
+         "CONNECTOR_BLOCKED", "HEIGHT_REGION", "STALE_COPPER", "SIDE_POLICY", "PLACEMENT_ILLEGAL", "PLACE_ESCAPE_UNRESERVED",
+         "COLLISION"]
 
 
 def _f(level, code, msg, refs=(), value=None, limit=None, cls=None):
@@ -417,9 +424,10 @@ def plan_gate_fail(cons):
     return str(((cons or {}).get("route_ready") or {}).get("plan_gate", "warn")).lower() == "fail"
 
 
-def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True):
+def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False):
     """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
-    (escape planner + global router, copper of the board respected) and card["plan"]."""
+    (escape planner + global router, copper of the board respected) and card["plan"].  collide=True adds the
+    grouped COLLISION findings (legality.collisions; the gates set it, the optimisers' score does not need it)."""
     from . import review as R
     cons = cons or {}
     cls = NC.classify(B, cons, spec)
@@ -435,6 +443,8 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
     f += PCK.stale_copper(B)
     f += PCK.side_policy(B, cons, spec)
     f += LGL.findings(B, cons)
+    if collide:
+        f += LGL.collisions(B, cons)
     plan_v = None
     if plan:
         from . import planroute as PL
@@ -544,6 +554,13 @@ def format_text(findings, card, title=""):
         for o in card["overrides"]:
             L.append(f"    {o['net']:18s} {('none' if o['mm'] is None else format(o['mm'], 'g') + ' mm'):>8s}  now {o['length']:.1f} mm "
                      f"{'ok' if o['ok'] else 'OVER'}  - {o['reason'] or '(no reason given)'}")
+    col = [x for x in findings if x["code"] == "COLLISION"]
+    if col:
+        L.append(f"  collisions (by footprint pair; {sum(x['level'] == FAIL for x in col)} FAIL):")
+        for x in col[:10]:
+            L.append(f"    {x['level']:4s} [{','.join(x.get('relevance', []))}] {x['msg'][:220]}")
+        if len(col) > 10:
+            L.append(f"    ... {len(col) - 10} more (--all / --json)")
     L.append("  worst 10:")
     for x in worst(findings):
         L.append(f"    {x['code']:19s} {x['msg']}")

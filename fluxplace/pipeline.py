@@ -95,7 +95,7 @@ def format_status(st):
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR
     B = RD.load(board)
-    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons))
+    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True)
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
@@ -308,6 +308,7 @@ def st_route_ready(c, n, board):
     rc, text = _run_cli(["route-ready", board] + c.cs() + waive + ["--json", rj],
                         os.path.join(d, "stage.log"))
     sc, f, codes = _scorecard(board, c.cons, c.spec, c.a.waive or [])
+    _collision_report(c, d, board)
     if rc == 0:
         return {"verdict": "pass", "line": f"gate passed, {sc.get('fail', 0)} FAIL", "board": board,
                 "scorecard": sc}
@@ -361,6 +362,26 @@ def pair_gap(cons, p):
     return best[1] if best else None
 
 
+def _collision_report(c, d, board):
+    """legality.collisions on `board` -> d/collisions.{txt,json}; waivers as the gate's. -> summary dict."""
+    from . import routediag as RD, legality as LGL, review as R
+    f = LGL.collisions(RD.load(board), c.cons)
+    waivers = list(c.a.waive or []) + list(((c.cons or {}).get("review") or {}).get("waive", []))
+    f = [x for x in f if not R._waived(x, waivers)]
+    txt, js = os.path.join(d, "collisions.txt"), os.path.join(d, "collisions.json")
+    with open(txt, "w") as fh:
+        fh.write(LGL.format_collisions(f, board) + "\n")
+    with open(js, "w") as fh:
+        json.dump(f, fh, indent=1)
+    bad = [x for x in f if x["level"] == "FAIL"]
+    kinds = {}
+    for x in bad:
+        for k, v in x["kinds"].items():
+            kinds[k] = kinds.get(k, 0) + v
+    return {"fail": len(bad), "kinds": ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())), "txt": txt,
+            "lines": [f"COLLISION {x['msg'][:150]}" for x in bad]}
+
+
 def st_route(c, n, board):
     """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
@@ -368,6 +389,11 @@ def st_route(c, n, board):
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     from . import routerules as RR, routepar as RP
     a = c.a
+    col = _collision_report(c, c.dir(n, "route"), board)  # fast copper-collision gate: seconds, before any router hour
+    if col["fail"] and not a.force:
+        return {"verdict": "blocked", "board": board,
+                "line": f"collision gate: {col['fail']} FAIL footprint pair(s) ({col['kinds']})",
+                "next": col["lines"][:4] + [col["txt"], "fix the placement, waive (COLLISION:REGEX) or --force"]}
     rname = getattr(a, "router_name", None) or "krt"
     fr_loc = getattr(a, "fr_loc", None)
     have_krt = bool(a.router_py and a.router_dir and os.path.exists(a.router_py)

@@ -1917,14 +1917,31 @@ def cmd_route_ready(a):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(a.board, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons))
-    print(PR.format_text(f, card, a.board))
+    if getattr(a, "collisions_only", False):
+        from fluxplace import legality as LGL, review as R
+        waivers = list(a.waive or []) + list((cons.get("review") or {}).get("waive", []))
+        f = [x for x in LGL.collisions(B, cons) if not R._waived(x, waivers)]
+        rel = {t.strip() for t in (a.relevance or "").split(",") if t.strip()}
+        print(LGL.format_collisions([x for x in f if not rel or set(x["relevance"]) & rel], a.board))
+        if a.json:
+            with open(a.json, "w") as fh:
+                _json.dump({"findings": f}, fh, indent=1)
+        if any(x["level"] == "FAIL" for x in f):
+            raise SystemExit(1)
+        return
+    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons), collide=True)
+    if getattr(a, "relevance", None):           # display filter only: the verdict still counts every finding
+        keep = {t.strip() for t in a.relevance.split(",") if t.strip()}
+        shown = [x for x in f if x["code"] != "COLLISION" or set(x.get("relevance", ())) & keep]
+    else:
+        shown = f
+    print(PR.format_text(shown, card, a.board))
     if a.all:
-        for x in f:
+        for x in shown:
             print(f"  {x['level']:4s} {x['code']:19s} {x['msg']}")
     if a.json:
         with open(a.json, "w") as fh:
-            _json.dump({"scorecard": card, "findings": f}, fh, indent=1)
+            _json.dump({"scorecard": card, "findings": f}, fh, indent=1, default=sorted)
         print(f"route-ready: wrote {a.json}")
     if a.strip_stale:
         from fluxplace import placechecks as PCK
@@ -2030,7 +2047,7 @@ def _route_gate(a, board_path, stage="routing"):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(board_path, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()), plan=PR.use_plan(cons))
+    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()), plan=PR.use_plan(cons), collide=True)
     print(PR.format_text(f, card, board_path), flush=True)
     if card["fail"]:
         if getattr(a, "force", False):
@@ -3111,6 +3128,11 @@ def build_parser():
     prr.add_argument("--out", default=None, help="with --strip-stale: output board (default: in place)")
     prr.add_argument("--track", type=float, default=None)
     prr.add_argument("--clearance", type=float, default=None)
+    prr.add_argument("--collisions-only", action="store_true",
+                     help="only the copper-collision gate (seconds): COLLISION findings by footprint pair")
+    prr.add_argument("--relevance", default=None,
+                     help="show only COLLISION findings with these tags (placement,routing,manufacturing,electrical); "
+                          "display filter, the verdict counts all")
     prr.set_defaults(fn=cmd_route_ready)
     from fluxplace import plancli
     plancli.add_parsers(sub)              # map, plan-route, plan-compare
