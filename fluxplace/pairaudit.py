@@ -110,7 +110,13 @@ def audit(B, pairs, cons, open_nets):
         if not po and not no:
             pp, pn = profile(B, p), profile(B, n)
             e.update(p=pp, n=pn)
-            lim = C.skew_limit_mm(cons or {}, p)
+            try:
+                lim = C.skew_limit_mm(cons or {}, p)
+            except ValueError as ex:                   # a ps limit with no layer delay: never graded as passing
+                e.update(causes=[], skew=None, limit=None, status="unknown",
+                         why=f"{ex}; pair not graded")
+                res[(p, n)] = e
+                continue
             why, causes = [], []
             if pp["layers"] != pn["layers"]:
                 why.append(f"layers {'>'.join(x[:-3] for x in pp['layers'])} vs {'>'.join(x[:-3] for x in pn['layers'])}")
@@ -139,7 +145,7 @@ def strip_legs(text, nets):
 
 
 def summary(res):
-    out = {"complete": [], "mismatch": [], "half": [], "open": []}
+    out = {"complete": [], "mismatch": [], "half": [], "open": [], "unknown": []}
     for (p, n), e in res.items():
         out[e["status"]].append(f"{p}/{n}")
     return out
