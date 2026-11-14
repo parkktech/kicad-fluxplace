@@ -220,3 +220,23 @@ def test_no_rules_writes_no_rule_classes(tmp_path, monkeypatch):
                         log=lambda *_: None, board="unused.kicad_pcb")
     names = [c["name"] for c in json.loads(pro.read_text())["net_settings"]["classes"]]
     assert names == ["PWR_5V"]
+
+
+def test_net_gets_every_resolved_value_across_rules(tmp_path, monkeypatch):
+    # fix-c #1: A2 wins width from {net="^A"} and clearance from {net="^A2$"}; it must keep both.
+    import json
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text(json.dumps({"net_settings": {"classes": [], "netclass_patterns": []}}))
+    monkeypatch.setattr(RU, "board_objects",
+                        lambda path: ([{"net": "A1", "netclass": "Default"},
+                                       {"net": "A2", "netclass": "Default"}], []))
+    cons = {"rule": [{"name": "wide", "select": {"net": "^A"}, "set": {"width_mm": 0.4}},
+                     {"name": "gap", "select": {"net": "^A2$"}, "set": {"clearance_mm": 0.3}}]}
+    C.inject_netclasses(str(pro), cons, log=lambda *_: None, board="unused.kicad_pcb")
+    d = json.loads(pro.read_text())
+    cls = {c["name"]: c for c in d["net_settings"]["classes"]}
+    pats = {p["pattern"]: p["netclass"] for p in d["net_settings"]["netclass_patterns"]}
+    a2 = cls[pats["A2"]]
+    assert a2["track_width"] == 0.4 and a2["clearance"] == 0.3
+    a1 = cls[pats["A1"]]
+    assert a1["track_width"] == 0.4 and "clearance" not in a1

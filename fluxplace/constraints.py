@@ -310,6 +310,8 @@ def _rule_netclasses(board, cons, classes, patterns, log):
     except (RU.RuleError, OSError, RuntimeError, ImportError) as e:
         log(f"  rule netclasses skipped ({e})")
         return 0
+    # Group by the full set of resolved values (width, clearance, ...) so every net
+    # gets exactly what the rules resolved for it, no more and no less.
     groups = {}
     for n in nets:
         obj = {"net": n["net"], "netclass": n.get("netclass")}
@@ -319,11 +321,17 @@ def _rule_netclasses(board, cons, classes, patterns, log):
             if hits and not hits[0][0].legacy:
                 win[key] = (hits[0][0], hits[0][1])
         if win:
-            rule = next(iter(win.values()))[0]
             vals = {k: v for k, (_r, v) in win.items()}
-            groups.setdefault(id(rule), (rule, vals, []))[2].append(n["net"])
+            gkey = tuple(sorted(vals.items()))
+            first = win.get("width_mm", next(iter(win.values())))[0]
+            groups.setdefault(gkey, (first, vals, []))[2].append(n["net"])
+    used = set()
     for rule, vals, names in groups.values():
-        name = "RULE_" + re.sub(r"\W+", "_", rule.name or f"r{rule.order}").strip("_")
+        base = "RULE_" + re.sub(r"\W+", "_", rule.name or f"r{rule.order}").strip("_")
+        name, i = base, 2
+        while name in used:
+            name, i = f"{base}_{i}", i + 1
+        used.add(name)
         cls = {"name": name}
         if "clearance_mm" in vals:
             cls["clearance"] = float(vals["clearance_mm"])
