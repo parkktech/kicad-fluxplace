@@ -20,6 +20,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from .redact import urlopen as _redact_urlopen, redact as _redact
+
 __all__ = ["available", "token", "search", "datasheet_url", "part_data"]
 
 _TOKEN = {"value": None, "exp": 0.0}
@@ -58,7 +60,7 @@ def token(creds):
         "scope": "supply.domain"}).encode()
     req = urllib.request.Request(_IDENTITY, data=body, headers={
         "Content-Type": "application/x-www-form-urlencoded"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with _redact_urlopen(req, timeout=30) as r:
         d = json.load(r)
     _TOKEN["value"] = d["access_token"]
     _TOKEN["exp"] = time.time() + float(d.get("expires_in", 3600))
@@ -78,7 +80,7 @@ def search(mpn, creds, limit=3):
         body = json.dumps({"query": _QUERY, "variables": {"q": mpn, "limit": limit}}).encode()
         req = urllib.request.Request(_GQL, data=body, headers={
             "Content-Type": "application/json", "Authorization": "Bearer " + tok})
-        with urllib.request.urlopen(req, timeout=40) as r:
+        with _redact_urlopen(req, timeout=40) as r:
             d = json.load(r)
     except Exception:
         return []

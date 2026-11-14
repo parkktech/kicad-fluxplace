@@ -29,6 +29,8 @@ import time
 import urllib.error
 import urllib.request
 
+from .redact import urlopen as _redact_urlopen, redact as _redact
+
 from .models import credentials
 from . import sourcing as S
 
@@ -133,7 +135,7 @@ def _dk_details(mpn, creds, tok, on_token=None):
                      "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
                      "Authorization": "Bearer " + tok})
         try:
-            d = json.load(urllib.request.urlopen(req, timeout=30))
+            d = json.load(_redact_urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt < 2:
@@ -190,7 +192,7 @@ def _mouser_details(mpn, creds):
                 time.sleep(wait)
             S._last_mouser[0] = time.time()
             try:
-                d = json.load(urllib.request.urlopen(req, timeout=30))
+                d = json.load(_redact_urlopen(req, timeout=30))
                 break
             except urllib.error.HTTPError as e:
                 if e.code in (403, 429, 500, 502, 503, 504) and attempt < 2:
