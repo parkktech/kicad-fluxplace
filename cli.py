@@ -1779,6 +1779,8 @@ def cmd_finish(a):
         for n in res["diagnose"]["nets"]:
             print(f"  left open {n['net']}: " + "; ".join(str(c) for c in n["causes"][:2]))
     print(f"  protection: OK (hash {ck['hash_before']}, {len(ck['removed'])} removed, {sum(ck['added'].values())} added)")
+    cov = ", ".join(f"{k} {n}" for k, n in sorted(ck.get("covered", {}).items()))
+    print(f"  protected object classes: {cov or 'none'} (arc midpoints, via layer spans, keepouts, pad positions included)")
     for ext in (".kicad_pro", ".kicad_dru"):
         side = os.path.splitext(a.board)[0] + ext
         if os.path.exists(side):

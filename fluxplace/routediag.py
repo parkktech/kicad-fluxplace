@@ -228,6 +228,7 @@ def load(path, track=None, clearance=None, project=None):
             ex, ey = _f(n, "end")
             segs.append({"net": net, "a": (sx, sy), "b": (ex, ey),
                          "w": _f(n, "width", 1)[0],
+                         "mid": tuple(_f(n, "mid")) if n[0] == "arc" else None,
                          "layer": (BF._atoms(BF._first(n, "layer")) or [""])[0], "locked": _locked(n)})
 
     xs, ys, edge = [], [], []
