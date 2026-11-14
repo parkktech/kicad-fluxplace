@@ -181,6 +181,25 @@ def _real_layers(track, min_mm=2.0):
     return {l for l, mm in track.get("layers", {}).items() if mm >= min_mm}
 
 
+def _net_ps_per_mm(facts, net):
+    """Delay (ps/mm) of a net from the layers its copper is on, length-weighted; None when unknown."""
+    from . import impedance as IM
+    tr = (facts.get("net_tracks") or {}).get(net)
+    stackup = facts.get("stackup") or []
+    if not tr or not stackup:
+        return None
+    layers = {l: mm for l, mm in tr.get("layers", {}).items() if mm > 0}
+    return IM.route_delay_ps_per_mm(stackup, set(facts.get("plane_layers", [])), layers)
+
+
+def _ps_note(facts, master, skew_mm, limit_mm):
+    """' [X ps / limit Y ps]' next to an mm pair finding, or '' when the net's delay is unknown."""
+    pp = _net_ps_per_mm(facts, master)
+    if not pp:
+        return ""
+    return f" [{skew_mm * pp:.1f} ps / limit {limit_mm * pp:.1f} ps]"
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -204,7 +223,8 @@ def _pairs_from_audit(facts, cons):
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
         if "skew" in r["causes"]:
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit"))
+            note = _ps_note(facts, r["p"], r["skew"], r["limit"])
+            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
@@ -221,7 +241,15 @@ def check_pairs(facts, cons):
     if not pairs:
         return []
     lengths = {n: t["length"] for n, t in tracks.items()}
-    lim = lambda master: C.skew_limit_mm(cons or {}, master)
+    unknown = set()
+
+    def lim(master):
+        # a [pairs] skew_ps limit converts through the net's own layers; no delay known -> no finding, reported below
+        try:
+            return C.skew_limit_mm(cons or {}, master, ps_per_mm=lambda m: _net_ps_per_mm(facts, m))
+        except ValueError:
+            unknown.add(master)
+            return float("inf")
     finds, _ = SI.pair_skew_findings(lengths, pairs, warn_mm=lim)
     out = []
     fams = tuple((cons or {}).get("pairs", {}))
@@ -232,7 +260,14 @@ def check_pairs(facts, cons):
     for level, code, msg in finds:
         master = msg.split("/")[0]
         hard = code == "PAIR_SKEW" and gated(master)
+        m_ = re.search(r"(\d+\.\d+)mm intra-pair skew .*limit ([\d.]+)mm", msg)
+        if m_:
+            msg += _ps_note(facts, master, float(m_.group(1)), float(m_.group(2)))
         out.append(_f(FAIL if hard else WARN, code, msg))
+    for master in sorted(unknown):
+        out.append(_f(WARN, "PAIR_DELAY_UNKNOWN",
+                      f"{master}: skew limit is in ps but the delay of its layers is unknown "
+                      "(no reference-plane geometry) — no skew check on this pair"))
     for slave, master in sorted(pairs.items()):
         tm, ts = tracks.get(master), tracks.get(slave)
         if not tm or not ts or not gated(master):
@@ -247,6 +282,24 @@ def check_pairs(facts, cons):
             out.append(_f(WARN, "PAIR_VIA_MISMATCH",
                           f"{master}/{slave}: {tm.get('vias', 0)} vs "
                           f"{ts.get('vias', 0)} vias"))
+    return out
+
+
+def check_erc(facts, spec, cons):
+    """Schematic-level electrical checks (ercnet): decoupling per IC rail, I2C pull-ups,
+    passive values, nets with no driver. The spec's netlist when given, else the board's."""
+    from . import ercnet as EN
+    if spec and spec.get("nets"):
+        src = spec
+    else:
+        parts = facts.get("parts", {})
+        pads = [dict(ref=ref, footprint=parts.get(ref, {}).get("footprint", ""),
+                     value=parts.get(ref, {}).get("value", ""), pad=num, net=net)
+                for net, rows in (facts.get("net_pads") or {}).items() for ref, num in rows]
+        src = pads
+    out = []
+    for f in EN.run(src, cons or {}, board_facts=facts):
+        out.append(_f(WARN if f["severity"] == "warning" else INFO, f["code"], f["msg"], f["refs"]))
     return out
 
 
@@ -1665,6 +1718,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
+    out += check_erc(facts, spec, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)
     out += check_spec_sync(facts, spec)
@@ -1813,6 +1867,9 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "models": [m.m_Filename for m in fp.Models()],
             "pad_geom": [(pad.GetNumber(), pad.GetFPRelativePosition().x / 1e6, pad.GetFPRelativePosition().y / 1e6,
                           pad.GetSize().x / 1e6, pad.GetSize().y / 1e6) for pad in fp.Pads()],
+            "pad_abs": {pad.GetNumber(): (round(pcbnew.ToMM(pad.GetPosition().x), 4),
+                                          round(pcbnew.ToMM(pad.GetPosition().y), 4))
+                        for pad in fp.Pads() if pad.GetNumber()},
             "mech": is_mechanical(ref, footprint_name, pads),
             "tht": any(p.GetDrillSize().x > 0 for p in fp.Pads()),
         }

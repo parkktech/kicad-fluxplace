@@ -209,6 +209,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
         side = "B" if (_atoms(_first(fp, "layer")) or ["F.Cu"])[0] == "B.Cu" else "F"
         pads, conn, total, tht = {}, 0, 0, False
         pad_geom, xs, ys = [], [], []
+        pad_abs = {}
         for pad in _kids(fp, "pad"):
             a = _atoms(pad)
             num, ptype, shape = a[0], (a[1] if len(a) > 1 else ""), (a[2] if len(a) > 2 else "")
@@ -225,6 +226,8 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
                 xs.append(ax + rx)
                 ys.append(ay + ry)
             pad_geom.append((num, pat[0], pat[1], (size + [0, 0])[0], (size + [0, 0])[1]))
+            if num:
+                pad_abs[num] = (round(ax, 4), round(ay, 4))
             if not num:
                 continue
             if num.isdigit():
@@ -263,6 +266,7 @@ def facts_from_file(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "pads": pads, "connectable_pads": conn, "pads_total": total,
             "models": [(_atoms(m) or [""])[0] for m in _kids(fp, "model")],
             "pad_geom": pad_geom,
+            "pad_abs": pad_abs,
             "mech": R.is_mechanical(ref, fpname, pads),
             "tht": tht,
         }

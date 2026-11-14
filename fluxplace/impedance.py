@@ -134,3 +134,64 @@ def options(target, diff, g, floor=0.127, gap=None, max_options=4):
     if not good:                      # nothing clears the floor: best margin first, flagged by `manufacturable: False`
         out.sort(key=lambda o: -min(o["width_mm"], o["gap_mm"]))
     return (good or out)[:max_options]
+
+
+# ==========================================================================
+# Propagation delay (ps/mm) from the same stackup geometry
+# ==========================================================================
+C_MM_PER_PS = 0.299792458      # speed of light in mm/ps
+
+
+def _hammerstad_er_eff(w, h, er):
+    """Hammerstad microstrip effective permittivity, w/h the trace width over dielectric height."""
+    u = w / h
+    if u <= 1.0:
+        return (er + 1) / 2 + (er - 1) / 2 * ((1 + 12 / u) ** -0.5 + 0.04 * (1 - u) ** 2)
+    return (er + 1) / 2 + (er - 1) / 2 * (1 + 12 / u) ** -0.5
+
+
+def _width_for_z0(geom, target_ohm):
+    """Trace width (mm) giving target_ohm on the layer, by bisection on the closed form (monotone in w)."""
+    lo, hi = 0.02, 10.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        if _z0(mid, geom) > target_ohm:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def delay_ps_per_mm(geom, w_mm=None):
+    """Propagation delay in ps per mm of trace for a `geometry()` dict.
+
+    Stripline (two reference planes): sqrt(Er)/c with Er the dielectric average of the two sides.
+    Microstrip (one plane): sqrt(Er_eff)/c, Hammerstad Er_eff at trace width `w_mm`; with no width
+    given, the 50 ohm width of the layer (the usual controlled-impedance case).
+    None when the layer has no reference plane at all (no defined delay)."""
+    if not geom or geom.get("model") is None:
+        return None
+    if geom["model"] == "microstrip":
+        h, er = (geom["hd"], geom["ed"]) if geom["hu"] is None else (geom["hu"], geom["eu"])
+        w = w_mm if w_mm is not None else _width_for_z0(geom, 50.0)
+        er_eff = _hammerstad_er_eff(w, h, er)
+    else:
+        er_eff = (geom["eu"] + geom["ed"]) / 2
+    return math.sqrt(er_eff) / C_MM_PER_PS
+
+
+def route_delay_ps_per_mm(stackup, planes, layer_mm):
+    """Length-weighted ps/mm over the layers a net runs on. layer_mm = {layer: routed mm}.
+    None when any of those layers has no delay (never guessed)."""
+    tot = sum(v for v in layer_mm.values() if v > 0)
+    if tot <= 0:
+        return None
+    acc = 0.0
+    for layer, mm in layer_mm.items():
+        if mm <= 0:
+            continue
+        d = delay_ps_per_mm(geometry(stackup, planes, layer))
+        if d is None:
+            return None
+        acc += d * mm
+    return acc / tot

@@ -92,3 +92,19 @@ WARN `control-pin-floating` (only drivers can be Hi-Z at power-up: GPIO-expander
 `open-drain-no-pullup`, `input-undriven`. Review codes are the upper-case forms (relevance electrical);
 `[review] control_pins = false` turns them off. Name regexes: `[lint.control_pins] control|gpio|open_drain|output|active_low`;
 extra rails: `[lint] rails = [...]`, `rail_regex`.
+
+## Schematic ERC (`fluxplace/ercnet.py`)
+
+Runs on the spec netlist when `--spec` is given (else the board's), pin names from the spec `pinmap` or the official KiCad symbol.
+
+| code | level | meaning |
+|---|---|---|
+| DECAP_MISSING | WARN | IC power pin on a rail with no capacitor rail-to-ground |
+| DECAP_FAR | WARN | nearest such capacitor farther than `[lint] decap_mm` (default 5.0), pad to pad, placed board only |
+| I2C_PULLUP_MISSING | WARN | SDA/SCL-named net with no resistor to a rail |
+| PASSIVE_VALUE | WARN / INFO | R/C/L value does not parse to number + unit; INFO for a pull resistor outside `[erc] pull_min_ohm`..`pull_max_ohm` (1k..100k) |
+| NET_NO_DRIVER | INFO | every pin is an input by official symbol pin type (needs the symbol) |
+
+Skew limits accept `_ps` spellings (`[pairs.FAMILY] skew_ps`, `[si] default_skew_ps`, `audio_skew_ps`, `skew_ps_by_kind`);
+they convert to mm by the delay of the layers the net runs on (`impedance.delay_ps_per_mm`). Pair findings print ps beside mm.
+A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never converted by a guess.

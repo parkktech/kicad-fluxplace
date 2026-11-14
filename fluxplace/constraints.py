@@ -184,29 +184,68 @@ def pour_nets(cons):
 SLOW_PAIR_SKEW_MM = 10.0      # audio-rate differential nets: a skew limit in the mm range has no meaning
 
 
-def skew_limit_source(cons, master):
+def _skew_entry(d, mm_key, ps_key):
+    """(value, unit, key) of the mm or _ps spelling of a skew limit in d, else None."""
+    if mm_key in d:
+        return float(d[mm_key]), "mm", mm_key
+    if ps_key in d:
+        return float(d[ps_key]), "ps", ps_key
+    return None
+
+
+def _to_mm(val, unit, key, ps_per_mm, master):
+    """A ps limit in mm via the layer delay of `master` (a float, or callable(master) -> ps/mm).
+    No delay known -> ValueError: a ps limit is never converted by a guessed delay."""
+    if unit == "mm":
+        return val
+    pp = ps_per_mm(master) if callable(ps_per_mm) else ps_per_mm
+    if not pp:
+        raise ValueError(f"{key} is in ps but the layer delay of {master} is unknown")
+    return val / pp
+
+
+def skew_limit_source(cons, master, ps_per_mm=None):
     """(limit mm, where it comes from) for the pair whose master net is `master`. Resolved through
-    rules.resolve: the longest matching [pairs.FAMILY] skew_mm, or a `[[rule]]` that sets skew_mm;
-    else `[si] skew_mm_by_kind = {audio = .., usb2 = ..}` for the pair's kind (netclass.pair_kind),
-    else low-speed (audio) pairs get `[si] audio_skew_mm` (10), everything else `[si] default_skew_mm` (1)."""
+    rules.resolve: the longest matching [pairs.FAMILY] skew_mm, or a `[[rule]]` that sets skew_mm; else the
+    longest matching [pairs.FAMILY] skew_ps; else `[si] skew_mm_by_kind` (or skew_ps_by_kind) for the pair's
+    kind (netclass.pair_kind), else low-speed (audio) pairs get `[si] audio_skew_mm` (or audio_skew_ps, 10 mm),
+    everything else `[si] default_skew_mm` (or default_skew_ps, 1 mm). ps values convert with `ps_per_mm`
+    (float, or callable(master) giving the ps/mm on the layers the net runs on)."""
     from . import rules as RU
     v, prov = RU.load(cons).resolve({"net": master}, "skew_mm")
     if v is not None:
         return float(v), f"{prov} skew_mm"
+    best = None
+    for fam, p in cons.get("pairs", {}).items():
+        if master.startswith(fam) and isinstance(p, dict) and "skew_ps" in p:
+            if best is None or len(fam) > best[0]:
+                best = (len(fam), float(p["skew_ps"]), f"[pairs.{fam}] skew_ps")
+    if best:
+        return _to_mm(best[1], "ps", best[2], ps_per_mm, master), best[2]
     si = cons.get("si", {}) or {}
     from . import netclass as NC
     kind = NC.pair_kind(master)
     by = si.get("skew_mm_by_kind") or {}
     if kind in by:
         return float(by[kind]), f"[si] skew_mm_by_kind.{kind}"
+    by_ps = si.get("skew_ps_by_kind") or {}
+    if kind in by_ps:
+        return _to_mm(float(by_ps[kind]), "ps", f"[si] skew_ps_by_kind.{kind}", ps_per_mm, master), \
+            f"[si] skew_ps_by_kind.{kind}"
     if kind == "audio":
-        return float(si.get("audio_skew_mm", SLOW_PAIR_SKEW_MM)), "[si] audio_skew_mm (low-speed pair)"
-    return float(si.get("default_skew_mm", 1.0)), "[si] default_skew_mm"
+        e = _skew_entry(si, "audio_skew_mm", "audio_skew_ps")
+        if e:
+            return _to_mm(e[0], e[1], f"[si] {e[2]}", ps_per_mm, master), f"[si] {e[2]} (low-speed pair)"
+        return SLOW_PAIR_SKEW_MM, "[si] audio_skew_mm (low-speed pair)"
+    e = _skew_entry(si, "default_skew_mm", "default_skew_ps")
+    if e:
+        return _to_mm(e[0], e[1], f"[si] {e[2]}", ps_per_mm, master), f"[si] {e[2]}"
+    return 1.0, "[si] default_skew_mm"
 
 
-def skew_limit_mm(cons, master):
+def skew_limit_mm(cons, master, ps_per_mm=None):
     """SI-lite intra-pair skew limit (mm): see skew_limit_source."""
-    return skew_limit_source(cons, master)[0]
+    return skew_limit_source(cons, master, ps_per_mm)[0]
 
 
 def env_profile(cons):

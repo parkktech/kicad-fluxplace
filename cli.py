@@ -1465,14 +1465,29 @@ def cmd_lint(a):
     from fluxplace import lint as L
     if not a.board and not a.spec:
         raise SystemExit("lint: give --board and/or --spec")
-    findings = []
+    from fluxplace import ercnet as EN
+    findings, pads, facts, spec, cons = [], None, None, None, {}
+    if getattr(a, "constraints", None):
+        from fluxplace import constraints as C
+        cons = C.load(a.constraints)
     if a.board:
         from fluxplace import kicad_io as IO
-        findings += L.run(L.pads_from_board(IO.load(a.board)), waivers=a.waive)
+        board = IO.load(a.board)
+        pads = L.pads_from_board(board)
+        findings += L.run(pads, waivers=a.waive)
+        facts = {"parts": {}}
+        for fp in board.GetFootprints():
+            facts["parts"][fp.GetReference()] = {"pad_abs": {
+                pd.GetNumber(): (pcbnew_mm(pd.GetPosition().x), pcbnew_mm(pd.GetPosition().y))
+                for pd in fp.Pads() if pd.GetNumber()}}
     if a.spec:                                   # control-pin default levels from the spec netlist
-        from fluxplace import constraints as C
+        with open(a.spec, encoding="utf-8") as fh:
+            spec = _json.load(fh)
         st = L.sch_pin_types(a.sch) if getattr(a, "sch", None) else None
-        findings += L.control_pins(_json.load(open(a.spec)), C.load(a.constraints), st, waivers=a.waive)
+        findings += L.control_pins(spec, cons, st, waivers=a.waive)
+    # schematic-level checks: the spec's netlist (pin names, values) + placed pad positions when a board is given
+    erc = EN.run(spec if spec and spec.get("nets") else pads, cons, board_facts=facts)
+    findings += EN.waive(erc, a.waive)
     n = L.summarize(findings)
     if a.json:
         with open(a.json, "w") as fh:
@@ -1482,6 +1497,10 @@ def cmd_lint(a):
         raise SystemExit(1)
     if a.fail_on == "error" and n["error"]:
         raise SystemExit(1)
+
+
+def pcbnew_mm(nm):
+    return round(nm / 1e6, 4)
 
 
 def _open_gate(a):
@@ -3136,7 +3155,7 @@ def build_parser():
                          help="design-completeness checks: missing power/IO "
                               "wiring, dead-end nets, non-latching connectors")
     pli.add_argument("--board", default=None)
-    pli.add_argument("--spec", default=None, help="control-pin default-level lint on this spec's netlist")
+    pli.add_argument("--spec", default=None, help="spec JSON: control-pin default levels and schematic checks (decoupling, I2C pull-ups, passive values)")
     pli.add_argument("--constraints", default=None, help="[lint] default_level / rails / control_pins regexes")
     pli.add_argument("--sch", default=None, help="schematic whose symbols give pin electrical types")
     pli.add_argument("--json", default=None, help="also write findings as JSON")
