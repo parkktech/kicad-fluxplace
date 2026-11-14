@@ -1719,7 +1719,7 @@ def _legacy_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u < base[1]:
         shutil.move(tmp, out)
-        _project_beside(a.board, out)
+        print(f"  project file: {_project_beside(a.board, out)} ({os.path.splitext(out)[0]}.kicad_pro)")
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
@@ -1729,12 +1729,17 @@ def _legacy_finish(a):
 
 def _project_beside(board, out):
     """The .kicad_pro of the input, copied next to the output under the output's own name (so it opens with
-    its rules). The .finish copy stays too: anything that reads it keeps working."""
+    its rules). An existing <out>.kicad_pro is never overwritten (it may carry hand edits). Returns
+    "wrote", "kept existing", or "no source" and the caller prints it."""
     import shutil
     side = os.path.splitext(board)[0] + ".kicad_pro"
     dst = os.path.splitext(out)[0] + ".kicad_pro"
-    if os.path.exists(side) and os.path.abspath(side) != os.path.abspath(dst):
-        shutil.copy(side, dst)
+    if not os.path.exists(side) or os.path.abspath(side) == os.path.abspath(dst):
+        return "no source"
+    if os.path.exists(dst):
+        return "kept existing"
+    shutil.copy(side, dst)
+    return "wrote"
 
 
 def cmd_finish(a):
@@ -1781,7 +1786,7 @@ def cmd_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u <= base[1]:
         shutil.move(tmp, out)
-        _project_beside(a.board, out)
+        print(f"  project file: {_project_beside(a.board, out)} ({os.path.splitext(out)[0]}.kicad_pro)")
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
