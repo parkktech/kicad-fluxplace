@@ -240,10 +240,10 @@ def _macro_ap(body, params):
                        for s in sh], GC._shape_min_dim(sh))
 
 
-def _analytic_box(cx, cy, w, h, deg=0.0):
-    import math
+def _analytic_box(ox, oy, cx, cy, w, h, deg=0.0):
+    """Box w x h centred (cx, cy) in aperture coords, turned by deg about the origin, flashed at (ox, oy)."""
     pts = [(cx - w / 2, cy - h / 2), (cx + w / 2, cy - h / 2), (cx + w / 2, cy + h / 2), (cx - w / 2, cy + h / 2)]
-    pts = GC._rot(pts, deg)
+    pts = [(x + ox, y + oy) for x, y in GC._rot(pts, deg)]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     return min(xs), min(ys), max(xs), max(ys)
 
@@ -263,8 +263,7 @@ def test_rotated_rect_macro_matches_analytic_box():
     ap = _macro_ap("21,1,2.0,0.4,0.5,0.3,30", [])
     got = _raster_extent_mm(ap, (5.0, 5.0))
     # Gerber rotates the whole primitive about the flash origin: centre (0.5,0.3) turns too.
-    (ccx, ccy), = GC._rot([(0.5, 0.3)], 30)
-    want = _analytic_box(5.0 + ccx, 5.0 + ccy, 2.0, 0.4, 30)
+    want = _analytic_box(5.0, 5.0, 0.5, 0.3, 2.0, 0.4, 30)
     assert _close_box(got, want, 0.03), (got, want)
 
 
