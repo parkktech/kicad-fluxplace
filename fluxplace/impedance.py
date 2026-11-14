@@ -195,3 +195,41 @@ def route_delay_ps_per_mm(stackup, planes, layer_mm):
             return None
         acc += d * mm
     return acc / tot
+
+def template_report(name, floor=0.127):
+    """Standard impedance cases for a named stackup template, on its outer
+    signal layer F.Cu: 50 ohm single-ended, 90 and 100 ohm differential.
+
+    Computed from the template's own layers through geometry()/options(), the
+    same path as a real board, so template numbers and board numbers cannot
+    drift apart. A two-layer template has only B.Cu as a plane, so that is
+    the reference used when the template names none."""
+    t = ST.PROFILES[name]
+    stack, copper = [], []
+    for l in t["layers"]:
+        if l["type"] == "copper":
+            stack.append({"name": l["name"], "type": "copper",
+                          "thickness": l["thickness"]})
+            copper.append(l["name"])
+        else:
+            stack.append({"name": None, "type": l["type"],
+                          "thickness": l["thickness"],
+                          "epsilon_r": l["epsilon_r"]})
+    planes = t.get("reference_layers") or [copper[-1]]
+    g = geometry(stack, planes, "F.Cu")
+    out = {"template": name, "signal_layer": "F.Cu", "planes": planes,
+           "model": g["model"] if g else None,
+           "se50": None, "diff90": None, "diff100": None}
+    if g is None or g["model"] is None:
+        return out
+    out["h_mm"] = round(g["hd"] if g["hu"] is None else g["hu"], 4)
+    out["er"] = round(g["ed"] if g["hu"] is None else g["eu"], 3)
+    for key, target, diff in (("se50", 50.0, False), ("diff90", 90.0, True),
+                              ("diff100", 100.0, True)):
+        opts = options(target, diff, g, floor=floor, max_options=1)
+        if opts:
+            o = opts[0]
+            out[key] = {"width_mm": o["width_mm"], "gap_mm": o["gap_mm"],
+                        "z": o["z"], "accuracy_pct": o["accuracy_pct"],
+                        "manufacturable": o["manufacturable"]}
+    return out

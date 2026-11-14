@@ -31,6 +31,7 @@ import urllib.request
 from .models import credentials
 
 CACHE_NAME = ".sourcing_cache.json"
+PARTDATA_CACHE = ".partdata_cache.json"   # written by partdata.py (same dir)
 CACHE_TTL = 24 * 3600          # stock moves daily, not minutely
 BAD = ("obsolete", "discontinued", "end of life", "eol", "nrnd",
        "not recommended", "last time buy")
@@ -82,6 +83,54 @@ def _dk_token(creds):
 
 _DK_MIN_INTERVAL = 0.25         # s between calls; DigiKey throttles bursts too
 _last_dk = [0.0]
+
+
+def _money(v):
+    """'$1.23' / '1,234.5' / 1.23 -> float, or None."""
+    if v in (None, ""):
+        return None
+    try:
+        return float(str(v).replace("$", "").replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def _breaks_dk(p):
+    """DigiKey v4 StandardPricing -> sorted [[break_qty, unit_price], ...]."""
+    out = []
+    for b in p.get("StandardPricing") or []:
+        q, u = b.get("BreakQuantity"), _money(b.get("UnitPrice"))
+        if q and u is not None:
+            out.append([int(q), u])
+    return sorted(out)
+
+
+def _breaks_mouser(p):
+    """Mouser PriceBreaks -> sorted [[break_qty, unit_price], ...]."""
+    out = []
+    for b in p.get("PriceBreaks") or []:
+        q, u = b.get("Quantity"), _money(b.get("Price"))
+        if q and u is not None:
+            out.append([int(q), u])
+    return sorted(out)
+
+
+def unit_price_at(breaks, qty):
+    """-> (unit_price, moq) for buying `qty` pieces from [[break_qty, price]].
+
+    The deepest break at or below `qty` applies. Below the first break the
+    first price applies and the buy is raised to that MOQ (the caller prices
+    max(qty, moq)). (None, None) when no breaks are known."""
+    if not breaks:
+        return None, None
+    ordered = sorted(breaks)
+    price = None
+    for q, u in ordered:
+        if q <= qty:
+            price = u
+    if price is None:
+        return ordered[0][1], ordered[0][0]
+    return price, 1
 
 
 def _search_term(mpn):
@@ -138,7 +187,8 @@ def _dk(mpn, creds, tok, retries=3, on_token=None):
             continue
         row = [p.get("QuantityAvailable", 0),
                (p.get("ProductStatus") or {}).get("Status", "?"),
-               p.get("UnitPrice"), "", ("" if exact else cand)]
+               p.get("UnitPrice"), "", ("" if exact else cand),
+               _breaks_dk(p)]
         if exact:
             return row
         if best is None or row[0] > best[0]:
@@ -203,7 +253,8 @@ def _mouser_once(term, mpn, creds, retries=3):
         return [int(digits or 0), p.get("LifecycleStatus") or "Active",
                 (breaks[0].get("Price") if breaks else None),
                 p.get("LeadTime") or "",
-                ("" if exact else p.get("ManufacturerPartNumber", ""))]
+                ("" if exact else p.get("ManufacturerPartNumber", "")),
+                _breaks_mouser(p)]
     return None
 
 
@@ -253,9 +304,15 @@ def load_map(path):
 
 # ------------------------------------------------------------------- check
 def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
-          both=False):
+          both=False, qty=None):
     """-> (report, counts). Never raises on a per-part API error: an outage
-    must not block a layout, it just leaves that part ungraded."""
+    must not block a layout, it just leaves that part ungraded.
+
+    qty=None: legacy mode, every MPN must show `need` units in stock.
+    qty=N:    quantity mode. Each MPN must show per-board-count x N units,
+              its line is priced at that quantity from the distributors'
+              price breaks, and the Mouser lookup is always made so the
+              cheapest in-stock source can be chosen. `need` is ignored."""
     creds = credentials()
     if "DIGIKEY_CLIENT_ID" not in creds and "MOUSER_API_KEY" not in creds:
         log("    sourcing: no DigiKey/Mouser credentials — skipped")
@@ -272,6 +329,9 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
     for mpn in sorted(by_mpn):
         hit = cache.get(mpn)
         errs = []
+        req = len(by_mpn[mpn]) * qty if qty else need
+        if qty:
+            both = True
         if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
             dk, mo = hit.get("dk"), hit.get("mo")
         else:
@@ -288,7 +348,7 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             except Exception as e:
                 errs.append("DigiKey")
                 log(f"    ! DigiKey {mpn}: {e}")
-            settled = (dk and dk[0] >= need
+            settled = (dk and dk[0] >= req
                        and not any(b in str(dk[1]).lower() for b in BAD))
             if settled and not both:
                 skipped.add(mpn)        # DigiKey already passes it; don't burn
@@ -303,16 +363,138 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             # freeze a transient outage into the report for 24 h
             if not errs:
                 cache[mpn] = {"_t": time.time(), "dk": dk, "mo": mo}
-        verdict, stock = grade(dk, mo, need, errors=errs)
+        verdict, stock = grade(dk, mo, req, errors=errs)
         counts[verdict] = counts.get(verdict, 0) + 1
         report[mpn] = {"refs": by_mpn[mpn], "verdict": verdict,
                        "stock": stock, "digikey": dk, "mouser": mo,
-                       "mouser_skipped": mpn in skipped}
+                       "mouser_skipped": mpn in skipped,
+                       "required": req, "per_board": len(by_mpn[mpn]),
+                       "quantity": qty}
     try:
         json.dump(cache, open(cache_path, "w"))
     except Exception:
         pass
+    if qty:
+        price_lines(report, qty)
+        alternates(report, cache, cache_dir or ".")
     return report, counts
+
+
+# ------------------------------------------------------- quantity pricing
+def price_lines(report, qty):
+    """Attach per-source unit/extended price at the line quantity and pick
+    the cheapest source that can supply the line's required quantity.
+    Mutates report entries in place; quantity-independent data is untouched."""
+    for mpn, r in report.items():
+        req = r["required"]
+        prices = {}
+        for name, row in (("digikey", r["digikey"]), ("mouser", r["mouser"])):
+            breaks = row[5] if row and len(row) > 5 else None
+            if breaks is None:
+                prices[name] = {"unit": None, "moq": None, "ext": None,
+                                "stock": row[0] if row else None,
+                                "note": "cache predates price breaks"
+                                if row else "not carried"}
+                continue
+            unit, moq = unit_price_at(breaks, req)
+            ext = None if unit is None else round(unit * max(req, moq), 4)
+            prices[name] = {"unit": unit, "moq": moq, "ext": ext,
+                            "stock": row[0] if row else None,
+                            "note": "" if unit is not None else "no price"}
+        options = [(v["ext"], n) for n, v in prices.items()
+                   if v["ext"] is not None and (v["stock"] or 0) >= req]
+        chosen = min(options)[1] if options else None
+        r["prices"] = prices
+        r["chosen"] = chosen
+        r["chosen_ext"] = min(options)[0] if options else None
+
+
+def totals(report):
+    """Per-source extended BOM cost and the cheapest-source total."""
+    out = {"digikey": {"lines": 0, "ext": 0.0, "unpriced": 0, "short": 0},
+           "mouser": {"lines": 0, "ext": 0.0, "unpriced": 0, "short": 0},
+           "best": {"lines": 0, "ext": 0.0, "unpriced": 0}}
+    for r in report.values():
+        for name in ("digikey", "mouser"):
+            pr = r["prices"][name]
+            if pr["ext"] is None:
+                out[name]["unpriced"] += 1
+                continue
+            out[name]["lines"] += 1
+            out[name]["ext"] = round(out[name]["ext"] + pr["ext"], 2)
+            if (pr["stock"] or 0) < r["required"]:
+                out[name]["short"] += 1
+        if r.get("chosen"):
+            out["best"]["lines"] += 1
+            out["best"]["ext"] = round(out["best"]["ext"] + r["chosen_ext"], 2)
+        else:
+            out["best"]["unpriced"] += 1
+    return out
+
+
+# -------------------------------------------------------------- alternates
+# Parametric keys that must agree for two passives to be the same value.
+_ALT_VALUE_KEYS = ("Resistance", "Capacitance", "Inductance", "Voltage - Rated",
+                   "Voltage Rated", "Current Rating")
+_ALT_KEYS = _ALT_VALUE_KEYS + ("Tolerance", "Power (Watts)",
+                               "Temperature Coefficient")
+
+
+def _alt_sig(data):
+    raw = {k.lower(): v for k, v in ((data or {}).get("raw_params") or {}).items()}
+    return {k: raw[k.lower()] for k in _ALT_KEYS if k.lower() in raw}
+
+
+def same_spec(target, cand):
+    """True when a cached part has the same package and the same electrical
+    value (and tolerance / rating where both state one) as the target. Parts
+    with no parametric data never match: an alternate needs evidence."""
+    if not target or not cand:
+        return False
+    tp, cp = target.get("package"), cand.get("package")
+    if not tp or not cp or _norm(tp) != _norm(cp):
+        return False
+    ts, cs = _alt_sig(target), _alt_sig(cand)
+    if not (set(ts) & set(cs) & set(_ALT_VALUE_KEYS)):
+        return False
+    return all(_norm(ts[k]) == _norm(cs[k]) for k in set(ts) & set(cs))
+
+
+def alternates(report, cache, cache_dir, limit=3):
+    """For LEAD/RISK/NONE lines: up to `limit` other parts already in the
+    local caches with the same package and value, graded at the line's
+    required quantity. Candidates only: no network call is made, and the
+    pinout and datasheet are NOT verified, so nothing is substituted."""
+    pd_path = os.path.join(cache_dir, PARTDATA_CACHE)
+    try:
+        pdata = json.load(open(pd_path))
+    except Exception:
+        pdata = {}
+    pool = {m: h.get("data") for m, h in pdata.items() if h.get("data")}
+    for mpn, r in report.items():
+        r["alternates"] = []
+        if r["verdict"] not in ("LEAD", "RISK", "NONE") or mpn not in pool:
+            continue
+        target = pool[mpn]
+        found = []
+        for cand, cdata in pool.items():
+            if cand == mpn or cand in report or not same_spec(target, cdata):
+                continue
+            hit = cache.get(cand)
+            if not hit:
+                continue
+            dk, mo = hit.get("dk"), hit.get("mo")
+            verdict, stock = grade(dk, mo, r["required"])
+            if verdict not in ("OK", "LOW"):
+                continue
+            tmp = {"required": r["required"], "digikey": dk, "mouser": mo}
+            price_lines({cand: tmp}, 1)
+            found.append({"mpn": cand, "verdict": verdict, "stock": stock,
+                          "ext": tmp.get("chosen_ext"),
+                          "source": tmp.get("chosen"),
+                          "status": "candidate - pinout/datasheet not verified"})
+        found.sort(key=lambda c: (c["ext"] is None, c["ext"] or 0, -c["stock"]))
+        r["alternates"] = found[:limit]
 
 
 def summary(report, counts, need, log=print, show_ok=False):
@@ -561,3 +743,49 @@ def datasheet_gate(mpns, creds=None, log=print):
                     "copper" % (len(blocked), len(rows))) if blocked
                    else "every datasheet is retrievable",
     }
+
+
+def _fmt_src(pr):
+    """Unit price, with the buy quantity when a break above the need forces
+    a larger MOQ (price for max(need, MOQ) pieces)."""
+    if pr["unit"] is None:
+        return pr.get("note") or "-"
+    txt = "%.4g" % pr["unit"]
+    return txt + (" buy%d" % pr["moq"]) if pr.get("moq", 1) > 1 else txt
+
+
+def quantity_table(report, qty, log=print):
+    """Text table for quantity mode: grade, price per source, the chosen
+    source per line, alternates for the blocked lines, and totals."""
+    log(f"    sourcing @ quantity {qty}: per-line need = refs x {qty}")
+    log(f"    {'verdict':7s}{'MPN':24s}{'need':>7s}  {'DK stock':>9s} "
+        f"{'DK unit':>12s}  {'MO stock':>9s} {'MO unit':>12s}  "
+        f"{'chosen':8s}{'line ext':>10s}  refs")
+    for mpn, r in sorted(report.items(),
+                         key=lambda kv: (kv[1]["verdict"] == "OK", kv[0])):
+        dk, mo = r["prices"]["digikey"], r["prices"]["mouser"]
+        ext = ("%.2f" % r["chosen_ext"]) if r.get("chosen_ext") is not None else "-"
+        log(f"    {r['verdict']:7s}{mpn[:23]:24s}{r['required']:>7d}  "
+            f"{('%d' % dk['stock']) if dk['stock'] is not None else '-':>9s} "
+            f"{_fmt_src(dk):>12s}  "
+            f"{('%d' % mo['stock']) if mo['stock'] is not None else '-':>9s} "
+            f"{_fmt_src(mo):>12s}  "
+            f"{(r.get('chosen') or '-'):8s}{ext:>10s}  "
+            f"[{' '.join(r['refs'])}]")
+        for alt in r.get("alternates") or []:
+            log(f"      alt {alt['verdict']:4s} {alt['mpn']:26s} stock "
+                f"{alt['stock']:>7d}  ext {alt['ext'] if alt['ext'] is not None else '-'}"
+                f"  ({alt['status']})")
+    t = totals(report)
+    log(f"    totals @ {qty}: DigiKey {t['digikey']['ext']:.2f} "
+        f"({t['digikey']['lines']} priced, {t['digikey']['short']} short)  "
+        f"Mouser {t['mouser']['ext']:.2f} ({t['mouser']['lines']} priced, "
+        f"{t['mouser']['short']} short)  cheapest-in-stock "
+        f"{t['best']['ext']:.2f} ({t['best']['lines']} lines, "
+        f"{t['best']['unpriced']} unpriced)")
+    counts = {}
+    for r in report.values():
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    log("    sourcing: " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        + f"  (quantity {qty})")
+    return t
