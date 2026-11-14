@@ -122,6 +122,7 @@ POLICY = {
     "review":            ("read",  "Design-review gate: net rules, pair skew, RF impedance, part data, pinmap, sync. "
                                    "Compact: verdict, counts, worst N, report path."),
     "bom-opt":           ("read",  "Part-count report: array, value-merge, package and parallel candidates."),
+    "rules":             ("read",  "Selector-rule cascade: effective value per key for one net or footprint, every matching rule (winner marked); or the rule table with match counts."),
     "route-ready":       ("read",  "Pre-route gate scorecard (net budgets, support parts, anchors, congestion); exit 1 on FAIL."),
     "route-diagnose":    ("read",  "Why nets stayed unrouted and which parts to move; read-only."),
     "floorplan-check":   ("read",  "Area budget before placing: per block and side, courtyard demand vs free region area "
@@ -178,6 +179,7 @@ LISTED = {
     "sourcing": ["board", "show_ok"],
     "spec-check": ["spec", "datasheets", "mpn_map"],
     "bom-opt": ["spec", "constraints"],
+    "rules": ["board", "constraints", "net", "ref", "json"],
     "drc-scope": ["board", "report", "full"],
     "fab": ["board", "out", "spec", "constraints", "no_api"],
     "deliver": ["fab_dir", "out", "name"],

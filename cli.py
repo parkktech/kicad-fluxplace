@@ -1836,6 +1836,71 @@ def cmd_bomopt(a):
         raise SystemExit(1)
 
 
+def cmd_rules(a):
+    """Selector-rule cascade: effective value per key with every matching rule (winner marked), or the rule table."""
+    import json as _json
+    from fluxplace import constraints as C
+    from fluxplace import rules as RU
+    cons = C.load(a.constraints)
+    try:
+        rs = RU.load(cons)
+    except RU.RuleError as e:
+        print(f"{e.code}: {e}")
+        raise SystemExit(1)
+    nets, fps = RU.board_objects(a.board)
+    if a.net or a.ref:
+        if a.net:
+            obj = next((n for n in nets if n["net"] == a.net), None)
+            if obj is None:
+                print(f"RULE_MATCHES_NOTHING: no net '{a.net}' on {a.board} (cascade uses name only)")
+                obj = {"net": a.net}
+        else:
+            obj = next((f for f in fps if f["ref"] == a.ref), None)
+            if obj is None:
+                print(f"RULE_MATCHES_NOTHING: no footprint '{a.ref}' on {a.board}")
+                obj = {"ref": a.ref}
+        keys = sorted({k for r in rs if RU.matches(r, obj) for k in r.set})
+        out = {"object": {k: v for k, v in obj.items() if k != "props"}, "keys": {}}
+        for k in keys:
+            hits = rs.cascade(obj, k)
+            out["keys"][k] = {"value": hits[0][1], "provenance": hits[0][0].label,
+                              "cascade": [{"rule": r.label, "value": v, "level": r._level,
+                                           "important": r.important, "won": i == 0}
+                                          for i, (r, v) in enumerate(hits)]}
+        if a.json:
+            print(_json.dumps(out, indent=2))
+            return
+        print(f"RULES {'net' if a.net else 'ref'} {a.net or a.ref}")
+        if not keys:
+            print("  no rule sets a key for this object")
+        for k, v in out["keys"].items():
+            print(f"  {k} = {v['value']}   <- {v['provenance']}")
+            for c in v["cascade"]:
+                tag = "WIN " if c["won"] else "    "
+                imp = " important" if c["important"] else ""
+                print(f"      {tag}{c['rule']:<36} level {c['level']:>3}{imp}  -> {c['value']}")
+        return
+    # table of every rule: how many objects it matches, and what matches nothing
+    warn = RU.check_matches(rs, nets=[n["net"] for n in nets], refs=[f["ref"] for f in fps])
+    rows = []
+    for r in rs:
+        objs = nets + fps
+        n_match = sum(1 for o in objs if RU.matches(r, o))
+        rows.append({"rule": r.label, "select": r.describe_select(), "set": r.set, "important": r.important,
+                     "matches": n_match, "legacy": r.legacy})
+    if a.json:
+        print(_json.dumps({"rules": rows, "warnings": [m for _r, m in warn]}, indent=2))
+        return
+    print(f"RULES {a.board} — {len(rows)} rule(s), {len(nets)} nets, {len(fps)} footprints")
+    for row in rows:
+        imp = " important" if row["important"] else ""
+        src = " (legacy)" if row["legacy"] else ""
+        print(f"  {row['rule']:<36} matches {row['matches']:>4}  {row['select']}{src}{imp}")
+        print(f"      set {row['set']}")
+    for _r, m in warn:
+        print(f"RULE_MATCHES_NOTHING: {m}")
+
+
 def cmd_route_diagnose(a):
     """Read-only: why did these nets not route, and what to move. Exit 0."""
     import json as _json
@@ -3131,6 +3196,15 @@ def build_parser():
     pbo.add_argument("--constraints", default=None, help="constraints TOML ([bom])")
     pbo.add_argument("--json", default=None, help="also write the result as JSON")
     pbo.set_defaults(fn=cmd_bomopt)
+    pru = sub.add_parser("rules",
+                         help="selector-rule cascade: effective per-net/footprint values with every "
+                              "matching rule (winner marked); without --net/--ref the rule table")
+    pru.add_argument("board", help="board .kicad_pcb")
+    pru.add_argument("--constraints", default=None, help="constraints TOML ([[rule]] and per-object blocks)")
+    pru.add_argument("--net", default=None, help="net name: show its cascade")
+    pru.add_argument("--ref", default=None, help="footprint reference: show its cascade")
+    pru.add_argument("--json", action="store_true", help="JSON output")
+    pru.set_defaults(fn=cmd_rules)
 
     prd = sub.add_parser("route-diagnose",
                          help="read-only: explain why nets stayed unrouted and "
