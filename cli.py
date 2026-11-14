@@ -1784,13 +1784,16 @@ def _tune_match(a):
         mem = LM.members(g, list(facts["net_pads"]))
         return LM.lengths_from_board(board, mem, stackup, planes, g["include_vias"])
 
+    from fluxplace import rules as RU
+    rules = RU.load(cons)
+    clr = lambda net: float(rules.resolve({"net": net}, "clearance_mm")[0] or 0.127)
     rep = TU.tune_match(a.board, a.out or a.board, groups, net_lengths, targets,
-                        kicad_cli=a.kicad_cli, max_rounds=a.rounds,
+                        kicad_cli=a.kicad_cli, max_rounds=a.rounds, clearance_of=clr,
                         log=lambda m: print(m, flush=True))
     OG.refill(a.out or a.board)
     bad = [r for r in rep if r["status"] != "ok"]
     for r in rep:
-        print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} "
+        print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} [{r['basis']}] "
               f"(target {r['target']:.2f} +/- {r['tol']:g}) {r['status']} {r.get('note', '')}")
     return 1 if bad else 0
 

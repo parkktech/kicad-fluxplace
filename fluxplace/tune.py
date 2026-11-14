@@ -388,12 +388,14 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
 
 
 def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="kicad-cli",
-               max_rounds=4, log=print):
+               max_rounds=4, clearance_of=lambda net: 0.127, log=print):
     """Lengthen the short members of each match group until they are within tolerance.
 
     groups_: lengthmatch.groups() entries (already selected for this run).
     net_lengths(board, group) -> {net: {"mm", "ps"}} for the group's members (measured on the working file).
     targets: {group name: (target, tolerance)} in the group's unit, fixed by the caller from the input board.
+    clearance_of(net) -> mm: the default leg spacing is 3 x max(widest track of the net, clearance) unless the
+    group sets spacing_mm (the centre-to-centre gap between adjacent legs, i.e. the bump width).
     Every bump is one DRC-guarded step (accepted only if violations and unconnected do not rise).
     Returns [{group, net, before, after, target, tol, status, note}]."""
     import pcbnew
@@ -409,9 +411,13 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
     for g in groups_:
         target, tol = targets[g["name"]]
         unit = g["unit"]
-        period = 2.0 * (g["spacing_mm"] or 0.4)          # spacing_mm = bump width
         for net in sorted(net_lengths(pcbnew.LoadBoard(work), g)):
-            row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit}
+            wb = pcbnew.LoadBoard(work)
+            width = max([t.GetWidth() / 1e6 for t in wb.GetTracks() if t.GetNetname() == net] or [0.0])
+            spacing = g["spacing_mm"] or 3.0 * max(width, clearance_of(net))
+            period = 2.0 * spacing                       # two legs per bump: leg gap = spacing
+            row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit,
+                   "spacing_mm": spacing}
             for rnd in range(max_rounds):
                 cur = net_lengths(pcbnew.LoadBoard(work), g).get(net)
                 val = None if cur is None else cur.get(unit if unit == "ps" else "mm")
@@ -452,9 +458,11 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                 row.update(status="fail", note=f"not within tolerance after {max_rounds} rounds")
             cur = net_lengths(pcbnew.LoadBoard(work), g).get(net, {})
             row["after"] = cur.get(unit if unit == "ps" else "mm")
+            row["basis"] = cur.get("basis", "total")
             row.setdefault("status", "ok")
             report.append(row)
-            log(f"  {g['name']}/{net}: {row.get('before')} -> {row['after']} ({row['status']}) {row.get('note', '')}")
+            log(f"  {g['name']}/{net}: {row.get('before')} -> {row['after']} {unit} [{row['basis']}] "
+                f"spacing {spacing:.3f} mm ({row['status']}) {row.get('note', '')}")
     shutil.move(work, out_path)
     for ext in (".kicad_pro", ".kicad_dru"):
         p = os.path.splitext(work)[0] + ext

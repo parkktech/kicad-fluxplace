@@ -338,7 +338,8 @@ def check_match_groups(facts, cons):
             mm = lens[n]["mm"]
             ps = lens[n]["ps"]
             pstxt = f" / {ps:.1f} ps" if ps is not None else ""
-            parts.append(f"{n} {mm:.2f} mm{pstxt} (delta {d:+.2f} {res['unit']})" if d is not None
+            basis = "" if lens[n].get("basis") == "pad-to-pad" else " total"
+            parts.append(f"{n} {mm:.2f} mm{basis}{pstxt} (delta {d:+.2f} {res['unit']})" if d is not None
                          else f"{n} unknown")
         bad = [n for n, v, d, ok in res["rows"] if not ok]
         out.append(_f(FAIL, "MATCH_GROUP_SKEW",
