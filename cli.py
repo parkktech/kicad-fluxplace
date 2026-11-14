@@ -1839,7 +1839,8 @@ def cmd_tune(a):
     if a.prefix:
         pairs = {s: m for s, m in pairs.items() if m.startswith(tuple(a.prefix))}
     cons = C.load(a.constraints)
-    lim = lambda master: C.skew_limit_mm(cons, master)
+    from fluxplace.pairs import guard_limit      # ps limit with no known delay: not graded, never raises
+    lim = lambda master: guard_limit(cons, master)
     rep = TU.tune_pairs(a.board, a.out or a.board, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds,
                         log=lambda m: print(m, flush=True))

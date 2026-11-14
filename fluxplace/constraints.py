@@ -250,6 +250,15 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     return 1.0, "[si] default_skew_mm"
 
 
+def skew_limit_checked(cons, master, ps_per_mm=None):
+    """(limit mm or None, source). None = a ps limit with no known layer delay: report PAIR_DELAY_UNKNOWN and
+    do not grade the pair. Never raises for that case."""
+    try:
+        return skew_limit_source(cons, master, ps_per_mm)
+    except ValueError as e:
+        return None, f"PAIR_DELAY_UNKNOWN ({e})"
+
+
 def skew_limit_mm(cons, master, ps_per_mm=None):
     """SI-lite intra-pair skew limit (mm): see skew_limit_source."""
     return skew_limit_source(cons, master, ps_per_mm)[0]

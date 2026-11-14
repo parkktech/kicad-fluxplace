@@ -774,8 +774,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         return {"grid": grid, "items": items, "P": P, "base_n": items.mark(), "skip": pair_nets, "min_clearance": R.get("min_clearance", 0.0),
                 "closed": lambda pr: not open0.get(pr[0]) and not open0.get(pr[1]), "info": info, "rules": rules,
                 "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
-                "limit": lambda net: C.skew_limit_mm(cons, net),
-                "tol": lambda net: min(0.25 * C.skew_limit_mm(cons, net), 0.25),
+                "limit": lambda net: guard_limit(cons, net),
+                "tol": lambda net: min(0.25 * guard_limit(cons, net), 0.25),
                 "reserve": neg["reserve"], "preset": neg["preset"], "done": set()}
 
     def one_pass(order):
@@ -1058,7 +1058,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
         row = {"pair": e["pair"], "class": e["class"], "width": e["width"], "gap": e["gap"], "span": e["span"], "plan": e["status"],
                "why": e.get("why", ""), "blockers": e.get("blockers", []), "sections": e["sections"], "secs": e.get("secs", 0),
                "unpaired": e.get("unpaired", []), "netlist": {n: [f"{q['ref']}.{q['num']}" + (f" ({B2['parts'][q['ref']]['value']})" if B2["parts"].get(q["ref"], {}).get("value") else "")
-                                                                 for q in B2["pads"] if q["net"] == n and not q.get("np")] for n in pr}, "limit": C.skew_limit_mm(cons, pr[0]), "limit_from": C.skew_limit_source(cons, pr[0])[1], "geometry": e.get("geometry", {}),
+                                                                 for q in B2["pads"] if q["net"] == n and not q.get("np")] for n in pr}, "limit": C.skew_limit_checked(cons, pr[0])[0], "limit_from": C.skew_limit_checked(cons, pr[0])[1], "geometry": e.get("geometry", {}),
                "via_exit": sorted({x for s in e["sections"] for x in s.get("via_exit", [])}), "open": [opn.get(pr[0], 0), opn.get(pr[1], 0)]}
         if rep["plan_only"]:
             row["status"] = "planned" if e["status"] in ("planned", "kept") else "not-planned"
@@ -1255,3 +1255,11 @@ def add_parser(sub):
     p.add_argument("-q", "--quiet", dest="quiet", action="store_true")
     p.add_argument("--top", type=int, default=None)
     p.set_defaults(fn=cmd_pairs)
+
+
+def guard_limit(cons, net):
+    """Routing guard skew limit (mm). A ps limit with no known layer delay returns inf: the guard does not grade
+    that pair (the review reports PAIR_DELAY_UNKNOWN); it never raises."""
+    from . import constraints as C
+    lim, _src = C.skew_limit_checked(cons, net)
+    return float("inf") if lim is None else lim
