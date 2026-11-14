@@ -18,6 +18,8 @@ import os
 import shutil
 import subprocess
 
+from fluxplace import gerbercheck as GC
+
 
 def _run(args, log):
     log("  $ " + " ".join(args))
@@ -67,6 +69,9 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print):
                          "--output", ddir + os.sep, "--format", "excellon",
                          "--drill-origin", "plot", "--excellon-separate-th",
                          "--generate-map", "--map-format", "gerberx2", board], log)
+    # independent re-read of the exported copper + drill (gerbercheck.py)
+    done["gerbercheck"] = GC.emit_stage(out, board)
+
     # pick-and-place, both sides, CSV, mm. --exclude-dnp because this file is a
     # BUILD INSTRUCTION: a part flagged do-not-populate must not be handed to the
     # machine, and an assembler who fits one is following our own data.
