@@ -1679,10 +1679,10 @@ def cmd_repair(a):
               f"failed={res['failed']}")
 
 
-def cmd_finish(a):
-    """Route named nets with freerouting and take ONLY their copper back,
-    DRC-guarded: the result is kept if violations do not rise and the
-    unconnected count falls."""
+def _legacy_finish(a):
+    """`finish --nets` with no scope flag: the original behaviour, unchanged (the pipeline's per-net finish
+    relies on it). The named nets' existing copper is removed and re-routed; DRC-guarded: kept if violations
+    do not rise and the unconnected count falls."""
     import shutil
     from fluxplace import finish as FN, tune as TU
     out = a.out or a.board
@@ -1700,6 +1700,69 @@ def cmd_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u < base[1]:
         shutil.move(tmp, out)
+        _project_beside(a.board, out)
+        print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
+    else:
+        print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
+              f"(was {base[0]} / {base[1]}); scratch left at {tmp}")
+        raise SystemExit(1)
+
+
+def _project_beside(board, out):
+    """The .kicad_pro of the input, copied next to the output under the output's own name (so it opens with
+    its rules). The .finish copy stays too: anything that reads it keeps working."""
+    import shutil
+    side = os.path.splitext(board)[0] + ".kicad_pro"
+    dst = os.path.splitext(out)[0] + ".kicad_pro"
+    if os.path.exists(side) and os.path.abspath(side) != os.path.abspath(dst):
+        shutil.copy(side, dst)
+
+
+def cmd_finish(a):
+    """`finish`. With a scope flag (--refs/--area/--area-of/--selection) it routes that scope and copies back
+    ONLY its new copper, protection proven on the files (region.run). With --nets alone it is the legacy path."""
+    if not any((a.refs, a.area, a.area_of, a.selection)):
+        if not a.nets:
+            raise SystemExit("finish: give --nets (legacy) or --refs / --area / --area-of / --selection")
+        return _legacy_finish(a)
+    import shutil
+    from fluxplace import finish as FN, tune as TU, region as RG, routediag as RD
+    out = a.out or a.board
+    tmp = out + ".finish.kicad_pcb"
+    scope = RG.scope_from_args(RD.load(a.board), a.nets, a.refs.split(",") if a.refs else None, a.area,
+                               a.area_of.split(",") if a.area_of else None, a.margin, a.selection)
+    print(f"  scope: {scope['label']}")
+    base = TU.drc_counts(a.board, a.kicad_cli)
+    print(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
+    res = RG.run(a.board, tmp, scope, planes=a.planes, jar=a.jar, timeout=a.timeout,
+                 passes=a.passes, rip=a.rip, log=lambda m: print(m, flush=True))
+    ck = res                                    # run() returns the proof fields next to the counts
+    if not ck["ok"]:
+        bad = os.path.splitext(out)[0] + ".rejected.kicad_pcb"
+        shutil.move(tmp, bad)
+        for v in ck["violations"][:40]:
+            print("  protect: " + v)
+        print(f"  finish FAILED protection check (hash {ck['hash_before']} != {ck['hash_after']}); "
+              f"output moved to {bad}; input untouched")
+        raise SystemExit(1)
+    print(f"  connections in scope: {sum(res['in_scope_before'].values())} open before, "
+          f"{sum(res['in_scope_after'].values())} still open")
+    print(f"  copper added: {res['added_tracks']} tracks, {res['added_vias']} vias, {res['added_mm']} mm "
+          f"on {res['nets_kept']}")
+    if res["nets_dropped"]:
+        print(f"  dropped (route left the area or out of scope): {res['nets_dropped']}")
+    if res["diagnose"] and res["diagnose"].get("nets"):
+        for n in res["diagnose"]["nets"]:
+            print(f"  left open {n['net']}: " + "; ".join(str(c) for c in n["causes"][:2]))
+    print(f"  protection: OK (hash {ck['hash_before']}, {len(ck['removed'])} removed, {sum(ck['added'].values())} added)")
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(a.board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
+    v, u = TU.drc_counts(tmp, a.kicad_cli)
+    if v <= base[0] and u <= base[1]:
+        shutil.move(tmp, out)
+        _project_beside(a.board, out)
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
@@ -2604,7 +2667,7 @@ def cmd_stackup_apply(a):
     if a.json:
         print(_json.dumps(res, indent=2)); return
 
-    ck = res["check"]
+    ck = res                                    # run() returns the proof fields next to the counts
     print("Stackup: %s" % a.profile)
     print("  %s" % ST.PROFILES[a.profile]["description"])
     print("  total thickness      : %.3f mm" % ST.total_thickness(a.profile))
@@ -3515,11 +3578,23 @@ def build_parser():
     prp.set_defaults(fn=cmd_repair)
 
     pfn = sub.add_parser("finish",
-                         help="route named nets with freerouting and take only "
-                              "their copper back, DRC-guarded")
+                         help="route a scope (nets, parts, area) with freerouting; copy back only "
+                              "new in-scope copper, protection proven, DRC-guarded")
     pfn.add_argument("--board", required=True)
     pfn.add_argument("--out", default=None)
-    pfn.add_argument("--nets", nargs="+", required=True)
+    pfn.add_argument("--nets", nargs="+", default=None,
+                     help="net names or regexes (a token that is a net name is taken literally)")
+    pfn.add_argument("--refs", default=None,
+                     help="GLOB[,GLOB]: parts; the nets touching them, intersected with --nets")
+    pfn.add_argument("--area", default=None,
+                     help="X1,Y1,X2,Y2 mm: only connections with both pins inside; new copper stays inside")
+    pfn.add_argument("--area-of", default=None, dest="area_of",
+                     help="REF[,REF...] (globs): area = their courtyards' bounding box")
+    pfn.add_argument("--margin", type=float, default=2.0, help="mm added around --area-of (default 2)")
+    pfn.add_argument("--selection", default=None,
+                     help='JSON {"nets":[..],"refs":[..],"area":[x1,y1,x2,y2]}; intersected with the rest')
+    pfn.add_argument("--rip", action="store_true",
+                     help="allow ripping in-scope nets' copper inside the area (nothing else is ever ripped)")
     pfn.add_argument("--planes", nargs="*", default=["In1.Cu", "In4.Cu"],
                      help="plane layers declared (type power) in the DSN")
     pfn.add_argument("--jar", default=None)

@@ -1,5 +1,7 @@
 # Routing: batch routing with checkpoints (`pipeline` route stage, `auto`, `compact`)
 
+Scoped routing (named nets, parts, an area, protected copper): `finish.md`. `route` itself is unchanged.
+
 **Never time-box a whole-board router call; use batch routing.** The external router (KiCadRoutingTools
 `py_router`) writes its output only when a whole pass, including its end-of-pass retry / rip-up phase, has
 finished. Killing a whole-board call at a timeout therefore loses everything. `fluxplace/batchroute.py` routes in
