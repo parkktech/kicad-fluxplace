@@ -136,7 +136,7 @@ POLICY = {
                                    "prints the table. Stages may take minutes."),
     # ---- write --------------------------------------------------------------
     "stackup-define":    ("write", "Define the stackup from a fab profile, solve 50/100 ohm geometry; apply=true writes it."),
-    "schematic":         ("write", "Generate a .kicad_sch from a spec or board and verify it against the netlist."),
+    "schematic":         ("write", "Drafted hierarchical .kicad_sch (one sheet per block) from a spec or board; gate: netlist diff, ERC, legibility, renders."),
     "datasheets":        ("write", "Fetch every MPN's datasheet via DigiKey/Mouser into the project."),
     "fab":               ("write", "Manufacturing package: gerbers, drill, centroid, DRC report (runs the review gate)."),
     "deliver":           ("write", "Package a fab directory for upload: CAM zip plus loose documents."),

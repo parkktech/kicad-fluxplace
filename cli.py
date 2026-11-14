@@ -2478,6 +2478,8 @@ def cmd_schematic(a):
             raise SystemExit(f"schematic: refusing to generate — {len(fails)} undocumented "
                              f"part(s). Fetch datasheets / cite pinmap_source, or pass "
                              f"--undocumented to override.")
+    if getattr(a, "layout", "blocks") == "blocks":
+        return _schematic_blocks(a)
     res = SC.generate(a.spec or a.board, a.out, title=a.title,
                       from_copper=bool(a.board and not a.spec))
     print("wrote %s" % res["path"])
@@ -2495,6 +2497,58 @@ def cmd_schematic(a):
                 if v.get(k): print("    %s: %s" % (k, v[k][:8]))
             for d in v.get("differing_nets", [])[:5]: print("    DIFF %s" % d)
         if a.json: print(_json.dumps(v, indent=2))
+
+
+def _schematic_blocks(a):
+    """--layout blocks: hierarchical drafted schematic + netlist/ERC/legibility gate + renders (fluxplace.schblocks)."""
+    import json as _json
+    from fluxplace import schinv as SI, schblocks as SB, constraints as _C
+    if not (a.spec or a.board):
+        raise SystemExit("schematic: --spec or --board is required")
+    cons = _C.load(getattr(a, "constraints", None))
+    M = SI.load(spec=a.spec, board=None if a.spec else a.board)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
+    st = SB.generate(M, a.out, cons, title=a.title)
+    stem = os.path.splitext(os.path.abspath(a.out))[0]
+    names = [b["name"] for b in st["blocks"]]
+    rdir = None if a.no_render else (a.render or stem + "-render")
+    g = {"ok": True}
+    if not a.no_verify:
+        g = SB.gate(M, a.out, kicad_cli=a.kicad_cli, render_dir=rdir, sheet_names=names)
+    elif rdir:
+        g["render"] = SB.render(a.out, rdir, a.kicad_cli)
+    nl = g.get("netlist", {})
+    lg = g.get("legibility", {"counts": {}, "total": 0})
+    er = g.get("erc", {})
+    verdict = "FAIL" if (not a.no_verify and not nl.get("ok")) else ("WARN" if lg.get("total") else "PASS")
+    rep = {"verdict": verdict, "generate": st, "gate": g}
+    with open(stem + ".schematic.json", "w") as fh:
+        _json.dump(rep, fh, indent=1, default=str)
+    lines = ["schematic: %s - %d blocks, %d parts, %d nets, %d wires, %d local / %d global labels, %d joins (%d left as labels)"
+             % (verdict, len(st["blocks"]), len(M["comps"]), len(M["nets"]), sum(b["wires"] for b in st["blocks"]),
+                sum(b["labels_local"] for b in st["blocks"]), sum(b["labels_global"] for b in st["blocks"]),
+                st["routed"], st["unrouted"])]
+    lines.append("blocks: " + ", ".join("%s %d" % (b["name"], b["refs"]) for b in st["blocks"]))
+    if not a.no_verify:
+        lines.append("netlist: %s - %d/%d nets, %d/%d pins, %d/%d components, %d declared no-connects"
+                     % (nl.get("verdict"), nl.get("nets_sch", 0), nl.get("nets_spec", 0), nl.get("pins_sch", 0),
+                        nl.get("pins_spec", 0), nl.get("components_sch", 0), nl.get("components_spec", 0), nl.get("nc_declared", 0)))
+        for k in ("error", "missing_nets", "extra_nets", "differing_nets", "split_names", "missing_components",
+                  "extra_components", "differing_components"):
+            if nl.get(k):
+                lines.append("  %s: %s" % (k, str(nl[k])[:300]))
+        lines.append("erc: %d - %s" % (er.get("total", 0), ", ".join("%s %d" % kv for kv in er.get("by_type", {}).items()) or "none"))
+        lines.append("legibility: %d - %s" % (lg.get("total", 0), ", ".join("%s %d" % kv for kv in lg.get("counts", {}).items())))
+    if g.get("render"):
+        r = g["render"]
+        lines.append("render: %s (%d PNG pages, %d SVG)" % (os.path.dirname(r["pdf"] or r["svg_dir"]), len(r["pngs"]), len(r["svgs"])))
+    lines.append("wrote %s (+%d sheets)" % (a.out, len(st["blocks"])))
+    lines.append("full report: %s.schematic.json" % stem)
+    with open(stem + ".schematic.txt", "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    if verdict == "FAIL":
+        raise SystemExit(1)
 
 
 def cmd_route_status(a):
@@ -3424,6 +3478,9 @@ def build_parser():
     psc.add_argument("--spec", default=None, help="spec JSON (preferred: it is the source of truth)")
     psc.add_argument("--board", default=None, help="or derive from the routed copper")
     psc.add_argument("--out", required=True)
+    psc.add_argument("--layout", choices=["blocks", "flat"], default="blocks",
+                     help="blocks (default): one drafted sheet per functional block ([schematic] in the constraints); "
+                          "flat: the old single net-label sheet")
     psc.add_argument("--title", default=None)
     psc.add_argument("--no-verify", action="store_true")
     psc.add_argument("--datasheets", default=None,
@@ -3435,6 +3492,8 @@ def build_parser():
                      help="generate anyway (recorded in the output)")
     psc.add_argument("--kicad-cli", default="kicad-cli")
     psc.add_argument("--json", action="store_true")
+    psc.add_argument("--render", default=None, help="blocks: render dir (default <out stem>-render/)")
+    psc.add_argument("--no-render", action="store_true", help="blocks: skip PDF/PNG/SVG renders")
     psc.set_defaults(fn=cmd_schematic)
 
     prs = sub.add_parser("route-status",

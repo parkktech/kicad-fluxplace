@@ -10,7 +10,7 @@ MAX_LINES = 15
 
 # command -> doc that holds the long form (moved from the README, nothing deleted)
 CMD_DOC = {
-    "pipeline": "../AGENT-PIPELINE",
+    "pipeline": "../AGENT-PIPELINE", "schematic": "schematic",
     "review": "review", "route-ready": "route-ready", "route-diagnose": "route-diagnose",
     "clusters": "clusters", "floorplan-check": "floorplan-check", "templates": "templates", "anchor-check": "anchor-check", "place": "place",
     "bom-opt": "bom-opt", "magnetics": "magnetics", "fit-sheet": "fit-sheet", "auto": "auto", "compact": "auto",
