@@ -10,7 +10,8 @@ re-reads those files and checks what the fab will actually receive:
   GERBER_ANNULAR     plated hole whose outer-layer copper ring is below
                      [fab] min_annular_mm (exact, from flash apertures)
   GERBER_DRILL_NO_PAD (WARN) plated hole with no copper under it on any layer
-  GERBER_LAYER_MISSING  expected copper/mask/silk/edge layer absent or empty
+  GERBER_LAYER_MISSING  expected copper/mask/silk/edge layer absent (or Edge.Cuts empty)
+  GERBER_LAYER_EMPTY    present but no features: copper WARN, mask/silk INFO
   GERBER_EDGE_OPEN   Edge.Cuts outline does not close on itself
 
 Thresholds come from the constraints' [fab] table (fab_profile); nothing here
@@ -40,7 +41,7 @@ import time
 
 import numpy as np
 
-FAIL, WARN = "FAIL", "WARN"
+FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 RESOLUTION_MM = 0.02
 ARC_CHORD_MM = 0.05
 
@@ -694,14 +695,20 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     for lay in expected:
         path = files.get(lay)
         if path is None:
-            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"expected layer {lay} not exported"))
+            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"expected layer {lay} not exported", lay))
             continue
         objs = parse_gerber_or_empty(path)
         if isinstance(objs, dict):
             findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"{lay}: unreadable ({objs['error']})", lay))
             continue
         if not objs:
-            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"{lay} is empty", lay))
+            # present but no features: a single-sided board legitimately has empty back layers
+            if lay == "Edge_Cuts":
+                findings.append(_f(FAIL, "GERBER_LAYER_MISSING", "Edge_Cuts is empty (no board outline)", lay))
+            elif re.fullmatch(r"(F|B|In\d+)_Cu", lay):
+                findings.append(_f(WARN, "GERBER_LAYER_EMPTY", f"{lay}: copper layer has no features", lay))
+            else:
+                findings.append(_f(INFO, "GERBER_LAYER_EMPTY", f"{lay} has no features (nothing to mask or print)", lay))
         parsed[lay] = objs
     log(f"gerber check: {len(parsed)} layer(s) parsed, copper {copper_layers} layer(s)")
 

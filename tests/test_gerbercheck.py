@@ -271,3 +271,28 @@ def test_off_centre_circle_primitive_is_y_up():
     ap = _macro_ap("1,1,0.6,0.0,0.4", [])     # circle d=0.6 at (0.0, +0.4)
     got = _raster_extent_mm(ap, (5.0, 5.0))
     assert _close_box(got, (4.7, 5.1, 5.3, 5.7), 0.03), got
+
+
+def test_single_sided_board_empty_back_layers_do_not_fail(tmp_path):
+    b = pcbnew.BOARD()                          # front copper + outline only: every back/mask/silk layer empty
+    b.SetCopperLayerCount(2)
+    _edge(b, [(0, 0), (30, 0), (30, 20), (0, 20)])
+    _track(b, 2, 5, 20, 5, 0.2)
+    fab, _ = _export(tmp_path, b, "onesided")
+    res = GC.check_package(fab, cons=CONS, log=lambda m: None)
+    assert "GERBER_LAYER_MISSING" not in _codes(res), GC.format_report(res)
+    assert _codes(res, GC.FAIL) == [], GC.format_report(res)
+    empty = {(f["code"], f["level"], f["layer"]) for f in res["findings"]}
+    assert ("GERBER_LAYER_EMPTY", GC.WARN, "B_Cu") in empty, GC.format_report(res)
+    for lay in ("B_Mask", "B_Silkscreen"):
+        assert ("GERBER_LAYER_EMPTY", GC.INFO, lay) in empty, GC.format_report(res)
+
+
+def test_missing_copper_file_still_fails(tmp_path):
+    b = _board()
+    _track(b, 2, 5, 20, 5, 0.2)
+    fab, _ = _export(tmp_path, b, "nocu")
+    os.remove(os.path.join(fab, "gerbers", "board-B_Cu.gbl"))
+    res = GC.check_package(fab, cons=CONS, log=lambda m: None)
+    assert ("GERBER_LAYER_MISSING", "B_Cu") in [(f["code"], f["layer"]) for f in res["findings"]
+                                               if f["level"] == GC.FAIL], GC.format_report(res)
