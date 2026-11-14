@@ -107,6 +107,7 @@ class Model:
         ds = board.GetDesignSettings()
         self.edge = max(P.get("edge", 0.0), mmv(ds.m_CopperEdgeClearance))
         self.hole_clr = P.get("hole_clr", P["clear"])
+        self.h2h = max(P.get("hole_to_hole", 0.0), mmv(ds.m_HoleToHoleMin))
         self.cu = [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()]
         self.lid = {board.GetLayerName(l): l for l in board.GetEnabledLayers().CuStack()}
         self.sig = [l for l in job["signal_layers"] if l in self.lid]
@@ -258,8 +259,10 @@ class Model:
             o = self.obs[i]
             same = o.net == net and net
             if same and o.kind == "via":            # same-net vias may merge, but no via centre inside another's copper:
-                ob = o.bb                           # KiCad flags the track end that sits on it (track_not_centered_on_via)
-                if math.hypot((ob[0] + ob[2]) / 2 - p[0], (ob[1] + ob[3]) / 2 - p[1]) < r + 0.01:
+                ob = o.bb
+                ob_r = (ob[2] - ob[0]) / 2          # no via centre inside another's copper: KiCad flags the track end that sits on it (track_not_centered_on_via)
+                d = math.hypot((ob[0] + ob[2]) / 2 - p[0], (ob[1] + ob[3]) / 2 - p[1])
+                if d < r + 0.01 or d < self.VDR + self.h2h - 1e-6 or d < dia / 2 + ob_r + cl - 1e-6:   # hole-to-hole applies to same-net vias too; so does the router's via clearance
                     return (o.what, o.kind, i)
                 continue
             if same and o.kind in ("track", "hole"):
