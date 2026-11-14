@@ -154,9 +154,9 @@ def test_missing_layer_and_open_edge_are_found(tmp_path):
 def test_emit_stage_returns_status_and_never_raises(tmp_path):
     # no package at all: every layer is missing, so FAIL; the report write
     # cannot land in a directory that does not exist, which must not raise
-    assert GC.emit_stage(str(tmp_path / "missing"), None, log=lambda m: None).startswith(("FAIL", "ERROR"))
-    assert GC.emit_stage(str(tmp_path / "missing" / "deeper"), None, log=lambda m: None) \
-        .startswith("ERROR")
+    assert GC.run_stage(str(tmp_path / "missing"), None, log=lambda m: None)["word"].startswith(("FAIL", "ERROR"))
+    assert GC.run_stage(str(tmp_path / "missing" / "deeper"), None, log=lambda m: None) \
+        ["word"].startswith("ERROR")
 
 
 def test_roundrect_macro_size_is_its_box_not_one_corner_circle():

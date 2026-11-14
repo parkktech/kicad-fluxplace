@@ -94,7 +94,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
                          "--drill-origin", "plot", "--excellon-separate-th",
                          "--generate-map", "--map-format", "gerberx2", board], log)
     # independent re-read of the exported copper + drill (gerbercheck.py)
-    done["gerbercheck"] = GC.emit_stage(out, board, cons=cons)
+    gerber = GC.run_stage(out, board, cons=cons, log=log)
+    done["gerbercheck"] = gerber["word"]
 
     # pick-and-place, both sides, CSV, mm. --exclude-dnp because this file is a
     # BUILD INSTRUCTION: a part flagged do-not-populate must not be handed to the
@@ -217,7 +218,7 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
     files.update(fmt_files)
     return {"out": out, "drc": verdict, "violations": nviol,
             "unconnected": nunc, "stages": done, "files": files,
-            "xcheck": xcheck}
+            "xcheck": xcheck, "gerber": gerber, "gerber_blocking": gerber["blocking"]}
 
 
 # --------------------------------------------------------------- delivery

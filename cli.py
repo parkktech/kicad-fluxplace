@@ -141,6 +141,12 @@ def cmd_deliver(a):
     QS.refuse_assumed(a.board, "deliver")
     _review_gate(a, stage="deliver")
     _open_gate(a)
+    from fluxplace import constraints as C, gerbercheck as GC
+    gerber = GC.run_stage(a.fab_dir, a.board, cons=C.load(a.constraints),
+                          log=lambda m: print(m, flush=True))
+    if gerber["blocking"]:
+        print("deliver: gerber check FAILED with [fab] gerber_check = fail; nothing delivered")
+        raise SystemExit(1)
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -687,6 +693,9 @@ def cmd_fab(a):
     res = fab.emit(a.board, a.out, kicad_cli=a.kicad_cli, formats=cons.get("fab", {}).get("formats"), cons=cons)
     print(f"DRC {res['drc']}; package at {res['out']}")
     if res["xcheck"]:
+        raise SystemExit(1)
+    if res["gerber_blocking"]:
+        print("fab: gerber check FAILED with [fab] gerber_check = fail; see gerbercheck.txt")
         raise SystemExit(1)
     if a.upload_out:
         fab.upload_package(a.board, a.upload_out, project_dir=a.project_dir)

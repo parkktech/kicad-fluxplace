@@ -793,20 +793,6 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
             "copper_layers": copper_layers, "holes": len(holes)}
 
 
-def emit_stage(out, board=None, cons=None, log=print):
-    """fab.emit hook: check the package just written under `out`, write
-    out/gerbercheck.txt and return the status word for the MANIFEST stages line.
-    Never raises: an error is returned as text so the export still completes."""
-    try:
-        r = check_package(out, board=board, cons=cons, log=log)
-        with open(os.path.join(out, "gerbercheck.txt"), "w") as f:
-            f.write(format_report(r) + "\n")
-        log(format_report(r).splitlines()[0])
-        return r["status"]
-    except Exception as e:
-        return "ERROR (%s)" % e
-
-
 def format_report(res):
     lines = [f"gerber check : {res['status']}  ({res['seconds']} s, raster {res['resolution_mm']} mm, "
              f"{res['copper_layers']} copper layer(s), {res['holes']} drill hit(s))"]
@@ -818,6 +804,55 @@ def format_report(res):
     if len(res["findings"]) > 20:
         lines.append(f"  ... {len(res['findings']) - 20} more")
     return "\n".join(lines)
+
+
+
+GATE_MODES = ("fail", "warn", "off")
+
+
+def gerber_mode(cons):
+    """[fab] gerber_check: "fail" (FAIL-level GERBER_* blocks fab/deliver), "warn"
+    (default: print prominently, exit code unchanged) or "off"."""
+    v = str(((cons or {}).get("fab") or {}).get("gerber_check", "warn")).strip().lower()
+    if v not in GATE_MODES:
+        raise ValueError(f"[fab] gerber_check = {v!r}: must be one of fail, warn, off")
+    return v
+
+
+def run_stage(out, board=None, cons=None, log=print):
+    """fab.emit / deliver gate. Checks the package under `out`, writes out/gerbercheck.txt,
+    and returns dict(word, blocking, mode, status). `word` is the MANIFEST stages value.
+    `blocking` is True only in "fail" mode when the check FAILs or raises (GERBER_CHECK_ERROR).
+    Never raises: an exception becomes word "ERROR (...)" and, in fail mode, blocking."""
+    mode = gerber_mode(cons)
+    if mode == "off":
+        return {"word": "OFF", "blocking": False, "mode": mode, "status": "OFF"}
+    try:
+        r = check_package(out, board=board, cons=cons, log=log)
+    except Exception as e:
+        log(f"GERBER_CHECK_ERROR: gerber check could not run: {e}")
+        return {"word": "ERROR (%s)" % e, "blocking": mode == "fail", "mode": mode, "status": "ERROR"}
+    log(format_report(r).splitlines()[0])
+    try:
+        with open(os.path.join(out, "gerbercheck.txt"), "w") as f:
+            f.write(format_report(r) + "\n")
+    except OSError as e:
+        log(f"GERBER_CHECK_ERROR: could not write gerbercheck.txt: {e}")
+        return {"word": "ERROR (%s)" % e, "blocking": mode == "fail", "mode": mode, "status": "ERROR"}
+    if r["status"] != "PASS":
+        tag = "GERBER CHECK FAILED - fab blocked (gerber_check = fail)" if (
+            mode == "fail" and r["status"] == "FAIL") else f"GERBER CHECK {r['status']} (gerber_check = {mode})"
+        log(f"*** {tag}")
+        for f in r["findings"]:
+            if f["level"] in (FAIL, WARN):
+                log(f"***   [{f['level']}] {f['code']} {f['layer'] or ''}: {f['msg']}")
+    return {"word": r["status"], "blocking": mode == "fail" and r["status"] == "FAIL",
+            "mode": mode, "status": r["status"]}
+
+
+def emit_stage(out, board=None, cons=None, log=print):
+    """Compatibility wrapper: the MANIFEST status word only."""
+    return run_stage(out, board=board, cons=cons, log=log)["word"]
 
 
 if __name__ == "__main__":
