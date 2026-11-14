@@ -72,6 +72,10 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 `min_drill_mm`, `min_annular_mm`, `min_via_dia_mm`, `min_silk_width_mm`,
 `profile`), `[silk]` (see `silk.md`).
 
+`HOLE_TO_HOLE` (FAIL, `holes.py`): edge-to-edge distance between every pair of drilled holes (vias, PTH and NPTH pads;
+same pad skipped). The minimum is the `[fab] profile`'s `hole_to_hole` (profiles.py) when it names one, else the board's
+`.kicad_pro` `min_hole_to_hole`; with neither the check reports `HOLE_TO_HOLE_UNDEFINED` (INFO) and guesses nothing.
+
 `review` also runs the part-entry gate (`PART_*`, [parts.md](parts.md): offline unless the review fetched distributor data; waive like any code) and the pin-group checks (`MAG_*`, `PINGRP_*`, [pin-groups.md](pin-groups.md)).
 ## Open connections, stale fills, pair and RF quality
 - `UNROUTED` (FAIL, one per open connection: net, both pads, distance): pcbnew counts after a FRESH zone fill, cross-checked with
