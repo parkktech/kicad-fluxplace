@@ -143,7 +143,7 @@ POLICY = {
     "deliver":           ("write", "Package a fab directory for upload: CAM zip plus loose documents."),
     "pcbway":            ("write", "PCBWay order worksheet and assembly instructions from the board."),
     "repair":            ("write", "Copper repairs the review gate asks for: pair loops, RF widths, pin remap, text."),
-    "finish":            ("long",  "Route named nets with freerouting; kept only if DRC does not worsen."),
+    "finish":            ("long",  "Route a scope (nets / parts / area) with freerouting; only new in-scope copper is kept; protection proven."),
     "drc-fix":           ("write", "Fix DRC noise a repair leaves behind; loops until the count stops falling."),
     "tune":              ("long",  "DRC-guarded differential-pair length tuning to the [pairs.*] skew limits."),
     "models":            ("write", "Fetch real vendor STEP models via distributor APIs and wire them to footprints."),
