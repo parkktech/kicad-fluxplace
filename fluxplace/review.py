@@ -1842,6 +1842,22 @@ def _waived(fnd, waivers):
     return False
 
 
+def check_blocks(facts, spec, cons):
+    """BLOCK_SCATTERED (fluxplace/blocks.py): a functional block split across regions with another block between.
+    INFO; WARN when `[placement] use_blocks` is on."""
+    from . import blocks as BK, routediag as RD
+    path = facts.get("board_path") or facts.get("board")
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return []
+    try:
+        B = RD.load(path)
+        inv = BK.of_board(B, cons, None)
+    except (BK.BlockError, OSError, ValueError):
+        return []
+    level = "WARN" if ((cons or {}).get("placement") or {}).get("use_blocks") else "INFO"
+    return BK.check(B, inv, level)
+
+
 def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
         ds_dir=None, stage="review"):
     facts = dict(facts)
@@ -1860,6 +1876,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_pairs(facts, cons)
     out += check_match_groups(facts, cons)
     out += check_timing(facts, cons)
+    out += check_blocks(facts, spec, cons)
     out += check_erc(facts, spec, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)

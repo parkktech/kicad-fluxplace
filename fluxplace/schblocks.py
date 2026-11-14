@@ -21,12 +21,13 @@ from collections import Counter, defaultdict
 
 from . import schdraw as D
 from . import schinv as I
+from . import blocks as BK
 
 
 def generate(M, out_path, cons=None, title=None, inv=None):
     cons = cons or {}
     kinds = I.net_kinds(M, cons)
-    inv = inv or I.inventory(M, cons)
+    inv = inv or BK.inventory(M, cons)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     stem = os.path.splitext(os.path.basename(out_path))[0]
     project = stem
@@ -43,6 +44,8 @@ def generate(M, out_path, cons=None, title=None, inv=None):
             if s["kind"] == "pwr":
                 pwr_n[0] += 1
                 s["ref_i"] = "#PWR%04d" % pwr_n[0]
+            elif s.get("ref") in inv["of"]:          # hidden field: the block the part belongs to (fluxplace blocks)
+                s["fields"] = list(s["fields"]) + [(BK.FIELD, b["name"], s["x"], s["y"], "", True)]
         fname = "%s-%s.kicad_sch" % (stem, I.slug(b["name"]))
         suuid = D._uuid("sheetsym:%s:%s" % (stem, b["name"]))
         lines, paper, _ = D.emit_sheet(

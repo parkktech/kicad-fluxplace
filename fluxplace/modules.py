@@ -65,6 +65,7 @@ ATTACH_MM = 15.0                    # a support farther than this from its modul
 def build(B, cons=None, spec=None, arrange=True, log=None):
     """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
     from . import clusters as CL, legality as LGL, netclass as NC, routable as RB
+    from . import blocks as BK
     cons = cons or {}
     parts = B["parts"]
     fixed = fixed_set(B, cons)
@@ -85,6 +86,9 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     anchors = [r for r in sorted(parts) if not _small(r, parts[r])]
     mods = {}
     of = {}
+    # [placement] use_blocks: supports join only anchors of their own functional block (blocks.py); off = unchanged
+    bl = BK.of_board(B, cons, spec if isinstance(spec, str) else None)["of"] if (cons.get("placement") or {}).get("use_blocks") else None
+    same = (lambda a, b: True) if bl is None else (lambda a, b: bl.get(a) == bl.get(b))
     for r in anchors:
         key = groups.get(r) or r
         m = mods.setdefault(key, {"name": key, "anchor": None, "refs": [], "group": bool(groups.get(r))})
@@ -100,7 +104,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         if r in of or MECH.match(r):
             continue
         ic = owner.get(r)
-        if ic and ic in of:
+        if ic and ic in of and same(ic, r):
             of[r] = of[ic]
             mods[of[ic]]["refs"].append(r)
         else:
@@ -114,13 +118,19 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             if not n or n in rail:
                 continue
             for o in pads.get(n, []):
-                if o["ref"] in of and o["ref"] != r:
+                if o["ref"] in of and o["ref"] != r and same(o["ref"], r):
                     score[of[o["ref"]]] += 1
         if score:
             best = sorted(score.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         else:
             cx, cy = _centre(parts[r])
-            best = min(sorted(mod_c), key=lambda k: math.hypot(mod_c[k][0] - cx, mod_c[k][1] - cy))
+            cand = [k for k in sorted(mod_c) if same(mods[k]["anchor"], r)]
+            if bl is not None and not cand:          # its block has no anchor here: the part stands alone
+                mods[r] = {"name": r, "anchor": r, "refs": [r], "group": False}
+                of[r] = r
+                continue
+            cand = cand or sorted(mod_c)
+            best = min(cand, key=lambda k: math.hypot(mod_c[k][0] - cx, mod_c[k][1] - cy))
         of[r] = best
         mods[best]["refs"].append(r)
     # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone
@@ -151,6 +161,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         mod = {"name": key, "anchor": m["anchor"], "members": mem, "fixed": bool(m["anchor"] in fixed or MECH.match(m["anchor"])),
                "pos": [round(ax, 4), round(ay, 4)], "angle": round(a["angle"], 4), "side": a["side"],
                "fixed_members": sorted(r for r in m["refs"] if r in fixed and r != m["anchor"])}
+        if bl is not None:
+            mod["block"] = bl.get(m["anchor"])
         _geometry(B, mod)
         out.append(mod)
     ports(B, out, of, cls)

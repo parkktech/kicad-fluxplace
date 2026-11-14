@@ -112,3 +112,67 @@ def test_pipeline_stopped_by_to_is_still_marked_incomplete(tmp_path):
     st = PL.load_state(a.workdir)
     assert "INCOMPLETE" in st["incomplete"]                 # --to stops early: still not done
     assert os.path.exists(os.path.join(a.workdir, "2-floorplan-check", "ledger.txt"))
+
+
+def test_guard_snapshot_uses_the_source_project_rules(tmp_path):
+    """A pcbnew save writes a default .kicad_pro beside the output; the collision count must not depend on it.
+    Same geometry, the source's rules (Default clearance 0.25 mm) -> same collision_fail before and after a re-save."""
+    import json as _j
+    from fluxplace import audit as AU2, kicad_io as IO
+    import planboards as PB
+    body = PB.fp("R1", 40, 40, [PB.pad("1", 0, 0, "N1", 0.5, 0.5)])
+    body += PB.fp("R2", 40.72, 40, [PB.pad("1", 0, 0, "N2", 0.5, 0.5)])     # 0.22 mm copper gap: under 0.25, over 0.2
+    src = PB.write(tmp_path, body, name="src.kicad_pcb")
+    pro = tmp_path / "src.kicad_pro"
+    pro.write_text(_j.dumps({"meta": {"version": 3}, "net_settings": {"classes": [
+        {"name": "Default", "clearance": 0.25, "track_width": 0.2}]}, "board": {"design_settings": {
+        "rules": {"min_clearance": 0.25}, "rule_severities": {"clearance": "error"}}}}))
+    before = AU2.snapshot(src, project=str(pro))
+    assert before["checks"]["collision_fail"] >= 1
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = str(out_dir / "resaved.kicad_pcb")
+    IO.save(IO.load(src), out)
+    after = AU2.snapshot(out, project=str(pro))
+    assert after["checks"] == before["checks"]
+    assert AU2.connectivity_diff(before, after)["ok"]
+
+
+def test_guard_resave_keeps_the_same_findings_without_a_project(tmp_path):
+    """A board with no .kicad_pro: the source's rules are the defaults (clearance 0.14). pcbnew's save writes its own
+    project beside the output (clearance 0.2), which used to change the findings for the same pads (0.17 mm gap:
+    courtyard overlap before, copper clearance after). The guard passes the source's project to both snapshots."""
+    from fluxplace import audit as AU2, kicad_io as IO, legality as LGL, routediag as RD2
+    import planboards as PB
+    body = PB.fp("R1", 40, 40, [PB.pad("1", 0, 0, "N1", 0.5, 0.5)])
+    body += PB.fp("R2", 40.67, 40, [PB.pad("1", 0, 0, "N2", 0.5, 0.5)])
+    src = PB.write(tmp_path, body, name="src.kicad_pcb")
+    (tmp_path / "out").mkdir()
+    out = str(tmp_path / "out" / "resaved.kicad_pcb")
+    IO.save(IO.load(src), out)
+    pro = str(tmp_path / "src.kicad_pro")                  # does not exist: defaults
+    kinds = lambda p: sorted(sorted(x["kinds"]) for x in LGL.collisions(RD2.load(p, project=pro)) if x["level"] == "FAIL")
+    assert kinds(src) == kinds(out) and kinds(src)
+    assert AU2.snapshot(src, project=pro)["checks"] == AU2.snapshot(out, project=pro)["checks"]
+
+
+def test_guard_reports_no_collision_change_for_a_plain_resave(tmp_path, capsys):
+    """The guard line must not show a collision_fail change for a resave of the same geometry (the source's
+    project rules are used for both snapshots, so the output's pcbnew-written project does not count)."""
+    import argparse
+    from fluxplace import kicad_io as IO
+    import planboards as PB
+    # 0.17 mm copper gap, courtyards clear: a clearance hit only under the 0.2 mm default pcbnew writes beside the output
+    body = PB.fp("R1", 40, 40, [PB.pad("1", 0, 0, "N1", 0.5, 0.5)], court=(-0.2, -0.2, 0.2, 0.2))
+    body += PB.fp("R2", 40.67, 40, [PB.pad("1", 0, 0, "N2", 0.5, 0.5)], court=(-0.2, -0.2, 0.2, 0.2))
+    src = PB.write(tmp_path, body, name="src.kicad_pcb")
+    (tmp_path / "out").mkdir()
+    out = str(tmp_path / "out" / "resaved.kicad_pcb")
+    ns = argparse.Namespace(cmd="sync-nets", board=src, out=out)
+    g = cli._guard_begin(ns)
+    IO.save(IO.load(src), out)
+    assert cli._guard_end(g, ns)
+    import re
+    err = capsys.readouterr().err
+    m = re.search(r"collision_fail (\d+)->(\d+)", err)
+    assert m and m.group(1) == m.group(2), err

@@ -262,6 +262,12 @@ def blocks_of(B, spec=None, cons=None):
     import os
     out = {}
     pl = (cons or {}).get("placement") or {}
+    if not (pl.get("blocks") or pl.get("blocks_dir")) and (cons or {}).get("blocks"):
+        # one concept: with no [placement.blocks] / blocks_dir, the functional-block inventory of `[blocks]` (+ automatic
+        # grouping for the rest) is the block list. Automatic-only boards keep the legacy rules below (scoring unchanged).
+        from . import blocks as BK
+        inv = BK.of_board(B, cons, spec if isinstance(spec, str) else None)
+        out = {b["name"]: list(b["refs"]) for b in inv["blocks"]}
     for k, v in (pl.get("blocks") or {}).items():
         if isinstance(v, list):
             refs = [r for r in B["parts"] if any(fnmatch.fnmatch(r, g) for g in v)]

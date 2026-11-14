@@ -40,6 +40,16 @@ CS = {0: (1.0, 0.0), 90: (0.0, 1.0), 180: (-1.0, 0.0), 270: (0.0, -1.0)}      # 
 
 
 # ---------------------------------------------------------------- model
+def block_spread(X, Y, fixed, groups):
+    """sum over functional blocks (groups: {name: index array}) of the x + y extent of their modules; a block of fixed
+    modules only is not the optimiser's to pull and counts 0."""
+    t = 0.0
+    for idx in groups.values():
+        if (~np.asarray(fixed)[idx]).any():
+            t += float(np.ptp(X[idx]) + np.ptp(Y[idx]))
+    return t
+
+
 class Plan:
     def __init__(self, B, cons, spec, M, log=print, halo=None):
         from . import legality as LGL, netclass as NC, escapeplan as EP
@@ -49,6 +59,14 @@ class Plan:
         self.n = len(self.mods)
         self.idx = {m["name"]: i for i, m in enumerate(self.mods)}
         self.fixed = np.array([m["fixed"] for m in self.mods])
+        # [placement] use_blocks: the modules of one functional block are pulled together (cohesion term, `block`);
+        # weight `[floorplan] block_weight` (1.0). Off by default: no term, the objective is unchanged.
+        self.blk_w = float((cons.get("floorplan") or {}).get("block_weight", 1.0)) if (cons.get("placement") or {}).get("use_blocks") else 0.0
+        groups = defaultdict(list)
+        for i, m in enumerate(self.mods):
+            if m.get("block") is not None:
+                groups[m["block"]].append(i)
+        self.blk = {k: np.array(v) for k, v in groups.items() if len(v) > 1} if self.blk_w > 0 else {}
         self.X = np.array([m["pos"][0] for m in self.mods])
         self.Y = np.array([m["pos"][1] for m in self.mods])
         self.T = np.zeros(self.n, int)
@@ -139,10 +157,12 @@ class Plan:
             bx = float(np.ptp(self.X[mov])) + float(np.ptp(self.Y[mov]))
         else:
             bx = 0.0
-        return {"wl": wl, "over": over, "cross": cr, "compact": bx, "intent": self.intent.penalty() if self.intent.items else 0.0}
+        blk = block_spread(self.X, self.Y, self.fixed, self.blk)
+        return {"wl": wl, "over": over, "cross": cr, "compact": bx, "block": self.blk_w * blk,
+                "intent": self.intent.penalty() if self.intent.items else 0.0}
 
     def total(self, p, w_cross=4.0):
-        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("intent", 0.0)
+        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0)
 
     def crossings(self):
         """port-to-port crossing count: ports of one net chained by x, edges of different nets that intersect."""

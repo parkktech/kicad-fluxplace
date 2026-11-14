@@ -63,3 +63,16 @@ def test_blocks_from_a_blocks_dir_and_unassigned_pool(tmp_path):
     f, rows = FP.check(B, {"placement": {"blocks_dir": str(d)}})
     names = {r["name"] for r in rows}
     assert "(side B)" in names and not f
+
+
+def test_block_cohesion_term_is_a_spread_of_each_block():
+    import numpy as np
+    from fluxplace import floorplan2 as F2
+    X = np.array([0.0, 10.0, 50.0, 0.0])
+    Y = np.array([0.0, 0.0, 0.0, 4.0])
+    fixed = np.array([False, False, False, False])
+    groups = {"A": np.array([0, 1]), "B": np.array([2, 3])}
+    assert F2.block_spread(X, Y, fixed, groups) == (10 + 0) + (50 + 4)
+    # a block of fixed modules only is not pulled
+    assert F2.block_spread(X, Y, np.array([True, True, False, False]), groups) == 54.0
+    assert F2.block_spread(X, Y, fixed, {}) == 0.0

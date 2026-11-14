@@ -6,7 +6,8 @@ MODULES = ("density", "fanout", "modules", "floorplan2", "snapvias")
 MODULES += ("closure", "pairs")
 MODULES += ("joingaps",)
 MODULES += ("intent", "intentdraft")          # placement intent: gate + draft (docs/INTENT.md)
-MODULES += ("wlrefine",)                      # wire-length refinement of a legal placement
+MODULES += ("wlrefine",)
+MODULES += ("blocks",)                        # functional-block inventory (fluxplace/blocks.py)                      # wire-length refinement of a legal placement
 
 
 def add_parsers(sub):

@@ -394,13 +394,13 @@ def stackup(board_path):
 EXPECT = {"sync-nets": ("nets",), "replace-footprint": ("footprints", "nets")}   # declared, legitimate changes
 
 
-def snapshot(board_path, checks=True):
+def snapshot(board_path, checks=True, project=None):
     """Pad -> net membership, footprint identity and pose, per-net copper signature, and two cheap checks.
     Pins with several copper pieces sharing a number (a QFN's split pad) keep every piece: their nets are
     compared as a multiset, so the pieces may be listed in any order."""
     from collections import defaultdict
     from . import routediag as RD
-    B = RD.load(board_path)
+    B = RD.load(board_path, project=project)
     pads = defaultdict(list)
     for q in B["pads"]:
         pads[f"{q['ref']}.{q['num']}"].append(q["net"] or "")
