@@ -117,7 +117,7 @@ def build(B, cons=None, spec=None, board_path=None, cls=None, state=None):
         refs = sorted(r for r in g.get("refs", []) if r in parts)
         if refs:
             groups[name] = {"refs": refs, "src": "placement.group"}
-    for name, refs in sorted(PCK.blocks_of(B, spec, cons).items()):
+    for name, refs in sorted(PCK.blocks_safe(B, spec, cons).items()):
         groups.setdefault(name, {"refs": sorted(refs), "src": "blocks"})
     if not any(g["src"] == "blocks" for g in groups.values()):
         sheets = defaultdict(list)

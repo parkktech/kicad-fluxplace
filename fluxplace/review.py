@@ -1846,13 +1846,17 @@ def check_blocks(facts, spec, cons):
     """BLOCK_SCATTERED (fluxplace/blocks.py): a functional block split across regions with another block between.
     INFO; WARN when `[placement] use_blocks` is on."""
     from . import blocks as BK, routediag as RD
+    from .preroute import _f
     path = facts.get("board_path") or facts.get("board")
     if not isinstance(path, str) or not os.path.isfile(path):
         return []
     try:
         B = RD.load(path)
-        inv = BK.of_board(B, cons, None)
-    except (BK.BlockError, OSError, ValueError):
+        # the same membership as the `blocks` command: a spec path is passed through
+        inv = BK.of_board(B, cons, spec if isinstance(spec, str) else None)
+    except BK.BlockError as e:
+        return [_f("WARN", "BLOCK_CONFIG", f"[blocks] clash, block membership unresolved: {e}")]
+    except (OSError, ValueError):
         return []
     level = "WARN" if ((cons or {}).get("placement") or {}).get("use_blocks") else "INFO"
     return BK.check(B, inv, level)

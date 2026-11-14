@@ -75,6 +75,13 @@ def inventory(M, cons=None):
     return {"blocks": inv["blocks"], "of": inv["of"], "warnings": warns, "modules": inv.get("modules", 0)}
 
 
+def explicit_claims(B, cons=None, spec=None):
+    """{block: [refs]} from `[blocks]` / `[schematic.blocks]` ONLY: no automatic groups. Raises BlockError on a clash."""
+    M = I.from_spec(spec) if isinstance(spec, str) else model_from_board(B)
+    claims, _warns = _claims(M, cons or {})
+    return {k: sorted(v, key=I.natkey) for k, v in claims.items()}
+
+
 def of_board(B, cons=None, spec=None):
     """inventory for placement: from the spec file when given (the netlist of record), else from the board's pads."""
     return inventory(I.from_spec(spec) if isinstance(spec, str) else model_from_board(B), cons)
@@ -202,6 +209,8 @@ def cmd_blocks(a):
     B = RD.load(a.board) if a.board else None
     if not (a.spec or B):
         raise SystemExit("blocks: a board or --spec is required")
+    if a.write and not a.board:
+        raise SystemExit("blocks: --write needs a board (--board); a spec alone has no board to write")
     if a.write and not a.out:
         raise SystemExit("blocks: --write needs --out (the input board is never written in place by default)")
     try:

@@ -263,11 +263,10 @@ def blocks_of(B, spec=None, cons=None):
     out = {}
     pl = (cons or {}).get("placement") or {}
     if not (pl.get("blocks") or pl.get("blocks_dir")) and (cons or {}).get("blocks"):
-        # one concept: with no [placement.blocks] / blocks_dir, the functional-block inventory of `[blocks]` (+ automatic
-        # grouping for the rest) is the block list. Automatic-only boards keep the legacy rules below (scoring unchanged).
+        # legacy callers with only `[blocks]` set get the explicitly claimed blocks, never automatic groups
+        # (a clash raises BlockError: use blocks_safe at a caller boundary)
         from . import blocks as BK
-        inv = BK.of_board(B, cons, spec if isinstance(spec, str) else None)
-        out = {b["name"]: list(b["refs"]) for b in inv["blocks"]}
+        out = {k: list(v) for k, v in BK.explicit_claims(B, cons, spec if isinstance(spec, str) else None).items()}
     for k, v in (pl.get("blocks") or {}).items():
         if isinstance(v, list):
             refs = [r for r in B["parts"] if any(fnmatch.fnmatch(r, g) for g in v)]
@@ -296,11 +295,21 @@ def blocks_of(B, spec=None, cons=None):
     return {k: v for k, v in out.items() if len(v) >= 2}
 
 
+def blocks_safe(B, spec=None, cons=None):
+    """blocks_of at a caller boundary: a `[blocks]` clash yields no blocks here; review.check_blocks reports it as
+    the WARN finding BLOCK_CONFIG."""
+    from . import blocks as BK
+    try:
+        return blocks_of(B, spec, cons)
+    except BK.BlockError:
+        return {}
+
+
 def block_mm(B, spec=None, cons=None):
     """Sum over blocks of the half-perimeter of their parts' bounding box (mm): the
     cohesion term of the placement score."""
     t = 0.0
-    for refs in blocks_of(B, spec, cons).values():
+    for refs in blocks_safe(B, spec, cons).values():
         xs = [B["parts"][r]["pos"][0] for r in refs]
         ys = [B["parts"][r]["pos"][1] for r in refs]
         t += (max(xs) - min(xs)) + (max(ys) - min(ys))

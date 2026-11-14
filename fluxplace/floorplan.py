@@ -142,7 +142,7 @@ def check(B, cons=None, spec=None, fixed=None):
     G = Grid(B["bbox"], float(fp.get("cell_mm", 0.5)))
     fixed = set(fixed) if fixed is not None else PCK_fixed(B, cons)
     M = LG._Model(B, cons, fixed, B["bbox"])
-    blocks = PCK.blocks_of(B, spec, cons)
+    blocks = PCK.blocks_safe(B, spec, cons)
     block_of = {r: b for b, rs in blocks.items() for r in rs}
     parts = {r: p for r, p in B["parts"].items() if not r.startswith(_MECH)}
     inside = G.outline(B)

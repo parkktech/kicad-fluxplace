@@ -42,7 +42,7 @@ def resolve(board, B, cons, spec, m=None):
     out = {}
     if pl.get("group"):
         out["groups"] = ("constraints", f"{len(pl['group'])} [placement.group]")
-    elif PCK.blocks_of(B, spec, cons):
+    elif PCK.blocks_safe(B, spec, cons):
         out["groups"] = ("spec" if spec else "constraints", "blocks")
     elif any((g or {}).get("src") not in (None, "sheet", "cluster") for g in (m.get("groups") or {}).values()
              if isinstance(g, dict)):
