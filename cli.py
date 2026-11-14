@@ -1736,9 +1736,12 @@ def cmd_drcfix(a):
 def cmd_tune(a):
     """DRC-guarded differential-pair length tuning: hairpin shortcuts on the
     long side, serpentine meanders on the short side, every step accepted
-    only if kicad-cli DRC does not get worse."""
+    only if kicad-cli DRC does not get worse. --match NAME|all instead tunes
+    [match.*] groups (bumps on the short members, see fluxplace/lengthmatch.py)."""
     from fluxplace import tune as TU, constraints as C, graph as G
     from fluxplace import kicad_io as IO
+    if a.match:
+        return _tune_match(a)
     board = IO.load(a.board)
     names = sorted({t.GetNetname() for t in board.GetTracks() if t.GetNetname()})
     pairs = G.diff_pairs(names)
@@ -1754,6 +1757,56 @@ def cmd_tune(a):
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
+
+
+def _tune_match(a):
+    """tune --match: lengthen the short members of [match.*] groups, one DRC-guarded bump at a time."""
+    from fluxplace import tune as TU, constraints as C, lengthmatch as LM, review as RV
+    from fluxplace import opengate as OG
+    cons = C.load(a.constraints)
+    groups = LM.groups(cons)
+    if a.match != "all":
+        groups = [g for g in groups if g["name"] == a.match]
+        if not groups:
+            print(f"no [match.{a.match}] group in {a.constraints}")
+            return 1
+    facts = RV.facts_from_board(a.board)
+    stackup, planes = facts.get("stackup") or [], facts.get("plane_layers") or []
+    import pcbnew
+    from fluxplace import repair as RP
+    board0 = pcbnew.LoadBoard(a.board)
+    targets = {}
+    for g in groups:
+        mem = LM.members(g, list(facts["net_pads"]))
+        if not mem:
+            print(f"  [match.{g['name']}] matched no net")
+            continue
+        lens = LM.lengths_from_board(board0, set(mem) | ({g["reference"]} if g["reference"] else set()),
+                                     stackup, planes, g["include_vias"])
+        unit = g["unit"]
+        key = (lambda v: v["ps"]) if unit == "ps" else (lambda v: v["mm"])
+        if g["target"] is not None:
+            tgt = g["target"]
+        elif g["reference"]:
+            tgt = key(lens[g["reference"]])
+        else:
+            tgt = max(key(lens[n]) for n in mem)
+        targets[g["name"]] = (tgt, g["tol"])
+    groups = [g for g in groups if g["name"] in targets]
+
+    def net_lengths(board, g):
+        mem = LM.members(g, list(facts["net_pads"]))
+        return LM.lengths_from_board(board, mem, stackup, planes, g["include_vias"])
+
+    rep = TU.tune_match(a.board, a.out or a.board, groups, net_lengths, targets,
+                        kicad_cli=a.kicad_cli, max_rounds=a.rounds,
+                        log=lambda m: print(m, flush=True))
+    OG.refill(a.out or a.board)
+    bad = [r for r in rep if r["status"] != "ok"]
+    for r in rep:
+        print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} "
+              f"(target {r['target']:.2f} +/- {r['tol']:g}) {r['status']} {r.get('note', '')}")
+    return 1 if bad else 0
 
 
 def cmd_datasheets(a):
@@ -3450,6 +3503,8 @@ def build_parser():
     ptu.add_argument("--amplitude", type=float, default=0.6, help="meander amplitude mm")
     ptu.add_argument("--rounds", type=int, default=6)
     ptu.add_argument("--kicad-cli", default="kicad-cli")
+    ptu.add_argument("--match", default=None, metavar="NAME|all",
+                     help="tune [match.*] length groups instead of diff pairs")
     ptu.set_defaults(fn=cmd_tune)
 
     pmo = sub.add_parser("models",

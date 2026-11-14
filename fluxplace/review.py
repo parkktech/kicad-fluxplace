@@ -299,6 +299,87 @@ def check_pairs(facts, cons):
     return out
 
 
+def check_match_groups(facts, cons):
+    """[match.*] length-matching groups: MATCH_GROUP_SKEW (FAIL), MATCH_UNROUTED / MATCH_NO_NETS (WARN),
+    MATCH_DELAY_UNKNOWN / MATCH_NOT_EVALUATED (WARN). Lengths come from the board through pcbnew."""
+    from . import lengthmatch as LM
+    try:
+        groups = LM.groups(cons or {})
+    except ValueError as e:
+        return [_f(FAIL, "MATCH_CONFIG", str(e))]
+    if not groups:
+        return []
+    path = facts.get("board_path") or facts.get("board")
+    out = []
+    names = list(facts.get("net_pads") or {})
+    try:
+        import pcbnew
+        from . import routeconn as RC
+        board = pcbnew.LoadBoard(path)
+        open_nets = {n for n, k in RC.open_by_net(path).items() if k > 0}
+    except Exception as e:                       # no pcbnew / unreadable board: say so, never pass silently
+        return [_f(WARN, "MATCH_NOT_EVALUATED", f"length match not evaluated: {type(e).__name__}: {e}")]
+    stackup, planes = facts.get("stackup") or [], facts.get("plane_layers") or []
+    for g in groups:
+        mem = LM.members(g, names)
+        if not mem:
+            out.append(_f(WARN, "MATCH_NO_NETS", f"[match.{g['name']}] matched no net: {g['nets']}"))
+            continue
+        unrouted = [n for n in mem if n in open_nets]
+        if unrouted:
+            out.append(_f(WARN, "MATCH_UNROUTED",
+                          f"[match.{g['name']}] not evaluated: not fully routed: {', '.join(unrouted)}", refs=unrouted))
+            continue
+        need = set(mem)
+        if g["reference"]:
+            need.add(g["reference"])
+        lens = LM.lengths_from_board(board, need, stackup, planes, g["include_vias"])
+        if g["unit"] == "ps":
+            bad = [n for n in need if lens[n]["ps"] is None]
+            if bad:
+                out.append(_f(WARN, "MATCH_DELAY_UNKNOWN",
+                              f"[match.{g['name']}] tolerance is in ps but the layer delay is unknown for: "
+                              f"{', '.join(sorted(bad))} — not evaluated", refs=bad))
+                continue
+        ref_len = None
+        if g["reference"]:
+            ref_len = (lens[g["reference"]]["ps"] if g["unit"] == "ps" else lens[g["reference"]]["mm"])
+        res = LM.evaluate(g, {n: lens[n] for n in mem}, reference_len=ref_len)
+        if res["ok"]:
+            continue
+        parts = []
+        for n, v, d, ok in res["rows"]:
+            mm = lens[n]["mm"]
+            ps = lens[n]["ps"]
+            pstxt = f" / {ps:.1f} ps" if ps is not None else ""
+            parts.append(f"{n} {mm:.2f} mm{pstxt} (delta {d:+.2f} {res['unit']})" if d is not None
+                         else f"{n} unknown")
+        bad = [n for n, v, d, ok in res["rows"] if not ok]
+        out.append(_f(FAIL, "MATCH_GROUP_SKEW",
+                      f"[match.{g['name']}] target {res['target']:.2f} {res['unit']} +/- {res['tol']:g}: "
+                      + "; ".join(parts), refs=bad))
+    return out
+
+
+def check_timing(facts, cons):
+    """[timing.*] flight-time budgets (TIMING_SKEW, TIMING_FLYBY_ORDER: FAIL; TIMING_UNROUTED, TIMING_DELAY_UNKNOWN: WARN)."""
+    from . import timing as TM
+    try:
+        if not TM.groups(cons or {}):
+            return []
+    except ValueError as e:
+        return [_f(FAIL, "TIMING_CONFIG", str(e))]
+    path = facts.get("board_path") or facts.get("board")
+    try:
+        import pcbnew
+        from . import routeconn as RC
+        board = pcbnew.LoadBoard(path)
+        open_nets = {n for n, k in RC.open_by_net(path).items() if k > 0}
+    except Exception as e:
+        return [_f(WARN, "TIMING_NOT_EVALUATED", f"timing budget not evaluated: {type(e).__name__}: {e}")]
+    return TM.check(board, facts, cons, open_nets)
+
+
 def check_erc(facts, spec, cons):
     """Schematic-level electrical checks (ercnet): decoupling per IC rail, I2C pull-ups,
     passive values, nets with no driver. The spec's netlist when given, else the board's."""
@@ -1776,6 +1857,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
+    out += check_match_groups(facts, cons)
+    out += check_timing(facts, cons)
     out += check_erc(facts, spec, cons)
     out += check_rf(facts, cons)
     out += check_parts(facts, spec, partdata, cons, idx=idx, ds_dir=ds_dir)
