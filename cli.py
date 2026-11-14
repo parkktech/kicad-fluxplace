@@ -1431,9 +1431,16 @@ def cmd_lint(a):
     unwired connectors, barrel-jack / friction-header connector smells."""
     import json as _json
     from fluxplace import lint as L
-    from fluxplace import kicad_io as IO
-    board = IO.load(a.board)
-    findings = L.run(L.pads_from_board(board), waivers=a.waive)
+    if not a.board and not a.spec:
+        raise SystemExit("lint: give --board and/or --spec")
+    findings = []
+    if a.board:
+        from fluxplace import kicad_io as IO
+        findings += L.run(L.pads_from_board(IO.load(a.board)), waivers=a.waive)
+    if a.spec:                                   # control-pin default levels from the spec netlist
+        from fluxplace import constraints as C
+        st = L.sch_pin_types(a.sch) if getattr(a, "sch", None) else None
+        findings += L.control_pins(_json.load(open(a.spec)), C.load(a.constraints), st, waivers=a.waive)
     n = L.summarize(findings)
     if a.json:
         with open(a.json, "w") as fh:
@@ -3031,7 +3038,10 @@ def build_parser():
     pli = sub.add_parser("lint",
                          help="design-completeness checks: missing power/IO "
                               "wiring, dead-end nets, non-latching connectors")
-    pli.add_argument("--board", required=True)
+    pli.add_argument("--board", default=None)
+    pli.add_argument("--spec", default=None, help="control-pin default-level lint on this spec's netlist")
+    pli.add_argument("--constraints", default=None, help="[lint] default_level / rails / control_pins regexes")
+    pli.add_argument("--sch", default=None, help="schematic whose symbols give pin electrical types")
     pli.add_argument("--json", default=None, help="also write findings as JSON")
     pli.add_argument("--waive", action="append", default=[],
                      help="suppress findings: CODE:REGEX (matches msg or refs), "

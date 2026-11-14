@@ -173,7 +173,7 @@ LISTED = {
     "route-status": ["target"],
     "route-wait": ["target", "timeout", "until"],
     "pipeline": ["board", "workdir", "constraints", "spec", "from_stage", "to_stage", "status", "route_budget"],
-    "lint": ["board", "waive", "fail_on"],
+    "lint": ["board", "spec", "constraints", "waive", "fail_on"],
     "eval": ["board", "prc"],
     "sourcing": ["board", "show_ok"],
     "spec-check": ["spec", "datasheets", "mpn_map"],
