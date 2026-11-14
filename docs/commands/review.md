@@ -81,9 +81,9 @@ regulator's hot loop (input-cap rail pad, IC input pin, IC ground pin, input-cap
 extent (largest pad-pair span on the SW net). WARN past 3 x the IC body diagonal. Works on a placed, unrouted board. The existing
 `[placement.budget] switch_node` is an MST net budget graded by route-ready and is not reused.
 
-`REF_PLANE_GAP` (FAIL), `RETURN_VIA_MISSING` and `EDGE_TRACE` (WARN), `returnpath.py`: for controlled nets (diff pairs, RF
+`REF_PLANE_GAP` (WARN; FAIL with `[review] return_path = "fail"`), `RETURN_VIA_MISSING` and `EDGE_TRACE` (WARN), `returnpath.py`: for controlled nets (diff pairs, RF
 nets, and `[review] return_path_nets = ["regex", ...]`): a track run with no filled plane under it on either adjacent reference layer
-longer than `[review] plane_gap_mm` (1.0); a layer change between layers with different reference planes and no via on the reference
+longer than `[review] plane_gap_mm` (1.0), where the first/last `plane_gap_mm` of a track that starts or ends on a same-net pad or via are exempt (antipad); a layer change between layers with different reference planes and no via on the reference
 net within `[review] return_via_mm` (2.0); a track within `[review] edge_trace_mm` (0.5) of the outline. Reads the saved zone fills
 of the board file. No findings on a board without tracks.
 

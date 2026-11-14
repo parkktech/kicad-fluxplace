@@ -5,7 +5,9 @@ ways a routed board breaks that, each invisible to DRC (which checks copper agai
 
   REF_PLANE_GAP        a track segment crosses a stretch with no filled plane copper on either
                        adjacent reference layer (a slot cut by a foreign track, a split plane).
-                       FAIL when a contiguous unreferenced run exceeds `[review] plane_gap_mm`.
+                       WARN when a contiguous unreferenced run exceeds `[review] plane_gap_mm`;
+                       FAIL with `[review] return_path = "fail"`. The first/last plane_gap_mm of
+                       a chain that starts/ends on a same-net pad or via are exempt (antipad).
   RETURN_VIA_MISSING   a via where the signal changes layer and the two layers reference different
                        planes, with no via on the reference net within `[review] return_via_mm`.
                        WARN; says so when the two planes are different nets.
@@ -79,6 +81,7 @@ def _inside(rings, x, y):
 
 
 CELL_MM = 2.0
+ANCHOR_MM = 0.5      # a chain endpoint this close to a same-net pad or via centre counts as anchored
 
 
 class Planes:
@@ -182,11 +185,19 @@ def check_return_path(facts, cons):
     gap_lim = float(rv.get("plane_gap_mm", 1.0))
     via_lim = float(rv.get("return_via_mm", 2.0))
     edge_lim = float(rv.get("edge_trace_mm", 0.5))
+    gap_level = FAIL if str(rv.get("return_path", "warn")).lower() == "fail" else WARN
     ctrl = controlled_nets(facts, cons)
     if not ctrl:
         return []
     P = Planes(board_path, B["copper"])
     out = []
+    # same-net copper a track may legitimately start or end on (pad or via): the plane is antipadded there
+    anchors = defaultdict(list)
+    for p in B["pads"]:
+        if p["net"]:
+            anchors[p["net"]].append((p["x"], p["y"]))
+    for v in B["vias"]:
+        anchors[v["net"]].append((v["x"], v["y"]))
     by = defaultdict(list)
     for s in B["segs"]:
         if s["net"] in ctrl and s["layer"] in B["copper"] and s["layer"]:
@@ -195,7 +206,13 @@ def check_return_path(facts, cons):
         refs = P.ref_layers(layer)
         for pts in _chains(segs):
             samp = _samples(pts)
-            ref_ok = [any(P.nets_at(r, x, y) for r in refs) for x, y, _ in samp]
+            total = samp[-1][2]
+            near = lambda q: any(math.hypot(q[0] - ax, q[1] - ay) <= ANCHOR_MM for ax, ay in anchors[net])
+            a0, a1 = near(pts[0]), near(pts[-1])
+            # the first/last plane_gap_mm of a chain that starts/ends on a same-net pad or via count as referenced:
+            # the antipad of that pad or via is expected there and is not a return-path break
+            exempt = [(a0 and s < gap_lim) or (a1 and total - s < gap_lim) for _, _, s in samp]
+            ref_ok = [exempt[k] or any(P.nets_at(r, x, y) for r in refs) for k, (x, y, _) in enumerate(samp)]
             run_start = None
             best = None
             for k, (x, y, s) in enumerate(samp):
@@ -209,7 +226,7 @@ def check_return_path(facts, cons):
                     run_start = None
             if best and best[0] > gap_lim:
                 x, y, _ = samp[best[1]]
-                out.append(_f(FAIL, "REF_PLANE_GAP",
+                out.append(_f(gap_level, "REF_PLANE_GAP",
                               f"{net} on {layer}: {best[0]:.2f} mm with no plane copper on "
                               f"{'/'.join(refs) or 'no reference layer'}, from x={x:.2f} y={y:.2f} "
                               f"(limit {gap_lim:g} mm)", refs=[net]))

@@ -69,7 +69,7 @@ ENVIRONMENT. This module does that:
                          [placement] hot_loop_max_mm / sw_node_max_mm (swloop.py)
   REF_PLANE_GAP          controlled net (diff pair, RF, [review] return_path_nets)
                          with no filled plane under a run longer than
-                         [review] plane_gap_mm; FAIL (returnpath.py)
+                         [review] plane_gap_mm; WARN, FAIL with [review] return_path = "fail" (returnpath.py)
   RETURN_VIA_MISSING     layer change between layers with different reference
                          planes, no return via within [review] return_via_mm; WARN
   EDGE_TRACE             controlled track within [review] edge_trace_mm of the outline; WARN

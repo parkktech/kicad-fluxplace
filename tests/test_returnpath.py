@@ -54,11 +54,30 @@ def test_slot_under_track_is_ref_plane_gap(tmp_path):
             + trk("SIG", "F.Cu", 10, 40, 90, 40))
     out = _run(filled_board(tmp_path, body))
     gaps = _codes(out, "REF_PLANE_GAP")
-    assert len(gaps) == 1 and gaps[0]["level"] == "FAIL"
+    assert len(gaps) == 1 and gaps[0]["level"] == "WARN"      # default level is WARN
     assert "SIG on F.Cu" in gaps[0]["msg"] and "from x=" in gaps[0]["msg"]
     # the run starts at the slot's left edge (x ~ 30 - clearance - half width ~ 29.4), 20+ mm long
     start_x = float(gaps[0]["msg"].split("x=")[1].split()[0])
     assert 28.5 < start_x < 31.0
+
+
+def test_gap_is_fail_only_when_opted_in(tmp_path):
+    body = (zone("GND", "In1.Cu") + trk("X", "In1.Cu", 30, 40, 50, 40)
+            + trk("SIG", "F.Cu", 10, 40, 90, 40))
+    cons = {"review": {"return_path_nets": ["^SIG$"], "return_path": "fail"}}
+    gaps = _codes(_run(filled_board(tmp_path, body), cons), "REF_PLANE_GAP")
+    assert len(gaps) == 1 and gaps[0]["level"] == "FAIL"
+
+
+def test_gap_at_same_net_via_endpoint_is_exempt(tmp_path):
+    # foreign track X cuts the plane from x~9 to ~11.5 under a SIG track that starts at x=10.
+    # Unanchored, the unreferenced run is 10..11.5 = 1.5 mm (> 1 mm): reported.
+    # Anchored by a SIG via at the start, the first 1 mm is the antipad and is exempt: the rest is 0.5 mm.
+    body = (zone("GND", "In1.Cu") + trk("X", "In1.Cu", 9.5, 40, 11.2, 40)
+            + trk("SIG", "F.Cu", 10, 40, 90, 40))
+    assert len(_codes(_run(filled_board(tmp_path / "bare", body)), "REF_PLANE_GAP")) == 1
+    anchored = body + via("SIG", 10, 40)
+    assert _codes(_run(filled_board(tmp_path / "via", anchored)), "REF_PLANE_GAP") == []
 
 
 def test_unslotted_plane_has_no_gap(tmp_path):
