@@ -17,7 +17,7 @@ CMD_DOC = {
     "route-status": "route-wait", "route-wait": "route-wait", "drc-scope": "audit",
     "stackup": "audit", "stackup-define": "audit", "netlist": "audit",
     "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "route", "tournament": "cli",
-    "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli",
+    "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli", "corpus": "cli",
     "parts": "parts", "ready": "ready", "pin-groups": "pin-groups", "part-diff": "part-diff",
     "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
     "rules": "rules",

@@ -3530,6 +3530,8 @@ def build_parser():
     fancli.add_parsers(sub)               # density, fanout, modules, floorplan (constructive flow)
     from fluxplace import partscli
     partscli.add_parsers(sub)             # parts, ready, pin-groups, part-diff
+    from fluxplace import corpus as CP
+    CP.add_parsers(sub)                   # corpus: multi-board regression scorecard
 
     pcl = sub.add_parser("clusters",
                          help="IC support clusters (which 2-pin parts belong to which IC); "
