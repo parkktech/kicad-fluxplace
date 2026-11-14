@@ -1673,11 +1673,52 @@ def cmd_repair(a):
               f"failed={res['failed']}")
 
 
+def _legacy_finish(a):
+    """`finish --nets` with no scope flag: the original behaviour, unchanged (the pipeline's per-net finish
+    relies on it). The named nets' existing copper is removed and re-routed; DRC-guarded: kept if violations
+    do not rise and the unconnected count falls."""
+    import shutil
+    from fluxplace import finish as FN, tune as TU
+    out = a.out or a.board
+    tmp = out + ".finish.kicad_pcb"
+    base = TU.drc_counts(a.board, a.kicad_cli)
+    print(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
+    res = FN.route_nets(a.board, tmp, a.nets, planes=a.planes, jar=a.jar, timeout=a.timeout,
+                        passes=a.passes, log=lambda m: print(m, flush=True))
+    if not res:
+        raise SystemExit("finish: nothing produced")
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(a.board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
+    v, u = TU.drc_counts(tmp, a.kicad_cli)
+    if v <= base[0] and u < base[1]:
+        shutil.move(tmp, out)
+        _project_beside(a.board, out)
+        print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
+    else:
+        print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
+              f"(was {base[0]} / {base[1]}); scratch left at {tmp}")
+        raise SystemExit(1)
+
+
+def _project_beside(board, out):
+    """The .kicad_pro of the input, copied next to the output under the output's own name (so it opens with
+    its rules). The .finish copy stays too: anything that reads it keeps working."""
+    import shutil
+    side = os.path.splitext(board)[0] + ".kicad_pro"
+    dst = os.path.splitext(out)[0] + ".kicad_pro"
+    if os.path.exists(side) and os.path.abspath(side) != os.path.abspath(dst):
+        shutil.copy(side, dst)
+
+
 def cmd_finish(a):
-    """Route the connections a scope names with freerouting and copy back ONLY their new copper.
-    Protection is proven on the files (region.check): every other track/via/zone is hash-identical,
-    otherwise the result goes to <out>.rejected.kicad_pcb and the command fails. DRC-guarded too:
-    the result is kept only if violations and unconnected counts do not rise."""
+    """`finish`. With a scope flag (--refs/--area/--area-of/--selection) it routes that scope and copies back
+    ONLY its new copper, protection proven on the files (region.run). With --nets alone it is the legacy path."""
+    if not any((a.refs, a.area, a.area_of, a.selection)):
+        if not a.nets:
+            raise SystemExit("finish: give --nets (legacy) or --refs / --area / --area-of / --selection")
+        return _legacy_finish(a)
     import shutil
     from fluxplace import finish as FN, tune as TU, region as RG, routediag as RD
     out = a.out or a.board
@@ -1715,6 +1756,7 @@ def cmd_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u <= base[1]:
         shutil.move(tmp, out)
+        _project_beside(a.board, out)
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "

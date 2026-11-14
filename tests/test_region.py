@@ -40,6 +40,9 @@ def _import_fake_ses(monkeypatch):
 
     def imp(board, ses_path):
         text = open(ses_path).read()
+        from fluxplace import repair as RP
+        for t in list(board.GetTracks()):          # a session is the complete routing: the importer replaces
+            RP._remove(board, t)                   # (repair keeps removed items alive: SWIG crashes otherwise)
         for m in _re.finditer(r'\(net "([^"]+)"\s*\(wire\s*\(path (\S+) (\d+) ([^)]*)\)', text, _re.S):
             net, layer, w, coords = m.group(1), m.group(2), int(m.group(3)), m.group(4).split()
             pts = [(int(coords[i]) / 1e4, -int(coords[i + 1]) / 1e4) for i in range(0, len(coords), 2)]
@@ -220,3 +223,26 @@ def test_cli_finish_fails_loudly_and_keeps_input(tmp_path, monkeypatch):
     assert e.value.code == 1
     assert os.path.exists(base[:-len(".kicad_pcb")] + ".rejected.kicad_pcb")
     assert open(base, "rb").read() == before
+
+
+def test_legacy_finish_nets_removes_named_nets_copper_and_reroutes(tmp_path, fake, monkeypatch):
+    """`finish --nets B` with no scope flag is the legacy path (the pipeline's per-net finish): B's existing
+    copper is removed, B is re-routed from the session; other nets are not named and so not touched."""
+    import cli
+    from fluxplace import tune as TU
+    loc, set_cfg = fake
+    _java(tmp_path, monkeypatch)
+    _import_fake_ses(monkeypatch)
+    base = _board(tmp_path)
+    out = str(tmp_path / "legacy.kicad_pcb")
+    old_b = _tracks(base, "B")
+    assert old_b                                           # B has its existing track
+    set_cfg(ses=ses_text([("B", "F.Cu", 0.2, [(12, 14), (16, 14)])]))
+    counts = iter([(5, 2), (5, 1)])                        # DRC: baseline, then the result (unconnected falls)
+    monkeypatch.setattr(TU, "drc_counts", lambda *a, **k: next(counts))
+    cli.main(["finish", "--board", base, "--out", out, "--nets", "B", "--planes",
+              "--jar", str(tmp_path / "freerouting-2.5.0.jar"), "--passes", "1", "--timeout", "60"])
+    assert _tracks(out, "B") != old_b                      # the old B copper is gone ...
+    assert _tracks(out, "B") == [("F.Cu", "B", (12.0, 14.0), (16.0, 14.0), 0.2)]   # ... and re-routed
+    assert _tracks(out, "X") == _tracks(base, "X")         # an unnamed net is not touched
+    assert os.path.exists(out)

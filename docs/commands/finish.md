@@ -9,6 +9,14 @@ fluxplace finish --board B --out O --area 7,38,13,46 --rip
 fluxplace finish --board B --out O --selection scope.json      # {"nets":[..],"refs":[..],"area":[x1,y1,x2,y2]}
 ```
 
+## Legacy path
+
+`--nets` alone (no `--refs`, `--area`, `--area-of`, `--selection`) is the original behaviour, unchanged: the named
+nets' existing copper is removed and re-routed (the pipeline's per-net finish relies on it). The protection proof
+and `--rip` apply only with a scope flag.
+
+The output gets a copy of the input's `.kicad_pro` under its own name; the `.finish` copy is kept as before.
+
 ## Scope (intersection of what is given)
 
 | flag | meaning |
