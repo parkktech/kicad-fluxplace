@@ -82,3 +82,19 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 - `PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH` and `RF_IMPEDANCE_OFF / RF_WIDTH_OFF / RF_VIA_COUNT` come from the routing audit
   (`qualaudit.py`, `pairaudit.py`): one implementation. RF width: `[nets.X] width_mm`, the map's `rf_geometry`, `[rf] width_mm` (a width or
   per-layer table; tolerance `width_tol_mm` 0.02), else the impedance computed from the stackup (`target_z`, `tolerance_pct`).
+
+## Schematic ERC (`fluxplace/ercnet.py`)
+
+Runs on the spec netlist when `--spec` is given (else the board's), pin names from the spec `pinmap` or the official KiCad symbol.
+
+| code | level | meaning |
+|---|---|---|
+| DECAP_MISSING | WARN | IC power pin on a rail with no capacitor rail-to-ground |
+| DECAP_FAR | WARN | nearest such capacitor farther than `[lint] decap_mm` (default 5.0), pad to pad, placed board only |
+| I2C_PULLUP_MISSING | WARN | SDA/SCL-named net with no resistor to a rail |
+| PASSIVE_VALUE | WARN / INFO | R/C/L value does not parse to number + unit; INFO for a pull resistor outside `[erc] pull_min_ohm`..`pull_max_ohm` (1k..100k) |
+| NET_NO_DRIVER | INFO | every pin is an input by official symbol pin type (needs the symbol) |
+
+Skew limits accept `_ps` spellings (`[pairs.FAMILY] skew_ps`, `[si] default_skew_ps`, `audio_skew_ps`, `skew_ps_by_kind`);
+they convert to mm by the delay of the layers the net runs on (`impedance.delay_ps_per_mm`). Pair findings print ps beside mm.
+A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never converted by a guess.
