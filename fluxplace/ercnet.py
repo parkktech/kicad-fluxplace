@@ -354,6 +354,9 @@ def waive(findings, waivers):
 
 def run(spec_or_pads, cons=None, board_facts=None, idx=None):
     """See module doc. Returns lint-style findings (severity warning|info)."""
+    if spec_or_pads is None or (isinstance(spec_or_pads, dict) and not spec_or_pads.get("nets")):
+        return [dict(severity="error", code="ERC_NO_NETS", refs=[],
+                     msg="no nets to check: the spec has no nets; give --board (the placed pads) instead")]
     if isinstance(spec_or_pads, list):
         spec, use_lib = _from_pads(spec_or_pads), False
     else:

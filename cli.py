@@ -1511,6 +1511,8 @@ def cmd_lint(a):
         st = L.sch_pin_types(a.sch) if getattr(a, "sch", None) else None
         findings += L.control_pins(spec, cons, st, waivers=a.waive)
     # schematic-level checks: the spec's netlist (pin names, values) + placed pad positions when a board is given
+    if not a.board and not (spec and spec.get("nets")):
+        raise SystemExit("lint: spec has no nets; give --board (the placed pads) to lint")
     erc = EN.run(spec if spec and spec.get("nets") else pads, cons, board_facts=facts)
     findings += EN.waive(erc, a.waive)
     n = L.summarize(findings)
