@@ -310,19 +310,42 @@ def resolve_all(rules, obj):
     return rules.resolve_all(obj)
 
 
-def check_matches(rules, nets=(), refs=()):
-    """RULE_MATCHES_NOTHING warnings: [(rule, text)] for rules whose net/ref selectors match no object.
-    Only net and ref selectors are checkable from names alone; the others are reported as unchecked."""
+def check_matches(rules, nets=(), refs=(), objects=None, notes=None):
+    """RULE_MATCHES_NOTHING warnings: [(rule, text)] for rules whose selectors match no object.
+
+    With `objects` (board elements from `board_element_objects`: tracks, vias, zones, pads and
+    footprints, each with net/netclass/layer/type) every select key is evaluated. Without them only
+    net/ref/pair can be checked from names; a rule that also has netclass/type/layer is checked on
+    its name keys alone and a note is appended to `notes` (when given) saying what was skipped."""
+    import dataclasses
     out = []
+    name_objs = [{"net": n} for n in nets] + [{"ref": f} for f in refs]
     for r in rules:
         if not r.set or r.legacy:
             continue
         s = r.select
-        if "net" in s or "ref" in s or "pair" in s:
-            objs = [{"net": n} for n in nets] + [{"ref": f} for f in refs]
-            if not any(matches(r, o) for o in objs):
-                out.append((r, f"{r.label} matches no net or footprint on this board ({r.describe_select()})"))
+        if objects is not None:
+            pool, rr = objects, r
+        else:
+            if not ({"net", "ref", "pair"} & set(s)):
+                continue
+            skipped = sorted(set(s) - {"net", "ref", "pair"})
+            pool = name_objs
+            rr = r
+            if skipped:
+                rr = dataclasses.replace(r, select={k: v for k, v in s.items() if k in ("net", "ref", "pair")})
+                if notes is not None:
+                    notes.append(f"{r.label}: {', '.join(skipped)} not checked (no board objects)")
+        if not any(matches(rr, o) for o in pool):
+            out.append((r, f"{r.label} matches no net or footprint on this board ({r.describe_select()})"
+                        if objects is None else
+                        f"{r.label} matches no board object ({r.describe_select()})"))
     return out
+
+
+def matched_nets(rule, nets):
+    """Net names a rule's select hits (for the rules table: makes regex scope surprises visible)."""
+    return sorted({n["net"] for n in nets if matches(rule, n)})
 
 
 def board_objects(board_path):
@@ -342,5 +365,42 @@ def board_objects(board_path):
     return nets, fps
 
 
+def board_element_objects(board_path):
+    """Every board element a selector can match: tracks, vias, zones, pads (with ref/net/netclass/layer).
+    One object per layer an element sits on. Needs pcbnew."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board_path)
+    net_class = {}
+    for name, item in b.GetNetInfo().NetsByName().items():
+        net_class[str(name)] = str(item.GetNetClassName())
+
+    def _net(item):
+        n = item.GetNet() if hasattr(item, "GetNet") else None
+        name = str(n.GetNetname()) if n is not None else ""
+        return name, net_class.get(name, "")
+
+    objs = []
+    for t in b.GetTracks():
+        net, nc = _net(t)
+        if t.Type() == pcbnew.PCB_VIA_T:
+            layers = [str(b.GetLayerName(i)) for i in t.GetLayerSet().Seq()]
+            objs += [{"net": net, "netclass": nc, "type": "via", "layer": ly} for ly in layers]
+        else:
+            objs.append({"net": net, "netclass": nc, "type": "track", "layer": str(b.GetLayerName(t.GetLayer()))})
+    for z in b.Zones():
+        net, nc = _net(z)
+        for ly in z.GetLayerSet().Seq():
+            objs.append({"net": net, "netclass": nc, "type": "zone", "layer": str(b.GetLayerName(ly))})
+    for fp in b.GetFootprints():
+        ref = str(fp.GetReference())
+        props = {str(f.GetName()): str(f.GetText()) for f in fp.GetFields()}
+        objs.append({"ref": ref, "type": "footprint", "layer": str(fp.GetLayerName()), "props": props})
+        for pad in fp.Pads():
+            net, nc = _net(pad)
+            objs.append({"ref": ref, "net": net, "netclass": nc, "type": "pad",
+                         "layer": str(fp.GetLayerName()), "props": props})
+    return objs
+
+
 __all__ = ["load", "RuleSet", "RuleError", "resolve", "resolve_all", "matches", "check_matches",
-           "board_objects", "SET_KEYS", "SELECT_KEYS", "OBJECT_TYPES"]
+           "matched_nets", "board_element_objects", "board_objects", "SET_KEYS", "SELECT_KEYS", "OBJECT_TYPES"]

@@ -65,5 +65,9 @@ Nothing else in those blocks moves (fab floors, placement weights, `[si]`, `[rf]
 
 - `track`, `via` and `zone` selectors resolve when the caller supplies such objects; `rules` lists only nets and
   footprints, so per-track matches are not counted there.
-- `prop` and `netclass` selectors are not checked by `RULE_MATCHES_NOTHING` (names alone cannot evaluate them).
+- `RULE_MATCHES_NOTHING` evaluates every select key (`net`, `ref`, `pair`, `type`, `layer`, `netclass`, `prop`)
+  against the board's real objects (tracks, vias, zones, pads, footprints; one object per layer). Without a board
+  (review gate) only `net`/`ref`/`pair` are checked; the other keys are skipped and listed as `RULE_NOT_CHECKED`.
+- `net` is a regex, not a glob, and is unanchored unless you anchor it: `net = "USB"` also matches `XUSB_Q`.
+  The rule table prints the matched net names (first 5 + count) under each rule so scope surprises show up.
 - Board objects are read with pcbnew; the rule table needs KiCad's Python.

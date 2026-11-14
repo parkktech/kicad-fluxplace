@@ -251,3 +251,26 @@ def test_longer_pair_family_beats_extra_select_key(tmp_path):
                       {"select": {"pair": "USB", "type": "track"}, "set": {"clearance_mm": 0.3}}]}
     assert RU.load(cons2).resolve(obj, "clearance_mm")[0] == 0.2
     assert RU.load(cons).resolve(obj, "clearance_mm")[0] == 0.2
+
+
+def test_pair_plus_type_rule_not_false_warned_without_board():
+    # fix-c #3: pair + type used to always emit RULE_MATCHES_NOTHING (type never checkable from names)
+    cons = {"rule": [{"name": "usb tracks", "select": {"pair": "USB_", "type": "track"}, "set": {"width_mm": 0.2}}]}
+    notes = []
+    assert RU.check_matches(RU.load(cons), nets=["USB_DP"], refs=["U1"], notes=notes) == []
+    assert any("type not checked" in n for n in notes)
+
+
+def test_pair_plus_type_rule_evaluated_against_board_objects():
+    cons = {"rule": [{"name": "usb vias", "select": {"pair": "USB_", "type": "via"}, "set": {"width_mm": 0.2}},
+                     {"name": "usb tracks", "select": {"pair": "USB_", "type": "track"}, "set": {"width_mm": 0.2}}]}
+    objs = [{"net": "USB_DP", "netclass": "Default", "type": "track", "layer": "F.Cu"},
+            {"ref": "U1", "net": "USB_DP", "type": "pad", "layer": "F.Cu", "props": {}}]
+    warn = RU.check_matches(RU.load(cons), nets=["USB_DP"], refs=["U1"], objects=objs)
+    assert [r.name for r, _ in warn] == ["usb vias"]
+
+
+def test_matched_nets_shows_regex_scope():
+    rs = RU.load({"rule": [{"name": "usb", "select": {"net": "USB"}, "set": {"width_mm": 0.2}}]})
+    nets = [{"net": "USB_DP"}, {"net": "XUSB_Q"}, {"net": "GND"}]
+    assert RU.matched_nets(rs[0], nets) == ["USB_DP", "XUSB_Q"]

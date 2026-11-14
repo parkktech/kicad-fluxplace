@@ -2052,22 +2052,31 @@ def cmd_rules(a):
                 print(f"      {tag}{c['rule']:<36} level {c['level']:>3}{imp}  -> {c['value']}")
         return
     # table of every rule: how many objects it matches, and what matches nothing
-    warn = RU.check_matches(rs, nets=[n["net"] for n in nets], refs=[f["ref"] for f in fps])
+    elements = RU.board_element_objects(a.board)
+    notes = []
+    warn = RU.check_matches(rs, nets=[n["net"] for n in nets], refs=[f["ref"] for f in fps],
+                            objects=elements, notes=notes)
     rows = []
     for r in rs:
         objs = nets + fps
-        n_match = sum(1 for o in objs if RU.matches(r, o))
+        n_match = sum(1 for o in elements if RU.matches(r, o)) if r.select else len(objs)
+        matched = RU.matched_nets(r, nets) if r.select else [n["net"] for n in nets]
         rows.append({"rule": r.label, "select": r.describe_select(), "set": r.set, "important": r.important,
-                     "matches": n_match, "legacy": r.legacy})
+                     "matches": n_match, "nets": matched, "legacy": r.legacy})
     if a.json:
-        print(_json.dumps({"rules": rows, "warnings": [m for _r, m in warn]}, indent=2))
+        print(_json.dumps({"rules": rows, "warnings": [m for _r, m in warn], "notes": notes}, indent=2))
         return
-    print(f"RULES {a.board} — {len(rows)} rule(s), {len(nets)} nets, {len(fps)} footprints")
+    print(f"RULES {a.board} — {len(rows)} rule(s), {len(nets)} nets, {len(fps)} footprints, "
+          f"{len(elements)} board objects")
     for row in rows:
         imp = " important" if row["important"] else ""
         src = " (legacy)" if row["legacy"] else ""
         print(f"  {row['rule']:<36} matches {row['matches']:>4}  {row['select']}{src}{imp}")
+        shown = ", ".join(row["nets"][:5]) + (f" (+{len(row['nets']) - 5} more)" if len(row["nets"]) > 5 else "")
+        print(f"      nets ({len(row['nets'])}): {shown or '-'}")
         print(f"      set {row['set']}")
+    for n in notes:
+        print(f"RULE_NOT_CHECKED: {n}")
     for _r, m in warn:
         print(f"RULE_MATCHES_NOTHING: {m}")
 
