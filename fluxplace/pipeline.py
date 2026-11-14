@@ -465,6 +465,9 @@ def st_route(c, n, board):
             b0 = state["best"]
             frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
     start_board = best if frrec else board             # hybrid finish: what Freerouting left goes to the per-net router
+    if frrec:
+        B = RD.load(start_board)                       # the audit baseline is the board the router starts from, not the pre-Freerouting one:
+        #                                                else every Freerouting track/via is "new copper" the batch audit rejects (CLEARANCE)
     rtodo = sorted(conn(best)) if frrec else todo
     res = {"timeouts": 0, "halvings": 0, "checkpoints": [], "board": None, "leftovers": rtodo}
     if not have_krt or not rtodo:

@@ -1,6 +1,7 @@
 """[lock.at] is authoritative: a part away from its lock is moved there before the first placement stage."""
 import argparse, os, sys
 import pytest
+pcbnew = pytest.importorskip("pcbnew")   # imported at collection: test_core later parks a stub in sys.modules
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planboards as PB

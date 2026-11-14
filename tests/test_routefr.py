@@ -342,3 +342,18 @@ def test_pipeline_router_selection(tmp_path, fake, monkeypatch):
     a = _pipe_args(tmp_path, b, loc, router=None, constraints=str(cons), freerouting_jar=str(tmp_path / "nope.jar"))
     with pytest.raises(SystemExit, match="jar not found"):                                 # the [route] router key selects too
         PL.run(a)
+
+
+@need_pcbnew
+def test_per_net_finish_audits_only_its_own_copper_not_freerouting_s(tmp_path, fake):
+    """Freerouting copper that is itself under the clearance floor must not make the per-net batches fail their audit:
+    the baseline of that audit is the post-Freerouting board (a pre-Freerouting baseline reported every Freerouting track as new)."""
+    loc, set_cfg = fake
+    b = write(tmp_path, G.ic("U1", 20, 20, ["A", "B", "C", "D"], pitch=1.27) + G.ic("U2", 60, 40, ["A", "B", "C", "E"], pitch=1.27), inner=False)
+    # A runs 0.05 mm from the foreign pads of U1 (floor 0.127)
+    set_cfg(ses=ses_text([("A", "F.Cu", 0.2, [(18, 19.365), (18, 19.065), (25, 19.065), (25, 50), (50, 50), (50, 39.365), (58, 39.365)])]))
+    a = _pipe_args(tmp_path, b, loc)
+    PL.run(a)
+    res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "6-route", "result.json")))
+    assert res["open_end"] == 1, res["line"]                  # A by Freerouting, B by the per-net router
+    assert "RULE_VIOLATION" not in res["line"] and "0 checkpoint(s)" not in res["line"], res["line"]   # closed by the batch, not a ladder rescue
