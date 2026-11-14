@@ -1,3 +1,12 @@
+## 2026-11-13 - schematic --layout blocks (branch sch-blocks)
+
+`schematic` now draws a hierarchical, drafted schematic by default (schinv.py inventory, schdraw.py layout/router/emit,
+schlegible.py read-back checks, schblocks.py generate + gate; docs/commands/schematic.md, tests/test_schblocks.py).
+Netlist PASS + legibility 0 on UTV V1.6/V1.5 specs and three razor boards (from copper). Open: pin side/order is pad order
+(no signal-flow inference: inputs are not forced left); nets between cells far apart become labels, not wires (router length
+cap); block names are `<anchor ref> <value>` unless `[schematic.blocks]` names them; box symbols are generic (no transistor /
+op-amp shapes); 25 ERC footprint_link warnings on V1.6 are the project footprint library not visible from the output dir.
+
 ## 2026-11-12 - routing-flow work (branch fan-flow, second agent)
 
 Done (all with tests; docs/commands/route.md, snap-vias.md, questions.md, FLOW.md): clearance request margin + escalation off / strict sizes;
