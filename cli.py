@@ -2891,6 +2891,7 @@ def _schematic_blocks(a):
                 lines.append("  %s: %s" % (k, str(nl[k])[:300]))
         lines.append("erc: %d - %s" % (er.get("total", 0), ", ".join("%s %d" % kv for kv in er.get("by_type", {}).items()) or "none"))
         lines.append("legibility: %d - %s" % (lg.get("total", 0), ", ".join("%s %d" % kv for kv in lg.get("counts", {}).items())))
+        lines.append(g["verified"])
     if g.get("render"):
         r = g["render"]
         lines.append("render: %s (%d PNG pages, %d SVG)" % (os.path.dirname(r["pdf"] or r["svg_dir"]), len(r["pngs"]), len(r["svgs"])))
