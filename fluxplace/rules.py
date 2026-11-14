@@ -15,8 +15,9 @@ Two sources feed the same list of rules:
 
 Specificity, high to low:  exact ref / exact net  >  ref glob / net regex  >  prop  >  pair
 >  netclass  >  type / layer  >  global default (empty select).  Several select keys are AND
-and rank by their most specific key.  Among equal specificity the longer pair family wins, then
-the later rule (legacy blocks load first, `[[rule]]` entries in file order after them).
+and rank by their most specific key.  Among equal specificity the longer pair family (or longer
+glob/regex pattern) wins, then the rule with more select keys, then the later rule (legacy blocks load
+first, `[[rule]]` entries in file order after them).
 `important = true` beats any non-important rule regardless of specificity.
 
 `resolve(obj, key)` is per key: the winner is the best-ranked rule that SETS that key and matches
@@ -79,8 +80,9 @@ class Rule:
         return f'"{self.name}"' if self.name else self.origin
 
     def rank(self):
-        """Sort key, higher wins: (important, specificity level, number of select keys, detail, file order)."""
-        return (self.important, self._level, len(self.select), self._detail, self.order)
+        """Sort key, higher wins: (important, specificity level, detail, number of select keys, file order).
+        detail = pair family length, else the net/ref pattern length (longer = narrower)."""
+        return (self.important, self._level, self._detail, len(self.select), self.order)
 
     def describe_select(self):
         if not self.select:
@@ -108,6 +110,7 @@ def _compile_select(origin, select):
         if not isinstance(select["ref"], str):
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.ref must be a string")
         levels.append(_ref_level(select["ref"]))
+        detail = max(detail, len(select["ref"]) if levels[-1] == LEVEL["pattern"] else 0)
     if "net" in select:
         if not isinstance(select["net"], str):
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.net must be a regex string")
@@ -116,6 +119,7 @@ def _compile_select(origin, select):
         except re.error as e:
             raise RuleError("RULE_BAD_REGEX", f"{origin}: select.net '{select['net']}' is not a regex: {e}")
         levels.append(_net_level(select["net"]))
+        detail = max(detail, len(select["net"]) if levels[-1] == LEVEL["pattern"] else 0)
     if "prop" in select:
         p = select["prop"]
         if not isinstance(p, dict) or not all(isinstance(v, str) for v in p.values()):
@@ -125,7 +129,7 @@ def _compile_select(origin, select):
         if not isinstance(select["pair"], str) or not select["pair"]:
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.pair must be a family prefix")
         levels.append(LEVEL["pair"])
-        detail = len(select["pair"])
+        detail = max(detail, len(select["pair"]))
     if "netclass" in select:
         levels.append(LEVEL["netclass"])
     if "type" in select:

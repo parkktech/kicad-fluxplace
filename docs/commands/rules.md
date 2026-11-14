@@ -38,7 +38,7 @@ important = false
 
 Highest first: exact ref or exact net > net regex / ref glob > `prop` > `pair` > `netclass` > `type`/`layer`
 > global default (no select). A rule with several select keys ranks by its most specific key. Ties go to the
-longer pair family, then to the later rule. Legacy blocks load first, `[[rule]]` entries in file order after
+longer pair family (or longer non-exact net/ref pattern), then to the rule with more select keys, then to the later rule. Legacy blocks load first, `[[rule]]` entries in file order after
 them. `important = true` beats any non-important rule. Resolution is per key: a rule that sets only
 `width_mm` does not hide a `clearance_mm` set elsewhere.
 

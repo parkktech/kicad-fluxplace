@@ -240,3 +240,14 @@ def test_net_gets_every_resolved_value_across_rules(tmp_path, monkeypatch):
     assert a2["track_width"] == 0.4 and a2["clearance"] == 0.3
     a1 = cls[pats["A1"]]
     assert a1["track_width"] == 0.4 and "clearance" not in a1
+
+
+def test_longer_pair_family_beats_extra_select_key(tmp_path):
+    # fix-c #2: pair family length decides before the number of select keys.
+    cons = {"rule": [{"select": {"pair": "USB"}, "set": {"clearance_mm": 0.3}},
+                     {"select": {"pair": "USB_DP"}, "set": {"clearance_mm": 0.2}}]}
+    obj = {"net": "USB_DP", "type": "track", "layer": "F.Cu"}
+    cons2 = {"rule": [{"select": {"pair": "USB_DP"}, "set": {"clearance_mm": 0.2}},
+                      {"select": {"pair": "USB", "type": "track"}, "set": {"clearance_mm": 0.3}}]}
+    assert RU.load(cons2).resolve(obj, "clearance_mm")[0] == 0.2
+    assert RU.load(cons).resolve(obj, "clearance_mm")[0] == 0.2
