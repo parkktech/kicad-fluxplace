@@ -24,7 +24,7 @@ import tempfile
 
 from . import repair as RP
 
-__all__ = ["drc_counts", "shortcut", "meander", "tune_pairs"]
+__all__ = ["drc_counts", "shortcut", "meander", "tune_pairs", "meander_to", "tune_match", "bump_plan"]
 
 
 # ------------------------------------------------------------------- DRC
@@ -318,4 +318,147 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         if os.path.exists(p):
             os.unlink(p)
     log(f"  final DRC: {base[0]} violations, {base[1]} unconnected")
+    return report
+
+
+# ------------------------------------------------------- length matching
+def _bump_polyline(L, n, amp, period):
+    """Local polyline (s along the segment, t across) of n rectangular bumps centred on a segment of length L.
+    Bump i rises on its left leg at s_i, runs across its width (period / 2) and drops on its right leg; the copper
+    between bumps is a straight run along the axis, so no leg reverses direction (no acute tip for DRC)."""
+    w = period / 2.0
+    s0 = (L - n * period) / 2.0
+    pts = [(0.0, 0.0), (s0, 0.0)]
+    for i in range(n):
+        sg = 1.0 if i % 2 == 0 else -1.0
+        x0 = s0 + i * period
+        x1 = x0 + w
+        pts += [(x0, 0.0), (x0, sg * amp), (x1, sg * amp), (x1, 0.0)]
+    pts.append((L, 0.0))
+    return [q for k, q in enumerate(pts) if k == 0 or q != pts[k - 1]]
+
+
+def bump_plan(L, need_mm, amp_max, period, margin):
+    """(n, amp) of accordion bumps adding `need_mm` on a segment of length L, or None when no room.
+    Each bump adds exactly 2 * amp (two legs), so n = ceil(need / (2 amp_max)) and amp = need / (2 n)."""
+    if need_mm <= 0:
+        return None
+    n = max(1, int(math.ceil(need_mm / (2.0 * amp_max) - 1e-9)))
+    a = need_mm / (2.0 * n)
+    if n * period + 2 * margin > L:
+        return None
+    return n, a
+
+
+def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
+               candidate=0, log=print):
+    """Lengthen `net` by exactly `need_mm` with accordion bumps on its `candidate`-th longest UNLOCKED straight
+    segment that has room (period_mm = 2 x bump width). Returns the length added (0.0 when no segment has room)."""
+    import pcbnew
+    lockers = [t for t in board.GetTracks() if t.GetNetname() == net and t.GetClass() == "PCB_TRACK"
+               and not t.IsLocked()]
+    lockers.sort(key=lambda t: -t.GetLength())
+    straights = [t for t in lockers
+                 if bump_plan(t.GetLength() / 1e6, need_mm, amp_mm, period_mm, margin_mm) is not None]
+    if candidate >= len(straights):
+        return 0.0
+    seg = straights[candidate]
+    s, e = seg.GetStart(), seg.GetEnd()
+    sx, sy, ex, ey = s.x / 1e6, s.y / 1e6, e.x / 1e6, e.y / 1e6
+    L = math.hypot(ex - sx, ey - sy)
+    n, a = bump_plan(L, need_mm, amp_mm, period_mm, margin_mm)
+    ux, uy = (ex - sx) / L, (ey - sy) / L
+    nx, ny = -uy, ux
+    pts = [(sx + u * ux + t * nx, sy + u * uy + t * ny) for u, t in _bump_polyline(L, n, a, period_mm)]
+    width, layer, code = seg.GetWidth(), seg.GetLayer(), seg.GetNetCode()
+    RP._remove(board, seg)
+    added = 0.0
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(pcbnew.VECTOR2I(int(round(x0 * 1e6)), int(round(y0 * 1e6))))
+        t.SetEnd(pcbnew.VECTOR2I(int(round(x1 * 1e6)), int(round(y1 * 1e6))))
+        t.SetLayer(layer)
+        t.SetWidth(width)
+        t.SetNetCode(code)
+        board.Add(t)
+        added += math.hypot(x1 - x0, y1 - y0)
+    added -= L
+    log(f"      {net}: accordion x{n} on {board.GetLayerName(layer)} adds {added:.3f} mm (asked {need_mm:.3f})")
+    return added
+
+
+def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="kicad-cli",
+               max_rounds=4, log=print):
+    """Lengthen the short members of each match group until they are within tolerance.
+
+    groups_: lengthmatch.groups() entries (already selected for this run).
+    net_lengths(board, group) -> {net: {"mm", "ps"}} for the group's members (measured on the working file).
+    targets: {group name: (target, tolerance)} in the group's unit, fixed by the caller from the input board.
+    Every bump is one DRC-guarded step (accepted only if violations and unconnected do not rise).
+    Returns [{group, net, before, after, target, tol, status, note}]."""
+    import pcbnew
+    work = out_path + ".work.kicad_pcb"
+    shutil.copy(board_path, work)
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(board_path)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(work)[0] + ext)
+    base = base0 = drc_counts(work, kicad_cli)
+    log(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
+    report = []
+    for g in groups_:
+        target, tol = targets[g["name"]]
+        unit = g["unit"]
+        period = 2.0 * (g["spacing_mm"] or 0.4)          # spacing_mm = bump width
+        for net in sorted(net_lengths(pcbnew.LoadBoard(work), g)):
+            row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit}
+            for rnd in range(max_rounds):
+                cur = net_lengths(pcbnew.LoadBoard(work), g).get(net)
+                val = None if cur is None else cur.get(unit if unit == "ps" else "mm")
+                if rnd == 0:
+                    row["before"] = val
+                if val is None:
+                    row.update(status="unknown", note="layer delay unknown")
+                    break
+                if abs(val - target) <= tol:
+                    row.update(status="ok", note="")
+                    break
+                if val > target + tol:
+                    row.update(status="fail", note="longer than target: never shortened")
+                    break
+                need = target - val
+                if unit == "ps":
+                    # ps -> mm with the net's average delay (the bump layer is picked by the guard)
+                    avg = val / max(cur.get("mm") or 1e-9, 1e-9)
+                    need = need / avg
+                ok = False
+                for cand in range(4):
+                    for amp, frac in ((g["amplitude_mm"], 1.0), (g["amplitude_mm"], 0.5),
+                                      (g["amplitude_mm"] * 0.5, 1.0)):
+                        ok, base = _guarded(
+                            board_path, work,
+                            lambda bd, c=cand, a=amp, f=frac: meander_to(
+                                bd, net, need * f, amp_mm=a, period_mm=period,
+                                candidate=c, log=log) > 0,
+                            kicad_cli, base, log)
+                        if ok:
+                            break
+                    if ok:
+                        break
+                if not ok:
+                    row.update(status="fail", note="no room: no DRC-clean bump found on any straight segment")
+                    break
+            else:
+                row.update(status="fail", note=f"not within tolerance after {max_rounds} rounds")
+            cur = net_lengths(pcbnew.LoadBoard(work), g).get(net, {})
+            row["after"] = cur.get(unit if unit == "ps" else "mm")
+            row.setdefault("status", "ok")
+            report.append(row)
+            log(f"  {g['name']}/{net}: {row.get('before')} -> {row['after']} ({row['status']}) {row.get('note', '')}")
+    shutil.move(work, out_path)
+    for ext in (".kicad_pro", ".kicad_dru"):
+        p = os.path.splitext(work)[0] + ext
+        if os.path.exists(p):
+            os.unlink(p)
+    log(f"  final DRC: {base[0]} violations, {base[1]} unconnected (baseline {base0[0]} / {base0[1]})")
     return report
