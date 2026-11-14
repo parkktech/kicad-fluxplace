@@ -118,7 +118,11 @@ def _pad_to_pad(board, net, stackup):
             vmm += via_mm(stackup, board.GetLayerName(a[2]), board.GetLayerName(b[2])) or 0.0
             continue
         lyr = board.GetLayerName(a[2])
-        by[lyr] = by.get(lyr, 0.0) + math.hypot(a[0] - b[0], a[1] - b[1])
+        if _item is not None and _item.GetClass() == "PCB_ARC":   # chord is not the length of an arc
+            seg = _item.GetLength() / 1e6
+        else:
+            seg = math.hypot(a[0] - b[0], a[1] - b[1])
+        by[lyr] = by.get(lyr, 0.0) + seg
     return by, vias, vmm
 
 
@@ -137,7 +141,7 @@ def lengths_from_board(board, nets, stackup, planes, include_vias=False):
         if t.GetClass() == "PCB_VIA":
             acc[n]["vias"] += 1
             acc[n]["via_list"].append((board.GetLayerName(t.TopLayer()), board.GetLayerName(t.BottomLayer())))
-        elif t.GetClass() == "PCB_TRACK":
+        elif t.GetClass() in ("PCB_TRACK", "PCB_ARC"):      # an arc's GetLength() is its arc length
             lyr = board.GetLayerName(t.GetLayer())
             acc[n]["by_layer"][lyr] = acc[n]["by_layer"].get(lyr, 0.0) + t.GetLength() / 1e6
     out = {}

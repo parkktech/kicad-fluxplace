@@ -255,3 +255,56 @@ def test_default_spacing_is_three_times_max_width_or_clearance(tmp_path):
     rep2 = TU.tune_match(src, str(tmp_path / "o2.kicad_pcb"), [g], f, {"S": (42.0, 0.5)},
                          clearance_of=lambda n: 0.1, log=lambda m: None)
     assert rep2[0]["spacing_mm"] == pytest.approx(0.6)
+
+
+def _fcu_set():
+    import pcbnew
+    s = pcbnew.LSET()
+    s.AddLayer(pcbnew.F_Cu)
+    return s
+
+
+def _arc_board(path):
+    """Two pads on net SIG joined by a 10 mm straight then a 5 mm quarter-ish arc (true arc length)."""
+    import pcbnew
+    b = pcbnew.BOARD()
+    b.SetCopperLayerCount(2)
+    net = pcbnew.NETINFO_ITEM(b, "SIG")
+    b.Add(net)
+    r = 5.0 / (math.pi / 2)                       # radius for a 5 mm quarter arc
+    pads = [(0.0, 0.0), (10.0 + r, r)]
+    for i, (x, y) in enumerate(pads):
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetReference(f"P{i}")
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(0.8), pcbnew.FromMM(0.8)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(_fcu_set())
+        pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+        pad.SetNumber("1")
+        pad.SetNet(net)
+        fp.Add(pad)
+        b.Add(fp)
+    t = pcbnew.PCB_TRACK(b)
+    t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0.0), pcbnew.FromMM(0.0)))
+    t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(10.0), pcbnew.FromMM(0.0)))
+    t.SetWidth(pcbnew.FromMM(0.2)); t.SetLayer(pcbnew.F_Cu); t.SetNet(net)
+    b.Add(t)
+    a = pcbnew.PCB_ARC(b)
+    c = (10.0, r)                                  # arc centre; start at -90 deg, end at 0 deg
+    pt = lambda ang: pcbnew.VECTOR2I(pcbnew.FromMM(c[0] + r * math.cos(math.radians(ang))),
+                                     pcbnew.FromMM(c[1] + r * math.sin(math.radians(ang))))
+    a.SetStart(pt(-90)); a.SetMid(pt(-45)); a.SetEnd(pt(0))
+    a.SetWidth(pcbnew.FromMM(0.2)); a.SetLayer(pcbnew.F_Cu); a.SetNet(net)
+    b.Add(a)
+    b.Save(path)
+    return path
+
+
+def test_arc_track_counts_its_true_length_and_pad_to_pad_path_goes_through_it(tmp_path):
+    pytest.importorskip("pcbnew")
+    p = _arc_board(str(tmp_path / "arc.kicad_pcb"))
+    l = _lens(p, ["SIG"])["SIG"]
+    assert l["basis"] == "pad-to-pad", l          # the arc joins the two pads in the connectivity graph
+    assert l["mm"] == pytest.approx(15.0, abs=0.01), l   # 10 mm straight + 5 mm arc
