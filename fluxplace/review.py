@@ -232,6 +232,8 @@ def _pairs_from_audit(facts, cons):
         return None
     fams = tuple((cons or {}).get("pairs", {}))
     gated = lambda m: m.startswith(fams) or m.upper().split("_")[0] in _HS_FAMILIES
+    if any(r["status"] == "unknown" and gated(r["p"]) for r in rows):
+        return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
     out = []
     for r in rows:
         if r["status"] != "mismatch" or not gated(r["p"]):

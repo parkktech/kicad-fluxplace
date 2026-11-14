@@ -132,3 +132,50 @@ def test_review_pair_ps_limit_without_stackup_is_reported_not_guessed():
     facts["stackup"] = []
     out = R.check_pairs(facts, cons)
     assert [f["code"] for f in out] == ["PAIR_DELAY_UNKNOWN"]
+
+
+def test_ps_limit_with_no_layer_delay_is_warn_and_never_passing(monkeypatch):
+    from fluxplace import pairaudit as PA
+    from fluxplace import review as R
+    # 1) the review path: WARN PAIR_DELAY_UNKNOWN, no PAIR_SKEW, nothing that reads as a pass
+    cons = {"pairs": {"ETH_": {"skew_ps": 30}}}
+    facts = _pair_facts(5.0)
+    facts["stackup"] = []
+    out = R.check_pairs(facts, cons)
+    unk = [f for f in out if f["code"] == "PAIR_DELAY_UNKNOWN"]
+    assert len(unk) == 1 and unk[0]["level"] == R.WARN
+    assert not [f for f in out if f["code"] == "PAIR_SKEW"]
+    # 2) the audit: the pair is "unknown" (not graded), never "complete"
+    monkeypatch.setattr(PA, "profile", lambda B, net: {
+        "layers": ["F.Cu"], "vias": 0, "length": 10.0 if net.endswith("_P") else 15.0})
+    res = PA.audit(None, [("ETH_P", "ETH_N")], cons, set())
+    e = res[("ETH_P", "ETH_N")]
+    assert e["status"] == "unknown" and e["limit"] is None and "not graded" in e["why"]
+    s = PA.summary(res)
+    assert s["complete"] == [] and s["unknown"] == ["ETH_P/ETH_N"]
+    # 3) when the audit cannot grade it, review falls back to check_pairs (which warns), never a pass
+    monkeypatch.setattr("fluxplace.review._pairs_from_audit", lambda facts, cons: None)
+    assert [f["level"] for f in R.check_pairs(facts, cons) if f["code"] == "PAIR_DELAY_UNKNOWN"] == [R.WARN]
+
+
+def test_stripline_vs_microstrip_on_asymmetric_stack_and_two_layer_board():
+    from fluxplace import impedance as IM2
+    # GND1 above S1, GND2 below: a true stripline (both planes); MICRO (one plane only) is microstrip
+    asym = [{"type": "copper", "name": "GND1", "thickness": 0.035},
+            {"type": "dielectric", "thickness": 0.1, "epsilon_r": 4.3},
+            {"type": "copper", "name": "S1", "thickness": 0.035},
+            {"type": "dielectric", "thickness": 0.4, "epsilon_r": 3.0},
+            {"type": "copper", "name": "GND2", "thickness": 0.035}]
+    g = IM2.geometry(asym, ["GND1", "GND2"], "S1")
+    assert g["model"] == "asymmetric stripline"          # both planes, different dielectrics
+    # one plane only, same stack: microstrip, not stripline
+    g2 = IM2.geometry(asym, ["GND2"], "S1")
+    assert "stripline" not in g2["model"]
+    # 2-layer board: F.Cu over a B.Cu plane is microstrip, never stripline
+    two = [{"type": "copper", "name": "F.Cu", "thickness": 0.035},
+           {"type": "dielectric", "thickness": 1.6, "epsilon_r": 4.3},
+           {"type": "copper", "name": "B.Cu", "thickness": 0.035}]
+    g3 = IM2.geometry(two, ["B.Cu"], "F.Cu")
+    assert g3["model"] == "microstrip"
+    # microstrip sees the air above: faster than a fully-dielectric stripline on the same er
+    assert 5.5 < IM2.delay_ps_per_mm(g3) < math.sqrt(4.3) / C_MM_PER_PS

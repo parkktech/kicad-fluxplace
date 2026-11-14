@@ -10,7 +10,8 @@ re-reads those files and checks what the fab will actually receive:
   GERBER_ANNULAR     plated hole whose outer-layer copper ring is below
                      [fab] min_annular_mm (exact, from flash apertures)
   GERBER_DRILL_NO_PAD (WARN) plated hole with no copper under it on any layer
-  GERBER_LAYER_MISSING  expected copper/mask/silk/edge layer absent or empty
+  GERBER_LAYER_MISSING  expected copper/mask/silk/edge layer absent (or Edge.Cuts empty)
+  GERBER_LAYER_EMPTY    present but no features: copper WARN, mask/silk INFO
   GERBER_EDGE_OPEN   Edge.Cuts outline does not close on itself
 
 Thresholds come from the constraints' [fab] table (fab_profile); nothing here
@@ -40,7 +41,7 @@ import time
 
 import numpy as np
 
-FAIL, WARN = "FAIL", "WARN"
+FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 RESOLUTION_MM = 0.02
 ARC_CHORD_MM = 0.05
 
@@ -185,11 +186,19 @@ def _arc_points(p0, p1, i, j, cw, scale_done=True):
             for k in range(1, n + 1)]
 
 
+class GerberUnsupported(Exception):
+    """A construct this reader cannot scale or draw exactly. Reported as GERBER_UNSUPPORTED."""
+
+
 def parse_gerber(path):
     """-> list of objects, mm units:
        ('draw', pol, ap, [pts]) ; ('flash', pol, ap, (x, y)) ; ('region', pol, [contours])
        ap = ('C', d) | ('shapes', shapes, min_dim)."""
     txt = open(path, errors="replace").read()
+    if re.search(r"%SR", txt):
+        raise GerberUnsupported("step-repeat (%SR) block: not implemented; re-export without step-and-repeat")
+    if re.search(r"%AB", txt):
+        raise GerberUnsupported("block aperture (%AB): not implemented")
     macros = {m.group(1): m.group(2) for m in _MACRO.finditer(txt)}
     txt = _MACRO.sub("", txt).replace("%", "")
     xf = yf = (2, 6)
@@ -202,9 +211,13 @@ def parse_gerber(path):
         if not s or s.startswith("G04") or s.startswith(("TF", "TA", "TD", "TO")):
             continue
         if s.startswith("FS"):
-            m = re.match(r"FS[LT]AX(\d)(\d)Y(\d)(\d)", s)
-            if m:
-                xf, yf = (int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4)))
+            if s.startswith("FST"):
+                raise GerberUnsupported("%FST trailing-zero omission: not implemented; "
+                                        "re-export with leading-zero omission (%FSLA)")
+            m = re.match(r"FSLAX(\d)(\d)Y(\d)(\d)", s)
+            if not m:
+                raise GerberUnsupported(f"unrecognised format statement %{s}%")
+            xf, yf = (int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4)))
             continue
         if s.startswith("MO"):
             unit = 25.4 if s == "MOIN" else 1.0
@@ -315,6 +328,8 @@ def parse_gerber(path):
 def parse_gerber_or_empty(path):
     try:
         return parse_gerber(path)
+    except GerberUnsupported as e:
+        return {"unsupported": str(e)}
     except Exception as e:           # a file we cannot read is reported, not fatal
         return {"error": str(e)}
 
@@ -423,9 +438,9 @@ class _Canvas:
         for sh in ap[1]:
             if sh[0] == "circle":
                 d = sh[1]
-                circles.append((cx + sh[2] / self.res, cy - sh[3] / self.res, d / 2 / self.res))
+                circles.append((cx + sh[2] / self.res, cy + sh[3] / self.res, d / 2 / self.res))
             else:
-                polys.append([(cx + px_ / self.res, cy - py_ / self.res) for px_, py_ in sh[1]])
+                polys.append([(cx + px_ / self.res, cy + py_ / self.res) for px_, py_ in sh[1]])
         return polys, circles
 
     def draw_seg(self, ap, a, b, val):
@@ -626,6 +641,8 @@ def parse_excellon(path):
             unit = 1.0
         m = re.match(r"T(\d+)C([\d.]+)", line)
         if m:
+            if "." not in m.group(2):
+                raise GerberUnsupported(f"Excellon tool diameter {m.group(0)!r} has no decimal point: not implemented")
             tools[m.group(1)] = float(m.group(2)) * unit
             continue
         m = re.match(r"T(\d+)$", line)
@@ -635,6 +652,11 @@ def parse_excellon(path):
         if line.startswith(("X", "Y")) and "G85" not in line:
             mx = re.search(r"X([+-]?[\d.]+)", line)
             my = re.search(r"Y([+-]?[\d.]+)", line)
+            for mm_ in (mx, my):
+                if mm_ and "." not in mm_.group(1):
+                    raise GerberUnsupported(f"Excellon coordinate {mm_.group(0)!r} has no decimal point "
+                                            "(integer/zero-omitted format): not implemented; "
+                                            "re-export with decimal coordinates")
             if mx:
                 x = float(mx.group(1)) * unit
             if my:
@@ -694,14 +716,23 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     for lay in expected:
         path = files.get(lay)
         if path is None:
-            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"expected layer {lay} not exported"))
+            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"expected layer {lay} not exported", lay))
             continue
         objs = parse_gerber_or_empty(path)
+        if isinstance(objs, dict) and "unsupported" in objs:
+            findings.append(_f(FAIL, "GERBER_UNSUPPORTED", f"{lay}: {objs['unsupported']}", lay))
+            continue
         if isinstance(objs, dict):
             findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"{lay}: unreadable ({objs['error']})", lay))
             continue
         if not objs:
-            findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"{lay} is empty", lay))
+            # present but no features: a single-sided board legitimately has empty back layers
+            if lay == "Edge_Cuts":
+                findings.append(_f(FAIL, "GERBER_LAYER_MISSING", "Edge_Cuts is empty (no board outline)", lay))
+            elif re.fullmatch(r"(F|B|In\d+)_Cu", lay):
+                findings.append(_f(WARN, "GERBER_LAYER_EMPTY", f"{lay}: copper layer has no features", lay))
+            else:
+                findings.append(_f(INFO, "GERBER_LAYER_EMPTY", f"{lay} has no features (nothing to mask or print)", lay))
         parsed[lay] = objs
     log(f"gerber check: {len(parsed)} layer(s) parsed, copper {copper_layers} layer(s)")
 
@@ -742,7 +773,10 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 continue
             if "NPTH" in name.upper():
                 continue
-            holes += parse_excellon(os.path.join(ddir, name))
+            try:
+                holes += parse_excellon(os.path.join(ddir, name))
+            except GerberUnsupported as e:
+                findings.append(_f(FAIL, "GERBER_UNSUPPORTED", f"{name}: {e}"))
     if holes:
         if outer_flashes:
             fx = np.array([f[0] for f in outer_flashes])
@@ -786,20 +820,6 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
             "copper_layers": copper_layers, "holes": len(holes)}
 
 
-def emit_stage(out, board=None, cons=None, log=print):
-    """fab.emit hook: check the package just written under `out`, write
-    out/gerbercheck.txt and return the status word for the MANIFEST stages line.
-    Never raises: an error is returned as text so the export still completes."""
-    try:
-        r = check_package(out, board=board, cons=cons, log=log)
-        with open(os.path.join(out, "gerbercheck.txt"), "w") as f:
-            f.write(format_report(r) + "\n")
-        log(format_report(r).splitlines()[0])
-        return r["status"]
-    except Exception as e:
-        return "ERROR (%s)" % e
-
-
 def format_report(res):
     lines = [f"gerber check : {res['status']}  ({res['seconds']} s, raster {res['resolution_mm']} mm, "
              f"{res['copper_layers']} copper layer(s), {res['holes']} drill hit(s))"]
@@ -811,6 +831,55 @@ def format_report(res):
     if len(res["findings"]) > 20:
         lines.append(f"  ... {len(res['findings']) - 20} more")
     return "\n".join(lines)
+
+
+
+GATE_MODES = ("fail", "warn", "off")
+
+
+def gerber_mode(cons):
+    """[fab] gerber_check: "fail" (FAIL-level GERBER_* blocks fab/deliver), "warn"
+    (default: print prominently, exit code unchanged) or "off"."""
+    v = str(((cons or {}).get("fab") or {}).get("gerber_check", "warn")).strip().lower()
+    if v not in GATE_MODES:
+        raise ValueError(f"[fab] gerber_check = {v!r}: must be one of fail, warn, off")
+    return v
+
+
+def run_stage(out, board=None, cons=None, log=print):
+    """fab.emit / deliver gate. Checks the package under `out`, writes out/gerbercheck.txt,
+    and returns dict(word, blocking, mode, status). `word` is the MANIFEST stages value.
+    `blocking` is True only in "fail" mode when the check FAILs or raises (GERBER_CHECK_ERROR).
+    Never raises: an exception becomes word "ERROR (...)" and, in fail mode, blocking."""
+    mode = gerber_mode(cons)
+    if mode == "off":
+        return {"word": "OFF", "blocking": False, "mode": mode, "status": "OFF"}
+    try:
+        r = check_package(out, board=board, cons=cons, log=log)
+    except Exception as e:
+        log(f"GERBER_CHECK_ERROR: gerber check could not run: {e}")
+        return {"word": "ERROR (%s)" % e, "blocking": mode == "fail", "mode": mode, "status": "ERROR"}
+    log(format_report(r).splitlines()[0])
+    try:
+        with open(os.path.join(out, "gerbercheck.txt"), "w") as f:
+            f.write(format_report(r) + "\n")
+    except OSError as e:
+        log(f"GERBER_CHECK_ERROR: could not write gerbercheck.txt: {e}")
+        return {"word": "ERROR (%s)" % e, "blocking": mode == "fail", "mode": mode, "status": "ERROR"}
+    if r["status"] != "PASS":
+        tag = "GERBER CHECK FAILED - fab blocked (gerber_check = fail)" if (
+            mode == "fail" and r["status"] == "FAIL") else f"GERBER CHECK {r['status']} (gerber_check = {mode})"
+        log(f"*** {tag}")
+        for f in r["findings"]:
+            if f["level"] in (FAIL, WARN):
+                log(f"***   [{f['level']}] {f['code']} {f['layer'] or ''}: {f['msg']}")
+    return {"word": r["status"], "blocking": mode == "fail" and r["status"] == "FAIL",
+            "mode": mode, "status": r["status"]}
+
+
+def emit_stage(out, board=None, cons=None, log=print):
+    """Compatibility wrapper: the MANIFEST status word only."""
+    return run_stage(out, board=board, cons=cons, log=log)["word"]
 
 
 if __name__ == "__main__":

@@ -163,6 +163,40 @@ def _seg_dist(p, edge):
     return min(RD._seg_dist(p[0], p[1], a[0], a[1], b[0], b[1]) for a, b in edge)
 
 
+def _edge_index(edge, lim):
+    """Grid of outline segments (CELL_MM cells), each segment listed in every cell its bbox,
+    grown by `lim`, touches. Lets a sample test only the segments that can be within `lim`."""
+    g = defaultdict(list)
+    for seg in edge:
+        (ax, ay), (bx, by) = seg
+        for cx in range(math.floor((min(ax, bx) - lim) / CELL_MM), math.floor((max(ax, bx) + lim) / CELL_MM) + 1):
+            for cy in range(math.floor((min(ay, by) - lim) / CELL_MM), math.floor((max(ay, by) + lim) / CELL_MM) + 1):
+                g[(cx, cy)].append(seg)
+    return g
+
+
+def _edge_nearest(samp, edge, idx, lim):
+    """(sample, distance) of the sample closest to the outline: the same answer as the brute-force
+    min over every sample and every segment whenever that minimum is below `lim`. Samples whose
+    window holds no segment are at distance inf (they cannot be the answer below `lim`)."""
+    best, best_d = None, float("inf")
+    for p in samp:
+        cx, cy = math.floor(p[0] / CELL_MM), math.floor(p[1] / CELL_MM)
+        cand = {}
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for seg in idx.get((cx + dx, cy + dy), ()):
+                    cand[seg] = seg
+        if not cand:
+            continue
+        d = min(RD._seg_dist(p[0], p[1], a[0], a[1], b[0], b[1]) for a, b in cand.values())
+        if d < best_d:
+            best, best_d = p, d
+    if best is None:
+        return samp[0], float("inf")
+    return best, best_d
+
+
 def controlled_nets(facts, cons):
     from . import review as R
     cons = cons or {}
@@ -202,6 +236,8 @@ def check_return_path(facts, cons):
     for s in B["segs"]:
         if s["net"] in ctrl and s["layer"] in B["copper"] and s["layer"]:
             by[(s["net"], s["layer"])].append(s)
+    edge_idx = _edge_index(B["edge"], edge_lim) if B["edge"] else None
+    no_plane = False
     for (net, layer), segs in sorted(by.items()):
         refs = P.ref_layers(layer)
         for pts in _chains(segs):
@@ -224,19 +260,25 @@ def check_return_path(facts, cons):
                         best = (run_len, run_start)
                 else:
                     run_start = None
-            if best and best[0] > gap_lim:
+            if not refs:
+                # no plane layer adjacent (2-layer, coplanar pour at most): not a return-path break
+                no_plane = True
+            elif best and best[0] > gap_lim:
                 x, y, _ = samp[best[1]]
                 out.append(_f(gap_level, "REF_PLANE_GAP",
                               f"{net} on {layer}: {best[0]:.2f} mm with no plane copper on "
                               f"{'/'.join(refs) or 'no reference layer'}, from x={x:.2f} y={y:.2f} "
                               f"(limit {gap_lim:g} mm)", refs=[net]))
             if B["edge"]:
-                near = min(samp, key=lambda p: _seg_dist(p, B["edge"]))
-                d = _seg_dist(near, B["edge"])
+                near, d = _edge_nearest(samp, B["edge"], edge_idx, edge_lim)
                 if d < edge_lim:
                     out.append(_f(WARN, "EDGE_TRACE",
                                   f"{net} on {layer}: track {d:.2f} mm from the board outline at "
                                   f"x={near[0]:.2f} y={near[1]:.2f} (limit {edge_lim:g} mm)", refs=[net]))
+    if no_plane:
+        out.append(_f(INFO, "REF_PLANE_NONE",
+                      "no reference plane layers; return-path checks not applicable on the adjacent "
+                      "layers of this board"))
     out += _return_vias(B, P, ctrl, via_lim)
     return out
 
@@ -260,7 +302,8 @@ def _return_vias(B, P, ctrl, via_lim):
         ref_sets = {frozenset(P.ref_layers(l)) for l in touched}
         if len(ref_sets) < 2:
             continue
-        need = sorted({r for l in touched for r in P.ref_layers(l)})
+        # a reference layer the via itself touches is not a missing return path (it IS the plane)
+        need = sorted({r for l in touched for r in P.ref_layers(l)} - touched)
         missing, nets_all = [], set()
         for r in need:
             rnets = P.nets_on.get(r, set())

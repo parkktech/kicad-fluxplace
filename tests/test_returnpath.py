@@ -136,3 +136,68 @@ def test_track_away_from_outline_no_edge_trace(tmp_path):
 
 def test_no_tracks_no_findings(tmp_path):
     assert _run(filled_board(tmp_path, zone("GND", "In1.Cu"))) == []
+
+
+# ---- fix 7-9: 2-layer boards, reference-layer exclusion, coplanar pours, outline prefilter ----
+HEAD2 = ('(kicad_pcb (version 20260206) (generator "pcbnew")\n'
+         '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n')
+
+
+def _filled2(tmp_path, body, name="two.kicad_pcb"):
+    p = tmp_path / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(HEAD2 + EDGE + body + ")\n")
+    b = pcbnew.LoadBoard(str(p))
+    pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+    pcbnew.SaveBoard(str(p), b)
+    return str(p)
+
+
+def test_two_layer_via_over_bottom_pour_is_not_a_return_via_finding(tmp_path):
+    # F->B via on a controlled net; the bottom GND pour IS the reference: nothing to report
+    body = (zone("GND", "B.Cu") + trk("SIG", "F.Cu", 10, 40, 50, 40) + trk("SIG", "B.Cu", 50, 40, 90, 40)
+            + via("SIG", 50, 40))
+    out = _run(_filled2(tmp_path / "pour", body))
+    assert _codes(out, "RETURN_VIA_MISSING") == [], out
+
+
+def test_two_layer_via_with_no_reference_anywhere_is_not_flagged_as_missing_return(tmp_path):
+    body = trk("SIG", "F.Cu", 10, 40, 50, 40) + trk("SIG", "B.Cu", 50, 40, 90, 40) + via("SIG", 50, 40)
+    out = _run(_filled2(tmp_path / "bare", body))
+    assert _codes(out, "RETURN_VIA_MISSING") == [], out
+
+
+def test_two_layer_coplanar_pour_gives_one_info_not_a_gap(tmp_path):
+    # GND pour on F.Cu beside the controlled track: no adjacent plane layer at all
+    body = zone("GND", "F.Cu", 0, 0, 100, 36) + trk("SIG", "F.Cu", 10, 40, 90, 40)
+    out = _run(_filled2(tmp_path / "copl", body))
+    assert _codes(out, "REF_PLANE_GAP") == [], out
+    none = _codes(out, "REF_PLANE_NONE")
+    assert len(none) == 1 and none[0]["level"] == "INFO", out
+
+
+def test_four_layer_slot_still_gaps_and_no_plane_none(tmp_path):
+    out = _run(filled_board(tmp_path / "slot4", zone("GND", "In1.Cu") + trk("SIG", "F.Cu", 10, 40, 90, 40)
+                            + "(gr_rect (start 30 30) (end 60 50) (stroke (width 0.1) (type default)) "
+                              "(fill none) (layer \"In1.Cu\"))\n"))
+    assert _codes(out, "REF_PLANE_NONE") == []
+
+
+def test_edge_prefilter_gives_brute_force_answer():
+    import random
+    rnd = random.Random(7)
+    edge = []
+    for _ in range(60):
+        x, y = rnd.uniform(0, 60), rnd.uniform(0, 60)
+        edge.append(((x, y), (x + rnd.uniform(-8, 8), y + rnd.uniform(-8, 8))))
+    lim = 0.5
+    idx = RP._edge_index(edge, lim)
+    for _ in range(30):
+        samp = [(rnd.uniform(0, 60), rnd.uniform(0, 60), 0.0) for _ in range(40)]
+        brute = min(samp, key=lambda p: RP._seg_dist(p, edge))
+        bd = RP._seg_dist(brute, edge)
+        got, gd = RP._edge_nearest(samp, edge, idx, lim)
+        if bd < lim:
+            assert got == brute and gd == pytest.approx(bd)
+        else:
+            assert gd >= lim

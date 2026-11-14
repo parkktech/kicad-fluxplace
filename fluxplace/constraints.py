@@ -78,6 +78,10 @@ optional; anything not stated keeps the heuristic default. Schema:
     blind_vias = false      # default false: a blind/buried/micro via on the
     buried_vias = false     # board is a VIA_TYPE review FAIL unless the
     microvias = false       # matching flag here says the process supports it
+    gerber_check = "warn"   # "fail": a FAIL-level GERBER_* finding (or a check
+                            # error, GERBER_CHECK_ERROR) blocks fab and deliver
+                            # with exit 1. "warn" (default): findings print
+                            # prominently, exit code unchanged. "off": skip.
     profile = "pcbway-6L"   # label only — documents which fab's capability
                             # table the numbers below came from
     min_track_mm = 0.1      # narrowest copper the quoted fab will accept —

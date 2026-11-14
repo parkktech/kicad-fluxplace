@@ -125,3 +125,15 @@ they convert to mm by the delay of the layers the net runs on (`impedance.delay_
 A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never converted by a guess.
 
 `BLOCK_SCATTERED` (INFO; WARN with `[placement] use_blocks = true`): a functional block split across regions with another block's part between them, `blocks.py: check`. Details in `docs/commands/blocks.md`.
+
+## Gerber gate (`[fab] gerber_check`)
+
+`fab` and `deliver` re-read the exported Gerbers and drill (`gerbercheck.py`).
+`gerber_check = "fail" | "warn" | "off"` (default `"warn"`):
+
+- `fail`: any FAIL-level `GERBER_*` finding, or a check error (`GERBER_CHECK_ERROR`), exits non-zero from `fab` and `deliver`.
+- `warn`: findings print in the command output (not only in MANIFEST / `gerbercheck.txt`); exit code unchanged.
+- `off`: the check does not run.
+
+Layer rules: a present but featureless copper layer is WARN (`GERBER_LAYER_EMPTY`);
+featureless mask/silk is INFO; a missing copper/mask/silk file or an empty Edge.Cuts is FAIL.

@@ -109,9 +109,9 @@ def _net_graph(board, netcode, via_cost=0.3):
             continue
         if t.GetClass() == "PCB_VIA":
             vias.append(t)
-        elif t.GetClass() == "PCB_TRACK":
+        elif t.GetClass() in ("PCB_TRACK", "PCB_ARC"):
             tracks.append(t)
-    for t in tracks:
+    for t in tracks:                       # arcs: endpoints as nodes, true arc length as the edge weight
         a, b = _key(t.GetStart(), t.GetLayer()), _key(t.GetEnd(), t.GetLayer())
         add(a, b, _mm(t.GetLength()), t)
     for v in vias:
