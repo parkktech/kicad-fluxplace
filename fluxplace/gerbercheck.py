@@ -186,11 +186,19 @@ def _arc_points(p0, p1, i, j, cw, scale_done=True):
             for k in range(1, n + 1)]
 
 
+class GerberUnsupported(Exception):
+    """A construct this reader cannot scale or draw exactly. Reported as GERBER_UNSUPPORTED."""
+
+
 def parse_gerber(path):
     """-> list of objects, mm units:
        ('draw', pol, ap, [pts]) ; ('flash', pol, ap, (x, y)) ; ('region', pol, [contours])
        ap = ('C', d) | ('shapes', shapes, min_dim)."""
     txt = open(path, errors="replace").read()
+    if re.search(r"%SR", txt):
+        raise GerberUnsupported("step-repeat (%SR) block: not implemented; re-export without step-and-repeat")
+    if re.search(r"%AB", txt):
+        raise GerberUnsupported("block aperture (%AB): not implemented")
     macros = {m.group(1): m.group(2) for m in _MACRO.finditer(txt)}
     txt = _MACRO.sub("", txt).replace("%", "")
     xf = yf = (2, 6)
@@ -203,9 +211,13 @@ def parse_gerber(path):
         if not s or s.startswith("G04") or s.startswith(("TF", "TA", "TD", "TO")):
             continue
         if s.startswith("FS"):
-            m = re.match(r"FS[LT]AX(\d)(\d)Y(\d)(\d)", s)
-            if m:
-                xf, yf = (int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4)))
+            if s.startswith("FST"):
+                raise GerberUnsupported("%FST trailing-zero omission: not implemented; "
+                                        "re-export with leading-zero omission (%FSLA)")
+            m = re.match(r"FSLAX(\d)(\d)Y(\d)(\d)", s)
+            if not m:
+                raise GerberUnsupported(f"unrecognised format statement %{s}%")
+            xf, yf = (int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4)))
             continue
         if s.startswith("MO"):
             unit = 25.4 if s == "MOIN" else 1.0
@@ -316,6 +328,8 @@ def parse_gerber(path):
 def parse_gerber_or_empty(path):
     try:
         return parse_gerber(path)
+    except GerberUnsupported as e:
+        return {"unsupported": str(e)}
     except Exception as e:           # a file we cannot read is reported, not fatal
         return {"error": str(e)}
 
@@ -627,6 +641,8 @@ def parse_excellon(path):
             unit = 1.0
         m = re.match(r"T(\d+)C([\d.]+)", line)
         if m:
+            if "." not in m.group(2):
+                raise GerberUnsupported(f"Excellon tool diameter {m.group(0)!r} has no decimal point: not implemented")
             tools[m.group(1)] = float(m.group(2)) * unit
             continue
         m = re.match(r"T(\d+)$", line)
@@ -636,6 +652,11 @@ def parse_excellon(path):
         if line.startswith(("X", "Y")) and "G85" not in line:
             mx = re.search(r"X([+-]?[\d.]+)", line)
             my = re.search(r"Y([+-]?[\d.]+)", line)
+            for mm_ in (mx, my):
+                if mm_ and "." not in mm_.group(1):
+                    raise GerberUnsupported(f"Excellon coordinate {mm_.group(0)!r} has no decimal point "
+                                            "(integer/zero-omitted format): not implemented; "
+                                            "re-export with decimal coordinates")
             if mx:
                 x = float(mx.group(1)) * unit
             if my:
@@ -698,6 +719,9 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
             findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"expected layer {lay} not exported", lay))
             continue
         objs = parse_gerber_or_empty(path)
+        if isinstance(objs, dict) and "unsupported" in objs:
+            findings.append(_f(FAIL, "GERBER_UNSUPPORTED", f"{lay}: {objs['unsupported']}", lay))
+            continue
         if isinstance(objs, dict):
             findings.append(_f(FAIL, "GERBER_LAYER_MISSING", f"{lay}: unreadable ({objs['error']})", lay))
             continue
@@ -749,7 +773,10 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 continue
             if "NPTH" in name.upper():
                 continue
-            holes += parse_excellon(os.path.join(ddir, name))
+            try:
+                holes += parse_excellon(os.path.join(ddir, name))
+            except GerberUnsupported as e:
+                findings.append(_f(FAIL, "GERBER_UNSUPPORTED", f"{name}: {e}"))
     if holes:
         if outer_flashes:
             fx = np.array([f[0] for f in outer_flashes])
