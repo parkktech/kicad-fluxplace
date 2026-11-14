@@ -33,7 +33,8 @@ def test_seeded_via_pair_caught(tmp_path):
     path = _board(tmp_path, via(10, 10, 0.3) + via(10.5, 10, 0.3) + via(30, 10, 0.3))
     h = [f for f in HO.check_hole_spacing(R.facts_from_board(path), CONS) if f["code"] == "HOLE_TO_HOLE"]
     assert len(h) == 1
-    assert h[0]["level"] == "FAIL"
+    assert h[0]["level"] == "WARN"                   # .kicad_pro fallback minimum: advisory
+    assert "board .kicad_pro min_hole_to_hole" in h[0]["msg"]
     assert "via@10.000,10.000" in h[0]["refs"] and "via@10.500,10.000" in h[0]["refs"]
     assert "0.200 mm" in h[0]["msg"] and "required 0.25 mm" in h[0]["msg"]
 
@@ -96,3 +97,16 @@ def test_thousand_holes_fast_and_grid_correct(tmp_path):
     out = [f for f in HO.check_hole_spacing(facts, {}) if f["code"] == "HOLE_TO_HOLE"]
     assert time.time() - t0 < 5.0
     assert len(out) == 1 and "via@5.400,5.000" in out[0]["refs"]
+
+
+def test_fab_profile_minimum_is_fail_and_fallback_overlap_is_fail(tmp_path):
+    # 0.2 mm edge gap, [fab] profile says 0.5: a FAIL because the rule is the quoted fab's
+    path = _board(tmp_path, via(10, 10, 0.3) + via(10.5, 10, 0.3), min_h2h=None)
+    h = [f for f in HO.check_hole_spacing(R.facts_from_board(path), {"fab": {"profile": "proto"}})
+         if f["code"] == "HOLE_TO_HOLE"]
+    assert h and all(f["level"] == "FAIL" for f in h), h
+    # a true overlap is FAIL even when the minimum is only the .kicad_pro fallback
+    (tmp_path / "ov").mkdir()
+    path = _board(tmp_path / "ov", via(10, 10, 0.3) + via(10.2, 10, 0.3))
+    h = [f for f in HO.check_hole_spacing(R.facts_from_board(path), CONS) if f["code"] == "HOLE_TO_HOLE"]
+    assert h and h[0]["level"] == "FAIL", h

@@ -128,8 +128,12 @@ def check_hole_spacing(facts, cons):
                         if key in seen:
                             continue
                         seen.add(key)
-                        out.append(_f(FAIL, "HOLE_TO_HOLE",
+                        # FAIL: holes overlap or touch, or the minimum is a [fab] rule. A minimum
+                        # that is only the .kicad_pro fallback is advisory: WARN, source named.
+                        level = FAIL if (gap <= 1e-9 or not src.startswith("board .kicad_pro")) else WARN
+                        note = "" if level == FAIL else " (advisory: .kicad_pro fallback minimum; a [fab] profile makes it FAIL)"
+                        out.append(_f(level, "HOLE_TO_HOLE",
                                       f"{a['label']} to {b['label']}: edge-to-edge {gap:.3f} mm, "
-                                      f"required {req:g} mm ({src})",
+                                      f"required {req:g} mm ({src}){note}",
                                       refs=[a["label"], b["label"]]))
     return out
