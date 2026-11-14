@@ -145,3 +145,43 @@ def test_modules_default_unchanged_without_use_blocks(tmp_path):
     a = MD.build(B, {}, None, arrange=False)
     b = MD.build(B, {"blocks": {"Power": ["U1"]}}, None, arrange=False)   # claims alone change nothing
     assert a["of"] == b["of"] and all("block" not in m for m in a["modules"])
+
+
+def _plan(tmp_path, cons):
+    from fluxplace import floorplan2 as F2
+    sig = [f"S{i}" for i in range(8)]
+    body = PB.column_ic("U1", 40, 40, ["VX"] + sig[1:])
+    body += PB.fp("C1", 44, 40, [PB.pad("1", -0.5, 0, "VX", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)])
+    body += PB.fp("U2", 70, 40, [PB.pad(str(i + 1), 0, i * 1.0, n, 0.6, 0.6) for i, n in enumerate(["Q0", "GND", "S0", "S1"])])
+    B = RD.load(PB.write(tmp_path, body))
+    M = MD.build(B, cons, None, arrange=False)
+    return F2.Plan(B, cons, None, M, log=lambda *a, **k: None)
+
+
+def test_floorplan_block_term_is_off_by_default(tmp_path):
+    P = _plan(tmp_path, {})
+    assert P.blk_w == 0.0 and P.blk == {}
+    p = P.cost_parts()
+    assert p["block"] == 0.0 and P.total(p) == P.total(dict(p, block=0.0))
+
+
+def test_floorplan_block_term_on_with_use_blocks(tmp_path):
+    cons = {"placement": {"use_blocks": True}, "blocks": {"Power": ["U1", "U2"]}}
+    P = _plan(tmp_path, cons)
+    assert P.blk_w == 1.0 and set(P.blk) == {"Power"} and len(P.blk["Power"]) == 2
+    p = P.cost_parts()
+    assert p["block"] > 0.0                                       # two anchors of one block, 30 mm apart
+
+
+def test_blocks_of_uses_the_inventory_only_when_placement_blocks_is_absent(tmp_path):
+    from fluxplace import placechecks as PCK
+    sig = [f"S{i}" for i in range(8)]
+    body = PB.column_ic("U1", 40, 40, ["VX"] + sig[1:])
+    body += PB.fp("C1", 44, 40, [PB.pad("1", -0.5, 0, "VX", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)])
+    B = RD.load(PB.write(tmp_path, body))
+    assert PCK.blocks_of(B, None, {}) == {}                      # legacy: no table, no block_refdes -> nothing
+    got = PCK.blocks_of(B, None, {"blocks": {"Power": ["U1", "C1"]}})
+    assert got == {"Power": ["U1", "C1"]} or sorted(got["Power"]) == ["C1", "U1"]
+    # [placement.blocks] keeps priority over [blocks]
+    got = PCK.blocks_of(B, None, {"placement": {"blocks": {"Mine": ["U1", "C1"]}}, "blocks": {"Power": ["U1", "C1"]}})
+    assert set(got) == {"Mine"}

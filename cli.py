@@ -3840,11 +3840,12 @@ def _guard_begin(a):
     out = out if isinstance(out, str) and out.endswith(".kicad_pcb") else src
     st = lambda p: (_os.stat(p).st_mtime_ns, _os.stat(p).st_size) if _os.path.exists(p) else None
     from fluxplace import audit as AU
+    pro = _os.path.splitext(src)[0] + ".kicad_pro"       # the rules of record: the source's project, for both snapshots
     try:
-        snap = AU.snapshot(src)
+        snap = AU.snapshot(src, project=pro)
     except Exception:                                    # noqa: BLE001 - a board the model cannot read: no guard
         return None
-    return {"src": src, "out": out, "stat": st(out), "snap": snap, "st": st,
+    return {"src": src, "out": out, "stat": st(out), "snap": snap, "st": st, "pro": pro,
             "orig": open(src, "rb").read() if _os.path.abspath(out) == _os.path.abspath(src) else None}
 
 
@@ -3861,7 +3862,7 @@ def _guard_end(g, a):
         return True
     from fluxplace import audit as AU
     try:
-        after = AU.snapshot(g["out"])
+        after = AU.snapshot(g["out"], project=g.get("pro"))
     except Exception as e:                               # noqa: BLE001
         _gp(f"guard: FAIL cannot read the written board {g['out']}: {e}")
         return False

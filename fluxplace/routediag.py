@@ -92,7 +92,7 @@ def _locked(n):
     return any(k == "locked" or (isinstance(k, list) and k and k[0] == "locked" and (len(k) < 2 or k[1] != "no")) for k in n[1:])
 
 
-def load(path, track=None, clearance=None):
+def load(path, track=None, clearance=None, project=None):
     root = BF.parse(open(path, errors="replace").read())
     copper = [a[1] for a in (BF._first(root, "layers") or [])[1:]
               if isinstance(a, list) and len(a) > 1 and a[1].endswith(".Cu")]
@@ -248,7 +248,8 @@ def load(path, track=None, clearance=None):
 
     dtrack, dclear = 0.15, 0.14
     sev, hclear = {}, 0.25                     # DRC rule severities + hole clearance (collision gate, legality.collisions)
-    pro = os.path.splitext(path)[0] + ".kicad_pro"
+    # the rules come from the project beside the board unless `project` names one (the guard passes the source's)
+    pro = project or os.path.splitext(path)[0] + ".kicad_pro"
     if os.path.exists(pro):
         try:
             ds = json.load(open(pro)).get("board", {}).get("design_settings", {})
