@@ -423,9 +423,9 @@ class _Canvas:
         for sh in ap[1]:
             if sh[0] == "circle":
                 d = sh[1]
-                circles.append((cx + sh[2] / self.res, cy - sh[3] / self.res, d / 2 / self.res))
+                circles.append((cx + sh[2] / self.res, cy + sh[3] / self.res, d / 2 / self.res))
             else:
-                polys.append([(cx + px_ / self.res, cy - py_ / self.res) for px_, py_ in sh[1]])
+                polys.append([(cx + px_ / self.res, cy + py_ / self.res) for px_, py_ in sh[1]])
         return polys, circles
 
     def draw_seg(self, ap, a, b, val):
