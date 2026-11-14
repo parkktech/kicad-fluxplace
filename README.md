@@ -13,7 +13,7 @@ wirelength, 28% less area.
     pip install -e .            # numpy only; pcbnew comes from KiCad's own python
     fluxplace doctor            # names every missing dependency (KiCad, router, API keys)
 
-Requirements, the interpreter trap (pcbnew needs KiCad's python), toolchain:
+Requirements, interpreter trap (pcbnew needs KiCad's python), toolchain:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Pipeline
@@ -24,7 +24,7 @@ floorplan-check, anchor-check, place (clusters, routable), route-ready gate, rou
 stall loop; `route-wait` instead of log polling), tune, review. `--from/--to/--status` select and inspect.
 Subagent briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-Analysis reports are compact (verdict, counts, worst N); `--full`, `-q` ([output.md](docs/commands/output.md)).
+Reports are compact (verdict, counts, worst N); `--full`, `-q` ([output.md](docs/commands/output.md)).
 
 ## Commands
 
@@ -63,6 +63,7 @@ route-ready       pre-route gate: net budgets, support...
 map               meta map: compact JSON of parts, groups...
 plan-route        escape planner + global router on the...
 plan-options      what-if recommender: the smallest...
+relieve           congestion relief, never worse
 plan-compare      two maps' plan verdicts side by side
 density           courtyard + fan-out ring utilisation per...
 fanout            real, locked escape copper for every pin...

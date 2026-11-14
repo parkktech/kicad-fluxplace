@@ -555,13 +555,14 @@ class PlanPlacer(RF.Refiner):
         return moves
 
 
-def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True, spread=None, max_evals=None):
+def plan_place(B, cons=None, spec=None, seed=0, log=print, time_limit=None, rotation=True, spread=None, max_evals=None, max_rounds=None):
     """-> (moves {ref: (x, y, angle)}, stats).  Mutates B.  Moves are accepted on the incremental lexicographic key; afterwards a fresh FULL
     plan is run and, if it is worse than the full plan of the input, EVERYTHING is reverted (moves = {}, stats["reverted_to_input"])."""
     cons = cons or {}
     pl = cons.get("placement") or {}
     R0 = PL.run(B, cons, spec, ignore_routing=True)
-    r = PlanPlacer(B, cons, spec, seed, log, time_limit, max_evals=int(max_evals if max_evals is not None else pl.get("max_evals", 400)))
+    r = PlanPlacer(B, cons, spec, seed, log, time_limit, max_evals=int(max_evals if max_evals is not None else pl.get("max_evals", 400)),
+                   **({"max_rounds": int(max_rounds)} if max_rounds is not None else {}))
     r.do_rotation_pass = rotation
     r.spread = spread
     mv = r.run()
