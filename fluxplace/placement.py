@@ -670,7 +670,7 @@ def _crystal_pass(parts, graph, p, angles, pad, R, rep):
     <=10mm, no vias). Move each crystal to the free slot nearest its parent's
     OSC pins, then its load caps beside the crystal. One score-gated batch per
     cluster — a cluster that can't improve reverts and costs nothing."""
-    from .comprehend import crystals as _crystals
+    from .comprehend_si import crystals as _crystals
     clusters = [c for c in _crystals(parts, dict(graph.signal_nets))
                 if c["crystal"] in p and c["parent"] in p]
     if not clusters:
