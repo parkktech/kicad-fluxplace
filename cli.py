@@ -1431,9 +1431,16 @@ def cmd_lint(a):
     unwired connectors, barrel-jack / friction-header connector smells."""
     import json as _json
     from fluxplace import lint as L
-    from fluxplace import kicad_io as IO
-    board = IO.load(a.board)
-    findings = L.run(L.pads_from_board(board), waivers=a.waive)
+    if not a.board and not a.spec:
+        raise SystemExit("lint: give --board and/or --spec")
+    findings = []
+    if a.board:
+        from fluxplace import kicad_io as IO
+        findings += L.run(L.pads_from_board(IO.load(a.board)), waivers=a.waive)
+    if a.spec:                                   # control-pin default levels from the spec netlist
+        from fluxplace import constraints as C
+        st = L.sch_pin_types(a.sch) if getattr(a, "sch", None) else None
+        findings += L.control_pins(_json.load(open(a.spec)), C.load(a.constraints), st, waivers=a.waive)
     n = L.summarize(findings)
     if a.json:
         with open(a.json, "w") as fh:
@@ -1917,14 +1924,31 @@ def cmd_route_ready(a):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(a.board, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons))
-    print(PR.format_text(f, card, a.board))
+    if getattr(a, "collisions_only", False):
+        from fluxplace import legality as LGL, review as R
+        waivers = list(a.waive or []) + list((cons.get("review") or {}).get("waive", []))
+        f = [x for x in LGL.collisions(B, cons) if not R._waived(x, waivers)]
+        rel = {t.strip() for t in (a.relevance or "").split(",") if t.strip()}
+        print(LGL.format_collisions([x for x in f if not rel or set(x["relevance"]) & rel], a.board))
+        if a.json:
+            with open(a.json, "w") as fh:
+                _json.dump({"findings": f}, fh, indent=1)
+        if any(x["level"] == "FAIL" for x in f):
+            raise SystemExit(1)
+        return
+    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons), collide=True)
+    if getattr(a, "relevance", None):           # display filter only: the verdict still counts every finding
+        keep = {t.strip() for t in a.relevance.split(",") if t.strip()}
+        shown = [x for x in f if x["code"] != "COLLISION" or set(x.get("relevance", ())) & keep]
+    else:
+        shown = f
+    print(PR.format_text(shown, card, a.board))
     if a.all:
-        for x in f:
+        for x in shown:
             print(f"  {x['level']:4s} {x['code']:19s} {x['msg']}")
     if a.json:
         with open(a.json, "w") as fh:
-            _json.dump({"scorecard": card, "findings": f}, fh, indent=1)
+            _json.dump({"scorecard": card, "findings": f}, fh, indent=1, default=sorted)
         print(f"route-ready: wrote {a.json}")
     if a.strip_stale:
         from fluxplace import placechecks as PCK
@@ -2030,7 +2054,7 @@ def _route_gate(a, board_path, stage="routing"):
     from fluxplace import routediag as RD, preroute as PR
     cons, spec = _text_ctx(a)
     B = RD.load(board_path, track=getattr(a, "track", None), clearance=getattr(a, "clearance", None))
-    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()), plan=PR.use_plan(cons))
+    f, card = PR.run(B, cons, spec, waivers=list(getattr(a, "waive", None) or ()), plan=PR.use_plan(cons), collide=True)
     print(PR.format_text(f, card, board_path), flush=True)
     if card["fail"]:
         if getattr(a, "force", False):
@@ -3014,7 +3038,10 @@ def build_parser():
     pli = sub.add_parser("lint",
                          help="design-completeness checks: missing power/IO "
                               "wiring, dead-end nets, non-latching connectors")
-    pli.add_argument("--board", required=True)
+    pli.add_argument("--board", default=None)
+    pli.add_argument("--spec", default=None, help="control-pin default-level lint on this spec's netlist")
+    pli.add_argument("--constraints", default=None, help="[lint] default_level / rails / control_pins regexes")
+    pli.add_argument("--sch", default=None, help="schematic whose symbols give pin electrical types")
     pli.add_argument("--json", default=None, help="also write findings as JSON")
     pli.add_argument("--waive", action="append", default=[],
                      help="suppress findings: CODE:REGEX (matches msg or refs), "
@@ -3111,6 +3138,11 @@ def build_parser():
     prr.add_argument("--out", default=None, help="with --strip-stale: output board (default: in place)")
     prr.add_argument("--track", type=float, default=None)
     prr.add_argument("--clearance", type=float, default=None)
+    prr.add_argument("--collisions-only", action="store_true",
+                     help="only the copper-collision gate (seconds): COLLISION findings by footprint pair")
+    prr.add_argument("--relevance", default=None,
+                     help="show only COLLISION findings with these tags (placement,routing,manufacturing,electrical); "
+                          "display filter, the verdict counts all")
     prr.set_defaults(fn=cmd_route_ready)
     from fluxplace import plancli
     plancli.add_parsers(sub)              # map, plan-route, plan-compare
@@ -3533,6 +3565,69 @@ def _silk_hook(a):
     BW.set_post_write(lambda path, refs: SK.after_write(path, refs, cons))
 
 
+def _guard_begin(a):
+    """Connectivity invariant (audit.snapshot): every command that writes a .kicad_pcb from an input board is
+    checked pad -> net and footprint identity before / after. Off with FLUXPLACE_GUARD=0."""
+    import os as _os
+    if _os.environ.get("FLUXPLACE_GUARD", "1") == "0" or a.cmd == "pipeline":
+        return None
+    src = getattr(a, "board", None)
+    if not (isinstance(src, str) and src.endswith(".kicad_pcb") and _os.path.isfile(src)):
+        return None
+    out = getattr(a, "out", None)
+    out = out if isinstance(out, str) and out.endswith(".kicad_pcb") else src
+    st = lambda p: (_os.stat(p).st_mtime_ns, _os.stat(p).st_size) if _os.path.exists(p) else None
+    from fluxplace import audit as AU
+    try:
+        snap = AU.snapshot(src)
+    except Exception:                                    # noqa: BLE001 - a board the model cannot read: no guard
+        return None
+    return {"src": src, "out": out, "stat": st(out), "snap": snap, "st": st,
+            "orig": open(src, "rb").read() if _os.path.abspath(out) == _os.path.abspath(src) else None}
+
+
+def _gp(*x):
+    """guard lines go to stderr: stdout may be a command's machine output (--json)."""
+    import sys as _sys
+    print(*x, file=_sys.stderr)
+
+
+def _guard_end(g, a):
+    """-> True when the written board passes the invariant (or nothing was written)."""
+    import os as _os, json as _json, shutil as _sh
+    if not g or not _os.path.exists(g["out"]) or g["st"](g["out"]) == g["stat"]:
+        return True
+    from fluxplace import audit as AU
+    try:
+        after = AU.snapshot(g["out"])
+    except Exception as e:                               # noqa: BLE001
+        _gp(f"guard: FAIL cannot read the written board {g['out']}: {e}")
+        return False
+    d = AU.connectivity_diff(g["snap"], after, AU.EXPECT.get(a.cmd, ()))
+    rec, line = AU.ledger(a.cmd, g["snap"], after, d)
+    lp = _os.path.splitext(g["out"])[0] + ".ledger.json"
+    try:
+        with open(lp, "w") as fh:
+            _json.dump(rec, fh, indent=1)
+    except OSError:
+        lp = None
+    _gp("guard: " + line + (f"  ledger {lp}" if lp else ""))
+    if d["ok"]:
+        return True
+    for v in d["violations"][:40]:
+        _gp("  guard: " + v)
+    bad = _os.path.splitext(g["out"])[0] + ".rejected.kicad_pcb"
+    _sh.copy(g["out"], bad)
+    if g["orig"] is not None:                            # written in place: put the input back
+        with open(g["out"], "wb") as fh:
+            fh.write(g["orig"])
+    else:
+        _os.remove(g["out"])
+    _gp(f"guard: unintended connectivity change - result moved to {bad}"
+          + ("; input restored" if g["orig"] is not None else "; no output written"))
+    return False
+
+
 def main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
@@ -3543,10 +3638,18 @@ def main(argv=None):
         print(text)
         raise SystemExit(0 if ok else 1)
     _silk_hook(a)
-    if a.cmd in OUT.COMPACT_CMDS:
-        rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
-    else:
-        rc = a.fn(a)
+    guard = _guard_begin(a)
+    try:
+        if a.cmd in OUT.COMPACT_CMDS:
+            rc = OUT.run_compact(a.cmd, a, a.fn)    # compact-by-default wrapper (one place)
+        else:
+            rc = a.fn(a)
+    except SystemExit as e:
+        if not _guard_end(guard, a) and not e.code:
+            raise SystemExit(1)
+        raise
+    if not _guard_end(guard, a):
+        raise SystemExit(1)
     if a.cmd in _HINT_CMDS and not getattr(a, "dry_run", False):
         _sheet_hint(getattr(a, "out", None) or a.board)
     if type(rc) is int and rc:                  # a command that RETURNS its verdict code (fanout, pairs, snap-vias ...)

@@ -68,3 +68,26 @@ With `[route_ready] use_plan = true` (default) the gate also runs `plan-route` i
 for `PLAN_PIN_SEALED` and `PLAN_OVERFLOW`, WARN for `PLAN_NO_VIA_SITE`, `PLAN_NET_OVER_BUDGET`, `PLAN_PAIR_SPLIT`,
 `PLAN_RF_LAYER_CHANGES`, `PLAN_UNREACHABLE`; `card["plan"]` holds PLAN_SCORE and counts. Waive like any finding (`--waive PLAN_OVERFLOW:REGEX`).
 The optimisers (`routable`, `--refine`) call `preroute.run` per move without it (plan=False); `place --objective plan` uses the plan itself.
+
+### 10. COLLISION (copper-collision gate, seconds, no DRC)
+
+`route-ready BOARD --collisions-only [--relevance TAGS] [--json J]` runs only this check; the full gate, `review` and the
+pipeline's `route` stage (before any router call; `W/<n>-route/collisions.{txt,json}`, blocked unless `--force`) run it too.
+One finding per footprint pair (or part x rule area, or pour piece), never per pad. True pad shapes (circle, oval, roundrect,
+rotated rect); pads of the same footprint are never tested against each other (multi-piece pins sharing a number are fine).
+
+| kind | relevance | level |
+|---|---|---|
+| copper_overlap (different nets) | electrical | always FAIL |
+| copper_clearance (< `[placement] pad_clearance_mm`, default the board clearance) | manufacturing | project `clearance` |
+| keepout (pad in a pads-forbidding rule area, courtyard in a footprints-forbidding one, constraint keep-out) | placement | always FAIL |
+| keepout_trapped (connected pad in a tracks-forbidding rule area) | routing | always FAIL |
+| keepout_own (a footprint's own NPTH in its own pads-forbidding rule area: library) | manufacturing | project `items_not_allowed` |
+| courtyard_overlap | placement | project `courtyards_overlap` |
+| hole_in_courtyard (PTH / NPTH in another part's courtyard) | placement | project `pth_/npth_inside_courtyard` |
+| hole_clearance (hole to another part's copper < project `min_hole_clearance`) | manufacturing | project `hole_clearance` |
+| pour_island (a filled piece touching no pad / via / track of its net; needs fills in the file) | electrical | project `isolated_copper` |
+
+Project severity `error` = FAIL, `warning` = WARN, `ignore` = INFO. Waive with `COLLISION:REGEX` (matches the pair text, e.g.
+`J1 x U1`). Not covered: tracks and vias against other copper (routed copper: DRC, `route-diagnose`), a footprint's own pads
+against each other, pad-to-pour clearance.

@@ -1334,10 +1334,22 @@ def check_preroute(facts, spec, cons):
     from . import routediag as RD
     from . import preroute as PR
     try:
-        found, _ = PR.run(RD.load(path), cons, spec, waivers=())
+        found, _ = PR.run(RD.load(path), cons, spec, waivers=(), collide=True)
     except Exception as e:           # a gate that cannot run must say so, not crash the review
         return [_f(WARN, "PREROUTE_UNAVAILABLE", f"pre-route checks could not run: {e}")]
-    return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in found]
+    return [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))
+            for x in found]
+
+
+def check_control_pins(spec, cons):
+    """CONTROL_PIN_* / OPEN_DRAIN_NO_PULLUP / INPUT_UNDRIVEN (WARN; defaults INFO): lint.control_pins on the spec
+    netlist, relevance electrical. Off with `[review] control_pins = false`."""
+    if not spec or not spec.get("nets") or ((cons or {}).get("review") or {}).get("control_pins", True) is False:
+        return []
+    from . import lint as L
+    lv = {"error": FAIL, "warning": WARN, "info": INFO}
+    return [dict(_f(lv[x["severity"]], x["code"].upper().replace("-", "_"), x["msg"], refs=x["refs"]), relevance=["electrical"])
+            for x in L.control_pins(spec, cons)]
 
 
 def check_open(facts, cons):
@@ -1649,6 +1661,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
     out += check_keepouts(facts, cons)
     out += check_preroute(facts, spec, cons)
+    out += check_control_pins(spec, cons)
     out += check_open(facts, cons)
     out += check_locks(facts, cons)
     out += check_sheet(facts, cons)

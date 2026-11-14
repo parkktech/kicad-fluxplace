@@ -82,3 +82,13 @@ Constraint blocks the gate reads (all optional, see `fluxplace/constraints.py`):
 - `PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH` and `RF_IMPEDANCE_OFF / RF_WIDTH_OFF / RF_VIA_COUNT` come from the routing audit
   (`qualaudit.py`, `pairaudit.py`): one implementation. RF width: `[nets.X] width_mm`, the map's `rf_geometry`, `[rf] width_mm` (a width or
   per-layer table; tolerance `width_tol_mm` 0.02), else the impedance computed from the stackup (`target_z`, `tolerance_pct`).
+
+## Control-pin default levels (`lint --spec S`, also in review)
+
+Enable / reset / gate / chip-select / power-down inputs (by pin name, spec `pin_types`, or `lint --sch` symbol types):
+INFO `control-pin-default` with the pull, rail and resulting level (active-low noted, one hop through a series resistor);
+WARN `control-pin-floating` (only drivers can be Hi-Z at power-up: GPIO-expander/SoC GPIO outputs, connector pins),
+`control-pin-intent` (level differs from `[lint.default_level] NET = "high"|"low"`), `control-pin-dnp`,
+`open-drain-no-pullup`, `input-undriven`. Review codes are the upper-case forms (relevance electrical);
+`[review] control_pins = false` turns them off. Name regexes: `[lint.control_pins] control|gpio|open_drain|output|active_low`;
+extra rails: `[lint] rails = [...]`, `rail_regex`.

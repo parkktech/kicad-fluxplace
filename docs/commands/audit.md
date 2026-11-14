@@ -19,3 +19,12 @@ answer questions nothing else in the toolchain does:
   netclass track and differential-pair geometry, and a straight answer on whether
   controlled impedance can be verified from the files at all. It cannot if no
   dielectric is defined, however precise the netclass looks.
+
+## Connectivity guard and ledger
+
+Every command that writes a `.kicad_pcb` from `--board`/`BOARD` (to `--out` or in place) is checked by `cli.main`:
+pad -> net (pins with several copper pieces sharing a number compare as a multiset), footprint ref / value / footprint.
+An undeclared change exits 1 with the diff on stderr, moves the result to `<out>.rejected.kicad_pcb` (an in-place write
+gets its input back) and writes `<out>.ledger.json` (moved refs with deltas, nets touched, open connections and collision
+FAILs before -> after). Declared changes: `sync-nets` (nets), `replace-footprint` (footprints). `FLUXPLACE_GUARD=0` = off.
+The pipeline applies the same check per stage (`W/LEDGER.txt`, `docs/AGENT-PIPELINE.md`).

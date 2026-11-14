@@ -95,7 +95,7 @@ def format_status(st):
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR
     B = RD.load(board)
-    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons))
+    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True)
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
@@ -308,6 +308,7 @@ def st_route_ready(c, n, board):
     rc, text = _run_cli(["route-ready", board] + c.cs() + waive + ["--json", rj],
                         os.path.join(d, "stage.log"))
     sc, f, codes = _scorecard(board, c.cons, c.spec, c.a.waive or [])
+    _collision_report(c, d, board)
     if rc == 0:
         return {"verdict": "pass", "line": f"gate passed, {sc.get('fail', 0)} FAIL", "board": board,
                 "scorecard": sc}
@@ -361,6 +362,26 @@ def pair_gap(cons, p):
     return best[1] if best else None
 
 
+def _collision_report(c, d, board):
+    """legality.collisions on `board` -> d/collisions.{txt,json}; waivers as the gate's. -> summary dict."""
+    from . import routediag as RD, legality as LGL, review as R
+    f = LGL.collisions(RD.load(board), c.cons)
+    waivers = list(c.a.waive or []) + list(((c.cons or {}).get("review") or {}).get("waive", []))
+    f = [x for x in f if not R._waived(x, waivers)]
+    txt, js = os.path.join(d, "collisions.txt"), os.path.join(d, "collisions.json")
+    with open(txt, "w") as fh:
+        fh.write(LGL.format_collisions(f, board) + "\n")
+    with open(js, "w") as fh:
+        json.dump(f, fh, indent=1)
+    bad = [x for x in f if x["level"] == "FAIL"]
+    kinds = {}
+    for x in bad:
+        for k, v in x["kinds"].items():
+            kinds[k] = kinds.get(k, 0) + v
+    return {"fail": len(bad), "kinds": ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())), "txt": txt,
+            "lines": [f"COLLISION {x['msg'][:150]}" for x in bad]}
+
+
 def st_route(c, n, board):
     """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
@@ -368,6 +389,11 @@ def st_route(c, n, board):
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
     from . import routerules as RR, routepar as RP
     a = c.a
+    col = _collision_report(c, c.dir(n, "route"), board)  # fast copper-collision gate: seconds, before any router hour
+    if col["fail"] and not a.force:
+        return {"verdict": "blocked", "board": board,
+                "line": f"collision gate: {col['fail']} FAIL footprint pair(s) ({col['kinds']})",
+                "next": col["lines"][:4] + [col["txt"], "fix the placement, waive (COLLISION:REGEX) or --force"]}
     rname = getattr(a, "router_name", None) or "krt"
     fr_loc = getattr(a, "fr_loc", None)
     have_krt = bool(a.router_py and a.router_dir and os.path.exists(a.router_py)
@@ -773,6 +799,70 @@ FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
 
+# ------------------------------------------------------------------ connectivity invariant + ledger
+STAGE_EXPECT = {}          # stage -> declared connectivity changes (audit.connectivity_diff); no pipeline stage re-nets
+
+
+class _Ledger:
+    """Per stage: pad -> net / footprint identity invariant on the stage's board (FAIL on an undeclared change), and a
+    ledger W/<n>-<stage>/ledger.{json,txt} + one line per stage in W/LEDGER.txt. A run that ends before the last stage of
+    its flow gets an explicit INCOMPLETE marker with the remaining stages."""
+
+    def __init__(self, work, stages, i0):
+        self.work, self.stages, self.i0 = work, stages, i0
+        self.path = os.path.join(work, "LEDGER.txt")
+        self.cache = {}
+        with open(self.path, "a") as fh:
+            fh.write(f"--- run {time.strftime('%Y-%m-%d %H:%M:%S')} from {stages[i0]}\n")
+
+    def _snap(self, board):
+        from . import audit as AU
+        key = (os.path.abspath(board), os.stat(board).st_mtime_ns, os.stat(board).st_size)
+        if key not in self.cache:
+            self.cache = {key: AU.snapshot(board)}          # keep one: the next stage's "before"
+        return self.cache[key]
+
+    def before(self, board):
+        try:
+            self.b, self.bpath = self._snap(board), board
+        except Exception as e:                               # noqa: BLE001 - unreadable input: no invariant
+            self.b, self.bpath, self.err = None, board, str(e)
+
+    def after(self, name, n, res):
+        from . import audit as AU
+        out = res.get("board") or self.bpath
+        d = os.path.join(self.work, f"{n}-{name}")
+        os.makedirs(d, exist_ok=True)
+        if self.b is None or not out or not os.path.exists(out):
+            rec, line = {"step": name, "ok": None, "note": "no board snapshot"}, f"{name}: no board snapshot"
+        else:
+            a = self._snap(out)
+            diff = AU.connectivity_diff(self.b, a, STAGE_EXPECT.get(name, ()))
+            rec, line = AU.ledger(name, self.b, a, diff, {"verdict": res["verdict"]})
+            if not diff["ok"] and res["verdict"] not in ("fail", "blocked"):
+                res["verdict"] = "fail"
+                res["line"] = f"connectivity changed ({len(diff['violations'])}): " + "; ".join(diff["violations"][:2])
+                res["next"] = diff["violations"][:5] + [os.path.join(d, "ledger.json")]
+            line = f"{line}  verdict {res['verdict']}"
+        with open(os.path.join(d, "ledger.json"), "w") as fh:
+            json.dump(rec, fh, indent=1)
+        with open(os.path.join(d, "ledger.txt"), "w") as fh:
+            fh.write(line + "\n")
+        with open(self.path, "a") as fh:
+            fh.write(f"[{n}] {line}\n")
+
+    def finish(self, done):
+        """`done` = index of the last stage that completed. -> INCOMPLETE text or ''."""
+        rest = self.stages[done + 1:]
+        if not rest:
+            msg = "COMPLETE: every stage of the flow ran"
+        else:
+            msg = "INCOMPLETE - do not treat as done; remaining: " + ", ".join(rest)
+        with open(self.path, "a") as fh:
+            fh.write(msg + "\n")
+        return "" if not rest else msg
+
+
 # ------------------------------------------------------------------ driver
 def _silk_version_line(c, board):
     """A revision copy still carrying the old version on its silkscreen: say so before any stage runs."""
@@ -884,12 +974,16 @@ def run(a):
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
     rc = 0
+    led = _Ledger(work, STAGES_, i0)
+    done = i0 - 1
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
         prev = board
+        led.before(prev)
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
+        led.after(name, i + 1, res)
         if res.get("board") and res["board"] != prev:
             from . import questions as QS
             QS.inherit(prev, res["board"])
@@ -932,5 +1026,14 @@ def run(a):
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break
+        done = i
+    inc = led.finish(done)
+    if inc:
+        st["incomplete"] = _clip(inc, 160)
+    else:
+        st.pop("incomplete", None)
+    save_state(work, st)
+    if inc:
+        print(inc)
     print(f"pipeline: {st['verdict']} at {st['stage']}; state {state_path(work)}")
     return rc

@@ -41,6 +41,10 @@ def place(part, x, y, ang):
     pads, court = moved(part, x, y, ang)
     for old, new in zip(part["pads"], pads):      # in place: B["pads"] shares these dicts
         old.update(new)
+    d = ang - part["angle"]
+    for h in part.get("holes", ()):               # unnumbered NPTH holes ride along
+        rx, ry = rot(h["x"] - part["pos"][0], h["y"] - part["pos"][1], d)
+        h["x"], h["y"] = x + rx, y + ry
     part["court"], part["pos"], part["angle"] = court, (x, y), ang
 
 
@@ -169,8 +173,72 @@ def flip(part):
         q["x"] = 2 * ox - q["x"]
         q["angle"] = (180.0 - q.get("angle", 0.0)) % 360.0
         q["layers"] = {sw.get(l, l) for l in q["layers"]}
+    for h in part.get("holes", ()):
+        h["x"] = 2 * ox - h["x"]
     x0, y0, x1, y1 = part["court"]
     part["court"] = (2 * ox - x1, y0, 2 * ox - x0, y1)
     part["side"] = sw[part["side"]]
     part["court_layers"] = {"F" if s == "B" else "B" for s in part.get("court_layers", ())}
     part["angle"] = (180.0 - part["angle"]) % 360.0
+
+
+# ---- true pad shapes (collision gate): a pad = convex core polygon + radius ---------------------------------------
+def pad_shape(q):
+    """(core points, radius) of a pad: circle = point + r, oval = segment + r, roundrect = shrunk rect + r,
+    rect / trapezoid / custom = the rotated size rectangle (custom: conservative). Angles are absolute (file form)."""
+    w, h, sh = q["w"], q["h"], q.get("shape", "rect")
+    a = q.get("angle", 0.0)
+    if sh == "circle":
+        return [(q["x"], q["y"])], w / 2
+    if sh == "oval":
+        r = min(w, h) / 2
+        hx, hy = (w / 2 - r, 0.0) if w >= h else (0.0, h / 2 - r)
+        pts = [(-hx, -hy), (hx, hy)]
+    else:
+        r = min(w, h) * float(q.get("rr", 0.25)) if sh == "roundrect" else 0.0
+        hx, hy = w / 2 - r, h / 2 - r
+        pts = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+    # KiCad rotates by -angle on screen (y down): the same convention BF._rot uses for footprint children
+    return [(q["x"] + px, q["y"] + py) for px, py in (rot(x, y, a) for x, y in pts)], r
+
+
+def _seg_pt(p, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L))
+    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+
+def _segs_cross(a, b, c, d):
+    def o(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    d1, d2, d3, d4 = o(c, d, a), o(c, d, b), o(a, b, c), o(a, b, d)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 * d2 != 0 and d3 * d4 != 0
+
+
+def _edges(pts):
+    if len(pts) == 1:
+        return [(pts[0], pts[0])]
+    if len(pts) == 2:
+        return [(pts[0], pts[1])]
+    return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+
+
+def core_gap(A, B):
+    """Distance between two point sets read as polygons (1 pt = point, 2 = segment, 3+ = closed polygon);
+    0 when they touch, cross or one contains the other."""
+    if len(B) >= 3 and any(poly_has(B, *p) for p in A[:1]) or len(A) >= 3 and any(poly_has(A, *p) for p in B[:1]):
+        return 0.0
+    ea, eb = _edges(A), _edges(B)
+    best = float("inf")
+    for a, b in ea:
+        for c, d in eb:
+            if _segs_cross(a, b, c, d):
+                return 0.0
+            best = min(best, _seg_pt(a, c, d), _seg_pt(b, c, d), _seg_pt(c, a, b), _seg_pt(d, a, b))
+    return best
+
+
+def shape_gap(s, t):
+    """Copper gap between two pad shapes (pad_shape); <= 0 = the copper overlaps."""
+    return core_gap(s[0], t[0]) - s[1] - t[1]
