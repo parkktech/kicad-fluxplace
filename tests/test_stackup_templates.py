@@ -38,7 +38,8 @@ class TestCatalog(unittest.TestCase):
                 # copper and dielectric must alternate: 2N-1 entries for N copper
                 self.assertEqual(len(p["layers"]), 2 * len(copper) - 1)
                 # 1.6 nominal; the existing 2-layer profile totals 1.58 mm (kept)
-                self.assertAlmostEqual(ST.total_thickness(n), 1.6, delta=0.05)
+                self.assertAlmostEqual(ST.total_thickness(n), p.get("finished_thickness_mm", 1.6),
+                                       delta=0.17 if p.get("finished_thickness_mm") else 0.05)
                 for ref in p.get("reference_layers", []):
                     self.assertIn(ref, copper[1:-1])
 

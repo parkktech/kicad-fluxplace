@@ -1,5 +1,14 @@
 # Change log (moved from the README)
 
+## 2026-11-15 - one board, two fabs: `[fab] profile` list, common stackup, verified capability rows
+
+`fabcaps.limits` takes a list of profiles (strictest per rule, provenance per limit; `constraints.fab_profile` returns `profiles`,
+`provenance`, `hard_provenance`); review `FAB_PROFILE` / `FAB_MIN_*` name the fab that sets each limit; `fab-advise` gains the
+"FITS ALL OF" verdict (`--profiles`) and `--stackups` (fabcommon.py: one 50/90/100 ohm geometry across fab stackups). `[stackup] profile`
+in the constraints now drives review's impedance/delay/copper-weight checks (`STACKUP_BOARD_MISMATCH` when the board file differs).
+Data: PCBWay Regular 6L 1.6 mm and JLCPCB JLC06161H-2116B stackups, surface finish / mask / via-covering / e-test notes, PCBWay ring
+and hole rows verified against the capability page; `stackup-define` printed a KeyError after `--apply` (fixed).
+
 ## 2026-11-15 - breakout: escape planning is part of placement
 
 `fluxplace/breakout.py`, `docs/BREAKOUT.md`: per-part escape templates (lanes + staggered via field) from footprint geometry; placement keeps

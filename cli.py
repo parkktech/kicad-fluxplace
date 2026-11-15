@@ -1507,11 +1507,19 @@ def cmd_fab_advise(a):
             i = FC.tier_info(v, t)
             print(f"{i['name']:22s} rank {i['rank']}  {i['description']}  [{i['source']}, retrieved {i['retrieved']}]")
         return
+    if getattr(a, "stackups", None):
+        from fluxplace import fabcommon as FCM
+        names = [x for x in a.stackups.split(",") if x]
+        print(FCM.format_text(FCM.common(names, layers=("F.Cu", "In2.Cu", "B.Cu")), names))
+        if not a.board:
+            return
     if not a.board:
         raise SystemExit("fab-advise: give --board (or --list)")
     cons = C.load(a.constraints) if a.constraints else {}
-    facts = R.facts_from_board(a.board)
-    res = FA.advise(facts, cons)
+    facts, _stk = R.apply_constraint_stackup(R.facts_from_board(a.board), cons)
+    for f_ in _stk:
+        print(f"  note {f_['code']}: {f_['msg'] if 'msg' in f_ else f_}")
+    res = FA.advise(facts, cons, profiles=[x for x in (getattr(a, "profiles", None) or "").split(",") if x] or None)
     print(FA.format_text(res, a.board))
     if a.json:
         _json.dump(res, open(a.json, "w"), indent=1, default=lambda o: dict(o) if hasattr(o, "items") else str(o))
@@ -1796,7 +1804,7 @@ def cmd_finish(a):
     print(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
     res = RG.run(a.board, tmp, scope, planes=a.planes, jar=a.jar, timeout=a.timeout,
                  passes=a.passes, rip=a.rip, log=lambda m: print(m, flush=True))
-    ck = res                                    # run() returns the proof fields next to the counts
+    ck = res.get("check") or res                # the proof fields live in the netclass check
     if not ck["ok"]:
         bad = os.path.splitext(out)[0] + ".rejected.kicad_pcb"
         shutil.move(tmp, bad)
@@ -2779,7 +2787,7 @@ def cmd_stackup_apply(a):
     if a.json:
         print(_json.dumps(res, indent=2)); return
 
-    ck = res                                    # run() returns the proof fields next to the counts
+    ck = res.get("check") or res                # the proof fields live in the netclass check
     print("Stackup: %s" % a.profile)
     print("  %s" % ST.PROFILES[a.profile]["description"])
     print("  total thickness      : %.3f mm" % ST.total_thickness(a.profile))
@@ -3493,6 +3501,8 @@ def build_parser():
                          help="cheapest manufacturer tier that builds the board as designed + what each constraint costs")
     pfa.add_argument("--board", default=None)
     pfa.add_argument("--constraints", default=None, help="[fab] profile / [route] floors / [pairs] are read")
+    pfa.add_argument("--profiles", default=None, help="comma list of <vendor>-<tier> the board must fit ALL of (default: [fab] profile list)")
+    pfa.add_argument("--stackups", default=None, help="comma list of stackup templates (one per fab): one common 50/90/100 ohm geometry on all of them")
     pfa.add_argument("--list", action="store_true", help="list every known <vendor>-<tier> profile with its source")
     pfa.add_argument("--json", default=None, help="also write the result as JSON")
     pfa.set_defaults(fn=cmd_fab_advise)

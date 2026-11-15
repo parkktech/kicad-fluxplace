@@ -39,7 +39,15 @@ def features(facts, cons):
     pair_gaps = {}
     for fam, p in pairs.items():
         z = int(p.get("impedance_diff", 0) or 0)
-        g = p.get("gap_mm") or (C.PAIR_GEOM_BY_Z.get(z) or (None, None))[1]
+        g = p.get("gap_mm")
+        if not g:
+            try:                                    # the gap the stackup actually gives (zgeom), not the old constant
+                from . import zgeom as ZG
+                og = ZG.outer_geometry(cons, fam, board=facts.get("board_path"))
+                g = og[1] if og else None
+            except Exception:                       # no readable stackup: fall back to the legacy constant below
+                g = None
+        g = g or (C.PAIR_GEOM_BY_Z.get(z) or (None, None))[1]
         if g:
             pair_gaps[fam] = float(g)
     space_req = [float(v) for v in ((route.get("min_clearance_mm"),) if route.get("min_clearance_mm") else (dm.get("clearance_mm"),)) if v]
@@ -148,7 +156,26 @@ def data_feature(vendor, key):
     return FC.data()["vendors"][vendor]["features"].get(key, {}).get("price_step", "price not published")
 
 
-def advise(facts, cons):
+def _targets(cons, profiles=None):
+    """[(vendor, tier)] of the listed `[fab] profile` names (or the `profiles` override); legacy names have no row and are skipped."""
+    names = FC.profile_list(profiles if profiles is not None else ((cons or {}).get("fab") or {}).get("profile"))
+    out = []
+    for n in names:
+        if not FC.is_legacy(n):
+            out.append(FC.split(n))
+    return out
+
+
+def all_of(feat, targets):
+    """The 'fits all of' verdict for a board that must be buildable at several fabs: {profiles, fit, rows, only_some}.
+    only_some = per listed fab that does NOT fit: its failing items, and which of the others fit (fits one, not the other)."""
+    rows = {f"{v}-{t}": grade(feat, v, t) for v, t in targets}
+    fit = [n for n, r in rows.items() if r["fit"]]
+    only = [{"fab": n, "fails": r["fails"], "others_fit": [m for m in fit if m != n]} for n, r in rows.items() if not r["fit"]]
+    return {"profiles": list(rows), "fit": len(fit) == len(rows) and bool(rows), "rows": rows, "only_some": only}
+
+
+def advise(facts, cons, profiles=None):
     feat = features(facts, cons)
     rows = [grade(feat, v, t) for v, t in FC.all_tiers()]
     fit = [r for r in rows if r["fit"]]
@@ -159,8 +186,9 @@ def advise(facts, cons):
         for r in rows:
             if r["offers"] and not r["fit"] and r["rank"] <= best_rank:
                 drop.append(r)
+    tg = _targets(cons, profiles)
     return {"features": feat, "tiers": rows, "recommended": best, "cheaper_if": drop,
-            "mask_dams": _dams(facts)}
+            "mask_dams": _dams(facts), "all_of": all_of(feat, tg) if len(tg) > 1 else None}
 
 
 def _fmt(x):
@@ -197,6 +225,17 @@ def format_text(res, name=""):
         L.append("  what raises the tier (vendor wording): " + " | ".join(
             f"{r['name']}: {r['price_step']}" for r in res["tiers"] if r["rank"] > rec[0]["rank"] and r["offers"]
             and r["vendor"] in {x["vendor"] for x in rec}))
+    ao = res.get("all_of")
+    if ao:
+        names = " + ".join(ao["profiles"])
+        if ao["fit"]:
+            L.append(f"  FITS ALL OF {names}: the board as designed is within every listed fab's tier")
+        else:
+            L.append(f"  DOES NOT FIT ALL OF {names}")
+            for o in ao["only_some"]:
+                other = (", ".join(o["others_fit"]) + " fits") if o["others_fit"] else "no listed fab fits"
+                L.append(f"    {o['fab']} does not fit ({other}): " + "; ".join(
+                    f"{w} {_fmt(h)} vs limit {_fmt(n)}" + (f" ({c} affected)" if c else "") for w, h, n, c in o["fails"]))
     if res["mask_dams"]:
         L.append("  mask dams under 0.12 mm after 0.05 mm expansion (vendors list dam 0.10 mm, advisory): " +
                  ", ".join(f"{a} {b:g}" for a, b in res["mask_dams"][:10]))

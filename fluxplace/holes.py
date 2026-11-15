@@ -29,11 +29,13 @@ def _f(level, code, msg, refs=()):
 def required_mm(cons, board_path):
     """-> (min hole-to-hole mm, source label) or (None, reason)."""
     from .profiles import PROFILES
-    name = str(((cons or {}).get("fab") or {}).get("profile") or "")
-    if name in PROFILES and PROFILES[name].get("hole_to_hole") is not None:
+    from . import fabcaps as FC
+    names = FC.profile_list(((cons or {}).get("fab") or {}).get("profile"))
+    name = " + ".join(names)
+    if len(names) == 1 and name in PROFILES and PROFILES[name].get("hole_to_hole") is not None:
         return float(PROFILES[name]["hole_to_hole"]), f"fab profile {name}"
-    if name and name not in PROFILES:
-        from . import fabcaps as FC, constraints as C
+    if name and not (len(names) == 1 and name in PROFILES):
+        from . import constraints as C
         lim = C.fab_profile(cons, board=board_path)["hard"]       # unknown name -> FabProfileError, loud
         if lim.get("hole_to_hole_via") is not None:
             return float(lim["hole_to_hole_via"]), f"fab profile {name} (via-to-via figure)"

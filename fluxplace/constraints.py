@@ -84,7 +84,11 @@ optional; anything not stated keeps the heuristic default. Schema:
                             # prominently, exit code unchanged. "off": skip.
     profile = "pcbway-standard"  # "<vendor>-<tier>" (fabcaps: fluxplace fab-profiles) —
                             # with the board's layer count it SELECTS the
-                            # manufacturer's hard limits; unknown name = error
+                            # manufacturer's hard limits; unknown name = error.
+                            # A LIST (profile = ["pcbway-standard", "jlcpcb-standard"])
+                            # = a board that must be buildable at every listed
+                            # fab: each hard limit is the strictest of the rows,
+                            # review and fab-advise name which fab sets it
     min_track_mm = 0.1      # narrowest copper the quoted fab will accept —
     min_clearance_mm = 0.1  # PCBWay rejected a 0.09 mm UTV V1.5 GND stub at
     min_drill_mm = 0.2      # upload ("minimum trace width ... no less than
@@ -148,13 +152,20 @@ def fab_profile(cons, layers=None, board=None):
             sl = ((cons or {}).get("stackup") or {}).get("layers") or []
             n = sum(1 for l in sl if isinstance(l, dict) and str(l.get("type", "copper")) == "copper")
             layers = n or None
-        res = FC.limits(str(name), layers)
+        res = FC.limits(name, layers)                   # a list of profiles = the strictest of all of them
         out.update(res["floors"])
+    explicit = {}
     for k in _FAB_DEFAULTS:
         if k in fab:
             v = float(fab[k])
+            if res and k in res["floors"] and v > out[k] + 1e-9:
+                explicit[k] = True
             out[k] = max(v, out[k]) if (res and k in res["floors"]) else v
-    out["profile"] = name
+    out["profile"] = res["name"] if res else name
+    out["profiles"] = res["profiles"] if res else []
+    out["provenance"] = {k: ("[fab] explicit value" if explicit.get(k) else " = ".join(v))
+                         for k, v in res["floor_prov"].items()} if res else {}
+    out["hard_provenance"] = {k: " = ".join(v) for k, v in res["provenance"].items()} if res else {}
     out["hard"] = res["limits"] if res else {}
     out["vendor"], out["tier"] = (res["vendor"], res["tier"]) if res else (None, None)
     out["layers"] = res["layers"] if res else layers

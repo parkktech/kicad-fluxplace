@@ -107,15 +107,92 @@ def board_layer_count(board_path):
     return n or None
 
 
+def profile_list(name):
+    """`[fab] profile` as a list of names: a string is one profile, a list (a board built at several fabs) is all of them."""
+    if name is None or name == "":
+        return []
+    if isinstance(name, (list, tuple)):
+        out = []
+        for n in name:
+            if str(n) not in out:
+                out.append(str(n))
+        return out
+    return [str(name)]
+
+
+def _strict_hi(k, x):
+    """True when the larger number is the stricter one for limits key `k` (every minimum / spacing / dam / edge figure)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and (
+        k.endswith(("_min", "_advisory")) or k.startswith(("hole_to", "mask_dam", "copper_to")))
+
+
+def merge_limits(rows):
+    """rows = [(profile name, limits dict)] -> (limits, provenance). The STRICTEST value per rule wins: larger for every
+    minimum/spacing, smaller board size, intersection of the offered copper weights and thickness range, impedance
+    control only when every fab offers it. provenance[key] = [profile names whose value equals the winner]."""
+    lim, prov = {}, {}
+    for name, l in rows:
+        for k, x in l.items():
+            if k not in lim:
+                lim[k], prov[k] = x, [name]
+                continue
+            cur = lim[k]
+            if _strict_hi(k, x) and _strict_hi(k, cur):
+                if x > cur + 1e-9:
+                    lim[k], prov[k] = x, [name]
+                elif abs(x - cur) <= 1e-9:
+                    prov[k].append(name)
+            elif k in ("outer_oz", "inner_oz") and isinstance(x, list) and isinstance(cur, list):
+                lim[k] = [v for v in cur if v in x]
+                prov[k].append(name)
+            elif k == "thickness_options" and isinstance(x, list) and isinstance(cur, list) and len(x) == 2 == len(cur):
+                lim[k] = [max(cur[0], x[0]), min(cur[1], x[1])]
+                prov[k].append(name)
+            elif k == "max_size" and isinstance(x, list) and isinstance(cur, list) and len(x) == 2 == len(cur):
+                lim[k] = [min(cur[0], x[0]), min(cur[1], x[1])]
+                prov[k].append(name)
+            elif k == "impedance_control":
+                lim[k] = bool(cur) and bool(x)
+                prov[k].append(name)
+    for name, l in rows:
+        for k in lim:
+            if k not in l and k in ("outer_oz", "inner_oz", "impedance_control") and k in prov and name not in prov[k]:
+                prov[k].append(name)
+    return lim, prov
+
+
 def limits(name, layers=None):
-    """Resolved hard limits for profile `name` at `layers` copper layers.
-    -> dict(limits={...}, floors={[fab] keys}, vendor, tier, layers, unverified, legacy) ; layers None = strictest row."""
+    """Resolved hard limits for profile `name` (one name, or a list = the strictest of all) at `layers` copper layers.
+    -> dict(limits={...}, floors={[fab] keys}, vendor, tier, layers, unverified, legacy, profiles, provenance, floor_prov);
+    layers None = strictest row. A list gives vendor/tier None and `name` = the names joined with ' + '."""
+    names = profile_list(name)
+    if len(names) > 1:
+        parts = [limits(n, layers) for n in names]
+        lim, prov = merge_limits([(r["name"], r["limits"]) for r in parts if r["limits"]])
+        fl, fprov = {}, {}
+        for r in parts:
+            for k, x in r["floors"].items():
+                if k not in fl or x > fl[k] + 1e-9:
+                    fl[k], fprov[k] = x, [r["name"]]
+                elif abs(x - fl[k]) <= 1e-9:
+                    fprov[k].append(r["name"])
+        if lim:                              # the merged row's own drill+ring floor can exceed either row's
+            drill, ann = lim.get("drill_min"), lim.get("via_annular_min")
+            if drill is not None and ann is not None:
+                vd = round(max(lim.get("via_dia_min", 0.0), drill + 2 * ann), 4)
+                if vd > fl.get("min_via_dia_mm", 0.0) + 1e-9:
+                    fl["min_via_dia_mm"], fprov["min_via_dia_mm"] = vd, prov.get("via_dia_min", []) + ["combined drill + 2 x ring"]
+        unv = [f"{r['name']}: {u}" for r in parts for u in r["unverified"]]
+        return {"limits": lim, "floors": fl, "vendor": None, "tier": None, "layers": layers, "unverified": unv,
+                "legacy": all(r["legacy"] for r in parts), "name": " + ".join(names), "profiles": names,
+                "provenance": prov, "floor_prov": fprov}
+    name = names[0] if names else str(name)
     if is_legacy(name):
         p = _legacy()[name]
         fl = {"min_track_mm": p["track_min"], "min_clearance_mm": p["clearance_min"], "min_drill_mm": p["via_drill_min"],
               "min_via_dia_mm": p["via_dia_min"], "min_annular_mm": round((p["via_dia_min"] - p["via_drill_min"]) / 2, 4)}
         return {"limits": {}, "floors": fl, "vendor": None, "tier": None, "layers": layers, "unverified": [], "legacy": True,
-                "name": name}
+                "name": name, "profiles": [name], "provenance": {}, "floor_prov": {k: [name] for k in fl}}
     v, t = split(name)
     if layers is None:
         rows = tier_rows(v, t)
@@ -134,7 +211,7 @@ def limits(name, layers=None):
     if drill is not None and ann is not None:
         fl["min_via_dia_mm"] = round(max(lim.get("via_dia_min", 0.0), drill + 2 * ann), 4)
     return {"limits": lim, "floors": fl, "vendor": v, "tier": t, "layers": layers, "unverified": unv, "legacy": False,
-            "name": name}
+            "name": name, "profiles": [name], "provenance": {k: [name] for k in lim}, "floor_prov": {k: [name] for k in fl}}
 
 
 def judge(value_mm, preferred_mm, hard_mm):

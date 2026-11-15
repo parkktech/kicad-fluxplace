@@ -194,7 +194,7 @@
     }
    ],
    "kind": "fab",
-   "source": "unverified: values carried from earlier profile code; no vendor page checked this revision"
+   "source": "NOT a published fab stackup: figures carried from earlier profile code (thin core + thick middle prepreg that neither fab lists as a standard 6-layer 1.6 mm build); use pcbway-6l-1.6-2116 / jlcpcb-6l-1.6-2116b instead"
   },
   "pcbway-6l-1.6": {
    "description": "PCBWay standard 6-layer 1.6 mm \u2014 Sig/GND/Sig/Sig/PWR/Sig",
@@ -277,7 +277,7 @@
     }
    ],
    "kind": "fab",
-   "source": "unverified: values carried from earlier profile code; no vendor page checked this revision"
+   "source": "NOT a published fab stackup: figures carried from earlier profile code (thin core + thick middle prepreg that neither fab lists as a standard 6-layer 1.6 mm build); use pcbway-6l-1.6-2116 / jlcpcb-6l-1.6-2116b instead"
   },
   "generic-2l-1.6": {
    "description": "Generic 2-layer 1.6 mm FR4",
@@ -556,6 +556,282 @@
      "weight_oz": 1
     }
    ]
+  },
+  "pcbway-6l-1.6-2116": {
+   "description": "PCBWay 'Regular' 6-layer 1.6 mm laminated structure, 1 oz outer / 1 oz inner, 70% residual copper - Sig/GND/Sig/Sig/PWR/Sig",
+   "vendor": "PCBWay",
+   "reference_layers": [
+    "In1.Cu",
+    "In4.Cu"
+   ],
+   "layers": [
+    {
+     "type": "copper",
+     "name": "F.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1195,
+     "epsilon_r": 4.45,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In1.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.43,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In2.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "7628",
+     "thickness": 0.175,
+     "epsilon_r": 4.74,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In3.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.43,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In4.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1195,
+     "epsilon_r": 4.45,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "B.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    }
+   ],
+   "kind": "fab",
+   "source": "https://www.pcbway.com/multi-layer-laminated-structure.html (6-layer entry 1, retrieved 2026-11-15): prepreg thicknesses are the page's 'after lamination' values (2116 0.1195 of 0.1300, 7628 0.1750 of 0.1960), DK 4.45 / 4.74, core 0.43 DK 4.6; page states 'thickness after lamination 1.45 mm, finished PCB thickness 1.55 mm +/-10%'",
+   "finished_thickness_mm": 1.55,
+   "matches": {
+    "vendor": "pcbway",
+    "standard_stack": "Regular, 6 layers, 1.6 mm, outer 1 oz, inner 1 oz, residual copper 70%"
+   },
+   "common_with": [
+    "jlcpcb-6l-1.6-2116b"
+   ],
+   "retrieved": "2026-11-15"
+  },
+  "jlcpcb-6l-1.6-2116b": {
+   "description": "JLCPCB JLC06161H-2116B 6-layer 1.6 mm impedance stackup as published (1 oz outer, 0.5 oz inner) - Sig/GND/Sig/Sig/PWR/Sig",
+   "vendor": "JLCPCB",
+   "reference_layers": [
+    "In1.Cu",
+    "In4.Cu"
+   ],
+   "layers": [
+    {
+     "type": "copper",
+     "name": "F.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1164,
+     "epsilon_r": 4.16,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In1.Cu",
+     "thickness": 0.0152,
+     "weight_oz": 0.5
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.5,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In2.Cu",
+     "thickness": 0.0152,
+     "weight_oz": 0.5
+    },
+    {
+     "type": "prepreg",
+     "material": "1080",
+     "thickness": 0.1528,
+     "epsilon_r": 3.91,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In3.Cu",
+     "thickness": 0.0152,
+     "weight_oz": 0.5
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.5,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In4.Cu",
+     "thickness": 0.0152,
+     "weight_oz": 0.5
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1164,
+     "epsilon_r": 4.16,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "B.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    }
+   ],
+   "kind": "fab",
+   "source": "https://jlcpcb.com/impedance (6-layer table, item 14 JLC06161H-2116B: 2116 0.1164 / core 0.5 H/H without copper / 1080 x2 0.0764 each / core 0.5 / 2116 0.1164; copper 0.035 outer, 0.0152 inner); Er 2116 4.16, 1080 3.91, core 4.6 from the same page; retrieved 2026-11-15",
+   "finished_thickness_mm": 1.6,
+   "matches": {
+    "vendor": "jlcpcb",
+    "standard_stack": "JLC06161H-2116B"
+   },
+   "common_with": [
+    "pcbway-6l-1.6-2116"
+   ],
+   "retrieved": "2026-11-15"
+  },
+  "jlcpcb-6l-1.6-2116b-1oz": {
+   "description": "JLCPCB JLC06161H-2116B with 1 oz inner copper (the inner weight both fabs offer) - same dielectric figures as published; JLCPCB's own calculator may adjust prepreg thickness for heavier inner copper (unverified)",
+   "vendor": "JLCPCB",
+   "reference_layers": [
+    "In1.Cu",
+    "In4.Cu"
+   ],
+   "layers": [
+    {
+     "type": "copper",
+     "name": "F.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1164,
+     "epsilon_r": 4.16,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In1.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.5,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In2.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "1080",
+     "thickness": 0.1528,
+     "epsilon_r": 3.91,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In3.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "core",
+     "material": "FR4",
+     "thickness": 0.5,
+     "epsilon_r": 4.6,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "In4.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    },
+    {
+     "type": "prepreg",
+     "material": "2116",
+     "thickness": 0.1164,
+     "epsilon_r": 4.16,
+     "loss_tangent": 0.02
+    },
+    {
+     "type": "copper",
+     "name": "B.Cu",
+     "thickness": 0.035,
+     "weight_oz": 1
+    }
+   ],
+   "kind": "fab",
+   "source": "https://jlcpcb.com/impedance (as jlcpcb-6l-1.6-2116b) with inner copper set to 1 oz (selectable 0.5 / 1 / 2 oz per the same page); dielectric thicknesses NOT re-derived for 1 oz inner - unverified; retrieved 2026-11-15",
+   "finished_thickness_mm": 1.6,
+   "matches": {
+    "vendor": "jlcpcb",
+    "standard_stack": "JLC06161H-2116B, inner copper option 1 oz"
+   },
+   "common_with": [
+    "pcbway-6l-1.6-2116"
+   ],
+   "retrieved": "2026-11-15"
   }
  }
 }

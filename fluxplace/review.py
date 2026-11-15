@@ -1307,11 +1307,22 @@ def check_fab_capability(facts, cons):
         return [_f(FAIL, "FAB_PROFILE_ERROR", str(e))]
     out = []
     hard = fab.get("hard") or {}
-    if fab.get("vendor"):
+    multi = len(fab.get("profiles") or []) > 1
+
+    def _pv(key):
+        """' [0.15 mm from pcbway-standard]' when the board targets several fabs, else ''."""
+        src = (fab.get("provenance") or {}).get(key)
+        return f" [{fab[key]:g} mm from {src}]" if (multi and src) else ""
+
+    if fab.get("vendor") or multi:
         unv = f" (unverified: {'; '.join(fab['unverified'])})" if fab.get("unverified") else ""
+        prov = ("; strictest of " + ", ".join(fab["profiles"]) + ": " + "; ".join(
+            f"{lbl} {fab[k]:g} mm from {(fab['provenance'] or {}).get(k, '?')}" for lbl, k in (
+                ("track", "min_track_mm"), ("space", "min_clearance_mm"), ("drill", "min_drill_mm"),
+                ("via ring", "min_annular_mm"), ("via pad", "min_via_dia_mm")) if k in (fab.get("provenance") or {}))) if multi else ""
         out.append(_f(INFO, "FAB_PROFILE", f"{fab['profile']} @ {fab['layers']} copper layers: hard limits track "
                       f"{fab['min_track_mm']:g} / space {fab['min_clearance_mm']:g} / drill {fab['min_drill_mm']:g} / via ring "
-                      f"{fab['min_annular_mm']:g} mm{unv}"))
+                      f"{fab['min_annular_mm']:g} mm{prov}{unv}"))
 
     narrow = sorted(
         (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),
@@ -1319,7 +1330,7 @@ def check_fab_capability(facts, cons):
     if narrow:
         out.append(_f(FAIL, "FAB_MIN_TRACK",
                       f"{len(narrow)} track/arc segment(s) narrower than "
-                      f"[fab] min_track_mm={fab['min_track_mm']:g}: " +
+                      f"[fab] min_track_mm={fab['min_track_mm']:g}{_pv('min_track_mm')}: " +
                       _fab_list(narrow, lambda s: f"{s['net']} {s['layer']} "
                                 f"{s['width']:g}mm ({s['x']:g},{s['y']:g})"),
                       refs={s["net"] for s in narrow}))
@@ -1345,7 +1356,7 @@ def check_fab_capability(facts, cons):
         bad_drill.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
         out.append(_f(FAIL, "FAB_MIN_DRILL",
                       f"{len(bad_drill)} via/PTH drill(s) narrower than "
-                      f"[fab] min_drill_mm={fab['min_drill_mm']:g}: " +
+                      f"[fab] min_drill_mm={fab['min_drill_mm']:g}{_pv('min_drill_mm')}: " +
                       _fab_list(bad_drill, lambda it: f"{_via_ref(it)} "
                                 f"{it['drill_mm']:g}mm ({it.get('x', 0):g},{it.get('y', 0):g})"),
                       refs={_via_ref(it) for it in bad_drill}))
@@ -1353,7 +1364,7 @@ def check_fab_capability(facts, cons):
         bad_via.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
         out.append(_f(FAIL, "FAB_MIN_VIA",
                       f"{len(bad_via)} via(s) narrower than "
-                      f"[fab] min_via_dia_mm={fab['min_via_dia_mm']:g}: " +
+                      f"[fab] min_via_dia_mm={fab['min_via_dia_mm']:g}{_pv('min_via_dia_mm')}: " +
                       _fab_list(bad_via, lambda it: f"{_via_ref(it)} "
                                 f"{it['dia_mm']:g}mm ({it.get('x', 0):g},{it.get('y', 0):g})"),
                       refs={_via_ref(it) for it in bad_via}))
@@ -1361,7 +1372,7 @@ def check_fab_capability(facts, cons):
         bad_ann.sort(key=lambda it: (_via_ref(it), it.get("x", 0), it.get("y", 0)))
         out.append(_f(FAIL, "FAB_MIN_ANNULAR",
                       f"{len(bad_ann)} via/PTH annular ring(s) narrower than "
-                      f"[fab] min_annular_mm={fab['min_annular_mm']:g}: " +
+                      f"[fab] min_annular_mm={fab['min_annular_mm']:g}{_pv('min_annular_mm')}: " +
                       _fab_list(bad_ann, lambda it: f"{_via_ref(it)} "
                                 f"{(it['dia_mm'] - it['drill_mm']) / 2.0:g}mm "
                                 f"({it.get('x', 0):g},{it.get('y', 0):g})"),
@@ -1970,14 +1981,50 @@ def check_blocks(facts, spec, cons):
     return BK.check(B, inv, level)
 
 
+def apply_constraint_stackup(facts, cons):
+    """When the constraints name the stackup ([stackup] profile = "template" or [[stackup.layers]]), THAT is the stack every
+    impedance / delay / copper-weight check uses (zgeom.resolve_stack order). -> (facts, [findings]); the findings say when
+    the stackup stored in the board file differs from it (the board must then be re-stamped: `fluxplace stackup-define`)."""
+    sc = (cons or {}).get("stackup") or {}
+    if not (sc.get("profile") or sc.get("layers")):
+        return facts, []
+    from . import zgeom as ZG
+    rows, planes, src = ZG.resolve_stack(cons)
+    if not rows:
+        return facts, []
+    facts = dict(facts)
+    board_rows = list(facts.get("stackup") or [])
+    facts["stackup"] = rows
+    if planes:
+        facts["plane_layers"] = planes
+    facts["stackup_source"] = src
+    out = []
+
+    def sig(rr):
+        return [(round(float(r.get("thickness") or 0), 3), "cu" if r.get("type") == "copper" else "d") for r in rr]
+    if board_rows and len(sig(board_rows)) == len(sig(rows)):
+        diff = [i for i, (a, b) in enumerate(zip(sig(board_rows), sig(rows)))
+                if a[1] != b[1] or abs(a[0] - b[0]) > max(0.005, 0.05 * b[0])]
+    else:
+        diff = list(range(max(len(board_rows), len(rows)))) if board_rows else []
+    if diff:
+        out.append(_f(WARN, "STACKUP_BOARD_MISMATCH",
+                      f"the stackup stored in the board file differs from the constraints' {src} in {len(diff)} of {len(rows)} "
+                      "layers (copper weight or dielectric thickness): impedance, delay and copper weights are computed from the "
+                      "constraints; the board's own stackup (what KiCad exports to the fab) must be re-stamped to match "
+                      "(fluxplace stackup-define)"))
+    return facts, out
+
+
 def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
         ds_dir=None, stage="review"):
     facts = dict(facts)
+    facts, _stk = apply_constraint_stackup(facts, cons)
     facts["partdata"] = partdata or {}
     docs = (cons or {}).get("docs", {})
     strict = bool(docs.get("strict", True))
     ds_dir = ds_dir or docs.get("datasheets")
-    out = []
+    out = list(_stk)
     out += check_env(facts, cons)
     if ds_dir or spec:
         out += check_docs(facts, spec, ds_dir or "", strict=strict)

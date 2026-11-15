@@ -181,3 +181,87 @@ def test_advisor_flags_inner_copper_weight_not_offered():
     by = {t["name"]: t for t in FA.advise(base, {})["tiers"]}
     assert by["jlcpcb-standard"]["fit"] and not by["pcbway-standard"]["fit"]            # PCBWay inner copper starts at 1 oz
     assert "inner copper" in by["pcbway-standard"]["fails"][0][0]
+
+
+# ---- several fabs at once: [fab] profile = [a, b] -> strictest per rule, with provenance ----
+def test_profile_list_takes_strictest_with_provenance():
+    fp = C.fab_profile({"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"]}}, layers=6)
+    assert fp["min_track_mm"] == 0.1 and fp["provenance"]["min_track_mm"] == "pcbway-standard"     # 0.1 beats 0.09
+    assert fp["min_drill_mm"] == 0.2 and set(fp["provenance"]["min_drill_mm"].split(" = ")) == {"pcbway-standard", "jlcpcb-standard"}
+    assert fp["min_via_dia_mm"] == pytest.approx(0.454, abs=1e-3)                                  # PCBWay drill + 2 x ring > JLC 0.45
+    assert fp["hard"]["hole_to_hole_via"] == 0.279 and fp["hard_provenance"]["hole_to_hole_via"] == "pcbway-standard"
+    assert fp["hard"]["inner_oz"] == [1, 2] and fp["hard"]["outer_oz"] == [1, 2]                   # copper weights both offer
+    assert fp["hard"]["hole_to_copper_inner"] == 0.203 and fp["hard"]["thickness_options"][0] == 0.9
+    assert fp["profiles"] == ["pcbway-standard", "jlcpcb-standard"] and fp["profile"] == "pcbway-standard + jlcpcb-standard"
+    assert fp["vendor"] is None
+    assert C.fab_profile({"fab": {"profile": ["jlcpcb-standard"]}}, layers=6)["min_track_mm"] == 0.09   # one-element list = a string
+    with pytest.raises(FC.FabProfileError):
+        C.fab_profile({"fab": {"profile": ["pcbway-standard", "nope"]}}, layers=6)
+    st = C.fab_profile({"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"], "min_track_mm": 0.15}}, layers=6)
+    assert st["min_track_mm"] == 0.15 and "explicit" in st["provenance"]["min_track_mm"]
+
+
+def test_review_names_the_fab_that_sets_each_limit():
+    cons = {"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"]}}
+    f = _facts([_tr("N", "F.Cu", 0.09, 5.0)], [{"net": "V", "dia_mm": 0.45, "drill_mm": 0.2, "x": 0, "y": 0}])
+    out = R.check_fab_capability(f, cons)
+    msg = " ".join(x["msg"] if "msg" in x else str(x) for x in out)
+    assert "0.1 mm from pcbway-standard" in msg and "FAB_MIN_VIA" in [x["code"] for x in out]      # 0.45 pad < 0.454 combined
+
+
+def test_advisor_fits_all_of_and_names_the_fab_that_fails():
+    base = dict(copper_layers=6, size_mm=(100.0, 80.0), parts={}, via_type_counts={}, design_min={}, board_path="/nonexistent",
+                pth_pads=[], zone_nets=[], track_geom=[_tr("a", "F.Cu", 0.15, 5)],
+                vias=[{"net": "a", "dia_mm": 0.6, "drill_mm": 0.3, "x": 0, "y": 0}])
+    cons = {"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"]}}
+    r = FA.advise(base, cons)
+    assert r["all_of"]["fit"] and "FITS ALL OF pcbway-standard + jlcpcb-standard" in FA.format_text(r)
+    thin = dict(base, track_geom=[_tr("a", "F.Cu", 0.095, 5)])                  # fits JLCPCB (0.09), not PCBWay (0.1)
+    r = FA.advise(thin, cons)
+    assert not r["all_of"]["fit"]
+    o = r["all_of"]["only_some"]
+    assert [x["fab"] for x in o] == ["pcbway-standard"] and o[0]["others_fit"] == ["jlcpcb-standard"]
+    assert "pcbway-standard does not fit (jlcpcb-standard fits)" in FA.format_text(r)
+    assert FA.advise(base, {})["all_of"] is None
+
+
+def test_common_geometry_across_two_fab_stackups():
+    from fluxplace import fabcommon as FCM, stackup as ST
+    names = ["pcbway-6l-1.6-2116", "jlcpcb-6l-1.6-2116b-1oz"]
+    for n in names:
+        assert ST.PROFILES[n]["matches"]["standard_stack"] and ST.PROFILES[n]["source"].startswith("https://")
+    rows = FCM.common(names, layers=("F.Cu", "In2.Cu"))
+    assert len(rows) == 6 and all(r["within_tol"] for r in rows)
+    se = next(r for r in rows if r["layer"] == "F.Cu" and r["target"] == 50.0)
+    assert 0.17 <= se["w"] <= 0.19 and all(abs(e) < 2 for _z, e in se["per_fab"].values())
+    for r in rows:
+        assert r["w"] >= 0.127 and (r["gap"] is None or r["gap"] >= 0.127)     # never under the routing floor
+    # two stacks that cannot share a width: the answer says so and carries the per-fab widths
+    ST.PROFILES["_t_thick"] = {**ST.PROFILES[names[0]], "layers": [dict(l, thickness=l["thickness"] * 2) if l["type"] != "copper" else l
+                                                                    for l in ST.PROFILES[names[0]]["layers"]]}
+    try:
+        bad = FCM.common([names[0], "_t_thick"], layers=("F.Cu",))
+    finally:
+        del ST.PROFILES["_t_thick"]
+    se = next(r for r in bad if r["target"] == 50.0)
+    assert not se["within_tol"] and len(se["alone"]) == 2 and "NO COMMON GEOMETRY" in FCM.format_text(bad, names)
+
+
+def test_constraints_stackup_profile_drives_review_and_flags_board_mismatch():
+    from fluxplace import stackup as ST
+    cons = {"stackup": {"profile": "pcbway-6l-1.6-2116", "planes": ["In1.Cu", "In4.Cu"]}}
+    old = [{"name": "F.Cu", "type": "copper", "thickness": 0.035}, {"name": None, "type": "prepreg", "thickness": 0.1, "epsilon_r": 4.1},
+           {"name": "In1.Cu", "type": "copper", "thickness": 0.0152}, {"name": None, "type": "core", "thickness": 0.2, "epsilon_r": 4.5},
+           {"name": "In2.Cu", "type": "copper", "thickness": 0.0152}, {"name": None, "type": "prepreg", "thickness": 0.8692, "epsilon_r": 4.4},
+           {"name": "In3.Cu", "type": "copper", "thickness": 0.0152}, {"name": None, "type": "core", "thickness": 0.2, "epsilon_r": 4.5},
+           {"name": "In4.Cu", "type": "copper", "thickness": 0.0152}, {"name": None, "type": "prepreg", "thickness": 0.1, "epsilon_r": 4.1},
+           {"name": "B.Cu", "type": "copper", "thickness": 0.035}]
+    facts, out = R.apply_constraint_stackup({"stackup": old, "plane_layers": ["In1.Cu"]}, cons)
+    assert facts["stackup_source"] == "profile pcbway-6l-1.6-2116" and facts["plane_layers"] == ["In1.Cu", "In4.Cu"]
+    assert PW.oz_from_stackup(facts["stackup"]) == (1.0, 1.0)
+    assert [x["code"] for x in out] == ["STACKUP_BOARD_MISMATCH"]
+    # board file already stamped with the template: no mismatch
+    same = [{"name": l.get("name"), "type": l["type"], "thickness": l["thickness"], "epsilon_r": l.get("epsilon_r", 4.4)}
+            for l in ST.PROFILES["pcbway-6l-1.6-2116"]["layers"]]
+    assert R.apply_constraint_stackup({"stackup": same}, cons)[1] == []
+    assert R.apply_constraint_stackup({"stackup": old}, {})[0]["stackup"] is old        # no [stackup]: board file untouched

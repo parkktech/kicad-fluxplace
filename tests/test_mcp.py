@@ -270,7 +270,8 @@ class TestImpedance(unittest.TestCase):
         from fluxplace import stackup as ST
         for name in ST.profile_names():
             t = ST.total_thickness(name)
-            self.assertAlmostEqual(t, 1.6, delta=0.05,
+            fin = ST.PROFILES[name].get("finished_thickness_mm")      # a fab's own stated finished thickness (+/-10 %)
+            self.assertAlmostEqual(t, fin or 1.6, delta=0.17 if fin else 0.05,
                                    msg="%s totals %s mm" % (name, t))
 
     def test_rf_net_detection(self):
