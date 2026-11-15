@@ -26,8 +26,11 @@ from . import routeconn as RC
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
 CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "tune", "silk", "review"]
-FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
-ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
+# the direct flow: no fan-out and no pairs stage; the route stage runs krt-whole (krtwhole.py) on the placed board, and
+# pour-tie / plane-tie run after the router inside it
+DIRECT = ["ready", "modules", "floorplan", "route", "tune", "silk", "review"]
+FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE, "direct": DIRECT}
+ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + DIRECT + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
 VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped")   # warn: ran, its own gate line says FAIL, does not block
 
@@ -415,6 +418,9 @@ def st_route(c, n, board):
                     "next": [QS.questions_path(board)]}
         raise
     c.cons, c.spec = c_cons, c_spec
+    if getattr(a, "route_mode", None) == "krt-whole":        # whole-board passes (krtwhole.py); nothing below runs
+        from . import krtwhole as KW
+        return KW.run(c, n, board, BR.default_conn(BR.settings(c.cons)))
     best = os.path.join(d, "board.kicad_pcb")
     _copy(board, best)
     _sidecar(board, best)
@@ -1131,6 +1137,10 @@ def run(a):
         return 0
     flow = getattr(a, "flow", None) or (st or {}).get("flow") or "classic"
     STAGES_ = list(FLOWS[flow])
+    if a.constraints and flow == "direct" and "relieve" not in STAGES_:
+        from . import constraints as C_relieve
+        if bool(((C_relieve.load(a.constraints) or {}).get("relieve") or {}).get("enable", False)):
+            STAGES_.insert(STAGES_.index("route"), "relieve")      # direct flow: before the whole-board route
     if a.constraints and "plan-route" in STAGES_ and "relieve" not in STAGES_:
         from . import constraints as C_relieve
         if bool(((C_relieve.load(a.constraints) or {}).get("relieve") or {}).get("enable", False)):
@@ -1153,6 +1163,10 @@ def run(a):
                 want = ((C_.load(a.constraints) or {}).get("route") or {}).get("router") if a.constraints else None
             except Exception:                           # noqa: BLE001 - the stage reports a bad constraints file
                 want = None
+        # krt-whole is a mode of the krt router (krtwhole.py); the direct flow selects it unless a router is named
+        a.route_mode = None
+        if str(want or "").lower() == "krt-whole" or (flow == "direct" and not want):
+            a.route_mode, want = "krt-whole", "krt"
         try:
             a.router_name, a.fr_loc, note = FR.choose(want or "krt", getattr(a, "freerouting_jar", None), getattr(a, "java", None))
         except (RuntimeError, ValueError) as e:

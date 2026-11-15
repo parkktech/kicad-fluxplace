@@ -3983,9 +3983,11 @@ def build_parser():
     ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
     ppl.add_argument("--track", type=float, default=0.2)
     ppl.add_argument("--clearance", type=float, default=0.2)
-    ppl.add_argument("--router", choices=["krt", "freerouting", "auto"], default=None,
-                     help="route stage: krt = KiCadRoutingTools, freerouting = whole-board Freerouting then krt on what is left, "
+    ppl.add_argument("--router", choices=["krt", "krt-whole", "freerouting", "auto"], default=None,
+                     help="route stage: krt = KiCadRoutingTools net batches, krt-whole = whole-board KiCadRoutingTools passes (krtwhole.py), freerouting = whole-board Freerouting then krt on what is left, "
                           "auto = freerouting when a 2.5.0+ jar and Java are found (default [route] router, else krt)")
+    ppl.add_argument("--krt-whole-resume", dest="krt_whole_resume", action="store_true",
+                     help="krt-whole route: continue from the router passes an interrupted run completed (steps/passes.json)")
     ppl.add_argument("--freerouting-jar", default=None, help="Freerouting jar (else $FLUXPLACE_FREEROUTING_JAR, else newest ~/tools/freerouting*.jar)")
     ppl.add_argument("--java", default=None, help="Java runtime for Freerouting (else $FLUXPLACE_JAVA, $JAVA_HOME, ~/tools/jdk*, PATH)")
     ppl.add_argument("--freerouting-budget", type=float, default=None, help="Freerouting job timeout, s (default [route.freerouting] budget_s, else budget_frac of --route-budget)")

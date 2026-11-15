@@ -144,6 +144,18 @@ via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`r
   `route-status` and the route stage line. At the end of the route stage pairs failing ONLY on skew go through `tune` (`[route] tune_rounds` 3, `tune_pairs` 8);
   the result is kept when no connection opens and the skew falls.
 
+## Whole-board KiCadRoutingTools (`--router krt-whole`, `krtwhole.py`, flow `direct`)
+
+`pipeline --router krt-whole` (or `[route] router = "krt-whole"`; the `direct` flow selects it by default) replaces the
+net batches with whole-board passes: planes (`route_planes.py` per plane net), pairs (`route_diff.py '*'`), the rest
+(`route.py '*'`, rails and RF nets at their rule width), leftovers (open nets only, `--max-ripup 10`, then the layer-swap
+rung), snap-vias (centring), plane-tie, pour-tie, refill. Each optional pass is kept only when it adds no DRC key and
+opens no more connections. Floors are pinned from `[fab]`/`[route]`/`.kicad_pro` (the `--fab-overrides` file), and the
+copy's netclasses are conformed to them (raised to the floor; via sizes capped at the requested rule).
+Output: `<stage>/krtwhole.json` (per step, DRC by type before and after, pairs, rails), `route_owners.txt`.
+Not covered: review's `PAIR_ROUTED_UNCOUPLED` is not raised from here (names listed in the record), and push-and-shove
+is absent from the router, so leftovers that need it remain open and are reported by net.
+
 ## Freerouting as the route stage (`--router freerouting|auto`, `routefr.py`)
 
 `pipeline --router krt|freerouting|auto` (or `[route] router = "..."`; default `krt`). `freerouting` = one whole-board
