@@ -328,6 +328,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     cks, reasons = [], {}
     tally = DR.Tally()
     stats = {"attempts": 0, "halvings": 0, "timeouts": 0, "violations": 0}
+    timings = []          # one row per router call: nets given, closed, seconds, timed out (nothing recorded these before)
     queue = deque(chunks(order, size)) if not hybrid else deque()
     rest = deque(order) if hybrid else deque()
     total = lambda: sum(cur_open.values())
@@ -448,6 +449,8 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         t_a = time.time()
         n_open = len([n for n in batch if n in cur_open])
         ok, timed, why = attempt(batch, True, timeout)
+        timings.append({"call": stats["attempts"], "nets": list(batch), "closed": n_open - len([n for n in batch if n in cur_open]),
+                        "secs": round(time.time() - t_a, 1), "cap_s": round(timeout, 1), "timed_out": bool(timed), "ok": ok})
         if pace:
             pace.note(time.time() - t_a, n_open, n_open - len([n for n in batch if n in cur_open]))
         if ok and not timed:
@@ -487,6 +490,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     out = finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
     out["tried_failed"] = [n for n in out["leftovers"] if n in tried]
     out["untried"] = [n for n in out["leftovers"] if n not in tried]
+    out["timings"] = timings
     out["dropped"] = tally.totals()
     push_status("done")
     write_leftovers(workdir, out)
@@ -508,7 +512,7 @@ def write_leftovers(workdir, r):
         import json
         with open(os.path.join(workdir, "leftovers.json"), "w") as fh:
             json.dump({"board": r["board"], "checkpoints": r["checkpoints"], "leftovers": r["leftovers"],
-                       "untried": r.get("untried", []), "tried_failed": r.get("tried_failed", []),
+                       "untried": r.get("untried", []), "tried_failed": r.get("tried_failed", []), "timings": r.get("timings", []),
                        "reasons": r["reasons"], "open_connections": r["open"], "open_nets": r["open_nets"]},
                       fh, indent=1)
     except OSError:

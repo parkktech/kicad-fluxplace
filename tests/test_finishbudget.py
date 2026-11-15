@@ -70,6 +70,9 @@ def test_hybrid_closes_the_cheapest_nets_in_the_first_calls(tmp_path):
                          log=lambda m: None, hybrid=True, retry_last=["N0"])
     first = TB.calls(tmp_path)[0]["nets"]
     assert "N0" not in first and first[0] == "N1"                     # the retried net waits
+    t = r["timings"]
+    assert t and t[0]["nets"][0] == "N1" and all(x["secs"] >= 0 and "cap_s" in x for x in t) and sum(x["closed"] for x in t) == 8
+    assert json.load(open(os.path.join(W, "leftovers.json")))["timings"]
     assert not r["leftovers"] and r["untried"] == [] and r["tried_failed"] == []
 
 
