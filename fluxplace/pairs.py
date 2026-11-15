@@ -42,7 +42,8 @@ def params(cons):
             "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1))),
             "skew_frac": float(e.get("skew_frac", 0.85)), "max_uncoupled": float(e.get("max_uncoupled_mm", 0.0)),
             "keep_partial": e.get("keep_partial", False) is True, "fallback": e.get("fallback", True) is not False,
-            "rip_stubs": e.get("rip_fanout_stubs", True) is not False, "fb_trials": int(e.get("fallback_trials", 12))}
+            "rip_stubs": e.get("rip_fanout_stubs", True) is not False, "fb_trials": int(e.get("fallback_trials", 12)),
+            "tight": e.get("tight_geometry", False) is True}
 
 
 def project_classes(board):
@@ -65,6 +66,9 @@ def class_of(net, classes, patterns, assign):
     return d
 
 
+from .zgeom import pair_geometry, pair_geometry as geometry, family_table, family_of, single_width, resolve_stack   # noqa: E402,F401  (THE geometry: pairs.geometry(cons, rows, planes, family, layer))
+
+
 def rules_for(board, B, cons, R, p, P, proj=None):
     """track width, gap, clearance, via of the pair whose first net is `p`."""
     from . import constraints as C
@@ -74,18 +78,24 @@ def rules_for(board, B, cons, R, p, P, proj=None):
     zw, zg = C.PAIR_GEOM_BY_Z.get(int(fv["impedance_diff"]), (None, None)) if "impedance_diff" in fv and not c else (None, None)
     w = float(fv.get("width_mm") or c.get("diff_pair_width") or c.get("track_width") or zw or max(B["track"], 0.15))
     gap = float(fv.get("gap_mm") or c.get("diff_pair_gap") or zg or 0.2)
-    w = max(w, float(c.get("diff_pair_width") or 0.0), R.get("min_track", 0.0))
+    og = None
+    if fam and "impedance_diff" in fv and not (fv.get("width_mm") and fv.get("gap_mm")):
+        from . import zgeom as ZG                       # impedance family: width/gap from the ACTUAL stackup, first copper layer
+        og = ZG.outer_geometry(cons, fam, board=board, B=B)
+        if og:
+            w, gap = og
+    w = max(w, 0.0 if og else float(c.get("diff_pair_width") or 0.0), R.get("min_track", 0.0) if not og else 0.0)
     # the clearance the router is given (floor + margin, routerules.request_clearance): the pair's copper must clear it
     from . import routerules as RR
     req = RR.request_clearance(R) if R.get("min_clearance") else 0.0
     clr = float(P["clearance"]) if P["clearance"] else max(float(c.get("clearance") or 0.0), req, R.get("min_clearance", 0.0), FLOOR) + 0.003
     # intra-pair gap: judged against the manufacturer's HARD limit, not the owner's preferred general floor
     # (an impedance-derived gap below the preferred floor but inside the fab limit is legal: fabcaps.judge)
-    gap = max(gap, float(c.get("diff_pair_gap") or 0.0), R.get("fab_min_clearance") or R.get("min_clearance", 0.0))
+    gap = max(gap, 0.0 if og else float(c.get("diff_pair_gap") or 0.0), R.get("fab_min_clearance") or R.get("min_clearance", 0.0))
     via = max(float(c.get("via_diameter") or R.get("via", 0.45)), R.get("min_via", 0.0))
     drill = max(float(c.get("via_drill") or R.get("drill", 0.2)), R.get("min_drill", 0.0))
     return {"w": w, "gap": gap, "clr": clr, "via": via, "drill": drill, "via_gap": max(float(c.get("diff_pair_via_gap") or 0.0), gap, clr),
-            "target": fv.get("impedance_diff"), "class": c.get("name") or "-", "prio": int(c.get("priority", 1 << 31)) if c else 1 << 31}
+            "target": fv.get("impedance_diff"), "family": fam, "class": c.get("name") or "-", "prio": int(c.get("priority", 1 << 31)) if c else 1 << 31}
 
 
 def terminals(B, p, n, pad_max):
@@ -390,24 +400,21 @@ def pair_layers(B, cons):
     return [l for l in cu if l not in plane], [l for l in cu if l in plane]
 
 
-def layer_geometry(rule, sig, planes, copper, stackup, floor):
-    """{layer: (width, gap, source)}: the class geometry on the outer layers; on an inner signal layer, when the pair has an
-    impedance target (`[pairs.FAMILY] impedance_diff`) and the stackup is known, the width impedance.py solves for the class
-    gap there (never thinner than the class)."""
-    from . import impedance as IM
+def layer_geometry(rule, sig, planes, copper, stackup, floor, cons=None, tight=False, board=None):
+    """{layer: (width, gap, source)} per signal layer. An impedance family (`rule["family"]`, `[pairs.F] impedance_diff`) with a
+    known stackup gets zgeom.pair_geometry on EVERY layer (the width AND gap that give the target there; the preferred floor, the
+    fab limit when `tight` and `allow_fab_limit`); everything else keeps the class geometry."""
     geo = {l: (rule["w"], rule["gap"], "class") for l in sig}
+    fam = rule.get("family")
     if not rule.get("target") or not stackup:
         return geo
+    if cons is None or not fam:                          # no constraints given: the rule's own target and the floor argument
+        fam = fam or "_"
+        cons = {"pairs": {fam: {"impedance_diff": rule["target"]}}, "route": {"min_track_mm": floor, "min_clearance_mm": floor}}
     for l in sig:
-        if l in (copper[0], copper[-1]):
-            continue
-        try:
-            g = IM.geometry(stackup, set(planes), l)
-            o = IM.options(float(rule["target"]), True, g, floor=max(floor, 0.05), gap=rule["gap"])
-        except Exception:                                    # noqa: BLE001 - no model for this layer: the class geometry stays
-            o = []
-        if o:
-            geo[l] = (round(max(rule["w"], o[0]["width_mm"]), 3), rule["gap"], f"{o[0].get('model', 'stripline')} {rule['target']} ohm")
+        g = pair_geometry(cons, stackup, planes, fam, l, tight=tight, board=board, class_geom=(rule["w"], rule["gap"]))
+        if g["w"] and g["status"] in ("ok", "off", "unreachable"):
+            geo[l] = (g["w"], g["gap"], f"{g['source']} {g['target']} ohm ({g['err_pct']:+.1f}%{', ' + g['status'] if g['status'] != 'ok' else ''})")
     return geo
 
 
@@ -745,7 +752,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             stackup = []
     rules = {pr: rules_for(board, B, cons, R, pr[0], P, proj) for pr in pl}
     for r in rules.values():
-        r["geo"] = layer_geometry(r, sig, planes, B["copper"], stackup, R.get("min_track", 0.0))
+        r["geo"] = layer_geometry(r, sig, planes, B["copper"], stackup, R.get("min_track", 0.0), cons=cons, tight=P.get("tight", False), board=board)
     open0 = RC.text_open(B)
     res = {"pairs": [], "laid": {}, "strip": [], "kill": [], "keep": [], "B": B, "signal_layers": sig, "plane_layers": planes, "passes": 0}
     if not pl:

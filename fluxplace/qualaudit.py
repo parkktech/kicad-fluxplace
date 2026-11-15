@@ -80,10 +80,11 @@ def rf_grade(net, tr, stackup, planes, cons, fmap=None):
             if abs(w - dw) > wtol and (worst is None or abs(w - dw) > worst[0]):
                 worst = (abs(w - dw), layer, w, mm, dw)
             continue
-        geom = R.layer_geometry(stackup or [], planes, layer) if stackup else None
+        from . import impedance as IM, zgeom as ZG        # ONE model: impedance.py, the same one zgeom.single_width solves with
+        geom = IM.geometry(stackup, set(planes), layer) if stackup else None
         if geom is None:
             continue
-        z, model = R.z0_on_layer(w, geom)
+        z, model = (IM.z_single(w, geom), geom["model"]) if geom["model"] else (None, "unreferenced")
         if z is None:
             out.append({"level": "WARN", "code": "RF_NO_REFERENCE", "kind": "noref",
                         "msg": f"{net}: {mm:.1f}mm on {layer} with no reference plane on either side"})
@@ -97,7 +98,7 @@ def rf_grade(net, tr, stackup, planes, cons, fmap=None):
             z, model, err = d
             out.append({"level": "FAIL", "code": "RF_IMPEDANCE_OFF", "kind": "impedance",
                         "msg": f"{net}: {mm:.1f}mm of {w:.3f}mm trace on {layer} is ~{z:.0f} ohm ({model}, {err:+.0f}% of {target:.0f}) — "
-                               f"the width is right for an outer layer, not this one"})
+                               f"it needs {ZG.single_width(cons, stackup, planes, net, layer)['w']} mm there (zgeom.single_width)"})
         else:
             out.append({"level": "FAIL", "code": "RF_WIDTH_OFF", "kind": "width",
                         "msg": f"{net}: {mm:.1f}mm of {w:.3f}mm trace on {layer}, the declared geometry is {d:.3f}mm"})

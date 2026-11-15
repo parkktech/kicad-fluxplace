@@ -13,6 +13,9 @@ ENVIRONMENT. This module does that:
   NET_STRAIGHT_COPPER    a spec-protected net has a component on it
   PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH
                          diff pair P and N routed differently
+  PAIR_GEOMETRY / PAIR_IMPEDANCE_UNREACHABLE / PAIR_IMPEDANCE_OFF
+                         pair width/gap/impedance per layer from the stackup (zgeom);
+                         FAIL when unreachable or the routed copper is off target
   RF_IMPEDANCE_OFF       RF copper graded on the LAYER it is actually on
   RF_VIA_COUNT           layer transitions on an RF net
   FOOTPRINT_PACKAGE_MISMATCH / PIN_COUNT_MISMATCH
@@ -464,6 +467,59 @@ def z0_on_layer(w, geom):
     z1 = ST.stripline_z0(w, 2 * hu + t, t, eu)
     z2 = ST.stripline_z0(w, 2 * hd + t, t, ed)
     return 2 * z1 * z2 / (z1 + z2), "stripline"
+
+
+def check_pair_geometry(facts, cons):
+    """Controlled-impedance pair families graded against zgeom.pair_geometry (the geometry the pairs stage lays):
+    PAIR_GEOMETRY (info: width/gap/impedance per layer), PAIR_IMPEDANCE_UNREACHABLE (FAIL: no allowed layer meets the target),
+    PAIR_IMPEDANCE_OFF (FAIL: routed copper of a pair is off its target on a layer)."""
+    from . import zgeom as ZG, impedance as IM
+    fams = {f: v for f, v in ((cons or {}).get("pairs") or {}).items() if isinstance(v, dict) and "impedance_diff" in v}
+    if not fams:
+        return []
+    rows = facts.get("stackup") or []
+    planes = (cons.get("stackup") or {}).get("planes") if (cons.get("stackup") or {}).get("planes") is not None else facts.get("plane_layers", [])
+    if not rows:
+        return [_f(WARN, "PAIR_IMPEDANCE_NO_STACKUP", "controlled pair families declared but the board has no stackup: geometry cannot be computed")]
+    cu = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
+    sig = [l for l in cu if l not in set(planes)]
+    board = facts.get("board_path") or facts.get("board")
+    out = []
+    for fam, v in sorted(fams.items()):
+        tab = ZG.family_table(cons, rows, planes, sig, fam, board=board, layers=facts.get("copper_layers"))
+        ok, _best = ZG.family_ok(tab)
+        line = "; ".join(f"{l[:-3]} {g['w']:g}/{g['gap']:g} {g['z']:g}ohm ({g['err_pct']:+.1f}%)" for l, g in tab.items() if g.get("z"))
+        if not ok:
+            worst = min(tab.values(), key=lambda g: abs(g["err_pct"] or 1e9)) if tab else None
+            out.append(_f(FAIL, "PAIR_IMPEDANCE_UNREACHABLE",
+                          f"{fam}: {v['impedance_diff']} ohm differential is not reachable within +-{v.get('tolerance_pct', 10):g}% on any allowed "
+                          f"layer; best achievable " + (f"{worst['layer']} {worst['w']:g}/{worst['gap']:g} = {worst['z']:g} ohm ({worst['err_pct']:+.1f}%)" if worst else "none")
+                          + " - change the stackup, the floors ([route]) or allow the fab limit ([pairs] allow_fab_limit)", refs={fam}))
+            continue
+        out.append(_f(INFO, "PAIR_GEOMETRY", f"{fam} {v['impedance_diff']} ohm: {line}"))
+        if v.get("width_mm") and v.get("gap_mm"):
+            continue                                              # explicit geometry is kept; the table above reports its impedance
+        for net, tr in sorted((facts.get("net_tracks") or {}).items()):
+            if not net.startswith(fam) or ZG.family_of(cons, net) != fam:
+                continue
+            bad = None
+            for layer, w, mm in tr.get("segments", []):
+                g = tab.get(layer)
+                if not g or mm < 1.0 or not g.get("gap"):
+                    continue
+                gg = IM.geometry(rows, planes, layer)
+                if not gg or not gg["model"]:
+                    continue
+                z = IM.z_diff(w, g["gap"], gg)
+                err = 100.0 * (z - v["impedance_diff"]) / v["impedance_diff"]
+                if abs(err) > g["tol_pct"] and (bad is None or abs(err) > abs(bad[0])):
+                    bad = (err, layer, w, mm, g)
+            if bad:
+                err, layer, w, mm, g = bad
+                out.append(_f(FAIL, "PAIR_IMPEDANCE_OFF",
+                              f"{net}: {mm:.1f} mm of {w:g} mm on {layer} is {err:+.0f}% off {v['impedance_diff']} ohm at the planned gap; "
+                              f"this layer needs {g['w']:g}/{g['gap']:g} (pairs.geometry)", refs={net}))
+    return out
 
 
 _RF_TOKENS = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
@@ -1901,6 +1957,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
+    out += check_pair_geometry(facts, cons)
     out += check_match_groups(facts, cons)
     out += check_timing(facts, cons)
     out += check_blocks(facts, spec, cons)

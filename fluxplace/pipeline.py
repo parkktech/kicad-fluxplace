@@ -372,13 +372,14 @@ def diff_named(p, n):
     return False
 
 
-def pair_gap(cons, p):
+def pair_gap(cons, p, board=None):
     """Gap P-N the constraints imply for pair `p` ([pairs.FAMILY] impedance_diff via PAIR_GEOM_BY_Z); None = the router's own default."""
-    from . import constraints as C
+    from . import constraints as C, zgeom as ZG
     best = None
     for fam, v in ((cons or {}).get("pairs") or {}).items():
         if p.startswith(fam) and "impedance_diff" in v and (best is None or len(fam) > best[0]):
-            best = (len(fam), C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), C.PAIR_GEOM_BY_Z[100])[1])
+            og = ZG.outer_geometry(cons, fam, board=board)             # from the actual stackup (pairs.geometry); constant = fallback
+            best = (len(fam), og[1] if og else C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), C.PAIR_GEOM_BY_Z[100])[1])
     return best[1] if best else None
 
 
@@ -451,7 +452,7 @@ def st_route(c, n, board):
     def build(s, o, only, lim, pair=False):
         pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
         return _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
-                          gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
+                          gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
     run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
     def left():
@@ -580,7 +581,7 @@ def st_route(c, n, board):
             def build2(s_, o_, only, lim, pair=False):
                 pair = pair and len(only) == 2 and diff_named(*only)
                 return _route_cmd(a2, s_, o_, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
-                                  gap=pair_gap(c.cons, only[0]) if pair else None, dflags=dflags)
+                                  gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
             return BR.make_runner(build2, a.router_dir, extra, spath, S)
         lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, lleft, B, c.cons, c.spec, cls, a.layers,
                          trial_s=min(a.route_timeout, 180), post=post_round, log=lambda m: None)
@@ -824,14 +825,14 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     # pre-route gate: the pre-placed copper must already clear the rules the router is given (zero load-time violations);
     # unlocked stubs that do not are removed here so the router redoes them, locked copper is reported
     gated = os.path.join(d, "gated.kicad_pcb")
-    gate = FR.preroute_gate(board, os.path.join(fdir, "gate"), loc=a.fr_loc, S=FS, classes=FR.net_classes(c.cons, R, R["clearance_class"]), out=gated,
+    gate = FR.preroute_gate(board, os.path.join(fdir, "gate"), loc=a.fr_loc, S=FS, classes=FR.net_classes(c.cons, R, R["clearance_class"], board=board), out=gated,
                             planes=planes)
     gate["log"] = FR.gate_summary(gate)
     board = gated
     rec = FR.route_board(board, out, fdir, loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
                          floor_clearance=RR.request_clearance(R) if R["min_clearance"] else 0.0, budget_s=fb, S=FS, cons=c.cons,
                          skip_nets=skip, has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick,
-                         classes=FR.net_classes(c.cons, R, R["clearance_class"]),
+                         classes=FR.net_classes(c.cons, R, R["clearance_class"], board=board),
                          plane_nets=FR.plane_nets(board, os.path.join(d, "freerouting"), planes),
                          pour=_pour_json(c))
     rec["out"] = out

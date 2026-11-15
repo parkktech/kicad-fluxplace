@@ -233,8 +233,12 @@ def test_inner_layer_width_follows_the_impedance_target(tmp_path):
     cu = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
     rule = {"w": 0.15, "gap": 0.25, "target": 100}
     geo = PR.layer_geometry(rule, ["F.Cu", "In2.Cu", "B.Cu"], ["In1.Cu"], cu, stackup, 0.1)
-    assert geo["F.Cu"] == (0.15, 0.25, "class") and geo["B.Cu"][2] == "class"
-    assert geo["In2.Cu"][0] >= 0.15 and geo["In2.Cu"][1] == 0.25 and "100 ohm" in geo["In2.Cu"][2]
+    # every layer is computed from the stackup (width AND gap for the target at the floor), none keeps the class constant
+    from fluxplace import impedance as IM
+    for l in ("F.Cu", "In2.Cu", "B.Cu"):
+        w, g, src = geo[l]
+        assert w >= 0.1 and g >= 0.1 and "100 ohm" in src
+        assert abs(IM.z_diff(w, g, IM.geometry(stackup, {"In1.Cu"}, l)) - 100) < 1.5
     # no target, or no stackup: the class geometry everywhere
     assert PR.layer_geometry(dict(rule, target=None), ["F.Cu", "In2.Cu"], ["In1.Cu"], cu, stackup, 0.1)["In2.Cu"][2] == "class"
     assert PR.layer_geometry(rule, ["F.Cu", "In2.Cu"], ["In1.Cu"], cu, [], 0.1)["In2.Cu"][2] == "class"
