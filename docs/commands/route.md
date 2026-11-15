@@ -152,11 +152,13 @@ in the constructive flow (ready, modules, floorplan, fanout, pour-tie, pairs, ro
 
 1. **planes**: `route_planes.py` per (net, layer) of the zones on the board's non-signal copper layers.
 2. **pairs**: `route_diff.py` only for the pairs with an open leg (or handed over, state c); complete pairs are the pairs stage's locked copper.
-3. **protected**: `route.py` on the open nets the constraints keep from thinning (`globalroute.is_fixed_width`: rails, RF, clocks,
-   `[pairs.*]` and `[nets.X]` impedance nets, controlled names) at their rule width (`--power-nets-widths`), `--escalation off`.
-4. **rest**: `route.py '*'` at the preferred sizes (`[route] preferred_track_mm / preferred_clearance_mm`, else the board's Default net class, else `--track`/`--clearance`) with `--escalation fab` and a generated `--fab-overrides`
-   file holding the floors, so features step down to the floor only where needed and never below it. Protected nets still open
-   are excluded (`!net`), so the step-down never thins them.
+3. **whole**: `route.py '*'` at the preferred sizes (`[route] preferred_track_mm / preferred_clearance_mm`, else the board's Default net
+   class, else `--track`/`--clearance`), `--escalation off`; rails and RF nets at their rule width (`--power-nets-widths`), every other
+   net at the preferred track. Protected nets (`globalroute.is_fixed_width`: rails, RF, clocks, `[pairs.*]`, `[nets.X]` impedance
+   nets, controlled names) cannot thin here. (A pass over the protected nets alone, with every one at a rule width, took an hour on the
+   proof board against minutes for this one.)
+4. **step-down**: the unprotected nets still open, `--escalation fab` with a generated `--fab-overrides` file holding the floors: they step
+   below the preferred sizes only where needed and never below the floor. Protected nets still open are not given to this pass.
 5. **finish**: `batchroute.route_batches` (hybrid finish, cheapest first, rip-up of unlocked copper) on what is open, capped at
    `[route] finish_share` of `--route-budget`.
 6. **centring**: every unlocked track end inside a same-net via is moved to the via centre; a move survives only if kicad-cli shows no

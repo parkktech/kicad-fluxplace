@@ -451,30 +451,29 @@ def run(c, n, board, conn):
     elif not diff:
         rec("pairs route_diff", 0, 0.0, True, "no pair with an open leg")
 
-    # 3 protected nets: exact sizes (escalation off), rule widths; plane nets ride here (their pads are already plane-tied)
+    # 3 whole board at the preferred sizes, escalation off: nets with a rule width (rails, RF) at that width, every other net at the
+    #   preferred track; the protected nets cannot thin here. (A pass over the protected nets alone, one router call apiece, took
+    #   an hour on the proof board against minutes for this one.)
     open_now = lambda p_: {k for k, v in conn(p_).items() if v}
     pw = protected_widths(prot, rails, rf, rfw, R)
-    todo = sorted(k for k in open_now(cur) if k in prot and k not in diff)
-    dst = os.path.join(work, "03-protected.kicad_pcb")
-    if todo and "protected" not in done:
-        rc, secs = run_router(router_cmd(a, R, d, "route.py", cur, dst, ["--nets", *[glob_escape(x) for x in todo],
-                                                                         *power_args({k: pw[k] for k in todo if k in pw}), *route_extra(a)], esc="off"),
-                              a.router_dir, os.path.join(work, "03-protected.log"), cap_s)
-        if judge(f"protected route.py ({len(todo)} net(s))", rc, secs, dst):
+    explicit = {k: w for k, w in pw.items() if k in rails or (k in rf and rfw)}
+    dst = os.path.join(work, "03-whole.kicad_pcb")
+    if open_now(cur) and "whole" not in done:
+        rc, secs = run_router(router_cmd(a, R, d, "route.py", cur, dst, ["--nets", "*", *power_args(explicit), *route_extra(a)], esc="off"),
+                              a.router_dir, os.path.join(work, "03-whole.log"), cap_s)
+        if judge("whole route.py * (preferred sizes, exact)", rc, secs, dst):
             cur, cur_open = dst, signal_open(dst)
-            checkpoint("protected")
+            checkpoint("whole")
 
-    # 4 the rest: preferred sizes, stepping down to the floor file only where needed; protected nets still open stay out
-    held = sorted(k for k in open_now(cur) if k in prot)
-    todo = sorted(k for k in open_now(cur) if k not in prot)
-    dst = os.path.join(work, "04-rest.kicad_pcb")
-    if todo and "rest" not in done:
-        rc, secs = run_router(router_cmd(a, R, d, "route.py", cur, dst, ["--nets", "*", *[f"!{glob_escape(x)}" for x in held],
-                                                                         *power_args({k: pw[k] for k in pw if k in prot}), *route_extra(a)], esc="fab"),
-                              a.router_dir, os.path.join(work, "04-rest.log"), cap_s)
-        if judge(f"rest route.py * ({len(todo)} net(s) open at start)", rc, secs, dst):
+    # 4 step-down: the unprotected nets still open, preferred sizes stepping down to the floor file only where needed
+    todo = sorted(k for k in open_now(cur) if k not in prot and k not in plane_set)
+    dst = os.path.join(work, "04-stepdown.kicad_pcb")
+    if todo and "stepdown" not in done:
+        rc, secs = run_router(router_cmd(a, R, d, "route.py", cur, dst, ["--nets", *[glob_escape(x) for x in todo], *route_extra(a)], esc="fab"),
+                              a.router_dir, os.path.join(work, "04-stepdown.log"), cap_s)
+        if judge(f"stepdown route.py ({len(todo)} net(s), to the floor)", rc, secs, dst):
             cur, cur_open = dst, signal_open(dst)
-            checkpoint("rest")
+            checkpoint("stepdown")
 
     # 5 finish: the existing hybrid finish step on what is open, cheapest first, rip-up of unlocked copper, capped
     keys_cur = drc(cur)[0]

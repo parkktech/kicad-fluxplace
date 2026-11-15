@@ -171,13 +171,14 @@ def _stub_stage(monkeypatch, tmp_path, rc=0, below_floor=False, thin_rail=False,
     return c, str(board), calls, conn
 
 
-def _conn_factory(pairs_open):
-    """open connections of a stub board: the pairs step closes the USB pair, the rest step closes SIG."""
+def _conn_factory(pairs_open, gnd_open=False):
+    """open connections of a stub board: the pairs step closes the USB pair, the step-down pass closes SIG (GND stays open
+    when `gnd_open`: a protected net the whole-board pass could not route)."""
     def conn(path):
         b = os.path.basename(path)
         usb = 0 if (b.startswith(("02-pairs", "03-", "04-", "05-", "06-", "07-")) or b == "board.kicad_pcb" or not pairs_open) else 1
-        sig = 0 if (b.startswith(("04-rest", "05-", "06-", "07-")) or b == "board.kicad_pcb") else 1
-        return {"USB_P": usb, "USB_N": usb, "SIG": sig}
+        sig = 0 if (b.startswith(("04-stepdown", "05-", "06-", "07-")) or b == "board.kicad_pcb") else 1
+        return {"USB_P": usb, "USB_N": usb, "SIG": sig, "GND": 2 if gnd_open and b.startswith(("03-", "04-")) else 0}
     return conn
 
 
@@ -185,38 +186,34 @@ def _steps(tmp_path):
     return json.load(open(str(tmp_path / "W" / "4-route" / "krtwhole.json")))["steps"]
 
 
-def test_stage_chains_pairs_protected_then_rest_and_the_pairs_output_feeds_the_next_step(monkeypatch, tmp_path):
+def test_stage_chains_planes_pairs_whole_then_stepdown_and_each_output_feeds_the_next(monkeypatch, tmp_path):
     c, board, calls, conn = _stub_stage(monkeypatch, tmp_path)
     res = KW.run(c, 4, board, conn)
-    scripts = [x["script"] for x in calls]
-    assert scripts == ["route_planes.py", "route_planes.py", "route_diff.py", "route.py"]        # no protected nets open: no call
-    assert calls[2]["nets"] == ["USB_N", "USB_P"]                                                 # only the open pair
-    assert calls[3]["src"] == calls[2]["dst"] and calls[2]["src"] == calls[1]["dst"]              # each step builds on the last
-    assert calls[3]["esc"] == "fab" and "--escalation" in calls[3]["cmd"]
-    assert "!USB_N" not in calls[3]["nets"]                                                       # the pair was closed
+    assert [x["script"] for x in calls] == ["route_planes.py", "route_planes.py", "route_diff.py", "route.py", "route.py"]
+    assert calls[2]["nets"] == ["USB_N", "USB_P"]                                  # only the pair with an open leg
+    for prev, nxt in zip(calls[1:], calls[2:]):
+        assert nxt["src"] == prev["dst"]                                            # each step builds on the last output
+    whole, down = calls[3], calls[4]
+    assert whole["esc"] == "off" and whole["nets"][0] == "*" and "--power-nets" in whole["nets"]
+    assert down["esc"] == "fab" and down["nets"][:1] == ["SIG"]                     # only what is still open, stepping to the floor
+    assert "--fab-overrides" in down["cmd"] and "--strict-sizes" in down["cmd"] and "--keep-input-copper" in down["cmd"]
     names = [s["step"] for s in _steps(tmp_path)]
     assert names[:2] == ["planes GND->In1.Cu", "planes +5V->In4.Cu"] and names[2].startswith("pairs route_diff")
     assert res["verdict"] == "pass"
 
 
-def test_open_protected_nets_get_an_exact_pass_and_stay_out_of_the_step_down_pass(monkeypatch, tmp_path):
-    c, board, calls, conn = _stub_stage(monkeypatch, tmp_path, pairs_open=False)
-    base = conn
-
-    def conn2(path):
-        r = dict(base(path))
-        r["GND"] = 0 if os.path.basename(path).startswith("03-") or "05-" in os.path.basename(path) else 2
-        return r
-    KW.run(c, 4, board, conn2)
-    prot = [x for x in calls if x["dst"].endswith("03-protected.kicad_pcb")][0]
-    assert prot["esc"] == "off" and "GND" in prot["nets"] and "--power-nets-widths" in prot["nets"]
+def test_a_protected_net_left_open_is_never_given_to_the_step_down_pass(monkeypatch, tmp_path):
+    c, board, calls, _conn = _stub_stage(monkeypatch, tmp_path, pairs_open=False)
+    KW.run(c, 4, board, _conn_factory(False, gnd_open=True))
+    down = [x for x in calls if x["dst"].endswith("04-stepdown.kicad_pcb")][0]
+    assert "GND" not in down["nets"] and "+5V" not in down["nets"]
 
 
 def test_exit_three_with_every_feature_at_the_floor_is_kept_with_a_note(monkeypatch, tmp_path):
     c, board, calls, conn = _stub_stage(monkeypatch, tmp_path, rc=3)
     KW.run(c, 4, board, conn)
     steps = _steps(tmp_path)
-    rest = [s for s in steps if s["step"].startswith("rest")][0]
+    rest = [s for s in steps if s["step"].startswith("stepdown")][0]
     assert rest["rc"] == 3 and rest["accepted"] is True and "at or above the floor" in rest["why"]
 
 
@@ -224,7 +221,7 @@ def test_a_step_delivering_below_a_floor_is_rejected_and_its_input_kept(monkeypa
     c, board, calls, conn = _stub_stage(monkeypatch, tmp_path, rc=3, below_floor=True)
     res = KW.run(c, 4, board, conn)
     steps = _steps(tmp_path)
-    rest = [s for s in steps if s["step"].startswith("rest")][0]
+    rest = [s for s in steps if s["step"].startswith("whole")][0]
     assert rest["accepted"] is False and "below floor" in rest["why"]
     assert res["verdict"] == "fail"              # the final audit also sees the below-floor copper
 
@@ -232,7 +229,7 @@ def test_a_step_delivering_below_a_floor_is_rejected_and_its_input_kept(monkeypa
 def test_a_thinned_protected_net_fails_the_step(monkeypatch, tmp_path):
     c, board, calls, conn = _stub_stage(monkeypatch, tmp_path, thin_rail=True)
     res = KW.run(c, 4, board, conn)
-    assert [s for s in _steps(tmp_path) if s["step"].startswith("rest")][0]["accepted"] is False
+    assert [s for s in _steps(tmp_path) if s["step"].startswith("whole")][0]["accepted"] is False
     assert res["verdict"] == "fail"
 
 
