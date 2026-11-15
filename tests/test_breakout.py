@@ -234,3 +234,23 @@ def test_a_pin_walled_in_outward_leaves_the_other_way(tmp_path):
     res = BO.solve(B, {}, None)
     alt = [r for r in res["pins"].values() if r.get("alt") is not None]
     assert alt and not res["failed"]
+
+
+def test_fanout_lays_the_templates_first_and_does_not_escape_those_pins_again(tmp_path):
+    import argparse
+    from fluxplace import fanout as FO
+    body = conn("J1", 50, 40) + G.fp("J2", 90, 40, [G.pad(str(i + 1), 0, i * 1.0, f"A{i}", 0.6, 0.6) for i in range(20)], court=(-1, -1, 1, 21))
+    path = G.board(tmp_path, body).replace("b.kicad_pcb", "b.kicad_pcb")
+    txt = open(path).read().replace(' (4 "In1.Cu" signal)', "")
+    open(path, "w").write(txt)
+    a = lambda **kw: argparse.Namespace(**dict(dict(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
+                                                    nodes=200000, repairs=12, check_only=False, no_breakout=False), **kw))
+    out = str(tmp_path / "o.kicad_pcb")
+    B, res = FO.run(path, {}, None, out, a(), None)
+    assert res["breakout"]["pins"] == 60 and not res["breakout"]["failed"]
+    assert not [p for p in res["pins"] if p["ref"] == "J1"]                      # laid, so the generic solver leaves them alone
+    B2 = RD.load(out)
+    assert sum(1 for v in B2["vias"] if v["locked"]) >= 20 and sum(1 for s in B2["segs"] if s["locked"]) >= 80
+    out2 = str(tmp_path / "o2.kicad_pcb")
+    B3, res3 = FO.run(path, {}, None, out2, a(no_breakout=True), None)
+    assert [p for p in res3["pins"] if p["ref"] == "J1"]                         # without the templates the generic solver does them

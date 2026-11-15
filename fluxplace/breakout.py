@@ -32,6 +32,7 @@ from . import netclass as NC
 SIDES = ((-1, 0), (0, -1), (1, 0), (0, 1))               # outward normal of side 0 left / 1 top / 2 right / 3 bottom
 SHIFTS = (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, -0.3)
 EPS = 1e-9
+MARK = "b4e0a7c1"                                       # uuid prefix of every track / via laid here (fanout_helper.already)
 
 
 def conf(cons):
@@ -503,7 +504,11 @@ def lay_text(text, pins, drill):
     """board text with the planned lanes and vias as locked copper, grouped `breakout:<ref>`. -> (text, segments, vias)."""
     from . import boardtext as BT
     blks, ns, nv = [], 0, 0
-    u = lambda: str(uuid.uuid4())
+    cnt = [0]
+
+    def u():                                            # deterministic ids, marked so the generic fan-out knows these pads are escaped
+        cnt[0] += 1
+        return MARK + str(uuid.uuid5(uuid.NAMESPACE_URL, f"breakout/{cnt[0]}"))[len(MARK):]
     for key in sorted(pins, key=lambda k: (k[0], pins[k]["side"], pins[k]["row"], k[1])):
         r = pins[key]
         for a, b in zip(r["pts"], r["pts"][1:]):
