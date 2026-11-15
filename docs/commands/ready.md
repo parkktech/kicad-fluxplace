@@ -9,6 +9,7 @@ Runs first in `pipeline` (stage `ready`) and standalone. Prints a checklist, one
 | line | PASS when | else |
 |---|---|---|
 | `parts` | every part passes the part-entry gate ([parts.md](parts.md)); with `--no-api` the distributor/stock checks print `NOT CHECKED` | FAIL, blockers spread over the codes |
+| `parts gate` | every part is RESOLVED: concrete MPN (not generic, not in the value), stock at the build quantity (`[bom] quantity_target`), datasheet on disk, cited pin data, package agrees with the footprint (a missing package string blocks only with `[parts] package = "required"`), a real 3D model; anything NOT CHECKED (offline, no `--board`) blocks | FAIL (blockers per need). **`--allow-incomplete` does not skip it**; only `--allow-undocumented` does: line `WAIVED`, exit 0, `<board>.notready.json` written, the pipeline records it in `state.json` and the ledger and repeats it in the final report |
 | `stackup` | declared in the constraints (`[stackup]`) or read from the board file (printed as inferred) | question `stackup` (profile choice) |
 | `class <name>` | the controlled class has a geometry (layer, width, gap) COMPUTED from the stackup; a netclass the project already declares for it is within tolerance | FAIL: no reference plane / target not reachable / declared netclass off target |
 | `rails` | every rail of >= `[route] rail_min_pads` pads has a plane/pour or an answer | OPEN: `rail-pour:NET` = `tree` \| `pour` |
@@ -39,4 +40,4 @@ netclass's Z and the dominant routed widths' Z per layer (a width that is right 
 `--allow-incomplete`: exit 0 and write `<board>.notready.json`. The pipeline then prints `NOT READY ...` on every stage line, puts
 `not_ready` in `state.json`, the status table and every `*.status.json`; the sidecar follows each stage's output board
 (`questions.inherit`); `fab` and `deliver` refuse such a board (`NOT READY: <reasons>`). `pipeline` without `--spec` reports the
-stage `na` (nothing to check); `--api` turns the live distributor lookups on (default offline in the pipeline).
+stage `na` (nothing to check); the stage's distributor/stock lookups are live by default (`--no-api` for offline, which blocks the parts gate: stock cannot be checked). Work list: [parts-todo](parts-todo.md), [parts-apply](parts-apply.md).

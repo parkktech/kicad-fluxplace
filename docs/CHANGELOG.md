@@ -1,5 +1,16 @@
 # Change log (moved from the README)
 
+## 2026-11-15 - parts first: the first-stage parts gate, parts-todo, parts-apply
+
+Parts are resolved BEFORE placement or routing. `ready` (and the pipeline `ready` stage) gained the **parts gate**
+(`fluxplace/partsgate.py`, [ready.md](commands/ready.md)): every part needs a concrete MPN (not generic, not typed into the value),
+stock at the build quantity (`[bom] quantity_target` boards x parts per board), a datasheet on disk, cited pin data, footprint/package
+agreement and a real 3D model; anything not checked (offline, no board) blocks. **Behaviour change:** the pipeline `ready` stage is
+live (DigiKey/Mouser) by default (`--no-api` for offline) and `--force` / `--allow-incomplete` no longer skip the parts gate; the only
+bypass is `--allow-undocumented` (recorded in `state.json` and the ledger, repeated in the final report, later outputs stamped NOT
+READY, fab/deliver refuse). New [parts-todo](commands/parts-todo.md) (JSON work list for an agent, with distributor candidates) and
+[parts-apply](commands/parts-apply.md) (validates agent proposals, writes only what passes, never owner decisions).
+
 ## 2026-11-13 - Freerouting as a route stage; exit codes
 
 `pipeline --router krt|freerouting|auto` (`[route] router`, `fluxplace/routefr.py`, `docs/commands/route.md`): one whole-board
