@@ -88,6 +88,10 @@ class Plan:
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
         self.claims_rel = {}
         self.chash = GM.Hash(3.0)
+        self.bo_rel, self.bhash = {}, GM.Hash(3.0)             # --- breakout (breakout.py): lane regions per module, hashed in world coordinates
+        self.bo_reg = []
+        self.bo_w = float((cons.get("floorplan") or {}).get("breakout_weight", 6.0))
+        self.bo_apron = float((cons.get("floorplan") or {}).get("breakout_apron_mm", 2.0))
         from . import intent as IT
         self.intent = IT.PlanTerms(self)                      # --- intent: away penalty / legality
 
@@ -164,12 +168,14 @@ class Plan:
         blk = block_spread(self.X, self.Y, self.fixed, self.blk)
         out = {"wl": wl, "over": over, "cross": cr, "compact": bx, "block": self.blk_w * blk,
                "intent": self.intent.penalty() if self.intent.items else 0.0}
+        if self.bo_reg and self.bo_w:
+            out["breakout"] = self.bo_w * self.breakout_pen()
         if self.stay.any():
             out["stay"] = float((self.stay * (np.abs(self.X - self.src[0]) + np.abs(self.Y - self.src[1]) + 2.0 * (self.T != 0))).sum())
         return out
 
     def total(self, p, w_cross=4.0):
-        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0) + p.get("stay", 0.0)
+        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0) + p.get("stay", 0.0) + p.get("breakout", 0.0)
 
     def crossings(self):
         """port-to-port crossing count: ports of one net chained by x, edges of different nets that intersect."""
@@ -325,6 +331,57 @@ class Plan:
         for i in range(self.n):
             self._claims(i)
 
+    def set_breakouts(self, regs):
+        """regs: [(module index, rect rel to the anchor, outward unit vector rel, sides)] = the lane regions of the dense parts' templates."""
+        self.bo_reg = list(regs)
+        self.bo_rel = defaultdict(list)
+        for i, rect, n, sd in regs:
+            self.bo_rel[i].append((rect, sd))
+        self.bo_m = np.array([r[0] for r in regs], int)
+        self.bo_r = np.array([r[1] for r in regs], float).reshape(-1, 4)
+        self.bo_n = np.array([r[2] for r in regs], float).reshape(-1, 2)
+        self.bo_sd = ["F" if "F" in r[3] and "B" not in r[3] else "B" for r in regs]
+        self.bhash = GM.Hash(3.0)
+        for i in range(self.n):
+            self._claims(i)
+
+    def breakout_world(self, i=None):
+        """world rects of the lane regions ([k] arrays x0, y0, x1, y1) and their outward vectors."""
+        m = self.bo_m
+        th = self.T[m]
+        c = np.array([CS[t][0] for t in th])
+        s_ = np.array([CS[t][1] for t in th])
+        ax, ay = self.X[m] + self.bo_r[:, 0] * c + self.bo_r[:, 1] * s_, self.Y[m] + (-self.bo_r[:, 0] * s_ + self.bo_r[:, 1] * c)
+        bx, by = self.X[m] + self.bo_r[:, 2] * c + self.bo_r[:, 3] * s_, self.Y[m] + (-self.bo_r[:, 2] * s_ + self.bo_r[:, 3] * c)
+        nx = self.bo_n[:, 0] * c + self.bo_n[:, 1] * s_
+        ny = -self.bo_n[:, 0] * s_ + self.bo_n[:, 1] * c
+        return np.minimum(ax, bx), np.minimum(ay, by), np.maximum(ax, bx), np.maximum(ay, by), nx, ny
+
+    def breakout_pen(self):
+        """Orientation preference of the dense parts' breakouts: each lane region's apron (the region's outward extension by
+        `[floorplan] breakout_apron_mm`) is charged for the share of it that is outside the board / in a keep-out, and for every
+        breakout of another module it runs into. 0 = every breakout faces open board."""
+        x0, y0, x1, y1, nx, ny = self.breakout_world()
+        A = self.bo_apron
+        ax0 = np.where(nx < -0.5, x0 - A, x0)
+        ax1 = np.where(nx > 0.5, x1 + A, x1)
+        ay0 = np.where(ny < -0.5, y0 - A, y0)
+        ay1 = np.where(ny > 0.5, y1 + A, y1)
+        pen = 0.0
+        for k in range(len(x0)):
+            arr = self.base[self.bo_sd[k]]
+            i0 = int(math.floor((ax0[k] - self.r0[0]) / self.RES))
+            i1 = int(math.ceil((ax1[k] - self.r0[0]) / self.RES))
+            j0 = int(math.floor((ay0[k] - self.r0[1]) / self.RES))
+            j1 = int(math.ceil((ay1[k] - self.r0[1]) / self.RES))
+            tot = max(1, (i1 - i0) * (j1 - j0))
+            sub = arr[max(0, j0):max(0, min(self.ny, j1)), max(0, i0):max(0, min(self.nx, i1))]
+            pen += 1.0 - (sub.size - float(sub.sum())) / tot
+        ox = np.maximum(0.0, np.minimum(ax1[:, None], x1[None, :]) - np.maximum(ax0[:, None], x0[None, :]))
+        oy = np.maximum(0.0, np.minimum(ay1[:, None], y1[None, :]) - np.maximum(ay0[:, None], y0[None, :]))
+        ov = (ox * oy > 1e-9) & (self.bo_m[:, None] != self.bo_m[None, :])
+        return pen + 0.5 * float(ov.sum())
+
     def claims_world(self, i):
         X, Y, th = self.cur[i]
         out = []
@@ -341,6 +398,16 @@ class Plan:
         for k, (rect, sides) in enumerate(self.claims_world(i)):
             for sd in sides:
                 self.chash.add((i, k, sd), rect, sd)
+        for k in range(len(self.bo_rel.get(i, ())) + 8):
+            for sd in ("F", "B"):
+                self.bhash.remove((i, k, sd))
+        X, Y, th = self.cur[i]
+        for k, (rect, sides) in enumerate(self.bo_rel.get(i, ())):
+            ax, ay = GM.rot(rect[0], rect[1], th)
+            bx, by = GM.rot(rect[2], rect[3], th)
+            w = (X + min(ax, bx), Y + min(ay, by), X + max(ax, bx), Y + max(ay, by))
+            for sd in sides:
+                self.bhash.add((i, k, sd), w, sd)
 
     def legal(self, i):
         """members of module i legal at their current pose (new violations only)."""
@@ -372,13 +439,18 @@ class Plan:
         mine = {(i, k, sd) for k in range(len(self.claims_rel.get(i, ())) + 8) for sd in ("F", "B")}
         for r in mem:
             for q in P[r]["pads"]:
-                if q.get("np"):
-                    continue
                 rect = (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"])
                 sides = [("F" if l == "F.Cu" else "B") for l in q["layers"] if l in ("F.Cu", "B.Cu")] or ["F", "B"]
+                if q.get("np"):                         # a hole goes through every layer
+                    sides = ["F", "B"]
                 for sd in sides:
                     if next(self.chash.hits(rect, sd, 0.0, ignore=mine), None) is not None:
                         return False
+        mineb = {(i, k, sd) for k in range(len(self.bo_rel.get(i, ())) + 8) for sd in ("F", "B")}
+        for k, (rect, sides) in enumerate(self.bo_rel.get(i, ())):      # two dense parts' breakouts may not overlap
+            for sd in sides:
+                if next(self.bhash.hits(rect_w(self, i, rect), sd, 0.0, ignore=mineb), None) is not None:
+                    return False
         for rect, sides in self.claims_world(i):
             for (o, j) in self.L.phash.hits(rect, "x", 0.0, ignore=()):
                 if o in mem:
@@ -414,6 +486,38 @@ class Plan:
 
 
 # ---------------------------------------------------------------- constructive + annealing
+def rect_w(P, i, rect):
+    X, Y, th = P.cur[i]
+    ax, ay = GM.rot(rect[0], rect[1], th)
+    bx, by = GM.rot(rect[2], rect[3], th)
+    return (X + min(ax, bx), Y + min(ay, by), X + max(ax, bx), Y + max(ay, by))
+
+
+def breakout_claims(B, cons, spec, M, P):
+    """The ISOLATED breakout templates of the dense parts as module-relative rectangles: ({module index: [(rect, sides)]} for claims_ok
+    = lane region on the pad layer + each via site on both, [(module, region rect, outward vector, sides)] for the placement cost)."""
+    from . import breakout as BO
+    if not BO.conf(cons)["enabled"]:
+        return {}, []
+    pr = BO.params(cons, B)
+    res = BO.solve(B, cons, spec, pr=pr, others=False)
+    claims, regs = defaultdict(list), []
+    for ref, t in res["templates"].items():
+        if ref not in M["of"]:
+            continue
+        i = P.idx[M["of"][ref]]
+        ox, oy = M["modules"][i]["pos"]
+        lay = "F" if (t["pins"] and t["pins"][0]["layer"] == "F.Cu") else "B"
+        for s_ in t["sides"]:
+            r = s_["rect"]
+            rel = (r[0] - ox, r[1] - oy, r[2] - ox, r[3] - oy)
+            regs.append((i, rel, BO.SIDES[s_["k"]], {lay}))
+            claims[i].append((rel, [lay]))
+        for rect, sd in BO.rects(B, ref, {"templates": {ref: dict(t, sides=[])}}, pr):
+            claims[i].append(((rect[0] - ox, rect[1] - oy, rect[2] - ox, rect[3] - oy), sorted(sd)))
+    return dict(claims), regs
+
+
 def reseat_module(P, i, step=1.0):
     """move module i to the nearest legal pose (by the same cost as the constructive pass) outside the halos."""
     x0, y0, x1, y1 = P.B["bbox"]
@@ -847,7 +951,12 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
             whole[m["name"]].append(e)
     for m in M["modules"]:
         m["fanout"] = {"pins": whole.get(m["name"], [])}
-    P.set_claims(claims_from(M["modules"]))
+    cl = claims_from(M["modules"])
+    bcl, bregs = breakout_claims(B, cons, spec, M, P)
+    for i, extra in bcl.items():
+        cl[i] = list(cl.get(i, [])) + extra
+    P.set_claims(cl)
+    P.set_breakouts(bregs)
     P.freeze_baseline()
     src = P.cost_parts()
     if start == "construct":
@@ -1034,11 +1143,13 @@ def cmd_floorplan(a):
     except Exception as e:                  # the report must never fail the floorplan
         print(f"  plan-route summary unavailable: {e}")
     print(f"  legality new: {best['legality_new']}")
+    from . import breakout as BO                     # --- breakout gate: every pin of every dense part has an escape on the WHOLE placed board
+    brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
-    if (not passes(best) and not waive) or irc:
+    if (not passes(best) and not waive) or irc or brc:
         raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
     return 0
 

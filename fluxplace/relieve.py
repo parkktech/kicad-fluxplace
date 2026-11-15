@@ -49,15 +49,19 @@ def settings(cons, rounds=None, may_grow=None, sides=None):
 
 
 def hard_state(B, cons, spec):
-    """What a relieve move must not worsen: collision FAILs and failing hard intent rows (names, sorted)."""
+    """What a relieve move must not worsen: collision FAILs, pins without a breakout escape and failing hard intent rows (names, sorted)."""
     _ok, cf = LGL.collision_gate(B, cons)
     rows = IT.check(B, cons, spec) if IT.enabled(cons) else []
+    from . import breakout as BO
+    bo = BO.solve(B, cons, spec) if BO.conf(cons)["enabled"] else {"failed": []}
     return {"collisions_fail": sum(1 for x in cf if x["level"] == "FAIL"),
+            "breakout_failed": sorted(f"{f['ref']}.{f['pin']}" for f in bo["failed"]),          # a move may not seal a pin the input could escape
             "intent_hard_failed": sorted({f"{r['kind']}:{r['name']}" for r in rows if r["hard"] and not r["met"]})}
 
 
 def hard_ok(h, ref):
-    return h["collisions_fail"] <= ref["collisions_fail"] and set(h["intent_hard_failed"]) <= set(ref["intent_hard_failed"])
+    return (h["collisions_fail"] <= ref["collisions_fail"] and set(h["intent_hard_failed"]) <= set(ref["intent_hard_failed"])
+            and set(h.get("breakout_failed", ())) <= set(ref.get("breakout_failed", ())))
 
 
 def _touched(B, x, y, net, half):

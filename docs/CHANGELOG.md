@@ -1,5 +1,10 @@
 # Change log (moved from the README)
 
+## 2026-11-15 - breakout: escape planning is part of placement
+
+`fluxplace/breakout.py`, `docs/BREAKOUT.md`: per-part escape templates (lanes + staggered via field) from footprint geometry; placement keeps
+the regions free and prefers orientations facing open board; whole-board gate at the end of `floorplan`; `fanout` lays the templates first.
+
 ## 2026-11-15 - placement: pin conflicts resolved, holes go through the board
 
 `fluxplace/pins.py` (`docs/commands/floorplan.md`, "Pinned-part conflicts"): before `floorplan` searches, collisions among

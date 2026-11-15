@@ -15,6 +15,7 @@ bands of parts that stay put are absolute rectangles; a movable owner carries it
 legalise.legalise(reserve=...) applies it; `[escape] reserve = false` turns it off."""
 import math
 
+from . import breakout as BO
 from . import escapeplan as EP
 from . import geom as GM
 
@@ -119,6 +120,7 @@ def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None
     track, clr, via = max(R["track"], B["track"]), max(R["clearance"], B["clearance"]), R["via"]
     d1, drow = via + 2 * clr + track, via + clr
     movable = set(movable)
+    BP = {"on": BO.conf(cons)["enabled"], "pr": BO.params(cons, B) if BO.conf(cons)["enabled"] else None}
     cache = B.setdefault("_escreserve", {})               # bands per part pose: the placer calls this in a loop
     for ref, part in B["parts"].items():
         if EP.is_mech(ref) or part["n_pads"] < 6:
@@ -127,6 +129,13 @@ def for_legalise(B, cons=None, spec=None, movable=(), board=None, corridors=None
         if key not in cache:
             cache[key] = part_bands(part, part["pads"], part["court"], d1, drow, P["fine"])
         bands = cache[key]
+        if bands and BP["on"]:                           # the breakout template (breakout.py) sets the depth: lanes + via field beyond the courtyard
+            bk = (key, "breakout")
+            if bk not in cache:
+                rc = BO.reach(B, ref, BP["pr"])
+                cache[bk] = [(k, max(h, rc.get(k, (0,))[0]), sf, min(lo, rc[k][1]) if k in rc else lo, max(hi, rc[k][2]) if k in rc else hi)
+                             for k, h, sf, lo, hi in bands]
+            bands = cache[bk]
         if not bands:
             continue
         if ref in movable:
