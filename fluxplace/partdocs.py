@@ -36,6 +36,8 @@ import subprocess
 import time
 import urllib.request
 
+from .redact import urlopen as _redact_urlopen
+
 __all__ = ["datasheet_temp", "fetch", "load_manifest", "page_text", "evidence", "spec_check",
            "PASSIVE_PREFIXES", "manifest_path"]
 
@@ -85,7 +87,7 @@ def _get(url, timeout=60):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0",
         "Accept": "application/pdf,*/*"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _redact_urlopen(req, timeout=timeout) as r:
         return r.status, r.headers.get("Content-Type", ""), r.read()
 
 

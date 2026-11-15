@@ -32,6 +32,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+from .redact import redact as _redact, urlopen as _redact_urlopen
+
 __all__ = ["credentials", "audit_board", "fetch_step", "attach", "sync",
           "missing_models", "easyeda_model", "fetch_missing"]
 
@@ -73,7 +75,7 @@ def _dk_token(creds):
     r = urllib.request.Request("https://api.digikey.com/v1/oauth2/token",
                                data=d, headers={"Content-Type":
                                                 "application/x-www-form-urlencoded"})
-    return json.load(urllib.request.urlopen(r, timeout=25))["access_token"]
+    return json.load(_redact_urlopen(r, timeout=25))["access_token"]
 
 
 def _dk_headers(creds, tok):
@@ -89,12 +91,12 @@ def dk_media(mpn, creds, tok):
     body = json.dumps({"Keywords": mpn, "Limit": 1}).encode()
     r = urllib.request.Request(
         "https://api.digikey.com/products/v4/search/keyword", data=body, headers=h)
-    prods = json.load(urllib.request.urlopen(r, timeout=25)).get("Products", [])
+    prods = json.load(_redact_urlopen(r, timeout=25)).get("Products", [])
     real = prods[0]["ManufacturerProductNumber"] if prods else mpn
     pn = urllib.parse.quote(real, safe="")
     r = urllib.request.Request(
         "https://api.digikey.com/products/v4/search/%s/media" % pn, headers=h)
-    return real, (json.load(urllib.request.urlopen(r, timeout=25))
+    return real, (json.load(_redact_urlopen(r, timeout=25))
                   .get("MediaLinks") or [])
 
 
@@ -108,7 +110,7 @@ def mouser_lookup(mpn, creds):
         creds["MOUSER_API_KEY"], data=body,
         headers={"Content-Type": "application/json"})
     try:
-        parts = (json.load(urllib.request.urlopen(r, timeout=25))
+        parts = (json.load(_redact_urlopen(r, timeout=25))
                  .get("SearchResults") or {}).get("Parts") or []
     except Exception:
         return None
@@ -146,6 +148,7 @@ def fetch_step(mpn, dest_dir, creds, tok, log=print, force=False):
     cache_path, fails = _fail_cache(dest_dir)
 
     def _fail(status):
+        status = _redact(status)            # cached and returned: never carries a key or key-bearing URL
         fails[mpn] = status
         try:
             json.dump(fails, open(cache_path, "w"), indent=1)
@@ -178,7 +181,7 @@ def fetch_step(mpn, dest_dir, creds, tok, log=print, force=False):
         return _fail("login-walled: %s" % url[:90])
     try:
         req = urllib.request.Request(url, headers=UA)
-        data = urllib.request.urlopen(req, timeout=20).read()
+        data = _redact_urlopen(req, timeout=20).read()
     except Exception as e:
         return _fail("download-blocked: %s -> %s" % (type(e).__name__, url[:90]))
     if data[:2] == b"PK":
@@ -223,7 +226,7 @@ def fetch_kicad_official(broken_path, dest_dir, log=print):
         return dest, "cached"
     url = KICAD3D_RAW % urllib.parse.quote(rel)
     try:
-        data = urllib.request.urlopen(
+        data = _redact_urlopen(
             urllib.request.Request(url, headers=UA), timeout=60).read()
     except Exception as e:
         return None, "kicad-official-miss: %s" % type(e).__name__
