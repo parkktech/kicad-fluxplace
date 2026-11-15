@@ -27,7 +27,7 @@ import os
 import re
 
 from . import repair as RP
-from .tune import drc_counts
+from . import drcguard as DG
 
 __all__ = ["run_drc", "fix", "loop"]
 
@@ -426,7 +426,7 @@ def guarded_islands(work, kicad_cli, log=print):
     and unconnected items fall."""
     import pcbnew
     import shutil
-    v0, u0 = drc_counts(work, kicad_cli)
+    base = DG.drc_keys(work, kicad_cli)
     b = pcbnew.LoadBoard(work)
     n = RP.stitch_islands(b, log=log)
     if not n:
@@ -437,13 +437,14 @@ def guarded_islands(work, kicad_cli, log=print):
         side = os.path.splitext(work)[0] + ext
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(tmp)[0] + ext)
-    v1, u1 = drc_counts(tmp, kicad_cli)
-    if v1 <= v0 and u1 < u0:
+    ok, cur, new = DG.check(tmp, base, kicad_cli, log=None)
+    (v0, u0), (v1, u1) = base[1], cur[1]
+    if ok and u1 < u0:
         shutil.move(tmp, work)
-        log(f"    island vias kept: {v0}/{u0} -> {v1}/{u1}")
+        log(f"    island vias kept: {v0}/{u0} -> {v1}/{u1}, {len(new)} new key(s)")
         return True
     os.unlink(tmp)
-    log(f"    island vias rejected: {v0}/{u0} -> {v1}/{u1}")
+    log(f"    island vias rejected: {v0}/{u0} -> {v1}/{u1}, {len(new)} new key(s)")
     return False
 
 

@@ -159,6 +159,8 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
     unc0 = len(d.get("unconnected_items", []))
     total_removed = 0
     accepted_rounds = 0
+    from . import drcguard as DG
+    keys_prev = DG.keys_from_report(d)[0]
     vio_prev, unc_prev = vio0, unc0
     tmp = work + ".round.kicad_pcb"
     for phase_name, types, guard in _PHASES:
@@ -211,7 +213,7 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
                            if v.get("type") in types)
 
             def _try(subset):
-                nonlocal vio_prev, unc_prev, total_removed, d
+                nonlocal vio_prev, unc_prev, keys_prev, total_removed, d
                 cls_prev = _class_count(d)
                 gone = _mutate(work, tmp, subset)
                 if not gone:
@@ -221,19 +223,20 @@ def launder_board(board_path, out_path, kicad_cli="kicad-cli",
                     if os.path.exists(s):
                         shutil.copy(s, os.path.splitext(tmp)[0] + ext)
                 d1 = _drc(tmp, kicad_cli)
-                vio1 = len(d1.get("violations", []))
-                unc1 = len(d1.get("unconnected_items", []))
+                keys1, (vio1, unc1) = DG.keys_from_report(d1)
+                # shared rule: no violation key new against the last accepted board
+                no_new = not DG.new_keys(keys_prev, keys1)
                 if guard == "class_count":
-                    ok = _class_count(d1) < cls_prev and vio1 <= vio_prev
+                    ok = _class_count(d1) < cls_prev and no_new
                 else:
-                    ok = vio1 <= vio_prev and unc1 <= unc_prev
+                    ok = no_new and unc1 <= unc_prev
                 if ok:
                     if unc1 > unc_prev:
                         log(f"      try: -{gone} short/hole item(s) "
                             f"opened {unc1 - unc_prev} connection(s) — "
                             f"patcher's job next")
                     os.replace(tmp, work)
-                    vio_prev, unc_prev = vio1, unc1
+                    vio_prev, unc_prev, keys_prev = vio1, unc1, keys1
                     total_removed += gone
                     d = d1
                     return True

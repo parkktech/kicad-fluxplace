@@ -105,3 +105,90 @@ def test_sliver_is_off_by_default_and_says_not_evaluated_on_file_backend():
     assert R.check_slivers({"zone_polys": poly}, on) == []            # wide pour: clean
     info = R.check_slivers({"track_segs": []}, on)                    # file backend
     assert [f["level"] for f in info] == [R.INFO] and "not evaluated" in info[0]["msg"]
+
+
+def _folded_pair(path, far_b):
+    import pcbnew as pn
+    b = pn.BOARD()
+    b.SetCopperLayerCount(2)
+    net = pn.NETINFO_ITEM(b, "N1")
+    b.Add(net)
+    for ex in (20, far_b):                       # two collinear tracks leaving (10,10) the same way
+        t = pn.PCB_TRACK(b)
+        t.SetStart(pn.VECTOR2I(pn.FromMM(10), pn.FromMM(10)))
+        t.SetEnd(pn.VECTOR2I(pn.FromMM(ex), pn.FromMM(10)))
+        t.SetWidth(pn.FromMM(0.2))
+        t.SetLayer(pn.F_Cu)
+        t.SetNet(net)
+        b.Add(t)
+    return b
+
+
+def test_folded_overlap_is_removed_not_chamfered(tmp_path):
+    import pcbnew as pn
+    from fluxplace import boardfile as BF
+    b = _folded_pair(str(tmp_path / "f.kicad_pcb"), 14)
+    n = AT.trim_overlaps(b, log=lambda m: None)
+    assert n == 1
+    assert AT.chamfer_junctions(b, log=lambda m: None) == 0   # folded pairs are never chamfered
+    segs = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"]
+    assert len(segs) == 1
+    assert abs(pn.ToMM(segs[0].GetLength()) - 10.0) < 1e-3   # the full run 10..20 is kept
+    p = str(tmp_path / "f.kicad_pcb")
+    b.Save(p)
+    assert AT.acute_junctions(BF.facts_from_file(p)["track_segs"]) == []
+
+
+def test_overlap_with_a_branch_at_the_stub_end_is_left_alone(tmp_path):
+    import pcbnew as pn
+    b = _folded_pair(str(tmp_path / "g.kicad_pcb"), 14)
+    t = pn.PCB_TRACK(b)                          # a third track that ends on the stub's far end
+    t.SetStart(pn.VECTOR2I(pn.FromMM(14), pn.FromMM(10)))
+    t.SetEnd(pn.VECTOR2I(pn.FromMM(14), pn.FromMM(15)))
+    t.SetWidth(pn.FromMM(0.2))
+    t.SetLayer(pn.F_Cu)
+    t.SetNet(b.GetNetInfo().GetNetItem("N1"))
+    b.Add(t)
+    assert AT.trim_overlaps(b, log=lambda m: None) == 0
+
+
+def test_duplicate_track_with_a_via_at_the_junction_is_removed(tmp_path):
+    import pcbnew as pn
+    b = pn.BOARD()
+    b.SetCopperLayerCount(2)
+    net = pn.NETINFO_ITEM(b, "N1")
+    b.Add(net)
+    for _ in range(2):                           # identical tracks: the far end is shared
+        t = pn.PCB_TRACK(b)
+        t.SetStart(pn.VECTOR2I(pn.FromMM(10), pn.FromMM(10)))
+        t.SetEnd(pn.VECTOR2I(pn.FromMM(20), pn.FromMM(10)))
+        t.SetWidth(pn.FromMM(0.2)); t.SetLayer(pn.F_Cu); t.SetNet(net); b.Add(t)
+    v = pn.PCB_VIA(b)
+    v.SetPosition(pn.VECTOR2I(pn.FromMM(10), pn.FromMM(10)))
+    v.SetNet(net); b.Add(v)
+    assert AT.trim_overlaps(b, log=lambda m: None) == 1
+    assert len([t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"]) == 1
+
+
+def test_fix_junctions_removes_a_folded_overlap_in_a_fresh_process(tmp_path):
+    import pcbnew as pn
+    from fluxplace import boardfile as BF
+    p = str(tmp_path / "fold.kicad_pcb")
+    _folded_pair(p, 14).Save(p)
+    n = AT.fix_junctions(p, kicad_cli=KICAD_CLI, log=lambda m: None)
+    assert n == 1
+    b = pn.LoadBoard(p)                           # the file reloads cleanly after the overlap pass
+    assert len([t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"]) == 1
+    assert AT.acute_junctions(BF.facts_from_file(p)["track_segs"]) == []
+
+
+def test_fix_junctions_removes_a_folded_overlap_in_a_fresh_process(tmp_path):
+    import pcbnew as pn
+    from fluxplace import boardfile as BF
+    p = str(tmp_path / "fold.kicad_pcb")
+    _folded_pair(p, 14).Save(p)
+    n = AT.fix_junctions(p, kicad_cli=KICAD_CLI, log=lambda m: None)
+    assert n == 1
+    b = pn.LoadBoard(p)                           # the file reloads cleanly after the overlap pass
+    assert len([t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"]) == 1
+    assert AT.acute_junctions(BF.facts_from_file(p)["track_segs"]) == []

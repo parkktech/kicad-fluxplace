@@ -27,6 +27,7 @@ import math
 import os
 
 import pcbnew
+from . import drcguard as DG
 
 
 # ---------------------------------------------------------------- grid ----
@@ -916,18 +917,8 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
     tmp = out_path + ".tmp.kicad_pcb"
 
     def _vkeys(d):
-        # zone-fill items are EXCLUDED: the filler is nondeterministic run
-        # to run, shifting pad-vs-zone findings and producing phantom 'new'
-        # violations far from any added copper (measured)
-        out = set()
-        for v in d.get("violations", []):
-            if any("Zone" in i.get("description", "")
-                   for i in v.get("items", [])):
-                continue
-            out.add((v.get("type"), tuple(sorted(
-                (round(i["pos"]["x"], 2), round(i["pos"]["y"], 2))
-                for i in v.get("items", [])))))
-        return out
+        # shared rule (drcguard): zone-involving violations excluded (zone fill flickers run to run)
+        return DG.keys_from_report(d)[0]
 
     def _desc(it):
         return {"via": it.GetClass() == "PCB_VIA",
@@ -967,8 +958,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
         drc1, _ = AD.drc_unrouted(tmp, kicad_cli)
         unc1 = len(drc1.get("unconnected_items", []))
         vio1 = len(drc1.get("violations", []))
-        if unc1 < unc0 and (vio1 <= vio0
-                            or not (_vkeys(drc1) - _vkeys(drc0))):
+        if unc1 < unc0 and not DG.new_keys(_vkeys(drc0), _vkeys(drc1)):
             _sh2.copy(tmp, base)
             log(f"    checkpoint: ACCEPTED unconnected {unc0}->{unc1}, "
                 f"violations {vio0}->{vio1} ({len(chunk)} net(s))")
@@ -1013,8 +1003,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             drc2, _ = AD.drc_unrouted(tmp, kicad_cli)
             unc2 = len(drc2.get("unconnected_items", []))
             vio2 = len(drc2.get("violations", []))
-            if unc2 < unc0 and (vio2 <= vio0
-                                or not (_vkeys(drc2) - _vkeys(drc0))):
+            if unc2 < unc0 and not DG.new_keys(_vkeys(drc0), _vkeys(drc2)):
                 _sh2.copy(tmp, base)
                 log(f"    checkpoint: SUBSET-ACCEPTED -{len(drop)} "
                     f"item(s) — unconnected {unc0}->{unc2}, violations "

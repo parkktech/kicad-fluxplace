@@ -348,17 +348,19 @@ def cmd_fanout(a):
     blocked = [p for v in per.values() for p in v["blocked"]]
     drc = None
     if out and not a.no_drc:
-        wd = os.path.dirname(os.path.abspath(out))
-        c0, u0, t0 = drc_counts(a.board, wd)
-        c1, u1, t1 = drc_counts(out, wd)
-        added = {k: c1.get(k, 0) - c0.get(k, 0) for k in set(c0) | set(c1) if c1.get(k, 0) != c0.get(k, 0)}
-        drc = {"before": dict(c0), "after": dict(c1), "delta": added, "secs": round(t0 + t1, 1)}
+        from . import drcguard as DG
+        keep = lambda v: v.get("severity") == "error" or v["type"] == "hole_to_hole"
+        t0 = time.time()
+        k0, (c0, u0) = DG.drc_keys(a.board, keep=keep)
+        k1, (c1, u1) = DG.drc_keys(out, keep=keep)
+        added = dict(Counter(k[0] for k in DG.new_keys(k0, k1)))
+        drc = {"before": c0, "after": c1, "delta": added, "secs": round(time.time() - t0, 1)}
     waived = [p for v in per.values() for p in v["waived"]]
     surface = [p for v in per.values() for p in v["surface"]]
     for p in waived:
         if f"{p['ref']}.{p['pin']}" in res.get("waive_fail", []):
             print(f"fanout: [floorplan] waive_fail names {p['ref']}.{p['pin']}: applied to the fan-out stage (WAIVED, left for the router)")
-    fail_drc = bool(drc and any(v > 0 for v in drc["delta"].values()))
+    fail_drc = bool(drc and drc["delta"])
     verdict = ("FANOUT_FAIL" if blocked else "FANOUT_DRC" if fail_drc else "FANOUT_WARN" if (waived or surface) else "FANOUT_OK")
     nitems = sum(1 for p in res["pins"] if p["ok"]) + sum(1 for p in res["pins"] if p["ok"] and p.get("via"))
     print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked, {len(waived)} waived, {len(surface)} surface-only; "
@@ -369,7 +371,7 @@ def cmd_fanout(a):
         print(f"fanout: alternatives for {al['tried']} blocked pin(s): routed via {al['via']}, shared via {al['share']}, pour {al['pour']}, "
               f"small via {al['small-via']}, left {al['left']}")
     if drc:
-        print(f"fanout: DRC errors before {sum(drc['before'].values())} after {sum(drc['after'].values())}; added {drc['delta'] or 'none'} ({drc['secs']} s)")
+        print(f"fanout: DRC errors before {drc['before']} after {drc['after']}; added {drc['delta'] or 'none'} ({drc['secs']} s)")
     lim = len(per) if a.full_output else min(len(per), 12 if not a.top else a.top)
     worst = sorted(per.items(), key=lambda kv: (-(kv[1]["req"] - kv[1]["ok"]), kv[0]))
     for ref, v in worst[:lim]:
