@@ -160,8 +160,38 @@ def _drop_illegal_claims(board, job, claimed, wd, log):
     return out
 
 
+def lay_breakout(board, cons, spec, wd, log=print):
+    """The breakout templates of the dense parts (breakout.py), solved on the whole board and laid as locked lanes + vias BEFORE any
+    other escape: -> (board path, report dict)."""
+    from . import breakout as BO, routediag as RD
+    B = RD.load(board)
+    if not BO.conf(cons)["enabled"]:
+        return board, None
+    pr = BO.params(cons, B)
+    res = BO.solve(B, cons, spec, pr=pr)
+    for p in res["pins"].values():
+        p["pts"] = [p["pad"]] + p["pts"]                  # the lane starts inside its pad
+    if not res["pins"]:
+        return board, res
+    txt, ns, nv = BO.lay_text(open(board, errors="surrogateescape").read(), res["pins"], pr["drill"])
+    dst = os.path.join(wd, "breakout.kicad_pcb")
+    with open(dst, "w", errors="surrogateescape") as fh:
+        fh.write(txt)
+    for ext in (".kicad_pro", ".kicad_dru"):
+        side = os.path.splitext(board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(dst)[0] + ext)
+    res["laid"] = {"segments": ns, "vias": nv}
+    log(f"fanout: breakout templates laid: {len(res['pins'])} pins of {len(res['dense'])} dense parts, {ns} lane segments, {nv} vias; {len(res['failed'])} pins without an escape")
+    return dst, res
+
+
 def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _depth=0):
     from . import routediag as RD
+    bo_res = None
+    if not a.check_only and not refs and not _depth and not getattr(a, "no_breakout", False):
+        wd0 = tempfile.mkdtemp(prefix="breakout-")
+        board, bo_res = lay_breakout(board, cons, spec, wd0, log)
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
     from . import routerules as RR
@@ -187,6 +217,12 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
         if claimed:
             claimed = _drop_illegal_claims(board, job, claimed, wd, log)
         claimed = [c for c in claimed if (c["ref"], str(c["pin"])) not in _drop]
+        if bo_res and bo_res["pins"]:                   # a net that already has breakout copper within reach needs no second reserved via beside it
+            near = {}
+            for r_ in bo_res["pins"].values():
+                if r_.get("via"):
+                    near.setdefault(r_["net"], []).append(r_["via"])
+            claimed = [c for c in claimed if not any(math.hypot(c["site"][0] - v[0], c["site"][1] - v[1]) < 2.5 for v in near.get(c["net"], ()))]
         if claimed:
             src = os.path.join(wd, "claimed.kicad_pcb")
             txt, _n = ER.claim_text(open(board, errors="surrogateescape").read(), claimed)
@@ -239,6 +275,8 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
     res["params"] = job["params"]
     res["escapes"] = claimed
     res["waive"], res["waive_fail"] = waivers(cons)
+    if bo_res:
+        res["breakout"] = {"pins": len(bo_res["pins"]), "dense": bo_res["dense"], "failed": bo_res["failed"], "laid": bo_res.get("laid")}
     return B, res
 
 
@@ -367,6 +405,11 @@ def cmd_fanout(a):
     print(f"fanout: {verdict} - {ok}/{req} required pins escaped on {len(per)} parts, {len(blocked)} blocked, {len(waived)} waived, {len(surface)} surface-only; "
           f"{sum(len(t['vias']) for t in res.get('thermal', []))} thermal vias; {res['runtime_s']} s "
           f"(domains {res['time']['domains']}, arcs {res['time']['arcs']}, solve {res['time']['solve']}, repairs {res['repairs']})")
+    if res.get("breakout"):
+        bo = res["breakout"]
+        print(f"fanout: breakout templates: {bo['pins']} pins of {len(bo['dense'])} dense parts laid ({bo['laid']}), {len(bo['failed'])} without an escape")
+        for f in bo["failed"][: (len(bo["failed"]) if a.full_output else 10)]:
+            print(f"BREAKOUT_PIN_BLOCKED {f['msg']}")
     if res.get("alternatives") and res["alternatives"]["tried"]:
         al = res["alternatives"]
         print(f"fanout: alternatives for {al['tried']} blocked pin(s): routed via {al['via']}, shared via {al['share']}, pour {al['pour']}, "
@@ -417,6 +460,7 @@ def add_parser(sub):
     p.add_argument("--check-only", action="store_true", help="report only; write nothing")
     p.add_argument("--nets", default=None, help="comma-separated nets: escape only the pins of these nets")
     p.add_argument("--no-drc", action="store_true", help="skip the kicad-cli DRC self-check")
+    p.add_argument("--no-breakout", dest="no_breakout", action="store_true", help="do not lay the breakout templates of the dense parts first")
     p.add_argument("--add-zones", dest="add_zones", action="store_true",
                    help="also write the declared pours (`[[plan.pour]]`) as zones (priority 0, clearance 0.2, solid connection)")
     p.add_argument("--track", type=float, default=None)

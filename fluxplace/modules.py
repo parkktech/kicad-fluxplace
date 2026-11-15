@@ -301,6 +301,14 @@ def cmd_modules(a):
     print(f"modules: {nm} modules ({nfix} fixed, {len(multi)} with support parts, {sum(len(m['members']) for m in mods)} parts), "
           f"fan-out in isolation {ok}/{req} pins, {len(blocked)} modules with blocked pins; ports N{tot['N']} E{tot['E']} S{tot['S']} W{tot['W']}; "
           f"{time.time() - t0:.1f} s; wrote section 'modules' into {path}")
+    try:                                              # breakout templates (breakout.py): the escape demand placement must keep free
+        from . import breakout as BO, routediag as RD1
+        Bb = RD1.load(a.board)
+        rb = BO.solve(Bb, cons, spec, others=False)
+        print(f"modules: breakout templates for {len(rb['templates'])} dense parts, {len(rb['pins'])} pins, depth "
+              f"{max([s_['depth'] for t in rb['templates'].values() for s_ in t['sides']] or [0]):.2f} mm max; {len(rb['failed'])} pins without a lane in isolation")
+    except Exception as e:                            # noqa: BLE001 - advisory
+        print(f"modules: breakout templates unavailable: {type(e).__name__}: {e}")
     top = len(multi) if a.full_output else min(len(multi), a.top or 12)
     print(f"largest {top} modules (area mm2 of courtyards, parts, ports N/E/S/W, fan-out ok/req):")
     for m in multi[:top]:

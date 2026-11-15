@@ -78,3 +78,7 @@ To restore the strict behaviour (every SURFACE_ONLY pin is a blocked pin and the
 [fanout]
 surface_only = "fail"
 ```
+
+## Breakout templates first
+Dense parts (fine pitch, multi-row) get their planned lanes + via field laid as locked copper before any other escape; see
+[../BREAKOUT.md](../BREAKOUT.md). `--no-breakout` skips; `[breakout] waive = ["REF.PIN"]` waives a pin the template cannot escape.
