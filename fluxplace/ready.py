@@ -19,10 +19,11 @@ board."""
 import fnmatch
 import json
 import os
+import sys
 
 from . import questions as QS
 
-PASS, FAIL, OPEN, UNCHECKED = "PASS", "FAIL", "OPEN", "UNCHECKED"
+PASS, FAIL, OPEN, UNCHECKED, WAIVED = "PASS", "FAIL", "OPEN", "UNCHECKED", "WAIVED"
 
 
 def notready_path(board):
@@ -185,9 +186,9 @@ def class_lines(cons, facts, board, rows, planes, source, floor, nets):
 
 
 # ------------------------------------------------------------------ the gate
-def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False):
+def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow_undocumented=False):
     """-> (lines, detail)."""
-    from . import parts as P
+    from . import parts as P, partsgate as PG
     lines, detail = [], {}
     f = parts_res["findings"]
     t = P.totals(f)
@@ -197,6 +198,18 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False):
     lines.append(_line("parts", FAIL if t["FAIL"] else PASS,
                        f"{len(parts_res['rows'])} part(s): {t['FAIL']} FAIL, {t['WARN']} WARN" + (f" ({'; '.join(unc)})" if unc else ""),
                        [f"{x['code']} {x['msg']}" for x in P._spread([x for x in f if x["level"] == "FAIL"], 4)] if t["FAIL"] else []))
+    g = PG.gate(spec, cons, facts, parts_res, qty=P.build_quantity(cons))
+    detail["gate"] = g
+    if g["ok"]:
+        lines.append(_line("parts gate", PASS, PG.summary_line(g)[len("parts gate: "):]))
+    elif allow_undocumented:
+        lines.append(_line("parts gate", WAIVED, PG.bypass_note(g)))
+        for l in lines:
+            if l["name"] == "parts" and l["status"] == FAIL:      # the same documentation failures, already waived loudly above
+                l["status"], l["blockers"] = WAIVED, []
+    else:
+        lines.append(_line("parts gate", FAIL, PG.summary_line(g)[len("parts gate: "):], PG.blockers(g)
+                           + [u for u in g["unchecked"]]))
     nets = set((facts or {}).get("net_pads") or ()) or set((spec or {}).get("nets") or ())
     fab_min = float(((cons or {}).get("fab") or {}).get("min_track_mm", ((cons or {}).get("route") or {}).get("min_track_mm", 0.0)))
     floor = max(fab_min, float(((cons or {}).get("ready") or {}).get("min_feature_mm", 0.127)))   # never plan at the fab's bare minimum
@@ -244,7 +257,7 @@ def _minpads(cons):
 
 
 def reasons(lines):
-    return [f"{l['name']}: {l['detail'][:80]}" for l in lines if l["status"] in (FAIL, OPEN)]
+    return [f"{l['name']}: {l['detail'][:80]}" for l in lines if l["status"] in (FAIL, OPEN, WAIVED)]
 
 
 def format_text(lines, top=10, full=False, path=None, verdict=""):
@@ -267,11 +280,14 @@ def cmd_ready(a):
     sess = PC._session(a, cons, "ready")
     cache = os.path.dirname(os.path.abspath(a.spec))
     pres = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess)
-    lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres)
+    lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres, allow_undocumented=getattr(a, "allow_undocumented", False))
+    gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
     nopen = len(sess.open)
     rs = reasons(lines)
-    verdict = ("ready: NOT READY (exit 1)" if nfail else "ready: OPEN QUESTIONS (exit 3)" if nopen else "ready: READY") + \
+    waived = any(l["status"] == WAIVED for l in lines)
+    verdict = ("ready: NOT READY (exit 1)" if nfail else "ready: OPEN QUESTIONS (exit 3)" if nopen else
+               "ready: NOT READY - parts gate bypassed by --allow-undocumented" if waived else "ready: READY") + \
         f" - {sum(l['status'] == PASS for l in lines)} PASS, {nfail} FAIL, {nopen} open question(s)"
     stem = os.path.splitext(board or a.spec)[0]
     path = stem + ".ready.txt"
@@ -292,16 +308,21 @@ def cmd_ready(a):
     q = sess.gate(want_json=False)
     if board and os.path.exists(board) and not sess.open:
         sess.persist()
-    if (nfail or nopen) and a.allow_incomplete:
+    if gate_fail:                              # --allow-incomplete never skips the parts gate; only --allow-undocumented does
+        print("parts gate: refusing to continue (--allow-incomplete does not bypass it; --allow-undocumented, recorded, does)")
+        raise SystemExit(1)
+    other = bool(nfail or nopen)
+    if (other and a.allow_incomplete) or (not other and detail["gate"]["parts"] and getattr(a, "allow_undocumented", False)):
         if board:
             try:
                 with open(notready_path(board), "w") as fh:
                     json.dump({"reasons": rs, "command": "ready"}, fh)
             except OSError:
                 pass
-        print("NOT READY: " + "; ".join(rs)[:400] + "  (--allow-incomplete: continuing; later outputs are stamped, fab/deliver refuse)")
+        print("NOT READY: " + "; ".join(rs)[:400] + "  (continuing by --allow-incomplete / --allow-undocumented; later outputs are stamped, fab/deliver refuse)",
+              file=sys.stderr if getattr(a, "json", False) else sys.stdout)
         return
-    if board and not (nfail or nopen):
+    if board and not (nfail or nopen) and not detail["gate"]["parts"]:
         try:
             os.remove(notready_path(board))
         except OSError:
@@ -319,4 +340,6 @@ def add_parser(sub):
     PC._common(p)
     p.add_argument("--allow-incomplete", dest="allow_incomplete", action="store_true",
                    help="continue (exit 0) with every later output stamped NOT READY; fab/deliver refuse")
+    p.add_argument("--allow-undocumented", dest="allow_undocumented", action="store_true",
+                   help="the ONLY bypass of the parts gate (unresolved parts): exit 0, every later output stamped NOT READY, fab/deliver refuse")
     p.set_defaults(fn=cmd_ready)

@@ -234,8 +234,9 @@ def st_ready(c, n, board):
         return {"verdict": "na", "line": "no --spec: readiness (parts, impedance geometry) not checked", "board": board}
     d = c.dir(n, "ready")
     argv = ["ready", c.spec_path, "--board", board] + (["--constraints", c.cons_path] if c.cons_path else []) + c.qs()
-    argv += [] if getattr(c.a, "api", False) else ["--no-api"]
+    argv += [] if getattr(c.a, "api", None) is not False else ["--no-api"]     # the parts gate checks stock: live unless --no-api
     argv += ["--allow-incomplete"] if getattr(c.a, "allow_incomplete", False) else []
+    argv += ["--allow-undocumented"] if getattr(c.a, "allow_undocumented", False) else []
     rc, text = _run_cli(argv, os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
     if q:
@@ -244,7 +245,11 @@ def st_ready(c, n, board):
     if rc:
         return {"verdict": "blocked", "line": line, "board": board,
                 "next": [l.strip()[2:] for l in text.splitlines() if l.startswith("  - ")][:5] + [os.path.join(d, "stage.log")]}
-    return {"verdict": "pass", "line": next((l for l in text.splitlines() if l.startswith("NOT READY")), line), "board": board}
+    und = next((l for l in text.splitlines() if "UNDOCUMENTED PARTS ALLOWED" in l), None)
+    out = {"verdict": "pass", "line": next((l for l in text.splitlines() if l.startswith("NOT READY")), line), "board": board}
+    if und:
+        out["undocumented"] = und.strip()
+    return out
 
 
 def st_floorplan_check(c, n, board):
@@ -1236,6 +1241,8 @@ def run(a):
     if STAGES_[i0] in ("ready", "modules", "floorplan") and a.constraints:
         board = _apply_lock_at(a, work, board)         # [lock.at] is authoritative before any placement stage
         st["board"] = board
+    if "ready" in STAGES_[i0:]:
+        st.pop("undocumented", None)               # the gate runs again; its bypass is re-recorded only if used again
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
@@ -1255,6 +1262,9 @@ def run(a):
             from . import questions as QS
             QS.inherit(prev, res["board"])
         board = res.get("board", board)
+        if res.get("undocumented"):
+            st["undocumented"] = _clip(res["undocumented"], 200)
+            print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
         if name == "route" and router:
@@ -1305,6 +1315,11 @@ def run(a):
         inc = f"{inc} | {note}" if inc else "INCOMPLETE - " + note
         with open(led.path, "a") as fh:
             fh.write(inc + "\n")
+    if st.get("undocumented"):
+        note = st["undocumented"]
+        inc = f"{inc} | {note}" if inc else "INCOMPLETE - " + note
+        with open(led.path, "a") as fh:
+            fh.write(note + "\n")
     if inc:
         st["incomplete"] = _clip(inc, 160)
     else:

@@ -3998,7 +3998,13 @@ def build_parser():
     ppl.add_argument("--status", action="store_true", help="print the stage table (<= 15 lines) and exit")
     ppl.add_argument("--waive", action="append", default=[], help="route-ready waiver CODE:REGEX")
     ppl.add_argument("--force", action="store_true", help="continue past a failing route-ready gate")
-    ppl.add_argument("--api", action="store_true", help="review and the ready stage with live DigiKey/Mouser data")
+    ppl.add_argument("--api", dest="api", action="store_true", default=None,
+                     help="review with live DigiKey/Mouser data (the ready stage's parts gate is live by default)")
+    ppl.add_argument("--no-api", dest="api", action="store_false",
+                     help="offline: the parts gate cannot check stock, so it blocks unless --allow-undocumented")
+    ppl.add_argument("--allow-undocumented", dest="allow_undocumented", action="store_true",
+                     help="the ONLY bypass of the first-stage parts gate (unresolved parts); recorded in state/ledger, repeated in the final "
+                          "report, every later output stamped NOT READY, fab/deliver refuse. --force and --allow-incomplete do not skip it")
     ppl.add_argument("--allow-incomplete", dest="allow_incomplete", action="store_true",
                      help="continue past a failing ready stage; every later output is stamped NOT READY, fab/deliver refuse")
     ppl.add_argument("--route-budget", type=float, default=1800, help="route stage wall-clock cap, s")

@@ -285,6 +285,15 @@ def find_map(board_path):
     Looks beside the board, then in sibling tool/doc dirs — the common KiCad
     project shapes (hardware/<proj>/board.kicad_pcb + hardware/tools/)."""
     d = os.path.dirname(os.path.abspath(board_path))
+    # a versioned board (name-v16.kicad_pcb) uses its own map (mpn_map-v16.json) before the unversioned one: the older revision's
+    # map has other refs, and reading it silently turns every part of the newer board into "no MPN"
+    toks = os.path.splitext(os.path.basename(board_path))[0].split("-")
+    for k in range(len(toks) - 1, 0, -1):
+        name = "mpn_map-" + "-".join(toks[k:]) + ".json"
+        for base in (d, os.path.join(d, "..", "tools"), os.path.join(d, ".."), os.path.join(d, "..", "..", "tools")):
+            cand = os.path.normpath(os.path.join(base, name))
+            if os.path.exists(cand):
+                return cand
     for cand in (os.path.join(d, "mpn_map.json"),
                  os.path.join(d, "..", "tools", "mpn_map.json"),
                  os.path.join(d, "..", "mpn_map.json"),

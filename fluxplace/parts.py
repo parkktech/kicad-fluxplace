@@ -438,15 +438,29 @@ def fetch_data(mpns, cache_dir=None, refresh=False, log=lambda m: None):
     return PDA.fetch(sorted(set(mpns)), cache_dir=cache_dir, refresh=refresh, log=log, creds=creds)
 
 
-def fetch_stock(mpns, need=10, cache_dir=None, refresh=False, log=lambda m: None):
-    """{mpn: {verdict, stock}} via sourcing.check; None when offline."""
+def fetch_stock(mpns, need=10, cache_dir=None, refresh=False, log=lambda m: None, refs=None, qty=None):
+    """{mpn: {verdict, stock, required, per_board, chosen, ext}} via sourcing.check; None when offline.  With `qty` (the build
+    quantity) and `refs` ({mpn: [ref, ...]}) each MPN is graded against per-board count x qty, not the flat `need`."""
     from . import sourcing as S
-    rep, _ = S.check({m: [] for m in sorted(set(mpns))}, need=need, cache_dir=cache_dir, refresh=refresh, log=log)
-    return {m: {"verdict": r["verdict"], "stock": r["stock"]} for m, r in rep.items()} if rep else None
+    by = {m: list((refs or {}).get(m) or []) for m in sorted(set(mpns))}
+    if qty:
+        by = {m: (r or ["?"]) for m, r in by.items()}
+    rep, _ = S.check(by, need=need, cache_dir=cache_dir, refresh=refresh, log=log, qty=int(qty) if qty else None)
+    return ({m: {"verdict": r["verdict"], "stock": r["stock"], "required": r.get("required"), "per_board": r.get("per_board"),
+                 "chosen": r.get("chosen"), "ext": r.get("chosen_ext")} for m, r in rep.items()} if rep else None)
+
+
+def build_quantity(cons):
+    """[bom] quantity_target (boards to build) as an int >= 1, else None (legacy flat stock_need)."""
+    q = ((cons or {}).get("bom") or {}).get("quantity_target")
+    try:
+        return int(q) if q and int(q) >= 1 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def evaluate(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, api=True, cache_dir=None, session=None, data=None, stock=None,
-             extra_mpns=()):
+             extra_mpns=(), qty=None):
     """Look up (unless offline), then run().  `data`/`stock` inject results (tests)."""
     st = settings(cons)
     mm = mpn_map or (facts or {}).get("mpn_map") or {}
@@ -457,11 +471,18 @@ def evaluate(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, api=True, c
     if api and data is None and mpns:
         data = fetch_data(mpns, cache_dir=cache_dir)
         if data is not None and stock is None:
-            stock = fetch_stock(mpns, need=st["need"], cache_dir=cache_dir)
+            refs = {}
+            for c in spec.get("components", []):
+                m = c.get("mpn") or mm.get(c.get("ref"))
+                if m and not c.get("dnp"):
+                    refs.setdefault(m, []).append(c.get("ref"))
+            stock = fetch_stock(mpns, need=st["need"], cache_dir=cache_dir, refs=refs,
+                                qty=qty if qty is not None else build_quantity(cons))
     elif not api:
         data = stock = None
     res = run(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds_dir, data=data, stock=stock, session=session)
     res["data"] = data
+    res["stock_data"] = stock
     return res
 
 

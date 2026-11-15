@@ -89,7 +89,7 @@ def test_ready_computes_classes_from_the_declared_stackup(tmp_path, capsys):
     sp.write_text(json.dumps(_spec()))
     (tmp_path / "ds").mkdir()
     (tmp_path / "ds" / "RC0603FR-0710KL.pdf").write_bytes(b"%PDF")
-    cli.main(["ready", str(sp), "--constraints", _cons(tmp_path), "--no-api", "--datasheets", str(tmp_path / "ds"), "--json"])
+    cli.main(["ready", str(sp), "--constraints", _cons(tmp_path), "--no-api", "--allow-undocumented", "--datasheets", str(tmp_path / "ds"), "--json"])
     out = json.loads(capsys.readouterr().out)
     cl = {c["class"]: c for c in out["classes"]}
     assert cl["pair USB_"]["chosen"]["z"] == pytest.approx(90, abs=1) and cl["rf"]["chosen"]["z"] == pytest.approx(50, abs=1)
@@ -108,7 +108,11 @@ def test_ready_fails_and_exit_codes(tmp_path, capsys):
     assert e.value.code == 1
     out = capsys.readouterr().out
     assert "NOT READY" in out and "PART_MPN_MISSING" in out
-    cli.main(["ready", str(sp), "--constraints", _cons(tmp_path), "--no-api", "--datasheets", str(tmp_path), "--allow-incomplete"])
+    with pytest.raises(SystemExit) as e:                      # --allow-incomplete no longer skips the parts gate
+        cli.main(["ready", str(sp), "--constraints", _cons(tmp_path), "--no-api", "--datasheets", str(tmp_path), "--allow-incomplete"])
+    assert e.value.code == 1
+    capsys.readouterr()
+    cli.main(["ready", str(sp), "--constraints", _cons(tmp_path), "--no-api", "--allow-undocumented", "--datasheets", str(tmp_path)])
     assert "NOT READY:" in capsys.readouterr().out
 
 
@@ -118,7 +122,7 @@ def test_no_stackup_is_a_question(tmp_path):
     c = tmp_path / "c.toml"
     c.write_text("[parts]\ngeneric_passives = true\n[rf]\ntarget_z = 50\n")
     with pytest.raises(SystemExit) as e:
-        cli.main(["ready", str(sp), "--constraints", str(c), "--no-api", "--datasheets", str(tmp_path)])
+        cli.main(["ready", str(sp), "--constraints", str(c), "--no-api", "--allow-undocumented", "--datasheets", str(tmp_path)])
     assert e.value.code in (1, 3)
     q = json.load(open(tmp_path / "s.questions.json"))["questions"]
     assert "stackup" in [x["id"] for x in q]
@@ -131,7 +135,7 @@ def test_unreferenced_class_has_no_geometry(tmp_path, capsys):
     c.write_text(open(_cons(tmp_path)).read().replace('planes = ["In1.Cu", "In4.Cu"]', "planes = []"))
     c = str(c)
     with pytest.raises(SystemExit) as e:
-        cli.main(["ready", str(sp), "--constraints", c, "--no-api", "--datasheets", str(tmp_path)])
+        cli.main(["ready", str(sp), "--constraints", c, "--no-api", "--allow-undocumented", "--datasheets", str(tmp_path)])
     assert e.value.code == 1 and "no computed geometry" in capsys.readouterr().out
 
 
@@ -146,7 +150,7 @@ def test_not_ready_board_is_stamped_and_fab_deliver_refuse(tmp_path, capsys):
     s["components"].append({"ref": "U1", "value": "mystery", "lib": "L", "fp": "SOIC-8"})
     sp.write_text(json.dumps(s))
     cons = _cons(tmp_path)
-    cli.main(["ready", str(sp), "--board", b, "--constraints", cons, "--no-api", "--datasheets", str(tmp_path), "--allow-incomplete",
+    cli.main(["ready", str(sp), "--board", b, "--constraints", cons, "--no-api", "--allow-undocumented", "--datasheets", str(tmp_path), "--allow-incomplete",
               "--answer", "rule-floors=standard"])
     assert QS.notready_reasons(b)
     with pytest.raises(SystemExit) as e:
@@ -171,7 +175,8 @@ def test_pipeline_ready_stage_blocks_and_allow_incomplete_stamps(tmp_path):
     assert PL.run(a) == 1
     st = PL.load_state(a.workdir)
     assert st["stages"]["ready"]["verdict"] == "blocked" and "floorplan-check" not in st["stages"]
-    a2 = _args(tmp_path, b, allow_incomplete=True, **kw)
+    assert PL.run(_args(tmp_path, b, allow_incomplete=True, **kw)) == 1       # the parts gate is not skippable by --allow-incomplete
+    a2 = _args(tmp_path, b, allow_incomplete=True, allow_undocumented=True, **kw)
     assert PL.run(a2) == 0
     st = PL.load_state(a2.workdir)
     assert st["stages"]["floorplan-check"]["verdict"] == "pass" and "parts" in st["not_ready"]
