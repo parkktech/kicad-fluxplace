@@ -429,7 +429,8 @@ skew_mm = 0.5
 default_skew_mm = 1.0
 ''')
     cons = C.load(path)
-    assert C.power_width_mm(cons, "+5V", 0.4) == 2.0, "4A -> 2.0mm ampacity"
+    from fluxplace import power as PW
+    assert C.power_width_mm(cons, "+5V", 0.4) == PW.rail(cons, "+5V")["track_mm"] >= 2.0, "4A: IPC-2221 width from current (power.py), not 0.5 mm/A"
     assert C.power_width_mm(cons, "VIN_RAW", 0.4) == 2.5, "explicit width wins"
     assert C.power_width_mm(cons, "+3V3", 0.4) == 0.4, "unlisted keeps default"
     assert C.pour_nets(cons) == {"+5V"}

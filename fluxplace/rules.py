@@ -179,12 +179,16 @@ def _legacy(cons, out):
         if not isinstance(p, dict):
             continue
         vals = {}
-        if "width_mm" in p:
-            vals["width_mm"] = float(p["width_mm"])
-        elif "max_current_ma" in p:
-            vals["width_mm"] = max(0.3, 0.5 * float(p["max_current_ma"]) / 1000.0)
-        if p.get("pour") is True:
+        from . import power as PW
+        rr = PW.rail(cons, net)                       # width from current/voltage/fab copper; pour by policy
+        if rr and rr.get("track_mm") is not None:
+            vals["width_mm"] = rr["track_mm"]
+        if rr and rr["pour"]:
             vals["pour"] = True
+        if rr and rr.get("clearance_mm"):             # voltage-driven spacing (IPC-2221B 6-1), only above the project floor
+            ext = rr["clearance_mm"]["external"]
+            if ext > float(route.get("min_clearance_mm") or 0.1) + 1e-9:
+                vals["clearance_mm"] = ext
         add(f'[power."{net}"]', {"net": "^" + re.escape(net) + "$"}, vals)
 
     rf = cons.get("rf") or {}

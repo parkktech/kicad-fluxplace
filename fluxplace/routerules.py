@@ -57,7 +57,7 @@ def same_net_via_spacing(cons, router=None):
 def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=None):
     """-> the rule dict (floors, requested sizes, via_in_pad, grid, mode, workers, audit_drc)."""
     from . import constraints as C
-    fab = C.fab_profile(cons) if (cons or {}).get("fab") is not None else {}
+    fab = C.fab_profile(cons, board=board) if (cons or {}).get("fab") is not None else {}
     r = dict((cons or {}).get("route") or {})
     pro = _pro_rules(board) if board else {}
 
@@ -70,6 +70,11 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
          "min_via": floor(fab.get("min_via_dia_mm"), r.get("min_via_mm"), pro.get("min_via_diameter")),
          "min_drill": floor(fab.get("min_drill_mm"), r.get("min_drill_mm"), pro.get("min_through_hole_diameter")),
          "hole_to_hole": floor(r.get("hole_to_hole_mm"), pro.get("min_hole_to_hole"), default=0.0)}
+    # HARD fab limits (manufacturer row for this board's layer count): the router may never go below them, and a
+    # rule that cannot be met at the preferred floor above is judged against these (pairs, fabcaps.judge)
+    R["fab_min_track"] = float(fab.get("min_track_mm") or 0.0)
+    R["fab_min_clearance"] = float(fab.get("min_clearance_mm") or 0.0)
+    R["fab_profile"] = fab.get("profile")
     R["track"] = max(float(track or 0.0), R["min_track"]) or 0.2
     R["clearance"] = max(float(clearance or 0.0), R["min_clearance"]) or 0.2
     R["via"] = max(float(via), R["min_via"])

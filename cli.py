@@ -1498,6 +1498,25 @@ def cmd_compact(a):
     _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="COMPACT")
 
 
+def cmd_fab_advise(a):
+    """Which manufacturer tier builds this board as designed; what each constraint costs."""
+    import json as _json
+    from fluxplace import fabadvise as FA, fabcaps as FC, review as R, constraints as C
+    if a.list:
+        for v, t in FC.all_tiers():
+            i = FC.tier_info(v, t)
+            print(f"{i['name']:22s} rank {i['rank']}  {i['description']}  [{i['source']}, retrieved {i['retrieved']}]")
+        return
+    if not a.board:
+        raise SystemExit("fab-advise: give --board (or --list)")
+    cons = C.load(a.constraints) if a.constraints else {}
+    facts = R.facts_from_board(a.board)
+    res = FA.advise(facts, cons)
+    print(FA.format_text(res, a.board))
+    if a.json:
+        _json.dump(res, open(a.json, "w"), indent=1, default=lambda o: dict(o) if hasattr(o, "items") else str(o))
+
+
 def cmd_lint(a):
     """Design-completeness lint: missing power wiring, dead-end nets,
     unwired connectors, barrel-jack / friction-header connector smells."""
@@ -3470,6 +3489,14 @@ def build_parser():
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
 
+    pfa = sub.add_parser("fab-advise",
+                         help="cheapest manufacturer tier that builds the board as designed + what each constraint costs")
+    pfa.add_argument("--board", default=None)
+    pfa.add_argument("--constraints", default=None, help="[fab] profile / [route] floors / [pairs] are read")
+    pfa.add_argument("--list", action="store_true", help="list every known <vendor>-<tier> profile with its source")
+    pfa.add_argument("--json", default=None, help="also write the result as JSON")
+    pfa.set_defaults(fn=cmd_fab_advise)
+
     pds = sub.add_parser("datasheets",
                          help="fetch every MPN's datasheet into the project "
                               "(DigiKey/Mouser), hash it into datasheets.json, "
@@ -4032,7 +4059,7 @@ def _silk_hook(a):
 
 
 # commands that never write a board: no connectivity snapshot is taken for them
-_GUARD_READ_ONLY = {"lint", "review", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
+_GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
                     "floorplan-check", "rules", "analyze", "comprehend"}
 
 
@@ -4157,7 +4184,13 @@ def main(argv=None):
         if not _guard_end(guard, a) and not e.code:
             raise SystemExit(1)
         raise
-    except BaseException:
+    except BaseException as ex:
+        from fluxplace import fabcaps as _FC
+        if isinstance(ex, _FC.FabProfileError):      # a wrong [fab] profile is a one-line error, not a traceback
+            try:
+                _guard_end(guard, a, raised=True)
+            finally:
+                raise SystemExit(f"{a.cmd}: {ex}")
         # the command raised: the guard still runs (an in-place board is restored); the ORIGINAL error is
         # re-raised whatever the guard does
         try:

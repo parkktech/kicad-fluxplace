@@ -32,12 +32,16 @@ ENVIRONMENT. This module does that:
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
   VIA_TYPE               blind/buried/micro via on a through-via-only fab
                          profile ([fab] blind_vias/buried_vias/microvias)
-  FAB_MIN_TRACK / FAB_MIN_DRILL / FAB_MIN_ANNULAR / FAB_MIN_VIA
+  FAB_PROFILE_ERROR / FAB_PROFILE (info) / FAB_MIN_TRACK / FAB_MIN_DRILL / FAB_MIN_ANNULAR / FAB_MIN_VIA
                          copper geometry (track/arc width, via/PTH drill,
                          annular ring, via diameter) under what the quoted
                          fab process can build ([fab] min_track_mm etc.) —
                          DRC and lint only ever check the board's OWN
                          design-rule minimum, not the fab's real floor
+  POWER_WIDTH / POWER_VIAS / POWER_CURRENT_UNKNOWN
+                         rail copper vs the current it carries (power.py): track
+                         narrower than IPC-2221 needs (FAIL), too few vias (FAIL),
+                         a rail with no current figure (WARN)
   FAB_DESIGN_RULE_BELOW_PROFILE
                          the board's own design-settings minimums are
                          looser than the [fab] profile — the gap that let a
@@ -1238,8 +1242,18 @@ def check_fab_capability(facts, cons):
     fab = (cons or {}).get("fab")
     if fab is None:
         return []
-    fab = C.fab_profile(cons)
+    from . import fabcaps as FC
+    try:
+        fab = C.fab_profile(cons, layers=facts.get("copper_layers"))
+    except FC.FabProfileError as e:
+        return [_f(FAIL, "FAB_PROFILE_ERROR", str(e))]
     out = []
+    hard = fab.get("hard") or {}
+    if fab.get("vendor"):
+        unv = f" (unverified: {'; '.join(fab['unverified'])})" if fab.get("unverified") else ""
+        out.append(_f(INFO, "FAB_PROFILE", f"{fab['profile']} @ {fab['layers']} copper layers: hard limits track "
+                      f"{fab['min_track_mm']:g} / space {fab['min_clearance_mm']:g} / drill {fab['min_drill_mm']:g} / via ring "
+                      f"{fab['min_annular_mm']:g} mm{unv}"))
 
     narrow = sorted(
         (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),
@@ -1263,7 +1277,7 @@ def check_fab_capability(facts, cons):
         if p.get("drill_mm") is not None and p["drill_mm"] < fab["min_drill_mm"]:
             bad_drill.append(p)
         if p.get("dia_mm") is not None and p.get("drill_mm") is not None and \
-                (p["dia_mm"] - p["drill_mm"]) / 2.0 < fab["min_annular_mm"]:
+                (p["dia_mm"] - p["drill_mm"]) / 2.0 < max(fab["min_annular_mm"], hard.get("pth_annular_min", 0.0)):
             bad_ann.append(p)
 
     def _via_ref(it):
@@ -1903,6 +1917,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_slivers(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
+    out += [_f(x['level'], x['code'], x['msg'], refs=x['refs']) for x in __import__('fluxplace.power', fromlist=['x']).check(facts, cons)]
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
@@ -2129,6 +2144,7 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "x": round(pcbnew.ToMM((s.x + e.x) / 2), 4),
             "y": round(pcbnew.ToMM((s.y + e.y) / 2), 4),
             "kind": "arc" if cls == "PCB_ARC" else "track",
+            "len": round(pcbnew.ToMM(t.GetLength()), 4),
         })
         if cls == "PCB_TRACK":
             track_segs.append({"net": n, "layer": lname, "kind": "track",
@@ -2189,6 +2205,7 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
         "track_geom": track_geom,
         "track_segs": track_segs,
         "zone_polys": _zone_polys(board, pcbnew),
+        "zone_nets": sorted({z.GetNetname() for z in board.Zones() if z.GetNetname()}),
         "pth_pads": pth_pads,
         "design_min": design_min,
     }

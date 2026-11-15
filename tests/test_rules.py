@@ -155,7 +155,8 @@ def test_legacy_power_equals_rule_and_ampacity():
     legacy = {"power": {"+5V": {"max_current_ma": 4000, "pour": True}}}
     new = {"rule": [{"select": {"net": "^\\+5V$"}, "set": {"width_mm": 2.0, "pour": True}}]}
     o = {"net": "+5V"}
-    assert RU.load(legacy).resolve(o, "width_mm")[0] == pytest.approx(2.0)
+    from fluxplace import power as PW        # width now comes from the current (IPC-2221, power.py), not 0.5 mm/A
+    assert RU.load(legacy).resolve(o, "width_mm")[0] == PW.rail(legacy, "+5V")["track_mm"]
     assert RU.load(new).resolve(o, "width_mm")[0] == pytest.approx(2.0)
     assert RU.load(legacy).resolve(o, "pour")[0] is True
 

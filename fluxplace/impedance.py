@@ -136,6 +136,43 @@ def options(target, diff, g, floor=0.127, gap=None, max_options=4):
     return (good or out)[:max_options]
 
 
+def _solve_gap(target, w, g, lo=0.04, hi=1.5):
+    """Gap giving `target` differential ohms at trace width w (z_diff rises with gap); None when out of reach."""
+    if z_diff(w, lo, g) > target or z_diff(w, hi, g) < target:
+        return None
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if z_diff(w, mid, g) < target else (lo, mid)
+    return (lo + hi) / 2
+
+
+def _geo_row(label, w, s, g, target, preferred, hard_t, hard_s):
+    z = z_diff(w, s, g)
+    st = "illegal" if (w < hard_t - 1e-6 or s < hard_s - 1e-6) else ("below_preferred" if min(w, s) < preferred - 1e-6 else "ok")
+    return {"label": label, "width_mm": round(w, 3), "gap_mm": round(s, 3), "z": round(z, 1),
+            "err_pct": round(100.0 * (z - target) / target, 1), "status": st}
+
+
+def pair_judgement(target, g, preferred, hard_t, hard_s, declared=None):
+    """Differential-pair geometry options on one stackup layer: [declared (w, gap) as written], the geometry at the owner's
+    PREFERRED floor (wider trace + wider gap) and the one at the manufacturer's HARD limit (tightest coupling the fab allows).
+    -> list of rows {label, width_mm, gap_mm, z, err_pct, status: ok | below_preferred | illegal}; [] without a plane."""
+    if g is None or g.get("model") is None:
+        return []
+    rows = []
+    if declared:
+        rows.append(_geo_row("declared", declared[0], declared[1], g, target, preferred, hard_t, hard_s))
+    for label, fw, fs in (("preferred floor", preferred, preferred), ("fab limit", hard_t, hard_s)):
+        s = fs
+        w = solve_diff(target, g, s)
+        if w is not None and w < fw:
+            w = fw
+            s = _solve_gap(target, w, g)
+        if w is not None and s is not None:
+            rows.append(_geo_row(label, w, s, g, target, preferred, hard_t, hard_s))
+    return rows
+
+
 # ==========================================================================
 # Propagation delay (ps/mm) from the same stackup geometry
 # ==========================================================================

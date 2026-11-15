@@ -32,6 +32,11 @@ def required_mm(cons, board_path):
     name = str(((cons or {}).get("fab") or {}).get("profile") or "")
     if name in PROFILES and PROFILES[name].get("hole_to_hole") is not None:
         return float(PROFILES[name]["hole_to_hole"]), f"fab profile {name}"
+    if name and name not in PROFILES:
+        from . import fabcaps as FC, constraints as C
+        lim = C.fab_profile(cons, board=board_path)["hard"]       # unknown name -> FabProfileError, loud
+        if lim.get("hole_to_hole_via") is not None:
+            return float(lim["hole_to_hole_via"]), f"fab profile {name} (via-to-via figure)"
     if board_path:
         try:
             pro = json.load(open(os.path.splitext(board_path)[0] + ".kicad_pro"))

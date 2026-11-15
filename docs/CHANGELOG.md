@@ -1,5 +1,12 @@
 # Change log (moved from the README)
 
+## 2026-11-15 - manufacturer capability profiles, fab-advise, power sizing from current
+
+`[fab] profile = "<vendor>-<tier>"` + the board's layer count select a row of `fluxplace/data/fab_capabilities.json` (PCBWay,
+JLCPCB; source URL + retrieved date per table); those are HARD limits, `[route]` floors stay the preferred floor, an unknown name is
+an error. `fluxplace fab-advise` recommends the cheapest tier that builds the board. `fluxplace/power.py` sizes `[power.X]` copper
+from current/voltage/fab copper (POWER_WIDTH / POWER_VIAS / POWER_CURRENT_UNKNOWN). Docs: `docs/commands/fab-advise.md`.
+
 ## 2026-11-13 - Freerouting as a route stage; exit codes
 
 `pipeline --router krt|freerouting|auto` (`[route] router`, `fluxplace/routefr.py`, `docs/commands/route.md`): one whole-board

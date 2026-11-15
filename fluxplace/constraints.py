@@ -82,8 +82,9 @@ optional; anything not stated keeps the heuristic default. Schema:
                             # error, GERBER_CHECK_ERROR) blocks fab and deliver
                             # with exit 1. "warn" (default): findings print
                             # prominently, exit code unchanged. "off": skip.
-    profile = "pcbway-6L"   # label only — documents which fab's capability
-                            # table the numbers below came from
+    profile = "pcbway-standard"  # "<vendor>-<tier>" (fabcaps: fluxplace fab-profiles) —
+                            # with the board's layer count it SELECTS the
+                            # manufacturer's hard limits; unknown name = error
     min_track_mm = 0.1      # narrowest copper the quoted fab will accept —
     min_clearance_mm = 0.1  # PCBWay rejected a 0.09 mm UTV V1.5 GND stub at
     min_drill_mm = 0.2      # upload ("minimum trace width ... no less than
@@ -112,16 +113,12 @@ def load(path):
 
 
 def power_width_mm(cons, net, default_mm):
-    """Routed trace width for a power net: explicit width_mm wins, else the
-    ampacity rule on max_current_ma, else the caller's heuristic default."""
-    p = cons.get("power", {}).get(net)
-    if not p:
+    """Routed trace width for a power net: explicit width_mm wins, else the current-derived width (power.py: IPC-2221,
+    the fab row's copper weights, dT), else the caller's heuristic default."""
+    from . import power as PW
+    if not (cons or {}).get("power", {}).get(net):
         return default_mm
-    if "width_mm" in p:
-        return float(p["width_mm"])
-    if "max_current_ma" in p:
-        return max(0.3, 0.5 * float(p["max_current_ma"]) / 1000.0)
-    return default_mm
+    return PW.track_width_mm(cons, net, default_mm)
 
 
 _FAB_DEFAULTS = {
@@ -133,16 +130,35 @@ _FAB_DEFAULTS = {
 }
 
 
-def fab_profile(cons):
-    """The [fab] capability floor, defaults filled in. `profile` is a label
-    only (e.g. "pcbway-6L") — nothing here reads it, it documents which
-    fab's numbers these are."""
+def fab_profile(cons, layers=None, board=None):
+    """The [fab] capability floor, defaults filled in. `profile = "<vendor>-<tier>"` selects a manufacturer row
+    (fabcaps, by the board's copper `layers`, or read from `board`) and those numbers are HARD limits: an explicit
+    [fab] min_* is honoured only when it is STRICTER than the profile. An unknown profile name raises
+    fabcaps.FabProfileError (it used to fall back silently). Extra keys: `hard` (limits dict), `vendor`, `tier`,
+    `layers`, `unverified`."""
+    from . import fabcaps as FC
     fab = dict((cons or {}).get("fab", {}))
     out = dict(_FAB_DEFAULTS)
+    name = fab.get("profile")
+    res = None
+    if name:
+        if layers is None and board:
+            layers = FC.board_layer_count(board)
+        if layers is None:
+            sl = ((cons or {}).get("stackup") or {}).get("layers") or []
+            n = sum(1 for l in sl if isinstance(l, dict) and str(l.get("type", "copper")) == "copper")
+            layers = n or None
+        res = FC.limits(str(name), layers)
+        out.update(res["floors"])
     for k in _FAB_DEFAULTS:
         if k in fab:
-            out[k] = float(fab[k])
-    out["profile"] = fab.get("profile")
+            v = float(fab[k])
+            out[k] = max(v, out[k]) if (res and k in res["floors"]) else v
+    out["profile"] = name
+    out["hard"] = res["limits"] if res else {}
+    out["vendor"], out["tier"] = (res["vendor"], res["tier"]) if res else (None, None)
+    out["layers"] = res["layers"] if res else layers
+    out["unverified"] = res["unverified"] if res else []
     for k in ("blind_vias", "buried_vias", "microvias"):
         out[k] = bool(fab.get(k, False))
     return out
@@ -185,7 +201,8 @@ def clamp_drill_mm(drill_mm, cons, log=None, what=""):
 def pour_nets(cons):
     """Power nets the engineer says ride a plane/pour — the router should not
     also draw them as fat traces."""
-    return {n for n, p in cons.get("power", {}).items() if p.get("pour")}
+    from . import power as PW
+    return {n for n, p in cons.get("power", {}).items() if isinstance(p, dict) and (p.get("pour") or PW.is_pour(cons, n))}
 
 
 SLOW_PAIR_SKEW_MM = 10.0      # audio-rate differential nets: a skew limit in the mm range has no meaning
