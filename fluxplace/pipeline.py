@@ -559,6 +559,16 @@ def st_route(c, n, board):
     from . import routefr as FR_
     times["ladder_end"] = round(time.time() - t0)
     post_round(best)                                   # the board as it ends: snapped, gaps joined
+    # plane nets: one explicit owner (planetie) ties floating fragments to their pour, after the router and after the
+    # last copper change; what it cannot close is listed with a reason and owned by "plane-tie"
+    from . import planetie as PT
+    plane_nets = sorted(n for n, i in cls.items() if i.get("class") == "plane")
+    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None)
+    if ptr["placed"]:
+        shutil.copy(ptr["board"], best)
+        _sidecar(board, best)
+    with open(os.path.join(d, "planetie.txt"), "w") as fh:
+        fh.write("\n".join(PT.lines(ptr)) + "\n")
     final_open = conn(best)
     final = sorted(final_open)
     diag = None
@@ -570,6 +580,7 @@ def st_route(c, n, board):
     # rounds) when it ran; anything else is unowned
     claims = {n: ("router" if have_krt else None) for n in rtodo if n in final_open}
     claims = {k: v for k, v in claims.items() if v}
+    claims.update({n: "plane-tie" for n in plane_nets if n in final_open})
     try:
         dj = json.load(open(best + ".diagnose.json")) if final else None
     except (OSError, ValueError):
