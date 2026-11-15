@@ -30,3 +30,13 @@ A still-failing prediction is WARN; the options table is in the stage's `stage.l
 **Not done.** Per-move hard checks (collision gate and intent rows are verified per pass, not per move). Decoupling-distance budgets
 beyond the support-part guard. Side flips are not written to the board text (flipped parts are skipped; the pass is verified anyway).
 Region-wise candidate generation (channel shifts, swaps, passive flips) is not implemented: the move engine proposes moves from findings.
+
+## Routed parts, the guard, and the move ledger
+
+- A part with copper ending on one of its pads (fan-out, pair or router copper) is **fixed**. `--allow-move-routed` lets it move; the
+  copper that ends on its pads is then removed from the output and listed as `removed_copper` in the ledger, for re-fan-out.
+- The guard checks geometry: every track or via end that touched a pad before must still touch that same pad, and the remaining
+  copper keeps its positions and nets. A refused move writes a copy of the input to OUT, prints the guard diff and exits 1
+  (the pipeline stage fails).
+- `moves` and `parts_moved` / `max_move_mm` count only moves applied to the written board.
+- Pipeline: with `[relieve] enable = true` the stage runs before `fanout` (copper-free placement).
