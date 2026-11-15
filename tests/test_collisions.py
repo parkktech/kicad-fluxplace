@@ -90,6 +90,7 @@ def test_footprint_rule_area_flags_other_parts_and_own_npth(tmp_path):
     assert len(ko) == 1 and ko[0]["refs"] == ["R1"] and ko[0]["level"] == "FAIL" and ko[0]["relevance"] == ["placement"]
     own = [x for x in f if "keepout_own" in x["kinds"]]
     assert own and own[0]["refs"] == ["J1"]
+    assert own[0]["level"] == "WARN" and own[0]["relevance"] == ["footprint"]      # a footprint detail: reported, never a FAIL
     assert not any("R2" in x["refs"] for x in f)
 
 

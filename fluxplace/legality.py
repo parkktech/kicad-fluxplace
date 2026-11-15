@@ -386,14 +386,14 @@ KINDS = {
     "copper_clearance":  ("clearance", "manufacturing", False, "copper of different nets inside the clearance"),
     "keepout":           ("items_not_allowed", "placement", True, "inside a rule area that forbids it"),
     "keepout_trapped":   ("items_not_allowed", "routing", True, "connected pad inside a track-forbidding rule area"),
-    "keepout_own":       ("items_not_allowed", "manufacturing", False, "the footprint's own hole inside its own pad-forbidding rule area"),
+    "keepout_own":       ("items_not_allowed", "footprint", False, "FOOTPRINT detail, not a placement failure: the part's own hole inside its own pad-forbidding rule area"),
     "courtyard_overlap": ("courtyards_overlap", "placement", False, "courtyards overlap on the same side"),
     "hole_in_courtyard": ("pth_inside_courtyard", "placement", False, "a hole inside another part's courtyard"),
     "hole_clearance":    ("hole_clearance", "manufacturing", False, "a hole closer than the hole clearance to another part's copper"),
     "pour_island":       ("isolated_copper", "electrical", False, "a filled pour piece touches nothing of its net"),
     "unnetted_overlap":  ("shorting_items", "electrical", False, "unnetted copper overlaps"),
 }
-RELEVANCE = ("placement", "routing", "manufacturing", "electrical")
+RELEVANCE = ("placement", "routing", "manufacturing", "electrical", "footprint")
 _LEVEL = {"error": "FAIL", "warning": "WARN", "ignore": "INFO"}
 _RANK = {"FAIL": 0, "WARN": 1, "INFO": 2}
 
@@ -571,6 +571,8 @@ def collisions(B, cons=None, relevance=None):
             lv["pour_island"] = "WARN"
         if "unnetted_overlap" in lv:
             lv["unnetted_overlap"] = "WARN"
+        if "keepout_own" in lv:                         # a footprint detail (the part's own hole in its own rule area): never blocks
+            lv["keepout_own"] = "WARN"
         if kinds.keys() & {"hole_in_courtyard"}:
             npth = all(e.startswith("NPTH") for e in kinds["hole_in_courtyard"])
             lv["hole_in_courtyard"] = _LEVEL.get(sev.get("npth_inside_courtyard" if npth else "pth_inside_courtyard", "error"), "FAIL")

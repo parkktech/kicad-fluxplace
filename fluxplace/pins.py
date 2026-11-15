@@ -19,7 +19,7 @@ Precedence (lower rank wins; the loser's WHOLE rigid unit yields):
 The yielding unit is released from its pin (removed from `fixed` / `anchors` / `[lock.at]`, added to `[floorplan] movable`)
 and moved to the NEAREST legal pose (same rotation and side; every hard intent rule kept: edge side, `near`, `away`, regions,
 keep-outs) among the parts that stay; the floorplan then starts from that pose and a `stay` term in its cost keeps it there
-(`[placement] pin_stay_weight`, default 5 per mm). Same rank on both sides:
+(`[placement] pin_stay_weight`, default 100 per mm). Same rank on both sides:
   * rank 0 (two explicit coordinates): the step cannot choose. It stops with PIN_CONFLICT (both units, the overlap, the three
     smallest legal moves of each) unless `[placement] resolve_pin_conflicts = "auto"`: then the unit with the smaller required
     displacement moves (tie: the later ref) and the decision says so;
@@ -45,7 +45,7 @@ def settings(cons):
     mode = str(pl.get("resolve_pin_conflicts", "stop")).lower()
     if mode not in ("stop", "auto"):
         raise SystemExit(f"[placement] resolve_pin_conflicts = {mode!r}: use \"stop\" or \"auto\"")
-    return mode, float(pl.get("pin_stay_weight", 5.0))
+    return mode, float(pl.get("pin_stay_weight", 100.0))
 
 
 def ranks(B, cons):
@@ -179,7 +179,7 @@ class Resolver:
         self.S = IT.Seater(B, w, spec, log=None)
         self.orig = dict(self.S.orig)
         self.decisions, self.unresolved = [], []
-        self.released = []
+        self.released, self.evicted = [], []
 
     # -- search
     def _members(self, unit):
@@ -293,6 +293,13 @@ class Resolver:
                 "rule": RULE[0], "geometry": geom})
             self.released.extend(r for r in mem if r not in self.released)
             self.units.pop(loser)
+        if self.released and not self.unresolved:
+            # movable parts that now sit on a re-seated unit (they were placed around its old pose) move out to the nearest legal pose
+            self._stand(())
+            self.S.evict(only=set(self.released))
+            self.evicted = sorted(r for r in self.S.moves if r not in set(self.released))
+            if self.evicted:
+                self.log(f"pins: {len(self.evicted)} movable part(s) moved off the re-seated unit(s): {', '.join(self.evicted[:12])}")
         return self
 
     def _opt(self, unit, o):
@@ -344,7 +351,7 @@ def sidecar_path(board):
 
 
 def write(path, R):
-    json.dump({"decisions": R.decisions, "unresolved": R.unresolved}, open(path, "w"), indent=1, default=str)
+    json.dump({"decisions": R.decisions, "unresolved": R.unresolved, "evicted": R.evicted}, open(path, "w"), indent=1, default=str)
 
 
 def prepare(board, cons, spec, workdir, log=print, name="pins-resolved"):
@@ -353,7 +360,7 @@ def prepare(board, cons, spec, workdir, log=print, name="pins-resolved"):
     B = RD.load(board)
     if not any(True for _ in B["parts"]):
         return board, cons, None
-    R = Resolver(B, cons, spec)
+    R = Resolver(B, cons, spec, log=log)
     if not conflicts(B, R.S.cons, R.units, R.unit_of):
         return board, cons, None
     R.run()

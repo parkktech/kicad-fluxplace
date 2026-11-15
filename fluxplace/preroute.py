@@ -19,7 +19,7 @@ exactly like review findings (same matcher).
   COLLISION            FAIL/WARN/INFO  one finding per footprint pair (or part x rule area, or pour piece): true-shape
                              copper overlap / clearance of different nets, keep-out (KiCad rule areas, constraint
                              keep-outs), hole in another courtyard, hole clearance, courtyard overlap, pour island;
-                             each with a relevance tag (placement / routing / manufacturing / electrical).
+                             each with a relevance tag (placement / routing / manufacturing / electrical / footprint).
                              Levels follow the project's DRC severities; copper overlap + keep-out always FAIL.
                              Seconds, no DRC (legality.collisions). Run by the gates only (collide=True).
 

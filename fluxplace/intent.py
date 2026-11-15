@@ -824,9 +824,9 @@ class Seater:
                 self.bodies.append((n["name"], refs))
                 self.notes.append(f"{n['name']}: {', '.join(n['refs'])} + {to} made one rigid body, not held")
 
-    def evict(self):
+    def evict(self, only=None):
         """movable parts that now sit on a held part, in a forbidden zone or too close to a held part move to the nearest
-        legal pose (an IC with its support parts)."""
+        legal pose (an IC with its support parts). `only` = refs: just the parts that collide with one of those."""
         cl = self.claimed()
         todo = []
         for r in sorted(self.parts):
@@ -835,6 +835,11 @@ class Seater:
             bad = False
             for kind, d in self.L.part_issues(r):
                 o = d if kind in ("overlap", "hole") else d.split("/")[1].rsplit(".", 1)[0] if kind == "pad_short" else None
+                if only is not None:
+                    if o is not None and o in only:
+                        bad = True
+                        break
+                    continue
                 if o is None and kind != "outside" or (o is not None and o in cl):
                     bad = True
                     break

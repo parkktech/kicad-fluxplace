@@ -35,7 +35,7 @@ A rigid unit (`[[intent.group]]`, rigid unless `rigid = false`; `[placement.grou
 members, so a socket and its standoffs follow the socket's pin. The loser is released (out of `fixed` / `anchors` / `[lock.at]`,
 into `[floorplan] movable`) and seated at the nearest legal pose (same rotation and side, hard intent kept; a unit against the
 outline first slides along it, up to 25 mm). The floorplan starts there and a `stay` cost (`[placement] pin_stay_weight`,
-default 5 per mm) keeps it near. Equal ranks: rank 1..3 the unit with the smaller displacement moves; rank 0 (two explicit
+default 100 per mm) keeps it near. Equal ranks: rank 1..3 the unit with the smaller displacement moves; rank 0 (two explicit
 coordinates) stops the stage with `PIN_CONFLICT` (overlap geometry + the three smallest legal moves of each) unless
 `[placement] resolve_pin_conflicts = "auto"` (then the smaller displacement moves, recorded). Decisions go to the log
 (`pins: PIN_RELEASED ...`), `<out>.pins.json` (travels with the board) and `review` (`PIN_RELEASED` WARN, `PIN_CONFLICT` FAIL).

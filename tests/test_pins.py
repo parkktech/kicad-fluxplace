@@ -274,3 +274,13 @@ def test_relieve_engine_never_moves_a_group_member_alone(tmp_path):
     bad["H2"] = (bad["H2"][0] + 1, bad["H2"][1], bad["H2"][2])
     assert not ok(bad)                                                                  # not one rigid motion
     assert not ok(rigid(0, 0), flip="H1")                                               # never flipped alone
+
+
+def test_movable_parts_on_the_new_seat_are_moved_off(tmp_path):
+    path = load(tmp_path, D1_BODY + g.two("R3", 24, 3.5, "Q0", "Q1", court=(-1, -0.5, 1, 0.5)))     # sits where J1 will land
+    out, cons, R = run(path, D1_CONS, tmp_path)
+    assert R.evicted == ["R3"] and RD.load(out)["parts"]["R3"]["pos"] != (24, 3.5)
+    B = RD.load(out)
+    assert LGL.count(LGL.Legal(B, D1_CONS).issues()) == 0 and not [x for x in LGL.collisions(B, D1_CONS) if x["level"] == "FAIL"]
+    far = RD.load(path)["parts"]["R2"]["pos"]
+    assert RD.load(out)["parts"]["R2"]["pos"] == far                          # parts that collide with nothing stay where they are
