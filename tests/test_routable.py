@@ -99,10 +99,24 @@ def test_chain_detection_movable_ends_three_pad_nets_and_a_hub(tmp_path):
     assert any(c[0] in ("U1", "J1") and set(c) >= {"U1", "U2", "L1", "J1"} for c in ch), ch
 
 
+REFINE_EVALS = 200     # evaluation budget for the determinism tests (the budget, not the clock, ends them)
+_REFINE_CODE = """
+import json, sys, tempfile, pathlib
+sys.path.insert(0, "__ROOT__"); sys.path.insert(0, "__TESTS__")
+import test_routable as T
+from fluxplace import refine as RF, routediag as RD
+B = RD.load(T.mk(pathlib.Path(tempfile.mkdtemp())))
+cons = {"placement": {"fixed": ["J1", "J2"], "refine_max_evals": __EVALS__}}
+mv, st = RF.refine(B, cons, None, seed=3, log=lambda m: None, time_limit=600)
+print(json.dumps({"moves": sorted(mv.items()), "kept": st["kept"], "evals": st["evals"],
+                  "budget": st["budget"], "after": st["score_after"]}, sort_keys=True))
+"""
+
+
 def test_refine_is_local_legal_deterministic_and_improves(tmp_path):
     from fluxplace import refine as RF, legality as LGL
     p = mk(tmp_path)
-    cons = {"placement": {"fixed": ["J1", "J2"]}}
+    cons = {"placement": {"fixed": ["J1", "J2"], "refine_max_evals": REFINE_EVALS}}
     out = []
     for i in range(2):
         B = RD.load(p)
@@ -115,3 +129,47 @@ def test_refine_is_local_legal_deterministic_and_improves(tmp_path):
         assert LGL.count(LGL.Legal(B, cons).issues()) == 0
         out.append(sorted(mv.items()))
     assert out[0] == out[1]
+
+
+def test_refine_identical_across_hash_seeds(tmp_path):
+    """Same input, three PYTHONHASHSEED values (set/dict iteration order differs per process):
+    the refine must return the same placement, kept counts and evaluation count."""
+    import json
+    code = (_REFINE_CODE.replace("__ROOT__", os.path.abspath(ROOT))
+            .replace("__TESTS__", os.path.abspath(os.path.join(ROOT, "tests")))
+            .replace("__EVALS__", str(REFINE_EVALS)))
+    procs = [subprocess.Popen([sys.executable, "-c", code], cwd=ROOT, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True,
+                              env={**os.environ, "PYTHONHASHSEED": str(h)}) for h in (0, 1, 2)]
+    outs = []
+    for pr in procs:
+        so, se = pr.communicate(timeout=900)
+        assert pr.returncode == 0, se[-2000:]
+        outs.append(so.strip().splitlines()[-1])
+    assert outs[0] == outs[1] == outs[2], outs
+    got = json.loads(outs[0])
+    assert got["budget"] == "evals" and got["evals"] == REFINE_EVALS, got
+
+
+def test_refine_identical_under_slowed_run(tmp_path, monkeypatch):
+    """A machine several times slower must give the same placement: the budget counts evaluations,
+    so a slow run and a fast run stop at the same move. The wall-clock cap is far away here."""
+    import time as _time
+    from fluxplace import refine as RF, preroute as PRE
+    cons = {"placement": {"fixed": ["J1", "J2"], "refine_max_evals": REFINE_EVALS}}
+
+    def go():
+        B = RD.load(mk(tmp_path))
+        mv, st = RF.refine(B, cons, None, seed=3, log=lambda m: None, time_limit=300)
+        return sorted(mv.items()), st["kept"], st["evals"], st["budget"]
+
+    fast = go()
+    real = PRE.run
+
+    def slowed(*a, **k):
+        _time.sleep(0.05)
+        return real(*a, **k)
+    monkeypatch.setattr(PRE, "run", slowed)
+    slow = go()
+    assert slow == fast, (fast[1:], slow[1:])
+    assert fast[3] == "evals"

@@ -500,7 +500,7 @@ def test_builder_attachments():
 def test_comprehend():
     """Inference bundle: crystal finds its parent + load caps; pairs and bypass
     tables populate; power classes carried through."""
-    from fluxplace import comprehend as CO
+    from fluxplace import comprehend_si as CO
     parts, nets = _crystal_board()
     cg = G.build(parts, nets)
     comp = CO.comprehend(parts, nets, cg)
@@ -599,7 +599,7 @@ def test_model_registration_solver():
     the footprint holes (rotation + translation + z-lift recovered)."""
     import types
     sys.modules.setdefault("pcbnew", types.SimpleNamespace())
-    from fluxplace.models import solve_transform, _model_to_fp, _clusters, _fit
+    from fluxplace.model_verify import solve_transform, _model_to_fp, _clusters, _fit
     # synthetic model: 2x03 pin field at 3mm pitch, drawn displaced (+5,+2)
     # and needing a 2mm z-lift; 20 points per pin shaft below board
     pts = []

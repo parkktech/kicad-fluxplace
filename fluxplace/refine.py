@@ -15,8 +15,12 @@ score (preroute.score) improves AND no legality violation (legality.Legal) is ad
 
 A cheap local filter (class-weighted length plus budget excess of the nets the move touches) discards
 hopeless candidates before the full score is computed. First improvement is taken; passes repeat until a
-whole pass accepts nothing, `[placement] time_limit_s` (600) runs out or `max_passes` (30) is reached.
-Deterministic: candidates are visited in an order shuffled by `--seed` (default 0) from sorted keys.
+whole pass accepts nothing, `[placement] refine_max_evals` (5000 full-score evaluations) runs out or
+`max_passes` (30) is reached. The budget counts evaluations, not seconds, so the result never depends on
+machine load. `[placement] time_limit_s` (600) is only a safety cap; when it cuts a run, `stats["budget"]`
+is "wallclock" and the log says so.
+Deterministic: candidates are visited in an order shuffled by `--seed` (default 0) from sorted keys, and
+every float sum runs over sorted names (set iteration order depends on PYTHONHASHSEED).
 Fixed parts, locked parts and mounting hardware never move.
 """
 import fnmatch
@@ -46,6 +50,9 @@ class Refiner:
         pl = self.cons.get("placement") or {}
         self.t_end = time.time() + float(time_limit if time_limit is not None else pl.get("time_limit_s", 600))
         self.max_passes = int(pl.get("max_passes", 30))
+        self.max_evals = int(pl.get("refine_max_evals", 5000))
+        self.evals = 0
+        self.wall_hit = False
         self.rng = random.Random(seed)
         self.cls = NC.classify(B, self.cons, spec)
         self.fixed = RB._fixed_set(B, self.cons)
@@ -92,8 +99,17 @@ class Refiner:
     def _legal(self, refs):
         return self._triples(refs) <= self.base
 
+    def out_of_budget(self):
+        """Evaluation budget first (deterministic); wall clock is a safety cap, recorded when it cuts."""
+        if self.evals >= self.max_evals:
+            return True
+        if time.time() > self.t_end:
+            self.wall_hit = True
+            return True
+        return False
+
     def local(self, refs):
-        nets = set().union(*(self.by_ref[r] for r in refs)) if refs else set()
+        nets = sorted(set().union(*(self.by_ref[r] for r in refs))) if refs else []
         t = 0.0
         for n in nets:
             info = self.cls.get(n)
@@ -117,7 +133,8 @@ class Refiner:
             GM.flip(self.B["parts"][flip])
             self.legal.refresh(flip)
         ok = False
-        if self._legal(refs) and self.local(refs) <= l0 + slack:
+        if not self.out_of_budget() and self._legal(refs) and self.local(refs) <= l0 + slack:
+            self.evals += 1
             sc = PR.run(self.B, self.cons, self.spec)[1]["score"]
             if sc < self.score - max(EPS, gain):
                 self.score, ok = sc, True
@@ -152,7 +169,7 @@ class Refiner:
             ox += p["pos"][0]
             oy += p["pos"][1]
         ox, oy = ox / len(ms), oy / len(ms)
-        for n in set().union(*(self.by_ref[r] for r in ms)):
+        for n in sorted(set().union(*(self.by_ref[r] for r in ms))):
             info = self.cls.get(n)
             if not info or info["weight"] <= 0:
                 continue
@@ -231,7 +248,7 @@ class Refiner:
         done = False
         for i, a in enumerate(keys):
             for b in keys[i + 1:]:
-                if time.time() > self.t_end:
+                if self.out_of_budget():
                     return done
                 ma, mb = self.U[a], self.U[b]
                 if len(ma) == 1 and len(mb) == 1:
@@ -266,8 +283,9 @@ class Refiner:
             order = movable[:]
             self.rng.shuffle(order)
             for k in order:
-                if time.time() > self.t_end:
-                    self.log("wall-clock limit reached")
+                if self.out_of_budget():
+                    self.log(f"{'wall-clock safety cap' if self.wall_hit else 'evaluation budget'} reached "
+                             f"after {self.evals} evaluation(s)")
                     break
                 self.nudge(k)
                 self.rotate(k)
@@ -282,7 +300,7 @@ class Refiner:
             gained = sum(self.stats.values()) - acc0
             self.log(f"pass {ps + 1}: {gained} move(s) kept, score {self.score:.0f} "
                      f"({', '.join(f'{k} {v}' for k, v in sorted(self.stats.items()))})")
-            if not gained or time.time() > self.t_end:
+            if not gained or self.out_of_budget():
                 break
         self.reverted, whole = LGL.self_audit(self.B, self.cons, self.fixed, self.input_issues,
                                               self.origin_full, self.log)
@@ -305,4 +323,5 @@ def refine(B, cons=None, spec=None, seed=0, log=print, time_limit=None):
     r = Refiner(B, cons, spec, seed, log, time_limit)
     mv = r.run()
     return mv, {"score_before": r.score0, "score_after": r.score, "kept": dict(r.stats), "flips": sorted(r.flips),
-                 "reverted": r.reverted}
+                 "reverted": r.reverted, "evals": r.evals,
+                 "budget": "wallclock" if r.wall_hit else "evals" if r.evals >= r.max_evals else "done"}
