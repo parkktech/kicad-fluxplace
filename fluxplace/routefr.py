@@ -26,6 +26,7 @@ import tempfile
 import time
 import zipfile
 
+from . import pourdsn as PDS
 from . import routeconn as RC
 
 ENV_JAR, ENV_JAVA = "FLUXPLACE_FREEROUTING_JAR", "FLUXPLACE_JAVA"
@@ -127,7 +128,9 @@ def settings(cons, **over):
          "budget_s": r.get("budget_s"), "budget_frac": float(r.get("budget_frac", 0.6)),
          "grace_s": float(r.get("grace_s", 180)), "analytics": bool(r.get("analytics", False)),
          "segment_passes": int(r.get("segment_passes", 1)),        # passes per Freerouting run (the stall stop acts between runs)
-         "stall_passes": int(r.get("stall_passes", 3))}             # passes in a row without a lower SIGNAL unrouted count
+         "stall_passes": int(r.get("stall_passes", 3)),             # passes in a row without a lower SIGNAL unrouted count
+         # strip: signal-layer pours removed from the router's copy (today) | keep: left in | pour_job: strip + the pour-aware job
+         "pour_dsn": str(r.get("pour_dsn", "strip")).lower()}
     for k, v in over.items():
         if v is not None:
             s[k] = v
@@ -135,6 +138,8 @@ def settings(cons, **over):
         s["fanout"] = "on" if s["fanout"] == "true" else "off"
     if s["fanout"] not in ("auto", "on", "off"):
         raise ValueError(f"[route.freerouting] fanout = {s['fanout']!r}: use auto, on or off")
+    if s["pour_dsn"] not in ("strip", "keep", "pour_job"):
+        raise ValueError(f"[route.freerouting] pour_dsn = {s['pour_dsn']!r}: use strip, keep or pour_job")
     if s["pairs"] not in ("exclude", "route"):
         raise ValueError(f"[route.freerouting] pairs = {s['pairs']!r}: use exclude or route")
     s["threads"] = max(1, s["threads"])
@@ -616,8 +621,16 @@ def split_passes(passes, plane_open):
     return passes
 
 
+def _pour_job(text, pour_json):
+    """the pour-aware job (pourdsn.apply) on the DSN text; the one call site of pourdsn in the export path."""
+    if not pour_json:
+        return text, None
+    with open(pour_json) as fh:
+        return PDS.apply(text, json.load(fh))
+
+
 def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearance, budget_s, S=None, cons=None,
-                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0, classes=None, plane_nets=()):
+                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0, classes=None, plane_nets=(), pour=None):
     """One Freerouting run on `board` -> `out`, in SEGMENTS of `[route.freerouting] segment_passes` passes (default 1).
     Freerouting only saves its session when it finishes, so a stall cannot stop it in place: each segment is a
     complete run on the copper so far (the previous segment's session imported into the stripped board, which is then
@@ -643,7 +656,11 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
         rec["before"] = fp0
         dsn_board = os.path.join(workdir, "dsn.kicad_pcb")
         _side(board, dsn_board)
-        rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes), "netclasses": classes}, workdir)
+        if S.get("pour_dsn", "strip") == "keep":          # signal-layer pours stay in the router's copy (Freerouting 2.5 pour-aware)
+            shutil.copy(board, dsn_board)
+            rec["pours"] = {"mode": "keep"}
+        else:
+            rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes), "netclasses": classes}, workdir)
         # every count below is THE open-connection definition (opengate.unconnected_nets: kicad-cli after refill), taken
         # on the stripped chain the segments run on, so the segments are compared with each other on one basis
         from . import opengate as OG
@@ -663,6 +680,9 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
                 raise RuntimeError("Specctra DSN export failed")
             with open(dsn, errors="surrogateescape") as fh:
                 text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
+            text, pj = _pour_job(text, pour if S.get("pour_dsn") == "pour_job" else None)   # router copy only
+            if k == 0:
+                rep["pour"] = pj
             if rep["planes_missed"]:
                 raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
             with open(dsn, "w", errors="surrogateescape") as fh:
@@ -700,6 +720,8 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             for ps in log["passes"]:
                 passes.append(dict(ps, pass_no=len(passes) + 1, seg=k))
             rec["segments"].append({"seg": k, "passes": len(log["passes"]), "jvm_s": jr["elapsed"], "state": log["state"]})
+            if pour:                                       # pour-aware session: derived pours renamed back, as the stage always did
+                rec.setdefault("pour", {"ses_derived_renamed": []})["ses_derived_renamed"].append(PDS.unmap_ses(ses))
             nxt = os.path.join(seg, "after.kicad_pcb")
             _side(board, nxt)
             imp = _helper("import", {"board": cur, "ses": ses, "out": nxt, "skip_nets": sorted(skip_nets)}, workdir)
