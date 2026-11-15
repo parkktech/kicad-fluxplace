@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(not HAVE, reason="pcbnew not available")
 
 def args(**kw):
     d = dict(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60, nodes=200000,
-             repairs=12, check_only=False)
+             repairs=12, check_only=False, no_breakout=True)   # these tests exercise the generic solver; breakout: test_breakout.py
     d.update(kw)
     return argparse.Namespace(**d)
 

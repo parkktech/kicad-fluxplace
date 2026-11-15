@@ -23,6 +23,7 @@ LINK_REACH = 2.0          # mm: largest same-net link track to a neighbour's esc
 import os
 TRACE = os.environ.get("FANOUT_TRACE")
 V2 = pcbnew.VECTOR2I
+BREAKOUT_UUID = "b4e0a7c1"                              # breakout.py marks the tracks it lays with this uuid prefix
 NM = 1e6
 
 
@@ -490,8 +491,14 @@ class Fan:
         self.pins.sort(key=lambda q: (q.ref, str_num(q.num)))
 
     def already(self, fp, p, net):
-        """a pad that already has a same-net track or via ending in it is escaped."""
-        return False
+        """a pad that already has a breakout lane (breakout.py: locked track whose uuid starts with the breakout marker, same net) ending
+        in it is escaped: the planned template was laid before the generic escape."""
+        if not hasattr(self, "_bo"):
+            self._bo = {}
+            for t in self.b.GetTracks():
+                if t.GetClass() == "PCB_TRACK" and t.m_Uuid.AsString().startswith(BREAKOUT_UUID):
+                    self._bo.setdefault(t.GetNetname(), []).append(t.GetStart())
+        return any(p.HitTest(pt) for pt in self._bo.get(net, ()))
 
     # -- candidate generation -------------------------------------------
     def part_court(self, ref):

@@ -42,3 +42,8 @@ coordinates) stops the stage with `PIN_CONFLICT` (overlap geometry + the three s
 Make a decision permanent by updating the lock. A released `[lock.at]` row also shows as `LOCK_MOVED` in review (the lock file is
 unchanged by design). Mounting-hardware-only modules stay held at their re-seated pose.
 
+
+## Breakout regions and gate
+Each dense part's breakout region is kept free of other modules' pads and holes and of other dense parts' regions; a cost term prefers
+orientations whose breakout faces open board. The run ends with the whole-board breakout gate (`BREAKOUT_PIN_BLOCKED`, exit 1;
+not waived by `--allow-incomplete`). See [../BREAKOUT.md](../BREAKOUT.md).
