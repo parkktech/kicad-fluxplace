@@ -92,6 +92,26 @@ def format_status(st):
 
 
 # ------------------------------------------------------------------ helpers
+def _unc_nets(path, conn=None):
+    """Per-net open connections of `path`: kicad-cli after refill (opengate.unconnected_nets); in-process `conn` only when
+    kicad-cli cannot read the file (synthetic fixtures)."""
+    from . import opengate as OG
+    try:
+        return OG.unconnected_nets(path)
+    except (RuntimeError, OSError, ValueError):
+        return conn(path) if conn else {}
+
+
+def _open_count(board, B):
+    """The open-connection count of a scorecard: kicad-cli after refill; when kicad-cli has no report (a board it cannot read,
+    e.g. a synthetic test fixture) the in-process count, labelled approximate by the caller's `open_approx`."""
+    from . import opengate as OG
+    try:
+        return OG.unconnected(board)
+    except (RuntimeError, OSError, ValueError):
+        return sum(RC.text_open(B).values())
+
+
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR, opengate as OG
     B = RD.load(board)
@@ -104,7 +124,7 @@ def _scorecard(board, cons, spec, waivers=()):
           "ratsnest_mm": card.get("weighted_ratsnest_mm"),
           "overflow": (card.get("congestion") or {}).get("overflow"),
           "fail": card.get("fail"),
-          "open": OG.unconnected(board)}
+          "open": _open_count(board, B)}
     sc = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in sc.items() if v is not None}
     return sc, f, codes
 
@@ -444,8 +464,11 @@ def st_route(c, n, board):
     # the ladder's guaranteed slice: whatever the rounds, their audits and post-steps overran, it still gets this long
     ladder_min = float(rc_.get("ladder_min_s", min(reserve, max(60.0, 0.1 * budget))))
 
-    def nfail(path):
-        return OG.unconnected(path)                # THE open-connection count (kicad-cli after refill), every report uses it
+    def nfail(path):                               # THE open-connection count (kicad-cli after refill); in-process only when kicad-cli
+        try:                                       # cannot read the file (synthetic fixtures)
+            return OG.unconnected(path)
+        except (RuntimeError, OSError, ValueError):
+            return sum(conn(path).values())
 
     tm = time.time()
     state = {"best": nfail(best), "timeouts": 0, "halvings": 0, "ckpts": 0}
@@ -586,7 +609,7 @@ def st_route(c, n, board):
         _sidecar(board, best)
     with open(os.path.join(d, "planetie.txt"), "w") as fh:
         fh.write("\n".join(PT.lines(ptr)) + "\n")
-    final_open = OG.unconnected_nets(best)           # per net, kicad-cli after refill: the one open-connection definition
+    final_open = _unc_nets(best, conn)               # per net, kicad-cli after refill: the one open-connection definition
     final = sorted(final_open)
     diag = None
     if final:
@@ -812,7 +835,7 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
                          plane_nets=FR.plane_nets(board, os.path.join(d, "freerouting"), planes))
     rec["out"] = out
     rec["gate"] = gate
-    rec["open_before"] = OG.unconnected(board)
+    rec["open_before"] = sum(_unc_nets(board, conn).values())
     if rec.get("ok") and FS["pairs"] == "route":         # pairs Freerouting routed itself are never reported good unaudited
         try:
             now = set(conn(out))
