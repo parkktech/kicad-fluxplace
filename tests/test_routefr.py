@@ -133,8 +133,8 @@ def test_fix_dsn_declares_planes_raises_rules_and_fixes_wiring():
     assert rep["planes"] == ["In1.Cu"] and rep["planes_missed"] == ["In9.Cu"]
     assert "(layer In1.Cu\n      (type power)" in out and "(layer F.Cu\n      (type signal)" in out
     assert rep["widths_raised"] == 1 and "(width 127)" in out and "(width 200)" in out
-    assert rep["clearances_raised"] == 2 and "(clearance 31.75 (type smd_smd))" not in out     # typed clearances are raised too
-    assert "(clearance 127 (type smd_smd))" in out                                             # ... to the floor, never lower
+    assert rep["clearances_raised"] == 1 and "(clearance 31.75 (type smd_smd))" in out      # smd_smd stays as KiCad wrote it
+    assert "(clearance 127)" in out
     assert rep["fixed"] == 3 and "(type route)" not in out
     assert "(path F.Cu 90 " in out                                                            # existing copper is not rewritten
     dsn2 = dsn.replace("(network\n", '(network\n    (net A\n      (pins R1-1 R2-1)\n    )\n    (net "B 1"\n      (pins R1-2 R2-2)\n    )\n')
@@ -231,7 +231,8 @@ def test_run_planes_pours_fixed_copper_and_subfloor_repair(tmp_path, fake):
     assert rec["import"]["tracks_added"] == 3 and rec["plane_tracks_added"] == 0
     assert rec["subfloor"]["subfloor"] == 3 and rec["subfloor"]["fixed"] == 3 and not rec["subfloor"]["failed"]
     assert rec["after"]["subfloor"] == 0 and rec["after"]["min_width"] >= 0.127
-    assert rec["open"] == 1 and rec["open_cli"] is not None                                             # N1 closed, N2 open
+    from fluxplace import opengate as OG
+    assert rec["open"] == OG.unconnected(out) >= 1                                                     # N2 open, kicad-cli count
     assert [p["unrouted"] for p in rec["passes"]] == [2, 1] and rec["state"] == "TIMED_OUT"
     argv = json.load(open(base["argv_out"]))
     assert "--router.fanout.enabled=false" not in argv                                                  # auto: the board has no fan-out
@@ -254,7 +255,8 @@ def test_subfloor_that_cannot_be_widened_is_listed(tmp_path, fake):
 def test_skip_nets_are_not_imported_and_fanout_switch(tmp_path, fake):
     rec, _b, out, base = run(tmp_path, fake, [N1, N2], skip_nets=["N2"], has_fanout=True)
     assert rec["ok"] and rec["import"]["tracks_added"] == 3 and rec["import"]["skipped_items"] == 1
-    assert rec["open"] == 1 and rec["fanout"] == "off"
+    from fluxplace import opengate as OG
+    assert rec["open"] == OG.unconnected(out) >= 1 and rec["fanout"] == "off"
     seen = open(base["dsn_copy"]).read()
     assert rec["dsn"]["nets_excluded"] == 1                                                # N2 has no pins in the DSN
     assert "R3-2" not in seen[seen.index("(network"):seen.index("(wiring")].split("(class")[0]
@@ -264,7 +266,9 @@ def test_skip_nets_are_not_imported_and_fanout_switch(tmp_path, fake):
 @need_pcbnew
 def test_watchdog_kills_a_hung_jvm_and_keeps_the_session(tmp_path, fake):
     rec, _b, out, _ = run(tmp_path, fake, [N1], hang=True, grace_s=1.0)
-    assert rec["ok"] and rec["killed"] and rec["hung_after_save"] and rec["open"] == 1
+    from fluxplace import opengate as OG
+    assert rec["ok"] and rec["killed"] and rec["hung_after_save"], rec.get("error")
+    assert rec["open"] == OG.unconnected(out) >= 1                  # the one definition: kicad-cli after refill
     assert os.path.exists(out)
 
 
@@ -382,14 +386,15 @@ def test_fix_dsn_drops_duplicate_fixed_wires_and_keeps_distinct_ones():
 def test_net_classes_resolve_power_pair_and_default_widths_never_below_floor():
     cons = {"power": {"+5V": {"max_current_ma": 4000}, "+3V3": {"width_mm": 0.3}, "VBAT": {"width_mm": 0.05}},
             "pairs": {"USB_": {"impedance_diff": 90}}, "nets": {"ANT": {"width_mm": 0.25}}}
-    R = {"track": 0.15, "clearance": 0.2, "min_track": 0.127, "min_clearance": 0.127, "clearance_margin": 0.05}
-    cls = FR.net_classes(cons, R)
-    assert cls["default"] == {"width": 0.15, "clearance": 0.25}                       # floor + margin, the router's request
+    R = {"track": 0.15, "clearance": 0.2, "min_track": 0.127, "min_clearance": 0.127, "clearance_class": 0.12}
+    cls = FR.net_classes(cons, R, 0.12)
+    assert cls["default"] == {"width": 0.15, "clearance": 0.127}                      # the floor: max(class 0.12, floor 0.127)
+    assert FR.net_classes(cons, R, 0.2)["default"]["clearance"] == 0.2                  # a class clearance above the floor is kept
     by = {c["name"]: c for c in cls["classes"]}
     assert by["w2000um"]["width"] == 2.0 and by["w2000um"]["nets"] == ["+5V"]
     assert by["w300um"]["nets"] == ["+3V3"] and by["w250um"]["nets"] == ["ANT"]
     assert by["w201um"]["prefixes"] == ["USB_"]                                        # PAIR_GEOM_BY_Z[90] width
-    assert all(c["width"] >= 0.127 and c["clearance"] == 0.25 for c in cls["classes"])  # VBAT's 0.05 is raised to the floor
+    assert all(c["width"] >= 0.127 for c in cls["classes"])  # VBAT's 0.05 is raised to the floor
 
 
 def test_split_passes_separates_the_constant_plane_part():

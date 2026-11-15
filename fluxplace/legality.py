@@ -345,6 +345,8 @@ def collisions(B, cons=None, relevance=None):
     cons = cons or {}
     sev = B.get("severities") or {}
     clr = float((cons.get("placement") or {}).get("pad_clearance_mm", B.get("clearance", 0.1)))
+    # never below the routing floor: a pad pair the router must keep apart (`[route] min_clearance_mm`) is a collision
+    clr = max(clr, float((cons.get("route") or {}).get("min_clearance_mm", 0.0) or 0.0))
     hclr = float(B.get("hole_clearance", 0.25))
     P = B["parts"]
     hits = defaultdict(lambda: defaultdict(list))         # key -> kind -> [example]

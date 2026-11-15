@@ -189,7 +189,7 @@ def _section(text, key):
 
 
 def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0, skip_nets=()):
-    """-> (text, report): planes declared power, rule widths / EVERY clearance (untyped and typed) raised to the floors (mm),
+    """-> (text, report): planes declared power, rule widths / every clearance EXCEPT smd_smd raised to the floors (mm),
     every wire and via of the wiring section `(type fix)`, the pins of `skip_nets` taken off their nets (the router
     then has nothing to connect there and treats the pads as obstacles; the nets stay open for the caller)."""
     rep = {"planes": [], "planes_missed": [], "widths_raised": 0, "clearances_raised": 0, "fixed": 0, "already_fixed": 0,
@@ -212,6 +212,10 @@ def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0, skip_nets=())
         lim = floor_mm * per_mm
 
         def sub(mo):
+            # the smd_smd rule governs SMD-pad to SMD-pad spacing only: KiCad writes it small on purpose (fine-pitch
+            # footprints), that spacing is fixed by the footprint, not by the router.  It stays as exported.
+            if key == "clearance" and re.match(r"\s*\(type\s+smd_smd\)", mo.string[mo.end():mo.end() + 40]):
+                return mo.group(0)
             if float(mo.group(2)) + 1e-9 < lim:
                 rep[count_key] += 1
                 return f"{mo.group(1)}{lim:g}"
@@ -402,7 +406,7 @@ def repair_subfloor(board, workdir, floor, clearance, out=None):
 
 
 # ------------------------------------------------------------------ the run
-def net_classes(cons, R):
+def net_classes(cons, R, class_clearance=0.0):
     """The DSN net classes from the resolved rules (mm): default = the router track width, every class clearance =
     the clearance the router is given (floor + margin, RR.request_clearance).  Classes: one per distinct power width
     (`[power.N]` width_mm / max_current_ma, else the track default) and one per controlled pair family (`[pairs.F]`
@@ -410,7 +414,7 @@ def net_classes(cons, R):
     class.  No width is ever below the track floor."""
     from . import constraints as C
     from . import routerules as RR
-    clr = RR.request_clearance(R)
+    clr = RR.request_clearance(R)                # the floor (class clearance above it is kept per class)
     floor_w = R["min_track"]
     cons = cons or {}
     by_w = {}                                    # width (mm) -> {"nets": [...], "prefixes": [...]}
@@ -431,7 +435,9 @@ def net_classes(cons, R):
             add(float(v["width_mm"]), nets=[net])
     classes = [{"name": f"w{int(round(w * 1000))}um", "width": w, "clearance": clr, "nets": e["nets"], "prefixes": e["prefixes"]}
                for w, e in sorted(by_w.items()) if w != round(R["track"], 4)]
-    return {"default": {"width": max(R["track"], floor_w), "clearance": clr}, "classes": classes}
+    for c in classes:
+        c["clearance"] = max(c["clearance"], float(class_clearance or 0.0))
+    return {"default": {"width": max(R["track"], floor_w), "clearance": max(clr, float(class_clearance or 0.0))}, "classes": classes}
 
 
 _LOAD_FR = re.compile(r"\*\s+(\d+) (pin-to-pin|fixed trace/via) clearance violation")
@@ -477,6 +483,27 @@ def copper_clearance(drc):
         req = re.search(r"(?:clearance|netclass '[^']*' clearance) ([\d.]+) mm", d)
         out.append({"items": [{"desc": i.get("description"), "uuid": i.get("uuid"), "x": i["pos"]["x"], "y": i["pos"]["y"]} for i in its],
                     "actual": float(act.group(1)) if act else None, "required": float(req.group(1)) if req else None})
+    return out
+
+
+def subfloor_copper(board, workdir, classes, floor, drc_cli="kicad-cli"):
+    """Copper-to-copper clearance violations below the floor on `board` (kicad-cli DRC, zone fills excluded), with the
+    resolved class clearances: [{kinds, actual, required, nets}].  Used to find WHERE sub-floor copper is made."""
+    os.makedirs(workdir, exist_ok=True)
+    cp = os.path.join(workdir, "subfloor.kicad_pcb")
+    shutil.copy(board, cp)
+    gate_pro(os.path.splitext(board)[0] + ".kicad_pro", os.path.splitext(cp)[0] + ".kicad_pro", classes)
+    with tempfile.TemporaryDirectory() as td:
+        o = os.path.join(td, "drc.json")
+        subprocess.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones",
+                        "-o", o, cp], capture_output=True, text=True, timeout=900)
+        d = json.load(open(o)) if os.path.exists(o) else {"violations": []}
+    out = []
+    for v in copper_clearance(d):
+        if v["actual"] is None or v["actual"] + 1e-9 >= floor:
+            continue
+        kinds = sorted(re.sub(r" \[.*", "", i["desc"] or "") for i in v["items"])
+        out.append({"kinds": [k.split(" on ")[0] for k in kinds], "actual": v["actual"], "required": v["required"]})
     return out
 
 
@@ -617,14 +644,15 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
         dsn_board = os.path.join(workdir, "dsn.kicad_pcb")
         _side(board, dsn_board)
         rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes), "netclasses": classes}, workdir)
-        plane_open = 0
-        if conn and plane_nets:
-            plane_open = sum(v for n, v in conn(board).items() if n in set(plane_nets))
+        # every count below is THE open-connection definition (opengate.unconnected_nets: kicad-cli after refill), taken
+        # on the stripped chain the segments run on, so the segments are compared with each other on one basis
+        from . import opengate as OG
+        base_nets = OG.unconnected_nets(dsn_board)
+        plane_open = sum(v for n, v in base_nets.items() if n in set(plane_nets))
         rec["plane_open"] = plane_open
         cur, passes, stale, best, stop, state, jvm_s, starts = dsn_board, [], 0, None, None, None, 0.0, []
         best_seg_pass = 0
-        if conn:                                            # baseline: the input board's signal count, measured the same way
-            best = max(0, sum(conn(dsn_board).values()) - plane_open)
+        best = max(0, sum(base_nets.values()) - plane_open)     # baseline: the input chain's signal count
         rec["segments"] = []
         for k in range(100000):
             seg = os.path.join(workdir, f"seg{k:03d}")
@@ -680,12 +708,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             # session it writes is the state it ends in.  So the segment is ACCEPTED only when the imported board
             # measures fewer signal open connections than the best accepted board (pcbnew, zones filled).
             # Without `conn` the Freerouting count of the segment's last pass is used instead.
-            if conn:
-                meas = max(0, sum(conn(nxt).values()) - plane_open)
-            elif log["passes"]:
-                meas = max(0, log["passes"][-1]["unrouted"] - plane_open)
-            else:
-                meas = None
+            meas = max(0, OG.unconnected(nxt) - plane_open)
             acc = meas is not None and (best is None or meas < best)
             if acc:
                 best, stale, cur = meas, 0, nxt
@@ -728,21 +751,21 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
                              vias_added=sum(x.get("vias_added", 0) for x in imps))
         rec["subfloor"] = repair_subfloor(tmp, workdir, floor_track, floor_clearance) if floor_track else \
             {"subfloor": 0, "locked": 0, "fixed": 0, "failed": [], "widths": []}
+        if post and floor_clearance:                       # where sub-floor copper comes from: before the snap/join step, and after it
+            cl = classes or {"default": {"width": floor_track, "clearance": floor_clearance}, "classes": []}
+            rec["subfloor_before_post"] = subfloor_copper(tmp, os.path.join(workdir, "sub-pre"), cl, floor_clearance)
         if post:
             rec["post"] = {k: v for k, v in post(tmp).items() if k in ("snapped", "joined", "reverted", "error")}
             from . import opengate as OG
             OG.refill(tmp)
+        if post and floor_clearance:
+            rec["subfloor_after_post"] = subfloor_copper(tmp, os.path.join(workdir, "sub-post"), cl, floor_clearance)
         fp1 = fingerprint(tmp, workdir, floor_track, planes)
         rec["after"] = fp1
         rec["locked_same"] = fp0["locked"] == fp1["locked"] and fp0["locked_hash"] == fp1["locked_hash"]
         rec["plane_tracks_added"] = fp1["plane_tracks"] - fp0["plane_tracks"]
         if conn:
-            rec["open"] = sum(conn(tmp).values())
-            try:
-                from . import opengate as OG
-                rec["open_cli"] = OG._drc(tmp, False)["unconnected"]     # the saved fills, as kicad-cli sees the file
-            except Exception as e:                                         # noqa: BLE001
-                rec["open_cli"], rec["open_cli_error"] = None, str(e)[:100]
+            rec["open"] = OG.unconnected(tmp)
         os.replace(tmp, out)
         _side(board, out)
         for f in (os.path.splitext(tmp)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_prl"):
@@ -782,7 +805,7 @@ def state_record(rec):
     """The small form kept in state.json: jar, version, flags, pass curve [[pass, min, unrouted, violations]], the counts."""
     sf = rec.get("subfloor") or {}
     out = {"jar": rec.get("jar"), "v": rec.get("version"), "flags": rec.get("flags"), "ok": bool(rec.get("ok")),
-           "curve": curve(rec.get("passes") or [], 5), "open": [rec.get("open_before"), rec.get("open"), rec.get("open_cli")],
+           "curve": curve(rec.get("passes") or [], 5), "open": [rec.get("open_before"), rec.get("open")],
            "subfloor": [sf.get("subfloor", 0), sf.get("fixed", 0), len(sf.get("failed") or [])],
            "locked_same": rec.get("locked_same")}
     return {k: v for k, v in out.items() if v is not None}

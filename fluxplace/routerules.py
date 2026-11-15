@@ -85,7 +85,8 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
             R["grid"] = 0.05 if fine_pitch(B) else 0.1
         except Exception:
             R["grid"] = 0.1
-    R["clearance_margin"] = float(r.get("clearance_margin_mm", R["grid"])) if R["min_clearance"] else 0.0
+    R["clearance_margin"] = float(r.get("clearance_margin_mm", R["grid"])) if R["min_clearance"] else 0.0   # informational only
+    R["clearance_class"] = _pro_class_clearance(board)            # the board's Default net class clearance (0 = none)
     R["escalation"] = str(r.get("escalation", "off"))
     R["strict_sizes"] = bool(r.get("strict_sizes", True))
     R["mode"] = str(r.get("mode", "serial")).lower()
@@ -134,10 +135,23 @@ def flags(R, krt_dir, workdir, script="route.py"):
     return out
 
 
+def _pro_class_clearance(board):
+    try:
+        pro = os.path.splitext(board)[0] + ".kicad_pro"
+        for c in json.load(open(pro))["net_settings"]["classes"]:
+            if c.get("name") == "Default":
+                return float(c.get("clearance") or 0.0)
+    except (OSError, KeyError, ValueError, TypeError):
+        pass
+    return 0.0
+
+
 def request_clearance(R):
-    """Clearance asked of the router: default clearance + `[route] clearance_margin_mm` (default one grid step) when a
-    floor is set. The router lands up to a grid step closer to copper than asked; the audit keeps the floor unchanged."""
-    return R["clearance"] + (R.get("clearance_margin") or 0.0)
+    """THE clearance the router, fan-out and pair stages all use: exactly the floor, max(class clearance, [route] floor).
+    No margin is added: the floor already is the owner's margin over the fab minimum.  The router applies it to the
+    untyped rule and every typed rule; class clearances above the floor are kept (net_classes)."""
+    floor = R.get("min_clearance") or 0.0
+    return max(floor, R.get("clearance_class") or 0.0) if floor else R["clearance"]
 
 
 def size_args(R):

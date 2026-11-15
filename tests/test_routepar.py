@@ -55,7 +55,7 @@ def test_pipeline_route_cmd_carries_the_rules(tmp_path):
     cmd = PL._route_cmd(a, board, "o.kicad_pcb", ["A"], limited=True, R=R, rflags=RR.flags(R, str(krt), str(tmp_path)))
     j = " ".join(cmd)
     assert "--fab-overrides" in j and "--same-net-pad-clearance=0.2" in j and "--track-width 0.127" in j
-    assert float(cmd[cmd.index("--clearance") + 1]) == round(0.127 + R["grid"], 6) and cmd[-2:] == ["--nets", "A"]
+    assert float(cmd[cmd.index("--clearance") + 1]) == 0.127 and cmd[-2:] == ["--nets", "A"]
 
 
 # ---------------------------------------------------------------- audit
@@ -289,10 +289,10 @@ def test_clearance_margin_requested_floor_kept(tmp_path):
     board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
     R = RR.rules(CONS, board, 0.15, 0.2)
     assert R["clearance_margin"] == R["grid"] and R["min_clearance"] == 0.127
-    assert abs(RR.request_clearance(R) - (0.2 + R["grid"])) < 1e-9                  # default clearance + one grid step
-    assert RR.size_args(R)[3] == f"{0.2 + R['grid']:g}"
+    assert abs(RR.request_clearance(R) - 0.127) < 1e-9                              # exactly the floor: no margin is added
+    assert RR.size_args(R)[3] == "0.127"
     R2 = RR.rules(dict(CONS, route={"clearance_margin_mm": 0.03}), board, 0.15, 0.2)
-    assert abs(RR.request_clearance(R2) - 0.23) < 1e-9 and R2["min_clearance"] == 0.127   # the audit floor is unchanged
+    assert abs(RR.request_clearance(R2) - 0.127) < 1e-9 and R2["min_clearance"] == 0.127   # the margin key does not move the request
     assert RR.rules({}, board, 0.15, 0.2)["clearance_margin"] == 0.0                # no floor, no margin
     krt = tmp_path / "krt"
     (krt / "py_router").mkdir(parents=True)

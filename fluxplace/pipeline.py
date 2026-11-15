@@ -93,7 +93,7 @@ def format_status(st):
 
 # ------------------------------------------------------------------ helpers
 def _scorecard(board, cons, spec, waivers=()):
-    from . import routediag as RD, preroute as PR
+    from . import routediag as RD, preroute as PR, opengate as OG
     B = RD.load(board)
     f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board))
     codes = {}
@@ -104,7 +104,7 @@ def _scorecard(board, cons, spec, waivers=()):
           "ratsnest_mm": card.get("weighted_ratsnest_mm"),
           "overflow": (card.get("congestion") or {}).get("overflow"),
           "fail": card.get("fail"),
-          "open": sum(RC.text_open(B).values())}
+          "open": OG.unconnected(board)}
     sc = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in sc.items() if v is not None}
     return sc, f, codes
 
@@ -387,7 +387,7 @@ def st_route(c, n, board):
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
     stall loop. Time-boxed by --route-budget; the result is never less routed than the input."""
     from . import routediag as RD, routestatus as RS, stall as ST, netclass as NC, batchroute as BR
-    from . import routerules as RR, routepar as RP
+    from . import routerules as RR, routepar as RP, opengate as OG
     a = c.a
     col = _collision_report(c, c.dir(n, "route"), board)  # fast copper-collision gate: seconds, before any router hour
     if col["fail"] and not a.force:
@@ -445,7 +445,7 @@ def st_route(c, n, board):
     ladder_min = float(rc_.get("ladder_min_s", min(reserve, max(60.0, 0.1 * budget))))
 
     def nfail(path):
-        return sum(conn(path).values())            # open connections (real connectivity), not "nets without copper"
+        return OG.unconnected(path)                # THE open-connection count (kicad-cli after refill), every report uses it
 
     tm = time.time()
     state = {"best": nfail(best), "timeouts": 0, "halvings": 0, "ckpts": 0}
@@ -556,7 +556,7 @@ def st_route(c, n, board):
     from . import routefr as FR_
     times["ladder_end"] = round(time.time() - t0)
     post_round(best)                                   # the board as it ends: snapped, gaps joined
-    final_open = conn(best)
+    final_open = OG.unconnected_nets(best)           # per net, kicad-cli after refill: the same total every report shows
     final = sorted(final_open)
     diag = None
     if final:
@@ -655,7 +655,7 @@ def st_route(c, n, board):
 def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
     from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
-    from . import routerules as RR
+    from . import routerules as RR, opengate as OG
     a = c.a
     try:
         FS = FR.settings(c.cons, threads=getattr(a, "freerouting_threads", None))
@@ -680,18 +680,18 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     # pre-route gate: the pre-placed copper must already clear the rules the router is given (zero load-time violations);
     # unlocked stubs that do not are removed here so the router redoes them, locked copper is reported
     gated = os.path.join(d, "gated.kicad_pcb")
-    gate = FR.preroute_gate(board, os.path.join(fdir, "gate"), loc=a.fr_loc, S=FS, classes=FR.net_classes(c.cons, R), out=gated,
+    gate = FR.preroute_gate(board, os.path.join(fdir, "gate"), loc=a.fr_loc, S=FS, classes=FR.net_classes(c.cons, R, R["clearance_class"]), out=gated,
                             planes=planes)
     gate["log"] = FR.gate_summary(gate)
     board = gated
     rec = FR.route_board(board, out, fdir, loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
                          floor_clearance=RR.request_clearance(R) if R["min_clearance"] else 0.0, budget_s=fb, S=FS, cons=c.cons,
                          skip_nets=skip, has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick,
-                         classes=FR.net_classes(c.cons, R),
+                         classes=FR.net_classes(c.cons, R, R["clearance_class"]),
                          plane_nets=FR.plane_nets(board, os.path.join(d, "freerouting"), planes))
     rec["out"] = out
     rec["gate"] = gate
-    rec["open_before"] = sum(conn(board).values())
+    rec["open_before"] = OG.unconnected(board)
     if rec.get("ok") and FS["pairs"] == "route":         # pairs Freerouting routed itself are never reported good unaudited
         try:
             now = set(conn(out))
@@ -792,7 +792,7 @@ def st_fanout(c, n, board):
     out = os.path.join(d, "board.kicad_pcb")
     pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
     snv = ["--same-net-via-spacing", RR.same_net_via_spacing(c.cons, getattr(c.a, "router_name", None))]     # [route] same_net_via_spacing, else by the router
-    # the copper must clear the clearance the router is given (routerules.request_clearance: max(clearance, floor) + margin)
+    # the copper must clear the clearance the router is given (routerules.request_clearance: the floor)
     R = RR.rules(c.cons, board, c.a.track, c.a.clearance)
     clr = ["--clearance", f"{RR.request_clearance(R):g}"] if R["min_clearance"] else []
     rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + snv + clr + c.cs() + c.qs(),

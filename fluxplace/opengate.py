@@ -64,6 +64,43 @@ def _drc(board, refill_zones, cli="kicad-cli"):
     return {"unconnected": len(d.get("unconnected_items", [])), "zone_clearance": zc}
 
 
+_UNC = {}
+
+
+def unconnected_nets(board, cli="kicad-cli"):
+    """THE open-connection count of every report: kicad-cli DRC `unconnected_items` AFTER a zone refill, per net
+    (a net's name is read from its pad/track descriptions).  -> Counter {net: count}; sum = the total.
+    Cached per (file, mtime, size) so a stage that reports it twice pays once."""
+    from collections import Counter
+    st = os.stat(board)
+    key = (os.path.abspath(board), st.st_mtime_ns, st.st_size)
+    if key in _UNC:
+        return Counter(_UNC[key])
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "drc.json")
+        subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones",
+                        "-o", out, board], capture_output=True, text=True, timeout=900)
+        if not os.path.exists(out):
+            raise RuntimeError("kicad-cli drc produced no report")
+        d = json.load(open(out))
+    c = Counter()
+    for v in d.get("unconnected_items", []):
+        net = None
+        for it in v.get("items", []):
+            m = re.search(r"\[([^\]]*)\]", it.get("description") or "")
+            if m:
+                net = m.group(1)
+                break
+        c[net or "?"] += 1
+    _UNC[key] = dict(c)
+    return c
+
+
+def unconnected(board, cli="kicad-cli"):
+    """The total open connections (see unconnected_nets)."""
+    return sum(unconnected_nets(board, cli).values())
+
+
 def connections(clusters):
     """{net: [[pad dict]...]} -> [{net, a, b, mm}]: per net the minimum spanning tree over its clusters (closest pad pair)."""
     out = []
@@ -117,15 +154,17 @@ def _pad(p):
 
 
 def findings(m, level="FAIL"):
-    """review findings from `measure` -> [{level, code, msg, refs}]."""
+    """review findings from `measure` -> [{level, code, msg, refs}].  The UNROUTED TOTAL is kicad-cli's count after a
+    refill when it ran (the one open-connection definition every report uses); the pcbnew connections are listed beneath
+    it for location.  A total of 0 means no UNROUTED finding, whatever pcbnew's clusters say."""
     out = []
-    for c in m["connections"]:
-        out.append({"level": level, "code": "UNROUTED", "refs": sorted({c["net"], c["a"]["ref"], c["b"]["ref"]}),
-                    "msg": f"{c['net']}: {_pad(c['a'])} - {_pad(c['b'])} not connected ({c['mm']} mm apart)"})
-    x = m.get("cli_fresh")
-    if x is not None and x != m["fresh"] and not m["stale"]:
+    total = m.get("cli_fresh") if m.get("cli_fresh") is not None else m["fresh"]
+    if total:
+        for c in m["connections"]:
+            out.append({"level": level, "code": "UNROUTED", "refs": sorted({c["net"], c["a"]["ref"], c["b"]["ref"]}),
+                        "msg": f"{c['net']}: {_pad(c['a'])} - {_pad(c['b'])} not connected ({c['mm']} mm apart)"})
         out.append({"level": level, "code": "UNROUTED", "refs": [],
-                    "msg": f"kicad-cli counts {x} unconnected after a refill, pcbnew {m['fresh']}: use the larger"})
+                    "msg": f"{total} open connection(s), kicad-cli after a refill ({len(m['connections'])} pcbnew cluster pair(s) listed)"})
     if m["stale"]:
         out.append({"level": level, "code": "STALE_FILL", "refs": [],
                     "msg": "saved zone fills are stale (" + "; ".join(m["stale"]) + "): refill zones in KiCad (B) and save, "
