@@ -3569,6 +3569,9 @@ def build_parser():
     prd.add_argument("--spec", default=None, help="spec JSON (pin names)")
     prd.set_defaults(fn=cmd_route_diagnose)
 
+    from fluxplace import hrcli as _hrcli
+    _hrcli.register(sub)
+
     pac = sub.add_parser("anchor-check",
                          help="evaluate every allowed rotation of each connector/module/socket "
                               "and flag ANCHOR_MISORIENTED")
@@ -4066,7 +4069,7 @@ def _silk_hook(a):
 
 # commands that never write a board: no connectivity snapshot is taken for them
 _GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
-                    "floorplan-check", "rules", "analyze", "comprehend"}
+                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session"}
 
 
 def _guard_ledger_on(a):
