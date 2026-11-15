@@ -484,20 +484,26 @@ def st_route(c, n, board):
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
-    if rname == "freerouting" and todo:
+    resume = _resume_finish(a, d, board, best) if have_krt else None    # --from route: continue the finish step on the leftovers
+    if resume:
+        todo = sorted(conn(best))
+        state["best"] = state["start"] = sum(conn(best).values())
+    if rname == "freerouting" and todo and not resume:
+        # the finish step (per-net rounds + ladder) is guaranteed `[route] finish_share` of the budget: the router segment is cut to fit
         frrec = _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath,
-                             lambda: budget - ladder_min - (time.time() - t0), budget, claimer_runs=have_krt)
+                             lambda: BR.router_cap(budget, ladder_min, S["finish_share"], time.time() - t0), budget, claimer_runs=have_krt)
         if frrec.get("unowned"):                       # FAIL before any router hour: a skipped net nobody will route
             return {"verdict": "fail", "board": board, "line": frrec["error"],
                     "next": ["route-owners: fix the net exclusion or enable the per-net router (--router-dir)"]}
         if frrec.get("ok"):
             b0 = state["best"]
             frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
-    start_board = best if frrec else board             # hybrid finish: what Freerouting left goes to the per-net router
-    if frrec:
+    hybrid = bool(frrec or resume)
+    start_board = best if hybrid else board            # hybrid finish: what Freerouting left goes to the per-net router
+    if hybrid:
         B = RD.load(start_board)                       # the audit baseline is the board the router starts from, not the pre-Freerouting one:
         #                                                else every Freerouting track/via is "new copper" the batch audit rejects (CLEARANCE)
-    rtodo = sorted(conn(best)) if frrec else todo
+    rtodo = sorted(conn(best)) if hybrid else todo
     res = {"timeouts": 0, "halvings": 0, "checkpoints": [], "board": None, "leftovers": rtodo}
     if not have_krt or not rtodo:
         pass
@@ -508,7 +514,7 @@ def st_route(c, n, board):
     else:
         res = BR.route_batches(start_board, d, rtodo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                total_budget=left_rounds(), status_path=spath, extra=extra, log=lambda m: None,
-                               rules=R, conn=conn)
+                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()))
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
     state["ckpts"] += len(res["checkpoints"])
@@ -631,11 +637,19 @@ def st_route(c, n, board):
     warn = RPO2.gate_line(post_info)
     if warn:
         line += "; " + warn.split(" (")[0]
+    fin = None
+    if res.get("untried") is not None:
+        fin = {"untried": len(res["untried"]), "tried_failed": len(res["tried_failed"]), "untried_nets": res["untried"][:40],
+               "tried_failed_nets": res["tried_failed"][:40], "resumed": bool(resume)}
+        line += f", finish: {fin['untried']} net(s) untried (budget), {fin['tried_failed']} tried and failed" + (" [resumed]" if resume else "")
+    _save_resume(a, d, board, best, res)
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
+    if fin:
+        out["finish"] = fin
     with open(os.path.join(d, "result.json"), "w") as fh:
         json.dump({"line": line, "router": rname, "times": times, "open_start": state["start"], "open_end": sum(final_open.values()),
                    "freerouting": {k: v for k, v in (frrec or {}).items() if k != "passes"} or None,
-                   "ladder": ladder["rungs"] if ladder else None}, fh, indent=1)
+                   "finish": fin, "ladder": ladder["rungs"] if ladder else None}, fh, indent=1)
     if not have_krt:
         out.setdefault("next", []).append("per-net router (KiCadRoutingTools) not found: no hybrid finish, no ladder; pass --router-dir")
     if frrec:
@@ -685,6 +699,44 @@ def st_route(c, n, board):
     return out
 
 
+def _sha(path):
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _save_resume(a, d, board, best, res):
+    """what `pipeline --from route` needs to continue the finish step: the stage input's hash, a copy of the board as the
+    step ends and the nets it tried and failed on (`finish_resume.json`); never fatal."""
+    try:
+        keep = os.path.join(d, "resume.kicad_pcb")
+        shutil.copy(best, keep)
+        _sidecar(board, keep)
+        with open(os.path.join(d, "finish_resume.json"), "w") as fh:
+            json.dump({"input": _sha(board), "board": keep, "untried": res.get("untried", []), "tried_failed": res.get("tried_failed", [])}, fh, indent=1)
+    except OSError:
+        pass
+
+
+def _resume_finish(a, d, board, best):
+    """`pipeline --from route` with a finish record of the same input: the router is not run again; the finish step continues on the
+    board it ended with (`best` is overwritten with it).  -> the record, or None."""
+    if getattr(a, "from_stage", None) != "route" or getattr(a, "no_resume", False):
+        return None
+    try:
+        rec = json.load(open(os.path.join(d, "finish_resume.json")))
+        if rec["input"] != _sha(board) or not os.path.exists(rec["board"]) or not (rec.get("untried") or rec.get("tried_failed")):
+            return None
+        shutil.copy(rec["board"], best)
+        _sidecar(rec["board"], best)
+        return rec
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget, claimer_runs=True):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
     from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
@@ -698,7 +750,9 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     # from the DSN copy and refilled around the new copper.
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
-    skip = [n for n in todo if n in ctl] if FS["pairs"] == "exclude" else []
+    from . import pairfb as PFB
+    hand = PFB.handoff_nets(c.state, c.work)             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
+    skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)
     if bad:

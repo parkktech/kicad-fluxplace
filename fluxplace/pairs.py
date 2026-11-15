@@ -39,7 +39,10 @@ def params(cons):
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
             "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
             "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
-            "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1)))}
+            "neg_passes": int(e.get("negotiate_passes", 8)), "workers": int(e.get("workers", min(8, os.cpu_count() or 1))),
+            "skew_frac": float(e.get("skew_frac", 0.85)), "max_uncoupled": float(e.get("max_uncoupled_mm", 0.0)),
+            "keep_partial": e.get("keep_partial", False) is True, "fallback": e.get("fallback", True) is not False,
+            "rip_stubs": e.get("rip_fanout_stubs", True) is not False, "fb_trials": int(e.get("fallback_trials", 12))}
 
 
 def project_classes(board):
@@ -287,7 +290,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
                 cp, left_mm = PL.bump(items, cp, nets[0], -skew, pol, clr, ctx["skip"], 0, len(cp), hmax=max(0.6, min(2.0, abs(skew) / 6)))
         Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
         items.rollback(mark)
-        if left_mm > 0.85 * ctx["limit"](nets[0]):          # out of tolerance (or marginal) copper is not locked in: the router keeps the pair
+        if left_mm > P["skew_frac"] * ctx["limit"](nets[0]):          # out of tolerance (or marginal) copper is not locked in: the router keeps the pair
             reason, blockers = f"skew {left_mm:.2f} mm over the {ctx['limit'](nets[0]):g} mm limit after compensation (break-outs of unequal length, no room for bumps)", []
             banned |= _ban(states[0], grid, 0.3) | _ban(states[-1], grid, 0.3)
             continue
@@ -611,7 +614,7 @@ def _section(ctx, D, O, ta, tb, rule, pr, plan_only, preset=None):
         if r is None:
             r = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, preset=preset[1:] if pk == k else None)
             if not r["ok"] and k == 0 and "search budget" not in r["reason"]:          # a longer uncoupled break-out: gates further out
-                r2 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, ring=3 * P["ring"])
+                r2 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, ring=max(3 * P["ring"], P["max_uncoupled"]))
                 r = r2 if r2["ok"] else r
         if not r["ok"] and k == 0 and d < 3.0 and not plan_only:
             r = direct_section(ctx, a, b, rule, pr) or r
@@ -867,8 +870,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             best = st
     for pr in best["order"]:
         c = best["res"][pr]
+        c["e"]["key"] = [key[pr][0], key[pr][1], round(key[pr][2], 3)]
         res["pairs"].append(c["e"])
-        if c["nok"] and not plan_only:
+        if c["nok"] and not plan_only and (c["full"] or P["keep_partial"]):   # a half-laid pair is no state: its copper is not written
             for net, pcs in c["pcs"].items():
                 res["laid"][net] = res["laid"].get(net, []) + pcs
             res["keep"] += c["keep"]
@@ -1010,7 +1014,7 @@ def write(board, out, res, drill_of):
     return len(blks), len(keys)
 
 
-def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None):
+def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None, fallback=True, cs_args=None):
     """plan (and with `out`, write) -> report dict: complete / total, per pair length, skew, vias, layers, reasons."""
     from . import routediag as RD, pairaudit as PA, routeconn as RC, constraints as C, routerules as RR
     cons = cons or {}
@@ -1058,7 +1062,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
         row = {"pair": e["pair"], "class": e["class"], "width": e["width"], "gap": e["gap"], "span": e["span"], "plan": e["status"],
                "why": e.get("why", ""), "blockers": e.get("blockers", []), "sections": e["sections"], "secs": e.get("secs", 0),
                "unpaired": e.get("unpaired", []), "netlist": {n: [f"{q['ref']}.{q['num']}" + (f" ({B2['parts'][q['ref']]['value']})" if B2["parts"].get(q["ref"], {}).get("value") else "")
-                                                                 for q in B2["pads"] if q["net"] == n and not q.get("np")] for n in pr}, "limit": C.skew_limit_checked(cons, pr[0])[0], "limit_from": C.skew_limit_checked(cons, pr[0])[1], "geometry": e.get("geometry", {}),
+                                                                 for q in B2["pads"] if q["net"] == n and not q.get("np")] for n in pr}, "limit": C.skew_limit_checked(cons, pr[0])[0], "limit_from": C.skew_limit_checked(cons, pr[0])[1], "geometry": e.get("geometry", {}), "key": e.get("key"),
                "via_exit": sorted({x for s in e["sections"] for x in s.get("via_exit", [])}), "open": [opn.get(pr[0], 0), opn.get(pr[1], 0)]}
         if rep["plan_only"]:
             row["status"] = "planned" if e["status"] in ("planned", "kept") else "not-planned"
@@ -1075,6 +1079,21 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     good = ("planned",) if rep["plan_only"] else ("complete",)
     rep["complete"] = sum(1 for r in rep["pairs"] if r["status"] in good)
     rep["total"] = len(rep["pairs"])
+    if not rep["plan_only"] and fallback and out:
+        from . import pairfb as FB
+        FB.assign_states(rep)
+        if FB.pending(rep):
+            FB.ladder(rep, out, cons, spec, P, run, cs_args=cs_args, escape=(lambda b, nets: _escape(b, nets, cs_args, log)) if cs_args else None, log=log)
+            if rep["fallback"]["steps"] or any(r.get("state") == "c" for r in rep["pairs"]):
+                B2 = RD.load(out)
+                opn = RC.text_open(B2)
+                aud = PA.audit(B2, [tuple(r["pair"]) for r in rep["pairs"]], cons, {n for n, k in opn.items() if k})
+                for r in rep["pairs"]:
+                    r["open"] = [opn.get(r["pair"][0], 0), opn.get(r["pair"][1], 0)]
+                    r["status"] = aud[tuple(r["pair"])]["status"] if r.get("state") not in ("c",) else r["status"]
+        rep["complete"] = sum(1 for r in rep["pairs"] if r["status"] == "complete")
+        rep["states"] = {k: sum(1 for r in rep["pairs"] if r.get("state") == k) for k in FB.STATES + ("a-mismatch",)}
+        rep["handoff"] = sorted(n for r in rep["pairs"] if r.get("handoff") for n in r["pair"])
     rep["verdict"] = "PAIRS_OK" if rep["complete"] == rep["total"] else "PAIRS_WARN"
     return rep
 
@@ -1085,12 +1104,18 @@ def format_text(rep, top=None):
            + (f", negotiation {rep['negotiation']['passes']} pass(es) {rep['negotiation']['secs']} s on {rep['negotiation']['workers']} worker(s)" if rep.get("negotiation") else "")
            + (f"; {rep.get('added', 0)} locked items written, {rep.get('removed', 0)} fan-out items replaced" if not rep["plan_only"] else "")]
     rows = sorted(rep["pairs"], key=lambda r: (r["status"] in ("complete", "planned"), r["pair"]))
+    if rep.get("states"):
+        out.append("pairs states: " + ", ".join(f"{k} {v}" for k, v in rep["states"].items() if v)
+                   + (f"; fallback {rep['fallback']['secs']} s" if rep.get("fallback") else "")
+                   + (f"; {len(rep['handoff']) // 2} pair(s) handed to the router as ordinary nets (c)" if rep.get("handoff") else ""))
     for r in rows[: top or len(rows)]:
         nm = "/".join(r["pair"])
-        if r["status"] == "complete" and "length" in r:
+        if r.get("handoff"):
+            out.append(f"PAIR_HANDOFF {nm} [c] to the general router as two ordinary nets of class {r['class']}; tried {', '.join(r.get('tried', [])) or '-'}; {r['why'] or 'open'}")
+        elif r["status"] == "complete" and "length" in r:
             inner = sorted({f"{l[:-3]} {g['width']:g}/{g['gap']:g} ({g['from']})" for l, g in r.get("geometry", {}).items()
                             if l in r["layers"] and g["from"] != "class"})
-            out.append(f"  {nm}: complete {r['length'][0]:.2f} / {r['length'][1]:.2f} mm, skew {r['skew']:.3f} (limit {r['limit']:g} {r.get('limit_from', '')}), "
+            out.append(f"  {nm}: {'[' + r['state'] + '] ' if r.get('state') else ''}complete {r['length'][0]:.2f} / {r['length'][1]:.2f} mm, skew {r['skew']:.3f} (limit {r['limit']:g} {r.get('limit_from', '')}), "
                        f"{r['vias']} via(s), {'>'.join(l[:-3] for l in r['layers']) or '-'}, {r['width']:g}/{r['gap']:g} {r['class']}"
                        + (f", {'; '.join(inner)}" if inner else "") + (f", exit via {' '.join(r['via_exit'])}" if r.get("via_exit") else "")
                        + f", {r.get('secs', 0)} s" + (" [kept]" if r["plan"] == "kept" else ""))
@@ -1119,6 +1144,33 @@ def pad_questions(rep, board, cons, answers=None, assume=False):
     return S
 
 
+def _escape(board, nets, cs_args, log=lambda m: None):
+    """ordinary fan-out escapes for the pins of `nets` on `board` (edited in place) -> {nets, required, escaped, blocked}."""
+    import shutil
+    out = {}
+    import cli
+    import contextlib
+    import io
+    tmp = os.path.splitext(board)[0] + ".completion.kicad_pcb"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        try:
+            cli.main(["fanout", board, "--out", tmp, "--nets", ",".join(nets), "--no-drc"] + list(cs_args))
+        except SystemExit:
+            pass
+    log(buf.getvalue())
+    fj = os.path.splitext(tmp)[0] + ".fanout.json"
+    if os.path.exists(tmp) and os.path.exists(fj):
+        d = json.load(open(fj))
+        out.update(nets=len(nets), required=d.get("required", 0), escaped=d.get("escaped", 0),
+                   blocked=[f"{p['ref']}.{p['pin']} {p['net']}" for p in d.get("blocked", [])])
+        shutil.move(tmp, board)
+        x = os.path.splitext(tmp)[0] + ".fanout.json"
+        if os.path.exists(x):
+            shutil.move(x, os.path.splitext(board)[0] + ".completion.fanout.json")
+    return out
+
+
 def complete_fanout(board, src_board, cs_args, cons, spec, rep, log=lambda m: None):
     """after the pairs are laid: ordinary escapes for the pads of the pairs that were NOT laid (their pads were left to this
     stage by the pair-aware fan-out), and one more try (fanalt.py) for the pins the fan-out left blocked - the real pair copper
@@ -1142,27 +1194,7 @@ def complete_fanout(board, src_board, cs_args, cons, spec, rep, log=lambda m: No
         except (OSError, ValueError, KeyError):
             pass
     if nets:
-        import cli
-        import contextlib
-        import io
-        tmp = os.path.splitext(board)[0] + ".completion.kicad_pcb"
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            try:
-                cli.main(["fanout", board, "--out", tmp, "--nets", ",".join(nets), "--no-drc"] + list(cs_args))
-            except SystemExit:
-                pass
-        log(buf.getvalue())
-        fj = os.path.splitext(tmp)[0] + ".fanout.json"
-        if os.path.exists(tmp) and os.path.exists(fj):
-            d = json.load(open(fj))
-            out.update(nets=len(nets), required=d.get("required", 0), escaped=d.get("escaped", 0),
-                       blocked=[f"{p['ref']}.{p['pin']} {p['net']}" for p in d.get("blocked", [])])
-            shutil.move(tmp, board)
-            for ext in (".fanout.json", ".fluxmap.json", ".kicad_pro", ".kicad_prl"):
-                x = os.path.splitext(tmp)[0] + ext
-                if os.path.exists(x) and ext in (".fanout.json",):
-                    shutil.move(x, os.path.splitext(board)[0] + ".completion.fanout.json")
+        out.update(_escape(board, nets, cs_args, log))
     return out
 
 
@@ -1175,7 +1207,10 @@ def cmd_pairs(a):
         raise SystemExit("pairs: --out must differ from the input board")
     only = set(x.strip() for x in a.nets.split(",") if x.strip()) if a.nets else None
     import sys
-    rep = run(a.board, cons, spec, out, plan_only=a.plan_only, only=only,
+    cs0 = (["--constraints", a.constraints] if a.constraints else []) + (["--spec", a.spec] if a.spec else [])
+    for x in getattr(a, "answer", None) or []:
+        cs0 += ["--answer", x]
+    rep = run(a.board, cons, spec, out, plan_only=a.plan_only, only=only, cs_args=cs0,
               log=(lambda m: print(m, file=sys.stderr, flush=True)) if getattr(a, "verbose", False) else (lambda m: None))
     rp = os.path.splitext(out or a.board)[0] + (".pairs.plan.json" if a.plan_only else ".pairs.json")
     if out and getattr(a, "complete_fanout", False):
@@ -1215,7 +1250,7 @@ def stage(c, n, board):
     d = c.dir(n, "pairs")
     out = os.path.join(d, "board.kicad_pcb")
     try:
-        rep = run(board, c.cons, c.spec, out)
+        rep = run(board, c.cons, c.spec, out, cs_args=c.cs() + c.qs())
     except Exception as e:                                  # noqa: BLE001 - the router still has every pair
         return {"verdict": "pass", "line": f"WARN pairs not laid ({type(e).__name__}: {str(e)[:80]})", "board": board}
     try:
