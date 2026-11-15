@@ -81,7 +81,41 @@ def _inside(rings, x, y):
 
 
 CELL_MM = 2.0
+EDGE_BIN_MM = 1.0    # y-band width of the edge index in _EdgeRing
 ANCHOR_MM = 0.5      # a chain endpoint this close to a same-net pad or via centre counts as anchored
+
+
+class _EdgeRing:
+    """One filled ring with its edges indexed by y-band. A query at y only needs the edges whose
+    y-range covers y (every other edge fails the straddle test in _inside), so the band lookup
+    returns exactly the edges _inside would have counted, in the same orientation and order."""
+    __slots__ = ("bbox", "bands")
+
+    def __init__(self, bbox, pts):
+        self.bbox = bbox
+        self.bands = defaultdict(list)
+        n = len(pts)
+        for i in range(n):
+            xi, yi = pts[i]
+            xj, yj = pts[i - 1]                    # same edge order as _inside: j starts at n-1
+            lo, hi = (yi, yj) if yi <= yj else (yj, yi)
+            for b in range(math.floor(lo / EDGE_BIN_MM), math.floor(hi / EDGE_BIN_MM) + 1):
+                self.bands[b].append((xi, yi, xj, yj))
+
+    def crosses(self, x, y):
+        """Parity contribution of this ring at (x, y): identical arithmetic to _inside."""
+        x0, y0, x1, y1 = self.bbox
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            return 0
+        n = 0
+        for xi, yi, xj, yj in self.bands.get(math.floor(y / EDGE_BIN_MM), ()):
+            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+                n += 1
+        return n
+
+
+def _inside_indexed(rings, x, y):
+    return sum(r.crosses(x, y) for r in rings) % 2 == 1
 
 
 class Planes:
@@ -95,8 +129,9 @@ class Planes:
         for (lay, net), rs in self.rings.items():
             self.nets_on[lay].add(net)
             g = defaultdict(list)
-            for item in rs:
-                (x0, y0, x1, y1), _ = item
+            for bbox, pts in rs:
+                item = _EdgeRing(bbox, pts)
+                (x0, y0, x1, y1) = bbox
                 for cx in range(math.floor(x0 / CELL_MM), math.floor(x1 / CELL_MM) + 1):
                     for cy in range(math.floor(y0 / CELL_MM), math.floor(y1 / CELL_MM) + 1):
                         g[(cx, cy)].append(item)
@@ -112,7 +147,7 @@ class Planes:
     def nets_at(self, layer, x, y):
         cell = (math.floor(x / CELL_MM), math.floor(y / CELL_MM))
         return {net for net in self.nets_on.get(layer, ())
-                if _inside(self.grid[(layer, net)].get(cell, ()), x, y)}
+                if _inside_indexed(self.grid[(layer, net)].get(cell, ()), x, y)}
 
 
 def _chains(segs):
