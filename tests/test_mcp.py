@@ -773,7 +773,7 @@ class TestFootprint(unittest.TestCase):
     def test_budgets(self):
         tools = M.build_tools()
         for t in tools:
-            self.assertLessEqual(len(t["description"]), 340 if t["name"] == "fluxplace_run" else 160, t["name"])
+            self.assertLessEqual(len(t["description"]), 300 if t["name"] == "fluxplace_run" else 160, t["name"])
             for k, v in t["inputSchema"]["properties"].items():
                 self.assertLessEqual(len(v.get("description", "")), 80, (t["name"], k))
         self.assertLess(len(M.INSTRUCTIONS), 300)

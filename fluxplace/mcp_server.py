@@ -309,8 +309,7 @@ def build_tools(expose_long=False):
     if via_run:
         tools.append({
             "name": RUN_TOOL,
-            "description": "Run another fluxplace command by name: " + ", ".join(sorted(via_run))
-                           + ". Flags: help_brief.",
+            "description": "Run another fluxplace command by name: " + ", ".join(sorted(via_run)) + ".",
             "inputSchema": {"type": "object", "required": ["command"], "properties": {
                 "command": {"type": "string"},
                 "args": {"type": "object", "description": "flag name (underscores) -> value; board/spec are flags too"}}},
