@@ -867,6 +867,8 @@ def st_pour_tie(c, n, board):
     new = sum(v["tied_by_via"] for v in rec["nets"].values())
     pads = sum(v["pads"] for v in rec["nets"].values())
     untied = rec["untied"]
+    if rec.get("skipped"):
+        return {"verdict": "pass", "line": f"pour-tie: skipped ({rec['skipped']})", "board": out}
     line = (f"pour-tie: {len(rec['nets'])} pour net(s), {pads} pad(s): {before} tied already by pour, {new} tied by new via, "
             f"{len(untied)} not tied")
     return {"verdict": "warn" if untied else "pass", "line": line, "board": out,

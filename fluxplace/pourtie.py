@@ -197,9 +197,22 @@ def _tie_pads(board, net, pads, pours):
 def run(board_in, board_out, workdir, nets=None):
     """pour-first tie for every net with a copper zone -> record (also written to workdir/pourtie.json)."""
     board = pcbnew.LoadBoard(board_in)
+    rec = {"nets": {}, "tied": [], "untied": []}
+    if board is None:                            # not a KiCad board (a stub or an unreadable file): nothing to tie
+        import shutil
+        shutil.copy(board_in, board_out)
+        rec["skipped"] = "board unreadable"
+        with open(os.path.join(workdir, "pourtie.json"), "w") as fh:
+            json.dump(rec, fh, indent=1)
+        return rec
+    pm = pour_map(board)
+    if not pm:                                   # no pour on this board: nothing to tie (and no zone filler run)
+        pcbnew.SaveBoard(board_out, board)
+        with open(os.path.join(workdir, "pourtie.json"), "w") as fh:
+            json.dump(rec, fh, indent=1)
+        return rec
     PL.refill(board)
     pm = pour_map(board)
-    rec = {"nets": {}, "tied": [], "untied": []}
     for net in sorted(pm):
         if nets is not None and net not in nets:
             continue
