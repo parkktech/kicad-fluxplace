@@ -152,6 +152,82 @@ def snap_file(src, dst):
     return n, nv
 
 
+def snap_guarded(src, dst, report, iters=4, tol_mm=0.02):
+    """Move every unlocked track end that lies inside a same-net via's copper (not at its centre) onto the centre, keeping a
+    move only when it creates no violation that `src` did not already have (`report(board)` -> kicad-cli DRC json dict;
+    a violation is old when one of the same type sits at the same place). A track named in a new violation is excluded and
+    the pass repeats (`iters` times). -> {moved, before, after, accepted, why}; the board is written to `dst` only when it
+    is accepted (fewer off-centre ends, no new violation)."""
+    import pcbnew
+    base = report(src)
+
+    def where(d):
+        return [(v["type"], [(i["pos"]["x"], i["pos"]["y"]) for i in v.get("items", [])]) for v in d.get("violations", [])
+                if v["type"] != "track_not_centered_on_via"]
+
+    def n_off(d):
+        return sum(1 for v in d.get("violations", []) if v["type"] == "track_not_centered_on_via")
+    base_p = where(base)
+
+    def is_new(v):
+        for t, ps in base_p:
+            if t == v["type"] and len(ps) == len(v.get("items", [])) and all(
+                    any(math.hypot(a[0] - i["pos"]["x"], a[1] - i["pos"]["y"]) < tol_mm for a in ps) for i in v["items"]):
+                return False
+        return True
+    excl, best = set(), None
+    for _ in range(iters):
+        b = pcbnew.LoadBoard(src)
+        vias = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA"]
+        moved = 0
+        for t in [x for x in b.GetTracks() if x.GetClass() == "PCB_TRACK"]:
+            if t.IsLocked() or t.m_Uuid.AsString() in excl:
+                continue
+            for end in ("s", "e"):
+                p = t.GetStart() if end == "s" else t.GetEnd()
+                hit = None
+                for v in vias:
+                    if v.GetNetCode() != t.GetNetCode() or not v.IsOnLayer(t.GetLayer()):
+                        continue
+                    dd = math.hypot(p.x - v.GetPosition().x, p.y - v.GetPosition().y) / 1e6
+                    if 0 < dd <= v.GetWidth() / 2e6 and (hit is None or dd < hit[0]):
+                        hit = (dd, v)
+                if hit:
+                    (t.SetStart if end == "s" else t.SetEnd)(hit[1].GetPosition())
+                    moved += 1
+        if not moved:
+            break
+        tmp = dst + ".try.kicad_pcb"
+        b.Save(tmp)
+        shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
+        d = report(tmp)
+        new = [v for v in d.get("violations", []) if v["type"] != "track_not_centered_on_via" and is_new(v)]
+        best = {"moved": moved, "before": n_off(base), "after": n_off(d), "new": len(new), "tmp": tmp}
+        if not new:
+            break
+        for v in new:
+            for i in v["items"]:
+                if i.get("uuid") and str(i.get("description", "")).startswith("Track"):
+                    excl.add(i["uuid"])
+    if not best:
+        return {"moved": 0, "before": n_off(base), "after": n_off(base), "accepted": False, "why": "nothing to move"}
+    ok = best["new"] == 0 and best["after"] < best["before"]
+    out = {"moved": best["moved"], "before": best["before"], "after": best["after"], "accepted": ok,
+           "why": "" if ok else f"{best['new']} new violation(s) after {iters} pass(es)"}
+    if ok:
+        os.replace(best["tmp"], dst)
+        side = os.path.splitext(src)[0] + ".kicad_pro"
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(dst)[0] + ".kicad_pro")
+    elif os.path.exists(best["tmp"]):
+        os.unlink(best["tmp"])
+    for ext in (".kicad_pro", ".kicad_prl"):
+        q = os.path.splitext(dst + ".try.kicad_pcb")[0] + ext
+        if os.path.exists(q):
+            os.unlink(q)
+    return out
+
+
 def cmd_snap(a):
     src = a.board
     out = a.out
