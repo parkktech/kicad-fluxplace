@@ -706,7 +706,9 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         cand_raw = drc_raw(tmp, kicad_cli)
         cand = summarize_drc(cand_raw)
         new = cand["keys"] - base["keys"]
-        new_nonu = {k: v for k, v in new.items() if not k[0].startswith("U")}
+        # a shove leaves loose ends by design (the caller re-lays); the commit gate judges the end state
+        loose = ("track_dangling", "via_dangling") if op in ("shove", "unlay") else ()
+        new_nonu = {k: v for k, v in new.items() if not k[0].startswith("U") and k[0] not in loose}
         new_u = {n: (base["unc_by_net"].get(n, 0), c) for n, c in cand["unc_by_net"].items() if c > base["unc_by_net"].get(n, 0)}
         before_n = base["unc_by_net"].get(net, 0)
         after_n = cand["unc_by_net"].get(net, 0)
