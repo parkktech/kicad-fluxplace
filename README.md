@@ -1,27 +1,24 @@
 # fluxplace
 
-Signal-flow-aware placement, routing analysis, design review and fab packaging for KiCad 10.
-One pcbnew-free core: a headless CLI, a KiCad plugin and an MCP server.
+Signal-flow-aware placement, routing analysis, design review and fab packaging for KiCad 10:
+headless CLI, KiCad plugin, MCP server.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Per-command detail: `fluxplace help-brief CMD`.
 
 ## Install
 
-    pip install -e .            # numpy only; pcbnew comes from KiCad's own python
-    fluxplace doctor            # names every missing dependency (KiCad, router, API keys)
+    pip install -e .            # numpy only; pcbnew from KiCad's python
+    fluxplace doctor            # names missing dependencies
 
-Requirements and interpreter trap:
-[docs/INSTALL.md](docs/INSTALL.md).
+Requirements: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Pipeline
 
-`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages, each reading only the
-previous board and `W/state.json`, so each can run in its own agent context:
-floorplan-check, anchor-check, place (clusters, routable), route-ready gate, route (fanout, time-boxed,
-stall loop; `route-wait` instead of log polling), tune, review. `--from/--to/--status` select and inspect.
-Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages (floorplan-check, anchor-check,
+place, route-ready gate, route, tune, review); each reads the previous board and `W/state.json`.
+`--from/--to/--status` select. Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-Reports are compact (verdict, counts, worst N); `--full`, `-q` ([output.md](docs/commands/output.md)).
+Reports are compact; `--full`, `-q` ([output.md](docs/commands/output.md)).
 
 ## Commands
 
@@ -56,6 +53,14 @@ lock              print a [lock.at] constraints block for...
 bom-opt           part-count optimization: array...
 rules             selector-rule cascade: effective...
 route-diagnose    read-only: explain why nets stayed...
+open-nets         read-only: list open connections
+window            read-only: region as data + PNG
+probe             read-only: check a path
+lay               lay a probed path, guarded
+shove             remove unlocked copper
+unlay             remove copper by id
+suggest           grid-search a legal path
+session           hand-route session + commit
 anchor-check      evaluate every allowed rotation of each...
 route-ready       pre-route gate: net budgets, support...
 map               meta map: compact JSON of parts, groups...
@@ -111,7 +116,7 @@ help-brief        at most 15 lines on one command (none: one...
 
 ## More
 
-[CLI reference](docs/commands/cli.md), [docs/INTENT.md](docs/INTENT.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/CHANGELOG.md](docs/CHANGELOG.md), [NEXT.md](NEXT.md), [Cypress engine](docs/CYPRESS.md).
+[CLI](docs/commands/cli.md), [INTENT](docs/INTENT.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [CHANGELOG](docs/CHANGELOG.md),
+[NEXT](NEXT.md), [Cypress](docs/CYPRESS.md).
 
 MIT (c) 2026 Jason Ratzlaff

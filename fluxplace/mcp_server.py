@@ -126,6 +126,14 @@ POLICY = {
     "rules":             ("read",  "Selector-rule cascade: effective value per key for one net or footprint, every matching rule (winner marked); or the rule table with match counts."),
     "route-ready":       ("read",  "Pre-route gate scorecard (net budgets, support parts, anchors, congestion); exit 1 on FAIL."),
     "route-diagnose":    ("read",  "Why nets stayed unrouted and which parts to move; read-only."),
+    "open-nets":         ("read",  "Every unconnected connection: endpoints, coordinates, rules, locks, same-net islands, closest approach."),
+    "window":            ("read",  "One board region as data: pads, copper, free corridors per layer, free via sites; PNG/SVG render."),
+    "probe":             ("read",  "Check a proposed hand-routed path against clearances, keepouts, edge, angles; writes nothing."),
+    "suggest":           ("read",  "Grid-search a legal path between two islands of a net; the answer is probed."),
+    "lay":               ("write", "Lay a probed path; DRC + connectivity guard; writes the board only when nothing regresses."),
+    "shove":             ("write", "Remove an UNLOCKED net's copper by id/window/chain and report the connection it opened."),
+    "unlay":             ("write", "Remove copper by id (shove --ids)."),
+    "session":           ("write", "Hand-routing session: begin / undo / status / ledger / commit (whole-set acceptance)."),
     "floorplan-check":   ("read",  "Area budget before placing: per block and side, courtyard demand vs free region area "
                                    "(REGION_OVERFULL); exit 1 on FAIL."),
     "templates":         ("write", "Place [placement.template.*] structure templates (tree/chain); out writes the board."),
@@ -301,8 +309,7 @@ def build_tools(expose_long=False):
     if via_run:
         tools.append({
             "name": RUN_TOOL,
-            "description": "Run another fluxplace command by name: " + ", ".join(sorted(via_run))
-                           + ". Flags: help_brief.",
+            "description": "Run another fluxplace command by name: " + ", ".join(sorted(via_run)) + ".",
             "inputSchema": {"type": "object", "required": ["command"], "properties": {
                 "command": {"type": "string"},
                 "args": {"type": "object", "description": "flag name (underscores) -> value; board/spec are flags too"}}},
