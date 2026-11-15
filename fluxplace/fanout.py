@@ -217,6 +217,12 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
         if claimed:
             claimed = _drop_illegal_claims(board, job, claimed, wd, log)
         claimed = [c for c in claimed if (c["ref"], str(c["pin"])) not in _drop]
+        if bo_res and bo_res["pins"]:                   # a net that already has breakout copper within reach needs no second reserved via beside it
+            near = {}
+            for r_ in bo_res["pins"].values():
+                if r_.get("via"):
+                    near.setdefault(r_["net"], []).append(r_["via"])
+            claimed = [c for c in claimed if not any(math.hypot(c["site"][0] - v[0], c["site"][1] - v[1]) < 2.5 for v in near.get(c["net"], ()))]
         if claimed:
             src = os.path.join(wd, "claimed.kicad_pcb")
             txt, _n = ER.claim_text(open(board, errors="surrogateescape").read(), claimed)

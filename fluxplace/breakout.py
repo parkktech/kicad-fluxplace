@@ -49,7 +49,7 @@ def params(cons, B=None):
     c = conf(cons)
     return {"track": max(pr["track_mm"], R["min_track"]), "clr": max(pr["clearance_mm"], R["min_clearance"]),
             "via": max(pr["via_mm"], R["min_via"]), "drill": max(pr["drill_mm"], R["min_drill"]),
-            "h2h": max(R["hole_to_hole"], 0.25), "edge": pr["edge_clr_mm"], "pr": pr, **c}
+            "h2h": max(R["hole_to_hole"], 0.25), "hclr": max(pr["clearance_mm"], R["min_clearance"], float((B or {}).get("hole_clearance", 0.0) or 0.0)), "edge": pr["edge_clr_mm"], "pr": pr, **c}
 
 
 def _layer(q):
@@ -160,9 +160,15 @@ class Solver:
         pr, out = self.pr, []
         hw = w / 2
         rect = (min(a[0], b[0]) - hw, min(a[1], b[1]) - hw, max(a[0], b[0]) + hw, max(a[1], b[1]) + hw)
-        for kind, r, n, ref, num in self.ob.hits(rect, pr["clr"], frozenset({layer}), net, ignore=(own,)):
+        for kind, r, n, ref, num in self.ob.hits(rect, pr["clr"], frozenset({layer}), "", ignore=(own,)):
+            if n == net and kind != "via":              # same-net pads / tracks may touch; an existing via keeps its clearance (no endpoint inside it)
+                continue
             g = EP._seg_rect_gap(a, b, r) - hw
             out.append((g - pr["clr"], f"{ref}.{num}" if ref else f"{kind} of {n}"))
+        for key in self.holes.hits(rect, "x", pr["hclr"] + 1.0):
+            hx, hy, hr = self.hl[key]
+            g = EP.RD_seg_dist((hx, hy), a, b) - hr - hw
+            out.append((g - pr["hclr"], f"hole of {key[0]}"))
         L = math.hypot(b[0] - a[0], b[1] - a[1])
         for i in range(max(1, int(L / 0.1)) + 1):
             s = i / max(1, int(L / 0.1))
@@ -177,13 +183,11 @@ class Solver:
         for k in self.h.hits(rect, "x", pr["clr"] + pr["via"] / 2):
             it = self.items[k]
             if it[0] == "seg":
-                if it[5] == net or it[4] != layer:
+                if it[4] != layer or it[5] == net:          # lanes of one net may merge; vias keep their clearance to every lane (below)
                     continue
                 g = EP._seg_seg_gap(a, b, it[1], it[2]) - hw - it[3] / 2
                 out.append((g - pr["clr"], f"lane of {it[5]}"))
             else:
-                if it[2] == net:
-                    continue
                 g = EP.RD_seg_dist(it[1], a, b) - hw - pr["via"] / 2
                 out.append((g - pr["clr"], f"via of {it[2]}"))
         return [o for o in out if o[0] < EPS] or []
@@ -193,13 +197,15 @@ class Solver:
         d = pr["via"]
         r = d / 2
         rect = (p[0] - r, p[1] - r, p[0] + r, p[1] + r)
-        for kind, rc, n, ref, num in self.ob.hits(rect, pr["clr"], self.all_layers, net, ignore=(own,)):
+        for kind, rc, n, ref, num in self.ob.hits(rect, pr["clr"], self.all_layers, "", ignore=(own,)):
+            if n == net and kind != "via":
+                continue
             g = EP._rect_gap_pt(rc, p[0], p[1]) - r
             out.append((g - pr["clr"], f"{ref}.{num}" if ref else f"{kind} of {n}"))
-        for key in self.holes.hits(rect, "x", pr["clr"] + 1.0):
+        for key in self.holes.hits(rect, "x", pr["hclr"] + 1.0):
             hx, hy, hr = self.hl[key]
             g = math.hypot(hx - p[0], hy - p[1])
-            out.append((min(g - hr - r - pr["clr"], g - hr - pr["drill"] / 2 - pr["h2h"]), f"hole of {key[0]}"))
+            out.append((min(g - hr - r - pr["hclr"], g - hr - pr["drill"] / 2 - pr["h2h"]), f"hole of {key[0]}"))
         if not self.isolated and self.ob.keepout_hit(p[0], p[1], self.all_layers, vias=True):
             out.append((-r, "keep-out"))
         if not self.isolated and not GM.in_outline(self.B, (p[0] - r, p[1] - r, p[0] + r, p[1] + r), pr["edge"]):
@@ -207,14 +213,11 @@ class Solver:
         for k in self.h.hits(rect, "x", pr["clr"] + 1.0):
             it = self.items[k]
             if it[0] == "seg":
-                if it[5] == net:
-                    continue
                 g = EP.RD_seg_dist(p, it[1], it[2]) - it[3] / 2 - r
                 out.append((g - pr["clr"], f"lane of {it[5]}"))
             else:
                 g = math.hypot(p[0] - it[1][0], p[1] - it[1][1])
-                need = (pr["drill"] + pr["h2h"]) if it[2] == net else d + pr["clr"]
-                out.append((g - need, f"via of {it[2]}"))
+                out.append((g - (d + pr["clr"]), f"via of {it[2]}"))
         return [o for o in out if o[0] < EPS]
 
 
