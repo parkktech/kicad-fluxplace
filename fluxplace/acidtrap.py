@@ -25,6 +25,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from fluxplace import drcguard as DG
 from fluxplace import gerbercheck as GC
 
 DEFAULT_ACID_DEG = 60.0
@@ -201,22 +202,24 @@ def fix_junctions(work, kicad_cli="kicad-cli", min_deg=DEFAULT_ACID_DEG, log=pri
     rise. Returns the number of junctions chamfered (0 when nothing was kept)."""
     import pcbnew
     from fluxplace import tune as TU
-    v0, u0 = TU.drc_counts(work, kicad_cli)
+    base = DG.drc_keys(work, kicad_cli)
     b = pcbnew.LoadBoard(work)
     n = chamfer_junctions(b, min_deg=min_deg, log=log)
     if not n:
         return 0
     tmp = work + ".acid.kicad_pcb"
     pcbnew.SaveBoard(tmp, b)
-    base = os.path.splitext(work)[0]
+    stem = os.path.splitext(work)[0]
     for ext in (".kicad_pro", ".kicad_dru"):
-        if os.path.exists(base + ext):
-            shutil.copy(base + ext, os.path.splitext(tmp)[0] + ext)
-    v1, u1 = TU.drc_counts(tmp, kicad_cli)
-    if v1 <= v0 and u1 <= u0:
+        if os.path.exists(stem + ext):
+            shutil.copy(stem + ext, os.path.splitext(tmp)[0] + ext)
+    ok, cur, new = DG.check(tmp, base, kicad_cli, log=None)
+    v0, v1 = base[1], cur[1]
+    if ok:
         shutil.move(tmp, work)
-        log(f"    acid-trap fix kept: DRC {v0}/{u0} -> {v1}/{u1}")
+        log(f"    acid-trap fix kept: DRC {v0[0]}/{v0[1]} -> {v1[0]}/{v1[1]}, keys +0 "
+            f"(-{len(base[0] - cur[0])} removed)")
         return n
     os.unlink(tmp)
-    log(f"    acid-trap fix rejected: DRC {v0}/{u0} -> {v1}/{u1}")
+    log(f"    acid-trap fix rejected: DRC {v0[0]}/{v0[1]} -> {v1[0]}/{v1[1]}, {len(new)} new key(s)")
     return 0

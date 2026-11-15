@@ -24,6 +24,7 @@ import tempfile
 
 from . import geom as GM
 from . import repair as RP
+from . import drcguard as DG
 
 __all__ = ["drc_counts", "shortcut", "meander", "tune_pairs", "meander_to", "tune_match", "bump_plan"]
 
@@ -43,29 +44,8 @@ def drc_counts(board_path, kicad_cli="kicad-cli", timeout=600):
 
 
 def drc_report(board_path, kicad_cli="kicad-cli", timeout=600):
-    """(keys, (violations, unconnected)). keys: a frozenset of violation identities
-    (type, sorted item descriptions, first item position rounded to 0.01 mm), unconnected
-    items prefixed 'U'. A swap (one violation removed, another added) changes the set
-    even when the count does not."""
-    out = board_path + ".drc.json"
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
-                    "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
-                    board_path], capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(out):
-        raise RuntimeError("DRC produced no report")
-    d = json.load(open(out))
-    os.unlink(out)
-
-    def key(v, prefix=""):
-        items = v.get("items") or []
-        descs = tuple(sorted(str(i.get("description", "")) for i in items))
-        pos = (items[0].get("pos") if items else None) or v.get("pos") or {}
-        return (prefix + str(v.get("type", "")), descs,
-                round(float(pos.get("x", 0.0)), 2), round(float(pos.get("y", 0.0)), 2))
-    vio = d.get("violations", [])
-    unc = d.get("unconnected_items", [])
-    keys = frozenset([key(v) for v in vio] + [key(u, "U") for u in unc])
-    return keys, (len(vio), len(unc))
+    """(keys, (violations, unconnected)): see fluxplace/drcguard.py for the identity and noise rule."""
+    return DG.drc_keys(board_path, kicad_cli, timeout)
 
 
 # ------------------------------------------------------------------ paths
@@ -255,27 +235,10 @@ def meander(board, net, add_mm, amp_mm=0.6, pitch_mm=0.7, margin_mm=0.6,
 
 
 # --------------------------------------------------------------- driver
-def _guarded(board_path, work, mutate, kicad_cli, base_counts, log):
-    """Load work, mutate(board) -> bool changed, save to tmp, DRC, accept
-    into `work` only if violations did not rise. Returns (accepted, counts)."""
-    import pcbnew
-    board = pcbnew.LoadBoard(work)
-    if not mutate(board):
-        return False, base_counts
-    tmp = work + ".try.kicad_pcb"
-    pcbnew.SaveBoard(tmp, board)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        side = os.path.splitext(board_path)[0] + ext
-        if os.path.exists(side):
-            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
-    v, u = drc_counts(tmp, kicad_cli)
-    if v <= base_counts[0] and u <= base_counts[1]:
-        shutil.move(tmp, work)
-        return True, (v, u)
-    log(f"      rejected by DRC: {v} violations / {u} unconnected "
-        f"(was {base_counts[0]} / {base_counts[1]})")
-    os.unlink(tmp)
-    return False, base_counts
+def _guarded(board_path, work, mutate, kicad_cli, base, log, stats=None):
+    """tune_pairs / tune_match acceptance: base = (keys, counts) from drc_report."""
+    return DG.guard_board(board_path, work, mutate, base, kicad_cli, log, stats,
+                          report=lambda p, c: drc_report(p, c))
 
 
 def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
@@ -289,8 +252,8 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         side = os.path.splitext(board_path)[0] + ext
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(work)[0] + ext)
-    base = drc_counts(work, kicad_cli)
-    log(f"  baseline DRC: {base[0]} violations, {base[1]} unconnected")
+    base = drc_report(work, kicad_cli)
+    log(f"  baseline DRC: {base[1][0]} violations, {base[1][1]} unconnected")
     lim = limit_mm if callable(limit_mm) else (lambda m: limit_mm)
     report = []
     for slave, master in sorted(pairs.items()):
@@ -344,7 +307,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         p = os.path.splitext(work)[0] + ext
         if os.path.exists(p):
             os.unlink(p)
-    log(f"  final DRC: {base[0]} violations, {base[1]} unconnected")
+    log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected")
     return report
 
 
@@ -512,27 +475,8 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
 
 
 def _guarded_set(board_path, work, mutate, kicad_cli, base, log, stats):
-    """tune_match's acceptance: base = (keys, counts) from drc_report. Accept only when the
-    DRC violation SET gains no member; a swap (one removed, one added) is rejected."""
-    import pcbnew
-    board = pcbnew.LoadBoard(work)
-    if not mutate(board):
-        return False, base
-    tmp = work + ".try.kicad_pcb"
-    pcbnew.SaveBoard(tmp, board)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        side = os.path.splitext(board_path)[0] + ext
-        if os.path.exists(side):
-            shutil.copy(side, os.path.splitext(tmp)[0] + ext)
-    keys, counts = drc_report(tmp, kicad_cli)
-    stats["drc_runs"] = stats.get("drc_runs", 0) + 1
-    new = keys - base[0]
-    if not new:
-        shutil.move(tmp, work)
-        return True, (keys, counts)
-    log(f"      rejected by DRC: {len(new)} new violation(s), e.g. {sorted(new)[0][0]}")
-    os.unlink(tmp)
-    return False, base
+    """tune_match's acceptance (same rule as _guarded)."""
+    return _guarded(board_path, work, mutate, kicad_cli, base, log, stats)
 
 
 def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="kicad-cli",
