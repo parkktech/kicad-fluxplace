@@ -112,3 +112,48 @@ def test_without_allow_incomplete_a_sealed_fail_still_stops(tmp_path, monkeypatc
     monkeypatch.setitem(PL.FUNCS, "pairs", lambda c, n, board: seen.append(board) or {"verdict": "pass", "board": board})
     rc = PL.run(a)
     assert not seen and rc == 1
+
+
+# ---- fixes-d #5: SURFACE_ONLY stays WARN by default, is strict on request, and is checked after routing
+def test_surface_only_strict_config_restores_fail(tmp_path):
+    cons = {"escape": {"surface_exit_mm": 0.0}, "fanout": {"surface_only": "fail"}}
+    path = PB.write(tmp_path, sealed_body())
+    B, res = FO.run(path, cons, None, str(tmp_path / "out.kicad_pcb"), args(), None)
+    per = FO.summarise(B, res, FO.strict_surface(cons))
+    assert len(per["U1"]["blocked"]) == 6 and not per["U1"]["surface"]
+    assert FO.strict_surface({}) is False and FO.strict_surface({"fanout": {"surface_only": "warn"}}) is False
+
+
+def _pad_board(segs=(), vias=()):
+    """minimal routed-board model for preroute.surface_findings: one pad U1.1 on net N at (10,10), 1x1 mm."""
+    return {"pads": [{"ref": "U1", "num": "1", "net": "N", "x": 10.0, "y": 10.0, "ex": 0.5, "ey": 0.5}],
+            "segs": list(segs), "vias": list(vias), "parts": {}}
+
+
+def test_surface_pin_unrouted_after_routing_is_fail(tmp_path):
+    from fluxplace import preroute as PR
+    pins = [{"ref": "U1", "pin": "1", "net": "N"}]
+    f = PR.surface_findings(_pad_board(), pins, routed=True)
+    assert [x["code"] for x in f] == ["FANOUT_PIN_UNROUTED"] and f[0]["level"] == "FAIL"
+    # the same pin with a track of its net ending on the pad is connected: INFO, not FAIL
+    seg = {"net": "N", "w": 0.2, "a": (10.0, 10.0), "b": (14.0, 10.0), "layer": "F.Cu"}
+    f = PR.surface_findings(_pad_board([seg]), pins, routed=True)
+    assert [x["level"] for x in f] == ["INFO"]
+
+
+def test_route_ready_lists_surface_pins_as_warn(tmp_path):
+    from fluxplace import preroute as PR
+    pins = [{"ref": "U1", "pin": "1", "net": "N"}]
+    f = PR.surface_findings(_pad_board(), pins, routed=False)
+    assert [x["level"] for x in f] == ["WARN"] and "route pending" in f[0]["msg"]
+
+
+def test_surface_pins_read_from_fanout_sidecar(tmp_path):
+    import json
+    from fluxplace import preroute as PR
+    board = str(tmp_path / "b.kicad_pcb")
+    open(board, "w").write("")
+    json.dump({"surface": [{"ref": "U1", "pin": 1, "net": "N", "free_mm": 1.2}]}, open(tmp_path / "b.fanout.json", "w"))
+    assert PR.surface_pins(board) == ([{"ref": "U1", "pin": "1", "net": "N"}], False)
+    json.dump({"pins": [{"ref": "U1", "pin": "1", "net": "N"}]}, open(tmp_path / "b.surface.json", "w"))
+    assert PR.surface_pins(board) == ([{"ref": "U1", "pin": "1", "net": "N"}], True)

@@ -60,3 +60,21 @@ failed pin (blocker = the pad, board edge, keep-out or the neighbour whose escap
 before and after: the fan-out must add no error (`hole_to_hole` counts even when the board makes it a warning). `--check-only` writes nothing. `<out>.fanout.json` holds every pin (kind, layer,
 stub, via, end point, lane direction/layer: the router's start points and layer hint).
 Exit 0 = FANOUT_OK. Runs under KiCad's python (pcbnew + numpy); 337 parts: about 15 s plus the DRC.
+
+## Behaviour change: SURFACE_ONLY pins are checked
+
+A pin whose only free exit is a surface run (`SURFACE_ONLY`) stays a **WARN**: the fan-out stage passes, as before. What changed
+is that the claim is now checkable instead of taken on trust:
+
+- **route-ready** lists every SURFACE_ONLY pin as `FANOUT_PIN_SURFACE_ONLY` (WARN) with `not connected yet (route pending)` or
+  `connected by fan-out copper`.
+- **route stage** end report lists every SURFACE_ONLY pin as `FANOUT_PIN_SURFACE_ONLY REF.PIN NET connected` or
+  `... FANOUT_PIN_UNROUTED`, and writes `<routed>.surface.json` beside the routed board.
+- **review** reports a SURFACE_ONLY pin whose net still has no copper on its pad after routing as `FANOUT_PIN_UNROUTED` (FAIL).
+
+To restore the strict behaviour (every SURFACE_ONLY pin is a blocked pin and the fan-out verdict is FAIL):
+
+```toml
+[fanout]
+surface_only = "fail"
+```

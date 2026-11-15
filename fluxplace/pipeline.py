@@ -95,7 +95,7 @@ def format_status(st):
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR
     B = RD.load(board)
-    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True)
+    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board))
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
@@ -630,6 +630,21 @@ def st_route(c, n, board):
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
                        f"diagnosis (what to move): {diag}",
                        f"leftovers list: {os.path.join(d, 'leftovers.json')}"]
+    # SURFACE_ONLY pins the fan-out left for the router: every one is listed with whether its net reached the pad (review FAILs
+    # FANOUT_PIN_UNROUTED for any that did not); the list is written beside the routed board for review
+    from . import preroute as PR
+    pins, _routed = PR.surface_pins(board)
+    if pins:
+        st = PR.surface_status(RD.load(best), pins)
+        unrouted = [s for s in st if not s["connected"]]
+        out["surface"] = st
+        with open(os.path.splitext(best)[0] + ".surface.json", "w") as fh:
+            json.dump({"pins": [{"ref": s["ref"], "pin": s["pin"], "net": s["net"]} for s in pins], "status": st}, fh, indent=1)
+        out.setdefault("next", []).extend(
+            [f"FANOUT_PIN_SURFACE_ONLY {s['ref']}.{s['pin']} {s['net']} {'connected' if s['connected'] else 'FANOUT_PIN_UNROUTED'}"
+             for s in st])
+        if unrouted:
+            out["surface_unrouted"] = len(unrouted)
     if warn:
         out.setdefault("next", []).append(warn)
     if ladder:

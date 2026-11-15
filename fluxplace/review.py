@@ -1547,7 +1547,7 @@ def check_preroute(facts, spec, cons):
     from . import routediag as RD
     from . import preroute as PR
     try:
-        found, _ = PR.run(RD.load(path), cons, spec, waivers=(), collide=True)
+        found, _ = PR.run(RD.load(path), cons, spec, waivers=(), collide=True, surface=PR.surface_pins(path))
     except Exception as e:           # a gate that cannot run must say so, not crash the review
         return [_f(WARN, "PREROUTE_UNAVAILABLE", f"pre-route checks could not run: {e}")]
     return [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))

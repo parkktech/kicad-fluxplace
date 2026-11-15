@@ -279,9 +279,16 @@ def is_waived(ref, num, pats):
     return any(re.fullmatch(p, key) for p in pats)
 
 
-def summarise(B, res):
+def strict_surface(cons):
+    """`[fanout] surface_only = "fail"`: a SURFACE_ONLY pin is a blocked pin (FAIL) again. The default "warn" keeps it a WARN and
+    the claim is then checked by route-ready (FANOUT_PIN_SURFACE_ONLY) and the route stage (FANOUT_PIN_UNROUTED)."""
+    return str(((cons or {}).get("fanout") or {}).get("surface_only", "warn")).lower() == "fail"
+
+
+def summarise(B, res, strict=False):
     """per part: a PIN (ref + pad number) is escaped when every one of its copper components is; the count is of pins.
-    A blocked pin named by a waiver (res["waive"]) is `waived`, not `blocked`: it is WARN, not FAIL."""
+    A blocked pin named by a waiver (res["waive"]) is `waived`, not `blocked`: it is WARN, not FAIL. SURFACE_ONLY pins are
+    `surface` (WARN) unless `strict` (see strict_surface), when they are `blocked`."""
     per = {}
     keys = {}
     pats = res.get("waive") or []
@@ -295,7 +302,7 @@ def summarise(B, res):
             e["ok"] += 1
         elif is_waived(ref, num, pats):
             e["waived"].append(dict(bad[0], waived=True))
-        elif all(c.get("class") == "SURFACE_ONLY" for c in bad):
+        elif not strict and all(c.get("class") == "SURFACE_ONLY" for c in bad):
             e["surface"].append(dict(bad[0], surface=True))       # no via site, but a free surface run leaves the pad
         else:
             e["blocked"].append(next((c for c in bad if c.get("class") != "SURFACE_ONLY"), bad[0]))
@@ -335,7 +342,7 @@ def cmd_fanout(a):
     if out and os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("fanout: --out must differ from the input board")
     B, res = run(a.board, cons, spec, out, a, refs)
-    per = summarise(B, res)
+    per = summarise(B, res, strict_surface(cons))
     req = sum(v["req"] for v in per.values())
     ok = sum(v["ok"] for v in per.values())
     blocked = [p for v in per.values() for p in v["blocked"]]

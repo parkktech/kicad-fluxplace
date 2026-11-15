@@ -30,7 +30,9 @@ exactly like review findings (same matcher).
     signal_layers = 4        # count, or a list of names ["F.Cu", "In2.Cu", ...]; or plane_layers = [...]
     anchor_tolerance_pct = 15
 """
+import json
 import math
+import os
 from collections import defaultdict
 
 from . import anchors as AN
@@ -446,6 +448,57 @@ def waived_pin_findings(B, cons):
     return out
 
 
+def surface_pins(board):
+    """-> (pins, routed). The SURFACE_ONLY pins a fan-out left for the router, as [{ref, pin, net}]. Read from `<board>.surface.json`
+    (written by the route stage next to the routed board: routed=True) when present, else from the fan-out sidecar
+    `<board>.fanout.json` (routed=False). Missing or unreadable -> ([], False)."""
+    base = os.path.splitext(board or "")[0]
+    p = base + ".surface.json"
+    if os.path.exists(p):
+        try:
+            d = json.load(open(p))
+            return [dict(x) for x in d.get("pins", [])], True
+        except (OSError, ValueError):
+            return [], True
+    p = base + ".fanout.json"
+    if os.path.exists(p):
+        try:
+            d = json.load(open(p))
+            return [{"ref": s["ref"], "pin": str(s["pin"]), "net": s["net"]} for s in d.get("surface", [])], False
+        except (OSError, ValueError, KeyError):
+            return [], False
+    return [], False
+
+
+def surface_status(B, pins):
+    """-> [{ref, pin, net, connected}]: a SURFACE_ONLY pin is connected when a pad piece of it carries copper of its net."""
+    keyed = defaultdict(list)
+    for q in B["pads"]:
+        keyed[(q["ref"], str(q["num"]))].append(q)
+    out = []
+    for p in pins:
+        pads = keyed.get((p["ref"], str(p["pin"])), [])
+        out.append(dict(p, connected=any(_on_pad(B, q, p["net"]) for q in pads)))
+    return out
+
+
+def surface_findings(B, pins, routed):
+    """Route-ready (routed=False): every SURFACE_ONLY pin is listed (WARN, not yet connected or already connected).
+    After routing (routed=True): a SURFACE_ONLY pin with no copper on its pad is FANOUT_PIN_UNROUTED (FAIL); a connected one is INFO."""
+    out = []
+    for s in surface_status(B, pins):
+        ref = f"{s['ref']}.{s['pin']}"
+        if routed and not s["connected"]:
+            out.append(_f(FAIL, "FANOUT_PIN_UNROUTED",
+                          f"{ref} {s['net']}: SURFACE_ONLY pin left for the router, net still not connected to its pad", refs=[s["ref"]]))
+        elif routed:
+            out.append(_f(INFO, "FANOUT_PIN_SURFACE_ONLY", f"{ref} {s['net']}: SURFACE_ONLY, connected by the router", refs=[s["ref"]]))
+        else:
+            state = "connected by fan-out copper" if s["connected"] else "not connected yet (route pending)"
+            out.append(_f(WARN, "FANOUT_PIN_SURFACE_ONLY", f"{ref} {s['net']}: SURFACE_ONLY, {state}", refs=[s["ref"]]))
+    return out
+
+
 def _on_pad(B, q, net):
     for s in B["segs"]:
         if s["net"] != net:
@@ -460,7 +513,7 @@ def _on_pad(B, q, net):
     return False
 
 
-def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False):
+def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False, surface=None):
     """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
     (escape planner + global router, copper of the board respected) and card["plan"].  collide=True adds the
     grouped COLLISION findings (legality.collisions; the gates set it, the optimisers' score does not need it)."""
@@ -475,6 +528,8 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
     f += pin_escape_blocked(B)
     f += keepout_trapped(B)
     f += waived_pin_findings(B, cons)
+    if surface is not None:                       # (pins, routed) from surface_pins(board): SURFACE_ONLY pins are listed / checked
+        f += surface_findings(B, surface[0], surface[1])
     f += PCK.connector_blocked(B, cons)
     f += PCK.height_regions(B, cons)
     f += PCK.stale_copper(B)
