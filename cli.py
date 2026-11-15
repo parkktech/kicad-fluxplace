@@ -3977,6 +3977,8 @@ def build_parser():
     ppl.add_argument("--route-budget", type=float, default=1800, help="route stage wall-clock cap, s")
     ppl.add_argument("--route-timeout", type=float, default=900, help="per router call cap, s")
     ppl.add_argument("--stall-rounds", type=int, default=2)
+    ppl.add_argument("--no-resume", dest="no_resume", action="store_true",
+                     help="--from route: run the router again even when the previous run left a finish record of the same input")
     ppl.add_argument("--replace-on-stall", action="store_true", help="let the stall loop move parts")
     ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
     ppl.add_argument("--track", type=float, default=0.2)
