@@ -500,15 +500,15 @@ def surface_findings(B, pins, routed):
 
 
 def _on_pad(B, q, net):
+    """Copper of `net` is on pad q: a track (its ends or its body, not only its ends) or a via whose copper shape touches the pad
+    shape (geom.pad_shape: circle, oval, roundrect, trapezoid, rect at the absolute angle)."""
+    from . import geom as GM
+    pad = GM.pad_shape(q)
     for s in B["segs"]:
-        if s["net"] != net:
-            continue
-        h = s["w"] / 2
-        for x, y in (s["a"], s["b"]):
-            if abs(x - q["x"]) <= q["ex"] + h and abs(y - q["y"]) <= q["ey"] + h:
-                return True
+        if s["net"] == net and GM.shape_gap(([tuple(s["a"]), tuple(s["b"])], s["w"] / 2), pad) <= 1e-9:
+            return True
     for v in B["vias"]:
-        if v["net"] == net and abs(v["x"] - q["x"]) <= q["ex"] + v["d"] / 2 and abs(v["y"] - q["y"]) <= q["ey"] + v["d"] / 2:
+        if v["net"] == net and GM.shape_gap(([(v["x"], v["y"])], v["d"] / 2), pad) <= 1e-9:
             return True
     return False
 

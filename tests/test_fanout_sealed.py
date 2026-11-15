@@ -126,7 +126,7 @@ def test_surface_only_strict_config_restores_fail(tmp_path):
 
 def _pad_board(segs=(), vias=()):
     """minimal routed-board model for preroute.surface_findings: one pad U1.1 on net N at (10,10), 1x1 mm."""
-    return {"pads": [{"ref": "U1", "num": "1", "net": "N", "x": 10.0, "y": 10.0, "ex": 0.5, "ey": 0.5}],
+    return {"pads": [{"ref": "U1", "num": "1", "net": "N", "x": 10.0, "y": 10.0, "ex": 0.5, "ey": 0.5, "w": 1.0, "h": 1.0, "shape": "rect", "angle": 0.0}],
             "segs": list(segs), "vias": list(vias), "parts": {}}
 
 
@@ -157,3 +157,23 @@ def test_surface_pins_read_from_fanout_sidecar(tmp_path):
     assert PR.surface_pins(board) == ([{"ref": "U1", "pin": "1", "net": "N"}], False)
     json.dump({"pins": [{"ref": "U1", "pin": "1", "net": "N"}]}, open(tmp_path / "b.surface.json", "w"))
     assert PR.surface_pins(board) == ([{"ref": "U1", "pin": "1", "net": "N"}], True)
+
+
+# ---- fixes-d #9: a track that crosses a pad (no end on it) counts as on the pad
+def test_track_crossing_a_pad_without_ending_in_it_is_on_pad():
+    from fluxplace import preroute as PR
+    pad = {"ref": "U1", "num": "1", "net": "N", "x": 10.0, "y": 10.0, "ex": 0.5, "ey": 0.5, "w": 1.0, "h": 1.0, "shape": "rect", "angle": 0.0}
+    B = {"pads": [pad], "vias": [], "segs": [{"net": "N", "w": 0.2, "a": (8.0, 10.0), "b": (12.0, 10.0), "layer": "F.Cu"}]}
+    assert PR._on_pad(B, pad, "N"), "a track through the pad body must count"
+    B["segs"][0].update(a=(8.0, 12.0), b=(12.0, 12.0))           # clear of the pad by 1.5 mm: no
+    assert not PR._on_pad(B, pad, "N")
+    B["segs"][0].update(a=(8.0, 10.0), b=(12.0, 10.0), net="OTHER")  # another net's copper never counts
+    assert not PR._on_pad(B, pad, "N")
+
+
+def test_track_crossing_a_pad_clears_its_waived_finding(tmp_path):
+    from fluxplace import preroute as PR
+    pad = {"ref": "U1", "num": "1", "net": "N", "x": 10.0, "y": 10.0, "ex": 0.5, "ey": 0.5, "w": 1.0, "h": 1.0, "shape": "rect", "angle": 0.0}
+    B = {"pads": [pad], "vias": [], "segs": [{"net": "N", "w": 0.2, "a": (8.0, 10.0), "b": (12.0, 10.0), "layer": "F.Cu"}]}
+    cons = {"fanout": {"waive": ["U1\\.1: test"]}}
+    assert PR.waived_pin_findings(B, cons) == []
