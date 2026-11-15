@@ -185,6 +185,18 @@ def cmd_plan_options(a):
           f"{r['seconds']:g} s; candidates in {out}")
 
 
+def cmd_relieve(a):
+    """`relieve`: placement congestion relief against the plan-route predictor (fluxplace/relieve.py)."""
+    from . import relieve as RL
+    cons, spec = _ctx(a)
+    sides = [x.strip().upper() for x in a.grow_sides.split(",") if x.strip()] if a.grow_sides else None
+    S = RL.run(a.board, cons, spec, a.out, rounds=a.rounds, may_grow=a.may_grow, sides=sides, log=(lambda m: None), json_path=a.json)
+    o = S["output"]
+    print(S["text"])
+    print(f"relieve: wrote {a.out}")
+    return 1 if S["fails_output"] else 0
+
+
 def after_plan_place(a, board_in, board_out, cons, spec, st):
     """`place --objective plan` epilogue: confirm with a full plan-route, write the map and the move list."""
     from . import fluxmap as FM, routediag as RD, planroute as PL
@@ -262,6 +274,17 @@ def add_parsers(sub):
     po.add_argument("--json", default=None)
     po.add_argument("--verbose", action="store_true")
     po.set_defaults(fn=cmd_plan_options)
+
+    pr_ = sub.add_parser("relieve", help="congestion relief, never worse")
+    pr_.add_argument("board")
+    pr_.add_argument("--constraints", default=None)
+    pr_.add_argument("--spec", default=None)
+    pr_.add_argument("--out", required=True, help="output board (required; never the input)")
+    pr_.add_argument("--rounds", type=int, default=None, help="move rounds (default [relieve] rounds = 20)")
+    pr_.add_argument("--may-grow", dest="may_grow", type=float, default=None, help="growth allowed, mm (default [relieve] may_grow_mm = 0)")
+    pr_.add_argument("--grow-sides", dest="grow_sides", default=None, help="comma list of L,R,T,B growth may use")
+    pr_.add_argument("--json", default=None, help="also write the ledger here")
+    pr_.set_defaults(fn=cmd_relieve)
 
     pc = sub.add_parser("plan-compare", help="two maps' plan verdicts side by side")
     pc.add_argument("map_a")

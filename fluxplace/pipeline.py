@@ -27,7 +27,7 @@ STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "r
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
 CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pairs", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
-ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE))
+ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
 VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped")   # warn: ran, its own gate line says FAIL, does not block
 
@@ -794,13 +794,27 @@ def st_plan_route(c, n, board):
     return {"verdict": "warn" if bad else "pass", "line": ("WARN " if bad and not last.startswith("WARN") else "") + last, "board": board}
 
 
+def st_relieve(c, n, board):
+    """`[relieve] enable = true` only (the stage is inserted after plan-route then): moves parts against the predictor, never worse.
+    Its output board feeds the next stage; a still-failing prediction is WARN and the options table is written to the stage dir."""
+    d = c.dir(n, "relieve")
+    out = os.path.join(d, "board.kicad_pcb")
+    rc, text = _run_cli(["relieve", board, "--out", out, "--json", os.path.join(d, "relieve.json")] + c.cs(), os.path.join(d, "stage.log"))
+    last = _last_line(text)
+    bad = bool(rc) or "FAIL" in last
+    if os.path.exists(out) and not bad:
+        return {"verdict": "pass", "line": last, "board": out}
+    return {"verdict": "warn" if bad else "pass", "line": ("WARN " if bad and not last.startswith("WARN") else "") + last,
+            "board": out if os.path.exists(out) else board}
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route,
+FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
@@ -942,7 +956,11 @@ def run(a):
         print(format_status(st))
         return 0
     flow = getattr(a, "flow", None) or (st or {}).get("flow") or "classic"
-    STAGES_ = FLOWS[flow]
+    STAGES_ = list(FLOWS[flow])
+    if a.constraints and "plan-route" in STAGES_ and "relieve" not in STAGES_:
+        from . import constraints as C_relieve
+        if bool(((C_relieve.load(a.constraints) or {}).get("relieve") or {}).get("enable", False)):
+            STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")      # default off: existing pipelines are unchanged
     first = a.from_stage or STAGES_[0]
     last = a.to_stage or STAGES_[-1]
     i0, i1 = STAGES_.index(first), STAGES_.index(last)
