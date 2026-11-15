@@ -179,6 +179,25 @@ def cmd_parts_apply(a):
         raise SystemExit(1)
 
 
+def cmd_parts_fact(a):
+    """Record datasheet-verified facts for an MPN, each with its page: parts-fact MPN vin_min=4.5 vin_max=5.5 --source X.pdf#p7."""
+    from . import elec as EL, parts as P
+    ds = P.resolve_dir(a.datasheets, [os.getcwd()])
+    kv = {}
+    for item in a.facts:
+        k, _, v = item.partition("=")
+        if not v:
+            raise SystemExit(f"parts-fact: '{item}' is not key=value")
+        kv[k] = EL._coerce(v)
+    try:
+        keys, warn = EL.set_facts(ds, a.mpn, kv, a.source, force=a.force)
+    except ValueError as e:
+        raise SystemExit(f"parts-fact: {e}")
+    for w in warn:
+        print("  warning: " + w)
+    print(f"parts-fact: {a.mpn}: {', '.join(keys)} recorded ({a.source})")
+
+
 def add_parsers(sub):
     p = sub.add_parser("parts", help="part-entry gate: MPN/mfr/datasheet/pinmap/package/footprint complete and consistent")
     p.add_argument("spec", help="spec JSON")
@@ -202,6 +221,13 @@ def add_parsers(sub):
     ap.add_argument("--dry-run", dest="dry_run", action="store_true", help="validate and report, write nothing")
     ap.add_argument("--no-fetch", dest="no_fetch", action="store_true", help="do not try to fetch a missing datasheet")
     ap.set_defaults(fn=cmd_parts_apply)
+    pf = sub.add_parser("parts-fact", help="record datasheet facts (vin, i_max, contact_a, pin rules) for an MPN, with page")
+    pf.add_argument("mpn")
+    pf.add_argument("facts", nargs="+", help="key=value (JSON values), e.g. vin_min=4.5 supply_pins='[\"IN\"]'")
+    pf.add_argument("--source", required=True, help="datasheet file and page: file.pdf#p7")
+    pf.add_argument("--datasheets", default="docs/datasheets", help="datasheet folder holding datasheets.json")
+    pf.add_argument("--force", action="store_true", help="accept a number that is not found as text on the cited page")
+    pf.set_defaults(fn=cmd_parts_fact)
     import importlib
     for name in ("ready", "pingroups", "partdiff"):
         try:

@@ -31,6 +31,7 @@ ENVIRONMENT. This module does that:
                          the spec JSON and the copper have drifted apart
   HOLDUP_SHORT           bulk capacitance cannot deliver the stated ride-through
   TVS_MARGIN             clamp voltage vs the downstream device rating
+  SUPPLY_RANGE / SOURCE_OVERLOAD / CONTACT_CURRENT / FUSE_SIZING / PIN_STRAP / CAP_VOLTAGE_MARGIN   datasheet facts vs the spec netlist (elec.py)
   ENV_UNDEFINED          nobody answered the environment questions
   PAD_TWIN_UNNETTED      one of two same-numbered pads was left off its net
   VIA_TYPE               blind/buried/micro via on a through-via-only fab
@@ -1633,6 +1634,13 @@ def check_preroute(facts, spec, cons):
             for x in found]
 
 
+def check_elec(spec, cons, ds_dir, mpn_map=None):
+    """SUPPLY_RANGE / SOURCE_OVERLOAD / CONTACT_CURRENT / FUSE_SIZING / PIN_STRAP / CAP_VOLTAGE_MARGIN (elec.py): datasheet facts against
+    the spec netlist and [power.*]; ELEC_NOT_EVALUATED (INFO) names every part or rail that had no data."""
+    from . import elec as EL
+    return [_f(x["level"], x["code"], x["msg"], refs=x["refs"]) for x in EL.check_spec(spec, cons, ds_dir, mpn_map)]
+
+
 def check_control_pins(spec, cons):
     """CONTROL_PIN_* / OPEN_DRAIN_NO_PULLUP / INPUT_UNDRIVEN (WARN; defaults INFO): lint.control_pins on the spec
     netlist, relevance electrical. Off with `[review] control_pins = false`."""
@@ -2010,6 +2018,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_keepouts(facts, cons)
     out += check_preroute(facts, spec, cons)
     out += check_control_pins(spec, cons)
+    out += check_elec(spec, cons, ds_dir, facts.get("mpn_map"))
     out += check_open(facts, cons)
     out += check_locks(facts, cons)
     out += check_pins(facts, cons)
