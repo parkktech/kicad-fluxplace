@@ -428,6 +428,24 @@ def test_segments_stop_on_stall_and_keep_each_session(tmp_path, fake):
     """Several segments run; the stall stop ends them after `stall_passes` segments without a lower signal count."""
     rec, b, out, base = run(tmp_path, fake, [N1], stall_passes=2)
     assert rec["ok"], rec.get("error")
-    assert rec["stop"].startswith("stall") and len(rec["segments"]) == 3          # 1 productive + 2 without progress
+    assert rec["stop"].startswith("stall") and len(rec["segments"]) == 3          # 1 accepted + 2 without a lower measured count
     assert [p["signal"] for p in rec["passes"]] == [2, 1]
     assert rec["passes_split"][0][4] == rec["plane_open"] == 0
+    assert rec["best"]["fr_best_pass"] == 2 and rec["best"]["fr_best_signal"] == 1 and rec["best"]["measured_signal"] is not None
+    assert len(rec["rejected"]) == 2                                              # the later segments did not lower the count
+
+
+def test_copper_clearance_gates_vias_inside_keepouts():
+    drc = {"violations": [
+        {"type": "items_not_allowed", "description": "Track not allowed in keepout",
+         "items": [{"description": "Via [ETH_L0_N] on F.Cu", "pos": {"x": 3, "y": 4}, "uuid": "k1"},
+                   {"description": "Rule area [keepout]", "pos": {"x": 0, "y": 0}, "uuid": "k2"}]},
+        {"type": "items_not_allowed", "description": "Pad in keepout",
+         "items": [{"description": "Pad 1 [GND] of R1", "pos": {"x": 0, "y": 0}, "uuid": "k3"}]}]}
+    rows = FR.copper_clearance(drc)
+    assert len(rows) == 1 and rows[0]["kind"] == "keepout" and rows[0]["items"][0]["uuid"] == "k1"
+
+
+def test_fanout_reason_names_the_mode_and_why(tmp_path, fake):
+    rec, _b, _out, _base = run(tmp_path, fake, [N1], has_fanout=True)
+    assert rec["fanout_why"].startswith("[route.freerouting] fanout = auto; the input already has fan-out copper -> Freerouting's own fan-out OFF")

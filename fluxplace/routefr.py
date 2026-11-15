@@ -460,12 +460,19 @@ def copper_clearance(drc):
     """The copper-to-copper clearance violations of a kicad-cli DRC report (zone fills excluded): [{items, actual, required}]."""
     out = []
     for v in drc.get("violations", []):
-        if v.get("type") != "clearance":
+        # a via or track inside a keepout is the same failure for the router (its own rule), so both kinds are gated
+        if v.get("type") not in ("clearance", "items_not_allowed"):
             continue
         its = v.get("items") or []
         if any("Zone" in (i.get("description") or "") for i in its):
             continue
         d = v.get("description") or ""
+        if v.get("type") == "items_not_allowed":
+            if not any(("Track" in (i.get("description") or "") or "Via" in (i.get("description") or "")) for i in its):
+                continue
+            out.append({"kind": "keepout", "items": [{"desc": i.get("description"), "uuid": i.get("uuid"), "x": i["pos"]["x"],
+                                                       "y": i["pos"]["y"]} for i in its], "actual": 0.0, "required": None})
+            continue
         act = re.search(r"actual ([\d.]+) mm", d)
         req = re.search(r"(?:clearance|netclass '[^']*' clearance) ([\d.]+) mm", d)
         out.append({"items": [{"desc": i.get("description"), "uuid": i.get("uuid"), "x": i["pos"]["x"], "y": i["pos"]["y"]} for i in its],
@@ -598,6 +605,8 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
     fanout_on = S["fanout"] == "on" or (S["fanout"] == "auto" and not has_fanout)
     rec = {"ok": False, "router": "freerouting", "jar": loc["jar"], "java": loc["java"], "version": loc["version"],
            "flags": " ".join(router_flags(S, budget_s, fanout_on)), "fanout": "on" if fanout_on else "off", "pairs": S["pairs"],
+           "fanout_why": f"[route.freerouting] fanout = {S['fanout']}; the input {'already has' if has_fanout else 'has no'} "
+                         f"fan-out copper -> Freerouting's own fan-out {'ON' if fanout_on else 'OFF'}",
            "skip_nets": sorted(skip_nets), "budget_s": round(budget_s), "planes": list(planes),
            "segment_passes": int(S.get("segment_passes", 1)), "stall_passes": int(S.get("stall_passes", 3))}
     t0 = time.time()
@@ -613,6 +622,9 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             plane_open = sum(v for n, v in conn(board).items() if n in set(plane_nets))
         rec["plane_open"] = plane_open
         cur, passes, stale, best, stop, state, jvm_s, starts = dsn_board, [], 0, None, None, None, 0.0, []
+        best_seg_pass = 0
+        if conn:                                            # baseline: the input board's signal count, measured the same way
+            best = max(0, sum(conn(dsn_board).values()) - plane_open)
         rec["segments"] = []
         for k in range(100000):
             seg = os.path.join(workdir, f"seg{k:03d}")
@@ -656,29 +668,36 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
                     pass
                 raise RuntimeError(f"Freerouting left no usable session (rc {jr['rc']}, {'killed by the watchdog' if jr['killed'] else 'exited'}"
                                    f" after {jr['elapsed']:.0f}s): {tail}")
+            seg_first = len(passes) + 1
             for ps in log["passes"]:
-                ps = dict(ps, pass_no=len(passes) + 1, seg=k)
-                passes.append(ps)
-                sig = max(0, ps["unrouted"] - plane_open)
-                if best is None or sig < best:
-                    best, stale = sig, 0
-                else:
-                    stale += 1
-                if sig == 0:
-                    stop = "signal routed"
-                elif stale >= rec["stall_passes"] and stop is None:
-                    stop = f"stall: {stale} pass(es) without a lower signal unrouted count"
-            if not log["passes"]:                    # a segment that made no pass counts as a pass without progress
-                stale += 1
-                if stale >= rec["stall_passes"] and stop is None:
-                    stop = f"stall: {stale} segment(s) without a pass"
+                passes.append(dict(ps, pass_no=len(passes) + 1, seg=k))
             rec["segments"].append({"seg": k, "passes": len(log["passes"]), "jvm_s": jr["elapsed"], "state": log["state"]})
             nxt = os.path.join(seg, "after.kicad_pcb")
             _side(board, nxt)
             imp = _helper("import", {"board": cur, "ses": ses, "out": nxt, "skip_nets": sorted(skip_nets)}, workdir)
-            sessions.append(ses)
             rec.setdefault("import_segments", []).append(imp)
-            cur = nxt
+            # Freerouting's own pass counts are not monotonic (it can finish a pass worse than its best), and the
+            # session it writes is the state it ends in.  So the segment is ACCEPTED only when the imported board
+            # measures fewer signal open connections than the best accepted board (pcbnew, zones filled).
+            # Without `conn` the Freerouting count of the segment's last pass is used instead.
+            if conn:
+                meas = max(0, sum(conn(nxt).values()) - plane_open)
+            elif log["passes"]:
+                meas = max(0, log["passes"][-1]["unrouted"] - plane_open)
+            else:
+                meas = None
+            acc = meas is not None and (best is None or meas < best)
+            if acc:
+                best, stale, cur = meas, 0, nxt
+                sessions.append(ses)
+                best_seg_pass = len(passes) if log["passes"] else best_seg_pass
+            else:
+                stale += 1
+                rec.setdefault("rejected", []).append({"seg": k, "measured": meas, "best": best})
+            if acc and meas == 0:
+                stop = "signal routed"
+            elif stale >= rec["stall_passes"] and stop is None:
+                stop = f"stall: {stale} segment(s) without a lower measured signal count"
             if stop is None and len(passes) >= S["passes"]:
                 stop = "max passes"
             if stop:
@@ -689,6 +708,10 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
         rec["start_unrouted"] = starts[0] if starts else None
         split_passes(passes, plane_open)
         rec["passes"] = passes
+        fr_best = min(passes, key=lambda p: p["signal"]) if passes else None
+        rec["best"] = {"measured_signal": best, "fr_best_pass": fr_best and fr_best["pass_no"],
+                       "fr_best_signal": fr_best and fr_best["signal"], "accepted_last_pass": best_seg_pass,
+                       "plane_open": plane_open}
         rec["passes_split"] = [[p["pass_no"], round(p["min"] or 0, 1), p["unrouted"], p["signal"], p["plane"]] for p in passes]
         t1 = time.time()
         tmp = out + ".fr-import.kicad_pcb"
