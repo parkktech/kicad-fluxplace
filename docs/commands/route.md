@@ -154,7 +154,7 @@ in the constructive flow (ready, modules, floorplan, fanout, pour-tie, pairs, ro
 2. **pairs**: `route_diff.py` only for the pairs with an open leg (or handed over, state c); complete pairs are the pairs stage's locked copper.
 3. **protected**: `route.py` on the open nets the constraints keep from thinning (`globalroute.is_fixed_width`: rails, RF, clocks,
    `[pairs.*]` and `[nets.X]` impedance nets, controlled names) at their rule width (`--power-nets-widths`), `--escalation off`.
-4. **rest**: `route.py '*'` at the preferred sizes (`--track`/`--clearance`) with `--escalation fab` and a generated `--fab-overrides`
+4. **rest**: `route.py '*'` at the preferred sizes (`[route] preferred_track_mm / preferred_clearance_mm`, else the board's Default net class, else `--track`/`--clearance`) with `--escalation fab` and a generated `--fab-overrides`
    file holding the floors, so features step down to the floor only where needed and never below it. Protected nets still open
    are excluded (`!net`), so the step-down never thins them.
 5. **finish**: `batchroute.route_batches` (hybrid finish, cheapest first, rip-up of unlocked copper) on what is open, capped at

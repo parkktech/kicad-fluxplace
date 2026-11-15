@@ -322,6 +322,21 @@ def accept_rc(rc):
     return rc in (0, 3)
 
 
+def preferred_sizes(cons, board, R):
+    """the project's preferred track and clearance (floored): `[route] preferred_track_mm / preferred_clearance_mm`, else the
+    Default net class of the board's .kicad_pro, else what the stage was given (--track / --clearance). -> R with them set."""
+    r = (cons or {}).get("route") or {}
+    cl = {}
+    try:
+        pro = json.load(open(os.path.splitext(board)[0] + ".kicad_pro"))
+        cl = next((c_ for c_ in pro["net_settings"]["classes"] if c_.get("name") == "Default"), {})
+    except (OSError, KeyError, ValueError, TypeError):
+        pass
+    track = r.get("preferred_track_mm") or cl.get("track_width") or R["track"]
+    clear = r.get("preferred_clearance_mm") or cl.get("clearance") or R["clearance"]
+    return dict(R, track=max(float(track), R["min_track"]), clearance=max(float(clear), R["min_clearance"]))
+
+
 # ----------------------------------------------------------------- the stage
 def run(c, n, board, conn):
     """`route` stage in krt-whole mode -> stage result (verdict, line, board, next). `conn` is batchroute's
@@ -332,7 +347,7 @@ def run(c, n, board, conn):
     d = c.dir(n, "route")
     work = os.path.join(d, "steps")
     os.makedirs(work, exist_ok=True)
-    R = RR.rules(cons, board, a.track, a.clearance)
+    R = preferred_sizes(cons, board, RR.rules(cons, board, a.track, a.clearance))
     S = BR.settings(cons)
     cap_s = float(((cons.get("route") or {}).get("krt_whole_call_cap_s", CAP_S)))
     steps, t0 = [], time.time()

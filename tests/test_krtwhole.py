@@ -371,3 +371,18 @@ def test_real_router_run_on_a_tiny_board_keeps_the_floor_and_exit_codes(tmp_path
     assert KW.accept_rc(rc) and os.path.exists(out), open(str(tmp_path / "r.log")).read()[-800:]
     assert KW.floor_audit(out, R) == []
     assert sum(RC.open_by_net(out).values()) == 0
+
+
+def test_preferred_sizes_are_the_default_class_unless_the_constraints_say_otherwise(tmp_path):
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text("(kicad_pcb)\n")
+    board.with_suffix(".kicad_pro").write_text(json.dumps({"net_settings": {"classes": [
+        {"name": "Default", "clearance": 0.12, "track_width": 0.15}]}}))
+    cons = {"route": {"min_track_mm": 0.127, "min_clearance_mm": 0.127}}
+    R = RR.rules(cons, str(board), 0.2, 0.2)
+    got = KW.preferred_sizes(cons, str(board), R)
+    assert got["track"] == 0.15 and got["clearance"] == 0.127          # the class clearance is under the floor: floored
+    cons["route"]["preferred_track_mm"] = 0.2
+    assert KW.preferred_sizes(cons, str(board), R)["track"] == 0.2
+    board.with_suffix(".kicad_pro").unlink()
+    assert KW.preferred_sizes({"route": {"min_track_mm": 0.127, "min_clearance_mm": 0.127}}, str(board), R)["track"] == 0.2   # the stage's own sizes
