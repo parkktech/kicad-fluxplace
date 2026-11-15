@@ -1,8 +1,7 @@
 # fluxplace
 
 Signal-flow-aware placement, routing analysis, design review and fab packaging for KiCad 10.
-One pcbnew-free core: a headless CLI, a KiCad plugin and an MCP server. On the RAZOR-01 CM5
-carrier (178 parts): ~50% less weighted wirelength, 28% less area.
+One pcbnew-free core: a headless CLI, a KiCad plugin and an MCP server.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Per-command detail: `fluxplace help-brief CMD`.
 
