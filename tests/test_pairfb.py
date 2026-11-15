@@ -21,7 +21,7 @@ def test_unlaid_pair_is_state_c_and_handed_to_the_router(tmp_path):
     assert r["tried"] and r["tried"][0].startswith("b(i)")               # the ladder ran before the pair was given up
     assert not [s for s in B["segs"] if s["net"] in ("D_P", "D_N")]
     t = PR.format_text(rep)
-    assert "PAIR_HANDOFF D_N/D_P [c]" in t and "pairs states: c 1" in t
+    assert "PAIR_NOT_LAID D_N/D_P" in t and "PAIR_HANDOFF state c" in t and "pairs states: c 1" in t
 
 
 def test_half_laid_pair_leaves_no_partial_copper(tmp_path):

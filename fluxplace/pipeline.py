@@ -498,6 +498,7 @@ def st_route(c, n, board):
         if frrec.get("ok"):
             b0 = state["best"]
             frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
+    from . import pairfb as PFB
     hybrid = bool(frrec or resume)
     start_board = best if hybrid else board            # hybrid finish: what Freerouting left goes to the per-net router
     if hybrid:
@@ -643,6 +644,17 @@ def st_route(c, n, board):
                "tried_failed_nets": res["tried_failed"][:40], "resumed": bool(resume)}
         line += f", finish: {fin['untried']} net(s) untried (budget), {fin['tried_failed']} tried and failed" + (" [resumed]" if resume else "")
     _save_resume(a, d, board, best, res)
+    unc = []
+    try:                                                # pairs handed to the router (state c): connected-but-flagged with the numbers
+        from . import pairuncoupled as PU
+        hand_nets = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))
+        if hand_nets:
+            unc = PU.rows(RD.load(best), c.cons, c.spec, best, only=hand_nets)
+            with open(os.path.join(d, "pairs_uncoupled.json"), "w") as fh:
+                json.dump({"handoff_nets": sorted(hand_nets), "connected": unc, "flagged": PU.flagged(unc)}, fh, indent=1)
+            line += f", handed-over pairs: {len(unc)} connected, {len(PU.flagged(unc))} PAIR_ROUTED_UNCOUPLED of {len(hand_nets) // 2}"
+    except Exception as e:                              # noqa: BLE001 - numbers are advice
+        line += f", pairs_uncoupled not measured ({type(e).__name__})"
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
     if fin:
         out["finish"] = fin
@@ -716,19 +728,20 @@ def _save_resume(a, d, board, best, res):
         shutil.copy(best, keep)
         _sidecar(board, keep)
         with open(os.path.join(d, "finish_resume.json"), "w") as fh:
-            json.dump({"input": _sha(board), "board": keep, "untried": res.get("untried", []), "tried_failed": res.get("tried_failed", [])}, fh, indent=1)
+            json.dump({"input": _sha(board), "output": _sha(best), "board": keep, "untried": res.get("untried", []), "tried_failed": res.get("tried_failed", [])}, fh, indent=1)
     except OSError:
         pass
 
 
 def _resume_finish(a, d, board, best):
-    """`pipeline --from route` with a finish record of the same input: the router is not run again; the finish step continues on the
+    """`pipeline --from route` with a finish record of the same input (the stage's input board, or the board the stage ended with:
+    `--from route` starts from the last stage's output): the router is not run again; the finish step continues on the
     board it ended with (`best` is overwritten with it).  -> the record, or None."""
     if getattr(a, "from_stage", None) != "route" or getattr(a, "no_resume", False):
         return None
     try:
         rec = json.load(open(os.path.join(d, "finish_resume.json")))
-        if rec["input"] != _sha(board) or not os.path.exists(rec["board"]) or not (rec.get("untried") or rec.get("tried_failed")):
+        if _sha(board) not in (rec["input"], rec.get("output")) or not os.path.exists(rec["board"]) or not (rec.get("untried") or rec.get("tried_failed")):
             return None
         shutil.copy(rec["board"], best)
         _sidecar(rec["board"], best)
@@ -751,7 +764,7 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     from . import pairfb as PFB
-    hand = PFB.handoff_nets(c.state, c.work)             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
+    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
     skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)

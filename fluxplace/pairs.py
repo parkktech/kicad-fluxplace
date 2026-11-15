@@ -1110,9 +1110,7 @@ def format_text(rep, top=None):
                    + (f"; {len(rep['handoff']) // 2} pair(s) handed to the router as ordinary nets (c)" if rep.get("handoff") else ""))
     for r in rows[: top or len(rows)]:
         nm = "/".join(r["pair"])
-        if r.get("handoff"):
-            out.append(f"PAIR_HANDOFF {nm} [c] to the general router as two ordinary nets of class {r['class']}; tried {', '.join(r.get('tried', [])) or '-'}; {r['why'] or 'open'}")
-        elif r["status"] == "complete" and "length" in r:
+        if r["status"] == "complete" and "length" in r:
             inner = sorted({f"{l[:-3]} {g['width']:g}/{g['gap']:g} ({g['from']})" for l, g in r.get("geometry", {}).items()
                             if l in r["layers"] and g["from"] != "class"})
             out.append(f"  {nm}: {'[' + r['state'] + '] ' if r.get('state') else ''}complete {r['length'][0]:.2f} / {r['length'][1]:.2f} mm, skew {r['skew']:.3f} (limit {r['limit']:g} {r.get('limit_from', '')}), "
@@ -1123,7 +1121,8 @@ def format_text(rep, top=None):
             out.append(f"  {nm}: planned, {r.get('vias', 0)} via pair(s), {' '.join(l[:-3] for l in r.get('layers', [])) or '-'}")
         else:
             out.append(f"PAIR_NOT_LAID {nm} [{r['status']}/{r['plan']}, {r.get('secs', 0)} s] {r['why'] or 'open connections remain'}"
-                       + (f"; blocked by {', '.join(r['blockers'][:5])}" if r.get("blockers") else ""))
+                       + (f"; blocked by {', '.join(r['blockers'][:5])}" if r.get("blockers") else "")
+                       + (f"; PAIR_HANDOFF state c: two ordinary nets of class {r['class']} for the router, ladder tried {', '.join(r.get('tried', [])) or '-'}" if r.get("handoff") else ""))
     return "\n".join(out)
 
 
@@ -1250,7 +1249,11 @@ def stage(c, n, board):
     d = c.dir(n, "pairs")
     out = os.path.join(d, "board.kicad_pcb")
     try:
-        rep = run(board, c.cons, c.spec, out, cs_args=c.cs() + c.qs())
+        cs_args = c.cs() + c.qs()
+    except AttributeError:                                  # a bare context (tests): no fan-out re-escape, no rip of stubs
+        cs_args = None
+    try:
+        rep = run(board, c.cons, c.spec, out, cs_args=cs_args)
     except Exception as e:                                  # noqa: BLE001 - the router still has every pair
         return {"verdict": "pass", "line": f"WARN pairs not laid ({type(e).__name__}: {str(e)[:80]})", "board": board}
     try:

@@ -87,6 +87,8 @@ def test_from_route_resumes_the_finish_step_without_the_router(tmp_path):
     assert PL._resume_finish(args(from_stage="route", no_resume=True), str(d), str(board), best) is None
     rec = PL._resume_finish(args(from_stage="route"), str(d), str(board), best)
     assert rec["tried_failed"] == ["B"] and open(best).read() == "(kicad_pcb (routed))\n"
+    json.dump({"input": "x", "output": PL._sha(str(board)), "board": str(d / "resume.kicad_pcb"), "untried": ["A"], "tried_failed": []}, open(d / "finish_resume.json", "w"))
+    assert PL._resume_finish(args(from_stage="route"), str(d), str(board), best) is not None         # `--from route` starts from the stage's own output
     board.write_text("(kicad_pcb (changed))\n")                                                      # another input: never resume
     assert PL._resume_finish(args(from_stage="route"), str(d), str(board), best) is None
     json.dump({"input": PL._sha(str(board)), "board": str(d / "resume.kicad_pcb"), "untried": [], "tried_failed": []}, open(d / "finish_resume.json", "w"))
