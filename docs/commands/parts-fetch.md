@@ -7,6 +7,7 @@ recorded with its source, URL and outcome, so a failure names what was tried.
 
 | # | source | notes |
 |---|---|---|
+| 0 | local | a catalog / family sheet already in the datasheet dir (same manufacturer prefix) whose text carries the part number: reused, nothing downloaded |
 | 1 | distributor APIs | the datasheet URL DigiKey / Mouser return (also for the packaging variant of the MPN: Mouser often lists the URL only on the base MPN); TI redirect pages are unwrapped |
 | 2 | element14 / Farnell | product API, needs `ELEMENT14_API_KEY` (free); recorded as `skipped` without one |
 | 3 | LCSC / JLCPCB | `jlcsearch` + JLCPCB's part-detail endpoint give the LCSC code and its PDF link (`wmsc.lcsc.com` / `datasheet.lcsc.com`) |

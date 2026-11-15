@@ -84,7 +84,8 @@ def src_registry(mpn, ctx):
         return hits[0], "already in the project library"
     reg = ctx.get("registry") or {}
     for sect in ("real", "community", "kicad_library"):
-        for ref, note in (reg.get(sect) or {}).items():
+        sec = reg.get(sect)
+        for ref, note in (sec.items() if isinstance(sec, dict) else []):
             if isinstance(note, str) and mpn in note:
                 m = re.search(r"lib/3dmodels/([\w.+\-/]+\.(?:step|stp))", note)
                 if m and os.path.exists(os.path.join(ctx["lib_dir"], os.path.basename(m.group(1)))):

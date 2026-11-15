@@ -159,7 +159,7 @@ def _fit(cand, fp, required, temp):
     return ok, why
 
 
-def todo(spec, cons, res, g, qty=None, searcher=None, limit=5, verifier=None):
+def todo(spec, cons, res, g, qty=None, searcher=None, limit=5, verifier=None, enricher=None):
     """-> {"quantity", "summary", "unresolved", "parts": [record]}: one record per part (`missing` empty when resolved).
     `searcher(query, limit, qty)` -> [{mpn, mfr, stock, unit, ext, source, datasheet, package, temp_min, temp_max, lifecycle, params}].
     A part that has an MPN but is short at the build quantity also gets `alternatives`: dropin.classify() for each candidate (same MPN in
@@ -211,13 +211,13 @@ def todo(spec, cons, res, g, qty=None, searcher=None, limit=5, verifier=None):
         if mpn and "stock" in rec["missing"] and searcher and d:
             ak = ("alt", gk)
             if ak not in cache:
-                cache[ak] = alternatives(mpn, d, row.get("fp"), (qty or 1) * len(groups[gk]), temp, searcher, verifier, limit)
+                cache[ak] = alternatives(mpn, d, row.get("fp"), (qty or 1) * len(groups[gk]), temp, searcher, verifier, limit, enricher=enricher)
             rec["alternatives"] = cache[ak]
         recs.append(rec)
     return {"quantity": qty, "summary": g["by_need"], "unresolved": len(g["parts"]), "parts": recs}
 
 
-def alternatives(mpn, d, fp, required, temp, searcher, verifier=None, limit=5, verify_top=3):
+def alternatives(mpn, d, fp, required, temp, searcher, verifier=None, limit=5, verify_top=3, enricher=None):
     """Ranked equivalents for a part short at `required`: packaging variants of the same MPN, then parametric matches.
     -> [{mpn, mfr, stock, ext, source, drop_in, identical, checks, differs, unverified, lead_time?}]."""
     from . import dropin as DI, sourcing as S
@@ -238,11 +238,24 @@ def alternatives(mpn, d, fp, required, temp, searcher, verifier=None, limit=5, v
                 seen.add(c["mpn"])
                 rows.append(c)
     out = []
+    if enricher:                                   # a listing without parametrics (Mouser keyword rows) is looked up by exact MPN
+        n = 0
+        for c in rows:
+            if not c.get("error") and not c.get("params") and (c.get("stock") or 0) >= required and n < 8:
+                n += 1
+                try:
+                    e = enricher(c["mpn"]) or {}
+                except Exception:                                      # noqa: BLE001
+                    e = {}
+                c["params"] = e.get("raw_params") or e.get("params") or {}
+                for k in ("package", "temp_min", "temp_max", "pins"):
+                    c[k] = c.get(k) or e.get(k)
+                c["lifecycle"] = c.get("lifecycle") or e.get("lifecycle")
     for c in rows:
         if c.get("error"):
             out.append(c)
             continue
-        r = DI.classify(orig, DI.row_for(c, c["mpn"]) | {"stock": c.get("stock"), "lifecycle": c.get("lifecycle")}, fp, required, temp, None)
+        r = DI.classify(orig, DI.row_for(c, c["mpn"]) | {"stock": c.get("stock"), "lifecycle": c.get("lifecycle"), "pins": c.get("pins")}, fp, required, temp, None)
         out.append({**{k: c.get(k) for k in ("mpn", "mfr", "stock", "unit", "ext", "source", "datasheet", "lifecycle", "package", "lead_time")},
                     "required": required, **r})
     out = DI.rank([o for o in out if not o.get("error")])[:max(limit, verify_top)]

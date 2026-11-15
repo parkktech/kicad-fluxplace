@@ -275,6 +275,27 @@ def _safe(mpn):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", mpn).strip("_") or "part"
 
 
+def local_match(mpn, ds_dir, man, min_prefix=3):
+    """A datasheet already in the manifest (same manufacturer prefix) whose text carries `mpn`: catalogs and family sheets cover many
+    parts, so the file on disk is reused instead of downloaded again.  -> filename | None."""
+    part, _ = part_tokens(mpn)
+    pre = _norm(mpn)[:min_prefix]
+    seen = set()
+    for k, v in sorted(man.items()):
+        f = v.get("file")
+        if not f or f in seen or _norm(k)[:min_prefix] != pre or not f.lower().endswith(".pdf"):
+            continue
+        seen.add(f)
+        path = os.path.join(ds_dir, f)
+        if not os.path.exists(path):
+            continue
+        txt = pdf_text(path)
+        flat = _norm(txt or "")
+        if any(t and t in flat for t in part):
+            return f
+    return None
+
+
 def fetch_datasheet(mpn, ds_dir, creds=None, refresh=False, log=lambda m: None, extra_urls=(), sources=None, now=time.time):
     """Run the chain for one MPN.  -> {"mpn", "ok", "level" ('part'|'series'|None), "file", "source", "url", "cached", "tried": [...]}.
     `tried` entries: {"source", "url", "outcome"}.  The manifest entry gets `level` and the successful URL; failures are written
@@ -295,6 +316,13 @@ def fetch_datasheet(mpn, ds_dir, creds=None, refresh=False, log=lambda m: None, 
         return {**old["result"], "cached": True}
     tried, series_hit = [], None
     dest = os.path.join(ds_dir, _safe(mpn) + ".pdf")
+    hit = local_match(mpn, ds_dir, man)
+    if hit:                                   # a catalog / family sheet already on disk carries this part: no download
+        tried.append({"source": "local", "url": hit, "outcome": f"accepted: {hit} on disk carries the part number [part]"})
+        ent = dict(man[next(k for k, v in man.items() if v.get("file") == hit)])
+        man[mpn] = {**ent, "via": "local", "level": "part", "fetched": time.strftime("%Y-%m-%d")}
+        json.dump(man, open(mpath, "w"), indent=1, sort_keys=True)
+        return {"mpn": mpn, "ok": True, "level": "part", "file": hit, "source": "local", "url": hit, "cached": False, "tried": tried}
     cands = [("given", u) for u in extra_urls]
     for name, fn in (sources or SOURCES):
         try:

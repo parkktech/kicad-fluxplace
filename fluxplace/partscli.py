@@ -134,11 +134,12 @@ def cmd_parts_todo(a):
     res = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess, qty=qty)
     g = PG.gate(spec, cons, facts, res, qty=qty)
     searcher = None
+    from . import partsearch as PS
     if not a.no_api and not a.no_search:
-        from . import partsearch as PS
         searcher = PS.keyword_search
     out = PG.todo(spec, cons, res, g, qty=qty, searcher=searcher, limit=a.limit,
-                  verifier=None if a.no_verify or not ds else _verifier(ds))
+                  verifier=None if a.no_verify or not ds else _verifier(ds),
+                  enricher=(lambda m: PS.lookup(m, cache_dir=cache)) if searcher else None)
     out["gate"] = PG.summary_line(g)
     out["unchecked"] = g["unchecked"]
     if a.only_missing:
@@ -232,6 +233,12 @@ def cmd_parts_fetch(a):
                 mpns.append(m)
     if not ds:
         raise SystemExit("parts-fetch: --datasheets (or --spec + constraints [docs] datasheets) is required")
+    if a.file:
+        if len(set(mpns)) != 1:
+            raise SystemExit("parts-fetch --file needs exactly one MPN")
+        ok, level, why = D.adopt_file(mpns[0], ds, a.file)
+        print(f"{mpns[0]}: " + (f"adopted {a.file} [{level}] {why}" if ok else f"REJECTED {a.file}: {why}"))
+        raise SystemExit(0 if ok else 1)
     res = [D.fetch_datasheet(m, ds, refresh=a.refresh) for m in sorted(set(mpns))]
     if a.json:
         print(json.dumps(res, indent=1))
@@ -254,7 +261,7 @@ def cmd_parts_page(a):
     f = P.datasheet_file(a.mpn, ds, None, man) if ds else None
     if not f:
         raise SystemExit(f"parts-page: no datasheet on disk for {a.mpn} in {ds}")
-    pdf = f if os.path.isabs(f) else os.path.join(ds, f)
+    pdf = f if os.path.exists(f) else os.path.join(ds, f)
     if a.pages:
         print(f"{pdf}: {PC2.page_count(pdf)} page(s)")
         return
@@ -311,7 +318,7 @@ def cmd_parts_model(a):
             out.append({"ref": ref, "ok": False, "tried": [{"source": "-", "outcome": "no MPN"}]})
             continue
         size = MC.fp_dims(a.board, ref) if a.board else None
-        r = MC.resolve(mpn, a.lib, fp_size=size, registry=reg, force=a.force)
+        r = MC.resolve(mpn, a.lib, fp_size=size, registry=reg, force=a.force, scratch=a.scratch)
         out.append({"ref": ref, "mpn": mpn, "fp_mm": size, **r})
         if r["ok"] and a.register and reg_path and r["source"] != "project-library":
             dest = os.path.join(a.lib, os.path.basename(r["path"]))
@@ -356,6 +363,7 @@ def add_parsers(sub):
     pf.add_argument("--mpn-map", dest="mpn_map", default=None)
     pf.add_argument("--datasheets", default=None)
     pf.add_argument("--refresh", action="store_true")
+    pf.add_argument("--file", default=None, help="adopt a PDF you fetched by hand for the one MPN (same validation)")
     pf.add_argument("--verbose", action="store_true", help="also print what was tried for the ones that succeeded")
     pf.add_argument("--json", action="store_true")
     pf.set_defaults(fn=cmd_parts_fetch)
@@ -382,6 +390,7 @@ def add_parsers(sub):
     pm.add_argument("--sources", default=None, help="model_sources.json registry (read; written with --register)")
     pm.add_argument("--register", action="store_true", help="copy an accepted model into --lib and record it in --sources (the board is not touched)")
     pm.add_argument("--force", action="store_true", help="retry sources that failed before")
+    pm.add_argument("--scratch", default=None, help="download/failure-cache directory (default <lib>/.fetch)")
     _common(pm)
     pm.set_defaults(fn=cmd_parts_model)
     ap = sub.add_parser("parts-apply", help="validate agent proposals (MPN in stock, package/pins agree, datasheet, model) and write what passes")

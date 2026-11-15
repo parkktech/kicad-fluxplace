@@ -161,7 +161,7 @@ def classify(orig, cand, fp=None, required=1, temp=(None, None), ds=None):
             f"{cmin:g}..{cmax:g} C vs required {need_lo}..{need_hi} C")
     qo, qc = _qual(orig.get("params")), _qual(cand.get("params"))
     if qo:
-        put("qualification", bool(qc) and int(qc) <= int(qo) or bool(qc) and qc == qo, f"AEC-Q{qc or '??'} vs original AEC-Q{qo}")
+        put("qualification", bool(qc) and int(qc) <= int(qo) or bool(qc) and qc == qo, (f"AEC-Q{qc} vs original AEC-Q{qo}" if qc else f"no AEC-Q listed vs original AEC-Q{qo}"))
     else:
         put("qualification", True, "original has no AEC-Q qualification")
     pc_ = compare_params(orig.get("params"), cand.get("params"))

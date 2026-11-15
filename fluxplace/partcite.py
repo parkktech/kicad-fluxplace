@@ -4,7 +4,7 @@ The AGENT reads the page; the tool only gives it the picture and checks and reco
   render_page(pdf, page, png)   pdftoppm -> PNG the agent can look at (`parts-page MPN --page N --png out.png`)
   compare(...)                  the pin table the agent read vs what the spec uses and the footprint has: findings, never a silent fix
   record(...)                   the citation (file, page, who/when, the table read, the findings) in <datasheets>/pin-citations.json;
-                                the spec's `pinmap_source` is set only for a part that HAS a pinmap and only when nothing mismatched
+                                the spec's `pinmap_source` is set (with --write-source) only when nothing mismatched
 """
 import json
 import os
@@ -92,9 +92,9 @@ def record(ds_dir, ref, mpn, file, page, read, result, by="agent"):
 
 
 def set_source(spec, ref, file, page):
-    """Set pinmap_source on a part that has a pinmap (never invents one).  -> bool."""
+    """Set pinmap_source (file#page of the pin table the agent read).  A pinmap is never invented: a positional connector has none.  -> bool."""
     for c in spec.get("components", []):
-        if c.get("ref") == ref and c.get("pinmap"):
+        if c.get("ref") == ref:
             c["pinmap_source"] = f"{file}#p{page}"
             return True
     return False

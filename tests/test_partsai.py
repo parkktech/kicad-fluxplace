@@ -305,7 +305,8 @@ def test_cite_matches_and_flags_mismatches(tmp_path):
     assert good["ok"]
     spec = _cspec()
     assert PC.set_source(spec, "U1", "U1.pdf", 4) and spec["components"][1]["pinmap_source"] == "U1.pdf#p4"
-    assert not PC.set_source(spec, "J1", "J1.pdf", 2) and "pinmap_source" not in spec["components"][0]    # never invents a pinmap
+    assert PC.set_source(spec, "J1", "J1.pdf", 2) and "pinmap" not in spec["components"][0]            # a source, never an invented pinmap
+    assert not PC.set_source(spec, "NOPE", "x.pdf", 1)
     p = PC.record(str(tmp_path), "J1", "J-1", "J1.pdf", 2, {"pins": {"1": "A"}}, bad)
     assert json.load(open(p))["J1"]["page"] == 2 and json.load(open(p))["J1"]["findings"]
 
@@ -349,3 +350,26 @@ def test_every_http_call_in_the_new_modules_goes_through_redact():
     for mod in ("dsfetch", "modelchain", "partcite", "dropin"):
         txt = open(os.path.join(os.path.dirname(__file__), "..", "fluxplace", mod + ".py")).read()
         assert not re.search(r"urllib\.request\.urlopen|requests\.get|curl_cffi", txt.replace("no browser impersonation", "")), mod
+
+
+def test_pincount_gate_accepts_a_pin_drawn_as_several_copper_pieces():
+    spec = {"components": [{"ref": "U1", "value": "IC", "fp": "VQFN-HR-14", "lib": "L", "mpn": "ABC123", "mfr": "X", "package": "14-VQFN",
+                            "pinmap_source": "ABC123.pdf#p1"}], "nets": {"N": [["U1", "1"]]}}
+    for total, names, bad in ((18, 14, False), (18, 18, True)):
+        facts = {"board_path": "/x/b.kicad_pcb", "parts": {"U1": {"footprint": "VQFN-HR-14", "models": [], "pads_total": total,
+                                                                   "pads": {str(i): "N" for i in range(1, names + 1)}}}}
+        res = P.run(spec, {}, facts=facts, mpn_map={}, ds_dir=None, data={"ABC123": {"matched": "ABC123", "manufacturer": "X", "package": "14-VQFN-HR (4x3.5)"}})
+        assert bool([f for f in res["findings"] if f["code"] == "PART_PINCOUNT_MISMATCH"]) is bad
+
+
+def test_a_catalog_already_on_disk_covers_other_parts(web, tmp_path):
+    pages, calls = web
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    make_pdf(str(ds / "ABC1234XYZ.pdf"), "ABC1234XYZ and ABC5678QQQ ordering table\n" + FILLER)
+    import hashlib
+    sha = hashlib.sha256((ds / "ABC1234XYZ.pdf").read_bytes()).hexdigest()
+    (ds / "datasheets.json").write_text(json.dumps({"ABC1234XYZ": {"file": "ABC1234XYZ.pdf", "sha256": sha, "source": "x", "level": "part"}}))
+    r = D.fetch_datasheet("ABC5678QQQD", str(ds), creds={}, sources=[("lcsc", lambda m, c: [("lcsc", "https://never.pdf")])])
+    assert r["ok"] and r["source"] == "local" and r["file"] == "ABC1234XYZ.pdf" and not calls
+    assert not D.fetch_datasheet("ZZZ9999QQQ", str(ds), creds={}, sources=[])["ok"]                 # other manufacturer prefix: not scanned
