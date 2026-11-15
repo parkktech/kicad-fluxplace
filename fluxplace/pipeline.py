@@ -486,7 +486,10 @@ def st_route(c, n, board):
     frrec = None
     if rname == "freerouting" and todo:
         frrec = _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath,
-                             lambda: budget - ladder_min - (time.time() - t0), budget)
+                             lambda: budget - ladder_min - (time.time() - t0), budget, claimer_runs=have_krt)
+        if frrec.get("unowned"):                       # FAIL before any router hour: a skipped net nobody will route
+            return {"verdict": "fail", "board": board, "line": frrec["error"],
+                    "next": ["route-owners: fix the net exclusion or enable the per-net router (--router-dir)"]}
         if frrec.get("ok"):
             b0 = state["best"]
             frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
@@ -562,6 +565,17 @@ def st_route(c, n, board):
     if final:
         from . import routestatus as RS2
         diag, _ = RS2.diagnose_result({"out": best}, c.cons or None, c.spec)
+    from . import routeowners as RO
+    # every open net at the end is owned by the step that was handed it: the router (the hybrid finish or the batch
+    # rounds) when it ran; anything else is unowned
+    claims = {n: ("router" if have_krt else None) for n in rtodo if n in final_open}
+    claims = {k: v for k, v in claims.items() if v}
+    try:
+        dj = json.load(open(best + ".diagnose.json")) if final else None
+    except (OSError, ValueError):
+        dj = None
+    owner_rows, unowned = RO.table(final_open, cls, claims, dj)
+    owner_line = RO.write(d, owner_rows, unowned)
     el = round(time.time() - t0)
     line = ((FR_.summary(frrec) + "; " if frrec else "") + f"{len(todo)} open net(s), open connections {state['start']} -> {sum(final_open.values())} "
             f"({len(final)} net(s)) in {el}s, "
@@ -626,6 +640,10 @@ def st_route(c, n, board):
         out["ladder"] = ladder["rungs"]
         with open(os.path.join(d, "ladder.json"), "w") as fh:
             json.dump(ladder, fh, indent=1)
+    out["owners"] = {"rows": owner_rows, "unowned": unowned, "file": os.path.join(d, "route_owners.txt")}
+    if unowned:
+        out["verdict"] = "fail"
+        out.setdefault("next", []).insert(0, f"ROUTE_NET_UNOWNED {len(unowned)} net(s): {', '.join(unowned[:8])}")
     if final:
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
                        f"diagnosis (what to move): {diag}",
@@ -652,7 +670,7 @@ def st_route(c, n, board):
     return out
 
 
-def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
+def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget, claimer_runs=True):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
     from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
     a = c.a
@@ -666,6 +684,11 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     skip = [n for n in todo if n in ctl] if FS["pairs"] == "exclude" else []
+    from . import routeowners as RO
+    bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)
+    if bad:
+        return {"ok": False, "unowned": bad, "error": f"ROUTE_NET_UNOWNED {len(bad)} net(s) excluded from Freerouting and not "
+                f"claimed by a later step: {', '.join(bad[:8])}"}
     want = getattr(a, "freerouting_budget", None) or FS["budget_s"]
     fb = max(10.0, min(float(want) if want else budget * FS["budget_frac"], cap() - 30.0))
 
