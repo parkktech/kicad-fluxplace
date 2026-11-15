@@ -138,6 +138,7 @@ def _stub_stage(monkeypatch, tmp_path, rc=0, below_floor=False, thin_rail=False,
     monkeypatch.setattr(KW, "copper_names", lambda b: ["F.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu", "B.Cu"])
     monkeypatch.setattr(KW, "planes_of", lambda b, sig: [("GND", "In1.Cu"), ("+5V", "In4.Cu")])
     monkeypatch.setattr(KW, "floor_audit", lambda b, R: ["track width below floor x2"] if below_floor else [])
+    monkeypatch.setattr(KW, "copper_keys", lambda b, locked_only=True: set())
     monkeypatch.setattr(KW.RD, "load", lambda b: {"pads": []})
     monkeypatch.setattr(KW.NC, "net_pads", lambda B: {"GND": [1] * 5, "+5V": [1] * 3, "SIG": [1, 1], "USB_P": [1, 1], "USB_N": [1, 1]})
     monkeypatch.setattr(KW.NC, "classify", lambda B, cons, spec: {"GND": {"class": "rail"}, "+5V": {"class": "rail"},
@@ -386,3 +387,21 @@ def test_preferred_sizes_are_the_default_class_unless_the_constraints_say_otherw
     assert KW.preferred_sizes(cons, str(board), R)["track"] == 0.2
     board.with_suffix(".kicad_pro").unlink()
     assert KW.preferred_sizes({"route": {"min_track_mm": 0.127, "min_clearance_mm": 0.127}}, str(board), R)["track"] == 0.2   # the stage's own sizes
+
+
+@need_pcbnew
+def test_a_router_output_that_drops_locked_input_copper_is_detectable(tmp_path):
+    src, _u = _tiny(str(tmp_path / "a.kicad_pcb"))
+    b = P.LoadBoard(src)
+    for t in b.GetTracks():
+        t.SetLocked(True)
+    P.SaveBoard(src, b)
+    keys = KW.copper_keys(src)
+    assert len(keys) == 2
+    b = P.LoadBoard(src)
+    for t in list(b.GetTracks()):
+        if t.GetClass() == "PCB_TRACK":
+            b.Remove(t)
+    out = str(tmp_path / "o.kicad_pcb")
+    P.SaveBoard(out, b)
+    assert len(keys - KW.copper_keys(out)) == 1

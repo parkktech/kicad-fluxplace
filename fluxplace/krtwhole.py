@@ -317,6 +317,21 @@ def floor_audit(board, R):
     return [f"{k} below floor x{v}" for k, v in sorted(bad.items())]
 
 
+def copper_keys(board, locked_only=True):
+    """{(kind, net, layer, geometry)} of the tracks and vias of `board` (the locked ones: fan-out and pair copper)."""
+    b = _pcb().LoadBoard(board)
+    out = set()
+    for t in b.GetTracks():
+        if locked_only and not t.IsLocked():
+            continue
+        if t.GetClass() == "PCB_VIA":
+            out.add(("via", t.GetNetname(), t.GetPosition().x // 1000, t.GetPosition().y // 1000, t.GetWidth() // 1000))
+        else:
+            a, e = sorted(((t.GetStart().x // 1000, t.GetStart().y // 1000), (t.GetEnd().x // 1000, t.GetEnd().y // 1000)))
+            out.add(("trk", t.GetNetname(), t.GetLayerName(), a, e, t.GetWidth() // 1000))
+    return out
+
+
 def accept_rc(rc):
     """0 = delivered as requested; 3 = `--strict-sizes`: something delivered below a requested size (the floor audit decides)."""
     return rc in (0, 3)
@@ -399,6 +414,9 @@ def run(c, n, board, conn):
             rec(name, rc, secs, False, "router error" if rc != 124 else "wall-clock cap")
             return False
         why = floor_audit(dst, R)
+        if not why:                                      # the protection proof: no locked input copper removed or edited
+            gone = copper_keys(cur) - copper_keys(dst)
+            why = [f"{len(gone)} locked input item(s) removed or changed"] if gone else []
         if not why:
             seg, _v = measure(dst, rules_by_net)
             thin = [r["net"] for r in rail_report(seg, rails, rf, rfw) if r["fail"]]
