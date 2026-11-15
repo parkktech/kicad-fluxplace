@@ -349,10 +349,11 @@ def cmd_fanout(a):
     drc = None
     if out and not a.no_drc:
         from . import drcguard as DG
+        # copper-rule errors only: connectivity (unconnected items) is the open-connection count's, one definition for reports
         keep = lambda v: v.get("severity") == "error" or v["type"] == "hole_to_hole"
         t0 = time.time()
-        k0, (c0, u0) = DG.drc_keys(a.board, keep=keep)
-        k1, (c1, u1) = DG.drc_keys(out, keep=keep)
+        k0, (c0, u0) = DG.drc_keys(a.board, keep=keep, unconnected=False)
+        k1, (c1, u1) = DG.drc_keys(out, keep=keep, unconnected=False)
         added = dict(Counter(k[0] for k in DG.new_keys(k0, k1)))
         drc = {"before": c0, "after": c1, "delta": added, "secs": round(time.time() - t0, 1)}
     waived = [p for v in per.values() for p in v["waived"]]

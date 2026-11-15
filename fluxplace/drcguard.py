@@ -39,16 +39,16 @@ def _zone_item(v):
     return any(ZONE_MARK in str(i.get("description", "")) for i in v.get("items") or [])
 
 
-def keys_from_report(d, keep=None):
+def keys_from_report(d, keep=None, unconnected=True):
     """(Counter of keys, (violations, unconnected)) from a kicad-cli JSON dict.
     keep(v) -> bool restricts violations (fanout counts errors only)."""
     vio = [v for v in d.get("violations", []) if keep is None or keep(v)]
     unc = d.get("unconnected_items", [])
-    keys = [key_of(v) for v in vio if not _zone_item(v)] + [key_of(u, "U") for u in unc]
+    keys = [key_of(v) for v in vio if not _zone_item(v)] + ([key_of(u, "U") for u in unc] if unconnected else [])
     return Counter(keys), (len(vio), len(unc))
 
 
-def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None):
+def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnected=True):
     """Run kicad-cli DRC (all severities, zones refilled) -> (keys, (violations, unconnected))."""
     out = board_path + ".drc.json"
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
@@ -58,7 +58,7 @@ def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None):
         raise RuntimeError("DRC produced no report")
     d = json.load(open(out))
     os.unlink(out)
-    return keys_from_report(d, keep)
+    return keys_from_report(d, keep, unconnected)
 
 
 def new_keys(base_keys, keys):
