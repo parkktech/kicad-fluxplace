@@ -83,8 +83,38 @@ def _pad_ties(board, netname, pads):
     return n_ok
 
 
-def run(board_in, board_out, plane_nets, conn, log=None, workdir=None):
-    """Tie every floating cluster of each plane net to its plane, refill, save board_out.
+def pour_census(board, netname):
+    """Signal-layer pours of `netname` (copper layers other than the nets' plane layers) and the census of its pads: how many
+    are reached by a same-net track on a non-pour layer (track-made connections), and how many of those have a hole-legal
+    via site (a proxy for 'a short via into the pour would have covered it'). Measured, not acted on."""
+    import pcbnew
+    from . import planes as PL
+    pour_layers = set()
+    for z in board.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != netname:
+            continue
+        for l in z.GetLayerSet().Seq():
+            if pcbnew.IsCopperLayer(l):
+                pour_layers.add(board.GetLayerName(l))
+    if not pour_layers:
+        return None
+    pads = [p for f in board.GetFootprints() for p in f.Pads() if p.GetNetname() == netname]
+    tracks = [t for t in board.GetTracks() if t.Type() != pcbnew.PCB_VIA_T and t.GetNetname() == netname
+              and t.GetLayerName() not in pour_layers]
+    tracked = via_ok = 0
+    r2 = pcbnew.FromMM(0.3) ** 2
+    for p in pads:
+        pp = p.GetPosition()
+        if any(p.IsOnLayer(t.GetLayer()) and min((t.GetStart().x - pp.x) ** 2 + (t.GetStart().y - pp.y) ** 2,
+                                                  (t.GetEnd().x - pp.x) ** 2 + (t.GetEnd().y - pp.y) ** 2) < r2 for t in tracks):
+            tracked += 1
+            via_ok += 1 if PL.hole_ok(board, pp.x, pp.y) else 0
+    return {"pour_layers": sorted(pour_layers), "pads": len(pads), "track_made_pads": tracked, "via_into_pour_sites": via_ok}
+
+
+def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_layers=()):
+    """`plane_layers`: the copper layers the router may not use (the planes); a pour on any other layer is a signal-layer pour.
+    Tie every floating cluster of each plane net to its plane, refill, save board_out.
     -> {"placed": n, "per_net": {net: {"open_before", "open_after", "layer", "vias", "reason"}}, "board": board_out}.
     `conn` is batchroute's connectivity count (net -> open connections) and is the only judge of "connected"."""
     import pcbnew
@@ -99,9 +129,12 @@ def run(board_in, board_out, plane_nets, conn, log=None, workdir=None):
     pad_pts = unconnected_pads(board_in, targets, workdir=workdir)
     board = pcbnew.LoadBoard(board_in)
     PL.refill(board)                 # the tie tests the FILLED copper: fill the zones first
+    census = {n: pour_census(board, n) for n in plane_nets}
     for n in targets:
         layers = plane_zone_layers(board, n)
-        r = {"open_before": before[n], "layer": layers[0] if layers else None, "vias": 0, "reason": None}
+        r = {"open_before": before[n], "layer": layers[0] if layers else None, "vias": 0, "reason": None,
+             "signal_pour": bool(census.get(n) and [l for l in census[n]["pour_layers"] if l not in plane_layers]),
+             "census": census.get(n)}
         if not layers:
             r["reason"] = "no zone of this net on any layer (pour missing)"
         else:

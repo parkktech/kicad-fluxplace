@@ -564,7 +564,8 @@ def st_route(c, n, board):
     from . import planetie as PT
     from . import escapeplan as EP
     plane_nets = sorted(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))      # the nets that connect through a plane/pour
-    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d)
+    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
+                 plane_layers=[l for l in B["copper"] if l not in a.layers])
     if ptr["placed"]:
         shutil.copy(ptr["board"], best)
         _sidecar(board, best)
@@ -581,7 +582,9 @@ def st_route(c, n, board):
     # rounds) when it ran; anything else is unowned
     claims = {n: ("router" if have_krt else None) for n in rtodo if n in final_open}
     claims = {k: v for k, v in claims.items() if v}
-    claims.update({n: "plane-tie" for n in plane_nets if n in final_open})
+    # plane nets: "pour" when the net also has a signal-layer pour (the pour step closes its pads), else "plane-tie"
+    claims.update({n: ("pour" if ptr["per_net"].get(n, {}).get("signal_pour") else "plane-tie")
+                   for n in plane_nets if n in final_open})
     try:
         dj = json.load(open(best + ".diagnose.json")) if final else None
     except (OSError, ValueError):

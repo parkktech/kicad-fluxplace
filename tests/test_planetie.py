@@ -91,3 +91,21 @@ def test_via_at_points_refuses_a_hole_within_the_fab_spacing(tmp_path):
     assert PLN.hole_ok(b, pcbnew.FromMM(21.5), pcbnew.FromMM(15)) is True
     assert PLN.via_at_points(b, "GND", [(20.3, 15.0)]) == 0
     assert PLN.via_at_points(b, "GND", [(21.5, 15.0)]) == 1
+
+
+def test_signal_layer_pour_is_classified_and_census_counts_track_made_pads(tmp_path):
+    """a pour on a layer that is not a plane is a signal-layer pour (owner "pour"); the census counts pads that a same-net
+    track on a non-pour layer reaches (a track-made connection a via into the pour could replace)."""
+    src = make(str(tmp_path / "s.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    tr = pcbnew.PCB_TRACK(b)
+    tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(10)))
+    tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(15), pcbnew.FromMM(10)))
+    tr.SetWidth(pcbnew.FromMM(0.2)); tr.SetLayer(b.GetLayerID("F.Cu")); tr.SetNet(b.FindNet("GND"))
+    b.Add(tr)
+    c = PT.pour_census(b, "GND")
+    assert c["pour_layers"] == ["In1.Cu"] and c["pads"] == 1 and c["track_made_pads"] == 0   # the test pad sits on B.Cu, the track on F.Cu
+    rec = PT.run(src, str(tmp_path / "s2.kicad_pcb"), ["GND"], lambda p: {"GND": 1}, plane_layers=())
+    assert rec["per_net"]["GND"]["signal_pour"] is True
+    rec2 = PT.run(src, str(tmp_path / "s3.kicad_pcb"), ["GND"], lambda p: {"GND": 1}, plane_layers=("In1.Cu",))
+    assert rec2["per_net"]["GND"]["signal_pour"] is False

@@ -4,7 +4,7 @@ that was responsible for closing it) and the measured reason (routediag causes).
 import json
 import os
 
-OWNERS = ("pairs", "router", "plane-tie", "rail-pour", "finish")
+OWNERS = ("pairs", "router", "plane-tie", "pour", "rail-pour", "finish")
 
 
 def unclaimed_skips(skip, open_conn, claimer_runs):
