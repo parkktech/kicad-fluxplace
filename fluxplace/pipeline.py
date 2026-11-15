@@ -25,7 +25,7 @@ from . import routeconn as RC
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pairs", "plan-route", "route", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -569,6 +569,14 @@ def st_route(c, n, board):
     if ptr["placed"]:
         shutil.copy(ptr["board"], best)
         _sidecar(board, best)
+    # pour-first ties: re-check the verified ties after routing and planetie; a tie routing cut off is re-tied
+    from . import pourtie as PTI
+    ptd = _pour_tie_dir(c)
+    pour_rec = None
+    if ptd:
+        pour_rec = PTI.repair(best, os.path.join(d, "pour_repaired.kicad_pcb"), ptd, workdir=d)
+        shutil.copy(pour_rec["board"], best)
+        _sidecar(board, best)
     with open(os.path.join(d, "planetie.txt"), "w") as fh:
         fh.write("\n".join(PT.lines(ptr)) + "\n")
     final_open = conn(best)
@@ -585,6 +593,8 @@ def st_route(c, n, board):
     # plane nets: "pour" when the net also has a signal-layer pour (the pour step closes its pads), else "plane-tie"
     claims.update({n: ("pour" if ptr["per_net"].get(n, {}).get("signal_pour") else "plane-tie")
                    for n in plane_nets if n in final_open})
+    if ptd:                                            # pads tied through a pour before routing are owned by the pour
+        claims.update({n: "pour" for n in pt_rec_nets(ptd) if n in final_open})
     try:
         dj = json.load(open(best + ".diagnose.json")) if final else None
     except (OSError, ValueError):
@@ -656,6 +666,12 @@ def st_route(c, n, board):
         with open(os.path.join(d, "ladder.json"), "w") as fh:
             json.dump(ladder, fh, indent=1)
     out["owners"] = {"rows": owner_rows, "unowned": unowned, "file": os.path.join(d, "route_owners.txt")}
+    if ptd:
+        pt_rec = json.load(open(os.path.join(ptd, "pourtie.json")))
+        out["pour"] = {"tied_before_routing": len(pt_rec["tied"]) + sum(v["tied_before"] for v in pt_rec["nets"].values()),
+                       "untied_before_routing": len(pt_rec["untied"]), "lost_after_routing": pour_rec["lost"],
+                       "repaired": pour_rec["repaired"], "unrepaired": len(pour_rec["unrepaired"]),
+                       "owner": "pour"}
     if unowned:
         out["verdict"] = "fail"
         out.setdefault("next", []).insert(0, f"ROUTE_NET_UNOWNED {len(unowned)} net(s): {', '.join(unowned[:8])}")
@@ -838,6 +854,38 @@ def st_fanout(c, n, board):
     return res
 
 
+def st_pour_tie(c, n, board):
+    """pour-first: every pad of a net with a copper pour is tied through that copper before the pairs and the router run
+    (pourtie.py); each tie is verified on the filled zone. Untied pads are listed with the measured reason; they stay with
+    the router as ordinary connections."""
+    from . import pourtie as PTI
+    d = c.dir(n, "pour-tie")
+    out = os.path.join(d, "board.kicad_pcb")
+    rec = PTI.run(board, out, d)
+    _sidecar(board, out)
+    before = sum(v["tied_before"] for v in rec["nets"].values())
+    new = sum(v["tied_by_via"] for v in rec["nets"].values())
+    pads = sum(v["pads"] for v in rec["nets"].values())
+    untied = rec["untied"]
+    line = (f"pour-tie: {len(rec['nets'])} pour net(s), {pads} pad(s): {before} tied already by pour, {new} tied by new via, "
+            f"{len(untied)} not tied")
+    return {"verdict": "warn" if untied else "pass", "line": line, "board": out,
+            "next": [f"untied {u['net']} pad {u['pad']} at {u['at']}: {u['reason']}" for u in untied[:6]]}
+
+
+def pt_rec_nets(ptd):
+    try:
+        return set(json.load(open(os.path.join(ptd, "pourtie.json")))["nets"])
+    except (OSError, ValueError, KeyError):
+        return set()
+
+
+def _pour_tie_dir(c):
+    import glob
+    hits = sorted(glob.glob(os.path.join(c.work, "*-pour-tie", "pourtie.json")))
+    return os.path.dirname(hits[-1]) if hits else None
+
+
 def st_plan_route(c, n, board):
     """channels only: sealed pins cannot exist (the fan-out gate passed), so overflow is a WARN and never blocks."""
     d = c.dir(n, "plan-route")
@@ -871,7 +919,7 @@ def st_pairs(c, n, board):
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
+FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 
