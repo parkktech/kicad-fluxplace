@@ -140,12 +140,92 @@ def _junction_is_bare(board, P, layer, net):
     return True
 
 
+OVERLAP_DEG = 5.0
+_MARK = "ACIDTRAP_OVERLAPS="
+
+
+def trim_overlaps(board, log=print, tol_mm=0.01):
+    """Delete the redundant stub of a folded or overlapping same-net track pair (junction
+    angle under OVERLAP_DEG). The longer track L already covers the whole run from the
+    junction P to its far end, so the shorter track S is pure duplicate copper: it is
+    removed. P needs no check: it is an end of L, so whatever touched it still does.
+    Skipped unless S's far end F_S lies on L's line (within tol_mm) and, when F_S is not
+    also L's far end (a true interior point of L), F_S carries no other track end and no
+    via/pad (removing S must not strand copper that touched it). Returns the count removed."""
+    import pcbnew
+    tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
+    segs = []
+    for t in tracks:
+        s, e = t.GetStart(), t.GetEnd()
+        segs.append({"net": t.GetNetname(), "layer": board.GetLayerName(t.GetLayer()),
+                     "x1": pcbnew.ToMM(s.x), "y1": pcbnew.ToMM(s.y),
+                     "x2": pcbnew.ToMM(e.x), "y2": pcbnew.ToMM(e.y), "kind": "track"})
+    ends = [(g["x1"], g["y1"]) for g in segs] + [(g["x2"], g["y2"]) for g in segs]
+
+    def ends_at(pt, skip):
+        n = 0
+        for k, g in enumerate(segs):
+            if k == skip:
+                continue
+            if g["net"] == segs[skip]["net"] and g["layer"] == segs[skip]["layer"]:
+                for ex, ey in ((g["x1"], g["y1"]), (g["x2"], g["y2"])):
+                    if abs(ex - pt[0]) < 0.002 and abs(ey - pt[1]) < 0.002:
+                        n += 1
+        return n
+
+    done, touched = 0, set()
+    for j in acute_junctions(segs, OVERLAP_DEG):
+        if j["a"] in touched or j["b"] in touched:
+            continue
+        P = (j["x"], j["y"])
+        ia, ib = j["a"], j["b"]
+        la = math.hypot(segs[ia]["x2"] - segs[ia]["x1"], segs[ia]["y2"] - segs[ia]["y1"])
+        lb = math.hypot(segs[ib]["x2"] - segs[ib]["x1"], segs[ib]["y2"] - segs[ib]["y1"])
+        L, S = (ia, ib) if la >= lb else (ib, ia)
+        eL = j["ea"] if L == ia else j["eb"]
+        eS = j["eb"] if L == ia else j["ea"]
+        fL = (segs[L]["x2"], segs[L]["y2"]) if eL == 0 else (segs[L]["x1"], segs[L]["y1"])
+        fS = (segs[S]["x2"], segs[S]["y2"]) if eS == 0 else (segs[S]["x1"], segs[S]["y1"])
+        ux, uy = fL[0] - P[0], fL[1] - P[1]
+        Lmag = math.hypot(ux, uy)
+        ux, uy = ux / Lmag, uy / Lmag
+        vx, vy = fS[0] - P[0], fS[1] - P[1]
+        if abs(vx * uy - vy * ux) > tol_mm or vx * ux + vy * uy > Lmag + tol_mm:
+            continue                    # not collinear, or S reaches past F: not a pure duplicate
+        if math.hypot(fS[0] - fL[0], fS[1] - fL[1]) > 0.002:      # interior point of L
+            if not _junction_is_bare(board, fS, segs[S]["layer"], segs[S]["net"]) or ends_at(fS, S):
+                continue
+        log(f"    overlap removed: {segs[S]['net']} {segs[S]['layer']} stub "
+            f"{math.hypot(vx, vy):.3f} mm inside the longer track at ({P[0]:.3f},{P[1]:.3f})")
+        board.Remove(tracks[S])
+        touched.update((ia, ib))
+        done += 1
+    return done
+
+
+def _trim_overlaps_subprocess(src, dst, log=print):
+    """trim_overlaps on src in a fresh interpreter, result written to dst. Returns the count
+    (dst is only written when the count is non-zero)."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, "-m", "fluxplace.acidtrap", "--trim", src, dst],
+                       capture_output=True, text=True, timeout=600, cwd=root)
+    # pcbnew prints its SWIG leak warnings to stdout at exit, so the count is a marked line
+    marks = [ln for ln in r.stdout.splitlines() if ln.startswith(_MARK)]
+    if r.returncode != 0 or not marks:
+        raise RuntimeError(f"acid-trap overlap pass failed: {r.stderr[-300:]}")
+    for ln in r.stdout.splitlines():
+        if ln.startswith("    overlap"):
+            log(ln)
+    return int(marks[-1][len(_MARK):])
+
+
 def chamfer_junctions(board, min_deg=DEFAULT_ACID_DEG, max_chamfer_mm=0.3, log=print):
     """Chamfer every bare acute junction on `board` (pcbnew object, edited in place).
+    Folded tracks (under OVERLAP_DEG) are not chamfered: that is trim_overlaps' job.
     Each wedge tip is cut by one segment of the narrower track's width between
     points on the two tracks, `min(max_chamfer, 0.4 * length)` from the tip.
-    Junctions under 5 degrees (overlapping or folded tracks) are left alone:
-    a chamfer there is a zero-length cut and the copper problem is the overlap.
     Returns the number of junctions chamfered."""
     import pcbnew
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
@@ -197,14 +277,22 @@ def chamfer_junctions(board, min_deg=DEFAULT_ACID_DEG, max_chamfer_mm=0.3, log=p
 
 
 def fix_junctions(work, kicad_cli="kicad-cli", min_deg=DEFAULT_ACID_DEG, log=print):
-    """DRC-guarded: chamfer the bare acute junctions of `work` (a .kicad_pcb, edited
-    in place only if kept). Kept when DRC violations and unconnected items do not
-    rise. Returns the number of junctions chamfered (0 when nothing was kept)."""
+    """DRC-guarded: remove redundant overlaps of folded tracks, then chamfer the bare acute
+    junctions of `work` (a .kicad_pcb, edited in place only if kept). Kept when no new DRC
+    key appears and unconnected items do not rise. Returns the number of junctions fixed
+    (0 when nothing was kept)."""
     import pcbnew
     from fluxplace import tune as TU
     base = DG.drc_keys(work, kicad_cli)
-    b = pcbnew.LoadBoard(work)
-    n = chamfer_junctions(b, min_deg=min_deg, log=log)
+    # Overlap removal runs in its own process: board.Remove() in this process leaves
+    # pcbnew.LoadBoard() returning a raw SwigPyObject (migrate.py notes the same decay).
+    ov = work + ".ov.kicad_pcb"
+    n_ov = _trim_overlaps_subprocess(work, ov, log)
+    b = pcbnew.LoadBoard(ov if n_ov else work)
+    if n_ov:
+        os.unlink(ov)
+    n_ch = chamfer_junctions(b, min_deg=min_deg, log=log)
+    n = n_ov + n_ch
     if not n:
         return 0
     tmp = work + ".acid.kicad_pcb"
@@ -223,3 +311,15 @@ def fix_junctions(work, kicad_cli="kicad-cli", min_deg=DEFAULT_ACID_DEG, log=pri
     os.unlink(tmp)
     log(f"    acid-trap fix rejected: DRC {v0[0]}/{v0[1]} -> {v1[0]}/{v1[1]}, {len(new)} new key(s)")
     return 0
+
+
+if __name__ == "__main__":                 # python -m fluxplace.acidtrap --trim SRC DST
+    import sys
+    import pcbnew
+    _, flag, src, dst = sys.argv
+    assert flag == "--trim"
+    _b = pcbnew.LoadBoard(src)
+    _n = trim_overlaps(_b, log=lambda m: print(m))
+    if _n:
+        pcbnew.SaveBoard(dst, _b)
+    print(_MARK + str(_n))
