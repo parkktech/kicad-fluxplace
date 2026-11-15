@@ -655,6 +655,7 @@ def st_route(c, n, board):
 def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
     from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
+    from . import routerules as RR
     a = c.a
     try:
         FS = FR.settings(c.cons, threads=getattr(a, "freerouting_threads", None))
@@ -675,10 +676,21 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
                      fr_unrouted=ps[-1]["unrouted"] if ps else log["start_unrouted"])
         BR._status_write(spath, extra, "running")
     out = os.path.join(d, "freerouting.kicad_pcb")
-    rec = FR.route_board(board, out, os.path.join(d, "freerouting"), loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
-                         floor_clearance=R["min_clearance"], budget_s=fb, S=FS, cons=c.cons, skip_nets=skip,
-                         has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick)
+    fdir = os.path.join(d, "freerouting")
+    # pre-route gate: the pre-placed copper must already clear the rules the router is given (zero load-time violations);
+    # unlocked stubs that do not are removed here so the router redoes them, locked copper is reported
+    gated = os.path.join(d, "gated.kicad_pcb")
+    gate = FR.preroute_gate(board, os.path.join(fdir, "gate"), loc=a.fr_loc, S=FS, classes=FR.net_classes(c.cons, R), out=gated,
+                            planes=planes)
+    gate["log"] = FR.gate_summary(gate)
+    board = gated
+    rec = FR.route_board(board, out, fdir, loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
+                         floor_clearance=RR.request_clearance(R) if R["min_clearance"] else 0.0, budget_s=fb, S=FS, cons=c.cons,
+                         skip_nets=skip, has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick,
+                         classes=FR.net_classes(c.cons, R),
+                         plane_nets=FR.plane_nets(board, os.path.join(d, "freerouting"), planes))
     rec["out"] = out
+    rec["gate"] = gate
     rec["open_before"] = sum(conn(board).values())
     if rec.get("ok") and FS["pairs"] == "route":         # pairs Freerouting routed itself are never reported good unaudited
         try:
@@ -775,12 +787,15 @@ def st_floorplan(c, n, board):
 
 
 def st_fanout(c, n, board):
+    from . import routerules as RR
     d = c.dir(n, "fanout")
     out = os.path.join(d, "board.kicad_pcb")
     pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
-    from . import routerules as RR
     snv = ["--same-net-via-spacing", RR.same_net_via_spacing(c.cons, getattr(c.a, "router_name", None))]     # [route] same_net_via_spacing, else by the router
-    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + snv + c.cs() + c.qs(),
+    # the copper must clear the clearance the router is given (routerules.request_clearance: max(clearance, floor) + margin)
+    R = RR.rules(c.cons, board, c.a.track, c.a.clearance)
+    clr = ["--clearance", f"{RR.request_clearance(R):g}"] if R["min_clearance"] else []
+    rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + snv + clr + c.cs() + c.qs(),
                         os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
     if q:

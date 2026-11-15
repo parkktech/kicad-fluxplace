@@ -72,7 +72,10 @@ def rules_for(board, B, cons, R, p, P, proj=None):
     w = float(fv.get("width_mm") or c.get("diff_pair_width") or c.get("track_width") or zw or max(B["track"], 0.15))
     gap = float(fv.get("gap_mm") or c.get("diff_pair_gap") or zg or 0.2)
     w = max(w, float(c.get("diff_pair_width") or 0.0), R.get("min_track", 0.0))
-    clr = float(P["clearance"]) if P["clearance"] else max(float(c.get("clearance") or 0.0), R.get("min_clearance", 0.0), FLOOR) + 0.003
+    # the clearance the router is given (floor + margin, routerules.request_clearance): the pair's copper must clear it
+    from . import routerules as RR
+    req = RR.request_clearance(R) if R.get("min_clearance") else 0.0
+    clr = float(P["clearance"]) if P["clearance"] else max(float(c.get("clearance") or 0.0), req, R.get("min_clearance", 0.0), FLOOR) + 0.003
     gap = max(gap, float(c.get("diff_pair_gap") or 0.0), R.get("min_clearance", 0.0))
     via = max(float(c.get("via_diameter") or R.get("via", 0.45)), R.get("min_via", 0.0))
     drill = max(float(c.get("via_drill") or R.get("drill", 0.2)), R.get("min_drill", 0.0))

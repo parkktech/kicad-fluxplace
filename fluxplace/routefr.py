@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import zipfile
 
@@ -124,7 +125,9 @@ def settings(cons, **over):
          "pairs": str(r.get("pairs", "exclude")).lower(),         # exclude | route (audited, never reported good unaudited)
          "neckdown": bool(r.get("neckdown", False)),              # pad-entry necks below the track width: off
          "budget_s": r.get("budget_s"), "budget_frac": float(r.get("budget_frac", 0.6)),
-         "grace_s": float(r.get("grace_s", 180)), "analytics": bool(r.get("analytics", False))}
+         "grace_s": float(r.get("grace_s", 180)), "analytics": bool(r.get("analytics", False)),
+         "segment_passes": int(r.get("segment_passes", 1)),        # passes per Freerouting run (the stall stop acts between runs)
+         "stall_passes": int(r.get("stall_passes", 3))}             # passes in a row without a lower SIGNAL unrouted count
     for k, v in over.items():
         if v is not None:
             s[k] = v
@@ -186,7 +189,7 @@ def _section(text, key):
 
 
 def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0, skip_nets=()):
-    """-> (text, report): planes declared power, rule widths / untyped clearances raised to the floors (mm),
+    """-> (text, report): planes declared power, rule widths / EVERY clearance (untyped and typed) raised to the floors (mm),
     every wire and via of the wiring section `(type fix)`, the pins of `skip_nets` taken off their nets (the router
     then has nothing to connect there and treats the pads as obstacles; the nets stay open for the caller)."""
     rep = {"planes": [], "planes_missed": [], "widths_raised": 0, "clearances_raised": 0, "fixed": 0, "already_fixed": 0,
@@ -211,20 +214,45 @@ def fix_dsn(text, planes=(), floor_track=0.0, floor_clearance=0.0, skip_nets=())
         def sub(mo):
             if float(mo.group(2)) + 1e-9 < lim:
                 rep[count_key] += 1
-                return f"{mo.group(1)}{lim:g}{mo.group(3)}"
+                return f"{mo.group(1)}{lim:g}"
             return mo.group(0)
-        return re.sub(r"(\(%s\s+)([\d.]+)(\s*\))" % key, sub, body)
+        # the value is followed by ")" (untyped) or by a space and "(type ...)" (typed clearance); the lookahead keeps both
+        return re.sub(r"(\(%s\s+)([\d.]+)(?=[\s)])" % key, sub, body)
     w = _section(text, "wiring")
     head, wiring, tail = (text[:w[0]], text[w[0]:w[1]], text[w[1]:]) if w else (text, "", "")
     if floor_track:
         head = raise_to("width", floor_track, "widths_raised", head)
-    if floor_clearance:
+    if floor_clearance:                 # every clearance: the untyped one AND the typed ones (smd_smd, smd_via, via_via, ...)
         head = raise_to("clearance", floor_clearance, "clearances_raised", head)
     if wiring:
         rep["already_fixed"] = wiring.count("(type fix)")
         wiring, n = re.subn(r"\(type\s+(?:route|protect|normal)\)", "(type fix)", wiring)
         rep["fixed"] = n + rep["already_fixed"]
+        wiring, rep["duplicate_wires"] = _dedupe_wires(wiring)
     return head + wiring + tail, rep
+
+
+_WIRE = re.compile(r"[ \t]*\(wire \(path (\S+) (\d+)\s+([-\d\s.]+?)\)\(net ([^)]*)\)\(type \w+\)\)\n?")
+
+
+def _dedupe_wires(text):
+    """Drop a fixed wire whose every segment already exists (same layer, width, net, end points, either direction).
+    Fan-out/pairs copper was written twice on +3V3, +5V and VBUS (50 segments on the v16 board); the router's
+    normaliser loops on such overlaps.  -> (text, number dropped)."""
+    seen, out, dropped, last = set(), [], 0, 0
+    for mo in _WIRE.finditer(text):
+        out.append(text[last:mo.start()])
+        last = mo.end()
+        lay, w, pts, net = mo.group(1), mo.group(2), mo.group(3).split(), mo.group(4)
+        xy = [float(v) for v in pts]
+        segs = [((lay, w, net), tuple(sorted([(xy[i], xy[i + 1]), (xy[i + 2], xy[i + 3])]))) for i in range(0, len(xy) - 3, 2)]
+        if segs and all(k in seen for k in segs):
+            dropped += 1
+            continue
+        seen.update(segs)
+        out.append(mo.group(0))
+    out.append(text[last:])
+    return "".join(out), dropped
 
 
 # ------------------------------------------------------------------ log
@@ -357,6 +385,13 @@ def _side(src, dst):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
 
 
+def plane_nets(board, workdir, planes):
+    """Nets that own a zone on a plane layer: their unrouted connections are the constant plane part of Freerouting's count."""
+    if not planes:
+        return []
+    return _helper("planenets", {"board": board, "planes": list(planes)}, workdir)["nets"]
+
+
 def fingerprint(board, workdir, floor=0.0, planes=()):
     return _helper("fingerprint", {"board": board, "floor": floor, "planes": list(planes)}, workdir)
 
@@ -367,62 +402,307 @@ def repair_subfloor(board, workdir, floor, clearance, out=None):
 
 
 # ------------------------------------------------------------------ the run
+def net_classes(cons, R):
+    """The DSN net classes from the resolved rules (mm): default = the router track width, every class clearance =
+    the clearance the router is given (floor + margin, RR.request_clearance).  Classes: one per distinct power width
+    (`[power.N]` width_mm / max_current_ma, else the track default) and one per controlled pair family (`[pairs.F]`
+    width_mm, else the PAIR_GEOM_BY_Z width of its impedance_diff); a `[nets.N] width_mm` on any other net is its own
+    class.  No width is ever below the track floor."""
+    from . import constraints as C
+    from . import routerules as RR
+    clr = RR.request_clearance(R)
+    floor_w = R["min_track"]
+    cons = cons or {}
+    by_w = {}                                    # width (mm) -> {"nets": [...], "prefixes": [...]}
+
+    def add(w, nets=(), prefixes=()):
+        w = round(max(float(w), floor_w), 4)
+        e = by_w.setdefault(w, {"nets": [], "prefixes": []})
+        e["nets"] += [n for n in nets if n not in e["nets"]]
+        e["prefixes"] += [p for p in prefixes if p not in e["prefixes"]]
+    for net in (cons.get("power") or {}):
+        add(C.power_width_mm(cons, net, R["track"]), nets=[net])
+    for fam, v in (cons.get("pairs") or {}).items():
+        w = v.get("width_mm") or (C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), (None, None))[0] if "impedance_diff" in v else None)
+        if w:
+            add(w, prefixes=[fam])
+    for net, v in (cons.get("nets") or {}).items():
+        if isinstance(v, dict) and v.get("width_mm"):
+            add(float(v["width_mm"]), nets=[net])
+    classes = [{"name": f"w{int(round(w * 1000))}um", "width": w, "clearance": clr, "nets": e["nets"], "prefixes": e["prefixes"]}
+               for w, e in sorted(by_w.items()) if w != round(R["track"], 4)]
+    return {"default": {"width": max(R["track"], floor_w), "clearance": clr}, "classes": classes}
+
+
+_LOAD_FR = re.compile(r"\*\s+(\d+) (pin-to-pin|fixed trace/via) clearance violation")
+_LOAD_DONE = ("Auto-routing stage started", "Fanout stage started", "Job '")
+
+
+def gate_pro(src_pro, out_pro, classes):
+    """A copy of the board's .kicad_pro whose net classes are the resolved ones (`net_classes`), so kicad-cli DRC measures
+    the copper against the rules the router is given."""
+    d = json.load(open(src_pro)) if os.path.exists(src_pro) else {"meta": {"version": 1}}
+    ns = d.setdefault("net_settings", {})
+    base = next((c for c in ns.get("classes") or [] if c.get("name") == "Default"), {"name": "Default"})
+    dflt = dict(base, name="Default", clearance=classes["default"]["clearance"], track_width=classes["default"]["width"])
+    new, pats = [dflt], []
+    for c in classes.get("classes") or []:
+        new.append(dict(base, name=c["name"], clearance=c["clearance"], track_width=c["width"]))
+        pats += [{"netclass": c["name"], "pattern": n} for n in c.get("nets") or ()]
+        pats += [{"netclass": c["name"], "pattern": pre + "*"} for pre in c.get("prefixes") or ()]
+    ns["classes"], ns["netclass_patterns"] = new, pats
+    with open(out_pro, "w") as fh:
+        json.dump(d, fh, indent=2)
+    return out_pro
+
+
+def copper_clearance(drc):
+    """The copper-to-copper clearance violations of a kicad-cli DRC report (zone fills excluded): [{items, actual, required}]."""
+    out = []
+    for v in drc.get("violations", []):
+        if v.get("type") != "clearance":
+            continue
+        its = v.get("items") or []
+        if any("Zone" in (i.get("description") or "") for i in its):
+            continue
+        d = v.get("description") or ""
+        act = re.search(r"actual ([\d.]+) mm", d)
+        req = re.search(r"(?:clearance|netclass '[^']*' clearance) ([\d.]+) mm", d)
+        out.append({"items": [{"desc": i.get("description"), "uuid": i.get("uuid"), "x": i["pos"]["x"], "y": i["pos"]["y"]} for i in its],
+                    "actual": float(act.group(1)) if act else None, "required": float(req.group(1)) if req else None})
+    return out
+
+
+def load_violations(board, workdir, loc, S, planes=(), floor_track=0.0, floor_clearance=0.0, tmo_s=150.0):
+    """Freerouting's own load-time report for `board` (a zero-pass run, fan-out off; killed once the report is out).
+    -> {pin_to_pin, fixed_trace_via, report: [lines]} or {error}."""
+    seg = os.path.join(workdir, "load")
+    os.makedirs(seg, exist_ok=True)
+    dsn, ses, flog = os.path.join(seg, "in.dsn"), os.path.join(seg, "out.ses"), os.path.join(seg, "freerouting.log")
+    ex = _helper("export", {"board": board, "dsn": dsn}, workdir)
+    if not ex.get("ok"):
+        return {"error": "DSN export failed"}
+    with open(dsn, errors="surrogateescape") as fh:               # the same DSN rules route_board gives the router
+        text, _ = fix_dsn(fh.read(), planes, floor_track, floor_clearance, ())
+    with open(dsn, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    cmd = command(loc, dsn, ses, dict(S, passes=0), tmo_s, os.path.join(seg, "jvmtmp"), False)
+    os.makedirs(os.path.join(seg, "jvmtmp"), exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    with open(flog, "wb") as lf:
+        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=seg, env=env)
+    t0 = time.time()
+    try:
+        while time.time() - t0 < tmo_s:
+            time.sleep(0.5)
+            txt = open(flog, errors="replace").read()
+            if "clearance violation" in txt and any(k in txt for k in _LOAD_DONE[:2]):
+                break
+            if p.poll() is not None:
+                break
+    finally:
+        if p.poll() is None:
+            p.kill()
+        p.wait(timeout=30)
+    txt = open(flog, errors="replace").read()
+    rep = {"pin_to_pin": 0, "fixed_trace_via": 0, "report": [l.strip() for l in txt.splitlines() if "violation" in l][:20]}
+    for m in _LOAD_FR.finditer(txt):
+        if m.group(2) == "pin-to-pin":
+            rep["pin_to_pin"] = int(m.group(1))
+        else:
+            rep["fixed_trace_via"] = int(m.group(1))
+    rep["seconds"] = round(time.time() - t0, 1)
+    return rep
+
+
+def preroute_gate(board, workdir, *, loc, S, classes, out, planes=(), floor_track=0.0, floor_clearance=0.0, drc_cli="kicad-cli"):
+    """The route stage's pre-route gate. Pre-placed copper (fan-out, pairs) must not violate the rules the router is given:
+    kicad-cli DRC against the resolved classes lists the copper-to-copper clearance violations (measured vs required);
+    the UNLOCKED tracks and vias among them are removed (the router redoes those connections); locked copper is only
+    reported.  Freerouting's own load report (`load_violations`) is recorded beside the DRC count.  -> record; `out` is
+    the board to route (the input when nothing was removed)."""
+    from . import opengate as OG  # noqa: F401 - the same kicad-cli DRC the review uses
+    os.makedirs(workdir, exist_ok=True)
+    g = os.path.join(workdir, "gate.kicad_pcb")
+    shutil.copy(board, g)
+    gate_pro(os.path.splitext(board)[0] + ".kicad_pro", os.path.splitext(g)[0] + ".kicad_pro", classes)
+
+    def drc(path):
+        with tempfile.TemporaryDirectory() as td:
+            o = os.path.join(td, "drc.json")
+            subprocess.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "-o", o, path],
+                           capture_output=True, text=True, timeout=900)
+            return json.load(open(o)) if os.path.exists(o) else {"violations": []}
+    rec = {"classes": len(classes.get("classes") or ()), "ok": True}
+    before = copper_clearance(drc(g))
+    rec["drc_before"] = len(before)
+    # the load check reads the SAME DSN the router will get: pours stripped, the resolved net classes applied
+    stripped = os.path.join(workdir, "gate-dsn.kicad_pcb")
+    _side(board, stripped)
+    _helper("strip", {"board": board, "out": stripped, "planes": list(planes), "netclasses": classes}, workdir)
+    rec["load_before"] = load_violations(stripped, workdir, loc, S, planes=planes, floor_track=floor_track,
+                                         floor_clearance=floor_clearance)
+    victims = {}
+    for v in before:
+        for it in v["items"]:
+            if it["uuid"] and it["uuid"] not in victims:
+                victims[it["uuid"]] = v
+    res = _helper("unlink", {"board": g, "out": out, "uuids": list(victims), "skip": []}, workdir)
+    for r in res["removed"] + res["locked"]:
+        v = victims.get(r["uuid"], {})
+        r.update(measured=v.get("actual"), required=v.get("required"))
+    rec["removed"], rec["locked"] = res["removed"], res["locked"]
+    rec["unremovable"] = [v for v in before if not any(it["uuid"] in res["uuids_hit"] for it in v["items"])
+                          and not any(it["uuid"] in {r["uuid"] for r in res["locked"]} for it in v["items"])]
+    if res["removed"]:
+        _side(board, out)
+        rec["drc_after"] = len(copper_clearance(drc(out)))
+    else:
+        shutil.copy(board, out)
+        rec["drc_after"] = rec["drc_before"]
+    return rec
+
+
+def gate_summary(g):
+    """One stage-log line for the pre-route gate."""
+    lb = g.get("load_before") or {}
+    s = (f"pre-route gate: DRC copper clearance {g.get('drc_before')} -> {g.get('drc_after')}"
+         f", Freerouting load {lb.get('pin_to_pin', '?')} pin-to-pin + {lb.get('fixed_trace_via', '?')} fixed trace/via"
+         f", removed {len(g.get('removed') or [])} unlocked stub(s), locked {len(g.get('locked') or [])}"
+         f", unremovable {len(g.get('unremovable') or [])}")
+    return s
+
+
+def split_passes(passes, plane_open):
+    """Per pass: total unrouted (Freerouting's count, plane connections included), plane part (constant: plane nets are
+    never routed on signal layers), signal part = total - plane.  Mutates and returns `passes` with signal/plane keys."""
+    for p in passes:
+        p["plane"] = plane_open
+        p["signal"] = max(0, p["unrouted"] - plane_open)
+    return passes
+
+
 def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearance, budget_s, S=None, cons=None,
-                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0):
-    """One Freerouting run on `board` -> `out`. -> the record (see module doc); `ok` False + `error` on failure,
-    in which case `out` is not written.  `subfloor.failed` non-empty = sub-floor copper is still on `out`: the caller
-    must fail its stage."""
+                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0, classes=None, plane_nets=()):
+    """One Freerouting run on `board` -> `out`, in SEGMENTS of `[route.freerouting] segment_passes` passes (default 1).
+    Freerouting only saves its session when it finishes, so a stall cannot stop it in place: each segment is a
+    complete run on the copper so far (the previous segment's session imported into the stripped board, which is then
+    exported again as fixed copper).  The run stops when `stall_passes` passes in a row do not lower the SIGNAL
+    unrouted count (total minus the constant plane part `plane_nets`), when it completes, or at the budget.
+    -> the record; `ok` False + `error` on failure, `out` not written.  `subfloor.failed` non-empty = sub-floor copper
+    is still on `out`: the caller must fail its stage."""
     S = S or settings(cons)
     os.makedirs(workdir, exist_ok=True)
     tmpdir = os.path.join(workdir, "jvmtmp")
     os.makedirs(tmpdir, exist_ok=True)
     fanout_on = S["fanout"] == "on" or (S["fanout"] == "auto" and not has_fanout)
-    flags = router_flags(S, budget_s, fanout_on)
     rec = {"ok": False, "router": "freerouting", "jar": loc["jar"], "java": loc["java"], "version": loc["version"],
-           "flags": " ".join(flags), "fanout": "on" if fanout_on else "off", "pairs": S["pairs"],
-           "skip_nets": sorted(skip_nets), "budget_s": round(budget_s), "planes": list(planes)}
+           "flags": " ".join(router_flags(S, budget_s, fanout_on)), "fanout": "on" if fanout_on else "off", "pairs": S["pairs"],
+           "skip_nets": sorted(skip_nets), "budget_s": round(budget_s), "planes": list(planes),
+           "segment_passes": int(S.get("segment_passes", 1)), "stall_passes": int(S.get("stall_passes", 3))}
     t0 = time.time()
+    sessions = []
     try:
         fp0 = fingerprint(board, workdir, floor_track, planes)
         rec["before"] = fp0
         dsn_board = os.path.join(workdir, "dsn.kicad_pcb")
         _side(board, dsn_board)
-        rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes)}, workdir)
-        dsn, ses, flog = os.path.join(workdir, "in.dsn"), os.path.join(workdir, "out.ses"), os.path.join(workdir, "freerouting.log")
-        for f in (dsn, ses):
-            if os.path.exists(f):
-                os.remove(f)
-        ex = _helper("export", {"board": dsn_board, "dsn": dsn}, workdir)
-        if not ex.get("ok"):
-            raise RuntimeError("Specctra DSN export failed")
-        with open(dsn, errors="surrogateescape") as fh:
-            text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
-        if rep["planes_missed"]:
-            raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
-        with open(dsn, "w", errors="surrogateescape") as fh:
-            fh.write(text)
-        rec["dsn"] = rep
-        rec["prep_s"] = round(time.time() - t0, 1)
-        jr = run_jvm(command(loc, dsn, ses, S, budget_s, tmpdir, fanout_on), flog, budget_s, S["grace_s"], ses,
-                     cwd=workdir, tick=tick, poll=poll)
-        log = parse_log(open(flog, errors="replace").read()) if os.path.exists(flog) else parse_log("")
-        rec.update(rc=jr["rc"], killed=jr["killed"], hung_after_save=jr["hung_after_save"], jvm_s=jr["elapsed"],
-                   state=log["state"] or ("KILLED" if jr["killed"] else None), passes=log["passes"], fanout_passes=log["fanout"],
-                   start_unrouted=log["start_unrouted"], log=flog)
-        if log["version"] and log["version"] != loc["version"]:
-            rec["version"] = log["version"]
-        if not ses_ok(ses):
-            tail = ""
-            try:
-                tail = " | ".join(open(flog, errors="replace").read().strip().splitlines()[-2:])[-240:]
-            except OSError:
-                pass
-            raise RuntimeError(f"Freerouting left no usable session (rc {jr['rc']}, {'killed by the watchdog' if jr['killed'] else 'exited'}"
-                               f" after {jr['elapsed']:.0f}s): {tail}")
+        rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes), "netclasses": classes}, workdir)
+        plane_open = 0
+        if conn and plane_nets:
+            plane_open = sum(v for n, v in conn(board).items() if n in set(plane_nets))
+        rec["plane_open"] = plane_open
+        cur, passes, stale, best, stop, state, jvm_s, starts = dsn_board, [], 0, None, None, None, 0.0, []
+        rec["segments"] = []
+        for k in range(100000):
+            seg = os.path.join(workdir, f"seg{k:03d}")
+            os.makedirs(seg, exist_ok=True)
+            dsn, ses, flog = os.path.join(seg, "in.dsn"), os.path.join(seg, "out.ses"), os.path.join(seg, "freerouting.log")
+            ex = _helper("export", {"board": cur, "dsn": dsn}, workdir)
+            if not ex.get("ok"):
+                raise RuntimeError("Specctra DSN export failed")
+            with open(dsn, errors="surrogateescape") as fh:
+                text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
+            if rep["planes_missed"]:
+                raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
+            with open(dsn, "w", errors="surrogateescape") as fh:
+                fh.write(text)
+            if k == 0:
+                rec["dsn"] = rep
+                rec["prep_s"] = round(time.time() - t0, 1)
+            left = budget_s - (time.time() - t0)
+            if left < 1 and k > 0:                  # the first segment always runs (its failure is loud)
+                stop = "budget"
+                break
+            left = max(1.0, left)
+            Sk = dict(S, passes=rec["segment_passes"])
+            jr = run_jvm(command(loc, dsn, ses, Sk, left, tmpdir, fanout_on), flog, left, S["grace_s"], ses,
+                         cwd=seg, tick=tick, poll=poll)
+            log = parse_log(open(flog, errors="replace").read()) if os.path.exists(flog) else parse_log("")
+            jvm_s += jr["elapsed"]
+            rec["killed"] = bool(rec.get("killed") or jr["killed"])
+            rec["hung_after_save"] = bool(rec.get("hung_after_save") or jr["hung_after_save"])
+            state = log["state"] or state or ("KILLED" if jr["killed"] else None)
+            if log["version"] and log["version"] != loc["version"]:
+                rec["version"] = log["version"]
+            if log["start_unrouted"] is not None:
+                starts.append(log["start_unrouted"])
+            if not ses_ok(ses):
+                rec["rc"] = jr["rc"]
+                tail = ""
+                try:
+                    tail = " | ".join(open(flog, errors="replace").read().strip().splitlines()[-2:])[-240:]
+                except OSError:
+                    pass
+                raise RuntimeError(f"Freerouting left no usable session (rc {jr['rc']}, {'killed by the watchdog' if jr['killed'] else 'exited'}"
+                                   f" after {jr['elapsed']:.0f}s): {tail}")
+            for ps in log["passes"]:
+                ps = dict(ps, pass_no=len(passes) + 1, seg=k)
+                passes.append(ps)
+                sig = max(0, ps["unrouted"] - plane_open)
+                if best is None or sig < best:
+                    best, stale = sig, 0
+                else:
+                    stale += 1
+                if sig == 0:
+                    stop = "signal routed"
+                elif stale >= rec["stall_passes"] and stop is None:
+                    stop = f"stall: {stale} pass(es) without a lower signal unrouted count"
+            if not log["passes"]:                    # a segment that made no pass counts as a pass without progress
+                stale += 1
+                if stale >= rec["stall_passes"] and stop is None:
+                    stop = f"stall: {stale} segment(s) without a pass"
+            rec["segments"].append({"seg": k, "passes": len(log["passes"]), "jvm_s": jr["elapsed"], "state": log["state"]})
+            nxt = os.path.join(seg, "after.kicad_pcb")
+            _side(board, nxt)
+            imp = _helper("import", {"board": cur, "ses": ses, "out": nxt, "skip_nets": sorted(skip_nets)}, workdir)
+            sessions.append(ses)
+            rec.setdefault("import_segments", []).append(imp)
+            cur = nxt
+            if stop is None and len(passes) >= S["passes"]:
+                stop = "max passes"
+            if stop:
+                break
+        rec["stop"] = stop or "segments exhausted"
+        rec["state"] = state
+        rec["jvm_s"] = round(jvm_s, 1)
+        rec["start_unrouted"] = starts[0] if starts else None
+        split_passes(passes, plane_open)
+        rec["passes"] = passes
+        rec["passes_split"] = [[p["pass_no"], round(p["min"] or 0, 1), p["unrouted"], p["signal"], p["plane"]] for p in passes]
         t1 = time.time()
         tmp = out + ".fr-import.kicad_pcb"
+        # the final board: the ORIGINAL copper and pours, every segment's session imported onto it in order
         _side(board, tmp)
-        rec["import"] = _helper("import", {"board": board, "ses": ses, "out": tmp, "skip_nets": sorted(skip_nets)}, workdir)
+        src, imps = board, []
+        if not sessions:                                   # no segment ran (budget): the input copper stands
+            shutil.copy(board, tmp)
+        for i, ses in enumerate(sessions):
+            dst = tmp if i == len(sessions) - 1 else os.path.join(workdir, f"final{i:03d}.kicad_pcb")
+            imps.append(_helper("import", {"board": src, "ses": ses, "out": dst, "skip_nets": sorted(skip_nets)}, workdir))
+            src = dst
+        rec["import"] = dict(imps[-1] if imps else {}, tracks_added=sum(x.get("tracks_added", 0) for x in imps),
+                             vias_added=sum(x.get("vias_added", 0) for x in imps))
         rec["subfloor"] = repair_subfloor(tmp, workdir, floor_track, floor_clearance) if floor_track else \
             {"subfloor": 0, "locked": 0, "fixed": 0, "failed": [], "widths": []}
         if post:

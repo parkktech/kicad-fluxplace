@@ -1,11 +1,14 @@
 """Runs under KiCad's python (has `pcbnew`), one board per process:  python3 fr_helper.py CMD ARGS.json
 The pcbnew half of routefr.py (whole-board Freerouting).  Every command prints one JSON line.
 
-  strip        {board, out, planes}                  copy without the pours on signal layers (they are obstacles in a DSN)
+  strip        {board, out, planes, netclasses}      copy without the pours on signal layers (they are obstacles in a DSN);
+                                                     netclasses = the DSN's net classes (see _apply_classes)
   export       {board, dsn}                          Specctra DSN of `board`
   import       {board, ses, out, skip_nets}          session copper added to the board's own (kept) copper, zones refilled
   widen        {board, out, floor, clearance}        unlocked tracks below `floor` -> net-class width (else the floor) where
                                                      clearance to other-net copper allows; the rest are listed
+  planenets    {board, planes}                       nets with a zone on a plane layer
+  unlink       {board, out, uuids}                   remove the unlocked tracks/vias with these UUIDs (pre-route gate)
   fingerprint  {board, floor, planes}                locked-copper hash, track/via counts, sub-floor count, tracks on planes
 """
 import hashlib
@@ -37,9 +40,39 @@ def _is_via(t):
     return t.GetClass() == "PCB_VIA"
 
 
+def _apply_classes(b, spec):
+    """Net classes of the DSN copy (KiCad writes them as the router's `class` rules): `spec` = {"default": {width, clearance},
+    "classes": [{"name", "width", "clearance", "nets"}]} in mm.  The default class takes the default values; every named
+    class gets its nets.  Widths and clearances are whatever the caller resolved (never below the floors)."""
+    ns = b.GetDesignSettings().m_NetSettings
+    dn = ns.GetDefaultNetclass()
+    d = spec.get("default") or {}
+    if d.get("width"):
+        dn.SetTrackWidth(pcbnew.FromMM(float(d["width"])))
+    if d.get("clearance"):
+        dn.SetClearance(pcbnew.FromMM(float(d["clearance"])))
+    n = 0
+    for c in spec.get("classes") or ():
+        nc = pcbnew.NETCLASS(c["name"])
+        nc.SetTrackWidth(pcbnew.FromMM(float(c["width"])))
+        nc.SetClearance(pcbnew.FromMM(float(c["clearance"])))
+        ns.SetNetclass(c["name"], nc)
+        names = list(c.get("nets") or ())
+        if c.get("prefixes"):                      # every board net under a pair family prefix (`[pairs.F]`)
+            allnets = [str(k) for k in b.GetNetInfo().NetsByName().keys()]
+            names += [x for x in allnets if any(x.startswith(p) for p in c["prefixes"]) and x not in names]
+        for net in names:
+            ni = b.FindNet(net)
+            if ni is not None and ni.GetNetCode() > 0:
+                ni.SetNetClass(nc)
+                n += 1
+    return {"classes": len(spec.get("classes") or ()), "nets_assigned": n}
+
+
 def cmd_strip(a):
     b = _load(a["board"])
     planes = set(a.get("planes") or ())
+    cls = _apply_classes(b, a["netclasses"]) if a.get("netclasses") else {}
     removed = kept = trimmed = 0
     hold = []
     for z in list(b.Zones()):
@@ -62,13 +95,50 @@ def cmd_strip(a):
         hold.append(z)
         removed += 1
     pcbnew.SaveBoard(a["out"], b)
-    return {"zones_removed": removed, "zones_kept": kept, "zones_trimmed": trimmed}
+    return {"zones_removed": removed, "zones_kept": kept, "zones_trimmed": trimmed, **cls}
 
 
 def cmd_export(a):
     b = _load(a["board"])
     ok = bool(pcbnew.ExportSpecctraDSN(b, a["dsn"]))
     return {"ok": ok and os.path.exists(a["dsn"]), "tracks": len(_tracks(b))}
+
+
+def cmd_planenets(a):
+    """Nets with a zone on one of the plane layers (the `planes` of the route stage)."""
+    b = _load(a["board"])
+    planes = set(a.get("planes") or ())
+    nets = set()
+    for z in b.Zones():
+        if z.GetIsRuleArea():
+            continue
+        if any(pcbnew.LayerName(l) in planes for l in z.GetLayerSet().Seq()):
+            nets.add(str(z.GetNetname()))
+    return {"nets": sorted(n for n in nets if n)}
+
+
+def cmd_unlink(a):
+    """Remove the UNLOCKED tracks and vias whose UUIDs are listed (the pre-route gate's victims); locked copper stays and is
+    reported.  -> removed/locked lists (net, kind, layer, start point in mm) and the UUIDs found on the board."""
+    b = _load(a["board"])
+    want = set(a.get("uuids") or ())
+    removed, locked, hit = [], [], []
+    for t in list(b.GetTracks()):
+        u = str(t.m_Uuid.AsString())
+        if u not in want:
+            continue
+        hit.append(u)
+        st = t.GetStart()
+        row = {"net": str(t.GetNetname()), "kind": "via" if _is_via(t) else "track",
+               "layer": "" if _is_via(t) else b.GetLayerName(t.GetLayer()),
+               "at": [round(MM(st.x), 3), round(MM(st.y), 3)], "uuid": u}
+        if t.IsLocked():
+            locked.append(row)
+            continue
+        b.Remove(t)
+        removed.append(row)
+    pcbnew.SaveBoard(a["out"], b)
+    return {"removed": removed, "locked": locked, "uuids_hit": hit}
 
 
 def _ses_module():
@@ -181,7 +251,8 @@ def cmd_fingerprint(a):
 def main():
     cmd, args = sys.argv[1], json.load(open(sys.argv[2]))
     out = {"strip": cmd_strip, "export": cmd_export, "import": cmd_import, "widen": cmd_widen,
-           "fingerprint": cmd_fingerprint}[cmd](args)
+           "fingerprint": cmd_fingerprint, "planenets": cmd_planenets,
+           "unlink": cmd_unlink}[cmd](args)
     print(json.dumps(out), flush=True)
     sys.stdout.flush()
     os._exit(0)                                         # skip SWIG teardown (it can crash after the result is out)

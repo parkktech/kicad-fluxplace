@@ -25,13 +25,19 @@ import json, os, shutil, sys, time
 a = sys.argv
 cfg = json.load(open(os.environ["FAKE_FREEROUTING"]))
 dsn, ses = a[a.index("-de") + 1], a[a.index("-do") + 1]
-shutil.copy(dsn, cfg["dsn_copy"])
-json.dump(a, open(cfg["argv_out"], "w"))
+# a zero-pass run is the pre-route gate's load check: it prints nothing but the start lines and saves no session
+load_only = "--router.autorouter.max_passes=0" in a
+# the first real run (segment 1) gets the DSN copy and the two passes; later segments make no pass (the stall stop)
+first = not load_only and not os.path.exists(cfg["dsn_copy"])
+if first:
+    shutil.copy(dsn, cfg["dsn_copy"])
+    json.dump(a, open(cfg["argv_out"], "w"))
 print("2026-01-01 10:00:00.000 INFO   Freerouting v2.5.0 (build-date: 2026-01-01)", flush=True)
 print("2026-01-01 10:00:01.000 INFO   [J] Auto-routing stage started on board 'x' with baseline score 1.0 for 3 unrouted items.", flush=True)
-print("2026-01-01 10:01:01.000 INFO   [J] Auto-routing pass #1 on board 'x' was completed in 60.00 seconds with score 5.00 (2 unrouted and 0 violations), using 1 CPU seconds", flush=True)
-print("2026-01-01 10:03:01.000 INFO   [J] Auto-routing pass #2 on board 'x' was completed in 120.00 seconds with score 6.00 (1 unrouted and 0 violations), using 1 CPU seconds", flush=True)
-if cfg.get("ses"):
+if first:
+    print("2026-01-01 10:01:01.000 INFO   [J] Auto-routing pass #1 on board 'x' was completed in 60.00 seconds with score 5.00 (2 unrouted and 0 violations), using 1 CPU seconds", flush=True)
+    print("2026-01-01 10:03:01.000 INFO   [J] Auto-routing pass #2 on board 'x' was completed in 120.00 seconds with score 6.00 (1 unrouted and 0 violations), using 1 CPU seconds", flush=True)
+if cfg.get("ses") and not load_only:
     open(ses, "w").write(cfg["ses"])
     print("2026-01-01 10:03:02.000 INFO   [J] Job 'J' finished with state: TIMED_OUT (elapsed)", flush=True)
     print("2026-01-01 10:03:02.000 INFO   Successfully saved output file", flush=True)
@@ -106,7 +112,7 @@ def run(tmp_path, fake, wires, floor=0.127, clr=0.127, **kw):
     base = set_cfg(ses=ses_text(wires) if wires is not None else None, **{k: kw.pop(k) for k in ("hang",) if k in kw})
     b = board(tmp_path)
     out = str(tmp_path / "out.kicad_pcb")
-    S = FR.settings(None, threads=1, **{k: kw.pop(k) for k in ("grace_s",) if k in kw})
+    S = FR.settings(None, threads=1, **{k: kw.pop(k) for k in ("grace_s", "stall_passes", "segment_passes") if k in kw})
     rec = FR.route_board(b, out, str(tmp_path / "fr"), loc=loc, planes=["In1.Cu"], floor_track=floor, floor_clearance=clr,
                          budget_s=kw.pop("budget_s", 20), S=S, conn=lambda p: RC.open_by_net(p, fill=True), poll=0.2, **kw)
     return rec, b, out, base
@@ -127,7 +133,8 @@ def test_fix_dsn_declares_planes_raises_rules_and_fixes_wiring():
     assert rep["planes"] == ["In1.Cu"] and rep["planes_missed"] == ["In9.Cu"]
     assert "(layer In1.Cu\n      (type power)" in out and "(layer F.Cu\n      (type signal)" in out
     assert rep["widths_raised"] == 1 and "(width 127)" in out and "(width 200)" in out
-    assert rep["clearances_raised"] == 1 and "(clearance 31.75 (type smd_smd))" in out      # typed clearances are KiCad's own
+    assert rep["clearances_raised"] == 2 and "(clearance 31.75 (type smd_smd))" not in out     # typed clearances are raised too
+    assert "(clearance 127 (type smd_smd))" in out                                             # ... to the floor, never lower
     assert rep["fixed"] == 3 and "(type route)" not in out
     assert "(path F.Cu 90 " in out                                                            # existing copper is not rewritten
     dsn2 = dsn.replace("(network\n", '(network\n    (net A\n      (pins R1-1 R2-1)\n    )\n    (net "B 1"\n      (pins R1-2 R2-2)\n    )\n')
@@ -357,3 +364,70 @@ def test_per_net_finish_audits_only_its_own_copper_not_freerouting_s(tmp_path, f
     res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "6-route", "result.json")))
     assert res["open_end"] == 1, res["line"]                  # A by Freerouting, B by the per-net router
     assert "RULE_VIOLATION" not in res["line"] and "0 checkpoint(s)" not in res["line"], res["line"]   # closed by the batch, not a ladder rescue
+
+
+# ------------------------------------------------------------------ route-rules: DSN copper rules, classes, gate, segments
+def test_fix_dsn_drops_duplicate_fixed_wires_and_keeps_distinct_ones():
+    dsn = ('(pcb x\n  (structure\n    (rule\n      (width 150)\n      (clearance 127)\n    )\n  )\n  (wiring\n'
+           '    (wire (path F.Cu 150  1 1  2 2)(net A)(type fix))\n'
+           '    (wire (path F.Cu 150  2 2  1 1)(net A)(type fix))\n'          # same segment reversed: dropped
+           '    (wire (path F.Cu 150  2 2  3 3)(net A)(type fix))\n'
+           '    (wire (path F.Cu 150  1 1  2 2)(net B)(type fix))\n'          # another net: kept
+           ')\n)\n')
+    out, rep = FR.fix_dsn(dsn, (), 0, 0)
+    assert rep["duplicate_wires"] == 1 and out.count("(wire ") == 3
+    assert "(net B)" in out and "(path F.Cu 150  2 2  3 3)" in out
+
+
+def test_net_classes_resolve_power_pair_and_default_widths_never_below_floor():
+    cons = {"power": {"+5V": {"max_current_ma": 4000}, "+3V3": {"width_mm": 0.3}, "VBAT": {"width_mm": 0.05}},
+            "pairs": {"USB_": {"impedance_diff": 90}}, "nets": {"ANT": {"width_mm": 0.25}}}
+    R = {"track": 0.15, "clearance": 0.2, "min_track": 0.127, "min_clearance": 0.127, "clearance_margin": 0.05}
+    cls = FR.net_classes(cons, R)
+    assert cls["default"] == {"width": 0.15, "clearance": 0.25}                       # floor + margin, the router's request
+    by = {c["name"]: c for c in cls["classes"]}
+    assert by["w2000um"]["width"] == 2.0 and by["w2000um"]["nets"] == ["+5V"]
+    assert by["w300um"]["nets"] == ["+3V3"] and by["w250um"]["nets"] == ["ANT"]
+    assert by["w201um"]["prefixes"] == ["USB_"]                                        # PAIR_GEOM_BY_Z[90] width
+    assert all(c["width"] >= 0.127 and c["clearance"] == 0.25 for c in cls["classes"])  # VBAT's 0.05 is raised to the floor
+
+
+def test_split_passes_separates_the_constant_plane_part():
+    ps = FR.split_passes([{"pass": 1, "unrouted": 545}, {"pass": 2, "unrouted": 426}], 419)
+    assert [(p["signal"], p["plane"]) for p in ps] == [(126, 419), (7, 419)]
+
+
+def test_copper_clearance_keeps_copper_pairs_and_drops_zone_fills():
+    drc = {"violations": [
+        {"type": "clearance", "description": "Clearance violation (netclass 'Default' clearance 0.25 mm; actual 0.2 mm)",
+         "items": [{"description": "Track [A] on F.Cu", "pos": {"x": 1, "y": 2}, "uuid": "u1"},
+                   {"description": "Via [B]", "pos": {"x": 1.2, "y": 2}, "uuid": "u2"}]},
+        {"type": "clearance", "description": "Clearance violation (zone clearance 0.25 mm; actual 0 mm)",
+         "items": [{"description": "Track [A] on F.Cu", "pos": {"x": 1, "y": 2}, "uuid": "u3"},
+                   {"description": "Zone [GND] on F.Cu", "pos": {"x": 0, "y": 0}, "uuid": "u4"}]},
+        {"type": "solder_mask_bridge", "description": "x", "items": []}]}
+    rows = FR.copper_clearance(drc)
+    assert len(rows) == 1 and rows[0]["actual"] == 0.2 and rows[0]["required"] == 0.25
+    assert [i["uuid"] for i in rows[0]["items"]] == ["u1", "u2"]
+
+
+def test_gate_pro_writes_the_resolved_classes_for_drc(tmp_path):
+    src = tmp_path / "b.kicad_pro"
+    src.write_text('{"net_settings": {"classes": [{"name": "Default", "clearance": 0.12, "track_width": 0.15}]}}')
+    cls = {"default": {"width": 0.15, "clearance": 0.25},
+           "classes": [{"name": "w2000um", "width": 2.0, "clearance": 0.25, "nets": ["+5V"], "prefixes": []},
+                       {"name": "w201um", "width": 0.201, "clearance": 0.25, "nets": [], "prefixes": ["USB_"]}]}
+    out = FR.gate_pro(str(src), str(tmp_path / "g.kicad_pro"), cls)
+    d = json.load(open(out))["net_settings"]
+    assert {c["name"]: c["clearance"] for c in d["classes"]} == {"Default": 0.25, "w2000um": 0.25, "w201um": 0.25}
+    assert {"netclass": "w2000um", "pattern": "+5V"} in d["netclass_patterns"]
+    assert {"netclass": "w201um", "pattern": "USB_*"} in d["netclass_patterns"]
+
+
+def test_segments_stop_on_stall_and_keep_each_session(tmp_path, fake):
+    """Several segments run; the stall stop ends them after `stall_passes` segments without a lower signal count."""
+    rec, b, out, base = run(tmp_path, fake, [N1], stall_passes=2)
+    assert rec["ok"], rec.get("error")
+    assert rec["stop"].startswith("stall") and len(rec["segments"]) == 3          # 1 productive + 2 without progress
+    assert [p["signal"] for p in rec["passes"]] == [2, 1]
+    assert rec["passes_split"][0][4] == rec["plane_open"] == 0
