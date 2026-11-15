@@ -219,16 +219,20 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     everything else `[si] default_skew_mm` (or default_skew_ps, 1 mm). ps values convert with `ps_per_mm`
     (float, or callable(master) giving the ps/mm on the layers the net runs on)."""
     from . import rules as RU
-    v, prov = RU.load(cons).resolve({"net": master}, "skew_mm")
-    if v is not None:
-        return float(v), f"{prov} skew_mm"
-    best = None
-    for fam, p in cons.get("pairs", {}).items():
-        if master.startswith(fam) and isinstance(p, dict) and "skew_ps" in p:
-            if best is None or len(fam) > best[0]:
-                best = (len(fam), float(p["skew_ps"]), f"[pairs.{fam}] skew_ps")
-    if best:
-        return _to_mm(best[1], "ps", best[2], ps_per_mm, master), best[2]
+    # one precedence: every skew entry (legacy [pairs.F] skew_mm / skew_ps, explicit [[rule]] skew_mm / skew_ps)
+    # is a rule; the best-ranked hit wins (explicit rule / longest pair family), whatever its unit.
+    rs = RU.load(cons)
+    obj = {"net": master}
+    cands = []
+    for key in ("skew_mm", "skew_ps"):
+        hits = rs.cascade(obj, key)
+        if hits:
+            r, v = hits[0]
+            cands.append((r.rank(), key, float(v), r))
+    if cands:
+        _rk, key, v, r = max(cands, key=lambda c: c[0])
+        unit = "mm" if key == "skew_mm" else "ps"
+        return _to_mm(v, unit, f"{r.label} {key}", ps_per_mm, master), f"{r.label} {key}"
     si = cons.get("si", {}) or {}
     from . import netclass as NC
     kind = NC.pair_kind(master)
@@ -248,6 +252,15 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     if e:
         return _to_mm(e[0], e[1], f"[si] {e[2]}", ps_per_mm, master), f"[si] {e[2]}"
     return 1.0, "[si] default_skew_mm"
+
+
+def skew_limit_checked(cons, master, ps_per_mm=None):
+    """(limit mm or None, source). None = a ps limit with no known layer delay: report PAIR_DELAY_UNKNOWN and
+    do not grade the pair. Never raises for that case."""
+    try:
+        return skew_limit_source(cons, master, ps_per_mm)
+    except ValueError as e:
+        return None, f"PAIR_DELAY_UNKNOWN ({e})"
 
 
 def skew_limit_mm(cons, master, ps_per_mm=None):
@@ -314,6 +327,8 @@ def _rule_netclasses(board, cons, classes, patterns, log):
     except (RU.RuleError, OSError, RuntimeError, ImportError) as e:
         log(f"  rule netclasses skipped ({e})")
         return 0
+    # Group by the full set of resolved values (width, clearance, ...) so every net
+    # gets exactly what the rules resolved for it, no more and no less.
     groups = {}
     for n in nets:
         obj = {"net": n["net"], "netclass": n.get("netclass")}
@@ -323,11 +338,17 @@ def _rule_netclasses(board, cons, classes, patterns, log):
             if hits and not hits[0][0].legacy:
                 win[key] = (hits[0][0], hits[0][1])
         if win:
-            rule = next(iter(win.values()))[0]
             vals = {k: v for k, (_r, v) in win.items()}
-            groups.setdefault(id(rule), (rule, vals, []))[2].append(n["net"])
+            gkey = tuple(sorted(vals.items()))
+            first = win.get("width_mm", next(iter(win.values())))[0]
+            groups.setdefault(gkey, (first, vals, []))[2].append(n["net"])
+    used = set()
     for rule, vals, names in groups.values():
-        name = "RULE_" + re.sub(r"\W+", "_", rule.name or f"r{rule.order}").strip("_")
+        base = "RULE_" + re.sub(r"\W+", "_", rule.name or f"r{rule.order}").strip("_")
+        name, i = base, 2
+        while name in used:
+            name, i = f"{base}_{i}", i + 1
+        used.add(name)
         cls = {"name": name}
         if "clearance_mm" in vals:
             cls["clearance"] = float(vals["clearance_mm"])

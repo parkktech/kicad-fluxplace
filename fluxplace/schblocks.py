@@ -265,6 +265,112 @@ def render(sch, out_dir, kicad_cli="kicad-cli", dpi=60):
             "svgs": sorted(os.listdir(svgd)), "pngs": pngs}
 
 
+def _kicad_dirs(kind):
+    """KiCad library roots for footprints/symbols: env overrides first, then the system install."""
+    dirs = []
+    for k, v in os.environ.items():
+        if k.startswith("KICAD") and k.endswith("_" + kind + "_DIR") and os.path.isdir(v):
+            dirs.append(v)
+    for root in ("/usr/share/kicad", "/usr/local/share/kicad"):
+        d = os.path.join(root, kind)
+        if os.path.isdir(d):
+            dirs.append(d)
+    return dirs
+
+
+def _footprint_pads(lib, name, fp_dirs):
+    for d in fp_dirs:
+        f = os.path.join(d, lib + ".pretty", name + ".kicad_mod")
+        if os.path.isfile(f):
+            return set(re.findall(r'\(pad\s+"([^"]*)"', open(f, encoding="utf-8", errors="replace").read()))
+    return None
+
+
+def _symbol_pins(lib, name, sym_dirs):
+    """{pin name: pin number} of a library symbol, or None when the library/symbol is not on this machine."""
+    for d in sym_dirs:
+        f = os.path.join(d, lib + ".kicad_sym")
+        if not os.path.isfile(f):
+            continue
+        text = open(f, encoding="utf-8", errors="replace").read()
+        m = re.search(r'\(symbol\s+"%s"' % re.escape(name), text)
+        if not m:
+            return None
+        depth, i = 0, m.start()
+        end = len(text)
+        for j in range(m.start(), len(text)):
+            c = text[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        body = text[m.start():end]
+        pins = {}
+        for pm in re.finditer(r'\(pin\s.*?\(name\s+"([^"]*)".*?\(number\s+"([^"]*)"', body, re.S):
+            pins.setdefault(pm.group(1), pm.group(2))
+        return pins
+    return None
+
+
+def pinmap_crosscheck(M, fp_dirs=None, sym_dirs=None):
+    """Compare each spec pinmap (pin name -> pad number) with the KiCad library the part names, when one is
+    installed here. Footprint: every pinmap pad must be a pad of the footprint. Symbol (spec key `symbol`):
+    each pin name must sit on the pad number the symbol gives it. Disagreement -> SCH_PINMAP_MISMATCH (WARN);
+    parts with a pinmap but no resolvable library -> counted as SCH_PINMAP_UNCHECKED."""
+    fp_dirs = _kicad_dirs("footprints") if fp_dirs is None else fp_dirs
+    sym_dirs = _kicad_dirs("symbols") if sym_dirs is None else sym_dirs
+    findings, checked, unchecked = [], 0, 0
+    for ref, c in sorted(M["comps"].items()):
+        pm = c.get("pinmap") or {}
+        if not pm:
+            continue
+        ok_any = False
+        fp = c.get("fp") or ""
+        if ":" in fp:
+            lib, name = fp.split(":", 1)
+            pads = _footprint_pads(lib, name, fp_dirs)
+            if pads is not None:
+                ok_any = True
+                bad = sorted(p for p in set(pm.values()) if str(p) not in pads)
+                if bad:
+                    findings.append({"level": "WARN", "code": "SCH_PINMAP_MISMATCH", "ref": ref,
+                                     "msg": f"pinmap pads {bad} are not pads of footprint {fp}"})
+        sym = c.get("symbol") or ""
+        if ":" in sym:
+            lib, name = sym.split(":", 1)
+            sp = _symbol_pins(lib, name, sym_dirs)
+            if sp is not None:
+                ok_any = True
+                for pin, pad in sorted(pm.items()):
+                    if pin in sp and str(sp[pin]) != str(pad):
+                        findings.append({"level": "WARN", "code": "SCH_PINMAP_MISMATCH", "ref": ref,
+                                         "msg": f"pin {pin} is number {sp[pin]} in symbol {sym}, spec says pad {pad}"})
+        if ok_any:
+            checked += 1
+        else:
+            unchecked += 1
+    return {"checked": checked, "unchecked": unchecked, "findings": findings}
+
+
+def verified_statement(netlist, pinmap):
+    """The gate report, saying exactly what was verified (never implying the part's pinmap was)."""
+    lines = []
+    if netlist.get("ok"):
+        lines.append("netlist: drawing matches spec netlist")
+    else:
+        lines.append("netlist: drawing does NOT match spec netlist")
+    lines.append("spec pinmap NOT checked against the part here - see review PINMAP_* codes")
+    if pinmap.get("findings"):
+        for f in pinmap["findings"][:10]:
+            lines.append("  %s %s: %s" % (f["code"], f["ref"], f["msg"]))
+    lines.append("pinmap cross-check: %d part(s) compared with installed KiCad libraries, "
+                 "SCH_PINMAP_UNCHECKED %d" % (pinmap.get("checked", 0), pinmap.get("unchecked", 0)))
+    return "\n".join(lines)
+
+
 def gate(M, root, kicad_cli="kicad-cli", render_dir=None, sheet_names=()):
     from . import schlegible as LG
     res = {}
@@ -274,6 +380,8 @@ def gate(M, root, kicad_cli="kicad-cli", render_dir=None, sheet_names=()):
         res["netlist"] = {"ok": False, "verdict": "FAIL", "error": str(e)}
     res["erc"] = erc(root, kicad_cli)
     res["legibility"] = LG.check_tree(root)
+    res["pinmap"] = pinmap_crosscheck(M)
+    res["verified"] = verified_statement(res["netlist"], res["pinmap"])
     if render_dir:
         res["render"] = render(root, render_dir, kicad_cli)
     res["ok"] = bool(res["netlist"].get("ok")) and res["legibility"]["total"] == 0

@@ -148,8 +148,14 @@ def _r(v):
     return round(float(v), _NR) + 0.0
 
 
+COPPER_KINDS = ("seg", "arc", "via")
+
+
 def fingerprint(path):
-    """-> list of items {kind, key, net, layer, pts, w, d, drill}. key = canonical tuple for multiset compare."""
+    """-> (items, B). Each item {kind, key, net, layer, pts, ...}; key = canonical tuple for the multiset compare.
+    Kinds: seg (straight track), arc (midpoint is part of the key), via (layer span is part of the key),
+    zone (copper pour outline), keepout (keepout/rule area: layers, outline, what it forbids), pad (footprint
+    pad: ref, pad number, position, net, layers - a moved footprint moves its pads)."""
     from . import routediag as RD
     B = RD.load(path)
     items = []
@@ -157,21 +163,42 @@ def fingerprint(path):
         a = (_r(s["a"][0]), _r(s["a"][1]))
         b = (_r(s["b"][0]), _r(s["b"][1]))
         ends = tuple(sorted([a, b]))
-        key = ("S", s["net"] or "", s["layer"], ends, _r(s["w"]))
-        items.append({"kind": "seg", "key": key, "net": s["net"] or "", "layer": s["layer"],
+        mid = s.get("mid")
+        kind = "arc" if mid else "seg"
+        key = ("A" if mid else "S", s["net"] or "", s["layer"], ends, _r(s["w"]))
+        if mid:
+            key += ((_r(mid[0]), _r(mid[1])),)
+        items.append({"kind": kind, "key": key, "net": s["net"] or "", "layer": s["layer"],
                       "pts": [a, b], "w": s["w"]})
     for v in B["vias"]:
-        key = ("V", v["net"] or "", (_r(v["x"]), _r(v["y"])), _r(v["d"]), _r(v["drill"]))
-        items.append({"kind": "via", "key": key, "net": v["net"] or "", "layer": "",
+        key = ("V", v["net"] or "", (_r(v["x"]), _r(v["y"])), _r(v["d"]), _r(v["drill"]),
+               tuple(sorted(v.get("layers") or ())))
+        items.append({"kind": "via", "key": key, "net": v["net"] or "", "layer": ",".join(sorted(v.get("layers") or ())),
                       "pts": [(v["x"], v["y"])], "d": v["d"], "drill": v["drill"]})
     for z in B["zones"]:
-        if z["keepout"] or len(z["pts"]) < 3:
+        if len(z["pts"]) < 3:
             continue
         pts = tuple(sorted((_r(x), _r(y)) for x, y in z["pts"]))
-        key = ("Z", z["net"] or "", tuple(sorted(z["layers"])), pts)
-        items.append({"kind": "zone", "key": key, "net": z["net"] or "", "layer": ",".join(sorted(z["layers"])),
+        layers = tuple(sorted(z["layers"]))
+        if z["keepout"]:
+            key = ("K", z["net"] or "", layers, pts, bool(z.get("no_tracks")), bool(z.get("no_vias")))
+            kind = "keepout"
+        else:
+            key = ("Z", z["net"] or "", layers, pts)
+            kind = "zone"
+        items.append({"kind": kind, "key": key, "net": z["net"] or "", "layer": ",".join(layers),
                       "pts": [(x, y) for x, y in z["pts"]]})
+    for p in B.get("pads") or []:
+        layers = tuple(sorted(p["layers"]))
+        key = ("P", p["ref"], p["num"], _r(p["x"]), _r(p["y"]), p["net"] or "", layers)
+        items.append({"kind": "pad", "key": key, "net": p["net"] or "", "layer": ",".join(layers),
+                      "pts": [(p["x"], p["y"])]})
     return items, B
+
+
+def covered(items):
+    """{kind: count} of what a fingerprint covers (printed in the proof)."""
+    return dict(Counter(i["kind"] for i in items))
 
 
 def _digest(keys):
@@ -198,8 +225,8 @@ def check(before_path, after_path, scope, ripped=()):
         viol.append(f"protected copper changed/removed x{n}: {_show(k)}")
     for k, n in added.items():
         item = next(i for i in ai if i["key"] == k)
-        if item["kind"] == "zone":
-            viol.append(f"zone outline added x{n}: {_show(k)}")
+        if item["kind"] not in COPPER_KINDS:
+            viol.append(f"{item['kind']} added x{n}: {_show(k)}")
             continue
         if scope["nets"] is not None and item["net"] not in scope["nets"]:
             viol.append(f"copper added to an out-of-scope net {item['net']!r} x{n}")
@@ -211,7 +238,16 @@ def check(before_path, after_path, scope, ripped=()):
     if hb != ha and not viol:
         viol.append("protected copper hash differs")
     return {"ok": ok, "hash_before": hb, "hash_after": ha, "removed": removed, "added": added,
-            "violations": viol}
+            "violations": viol, "covered": covered(bi)}
+
+
+def _rip_selected(item, scope):
+    """The copper --rip removes: in-scope nets with every point inside the area."""
+    if item["kind"] not in COPPER_KINDS:
+        return False
+    if scope["nets"] is not None and item["net"] not in scope["nets"]:
+        return False
+    return all(_inside(scope["area"], x, y) for x, y in item["pts"])
 
 
 def _show(k):
@@ -293,7 +329,11 @@ def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, p
                 RP._remove(board, t)
     pcbnew.SaveBoard(base_file, board)
     base_items, Bb = fingerprint(base_file)
-    ripped = Counter(i["key"] for i in before_items) - Counter(i["key"] for i in base_items)
+    # removable = exactly the --rip selection (the same test as the removal loop above); anything else
+    # that pcbnew drops on the re-save is a protection failure, not a pre-authorised removal
+    ripped = Counter()
+    if rip:
+        ripped = Counter(i["key"] for i in before_items if _rip_selected(i, scope))
     base_keys = Counter(i["key"] for i in base_items)
 
     groups = {}
@@ -379,7 +419,7 @@ def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, p
     groups_a = {}
     open_after = RC.text_open(Bo, groups=groups_a)
     in_after = _in_scope_open(groups_a, scope)
-    res.update({"added_tracks": nt, "added_vias": nv, "added_mm": round(mm, 3),
+    res.update({"covered": covered(before_items), "added_tracks": nt, "added_vias": nv, "added_mm": round(mm, 3),
                 "nets_kept": sorted({i["net"] for i in kept}), "nets_dropped": dict(dropped_nets),
                 "in_scope_before": in_before, "in_scope_after": in_after, "open_before": sum(open_before.values()),
                 "open_after": sum(open_after.values()), "out": out_path, "dsn_pins_dropped": dropped,

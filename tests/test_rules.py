@@ -220,3 +220,57 @@ def test_no_rules_writes_no_rule_classes(tmp_path, monkeypatch):
                         log=lambda *_: None, board="unused.kicad_pcb")
     names = [c["name"] for c in json.loads(pro.read_text())["net_settings"]["classes"]]
     assert names == ["PWR_5V"]
+
+
+def test_net_gets_every_resolved_value_across_rules(tmp_path, monkeypatch):
+    # fix-c #1: A2 wins width from {net="^A"} and clearance from {net="^A2$"}; it must keep both.
+    import json
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text(json.dumps({"net_settings": {"classes": [], "netclass_patterns": []}}))
+    monkeypatch.setattr(RU, "board_objects",
+                        lambda path: ([{"net": "A1", "netclass": "Default"},
+                                       {"net": "A2", "netclass": "Default"}], []))
+    cons = {"rule": [{"name": "wide", "select": {"net": "^A"}, "set": {"width_mm": 0.4}},
+                     {"name": "gap", "select": {"net": "^A2$"}, "set": {"clearance_mm": 0.3}}]}
+    C.inject_netclasses(str(pro), cons, log=lambda *_: None, board="unused.kicad_pcb")
+    d = json.loads(pro.read_text())
+    cls = {c["name"]: c for c in d["net_settings"]["classes"]}
+    pats = {p["pattern"]: p["netclass"] for p in d["net_settings"]["netclass_patterns"]}
+    a2 = cls[pats["A2"]]
+    assert a2["track_width"] == 0.4 and a2["clearance"] == 0.3
+    a1 = cls[pats["A1"]]
+    assert a1["track_width"] == 0.4 and "clearance" not in a1
+
+
+def test_longer_pair_family_beats_extra_select_key(tmp_path):
+    # fix-c #2: pair family length decides before the number of select keys.
+    cons = {"rule": [{"select": {"pair": "USB"}, "set": {"clearance_mm": 0.3}},
+                     {"select": {"pair": "USB_DP"}, "set": {"clearance_mm": 0.2}}]}
+    obj = {"net": "USB_DP", "type": "track", "layer": "F.Cu"}
+    cons2 = {"rule": [{"select": {"pair": "USB_DP"}, "set": {"clearance_mm": 0.2}},
+                      {"select": {"pair": "USB", "type": "track"}, "set": {"clearance_mm": 0.3}}]}
+    assert RU.load(cons2).resolve(obj, "clearance_mm")[0] == 0.2
+    assert RU.load(cons).resolve(obj, "clearance_mm")[0] == 0.2
+
+
+def test_pair_plus_type_rule_not_false_warned_without_board():
+    # fix-c #3: pair + type used to always emit RULE_MATCHES_NOTHING (type never checkable from names)
+    cons = {"rule": [{"name": "usb tracks", "select": {"pair": "USB_", "type": "track"}, "set": {"width_mm": 0.2}}]}
+    notes = []
+    assert RU.check_matches(RU.load(cons), nets=["USB_DP"], refs=["U1"], notes=notes) == []
+    assert any("type not checked" in n for n in notes)
+
+
+def test_pair_plus_type_rule_evaluated_against_board_objects():
+    cons = {"rule": [{"name": "usb vias", "select": {"pair": "USB_", "type": "via"}, "set": {"width_mm": 0.2}},
+                     {"name": "usb tracks", "select": {"pair": "USB_", "type": "track"}, "set": {"width_mm": 0.2}}]}
+    objs = [{"net": "USB_DP", "netclass": "Default", "type": "track", "layer": "F.Cu"},
+            {"ref": "U1", "net": "USB_DP", "type": "pad", "layer": "F.Cu", "props": {}}]
+    warn = RU.check_matches(RU.load(cons), nets=["USB_DP"], refs=["U1"], objects=objs)
+    assert [r.name for r, _ in warn] == ["usb vias"]
+
+
+def test_matched_nets_shows_regex_scope():
+    rs = RU.load({"rule": [{"name": "usb", "select": {"net": "USB"}, "set": {"width_mm": 0.2}}]})
+    nets = [{"net": "USB_DP"}, {"net": "XUSB_Q"}, {"net": "GND"}]
+    assert RU.matched_nets(rs[0], nets) == ["USB_DP", "XUSB_Q"]

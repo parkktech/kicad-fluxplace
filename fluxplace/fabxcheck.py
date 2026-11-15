@@ -91,22 +91,47 @@ _BOM_REF_COLS = ("references", "reference(s)", "designator", "designators",
                  "refs", "ref", "refdes", "reference")
 
 
+_RANGE_RX = re.compile(r"^([A-Za-z]+)(\d+)-([A-Za-z]+)?(\d+)$")
+
+
+def _expand_ref(tok):
+    """`R1-R4` / `R1-4` -> R1..R4 (same prefix, ascending). Anything else is returned as written."""
+    m = _RANGE_RX.match(tok)
+    if not m:
+        return [tok]
+    pre, a, pre2, b = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+    if pre2 and pre2 != pre:
+        return [tok]
+    if b < a or b - a > 500:
+        return [tok]
+    return [f"{pre}{i}" for i in range(a, b + 1)]
+
+
 def bom_refs(bom_path):
-    """All reference designators listed in a BOM CSV (KiCad/JLCPCB/generic)."""
+    """All reference designators listed in a BOM CSV (KiCad/JLCPCB/generic). The header row is searched in the
+    first 10 rows; `R1-R4` ranges expand to R1..R4 (same prefix only)."""
     with open(bom_path, newline="", encoding="utf-8", errors="replace") as f:
         rows = list(csv.reader(f))
     if not rows:
         return []
-    head = [h.strip().lower() for h in rows[0]]
+    hdr = None
+    for i, r in enumerate(rows[:10]):
+        head = [h.strip().lower() for h in r]
+        if any(c in head for c in _BOM_REF_COLS) or any("ref" in h or "designator" in h for h in head):
+            hdr = i
+            break
+    if hdr is None:
+        raise ValueError("BOM has no reference-designator column")
+    head = [h.strip().lower() for h in rows[hdr]]
     col = next((head.index(c) for c in _BOM_REF_COLS if c in head), None)
     if col is None:
         col = next((i for i, h in enumerate(head) if "ref" in h or "designator" in h), None)
-    if col is None:
-        raise ValueError("BOM has no reference-designator column")
     refs = []
-    for r in rows[1:]:
+    for r in rows[hdr + 1:]:
         if len(r) > col:
-            refs += [x for x in re.split(r"[,\s;]+", r[col]) if x]
+            for x in re.split(r"[,\s;]+", r[col]):
+                if x:
+                    refs += _expand_ref(x)
     return refs
 
 

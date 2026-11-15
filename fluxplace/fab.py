@@ -405,6 +405,31 @@ def quilter_csvs(cons, out, log=print):
     return written
 
 
+def _reachable_sheets(root, log=print):
+    """The root schematic and every sheet it references (recursively, via the `Sheetfile` property of
+    `(sheet ...)` entries; paths are relative to the referencing sheet's folder). Existing files only."""
+    import re
+    found, todo = [], [root]
+    seen = set()
+    rx = re.compile(r'\(property\s+"Sheetfile"\s+"((?:[^"\\]|\\.)*)"')
+    while todo:
+        cur = os.path.abspath(todo.pop(0))
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if not os.path.isfile(cur):
+            if cur == os.path.abspath(root):
+                log(f"  upload: root sheet {root} not found; no schematic copied")
+            else:
+                log(f"  upload: referenced sheet {cur} missing")
+            continue
+        found.append(cur)
+        text = open(cur, encoding="utf-8", errors="replace").read()
+        for ref in rx.findall(text):
+            todo.append(os.path.join(os.path.dirname(cur), ref.replace('\\"', '"')))
+    return found
+
+
 def upload_package(board, out, project_dir=None, log=print):
     """Assemble the ECAD upload set (external audit/re-route services parse
     these for component relationships): the routed board renamed to the
@@ -423,10 +448,15 @@ def upload_package(board, out, project_dir=None, log=print):
     shutil.copy2(board, dst)
     written.append(dst)
     for f in sorted(os.listdir(project_dir)):
-        if f.endswith((".kicad_pro", ".kicad_sch")):
+        if f.endswith(".kicad_pro"):
             dst = os.path.join(out, f)
             shutil.copy2(os.path.join(project_dir, f), dst)
             written.append(dst)
+    # schematic sheets: only those reachable from the root sheet (stale block sheets are not uploaded)
+    for sheet in _reachable_sheets(os.path.join(project_dir, stem + ".kicad_sch"), log=log):
+        dst = os.path.join(out, os.path.basename(sheet))
+        shutil.copy2(sheet, dst)
+        written.append(dst)
     # constraint intent travels IN the project file: inject netclasses from
     # <stem>.constraints.toml so ECAD parsers read 85R pairs and real rail
     # widths instead of guessing 100R/500mA (measured on Quilter)
@@ -436,7 +466,7 @@ def upload_package(board, out, project_dir=None, log=print):
         try:
             from . import constraints as CONS
             cons = CONS.load(ctoml)
-            CONS.inject_netclasses(pro, cons, log=log, board=os.path.join(project_dir, stem + ".kicad_pcb"))
+            CONS.inject_netclasses(pro, cons, log=log, board=board)
             quilter_csvs(cons, out, log=log)
         except Exception as e:
             log(f"  netclass injection failed ({e}) — package unchanged")

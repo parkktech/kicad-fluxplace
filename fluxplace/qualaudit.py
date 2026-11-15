@@ -166,7 +166,7 @@ def autotune(board, cons, conn, log=lambda m: None):
         side = os.path.splitext(board)[0] + ext
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(tmp)[0] + ext)
-    lim = lambda master: C.skew_limit_mm(cons or {}, master)
+    lim = lambda master: (lambda v: float("inf") if v is None else v)(C.skew_limit_checked(cons or {}, master)[0])
     TU.tune_pairs(board, tmp, {r["n"]: r["p"] for r in rows}, lim, max_rounds=int(r_.get("tune_rounds", 3)), log=log)
     open1 = conn(tmp)
     B1 = RD.load(tmp)

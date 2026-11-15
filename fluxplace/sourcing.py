@@ -28,6 +28,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .redact import urlopen as _redact_urlopen, redact as _redact
+
 from .models import credentials
 
 CACHE_NAME = ".sourcing_cache.json"
@@ -78,7 +80,7 @@ def _dk_token(creds):
     req = urllib.request.Request(
         "https://api.digikey.com/v1/oauth2/token", data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"})
-    return json.load(urllib.request.urlopen(req, timeout=30))["access_token"]
+    return json.load(_redact_urlopen(req, timeout=30))["access_token"]
 
 
 _DK_MIN_INTERVAL = 0.25         # s between calls; DigiKey throttles bursts too
@@ -165,7 +167,7 @@ def _dk(mpn, creds, tok, retries=3, on_token=None):
                      "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
                      "Authorization": "Bearer " + tok})
         try:
-            d = json.load(urllib.request.urlopen(req, timeout=30))
+            d = json.load(_redact_urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt < retries - 1:
@@ -236,7 +238,7 @@ def _mouser_once(term, mpn, creds, retries=3):
             time.sleep(wait)
         _last_mouser[0] = time.time()
         try:
-            d = json.load(urllib.request.urlopen(req, timeout=30))
+            d = json.load(_redact_urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code in (403, 429, 500, 502, 503, 504) and attempt < retries - 1:
@@ -476,12 +478,15 @@ def alternates(report, cache, cache_dir, limit=3):
         if r["verdict"] not in ("LEAD", "RISK", "NONE") or mpn not in pool:
             continue
         target = pool[mpn]
-        found = []
+        found, stale = [], 0
         for cand, cdata in pool.items():
             if cand == mpn or cand in report or not same_spec(target, cdata):
                 continue
             hit = cache.get(cand)
             if not hit:
+                continue
+            if time.time() - hit.get("_t", 0) >= CACHE_TTL:   # same TTL rule as the main lookup
+                stale += 1
                 continue
             dk, mo = hit.get("dk"), hit.get("mo")
             verdict, stock = grade(dk, mo, r["required"])
@@ -495,6 +500,7 @@ def alternates(report, cache, cache_dir, limit=3):
                           "status": "candidate - pinout/datasheet not verified"})
         found.sort(key=lambda c: (c["ext"] is None, c["ext"] or 0, -c["stock"]))
         r["alternates"] = found[:limit]
+        r["alternates_stale"] = stale                  # rows older than CACHE_TTL: stale, not used
 
 
 def summary(report, counts, need, log=print, show_ok=False):
@@ -581,7 +587,7 @@ def datasheet_urls(mpn, creds):
                 headers={"Authorization": "Bearer " + tok,
                          "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
                          "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _redact_urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in data.get("Products", []) or []:
                 if _same_part(p.get("ManufacturerProductNumber") or "", mpn)[0] and p.get("DatasheetUrl"):
@@ -596,7 +602,7 @@ def datasheet_urls(mpn, creds):
                 "https://api.mouser.com/api/v1/search/partnumber?apiKey="
                 + creds["MOUSER_API_KEY"], data=body,
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _redact_urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in ((data.get("SearchResults") or {}).get("Parts") or []):
                 if _same_part(p.get("ManufacturerPartNumber") or "", mpn)[0] and p.get("DataSheetUrl"):
@@ -651,7 +657,7 @@ def datasheet_url(mpn, creds):
                          "Content-Type": "application/json",
                          "X-DIGIKEY-Locale-Site": "US",
                          "X-DIGIKEY-Locale-Currency": "USD"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _redact_urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in data.get("Products", []) or []:
                 if _same_part(p.get("ManufacturerProductNumber") or "", mpn):
@@ -668,7 +674,7 @@ def datasheet_url(mpn, creds):
                 "https://api.mouser.com/api/v1/search/partnumber?apiKey="
                 + creds["MOUSER_API_KEY"], data=body,
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _redact_urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in ((data.get("SearchResults") or {}).get("Parts") or []):
                 if _same_part(p.get("ManufacturerPartNumber") or "", mpn):
@@ -702,7 +708,7 @@ def datasheet_reachable(url, timeout=_DS_TIMEOUT):
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
         "Accept": "application/pdf,*/*"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _redact_urlopen(req, timeout=timeout) as r:
             ctype = (r.headers.get("Content-Type") or "").lower()
             head = r.read(1024)
         if head.startswith(b"%PDF"):
@@ -715,7 +721,7 @@ def datasheet_reachable(url, timeout=_DS_TIMEOUT):
     except urllib.error.HTTPError as e:
         return (False, "HTTP %s" % e.code)
     except ValueError as e:
-        return (False, "bad URL: %s" % str(e)[:50])
+        return (False, "bad URL: %s" % _redact(str(e))[:50])
     except Exception as e:
         return (False, type(e).__name__)
 

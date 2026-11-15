@@ -15,8 +15,9 @@ Two sources feed the same list of rules:
 
 Specificity, high to low:  exact ref / exact net  >  ref glob / net regex  >  prop  >  pair
 >  netclass  >  type / layer  >  global default (empty select).  Several select keys are AND
-and rank by their most specific key.  Among equal specificity the longer pair family wins, then
-the later rule (legacy blocks load first, `[[rule]]` entries in file order after them).
+and rank by their most specific key.  Among equal specificity the longer pair family (or longer
+glob/regex pattern) wins, then the rule with more select keys, then the later rule (legacy blocks load
+first, `[[rule]]` entries in file order after them).
 `important = true` beats any non-important rule regardless of specificity.
 
 `resolve(obj, key)` is per key: the winner is the best-ranked rule that SETS that key and matches
@@ -38,6 +39,7 @@ SET_KEYS = {
     "gap_mm": "[pairs.F] gap_mm",
     "clearance_mm": "[pairs.F] clearance_mm",
     "skew_mm": "[pairs.F] skew_mm",
+    "skew_ps": "[pairs.F] skew_ps (converted to mm with the layer delay of the pair)",
     "impedance_diff": "[pairs.F] impedance_diff",
     "straight_copper": "[nets.X] straight_copper",
     "max_vias": "[nets.X] max_vias, [rf] nets max_vias",
@@ -45,7 +47,7 @@ SET_KEYS = {
     "min_track_mm": "[route] min_track_mm (a floor; routerules takes the max with [fab])",
     "min_clearance_mm": "[route] min_clearance_mm (a floor; routerules takes the max with [fab])",
 }
-_NUMERIC = {"width_mm", "gap_mm", "clearance_mm", "skew_mm", "impedance_diff", "max_vias",
+_NUMERIC = {"width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "impedance_diff", "max_vias",
             "min_track_mm", "min_clearance_mm"}
 
 LEVEL = {"exact": 100, "pattern": 90, "prop": 70, "pair": 60, "netclass": 50, "type_layer": 40, "default": 0}
@@ -79,8 +81,9 @@ class Rule:
         return f'"{self.name}"' if self.name else self.origin
 
     def rank(self):
-        """Sort key, higher wins: (important, specificity level, number of select keys, detail, file order)."""
-        return (self.important, self._level, len(self.select), self._detail, self.order)
+        """Sort key, higher wins: (important, specificity level, detail, number of select keys, file order).
+        detail = pair family length, else the net/ref pattern length (longer = narrower)."""
+        return (self.important, self._level, self._detail, len(self.select), self.order)
 
     def describe_select(self):
         if not self.select:
@@ -108,6 +111,7 @@ def _compile_select(origin, select):
         if not isinstance(select["ref"], str):
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.ref must be a string")
         levels.append(_ref_level(select["ref"]))
+        detail = max(detail, len(select["ref"]) if levels[-1] == LEVEL["pattern"] else 0)
     if "net" in select:
         if not isinstance(select["net"], str):
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.net must be a regex string")
@@ -116,6 +120,7 @@ def _compile_select(origin, select):
         except re.error as e:
             raise RuleError("RULE_BAD_REGEX", f"{origin}: select.net '{select['net']}' is not a regex: {e}")
         levels.append(_net_level(select["net"]))
+        detail = max(detail, len(select["net"]) if levels[-1] == LEVEL["pattern"] else 0)
     if "prop" in select:
         p = select["prop"]
         if not isinstance(p, dict) or not all(isinstance(v, str) for v in p.values()):
@@ -125,7 +130,7 @@ def _compile_select(origin, select):
         if not isinstance(select["pair"], str) or not select["pair"]:
             raise RuleError("RULE_BAD_VALUE", f"{origin}: select.pair must be a family prefix")
         levels.append(LEVEL["pair"])
-        detail = len(select["pair"])
+        detail = max(detail, len(select["pair"]))
     if "netclass" in select:
         levels.append(LEVEL["netclass"])
     if "type" in select:
@@ -206,7 +211,7 @@ def _legacy(cons, out):
     for fam, p in (cons.get("pairs") or {}).items():
         if not isinstance(p, dict):
             continue
-        vals = {k: p[k] for k in ("width_mm", "gap_mm", "clearance_mm", "skew_mm", "impedance_diff")
+        vals = {k: p[k] for k in ("width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "impedance_diff")
                 if isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool)}
         add(f"[pairs.{fam}]", {"pair": fam}, {k: float(v) if k != "impedance_diff" else v for k, v in vals.items()})
 
@@ -306,19 +311,42 @@ def resolve_all(rules, obj):
     return rules.resolve_all(obj)
 
 
-def check_matches(rules, nets=(), refs=()):
-    """RULE_MATCHES_NOTHING warnings: [(rule, text)] for rules whose net/ref selectors match no object.
-    Only net and ref selectors are checkable from names alone; the others are reported as unchecked."""
+def check_matches(rules, nets=(), refs=(), objects=None, notes=None):
+    """RULE_MATCHES_NOTHING warnings: [(rule, text)] for rules whose selectors match no object.
+
+    With `objects` (board elements from `board_element_objects`: tracks, vias, zones, pads and
+    footprints, each with net/netclass/layer/type) every select key is evaluated. Without them only
+    net/ref/pair can be checked from names; a rule that also has netclass/type/layer is checked on
+    its name keys alone and a note is appended to `notes` (when given) saying what was skipped."""
+    import dataclasses
     out = []
+    name_objs = [{"net": n} for n in nets] + [{"ref": f} for f in refs]
     for r in rules:
         if not r.set or r.legacy:
             continue
         s = r.select
-        if "net" in s or "ref" in s or "pair" in s:
-            objs = [{"net": n} for n in nets] + [{"ref": f} for f in refs]
-            if not any(matches(r, o) for o in objs):
-                out.append((r, f"{r.label} matches no net or footprint on this board ({r.describe_select()})"))
+        if objects is not None:
+            pool, rr = objects, r
+        else:
+            if not ({"net", "ref", "pair"} & set(s)):
+                continue
+            skipped = sorted(set(s) - {"net", "ref", "pair"})
+            pool = name_objs
+            rr = r
+            if skipped:
+                rr = dataclasses.replace(r, select={k: v for k, v in s.items() if k in ("net", "ref", "pair")})
+                if notes is not None:
+                    notes.append(f"{r.label}: {', '.join(skipped)} not checked (no board objects)")
+        if not any(matches(rr, o) for o in pool):
+            out.append((r, f"{r.label} matches no net or footprint on this board ({r.describe_select()})"
+                        if objects is None else
+                        f"{r.label} matches no board object ({r.describe_select()})"))
     return out
+
+
+def matched_nets(rule, nets):
+    """Net names a rule's select hits (for the rules table: makes regex scope surprises visible)."""
+    return sorted({n["net"] for n in nets if matches(rule, n)})
 
 
 def board_objects(board_path):
@@ -338,5 +366,42 @@ def board_objects(board_path):
     return nets, fps
 
 
+def board_element_objects(board_path):
+    """Every board element a selector can match: tracks, vias, zones, pads (with ref/net/netclass/layer).
+    One object per layer an element sits on. Needs pcbnew."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board_path)
+    net_class = {}
+    for name, item in b.GetNetInfo().NetsByName().items():
+        net_class[str(name)] = str(item.GetNetClassName())
+
+    def _net(item):
+        n = item.GetNet() if hasattr(item, "GetNet") else None
+        name = str(n.GetNetname()) if n is not None else ""
+        return name, net_class.get(name, "")
+
+    objs = []
+    for t in b.GetTracks():
+        net, nc = _net(t)
+        if t.Type() == pcbnew.PCB_VIA_T:
+            layers = [str(b.GetLayerName(i)) for i in t.GetLayerSet().Seq()]
+            objs += [{"net": net, "netclass": nc, "type": "via", "layer": ly} for ly in layers]
+        else:
+            objs.append({"net": net, "netclass": nc, "type": "track", "layer": str(b.GetLayerName(t.GetLayer()))})
+    for z in b.Zones():
+        net, nc = _net(z)
+        for ly in z.GetLayerSet().Seq():
+            objs.append({"net": net, "netclass": nc, "type": "zone", "layer": str(b.GetLayerName(ly))})
+    for fp in b.GetFootprints():
+        ref = str(fp.GetReference())
+        props = {str(f.GetName()): str(f.GetText()) for f in fp.GetFields()}
+        objs.append({"ref": ref, "type": "footprint", "layer": str(fp.GetLayerName()), "props": props})
+        for pad in fp.Pads():
+            net, nc = _net(pad)
+            objs.append({"ref": ref, "net": net, "netclass": nc, "type": "pad",
+                         "layer": str(fp.GetLayerName()), "props": props})
+    return objs
+
+
 __all__ = ["load", "RuleSet", "RuleError", "resolve", "resolve_all", "matches", "check_matches",
-           "board_objects", "SET_KEYS", "SELECT_KEYS", "OBJECT_TYPES"]
+           "matched_nets", "board_element_objects", "board_objects", "SET_KEYS", "SELECT_KEYS", "OBJECT_TYPES"]

@@ -110,11 +110,10 @@ def audit(B, pairs, cons, open_nets):
         if not po and not no:
             pp, pn = profile(B, p), profile(B, n)
             e.update(p=pp, n=pn)
-            try:
-                lim = C.skew_limit_mm(cons or {}, p)
-            except ValueError as ex:                   # a ps limit with no layer delay: never graded as passing
-                e.update(causes=[], skew=None, limit=None, status="unknown",
-                         why=f"{ex}; pair not graded")
+            lim, lim_src = C.skew_limit_checked(cons or {}, p)     # lim None: PAIR_DELAY_UNKNOWN, not graded
+            if lim is None:                            # a ps limit with no layer delay: never graded as passing
+                e.update(causes=[], skew=None, limit=None, limit_from=lim_src, status="unknown",
+                         why=f"{lim_src}; pair not graded")
                 res[(p, n)] = e
                 continue
             why, causes = [], []
@@ -125,10 +124,10 @@ def audit(B, pairs, cons, open_nets):
                 why.append(f"vias {pp['vias']} vs {pn['vias']}")
                 causes.append("vias")
             skew = abs(pp["length"] - pn["length"])
-            if skew > lim:
+            if lim is not None and skew > lim:
                 why.append(f"skew {skew:.2f} > {lim:g} mm")
                 causes.append("skew")
-            e.update(causes=causes, skew=round(skew, 3), limit=lim)
+            e.update(causes=causes, skew=round(skew, 3), limit=lim, limit_from=lim_src)
             e["status"], e["why"] = ("mismatch", "; ".join(why)) if why else ("complete", "")
         elif po != no:
             e["status"], e["why"] = "half", f"{p if no else n} routed, {p if po else n} open"

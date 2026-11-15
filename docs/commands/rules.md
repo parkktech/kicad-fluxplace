@@ -31,14 +31,14 @@ important = false
 | `pair` | net name starts with the family (`pair = "USB_"`) | prefix |
 
 `set` keys use the same names as the blocks they replace: `width_mm`, `gap_mm`, `clearance_mm`,
-`skew_mm`, `impedance_diff`, `straight_copper`, `max_vias`, `pour`, and the `[route]` floors
+`skew_mm`, `skew_ps`, `impedance_diff`, `straight_copper`, `max_vias`, `pour`, and the `[route]` floors
 `min_track_mm` / `min_clearance_mm`.
 
 ## Precedence
 
 Highest first: exact ref or exact net > net regex / ref glob > `prop` > `pair` > `netclass` > `type`/`layer`
 > global default (no select). A rule with several select keys ranks by its most specific key. Ties go to the
-longer pair family, then to the later rule. Legacy blocks load first, `[[rule]]` entries in file order after
+longer pair family (or longer non-exact net/ref pattern), then to the rule with more select keys, then to the later rule. Legacy blocks load first, `[[rule]]` entries in file order after
 them. `important = true` beats any non-important rule. Resolution is per key: a rule that sets only
 `width_mm` does not hide a `clearance_mm` set elsewhere.
 
@@ -65,5 +65,9 @@ Nothing else in those blocks moves (fab floors, placement weights, `[si]`, `[rf]
 
 - `track`, `via` and `zone` selectors resolve when the caller supplies such objects; `rules` lists only nets and
   footprints, so per-track matches are not counted there.
-- `prop` and `netclass` selectors are not checked by `RULE_MATCHES_NOTHING` (names alone cannot evaluate them).
+- `RULE_MATCHES_NOTHING` evaluates every select key (`net`, `ref`, `pair`, `type`, `layer`, `netclass`, `prop`)
+  against the board's real objects (tracks, vias, zones, pads, footprints; one object per layer). Without a board
+  (review gate) only `net`/`ref`/`pair` are checked; the other keys are skipped and listed as `RULE_NOT_CHECKED`.
+- `net` is a regex, not a glob, and is unanchored unless you anchor it: `net = "USB"` also matches `XUSB_Q`.
+  The rule table prints the matched net names (first 5 + count) under each rule so scope surprises show up.
 - Board objects are read with pcbnew; the rule table needs KiCad's Python.

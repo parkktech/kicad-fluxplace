@@ -798,8 +798,11 @@ def cmd_auto_candidates(a):
     json.dump({"winner": win, "candidates": [
         {"cand": k, "unrouted": u, "violations": v} for k, u, v in rows]},
         open(os.path.join(a.out, "candidates.json"), "w"), indent=1)
+    from fluxplace import constraints as _C
+    _cons = _C.load(a.constraints) if getattr(a, "constraints", None) else None
     res = fab.emit(os.path.join(a.out, "routed.kicad_pcb"),
-                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+                   os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli,
+                   formats=(_cons or {}).get("fab", {}).get("formats"), cons=_cons)
     from fluxplace import profiles as PROF
     fchecks, fsummary = PROF.check_board(os.path.join(a.out, "routed.kicad_pcb"),
                                          PROF.get(a.profile))
@@ -1334,7 +1337,10 @@ def _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="AUTO"):
         print(f"    ! via at ({gx:.2f},{gy:.2f}) still grazes a pad ({gap} mm air) — review")
 
     # ---- [6] FAB -------------------------------------------------------------------
-    res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli)
+    from fluxplace import constraints as _C
+    _cons = _C.load(getattr(a, "constraints", None)) if getattr(a, "constraints", None) else None
+    res = fab.emit(src, os.path.join(a.out, "fab"), kicad_cli=a.kicad_cli,
+                   formats=(_cons or {}).get("fab", {}).get("formats"), cons=_cons)
     verdict = res["drc"]
     print(f"[6/{NSTAGE}] fab package -> {res['out']}  DRC {verdict}"
           + (f" ({res['violations']} viol, {res['unconnected']} unrouted)"
@@ -1520,6 +1526,8 @@ def cmd_lint(a):
         st = L.sch_pin_types(a.sch) if getattr(a, "sch", None) else None
         findings += L.control_pins(spec, cons, st, waivers=a.waive)
     # schematic-level checks: the spec's netlist (pin names, values) + placed pad positions when a board is given
+    if not a.board and not (spec and spec.get("nets")):
+        raise SystemExit("lint: spec has no nets; give --board (the placed pads) to lint")
     erc = EN.run(spec if spec and spec.get("nets") else pads, cons, board_facts=facts)
     findings += EN.waive(erc, a.waive)
     n = L.summarize(findings)
@@ -1728,7 +1736,7 @@ def _legacy_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u < base[1]:
         shutil.move(tmp, out)
-        _project_beside(a.board, out)
+        print(f"  project file: {_project_beside(a.board, out)} ({os.path.splitext(out)[0]}.kicad_pro)")
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
@@ -1738,12 +1746,17 @@ def _legacy_finish(a):
 
 def _project_beside(board, out):
     """The .kicad_pro of the input, copied next to the output under the output's own name (so it opens with
-    its rules). The .finish copy stays too: anything that reads it keeps working."""
+    its rules). An existing <out>.kicad_pro is never overwritten (it may carry hand edits). Returns
+    "wrote", "kept existing", or "no source" and the caller prints it."""
     import shutil
     side = os.path.splitext(board)[0] + ".kicad_pro"
     dst = os.path.splitext(out)[0] + ".kicad_pro"
-    if os.path.exists(side) and os.path.abspath(side) != os.path.abspath(dst):
-        shutil.copy(side, dst)
+    if not os.path.exists(side) or os.path.abspath(side) == os.path.abspath(dst):
+        return "no source"
+    if os.path.exists(dst):
+        return "kept existing"
+    shutil.copy(side, dst)
+    return "wrote"
 
 
 def cmd_finish(a):
@@ -1783,6 +1796,8 @@ def cmd_finish(a):
         for n in res["diagnose"]["nets"]:
             print(f"  left open {n['net']}: " + "; ".join(str(c) for c in n["causes"][:2]))
     print(f"  protection: OK (hash {ck['hash_before']}, {len(ck['removed'])} removed, {sum(ck['added'].values())} added)")
+    cov = ", ".join(f"{k} {n}" for k, n in sorted(ck.get("covered", {}).items()))
+    print(f"  protected object classes: {cov or 'none'} (arc midpoints, via layer spans, keepouts, pad positions included)")
     for ext in (".kicad_pro", ".kicad_dru"):
         side = os.path.splitext(a.board)[0] + ext
         if os.path.exists(side):
@@ -1790,7 +1805,7 @@ def cmd_finish(a):
     v, u = TU.drc_counts(tmp, a.kicad_cli)
     if v <= base[0] and u <= base[1]:
         shutil.move(tmp, out)
-        _project_beside(a.board, out)
+        print(f"  project file: {_project_beside(a.board, out)} ({os.path.splitext(out)[0]}.kicad_pro)")
         print(f"  finish KEPT: {v} violations, {u} unconnected -> {out}")
     else:
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
@@ -1839,7 +1854,8 @@ def cmd_tune(a):
     if a.prefix:
         pairs = {s: m for s, m in pairs.items() if m.startswith(tuple(a.prefix))}
     cons = C.load(a.constraints)
-    lim = lambda master: C.skew_limit_mm(cons, master)
+    from fluxplace.pairs import guard_limit      # ps limit with no known delay: not graded, never raises
+    lim = lambda master: guard_limit(cons, master)
     rep = TU.tune_pairs(a.board, a.out or a.board, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds,
                         log=lambda m: print(m, flush=True))
@@ -2061,22 +2077,31 @@ def cmd_rules(a):
                 print(f"      {tag}{c['rule']:<36} level {c['level']:>3}{imp}  -> {c['value']}")
         return
     # table of every rule: how many objects it matches, and what matches nothing
-    warn = RU.check_matches(rs, nets=[n["net"] for n in nets], refs=[f["ref"] for f in fps])
+    elements = RU.board_element_objects(a.board)
+    notes = []
+    warn = RU.check_matches(rs, nets=[n["net"] for n in nets], refs=[f["ref"] for f in fps],
+                            objects=elements, notes=notes)
     rows = []
     for r in rs:
         objs = nets + fps
-        n_match = sum(1 for o in objs if RU.matches(r, o))
+        n_match = sum(1 for o in elements if RU.matches(r, o)) if r.select else len(objs)
+        matched = RU.matched_nets(r, nets) if r.select else [n["net"] for n in nets]
         rows.append({"rule": r.label, "select": r.describe_select(), "set": r.set, "important": r.important,
-                     "matches": n_match, "legacy": r.legacy})
+                     "matches": n_match, "nets": matched, "legacy": r.legacy})
     if a.json:
-        print(_json.dumps({"rules": rows, "warnings": [m for _r, m in warn]}, indent=2))
+        print(_json.dumps({"rules": rows, "warnings": [m for _r, m in warn], "notes": notes}, indent=2))
         return
-    print(f"RULES {a.board} — {len(rows)} rule(s), {len(nets)} nets, {len(fps)} footprints")
+    print(f"RULES {a.board} — {len(rows)} rule(s), {len(nets)} nets, {len(fps)} footprints, "
+          f"{len(elements)} board objects")
     for row in rows:
         imp = " important" if row["important"] else ""
         src = " (legacy)" if row["legacy"] else ""
         print(f"  {row['rule']:<36} matches {row['matches']:>4}  {row['select']}{src}{imp}")
+        shown = ", ".join(row["nets"][:5]) + (f" (+{len(row['nets']) - 5} more)" if len(row["nets"]) > 5 else "")
+        print(f"      nets ({len(row['nets'])}): {shown or '-'}")
         print(f"      set {row['set']}")
+    for n in notes:
+        print(f"RULE_NOT_CHECKED: {n}")
     for _r, m in warn:
         print(f"RULE_MATCHES_NOTHING: {m}")
 
@@ -2827,6 +2852,9 @@ def cmd_schematic(a):
     print("  %d components, %d nets, %d pins, %.0f x %.0f mm, %d column(s)"
           % (res["components"], res["nets"], res["pins"],
              res["sheet_mm"][0], res["sheet_mm"][1], res["columns"]))
+    if a.spec and a.no_verify:
+        print()
+        print("  VERIFY: NOT_VERIFIED (--no-verify: the netlist was not compared with the spec)")
     if a.spec and not a.no_verify:
         v = SC.verify(a.out, a.spec, kicad_cli=a.kicad_cli)
         print()
@@ -2861,7 +2889,8 @@ def _schematic_blocks(a):
     nl = g.get("netlist", {})
     lg = g.get("legibility", {"counts": {}, "total": 0})
     er = g.get("erc", {})
-    verdict = "FAIL" if (not a.no_verify and not nl.get("ok")) else ("WARN" if lg.get("total") else "PASS")
+    verdict, code = _schematic_verdict(a.no_verify, nl.get("ok"), lg.get("total", 0),
+                                       getattr(a, "allow_unverified", False))
     rep = {"verdict": verdict, "generate": st, "gate": g}
     with open(stem + ".schematic.json", "w") as fh:
         _json.dump(rep, fh, indent=1, default=str)
@@ -2880,6 +2909,7 @@ def _schematic_blocks(a):
                 lines.append("  %s: %s" % (k, str(nl[k])[:300]))
         lines.append("erc: %d - %s" % (er.get("total", 0), ", ".join("%s %d" % kv for kv in er.get("by_type", {}).items()) or "none"))
         lines.append("legibility: %d - %s" % (lg.get("total", 0), ", ".join("%s %d" % kv for kv in lg.get("counts", {}).items())))
+        lines.append(g["verified"])
     if g.get("render"):
         r = g["render"]
         lines.append("render: %s (%d PNG pages, %d SVG)" % (os.path.dirname(r["pdf"] or r["svg_dir"]), len(r["pngs"]), len(r["svgs"])))
@@ -2888,8 +2918,17 @@ def _schematic_blocks(a):
     with open(stem + ".schematic.txt", "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print("\n".join(lines))
-    if verdict == "FAIL":
-        raise SystemExit(1)
+    if code:
+        raise SystemExit(code)
+
+
+def _schematic_verdict(no_verify, nl_ok, legibility_total, allow_unverified=False):
+    """-> (verdict, exit code). --no-verify is NOT_VERIFIED, never PASS; it exits 0 only with --allow-unverified."""
+    if no_verify:
+        return "NOT_VERIFIED", (0 if allow_unverified else 1)
+    if not nl_ok:
+        return "FAIL", 1
+    return ("WARN" if legibility_total else "PASS"), 0
 
 
 def cmd_route_status(a):
@@ -3877,7 +3916,10 @@ def build_parser():
                      help="blocks (default): one drafted sheet per functional block ([schematic] in the constraints); "
                           "flat: the old single net-label sheet")
     psc.add_argument("--title", default=None)
-    psc.add_argument("--no-verify", action="store_true")
+    psc.add_argument("--no-verify", action="store_true",
+                     help="skip the netlist/ERC gate: verdict NOT_VERIFIED (block layout exits non-zero)")
+    psc.add_argument("--allow-unverified", action="store_true",
+                     help="with --no-verify, exit 0 anyway (the verdict stays NOT_VERIFIED)")
     psc.add_argument("--datasheets", default=None,
                      help="datasheet dir: refuse to generate from a spec whose "
                           "parts are not documented (spec-check)")
