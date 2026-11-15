@@ -606,8 +606,9 @@ def st_route(c, n, board):
     from . import planetie as PT
     from . import escapeplan as EP
     plane_nets = sorted(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))      # the nets that connect through a plane/pour
-    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
-                 plane_layers=[l for l in B["copper"] if l not in a.layers])
+    ptr = PT.run_guarded(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
+                         plane_layers=[l for l in B["copper"] if l not in a.layers],
+                         rules={"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]})
     if ptr["placed"]:
         shutil.copy(ptr["board"], best)
         _sidecar(board, best)

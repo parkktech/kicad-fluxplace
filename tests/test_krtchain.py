@@ -51,3 +51,14 @@ def test_chain_stops_on_failure(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 1, 0])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     assert r["verdict"] == "fail" and len(calls) == 2
+
+
+def test_stub_ok_keeps_clearance(tmp_path):
+    pcbnew = __import__("pytest").importorskip("pcbnew")
+    from fluxplace import planetie as PT
+    from test_routerules_syn import _board
+    b = pcbnew.LoadBoard(_board(str(tmp_path / "s.kicad_pcb"), pads=[("U1", 5, 6, "A"), ("U2", 5.5, 6, "B")]))
+    nc = b.FindNet("A").GetNetCode()
+    f = pcbnew.F_Cu
+    assert not PT.stub_ok(b, nc, f, (5, 6), (6, 6), 0.15, 0.127)        # runs into the B pad
+    assert PT.stub_ok(b, nc, f, (5, 6), (5, 7), 0.15, 0.127)
