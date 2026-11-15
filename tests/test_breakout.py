@@ -37,6 +37,11 @@ def qfn(ref, x, y, per=8, pitch=0.5):
     return G.fp(ref, x, y, pads, court=(-3.2, -3.2, 3.2, 3.2))
 
 
+def wall(ref="C1", x=46.5, y=40.25):
+    """a single 0.5 mm pad standing 0.7 mm in front of a left-side pin of qfn("U1", 50, 40): the lanes of a pin row that has no other way out."""
+    return G.fp(ref, x, y, [G.pad("1", 0, 0, "X", 0.5, 0.5), G.pad("2", 0, 2.0, "Y", 0.5, 0.5)], court=(-0.4, -0.4, 0.4, 2.4))
+
+
 def load(tmp, body, **kw):
     return RD.load(G.board(tmp, body, **kw))
 
@@ -145,32 +150,34 @@ def test_placer_prefers_a_pose_whose_breakout_faces_open_board(tmp_path):
 
 
 def test_whole_board_gate_catches_a_pin_the_isolated_solve_passes(tmp_path):
-    cap = dict(court=(-0.6, -0.3, 0.6, 0.3))
-    body = conn("J1", 50, 40) + G.two("C1", 52.6, 40.0, "X", "Y", w=0.3, **cap) if False else None
-    body = conn("J1", 50, 40) + G.fp("C1", 52.6, 40.2, [G.pad("1", 0, 0, "X", 0.3, 0.3), G.pad("2", 0.6, 0, "Y", 0.3, 0.3)], **cap)
-    B = load(tmp_path, body)
+    B = load(tmp_path, qfn("U1", 50, 40) + wall())
     iso = BO.solve(B, {}, None, others=False)
-    assert not iso["failed"] and len(iso["pins"]) == 40
+    assert not iso["failed"] and len(iso["pins"]) == 32
     ok, res, lines = BO.gate(B, {}, None)
     assert not ok and res["failed"]
-    assert all(f["ref"] == "J1" for f in res["failed"])
+    assert all(f["ref"] == "U1" for f in res["failed"])
     assert any("C1." in f["blocker"] for f in res["failed"])
-    assert any(l.startswith("BREAKOUT_PIN_BLOCKED J1.") and "short by" in l for l in lines)
+    assert any(l.startswith("BREAKOUT_PIN_BLOCKED U1.") and "short by" in l for l in lines)
     # a named-pin waiver passes the gate and says so
-    names = [f"J1.{f['pin']}" for f in res["failed"]]
+    names = [f"U1.{f['pin']}" for f in res["failed"]]
     ok2, res2, lines2 = BO.gate(B, {"breakout": {"waive": names}}, None)
     assert ok2 and any("WAIVED" in l for l in lines2) and len(res2["waived"]) == len(names)
 
 
 def test_gate_file_fails_and_records_the_report(tmp_path, capsys):
-    cap = dict(court=(-0.6, -0.3, 0.6, 0.3))
-    body = conn("J1", 50, 40) + G.fp("C1", 52.6, 40.2, [G.pad("1", 0, 0, "X", 0.3, 0.3), G.pad("2", 0.6, 0, "Y", 0.3, 0.3)], **cap)
-    path = G.board(tmp_path, body)
+    path = G.board(tmp_path, qfn("U1", 50, 40) + wall())
     rp = str(tmp_path / "r.json")
     assert BO.gate_file(path, {}, None, rp) == 1
     d = json.load(open(rp))["breakout"]
-    assert d["ok"] is False and d["failed"] and "J1" in d["templates"]
+    assert d["ok"] is False and d["failed"] and "U1" in d["templates"]
     assert "BREAKOUT_PIN_BLOCKED" in capsys.readouterr().out
+
+
+def test_repair_moves_the_blocking_part_out_and_the_gate_passes(tmp_path):
+    path = G.board(tmp_path, qfn("U1", 50, 40) + wall())
+    r = BO.repair(path, {}, None)
+    assert r["before"] > 0 and r["after"] == 0 and "C1" in r["moved"] and r["moved"]["C1"][3] > 0
+    assert BO.gate_file(path, {}, None) == 0
 
 
 def test_qfn_with_a_thermal_pad(tmp_path):
@@ -199,8 +206,7 @@ def test_lay_writes_locked_lanes_and_vias(tmp_path):
 
 
 def test_determinism_across_hash_seeds(tmp_path):
-    cap = dict(court=(-0.6, -0.3, 0.6, 0.3))
-    path = G.board(tmp_path, conn("J1", 50, 40) + qfn("U1", 70, 40) + G.fp("C1", 52.6, 40.2, [G.pad("1", 0, 0, "X", 0.3, 0.3), G.pad("2", 0.6, 0, "Y", 0.3, 0.3)], **cap))
+    path = G.board(tmp_path, conn("J1", 50, 40) + qfn("U1", 70, 40) + wall("C1", 66.5))
     code = ("import sys,json; sys.path.insert(0, %r)\nfrom fluxplace import breakout as BO, routediag as RD\n"
             "r = BO.solve(RD.load(%r), {}, None)\n"
             "print(json.dumps([sorted((list(k), v['pts'], v['via'], v['row']) for k, v in r['pins'].items()), [f['msg'] for f in r['failed']]], sort_keys=True))\n"
@@ -214,10 +220,17 @@ def test_determinism_across_hash_seeds(tmp_path):
 
 def test_relieve_never_keeps_a_move_that_seals_a_pin(tmp_path):
     from fluxplace import relieve as RV
-    cap = dict(court=(-0.6, -0.3, 0.6, 0.3))
-    pad2 = lambda: [G.pad("1", 0, 0, "X", 0.3, 0.3), G.pad("2", 0.6, 0, "Y", 0.3, 0.3)]
-    free = RD.load(G.board(tmp_path, conn("J1", 50, 40) + G.fp("C1", 58.0, 40.2, pad2(), **cap), name="a.kicad_pcb"))
-    walled = RD.load(G.board(tmp_path, conn("J1", 50, 40) + G.fp("C1", 52.6, 40.2, pad2(), **cap), name="b.kicad_pcb"))
+    free = RD.load(G.board(tmp_path, qfn("U1", 50, 40) + wall(x=60.0), name="a.kicad_pcb"))
+    walled = RD.load(G.board(tmp_path, qfn("U1", 50, 40) + wall(), name="b.kicad_pcb"))
     h0, h1 = RV.hard_state(free, {}, None), RV.hard_state(walled, {}, None)
     assert h0["breakout_failed"] == [] and h1["breakout_failed"]
     assert RV.hard_ok(h0, h1) and not RV.hard_ok(h1, h0)
+
+
+def test_a_pin_walled_in_outward_leaves_the_other_way(tmp_path):
+    # a 0.5 mm pad 0.8 mm in front of J1.7 (left column): every outward lane of its neighbours' rows stays, the pin itself turns round
+    wall1 = G.fp("C1", 47.2, 38.0, [G.pad("1", 0, 0, "X", 0.5, 0.5), G.pad("2", 0, 2.0, "Y", 0.5, 0.5)], court=(-0.4, -0.4, 0.4, 2.4))
+    B = load(tmp_path, conn("J1", 50, 40) + wall1)
+    res = BO.solve(B, {}, None)
+    alt = [r for r in res["pins"].values() if r.get("alt") is not None]
+    assert alt and not res["failed"]

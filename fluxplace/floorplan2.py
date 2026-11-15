@@ -1144,6 +1144,11 @@ def cmd_floorplan(a):
         print(f"  plan-route summary unavailable: {e}")
     print(f"  legality new: {best['legality_new']}")
     from . import breakout as BO                     # --- breakout gate: every pin of every dense part has an escape on the WHOLE placed board
+    if BO.conf(cons)["enabled"]:
+        fix = BO.repair(out, cons, spec)                  # parts that wall a dense part in are moved out of its breakout first
+        if fix["moved"]:
+            print(f"breakout: {len(fix['moved'])} part(s) moved out of breakout regions; pins without an escape {fix['before']} -> {fix['after']}")
+            Bn = RD.load(out)
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
     waive = (cons.get("floorplan") or {}).get("waive_fail")

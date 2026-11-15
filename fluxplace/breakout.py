@@ -21,6 +21,7 @@ copper (lanes + vias).  Pure text model (routediag.load), no pcbnew.  Determinis
     [breakout]   enabled = true   lane_start_mm = 0.15   max_extra_rows = 3   waive = ["REF.PIN", ...]
 """
 import math
+import os
 import statistics
 import uuid
 
@@ -61,7 +62,7 @@ def side_pads(part):
     """[[pads of side 0 left / 1 top / 2 right / 3 bottom]] of the SMD signal pads of a part. A pad belongs to the row (pads sharing
     its x, or its y, within 0.15 mm; the longer one) it sits in; a column of pads leaves left or right of the pad centroid, a line
     of pads up or down; short ties by the courtyard ratio."""
-    ps = [q for q in part["pads"] if not q.get("np") and not q.get("tht") and _layer(q) is not None and q["w"] * q["h"] <= 4.0]
+    ps = [q for q in part["pads"] if not q.get("np") and not q.get("tht") and _layer(q) is not None and q["w"] * q["h"] < EP.DEFAULTS["thermal_pad_mm2"]]
     out = [[], [], [], []]
     if not ps:
         return out
@@ -299,6 +300,8 @@ def plan_side(S, part, ref, k, pads, info, prior=()):
                     first_bad = sorted(bad)[0]
             if best:
                 break
+        if not best:                                    # last resort: leave the pad in another direction (a corner pad, a pad beside a row)
+            best = _alt_dir(S, q, ref, k, info, surface, w)
         if best:
             S.add(best)
             recs.append(best)
@@ -306,6 +309,33 @@ def plan_side(S, part, ref, k, pads, info, prior=()):
             fail.append({"ref": ref, "pin": str(q["num"]), "net": net, "side": k, "gap": round(first_bad[0], 3), "blocker": first_bad[1],
                          "msg": f"{ref}.{q['num']} ({net}): no escape lane/via site; {first_bad[1]} short by {-first_bad[0]:.3f} mm"})
     return recs, fail
+
+
+def _alt_dir(S, q, ref, k, info, surface, w):
+    """a single pin out of its pad in one of the three other directions (straight lane, via row 0.. beyond, small shifts)."""
+    pr = S.pr
+    d, clr = pr["via"], pr["clr"]
+    net, layer = q["net"], _layer(q)
+    for k2 in range(4):
+        if k2 == k:
+            continue
+        n = SIDES[k2]
+        u0, v0 = _uv(q, n)
+        ve = v0 + _ext(q, n)[0]
+        for r in range(pr["extra"] + 2):
+            for s in (SHIFTS if not surface else (0.0,)):
+                vv = ve + max(d / 2 + clr, pr["a0"] + d / 2 + clr) + r * (d + clr + 0.02)
+                pts, via = _mk_pts(n, u0, ve, u0, vv, s, pr["a0"], surface)
+                bad = []
+                for a, b in zip(pts, pts[1:]):
+                    if math.hypot(a[0] - b[0], a[1] - b[1]) > 1e-6:
+                        bad += S.check_seg(a, b, w, layer, net, (ref, q["num"]))
+                if via:
+                    bad += S.check_via(via, net, (ref, q["num"]))
+                if not bad:
+                    return {"ref": ref, "pin": str(q["num"]), "net": net, "side": k, "layer": layer, "pad": (q["x"], q["y"]), "pts": pts, "via": via,
+                            "via_d": d, "row": r, "alt": k2, "kind": "surface" if surface else ("plane" if net in info["plane"] else "via"), "width": w}
+    return None
 
 
 def _region(recs, pads, k, pr):
@@ -486,3 +516,82 @@ def lay_text(text, pins, drill):
                         f'\t\t(net "{r["net"]}")\n\t\t(locked yes)\n\t\t(uuid "{u()}")\n\t)')
             nv += 1
     return BT.append_blocks(text, blks), ns, nv
+
+
+def _pad_rect(q, m=0.0):
+    return (q["x"] - q["ex"] - m, q["y"] - q["ey"] - m, q["x"] + q["ex"] + m, q["y"] + q["ey"] + m)
+
+
+def _sides_of(q):
+    return {"F" if l == "F.Cu" else "B" for l in q["layers"] if l in ("F.Cu", "B.Cu")} or {"F", "B"}
+
+
+def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
+    """Evict what walls a dense part in: every movable, non-dense part whose pad blocks a pin's template (the gate's blocker) is moved
+    to the nearest legal pose (same angle first, then turned) whose pads stay out of every dense part's breakout region, then the
+    whole board is solved again; up to `rounds`.  Parts the placement holds (fixed, locked, pinned) never move.  Writes `path` in place.
+    -> {"moved": {ref: (x, y, angle, mm)}, "before": failed pins, "after": failed pins}."""
+    from . import boardwrite as BW, legality as LGL, modules as MD, routediag as RD
+    pr0 = None
+    B = RD.load(path)
+    if not conf(cons)["enabled"]:
+        return {"moved": {}, "before": 0, "after": 0}
+    pr0 = params(cons, B)
+    fixed = MD.fixed_set(B, cons) | {r for r, p in B["parts"].items() if p.get("locked")}
+    L = LGL.Legal(B, cons, fixed)
+    origin = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in B["parts"].items()}
+    res = solve(B, cons, spec, pr=pr0)
+    n0 = len(res["failed"])
+    moved = {}
+    for _ in range(rounds):
+        if not res["failed"]:
+            break
+        dense = set(res["dense"])
+        blockers = sorted({f["blocker"].split(".")[0] for f in res["failed"] if "." in f["blocker"] and not f["blocker"].startswith(("via", "lane", "keep", "board", "hole"))})
+        blockers = [r for r in blockers if r in B["parts"] and r not in fixed and r not in dense]
+        if not blockers:
+            break
+        iso = solve(B, cons, spec, pr=pr0, others=False)
+        regs = [(r, s) for ref in sorted(iso["templates"]) for r, s in rects(B, ref, iso, pr0)]
+        progressed = False
+        for ref in blockers:
+            part = B["parts"][ref]
+            x0, y0, a0 = part["pos"][0], part["pos"][1], part["angle"]
+            base = set(LGL.Legal.part_issues(L, ref))
+            cands = []
+            R = int(reach / step)
+            for i in range(-R, R + 1):
+                for j in range(-R, R + 1):
+                    d = math.hypot(i, j) * step
+                    if 0 < d <= reach:
+                        for ai, da in enumerate((0, 180, 90, 270)):
+                            cands.append((round(d + 0.3 * ai, 4), i, j, da))
+            cands.sort()
+            hit = None
+            for _d, i, j, da in cands:
+                x, y, a = x0 + i * step, y0 + j * step, (a0 + da) % 360
+                pads, court = GM.moved(part, x, y, a)
+                m = pr0["clr"] + 0.05
+                if any(GM.overlap(_pad_rect(q, m), rc, 0.0) and (_sides_of(q) & sd) for q in pads if not q.get("np") for rc, sd in regs):
+                    continue
+                if set(L.part_issues(ref, court=court, pads=pads)) - base:
+                    continue
+                hit = (x, y, a)
+                break
+            if hit:
+                GM.place(part, *hit)
+                L.refresh(ref)
+                moved[ref] = hit
+                progressed = True
+        if not progressed:
+            break
+        res = solve(B, cons, spec, pr=pr0)
+    if moved:
+        mv = {r: v for r, v in moved.items()}
+        BW.move_file(path, path + ".tmp", mv, post=False)
+        os.replace(path + ".tmp", path)
+        for r, (x, y, a) in sorted(moved.items()):
+            ox, oy, oa = origin[r]
+            log(f"breakout: moved {r} {math.hypot(x - ox, y - oy):.2f} mm" + (f", turned {(a - oa) % 360:g}" if a != oa else "") + " out of a breakout region")
+    return {"moved": {r: (v[0], v[1], v[2], round(math.hypot(v[0] - origin[r][0], v[1] - origin[r][1]), 3)) for r, v in moved.items()},
+            "before": n0, "after": len(res["failed"])}
