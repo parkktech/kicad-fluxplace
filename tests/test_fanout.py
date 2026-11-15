@@ -250,3 +250,31 @@ def test_fanalt_reuses_a_via_of_the_net_before_adding_one(tmp_path):
     st = FALT.rescue(path, {"pins": [pin], "params": P}, {}, None)
     assert st["share"] == 1 and st["via"] == 0 and pin["kind"] == "alt-share" and pin["via"] is None
     assert open(path).read().count("(via") == 1                      # no new drill
+
+
+def _clearance_probe(tmp_path):
+    """Synthetic board with one BIG pad at x=50.  Two checks, each with a 0.25 mm gap that is legal for one net's clearance
+    but not the other's: (1) a SIG track (0.15) against the BIG pad (0.4); (2) a SIG track (0.4) against a chosen BIG track
+    (0.15).  -> (static clash?, clash with the chosen track?)"""
+    path = PB.write(tmp_path, PB.fp("U1", 50, 40, [PB.pad("1", 0, 0, "BIG", 1.0, 1.0)]))
+    P = FO._params(args(), {"track_mm": 0.15, "clearance_mm": 0.15, "via_mm": 0.45, "drill_mm": 0.2})
+    job = {"params": P, "signal_layers": ["F.Cu", "B.Cu"], "nets": {}, "parts": {}}
+    code = ("import sys,json,pcbnew;sys.path.insert(0,sys.argv[1]);import fluxplace.fanout_helper as H\n"
+            "b=pcbnew.LoadBoard(sys.argv[2]);F=H.Fan(b,json.loads(sys.argv[3]),lambda *a:None);M=F.M\n"
+            "M.netcls={'BIG':(0.15,0.4),'SIG':(0.15,0.15)}\n"
+            "static=bool(M.hit_seg('SIG','F.Cu',(50.825,40.0),(56.0,40.0),0.15))\n"
+            "M.netcls={'BIG':(0.15,0.15),'SIG':(0.15,0.4)}\n"
+            "chosen=[('BIG',H.Cand('link','F.Cu',((50.825,40.0),(56.0,40.0)),None,0.15,0.0,0,5.1))]\n"
+            "print('R',json.dumps([static,not F.clear_of_chosen('SIG','F.Cu',(52.0,39.6),(53.0,39.6),0.15,chosen)]))")
+    r = subprocess.run(["/usr/bin/python3", "-c", code, os.path.join(os.path.dirname(__file__), ".."), path, json.dumps(job)],
+                       capture_output=True, text=True)
+    line = [l for l in r.stdout.splitlines() if l.startswith("R ")]
+    assert line, r.stderr[-800:]
+    return json.loads(line[0][2:])
+
+
+def test_track_clearance_is_max_of_link_and_obstacle_net(tmp_path):
+    """fixes-d #4: a 0.25 mm gap is legal for one net's clearance but not the other's; both checks must report the clash."""
+    static_clash, chosen_clash = _clearance_probe(tmp_path)
+    assert static_clash, "SIG track against a 0.4 mm BIG pad must clash (obstacle clearance applies)"
+    assert chosen_clash, "SIG (0.4) track against a chosen BIG track must clash (link clearance applies)"

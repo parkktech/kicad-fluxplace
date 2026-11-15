@@ -230,19 +230,28 @@ class Model:
         return sorted(out)
 
     # -- exact static tests
+    def max_clr(self):
+        """largest clearance of any obstacle net (cached): bounds the spatial query of hit_seg."""
+        if getattr(self, "_max_clr", None) is None:
+            self._max_clr = max([self.net_rules(n)[1] for n in {o.net for o in self.obs if o.net}] or [self.C])
+        return self._max_clr
+
     def hit_seg(self, net, layer, a, b, w, clr=None, ignore=()):
         """first blocker description for a track a-b (mm) of width w on `layer`, or None."""
         wn, cl = self.net_rules(net)
-        clr = cl if clr is None else clr
+        # no explicit clearance: each obstacle is kept off by the larger of this net's and the obstacle net's clearance (as arc())
+        own = clr is None
+        clr = cl if own else clr
         sh = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(w))
         bb = (min(a[0], b[0]) - w / 2, min(a[1], b[1]) - w / 2, max(a[0], b[0]) + w / 2, max(a[1], b[1]) + w / 2)
-        for i in self.near(bb, max(clr, self.hole_clr) + 0.02):
+        reach = max(clr, self.hole_clr, self.max_clr()) if own else max(clr, self.hole_clr)
+        for i in self.near(bb, reach + 0.02):
             o = self.obs[i]
             if layer not in o.layers or i in ignore:
                 continue
             if o.net == net and net and not o.hole:
                 continue
-            c = self.hole_clr if o.hole else clr
+            c = self.hole_clr if o.hole else (max(clr, self.net_rules(o.net)[1]) if own and o.net else clr)
             if o.bb[0] - c > bb[2] or o.bb[2] + c < bb[0] or o.bb[1] - c > bb[3] or o.bb[3] + c < bb[1]:
                 continue
             osh = o.shapes.get(layer) or o.shapes.get("*")
@@ -844,13 +853,14 @@ class Fan:
 
     # -- lanes after the search --------------------------------------------
     def clear_of_chosen(self, net, layer, a, b, w, chosen, clr=None):
-        """a track a-b (width w, net, layer) keeps `clr` (default the net's clearance) from the copper chosen in this run."""
+        """a track a-b (width w, net, layer) keeps `clr` (default: the larger of its net's and each chosen net's clearance) from
+        the copper chosen in this run."""
         M = self.M
         sh = pcbnew.SHAPE_SEGMENT(V2(nm(a[0]), nm(a[1])), V2(nm(b[0]), nm(b[1])), nm(w))
         for (n2, cd2) in chosen:
             if n2 == net:
                 continue
-            c2 = M.net_rules(n2)[1] if clr is None else clr
+            c2 = max(M.net_rules(net)[1], M.net_rules(n2)[1]) if clr is None else clr
             for (ly, a2, b2, r) in self.caps(None, cd2):
                 if ly is not None and ly != layer:
                     continue
