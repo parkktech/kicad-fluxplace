@@ -125,7 +125,9 @@ def settings(cons, **over):
          "pairs": str(r.get("pairs", "exclude")).lower(),         # exclude | route (audited, never reported good unaudited)
          "neckdown": bool(r.get("neckdown", False)),              # pad-entry necks below the track width: off
          "budget_s": r.get("budget_s"), "budget_frac": float(r.get("budget_frac", 0.6)),
-         "grace_s": float(r.get("grace_s", 180)), "analytics": bool(r.get("analytics", False))}
+         "grace_s": float(r.get("grace_s", 180)), "analytics": bool(r.get("analytics", False)),
+         # strip: signal-layer pours removed from the router's copy (today) | keep: left in | pour_job: strip + the pour-aware job
+         "pour_dsn": str(r.get("pour_dsn", "strip")).lower()}
     for k, v in over.items():
         if v is not None:
             s[k] = v
@@ -133,6 +135,8 @@ def settings(cons, **over):
         s["fanout"] = "on" if s["fanout"] == "true" else "off"
     if s["fanout"] not in ("auto", "on", "off"):
         raise ValueError(f"[route.freerouting] fanout = {s['fanout']!r}: use auto, on or off")
+    if s["pour_dsn"] not in ("strip", "keep", "pour_job"):
+        raise ValueError(f"[route.freerouting] pour_dsn = {s['pour_dsn']!r}: use strip, keep or pour_job")
     if s["pairs"] not in ("exclude", "route"):
         raise ValueError(f"[route.freerouting] pairs = {s['pairs']!r}: use exclude or route")
     s["threads"] = max(1, s["threads"])
@@ -396,7 +400,12 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
         rec["before"] = fp0
         dsn_board = os.path.join(workdir, "dsn.kicad_pcb")
         _side(board, dsn_board)
-        rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes)}, workdir)
+        if S.get("pour_dsn", "strip") == "keep":          # signal-layer pours stay in the router's copy (Freerouting 2.5 pour-aware)
+            _side(board, dsn_board)
+            shutil.copy(board, dsn_board)
+            rec["pours"] = {"mode": "keep"}
+        else:
+            rec["pours"] = _helper("strip", {"board": board, "out": dsn_board, "planes": list(planes)}, workdir)
         dsn, ses, flog = os.path.join(workdir, "in.dsn"), os.path.join(workdir, "out.ses"), os.path.join(workdir, "freerouting.log")
         for f in (dsn, ses):
             if os.path.exists(f):
@@ -406,7 +415,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             raise RuntimeError("Specctra DSN export failed")
         with open(dsn, errors="surrogateescape") as fh:
             text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
-            text, rep["pour"] = _pour_job(text, pour)              # the router's copy: pour-satisfied connections taken out
+            text, rep["pour"] = _pour_job(text, pour if S.get("pour_dsn") == "pour_job" else None)   # router copy only
         if rep["planes_missed"]:
             raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
         with open(dsn, "w", errors="surrogateescape") as fh:
