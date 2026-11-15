@@ -215,6 +215,11 @@ def ladder(rep, out, cons, spec, P, run_fn, cs_args=None, escape=None, log=lambd
             k += 1
             if pending(rep):
                 steps.append(("b(i)", _trial(rep, out, variant(cons, **kv), spec, run_fn, f"i{k}", "b(i)", log)))
+        # b(i)-tight: the fab-limit geometry, only for families that allow it ([pairs] / [pairs.F] allow_fab_limit = true)
+        if pending(rep) and (((cons or {}).get("pairs") or {}).get("allow_fab_limit") is True or any(
+                isinstance(v, dict) and v.get("allow_fab_limit") is True for v in ((cons or {}).get("pairs") or {}).values())):
+            steps.append(("b(i)", _trial(rep, out, variant(cons, tight_geometry=True, max_nodes=P["nodes"] * 3, negotiate=False, passes=2),
+                                         spec, run_fn, "i-tight", "b(i)", log)))
         # b(ii): rip blockers (stubs of single-ended nets near the terminals, lower-priority pair copper)
         if pending(rep):
             steps.append(("b(ii)", _rip(rep, out, cons, spec, P, run_fn, escape, cs_args, log)))

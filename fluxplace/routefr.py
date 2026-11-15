@@ -411,7 +411,7 @@ def repair_subfloor(board, workdir, floor, clearance, out=None):
 
 
 # ------------------------------------------------------------------ the run
-def net_classes(cons, R, class_clearance=0.0):
+def net_classes(cons, R, class_clearance=0.0, board=None):
     """The DSN net classes from the resolved rules (mm): default = the router track width, every class clearance =
     the clearance the router is given (floor + margin, RR.request_clearance).  Classes: one per distinct power width
     (`[power.N]` width_mm / max_current_ma, else the track default) and one per controlled pair family (`[pairs.F]`
@@ -432,7 +432,11 @@ def net_classes(cons, R, class_clearance=0.0):
     for net in (cons.get("power") or {}):
         add(C.power_width_mm(cons, net, R["track"]), nets=[net])
     for fam, v in (cons.get("pairs") or {}).items():
-        w = v.get("width_mm") or (C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), (None, None))[0] if "impedance_diff" in v else None)
+        og = None
+        if not v.get("width_mm") and "impedance_diff" in v:
+            from . import zgeom as ZG                                          # computed from the stackup (first copper layer)
+            og = ZG.outer_geometry(cons, fam, board=board)
+        w = v.get("width_mm") or (og[0] if og else (C.PAIR_GEOM_BY_Z.get(int(v["impedance_diff"]), (None, None))[0] if "impedance_diff" in v else None))
         if w:
             add(w, prefixes=[fam])
     for net, v in (cons.get("nets") or {}).items():

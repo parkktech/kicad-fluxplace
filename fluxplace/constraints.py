@@ -392,7 +392,9 @@ def inject_netclasses(pro_path, cons, log=print, board=None):
                 if not p.get("netclass", "").startswith(("DP_", "PWR_", "RULE_"))]
     for group, p in sorted((cons or {}).get("pairs", {}).items()):
         z = int(p.get("impedance_diff", 100))
-        w, g = PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])
+        from . import zgeom as ZG
+        og = ZG.outer_geometry(cons, group, board=board) if p.get("impedance_diff") else None
+        w, g = og or PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])      # computed from the stackup; the constant is the fallback
         name = f"DP_{group}_{z}R"
         classes.append({
             "name": name, "clearance": 0.1,
