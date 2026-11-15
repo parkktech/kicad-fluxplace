@@ -19,6 +19,16 @@ both sides, in the placers and (same code) in the collision gate; the route floo
 JLCPCB; source URL + retrieved date per table); those are HARD limits, `[route]` floors stay the preferred floor, an unknown name is
 an error. `fluxplace fab-advise` recommends the cheapest tier that builds the board. `fluxplace/power.py` sizes `[power.X]` copper
 from current/voltage/fab copper (POWER_WIDTH / POWER_VIAS / POWER_CURRENT_UNKNOWN). Docs: `docs/commands/fab-advise.md`.
+## 2026-11-15 - AI component fetch: datasheet and model source chains, drop-in equivalents, pin-table citation
+
+[parts-fetch](commands/parts-fetch.md) (`fluxplace/dsfetch.py`): datasheets through an ordered chain (distributor APIs, element14/Farnell,
+LCSC, manufacturer templates, Nexar), every attempt recorded, every file validated (PDF header, size, part number or base code in the text;
+series-level documents flagged). [parts-model](commands/parts-model.md) (`fluxplace/modelchain.py`): the same for 3D models, with STEP and
+footprint-size validation. `parts-todo` gives short parts ranked `alternatives` with `drop_in` only when fully verified (`fluxplace/dropin.py`);
+`parts-apply` auto-applies a verified substitution and logs old -> new with evidence, anything else stays owner. [parts-page](commands/parts-page.md)
+and [parts-cite](commands/parts-cite.md): drawing-only pin tables go to the agent as PNG and come back as a recorded, compared citation.
+Model fetch and datasheet fetch no longer present a browser user agent.
+
 ## 2026-11-15 - parts first: the first-stage parts gate, parts-todo, parts-apply
 
 Parts are resolved BEFORE placement or routing. `ready` (and the pipeline `ready` stage) gained the **parts gate**

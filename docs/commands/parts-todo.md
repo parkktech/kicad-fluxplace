@@ -15,3 +15,12 @@ A candidate is evidence, never a decision: it changes nothing until [parts-apply
 
 `--no-api` / no credentials: no lookups and no search (stock and package are reported NOT CHECKED). `--strict`: exit 1 while a part is
 unresolved. The build quantity comes from `[bom] quantity_target`.
+
+**Stock shortages: `alternatives`.** A part with an MPN that is short or absent at the build quantity gets `alternatives`: packaging variants of
+the same MPN plus parametric matches (the original's description), each classified by `dropin.classify` and ranked (verified drop-ins first).
+`drop_in: true` only when ALL of these are verified from distributor data and the candidate's own datasheet (fetched by [parts-fetch](parts-fetch.md)
+into `<datasheets>/_candidates`): footprint and package, pin count, electrical value equal, rating / current / voltage equal or better,
+tolerance and resistance-type figures equal or better, operating temperature at least `[parts] temp_min/temp_max` and the original's, AEC-Q kept,
+active lifecycle, stock at the build quantity. `checks` shows each, `differs` what is different, `unverified` what could not be checked (that
+is not a drop-in). Packaging variants (tape/reel/cut-tape codes) are the same part (`identical: true`). Each candidate carries `lead_time` when
+the API gives one. `--no-verify` skips the datasheet fetches (nothing is then `drop_in`).

@@ -159,9 +159,11 @@ def _fit(cand, fp, required, temp):
     return ok, why
 
 
-def todo(spec, cons, res, g, qty=None, searcher=None, limit=5):
+def todo(spec, cons, res, g, qty=None, searcher=None, limit=5, verifier=None):
     """-> {"quantity", "summary", "unresolved", "parts": [record]}: one record per part (`missing` empty when resolved).
-    `searcher(query, limit, qty)` -> [{mpn, mfr, stock, unit, ext, source, datasheet, package, temp_min, temp_max, lifecycle}]."""
+    `searcher(query, limit, qty)` -> [{mpn, mfr, stock, unit, ext, source, datasheet, package, temp_min, temp_max, lifecycle, params}].
+    A part that has an MPN but is short at the build quantity also gets `alternatives`: dropin.classify() for each candidate (same MPN in
+    other packaging first), `drop_in` true only when verified; `verifier(mpn, url)` -> {"level","text"} fetches the candidate's datasheet."""
     comps = {c.get("ref"): c for c in spec.get("components", [])}
     stock = res.get("stock_data") or {}
     data = res.get("data") or {}
@@ -206,8 +208,55 @@ def todo(spec, cons, res, g, qty=None, searcher=None, limit=5):
                 cs.sort(key=lambda x: (not x.get("fits"), x.get("ext") is None, x.get("ext") or 0))
                 cache[gk] = {"query": q, "list": cs[:limit]}
             rec["query"], rec["candidates"] = cache[gk]["query"], cache[gk]["list"]
+        if mpn and "stock" in rec["missing"] and searcher and d:
+            ak = ("alt", gk)
+            if ak not in cache:
+                cache[ak] = alternatives(mpn, d, row.get("fp"), (qty or 1) * len(groups[gk]), temp, searcher, verifier, limit)
+            rec["alternatives"] = cache[ak]
         recs.append(rec)
     return {"quantity": qty, "summary": g["by_need"], "unresolved": len(g["parts"]), "parts": recs}
+
+
+def alternatives(mpn, d, fp, required, temp, searcher, verifier=None, limit=5, verify_top=3):
+    """Ranked equivalents for a part short at `required`: packaging variants of the same MPN, then parametric matches.
+    -> [{mpn, mfr, stock, ext, source, drop_in, identical, checks, differs, unverified, lead_time?}]."""
+    from . import dropin as DI, sourcing as S
+    orig = DI.row_for(d, mpn)
+    queries = [S._search_term(mpn)]
+    desc = re.sub(r"\s+", " ", (d.get("description") or "")).strip()
+    if desc:
+        queries.append(desc[:120])
+    seen, rows = {mpn}, []
+    for q in queries:
+        try:
+            found = searcher(q, limit=20, qty=required) or []
+        except Exception as e:                                         # noqa: BLE001
+            rows.append({"error": f"{q[:40]}: {type(e).__name__}"})
+            continue
+        for c in found:
+            if c.get("mpn") and c["mpn"] not in seen:
+                seen.add(c["mpn"])
+                rows.append(c)
+    out = []
+    for c in rows:
+        if c.get("error"):
+            out.append(c)
+            continue
+        r = DI.classify(orig, DI.row_for(c, c["mpn"]) | {"stock": c.get("stock"), "lifecycle": c.get("lifecycle")}, fp, required, temp, None)
+        out.append({**{k: c.get(k) for k in ("mpn", "mfr", "stock", "unit", "ext", "source", "datasheet", "lifecycle", "package", "lead_time")},
+                    "required": required, **r})
+    out = DI.rank([o for o in out if not o.get("error")])[:max(limit, verify_top)]
+    if verifier:                                                       # datasheets only for the leading candidates: each is a download
+        for o in out[:verify_top]:
+            if o["checks"].get("stock", (False,))[0] and not o["differs"] or o["identical"]:
+                ds = verifier(o["mpn"], o.get("datasheet"))
+                row = next(c for c in rows if c.get("mpn") == o["mpn"])
+                o.update({**o, **DI.classify(orig, DI.row_for(row, o["mpn"]) | {"stock": row.get("stock"), "lifecycle": row.get("lifecycle")},
+                                            fp, required, temp, ds)})
+                o["datasheet_file"] = (ds or {}).get("file")
+                o["datasheet_level"] = (ds or {}).get("level")
+        out = DI.rank(out)
+    return out[:limit]
 
 
 # ------------------------------------------------------------------ parts-apply
@@ -215,9 +264,11 @@ def _norm_pm(pm):
     return {str(k).upper(): str(v) for k, v in (pm or {}).items()}
 
 
-def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds_ok=None):
+def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds_ok=None, dropin=None):
     """-> ("apply"|"owner"|"reject", [reasons], patch).  `lookup(mpn)` -> distributor row|None; `stocker(mpn, refs)` -> {verdict, stock}|None;
-    `model_ok(ref, comp, prop)` -> (bool, why); `ds_ok(mpn, prop)` -> bool (datasheet file on disk or fetched)."""
+    `model_ok(ref, comp, prop)` -> (bool, why); `ds_ok(mpn, prop)` -> bool (datasheet file on disk or fetched).
+    A proposal that CHANGES an existing MPN (not a packaging variant of it) is a substitution: it is applied only when
+    `dropin(old, new, refs)` -> dropin.classify() result says `drop_in`, otherwise it is an owner decision listing what differs."""
     refs = prop.get("refs") or ([prop["ref"]] if prop.get("ref") else [])
     mpn = (prop.get("mpn") or "").strip()
     comps = {c.get("ref"): c for c in spec.get("components", [])}
@@ -242,6 +293,17 @@ def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds
     if owner:
         return "owner", sorted(set(owner)), None
     reasons = []
+    from . import dropin as DI
+    olds = {(comps[r].get("mpn") or mm.get(r) or "").strip() for r in refs} - {""}
+    subst = sorted(o for o in olds if not DI.packaging_equivalent(o, mpn))
+    evid = None
+    if subst:
+        if dropin is None or len(subst) > 1:
+            return "owner", [f"replaces {', '.join(subst)} with {mpn}: needs drop-in verification (none available)"], None
+        evid = dropin(subst[0], mpn, refs)
+        if not evid or not evid.get("drop_in"):
+            why = (evid or {}).get("differs", []) + (evid or {}).get("unverified", []) or ["could not be checked"]
+            return "owner", [f"replaces {subst[0]} with {mpn}, not a verified drop-in: " + "; ".join(why[:6])], None
     d = lookup(mpn)
     if not d:
         return "reject", [f"{mpn}: not found at DigiKey/Mouser"], None
@@ -257,6 +319,9 @@ def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds
     for k in ("pinmap_source", "pinmap"):
         if prop.get(k):
             patch[k] = prop[k]
+    if subst:
+        patch["replaces"] = {"from": subst[0], "to": mpn, "date": __import__("time").strftime("%Y-%m-%d"),
+                             "evidence": {k: v[1] for k, v in evid["checks"].items()}}
     if not patch["mfr"]:
         reasons.append(f"{mpn}: no manufacturer")
     if ds_ok is not None and not ds_ok(mpn, prop):
@@ -284,7 +349,7 @@ def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds
     return ("reject", reasons, None) if reasons else ("apply", [], patch)
 
 
-def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, model_ok=None, ds_ok=None, dry_run=False):
+def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, model_ok=None, ds_ok=None, dry_run=False, dropin=None):
     """Validate every proposal, then write all that pass to the spec and the mpn_map in one step.
     -> {"applied": [...], "owner": [...], "rejected": [...]}."""
     spec = json.load(open(spec_path))
@@ -294,7 +359,7 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
     patches, claimed = [], {}
     for i, prop in enumerate(proposals):
         label = (",".join(prop.get("refs") or [prop.get("ref", "?")]) + " " + str(prop.get("mpn", ""))).strip()
-        verdict, why, patch = validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok, ds_ok)
+        verdict, why, patch = validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok, ds_ok, dropin)
         if verdict == "apply":
             dup = [r for r in patch["refs"] if r in claimed]
             if dup:
@@ -303,7 +368,8 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
             claimed.update({r: i for r in patch["refs"]})
             patches.append(patch)
             rep["applied"].append({"proposal": i, "what": label, "refs": patch["refs"],
-                                   **({"note": f"distributor lists it as {patch['matched']}"} if patch.get("matched") else {})})
+                                   **({"note": f"distributor lists it as {patch['matched']}"} if patch.get("matched") else {}),
+                                   **({"replaces": patch["replaces"]} if patch.get("replaces") else {})})
         else:
             rep["owner" if verdict == "owner" else "rejected"].append(
                 {"proposal": i, "what": label, "reasons": why, "refs": prop.get("refs") or [prop.get("ref")]})
@@ -322,6 +388,14 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
         _write_json(spec_path, spec)
         if mpn_map_path:
             _write_json(mpn_map_path, mm_all)
+        subs = [p["replaces"] | {"refs": p["refs"]} for p in patches if p.get("replaces")]
+        if subs:                                       # old MPN -> new MPN with the evidence, next to the spec, appended
+            lp = os.path.join(os.path.dirname(os.path.abspath(spec_path)), "parts-substitutions.json")
+            try:
+                log = json.load(open(lp))
+            except (OSError, ValueError):
+                log = []
+            _write_json(lp, log + subs)
     return rep
 
 

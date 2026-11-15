@@ -49,9 +49,9 @@ def _dk_rows(d, qty):
                     "mfr": (p.get("Manufacturer") or {}).get("Name", "") if isinstance(p.get("Manufacturer"), dict) else "",
                     "stock": p.get("QuantityAvailable", 0), "unit": unit, "moq": moq,
                     "ext": None if unit is None else round(unit * max(qty, moq or 1), 4), "source": "digikey",
-                    "datasheet": p.get("DatasheetUrl") or "", "lifecycle": (p.get("ProductStatus") or {}).get("Status", ""),
+                    "datasheet": p.get("DatasheetUrl") or "", "lead_time": (f"{p['ManufacturerLeadWeeks']} weeks" if p.get("ManufacturerLeadWeeks") else ""), "lifecycle": (p.get("ProductStatus") or {}).get("Status", ""),
                     "package": n["package"], "temp_min": n["temp_min"], "temp_max": n["temp_max"],
-                    "params": {k: params[k] for k in list(params)[:14]}})
+                    "params": {k: params[k] for k in list(params)[:40]}})
     return out
 
 
@@ -74,9 +74,9 @@ def _mouser_rows(query, creds, limit, qty):
         unit, moq = S.unit_price_at(S._breaks_mouser(p), qty)
         out.append({"mpn": p.get("ManufacturerPartNumber", ""), "mfr": p.get("Manufacturer") or "", "stock": int(digits or 0),
                     "unit": unit, "moq": moq, "ext": None if unit is None else round(unit * max(qty, moq or 1), 4),
-                    "source": "mouser", "datasheet": p.get("DataSheetUrl") or "", "lifecycle": p.get("LifecycleStatus") or "",
+                    "source": "mouser", "datasheet": p.get("DataSheetUrl") or "", "lead_time": p.get("LeadTime") or "", "lifecycle": p.get("LifecycleStatus") or "",
                     "package": n["package"], "temp_min": n["temp_min"], "temp_max": n["temp_max"],
-                    "params": {k: params[k] for k in list(params)[:14]}})
+                    "params": {k: params[k] for k in list(params)[:40]}})
     return out
 
 

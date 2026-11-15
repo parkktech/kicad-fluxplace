@@ -580,8 +580,8 @@ def preflight(board_path, mpn_map=None, need=10, strict=False, refresh=False,
 _DS_TIMEOUT = 20
 
 
-def datasheet_urls(mpn, creds):
-    """Every datasheet URL the distributors offer for an MPN, DigiKey first
+def datasheet_urls_by_source(mpn, creds):
+    """[(source, url)] every datasheet URL the distributor APIs offer for an MPN, DigiKey first
     then Mouser (they often point at different hosts, and one host's bot
     wall is the other's plain PDF)."""
     import json as _json
@@ -600,7 +600,7 @@ def datasheet_urls(mpn, creds):
                 data = _json.load(r)
             for p in data.get("Products", []) or []:
                 if _same_part(p.get("ManufacturerProductNumber") or "", mpn)[0] and p.get("DatasheetUrl"):
-                    out.append(p["DatasheetUrl"])
+                    out.append(("digikey", p["DatasheetUrl"]))
         except Exception:
             pass
     if "MOUSER_API_KEY" in creds:
@@ -615,7 +615,7 @@ def datasheet_urls(mpn, creds):
                 data = _json.load(r)
             for p in ((data.get("SearchResults") or {}).get("Parts") or []):
                 if _same_part(p.get("ManufacturerPartNumber") or "", mpn)[0] and p.get("DataSheetUrl"):
-                    out.append(p["DataSheetUrl"])
+                    out.append(("mouser", p["DataSheetUrl"]))
         except Exception:
             pass
     # Nexar only when the two distributors offer nothing: the evaluation plan
@@ -626,7 +626,7 @@ def datasheet_urls(mpn, creds):
             if NX.available(creds):
                 u = NX.datasheet_url(mpn, creds)
                 if u:
-                    out.append(u)
+                    out.append(("nexar", u))
         except Exception:
             pass
     if not out:                 # LCSC's copy (JLCPCB parts API), last
@@ -634,14 +634,19 @@ def datasheet_urls(mpn, creds):
             from . import lcsc as L
             row = L.lookup(mpn)
             if row and row.get("datasheet"):
-                out.append(row["datasheet"])
+                out.append(("lcsc", row["datasheet"]))
         except Exception:
             pass
     seen, uniq = set(), []
-    for u in out:
+    for src, u in out:
         if u not in seen:
-            seen.add(u); uniq.append(u)
+            seen.add(u); uniq.append((src, u))
     return uniq
+
+
+def datasheet_urls(mpn, creds):
+    """The URLs of datasheet_urls_by_source, without the source names."""
+    return [u for _s, u in datasheet_urls_by_source(mpn, creds)]
 
 
 def datasheet_url(mpn, creds):
