@@ -144,17 +144,32 @@ via-in-pad, off-board (copper crossing the outline), timeout, no-path, other (`r
   `route-status` and the route stage line. At the end of the route stage pairs failing ONLY on skew go through `tune` (`[route] tune_rounds` 3, `tune_pairs` 8);
   the result is kept when no connection opens and the skew falls.
 
-## Whole-board KiCadRoutingTools (`--router krt-whole`, `krtwhole.py`, flow `direct`)
+## Whole-board KiCadRoutingTools (`--router krt-whole`, `krtwhole.py`)
 
-`pipeline --router krt-whole` (or `[route] router = "krt-whole"`; the `direct` flow selects it by default) replaces the
-net batches with whole-board passes: planes (`route_planes.py` per plane net), pairs (`route_diff.py '*'`), the rest
-(`route.py '*'`, rails and RF nets at their rule width), leftovers (open nets only, `--max-ripup 10`, then the layer-swap
-rung), snap-vias (centring), plane-tie, pour-tie, refill. Each optional pass is kept only when it adds no DRC key and
-opens no more connections. Floors are pinned from `[fab]`/`[route]`/`.kicad_pro` (the `--fab-overrides` file), and the
-copy's netclasses are conformed to them (raised to the floor; via sizes capped at the requested rule).
-Output: `<stage>/krtwhole.json` (per step, DRC by type before and after, pairs, rails), `route_owners.txt`.
-Not covered: review's `PAIR_ROUTED_UNCOUPLED` is not raised from here (names listed in the record), and push-and-shove
-is absent from the router, so leftovers that need it remain open and are reported by net.
+`pipeline --router krt-whole` (or `[route] router = "krt-whole"`; the `direct` flow selects it by default) replaces the net
+batches with whole-board passes that keep the copper already on the board (`--keep-input-copper`), so it follows the pairs stage
+in the constructive flow (ready, modules, floorplan, fanout, pour-tie, pairs, route):
+
+1. **planes**: `route_planes.py` per (net, layer) of the zones on the board's non-signal copper layers.
+2. **pairs**: `route_diff.py` only for the pairs with an open leg (or handed over, state c); complete pairs are the pairs stage's locked copper.
+3. **protected**: `route.py` on the open nets the constraints keep from thinning (`globalroute.is_fixed_width`: rails, RF, clocks,
+   `[pairs.*]` and `[nets.X]` impedance nets, controlled names) at their rule width (`--power-nets-widths`), `--escalation off`.
+4. **rest**: `route.py '*'` at the preferred sizes (`--track`/`--clearance`) with `--escalation fab` and a generated `--fab-overrides`
+   file holding the floors, so features step down to the floor only where needed and never below it. Protected nets still open
+   are excluded (`!net`), so the step-down never thins them.
+5. **finish**: `batchroute.route_batches` (hybrid finish, cheapest first, rip-up of unlocked copper) on what is open, capped at
+   `[route] finish_share` of `--route-budget`.
+6. **centring**: every unlocked track end inside a same-net via is moved to the via centre; a move survives only if kicad-cli shows no
+   new violation (a track named in a new violation is excluded, up to four passes).
+7. plane-tie, pour-tie, refill; ownership table (`route_owners.txt`); counts from kicad-cli, never from the router.
+
+Exit code 3 (`--strict-sizes`: something delivered below a requested size) is accepted when `floor_audit` finds no track, via or
+drill below its floor and no protected net was thinned (a thin run longer than 2 mm); anything else rejects the step and keeps its
+input. The record `<stage>/krtwhole.json` lists every step (rc, seconds, accepted, why), the nets whose copper stepped below the
+preferred track (`stepped_down`), pairs (skew against limit), rails, RF width, and DRC by type before and after.
+`[route] krt_whole_call_cap_s` (default 10800) caps one router call by wall clock.
+Not covered: review's `PAIR_ROUTED_UNCOUPLED` is not raised from here, and push-and-shove is absent from the router, so leftovers
+that need it remain open and are reported by net.
 
 ## Freerouting as the route stage (`--router freerouting|auto`, `routefr.py`)
 
