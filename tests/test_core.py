@@ -571,9 +571,12 @@ def test_upload_package_excludes_prl():
     from fluxplace import fab
     with tempfile.TemporaryDirectory() as d:
         proj = os.path.join(d, "proj"); os.makedirs(proj)
-        for f in ("x.kicad_pro", "x.kicad_sch", "sub.kicad_sch", "x.kicad_dru",
-                  "x.kicad_prl", "x.kicad_pcb"):
+        for f in ("x.kicad_pro", "x.kicad_dru", "x.kicad_prl", "x.kicad_pcb", "orphan.kicad_sch"):
             open(os.path.join(proj, f), "w").write("stub")
+        # root sheet references sub.kicad_sch; orphan.kicad_sch is unreferenced and must not ship
+        open(os.path.join(proj, "x.kicad_sch"), "w").write(
+            '(kicad_sch (sheet (at 0 0) (size 1 1) (property "Sheetfile" "sub.kicad_sch")))')
+        open(os.path.join(proj, "sub.kicad_sch"), "w").write("(kicad_sch)")
         routed = os.path.join(d, "routed.kicad_pcb")
         open(routed, "w").write("routed")
         open(os.path.join(d, "routed.kicad_dru"), "w").write("current-rules")

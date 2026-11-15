@@ -1,10 +1,8 @@
 # fluxplace
 
 Signal-flow-aware placement, routing analysis, design review and fab packaging for KiCad 10.
-Reads a board's communication graph, places by connection, gates routing on a pre-route
-scorecard, then reviews, packages. One pcbnew-free core; a headless CLI, a KiCad plugin
-and an MCP server. Built on the RAZOR-01 CM5 carrier (178 parts): about 50% less weighted
-wirelength, 28% less area.
+One pcbnew-free core: a headless CLI, a KiCad plugin and an MCP server. On the RAZOR-01 CM5
+carrier (178 parts): ~50% less weighted wirelength, 28% less area.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Per-command detail: `fluxplace help-brief CMD`.
 
@@ -13,7 +11,7 @@ wirelength, 28% less area.
     pip install -e .            # numpy only; pcbnew comes from KiCad's own python
     fluxplace doctor            # names every missing dependency (KiCad, router, API keys)
 
-Requirements, interpreter trap (pcbnew needs KiCad's python), toolchain:
+Requirements and interpreter trap:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Pipeline
