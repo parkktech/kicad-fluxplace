@@ -19,7 +19,7 @@ CMD_DOC = {
     "mcp": "mcp", "doctor": "mcp", "analyze": "cli", "plan": "cli", "gather": "cli", "route": "route", "tournament": "cli",
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli", "corpus": "cli",
     "parts": "parts", "ready": "ready", "pin-groups": "pin-groups", "part-diff": "part-diff",
-    "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
+    "fab-advise": "fab-advise", "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
     "rules": "rules",
 }
 

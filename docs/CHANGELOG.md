@@ -8,6 +8,12 @@ the loser re-seated at the nearest legal pose with a `stay` cost; two explicit c
 `[placement] resolve_pin_conflicts = "auto"`; review reports `PIN_RELEASED`. `legality.Legal.hole_issues`: a drilled hole occupies
 both sides, in the placers and (same code) in the collision gate; the route floor now also bounds `Legal`'s pad clearance.
 `[[intent.group]] rigid` (default true); relieve moves a group member only with its group.
+## 2026-11-15 - manufacturer capability profiles, fab-advise, power sizing from current
+
+`[fab] profile = "<vendor>-<tier>"` + the board's layer count select a row of `fluxplace/data/fab_capabilities.json` (PCBWay,
+JLCPCB; source URL + retrieved date per table); those are HARD limits, `[route]` floors stay the preferred floor, an unknown name is
+an error. `fluxplace fab-advise` recommends the cheapest tier that builds the board. `fluxplace/power.py` sizes `[power.X]` copper
+from current/voltage/fab copper (POWER_WIDTH / POWER_VIAS / POWER_CURRENT_UNKNOWN). Docs: `docs/commands/fab-advise.md`.
 
 ## 2026-11-13 - Freerouting as a route stage; exit codes
 

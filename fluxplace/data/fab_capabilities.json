@@ -1,0 +1,86 @@
+{
+  "_comment": "Manufacturer capability tables for fluxplace fabcaps.py. Every table carries `source` (URL) and `retrieved` (date). All lengths mm. Add vendors/tiers HERE, not in code. A tier = one price level (rank: lower is cheaper); its rows select by copper layer count. `unverified` lists keys whose value is NOT stated on the vendor page (carried as a conservative assumption). `price_step` quotes the vendor's own wording for what pushes a feature to a costlier tier; the vendors publish no per-feature prices on these pages (instant-quote form only). mil->mm: 4 mil=0.1016 but PCBWay states 0.1 mm for the 4 mil class and JLCPCB 0.09 for 3.5 mil; the vendor's mm figure is used.",
+  "plating_um": {"value": 20, "source": "IPC-6012 Class 2 average via-barrel copper (not published on the vendor capability pages)", "retrieved": "2026-11-15", "unverified": true},
+  "vendors": {
+    "pcbway": {
+      "source": "https://www.pcbway.com/capabilities.html",
+      "retrieved": "2026-11-15",
+      "features": {
+        "impedance": {"layers": [4, 24], "tolerance": "+/-10%, 50 ohm and below +/-5 ohm", "source": "https://www.pcbway.com/capabilities.html (Advanced PCB table)", "price_step": "published only as an instant-quote option; price not published"},
+        "via_in_pad": {"source": "https://www.pcbway.com/pcb_prototype/PCB_Via_in_Pad.html", "price_step": "\"may be more expensive than traditional PTHs\" (resin filled + electroplated cap); no dimension limits given"},
+        "blind_buried": {"source": "https://www.pcbway.com/pcb_prototype/Blind_vias_and_Buried_Vias.html", "price_step": "\"can significantly increase the cost of the circuit board\"; IPC advice: via dia not above 6 mil (150 um)"},
+        "back_drill": {"source": "https://www.pcbway.com/pcb_prototype/PCB_Backdrill.html", "price_step": "special process; price not published"},
+        "heavy_copper": {"above_oz": 4, "source": "https://www.pcbway.com/capabilities.html", "price_step": "Advanced table: 0.5-4 oz normal, 4-6 oz medium difficulty, >6 oz high difficulty"}
+      },
+      "tiers": {
+        "standard": {
+          "rank": 10,
+          "description": "PCBWay Standard PCB table (headline service); annular ring: Standard table says 0.15 mm (hard), Advanced table lists 0.254 mm for component holes (pth_annular_advisory, reported as a note)",
+          "source": "https://www.pcbway.com/capabilities.html (Standard PCB + Advanced PCB 'Normal process' columns)",
+          "retrieved": "2026-11-15",
+          "price_step": "Standard table: holes \"smaller than 0.2mm will be subject to extra charges\"; layers above 14 need the Advanced table",
+          "rows": [
+            {"layers": [1, 2], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_annular_min": 0.127, "pth_annular_min": 0.15, "pth_annular_advisory": 0.254, "hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406, "hole_to_copper_inner": 0.178, "copper_to_edge": 0.25, "mask_dam": 0.1016, "mask_expansion": 0.0508, "silk_width_min": 0.15, "silk_height_min": 0.8, "thickness_options": [0.2, 3.2], "outer_oz": [1, 2, 3, 4], "inner_oz": [], "max_size": [560, 1150]}, "unverified": []},
+            {"layers": [3, 4], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_annular_min": 0.127, "pth_annular_min": 0.15, "pth_annular_advisory": 0.254, "hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406, "hole_to_copper_inner": 0.178, "copper_to_edge": 0.25, "mask_dam": 0.1016, "mask_expansion": 0.0508, "silk_width_min": 0.15, "silk_height_min": 0.8, "thickness_min": 0.6, "thickness_options": [0.6, 3.2], "outer_oz": [1, 2, 3, 4], "inner_oz": [1, 1.5, 2, 3, 4], "max_size": [560, 1150], "impedance_control": true}, "unverified": []},
+            {"layers": [5, 6], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_annular_min": 0.127, "pth_annular_min": 0.15, "pth_annular_advisory": 0.254, "hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406, "hole_to_copper_inner": 0.203, "copper_to_edge": 0.25, "mask_dam": 0.1016, "mask_expansion": 0.0508, "silk_width_min": 0.15, "silk_height_min": 0.8, "thickness_min": 0.9, "thickness_options": [0.9, 3.2], "outer_oz": [1, 2, 3, 4], "inner_oz": [1, 1.5, 2, 3, 4], "max_size": [560, 1150], "impedance_control": true}, "unverified": []},
+            {"layers": [7, 8], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_annular_min": 0.127, "pth_annular_min": 0.15, "pth_annular_advisory": 0.254, "hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406, "hole_to_copper_inner": 0.229, "copper_to_edge": 0.25, "mask_dam": 0.1016, "mask_expansion": 0.0508, "silk_width_min": 0.15, "silk_height_min": 0.8, "thickness_min": 1.2, "thickness_options": [1.2, 3.2], "outer_oz": [1, 2, 3, 4], "inner_oz": [1, 1.5, 2, 3, 4], "max_size": [560, 1150], "impedance_control": true}, "unverified": []},
+            {"layers": [9, 14], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_annular_min": 0.127, "pth_annular_min": 0.15, "pth_annular_advisory": 0.254, "hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406, "hole_to_copper_inner": 0.254, "copper_to_edge": 0.25, "mask_dam": 0.1016, "mask_expansion": 0.0508, "silk_width_min": 0.15, "silk_height_min": 0.8, "thickness_min": 1.4, "thickness_options": [1.4, 3.2], "outer_oz": [1, 2, 3, 4], "inner_oz": [1, 1.5, 2, 3, 4], "max_size": [560, 1150], "impedance_control": true}, "unverified": []}
+          ]
+        },
+        "fine-drill": {
+          "rank": 20,
+          "description": "PCBWay Standard table with 0.15-0.2 mm drills (extra-charge band)",
+          "source": "https://www.pcbway.com/capabilities.html (Standard PCB: drill 0.15-6.0 mm)",
+          "retrieved": "2026-11-15",
+          "price_step": "Standard table: holes \"smaller than 0.2mm will be subject to extra charges\"; Advanced table: drill <0.2 mm aspect ratio >=10 is medium difficulty",
+          "inherits": "standard",
+          "override": {"drill_min": 0.15, "via_annular_min": 0.127}
+        }
+      }
+    },
+    "jlcpcb": {
+      "source": "https://jlcpcb.com/capabilities/pcb-capabilities",
+      "retrieved": "2026-11-15",
+      "features": {
+        "impedance": {"layers": [4, 32], "tolerance": "+/-10% standard (+/-5 ohm below 50 ohm); +/-5% on special request", "source": "https://jlcpcb.com/capabilities/pcb-capabilities ; https://jlcpcb.com/help/article/hdi-pcb-capabilities-faq", "price_step": "\"tight impedance control\" listed among options that \"may increase both cost and production time\"; price not published"},
+        "via_in_pad": {"source": "https://jlcpcb.com/help/article/pcb-via-covering", "price_step": "epoxy/copper-filled and capped 0.15-0.55 mm; \"default for 6-layer and above\"; via-covering page: \"Complex process, high cost\" (page also says free for 6+ layers - conflict, unverified)"},
+        "blind_buried": {"source": "https://jlcpcb.com/help/article/hdi-pcb-capabilities-faq", "price_step": "\"blind/buried vias, HDI (laser vias), heavy copper (up to 3oz)\" \"may increase both cost and production time\""},
+        "heavy_copper": {"above_oz": 2, "source": "https://jlcpcb.com/capabilities/pcb-capabilities", "price_step": "multilayer outer copper offered 1 / 2 oz only"}
+      },
+      "tiers": {
+        "standard": {
+          "rank": 10,
+          "description": "JLCPCB standard multilayer: 3.5/3.5 mil, 0.2 mm drill with >=0.45 mm via pad",
+          "source": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-11-15",
+          "price_step": "\"0.1mm or 0.15mm hole size with any size via diameter, and 0.2mm or 0.25mm hole size with via diameter less than 0.45mm, will cost more.\"",
+          "rows": [
+            {"layers": [1, 2], "limits": {"track_min": 0.1, "space_min": 0.1, "drill_min": 0.2, "via_dia_min": 0.45, "via_annular_min": 0.125, "pth_annular_min": 0.18, "hole_to_hole_via": 0.2, "hole_to_hole_pth": 0.45, "hole_to_copper_inner": 0.2, "copper_to_edge": 0.2, "mask_dam": 0.1, "mask_expansion": 0.0, "silk_width_min": 0.15, "silk_height_min": 1.0, "thickness_options": [0.4, 4.5], "outer_oz": [1, 2], "inner_oz": [], "max_size": [670, 600]}, "unverified": ["via_dia_min derived from price-step wording"]},
+            {"layers": [3, 5], "limits": {"track_min": 0.09, "space_min": 0.09, "drill_min": 0.2, "via_dia_min": 0.45, "via_annular_min": 0.125, "pth_annular_min": 0.15, "hole_to_hole_via": 0.2, "hole_to_hole_pth": 0.45, "hole_to_copper_inner": 0.2, "copper_to_edge": 0.2, "mask_dam": 0.1, "mask_expansion": 0.0, "silk_width_min": 0.15, "silk_height_min": 1.0, "thickness_options": [0.4, 4.5], "outer_oz": [1, 2], "inner_oz": [0.5, 1, 2], "max_size": [663, 593]}, "unverified": ["odd layer counts not listed on the page", "via_dia_min derived from price-step wording"]},
+            {"layers": [4, 4], "limits": {"track_min": 0.09, "space_min": 0.09, "drill_min": 0.2, "via_dia_min": 0.45, "via_annular_min": 0.125, "pth_annular_min": 0.15, "hole_to_hole_via": 0.2, "hole_to_hole_pth": 0.45, "hole_to_copper_inner": 0.2, "copper_to_edge": 0.2, "mask_dam": 0.1, "mask_expansion": 0.0, "silk_width_min": 0.15, "silk_height_min": 1.0, "thickness_options": [0.4, 4.5], "outer_oz": [1, 2], "inner_oz": [0.5, 1, 2], "max_size": [663, 593], "impedance_control": true}, "unverified": ["via_dia_min derived from price-step wording"]},
+            {"layers": [6, 32], "limits": {"track_min": 0.09, "space_min": 0.09, "drill_min": 0.2, "via_dia_min": 0.45, "via_annular_min": 0.125, "pth_annular_min": 0.15, "hole_to_hole_via": 0.2, "hole_to_hole_pth": 0.45, "hole_to_copper_inner": 0.2, "copper_to_edge": 0.2, "mask_dam": 0.1, "mask_expansion": 0.0, "silk_width_min": 0.15, "silk_height_min": 1.0, "thickness_options": [0.4, 4.5], "outer_oz": [1, 2], "inner_oz": [0.5, 1, 2], "max_size": [656, 586], "impedance_control": true}, "unverified": ["via_dia_min derived from price-step wording", "min thickness for 6+ layers not stated"]}
+          ]
+        },
+        "fine-drill": {
+          "rank": 20,
+          "description": "JLCPCB multilayer with 0.15 mm drill / 0.25 mm via",
+          "source": "https://jlcpcb.com/capabilities/pcb-capabilities",
+          "retrieved": "2026-11-15",
+          "price_step": "\"0.1mm or 0.15mm hole size with any size via diameter ... will cost more.\"",
+          "inherits": "standard",
+          "override": {"drill_min": 0.15, "via_dia_min": 0.25, "via_annular_min": 0.05}
+        },
+        "extreme-trace": {
+          "rank": 30,
+          "description": "JLCPCB 2.7/2.7 mil extreme line width/spacing plus 0.15 mm drills",
+          "source": "https://jlcpcb.com/help/article/hdi-pcb-capabilities-faq",
+          "retrieved": "2026-11-15",
+          "price_step": "\"In tight spaces, we support an extreme line width/spacing of 2.7/2.7 mil, but this will increase difficulty and cost.\"",
+          "inherits": "fine-drill",
+          "override": {"track_min": 0.0686, "space_min": 0.0686},
+          "unverified": ["extreme track/space is from the HDI FAQ and not confirmed for plain multilayer"]
+        }
+      }
+    }
+  }
+}

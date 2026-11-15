@@ -391,7 +391,10 @@ def test_net_classes_resolve_power_pair_and_default_widths_never_below_floor():
     assert cls["default"] == {"width": 0.15, "clearance": 0.127}                      # the floor: max(class 0.12, floor 0.127)
     assert FR.net_classes(cons, R, 0.2)["default"]["clearance"] == 0.2                  # a class clearance above the floor is kept
     by = {c["name"]: c for c in cls["classes"]}
-    assert by["w2000um"]["width"] == 2.0 and by["w2000um"]["nets"] == ["+5V"]
+    from fluxplace import power as PW                                                   # 4 A: IPC-2221 width (power.py)
+    w5 = PW.rail(cons, "+5V")["track_mm"]
+    key = f"w{round(w5 * 1000)}um"
+    assert by[key]["width"] == w5 and by[key]["nets"] == ["+5V"]
     assert by["w300um"]["nets"] == ["+3V3"] and by["w250um"]["nets"] == ["ANT"]
     assert by["w201um"]["prefixes"] == ["USB_"]                                        # PAIR_GEOM_BY_Z[90] width
     assert all(c["width"] >= 0.127 for c in cls["classes"])  # VBAT's 0.05 is raised to the floor

@@ -79,7 +79,9 @@ def rules_for(board, B, cons, R, p, P, proj=None):
     from . import routerules as RR
     req = RR.request_clearance(R) if R.get("min_clearance") else 0.0
     clr = float(P["clearance"]) if P["clearance"] else max(float(c.get("clearance") or 0.0), req, R.get("min_clearance", 0.0), FLOOR) + 0.003
-    gap = max(gap, float(c.get("diff_pair_gap") or 0.0), R.get("min_clearance", 0.0))
+    # intra-pair gap: judged against the manufacturer's HARD limit, not the owner's preferred general floor
+    # (an impedance-derived gap below the preferred floor but inside the fab limit is legal: fabcaps.judge)
+    gap = max(gap, float(c.get("diff_pair_gap") or 0.0), R.get("fab_min_clearance") or R.get("min_clearance", 0.0))
     via = max(float(c.get("via_diameter") or R.get("via", 0.45)), R.get("min_via", 0.0))
     drill = max(float(c.get("via_drill") or R.get("drill", 0.2)), R.get("min_drill", 0.0))
     return {"w": w, "gap": gap, "clr": clr, "via": via, "drill": drill, "via_gap": max(float(c.get("diff_pair_via_gap") or 0.0), gap, clr),

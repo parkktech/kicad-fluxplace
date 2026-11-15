@@ -159,7 +159,21 @@ def class_lines(cons, facts, board, rows, planes, source, floor, nets):
         if rz:
             note += "; routed: " + ", ".join(rz)
             used["routed_z"] = rz
+        pj = []
+        if diff and g0:
+            from . import constraints as C, fabcaps as FC
+            try:
+                fab = C.fab_profile(cons, layers=sum(1 for r in rows if r.get("type") == "copper") or None)
+            except FC.FabProfileError as e:
+                fab = {"min_track_mm": 0.0, "min_clearance_mm": 0.0, "profile": None}
+                note += f"; {e}"
+            decl = (nc.get("diff_width"), nc.get("diff_gap")) if nc and nc.get("diff_width") and nc.get("diff_gap") else None
+            pj = IM.pair_judgement(cls["target"], g0, floor, fab["min_track_mm"], fab["min_clearance_mm"], decl)
+            if pj and decl and pj[0]["status"] == "below_preferred":
+                tier = fab.get("profile") or "fab limit"
+                note += (f"; declared gap {decl[1]:g} below preferred floor {floor:g}, within fab limit ({tier})")
         ok = not used.get("netclass_z") or abs(used["netclass_z"][1]) <= tolerance
+        used["pair_geometry"] = pj
         st = PASS if ok else FAIL
         geo = f"{L} w {o['width_mm']}" + (f" gap {o['gap_mm']}" if o["gap_mm"] else "") + f" -> {o['z']} ohm, {o['accuracy']}"
         lines.append(_line("class " + cls["name"], st, f"{name}: {geo}{note}",
