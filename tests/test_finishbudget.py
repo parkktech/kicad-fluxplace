@@ -20,15 +20,18 @@ def test_router_cap_leaves_the_finish_share():
     assert BR.settings({"route": {"finish_share": 5}})["finish_share"] == 0.9
 
 
-def test_pace_scales_the_cap_from_measured_time_per_closed_net():
+def test_pace_scales_the_cap_from_measured_time_and_does_not_shrink_batches_to_fit_the_call_overhead():
     p = BR.Pace(tmo=240, size=35)
-    assert p.size_now() == 8 and p.timeout(8) == 240.0 and p.timeout(2) == 160.0   # nothing measured: small batches, 4 x 20 s a net, capped by the batch timeout
-    p.note(30.0, 10)                                                 # 3 s per closed net
-    assert abs(p.avg() - 3.0) < 1e-9
-    assert p.timeout(5) == 60.0 and p.timeout(1) == 20.0             # 4 x 3 s x k, never under the floor
-    assert p.size_now() == 35 and BR.Pace(tmo=240, size=35).size_now() == 8
-    p.note(5000.0, 0)                                                # time spent on attempts that closed nothing does not inflate it
-    assert abs(p.avg() - 3.0) < 1e-9
+    assert p.size_now() == 8 and p.timeout(8) == 240.0 and p.timeout(1) == 60.0      # nothing measured: 8 nets, 3 x 20 s a net, capped by the batch timeout
+    p.note(110.0, 8, 2)                                                              # one call: 110 s for 8 nets (2 closed)
+    p.note(100.0, 2, 0)                                                              # a 2-net call still takes 100 s: the overhead is ~80 s
+    assert abs(p.overhead() - 80.0) < 1e-9 and abs(p.per_net() - (210 - 160) / 10) < 1e-9
+    assert p.size_now() == 12                                                        # (144 - 80) / 5: as many nets as one timeout holds, not 2
+    assert p.timeout(2) == 80.0 + 3 * 5.0 * 2 and p.timeout(100) == 240.0
+    q = BR.Pace(tmo=240, size=35)
+    q.note(40.0, 4, 4)
+    q.note(40.0, 4, 4)
+    assert q.size_now() == 35 and q.closed == 8                                      # fast nets: full batches
 
 
 def test_order_finish_is_cheapest_first_and_failed_nets_last(tmp_path):

@@ -212,32 +212,42 @@ def make_runner(build_cmd, cwd, extra, status_path, settings_=None, env_limited=
     return run
 
 class Pace:
-    """Per-net time caps of the finish step, scaled from the measured seconds per CLOSED net: a batch of k nets may take
-    `mult` x k x (seconds per closed net so far), at least `floor_s`, at most the batch timeout; the batch size follows
-    the same measure (about half a batch timeout of expected work).  Before anything is measured: small batches, `first_s`
-    seconds per net."""
+    """Per-net time caps of the finish step, scaled from measured time.  A router call costs `overhead` (loading the board,
+    the grid; the shortest call seen, x 0.8) plus `per_net` seconds per net it is given (measured over every call, whether the
+    nets closed or not).  A batch holds as many nets as fit in 0.6 of the batch timeout (so one call closes many nets instead of
+    paying the overhead for two), and its time cap is overhead + `mult` x k x per_net, at least `floor_s`, at most the batch timeout.
+    Before anything is measured: `first_nets` nets, `first_s` seconds per net."""
 
-    def __init__(self, tmo, size, mult=4.0, first_s=20.0, floor_s=20.0, first_nets=8):
+    def __init__(self, tmo, size, mult=3.0, first_s=20.0, floor_s=20.0, first_nets=8):
         self.tmo, self.size, self.mult, self.first_s = float(tmo), int(size), float(mult), float(first_s)
         self.floor, self.first_nets = min(float(floor_s), float(tmo)), int(first_nets)
-        self.spent = 0.0
+        self.calls = []                    # (seconds, nets given)
         self.closed = 0
 
-    def avg(self):
-        return self.spent / self.closed if self.closed else None
+    def note(self, dt, k, closed=0):
+        if k > 0:
+            self.calls.append((float(dt), int(k)))
+        self.closed += max(0, int(closed))
 
-    def note(self, dt, closed):
-        if closed > 0:
-            self.spent += dt
-            self.closed += closed
+    def overhead(self):
+        return 0.8 * min(dt for dt, _k in self.calls) if len(self.calls) >= 2 else 0.0
+
+    def per_net(self):
+        if not self.calls:
+            return None
+        o = self.overhead()
+        return max(0.5, (sum(dt for dt, _k in self.calls) - len(self.calls) * o) / max(1, sum(k for _dt, k in self.calls)))
 
     def size_now(self):
-        a = self.avg()
-        return max(1, min(self.size, self.first_nets)) if a is None else max(2, min(self.size, int(0.5 * self.tmo / max(a, 1e-3))))
+        pn = self.per_net()
+        if pn is None:
+            return max(1, min(self.size, self.first_nets))
+        return max(2, min(self.size, int((0.6 * self.tmo - self.overhead()) / pn)))
 
     def timeout(self, k):
-        a = self.avg() if self.avg() is not None else self.first_s
-        return max(self.floor, min(self.tmo, self.mult * a * max(1, k)))
+        pn = self.per_net()
+        pn = self.first_s if pn is None else pn
+        return max(self.floor, min(self.tmo, self.overhead() + self.mult * pn * max(1, k)))
 
 
 def router_cap(budget, ladder_min, share, elapsed):
@@ -439,7 +449,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         n_open = len([n for n in batch if n in cur_open])
         ok, timed, why = attempt(batch, True, timeout)
         if pace:
-            pace.note(time.time() - t_a, n_open - len([n for n in batch if n in cur_open]))
+            pace.note(time.time() - t_a, n_open, n_open - len([n for n in batch if n in cur_open]))
         if ok and not timed:
             for n in batch:
                 if n in cur_open:
