@@ -327,15 +327,16 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
 
 def _write_json(path, obj):
     """Atomic write that keeps the file's own indent style (so a git diff shows only the records that changed)."""
-    ind = 1
+    ind, nl = 1, True
     try:
-        head = open(path).read(400)
-        m = re.match(r"\s*[\[{]\s*\n( +)", head)
-        ind = len(m.group(1)) if m else None
+        txt = open(path).read()
+        m = re.match(r"\s*[\[{]\s*\n( +)", txt[:400])
+        ind, nl = (len(m.group(1)) if m else None), txt.endswith("\n")
     except OSError:
         pass
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), suffix=".tmp")
     with os.fdopen(fd, "w") as fh:
         json.dump(obj, fh, indent=ind, ensure_ascii=False)
-        fh.write("\n")
+        if nl:
+            fh.write("\n")
     os.replace(tmp, path)
