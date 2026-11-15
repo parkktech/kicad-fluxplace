@@ -25,7 +25,7 @@ from . import routeconn as RC
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pairs", "plan-route", "route", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -484,17 +484,27 @@ def st_route(c, n, board):
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
-    if rname == "freerouting" and todo:
+    resume = _resume_finish(a, d, board, best) if have_krt else None    # --from route: continue the finish step on the leftovers
+    if resume:
+        todo = sorted(conn(best))
+        state["best"] = state["start"] = sum(conn(best).values())
+    if rname == "freerouting" and todo and not resume:
+        # the finish step (per-net rounds + ladder) is guaranteed `[route] finish_share` of the budget: the router segment is cut to fit
         frrec = _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath,
-                             lambda: budget - ladder_min - (time.time() - t0), budget)
+                             lambda: BR.router_cap(budget, ladder_min, S["finish_share"], time.time() - t0), budget, claimer_runs=have_krt)
+        if frrec.get("unowned"):                       # FAIL before any router hour: a skipped net nobody will route
+            return {"verdict": "fail", "board": board, "line": frrec["error"],
+                    "next": ["route-owners: fix the net exclusion or enable the per-net router (--router-dir)"]}
         if frrec.get("ok"):
             b0 = state["best"]
             frrec["adopted"] = keep(frrec["out"]) < b0  # every later board is built on it, sub-floor copper included
-    start_board = best if frrec else board             # hybrid finish: what Freerouting left goes to the per-net router
-    if frrec:
+    from . import pairfb as PFB
+    hybrid = bool(frrec or resume)
+    start_board = best if hybrid else board            # hybrid finish: what Freerouting left goes to the per-net router
+    if hybrid:
         B = RD.load(start_board)                       # the audit baseline is the board the router starts from, not the pre-Freerouting one:
         #                                                else every Freerouting track/via is "new copper" the batch audit rejects (CLEARANCE)
-    rtodo = sorted(conn(best)) if frrec else todo
+    rtodo = sorted(conn(best)) if hybrid else todo
     res = {"timeouts": 0, "halvings": 0, "checkpoints": [], "board": None, "leftovers": rtodo}
     if not have_krt or not rtodo:
         pass
@@ -505,7 +515,7 @@ def st_route(c, n, board):
     else:
         res = BR.route_batches(start_board, d, rtodo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                total_budget=left_rounds(), status_path=spath, extra=extra, log=lambda m: None,
-                               rules=R, conn=conn)
+                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()))
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
     state["ckpts"] += len(res["checkpoints"])
@@ -556,12 +566,48 @@ def st_route(c, n, board):
     from . import routefr as FR_
     times["ladder_end"] = round(time.time() - t0)
     post_round(best)                                   # the board as it ends: snapped, gaps joined
-    final_open = OG.unconnected_nets(best)           # per net, kicad-cli after refill: the same total every report shows
+    # plane nets: one explicit owner (planetie) ties floating fragments to their pour, after the router and after the
+    # last copper change; what it cannot close is listed with a reason and owned by "plane-tie"
+    from . import planetie as PT
+    from . import escapeplan as EP
+    plane_nets = sorted(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))      # the nets that connect through a plane/pour
+    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
+                 plane_layers=[l for l in B["copper"] if l not in a.layers])
+    if ptr["placed"]:
+        shutil.copy(ptr["board"], best)
+        _sidecar(board, best)
+    # pour-first ties: re-check the verified ties after routing and planetie; a tie routing cut off is re-tied
+    from . import pourtie as PTI
+    ptd = _pour_tie_dir(c)
+    pour_rec = None
+    if ptd:
+        pour_rec = PTI.repair(best, os.path.join(d, "pour_repaired.kicad_pcb"), ptd, workdir=d)
+        shutil.copy(pour_rec["board"], best)
+        _sidecar(board, best)
+    with open(os.path.join(d, "planetie.txt"), "w") as fh:
+        fh.write("\n".join(PT.lines(ptr)) + "\n")
+    final_open = OG.unconnected_nets(best)           # per net, kicad-cli after refill: the one open-connection definition
     final = sorted(final_open)
     diag = None
     if final:
         from . import routestatus as RS2
         diag, _ = RS2.diagnose_result({"out": best}, c.cons or None, c.spec)
+    from . import routeowners as RO
+    # every open net at the end is owned by the step that was handed it: the router (the hybrid finish or the batch
+    # rounds) when it ran; anything else is unowned
+    claims = {n: ("router" if have_krt else None) for n in rtodo if n in final_open}
+    claims = {k: v for k, v in claims.items() if v}
+    # plane nets: "pour" when the net also has a signal-layer pour (the pour step closes its pads), else "plane-tie"
+    claims.update({n: ("pour" if ptr["per_net"].get(n, {}).get("signal_pour") else "plane-tie")
+                   for n in plane_nets if n in final_open})
+    if ptd:                                            # pads tied through a pour before routing are owned by the pour
+        claims.update({n: "pour" for n in pt_rec_nets(ptd) if n in final_open})
+    try:
+        dj = json.load(open(best + ".diagnose.json")) if final else None
+    except (OSError, ValueError):
+        dj = None
+    owner_rows, unowned = RO.table(final_open, cls, claims, dj)
+    owner_line = RO.write(d, owner_rows, unowned)
     el = round(time.time() - t0)
     line = ((FR_.summary(frrec) + "; " if frrec else "") + f"{len(todo)} open net(s), open connections {state['start']} -> {sum(final_open.values())} "
             f"({len(final)} net(s)) in {el}s, "
@@ -602,11 +648,30 @@ def st_route(c, n, board):
     warn = RPO2.gate_line(post_info)
     if warn:
         line += "; " + warn.split(" (")[0]
+    fin = None
+    if res.get("untried") is not None:
+        fin = {"untried": len(res["untried"]), "tried_failed": len(res["tried_failed"]), "untried_nets": res["untried"][:40],
+               "tried_failed_nets": res["tried_failed"][:40], "resumed": bool(resume)}
+        line += f", finish: {fin['untried']} net(s) untried (budget), {fin['tried_failed']} tried and failed" + (" [resumed]" if resume else "")
+    _save_resume(a, d, board, best, res)
+    unc = []
+    try:                                                # pairs handed to the router (state c): connected-but-flagged with the numbers
+        from . import pairuncoupled as PU
+        hand_nets = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))
+        if hand_nets:
+            unc = PU.rows(RD.load(best), c.cons, c.spec, best, only=hand_nets)
+            with open(os.path.join(d, "pairs_uncoupled.json"), "w") as fh:
+                json.dump({"handoff_nets": sorted(hand_nets), "connected": unc, "flagged": PU.flagged(unc)}, fh, indent=1)
+            line += f", handed-over pairs: {len(unc)} connected, {len(PU.flagged(unc))} PAIR_ROUTED_UNCOUPLED of {len(hand_nets) // 2}"
+    except Exception as e:                              # noqa: BLE001 - numbers are advice
+        line += f", pairs_uncoupled not measured ({type(e).__name__})"
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
+    if fin:
+        out["finish"] = fin
     with open(os.path.join(d, "result.json"), "w") as fh:
         json.dump({"line": line, "router": rname, "times": times, "open_start": state["start"], "open_end": sum(final_open.values()),
                    "freerouting": {k: v for k, v in (frrec or {}).items() if k != "passes"} or None,
-                   "ladder": ladder["rungs"] if ladder else None}, fh, indent=1)
+                   "finish": fin, "ladder": ladder["rungs"] if ladder else None}, fh, indent=1)
     if not have_krt:
         out.setdefault("next", []).append("per-net router (KiCadRoutingTools) not found: no hybrid finish, no ladder; pass --router-dir")
     if frrec:
@@ -626,6 +691,16 @@ def st_route(c, n, board):
         out["ladder"] = ladder["rungs"]
         with open(os.path.join(d, "ladder.json"), "w") as fh:
             json.dump(ladder, fh, indent=1)
+    out["owners"] = {"rows": owner_rows, "unowned": unowned, "file": os.path.join(d, "route_owners.txt")}
+    if ptd:
+        pt_rec = json.load(open(os.path.join(ptd, "pourtie.json")))
+        out["pour"] = {"tied_before_routing": len(pt_rec["tied"]) + sum(v["tied_before"] for v in pt_rec["nets"].values()),
+                       "untied_before_routing": len(pt_rec["untied"]), "lost_after_routing": pour_rec["lost"],
+                       "repaired": pour_rec["repaired"], "unrepaired": len(pour_rec["unrepaired"]),
+                       "owner": "pour"}
+    if unowned:
+        out["verdict"] = "fail"
+        out.setdefault("next", []).insert(0, f"ROUTE_NET_UNOWNED {len(unowned)} net(s): {', '.join(unowned[:8])}")
     if final:
         out["next"] = [f"{sum(final_open.values())} open connection(s) in {len(final)} net(s); first: {', '.join(final[:6])}",
                        f"diagnosis (what to move): {diag}",
@@ -652,7 +727,46 @@ def st_route(c, n, board):
     return out
 
 
-def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget):
+def _sha(path):
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _save_resume(a, d, board, best, res):
+    """what `pipeline --from route` needs to continue the finish step: the stage input's hash, a copy of the board as the
+    step ends and the nets it tried and failed on (`finish_resume.json`); never fatal."""
+    try:
+        keep = os.path.join(d, "resume.kicad_pcb")
+        shutil.copy(best, keep)
+        _sidecar(board, keep)
+        with open(os.path.join(d, "finish_resume.json"), "w") as fh:
+            json.dump({"input": _sha(board), "output": _sha(best), "board": keep, "untried": res.get("untried", []), "tried_failed": res.get("tried_failed", [])}, fh, indent=1)
+    except OSError:
+        pass
+
+
+def _resume_finish(a, d, board, best):
+    """`pipeline --from route` with a finish record of the same input (the stage's input board, or the board the stage ended with:
+    `--from route` starts from the last stage's output): the router is not run again; the finish step continues on the
+    board it ended with (`best` is overwritten with it).  -> the record, or None."""
+    if getattr(a, "from_stage", None) != "route" or getattr(a, "no_resume", False):
+        return None
+    try:
+        rec = json.load(open(os.path.join(d, "finish_resume.json")))
+        if _sha(board) not in (rec["input"], rec.get("output")) or not os.path.exists(rec["board"]) or not (rec.get("untried") or rec.get("tried_failed")):
+            return None
+        shutil.copy(rec["board"], best)
+        _sidecar(rec["board"], best)
+        return rec
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, cap, budget, claimer_runs=True):
     """The Freerouting phase of the route stage -> its record (routefr.route_board) + `out`; full record in freerouting.json."""
     from . import routefr as FR, ripolicy as RIP, batchroute as BR, pairaudit as PA, routediag as RD
     from . import routerules as RR, opengate as OG
@@ -666,7 +780,14 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     # from the DSN copy and refilled around the new copper.
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
-    skip = [n for n in todo if n in ctl] if FS["pairs"] == "exclude" else []
+    from . import pairfb as PFB
+    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
+    skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
+    from . import routeowners as RO
+    bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)
+    if bad:
+        return {"ok": False, "unowned": bad, "error": f"ROUTE_NET_UNOWNED {len(bad)} net(s) excluded from Freerouting and not "
+                f"claimed by a later step: {', '.join(bad[:8])}"}
     want = getattr(a, "freerouting_budget", None) or FS["budget_s"]
     fb = max(10.0, min(float(want) if want else budget * FS["budget_frac"], cap() - 30.0))
 
@@ -815,6 +936,40 @@ def st_fanout(c, n, board):
     return res
 
 
+def st_pour_tie(c, n, board):
+    """pour-first: every pad of a net with a copper pour is tied through that copper before the pairs and the router run
+    (pourtie.py); each tie is verified on the filled zone. Untied pads are listed with the measured reason; they stay with
+    the router as ordinary connections."""
+    from . import pourtie as PTI
+    d = c.dir(n, "pour-tie")
+    out = os.path.join(d, "board.kicad_pcb")
+    rec = PTI.run(board, out, d)
+    _sidecar(board, out)
+    before = sum(v["tied_before"] for v in rec["nets"].values())
+    new = sum(v["tied_by_via"] for v in rec["nets"].values())
+    pads = sum(v["pads"] for v in rec["nets"].values())
+    untied = rec["untied"]
+    if rec.get("skipped"):
+        return {"verdict": "pass", "line": f"pour-tie: skipped ({rec['skipped']})", "board": out}
+    line = (f"pour-tie: {len(rec['nets'])} pour net(s), {pads} pad(s): {before} tied already by pour, {new} tied by new via, "
+            f"{len(untied)} not tied")
+    return {"verdict": "warn" if untied else "pass", "line": line, "board": out,
+            "next": [f"untied {u['net']} pad {u['pad']} at {u['at']}: {u['reason']}" for u in untied[:6]]}
+
+
+def pt_rec_nets(ptd):
+    try:
+        return set(json.load(open(os.path.join(ptd, "pourtie.json")))["nets"])
+    except (OSError, ValueError, KeyError):
+        return set()
+
+
+def _pour_tie_dir(c):
+    import glob
+    hits = sorted(glob.glob(os.path.join(c.work, "*-pour-tie", "pourtie.json")))
+    return os.path.dirname(hits[-1]) if hits else None
+
+
 def st_plan_route(c, n, board):
     """channels only: sealed pins cannot exist (the fan-out gate passed), so overflow is a WARN and never blocks."""
     d = c.dir(n, "plan-route")
@@ -848,7 +1003,7 @@ def st_pairs(c, n, board):
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
+FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
 

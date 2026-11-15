@@ -222,3 +222,14 @@ def test_route_diff_only_for_suffix_named_pairs():
     from fluxplace import pipeline as PL
     assert PL.diff_named("USB_P", "USB_N") and PL.diff_named("X_N", "X_P") and PL.diff_named("D+", "D-") and PL.diff_named("CLKP", "CLKN")
     assert not PL.diff_named("USB_DP", "USB_DM") and not PL.diff_named("A_P", "B_N")
+
+
+def test_rail_in_batch_mode_is_routed_not_dropped(tmp_path):
+    """batch mode (route_batches) used to drop every rail from its work list ('set mode = parallel'): the rail's pads stayed
+    open with no owner. A rail is one job like any other net in batch mode, so it is routed and left open only on failure."""
+    from fluxplace import batchroute as BR2
+    board, W, build, run, extra, spath = setup(tmp_path, rail_body(2))       # two pads: the fake router joins them in one call
+    c = dict(CONS, route={"rail_min_pads": 2})
+    r = BR2.route_batches(board, W, ["VX"], run, cons=c, status_path=spath, extra=extra, log=lambda m: None, leftover_timeout=10)
+    assert "VX" not in RC.open_by_net(r["board"], method="text")
+    assert r["leftovers"] == [] and "rail" not in str(r["reasons"])

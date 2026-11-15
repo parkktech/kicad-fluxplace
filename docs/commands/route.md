@@ -59,6 +59,7 @@ checkpoint. `route-wait` prints the last good board as the result.
     escalation = "off"       # router --escalation (off|board|fab); strict_sizes = true -> --strict-sizes
     rail_min_pads = 8        # >= this many pads and no plane/pour: routed as a tree of two-cluster jobs (parallel mode); rail_edges_per_round = 3
     allow_rip = "low-speed"  # "never" | "low-speed" | "any": see Rip policy;  controlled = [nets], controlled_patterns = [regex]
+    finish_share = 0.4          # hybrid: the finish step (per-net rounds + ladder) keeps this share of --route-budget; Freerouting is cut to the rest
     ladder_reserve_frac = 0.25  # share of --route-budget kept back for the escalation ladder (0 = rounds may use it all)
     pair_audit = true        # a pair is routed only when both legs are complete and match; else removed and retried as a pair
     audit = true             # post-batch audit; audit_drc = false (true: kicad-cli DRC, new error types vs the input)
@@ -189,3 +190,18 @@ are not covered by any router timeout and used to eat the ladder's reserve. The 
 less than `[route] ladder_min_s` (default `min(reserve, max(60, 10 % of the budget))`) counted from its start, even when the
 rounds overran. `W/<n>-route/result.json` `times` = `budget, reserve, ladder_min, overhead, rounds_end, ladder_left, ladder_end`.
 
+
+
+## Hybrid finish step: budget, order, resume
+After Freerouting the per-net router finishes what is left (`route_batches(hybrid=True)`).
+- **Budget split.** `[route] finish_share` (default 0.4) of `--route-budget` is guaranteed to the finish step (rounds + ladder):
+  Freerouting's budget is `min(budget x (1 - finish_share), budget - ladder_min) - elapsed` (`batchroute.router_cap`). Time the router
+  hands back (stall stop, early finish) goes to the rounds.
+- **Order and caps.** Cheapest nets first (`order_finish`: net length per connection x open connections; nets that failed in an earlier
+  run last). Batch size and the time cap of a call scale with the measured seconds per CLOSED net (`Pace`: cap = 4 x k x measured, at
+  least 20 s, at most `batch_timeout_s`); small batches (8 nets, 20 s a net) until something is measured. The leftovers pass only retries nets that were tried.
+- **Accounting.** `leftovers.json`, the stage line, `result.json` (`finish`) and the stage result say how many leftover nets were
+  `untried` (the budget ended first, reason `budget`) and how many were `tried and failed`.
+- **Resume.** The stage writes `finish_resume.json` + `resume.kicad_pcb`. `pipeline --from route` with the same stage input (hash) does
+  not run Freerouting again: the finish step continues on that board, untried nets first, failed ones last. `--no-resume` runs everything again.
+- **Handed-over pairs.** Pairs the pairs stage leaves in state `c` (see `pairs.md`) are not on Freerouting's skip list; they are routed as ordinary nets of their class.

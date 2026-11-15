@@ -64,3 +64,19 @@ fine-pitch (pitch <= `[escape] fine_pitch_mm`, 0.65) and multi-row parts keep a 
 (via + 2 clearances + track) and a SOFT band behind it; `escres` pin sites and (opt-in) pair corridors are soft.  Hard = a
 keep-out for other parts; soft = a part is moved out when a legal seat exists within `[escape] reserve_cost_mm` (3).
 `[escape] reserve = false` turns it off.
+
+## Completion ladder (`pairfb.py`): every pair leaves the stage connected or handed over, in one reported state
+A pair the main pass (negotiation, order passes) does not complete is never left half routed: its partial copper is not written
+(`[pairlay] keep_partial = true` brings the old behaviour back).  Then, on the written board, per pending pair, each step as a trial
+on a copy that is kept only when it completes a pair and every pair it ripped is complete again (`fallback = true`, `fallback_trials = 12`):
+
+| state | meaning |
+|---|---|
+| `a` | complete and coupled by the main pass (also: already connected) |
+| `b(i)` | another via / layer pattern: cheaper vias, inner layers at face cost, a 3x / 5x search budget, re-ordering passes |
+| `b(ii)` | after a rip: single-ended fan-out stubs the failure line names (a short stub touching one pad, never a rail / plane net; their pins are escaped again by `fanout --nets`; `rip_fanout_stubs = false` turns this off) or the copper of an earlier LOWER-priority complete pair (both are laid again) |
+| `b(iii)` | coupled, with a bounded uncoupled break-out at the terminals (`[pairs.FAMILY] max_uncoupled_mm`, else `[pairlay] max_uncoupled_mm`, default 5 mm = 10 pitches of a 0.5 mm part) and the skew allowed up to its own limit (`skew_frac` 1.0 instead of 0.85) |
+| `c` | none worked: both nets go to the general router as ordinary nets of the pair's class (`handoff` in `board.pairs.json`; `PAIR_HANDOFF` line); they are not on the router's skip list.  After routing the numbers are measured: review WARN `PAIR_ROUTED_UNCOUPLED` (`pairuncoupled.py`: skew, length, uncoupled length beside the partner, limit 2 x `max_uncoupled_mm`) |
+| `a-mismatch` | connected, legs differ in layer sequence / vias (copper kept: connected beats open) |
+
+Not done: a coupled run that goes uncoupled in the MIDDLE to squeeze past an obstacle (only the terminal break-outs are bounded-uncoupled).

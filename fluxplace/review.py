@@ -245,6 +245,13 @@ def _pairs_from_audit(facts, cons):
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
             out.append(_f(WARN, "PAIR_VIA_MISMATCH", f"{r['p']}/{r['n']}: {r['why']}"))
+    try:                                                 # connected, but the router laid the legs apart (pairs-stage state c)
+        from . import pairuncoupled as PU
+        for m in PU.flagged(PU.rows(B, cons or {}, None, path)):
+            if gated(m["pair"][0]):
+                out.append(_f(WARN, "PAIR_ROUTED_UNCOUPLED", PU.detail(m)))
+    except Exception:                                    # noqa: BLE001 - the coupling numbers are advice, never a crash
+        pass
     return out
 
 
