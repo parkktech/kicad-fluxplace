@@ -60,9 +60,56 @@ def hard_ok(h, ref):
     return h["collisions_fail"] <= ref["collisions_fail"] and set(h["intent_hard_failed"]) <= set(ref["intent_hard_failed"])
 
 
-def guard(path_in, path_out):
-    """Connectivity guard: same refs, same pad->net map per ref, same segments and vias.  -> (ok, [problems])."""
+def _touched(B, x, y, net, half):
+    """(ref, pad number) of every pad of `net` that the copper point (x, y) with half-size `half` lies on."""
+    return frozenset((q["ref"], str(q["num"])) for q in B["pads"]
+                     if q["net"] == net and abs(x - q["x"]) <= q["ex"] + half and abs(y - q["y"]) <= q["ey"] + half)
+
+
+def attached_copper(B):
+    """Copper that ends on a pad: {'segs': {seg index: [(end, ref, pad)]}, 'vias': {via index: [(ref, pad)]}}, indices into B's
+    lists. Parts with any such copper are the 'routed' parts (fan-out, pair or router copper)."""
+    segs, vias = {}, {}
+    for i, s in enumerate(B["segs"]):
+        for k, (x, y) in enumerate((s["a"], s["b"])):
+            t = _touched(B, x, y, s["net"], s["w"] / 2)
+            if t:
+                segs.setdefault(i, []).extend((k, ref, num) for ref, num in sorted(t))
+    for i, v in enumerate(B["vias"]):
+        t = _touched(B, v["x"], v["y"], v["net"], v["d"] / 2)
+        if t:
+            vias[i] = [(ref, num) for ref, num in sorted(t)]
+    return {"segs": segs, "vias": vias}
+
+
+def routed_refs(B):
+    """Refs with copper attached to one of their pads (see attached_copper)."""
+    A = attached_copper(B)
+    refs = {ref for ends in A["segs"].values() for _k, ref, _n in ends}
+    refs |= {ref for pads in A["vias"].values() for ref, _n in pads}
+    return sorted(refs)
+
+
+def _endpoints_moved(A, Bo):
+    """Track/via end points that moved between the files (same index, same net)."""
+    out = []
+    for sa, sb in zip(A["segs"], Bo["segs"]):
+        if sa["net"] != sb["net"] or tuple(sa["a"]) != tuple(sb["a"]) or tuple(sa["b"]) != tuple(sb["b"]):
+            out.append(f"track {sa['net']} at {sa['a']}-{sa['b']} changed")
+    for va, vb in zip(A["vias"], Bo["vias"]):
+        if va["net"] != vb["net"] or (va["x"], va["y"]) != (vb["x"], vb["y"]):
+            out.append(f"via {va['net']} at ({va['x']},{va['y']}) changed")
+    return out
+
+
+def guard(path_in, path_out, removed=None):
+    """Connectivity guard.  Same refs and pad->net map per ref; the remaining segments and vias (after dropping the `removed`
+    indices, {'segs': [...], 'vias': [...]}, which the move-routed option names) keep their positions, nets and order; and every
+    end that touched a pad before still touches that same pad after (geometry, not counts).  -> (ok, [problems])."""
     A, Bo = RD.load(path_in), RD.load(path_out)
+    rm = removed or {}
+    rs, rv = set(rm.get("segs", ())), set(rm.get("vias", ()))
+    A2 = dict(A, segs=[s for i, s in enumerate(A["segs"]) if i not in rs], vias=[v for i, v in enumerate(A["vias"]) if i not in rv])
     probs = []
     if set(A["parts"]) != set(Bo["parts"]):
         probs.append(f"ref set differs by {len(set(A['parts']) ^ set(Bo['parts']))}")
@@ -71,9 +118,42 @@ def guard(path_in, path_out):
         pb = sorted((str(q.get("num")), str(q.get("net"))) for q in Bo["parts"][r]["pads"])
         if pa != pb:
             probs.append(f"{r}: pad/net map changed")
-    if len(A["segs"]) != len(Bo["segs"]) or len(A["vias"]) != len(Bo["vias"]):
+    if len(A2["segs"]) != len(Bo["segs"]) or len(A2["vias"]) != len(Bo["vias"]):
         probs.append("segment or via count changed")
-    return not probs, probs
+        return False, probs
+    probs += _endpoints_moved(A2, Bo)
+    # geometry: a copper end that touched pad P before still touches P (the same pad, same net) after the moves
+    Aa, Ba = attached_copper(A), attached_copper(Bo)
+    for kind, key in (("segs", "segs"), ("vias", "vias")):
+        keep = [i for i in range(len(A["segs"] if kind == "segs" else A["vias"])) if i not in (rs if kind == "segs" else rv)]
+        for j, i in enumerate(keep):
+            before = Aa[key].get(i)
+            if not before:
+                continue
+            if kind == "segs":
+                after = Ba["segs"].get(j, [])
+                pads_b = {(k, ref, num) for k, ref, num in after}
+                for k, ref, num in before:
+                    if (k, ref, num) not in pads_b:
+                        x, y = A["segs"][i]["a" if k == 0 else "b"]
+                        probs.append(f"track {A['segs'][i]['net']} end ({x:.3f},{y:.3f}) no longer on {ref}.{num}")
+            else:
+                after = set(Ba["vias"].get(j, []))
+                for ref, num in before:
+                    if (ref, num) not in after:
+                        probs.append(f"via {A['vias'][i]['net']} ({A['vias'][i]['x']:.3f},{A['vias'][i]['y']:.3f}) no longer on {ref}.{num}")
+    return not probs, probs[:50]
+
+
+def applied_log(log, flips):
+    """The move ledger restricted to moves that were actually applied: a flipped part (excluded from the applied moves) is dropped
+    from its entry, and entries left with no part are dropped."""
+    out = []
+    for e in log:
+        keep = [r for r in e["refs"] if r not in flips]
+        if keep:
+            out.append(dict(e, refs=keep, **{"from": {r: e["from"][r] for r in keep}, "to": {r: e["to"][r] for r in keep}}))
+    return out
 
 
 def _read(p):
@@ -87,11 +167,14 @@ def _write(p, text):
 
 
 class Pass:
-    """One move pass on a board file: result text, its predictor run, hard state, ledger."""
+    """One move pass on a board file: result text, its predictor run, hard state, ledger, and the copper removed with moved
+    routed parts (`removed`: {'segs': [...], 'vias': [...]} indices into the input, empty unless allow_move_routed)."""
 
-    def __init__(self, text, path, B, R, H, moves, log, skipped_flips, accepted, key):
+    def __init__(self, text, path, B, R, H, moves, log, skipped_flips, accepted, key, removed=None, removed_rows=()):
         self.text, self.path, self.B, self.R, self.H = text, path, B, R, H
         self.moves, self.log, self.skipped_flips, self.accepted, self.key = moves, log, skipped_flips, accepted, key
+        self.removed = removed or {"segs": [], "vias": []}
+        self.removed_rows = list(removed_rows)
 
 
 def _pass(path_in, work, name, cons, spec, rc, ref_hard, log):
@@ -102,10 +185,28 @@ def _pass(path_in, work, name, cons, spec, rc, ref_hard, log):
     R0 = PL.run(B0, cons, spec, ignore_routing=True)
     key0 = PL.rank_key(R0)
     B = RD.load(path_in)
+    # a part with copper on its pads (fan-out, pair or router copper) is fixed unless the move-routed option is on: moving it
+    # would leave that copper detached
+    routed = routed_refs(B)
+    if not rc.get("allow_move_routed"):
+        for r in routed:
+            if r in B["parts"]:
+                B["parts"][r]["locked"] = True
     mv, st = PP.plan_place(B, cons, spec, log=log, max_evals=rc["max_evals"], rotation=True, max_rounds=rc["rounds"])
     flips = set(st.get("flips", []))
     moves = {r: v for r, v in mv.items() if r not in flips}
     text1 = BW.apply_moves(text0, moves)[0] if moves else text0
+    # move-routed: the copper that ends on a moved part's pads goes (it would be detached); it is listed for re-fan-out
+    att = attached_copper(B0)
+    rem_s = sorted(i for i, ends in att["segs"].items() if any(ref in moves for _k, ref, _n in ends))
+    rem_v = sorted(i for i, pads in att["vias"].items() if any(ref in moves for ref, _n in pads))
+    removed_rows = [{"kind": "track", "net": B0["segs"][i]["net"], "layer": B0["segs"][i]["layer"],
+                     "ref": sorted({r for _k, r, _n in att["segs"][i] if r in moves}), "at": B0["segs"][i]["a"]} for i in rem_s]
+    removed_rows += [{"kind": "via", "net": B0["vias"][i]["net"], "layer": "", "ref": sorted({r for r, _n in att["vias"][i] if r in moves}),
+                      "at": (B0["vias"][i]["x"], B0["vias"][i]["y"])} for i in rem_v]
+    if rem_s or rem_v:
+        text1 = BW.strip_indexed(text1, set(rem_s), set(rem_v))[0]
+    removed = {"segs": rem_s, "vias": rem_v}
     path1 = os.path.join(work, name + ".kicad_pcb")
     _write(path1, text1)
     B1 = RD.load(path1)
@@ -116,7 +217,8 @@ def _pass(path_in, work, name, cons, spec, rc, ref_hard, log):
     accepted = bool(moves) and ok_hard and key1 < key0
     if not accepted:
         return Pass(text0, path_in, B0, R0, ref_hard, [], log, sorted(flips), False, key0)
-    return Pass(text1, path1, B1, R1, H1, st.get("log", []), log, sorted(flips), True, key1)
+    return Pass(text1, path1, B1, R1, H1, applied_log(st.get("log", []), flips), log, sorted(flips), True, key1,
+                removed=removed, removed_rows=removed_rows)
 
 
 def _edge_dist(cand, side):
@@ -167,14 +269,17 @@ def _owner_rows(R, B, cons):
 
 
 def _cand(kind, P, moves):
-    return {"kind": kind, "text": P.text, "path": P.path, "R": P.R, "H": P.H, "moves": moves}
+    return {"kind": kind, "text": P.text, "path": P.path, "R": P.R, "H": P.H, "moves": moves,
+            "removed": P.removed, "removed_rows": P.removed_rows}
 
 
-def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=print, json_path=None):
-    """-> summary dict.  Writes OUT (the best board seen), OUT + '.relieve.json' (ledger, verdict, options) and returns the text table."""
+def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=print, json_path=None, allow_move_routed=False):
+    """-> summary dict.  Writes OUT (the best board seen), OUT + '.relieve.json' (ledger, verdict, options) and returns the text table.
+    On a guard failure OUT is a copy of the input and `guard.ok` is False (the caller fails the stage)."""
     if os.path.abspath(out) == os.path.abspath(board):
         raise SystemExit("relieve: --out must differ from the input board")
     rc = settings(cons, rounds, may_grow, sides)
+    rc["allow_move_routed"] = bool(allow_move_routed)
     work = out + ".relieve-work"
     os.makedirs(work, exist_ok=True)
     src = os.path.join(work, "input.kicad_pcb")
@@ -183,7 +288,8 @@ def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=prin
     R_in = PL.run(B_in, cons, spec, ignore_routing=True)
     H_in = hard_state(B_in, cons, spec)
     before = PL.verdict(R_in)
-    cur = _cand("input", type("P", (), {"text": _read(src), "path": src, "R": R_in, "H": H_in})(), [])
+    cur = _cand("input", type("P", (), {"text": _read(src), "path": src, "R": R_in, "H": H_in, "removed": None,
+                                        "removed_rows": []})(), [])
 
     # phase 1: moves on the input (kept only if strictly better on the predictor key and no hard check worse)
     p1 = _pass(src, work, "pass1", cons, spec, rc, H_in, log)
@@ -245,7 +351,13 @@ def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=prin
             growth["table"].append({"option": f"layers: {v['variant']}", "fails": bool(v["sealed"] or v["overflow"] > 0),
                                     "sealed": v["sealed"], "overflow": v["overflow"], "score": v["score"]})
 
-    ok_g, probs = guard(board, cur["path"])
+    ok_g, probs = guard(board, cur["path"], cur.get("removed"))
+    rejected = []
+    if not ok_g:                                   # never deliver a board the guard rejects: OUT is the input, unchanged
+        rejected = probs
+        cur = _cand("input", type("P", (), {"text": _read(src), "path": src, "R": R_in, "H": H_in, "removed": None,
+                                            "removed_rows": []})(), [])
+        ok_g, probs = guard(board, src)
     B_out = RD.load(cur["path"])
     rows = _moved_rows(cur["moves"])
     maxd = max([math.hypot(r["to"][0] - r["from"][0], r["to"][1] - r["from"][1]) for r in rows] or [0.0])
@@ -262,7 +374,9 @@ def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=prin
                "growth": {"chosen": growth["chosen"], "allowed_mm": rc["may_grow_mm"], "sides": rc["may_grow_sides"],
                           "probes": growth["probes"], "table": growth["table"]},
                "owner_rows": _owner_rows(cur["R"], B_out, cons), "hard_in": H_in, "hard_out": cur["H"],
-               "guard": {"ok": ok_g, "problems": probs}, "settings": rc, "fails_output": PL.predicate(cur["R"])[0]}
+               "removed_copper": cur.get("removed_rows", []),
+               "guard": {"ok": ok_g, "problems": probs, "rejected": rejected}, "settings": rc,
+               "fails_output": PL.predicate(cur["R"])[0]}
     _write(out, cur["text"])
     with open(out + ".relieve.json", "w") as fh:
         json.dump(summary, fh, indent=1, default=str)
@@ -276,10 +390,11 @@ def run(board, cons, spec, out, rounds=None, may_grow=None, sides=None, log=prin
 
 def format_text(S, board, out):
     i, o = S["input"], S["output"]
-    L = [f"relieve: {'FAIL' if S['fails_output'] else 'ok'} - PLAN_SCORE {i['score']:g} -> {o['score']:g}; sealed {i['components']['sealed']} -> "
+    L = [f"relieve: {'GUARD FAILED' if S['guard']['rejected'] else 'FAIL' if S['fails_output'] else 'ok'} - PLAN_SCORE {i['score']:g} -> {o['score']:g}; sealed {i['components']['sealed']} -> "
          f"{o['components']['sealed']}, overflow {i['components']['overflow']:g} -> {o['components']['overflow']:g}; {S['parts_moved']} part(s) moved, "
          f"max {S['max_move_mm']:g} mm; {S['verdict']}",
-         f"  guard: {'ok' if S['guard']['ok'] else 'FAILED ' + '; '.join(S['guard']['problems'])}; collisions FAIL "
+         f"  guard: {'ok' if not S['guard']['rejected'] else 'FAILED (output is a copy of the input): ' + '; '.join(S['guard']['rejected'])}; "
+         f"removed copper {len(S['removed_copper'])}; collisions FAIL "
          f"{S['hard_in']['collisions_fail']} -> {S['hard_out']['collisions_fail']}; intent hard fails "
          f"{len(S['hard_in']['intent_hard_failed'])} -> {len(S['hard_out']['intent_hard_failed'])}",
          f"  output: {out}; ledger {out}.relieve.json"]

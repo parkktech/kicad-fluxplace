@@ -810,12 +810,16 @@ def st_plan_route(c, n, board):
 
 
 def st_relieve(c, n, board):
-    """`[relieve] enable = true` only (the stage is inserted after plan-route then): moves parts against the predictor, never worse.
+    """`[relieve] enable = true` only (the stage is inserted before fan-out, or after plan-route when there is none): moves parts
+    against the predictor, never worse; parts with copper on their pads stay put.
     Its output board feeds the next stage; a still-failing prediction is WARN and the options table is written to the stage dir."""
     d = c.dir(n, "relieve")
     out = os.path.join(d, "board.kicad_pcb")
     rc, text = _run_cli(["relieve", board, "--out", out, "--json", os.path.join(d, "relieve.json")] + c.cs(), os.path.join(d, "stage.log"))
     last = _last_line(text)
+    if "GUARD FAILED" in text or "relieve: guard diff" in text:      # the move was refused by the connectivity guard: the stage fails
+        return {"verdict": "fail", "line": "relieve: connectivity guard refused the moves (output is a copy of the input)",
+                "board": out if os.path.exists(out) else board}
     bad = bool(rc) or "FAIL" in last
     if os.path.exists(out) and not bad:
         return {"verdict": "pass", "line": last, "board": out}
@@ -975,7 +979,11 @@ def run(a):
     if a.constraints and "plan-route" in STAGES_ and "relieve" not in STAGES_:
         from . import constraints as C_relieve
         if bool(((C_relieve.load(a.constraints) or {}).get("relieve") or {}).get("enable", False)):
-            STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")      # default off: existing pipelines are unchanged
+            # default off: existing pipelines are unchanged. Before fan-out: the predictor sees a copper-free placement.
+            if "fanout" in STAGES_:
+                STAGES_.insert(STAGES_.index("fanout"), "relieve")
+            else:
+                STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")
     first = a.from_stage or STAGES_[0]
     last = a.to_stage or STAGES_[-1]
     i0, i1 = STAGES_.index(first), STAGES_.index(last)

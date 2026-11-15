@@ -190,9 +190,15 @@ def cmd_relieve(a):
     from . import relieve as RL
     cons, spec = _ctx(a)
     sides = [x.strip().upper() for x in a.grow_sides.split(",") if x.strip()] if a.grow_sides else None
-    S = RL.run(a.board, cons, spec, a.out, rounds=a.rounds, may_grow=a.may_grow, sides=sides, log=(lambda m: None), json_path=a.json)
-    o = S["output"]
+    S = RL.run(a.board, cons, spec, a.out, rounds=a.rounds, may_grow=a.may_grow, sides=sides, log=(lambda m: None), json_path=a.json,
+               allow_move_routed=bool(getattr(a, "allow_move_routed", False)))
     print(S["text"])
+    if S["guard"]["rejected"]:
+        print("relieve: guard diff (the move was refused; OUT is a copy of the input):")
+        for p in S["guard"]["rejected"]:
+            print(f"  {p}")
+        print(f"relieve: wrote {a.out} (copy of the input)")
+        return 1
     print(f"relieve: wrote {a.out}")
     return 1 if S["fails_output"] else 0
 
@@ -283,6 +289,8 @@ def add_parsers(sub):
     pr_.add_argument("--rounds", type=int, default=None, help="move rounds (default [relieve] rounds = 20)")
     pr_.add_argument("--may-grow", dest="may_grow", type=float, default=None, help="growth allowed, mm (default [relieve] may_grow_mm = 0)")
     pr_.add_argument("--grow-sides", dest="grow_sides", default=None, help="comma list of L,R,T,B growth may use")
+    pr_.add_argument("--allow-move-routed", dest="allow_move_routed", action="store_true",
+                     help="parts with copper on their pads may move; that copper is removed and listed for re-fan-out")
     pr_.add_argument("--json", default=None, help="also write the ledger here")
     pr_.set_defaults(fn=cmd_relieve)
 
