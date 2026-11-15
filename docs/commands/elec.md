@@ -1,0 +1,5 @@
+# Electrical checks (datasheet facts vs the spec netlist)
+
+Run in `review` and in `parts` / the parts-first stage, from the spec alone. Facts: [parts-fact](parts-fact.md). Codes: `SUPPLY_RANGE` (rail outside the part's recommended supply range, FAIL), `SOURCE_OVERLOAD` (sum of loads over the source limit FAIL, within 10 % WARN), `CONTACT_CURRENT` (pins x per-contact rating below the rail current, FAIL), `FUSE_SIZING` (`[fuse]` rating vs input current at the stated minimum voltage and temperature rerate, FAIL/WARN), `PIN_STRAP` (configuration pin straight on a rail/ground against its pin rule; a documented same-net mode is INFO), `CAP_VOLTAGE_MARGIN` (rating under the rail max or surge FAIL, under `[elec] cap_margin` WARN). Anything without data is one `ELEC_NOT_EVALUATED` INFO naming it, never a pass.
+
+Constraints: `[power."NET"] nominal_v min_v max_v surge_v source source_a load_extra_ma input_eff`; `[fuse] rating_a v_min also_v continuous_pct rerate extra_w`; `[elec] cap_margin source_warn_pct`; `[nets.NAME] role = "signal"` removes a sense/reference net from `POWER_CURRENT_UNKNOWN`.

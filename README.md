@@ -1,27 +1,24 @@
 # fluxplace
 
-Signal-flow-aware placement, routing analysis, design review and fab packaging for KiCad 10:
+Placement, routing analysis, design review and fab packaging for KiCad 10:
 headless CLI, KiCad plugin, MCP server.
 
-**AI agents: read only [AGENTS.md](AGENTS.md).** Per-command detail: `fluxplace help-brief CMD`.
+**AI agents: read only [AGENTS.md](AGENTS.md).** Detail: `fluxplace help-brief CMD`.
 
 ## Install
 
     pip install -e .            # numpy only; pcbnew from KiCad's python
-    fluxplace doctor            # names missing dependencies
+    fluxplace doctor            # missing deps
 
 Requirements: [docs/INSTALL.md](docs/INSTALL.md).
-
 ## Pipeline
 
 `fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages (floorplan-check, anchor-check,
-place, route-ready gate, route, tune, review); each reads the previous board and `W/state.json`.
-`--from/--to/--status` select. Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+place, route-ready, route, tune, review), each reading the previous board and `W/state.json`.
+`--from/--to/--status` select. See [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-Reports are compact; `--full`, `-q` ([output.md](docs/commands/output.md)).
-
+Reports are compact: `--full`, `-q` ([output.md](docs/commands/output.md)).
 ## Commands
-
 
 <!-- index:start -->
 deliver           split a fab package: CAM-only zip + loose...
@@ -83,6 +80,7 @@ blocks            functional-block inventory: --check placed...
 parts             part-entry gate...
 parts-todo        machine-readable parts work list for an...
 parts-apply       validate agent proposals (MPN in stock...
+parts-fact        record datasheet facts (vin, i_max...
 ready             readiness gate before place/route: parts...
 pin-groups        functional pin groups of multi-channel...
 part-diff         substitution diff: old vs new part pin...

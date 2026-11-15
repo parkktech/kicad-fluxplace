@@ -398,6 +398,8 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
             out.append(_f(INFO if acc else FAIL, "PART_GENERIC",
                           f"{ref} ({rows[ref]['value']}): generic passive, no MPN" + ("" if acc else " (not accepted: constraints [parts] generic_passives)"),
                           refs=[ref]))
+    from . import elec as EL
+    out += EL.check_spec(spec, cons, ds_dir, mpn_map)          # datasheet-driven electrical checks, before placement
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [x for x in out if not _waived(x, st["waive"])]
     out.sort(key=lambda x: (order[x["level"]], x["code"], x["msg"]))
@@ -578,7 +580,8 @@ def review_findings(spec, cons, facts, ds_dir, partdata=None):
     """For `review`: the PART_* findings.  Distributor-backed checks run only on the review's own fetched rows (`partdata`); the
     codes the review raises itself (MPN_MISSING, DATASHEET_MISSING) and bare package-missing notes are left out."""
     res = run(spec, cons, facts=facts, ds_dir=ds_dir, data=partdata or None)
-    skip = {"PART_MPN_MISSING", "PART_DATASHEET_MISSING", "PART_PACKAGE_MISSING"}
+    from . import elec as EL
+    skip = {"PART_MPN_MISSING", "PART_DATASHEET_MISSING", "PART_PACKAGE_MISSING"} | set(EL.CODES)     # elec codes: review's own check_elec
     return [x for x in res["findings"] if x["code"] not in skip and x["level"] != INFO]
 
 

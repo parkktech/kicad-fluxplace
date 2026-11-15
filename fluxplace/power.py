@@ -155,15 +155,21 @@ def is_pour(cons, net):
     return bool(r and r["pour"])
 
 
+def signal_nets(cons):
+    """Nets declared `[nets.NAME] role = "signal"`: sense / reference / logic nets that look like rails but carry no power."""
+    return {n for n, v in ((cons or {}).get("nets") or {}).items() if isinstance(v, dict) and v.get("role") == "signal"}
+
+
 def unknown_rails(cons, net_pads):
     """Rail-looking board nets (and [power.X] tables) with no current figure: [(net, volts_or_None, why)]."""
     from . import comprehend as CP
     declared = {n: p for n, p in ((cons or {}).get("power") or {}).items() if isinstance(p, dict)}
+    signal = signal_nets(cons)
     out = []
     for n, p in sorted(declared.items()):
-        if "width_mm" not in p and current_a(p) is None:
+        if n not in signal and "width_mm" not in p and current_a(p) is None:
             out.append((n, float(p["max_v"]) if p.get("max_v") is not None else None, "[power] table without a current"))
-    seen = set(declared)
+    seen = set(declared) | signal
     for c in CP._power_nets(net_pads or {}):
         if c["net"] not in seen:
             out.append((c["net"], c["volts"], "no [power] table"))
