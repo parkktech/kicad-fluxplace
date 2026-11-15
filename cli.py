@@ -4016,7 +4016,7 @@ def build_parser():
     ppl.add_argument("--layers", nargs="+", default=["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
     ppl.add_argument("--track", type=float, default=0.2)
     ppl.add_argument("--clearance", type=float, default=0.2)
-    ppl.add_argument("--router", choices=["krt", "freerouting", "auto"], default=None,
+    ppl.add_argument("--router", choices=["krt", "freerouting", "auto", "krt-whole"], default=None,
                      help="route stage: krt = KiCadRoutingTools, freerouting = whole-board Freerouting then krt on what is left, "
                           "auto = freerouting when a 2.5.0+ jar and Java are found (default [route] router, else krt)")
     ppl.add_argument("--freerouting-jar", default=None, help="Freerouting jar (else $FLUXPLACE_FREEROUTING_JAR, else newest ~/tools/freerouting*.jar)")
