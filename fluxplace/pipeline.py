@@ -773,9 +773,15 @@ def st_fanout(c, n, board):
     line = next((l for l in text.splitlines() if l.startswith("fanout:")), _last_line(text))
     # the gate line decides too: `fanout` returns its verdict code without exiting, so rc alone reads 0 on FANOUT_FAIL
     bad = rc != 0 or any(l.startswith(("fanout: FANOUT_FAIL", "fanout: FANOUT_DRC")) for l in text.splitlines())
-    res = {"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}
+    warn = any(l.startswith("fanout: FANOUT_WARN") for l in text.splitlines())      # waived / surface-only pins: left for the router
+    res = {"verdict": "fail" if bad else "warn" if warn else "pass", "line": line, "board": out if os.path.exists(out) else board}
+    from . import fanout as FO
+    if bad and FO.is_blocked_only(text) and rc == 1 and os.path.exists(out):
+        res["blocked_only"] = True                # a sealed pin only: --allow-incomplete may continue past it (pipeline)
     if bad:
         res["next"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_BLOCKED")][:5]
+    if warn:
+        res["waived"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_WAIVED")][:20]
     return res
 
 
@@ -992,6 +998,7 @@ def run(a):
     rc = 0
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
+    failed_on = []
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
@@ -1039,11 +1046,21 @@ def run(a):
                 print(l)
             print("pipeline: questions are open; relay them to the user, then re-run with --answer ID=CHOICE (never answer them yourself)")
             break
+        if res["verdict"] in ("fail", "blocked") and res.get("blocked_only") and getattr(c.a, "allow_incomplete", False):
+            print(f"pipeline: {name} FAIL on sealed pins only; --allow-incomplete: continuing (recorded in the ledger)", flush=True)
+            failed_on.append(name)
+            done = i
+            continue
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break
         done = i
     inc = led.finish(done)
+    if failed_on:
+        note = "stage(s) FAILED on sealed pins, passed by --allow-incomplete: " + ", ".join(failed_on)
+        inc = f"{inc} | {note}" if inc else "INCOMPLETE - " + note
+        with open(led.path, "a") as fh:
+            fh.write(inc + "\n")
     if inc:
         st["incomplete"] = _clip(inc, 160)
     else:

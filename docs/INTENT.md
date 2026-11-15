@@ -121,7 +121,8 @@ crystals, test points and mounting hardware are not connectors):
    pipeline stage. Without an `[intent]` table nothing is gated (`fluxplace intent` still reports the connector rules).
 
 A floorplan that ends `FAIL` (fan-out, legality) now exits 1 and fails its pipeline stage. The only way past it is
-`[floorplan] waive_fail = "reason"`, which is printed and recorded in the stage line.
+`[floorplan] waive_fail = "reason"`, which is printed and recorded in the stage line. A `REF.PIN` it names is also waived for the
+fan-out stage (`docs/commands/fanout.md`, `[fanout] waive`).
 
 ## Reading the gate
 
