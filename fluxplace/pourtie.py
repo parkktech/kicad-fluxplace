@@ -194,10 +194,90 @@ def _tie_pads(board, net, pads, pours):
     return tied, untied
 
 
-def run(board_in, board_out, workdir, nets=None):
+def _rect_pts(box):
+    return [(box.GetLeft(), box.GetTop()), (box.GetRight(), box.GetTop()), (box.GetRight(), box.GetBottom()),
+            (box.GetLeft(), box.GetBottom())]
+
+
+def outline_report(board, net, pad, pour_lids):
+    """how far the pad lies from the net's pour outline (mm), on the pour layers; the nearest zone."""
+    x, y = _pad_xy(pad)
+    best = None
+    for z in board.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != net or not any(z.IsOnLayer(l) for l in pour_lids):
+            continue
+        try:
+            d = pcbnew.ToMM(int(z.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y)))))
+        except (TypeError, RuntimeError):
+            continue
+        if best is None or d < best[0]:
+            best = (d, board.GetLayerName(z.GetLayer()))
+    return best
+
+
+def _grown_box(board, net, pad, pour_lids, max_mm):
+    """-> (zone, old box, grown box, None) when the pad can be taken, else (None, None, None, reason). Nothing is changed."""
+    x, y = _pad_xy(pad)
+    zs = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net and any(z.IsOnLayer(l) for l in pour_lids)]
+    if not zs:
+        return None, None, None, "no pour of this net"
+    z = min(zs, key=lambda q: q.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y))))
+    d = pcbnew.ToMM(int(z.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y)))))
+    if d > max_mm:
+        return None, None, None, f"{d:.2f} mm from the outline (extend_max_mm {max_mm:g})"
+    if z.Outline().OutlineCount() != 1 or z.Outline().Outline(0).PointCount() != 4:
+        return None, None, None, "outline is not a rectangle"
+    old = z.GetBoundingBox()
+    grown = pcbnew.BOX2I(old.GetPosition(), old.GetSize())
+    grown.Merge(pad.GetBoundingBox())
+    grown.Inflate(pcbnew.FromMM(0.3), pcbnew.FromMM(0.3))
+    grown.Merge(old)
+    clr = pcbnew.FromMM(0.2)
+    added = lambda bx: bx.Intersects(grown) and not bx.Intersects(old)
+    for t in board.GetTracks():
+        if t.GetNetname() == net:
+            continue
+        if t.Type() != pcbnew.PCB_VIA_T and t.GetLayer() not in pour_lids:
+            continue
+        tb = t.GetBoundingBox()
+        tb.Inflate(clr, clr)
+        if added(tb):
+            return None, None, None, f"other-net copper {t.GetNetname()} in the added area"
+    for f in board.GetFootprints():
+        for q in f.Pads():
+            if q.GetNetname() == net or q.GetNetname() == "" or not any(l in pour_lids for l in pad_copper_lids(q)):
+                continue
+            qb = q.GetBoundingBox()
+            qb.Inflate(clr, clr)
+            if added(qb):
+                return None, None, None, f"other-net pad {f.GetReference()}.{q.GetNumber()} in the added area"
+    for k in board.Zones():
+        if k is z or k.GetNetname() == net or not k.GetIsRuleArea():
+            continue
+        if added(k.GetBoundingBox()):
+            return None, None, None, "keepout in the added area"
+    return z, old, grown, None
+
+
+def try_extend(board, net, pad, max_mm, pour_lids, commit=False):
+    """grow a rectangular pour outline to take the pad when the added area holds no other-net copper, pad or keepout on
+    the pour's layers. -> (ok, reason). Changes the zone only when `commit`."""
+    z, old, grown, why = _grown_box(board, net, pad, pour_lids, max_mm)
+    if why:
+        return False, why
+    if commit:
+        o = z.Outline()
+        o.RemoveAllContours()
+        o.NewOutline()
+        for px, py in _rect_pts(grown):
+            o.Append(px, py)
+    return True, None
+
+
+def run(board_in, board_out, workdir, nets=None, cons=None):
     """pour-first tie for every net with a copper zone -> record (also written to workdir/pourtie.json)."""
     board = pcbnew.LoadBoard(board_in)
-    rec = {"nets": {}, "tied": [], "untied": []}
+    rec = {"nets": {}, "tied": [], "untied": [], "satisfied": []}
     if board is None:                            # not a KiCad board (a stub or an unreadable file): nothing to tie
         import shutil
         shutil.copy(board_in, board_out)
@@ -213,24 +293,73 @@ def run(board_in, board_out, workdir, nets=None):
         return rec
     PL.refill(board)
     pm = pour_map(board)
+    pcfg = ((cons or {}).get("pours") or {})
+    extend_on = bool(pcfg.get("extend_to_pads", False))
+    ext_max = float(pcfg.get("extend_max_mm", 5.0))
+    rec["outside"] = []
     for net in sorted(pm):
         if nets is not None and net not in nets:
             continue
         pads = [p for f in board.GetFootprints() for p in f.Pads() if p.GetNetname() == net and not p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH]
         if not pads:
             continue
-        already = sum(1 for p in pads if tie_status(board, net, p, pm[net])[0])
-        todo = [p for p in pads if not tie_status(board, net, p, pm[net])[0]]
+        already_pads = [p for p in pads if tie_status(board, net, p, pm[net])[0]]
+        todo = [p for p in pads if p not in already_pads]
         tied, untied = _tie_pads(board, net, todo, pm[net]) if todo else ([], [])
         rec["nets"][net] = {"pour_layers": [board.GetLayerName(l) for l in pm[net]], "pads": len(pads),
-                            "tied_before": already, "tied_by_via": len(tied), "untied": len(untied)}
+                            "tied_before": len(already_pads), "tied_by_via": len(tied), "untied": len(untied)}
+        for p in already_pads:
+            rec["satisfied"].append({"net": net, "ref": _ref(p), "pad": p.GetNumber(), "at": _mm_at(p)})
+        for t in tied:
+            rec["satisfied"].append(dict(t, ref=_ref(_pad_at(board, net, t["at"]))))
+        for u in untied:
+            u["ref"] = _ref(_pad_at(board, net, u["at"]))
+            if "outside" in u["reason"]:
+                p_ = _pad_at(board, net, u["at"])
+                rep = outline_report(board, net, p_, pm[net]) if p_ else None
+                u["outline_mm"] = round(rep[0], 3) if rep else None
+                u["pour_layer"] = rep[1] if rep else None
+                rec["outside"].append({"net": net, "ref": u["ref"], "pad": u["pad"], "at": u["at"],
+                                       "dist_mm": u["outline_mm"], "layer": u["pour_layer"],
+                                       "extendable": None, "why": None})
         rec["tied"] += tied
         rec["untied"] += untied
+    if extend_on and rec["outside"]:                   # opt-in: grow the outline to the pad when the added area is clear
+        for o in rec["outside"]:
+            p_ = _pad_at(board, o["net"], o["at"])
+            ok, why = try_extend(board, o["net"], p_, ext_max, pm[o["net"]], commit=True)
+            o["extendable"], o["why"] = ok, why
+            if ok:
+                tied, _u = _tie_pads(board, o["net"], [p_], pm[o["net"]])
+                if tied:
+                    rec["tied"] += tied
+                    rec["satisfied"].append(dict(tied[0], ref=o["ref"]))
+                    rec["untied"] = [u for u in rec["untied"] if not (u["net"] == o["net"] and u["at"] == o["at"])]
+                    rec["nets"][o["net"]]["tied_by_via"] += 1
+                    rec["nets"][o["net"]]["untied"] -= 1
+    else:
+        for o in rec["outside"]:
+            p_ = _pad_at(board, o["net"], o["at"])
+            o["extendable"], o["why"] = try_extend(board, o["net"], p_, ext_max, pm[o["net"]]) if p_ else (False, "pad not found")
+            if o["extendable"]:                       # report only: the zone is not grown
+                o["extendable"], o["why"] = True, "clear; extend_to_pads = false, not grown"
     PL.refill(board)
     pcbnew.SaveBoard(board_out, board)
     with open(os.path.join(workdir, "pourtie.json"), "w") as fh:
         json.dump(rec, fh, indent=1)
     return rec
+
+
+def _ref(pad):
+    if pad is None:
+        return ""
+    f = pad.GetParentFootprint()
+    return f.GetReference() if f is not None else ""
+
+
+def _mm_at(pad):
+    p = pad.GetPosition()
+    return [round(pcbnew.ToMM(p.x), 4), round(pcbnew.ToMM(p.y), 4)]
 
 
 def _pad_at(board, net, at_mm):

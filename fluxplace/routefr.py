@@ -25,6 +25,7 @@ import subprocess
 import time
 import zipfile
 
+from . import pourdsn as PDS
 from . import routeconn as RC
 
 ENV_JAR, ENV_JAVA = "FLUXPLACE_FREEROUTING_JAR", "FLUXPLACE_JAVA"
@@ -367,8 +368,16 @@ def repair_subfloor(board, workdir, floor, clearance, out=None):
 
 
 # ------------------------------------------------------------------ the run
+def _pour_job(text, pour_json):
+    """the pour-aware job (pourdsn.apply) on the DSN text; the one call site of pourdsn in the export path."""
+    if not pour_json:
+        return text, None
+    with open(pour_json) as fh:
+        return PDS.apply(text, json.load(fh))
+
+
 def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearance, budget_s, S=None, cons=None,
-                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0):
+                skip_nets=(), has_fanout=False, conn=None, post=None, tick=None, poll=2.0, pour=None):
     """One Freerouting run on `board` -> `out`. -> the record (see module doc); `ok` False + `error` on failure,
     in which case `out` is not written.  `subfloor.failed` non-empty = sub-floor copper is still on `out`: the caller
     must fail its stage."""
@@ -397,6 +406,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             raise RuntimeError("Specctra DSN export failed")
         with open(dsn, errors="surrogateescape") as fh:
             text, rep = fix_dsn(fh.read(), planes, floor_track, floor_clearance, skip_nets)
+            text, rep["pour"] = _pour_job(text, pour)              # the router's copy: pour-satisfied connections taken out
         if rep["planes_missed"]:
             raise RuntimeError("plane layer(s) not found in the DSN, refusing to route on them: " + ", ".join(rep["planes_missed"]))
         with open(dsn, "w", errors="surrogateescape") as fh:
@@ -420,6 +430,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
             raise RuntimeError(f"Freerouting left no usable session (rc {jr['rc']}, {'killed by the watchdog' if jr['killed'] else 'exited'}"
                                f" after {jr['elapsed']:.0f}s): {tail}")
         t1 = time.time()
+        rec["pour"] = {"ses_derived_renamed": PDS.unmap_ses(ses)} if pour else None
         tmp = out + ".fr-import.kicad_pcb"
         _side(board, tmp)
         rec["import"] = _helper("import", {"board": board, "ses": ses, "out": tmp, "skip_nets": sorted(skip_nets)}, workdir)

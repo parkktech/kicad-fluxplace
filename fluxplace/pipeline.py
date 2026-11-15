@@ -731,7 +731,8 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     out = os.path.join(d, "freerouting.kicad_pcb")
     rec = FR.route_board(board, out, os.path.join(d, "freerouting"), loc=a.fr_loc, planes=planes, floor_track=R["min_track"],
                          floor_clearance=R["min_clearance"], budget_s=fb, S=FS, cons=c.cons, skip_nets=skip,
-                         has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick)
+                         has_fanout=BR.has_fanout(board), conn=conn, post=post_round, tick=tick,
+                         pour=_pour_json(c))
     rec["out"] = out
     rec["open_before"] = sum(conn(board).values())
     if rec.get("ok") and FS["pairs"] == "route":         # pairs Freerouting routed itself are never reported good unaudited
@@ -861,7 +862,7 @@ def st_pour_tie(c, n, board):
     from . import pourtie as PTI
     d = c.dir(n, "pour-tie")
     out = os.path.join(d, "board.kicad_pcb")
-    rec = PTI.run(board, out, d)
+    rec = PTI.run(board, out, d, cons=c.cons)
     _sidecar(board, out)
     before = sum(v["tied_before"] for v in rec["nets"].values())
     new = sum(v["tied_by_via"] for v in rec["nets"].values())
@@ -880,6 +881,12 @@ def pt_rec_nets(ptd):
         return set(json.load(open(os.path.join(ptd, "pourtie.json")))["nets"])
     except (OSError, ValueError, KeyError):
         return set()
+
+
+def _pour_json(c):
+    """the pour-tie record the router's job is cut by (None when the flow ran without the pour-tie stage)."""
+    d = _pour_tie_dir(c)
+    return os.path.join(d, "pourtie.json") if d else None
 
 
 def _pour_tie_dir(c):
