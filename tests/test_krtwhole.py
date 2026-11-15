@@ -402,3 +402,13 @@ def test_a_router_output_that_drops_locked_input_copper_is_detectable(tmp_path):
     out = str(tmp_path / "o.kicad_pcb")
     P.SaveBoard(out, b)
     assert len(keys - KW.copper_keys(out)) == 1
+
+
+def test_a_router_killed_by_a_signal_is_run_again_once(monkeypatch, tmp_path):
+    rcs = iter([-15, 3])
+    monkeypatch.setattr(KW.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=next(rcs)))
+    rc, _s = KW.run_router(["x"], str(tmp_path), str(tmp_path / "l.log"))
+    assert rc == 3 and "attempt 2" in open(str(tmp_path / "l.log")).read()
+    rcs = iter([-9, -9, 0])
+    monkeypatch.setattr(KW.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=next(rcs)))
+    assert KW.run_router(["x"], str(tmp_path), str(tmp_path / "l.log"))[0] == -9          # one retry only

@@ -280,14 +280,22 @@ def router_cmd(a, R, d, script, src, dst, extra=(), esc="off"):
     return cmd + list(extra)
 
 
-def run_router(cmd, cwd, log, cap_s=CAP_S):
-    """-> (rc, seconds). Output to `log`; capped by wall clock only (rc 124 on the cap)."""
+def run_router(cmd, cwd, log, cap_s=CAP_S, signal_retries=1):
+    """-> (rc, seconds). Output to `log`; capped by wall clock only (rc 124 on the cap). A router killed by a signal (rc < 0:
+    a reaper on a shared machine, the OOM killer) is run again up to `signal_retries` times; the log keeps every attempt."""
     t = time.time()
-    with open(log, "w") as fh:
-        try:
-            rc = subprocess.run(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, timeout=cap_s).returncode
-        except subprocess.TimeoutExpired:
-            rc = 124
+    rc = 0
+    for attempt in range(signal_retries + 1):
+        with open(log, "w" if attempt == 0 else "a") as fh:
+            if attempt:
+                fh.write(f"\n=== krt-whole: router killed by signal {-rc}; attempt {attempt + 1} ===\n")
+                fh.flush()
+            try:
+                rc = subprocess.run(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, timeout=cap_s).returncode
+            except subprocess.TimeoutExpired:
+                return 124, round(time.time() - t, 1)
+        if rc >= 0:
+            break
     return rc, round(time.time() - t, 1)
 
 
