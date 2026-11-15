@@ -243,10 +243,13 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     fo = has_fanout(board)
     cls = cls or NC.classify(B, cons, spec)
     from . import railroute as RL
-    rails = set(RL.rail_nets(B, cons, cls, [n for n in nets if n in open0])[0])    # a rail is never one batch job: parallel mode routes it as a tree
+    # rails keep their "rails" phase but are ordinary jobs here: parallel mode splits them into a tree (routepar); in batch
+    # mode they used to be dropped from the work list, so their open connections had no owner (ROUTE_NET_UNOWNED)
+    rails = set(RL.rail_nets(B, cons, cls, [n for n in nets if n in open0])[0])
     first_eff = () if fo else first
-    ph = phase_map(B, [n for n in nets if n in open0 and n not in rails], cls, cons, first_eff, power, escape_nets_of(board, cons))
-    order = order_nets(B, [n for n in nets if n in open0 and n not in rails], cls, first_eff, power, hint, fanout=fo, phases=ph)
+    work = [n for n in nets if n in open0]
+    ph = phase_map(B, work, cls, cons, first_eff, power, escape_nets_of(board, cons), rails=rails)
+    order = order_nets(B, work, cls, first_eff, power, hint, fanout=fo, phases=ph)
     order_info = order_summary(order, ph)
     cur, cur_open = board, open0
     cur_B = B
@@ -389,8 +392,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
         else:
             for n in left:
                 reasons.setdefault(n, "budget")
-    rl = sorted(n for n in rails if n in cur_open)
-    out = finish(order + rl, cur, cur_open, cks, dict(reasons, **{n: 'rail: set [route] mode = "parallel" (tree routing)' for n in rl}), stats, open0, t0)
+    out = finish(order, cur, cur_open, cks, reasons, stats, open0, t0)
     out["dropped"] = tally.totals()
     push_status("done")
     write_leftovers(workdir, out)
