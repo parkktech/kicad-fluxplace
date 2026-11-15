@@ -562,8 +562,9 @@ def st_route(c, n, board):
     # plane nets: one explicit owner (planetie) ties floating fragments to their pour, after the router and after the
     # last copper change; what it cannot close is listed with a reason and owned by "plane-tie"
     from . import planetie as PT
-    plane_nets = sorted(n for n, i in cls.items() if i.get("class") == "plane")
-    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None)
+    from . import escapeplan as EP
+    plane_nets = sorted(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))      # the nets that connect through a plane/pour
+    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d)
     if ptr["placed"]:
         shutil.copy(ptr["board"], best)
         _sidecar(board, best)

@@ -4,6 +4,9 @@ The router counts a plane net's pads as connected through a pour, so a pad whose
 into the plane, or a void in the fill) stays open with no owner.  This step walks the real connectivity clusters of each
 plane net on each inner layer that carries its zone (planes.tie_floating_clusters: one fill-verified, clearance-checked
 via per floating cluster), refills the zones and reports what is still open with a reason.  Nothing else is changed."""
+import math
+import os
+
 
 
 def plane_zone_layers(board, netname):
@@ -22,7 +25,65 @@ def plane_zone_layers(board, netname):
     return [k for k, _ in sorted(best.items(), key=lambda kv: -kv[1])]
 
 
-def run(board_in, board_out, plane_nets, conn, log=None):
+def unconnected_pads(board_path, nets, cli="/usr/bin/kicad-cli", workdir=None):
+    """kicad-cli's own verdict: {net: [(x_mm, y_mm), ...]} for every pad of `nets` in a 'Missing connection' DRC item
+    (zones refilled by kicad-cli). The pads are where a via can reach the plane; nothing is inferred."""
+    import json, subprocess, tempfile
+    wd = workdir or tempfile.mkdtemp(prefix="planetie-")
+    out = os.path.join(wd, "drc.json")
+    subprocess.run([cli, "pcb", "drc", "--refill-zones", "--format", "json", "--severity-all", "--output", out, board_path],
+                   capture_output=True, text=True, timeout=900)
+    try:
+        items = json.load(open(out)).get("unconnected_items", [])
+    except (OSError, ValueError):
+        return {}
+    want = set(nets)
+    res = {}
+    import re
+    for it in items:
+        for sub in it.get("items", []):
+            m = re.match(r"Pad \S+ \[(.+?)\] of .* on (\S+)$", sub.get("description", ""))
+            if m and m.group(1) in want:
+                pos = sub["pos"]
+                res.setdefault(m.group(1), set()).add((round(pos["x"], 4), round(pos["y"], 4), m.group(2)))
+    return {k: sorted(v) for k, v in res.items()}
+
+
+def _pad_ties(board, netname, pads):
+    """Each unconnected pad (x, y, layer): a via on a short same-net stub from the pad, at the nearest of a few ring sites
+    that planes.via_at_points accepts (it keeps the via clear of other-net copper and holes). The stub is on the pad layer.
+    kicad-cli judges the result (the caller re-runs the DRC); a pad with no legal site is left open and reported."""
+    import pcbnew
+    from . import planes as PL
+    n_ok = 0
+    nc = board.FindNet(netname)
+    for x, y, layer in pads:
+        for r_mm in (0.0, 0.8, 1.1, 1.4):
+            cands = [(x, y)] if r_mm == 0.0 else [(x + r_mm * math.cos(a), y + r_mm * math.sin(a))
+                                                    for a in [k * math.pi / 6 for k in range(12)]]
+            done = False
+            for cx, cy in cands:
+                if not PL.hole_ok(board, cx, cy):
+                    continue
+                if PL.via_at_points(board, netname, [(cx, cy)]) != 1:
+                    continue
+                if r_mm > 0.0:
+                    tr = pcbnew.PCB_TRACK(board)
+                    tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+                    tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(cx), pcbnew.FromMM(cy)))
+                    tr.SetWidth(pcbnew.FromMM(0.15))
+                    tr.SetLayer(board.GetLayerID(layer))
+                    tr.SetNet(nc)
+                    board.Add(tr)
+                n_ok += 1
+                done = True
+                break
+            if done:
+                break
+    return n_ok
+
+
+def run(board_in, board_out, plane_nets, conn, log=None, workdir=None):
     """Tie every floating cluster of each plane net to its plane, refill, save board_out.
     -> {"placed": n, "per_net": {net: {"open_before", "open_after", "layer", "vias", "reason"}}, "board": board_out}.
     `conn` is batchroute's connectivity count (net -> open connections) and is the only judge of "connected"."""
@@ -35,6 +96,7 @@ def run(board_in, board_out, plane_nets, conn, log=None):
         import shutil
         shutil.copy(board_in, board_out)
         return rec
+    pad_pts = unconnected_pads(board_in, targets, workdir=workdir)
     board = pcbnew.LoadBoard(board_in)
     PL.refill(board)                 # the tie tests the FILLED copper: fill the zones first
     for n in targets:
@@ -45,6 +107,7 @@ def run(board_in, board_out, plane_nets, conn, log=None):
         else:
             for ly in layers:
                 r["vias"] += PL.tie_floating_clusters(board, n, ly)
+            r["vias"] += _pad_ties(board, n, pad_pts.get(n, []))
         rec["per_net"][n] = r
         rec["placed"] += r["vias"]
     PL.refill(board)

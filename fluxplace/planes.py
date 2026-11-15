@@ -201,6 +201,27 @@ def via_stub_ends(board, netnames=("GND",), via_d=0.6, via_drill=0.3,
     return placed
 
 
+def hole_ok(board, x, y, via_drill=0.3, extra=(), hgap_mm=0.25):
+    """hole-to-hole for a new via centre (x, y) in nm: no drilled pad or via of ANY net within the fab's hole spacing
+    (same-net holes included: the same-net copper is not an obstacle for a tie, but a drill rule still applies)."""
+    hgap = _mm(hgap_mm) + _mm(via_drill) // 2
+    for f in board.GetFootprints():
+        for p in f.Pads():
+            r = p.GetDrillSize().x // 2
+            if r > 0 and (p.GetPosition().x - x) ** 2 + (p.GetPosition().y - y) ** 2 < (r + hgap) ** 2:
+                return False
+    for t in board.GetTracks():
+        if t.Type() == pcbnew.PCB_VIA_T:
+            r = t.GetDrill() // 2
+            q = t.GetPosition()
+            if (q.x - x) ** 2 + (q.y - y) ** 2 < (r + hgap) ** 2:
+                return False
+    for ox, oy, r in extra:
+        if (ox - x) ** 2 + (oy - y) ** 2 < (r + hgap) ** 2:
+            return False
+    return True
+
+
 def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
                   keep=0.2):
     """Drop a through-via at each (x, y) mm point on `netname`, skipping
@@ -226,9 +247,17 @@ def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
         a = t.GetStart(); b = t.GetEnd()
         segs.append((a.x, a.y, b.x, b.y,
                      t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+    # hole-to-hole, any net (same-net holes are not obstacles above): a drill within the fab's hole spacing is refused,
+    # including the vias placed earlier in this call
+    holes = [(p.GetPosition().x, p.GetPosition().y, p.GetDrillSize().x // 2) for f in board.GetFootprints() for p in f.Pads()
+             if p.GetDrillSize().x > 0]
+    holes += [(t.GetPosition().x, t.GetPosition().y, t.GetDrill() // 2) for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    hgap = _mm(0.25) + _mm(via_drill) // 2
     placed = 0
     for (xm, ym) in points_mm:
         x, y = _mm(xm), _mm(ym)
+        if any((x - ox) ** 2 + (y - oy) ** 2 < (r + hgap) ** 2 for ox, oy, r in holes):
+            continue
         if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):
             continue
         hit = False
@@ -250,6 +279,7 @@ def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
         v.SetNetCode(nc)
         board.Add(v)
         _keepalive.append(v)
+        holes.append((x, y, _mm(via_drill) // 2))
         placed += 1
     return placed
 
@@ -436,7 +466,7 @@ def tie_floating_clusters(board, netname, plane_layer, via_d=0.6,
             for u in (0.5, 0.25, 0.75, 0.0, 1.0):
                 x = a.x + u * (b.x - a.x)
                 y = a.y + u * (b.y - a.y)
-                if on_fill(x, y) and clear_at(x, y):
+                if on_fill(x, y) and clear_at(x, y) and hole_ok(board, x, y, via_drill):
                     v = pcbnew.PCB_VIA(board)
                     v.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
                     v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))

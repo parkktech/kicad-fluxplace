@@ -74,3 +74,20 @@ def test_plane_net_without_a_zone_reports_why(tmp_path):
     assert rec["per_net"]["NOPE"]["reason"].startswith("no zone")      # open plane net with no pour: reported, not silent
     rec2 = PT.run(src, str(tmp_path / "out3.kicad_pcb"), ["GND"], lambda p: {"GND": 1})
     assert rec2["per_net"]["GND"]["layer"] == "In1.Cu"
+
+
+def test_via_at_points_refuses_a_hole_within_the_fab_spacing(tmp_path):
+    """hole-to-hole, any net: a same-net via 0.3 mm away used to be accepted (same-net copper is not an obstacle), and
+    kicad-cli then reported hole_to_hole for the pair. planes.hole_ok / via_at_points now refuse it."""
+    import pcbnew
+    from fluxplace import planes as PLN
+    src = make(str(tmp_path / "h.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    v = pcbnew.PCB_VIA(b)
+    v.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(15)))
+    v.SetWidth(pcbnew.FromMM(0.6)); v.SetDrill(pcbnew.FromMM(0.3)); v.SetNetCode(b.FindNet("GND").GetNetCode())
+    b.Add(v)
+    assert PLN.hole_ok(b, pcbnew.FromMM(20.3), pcbnew.FromMM(15)) is False
+    assert PLN.hole_ok(b, pcbnew.FromMM(21.5), pcbnew.FromMM(15)) is True
+    assert PLN.via_at_points(b, "GND", [(20.3, 15.0)]) == 0
+    assert PLN.via_at_points(b, "GND", [(21.5, 15.0)]) == 1
