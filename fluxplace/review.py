@@ -57,6 +57,8 @@ ENVIRONMENT. This module does that:
                          mezzanine module, in an antenna corner) on the
                          forbidden side or above the height limit
   LOCK_MOVED / LOCK_MISSING
+  PIN_RELEASED (WARN) / PIN_CONFLICT (FAIL)  a pinned part the placement step moved to resolve a collision with a higher-precedence
+                     pin (`<board>.pins.json`, pins.py); make it permanent by updating the lock
                          a footprint the enclosure fixes ([lock.at] — bolt
                          pattern, panel connectors) is not where it must be
   POLICY_NOT_AEC / POLICY_DIELECTRIC / POLICY_PASSIVE_SIZE
@@ -1669,6 +1671,33 @@ def check_locks(facts, cons):
     return out
 
 
+def check_pins(facts, cons=None):
+    """PIN_RELEASED (WARN) per pinned unit the placement step released and moved (decision list in `<board>.pins.json`, written
+    by `floorplan`; pins.py), PIN_CONFLICT (FAIL) per collision between two explicit pins it could not resolve."""
+    import json
+    path = facts.get("board_path") or facts.get("board")
+    if not path:
+        return []
+    f = os.path.splitext(path)[0] + ".pins.json"
+    if not os.path.exists(f):
+        return []
+    try:
+        rec = json.load(open(f))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for d in rec.get("decisions", []):
+        a, b = d["from"], d["to"]
+        out.append(_f(WARN, "PIN_RELEASED",
+                      f"{d['anchor']}{' (+' + ', '.join(r for r in d['unit'] if r != d['anchor']) + ')' if len(d['unit']) > 1 else ''} "
+                      f"released from its pin and moved ({a[0]:g}, {a[1]:g}) -> ({b[0]:g}, {b[1]:g}) = {d['distance']:g} mm: {d['why']}; "
+                      f"update the lock / fixed list to make it permanent", refs=d["unit"]))
+    for u in rec.get("unresolved", []):
+        out.append(_f(FAIL, "PIN_CONFLICT", f"{', '.join(u['a'])} x {', '.join(u['b'])}: two pins collide and cannot be ranked",
+                      refs=list(u["a"]) + list(u["b"])))
+    return out
+
+
 def check_sheet(facts, cons):
     """SHEET_OFF_PAGE: the board outline must sit inside the drawing sheet's
     usable area (10 mm frame + 5 mm) and clear of the title block — otherwise
@@ -1911,6 +1940,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_control_pins(spec, cons)
     out += check_open(facts, cons)
     out += check_locks(facts, cons)
+    out += check_pins(facts, cons)
     out += check_sheet(facts, cons)
     out += check_title_block(facts, cons, spec, stage)
     out += check_policy(facts, cons)

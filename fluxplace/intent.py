@@ -11,7 +11,8 @@ Full reference with examples: docs/INTENT.md. Keys (all under `[intent]`; every 
   [[intent.region]]  name, rect = [x0, y0, x1, y1] or under = "REF" (+ margin_mm), side = "F"|"B"|"both", keep = "out"|"in",
                      max_height_mm (keep-out: only parts taller than this are forbidden; absent = nothing at all),
                      refs (keep-in: these must be inside; keep-out: only these are concerned), allow = [refs]
-  [[intent.group]]   name, refs (move and turn as ONE body), rel = {REF = [dx, dy, rot]} (verified poses in the frame of the
+  [[intent.group]]   name, refs (move and turn as ONE body; `rigid = false` opts out, default true: floorplan, seater, pin
+                     resolution and relieve never move one member alone), rel = {REF = [dx, dy, rot]} (verified poses in the frame of the
                      first ref), swept = [refs] | "all" (their bounding box + swept_margin_mm is occupied on swept_side;
                      parts up to swept_max_height_mm may sit under it; absent = nothing at all, holes included;
                      swept_allow = [refs] may sit in it regardless)
@@ -156,6 +157,7 @@ def items(B, cons):
                       "swept": (refs if sw == "all" else [r for r in _list(sw) if r in parts]) if sw else [],
                       "margin": float(e.get("swept_margin_mm", 0.0)), "side": side[:1] if side else None,
                       "max_h": e.get("swept_max_height_mm"), "hard": bool(e.get("hard", True)),
+                      "rigid": bool(e.get("rigid", True)),
                       "allow": set(match(parts, e.get("swept_allow")))})
     sup = sec.get("support") or {}
     support = {"follow": bool(sup.get("follow", True)), "decap_hard": bool(sup.get("decap_hard", True)),
@@ -172,7 +174,7 @@ def effective(cons, B=None):
     c = copy.deepcopy(cons)
     pl = c.setdefault("placement", {})
     for i, e in enumerate(sec.get("group", []) or []):
-        if e.get("refs"):
+        if e.get("refs") and e.get("rigid", True):
             pl.setdefault("group", {}).setdefault("intent:" + str(e.get("name") or f"group{i + 1}"), {"refs": list(e["refs"])})
     return c
 
@@ -566,7 +568,7 @@ class Seater:
         self.entry = {s["ref"]: s for c in cl for s in c["supports"] if s["sure"]}
         self.sup = {c["ic"]: [s["ref"] for s in c["supports"] if s["sure"]] for c in cl}
         self.owner = {s: ic for ic, v in self.sup.items() for s in v}
-        self.group_of = {r: g["refs"] for g in self.it["group"] for r in g["refs"]}
+        self.group_of = {r: g["refs"] for g in self.it["group"] if g["rigid"] for r in g["refs"]}
         self.nets = _signal_nets(B)
         self.cls = NC.classify(B, self.cons, spec)
         self.near_refs = {r for n in self.it["near"] for r in (n.get("chain") or n.get("refs") or ())}
@@ -625,7 +627,7 @@ class Seater:
         for r, (x, y, a) in poses.items():
             pads, court = GM.moved(self.parts[r], x, y, a)
             for kind, d in self.L.part_issues(r, court, pads):
-                o = d if kind == "overlap" else d.split("/")[1].rsplit(".", 1)[0] if kind == "pad_short" else None
+                o = d if kind in ("overlap", "hole") else d.split("/")[1].rsplit(".", 1)[0] if kind == "pad_short" else None
                 if o is not None and (o in mem or (ghosts and o not in cl)):
                     continue
                 ok = False
@@ -832,7 +834,7 @@ class Seater:
                 continue
             bad = False
             for kind, d in self.L.part_issues(r):
-                o = d if kind == "overlap" else d.split("/")[1].rsplit(".", 1)[0] if kind == "pad_short" else None
+                o = d if kind in ("overlap", "hole") else d.split("/")[1].rsplit(".", 1)[0] if kind == "pad_short" else None
                 if o is None and kind != "outside" or (o is not None and o in cl):
                     bad = True
                     break

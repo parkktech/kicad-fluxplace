@@ -69,6 +69,7 @@ allow = ["J5"]
 [[intent.group]]         # several parts are ONE rigid body
 name = "card"
 refs = ["J7", "H1", "H2"]          # socket + stand-offs
+# rigid = false          # opt out: members may then move alone (default true: one body in floorplan, pins, relieve)
 swept = "all"            # the bounding box of these refs (or a list of them) is occupied space ...
 swept_margin_mm = 4.0
 swept_side = "B"         # ... on this side (default: the side of the first ref) ...

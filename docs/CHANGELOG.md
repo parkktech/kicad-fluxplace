@@ -1,5 +1,14 @@
 # Change log (moved from the README)
 
+## 2026-11-15 - placement: pin conflicts resolved, holes go through the board
+
+`fluxplace/pins.py` (`docs/commands/floorplan.md`, "Pinned-part conflicts"): before `floorplan` searches, collisions among
+parts it may not move are resolved by precedence (`[lock.at]` > hard intent > `fixed` > hardware; rigid groups move as one body),
+the loser re-seated at the nearest legal pose with a `stay` cost; two explicit coordinates stop with `PIN_CONFLICT` unless
+`[placement] resolve_pin_conflicts = "auto"`; review reports `PIN_RELEASED`. `legality.Legal.hole_issues`: a drilled hole occupies
+both sides, in the placers and (same code) in the collision gate; the route floor now also bounds `Legal`'s pad clearance.
+`[[intent.group]] rigid` (default true); relieve moves a group member only with its group.
+
 ## 2026-11-13 - Freerouting as a route stage; exit codes
 
 `pipeline --router krt|freerouting|auto` (`[route] router`, `fluxplace/routefr.py`, `docs/commands/route.md`): one whole-board

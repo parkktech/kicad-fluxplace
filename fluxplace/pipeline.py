@@ -170,6 +170,9 @@ def _sidecar(src, dst):
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
+    pn = os.path.splitext(src)[0] + ".pins.json"           # pin-conflict decisions (pins.py) travel with the board: review reports them
+    if os.path.exists(pn):
+        shutil.copy(pn, os.path.splitext(dst)[0] + ".pins.json")
     m = os.path.splitext(src)[0] + ".fluxmap.json"        # the map (answers, pours, fan-out record) travels with the board
     if os.path.exists(m) and not os.path.exists(os.path.splitext(dst)[0] + ".fluxmap.json"):
         shutil.copy(m, os.path.splitext(dst)[0] + ".fluxmap.json")

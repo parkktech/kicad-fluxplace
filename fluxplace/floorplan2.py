@@ -71,6 +71,10 @@ class Plan:
         self.Y = np.array([m["pos"][1] for m in self.mods])
         self.T = np.zeros(self.n, int)
         self.src = (self.X.copy(), self.Y.copy())
+        # pins.py: a unit released from its pin stays near the pose it was re-seated at (`[floorplan] stay`); absent = no term
+        st = (cons.get("floorplan") or {}).get("stay") or {}
+        sr = set(st.get("refs", []) or [])
+        self.stay = np.array([float(st.get("weight", 5.0)) if sr & set(m["members"]) else 0.0 for m in self.mods])
         self.halo = np.zeros(self.n)
         fx = MD.fixed_set(B, cons)
         self.L = LGL.Legal(B, cons, fx)
@@ -158,11 +162,14 @@ class Plan:
         else:
             bx = 0.0
         blk = block_spread(self.X, self.Y, self.fixed, self.blk)
-        return {"wl": wl, "over": over, "cross": cr, "compact": bx, "block": self.blk_w * blk,
-                "intent": self.intent.penalty() if self.intent.items else 0.0}
+        out = {"wl": wl, "over": over, "cross": cr, "compact": bx, "block": self.blk_w * blk,
+               "intent": self.intent.penalty() if self.intent.items else 0.0}
+        if self.stay.any():
+            out["stay"] = float((self.stay * (np.abs(self.X - self.src[0]) + np.abs(self.Y - self.src[1]) + 2.0 * (self.T != 0))).sum())
+        return out
 
     def total(self, p, w_cross=4.0):
-        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0)
+        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0) + p.get("stay", 0.0)
 
     def crossings(self):
         """port-to-port crossing count: ports of one net chained by x, edges of different nets that intersect."""
@@ -346,6 +353,10 @@ class Plan:
                     if frozenset((r, d)) in self.known:
                         continue
                     return False
+                if kind == "hole":                     # a hole through a part of ANOTHER module (both sides); known ones excepted
+                    if frozenset((r, d)) in self.known_hole:
+                        continue
+                    return False
                 if kind == "pad_short" and d in self.known_short:
                     continue
                 if kind == "outside" and r in self.known_out:
@@ -384,6 +395,7 @@ class Plan:
         fx = {r for i, m in enumerate(self.mods) if m["fixed"] for r in m["members"]}
         self.known = {frozenset(s.split("/")) for s in iss["overlap"] if set(s.split("/")) <= fx}
         self.known_short = set()
+        self.known_hole = {frozenset(s.split("/")) for s in iss.get("hole", []) if set(s.split("/")) <= fx}
         self.known_out = {s.split(" ")[0] for s in iss["outside"] if s.split(" ")[0] in fx}
 
     def try_pose(self, i, X, Y, th):
@@ -967,6 +979,11 @@ def cmd_floorplan(a):
     os.makedirs(wd, exist_ok=True)
     from . import intent as IT
     src_board = a.board
+    from . import pins as PN
+    a.board, cons, pin_res = PN.prepare(a.board, cons, spec, wd)       # --- pins: collisions among pinned parts, resolved by precedence
+    if pin_res is not None and pin_res.unresolved:
+        print("floorplan: FAIL - PIN_CONFLICT (see pins: above); nothing was placed")
+        raise SystemExit(1)
     a.board, cons, seated = IT.prepare(a.board, cons, spec, wd)        # --- intent: hard items seated and held before the search
     text_in = open(a.board, errors="surrogateescape").read()
     B0 = RD.load(a.board)
@@ -997,6 +1014,10 @@ def cmd_floorplan(a):
     import shutil
     shutil.copyfile(best["board"], out)
     _pro(src_board, out)
+    if pin_res is not None:
+        PN.write(PN.sidecar_path(out), pin_res)
+    elif os.path.exists(PN.sidecar_path(out)):
+        os.remove(PN.sidecar_path(out))
     S.mark(out)
     from . import wlrefine as WL                    # --- wire length: shorter where the fan-out, the plan and the intent allow it
     wl = WL.stage_step(out, cons, spec, check=lambda p: fanout_blocked(p, cons, spec))

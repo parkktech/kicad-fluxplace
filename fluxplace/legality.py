@@ -24,8 +24,14 @@ Violations, per part (`Legal.part_issues`):
              board's own clearance) to a pad of another net on a shared copper layer; pads of the same
              net or the same part are exempt (KiCad `shorting_items` / `clearance`).
   no_tht     a through-hole pad inside `[placement.no_tht.NAME] = {rect, allow, reason}`.
+  hole       a drilled hole (PTH, NPTH, mounting standoff) of one part inside another part's courtyard, closer than the
+             board's hole clearance to another net's copper or closer than that to another hole. A hole goes through
+             the whole board, so this holds across sides (a bottom-side standoff vs a top-side connector body);
+             courtyard overlap stays per side. Severity follows the project's DRC rules (`ignore` = not a violation).
+             `collisions` (the gate) and the placers use `Legal.hole_issues`: one code, so they cannot disagree.
 """
 import fnmatch
+import math
 import re
 from collections import defaultdict
 
@@ -85,9 +91,17 @@ class Legal:
         self.hash = GM.Hash(5.0)
         self.phash = GM.Hash(2.0)
         self.pclr = float((self.cons.get("placement") or {}).get("pad_clearance_mm", B.get("clearance", 0.1)))
+        # never below the routing floor (the gate's rule): a pad pair the router must keep apart is a collision
+        self.pclr = max(self.pclr, float((self.cons.get("route") or {}).get("min_clearance_mm", 0.0) or 0.0))
+        self.hclr = float(B.get("hole_clearance", 0.25))
+        sev = B.get("severities") or {}
+        self.hole_sev = {k: str(sev.get(k, "error")).lower() for k in ("pth_inside_courtyard", "npth_inside_courtyard", "hole_clearance")}
+        self.hh = GM.Hash(5.0)
+        self._hrefs = {}
         for r, p in B["parts"].items():
             self.hash.add(r, p["court"], "x")
             self._add_pads(r, p["pads"])
+            self._add_holes(r)
 
     @staticmethod
     def _rect(q):
@@ -100,9 +114,78 @@ class Legal:
             if not q.get("np"):
                 self.phash.add((ref, i), self._rect(q), "x")
 
+    def _add_holes(self, ref):
+        for k in [k for k in self.hh.r if k[0] == ref]:
+            self.hh.remove(k)
+        hs = GM.holes_of(self.B["parts"][ref])
+        self._hrefs[ref] = hs
+        for i, q in enumerate(hs):
+            r = q["drill"] / 2
+            self.hh.add((ref, i), (q["x"] - r, q["y"] - r, q["x"] + r, q["y"] + r), "x")
+
     def refresh(self, ref):
         self.hash.add(ref, self.B["parts"][ref]["court"], "x")
         self._add_pads(ref, self.B["parts"][ref]["pads"])
+        self._add_holes(ref)
+
+    def hole_issues(self, ref, court=None, pads=None):
+        """[(other ref, kind, example)] for the holes of `ref` against every other part (courtyard of either side, copper of
+        another net, other holes) AND every other part's holes against `ref`'s courtyard / copper, as is or at a
+        hypothetical courtyard / pad list. kind = hole_in_courtyard | hole_clearance. Holes occupy both sides."""
+        P = self.B["parts"]
+        part = P[ref]
+        pads_ = pads or part["pads"]
+        court_ = court or part["court"]
+        mine = GM.holes_of(part, pads_ if pads else None)
+        if not pads and court_ != part["court"] and mine:        # a pad-less part (mounting hole): follow the courtyard
+            dx, dy = (court_[0] + court_[2] - part["court"][0] - part["court"][2]) / 2, (court_[1] + court_[3] - part["court"][1] - part["court"][3]) / 2
+            mine = [dict(h, x=h["x"] + dx, y=h["y"] + dy) for h in mine]
+        out, hclr, sv = [], self.hclr, self.hole_sev
+        okc = (lambda q: sv["npth_inside_courtyard" if q.get("np") else "pth_inside_courtyard"] != "ignore")
+        name = lambda q: f"{'NPTH' if q.get('np') else 'PTH'} {q['ref']}.{q['num'] or '-'}"
+        cu = [q for q in pads_ if not q.get("np") and q["layers"]]
+        for h in mine:
+            r = h["drill"] / 2
+            hb = (h["x"] - r, h["y"] - r, h["x"] + r, h["y"] + r)
+            hs = ([(h["x"], h["y"])], r)
+            if okc(h):
+                for o in self.hash.hits(hb, "x", -1e-3, ignore=(ref,)):
+                    if frozenset((ref, o)) not in self.allow and P[o].get("court_layers"):
+                        out.append((o, "hole_in_courtyard", f"{name(h)} in {o} courtyard"))
+            if sv["hole_clearance"] == "ignore":
+                continue
+            for o, j in self.phash.hits(hb, "x", hclr, ignore=()):
+                c = P[o]["pads"][j]
+                if o == ref or frozenset((ref, o)) in self.allow or not c["layers"] or (h.get("net") and h["net"] == c["net"]):
+                    continue
+                g = GM.shape_gap(hs, GM.pad_shape(c))
+                if g < hclr - 1e-6:
+                    out.append((o, "hole_clearance", f"hole {ref}.{h['num'] or '-'} / {o}.{c['num']}[{c['net'] or '-'}] gap {g:.3f}"))
+            for o, k in self.hh.hits(hb, "x", hclr, ignore=()):
+                if o == ref or frozenset((ref, o)) in self.allow:
+                    continue
+                t = self._hrefs[o][k]
+                g = math.hypot(h["x"] - t["x"], h["y"] - t["y"]) - r - t["drill"] / 2
+                if g < hclr - 1e-6:
+                    a, b = sorted(((ref, h["num"] or "-"), (o, t["num"] or "-")))
+                    out.append((o, "hole_clearance", f"hole {a[0]}.{a[1]} / hole {b[0]}.{b[1]} gap {g:.3f}"))
+        if part.get("court_layers"):
+            for o, k in self.hh.hits(court_, "x", -1e-3, ignore=()):
+                t = self._hrefs[o][k]
+                if o != ref and frozenset((ref, o)) not in self.allow and okc(t):
+                    out.append((o, "hole_in_courtyard", f"{name(t)} in {ref} courtyard"))
+        if sv["hole_clearance"] != "ignore":
+            for q in cu:
+                qs = GM.pad_shape(q)
+                qb = _bbox(qs[0], qs[1])
+                for o, k in self.hh.hits(qb, "x", hclr, ignore=()):
+                    t = self._hrefs[o][k]
+                    if o == ref or frozenset((ref, o)) in self.allow or (t.get("net") and t["net"] == q["net"]):
+                        continue
+                    g = GM.shape_gap(([(t["x"], t["y"])], t["drill"] / 2), qs)
+                    if g < hclr - 1e-6:
+                        out.append((o, "hole_clearance", f"hole {o}.{t['num'] or '-'} / {ref}.{q['num']}[{q['net'] or '-'}] gap {g:.3f}"))
+        return out
 
     def pad_shorts(self, ref, pads):
         """['REF.n/OTHER.m'] pads of `ref` (hypothetical list `pads`) too close to another net's pad."""
@@ -161,6 +244,8 @@ class Legal:
             out.append(("outside", "pads"))
         for d in self.pad_shorts(ref, pads):
             out.append(("pad_short", d))
+        for o in sorted({o for o, _k, _e in self.hole_issues(ref, court, pads)}):
+            out.append(("hole", o))
         for name, rect in self.M.forbidden_named(ref):
             if GM.overlap(court, rect, -0.001):
                 out.append(("forbidden", name))
@@ -174,10 +259,10 @@ class Legal:
 
     def issues(self, refs=None):
         """{kind: [description]} over `refs` (default every part). Overlap pairs listed once."""
-        res = {"overlap": [], "outside": [], "forbidden": [], "no_tht": [], "pad_short": []}
+        res = {"overlap": [], "outside": [], "forbidden": [], "no_tht": [], "pad_short": [], "hole": []}
         for ref in sorted(refs or self.B["parts"]):
             for kind, d in self.part_issues(ref):
-                if kind == "overlap":
+                if kind in ("overlap", "hole"):
                     if refs is None and d < ref:
                         continue
                     res[kind].append(f"{ref}/{d}" if ref < d else f"{d}/{ref}")
@@ -189,6 +274,7 @@ class Legal:
                 else:
                     res[kind].append(f"{ref} in {d}")
         res["overlap"] = sorted(set(res["overlap"]))
+        res["hole"] = sorted(set(res["hole"]))
         res["pad_short"] = sorted(set(res["pad_short"]))
         return res
 
@@ -385,27 +471,14 @@ def collisions(B, cons=None, relevance=None):
             elif g < clr - 1e-6:
                 hit(pair(q["ref"], o["ref"]), "copper_clearance", ex)
 
-    # 2. holes: inside another part's courtyard, too close to another part's copper
-    allow = _pairs(cons)
-    holes = [q for q in B["pads"] if q.get("tht") and q.get("drill", 0) > 0] + \
-        [h for p in P.values() for h in p.get("holes", ())]
-    for q in holes:
-        hs = _hole_shape(q)
-        hb = _bbox(hs[0], hs[1])
-        for ref, p in P.items():
-            if ref == q["ref"] or frozenset((ref, q["ref"])) in allow or not p.get("court_layers"):
-                continue
-            if GM.overlap(hb, p["court"], -1e-3):
-                hit(pair(q["ref"], ref), "hole_in_courtyard",
-                    f"{'NPTH' if q.get('np') else 'PTH'} {q['ref']}.{q['num'] or '-'} in {ref} courtyard")
-        for j in H.hits(hb, "x", hclr):
-            o = cu[j]
-            if o["ref"] == q["ref"] or (q["net"] and q["net"] == o["net"]):
-                continue
-            g = GM.shape_gap(hs, shp[id(o)])
-            if g < hclr - 1e-6:
-                hit(pair(q["ref"], o["ref"]), "hole_clearance",
-                    f"hole {q['ref']}.{q['num'] or '-'} / {o['ref']}.{o['num']}[{o['net'] or '-'}] gap {g:.3f}")
+    # 2. holes (both sides): the placer's own code, Legal.hole_issues (one model for the gate and the placers)
+    L = Legal(B, cons)
+    seen = set()
+    for ref in sorted(P):
+        for o, kind, ex in L.hole_issues(ref):
+            if (kind, ex) not in seen:
+                seen.add((kind, ex))
+                hit(pair(ref, o), kind, ex)
 
     # 3. rule areas (KiCad keep-outs; footprint-owned ones exempt their owner and the part they are named after)
     allpads = [q for q in B["pads"] if q["layers"] or q.get("np")] + [h for p in P.values() for h in p.get("holes", ())]
@@ -440,7 +513,6 @@ def collisions(B, cons=None, relevance=None):
                     hit((ref, "@" + area), "keepout", f"{ref} courtyard in {area} (footprints not allowed)")
 
     # 4. constraint keep-outs and courtyard overlaps: the PLACEMENT_ILLEGAL model, re-keyed by pair
-    L = Legal(B, cons)
     res = L.issues()
     for x in res["overlap"]:
         a, b = x.split("/")

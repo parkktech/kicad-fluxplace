@@ -151,6 +151,10 @@ class PlanPlacer(RF.Refiner):
         self.key_of = {m: k for k, ms in self.U.items() for m in ms}
         self.flip_wanted = set()
         self.groups = {n: list(g.get("refs", [])) for n, g in (((self.cons.get("plan") or {}).get("group")) or {}).items()}
+        from . import intent as IT
+        self.rigid_groups = [g["refs"] for g in IT.items(B, self.cons)["group"] if g["rigid"] and len(g["refs"]) > 1]
+        for g in self.rigid_groups:                    # intent groups (rigid by default) are rigid group moves here too
+            self.groups.setdefault("intent:" + "+".join(g[:2]), list(g))
         # support-part guard: a move may not push a support part further beyond its limit (SUPPORT_PART_FAR of the gate)
         self.sup_lim = {s["ref"]: (c["ic"], s["pad"], s["via"], s["limit"]) for c in self.cl for s in c["supports"] if s["sure"]}
         self.excess = self.support_excess()
@@ -178,6 +182,8 @@ class PlanPlacer(RF.Refiner):
 
     def try_move(self, kind, poses, reason="", slack=0.0, gain=0.0, flip=None, allow_equal=False):
         refs = list(poses)
+        if not self._rigid_ok(poses, flip):
+            return False
         old = {r: self._pose(r) for r in refs}
         old_courts = {r: self.B["parts"][r]["court"] for r in refs}
         self._apply(poses)
@@ -213,6 +219,30 @@ class PlanPlacer(RF.Refiner):
         self._undo(old, flip)
         self.ps.restore(snap, set(refs))
         return False
+
+    def _rigid_ok(self, poses, flip=None):
+        """a member of a rigid intent group moves only with the whole group, by one rigid motion (same turn, distances kept); a
+        group member is never flipped alone."""
+        P = self.B["parts"]
+        for g in self.rigid_groups:
+            hit = [r for r in g if r in poses]
+            if not hit and not (flip and flip in g):
+                continue
+            if flip and flip in g:
+                return False
+            mem = [r for r in g if r in P]
+            if len(hit) != len(mem):
+                return False
+            d = {(poses[r][2] - P[r]["angle"] + 180.0) % 360.0 - 180.0 for r in mem}
+            if max(d) - min(d) > 1e-3:
+                return False
+            a = mem[0]
+            for r in mem[1:]:
+                d0 = math.hypot(P[r]["pos"][0] - P[a]["pos"][0], P[r]["pos"][1] - P[a]["pos"][1])
+                d1 = math.hypot(poses[r][0] - poses[a][0], poses[r][1] - poses[a][1])
+                if abs(d0 - d1) > 1e-3:
+                    return False
+        return True
 
     def _undo(self, old, flip):
         if flip:

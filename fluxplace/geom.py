@@ -56,6 +56,33 @@ def place(part, x, y, ang):
     part["court"], part["pos"], part["angle"] = court, (x, y), ang
 
 
+def holes_of(part, pads=None):
+    """Every drilled hole of `part`: PTH / NPTH pads (drill > 0) and the unnumbered NPTH holes (`part["holes"]`). A hole
+    goes through the whole board: it occupies BOTH sides. `pads` = a hypothetical pad list (GM.moved) -> the holes as
+    they would be there (the unnumbered ones follow the rigid motion recovered from the first pad pair)."""
+    mine = [q for q in (pads if pads is not None else part["pads"]) if q.get("drill", 0) > 0 and (q.get("tht") or q.get("np"))]
+    extra = list(part.get("holes", ()))
+    if not extra:
+        return mine
+    if pads is None or pads is part["pads"]:
+        return mine + extra
+    px, py = part["pos"]
+    if part["pads"] and pads:
+        p0, q0 = part["pads"][0], pads[0]
+        d = q0.get("angle", 0.0) - p0.get("angle", 0.0)
+        rx, ry = rot(p0["x"] - px, p0["y"] - py, d)
+        nx, ny = q0["x"] - rx, q0["y"] - ry
+    else:
+        nx, ny, d = px, py, 0.0
+    out = []
+    for h in extra:
+        rx, ry = rot(h["x"] - px, h["y"] - py, d)
+        q = dict(h)
+        q["x"], q["y"] = nx + rx, ny + ry
+        out.append(q)
+    return mine + out
+
+
 def overlap(a, b, gap=0.0):
     return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
 
