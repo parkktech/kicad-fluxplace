@@ -73,6 +73,7 @@ def test_fully_tied_net_has_no_open_connection_for_the_router(tmp_path):
     """the router's job is the open connections (routeconn): VT's only pad is in its own pour, so VT is not in the job."""
     src = board(str(tmp_path / "in2.kicad_pcb"))
     PT.run(src, str(tmp_path / "out2.kicad_pcb"), str(tmp_path))
+    RC.PY = "/usr/bin/python3"                   # other tests point RC.PY at a missing interpreter (module global)
     assert RC.open_by_net(str(tmp_path / "out2.kicad_pcb"), method="pcbnew", fill=True).get("VT", 0) == 0
 
 
