@@ -356,7 +356,7 @@ def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R
     differential pair and go to route_diff.py (coupled P and N); `dflags` = the rule flags that script accepts."""
     from . import adaptive
     from . import routerules as RR
-    R = R or RR.rules(None, src, a.track, a.clearance)
+    R = R or RR.rules_for(None, src, a)
     script = "route_diff.py" if pair else "route.py"
     cmd = [a.router_py, os.path.join(a.router_dir, "py_router", script), src,
            "--output", dst, "--keep-input-copper", "--layers", *a.layers,
@@ -454,7 +454,7 @@ def st_route(c, n, board):
     budget = float(a.route_budget)
     spath = os.path.join(d, "routed.kicad_pcb.status.json")
     S = BR.settings(c.cons)
-    R = RR.rules(c.cons, board, a.track, a.clearance)
+    R = RR.rules_for(c.cons, board, a)
     rflags = RR.flags(R, a.router_dir, d) if have_krt else []
     conn = BR.default_conn(S)
     extra = {}
@@ -951,7 +951,7 @@ def st_fanout(c, n, board):
     pours = bool(((c.cons or {}).get("plan") or {}).get("pour"))          # declared pours become real zones; only their pads are fanned out
     snv = ["--same-net-via-spacing", RR.same_net_via_spacing(c.cons, getattr(c.a, "router_name", None))]     # [route] same_net_via_spacing, else by the router
     # the copper must clear the clearance the router is given (routerules.request_clearance: the floor)
-    R = RR.rules(c.cons, board, c.a.track, c.a.clearance)
+    R = RR.rules_for(c.cons, board, c.a)
     clr = ["--clearance", f"{RR.request_clearance(R):g}"] if R["min_clearance"] else []
     rc, text = _run_cli(["fanout", board, "--out", out] + (["--add-zones"] if pours else []) + snv + clr + c.cs() + c.qs(),
                         os.path.join(d, "stage.log"))

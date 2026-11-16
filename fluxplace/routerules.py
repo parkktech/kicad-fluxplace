@@ -11,6 +11,8 @@ Floors = the strictest of `[fab]` (min_track_mm, min_clearance_mm, min_via_dia_m
     [route]
     via_in_pad = false            # default false: vias keep `same_net_pad_clearance_mm` off every pad
     same_net_pad_clearance_mm = 0.2
+    track_mm = 0.15               # PREFERRED track width / clearance (CLI > these > 0.2), lifted to the min_* floors
+    clearance_mm = 0.127
     grid_mm = 0.05                # default 0.05 when any part has pitch <= 0.5 mm, else 0.1
     mode = "serial"               # "serial" | "parallel" (batchroute / routepar)
     workers = 8                   # parallel: CPU count / 2, max 16
@@ -22,6 +24,7 @@ import os
 from . import adaptive
 
 DEFAULT_SNPC = 0.2
+DEFAULT_SIZE = 0.2
 
 
 def _pro_rules(board):
@@ -54,8 +57,9 @@ def same_net_via_spacing(cons, router=None):
     return "freerouting" if str(router or r.get("router") or "").lower() == "freerouting" else "hole"
 
 
-def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=None):
-    """-> the rule dict (floors, requested sizes, via_in_pad, grid, mode, workers, audit_drc)."""
+def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=None, default=None):
+    """-> the rule dict (floors, requested sizes, via_in_pad, grid, mode, workers, audit_drc).
+    Sizes: explicit track/clearance > [route] track_mm/clearance_mm (preferred) > `default`; then lifted to the floor."""
     from . import constraints as C
     fab = C.fab_profile(cons, board=board) if (cons or {}).get("fab") is not None else {}
     r = dict((cons or {}).get("route") or {})
@@ -75,8 +79,10 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
     R["fab_min_track"] = float(fab.get("min_track_mm") or 0.0)
     R["fab_min_clearance"] = float(fab.get("min_clearance_mm") or 0.0)
     R["fab_profile"] = fab.get("profile")
-    R["track"] = max(float(track or 0.0), R["min_track"]) or 0.2
-    R["clearance"] = max(float(clearance or 0.0), R["min_clearance"]) or 0.2
+    track = next((x for x in (track, r.get("track_mm"), default) if x), 0.0)
+    clearance = next((x for x in (clearance, r.get("clearance_mm"), default) if x), 0.0)
+    R["track"] = max(float(track), R["min_track"]) or 0.2
+    R["clearance"] = max(float(clearance), R["min_clearance"]) or 0.2
     R["via"] = max(float(via), R["min_via"])
     R["drill"] = max(float(drill), R["min_drill"])
     R["via_in_pad"] = bool(r.get("via_in_pad", False))
@@ -100,6 +106,11 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
     R["audit_drc"] = bool(r.get("audit_drc", False))
     R["audit"] = bool(r.get("audit", True))
     return R
+
+
+def rules_for(cons, board, a, **kw):
+    """`rules` for the pipeline namespace: CLI --track/--clearance (None = not given) > [route] preferred > 0.2."""
+    return rules(cons, board, a.track, a.clearance, default=DEFAULT_SIZE, **kw)
 
 
 def write_overrides(path, R):

@@ -99,7 +99,7 @@ def run(c, n, board, runner=run_step):
     d = c.dir(n, "route")
     best = os.path.join(d, "board.kicad_pcb")
     shutil_copy(board, best)
-    R = RR.rules(c.cons, board, a.track, a.clearance)
+    R = RR.rules_for(c.cons, board, a)
     base = base_flags(R, d)
     sig, planes = plane_plan(board)
     names = set(RC.open_by_net(board))                       # nets that are open
@@ -120,6 +120,7 @@ def run(c, n, board, runner=run_step):
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power)))
+    sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     cur, rows = best, []
     for i, (name, build) in enumerate(steps, 1):
         dst = os.path.join(d, f"{i}-{name}.kicad_pcb".replace("*", "x"))
@@ -133,8 +134,8 @@ def run(c, n, board, runner=run_step):
         cur = dst
     shutil_copy(cur, best)
     left = RC.open_by_net(best)
-    line = f"krt-whole: {sum(left.values())} unconnected in {sum(r['s'] for r in rows):.0f}s, steps " + ", ".join(f"{r['step']}={r['rc']}" for r in rows)
-    json.dump({"line": line, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power},
+    line = f"krt-whole: sizes " + "/".join(f"{v:g}" for v in sizes.values()) + f" (track/clr/via/drill); {sum(left.values())} unconnected in {sum(r['s'] for r in rows):.0f}s, steps " + ", ".join(f"{r['step']}={r['rc']}" for r in rows)
+    json.dump({"line": line, "sizes": sizes, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))

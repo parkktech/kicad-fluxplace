@@ -62,3 +62,29 @@ def test_stub_ok_keeps_clearance(tmp_path):
     f = pcbnew.F_Cu
     assert not PT.stub_ok(b, nc, f, (5, 6), (6, 6), 0.15, 0.127)        # runs into the B pad
     assert PT.stub_ok(b, nc, f, (5, 6), (5, 7), 0.15, 0.127)
+
+
+def _sized(tmp_path, cons, track=None, clr=None):
+    from fluxplace import routerules as RR
+    a = types.SimpleNamespace(track=track, clearance=clr)
+    r = RR.rules_for(cons, None, a, B={"parts": {}})
+    return K.base_flags(r, str(tmp_path))
+
+
+FLOOR = {"min_track_mm": 0.127, "min_clearance_mm": 0.127}
+
+
+def test_preferred_size_from_constraints(tmp_path):
+    f = _sized(tmp_path, {"route": {**FLOOR, "track_mm": 0.15}})
+    assert " ".join(f[:8]) == "--track-width 0.15 --clearance 0.127 --via-size 0.45 --via-drill 0.2"
+    assert f[8:11] == ["--escalation", "off", "--strict-sizes"] and f[11] == "--fab-overrides"
+
+
+def test_cli_size_beats_constraints(tmp_path):
+    f = _sized(tmp_path, {"route": {**FLOOR, "track_mm": 0.15, "clearance_mm": 0.14}}, track=0.18, clr=0.13)
+    assert f[:2] == ["--track-width", "0.18"]
+
+
+def test_legacy_default_lifted_by_floor(tmp_path):
+    assert _sized(tmp_path, {"route": FLOOR})[:4] == ["--track-width", "0.2", "--clearance", "0.127"]   # clearance on the wire = the floor (request_clearance)
+    assert _sized(tmp_path, {"route": {"min_track_mm": 0.25}})[:2] == ["--track-width", "0.25"]

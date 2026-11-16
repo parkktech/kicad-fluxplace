@@ -50,6 +50,7 @@ checkpoint. `route-wait` prints the last good board as the result.
     via_in_pad = false       # default false: --same-net-pad-clearance keeps vias off every pad
     same_net_pad_clearance_mm = 0.2
     grid_mm = 0.05           # default 0.05 when any part has pitch <= 0.5 mm, else 0.1
+    track_mm / clearance_mm                                   # PREFERRED sizes: CLI --track/--clearance > these > 0.2; always lifted to the floors below
     min_track_mm / min_clearance_mm / min_via_mm / min_drill_mm / hole_to_hole_mm   # extra floors (else [fab] and .kicad_pro)
     same_net_via_spacing = "hole"  # "freerouting" | "hole": how far apart two vias of ONE net are placed (fan-out, escape reservation, alternatives).
                              # hole = hole-to-hole only (KiCad DRC; always kept).  freerouting = also via + clearance centre to centre:
