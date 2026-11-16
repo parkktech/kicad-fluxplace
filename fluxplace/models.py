@@ -37,14 +37,14 @@ from .redact import redact as _redact, urlopen as _redact_urlopen
 __all__ = ["credentials", "audit_board", "fetch_step", "attach", "sync",
           "missing_models", "easyeda_model", "fetch_missing"]
 
-UA = {"User-Agent": "Mozilla/5.0"}
+UA = {"User-Agent": "fluxplace-parts/1.0 (3D model fetch; plain client)"}
 
 
 # ---------------------------------------------------------------- credentials
 def credentials():
     """-> dict with any of DIGIKEY_CLIENT_ID/SECRET, MOUSER_API_KEY found."""
     keys = ("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET", "MOUSER_API_KEY",
-            "NEXAR_CLIENT_ID", "NEXAR_CLIENT_SECRET")
+            "NEXAR_CLIENT_ID", "NEXAR_CLIENT_SECRET", "ELEMENT14_API_KEY")
     out = {k: os.getenv(k) for k in keys if os.getenv(k)}
     if len(out) == len(keys):
         return out

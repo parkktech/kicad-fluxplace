@@ -1,23 +1,21 @@
 # fluxplace
 
-Placement, routing analysis, design review and fab packaging for KiCad 10:
-headless CLI, KiCad plugin, MCP server.
+Placement, routing, review and fab packaging for KiCad 10: CLI, plugin, MCP.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Detail: `fluxplace help-brief CMD`.
 
 ## Install
 
-    pip install -e .            # numpy only; pcbnew from KiCad's python
-    fluxplace doctor            # missing deps
+    pip install -e .      # numpy; pcbnew from KiCad's python
+    fluxplace doctor      # names missing dependencies
 
-Requirements: [docs/INSTALL.md](docs/INSTALL.md).
+See [docs/INSTALL.md](docs/INSTALL.md).
+
 ## Pipeline
 
-`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs seven stages (floorplan-check, anchor-check,
-place, route-ready, route, tune, review), each reading the previous board and `W/state.json`.
-`--from/--to/--status` select. See [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged via `W/state.json`. Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-Reports are compact: `--full`, `-q` ([output.md](docs/commands/output.md)).
+`--full`, `-q`: [output.md](docs/commands/output.md).
 ## Commands
 
 <!-- index:start -->
@@ -79,6 +77,10 @@ wl-refine         shorten wire length
 blocks            functional-block inventory: --check placed...
 parts             part-entry gate...
 parts-todo        machine-readable parts work list for an...
+parts-fetch       datasheets via source chain
+parts-page        datasheet page to PNG
+parts-cite        record a pin table read from a page
+parts-model       3D model source chain
 parts-apply       validate agent proposals (MPN in stock...
 parts-fact        record datasheet facts (vin, i_max...
 ready             readiness gate before place/route: parts...
@@ -114,7 +116,6 @@ help-brief        at most 15 lines on one command (none: one...
 
 ## More
 
-[CLI](docs/commands/cli.md), [INTENT](docs/INTENT.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [CHANGELOG](docs/CHANGELOG.md),
-[NEXT](NEXT.md), [Cypress](docs/CYPRESS.md).
+[CLI](docs/commands/cli.md), [INTENT](docs/INTENT.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [CHANGELOG](docs/CHANGELOG.md), [NEXT](NEXT.md), [Cypress](docs/CYPRESS.md).
 
 MIT (c) 2026 Jason Ratzlaff

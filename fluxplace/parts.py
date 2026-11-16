@@ -362,7 +362,10 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
             if want and npins:
                 n, src = want
                 ep = re.search(r"(?<![A-Za-z])EP(?![a-z])|PAD|THERMAL|EXPOSED|QFN|DFN|SON|LGA|MLP|MLF|LFCSP|PowerPAK|HSOP|HTSSOP|HVSSOP", fp, re.I)
-                if npins not in ((n, n + 1) if ep else (n,)):   # an exposed pad is one extra pad on the IC families that have one
+                pads = ((facts or {}).get("parts") or {}).get(ref, {}).get("pads")
+                names = len(pads) if isinstance(pads, (dict, list)) and pads else None   # a pin drawn as several copper pieces is one pad NAME
+                ok_counts = (n, n + 1) if ep else (n,)
+                if npins not in ok_counts and names not in ok_counts:   # an exposed pad is one extra pad on the IC families that have one
                     out.append(_f(FAIL, "PART_PINCOUNT_MISMATCH",
                                   f"{ref} {mpn}: {src} says {n} but the footprint {fp} has {npins} pads ({nsrc})", refs=[ref]))
             elif npins and not want and lookup_on:
