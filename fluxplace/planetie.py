@@ -6,6 +6,7 @@ plane net on each inner layer that carries its zone (planes.tie_floating_cluster
 via per floating cluster), refills the zones and reports what is still open with a reason.  Nothing else is changed."""
 import math
 import os
+import subprocess
 
 
 
@@ -179,8 +180,16 @@ def run_guarded(board_in, board_out, plane_nets, conn, log=None, workdir=None, p
     side = os.path.splitext(board_in)[0] + ".kicad_pro"
     if os.path.exists(side):
         shutil.copy(side, os.path.splitext(cur)[0] + ".kicad_pro")
-    base = DG.drc_keys(cur)[0]
     rec = {"placed": 0, "per_net": {}, "board": board_out}
+    try:
+        base = DG.drc_keys(cur)[0]
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:       # no DRC, no guard: no ties, never unguarded
+        before = conn(cur)
+        rec["per_net"] = {n: {"open_before": before.get(n, 0), "open_after": before.get(n, 0), "layer": None, "vias": 0,
+                              "signal_pour": False, "census": None, "reason": f"ties skipped: DRC guard unavailable ({e})"}
+                          for n in plane_nets if before.get(n)}
+        shutil.copy(cur, board_out)
+        return rec
     for n in plane_nets:
         if not conn(cur).get(n):
             continue
