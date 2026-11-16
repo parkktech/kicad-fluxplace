@@ -444,6 +444,9 @@ def st_route(c, n, board):
                     "next": [QS.questions_path(board)]}
         raise
     c.cons, c.spec = c_cons, c_spec
+    if getattr(a, "route_mode", None) == "krt-whole":        # the four-call KiCadRoutingTools chain (krtchain.py)
+        from . import krtchain as KC
+        return KC.run(c, n, board)
     best = os.path.join(d, "board.kicad_pcb")
     _copy(board, best)
     _sidecar(board, best)
@@ -603,8 +606,9 @@ def st_route(c, n, board):
     from . import planetie as PT
     from . import escapeplan as EP
     plane_nets = sorted(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))      # the nets that connect through a plane/pour
-    ptr = PT.run(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
-                 plane_layers=[l for l in B["copper"] if l not in a.layers])
+    ptr = PT.run_guarded(best, os.path.join(d, "planetie.kicad_pcb"), plane_nets, conn, log=lambda m: None, workdir=d,
+                         plane_layers=[l for l in B["copper"] if l not in a.layers],
+                         rules={"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]})
     if ptr["placed"]:
         shutil.copy(ptr["board"], best)
         _sidecar(board, best)
@@ -1207,6 +1211,9 @@ def run(a):
                 want = ((C_.load(a.constraints) or {}).get("route") or {}).get("router") if a.constraints else None
             except Exception:                           # noqa: BLE001 - the stage reports a bad constraints file
                 want = None
+        a.route_mode = "krt-whole" if str(want or "").lower() == "krt-whole" else None
+        if a.route_mode:
+            want = "krt"
         try:
             a.router_name, a.fr_loc, note = FR.choose(want or "krt", getattr(a, "freerouting_jar", None), getattr(a, "java", None))
         except (RuntimeError, ValueError) as e:

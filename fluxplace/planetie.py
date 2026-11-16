@@ -49,7 +49,18 @@ def unconnected_pads(board_path, nets, cli="/usr/bin/kicad-cli", workdir=None):
     return {k: sorted(v) for k, v in res.items()}
 
 
-def _pad_ties(board, netname, pads):
+def stub_ok(board, nc, lid, a, b, width_mm, clear_mm, step_mm=0.05):
+    """True when a `width_mm` track from a to b (mm) on copper layer `lid` keeps `clear_mm` off every other-net pad, track and via."""
+    import pcbnew
+    acc = pcbnew.FromMM(width_mm / 2 + clear_mm)
+    n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / step_mm))
+    pts = [pcbnew.VECTOR2I(pcbnew.FromMM(a[0] + (b[0] - a[0]) * k / n), pcbnew.FromMM(a[1] + (b[1] - a[1]) * k / n)) for k in range(n + 1)]
+    pads = [p for f in board.GetFootprints() for p in f.Pads() if p.GetNetCode() != nc and p.IsOnLayer(lid)]
+    trks = [t for t in board.GetTracks() if t.GetNetCode() != nc and t.IsOnLayer(lid)]
+    return not any(o.HitTest(q, acc) for o in pads + trks for q in pts)
+
+
+def _pad_ties(board, netname, pads, rules=None):
     """Each unconnected pad (x, y, layer): a via on a short same-net stub from the pad, at the nearest of a few ring sites
     that planes.via_at_points accepts (it keeps the via clear of other-net copper and holes). The stub is on the pad layer.
     kicad-cli judges the result (the caller re-runs the DRC); a pad with no legal site is left open and reported."""
@@ -65,13 +76,16 @@ def _pad_ties(board, netname, pads):
             for cx, cy in cands:
                 if not PL.hole_ok(board, cx, cy):
                     continue
-                if PL.via_at_points(board, netname, [(cx, cy)]) != 1:
+                if rules and r_mm > 0.0 and not stub_ok(board, nc.GetNetCode(), board.GetLayerID(layer), (x, y), (cx, cy),
+                                                       rules["track"], rules["clearance"]):
+                    continue                                   # the stub is copper too: it keeps the rule's clearance
+                if PL.via_at_points(board, netname, [(cx, cy)], **({"via_d": rules["via"], "via_drill": rules["drill"]} if rules else {})) != 1:
                     continue
                 if r_mm > 0.0:
                     tr = pcbnew.PCB_TRACK(board)
                     tr.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
                     tr.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(cx), pcbnew.FromMM(cy)))
-                    tr.SetWidth(pcbnew.FromMM(0.15))
+                    tr.SetWidth(pcbnew.FromMM(rules["track"] if rules else 0.15))
                     tr.SetLayer(board.GetLayerID(layer))
                     tr.SetNet(nc)
                     board.Add(tr)
@@ -112,7 +126,7 @@ def pour_census(board, netname):
     return {"pour_layers": sorted(pour_layers), "pads": len(pads), "track_made_pads": tracked, "via_into_pour_sites": via_ok}
 
 
-def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_layers=()):
+def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_layers=(), rules=None):
     """`plane_layers`: the copper layers the router may not use (the planes); a pour on any other layer is a signal-layer pour.
     Tie every floating cluster of each plane net to its plane, refill, save board_out.
     -> {"placed": n, "per_net": {net: {"open_before", "open_after", "layer", "vias", "reason"}}, "board": board_out}.
@@ -140,7 +154,7 @@ def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_lay
         else:
             for ly in layers:
                 r["vias"] += PL.tie_floating_clusters(board, n, ly)
-            r["vias"] += _pad_ties(board, n, pad_pts.get(n, []))
+            r["vias"] += _pad_ties(board, n, pad_pts.get(n, []), rules)
         rec["per_net"][n] = r
         rec["placed"] += r["vias"]
     PL.refill(board)
@@ -152,6 +166,42 @@ def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_lay
             r["reason"] = "still open after tie: pad islands not reached by a clearance-legal via (see route_owners reason)"
     if log:
         log(f"planetie: {rec['placed']} via(s) placed on {len(targets)} plane net(s)")
+    return rec
+
+
+def run_guarded(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_layers=(), rules=None):
+    """`run`, one plane net at a time, each accepted only when kicad-cli finds no violation key the board did not already have
+    (drcguard); a net whose ties add one is dropped and says why.  -> the merged `run` record."""
+    import shutil
+    from . import drcguard as DG
+    cur = board_in + ".guard.kicad_pcb"
+    shutil.copy(board_in, cur)
+    side = os.path.splitext(board_in)[0] + ".kicad_pro"
+    if os.path.exists(side):
+        shutil.copy(side, os.path.splitext(cur)[0] + ".kicad_pro")
+    base = DG.drc_keys(cur)[0]
+    rec = {"placed": 0, "per_net": {}, "board": board_out}
+    for n in plane_nets:
+        if not conn(cur).get(n):
+            continue
+        tmp = board_in + ".try.kicad_pcb"
+        shutil.copy(os.path.splitext(cur)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
+        r = run(cur, tmp, [n], conn, log, workdir, plane_layers, rules)
+        if not r["placed"]:
+            rec["per_net"].update(r["per_net"])
+            continue
+        keys = DG.drc_keys(tmp)[0]
+        new = DG.new_keys(base, keys)
+        if new:
+            r["per_net"][n]["reason"] = f"ties dropped: {sum(new.values())} new DRC violation(s), e.g. {sorted(new)[0][0]}"
+            r["per_net"][n].update(vias=0, open_after=r["per_net"][n]["open_before"])
+            rec["per_net"][n] = r["per_net"][n]
+            continue
+        shutil.copy(tmp, cur)
+        base = keys
+        rec["per_net"].update(r["per_net"])
+        rec["placed"] += r["placed"]
+    shutil.copy(cur, board_out)
     return rec
 
 
