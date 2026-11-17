@@ -155,6 +155,10 @@ def install_stderr(force=False):
     global _active
     if _active is not None and not _active.done:
         return _active
+    # Opt-in since 2026-11-17: on a real routed board the fd-2 pipe filter made hand-route commands hang (open-nets 13 s raw,
+    # no result in 150 s filtered), which looked like tool timeouts. Off unless FLUXPLACE_QUIET_STDERR=1 until that is fixed.
+    if not force and os.environ.get("FLUXPLACE_QUIET_STDERR") != "1":
+        return None
     if raw_requested() or (not force and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)):
         return None
     try:

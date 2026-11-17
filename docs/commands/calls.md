@@ -23,4 +23,4 @@ pcbnew prints `property.h(..): assert "m_choices.GetCount() > 0" failed ...` fro
   `[fluxplace] dropped N repeated KiCad assert lines` is printed at the end. Other lines are never dropped.
 - `quietlog.filter_file(path)` / `filter_text(text)` clean a subprocess log after it finishes (used for the Cypress log).
 - Known-noise patterns are the list `quietlog.NOISE`; add more there.
-- Off: `FLUXPLACE_RAW_STDERR=1`; automatically off under pytest.
+- OFF by default since 2026-11-17 (on a real routed board the fd-2 filter made hand-route commands hang); opt in with `FLUXPLACE_QUIET_STDERR=1`. `FLUXPLACE_RAW_STDERR=1` forces it off; automatically off under pytest.
