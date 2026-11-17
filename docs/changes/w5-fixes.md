@@ -11,3 +11,4 @@
 - `place --strategy routable --refine` crashed with `KeyError` in `preroute.congestion`: a pad beyond the
   outline's grid indexed a cell that does not exist. Such pads block no cell, ratsnest ends are clamped to
   the edge cell, and the new WARN `PLACE_OUTSIDE_OUTLINE` (plus `congestion.outside_refs`) names the parts.
+- `parts-fetch A,B` splits comma-separated MPNs (and still accepts spaces); no MPN with a comma is relied on.

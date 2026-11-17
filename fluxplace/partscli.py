@@ -237,7 +237,7 @@ def cmd_parts_fetch(a):
     from . import dsfetch as D, parts as P
     ds = a.datasheets
     spec = json.load(open(a.spec)) if a.spec else None
-    mpns = list(a.mpns)
+    mpns = [m.strip() for x in a.mpns for m in str(x).split(",") if m.strip()]   # comma- and space-separated alike
     if spec:
         from . import partdocs as PD
         ds = ds or P.resolve_dir(((__import__("fluxplace.constraints", fromlist=["load"]).load(a.constraints) or {}).get("docs") or {}).get("datasheets"),
