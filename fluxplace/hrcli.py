@@ -23,6 +23,11 @@ def _viol(v):
     at = v.get("at")
     if at is not None:
         s += " at " + (",".join(str(x) for x in at) if isinstance(at, (list, tuple)) else str(at))
+    if v.get("clear_dir") and v.get("clear_shift_mm") is not None:
+        dx, dy = v["clear_dir"]
+        ax, ay = abs(dx), abs(dy)
+        d = ("+x" if dx > 0 else "-x") if ax >= ay * 2 else ("+y" if dy > 0 else "-y") if ay >= ax * 2 else f"({dx:+.2f},{dy:+.2f})"
+        s += f" move {v['clear_shift_mm']} mm toward {d}"
     return s
 
 
@@ -173,6 +178,39 @@ def cmd_lay(a):
     return 0 if r["accepted"] else 1
 
 
+def cmd_copy_net(a):
+    from . import handroute as H
+    g = _write_guard(a, a.out or a.board)
+    if g is not None:
+        return g
+    r = H.copy_net(a.src, a.board, a.net, a.out, a.constraints)
+    r.pop("cand_unc_pairs", None)
+    _emit(a, r, lambda: f"copy-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "copy-net")
+    return 0 if r["accepted"] else 1
+
+
+def cmd_via_min(a):
+    from . import viamin
+    g = _write_guard(a, a.out)
+    if g is not None:
+        return g
+    r = viamin.via_min(a.board, a.out, a.constraints)
+    r["summary"] = f"via-min: {r['changed']} raised to {r['floor_mm']} mm, {r['kept']} already ok, {r['rejected']} rejected by DRC, {r['locked_skipped']} locked"
+    _emit(a, r, lambda: r["summary"], None, None)
+    return 0
+
+
+def cmd_repair(a):
+    from . import handrepair as repair
+    g = _write_guard(a, a.out)
+    if g is not None:
+        return g
+    r = repair.repair(a.board, a.out, a.constraints, a.max_attempts, a.budget, a.layers, a.report)
+    r["summary"] = f"repair: {r['closed']} closed, {r['blocked']} blocked, {r['pairs']} pair(s) skipped; commit {'accepted' if r['commit']['accepted'] else 'rejected: ' + '; '.join(r['commit']['reasons'][:1])}"
+    _emit(a, r, lambda: r["summary"], None, None)
+    return 0 if r["commit"]["accepted"] else 1
+
+
 def cmd_shove(a, op="shove"):
     from . import handroute as H
     g = _write_guard(a, a.out or a.board)
@@ -264,11 +302,11 @@ def register(sub):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
 
-    p = sub.add_parser("open-nets", help="read-only: list open connections")
+    p = sub.add_parser("open-nets", help="list open nets")
     common(p)
     p.set_defaults(fn=cmd_open_nets)
 
-    p = sub.add_parser("window", help="read-only: region as data + PNG")
+    p = sub.add_parser("window", help="region data + PNG")
     common(p)
     geom(p)
     p.add_argument("--at", default=None, help="window centre X,Y mm")
@@ -284,7 +322,7 @@ def register(sub):
     p.add_argument("--path", default=None, help="overlay a proposed path on the render")
     p.set_defaults(fn=cmd_window)
 
-    p = sub.add_parser("probe", help="read-only: check a path")
+    p = sub.add_parser("probe", help="check a path")
     common(p)
     geom(p)
     p.add_argument("--net", required=True)
@@ -293,7 +331,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_probe)
 
-    p = sub.add_parser("lay", help="lay a probed path, guarded")
+    p = sub.add_parser("lay", help="guarded lay")
     common(p)
     geom(p)
     p.add_argument("--net", required=True)
@@ -305,8 +343,33 @@ def register(sub):
     guards(p)
     p.set_defaults(fn=cmd_lay)
 
-    for name, h in (("shove", "remove unlocked copper"),
-                    ("unlay", "remove copper by id")):
+    p = sub.add_parser("copy-net", help="restore a net")
+    p.add_argument("src", help="board to copy the net's tracks and vias FROM")
+    common(p)
+    p.add_argument("--net", required=True)
+    p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board = DST)")
+    brief(p)
+    guards(p)
+    p.set_defaults(fn=cmd_copy_net)
+
+    p = sub.add_parser("via-min", help="raise vias")
+    common(p)
+    p.add_argument("--out", required=True)
+    guards(p)
+    p.set_defaults(fn=cmd_via_min)
+
+    p = sub.add_parser("hand-repair", help="close open nets")
+    common(p)
+    p.add_argument("--out", required=True, help="committed board (WORK is the session work board)")
+    p.add_argument("--max-attempts", type=int, default=2, help="per connection")
+    p.add_argument("--budget", type=float, default=900.0, help="total seconds")
+    p.add_argument("--layers", default=None)
+    p.add_argument("--report", default=None, help="JSON report path")
+    guards(p)
+    p.set_defaults(fn=cmd_repair)
+
+    for name, h in (("shove", "remove copper"),
+                    ("unlay", "remove copper by ID")):
         p = sub.add_parser(name, help=h)
         common(p)
         p.add_argument("--net", required=True, help="net whose copper is removed")
@@ -318,7 +381,7 @@ def register(sub):
         guards(p)
         p.set_defaults(fn=cmd_shove if name == "shove" else cmd_unlay)
 
-    p = sub.add_parser("suggest", help="grid-search a legal path")
+    p = sub.add_parser("suggest", help="grid search")
     common(p)
     geom(p)
     p.add_argument("--net", default=None)
@@ -335,7 +398,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_suggest)
 
-    p = sub.add_parser("session", help="hand-route session + commit")
+    p = sub.add_parser("session", help="hand-route")
     p.add_argument("action", choices=["begin", "undo", "status", "ledger", "commit"])
     p.add_argument("work", help="begin: the SOURCE board; others: the WORK board")
     p.add_argument("--work", dest="work_out", default=None, help="begin: the WORK board to create")

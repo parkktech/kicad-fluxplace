@@ -48,14 +48,17 @@ lock              print a [lock.at] constraints block for...
 bom-opt           part-count optimization: array...
 rules             selector-rule cascade: effective...
 route-diagnose    read-only: explain why nets stayed...
-open-nets         read-only: list open connections
-window            read-only: region as data + PNG
-probe             read-only: check a path
-lay               lay a probed path, guarded
-shove             remove unlocked copper
-unlay             remove copper by id
-suggest           grid-search a legal path
-session           hand-route session + commit
+open-nets         list open nets
+window            region data + PNG
+probe             check a path
+lay               guarded lay
+copy-net          restore a net
+via-min           raise vias
+hand-repair       close open nets
+shove             remove copper
+unlay             remove copper by ID
+suggest           grid search
+session           hand-route
 anchor-check      evaluate every allowed rotation of each...
 route-ready       pre-route gate: net budgets, support...
 map               meta map: compact JSON of parts, groups...

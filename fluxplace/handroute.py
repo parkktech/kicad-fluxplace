@@ -414,11 +414,25 @@ def _window_public(W):
 
 
 # ======================================================================================================= probe
-def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
+def _clear_fix(obs_pt, a, b, shortfall):
+    """Direction (unit vector, obstacle -> path) to move a path segment a-b and the shift (rounded up to 0.01 mm) that cures `shortfall` mm."""
+    if obs_pt is None or shortfall <= 0:
+        return {}
+    _, q = G.pt_seg(obs_pt, a, b)
+    dx, dy = q[0] - obs_pt[0], q[1] - obs_pt[1]
+    n = math.hypot(dx, dy)
+    if n < 1e-9:
+        return {}
+    return {"clear_dir": [round(dx / n, 4), round(dy / n, 4)], "clear_shift_mm": round(math.ceil(shortfall / 0.01 - 1e-6) * 0.01, 2)}
+
+
+def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=()):
     rule = M.net_rule(net)
     w = width or rule["width"]
     vd, vdr = via or (rule["via_dia"], rule["via_drill"])
     f = M.floors
+    skip = set(skip_ids or ())
+    in_box = (lambda *a: [o for o in M.in_box(*a) if o.id not in skip]) if skip else M.in_box
     viol, items, notes = [], [], []
     if w < f["track"] - 1e-6:
         viol.append({"kind": "width_below_floor", "need": f["track"], "have": w})
@@ -453,7 +467,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
                 if min(ang, 45 - ang) > 0.01:
                     viol.append({"kind": "angle_not_45_90", "i": i, "at": _fmtp(a), "deg": round(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])), 2)})
             best = None
-            for o in M.in_box((min(a[0], b[0]) - w / 2 - 1.5, min(a[1], b[1]) - w / 2 - 1.5, max(a[0], b[0]) + w / 2 + 1.5, max(a[1], b[1]) + w / 2 + 1.5), lay):
+            for o in in_box((min(a[0], b[0]) - w / 2 - 1.5, min(a[1], b[1]) - w / 2 - 1.5, max(a[0], b[0]) + w / 2 + 1.5, max(a[1], b[1]) + w / 2 + 1.5), lay):
                 if not M.foreign(o, net, "track"):
                     continue
                 gap, pt = G.ob_gap(a, b, w / 2, o)
@@ -468,6 +482,8 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
                     v = dict(cand)
                     v.update({"kind": "crossing" if gap <= 0 and o.kind in ("track", "via", "pad") else "clearance" if o.kind != "ko" and o.kind != "edge" else o.kind + "_hit",
                               "i": i, "with": lab, "short_if_laid": gap <= 0 and o.kind in ("track", "via", "pad")})
+                    if v["kind"] == "clearance":
+                        v.update(_clear_fix(pt, a, b, -margin))
                     viol.append(v)
             rec["nearest"] = best
             items.append(rec)
@@ -476,7 +492,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
             rec = {"i": i, "type": "via", "at": _fmtp(c), "dia": vd, "drill": vdr, "nearest": None}
             best = None
             for lay in M.cu:
-                for o in M.in_box((c[0] - vd / 2 - 1.5, c[1] - vd / 2 - 1.5, c[0] + vd / 2 + 1.5, c[1] + vd / 2 + 1.5), lay):
+                for o in in_box((c[0] - vd / 2 - 1.5, c[1] - vd / 2 - 1.5, c[0] + vd / 2 + 1.5, c[1] + vd / 2 + 1.5), lay):
                     if o.kind == "hole" and not o.extra.get("via") and False:
                         continue
                     if not M.foreign(o, net, "via"):
@@ -498,6 +514,8 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
                     if margin < -G.EPS:
                         v = dict(cand)
                         v.update({"kind": "hole_to_hole" if o.kind == "hole" else "via_clearance" if o.kind not in ("ko", "edge") else o.kind + "_hit", "i": i, "with": lab})
+                        if v["kind"] in ("via_clearance", "hole_to_hole"):
+                            v.update(_clear_fix(pt, c, c, -margin))
                         viol.append(v)
                     if o.kind in ("pad", "track", "via"):
                         hgap = gap + (vd / 2 - vdr / 2)
@@ -511,7 +529,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
         if p[0] != "seg":
             continue
         for pt in (p[2], p[3]):
-            for o in M.in_box((pt[0] - 0.5, pt[1] - 0.5, pt[0] + 0.5, pt[1] + 0.5), p[1]):
+            for o in in_box((pt[0] - 0.5, pt[1] - 0.5, pt[0] + 0.5, pt[1] + 0.5), p[1]):
                 if o.kind == "via" and o.net == net:
                     c = o.g[1]
                     d = math.hypot(pt[0] - c[0], pt[1] - c[1])
@@ -534,15 +552,18 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False):
     # joins: which own-net copper the path ends touch
     joins = []
     ends = []
-    segs = [p for p in prims if p[0] == "seg"]
-    if segs:
-        ends = [(segs[0][1], segs[0][2]), (segs[-1][1], segs[-1][3])]
-    for lay, pt in ends:
-        hit = None
-        for o in M.in_box((pt[0] - 0.01, pt[1] - 0.01, pt[0] + 0.01, pt[1] + 0.01), lay):
-            if o.net == net and o.kind in ("pad", "track", "via") and G.ob_gap(pt, pt, 0.0, o)[0] <= 1e-3:
-                isl = M.islands(net)[1].get(o.id)
-                hit = {"item": o.ref or o.kind, "id": _sid(o.id), "island": isl}
+    if prims:
+        ends = [((p[1],), p[2]) if p[0] == "seg" else (tuple(M.cu), p[1]) for p in (prims[0],)]
+        ends += [((p[1],), p[3]) if p[0] == "seg" else (tuple(M.cu), p[1]) for p in (prims[-1],)]
+    for lays_e, pt in ends:
+        hit, lay = None, lays_e[0]
+        for lay in lays_e:
+            for o in in_box((pt[0] - 0.01, pt[1] - 0.01, pt[0] + 0.01, pt[1] + 0.01), lay):
+                if o.net == net and o.kind in ("pad", "track", "via") and G.ob_gap(pt, pt, 0.0, o)[0] <= 1e-3:
+                    isl = M.islands(net)[1].get(o.id)
+                    hit = {"item": o.ref or o.kind, "id": _sid(o.id), "island": isl}
+                    break
+            if hit:
                 break
         joins.append({"at": _fmtp(pt), "layer": lay, "touches": hit})
     return {"net": net, "ok": not out, "width": w, "via": [vd, vdr], "violations": out, "items": items, "ends_join": joins, "notes": notes,
@@ -811,6 +832,61 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
     return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli)
 
 
+def _net_copper(b, net):
+    return [t for t in b.GetTracks() if t.GetNetname() == net]
+
+
+def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
+    """Replace the copper of `net` on board `dst` (unlocked tracks/arcs/vias, refused if any is locked) by the copper of the same net NAME
+    on board `src`; items are rebuilt explicitly on dst's own net (no Duplicate(): it keeps the source net codes). The copied count must equal
+    the source count; then the same DRC + connectivity guard as `lay`. Writes nothing on failure."""
+    def mutate(b, M):
+        pc = M.pcbnew
+        sb = pc.LoadBoard(src)
+        items = _net_copper(sb, net)
+        if not items:
+            raise ValueError(f"source has no copper of net {net!r}")
+        dn = b.FindNet(net)
+        if dn is None:
+            raise ValueError(f"net {net!r} is not on the destination board")
+        old = _net_copper(b, net)
+        if any(t.IsLocked() for t in old):
+            raise ValueError(f"destination has locked copper of net {net!r}: {sum(1 for t in old if t.IsLocked())} item(s); unlock or leave it")
+        for t in old:
+            b.Remove(t)
+        lid = {sb.GetLayerName(l): l for l in sb.GetEnabledLayers().Seq()}
+        for t in items:
+            cls = t.GetClass()
+            if cls == "PCB_VIA":
+                n = pc.PCB_VIA(b)
+                n.SetPosition(t.GetPosition())
+                n.SetViaType(t.GetViaType())
+                n.SetLayerPair(t.TopLayer(), t.BottomLayer())
+                n.SetWidth(t.GetWidth())
+                n.SetDrill(t.GetDrill())
+            elif cls == "PCB_ARC":
+                n = pc.PCB_ARC(b)
+                n.SetStart(t.GetStart())
+                n.SetMid(t.GetMid())
+                n.SetEnd(t.GetEnd())
+                n.SetWidth(t.GetWidth())
+                n.SetLayer(t.GetLayer())
+            else:
+                n = pc.PCB_TRACK(b)
+                n.SetStart(t.GetStart())
+                n.SetEnd(t.GetEnd())
+                n.SetWidth(t.GetWidth())
+                n.SetLayer(t.GetLayer())
+            n.SetNet(dn)
+            n.SetLocked(t.IsLocked())
+            b.Add(n)
+        got = len(_net_copper(b, net))
+        if got != len(items):
+            raise ValueError(f"copied item count {got} != source count {len(items)}")
+        return {"removed": len(old), "copied": got, "source": src}
+    return _edit(dst, out, mutate, "copy-net", net, f"from {os.path.basename(src)}", constraints, False, False, kicad_cli)
+
+
 def _chain(M, seed):
     """Segments connected to `seed` through plain same-layer joints (degree 2, no pad / via / branch)."""
     tracks = [o for o in M.obs if o.kind == "track" and o.net == seed.net and o.layers == seed.layers and not o.extra.get("arc")]
@@ -956,6 +1032,58 @@ def _octi(a, v):
     return [[a, q1, v], [a, q2, v]]
 
 
+def _render_prims(prs):
+    parts, cur = [], None
+    for p in prs:
+        if p[0] == "via":
+            parts.append(f"via {p[1][0]},{p[1][1]}")
+            cur = None
+            continue
+        if cur is None or cur[0] != p[1] or cur[1][-1] != p[2]:
+            cur = [p[1], [p[2]]]
+            parts.append(cur)
+        cur[1].append(p[3])
+    return "; ".join(x if isinstance(x, str) else f"{x[0]}: " + " ".join(f"{q[0]:.4f},{q[1]:.4f}" for q in x[1]) for x in parts)
+
+
+def _rev_prims(prims):
+    return [("seg", p[1], p[3], p[2]) if p[0] == "seg" else p for p in reversed(prims)]
+
+
+def _island_target(M, net, items, pt, lay):
+    """Where a path end at `pt` on `lay` should finish on its island: None when it already touches a track (or there is nothing on `lay`),
+    else the centre of the pad / via it is in or nearest to (nearest point of a track when the end is off the island)."""
+    best = None
+    for o in items:
+        if o.net != net or o.kind not in ("pad", "via", "track") or lay not in o.layers:
+            continue
+        gap, near = G.ob_gap(pt, pt, 0.0, o)
+        if best is None or gap < best[0]:
+            best = (gap, o, near)
+    if best is None:
+        return None
+    gap, o, near = best
+    if o.kind == "via":
+        return o.g[1]
+    if o.kind == "pad":
+        return ((o.bb[0] + o.bb[2]) / 2, (o.bb[1] + o.bb[3]) / 2)
+    return None if gap <= 1e-3 else near
+
+
+def _tail_options(M, net, items, prims, layer):
+    """Variants of `prims` whose last end is carried on to its island (via, then pad-layer segment, then to the pad centre in 45/90
+    segments); the unextended prims come last."""
+    last = prims[-1]
+    pt, lay = (last[3], last[1]) if last[0] == "seg" else (last[1], layer)
+    tgt = _island_target(M, net, items, pt, lay)
+    out = []
+    if tgt is not None and math.hypot(pt[0] - tgt[0], pt[1] - tgt[1]) > 5e-4:
+        for pts in _octi(pt, tgt):
+            out.append(list(prims) + [("seg", lay, pts[k], pts[k + 1]) for k in range(len(pts) - 1)])
+    out.append(list(prims))
+    return out
+
+
 def _snap_ends(M, net, pathstr):
     """A path end that lands inside an own-net via is moved onto its centre (KiCad: track_not_centered_on_via), with an octilinear
     dog-leg if the last segment is no longer 45/90. -> candidate path strings (probe each)."""
@@ -971,27 +1099,15 @@ def _snap_ends(M, net, pathstr):
                 return o.g[1]
         return pt
 
-    def render(prs):
-        parts, cur = [], None
-        for p in prs:
-            if p[0] == "via":
-                parts.append(f"via {p[1][0]},{p[1][1]}")
-                cur = None
-                continue
-            if cur is None or cur[0] != p[1] or cur[1][-1] != p[2]:
-                cur = [p[1], [p[2]]]
-                parts.append(cur)
-            cur[1].append(p[3])
-        return "; ".join(x if isinstance(x, str) else f"{x[0]}: " + " ".join(f"{q[0]:.4f},{q[1]:.4f}" for q in x[1]) for x in parts)
     f, l = segs[0], segs[-1]
     last = prims[l]
     v = snap(last[3])
     cands = []
     for pts in _octi(last[2], v):
-        pr = list(prims[:l]) + [("seg", last[1], pts[k], pts[k + 1]) for k in range(len(pts) - 1)]
+        pr = list(prims[:l]) + [("seg", last[1], pts[k], pts[k + 1]) for k in range(len(pts) - 1)] + list(prims[l + 1:])
         first = pr[f]
         pr[f] = ("seg", first[1], snap(first[2]), first[3])
-        cands.append(render(pr))
+        cands.append(_render_prims(pr))
     return cands
 
 
@@ -1070,6 +1186,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
         return {"found": False, "reason": f"endpoints are not two separate islands (islands {ia}, {ib})"}
     lays = [G.norm_layer(l, M.cu) for l in layers] if layers else list(M.cu)
     bb = (min(pa[0], pb[0]) - margin, min(pa[1], pb[1]) - margin, max(pa[0], pb[0]) + margin, max(pa[1], pb[1]) + margin)
+    last, ep_fail = {"violations": []}, False
     for attempt, extra in enumerate((0.0, pitch * 0.5, pitch * 1.0)):
         sk = (lambda o: o.id in skip_ids) if skip_ids else None
         xs, ys, pit, st, sv, sh = _free_fields(M, net, lays, bb, w, pitch, skip=sk)
@@ -1228,30 +1345,39 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                     out.append(b)
             out.append(pts[-1])
             return out
-        parts = []
+        prims_g = []
         for i, (l, pts) in enumerate(chunks):
             if i:
-                parts.append(f"via {pts[0][0]},{pts[0][1]}")
+                prims_g.append(("via", pts[0]))
             pts = simplify(pts) if len(pts) > 1 else pts
-            if len(pts) >= 2:
-                parts.append(f"{l}: " + " ".join(f"{p[0]},{p[1]}" for p in pts))
-        pathstr = "; ".join(parts)
+            for q in range(len(pts) - 1):
+                prims_g.append(("seg", l, pts[q], pts[q + 1]))
+        pathstr = _render_prims(prims_g)
         if relax:
             return {"found": True, "needs_shove": bool(blockers), "path": pathstr, "blockers": sorted(blockers.values(), key=lambda b: -b["cells"]),
                     "note": "relaxed search: unlocked foreign tracks/vias are passable at a cost; shove the blockers, then run suggest again without --relax",
                     "width": w, "pitch": pit}
-        for cand in _snap_ends(M, net, pathstr):
+        variants, seen_c = [], set()
+        for tp in _tail_options(M, net, isl[ib]["items"], prims_g, chunks[-1][0]):
+            for hp in _tail_options(M, net, isl[ia]["items"], _rev_prims(tp), chunks[0][0]):
+                for cs in _snap_ends(M, net, _render_prims(_rev_prims(hp))):
+                    if cs not in seen_c:
+                        seen_c.add(cs)
+                        variants.append(cs)
+        for cand in variants:
             try:
                 prims = G.parse_path(cand, M.cu)
             except ValueError:
                 last = {"violations": [{"kind": "degenerate"}]}
                 continue
-            pr = probe_prims(M, net, prims, w, (vd, vdr), any_angle)
+            pr = probe_prims(M, net, prims, w, (vd, vdr), any_angle, skip_ids)
             if pr["ok"] and _endpoints_join(pr, ia, ib):
                 return {"found": True, "path": cand, "length_mm": round(sum(it.get("len", 0) for it in pr["items"]), 3), "vias": sum(1 for p in prims if p[0] == "via"),
                         "width": w, "via": [vd, vdr], "probe": "OK", "grid_margin_extra": extra, "pitch": pit, "expanded": pops}
             if pr["ok"]:
+                ep_fail = True
                 pr = dict(pr, violations=[{"kind": "endpoint_not_connected", "at": [j["at"] for j in pr.get("ends_join", []) if not j.get("touches")]}])
             last = pr
             pathstr = cand
-    return {"found": False, "reason": "grid path failed exact probe after margin retries", "path": pathstr, "violations": last["violations"][:4]}
+    return {"found": False, "reason": ("endpoint extension failed: grid path found but no variant joins both islands after margin retries" if ep_fail
+                                       else "grid path failed exact probe after margin retries"), "path": pathstr, "violations": last["violations"][:4]}

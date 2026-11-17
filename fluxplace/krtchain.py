@@ -176,9 +176,18 @@ def run(c, n, board, runner=run_step):
                     "next": tail, "steps": rows}
         cur = dst
     shutil_copy(cur, best)
-    post = None
+    post, post_error = None, None
     if ((c.cons or {}).get("route") or {}).get("whole_post", True):
-        post = _post(best, d, planes, R)
+        keep = best + ".prepost"
+        shutil_copy(best, keep)
+        try:
+            post = _post(best, d, planes, R)
+        except Exception as e:                               # snap / plane ties failed: the routed board stands, flagged
+            shutil_copy(keep, best)
+            post_error = {"type": type(e).__name__, "message": str(e)[:300]}
+        finally:
+            if os.path.exists(keep):
+                os.remove(keep)
     left = RC.open_by_net(best)
     try:
         from . import qualaudit as QA, routediag as RD, netclass as NC
@@ -190,15 +199,17 @@ def run(c, n, board, runner=run_step):
     line = f"krt-whole: sizes " + "/".join(f"{v:g}" for v in sizes.values()) + f" (track/clr/via/drill); {sum(left.values())} unconnected in {sum(r['s'] for r in rows):.0f}s, budget {budget:g}s, steps " + ", ".join(f"{r['step']}={r['rc']}" for r in rows)
     if post:
         line += f"; snap {post['snap']['moved']} end(s), {post['snap']['centred_left']} off-centre left; guarded plane ties {post['ties']['placed']}"
+    if post_error:
+        line += f"; POST ERROR {post_error['type']}: {post_error['message']} (routed board kept, cleanup skipped)"
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "quality": quality},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))
-    unfinished = bool(left) or bool(quality["not_done"]["count"])
-    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=quality)
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "quality": quality}
+    unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
+    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, **({"post_error": post_error} if post_error else {})))
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality}
 
 
 def shutil_copy(src, dst):
