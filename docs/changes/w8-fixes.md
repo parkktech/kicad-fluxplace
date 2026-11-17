@@ -15,3 +15,7 @@ A pad sealed by locked copper had no guarded repair-ladder step. `suggest --expl
 ## Explore connected-run verification
 
 Explore skipped a connected run during its search but reported only the originally named segment, so the emitted path was not valid after that single-segment shove. It now deduplicates the same `_chain` removal unit used by `shove --chain`, exact-probes with that whole unit absent, and reports every UUID. Ordinary candidates exclude runs containing locked copper; locked runs remain separate under `locked_explore`. On the W8 repair checkpoint, the candidate now names eight segments and passes probe after the real eight-item shove.
+
+## Pair-router missed classification
+
+`pairs_missed` treated absence from the external router summary as unfinished even when the bounded pairs stage had completed and locked the pair; route-only state could also omit the earlier report path. The route stage now falls back to `board.pairs.json` beside its input and partitions stage-complete pairs plus pairs whose two legs have real, fully locked copper and no input open into `pairs_already_done`. W8's original list partitions from 32 missed to 17 missed plus the expected 15 already complete.

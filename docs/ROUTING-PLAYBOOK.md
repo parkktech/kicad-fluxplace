@@ -66,8 +66,9 @@ Solve the net with the fewest options first, not the shortest one.
 | tune with a time limit | `tune --budget S` (keeps the best accepted board on budget end or an outer timeout) |
 | vias below the fab minimum | `via-min BOARD --out O` |
 
-The whole-board chain now also lists pairs the external pair router missed (`pairs_missed` in its result), keeps the routed
-board if the cleanup step fails (`post_error`, verdict `warn`), and counts an RF net over its stated via limit as not done.
+The whole-board chain lists external-router misses (`pairs_missed`) separately from stage-complete or input-connected locked
+pairs (`pairs_already_done`), keeps the routed board if cleanup fails (`post_error`, verdict `warn`), and counts RF via overages
+as not done.
 
 ## Known limits (state on 2026-11-16)
 

@@ -51,6 +51,48 @@ def pair_nets(cons, names, report):
     return sorted(x for x in names if any(x.startswith(f) for f in fams))
 
 
+def _missed_legs(row):
+    legs = {row.get("p"), row.get("n")} - {None}
+    if len(legs) == 2:
+        return frozenset(legs)
+    parts = str(row.get("pair", "")).split("/", 1)
+    return frozenset(parts) if len(parts) == 2 and all(parts) else frozenset()
+
+
+def _input_locked_connected(board, open_names, legsets):
+    """Pairs with real, entirely locked copper on both legs and no open leg in the router input."""
+    b = _pcb().LoadBoard(board)
+    copper = {}
+    for t in b.GetTracks():
+        copper.setdefault(t.GetNetname(), []).append(t)
+    done = set()
+    for legs in legsets:
+        if len(legs) != 2 or any(net in open_names for net in legs):
+            continue
+        items = [t for net in legs for t in copper.get(net, [])]
+        if all(copper.get(net) for net in legs) and all(t.IsLocked() for t in items):
+            done.add(legs)
+    return done
+
+
+def _partition_missed(missed, report, board, open_names):
+    complete = {frozenset(p.get("pair") or []) for p in (report or {}).get("pairs", []) if p.get("status") == "complete"}
+    legsets = {_missed_legs(row) for row in missed}
+    try:
+        locked = _input_locked_connected(board, open_names, legsets)
+    except Exception:                                        # noqa: BLE001 - diagnostics must not lose a routed board
+        locked = set()
+    remaining, done = [], []
+    for row in missed:
+        legs = _missed_legs(row)
+        reason = "pairs_stage_complete" if legs in complete else "input_connected_locked" if legs in locked else None
+        if reason:
+            done.append({"pair": row.get("pair"), "p": row.get("p"), "n": row.get("n"), "reason": reason})
+        else:
+            remaining.append(row)
+    return remaining, done
+
+
 def glob_escape(name):
     return name.replace("[", "[[]")
 
@@ -156,11 +198,14 @@ def run(c, n, board, runner=run_step):
     sig, planes = plane_plan(board)
     names = set(RC.open_by_net(board))                       # nets that are open
     rep = None
-    try:
-        pd = ((getattr(c, "state", None) or {}).get("stages") or {}).get("pairs", {}).get("dir")
-        rep = json.load(open(os.path.join(c.work, pd, "board.pairs.json"))) if pd else None
-    except (OSError, ValueError, TypeError):
-        pass
+    pd = ((getattr(c, "state", None) or {}).get("stages") or {}).get("pairs", {}).get("dir")
+    reports = ([os.path.join(c.work, pd, "board.pairs.json")] if pd else []) + [os.path.splitext(board)[0] + ".pairs.json"]
+    for report_path in reports:
+        try:
+            rep = json.load(open(report_path))
+            break
+        except (OSError, ValueError, TypeError):
+            pass
     allnets = set(_all_nets(board))
     hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))
     pn = pair_nets(c.cons, allnets, rep)
@@ -229,7 +274,7 @@ def run(c, n, board, runner=run_step):
         line += f"; snap {post['snap']['moved']} end(s), {post['snap']['centred_left']} off-centre left; guarded plane ties {post['ties']['placed']}"
     if post_error:
         line += f"; POST ERROR {post_error['type']}: {post_error['message']} (routed board kept, cleanup skipped)"
-    missed = []
+    missed, already_done = [], []
     try:                                                    # pairs the external pair router did not see or did not route coupled
         from . import pairs as PRS, pairaudit as PA, routediag as RD2, netclass as NC2
         drow = next((r for r in rows if r["step"] == "diff"), None)
@@ -237,18 +282,21 @@ def run(c, n, board, runner=run_step):
             Bm = RD2.load(best)
             missed = PRS.crosscheck_external(PA.pair_list(NC2.classify(Bm, c.cons, getattr(c, "spec", None))),
                                              summary=drow.get("summary"), log=drow.get("log"))
+            missed, already_done = _partition_missed(missed, rep, board, names)
     except Exception as e:                                  # noqa: BLE001 - a report, never a reason to lose the board
         missed = [{"pair": "?", "reason": "crosscheck_error", "detail": str(e)[:120]}]
+    if already_done:
+        line += f"; pairs already done {len(already_done)} pair(s), not missed"
     if missed:
         line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "router_project_discarded": discarded},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
-    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, **({"post_error": post_error} if post_error else {})))
+    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
     return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality}
 
 
