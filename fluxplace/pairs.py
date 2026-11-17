@@ -18,6 +18,7 @@ import fnmatch
 import json
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -1356,3 +1357,90 @@ def guard_limit(cons, net):
     from . import constraints as C
     lim, _src = C.skew_limit_checked(cons, net)
     return float("inf") if lim is None else lim
+
+
+# ------------------------------------------------ cross-check against an external pair router
+_OK_OUTCOMES = {"coupled"}
+_BAD_LISTS = ("failed_diff_pairs", "partial_diff_pairs", "member_incomplete_pairs", "single_ended_diff_pairs", "uncoupled_diff_pairs")
+
+
+def _stem_of(stem, p, n):
+    """the router names a pair by its common stem ("BT3_D" for BT3_DP / BT3_DM): both nets start with it and add <= 3 characters."""
+    return bool(stem) and p.startswith(stem) and n.startswith(stem) and len(p) - len(stem) <= 3 and len(n) - len(stem) <= 3
+
+
+def _read_maybe(x):
+    """dict | JSON path | log text | log path | None -> (dict or None, text)."""
+    if isinstance(x, dict):
+        return x, ""
+    if isinstance(x, (str, os.PathLike)):
+        s = str(x)
+        txt = open(s, errors="replace").read() if "\n" not in s and os.path.isfile(s) else s
+        try:
+            d = json.loads(txt)
+            return (d if isinstance(d, dict) else None), ""
+        except ValueError:
+            return None, txt
+    return None, ""
+
+
+def crosscheck_external(pairs, summary=None, log=None):
+    """The pairs fluxplace knows that the external pair router did NOT recognise or did NOT route as a pair.
+    pairs: [(p, n)] (pairaudit.pair_list). summary: the router's `--json-out` dict or path (pair_reports, routed_diff_pairs,
+    failed/partial/member_incomplete/single_ended/uncoupled lists, routed_single ...); log: its log text or path ("Routing diff pair
+    STEM", "No differential pairs found ... Patterns provided: [...]"). Either may be missing.
+    -> [{pair, p, n, reason, detail}], reason "not_recognised" (the router never saw it as a pair: absent, routed as two
+    single nets, or its patterns matched no pair) or "not_routed_as_pair" (recognised, but not coupled / incomplete / fell back to
+    single-ended). A pair the router did route coupled and complete is not listed. Hand the rows to fluxplace's own pair layer
+    (`run(board, cons, spec, out, only={nets})` or `pairsonly.reroute`)."""
+    d, t1 = _read_maybe(summary)
+    d2, t2 = _read_maybe(log)
+    d = d or d2 or {}
+    text = t1 + "\n" + t2
+    stems = set(re.findall(r"Routing diff pair (\S+)", text))
+    nomatch = set()
+    if "No differential pairs found" in text:
+        m = re.search(r"Patterns provided: (\[[^\]]*\])", text)
+        try:
+            nomatch = set(__import__("ast").literal_eval(m.group(1))) if m else set()
+        except (ValueError, SyntaxError):
+            nomatch = set()
+    reports = {frozenset((r.get("p_net"), r.get("n_net"))): r for r in d.get("pair_reports", []) or []}
+    single = set(d.get("routed_single", []) or []) | set(d.get("failed_single", []) or []) | set(d.get("open_single", []) or [])
+    bad = {k: list(d.get(k, []) or []) for k in _BAD_LISTS}
+    good = list(d.get("routed_diff_pairs", []) or [])
+    out = []
+    for p, n in pairs:
+        row = {"pair": f"{p}/{n}", "p": p, "n": n}
+        r = reports.get(frozenset((p, n)))
+        stem = next((s for s in good + sum(bad.values(), []) + sorted(stems) if _stem_of(s, p, n)), None)
+        if r:
+            probs = []
+            if r.get("outcome") not in _OK_OUTCOMES:
+                probs.append(f"outcome {r.get('outcome')}" + (f" at {r['failure_stage']}" if r.get("failure_stage") else ""))
+            if r.get("incomplete_members"):
+                probs.append("members incomplete: " + ", ".join(map(str, r["incomplete_members"])))
+            if r.get("no_coupled_trunk"):
+                probs.append("no coupled trunk")
+            if r.get("member_audit_mismatch"):
+                probs.append("member audit mismatch")
+            if r.get("se_fallback"):
+                probs.append("single-ended fallback")
+            if r.get("failure_reason"):
+                probs.append(str(r["failure_reason"])[:120])
+            if probs:
+                out.append(dict(row, reason="not_routed_as_pair", detail="; ".join(probs)))
+            continue
+        if stem is not None:
+            hit = [k for k, v in bad.items() if stem in v]
+            if hit:
+                out.append(dict(row, reason="not_routed_as_pair", detail=f"{stem} listed in {', '.join(hit)}"))
+            continue                                       # recognised and routed (stem in routed_diff_pairs or in the log)
+        if p in nomatch or n in nomatch:
+            why = "the router's --nets patterns matched no differential pair (net names without _P/_N, -P/-N, P/N or +/-)"
+        elif p in single or n in single:
+            why = "routed as single-ended nets, not as a pair"
+        else:
+            why = "absent from the router's summary and log"
+        out.append(dict(row, reason="not_recognised", detail=why))
+    return out
