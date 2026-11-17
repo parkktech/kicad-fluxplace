@@ -201,7 +201,7 @@ def cmd_via_min(a):
 
 
 def cmd_repair(a):
-    from . import repair
+    from . import handrepair as repair
     g = _write_guard(a, a.out)
     if g is not None:
         return g

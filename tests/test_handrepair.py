@@ -5,7 +5,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fluxplace import handroute as H, repair as RP  # noqa: E402
+from fluxplace import handroute as H, handrepair as RP  # noqa: E402
 
 
 def _conn(net, a, b):
