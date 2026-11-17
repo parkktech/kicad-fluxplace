@@ -71,3 +71,11 @@ pair, requires the accepted replacement to be locked, and sets `relocked`. Failu
 locks and geometry are restored byte-for-byte. Without the flag the refusal now names `--unlock`. Regressions:
 `test_unlock_reroutes_and_relocks_named_pair`, `test_unlock_failure_restores_original_locks_and_geometry`, and the updated
 locked-refusal test (37 pair/pair-only tests passed).
+
+## Complete failed-stage residuals
+
+Floorplan/fanout failure summaries were deltas from the placement search, not a residual audit of the output board. Failed
+stages now run `placementcheck.residual` on their actual output and attach complete outside, overlap, keep-out, no_tht,
+hardware, module, pad-short and hole lists to `residual_violations`. Every item is appended to `stage.log` and written to
+`placement-residual.json`, with no top-N truncation. Regressions in `test_placement_residual.py` include a 14-item group
+and result/log equivalence (40 selected tests passed).
