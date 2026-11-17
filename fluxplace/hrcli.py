@@ -23,6 +23,11 @@ def _viol(v):
     at = v.get("at")
     if at is not None:
         s += " at " + (",".join(str(x) for x in at) if isinstance(at, (list, tuple)) else str(at))
+    if v.get("clear_dir") and v.get("clear_shift_mm") is not None:
+        dx, dy = v["clear_dir"]
+        ax, ay = abs(dx), abs(dy)
+        d = ("+x" if dx > 0 else "-x") if ax >= ay * 2 else ("+y" if dy > 0 else "-y") if ay >= ax * 2 else f"({dx:+.2f},{dy:+.2f})"
+        s += f" move {v['clear_shift_mm']} mm toward {d}"
     return s
 
 

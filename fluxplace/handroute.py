@@ -414,6 +414,18 @@ def _window_public(W):
 
 
 # ======================================================================================================= probe
+def _clear_fix(obs_pt, a, b, shortfall):
+    """Direction (unit vector, obstacle -> path) to move a path segment a-b and the shift (rounded up to 0.01 mm) that cures `shortfall` mm."""
+    if obs_pt is None or shortfall <= 0:
+        return {}
+    _, q = G.pt_seg(obs_pt, a, b)
+    dx, dy = q[0] - obs_pt[0], q[1] - obs_pt[1]
+    n = math.hypot(dx, dy)
+    if n < 1e-9:
+        return {}
+    return {"clear_dir": [round(dx / n, 4), round(dy / n, 4)], "clear_shift_mm": round(math.ceil(shortfall / 0.01 - 1e-6) * 0.01, 2)}
+
+
 def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=()):
     rule = M.net_rule(net)
     w = width or rule["width"]
@@ -470,6 +482,8 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                     v = dict(cand)
                     v.update({"kind": "crossing" if gap <= 0 and o.kind in ("track", "via", "pad") else "clearance" if o.kind != "ko" and o.kind != "edge" else o.kind + "_hit",
                               "i": i, "with": lab, "short_if_laid": gap <= 0 and o.kind in ("track", "via", "pad")})
+                    if v["kind"] == "clearance":
+                        v.update(_clear_fix(pt, a, b, -margin))
                     viol.append(v)
             rec["nearest"] = best
             items.append(rec)
@@ -500,6 +514,8 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                     if margin < -G.EPS:
                         v = dict(cand)
                         v.update({"kind": "hole_to_hole" if o.kind == "hole" else "via_clearance" if o.kind not in ("ko", "edge") else o.kind + "_hit", "i": i, "with": lab})
+                        if v["kind"] in ("via_clearance", "hole_to_hole"):
+                            v.update(_clear_fix(pt, c, c, -margin))
                         viol.append(v)
                     if o.kind in ("pad", "track", "via"):
                         hgap = gap + (vd / 2 - vdr / 2)

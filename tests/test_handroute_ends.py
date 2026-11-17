@@ -69,3 +69,19 @@ def test_explore_reports_then_found_for_corridor_needing_extension(tmp_path):
     assert not R["found"]
     ok = [e for e in R["explore"] if e["then_found"]]
     assert ok and ok[0]["remove"][0]["net"] == "X" and ok[0]["path"]
+
+
+def test_probe_clear_dir_and_shift_in_summary(tmp_path):
+    from fluxplace import hrcli
+    from test_handroute import gap_board
+    p = gap_board(tmp_path)
+    R = H.probe(p, "B", "F.Cu: 6.7,-0.3 13.3,-0.3", width=0.25)      # A runs at y = 0: gap 0.05 of 0.2 -> 0.15 mm toward -y
+    v = [x for x in R["violations"] if x["kind"] == "clearance" and x["with"] == "track A"][0]
+    assert v["clear_dir"] == [0.0, -1.0] and v["clear_shift_mm"] == 0.15
+    assert hrcli.summary("probe", R).endswith("move 0.15 mm toward -y") or "move 0.15 mm toward -y" in hrcli.summary("probe", R)
+    # a diagonal path: shifting along clear_dir by clear_shift_mm cures it
+    R = H.probe(p, "B", "F.Cu: 4,-1 6,-3", width=0.25)
+    c = [x for x in R["violations"] if x["kind"] == "clearance"]
+    for x in c:
+        assert abs(math.hypot(*x["clear_dir"]) - 1) < 1e-3 and x["clear_shift_mm"] > 0
+        assert (x["clear_shift_mm"] * 100) % 1 < 1e-6 or abs((x["clear_shift_mm"] * 100) % 1 - 1) < 1e-6
