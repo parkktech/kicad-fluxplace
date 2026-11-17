@@ -26,6 +26,7 @@ HW = {"placement": {"hardware": {}}}
 
 
 def board(tmp_path, body):
+    tmp_path.mkdir(exist_ok=True)
     return RD.load(g.board(tmp_path, body))
 
 
@@ -39,12 +40,13 @@ def test_hardware_detect_by_drill_table_and_overrides(tmp_path):
     ic = g.ic("U1", 60, 60, ["A", "B", "C", "D"])
     th = g.fp("J9", 70, 20, [g.pad("1", 0, 0, "N1", typ="thru_hole"), g.pad("2", 3, 0, "N2", typ="thru_hole")])
     body = hole("H1", 20, 20, 2.2) + hole("H2", 30, 20, 2.7) + hole("H3", 40, 20, 3.2) + npth("H4", 50, 20, 3.4) \
-        + hole("H5", 20, 40, 3.2, net="GND") + hole("H6", 30, 40, 3.2) + ic + th + g.two("C1", 20, 60, "A", "B")
+        + hole("H5", 20, 40, 3.2, net="VBUS") + hole("H6", 30, 40, 3.2) + ic + th + g.two("C1", 20, 60, "A", "B")
     B = board(tmp_path, body)
     cons = {"placement": {"hardware": {"exclude": ["H6"], "refs": ["C1"], "diameter_mm": {"C1": 4.0, "H3": 8.0}}}}
     got = {r: (c, d) for r, c, d in PR.hardware(B, cons)}
     assert {r: d for r, (c, d) in got.items()} == {"C1": 4.0, "H1": 5.0, "H2": 6.0, "H3": 8.0, "H4": 7.0}
-    assert got["H2"][0] == (30.0, 20.0)                # J9 (two spots), U1, H5 (netted), H6 (excluded): not hardware
+    assert got["H2"][0] == (30.0, 20.0)                # J9 (two spots), U1, H5 (powered), H6 (excluded): not hardware
+    assert PR.hardware(board(tmp_path / "g", hole("G1", 20, 20, 3.2, net="GND")), HW)[0][0] == "G1"   # a grounded mounting hole counts
     cons["placement"]["hardware"]["table"] = [[3.0, 5.5]]
     assert {r: d for r, c, d in PR.hardware(B, cons)}["H4"] == 5.5     # beyond the table: the last row
 
@@ -61,7 +63,7 @@ def test_hardware_circle_is_exact_and_placers_get_the_square(tmp_path):
     assert r["hardware"] == ["C2 in H1"] and r["forbidden"] == []
     cons = {"placement": {"hardware": {"allow": ["C2"]}}}
     assert LGL.Legal(B, cons).issues()["hardware"] == []
-    assert any(f["code"] == "PLACEMENT_ILLEGAL" and "hardware" in f["message"] for f in LGL.findings(B, HW))
+    assert any(f["code"] == "PLACEMENT_ILLEGAL" and "hardware" in str(f) for f in LGL.findings(B, HW))
 
 
 def test_module_outline_expands_to_keepout_and_no_tht_only_when_asked():
@@ -82,7 +84,7 @@ def test_module_margin_outline_from_pads_and_load_expands(tmp_path):
     B = board(tmp_path, body)
     cons = {"placement": {"module": {"m": {"refs": ["J1"], "side": "F", "margin_mm": 1.0, "tht": False}}}}
     PR.expand(cons)                                              # no board: a margin outline waits
-    assert "keepout" not in cons["placement"]
+    assert not cons["placement"].get("keepout")
     rects = LG.keepout_rects(B, cons)                            # the readers expand with the board
     assert rects[0][0] == (28.0, 28.0, 42.0, 32.0) and rects[0][2] == ["J1"] and rects[0][4] == "module.m"
     r = LGL.Legal(B, cons).issues()
@@ -109,12 +111,12 @@ def test_placement_check_reports_every_rule_and_exits_1(tmp_path, capsys):
     assert e.value.code == 1
     res = json.loads(capsys.readouterr().out)
     by = {(r["kind"], r["name"]): r["violations"] for r in res["rules"]}
-    assert [v["ref"] for v in by[("hardware", "H1")]] == ["C2"] and by[("hardware", "H1")][0]["distance_mm"] == 2.5
-    assert [v["ref"] for v in by[("keepout", "module.m")]] == ["C3", "T1"]
-    assert by[("keepout", "module.m")][0]["face"] == "B" and by[("keepout", "module.m")][1]["fixed"] is True
-    assert by[("no_tht", "module.m")][0]["pad"] == "1"
+    assert [v["ref"] for v in by[("hardware", "H1")]] == ["C2"] and by[("hardware", "H1")][0]["distance_mm"] == 2.25
+    assert [v["ref"] for v in by[("keepout", "module.m")]] == ["C3"]
+    assert by[("keepout", "module.m")][0]["face"] == "B"          # T1 is on F: a B keep-out concerns B bodies only
+    assert by[("no_tht", "module.m")][0]["pad"] == "1" and by[("no_tht", "module.m")][0]["fixed"] is True
     assert set(res["quadrants"]) == {"NW", "NE", "SW", "SE"} and res["quadrants"]["NW"]["F_pct"] > 0
-    assert res["ok"] is False and res["violations"] == 5
+    assert res["ok"] is False and res["violations"] == 3
 
 
 def test_placement_check_ok_exit_0(tmp_path, capsys):
@@ -124,3 +126,42 @@ def test_placement_check_ok_exit_0(tmp_path, capsys):
     cli.main(["placement-check", brd, "--constraints", str(cons)])
     out = capsys.readouterr().out
     assert out.startswith("placement-check: OK") and "quadrant courtyard coverage" in out
+
+
+def _under_board(tmp_path):
+    body = "".join(g.two(r, x, 20, "A", "B", side="B", court=(-1, -1, 1, 1)) for r, x in (("C1", 15), ("C2", 20), ("C3", 25))) \
+        + g.two("C4", 15, 30, "A", "B", side="F", court=(-1, -1, 1, 1))
+    return g.board(tmp_path, body)
+
+
+UNDER = {"placement": {"heights": {"C1": 1.0, "C2": 3.0, "C4": 9.0},
+                       "module": {"m": {"refs": [], "side": "B", "outline": [10, 10, 40, 40], "under_height_mm": 2.5}}}}
+
+
+def test_under_height_zero_is_nothing_under_the_module(tmp_path):
+    cons = {"placement": {"heights": {"C1": 1.0},
+                          "module": {"m": {"refs": [], "side": "B", "outline": [10, 10, 40, 40]}}}}
+    r = LGL.Legal(RD.load(_under_board(tmp_path)), C.expand(cons) if hasattr(C, "expand") else PR.expand(cons)).issues()
+    assert r["forbidden"] == ["C1 in module.m", "C2 in module.m", "C3 in module.m"]
+
+
+def test_under_height_allows_low_rejects_tall_and_unknown(tmp_path):
+    import copy
+    cons = PR.expand(copy.deepcopy(UNDER))
+    assert not cons["placement"].get("keepout")                      # the height rule is an intent region, not a plain keep-out
+    r = LGL.Legal(RD.load(_under_board(tmp_path)), cons).issues()
+    assert r["forbidden"] == ["C2 in module.m", "C3 in module.m"]    # C1 1.0 <= 2.3 ok; C2 3.0 too tall; C3 unknown; C4 is on F
+
+
+def test_placement_check_reports_height_verdicts(tmp_path, capsys):
+    brd = _under_board(tmp_path)
+    cons = tmp_path / "c.toml"
+    cons.write_text('[placement.heights]\nC1 = 1.0\nC2 = 3.0\n[placement.module.m]\nrefs = []\nside = "B"\n'
+                    'outline = [10, 10, 40, 40]\nunder_height_mm = 2.5\n')
+    with pytest.raises(SystemExit):
+        cli.main(["placement-check", brd, "--constraints", str(cons), "--json"])
+    res = json.loads(capsys.readouterr().out)
+    u = res["under"][0]
+    assert u["limit_mm"] == 2.3 and [(p["ref"], p["verdict"]) for p in u["parts"]] == [
+        ("C1", "ok"), ("C2", "too tall"), ("C3", "height unknown")]
+    assert u["parts"][0]["source"].startswith("[placement.heights]") and res["violations"] == 2

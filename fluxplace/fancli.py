@@ -7,6 +7,7 @@ MODULES += ("closure", "pairs")
 MODULES += ("joingaps",)
 MODULES += ("intent", "intentdraft")          # placement intent: gate + draft (docs/INTENT.md)
 MODULES += ("wlrefine",)
+MODULES += ("placementcheck",)                # keep-out / hardware / module rule report (docs/commands/placement-check.md)
 MODULES += ("blocks",)                        # functional-block inventory (fluxplace/blocks.py)                      # wire-length refinement of a legal placement
 
 

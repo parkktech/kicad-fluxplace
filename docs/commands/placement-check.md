@@ -34,6 +34,14 @@ outline = [107.75, 40.0, 160.0, 70.0]   # or margin_mm = 1.0: bounding box of th
 allow = []                      # more exempt refs
 tht = false                     # also forbid through-hole pads in the outline (default true = keep-out only)
 ```
-A mounting hole = a part whose pads all sit on one spot, largest drill >= `min_drill_mm`, no net on it. The legality gate
+A mounting hole = a part whose pads all sit on one spot, largest drill >= `min_drill_mm`, no net (or a ground net) on it. The legality gate
 checks the circle exactly (reason `hardware`); rect-only placers get its bounding square (side both, allow = the hole's ref).
 `outline` modules are expanded by `constraints.load`; `margin_mm` ones when the board is at hand (`placerules.expand`).
+
+## Height allowance under a module
+`under_height_mm = H` (default 0: nothing at all) and `under_margin_mm` (0.2) on a `[placement.module.NAME]`: a part of the
+module's face inside the outline is allowed when its known height <= H - margin; unknown height is NOT allowed. Heights come
+from `[placement.heights]` (ref or footprint-name glob -> mm, first match), else the chip-size estimate for 0201-1210 passives
+(`intent.height`); no 3D-model or STEP parsing. It expands to a `[[intent.region]]` with `max_height_mm`, the mechanism the
+placers and the legaliser already honour per part, so gate and placers agree. `placement-check` lists each part under such a
+module with height, source and verdict `ok` / `too tall` / `height unknown`; the last two count as violations.

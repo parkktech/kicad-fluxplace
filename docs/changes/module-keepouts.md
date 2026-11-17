@@ -6,3 +6,4 @@
 - `placement-check`: read-only report of every keep-out, no_tht, hardware and module rule with offending parts and quadrant coverage.
 - README command index text narrowed (44 -> 40 columns) to stay inside its byte budget.
 Docs: docs/commands/placement-check.md.
+- `under_height_mm` / `under_margin_mm` on `[placement.module.NAME]`: height-aware keep-out via `[[intent.region]] max_height_mm`.

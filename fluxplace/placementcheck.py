@@ -101,9 +101,9 @@ def compute(B, cons):
                     rows.append({"ref": r2, "face": _face(p), "distance_mm": round(dist, 3), "required_mm": round(d / 2, 3),
                                  "fixed": r2 in fixed})
             rule("hardware", ref, {"centre": list(c), "diameter_mm": d}, rows)
-    quads = quadrants(B)
-    n = sum(len(r["violations"]) for r in rules)
-    return {"ok": n == 0, "violations": n, "rules": rules, "quadrants": quads}
+    under = PR.under_report(B, cons)
+    n = sum(len(r["violations"]) for r in rules) + sum(p["verdict"] != "ok" for u in under for p in u["parts"])
+    return {"ok": n == 0, "violations": n, "rules": rules, "under": under, "quadrants": quadrants(B)}
 
 
 def lines(res):
@@ -122,6 +122,11 @@ def lines(res):
             else:
                 d = f"pad {x['pad']} at {tuple(x['at'])}"
             out.append(f"    {x['ref']:8s} {x['face']}  {d}{'  [FIXED]' if x['fixed'] else ''}")
+    for u in res["under"]:
+        out.append(f"module {u['module']} ({u['side']}): parts up to {u['under_height_mm']:g} mm allowed underneath (limit {u['limit_mm']:g} mm)")
+        for p in u["parts"]:
+            h = "?" if p["height_mm"] is None else f"{p['height_mm']:g} mm"
+            out.append(f"    {p['ref']:8s} {p['face']}  {h:8s} {p['source']:28s} {p['verdict']}")
     out.append("quadrant courtyard coverage (courtyard / quadrant area):")
     for n, q in res["quadrants"].items():
         out.append(f"  {n}  F {q['F_pct']:5.1f}%  B {q['B_pct']:5.1f}%  total {q['total_pct']:5.1f}%  ({q['area_mm2']:.0f} mm2)")

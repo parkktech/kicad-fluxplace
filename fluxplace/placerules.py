@@ -22,12 +22,14 @@ allow = [...], tht = false, reason = "..."}`
     allow = [...]            refs allowed inside any circle (fnmatch), e.g. the standoff's own mating part
     diameter_mm = {REF = d}  per-ref override
     A mounting-hole footprint = a part whose pads all sit on ONE spot and whose largest drill >= min_drill_mm and has
-    no net on that pad. Circle centre = that spot (the part origin for `refs` without a drill).
+    no net (or a ground net) on that pad. Circle centre = that spot (the part origin for `refs` without a drill).
     The circle is exact in the legality gate (reason `hardware`); the placers see its bounding square as a keep-out
     (side both, allow = the hole's own ref).
 """
 import fnmatch
 import math
+
+from . import netclass as NC
 
 SIDES = ("F", "B")
 TABLE = ((2.4, 5.0), (2.9, 6.0), (3.6, 7.0))
@@ -81,7 +83,7 @@ def hardware(B, cons):
         if not holes or not pts:
             continue
         x, y, dr, net = max(holes, key=lambda t: t[2])
-        if dr < min_d or net or any(math.hypot(a - x, b - y) > 0.05 for a, b in pts):
+        if dr < min_d or (net and not NC.is_ground(net)) or any(math.hypot(a - x, b - y) > 0.05 for a, b in pts):
             continue
         out.append((ref, (round(x, 4), round(y, 4)), dia(ref, dr)))
     return out
@@ -130,8 +132,8 @@ def expand(cons, B=None):
     mods = pl.get("module")
     if not isinstance(mods, dict):
         return cons
-    ko = pl.setdefault("keepout", {})
-    nt = pl.setdefault("no_tht", {})
+    ko, nt = pl.get("keepout") or {}, pl.get("no_tht") or {}
+    pl["keepout"], pl["no_tht"] = ko, nt
     for name, m in sorted(mods.items()):
         if not isinstance(m, dict) or f"module.{name}" in ko or f"module.{name}" in nt or any(
                 r.get("name") == f"module.{name}" for r in (cons.get("intent") or {}).get("region", []) or []):

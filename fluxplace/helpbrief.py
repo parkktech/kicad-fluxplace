@@ -20,7 +20,7 @@ CMD_DOC = {
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli", "corpus": "cli",
     "parts": "parts", "ready": "ready", "pin-groups": "pin-groups", "part-diff": "part-diff",
     "fab-advise": "fab-advise", "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
-    "rules": "rules", "calls": "calls", "progress": "progress",
+    "placement-check": "placement-check", "rules": "rules", "calls": "calls", "progress": "progress",
 }
 
 
@@ -66,7 +66,7 @@ def index_lines(ap=None):
     return [f"{c:18s} {h}" for c, h in index(ap)]
 
 
-def readme_index(ap=None, width=44):
+def readme_index(ap=None, width=40):
     """The README command index (kept in sync by a test)."""
     rows = []
     for c, h in index(ap):
