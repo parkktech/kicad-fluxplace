@@ -285,9 +285,11 @@ def one_line(st):
                     + (f", {st['nets_ripped']} ripped" if st.get("nets_ripped") else "") + ")")
     elif st.get("freerouting"):
         f = st["freerouting"]
-        bits.append(f"freerouting pass {f.get('pass')} unrouted {f.get('unrouted')}")
+        bits.append(f"freerouting pass {f.get('pass')} router-log unrouted {f.get('unrouted')} (not connectivity)")
     if isinstance(st.get("open"), dict):
         bits.append(f"{sum(st['open'].values())} open connections in {len(st['open'])} net(s)")
+    else:
+        bits.append("open connections not measured")
     if st.get("stage") == "pairs" and st.get("total") is not None:
         bits.append(f"pairs {st.get('complete', 0)}/{st['total']} complete")
     bits.append(f"{st.get('elapsed_s', 0)}s")
@@ -355,8 +357,17 @@ def diagnose_result(st, cons=None, spec=None):
     if not out or not os.path.exists(out):
         return None, None
     B = RD.load(out)
-    failed = RD.unrouted_nets(B)
+    from . import routeconn as RC
+    try:
+        open_nets = RC.open_by_net(out)
+        failed = sorted(n for n, count in open_nets.items() if count)
+        connectivity = {"measured": True, "open": sum(open_nets.values()), "open_by_net": open_nets}
+    except Exception as e:
+        failed = RD.unrouted_nets(B)               # placement hints only; never present these as connectivity evidence
+        open_nets = None
+        connectivity = {"measured": False, "open": None, "status": "not measured", "error": str(e)[:200]}
     res = RD.diagnose(B, failed, cons or None, spec)
+    res["connectivity"] = connectivity
     base = out + ".diagnose"
     with open(base + ".json", "w") as fh:
         json.dump(res, fh, indent=1)

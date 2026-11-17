@@ -79,3 +79,12 @@ stages now run `placementcheck.residual` on their actual output and attach compl
 hardware, module, pad-short and hole lists to `residual_violations`. Every item is appended to `stage.log` and written to
 `placement-residual.json`, with no top-N truncation. Regressions in `test_placement_residual.py` include a 14-item group
 and result/log equivalence (40 selected tests passed).
+
+## Measured route connectivity
+
+Route status repeated router-log `unrouted` counters and diagnosis used “2+ pads, no copper,” both unrelated to actual
+connectivity. `diagnose_result` and direct `route-diagnose` now call `routeconn.open_by_net` on the current output, put a
+`connectivity` object and `CONNECTIVITY` line in the result, and diagnose the measured open nets. Log counters are labelled
+`router-log ... (not connectivity)`; unmeasured status says `open connections not measured`. Regressions:
+`test_diagnose_uses_kicad_connectivity_not_copper_heuristic` and `test_status_log_counter_is_not_claimed_as_open_count`
+(25 selected tests passed). On the real snapped board the report measures four opens with their four net names in 5.81 s.

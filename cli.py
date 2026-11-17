@@ -2168,16 +2168,27 @@ def cmd_route_diagnose(a):
     import json as _json
     from fluxplace import routediag as RD
     B = RD.load(a.board, track=a.track, clearance=a.clearance)
+    from fluxplace import routeconn as RC
+    try:
+        open_nets = RC.open_by_net(a.board)
+        connectivity = {"measured": True, "open": sum(open_nets.values()), "open_by_net": open_nets}
+    except Exception as e:
+        open_nets = None
+        connectivity = {"measured": False, "open": None, "status": "not measured", "error": str(e)[:200]}
     if a.nets:
         failed, src = [n for n in a.nets.split(",") if n], "--nets"
     elif a.log:
         st = RD.parse_logs(a.log)
         failed, src = sorted(n for n, s in st.items() if s == "FAILED"), "log"
+    elif open_nets is not None:
+        failed, src = sorted(n for n, count in open_nets.items() if count), "KiCad connectivity"
     else:
-        failed, src = RD.unrouted_nets(B), "board (2+ pads, no copper)"
-    print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}")
+        failed, src = RD.unrouted_nets(B), "placement heuristic (connectivity not measured)"
+    print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}; "
+          + (f"{connectivity['open']} open connection(s) measured by KiCad" if connectivity["measured"] else "connectivity not measured"))
     cons, spec = _text_ctx(a)
     res = RD.diagnose(B, failed, cons or None, spec)
+    res["connectivity"] = connectivity
     print(RD.format_text(res))
     if a.json:
         with open(a.json, "w") as fh:
