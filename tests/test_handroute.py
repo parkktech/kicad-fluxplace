@@ -126,6 +126,20 @@ def test_edit_guard_scopes_only_foreign_via_centring_flicker():
     assert H._edit_violation_keys(Counter({foreign: 1}), "GND") == {}
 
 
+def test_net_only_suggest_chooses_closest_distinct_islands():
+    import types
+
+    def pad(x):
+        return H.G.Ob("pad", "N", ("F.Cu",), ("poly", [(x - 0.2, -0.2), (x + 0.2, -0.2), (x + 0.2, 0.2), (x - 0.2, 0.2)]))
+
+    obs = [pad(0), pad(5), pad(9)]
+    islands = [{"items": [obs[0]], "zones": []}, {"items": [obs[1]], "zones": []}, {"items": [obs[2]], "zones": []}]
+    model = types.SimpleNamespace(obs=obs, islands=lambda net: (islands, {}))
+    ia, ib, pa, pb = H._auto_endpoints(model, "N", islands)
+    assert (ia, ib) == (1, 2)
+    assert pa[0] < pb[0] and round(pb[0] - pa[0], 1) == 3.6
+
+
 def test_suggest_requires_both_intended_endpoint_islands():
     pr = {"ends_join": [{"touches": {"island": 1}}, {"touches": {"island": 2}}]}
     assert H._endpoints_join(pr, 1, 2)

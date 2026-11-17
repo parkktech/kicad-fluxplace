@@ -1158,6 +1158,17 @@ def _endpoints_join(pr, ia, ib):
             and (ib is None or joins[-1]["touches"].get("island") == ib))
 
 
+def _auto_endpoints(M, net, isl):
+    """Closest pair of distinct same-net islands -> (ia, ib, point_a, point_b), or Nones when no pair exists."""
+    best = None
+    for i in range(len(isl)):
+        for j in range(i + 1, len(isl)):
+            d = _island_dist(M, net, i, j)
+            if d is not None and (best is None or d[0] < best[0]):
+                best = (d[0], i, j, d[1], d[2])
+    return best[1:] if best else (None, None, None, None)
+
+
 def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, width=None, via=None, pitch=0.05, margin=2.0,
             via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False):
     """Grid A* between two islands of `net`: sources = the island of the item nearest src_pt, targets = the island nearest dst_pt (or the
@@ -1176,6 +1187,10 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
         ia, ib = rec["a"].get("island"), rec["b"].get("island")
         pa = rec["closest"]["a"] if rec.get("closest") else (rec["a"]["x"], rec["a"]["y"])
         pb = rec["closest"]["b"] if rec.get("closest") else (rec["b"]["x"], rec["b"]["y"])
+    elif src_pt is None and dst_pt is None:
+        ia, ib, pa, pb = _auto_endpoints(M, net, isl)
+    elif src_pt is None or dst_pt is None:
+        return {"found": False, "reason": "both --from and --to are required when either endpoint is given"}
     else:
         def nearest(pt):
             best = min(((G.ob_gap(pt, pt, 0.0, o)[0], o) for o in M.obs if o.net == net and o.kind in ("pad", "track", "via")), key=lambda t: t[0])

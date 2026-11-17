@@ -309,8 +309,11 @@ def cmd_suggest(a):
     from . import handroute as H
     sp = tuple(float(x) for x in a.src.split(",")) if a.src else None
     dp = tuple(float(x) for x in a.dst.split(",")) if a.dst else None
-    r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
-                  a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+    try:
+        r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
+                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+    except Exception as e:
+        r = {"found": False, "reason": f"internal error: {type(e).__name__}: {e}"}
     _emit(a, r, lambda: ("suggest: none - " + r["reason"] + "\n  " + "\n  ".join(f"remove {[(x['net'], x['id']) for x in e['remove']]} -> found={e['then_found']} {e['path'] or ''}" for e in r["explore"]) if r.get("explore") is not None else f"suggest(relaxed): {r['path']}\n  blockers: " + ", ".join(f"{b['kind']} {b['id']} {b['net']} {b['layer']}x{b['cells']}" for b in r["blockers"]) if r.get("blockers") is not None else f"suggest: {r['path']}\n  length {r['length_mm']} mm, {r['vias']} via(s), probe OK" if r.get("found") else f"suggest: none - {r['reason']}"), "suggest", _rev(a))
     return 0 if r.get("found") else 1
 

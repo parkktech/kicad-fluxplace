@@ -18,3 +18,18 @@ def test_timeout_leaves_absent_destination_absent(tmp_path):
     out = tmp_path / "new.kicad_pcb"
     r = hrcli._timed("time:sleep", (2,), {}, 0.05, [str(out)])
     assert r["timed_out"] and not out.exists()
+
+
+def test_suggest_internal_error_is_normal_not_found(monkeypatch, capsys):
+    import json
+    import types
+    from fluxplace import handroute
+    monkeypatch.setattr(handroute, "suggest", lambda *a, **k: (_ for _ in ()).throw(TypeError("synthetic geometry error")))
+    monkeypatch.setattr(hrcli, "_rev", lambda a: "rev")
+    a = types.SimpleNamespace(board="b", net="N", src=None, dst=None, conn=None, constraints=None, width=None, via=None,
+                              pitch=0.05, margin=2.0, via_cost=2.0, layers=None, relax=False, relax_cost=1.5,
+                              explore=False, brief=False, json=True)
+    assert hrcli.cmd_suggest(a) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert not result["found"] and "TypeError: synthetic geometry error" in result["reason"]
+    assert result["summary"].startswith("suggest none:")

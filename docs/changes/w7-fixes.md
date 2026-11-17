@@ -45,3 +45,11 @@ approved input. After every successful external step, `_restore_project` now res
 records the changed sections per step, and adds `router project rules discarded: ...` to the result. Router commands carry
 the resolved approved via size/drill. `test_router_relaxed_project_is_discarded_after_every_step` uses a fake router that
 relaxes via, hole and net-class rules at all three steps (17 module tests passed).
+
+## Suggest endpoint crash
+
+A net-only suggestion passed `None` endpoints into `hrgeom.pip`; it now selects the closest distinct island pair through
+`_auto_endpoints`, rejects one-sided explicit endpoints cleanly, and the CLI converts any internal exception into a normal
+not-found result with its reason. The W7 net-only case changed from a traceback in 5.76 s to `suggest found: 2.049 mm, 0
+via(s)` in 1.66 s. Regressions: `test_net_only_suggest_chooses_closest_distinct_islands` and
+`test_suggest_internal_error_is_normal_not_found` (15 selected tests passed).
