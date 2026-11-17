@@ -933,7 +933,13 @@ def _residual_fail(res, c, d):
     if res.get("verdict") != "fail" or not os.path.exists(res.get("board", "")):
         return res
     from . import placementcheck as PC
-    report = PC.residual(res["board"], c.cons)
+    try:
+        report = PC.residual(res["board"], c.cons)
+    except Exception as e:
+        res["residual_error"] = f"{type(e).__name__}: {e}"
+        with open(os.path.join(d, "stage.log"), "a") as fh:
+            fh.write(f"\nresidual placement audit unavailable: {res['residual_error']}\n")
+        return res
     rp = os.path.join(d, "placement-residual.json")
     json.dump(report, open(rp, "w"), indent=1)
     lines = PC.residual_lines(report)

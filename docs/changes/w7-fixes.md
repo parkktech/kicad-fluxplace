@@ -106,3 +106,6 @@ nearby sites, requires the via to touch same-net filled/pad copper on at least t
 and applies the normal lay guard so the target open count must fall and no new DRC key or other open is accepted. It does
 not delete islands or write on failure. `test_guarded_stitching_via_joins_open_pour_island` proves one via closes a
 synthetic island; `test_net_without_pour_is_refused_without_output` proves the refusal path (2 tests passed).
+
+Follow-up: an unreadable failed-stage output no longer lets the residual audit replace the original exception/verdict;
+`residual_error` is recorded and the original FAIL is preserved (`test_unreadable_stage_output_keeps_original_failure`).

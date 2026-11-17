@@ -44,3 +44,14 @@ def test_failed_stage_result_and_log_share_complete_residual_lists(tmp_path, mon
     assert '"U1"' in text and '"U2"' in text and '"U3"' in text
     saved = json.load(open(tmp_path / "placement-residual.json"))
     assert saved["violations"]["outside"] == ["U1", "U2"]
+
+
+def test_unreadable_stage_output_keeps_original_failure(tmp_path):
+    board = tmp_path / "board.kicad_pcb"
+    board.write_text("not a board")
+    (tmp_path / "stage.log").write_text("original failure\n")
+    c = types.SimpleNamespace(cons={})
+    res = {"verdict": "fail", "line": "floorplan: FAIL", "board": str(board)}
+    out = P._residual_fail(res, c, str(tmp_path))
+    assert out["verdict"] == "fail" and out["line"] == "floorplan: FAIL"
+    assert "residual_error" in out and "audit unavailable" in (tmp_path / "stage.log").read_text()
