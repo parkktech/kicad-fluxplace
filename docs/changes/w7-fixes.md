@@ -98,3 +98,11 @@ clearance errors. Its `_keys` now re-includes zone-related clearance keys while 
 Regressions: raw-byte assertion in `test_nothing_accepted_copies_the_input`,
 `test_cli_skips_zone_refill_when_no_track_was_accepted`, and `test_zone_clearance_increase_is_not_ignored_by_snap_guard`
 (19 selected tests passed).
+
+## Guarded pour-island repair
+
+There was no guarded tool for a same-net pour island left open by routing. New `pour-island BOARD --net N --out O` searches
+nearby sites, requires the via to touch same-net filled/pad copper on at least two layers, uses resolved via/drill rules,
+and applies the normal lay guard so the target open count must fall and no new DRC key or other open is accepted. It does
+not delete islands or write on failure. `test_guarded_stitching_via_joins_open_pour_island` proves one via closes a
+synthetic island; `test_net_without_pour_is_refused_without_output` proves the refusal path (2 tests passed).

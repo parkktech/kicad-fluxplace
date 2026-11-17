@@ -3700,6 +3700,8 @@ def build_parser():
 
     from fluxplace import hrcli as _hrcli
     _hrcli.register(sub)
+    from fluxplace import pourisland as _pourisland
+    _pourisland.add_parser(sub)
 
     pac = sub.add_parser("anchor-check",
                          help="evaluate every allowed rotation of each connector/module/socket "
