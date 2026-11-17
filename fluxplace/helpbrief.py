@@ -20,7 +20,7 @@ CMD_DOC = {
     "comprehend": "cli", "lint": "cli", "eval": "cli", "fab": "cli", "corpus": "cli",
     "parts": "parts", "ready": "ready", "pin-groups": "pin-groups", "part-diff": "part-diff",
     "fab-advise": "fab-advise", "map": "map", "plan-route": "plan-route", "plan-compare": "plan-compare", "plan-options": "plan-options",
-    "rules": "rules",
+    "rules": "rules", "calls": "calls", "progress": "progress",
 }
 
 

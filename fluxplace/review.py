@@ -2083,13 +2083,34 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     return out
 
 
+# findings that say a check did not (fully) run: the review then reads INCOMPLETE, never a bare pass
+INCOMPLETE_CODES = frozenset({
+    "PREROUTE_UNAVAILABLE", "UNROUTED_UNAVAILABLE", "MATCH_NOT_EVALUATED", "TIMING_NOT_EVALUATED", "SILK_SKIPPED",
+    "ELEC_NOT_EVALUATED", "PAIR_DELAY_UNKNOWN", "MATCH_DELAY_UNKNOWN", "TIMING_DELAY_UNKNOWN", "POWER_CURRENT_UNKNOWN",
+    "POLICY_UNCHECKED", "PACKAGE_UNCHECKED", "CN_UNCHECKED", "TVS_UNCHECKED", "PINMAP_UNVERIFIED",
+    "PART_DATA_UNAVAILABLE", "RF_NO_STACKUP", "RF_NO_REFERENCE"})
+
+
+def incomplete(findings):
+    """[(code, count, first message)] for the findings that say part of the design was not checked."""
+    by = {}
+    for f in findings:
+        if f["code"] in INCOMPLETE_CODES:
+            by.setdefault(f["code"], []).append(f["msg"])
+    return [(c, len(m), m[0]) for c, m in sorted(by.items())]
+
+
 def summarize(findings, log=print):
     n = {FAIL: 0, WARN: 0, INFO: 0}
     for f in findings:
         n[f["level"]] += 1
         log(f"  {f['level']:4s} {f['code']:28s} {f['msg']}")
     log(f"review: {n[FAIL]} FAIL, {n[WARN]} WARN, {n[INFO]} INFO")
-    return {"fail": n[FAIL], "warning": n[WARN], "info": n[INFO]}
+    inc = incomplete(findings)
+    if inc:
+        log("review: INCOMPLETE - not covered: " + ", ".join(f"{c} x{k}" for c, k, _m in inc)
+            + " (waive the code with a reason, or --allow-incomplete)")
+    return {"fail": n[FAIL], "warning": n[WARN], "info": n[INFO], "incomplete": sum(k for _c, k, _m in inc)}
 
 
 # ==========================================================================

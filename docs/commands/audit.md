@@ -33,3 +33,8 @@ An input the guard cannot snapshot prints `guard: UNCHECKED - <reason>` (never s
 writing in place gets its input back (the original error is re-raised).
 Constraints: `[guard] ledger = false` turns the `<out>.ledger.json` sidecar off (default on).
 The pipeline applies the same check per stage (`W/LEDGER.txt`, `docs/AGENT-PIPELINE.md`).
+
+## drc-scope: INCOMPLETE
+
+`drc-scope` prints `INCOMPLETE - not covered: ...` and exits 1 when no `rule_severities` were found, fab-critical checks are
+ignored, `--report` is missing/unreadable, or `--full` failed. `--allow-incomplete` exits 0.

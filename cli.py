@@ -2048,6 +2048,9 @@ def cmd_review(a):
         raise SystemExit(1)
     if a.fail_on == "error" and n["fail"]:
         raise SystemExit(1)
+    inc = R.incomplete(findings)
+    if inc and a.fail_on != "never" and not getattr(a, "allow_incomplete", False):
+        raise SystemExit(1)          # INCOMPLETE is neither pass nor fail: exit 1 unless --allow-incomplete / waived
 
 
 def cmd_bomopt(a):
@@ -2632,7 +2635,12 @@ def cmd_drc_scope(a):
         res["full_run"] = audit.drc_full(a.board, kicad_cli=a.kicad_cli,
                                          out_path=a.out)
     if a.json:
-        print(_json.dumps(res, indent=2)); return
+        if "error" in res.get("full_run", {}):
+            res["incomplete"].append("full re-run failed: %s" % res["full_run"]["error"])
+        print(_json.dumps(res, indent=2))
+        if res["incomplete"] and not a.allow_incomplete:
+            raise SystemExit(1)
+        return
 
     print("DRC scope for %s" % os.path.basename(res["board"]))
     print("=" * 70)
@@ -2655,6 +2663,10 @@ def cmd_drc_scope(a):
               % (os.path.basename(r["path"]), r["violations"], r["unconnected"]))
     print()
     print("  VERDICT: %s" % res["verdict"])
+    if "full_run" in res and "error" in res["full_run"]:
+        res["incomplete"].append("full re-run failed: %s" % res["full_run"]["error"])
+    if res["incomplete"]:
+        print("  INCOMPLETE - not covered: %s" % "; ".join(res["incomplete"]))
     if "full_run" in res:
         f = res["full_run"]
         print()
@@ -2672,6 +2684,8 @@ def cmd_drc_scope(a):
                     print("          %-32s %d" % (k, n))
             else:
                 print("      nothing new surfaced — the clean result holds at full scope")
+    if res["incomplete"] and not a.allow_incomplete:
+        raise SystemExit(1)
 
 
 def cmd_netlist(a):
@@ -3037,6 +3051,56 @@ def cmd_help_brief(a):
     """<= 15 lines per command from the live parser (all commands: one line each)."""
     from fluxplace import helpbrief as HB
     print(HB.main_text(a.command))
+
+
+def cmd_calls(a):
+    """Recent fluxplace calls from the call log (.fluxplace/calls.jsonl), one line each."""
+    from fluxplace import calllog as CL
+    import json as _json
+    path = CL.resolve(a.path)
+    recs = CL.read(path, a.tail, a.failed)
+    if a.json:
+        print(_json.dumps(recs, indent=1))
+    else:
+        print(f"calls: {len(recs)} from {path}" + (" (failed only)" if a.failed else ""))
+        for r in recs:
+            print(CL.line(r))
+
+
+def cmd_progress(a):
+    """progress checkpoint|block|show|brief: accepted board, metric history, blockers, progressing/stalled/looping."""
+    import json as _json
+    from fluxplace import progress as PG
+    th = {"n": a.loop_n, "k": a.stall_k, "m": a.max_calls}
+    act, tgt = a.action, a.target
+    if act == "checkpoint":
+        if not tgt:
+            raise SystemExit("progress checkpoint: give the board")
+        try:
+            st, cp = PG.checkpoint(tgt, a.workdir, a.note, PG.parse_metrics(a.metric), a.measure)
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as e:
+            raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
+        wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
+        print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
+        print(f"brief: fluxplace progress brief {wd}")
+        return
+    if act == "block":
+        if not tgt or not a.reason:
+            raise SystemExit("progress block: give ITEM and --reason")
+        st = PG.block(tgt, a.reason, a.workdir or os.getcwd())
+        print(f"progress: blocked {tgt} ({len(st['blocked'])} blocker(s))")
+        return
+    wd = a.workdir or tgt or os.getcwd()
+    if act == "brief":
+        text, data = PG.brief(wd, max_chars=a.max_chars, **th)
+        print(_json.dumps(data, indent=1) if a.json else text)
+        return
+    text, v, st, ev = PG.show_text(wd, **th)
+    if a.json:
+        print(_json.dumps(dict(st, verdict=v, evidence=ev), indent=1))
+    else:
+        print(text)
+    return PG.EXIT[v]
 
 
 def build_parser():
@@ -3709,6 +3773,8 @@ def build_parser():
     prv.add_argument("--json", default=None, help="also write findings as JSON")
     prv.add_argument("--fail-on", choices=["never", "error", "warning"],
                      default="error", help="exit 1 at this severity (default error)")
+    prv.add_argument("--allow-incomplete", action="store_true",
+                     help="exit 0 although some checks could not run (the INCOMPLETE line is still printed)")
     prv.set_defaults(fn=cmd_review)
 
     prp = sub.add_parser("repair",
@@ -3926,6 +3992,8 @@ def build_parser():
     pds.add_argument("--out", default=None, help="write the full-run report here")
     pds.add_argument("--kicad-cli", default="kicad-cli")
     pds.add_argument("--json", action="store_true")
+    pds.add_argument("--allow-incomplete", action="store_true",
+                     help="exit 0 although the scope is incomplete (no severities, fab-critical checks ignored, report/full run failed)")
     pds.set_defaults(fn=cmd_drc_scope)
 
     pnl = sub.add_parser("netlist",
@@ -4081,6 +4149,28 @@ def build_parser():
     phb.add_argument("command", nargs="?", default=None)
     phb.set_defaults(fn=cmd_help_brief)
 
+    pcl = sub.add_parser("calls", help="recent calls from the call log")
+    pcl.add_argument("path", nargs="?", default=None, help="board, folder or calls.jsonl (default ./.fluxplace)")
+    pcl.add_argument("--tail", type=int, default=20)
+    pcl.add_argument("--failed", action="store_true", help="only calls with a non-zero exit")
+    pcl.add_argument("--json", action="store_true")
+    pcl.set_defaults(fn=cmd_calls)
+
+    ppg = sub.add_parser("progress", help="checkpoints, blockers, loop detection")
+    ppg.add_argument("action", choices=["checkpoint", "block", "show", "brief"])
+    ppg.add_argument("target", nargs="?", default=None, help="checkpoint: BOARD; block: ITEM; show/brief: WORKDIR")
+    ppg.add_argument("--workdir", default=None, help="folder holding .fluxplace/ (default: the board's folder / cwd)")
+    ppg.add_argument("--note", default="")
+    ppg.add_argument("--metric", action="append", default=[], metavar="K=V", help="a number to record, repeatable")
+    ppg.add_argument("--measure", action="store_true", help="checkpoint: DRC a temp copy for unconnected and errors")
+    ppg.add_argument("--reason", default=None, help="block: why")
+    ppg.add_argument("--json", action="store_true")
+    ppg.add_argument("--max-chars", type=int, default=2500, help="brief: size cap")
+    ppg.add_argument("--loop-n", type=int, default=3, help="looping: repeats that count (default 3)")
+    ppg.add_argument("--stall-k", type=int, default=5, help="stalled: checkpoints without gain (default 5)")
+    ppg.add_argument("--max-calls", type=int, default=60, help="stalled: calls since the last checkpoint (default 60)")
+    ppg.set_defaults(fn=cmd_progress)
+
     sub.choices["doctor"].add_argument(
         "--context", action="store_true",
         help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
@@ -4112,7 +4202,7 @@ def _silk_hook(a):
 
 # commands that never write a board: no connectivity snapshot is taken for them
 _GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
-                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session"}
+                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress"}
 
 
 def _guard_ledger_on(a):
@@ -4217,6 +4307,12 @@ def _guard_end(g, a, raised=False):
 
 
 def main(argv=None):
+    from fluxplace import quietlog, calllog
+    quietlog.install_stderr()                    # drop the repeated pcbnew assert line from fd 2 (FLUXPLACE_RAW_STDERR=1: off)
+    return calllog.run(_main, argv)              # one JSON line per call in .fluxplace/calls.jsonl
+
+
+def _main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
     from fluxplace import outputs as OUT

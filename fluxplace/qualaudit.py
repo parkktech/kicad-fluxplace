@@ -161,14 +161,16 @@ def not_done(B, cls, cons, open_nets, board=None, ctx=None):
     """-> {pairs: [{pair, cause}], rf: [{net, cause}], nets: set} for a board in the middle of routing. Open nets are not here
     (they are open); a pair with one open leg is half-routed, reported by pairaudit."""
     stackup, planes, fmap = ctx or _ctx(board, B, cons)
+    rows = pair_rows(B, cls, cons, open_nets)
     pairs = [{"pair": r["pair"], "cause": r["why"] or r["status"], "causes": r["causes"], "status": r["status"]}
-             for r in pair_rows(B, cls, cons, open_nets) if r["status"] in ("mismatch", "half")]
+             for r in rows if r["status"] in ("mismatch", "half")]
     rf = [{"net": r["net"], "cause": "via_count" if r["code"] == "RF_VIA_COUNT" else r["msg"], "code": r["code"], "msg": r["msg"]}
           for r in rf_rows(B, cons, stackup, planes, fmap)
           if r["net"] not in open_nets and (r["level"] == "FAIL" or via_stated(r))
           and not (r["code"] == "RF_VIA_COUNT" and via_waived(cons, r))]
     nets = {x for r in pairs for x in r["pair"].split("/")} | {r["net"] for r in rf}
-    return {"pairs": pairs, "rf": rf, "nets": nets}
+    ungraded = [{"pair": r["pair"], "cause": r["why"]} for r in rows if r["status"] == "unknown"]
+    return {"pairs": pairs, "rf": rf, "nets": nets, "ungraded": ungraded}
 
 
 def autotune(board, cons, conn, log=lambda m: None):
@@ -212,4 +214,5 @@ def status_fields(B, cls, cons, open_now, open0, ctx=None, board=None):
     nd = not_done(B, cls, cons, set(open_now), board=board, ctx=ctx)
     closed = [n for n in open0 if n not in open_now]
     return {"not_done": {"count": len(nd["nets"]), "pairs": nd["pairs"][:20], "rf": nd["rf"][:20]},
+            "ungraded": nd["ungraded"][:20],      # pairs whose skew could not be graded: counted routed, but NOT verified
             "nets_routed": sum(1 for n in closed if n not in nd["nets"]), "nets_open0": len(open0)}
