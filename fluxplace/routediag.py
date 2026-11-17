@@ -546,6 +546,9 @@ def format_text(res):
         L.append(f"{m}: not on the board (or no pads) - skipped")
     s = res["summary"]
     L.append("")
+    if res.get("connectivity"):
+        c = res["connectivity"]
+        L.append(f"CONNECTIVITY: {c['open']} open connection(s) measured by KiCad" if c.get("measured") else "CONNECTIVITY: not measured")
     L.append(f"SUMMARY: {s['failed']} failed net(s) diagnosed")
     for k in CAUSES:
         L.append(f"  {k:18s} {s['counts'][k]}")

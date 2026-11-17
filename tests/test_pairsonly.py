@@ -97,7 +97,31 @@ def test_locked_leg_is_refused_and_named(tmp_path):
     rep = PO.reroute(src, str(tmp_path / "o.kicad_pcb"), ["A_P"], {}, None, drc=no_drc(), log=lambda m: None)
     r = rep["pairs"][0]
     assert r["status"] == "refused_locked" and "segment A_P F.Cu" in r["reason"] and r["locked"]
+    assert "--unlock" in r["reason"]
     assert BT.blocks(open(src).read()) == BT.blocks(open(str(tmp_path / "o.kicad_pcb")).read())
+
+
+def test_unlock_reroutes_and_relocks_named_pair(tmp_path):
+    src = PB.write(tmp_path, bad_pair("A", 20, locked=True) + bad_pair("B", 50, locked=True))
+    out = str(tmp_path / "unlocked.kicad_pcb")
+    rep = PO.reroute(src, out, ["A_P"], {}, None, drc=no_drc(), log=lambda m: None, unlock=True)
+    row = rep["pairs"][0]
+    assert row["status"] == "rerouted" and row["unlocked_items"] == 1 and row["relocked"]
+    assert all(s["locked"] for s in RD.load(out)["segs"] if s["net"] in ("A_P", "A_N"))
+    other = [s for s in RD.load(out)["segs"] if s["net"] == "B_P"]
+    assert len(other) == 1 and other[0]["locked"]
+    assert any(s["locked"] for s in RD.load(src)["segs"] if s["net"] == "A_P")
+
+
+def test_unlock_failure_restores_original_locks_and_geometry(tmp_path):
+    src = PB.write(tmp_path, bad_pair("A", 20, locked=True))
+    out = str(tmp_path / "restore.kicad_pcb")
+    n = []
+    rep = PO.reroute(src, out, ["A_P"], {}, None,
+                     drc=lambda p: (Counter() if not n.append(p) and len(n) == 1 else Counter({("clearance", ("x",)): 1}), (0, 0)),
+                     log=lambda m: None, unlock=True)
+    assert rep["pairs"][0]["status"] == "kept_original" and rep["pairs"][0]["unlocked_items"] == 1
+    assert BT.blocks(open(out).read()) == BT.blocks(open(src).read())
 
 
 def test_new_drc_key_or_opened_net_rejects_the_candidate(tmp_path):

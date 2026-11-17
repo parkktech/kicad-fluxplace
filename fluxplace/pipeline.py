@@ -928,12 +928,35 @@ def st_modules(c, n, board):
         (l for l in text.splitlines() if l.startswith("modules:")), _last_line(text))[:160], "board": board}
 
 
+def _residual_fail(res, c, d):
+    """Attach and log every residual placement finding on a failed floorplan/fanout output."""
+    if res.get("verdict") != "fail" or not os.path.exists(res.get("board", "")):
+        return res
+    from . import placementcheck as PC
+    try:
+        report = PC.residual(res["board"], c.cons)
+    except Exception as e:
+        res["residual_error"] = f"{type(e).__name__}: {e}"
+        with open(os.path.join(d, "stage.log"), "a") as fh:
+            fh.write(f"\nresidual placement audit unavailable: {res['residual_error']}\n")
+        return res
+    rp = os.path.join(d, "placement-residual.json")
+    json.dump(report, open(rp, "w"), indent=1)
+    lines = PC.residual_lines(report)
+    with open(os.path.join(d, "stage.log"), "a") as fh:
+        fh.write("\n" + "\n".join(lines) + "\n")
+    res["residual_violations"] = report["violations"]
+    res["residual_report"] = rp
+    res["line"] += f"; residual placement findings: {sum(len(v) for v in report['violations'].values())} group(s), full list {rp}"
+    return res
+
+
 def st_floorplan(c, n, board):
     d = c.dir(n, "floorplan")
     out = os.path.join(d, "board.kicad_pcb")
     res = _engine_floorplan(c, d, board, out)
     if res:
-        return res
+        return _residual_fail(res, c, d)
     argv = ["floorplan", board, "--out", out] + c.cs() + (["--size"] if getattr(c.a, "size", False) else [])
     rc, text = _run_cli(argv + c.qs(), os.path.join(d, "stage.log"))
     q = _questions_result(rc, text, board)
@@ -943,7 +966,8 @@ def st_floorplan(c, n, board):
     # a floorplan / fan-out / INTENT FAIL fails the stage; `[floorplan] waive_fail = "reason"` is the only (recorded) way past it
     bad = rc != 0 or not os.path.exists(out) or line.startswith("floorplan: FAIL") or any(
         l.startswith("INTENT: FAIL") for l in text.splitlines())
-    return dict({"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}, **_wl_record(out))
+    res = dict({"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}, **_wl_record(out))
+    return _residual_fail(res, c, d)
 
 
 def st_fanout(c, n, board):
@@ -972,7 +996,7 @@ def st_fanout(c, n, board):
         res["next"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_BLOCKED")][:5]
     if warn:
         res["waived"] = [l for l in text.splitlines() if l.startswith("FANOUT_PIN_WAIVED")][:20]
-    return res
+    return _residual_fail(res, c, d)
 
 
 def st_pour_tie(c, n, board):

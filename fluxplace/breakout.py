@@ -503,7 +503,7 @@ def claims(B, cons, spec, pr=None):
     return out
 
 
-def lay_text(text, pins, drill):
+def lay_text(text, pins, drill, via):
     """board text with the planned lanes and vias as locked copper, grouped `breakout:<ref>`. -> (text, segments, vias)."""
     from . import boardtext as BT
     blks, ns, nv = [], 0, 0
@@ -520,7 +520,7 @@ def lay_text(text, pins, drill):
                             f'\t\t(layer "{r["layer"]}")\n\t\t(net "{r["net"]}")\n\t\t(locked yes)\n\t\t(uuid "{u()}")\n\t)')
                 ns += 1
         if r.get("via"):
-            blks.append(f'\t(via\n\t\t(at {r["via"][0]:.4f} {r["via"][1]:.4f})\n\t\t(size {r.get("via_d", 0.45)})\n\t\t(drill {drill})\n\t\t(layers "F.Cu" "B.Cu")\n'
+            blks.append(f'\t(via\n\t\t(at {r["via"][0]:.4f} {r["via"][1]:.4f})\n\t\t(size {via})\n\t\t(drill {drill})\n\t\t(layers "F.Cu" "B.Cu")\n'
                         f'\t\t(net "{r["net"]}")\n\t\t(locked yes)\n\t\t(uuid "{u()}")\n\t)')
             nv += 1
     return BT.append_blocks(text, blks), ns, nv

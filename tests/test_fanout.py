@@ -31,6 +31,13 @@ def go(tmp, body, refs=None, **kw):
     return path, out, B, res, FO.summarise(B, res)
 
 
+def test_params_use_route_and_fab_via_resolver():
+    pr = {"track_mm": 0.127, "clearance_mm": 0.127, "via_mm": 0.45, "drill_mm": 0.2}
+    cons = {"route": {"min_via_mm": 0.51, "min_drill_mm": 0.27}, "fab": {"min_via_dia_mm": 0.52, "min_drill_mm": 0.28}}
+    p = FO.params(args(), pr, cons=cons)
+    assert (p["via"], p["drill"]) == (0.52, 0.28)
+
+
 def sink(ref, x, y, nets):
     """a far-away connector that gives every net its second pad."""
     return PB.fp(ref, x, y, [PB.pad(str(i + 1), 0, i * 2.0, n, 1.2, 1.2) for i, n in enumerate(nets)])

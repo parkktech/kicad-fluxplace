@@ -111,3 +111,26 @@ def test_repair_reports_pair_nets_without_touching_them(monkeypatch, tmp_path):
     r = RP.repair(work, str(tmp_path / "o.kicad_pcb"), constraints="x.toml")
     assert next(x for x in r["connections"] if x["net"] == "A")["status"] == "pair"
     assert [c["net"] for c in w.open] == ["A"]
+
+
+def test_repair_zero_budget_still_writes_report_and_commits(monkeypatch, tmp_path):
+    w = World()
+    work = _install(monkeypatch, w, tmp_path)
+    report = tmp_path / "budget.json"
+    r = RP.repair(work, str(tmp_path / "o.kicad_pcb"), budget=0, report=str(report))
+    saved = json.load(open(report))
+    assert saved["budget_exhausted"] and saved["commit"]["accepted"]
+    assert saved["connections"] == [] and r["elapsed_s"] >= 0
+
+
+def test_repair_exception_still_writes_partial_report(monkeypatch, tmp_path):
+    w = World()
+    work = _install(monkeypatch, w, tmp_path)
+    monkeypatch.setattr(H, "open_nets", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("synthetic failure")))
+    report = tmp_path / "error.json"
+    try:
+        RP.repair(work, str(tmp_path / "o.kicad_pcb"), report=str(report))
+    except RuntimeError:
+        pass
+    saved = json.load(open(report))
+    assert saved["error"]["message"] == "synthetic failure"

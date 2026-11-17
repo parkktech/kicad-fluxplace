@@ -48,6 +48,29 @@ def test_chain_accepts_exit3(tmp_path, monkeypatch):
     assert "--json-out" in calls[1] and "--json-out" in calls[2]
 
 
+def test_router_relaxed_project_is_discarded_after_every_step(tmp_path, monkeypatch):
+    import json
+    approved = {"board": {"design_settings": {"rules": {"min_via_diameter": 0.46, "min_hole_to_hole": 0.3}}},
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}}
+    (tmp_path / "in.kicad_pro").write_text(json.dumps(approved))
+    c, calls, base_runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    monkeypatch.setattr(K.RR, "rules", lambda *a, **k: dict(R, min_via=0.46, via=0.46))
+
+    def relaxed_runner(cmd, log, **kw):
+        rc, secs = base_runner(cmd, log, **kw)
+        relaxed = {"board": {"design_settings": {"rules": {"min_via_diameter": 0.45, "min_hole_to_hole": 0.1}}},
+                   "net_settings": {"classes": [{"name": "Default", "clearance": 0.01}]}}
+        open(cmd[3][:-10] + ".kicad_pro", "w").write(json.dumps(relaxed))
+        return rc, secs
+
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), relaxed_runner)
+    assert json.load(open(tmp_path / "board.kicad_pro")) == approved
+    assert json.load(open(tmp_path / "3-route.kicad_pro")) == approved
+    assert "router project rules discarded:" in r["line"]
+    assert len(r["steps"]) == 3 and all(s["router_project_discarded"] for s in r["steps"])
+    assert all(cmd[cmd.index("--via-size") + 1] == "0.46" for cmd in calls)
+
+
 def test_chain_stops_on_failure(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 1, 0])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)

@@ -7,12 +7,16 @@ Same guards as `lay`: `--expect-rev`, KiCad-open lock check, DRC "no new violati
 Replaces the copper (tracks, arcs, vias) of net N on DST with SRC's copper of the same net name. DST's copper of N is removed
 first and the command refuses if any of it is locked. Items are rebuilt on DST's own net (pcbnew `Duplicate()` keeps the source net
 codes). The copied count must equal SRC's count. Inside a session omit `--out`: DST is the session WORK board.
+`copy-net`, `lay` and `shove` accept `--timeout S` (default 600): expiry restores every destination/session file, reports
+`no verdict: timed out after S s, nothing written`, and exits 2.
 
-## via-min BOARD --out O [--constraints C]
+## via-min BOARD --out O [--constraints C] [--budget S] [--report R.json]
 
-Raises EVERY via whose diameter is below the floor (project min via size raised by the constraints/fab profile) to that floor; drill
+Raises vias whose diameter is below the floor (project min via size raised by the constraints/fab profile) to that floor; drill
 unchanged, locked vias skipped. All raises are tried as one batch; a batch that adds any DRC violation key (multiset rule of
-`drcguard`) is bisected until single vias are kept or rejected. Output counts: changed, kept (already >= floor), rejected, locked_skipped.
+`drcguard`) is bisected until single vias are kept or rejected. Output counts: changed, kept (already >= floor), rejected,
+not-reached, locked_skipped. The default budget is 3 s per candidate (minimum 60); completed DRC verdicts are always kept,
+the output/report is written even on budget end, and partial output exits 0.
 
 ## hand-repair WORK --out O [--max-attempts 2] [--budget 900] [--report R.json]
 
@@ -22,4 +26,5 @@ the cheapest unlocked blocker set (`shove --chain`), lay the blocked net, re-lay
 `copy-net` from the session start board). An attempt that leaves a removed net open, or any other net more open than before, is
 undone whole. Pair nets (from `[pairs.*]` in the constraints) and blocker sets containing one are never touched: reported as `pair`.
 No part moves. The JSON report lists per connection `closed` / `blocked` (with `seal`: reason, limiting obstacles, via sites) / `pair`;
-the run ends with `session commit` (accepted only if unconnected falls with no new DRC key).
+it is written after every attempt and on budget end or an internal error. The run ends with `session commit` (accepted only
+if unconnected falls with no new DRC key).

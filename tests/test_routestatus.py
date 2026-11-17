@@ -113,6 +113,32 @@ def test_final_warn_is_terminal_and_not_success(tmp_path, capsys):
     assert e.value.code == 1 and "route-wait: warn" in capsys.readouterr().out
 
 
+def test_diagnose_uses_kicad_connectivity_not_copper_heuristic(tmp_path, monkeypatch):
+    from fluxplace import routeconn as RC
+    out = tmp_path / "routed.kicad_pcb"
+    out.write_text("synthetic")
+    monkeypatch.setattr(RS.RD, "load", lambda path: {})
+    monkeypatch.setattr(RS.RD, "unrouted_nets", lambda B: [])
+    monkeypatch.setattr(RC, "open_by_net", lambda path: {"A": 2, "B": 1, "C": 1, "D": 0})
+
+    def diagnose(B, failed, cons, spec):
+        assert failed == ["A", "B", "C"]
+        return {"nets": [], "missing": [], "summary": {"failed": len(failed), "counts": {k: 0 for k in RS.RD.CAUSES}, "moves": []}}
+
+    monkeypatch.setattr(RS.RD, "diagnose", diagnose)
+    path, count = RS.diagnose_result({"out": str(out)})
+    assert count == 3
+    text = open(path).read()
+    assert "CONNECTIVITY: 4 open connection(s) measured by KiCad" in text
+    saved = json.load(open(str(out) + ".diagnose.json"))
+    assert saved["connectivity"]["open"] == 4 and saved["connectivity"]["measured"]
+
+
+def test_status_log_counter_is_not_claimed_as_open_count():
+    line = RS.one_line({"state": "running", "freerouting": {"pass": 2, "unrouted": 0}})
+    assert "router-log unrouted 0 (not connectivity)" in line and "open connections not measured" in line
+
+
 def test_dead_writer_is_reported(tmp_path):
     sp = tmp_path / "d.status.json"
     sp.write_text(json.dumps({"state": "running", "pid": 2 ** 22 - 3}))

@@ -1,7 +1,12 @@
 """CLI glue for the hand-routing toolkit (fluxplace/handroute.py). Every command prints a compact verdict and, with --json, the
 full machine-readable record on stdout. Registered from cli.build_parser via register(sub)."""
+import importlib
 import json
+import multiprocessing
+import os
+import shutil
 import sys
+import tempfile
 
 
 def _first(x):
@@ -57,7 +62,9 @@ def summary(kind, r):
             return f"probe failed: {_viol(vs[0]) if vs else _reason(r) or 'unknown'}" + (f" (+{len(vs) - 1} more)" if len(vs) > 1 else "")
         if kind == "suggest":
             if r.get("found"):
-                return f"suggest found: {r.get('length_mm', '?')} mm, {r.get('vias', '?')} via(s)" + (" (relaxed, blockers listed)" if r.get("blockers") else "")
+                return (f"suggest found: {r.get('length_mm', '?')} mm, {r.get('vias', '?')} via(s)"
+                        + (f"; path {r['path']}" if r.get("path") else "")
+                        + (" (relaxed, blockers listed)" if r.get("blockers") else ""))
             return "suggest none: " + (_reason(r) or "no path")
         if "accepted" in r:
             ok = r["accepted"]
@@ -69,12 +76,14 @@ def summary(kind, r):
 
 
 def _emit(a, data, text, kind=None, rev=None):
-    """--json: full record, `summary` first (when kind given) and `board_rev` (when rev given); --brief: that one line only."""
+    """Brief normally replaces other output; suggest with both flags keeps JSON on stdout and puts brief on stderr."""
     if kind and isinstance(data, dict):
         line = summary(kind, data)
         if getattr(a, "brief", False):
-            print(line)
-            return
+            both = kind == "suggest" and getattr(a, "json", False)
+            print(line, file=sys.stderr if both else sys.stdout)
+            if not both:
+                return
         data = {"summary": line, **data}
     if rev and isinstance(data, dict) and getattr(a, "json", False):
         data = {**data, "board_rev": rev}
@@ -105,6 +114,69 @@ def _write_guard(a, *paths):
         print(f"error: {e}", file=sys.stderr)
         return 2
     return None
+
+
+def _invoke(spec, args, kwargs, queue):
+    try:
+        module, name = spec.split(":", 1)
+        fn = getattr(importlib.import_module(module), name)
+        queue.put((True, fn(*args, **kwargs)))
+    except Exception as e:
+        queue.put((False, (type(e).__name__, str(e))))
+
+
+def _edit_paths(board, out):
+    target = out or board
+    paths = [target, os.path.splitext(target)[0] + ".kicad_pro"]
+    if out is None:
+        paths.append(board + ".session")
+    return paths
+
+
+def _timed(spec, args, kwargs, timeout, paths):
+    """Run a guarded edit in a child; on expiry restore every destination exactly and return no verdict."""
+    if timeout is None or timeout <= 0:
+        module, name = spec.split(":", 1)
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+    with tempfile.TemporaryDirectory(prefix="fluxplace-timeout-") as td:
+        saved = []
+        for i, path in enumerate(paths):
+            backup = os.path.join(td, str(i))
+            exists = os.path.exists(path)
+            if os.path.isdir(path):
+                shutil.copytree(path, backup)
+            elif exists:
+                shutil.copy(path, backup)
+            saved.append((path, backup, exists))
+        ctx = multiprocessing.get_context("spawn")
+        queue = ctx.SimpleQueue()
+        p = ctx.Process(target=_invoke, args=(spec, args, kwargs, queue))
+        p.start()
+        p.join(timeout)
+        if p.is_alive():
+            p.terminate()
+            p.join(5)
+            if p.is_alive():
+                p.kill()
+                p.join()
+            for path, backup, exists in saved:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                elif os.path.exists(path):
+                    os.remove(path)
+                if exists:
+                    if os.path.isdir(backup):
+                        shutil.copytree(backup, path)
+                    else:
+                        shutil.copy(backup, path)
+            return {"accepted": False, "timed_out": True,
+                    "reason": f"no verdict: timed out after {timeout:g} s, nothing written"}
+        if not queue.empty():
+            ok, value = queue.get()
+            if ok:
+                return value
+            raise RuntimeError(f"{value[0]}: {value[1]}")
+        raise RuntimeError(f"guarded edit exited without a result (code {p.exitcode})")
 
 
 def _via(a):
@@ -168,25 +240,24 @@ def cmd_probe(a):
 
 
 def cmd_lay(a):
-    from . import handroute as H
     g = _write_guard(a, a.out or a.board)
     if g is not None:
         return g
-    r = H.lay(a.board, a.net, a.path, a.out, a.constraints, a.width, _via(a), a.any_angle, a.partial)
+    r = _timed("fluxplace.handroute:lay", (a.board, a.net, a.path, a.out, a.constraints, a.width, _via(a), a.any_angle, a.partial),
+               {}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"lay {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "lay")
-    return 0 if r["accepted"] else 1
+    return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
 
 
 def cmd_copy_net(a):
-    from . import handroute as H
     g = _write_guard(a, a.out or a.board)
     if g is not None:
         return g
-    r = H.copy_net(a.src, a.board, a.net, a.out, a.constraints)
+    r = _timed("fluxplace.handroute:copy_net", (a.src, a.board, a.net, a.out, a.constraints), {}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"copy-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "copy-net")
-    return 0 if r["accepted"] else 1
+    return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
 
 
 def cmd_via_min(a):
@@ -194,8 +265,11 @@ def cmd_via_min(a):
     g = _write_guard(a, a.out)
     if g is not None:
         return g
-    r = viamin.via_min(a.board, a.out, a.constraints)
-    r["summary"] = f"via-min: {r['changed']} raised to {r['floor_mm']} mm, {r['kept']} already ok, {r['rejected']} rejected by DRC, {r['locked_skipped']} locked"
+    r = viamin.via_min(a.board, a.out, a.constraints, budget=a.budget)
+    r["summary"] = (f"via-min: {r['changed']} raised to {r['floor_mm']} mm, {r['kept']} already ok, {r['rejected']} rejected by DRC, "
+                    f"{r['not_reached']} not reached, {r['locked_skipped']} locked")
+    if a.report:
+        json.dump(r, open(a.report, "w"), indent=1, default=str)
     _emit(a, r, lambda: r["summary"], None, None)
     return 0
 
@@ -212,12 +286,12 @@ def cmd_repair(a):
 
 
 def cmd_shove(a, op="shove"):
-    from . import handroute as H
     g = _write_guard(a, a.out or a.board)
     if g is not None:
         return g
-    r = H.shove(a.board, a.net, a.out, [i for i in (a.ids or "").split(",") if i] or None, _box(a.window) if a.window else None, a.chain,
-                a.constraints, op=op)
+    args = (a.board, a.net, a.out, [i for i in (a.ids or "").split(",") if i] or None, _box(a.window) if a.window else None,
+            a.chain, a.constraints)
+    r = _timed("fluxplace.handroute:shove", args, {"op": op}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
 
     def text():
@@ -228,7 +302,7 @@ def cmd_shove(a, op="shove"):
             o.append(f"  opened: {x['a'].get('pin') or x['a']['kind']}({x['a']['x']:.2f},{x['a']['y']:.2f}) <-> {x['b'].get('pin') or x['b']['kind']}({x['b']['x']:.2f},{x['b']['y']:.2f})")
         return "\n".join(o)
     _emit(a, r, text, op)
-    return 0 if r["accepted"] else 1
+    return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
 
 
 def cmd_unlay(a):
@@ -239,8 +313,11 @@ def cmd_suggest(a):
     from . import handroute as H
     sp = tuple(float(x) for x in a.src.split(",")) if a.src else None
     dp = tuple(float(x) for x in a.dst.split(",")) if a.dst else None
-    r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
-                  a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+    try:
+        r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
+                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+    except Exception as e:
+        r = {"found": False, "reason": f"internal error: {type(e).__name__}: {e}"}
     _emit(a, r, lambda: ("suggest: none - " + r["reason"] + "\n  " + "\n  ".join(f"remove {[(x['net'], x['id']) for x in e['remove']]} -> found={e['then_found']} {e['path'] or ''}" for e in r["explore"]) if r.get("explore") is not None else f"suggest(relaxed): {r['path']}\n  blockers: " + ", ".join(f"{b['kind']} {b['id']} {b['net']} {b['layer']}x{b['cells']}" for b in r["blockers"]) if r.get("blockers") is not None else f"suggest: {r['path']}\n  length {r['length_mm']} mm, {r['vias']} via(s), probe OK" if r.get("found") else f"suggest: none - {r['reason']}"), "suggest", _rev(a))
     return 0 if r.get("found") else 1
 
@@ -301,6 +378,8 @@ def register(sub):
     def guards(p):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
+        p.add_argument("--timeout", type=float, default=600.0,
+                       help="lay/shove/copy-net hard cap; expiry restores all destinations and exits 2 (default 600; 0 disables)")
 
     p = sub.add_parser("open-nets", help="list open nets")
     common(p)
@@ -355,6 +434,8 @@ def register(sub):
     p = sub.add_parser("via-min", help="raise vias")
     common(p)
     p.add_argument("--out", required=True)
+    p.add_argument("--budget", type=float, default=None, help="total seconds (default: 3 per candidate, minimum 60); partial output exits 0")
+    p.add_argument("--report", default=None, help="write the changed/kept/rejected/not-reached JSON report")
     guards(p)
     p.set_defaults(fn=cmd_via_min)
 

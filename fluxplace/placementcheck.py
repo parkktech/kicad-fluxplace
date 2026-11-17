@@ -106,6 +106,32 @@ def compute(B, cons):
     return {"ok": n == 0, "violations": n, "rules": rules, "under": under, "quadrants": quadrants(B)}
 
 
+def residual(board, cons):
+    """Complete residual placement findings on a stage output, with no per-rule or per-kind truncation."""
+    from . import legality as LE, routediag as RD
+    B = RD.load(board)
+    checked = compute(B, cons)
+    issues = LE.Legal(B, cons).issues()
+    grouped = {"outside": issues["outside"], "overlap": issues["overlap"]}
+    for kind, key in (("keep-out", "keepout"), ("no_tht", "no_tht"), ("hardware", "hardware")):
+        grouped[kind] = [{"rule": r["name"], "items": r["violations"]} for r in checked["rules"] if r["kind"] == key and r["violations"]]
+    grouped["module"] = [{"module": u["module"], "side": u["side"],
+                          "items": [p for p in u["parts"] if p["verdict"] != "ok"]} for u in checked["under"]
+                         if any(p["verdict"] != "ok" for p in u["parts"])]
+    grouped["pad_short"] = issues["pad_short"]
+    grouped["hole"] = issues["hole"]
+    return {"board": board, "ok": not any(grouped.values()), "violations": grouped, "placement_check": checked}
+
+
+def residual_lines(res):
+    lines = []
+    for kind, rows in res["violations"].items():
+        lines.append(f"residual {kind}: {len(rows)} finding group(s)")
+        for row in rows:
+            lines.append("  " + json.dumps(row, sort_keys=True, default=str))
+    return lines
+
+
 def lines(res):
     out = []
     for r in res["rules"]:

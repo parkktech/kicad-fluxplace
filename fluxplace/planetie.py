@@ -154,7 +154,8 @@ def run(board_in, board_out, plane_nets, conn, log=None, workdir=None, plane_lay
             r["reason"] = "no zone of this net on any layer (pour missing)"
         else:
             for ly in layers:
-                r["vias"] += PL.tie_floating_clusters(board, n, ly)
+                kw = {"via_d": rules["via"], "via_drill": rules["drill"]} if rules else {}
+                r["vias"] += PL.tie_floating_clusters(board, n, ly, **kw)
             r["vias"] += _pad_ties(board, n, pad_pts.get(n, []), rules)
         rec["per_net"][n] = r
         rec["placed"] += r["vias"]

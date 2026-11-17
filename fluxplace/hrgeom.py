@@ -292,8 +292,8 @@ class Model:
         f = self.floors
         f["clr"] = max(f["clr"], float(r.get("min_clearance_mm", 0)), float(fab["min_clearance_mm"]))
         f["track"] = max(f["track"], float(r.get("min_track_mm", 0)), float(fab["min_track_mm"]))
-        f["via_dia"] = max(f["via_dia"], float(fab["min_via_dia_mm"]))
-        f["via_drill"] = max(f["via_drill"], float(fab["min_drill_mm"]))
+        f["via_dia"] = max(f["via_dia"], float(r.get("min_via_mm", 0)), float(fab["min_via_dia_mm"]))
+        f["via_drill"] = max(f["via_drill"], float(r.get("min_drill_mm", 0)), float(fab["min_drill_mm"]))
         self.floor_src["constraints"] = {"route": {k: r[k] for k in r if k.startswith("min_")}, "fab_profile": fab.get("profile")}
 
     def net_rule(self, net):

@@ -28,6 +28,14 @@ DEFAULT_SIZE = 0.2
 
 
 def _pro_rules(board):
+    if hasattr(board, "GetDesignSettings"):
+        try:
+            ds = board.GetDesignSettings()
+            return {"min_track_width": ds.m_TrackMinWidth * 1e-6, "min_clearance": ds.m_MinClearance * 1e-6,
+                    "min_via_diameter": ds.m_ViasMinSize * 1e-6, "min_through_hole_diameter": ds.m_MinThroughDrill * 1e-6,
+                    "min_hole_to_hole": ds.m_HoleToHoleMin * 1e-6}
+        except (AttributeError, RuntimeError):
+            return {}
     try:
         pro = os.path.splitext(board)[0] + ".kicad_pro"
         return json.load(open(pro))["board"]["design_settings"]["rules"]
@@ -61,7 +69,8 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
     """-> the rule dict (floors, requested sizes, via_in_pad, grid, mode, workers, audit_drc).
     Sizes: explicit track/clearance > [route] track_mm/clearance_mm (preferred) > `default`; then lifted to the floor."""
     from . import constraints as C
-    fab = C.fab_profile(cons, board=board) if (cons or {}).get("fab") is not None else {}
+    fab = C.fab_profile(cons, layers=board.GetCopperLayerCount() if hasattr(board, "GetCopperLayerCount") else None,
+                        board=board if isinstance(board, (str, os.PathLike)) else None) if (cons or {}).get("fab") is not None else {}
     r = dict((cons or {}).get("route") or {})
     pro = _pro_rules(board) if board else {}
 

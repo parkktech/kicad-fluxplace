@@ -63,9 +63,12 @@ def test_floating_plane_fragment_is_tied_by_a_via(tmp_path):
     src = make(str(tmp_path / "in.kicad_pcb"))
     assert judge(src) == {"GND": 1}
     out = str(tmp_path / "out.kicad_pcb")
-    rec = PT.run(src, out, ["GND"], judge)
+    rules = {"track": 0.2, "clearance": 0.2, "via": 0.71, "drill": 0.31}
+    rec = PT.run(src, out, ["GND"], judge, rules=rules)
     assert rec["per_net"]["GND"]["vias"] >= 1 and rec["per_net"]["GND"]["open_after"] == 0
     assert vias(out) >= 1 and rec["placed"] >= 1
+    made = [t for t in pcbnew.LoadBoard(out).GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    assert all(t.GetWidth() == pcbnew.FromMM(0.71) and t.GetDrill() == pcbnew.FromMM(0.31) for t in made)
 
 
 def test_plane_net_without_a_zone_reports_why(tmp_path):

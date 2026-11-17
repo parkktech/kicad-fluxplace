@@ -1866,6 +1866,12 @@ def cmd_drcfix(a):
                                               for i in u.get("items", [])))
 
 
+def _tune_refill(out, res):
+    if res.get("stopped") != "signal" and res.get("accepted", 0) > 0:
+        from fluxplace import opengate as OG
+        OG.refill(out)
+
+
 def cmd_tune(a):
     """DRC-guarded differential-pair length tuning: hairpin shortcuts on the
     long side, serpentine meanders on the short side, every step accepted
@@ -1889,9 +1895,7 @@ def cmd_tune(a):
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
                         log=lambda m: print(m, flush=True))
-    from fluxplace import opengate as OG
-    if res.get("stopped") != "signal":
-        OG.refill(out)                               # a routed board is saved with fresh zone fills
+    _tune_refill(out, res)
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
@@ -1919,7 +1923,6 @@ def _tune_finish(a, out, res, bad, unit):
 def _tune_match(a):
     """tune --match: lengthen the short members of [match.*] groups, one DRC-guarded bump at a time."""
     from fluxplace import tune as TU, constraints as C, lengthmatch as LM, review as RV
-    from fluxplace import opengate as OG
     cons = C.load(a.constraints)
     groups = LM.groups(cons)
     if a.match != "all":
@@ -1964,8 +1967,7 @@ def _tune_match(a):
     rep = TU.tune_match(a.board, out, groups, net_lengths, targets,
                         kicad_cli=a.kicad_cli, max_rounds=a.rounds, clearance_of=clr, budget=budget,
                         stall=a.stall, result=res, log=lambda m: print(m, flush=True))
-    if res.get("stopped") != "signal":
-        OG.refill(out)
+    _tune_refill(out, res)
     bad = [r for r in rep if r["status"] != "ok"]
     for r in rep:
         print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} [{r['basis']}] "
@@ -2168,16 +2170,27 @@ def cmd_route_diagnose(a):
     import json as _json
     from fluxplace import routediag as RD
     B = RD.load(a.board, track=a.track, clearance=a.clearance)
+    from fluxplace import routeconn as RC
+    try:
+        open_nets = RC.open_by_net(a.board)
+        connectivity = {"measured": True, "open": sum(open_nets.values()), "open_by_net": open_nets}
+    except Exception as e:
+        open_nets = None
+        connectivity = {"measured": False, "open": None, "status": "not measured", "error": str(e)[:200]}
     if a.nets:
         failed, src = [n for n in a.nets.split(",") if n], "--nets"
     elif a.log:
         st = RD.parse_logs(a.log)
         failed, src = sorted(n for n, s in st.items() if s == "FAILED"), "log"
+    elif open_nets is not None:
+        failed, src = sorted(n for n, count in open_nets.items() if count), "KiCad connectivity"
     else:
-        failed, src = RD.unrouted_nets(B), "board (2+ pads, no copper)"
-    print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}")
+        failed, src = RD.unrouted_nets(B), "placement heuristic (connectivity not measured)"
+    print(f"route-diagnose - {a.board}: {len(failed)} failed net(s) from {src}; "
+          + (f"{connectivity['open']} open connection(s) measured by KiCad" if connectivity["measured"] else "connectivity not measured"))
     cons, spec = _text_ctx(a)
     res = RD.diagnose(B, failed, cons or None, spec)
+    res["connectivity"] = connectivity
     print(RD.format_text(res))
     if a.json:
         with open(a.json, "w") as fh:
@@ -3097,7 +3110,7 @@ def cmd_progress(a):
             raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
         wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
         print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
-        print(f"brief: fluxplace progress brief {wd}")
+        print(f"brief: fluxplace progress brief --workdir {wd}")
         return
     if act == "block":
         if not tgt or not a.reason:
@@ -3687,6 +3700,8 @@ def build_parser():
 
     from fluxplace import hrcli as _hrcli
     _hrcli.register(sub)
+    from fluxplace import pourisland as _pourisland
+    _pourisland.add_parser(sub)
 
     pac = sub.add_parser("anchor-check",
                          help="evaluate every allowed rotation of each connector/module/socket "

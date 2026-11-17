@@ -73,3 +73,31 @@ def test_subprocess_raw_env_keeps_noise():
 
 def test_install_disabled_under_pytest():
     assert Q.install_stderr() is None
+
+
+PCBNEW_CHILD = r"""
+import sys
+sys.path.insert(0, %r)
+from fluxplace import quietlog
+handle = quietlog.install_stderr(force=True)
+import pcbnew
+assert handle.p.poll() is None, "stderr pump exited during pcbnew import"
+board = pcbnew.CreateEmptyBoard()
+via = pcbnew.PCB_VIA(board)
+for _ in range(2000):
+    via.GetWidth()
+assert handle.p.poll() is None, "stderr pump exited while native code was writing"
+print("completed")
+"""
+
+
+def test_native_warning_writer_does_not_deadlock_reader():
+    try:
+        import pcbnew  # noqa: F401
+    except ImportError:
+        import pytest
+        pytest.skip("pcbnew missing")
+    r = subprocess.run([sys.executable, "-c", PCBNEW_CHILD % ROOT], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr[-1000:]
+    assert r.stdout.strip() == "completed"
+    assert "GetWidth called without a layer argument" in r.stderr

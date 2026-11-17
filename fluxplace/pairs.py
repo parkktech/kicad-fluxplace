@@ -1219,7 +1219,7 @@ def cmd_only(a, cons, spec):
     if os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
     rep = PO.reroute(a.board, out, [x for x in a.only.split(",") if x.strip()], cons, spec, budget=a.budget,
-                     allow_shove=a.allow_shove, log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
+                     allow_shove=a.allow_shove, unlock=a.unlock, log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
     rp = out + ".pairsonly.json"
     json.dump(rep, open(rp, "w"), indent=1)
     print(PO.format_text(rep))
@@ -1338,6 +1338,8 @@ def add_parser(sub):
                         "a pair is kept as it was unless the new one is connected, in tolerance and DRC/open-clean")
     p.add_argument("--allow-shove", dest="allow_shove", action="store_true",
                    help="with --only: when blocked, remove the unlocked signal-net neighbours the blocker report names and report the nets opened")
+    p.add_argument("--unlock", action="store_true",
+                   help="with --only: temporarily unlock the named pairs' own copper; re-lock accepted results, restore original locks on failure")
     p.add_argument("--budget", type=float, default=None, metavar="S",
                    help="with --only: wall-clock seconds (default 120 x named pairs); out of time or SIGTERM writes the best accepted board")
     p.add_argument("--complete-fanout", dest="complete_fanout", action="store_true",
