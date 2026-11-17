@@ -121,23 +121,24 @@ def _via_keys(board):
     return {(t.GetPosition().x, t.GetPosition().y) for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T}
 
 
-def _add_tie(board, net, pad, pours, made):
+def _add_tie(board, net, pad, pours, made, rules=None):
     """stub (if the site is off the pad) + via at the first legal ring site; the created objects go into `made`."""
     x, y = _pad_xy(pad)
     nc = board.FindNet(net)
     layer = pad_copper_lids(pad)[0]
+    rules = rules or {"via": 0.6, "drill": 0.3, "track": 0.15}
     for r_mm, cx, cy in _ring_sites(x, y):
-        if not PL.hole_ok(board, cx, cy):
+        if not PL.hole_ok(board, cx, cy, via_drill=rules["drill"]):
             continue
         before = _via_keys(board)
-        if PL.via_at_points(board, net, [(pcbnew.ToMM(cx), pcbnew.ToMM(cy))]) != 1:
+        if PL.via_at_points(board, net, [(pcbnew.ToMM(cx), pcbnew.ToMM(cy))], via_d=rules["via"], via_drill=rules["drill"]) != 1:
             continue
         made.extend(t for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and (t.GetPosition().x, t.GetPosition().y) not in before)
         if r_mm > 0.0:
             tr = pcbnew.PCB_TRACK(board)
             tr.SetStart(pcbnew.VECTOR2I(int(x), int(y)))
             tr.SetEnd(pcbnew.VECTOR2I(int(cx), int(cy)))
-            tr.SetWidth(pcbnew.FromMM(0.15))
+            tr.SetWidth(pcbnew.FromMM(rules["track"]))
             tr.SetLayer(layer)
             board.Add(tr)
             tr.SetNet(nc)                  # the net is set once the track is on the board (a pre-Add net was lost on save)
@@ -152,7 +153,7 @@ def _undo(board, made):
             board.Remove(o)
 
 
-def _tie_pads(board, net, pads, pours):
+def _tie_pads(board, net, pads, pours, rules=None):
     """-> (tied: [record], untied: [record]); verified after one refill."""
     cands = []
     outside = []
@@ -165,7 +166,7 @@ def _tie_pads(board, net, pads, pours):
             outside.append(pad)              # no via can land in a pour that does not reach the pad: the pour is the limit
             continue
         made = []
-        cands.append((pad, made if _add_tie(board, net, pad, pours, made) else None))
+        cands.append((pad, made if _add_tie(board, net, pad, pours, made, rules) else None))
     PL.refill(board)
     tied, untied = [], []
     for pad in outside:
@@ -276,8 +277,11 @@ def try_extend(board, net, pad, max_mm, pour_lids, commit=False):
 
 def run(board_in, board_out, workdir, nets=None, cons=None):
     """pour-first tie for every net with a copper zone -> record (also written to workdir/pourtie.json)."""
+    from . import routerules as RR
     board = pcbnew.LoadBoard(board_in)
-    rec = {"nets": {}, "tied": [], "untied": [], "satisfied": []}
+    R = RR.rules(cons, board_in)
+    rules = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
+    rec = {"nets": {}, "tied": [], "untied": [], "satisfied": [], "rules": rules}
     if board is None:                            # not a KiCad board (a stub or an unreadable file): nothing to tie
         import shutil
         shutil.copy(board_in, board_out)
@@ -305,7 +309,7 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
             continue
         already_pads = [p for p in pads if tie_status(board, net, p, pm[net])[0]]
         todo = [p for p in pads if p not in already_pads]
-        tied, untied = _tie_pads(board, net, todo, pm[net]) if todo else ([], [])
+        tied, untied = _tie_pads(board, net, todo, pm[net], rules) if todo else ([], [])
         rec["nets"][net] = {"pour_layers": [board.GetLayerName(l) for l in pm[net]], "pads": len(pads),
                             "tied_before": len(already_pads), "tied_by_via": len(tied), "untied": len(untied)}
         for p in already_pads:
@@ -330,7 +334,7 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
             ok, why = try_extend(board, o["net"], p_, ext_max, pm[o["net"]], commit=True)
             o["extendable"], o["why"] = ok, why
             if ok:
-                tied, _u = _tie_pads(board, o["net"], [p_], pm[o["net"]])
+                tied, _u = _tie_pads(board, o["net"], [p_], pm[o["net"]], rules)
                 if tied:
                     rec["tied"] += tied
                     rec["satisfied"].append(dict(tied[0], ref=o["ref"]))
@@ -384,7 +388,7 @@ def repair_in_memory(board, rec):
             continue
         if not tie_status(board, t["net"], pad, pm[t["net"]])[0]:
             lost.append(t)
-            tied, untied = _tie_pads(board, t["net"], [pad], pm[t["net"]])
+            tied, untied = _tie_pads(board, t["net"], [pad], pm[t["net"]], rec.get("rules"))
             if tied:
                 repaired += 1
             else:

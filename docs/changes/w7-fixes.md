@@ -27,3 +27,13 @@ all destinations (including session state), reports `no verdict: timed out after
 `hand-repair` checkpoints its report after each attempt and in a finally path, including budget exhaustion and errors.
 Regressions: `test_via_min_budget_writes_verified_prefix_and_marks_remainder`, the two tests in `test_hrcli_timeout.py`,
 `test_repair_zero_budget_still_writes_report_and_commits`, and `test_repair_exception_still_writes_partial_report`.
+
+## Constraint-driven via sizes
+
+Fan-out and breakout could emit 0.45 mm vias without applying the route/fab resolver; breakout also serialized a per-pin
+legacy diameter. Hand-route constraints ignored `[route]` via/drill floors, and plane/pour/repair tie paths had local
+defaults. These creators now use `routerules.rules` (or its resolved rule record), including open-board project rules.
+Breakout serialization requires the resolved diameter and has no 0.45 mm fallback. Regression coverage is in
+`test_params_use_route_and_fab_via_resolver`, `test_lay_writes_locked_lanes_and_vias`,
+`test_route_constraints_raise_hand_route_via_floors`, `test_tie_vias_use_route_rule_sizes`, the enlarged floating-plane
+tie test, and `test_open_board_project_via_floor_uses_shared_resolver` (55 selected tests passed).

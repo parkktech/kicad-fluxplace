@@ -54,6 +54,17 @@ def _board(path, pads=(), tracks=(), vias=()):
 
 
 @need_pcbnew
+def test_open_board_project_via_floor_uses_shared_resolver():
+    from fluxplace import routerules as RR
+    b = P.BOARD()
+    ds = b.GetDesignSettings()
+    ds.m_ViasMinSize = P.FromMM(0.61)
+    ds.m_MinThroughDrill = P.FromMM(0.31)
+    r = RR.rules({"route": {"min_via_mm": 0.62, "min_drill_mm": 0.32}}, b)
+    assert (r["via"], r["drill"]) == (0.62, 0.32)
+
+
+@need_pcbnew
 def test_same_part_fine_pitch_pads_are_no_load_violation(tmp_path):
     """(i) two pads of ONE part at a 0.10 mm gap (closer than the floor): the smd_smd rule stays as KiCad wrote it, so
     Freerouting's load check reports nothing for them."""

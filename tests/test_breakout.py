@@ -195,8 +195,8 @@ def test_lay_writes_locked_lanes_and_vias(tmp_path):
     res = BO.solve(B, {}, None)
     for p in res["pins"].values():
         p["pts"] = [p["pad"]] + p["pts"]
-    txt, ns, nv = BO.lay_text(open(path).read(), res["pins"], 0.2)
-    assert nv == 40 and ns >= 80
+    txt, ns, nv = BO.lay_text(open(path).read(), res["pins"], 0.2, 0.46)
+    assert nv == 40 and ns >= 80 and txt.count("(size 0.46)") == nv and "(size 0.45)" not in txt
     out = tmp_path / "laid.kicad_pcb"
     out.write_text(txt)
     B2 = RD.load(str(out))

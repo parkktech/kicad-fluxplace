@@ -97,16 +97,12 @@ def owned_nets(B):
     return sorted(n for n, lk in cu.items() if n and all(lk) and npads.get(n, 0) >= 2 and not opn.get(n))
 
 
-def params(a, pr, board=None):
-    """Fan-out geometry: the planner floors (or the command line), never below the board's own design rules (.kicad_pro)."""
+def params(a, pr, board=None, cons=None):
+    """Fan-out sizes resolved exactly like the route stage: CLI/planner preferences raised to route/fab/project floors."""
+    from . import routerules as RR
     P = _params(a, pr)
-    if board:
-        from . import routerules as RR
-        rr = RR._pro_rules(board)
-        for k, ks in (("track", "min_track_width"), ("clear", "min_clearance"), ("via", "min_via_diameter"),
-                      ("drill", "min_through_hole_diameter")):
-            if rr.get(ks) and P[k] < float(rr[ks]):
-                P[k] = float(rr[ks])
+    R = RR.rules(cons, board, track=P["track"], clearance=P["clear"], via=P["via"], drill=P["drill"])
+    P.update(track=R["track"], clear=RR.request_clearance(R), via=R["via"], drill=R["drill"])
     return P
 
 
@@ -173,7 +169,7 @@ def lay_breakout(board, cons, spec, wd, log=print):
         p["pts"] = [p["pad"]] + p["pts"]                  # the lane starts inside its pad
     if not res["pins"]:
         return board, res
-    txt, ns, nv = BO.lay_text(open(board, errors="surrogateescape").read(), res["pins"], pr["drill"])
+    txt, ns, nv = BO.lay_text(open(board, errors="surrogateescape").read(), res["pins"], pr["drill"], pr["via"])
     dst = os.path.join(wd, "breakout.kicad_pcb")
     with open(dst, "w", errors="surrogateescape") as fh:
         fh.write(txt)
@@ -195,7 +191,7 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
     B = RD.load(board)
     pol = policy(B, cons, spec, refs)
     from . import routerules as RR
-    job = {"params": params(a, pol["pr"], board), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
+    job = {"params": params(a, pol["pr"], board, cons), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
     job["params"]["share_reach"] = float(((cons or {}).get("escape") or {}).get("share_reach_mm", 1.5))
     job["params"]["surface_exit"] = float(((cons or {}).get("escape") or {}).get("surface_exit_mm", 1.0))

@@ -69,6 +69,15 @@ def test_pad_inside_pour_is_tied_by_via_and_outside_pad_is_listed(tmp_path):
     assert rec["nets"]["RAIL"]["pour_layers"] == ["In2.Cu"]
 
 
+def test_tie_vias_use_route_rule_sizes(tmp_path):
+    src = board(str(tmp_path / "rules.kicad_pcb"))
+    out = str(tmp_path / "rules-out.kicad_pcb")
+    rec = PT.run(src, out, str(tmp_path), cons={"route": {"min_via_mm": 0.73, "min_drill_mm": 0.33}})
+    assert rec["rules"]["via"] == 0.73 and rec["rules"]["drill"] == 0.33
+    vias = [t for t in pcbnew.LoadBoard(out).GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    assert vias and all(t.GetWidth() == pcbnew.FromMM(0.73) and t.GetDrill() == pcbnew.FromMM(0.33) for t in vias)
+
+
 def test_fully_tied_net_has_no_open_connection_for_the_router(tmp_path):
     """the router's job is the open connections (routeconn): VT's only pad is in its own pour, so VT is not in the job."""
     src = board(str(tmp_path / "in2.kicad_pcb"))

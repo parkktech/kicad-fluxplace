@@ -134,6 +134,18 @@ def test_suggest_requires_both_intended_endpoint_islands():
     assert H._endpoints_join(pr, None, None)
 
 
+def test_route_constraints_raise_hand_route_via_floors(tmp_path):
+    B = Brd()
+    B.edge(-2, -8, 22, 8)
+    B.pad("A1", "A", 2, 0)
+    path = B.save(tmp_path)
+    cons = tmp_path / "rules.toml"
+    cons.write_text("[route]\nmin_via_mm = 0.53\nmin_drill_mm = 0.31\n")
+    M = H._model(path, str(cons))
+    assert M.floors["via_dia"] == 0.53 and M.floors["via_drill"] == 0.31
+    assert M.net_rule("A")["via_dia"] >= 0.53
+
+
 def test_apply_reuses_exact_same_net_via(tmp_path):
     B = Brd()
     B.edge(-2, -8, 22, 8)

@@ -364,9 +364,9 @@ def _gnd_via(board, fp, pad, gnd, via_mm=0.45, drill_mm=0.25, gap_mm=0.75,
     """Drop a via to ground beside `pad`, pointing AWAY from the footprint
     body, joined by a short track. Returns the via."""
     import pcbnew
-    from . import constraints as C
-    via_mm = C.clamp_via_mm(via_mm, cons, log, what="gnd_via")
-    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what="gnd_via")
+    from . import constraints as C, routerules as RR
+    R = RR.rules(cons, board, via=via_mm, drill=drill_mm)
+    via_mm, drill_mm = R["via"], R["drill"]
     track_mm = C.clamp_track_mm(track_mm, cons, log, what="gnd_via")
     c, p = fp.GetPosition(), pad.GetPosition()
     dx, dy = p.x - c.x, p.y - c.y
@@ -575,9 +575,9 @@ def stitch_islands(board, net="GND", via_mm=0.45, drill_mm=0.25, clearance_mm=0.
     dropped by island centroid alone landed on inner-layer copper: 8 vias,
     34 hole-clearance violations, measured). Returns vias added."""
     import pcbnew
-    from . import constraints as C
-    via_mm = C.clamp_via_mm(via_mm, cons, log, what=f"stitch_islands {net}")
-    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what=f"stitch_islands {net}")
+    from . import routerules as RR
+    R = RR.rules(cons, board, via=via_mm, drill=drill_mm)
+    via_mm, drill_mm = R["via"], R["drill"]
     ni = None
     for fp in board.GetFootprints():
         for p in fp.Pads():
@@ -753,14 +753,14 @@ def bridge(board, ref, padnum, layers=None, cell=0.2, width_mm=0.15, clearance_m
     is the target set, so the route ends on whichever track, via or pad of
     the net is cheapest to reach. Straight runs are simplified against the
     same grid. `cons`, when given, floors width_mm/via_mm/drill_mm at the
-    [fab] minimums (D-fabcap) before the grid is built. Returns the list of
+    route/fab/project rules before the grid is built. Returns the list of
     items added ([] if no path)."""
     import numpy as np
     import pcbnew
-    from . import constraints as C
+    from . import constraints as C, routerules as RR
     width_mm = C.clamp_track_mm(width_mm, cons, log, what=f"bridge {ref}.{padnum}")
-    via_mm = C.clamp_via_mm(via_mm, cons, log, what=f"bridge {ref}.{padnum}")
-    drill_mm = C.clamp_drill_mm(drill_mm, cons, log, what=f"bridge {ref}.{padnum}")
+    R = RR.rules(cons, board, via=via_mm, drill=drill_mm)
+    via_mm, drill_mm = R["via"], R["drill"]
     fp = board.FindFootprintByReference(ref)
     pad = next(p for p in fp.Pads() if p.GetNumber() == str(padnum))
     net = pad.GetNetCode()

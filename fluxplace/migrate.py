@@ -240,7 +240,8 @@ def stitch_to_planes(board_path, drc_report, plane_layers=None, log=print):
             v.SetWidth(ds.GetCurrentViaSize())
             v.SetDrill(ds.GetCurrentViaDrill())
         except Exception:
-            v.SetWidth(pcbnew.FromMM(0.45)); v.SetDrill(pcbnew.FromMM(0.2))
+            v.SetWidth(ds.m_ViasMinSize)
+            v.SetDrill(ds.m_MinThroughDrill)
         v.SetNet(ni)
         b.Add(v)
         added.append({"net": net, "x": round(x, 3), "y": round(y, 3)})
