@@ -4,18 +4,16 @@ Placement, routing, review, fab for KiCad 10: CLI, plugin, MCP.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Detail: `fluxplace help-brief CMD`.
 
-## Install
+## Install ([INSTALL](docs/INSTALL.md))
 
-    pip install -e .      # numpy; pcbnew from KiCad's python
-    fluxplace doctor      # names missing dependencies
-
-See [docs/INSTALL.md](docs/INSTALL.md).
+    pip install -e .
+    fluxplace doctor      # missing deps
 
 ## Pipeline
 
-`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged (`W/state.json`) Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged (`W/state.json`). Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
-`--full`, `-q`: [output.md](docs/commands/output.md).
+Output flags: [output.md](docs/commands/output.md).
 ## Commands
 
 <!-- index:start -->
@@ -113,6 +111,7 @@ route-wait        block until the router is...
 pipeline          staged pipeline, one stage per agent...
 help-brief        at most 15 lines on one command (none: one...
 calls             recent calls from the call log
+progress          checkpoints, blockers, loop detection
 <!-- index:end -->
 
 ## More

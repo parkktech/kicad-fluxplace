@@ -3040,6 +3040,42 @@ def cmd_calls(a):
             print(CL.line(r))
 
 
+def cmd_progress(a):
+    """progress checkpoint|block|show|brief: accepted board, metric history, blockers, progressing/stalled/looping."""
+    import json as _json
+    from fluxplace import progress as PG
+    th = {"n": a.loop_n, "k": a.stall_k, "m": a.max_calls}
+    act, tgt = a.action, a.target
+    if act == "checkpoint":
+        if not tgt:
+            raise SystemExit("progress checkpoint: give the board")
+        try:
+            st, cp = PG.checkpoint(tgt, a.workdir, a.note, PG.parse_metrics(a.metric), a.measure)
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as e:
+            raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
+        wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
+        print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
+        print(f"brief: fluxplace progress brief {wd}")
+        return
+    if act == "block":
+        if not tgt or not a.reason:
+            raise SystemExit("progress block: give ITEM and --reason")
+        st = PG.block(tgt, a.reason, a.workdir or os.getcwd())
+        print(f"progress: blocked {tgt} ({len(st['blocked'])} blocker(s))")
+        return
+    wd = a.workdir or tgt or os.getcwd()
+    if act == "brief":
+        text, data = PG.brief(wd, max_chars=a.max_chars, **th)
+        print(_json.dumps(data, indent=1) if a.json else text)
+        return
+    text, v, st, ev = PG.show_text(wd, **th)
+    if a.json:
+        print(_json.dumps(dict(st, verdict=v, evidence=ev), indent=1))
+    else:
+        print(text)
+    return PG.EXIT[v]
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -4087,6 +4123,21 @@ def build_parser():
     pcl.add_argument("--json", action="store_true")
     pcl.set_defaults(fn=cmd_calls)
 
+    ppg = sub.add_parser("progress", help="checkpoints, blockers, loop detection")
+    ppg.add_argument("action", choices=["checkpoint", "block", "show", "brief"])
+    ppg.add_argument("target", nargs="?", default=None, help="checkpoint: BOARD; block: ITEM; show/brief: WORKDIR")
+    ppg.add_argument("--workdir", default=None, help="folder holding .fluxplace/ (default: the board's folder / cwd)")
+    ppg.add_argument("--note", default="")
+    ppg.add_argument("--metric", action="append", default=[], metavar="K=V", help="a number to record, repeatable")
+    ppg.add_argument("--measure", action="store_true", help="checkpoint: DRC a temp copy for unconnected and errors")
+    ppg.add_argument("--reason", default=None, help="block: why")
+    ppg.add_argument("--json", action="store_true")
+    ppg.add_argument("--max-chars", type=int, default=2500, help="brief: size cap")
+    ppg.add_argument("--loop-n", type=int, default=3, help="looping: repeats that count (default 3)")
+    ppg.add_argument("--stall-k", type=int, default=5, help="stalled: checkpoints without gain (default 5)")
+    ppg.add_argument("--max-calls", type=int, default=60, help="stalled: calls since the last checkpoint (default 60)")
+    ppg.set_defaults(fn=cmd_progress)
+
     sub.choices["doctor"].add_argument(
         "--context", action="store_true",
         help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
@@ -4118,7 +4169,7 @@ def _silk_hook(a):
 
 # commands that never write a board: no connectivity snapshot is taken for them
 _GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
-                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls"}
+                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress"}
 
 
 def _guard_ledger_on(a):
