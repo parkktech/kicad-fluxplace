@@ -1883,14 +1883,37 @@ def cmd_tune(a):
     cons = C.load(a.constraints)
     from fluxplace.pairs import guard_limit      # ps limit with no known delay: not graded, never raises
     lim = lambda master: guard_limit(cons, master)
-    rep = TU.tune_pairs(a.board, a.out or a.board, pairs, lim, kicad_cli=a.kicad_cli,
-                        amp_mm=a.amplitude, max_rounds=a.rounds,
+    out = a.out or a.board
+    budget = a.budget if a.budget is not None else TU.default_budget(len(pairs))
+    res = {}
+    rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
+                        amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
                         log=lambda m: print(m, flush=True))
     from fluxplace import opengate as OG
-    OG.refill(a.out or a.board)                      # a routed board is saved with fresh zone fills
+    if res.get("stopped") != "signal":
+        OG.refill(out)                               # a routed board is saved with fresh zone fills
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
+    return _tune_finish(a, out, res, [r for r in res.get("pairs", []) if r["status"] != "ok"], "pair")
+
+
+def _tune_finish(a, out, res, bad, unit):
+    """tune summary line + JSON report (`--report`, default OUT.tune.json). Exit 0 all in tolerance, 1 some left over /
+    needs_reroute, 2 stopped by budget or signal (OUT is the best accepted board)."""
+    import json as _json
+    nr = [r for r in res.get("pairs", []) if r["status"] == "needs_reroute"]
+    path = a.report or out + ".tune.json"
+    res["budget_s"] = res.get("budget_s")
+    with open(path, "w") as f:
+        _json.dump(res, f, indent=1)
+    msg = f"tune: {len(bad)} {unit}(s) not in tolerance"
+    if nr:
+        msg += f", {len(nr)} NEEDS_REROUTE (legs differ in layers/vias; length tuning cannot fix them: fluxplace pairs --only)"
+    if res.get("stopped"):
+        msg += f"; stopped: {res['stopped']}"
+    print(f"{msg}; report {path}", flush=True)
+    return 2 if res.get("stopped") in ("budget", "signal") else (1 if bad else 0)
 
 
 def _tune_match(a):
@@ -1935,15 +1958,19 @@ def _tune_match(a):
     from fluxplace import rules as RU
     rules = RU.load(cons)
     clr = lambda net: float(rules.resolve({"net": net}, "clearance_mm")[0] or 0.127)
-    rep = TU.tune_match(a.board, a.out or a.board, groups, net_lengths, targets,
-                        kicad_cli=a.kicad_cli, max_rounds=a.rounds, clearance_of=clr,
-                        log=lambda m: print(m, flush=True))
-    OG.refill(a.out or a.board)
+    out = a.out or a.board
+    budget = a.budget if a.budget is not None else TU.default_budget(len(groups), TU.PER_GROUP_S)
+    res = {}
+    rep = TU.tune_match(a.board, out, groups, net_lengths, targets,
+                        kicad_cli=a.kicad_cli, max_rounds=a.rounds, clearance_of=clr, budget=budget,
+                        stall=a.stall, result=res, log=lambda m: print(m, flush=True))
+    if res.get("stopped") != "signal":
+        OG.refill(out)
     bad = [r for r in rep if r["status"] != "ok"]
     for r in rep:
         print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} [{r['basis']}] "
               f"(target {r['target']:.2f} +/- {r['tol']:g}) {r['status']} {r.get('note', '')}")
-    return 1 if bad else 0
+    return _tune_finish(a, out, res, bad, "net")
 
 
 def cmd_datasheets(a):
@@ -3790,6 +3817,12 @@ def build_parser():
     ptu.add_argument("--amplitude", type=float, default=0.6, help="meander amplitude mm")
     ptu.add_argument("--rounds", type=int, default=6)
     ptu.add_argument("--kicad-cli", default="kicad-cli")
+    ptu.add_argument("--budget", type=float, default=None, metavar="S",
+                     help="wall-clock seconds (default: 90 x selected pairs, 180 x selected --match groups). At the end, "
+                          "or on SIGTERM/SIGINT, the best accepted board is written to --out (exit 2)")
+    ptu.add_argument("--stall", type=int, default=8,
+                     help="stop a pair/net after N DRC-guarded tries without an accepted step (default 8)")
+    ptu.add_argument("--report", default=None, help="JSON report (default OUT.tune.json)")
     ptu.add_argument("--match", default=None, metavar="NAME|all",
                      help="tune [match.*] length groups instead of diff pairs")
     ptu.set_defaults(fn=cmd_tune)

@@ -20,13 +20,17 @@ import math
 import os
 import shutil
 import subprocess
+import signal
+import threading
 import tempfile
+import time
 
 from . import geom as GM
 from . import repair as RP
 from . import drcguard as DG
 
-__all__ = ["drc_counts", "shortcut", "meander", "tune_pairs", "meander_to", "tune_match", "bump_plan"]
+__all__ = ["drc_counts", "shortcut", "meander", "tune_pairs", "meander_to", "tune_match", "bump_plan",
+           "Budget", "Stopped", "Stalled", "default_budget", "classify_pairs", "cleanup_work", "PER_PAIR_S", "STALL_TRIES"]
 
 
 # ------------------------------------------------------------------- DRC
@@ -46,6 +50,129 @@ def drc_counts(board_path, kicad_cli="kicad-cli", timeout=600):
 def drc_report(board_path, kicad_cli="kicad-cli", timeout=600):
     """(keys, (violations, unconnected)): see fluxplace/drcguard.py for the identity and noise rule."""
     return DG.drc_keys(board_path, kicad_cli, timeout)
+
+
+# ------------------------------------------------------- budget, stall, clean exit
+PER_PAIR_S = 90         # default budget = selected pairs x this (one DRC run is 10-40 s on a dense board)
+PER_GROUP_S = 180       # tune --match: per selected [match.*] group
+STALL_TRIES = 8         # DRC-guarded tries in a row without an accepted step, then the pair is left as it is
+
+
+class Stopped(Exception):
+    """The run must stop now: reason is "budget" or "signal". The working file holds only ACCEPTED steps."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class Stalled(Exception):
+    """One pair made `stall` DRC-guarded tries without an accepted step."""
+
+
+def default_budget(n_units, per_unit_s=PER_PAIR_S):
+    """Seconds for `n_units` selected pairs (or groups); never below one unit's allowance."""
+    return max(1, n_units) * per_unit_s
+
+
+class Budget:
+    """Wall-clock budget + signal stop. As a context manager (main thread only) SIGTERM / SIGINT raise Stopped("signal") and
+    SIGALRM at the deadline raises Stopped("budget"), so a long DRC subprocess is killed at once; check() is the polling form
+    used everywhere else (and in threads). A second signal while stopping is ignored, so the clean-up cannot be interrupted."""
+    def __init__(self, seconds=None, stall=STALL_TRIES, clock=time.monotonic):
+        self.seconds = float(seconds) if seconds else None
+        self.stall = int(stall)
+        self.clock = clock
+        self.t0 = clock()
+        self.reason = None
+        self._old = {}
+
+    def elapsed(self):
+        return self.clock() - self.t0
+
+    def remaining(self):
+        return None if self.seconds is None else self.seconds - self.elapsed()
+
+    def drc_timeout(self, cap=600):
+        r = self.remaining()
+        return cap if r is None else max(5.0, min(cap, r + 5.0))
+
+    def check(self):
+        if self.reason:
+            raise Stopped(self.reason)
+        r = self.remaining()
+        if r is not None and r <= 0:
+            self.reason = "budget"
+            raise Stopped("budget")
+
+    def on_signal(self, signum, _frame=None):
+        if self.reason:
+            return
+        self.reason = "budget" if signum == getattr(signal, "SIGALRM", None) else "signal"
+        raise Stopped(self.reason)
+
+    def __enter__(self):
+        if threading.current_thread() is threading.main_thread():
+            for sg in (signal.SIGTERM, signal.SIGINT) + ((signal.SIGALRM,) if self.seconds and hasattr(signal, "SIGALRM") else ()):
+                self._old[sg] = signal.signal(sg, self.on_signal)
+            if self.seconds and hasattr(signal, "setitimer"):
+                signal.setitimer(signal.ITIMER_REAL, max(0.01, self.remaining()))
+        return self
+
+    def __exit__(self, *_exc):
+        if self._old:
+            if hasattr(signal, "setitimer"):
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            for sg, h in self._old.items():
+                signal.signal(sg, h)
+            self._old = {}
+        return False
+
+
+def _lock_of(path):
+    return os.path.join(os.path.dirname(path), "~" + os.path.basename(path) + ".lck")
+
+
+def cleanup_work(work):
+    """Remove every temp file a tune run makes for `work` (the working copy, its .try copy, DRC reports, project sidecars and
+    the KiCad lock files of those copies). Safe to call twice."""
+    base = os.path.splitext(work)[0]
+    tries = work + ".try.kicad_pcb"
+    tb = os.path.splitext(tries)[0]
+    for q in (work, tries, work + ".drc.json", tries + ".drc.json", _lock_of(work), _lock_of(tries),
+              *(b_ + e for b_ in (base, tb) for e in (".kicad_pro", ".kicad_dru", ".kicad_prl"))):
+        try:
+            os.unlink(q)
+        except OSError:
+            pass
+
+
+def _finalize(work, out_path):
+    """The best accepted board becomes `out_path` (atomic replace), every temp file goes."""
+    if os.path.exists(work):
+        os.replace(work, out_path)
+    cleanup_work(work)
+
+
+def classify_pairs(board_path, pairs):
+    """{master: reason} for the pairs {slave: master} whose legs cannot be tuned: a leg open, or the legs run through
+    different layer sequences / via counts (pairaudit.profile). Length tuning cannot fix those; they need a re-route
+    (`fluxplace pairs --only`)."""
+    from . import routediag as RD, pairaudit as PA
+    B = RD.load(board_path)
+    out = {}
+    for slave, master in pairs.items():
+        pm, ps = PA.profile(B, master), PA.profile(B, slave)
+        if not pm["path"] or not ps["path"]:
+            out[master] = f"leg open: {master if not pm['path'] else slave} has no path between its pads"
+            continue
+        why = []
+        if pm["layers"] != ps["layers"]:
+            why.append(f"layers {'>'.join(pm['layers'])} vs {'>'.join(ps['layers'])}")
+        if pm["vias"] != ps["vias"]:
+            why.append(f"vias {pm['vias']} vs {ps['vias']}")
+        if why:
+            out[master] = "; ".join(why)
+    return out
 
 
 # ------------------------------------------------------------------ paths
@@ -235,79 +362,145 @@ def meander(board, net, add_mm, amp_mm=0.6, pitch_mm=0.7, margin_mm=0.6,
 
 
 # --------------------------------------------------------------- driver
-def _guarded(board_path, work, mutate, kicad_cli, base, log, stats=None):
-    """tune_pairs / tune_match acceptance: base = (keys, counts) from drc_report."""
-    return DG.guard_board(board_path, work, mutate, base, kicad_cli, log, stats,
-                          report=lambda p, c: drc_report(p, c))
+def _guarded(board_path, work, mutate, kicad_cli, base, log, stats=None, bud=None):
+    """tune_pairs / tune_match acceptance: base = (keys, counts) from drc_report. With a Budget the DRC is bounded by it and
+    its poll runs first; a DRC that outlives the budget is Stopped("budget")."""
+    if bud is None:
+        return DG.guard_board(board_path, work, mutate, base, kicad_cli, log, stats,
+                              report=lambda p, c: drc_report(p, c))
+    bud.check()
+
+    def rep(p, c):
+        try:
+            return drc_report(p, c, timeout=bud.drc_timeout()) if bud.seconds else drc_report(p, c)
+        except subprocess.TimeoutExpired:
+            bud.reason = bud.reason or "budget"
+            raise Stopped(bud.reason)
+    return DG.guard_board(board_path, work, mutate, base, kicad_cli, log, stats, report=rep)
 
 
-def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
-               amp_mm=0.6, max_rounds=6, log=print):
-    """pairs: {slave: master}. limit_mm: float or callable(master). Works on
-    files so every step is a fresh pcbnew session (SWIG decays otherwise)."""
-    import pcbnew
-    work = out_path + ".work.kicad_pcb"
-    shutil.copy(board_path, work)
+def _copy_sidecars(board_path, work):
     for ext in (".kicad_pro", ".kicad_dru"):
         side = os.path.splitext(board_path)[0] + ext
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(work)[0] + ext)
-    base = drc_report(work, kicad_cli)
-    log(f"  baseline DRC: {base[1][0]} violations, {base[1][1]} unconnected")
+
+
+def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
+               amp_mm=0.6, max_rounds=6, log=print, budget=None, stall=STALL_TRIES, result=None):
+    """pairs: {slave: master}. limit_mm: float or callable(master). Works on files so every step is a fresh pcbnew session
+    (SWIG decays otherwise). Returns [(master, slave, P mm, N mm)].
+
+    budget: seconds, or a Budget; None = unbounded. stall: guarded tries in a row without an accepted step before a pair is
+    left as it is. When the budget runs out or SIGTERM / SIGINT arrives, the best ACCEPTED board so far is written to
+    out_path (the input when nothing was accepted) and every temp file and lock file is removed. `result` (a dict) is filled:
+    {stopped: None|"budget"|"stall"|"signal", elapsed_s, budget_s, pairs: [{pair, p_mm, n_mm, skew, limit, status, reason}]},
+    status ok | over | needs_reroute | not_reached. A pair whose legs differ in layer sequence or via count (or are open) is
+    needs_reroute: no tries are spent on it."""
+    import pcbnew
+    bud = budget if isinstance(budget, Budget) else Budget(budget, stall)
+    work = out_path + ".work.kicad_pcb"
     lim = limit_mm if callable(limit_mm) else (lambda m: limit_mm)
-    report = []
-    for slave, master in sorted(pairs.items()):
-        for rnd in range(max_rounds):
-            b = pcbnew.LoadBoard(work)
-            m = RP.measure(b)
-            lm, ls = m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]
-            skew = lm - ls
-            if abs(skew) <= lim(master):
-                break
-            longer, shorter = (master, slave) if skew > 0 else (slave, master)
-            log(f"  {master}/{slave}: skew {skew:+.2f} mm (limit {lim(master)}) round {rnd + 1}")
-            # 1. shorten the long side
-            ok = False
-            for gap in (1.5, 3.0):
-                ok, base = _guarded(board_path, work,
-                                    lambda bd, g=gap: shortcut(bd, longer, max_gap_mm=g, log=log) > 0,
-                                    kicad_cli, base, log)
-                if ok:
-                    break
-            if ok:
-                continue
-            # 2. lengthen the short side: several segments, two amplitudes,
-            #    and a partial meander when the full one will not fit
-            need = abs(skew)
-            ok = False
-            for cand in range(6):
-                for amp, pitch in ((amp_mm, 0.7), (amp_mm * 0.6, 0.5), (0.35, 0.45)):
-                    for frac in (1.0, 0.5, 0.25):
-                        ok, base = _guarded(
-                            board_path, work,
-                            lambda bd, c=cand, a=amp, p=pitch, f=frac: meander(
-                                bd, shorter, need * f, amp_mm=a, pitch_mm=p,
-                                candidate=c, log=log) > 0,
-                            kicad_cli, base, log)
-                        if ok:
+    stalls, reached, need = set(), set(), {}
+    stopped = None
+    base = None
+    try:
+        with bud:
+            shutil.copy(board_path, work)
+            _copy_sidecars(board_path, work)
+            need = classify_pairs(board_path, pairs)
+            for master, why in need.items():
+                log(f"  {master}: needs_reroute ({why}); not tuned")
+            base = drc_report(work, kicad_cli, timeout=bud.drc_timeout()) if bud.seconds else drc_report(work, kicad_cli)
+            log(f"  baseline DRC: {base[1][0]} violations, {base[1][1]} unconnected")
+            stats = {}
+
+            def attempt(mutate, tries):
+                nonlocal base
+                bud.check()
+                if tries[0] >= bud.stall:
+                    raise Stalled()
+                n0 = stats.get("drc_runs", 0)
+                ok, base = _guarded(board_path, work, mutate, kicad_cli, base, log, stats, bud)
+                tries[0] = 0 if ok else tries[0] + (stats.get("drc_runs", 0) - n0)
+                return ok
+
+            for slave, master in sorted(pairs.items()):
+                if master in need:
+                    continue
+                tries = [0]
+                reached.add(master)
+                try:
+                    for rnd in range(max_rounds):
+                        b = pcbnew.LoadBoard(work)
+                        m = RP.measure(b)
+                        lm, ls = m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]
+                        skew = lm - ls
+                        if abs(skew) <= lim(master):
                             break
-                    if ok:
+                        longer, shorter = (master, slave) if skew > 0 else (slave, master)
+                        log(f"  {master}/{slave}: skew {skew:+.2f} mm (limit {lim(master)}) round {rnd + 1}")
+                        ok = False
+                        for gap in (1.5, 3.0):                      # 1. shorten the long side
+                            ok = attempt(lambda bd, g=gap: shortcut(bd, longer, max_gap_mm=g, log=log) > 0, tries)
+                            if ok:
+                                break
+                        if ok:
+                            continue
+                        need_mm = abs(skew)                          # 2. lengthen the short side
+                        for cand in range(6):
+                            for amp, pitch in ((amp_mm, 0.7), (amp_mm * 0.6, 0.5), (0.35, 0.45)):
+                                for frac in (1.0, 0.5, 0.25):
+                                    ok = attempt(lambda bd, c=cand, a=amp, p=pitch, f=frac: meander(
+                                        bd, shorter, need_mm * f, amp_mm=a, pitch_mm=p, candidate=c, log=log) > 0, tries)
+                                    if ok:
+                                        break
+                                if ok:
+                                    break
+                            if ok:
+                                break
+                        if ok:
+                            continue
+                        log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} mm")
                         break
-                if ok:
-                    break
-            if ok:
-                continue
-            log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} mm")
-            break
-        b = pcbnew.LoadBoard(work)
-        m = RP.measure(b)
-        report.append((master, slave, m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]))
-    shutil.move(work, out_path)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        p = os.path.splitext(work)[0] + ext
-        if os.path.exists(p):
-            os.unlink(p)
-    log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected")
+                except Stalled:
+                    stalls.add(master)
+                    log(f"    {master}/{slave}: stalled after {bud.stall} tries without an accepted step")
+    except Stopped as e:
+        stopped = e.reason
+        log(f"  stopped ({stopped}): writing the best accepted board")
+    except BaseException:
+        cleanup_work(work)                                           # an error never leaves temp files behind
+        raise
+    if not os.path.exists(work):                                     # stopped while copying: the input is the result
+        shutil.copy(board_path, work)
+    _finalize(work, out_path)
+    if stopped is None and stalls:
+        stopped = "stall"
+    report = []
+    pb = pcbnew.LoadBoard(out_path)
+    m = RP.measure(pb)
+    out_rows = []
+    for slave, master in sorted(pairs.items()):
+        lm, ls = m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]
+        report.append((master, slave, lm, ls))
+        limit = lim(master)
+        row = {"pair": f"{master}/{slave}", "p_mm": round(lm, 3), "n_mm": round(ls, 3), "skew": round(lm - ls, 3),
+               "limit": limit if limit != float("inf") else None, "reason": ""}
+        if master in need:
+            row.update(status="needs_reroute", reason=need[master])
+        elif abs(lm - ls) <= limit:
+            row["status"] = "ok"
+        elif master not in reached and stopped in ("budget", "signal"):
+            row.update(status="not_reached", reason=stopped)
+        else:
+            row.update(status="over", reason=("stall" if master in stalls else stopped or "no DRC-clean tuning found"))
+        out_rows.append(row)
+    if base is not None:
+        log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected")
+    if result is not None:
+        result.update(stopped=stopped, elapsed_s=round(bud.elapsed(), 1), budget_s=bud.seconds, pairs=out_rows,
+                      out=out_path, needs_reroute=sum(1 for r in out_rows if r["status"] == "needs_reroute"))
     return report
 
 
@@ -474,13 +667,13 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
     return added
 
 
-def _guarded_set(board_path, work, mutate, kicad_cli, base, log, stats):
+def _guarded_set(board_path, work, mutate, kicad_cli, base, log, stats, bud=None):
     """tune_match's acceptance (same rule as _guarded)."""
-    return _guarded(board_path, work, mutate, kicad_cli, base, log, stats)
+    return _guarded(board_path, work, mutate, kicad_cli, base, log, stats, bud)
 
 
 def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="kicad-cli",
-               max_rounds=4, clearance_of=lambda net: 0.127, log=print):
+               max_rounds=4, clearance_of=lambda net: 0.127, log=print, budget=None, stall=STALL_TRIES, result=None):
     """Lengthen the short members of each match group until they are within tolerance.
 
     groups_: lengthmatch.groups() entries (already selected for this run).
@@ -489,30 +682,29 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
     clearance_of(net) -> mm: the default leg spacing is 3 x max(widest track of the net, clearance) unless the
     group sets spacing_mm (the centre-to-centre gap between adjacent legs, i.e. the bump width).
     Every bump is one DRC-guarded step (accepted only if violations and unconnected do not rise).
+    budget / stall / result behave as in tune_pairs: a budget stop or SIGTERM / SIGINT writes the best ACCEPTED board to
+    out_path and removes the temp files; result["stopped"] is None | "budget" | "stall" | "signal" (stall = at least one net
+    made `stall` DRC-guarded tries in a row without an accepted bump). Nets not reached get status "not_reached".
     Returns [{group, net, before, after, target, tol, status, note}]."""
     import pcbnew
+    bud = budget if isinstance(budget, Budget) else Budget(budget, stall)
     work = out_path + ".work.kicad_pcb"
-    shutil.copy(board_path, work)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        side = os.path.splitext(board_path)[0] + ext
-        if os.path.exists(side):
-            shutil.copy(side, os.path.splitext(work)[0] + ext)
-    base = base0 = drc_report(work, kicad_cli)
-    log(f"  baseline DRC: {base[1][0]} violations, {base[1][1]} unconnected")
-    total_runs = 0
-    report = []
-    for g in groups_:
+    total_runs, report, stopped, base, base0, stalled = 0, [], None, None, None, False
+    done = set()
+
+    def tune_net(g, net, base):
+        """-> (row, base); raises Stopped. A net that makes `stall` DRC-guarded tries in a row without an accepted bump stops."""
         target, tol = targets[g["name"]]
         unit = g["unit"]
-        for net in sorted(net_lengths(pcbnew.LoadBoard(work), g)):
-            wb = pcbnew.LoadBoard(work)
-            width = max([t.GetWidth() / 1e6 for t in wb.GetTracks() if t.GetNetname() == net] or [0.0])
-            spacing = g["spacing_mm"] or 3.0 * max(width, clearance_of(net))
-            period = 2.0 * spacing                       # two legs per bump: leg gap = spacing
-            row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit,
-                   "spacing_mm": spacing}
-            stats = {}
+        wb = pcbnew.LoadBoard(work)
+        width = max([t.GetWidth() / 1e6 for t in wb.GetTracks() if t.GetNetname() == net] or [0.0])
+        spacing = g["spacing_mm"] or 3.0 * max(width, clearance_of(net))
+        period = 2.0 * spacing                               # two legs per bump: leg gap = spacing
+        row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit, "spacing_mm": spacing}
+        stats, tries = {}, 0
+        try:
             for rnd in range(max_rounds):
+                bud.check()
                 cur = net_lengths(pcbnew.LoadBoard(work), g).get(net)
                 val = None if cur is None else cur.get(unit if unit == "ps" else "mm")
                 if rnd == 0:
@@ -533,14 +725,17 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                     need = need / avg
                 ok = False
                 for cand in range(4):
-                    for amp, frac in ((g["amplitude_mm"], 1.0), (g["amplitude_mm"], 0.5),
-                                      (g["amplitude_mm"] * 0.5, 1.0)):
+                    for amp, frac in ((g["amplitude_mm"], 1.0), (g["amplitude_mm"], 0.5), (g["amplitude_mm"] * 0.5, 1.0)):
+                        if tries >= bud.stall:
+                            raise Stalled()
+                        n0 = stats.get("drc_runs", 0)
                         ok, base = _guarded_set(
                             board_path, work,
                             lambda bd, c=cand, a=amp, f=frac: meander_to(
                                 bd, net, need * f, amp_mm=a, period_mm=period,
                                 candidate=c, log=log, clearance_mm=clearance_of(net), stats=stats) > 0,
-                            kicad_cli, base, log, stats)
+                            kicad_cli, base, log, stats, bud)
+                        tries = 0 if ok else tries + stats.get("drc_runs", 0) - n0
                         if ok:
                             break
                     if ok:
@@ -550,22 +745,56 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                     break
             else:
                 row.update(status="fail", note=f"not within tolerance after {max_rounds} rounds")
-            cur = net_lengths(pcbnew.LoadBoard(work), g).get(net, {})
-            row["after"] = cur.get(unit if unit == "ps" else "mm")
-            row["drc_runs"] = stats.get("drc_runs", 0)
-            row["geom_rejected"] = stats.get("geom_rejected", 0)
-            total_runs += row["drc_runs"]
-            row["basis"] = cur.get("basis", "total")
-            row.setdefault("status", "ok")
-            report.append(row)
-            log(f"  {g['name']}/{net}: {row.get('before')} -> {row['after']} {unit} [{row['basis']}] "
-                f"spacing {spacing:.3f} mm ({row['status']}) {row.get('note', '')} "
-                f"[DRC runs {row['drc_runs']}, geometry rejects {row['geom_rejected']}]")
-    shutil.move(work, out_path)
-    for ext in (".kicad_pro", ".kicad_dru"):
-        p = os.path.splitext(work)[0] + ext
-        if os.path.exists(p):
-            os.unlink(p)
-    log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected "
-        f"(baseline {base0[1][0]} / {base0[1][1]}); DRC runs total {total_runs}")
+        except Stalled:
+            row.update(status="fail", note=f"stalled: {bud.stall} DRC-guarded tries without an accepted bump", stalled=True)
+        cur = net_lengths(pcbnew.LoadBoard(work), g).get(net, {})
+        row["after"] = cur.get(unit if unit == "ps" else "mm")
+        row["drc_runs"] = stats.get("drc_runs", 0)
+        row["geom_rejected"] = stats.get("geom_rejected", 0)
+        row["basis"] = cur.get("basis", "total")
+        row.setdefault("status", "ok")
+        return row, base
+
+    try:
+        with bud:
+            shutil.copy(board_path, work)
+            _copy_sidecars(board_path, work)
+            base = base0 = (drc_report(work, kicad_cli, timeout=bud.drc_timeout()) if bud.seconds
+                            else drc_report(work, kicad_cli))
+            log(f"  baseline DRC: {base[1][0]} violations, {base[1][1]} unconnected")
+            for g in groups_:
+                for net in sorted(net_lengths(pcbnew.LoadBoard(work), g)):
+                    row, base = tune_net(g, net, base)
+                    done.add((g["name"], net))
+                    stalled = stalled or bool(row.get("stalled"))
+                    total_runs += row["drc_runs"]
+                    report.append(row)
+                    log(f"  {g['name']}/{net}: {row.get('before')} -> {row['after']} {row['unit']} [{row['basis']}] "
+                        f"spacing {row['spacing_mm']:.3f} mm ({row['status']}) {row.get('note', '')} "
+                        f"[DRC runs {row['drc_runs']}, geometry rejects {row['geom_rejected']}]")
+    except Stopped as e:
+        stopped = e.reason
+        log(f"  stopped ({stopped}): writing the best accepted board")
+    except BaseException:
+        cleanup_work(work)
+        raise
+    if not os.path.exists(work):
+        shutil.copy(board_path, work)
+    _finalize(work, out_path)
+    if stopped is None and stalled:
+        stopped = "stall"
+    if stopped in ("budget", "signal"):                      # nets nobody reached: reported, not silently missing
+        for g in groups_:
+            target, tol = targets[g["name"]]
+            for net in sorted(net_lengths(pcbnew.LoadBoard(out_path), g)):
+                if (g["name"], net) not in done:
+                    report.append({"group": g["name"], "net": net, "target": target, "tol": tol, "unit": g["unit"],
+                                   "before": None, "after": None, "basis": "total", "status": "not_reached",
+                                   "note": stopped, "drc_runs": 0, "geom_rejected": 0})
+    if base is not None:
+        log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected "
+            f"(baseline {base0[1][0]} / {base0[1][1]}); DRC runs total {total_runs}")
+    if result is not None:
+        result.update(stopped=stopped, elapsed_s=round(bud.elapsed(), 1), budget_s=bud.seconds, out=out_path,
+                      groups=report)
     return report
