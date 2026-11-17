@@ -146,6 +146,8 @@ def run_tool(tool, aux, workdir, params, timeout=900, threads=8):
     except OSError as e:
         raise Unavailable(f"Cypress could not start: {e}")
     dt = time.time() - t
+    from . import quietlog
+    quietlog.filter_file(logp)                                    # drop the repeated pcbnew assert lines
     text = open(logp, errors="replace").read()
     own = os.path.join(workdir, "DREAMPlace.log")                 # the tool's Python log goes to its working directory
     if os.path.exists(own):

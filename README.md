@@ -1,6 +1,6 @@
 # fluxplace
 
-Placement, routing, review and fab packaging for KiCad 10: CLI, plugin, MCP.
+Placement, routing, review, fab for KiCad 10: CLI, plugin, MCP.
 
 **AI agents: read only [AGENTS.md](AGENTS.md).** Detail: `fluxplace help-brief CMD`.
 
@@ -13,7 +13,7 @@ See [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Pipeline
 
-`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged via `W/state.json`. Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
+`fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged (`W/state.json`) Briefs: [docs/AGENT-PIPELINE.md](docs/AGENT-PIPELINE.md).
 
 `--full`, `-q`: [output.md](docs/commands/output.md).
 ## Commands
@@ -112,6 +112,7 @@ route-status      one line from a router run's...
 route-wait        block until the router is...
 pipeline          staged pipeline, one stage per agent...
 help-brief        at most 15 lines on one command (none: one...
+calls             recent calls from the call log
 <!-- index:end -->
 
 ## More

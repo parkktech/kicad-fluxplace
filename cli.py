@@ -3012,6 +3012,20 @@ def cmd_help_brief(a):
     print(HB.main_text(a.command))
 
 
+def cmd_calls(a):
+    """Recent fluxplace calls from the call log (.fluxplace/calls.jsonl), one line each."""
+    from fluxplace import calllog as CL
+    import json as _json
+    path = CL.resolve(a.path)
+    recs = CL.read(path, a.tail, a.failed)
+    if a.json:
+        print(_json.dumps(recs, indent=1))
+    else:
+        print(f"calls: {len(recs)} from {path}" + (" (failed only)" if a.failed else ""))
+        for r in recs:
+            print(CL.line(r))
+
+
 def build_parser():
     """Build the full argument parser.
 
@@ -4048,6 +4062,13 @@ def build_parser():
     phb.add_argument("command", nargs="?", default=None)
     phb.set_defaults(fn=cmd_help_brief)
 
+    pcl = sub.add_parser("calls", help="recent calls from the call log")
+    pcl.add_argument("path", nargs="?", default=None, help="board, folder or calls.jsonl (default ./.fluxplace)")
+    pcl.add_argument("--tail", type=int, default=20)
+    pcl.add_argument("--failed", action="store_true", help="only calls with a non-zero exit")
+    pcl.add_argument("--json", action="store_true")
+    pcl.set_defaults(fn=cmd_calls)
+
     sub.choices["doctor"].add_argument(
         "--context", action="store_true",
         help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
@@ -4079,7 +4100,7 @@ def _silk_hook(a):
 
 # commands that never write a board: no connectivity snapshot is taken for them
 _GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
-                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session"}
+                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls"}
 
 
 def _guard_ledger_on(a):
@@ -4184,6 +4205,12 @@ def _guard_end(g, a, raised=False):
 
 
 def main(argv=None):
+    from fluxplace import quietlog, calllog
+    quietlog.install_stderr()                    # drop the repeated pcbnew assert line from fd 2 (FLUXPLACE_RAW_STDERR=1: off)
+    return calllog.run(_main, argv)              # one JSON line per call in .fluxplace/calls.jsonl
+
+
+def _main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
     from fluxplace import outputs as OUT
