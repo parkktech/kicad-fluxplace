@@ -62,3 +62,12 @@ stdout. Other commands retain their prior brief behavior. `progress checkpoint` 
 `fluxplace progress brief --workdir W` follow-up. Regressions: `test_suggest_brief_json_emits_path_and_full_object` and the
 updated `test_cli_checkpoint_block_show_brief` (29 selected tests passed). The real W7 suggestion emitted an identical path
 in both forms and completed in 1.64 s.
+
+## Pair-only lock override
+
+`pairs --only` had no supported way to re-route pipeline-locked pair copper. New `--unlock` (off by default) removes lock
+markers only from the named pair's temporary working text, records `unlocked_items` and original locked descriptors per
+pair, requires the accepted replacement to be locked, and sets `relocked`. Failures never modify the working original, so
+locks and geometry are restored byte-for-byte. Without the flag the refusal now names `--unlock`. Regressions:
+`test_unlock_reroutes_and_relocks_named_pair`, `test_unlock_failure_restores_original_locks_and_geometry`, and the updated
+locked-refusal test (37 pair/pair-only tests passed).

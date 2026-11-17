@@ -9,6 +9,9 @@ The result is accepted for a pair only when ALL of these hold on the candidate b
 Anything else: the pair's original copper stays exactly as it was (`kept_original`, with the measured reason: the corridor that
 is blocked and the obstacles that bind it). A pair already complete is not touched (`already_ok`): never worse than it started.
 
+--unlock (off by default): temporarily unlock only the named pair's copper; failure restores its original locks exactly,
+success requires locked replacement copper and records the unlocked item count.
+
 --allow-shove (off by default): when the coupled lay is blocked, the unlocked copper of the NON-pair, non-RF, non-power,
 non-clock neighbour nets the blocker report names is removed, the pair is laid, and the nets that were opened are reported
 (they are NOT laid again: the hand-route tools do that). Off, the report only names the neighbours that block.
@@ -44,16 +47,29 @@ def resolve(names, pairs):
     return out, miss
 
 
-def locked_items(text, nets):
-    """['segment NET LAYER (x,y)-(x,y)' | 'via NET (x,y)'] of the LOCKED tracks and vias of `nets` in the board text."""
+def locked_items(text, nets, locked=True):
+    """Copper descriptions of `nets` with the requested lock state."""
     from . import boardtext as BT
     want, out = set(nets), []
     for _i, _j, key, blk in BT.scan(text):
         net = BT.net_name(blk)
-        if net in want and BT.is_locked(blk):
+        if net in want and BT.is_locked(blk) == locked:
             out.append(f"via {net} ({key[1]},{key[2]})" if key[0] == "v" else
                        f"segment {net} {key[4]} ({key[1][0]},{key[1][1]})-({key[2][0]},{key[2][1]})")
     return out
+
+
+def unlock_items(text, nets):
+    """Temporarily remove lock markers only from the named nets' copper -> (text, item count)."""
+    from . import boardtext as BT
+    want = set(nets)
+    edits = []
+    for i, j, _key, blk in BT.scan(text):
+        if BT.net_name(blk) in want and BT.is_locked(blk):
+            edits.append((i, j, re.sub(r"\s*\(locked(?: yes)?\)", "", blk)))
+    for i, j, blk in reversed(edits):
+        text = text[:i] + blk + text[j + 1:]
+    return text, len(edits)
 
 
 def shove_nets(blockers, pair, cls, protect=()):
@@ -103,7 +119,7 @@ def _sidecars(src, dst):
 
 
 def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budget=None, allow_shove=False,
-            log=print, lay=None, drc=None, result=None):
+            log=print, lay=None, drc=None, result=None, unlock=False):
     """-> report {out, stopped, elapsed_s, budget_s, unmatched, pairs: [row]}; row.status is rerouted | kept_original |
     refused_locked | already_ok | not_reached. `lay(board_path, cons, spec, only=set)` defaults to pairs.plan, `drc(path)` ->
     (keys, counts) to a kicad-cli DRC; both can be replaced (tests)."""
@@ -150,14 +166,17 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 Bw = RD.load(work)
                 row["before"] = dict(_profile_row(Bw, pr), audit=aud0[pr]["status"], why=aud0[pr]["why"])
                 lk = locked_items(text, pr)
-                if lk:
+                if lk and not unlock:
                     row.update(status="refused_locked", locked=lk[:20],
-                               reason=f"{len(lk)} locked item(s): " + "; ".join(lk[:6]) + (" ..." if len(lk) > 6 else "") + " (unlock them to re-route)")
+                               reason=f"{len(lk)} locked item(s): " + "; ".join(lk[:6]) + (" ..." if len(lk) > 6 else "") + " (use --unlock to re-route and re-lock this pair)")
                     log(f"  {name}: refused, {row['reason']}")
                     continue
                 if aud0[pr]["status"] == "complete":
                     row.update(status="already_ok", reason="already connected, matched and in tolerance: not touched")
                     continue
+                if lk:
+                    text, row["unlocked_items"] = unlock_items(text, pr)
+                    row["unlocked"] = lk[:20]
                 stripped, nrem = PA.strip_legs(text, pr)
                 row["removed_items"] = nrem
                 put_pre(stripped)
@@ -195,12 +214,13 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 opn = RC.text_open(B2)
                 a = PA.audit(B2, [pr], cons, {n for n, k in opn.items() if k})[pr]
                 prof = _profile_row(B2, pr)
-                why = None
-                if a["status"] == "unknown":
+                unlocked_result = locked_items(open(try_, errors="replace").read(), pr, locked=False) if lk else []
+                why = "pair result was not locked again" if unlocked_result else None
+                if a["status"] == "unknown" and why is None:
                     pp, pn = PA.profile(B2, pr[0]), PA.profile(B2, pr[1])
                     if not (pp["path"] and pn["path"] and pp["layers"] == pn["layers"] and pp["vias"] == pn["vias"]):
                         why = "pair not connected on one layer sequence"
-                elif a["status"] != "complete":
+                elif a["status"] != "complete" and why is None:
                     why = f"pair audit: {a['status']}" + (f" ({a['why']})" if a["why"] else "")
                 if why is None:
                     worse = sorted(n for n, k in opn.items() if n not in pr and n not in shoved and k > open0.get(n, 0))
@@ -222,7 +242,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 base, open0 = (keys, _cnt), opn
                 aud0[pr] = a
                 row.update(status="rerouted", reason="", after=dict(prof, audit=a["status"], why=a["why"]), opened=sorted(
-                    n for n, k in opn.items() if n in shoved and k))
+                    n for n, k in opn.items() if n in shoved and k), relocked=bool(lk))
                 log(f"  {name}: rerouted, P {prof['p_mm']} / N {prof['n_mm']} mm, skew {prof['skew']}, vias {prof['vias']}"
                     + (f"; opened {', '.join(row['opened'])}" if row["opened"] else ""))
     except TU.Stopped as s:
@@ -251,7 +271,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
         if os.path.exists(src) and not os.path.exists(dst):
             shutil.copy(src, dst)
     rep = {"board": board, "out": out, "stopped": stopped, "elapsed_s": round(bud.elapsed(), 1), "budget_s": bud.seconds,
-           "allow_shove": bool(allow_shove), "unmatched": unmatched, "pairs": [rows[f"{p[0]}/{p[1]}"] for p in sel]}
+           "allow_shove": bool(allow_shove), "unlock": bool(unlock), "unmatched": unmatched, "pairs": [rows[f"{p[0]}/{p[1]}"] for p in sel]}
     if result is not None:
         result.update(rep)
     return rep
