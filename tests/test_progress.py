@@ -108,7 +108,7 @@ def test_cli_checkpoint_block_show_brief(tmp_path, capsys):
     b = _board(tmp_path)
     cli.main(["progress", "checkpoint", b, "--note", "n1", "--metric", "unconnected=4", "--metric", "pairs_not_done=2"])
     out = capsys.readouterr().out
-    assert out.splitlines()[-1] == f"brief: fluxplace progress brief {tmp_path}"
+    assert out.splitlines()[-1] == f"brief: fluxplace progress brief --workdir {tmp_path}"
     cli.main(["progress", "checkpoint", b, "--metric", "unconnected=0", "--metric", "pairs_not_done=2"])
     cli.main(["progress", "block", "NET_Z", "--reason", "placement", "--workdir", str(tmp_path)])
     capsys.readouterr()

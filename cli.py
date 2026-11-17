@@ -3097,7 +3097,7 @@ def cmd_progress(a):
             raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
         wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
         print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
-        print(f"brief: fluxplace progress brief {wd}")
+        print(f"brief: fluxplace progress brief --workdir {wd}")
         return
     if act == "block":
         if not tgt or not a.reason:

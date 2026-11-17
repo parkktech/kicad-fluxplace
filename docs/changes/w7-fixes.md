@@ -53,3 +53,12 @@ A net-only suggestion passed `None` endpoints into `hrgeom.pip`; it now selects 
 not-found result with its reason. The W7 net-only case changed from a traceback in 5.76 s to `suggest found: 2.049 mm, 0
 via(s)` in 1.66 s. Regressions: `test_net_only_suggest_chooses_closest_distinct_islands` and
 `test_suggest_internal_error_is_normal_not_found` (15 selected tests passed).
+
+## Actionable suggest brief and progress follow-up
+
+Suggest's brief success line omitted its path, and `--brief --json` returned before emitting JSON. A found brief now includes
+`path ...`; for suggest only, both flags put the brief on stderr and the complete JSON object (including `board_rev`) on
+stdout. Other commands retain their prior brief behavior. `progress checkpoint` now prints the documented
+`fluxplace progress brief --workdir W` follow-up. Regressions: `test_suggest_brief_json_emits_path_and_full_object` and the
+updated `test_cli_checkpoint_block_show_brief` (29 selected tests passed). The real W7 suggestion emitted an identical path
+in both forms and completed in 1.64 s.

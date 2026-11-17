@@ -62,7 +62,9 @@ def summary(kind, r):
             return f"probe failed: {_viol(vs[0]) if vs else _reason(r) or 'unknown'}" + (f" (+{len(vs) - 1} more)" if len(vs) > 1 else "")
         if kind == "suggest":
             if r.get("found"):
-                return f"suggest found: {r.get('length_mm', '?')} mm, {r.get('vias', '?')} via(s)" + (" (relaxed, blockers listed)" if r.get("blockers") else "")
+                return (f"suggest found: {r.get('length_mm', '?')} mm, {r.get('vias', '?')} via(s)"
+                        + (f"; path {r['path']}" if r.get("path") else "")
+                        + (" (relaxed, blockers listed)" if r.get("blockers") else ""))
             return "suggest none: " + (_reason(r) or "no path")
         if "accepted" in r:
             ok = r["accepted"]
@@ -74,12 +76,14 @@ def summary(kind, r):
 
 
 def _emit(a, data, text, kind=None, rev=None):
-    """--json: full record, `summary` first (when kind given) and `board_rev` (when rev given); --brief: that one line only."""
+    """Brief normally replaces other output; suggest with both flags keeps JSON on stdout and puts brief on stderr."""
     if kind and isinstance(data, dict):
         line = summary(kind, data)
         if getattr(a, "brief", False):
-            print(line)
-            return
+            both = kind == "suggest" and getattr(a, "json", False)
+            print(line, file=sys.stderr if both else sys.stdout)
+            if not both:
+                return
         data = {"summary": line, **data}
     if rev and isinstance(data, dict) and getattr(a, "json", False):
         data = {**data, "board_rev": rev}
