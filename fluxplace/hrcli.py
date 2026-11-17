@@ -178,6 +178,17 @@ def cmd_lay(a):
     return 0 if r["accepted"] else 1
 
 
+def cmd_copy_net(a):
+    from . import handroute as H
+    g = _write_guard(a, a.out or a.board)
+    if g is not None:
+        return g
+    r = H.copy_net(a.src, a.board, a.net, a.out, a.constraints)
+    r.pop("cand_unc_pairs", None)
+    _emit(a, r, lambda: f"copy-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "copy-net")
+    return 0 if r["accepted"] else 1
+
+
 def cmd_shove(a, op="shove"):
     from . import handroute as H
     g = _write_guard(a, a.out or a.board)
@@ -269,11 +280,11 @@ def register(sub):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
 
-    p = sub.add_parser("open-nets", help="read-only: list open connections")
+    p = sub.add_parser("open-nets", help="list open connections")
     common(p)
     p.set_defaults(fn=cmd_open_nets)
 
-    p = sub.add_parser("window", help="read-only: region as data + PNG")
+    p = sub.add_parser("window", help="region as data + PNG")
     common(p)
     geom(p)
     p.add_argument("--at", default=None, help="window centre X,Y mm")
@@ -289,7 +300,7 @@ def register(sub):
     p.add_argument("--path", default=None, help="overlay a proposed path on the render")
     p.set_defaults(fn=cmd_window)
 
-    p = sub.add_parser("probe", help="read-only: check a path")
+    p = sub.add_parser("probe", help="check a path")
     common(p)
     geom(p)
     p.add_argument("--net", required=True)
@@ -298,7 +309,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_probe)
 
-    p = sub.add_parser("lay", help="lay a probed path, guarded")
+    p = sub.add_parser("lay", help="lay a path, guarded")
     common(p)
     geom(p)
     p.add_argument("--net", required=True)
@@ -310,7 +321,16 @@ def register(sub):
     guards(p)
     p.set_defaults(fn=cmd_lay)
 
-    for name, h in (("shove", "remove unlocked copper"),
+    p = sub.add_parser("copy-net", help="restore a net")
+    p.add_argument("src", help="board to copy the net's tracks and vias FROM")
+    common(p)
+    p.add_argument("--net", required=True)
+    p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board = DST)")
+    brief(p)
+    guards(p)
+    p.set_defaults(fn=cmd_copy_net)
+
+    for name, h in (("shove", "remove copper"),
                     ("unlay", "remove copper by id")):
         p = sub.add_parser(name, help=h)
         common(p)
@@ -323,7 +343,7 @@ def register(sub):
         guards(p)
         p.set_defaults(fn=cmd_shove if name == "shove" else cmd_unlay)
 
-    p = sub.add_parser("suggest", help="grid-search a legal path")
+    p = sub.add_parser("suggest", help="grid-search a path")
     common(p)
     geom(p)
     p.add_argument("--net", default=None)
@@ -340,7 +360,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_suggest)
 
-    p = sub.add_parser("session", help="hand-route session + commit")
+    p = sub.add_parser("session", help="hand-route session")
     p.add_argument("action", choices=["begin", "undo", "status", "ledger", "commit"])
     p.add_argument("work", help="begin: the SOURCE board; others: the WORK board")
     p.add_argument("--work", dest="work_out", default=None, help="begin: the WORK board to create")

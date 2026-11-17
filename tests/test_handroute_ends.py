@@ -85,3 +85,60 @@ def test_probe_clear_dir_and_shift_in_summary(tmp_path):
     for x in c:
         assert abs(math.hypot(*x["clear_dir"]) - 1) < 1e-3 and x["clear_shift_mm"] > 0
         assert (x["clear_shift_mm"] * 100) % 1 < 1e-6 or abs((x["clear_shift_mm"] * 100) % 1 - 1) < 1e-6
+
+
+def _copy_pair(d):
+    import os
+    os.makedirs(os.path.join(d, "s"))
+    os.makedirs(os.path.join(d, "d"))
+    srcs, dsts = [], []
+    for name, sub in (("s", srcs), ("d", dsts)):
+        B = Brd()
+        B.edge(-2, -8, 24, 8)
+        _pad(B, "A1", "A", 2, 0, 0.5, 0.5, pcbnew.F_Cu)
+        _pad(B, "A2", "A", 18, 0, 0.5, 0.5, pcbnew.F_Cu)
+        _pad(B, "Z1", "Z", 2, 4, 0.5, 0.5, pcbnew.F_Cu)
+        _pad(B, "Z2", "Z", 18, 4, 0.5, 0.5, pcbnew.F_Cu)
+        B.track("Z", [(2, 4), (18, 4)])
+        if name == "s":
+            B.track("A", [(2, 0), (6, 0)])
+            B.track("A", [(6, 0), (14, 0)], layer=pcbnew.B_Cu)
+            B.track("A", [(14, 0), (18, 0)])
+            for x in (6, 14):
+                v = pcbnew.PCB_VIA(B.b)
+                v.SetPosition(V(x, 0))
+                v.SetWidth(mm(0.6))
+                v.SetDrill(mm(0.3))
+                v.SetNet(B.net("A"))
+                B.b.Add(v)
+        else:
+            B.track("A", [(2, 0), (18, 0)])
+        sub.append(B.save(os.path.join(d, name)))
+    return srcs[0], dsts[0]
+
+
+def test_copy_net_restores_exact_count_by_net_name(tmp_path):
+    s, dst = _copy_pair(str(tmp_path))
+    out = str(tmp_path / "o.kicad_pcb")
+    R = H.copy_net(s, dst, "A", out=out)
+    assert R["accepted"], R.get("reason")
+    assert R["info"] == {"removed": 1, "copied": 5, "source": s}
+    b = pcbnew.LoadBoard(out)
+    mine = [t for t in b.GetTracks() if t.GetNetname() == "A"]
+    assert len(mine) == 5 and all(t.GetNetCode() == b.FindNet("A").GetNetCode() for t in mine)
+    assert sum(1 for t in b.GetTracks() if t.GetNetname() == "Z") == 1
+
+
+def test_copy_net_refuses_locked_and_writes_nothing(tmp_path):
+    import os
+    s, dst = _copy_pair(str(tmp_path))
+    b = pcbnew.LoadBoard(dst)
+    for t in b.GetTracks():
+        if t.GetNetname() == "A":
+            t.SetLocked(True)
+    pcbnew.SaveBoard(dst, b)
+    out = str(tmp_path / "o.kicad_pcb")
+    R = H.copy_net(s, dst, "A", out=out)
+    assert not R["accepted"] and "locked" in R["reason"] and not os.path.exists(out)
+    R = H.copy_net(s, dst, "NOPE", out=out)
+    assert not R["accepted"] and not os.path.exists(out)

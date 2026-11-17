@@ -832,6 +832,61 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
     return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli)
 
 
+def _net_copper(b, net):
+    return [t for t in b.GetTracks() if t.GetNetname() == net]
+
+
+def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
+    """Replace the copper of `net` on board `dst` (unlocked tracks/arcs/vias, refused if any is locked) by the copper of the same net NAME
+    on board `src`; items are rebuilt explicitly on dst's own net (no Duplicate(): it keeps the source net codes). The copied count must equal
+    the source count; then the same DRC + connectivity guard as `lay`. Writes nothing on failure."""
+    def mutate(b, M):
+        pc = M.pcbnew
+        sb = pc.LoadBoard(src)
+        items = _net_copper(sb, net)
+        if not items:
+            raise ValueError(f"source has no copper of net {net!r}")
+        dn = b.FindNet(net)
+        if dn is None:
+            raise ValueError(f"net {net!r} is not on the destination board")
+        old = _net_copper(b, net)
+        if any(t.IsLocked() for t in old):
+            raise ValueError(f"destination has locked copper of net {net!r}: {sum(1 for t in old if t.IsLocked())} item(s); unlock or leave it")
+        for t in old:
+            b.Remove(t)
+        lid = {sb.GetLayerName(l): l for l in sb.GetEnabledLayers().Seq()}
+        for t in items:
+            cls = t.GetClass()
+            if cls == "PCB_VIA":
+                n = pc.PCB_VIA(b)
+                n.SetPosition(t.GetPosition())
+                n.SetViaType(t.GetViaType())
+                n.SetLayerPair(t.TopLayer(), t.BottomLayer())
+                n.SetWidth(t.GetWidth())
+                n.SetDrill(t.GetDrill())
+            elif cls == "PCB_ARC":
+                n = pc.PCB_ARC(b)
+                n.SetStart(t.GetStart())
+                n.SetMid(t.GetMid())
+                n.SetEnd(t.GetEnd())
+                n.SetWidth(t.GetWidth())
+                n.SetLayer(t.GetLayer())
+            else:
+                n = pc.PCB_TRACK(b)
+                n.SetStart(t.GetStart())
+                n.SetEnd(t.GetEnd())
+                n.SetWidth(t.GetWidth())
+                n.SetLayer(t.GetLayer())
+            n.SetNet(dn)
+            n.SetLocked(t.IsLocked())
+            b.Add(n)
+        got = len(_net_copper(b, net))
+        if got != len(items):
+            raise ValueError(f"copied item count {got} != source count {len(items)}")
+        return {"removed": len(old), "copied": got, "source": src}
+    return _edit(dst, out, mutate, "copy-net", net, f"from {os.path.basename(src)}", constraints, False, False, kicad_cli)
+
+
 def _chain(M, seed):
     """Segments connected to `seed` through plain same-layer joints (degree 2, no pad / via / branch)."""
     tracks = [o for o in M.obs if o.kind == "track" and o.net == seed.net and o.layers == seed.layers and not o.extra.get("arc")]
