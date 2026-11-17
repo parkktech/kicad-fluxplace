@@ -289,7 +289,8 @@ def cmd_ready(a):
     verdict = ("ready: NOT READY (exit 1)" if nfail else "ready: OPEN QUESTIONS (exit 3)" if nopen else
                "ready: NOT READY - parts gate bypassed by --allow-undocumented" if waived else "ready: READY") + \
         f" - {sum(l['status'] == PASS for l in lines)} PASS, {nfail} FAIL, {nopen} open question(s)"
-    stem = os.path.splitext(board or a.spec)[0]
+    from . import reportdir as RD
+    stem = RD.redirect(a, os.path.splitext(board or a.spec)[0])
     path = stem + ".ready.txt"
     try:
         with open(path, "w") as fh:

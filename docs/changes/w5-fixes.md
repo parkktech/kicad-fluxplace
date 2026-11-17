@@ -12,3 +12,7 @@
   outline's grid indexed a cell that does not exist. Such pads block no cell, ratsnest ends are clamped to
   the edge cell, and the new WARN `PLACE_OUTSIDE_OUTLINE` (plus `congestion.outside_refs`) names the parts.
 - `parts-fetch A,B` splits comma-separated MPNs (and still accepts spaces); no MPN with a comma is relied on.
+- Default report files: new global `--report-dir DIR` / `FLUXPLACE_REPORT_DIR`; an explicit `--json FILE` / `--out FILE`
+  sends companion reports to that file's directory; otherwise beside the input and announced as `report: PATH` on stderr
+  (`parts`, `-q`). Shared helper `fluxplace/reportdir.py`, wired into compact commands (`outputs._report_base`), `parts`,
+  `ready`, `part-diff`. See `docs/commands/output.md`.

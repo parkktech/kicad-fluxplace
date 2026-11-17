@@ -4336,6 +4336,8 @@ def _main(argv=None):
         text, ok = CC.report()
         print(text)
         raise SystemExit(0 if ok else 1)
+    from fluxplace import reportdir as RDIR
+    RDIR.set_dir(getattr(a, "report_dir", None))
     _silk_hook(a)
     guard = _guard_begin(a)
     try:
