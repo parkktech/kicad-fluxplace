@@ -303,7 +303,7 @@ def cmd_shove(a, op="shove"):
         return g
     args = (a.board, a.net, a.out, [i for i in (a.ids or "").split(",") if i] or None, _box(a.window) if a.window else None,
             a.chain, a.constraints)
-    r = _timed("fluxplace.handroute:shove", args, {"op": op}, a.timeout, _edit_paths(a.board, a.out))
+    r = _timed("fluxplace.handroute:shove", args, {"op": op, "allow_locked": a.allow_locked}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
 
     def text():
@@ -327,7 +327,7 @@ def cmd_suggest(a):
     dp = tuple(float(x) for x in a.dst.split(",")) if a.dst else None
     try:
         r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
-                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore, include_locked=getattr(a, "include_locked", False))
     except Exception as e:
         r = {"found": False, "reason": f"internal error: {type(e).__name__}: {e}"}
     _emit(a, r, lambda: ("suggest: none - " + r["reason"] + "\n  " + "\n  ".join(f"remove {[(x['net'], x['id']) for x in e['remove']]} -> found={e['then_found']} {e['path'] or ''}" for e in r["explore"]) if r.get("explore") is not None else f"suggest(relaxed): {r['path']}\n  blockers: " + ", ".join(f"{b['kind']} {b['id']} {b['net']} {b['layer']}x{b['cells']}" for b in r["blockers"]) if r.get("blockers") is not None else f"suggest: {r['path']}\n  length {r['length_mm']} mm, {r['vias']} via(s), probe OK" if r.get("found") else f"suggest: none - {r['reason']}"), "suggest", _rev(a))
@@ -481,6 +481,7 @@ def register(sub):
         p.add_argument("--ids", default=None, help="comma list of track/via ids (8+ hex chars) from `window`")
         p.add_argument("--window", default=None, help="X,Y,W,H: all copper of the net touching it")
         p.add_argument("--chain", action="store_true", help="extend each track to its whole run (to pad / via / branch)")
+        p.add_argument("--allow-locked", action="store_true", help="session only: explicitly named locked items are unlocked, removed and recorded")
         p.add_argument("--out", default=None)
         brief(p)
         guards(p)
@@ -499,6 +500,7 @@ def register(sub):
     p.add_argument("--via-cost", type=float, default=2.0, help="mm-equivalent cost of a via")
     p.add_argument("--relax-cost", type=float, default=1.5, help="mm-equivalent cost per grid cell crossing an unlocked foreign track/via (higher = fewer blockers)")
     p.add_argument("--explore", action="store_true", help="when no path: try removing each limiting UNLOCKED track/via (singles, then pairs) and report what would free it")
+    p.add_argument("--include-locked", action="store_true", help="with --explore: report locked candidates separately in locked_explore")
     p.add_argument("--relax", action="store_true", help="let the path cross UNLOCKED foreign tracks/vias at a cost and list them as blockers")
     brief(p)
     p.set_defaults(fn=cmd_suggest)

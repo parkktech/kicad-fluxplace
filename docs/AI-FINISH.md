@@ -3,7 +3,7 @@
 Procedure for an agent that finishes the last few unconnected nets of a routed board the way a layout engineer does:
 look at the local geometry, decide a path (moving a neighbour if needed), lay it, check it, undo if it breaks anything.
 The commands are small and deterministic; the decisions are yours. Floors (track, clearance, via, hole, edge) come from the
-board's rules raised by `--constraints` ([route], [fab] profile) and are never crossed. Locked copper is never changed.
+board's rules raised by `--constraints` ([route], [fab] profile) and are never crossed. Locked copper changes only through explicit guarded commands.
 
 Measurement is `kicad-cli pcb drc --refill-zones` with the `.kicad_pro` beside the board. Work on copies only.
 
@@ -15,14 +15,14 @@ Measurement is `kicad-cli pcb drc --refill-zones` with the `.kicad_pro` beside t
 | `window B --at X,Y --size W,H` / `--net N` / `--conn I` | region as data: pads, tracks (ids, locked), vias, zones and fill pieces, keepouts, edge, per-layer free corridors for a track width, free via sites; `--png/--svg` render with a 1 mm grid; `--path` overlays a proposal |
 | `probe B --net N --path P` | checks a path without writing: nearest foreign copper and margin per segment/via, crossings, keepout, edge, hole, 45/90, width/via floors, track-centred-on-via, what the ends touch. Exit 1 on violations |
 | `lay B --net N --path P [--lock] (--out O \| in a session)` | applies a probed path, then DRC (no new violation key) + connectivity guard (no pad changes net, no other net opens, target net's open count falls). `--lock` locks the newly laid tracks/vias on acceptance. Writes nothing on failure and says why |
-| `shove B --net M (--ids a,b \| --window X,Y,W,H) [--chain]` / `unlay` | removes UNLOCKED copper of net M; reports the connection it opened. Refuses (and names the items) if any selected copper is locked |
-| `suggest B --conn I` or `--net N --from x,y --to x,y` | grid A* between two islands of the net (all layers, vias, octilinear). Returns a path only when both ends touch the intended islands on reachable layers, or the measured seal: region reached per layer and the foreign obstacles that bound it. `--relax` lets the search cross unlocked foreign copper and lists them as blockers; `--explore` re-runs with each limiting unlocked obstacle (and pairs) removed |
+| `shove B --net M (--ids a,b \| --window X,Y,W,H) [--chain]` / `unlay` | removes UNLOCKED copper of net M and reports opened connections. Session-only `shove --allow-locked --ids ...` requires every locked item to be named, unlocks/removes it and records its full geometry in the ledger |
+| `suggest B --conn I` or `--net N --from x,y --to x,y` | grid A* between two islands of the net (all layers, vias, octilinear). Returns a path only when both ends touch the intended islands on reachable layers, or the measured seal: region reached per layer and the foreign obstacles that bound it. `--relax` lists unlocked blockers; `--explore` tries them; `--explore --include-locked` reports locked candidates separately in `locked_explore` with net and lock origin |
 | `copy-net SRC DST --net N [--lock] (--out O \| in a session)` | restores a removed net: DST's unlocked copper of N (refused if any locked) is replaced by SRC's, matched by net NAME, rebuilt on DST's own net; copied count must equal SRC's; then the `lay` DRC + connectivity guard. `--lock` locks all copied items on acceptance. Details: [commands/repair-cmds.md](commands/repair-cmds.md) |
 | `lock-net B --net N [--ids a,b] [--unlock] (--out O \| in a session)` | locks/unlocks all or explicitly selected tracks/vias of N. Requires unchanged geometry, connectivity and DRC keys; supports `--expect-rev` and the KiCad-open guard, and records session edits in the ledger |
 | `via-min B --out O [--budget S --report R]` | raises vias below the floor, one batch, bisected on any new DRC violation key; keeps verified changes on budget end and reports changed/kept/rejected/not-reached. Partial output exits 0. [commands/repair-cmds.md](commands/repair-cmds.md) |
 | `hand-repair W --out O` | ladder steps 1-2 on a session: per open connection suggest/lay, else explore + remove the cheapest unlocked blockers + re-lay them; whole attempt undone if anything stays open; pairs reported; ends with `session commit`. [commands/repair-cmds.md](commands/repair-cmds.md) |
 | `pour-island B --net N --out O` | joins an open same-net pour island with one stitching via at a legal filled-copper site, accepted only by the lay DRC + connectivity guard; no output when no site works |
-| `session begin SRC --work W` / `undo` / `status` / `ledger` / `commit W --out O` | edits on W with an undo stack; `commit` accepts the whole set only if vs the start: unconnected is lower, no new DRC key, no locked copper changed, no net more open, pad nets unchanged. Ledger: `W.session/ledger.{json,txt}` |
+| `session begin SRC --work W` / `undo` / `status` / `ledger` / `commit W --out O` | edits on W with an undo stack; `commit` requires lower unconnected, no new DRC key, protected locked geometry and no net more open. After locked re-escape it also requires every opened connection closed and all current copper of each affected net locked. Ledger: `W.session/ledger.{json,txt}` |
 
 Path syntax: `"F.Cu: x1,y1 x2,y2 x3,y3; via x,y; In2.Cu: x3,y3 x4,y4"`. A via sits between two chunks at their shared point;
 `"via x,y"` alone lays a stitching via. An exact same-net, same-size via already at that point is reused, not duplicated.
@@ -41,10 +41,9 @@ written`, restores the destination and session, and exits 2. `hand-repair` write
    (fewest segments, shortest re-lay, least critical net): `shove --ids ... --chain`. Lay the blocked net FIRST (`probe`, `lay`),
    then re-lay the shoved net (`open-nets`, `suggest --conn` on the opened connection, possibly on another layer). A shoved net
    whose connection is not re-closed fails `commit`.
-5. Stop and record the measured reason when only locked copper blocks it, the pad has no escape at all (reached region too
-   small for a via and every bounding obstacle locked or too costly), or the re-lay of the shoved net has no path. Say which
-   pads/tracks, the gap you measured vs the gap needed, and the change that would free it ("move track T of net M 0.2 mm",
-   "re-escape pad P", "part must move").
+5. If only locked copper blocks the pad, use `suggest --explore --include-locked`, then the explicit session re-escape in
+   [ROUTING-PLAYBOOK.md](ROUTING-PLAYBOOK.md). Stop and record the measured reason when the pad has no escape, the locked
+   items cannot be restored/re-laid and relocked, or a part must move. Say which pads/tracks and gap you measured.
 6. `session commit W --out OUT`. If rejected, read the reasons; `undo` the last edit(s); do not commit a set that is not better.
 7. Final numbers: `kicad-cli pcb drc --severity-error --format json --refill-zones OUT` before/after: unconnected and errors by
    type. No new error type.

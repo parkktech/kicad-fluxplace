@@ -40,9 +40,12 @@ came from placement and stage order. Commands for the repair part are in [AI-FIN
 3. A pair with one open leg: remove both legs and route them together. A routed partner acts as a wall.
 4. Nets that share a channel: solve them together and try both orders. One order can fail where the other fits.
 5. Move a via that is in the way.
-6. Move a part a small distance, collision-checked. Record the move as a design decision and put it back into the
+6. Re-escape a pad sealed only by locked copper. `suggest --explore --include-locked` names locked candidates separately.
+   Inside a session, `shove --allow-locked --ids ...` requires every locked item to be named and logs its full geometry.
+   Close every connection opened this way and lock every restored/re-laid item; `session commit` refuses otherwise.
+7. Move a part a small distance, collision-checked. Record the move as a design decision and put it back into the
    placement source.
-7. Stop and record a blocker with the measured reason. Do not add a via or relax a rule to force it.
+8. Stop and record a blocker with the measured reason. Do not add a via or relax a rule to force it.
 
 Solve the net with the fewest options first, not the shortest one.
 
