@@ -18,6 +18,7 @@ import fnmatch
 import json
 import math
 import os
+import sys
 import time
 import uuid
 
@@ -1209,10 +1210,30 @@ def complete_fanout(board, src_board, cs_args, cons, spec, rep, log=lambda m: No
     return out
 
 
+def cmd_only(a, cons, spec):
+    """pairs --only: re-route named pairs whole on a routed board (pairsonly.py). Exit 0 all done, 1 some kept / refused /
+    unmatched, 2 stopped by --budget or a signal (--out is the best accepted board)."""
+    from . import pairsonly as PO
+    out = a.out or os.path.splitext(a.board)[0] + ".pairs.kicad_pcb"
+    if os.path.abspath(out) == os.path.abspath(a.board):
+        raise SystemExit("pairs: --out must differ from the input board")
+    rep = PO.reroute(a.board, out, [x for x in a.only.split(",") if x.strip()], cons, spec, budget=a.budget,
+                     allow_shove=a.allow_shove, log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
+    rp = out + ".pairsonly.json"
+    json.dump(rep, open(rp, "w"), indent=1)
+    print(PO.format_text(rep))
+    print(f"full report: {rp}\nwrote {out}")
+    if rep["stopped"] in ("budget", "signal"):
+        return 2
+    return 0 if all(r["status"] in ("rerouted", "already_ok") for r in rep["pairs"]) and not rep["unmatched"] and rep["pairs"] else 1
+
+
 def cmd_pairs(a):
     from . import constraints as C
     cons = C.load(a.constraints)
     spec = json.load(open(a.spec)) if a.spec else None
+    if getattr(a, "only", None):
+        return cmd_only(a, cons, spec)
     out = None if a.plan_only else (a.out or os.path.splitext(a.board)[0] + ".pairs.kicad_pcb")
     if out and os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
@@ -1311,6 +1332,13 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.pairs.kicad_pcb)")
     p.add_argument("--plan-only", dest="plan_only", action="store_true", help="centre-line corridors only; writes no copper")
     p.add_argument("--nets", default=None, help="comma-separated nets: only the pairs of these nets")
+    p.add_argument("--only", default=None, metavar="A,B",
+                   help="re-route these pairs whole on a ROUTED board (pair names as the audit prints them, a net name or prefix); "
+                        "a pair is kept as it was unless the new one is connected, in tolerance and DRC/open-clean")
+    p.add_argument("--allow-shove", dest="allow_shove", action="store_true",
+                   help="with --only: when blocked, remove the unlocked signal-net neighbours the blocker report names and report the nets opened")
+    p.add_argument("--budget", type=float, default=None, metavar="S",
+                   help="with --only: wall-clock seconds (default 120 x named pairs); out of time or SIGTERM writes the best accepted board")
     p.add_argument("--complete-fanout", dest="complete_fanout", action="store_true",
                    help="afterwards: ordinary escapes for the pads of unlaid pairs, and the blocked fan-out pins tried again")
     from . import questions as QS
