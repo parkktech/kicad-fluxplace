@@ -200,6 +200,17 @@ def cmd_via_min(a):
     return 0
 
 
+def cmd_repair(a):
+    from . import repair
+    g = _write_guard(a, a.out)
+    if g is not None:
+        return g
+    r = repair.repair(a.board, a.out, a.constraints, a.max_attempts, a.budget, a.layers, a.report)
+    r["summary"] = f"repair: {r['closed']} closed, {r['blocked']} blocked, {r['pairs']} pair(s) skipped; commit {'accepted' if r['commit']['accepted'] else 'rejected: ' + '; '.join(r['commit']['reasons'][:1])}"
+    _emit(a, r, lambda: r["summary"], None, None)
+    return 0 if r["commit"]["accepted"] else 1
+
+
 def cmd_shove(a, op="shove"):
     from . import handroute as H
     g = _write_guard(a, a.out or a.board)
@@ -346,6 +357,16 @@ def register(sub):
     p.add_argument("--out", required=True)
     guards(p)
     p.set_defaults(fn=cmd_via_min)
+
+    p = sub.add_parser("repair", help="close open nets")
+    common(p)
+    p.add_argument("--out", required=True, help="committed board (WORK is the session work board)")
+    p.add_argument("--max-attempts", type=int, default=2, help="per connection")
+    p.add_argument("--budget", type=float, default=900.0, help="total seconds")
+    p.add_argument("--layers", default=None)
+    p.add_argument("--report", default=None, help="JSON report path")
+    guards(p)
+    p.set_defaults(fn=cmd_repair)
 
     for name, h in (("shove", "remove copper"),
                     ("unlay", "remove copper by ID")):
