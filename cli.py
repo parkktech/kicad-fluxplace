@@ -2021,6 +2021,9 @@ def cmd_review(a):
         raise SystemExit(1)
     if a.fail_on == "error" and n["fail"]:
         raise SystemExit(1)
+    inc = R.incomplete(findings)
+    if inc and a.fail_on != "never" and not getattr(a, "allow_incomplete", False):
+        raise SystemExit(1)          # INCOMPLETE is neither pass nor fail: exit 1 unless --allow-incomplete / waived
 
 
 def cmd_bomopt(a):
@@ -2605,7 +2608,12 @@ def cmd_drc_scope(a):
         res["full_run"] = audit.drc_full(a.board, kicad_cli=a.kicad_cli,
                                          out_path=a.out)
     if a.json:
-        print(_json.dumps(res, indent=2)); return
+        if "error" in res.get("full_run", {}):
+            res["incomplete"].append("full re-run failed: %s" % res["full_run"]["error"])
+        print(_json.dumps(res, indent=2))
+        if res["incomplete"] and not a.allow_incomplete:
+            raise SystemExit(1)
+        return
 
     print("DRC scope for %s" % os.path.basename(res["board"]))
     print("=" * 70)
@@ -2628,6 +2636,10 @@ def cmd_drc_scope(a):
               % (os.path.basename(r["path"]), r["violations"], r["unconnected"]))
     print()
     print("  VERDICT: %s" % res["verdict"])
+    if "full_run" in res and "error" in res["full_run"]:
+        res["incomplete"].append("full re-run failed: %s" % res["full_run"]["error"])
+    if res["incomplete"]:
+        print("  INCOMPLETE - not covered: %s" % "; ".join(res["incomplete"]))
     if "full_run" in res:
         f = res["full_run"]
         print()
@@ -2645,6 +2657,8 @@ def cmd_drc_scope(a):
                     print("          %-32s %d" % (k, n))
             else:
                 print("      nothing new surfaced — the clean result holds at full scope")
+    if res["incomplete"] and not a.allow_incomplete:
+        raise SystemExit(1)
 
 
 def cmd_netlist(a):
@@ -3696,6 +3710,8 @@ def build_parser():
     prv.add_argument("--json", default=None, help="also write findings as JSON")
     prv.add_argument("--fail-on", choices=["never", "error", "warning"],
                      default="error", help="exit 1 at this severity (default error)")
+    prv.add_argument("--allow-incomplete", action="store_true",
+                     help="exit 0 although some checks could not run (the INCOMPLETE line is still printed)")
     prv.set_defaults(fn=cmd_review)
 
     prp = sub.add_parser("repair",
@@ -3907,6 +3923,8 @@ def build_parser():
     pds.add_argument("--out", default=None, help="write the full-run report here")
     pds.add_argument("--kicad-cli", default="kicad-cli")
     pds.add_argument("--json", action="store_true")
+    pds.add_argument("--allow-incomplete", action="store_true",
+                     help="exit 0 although the scope is incomplete (no severities, fab-critical checks ignored, report/full run failed)")
     pds.set_defaults(fn=cmd_drc_scope)
 
     pnl = sub.add_parser("netlist",

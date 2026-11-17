@@ -256,6 +256,8 @@ def drc_types(path, cli="kicad-cli", timeout=900):
         subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--output", rep, path],
                        capture_output=True, timeout=timeout)
         j = json.load(open(rep))
+        if not isinstance(j.get("violations"), list):      # a report with no violations list is not a clean report
+            raise RuntimeError(f"kicad-cli DRC report has no violations list ({path})")
         return dict(Counter(v.get("type", "?") for v in j.get("violations", [])))
     finally:
         shutil.rmtree(d, ignore_errors=True)

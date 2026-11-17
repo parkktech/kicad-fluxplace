@@ -901,8 +901,10 @@ def st_review(c, n, board):
     argv = ["review", "--board", board] + c.cs() + ["--json", os.path.join(d, "review.json")]
     if not c.a.api:
         argv += ["--no-api"]
+    argv += ["--allow-incomplete"] if getattr(c.a, "allow_incomplete", False) else []
     rc, text = _run_cli(["--no-sourcing"] + argv, os.path.join(d, "stage.log"))
-    summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("review:")), _last_line(text))
+    summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("review: INCOMPLETE")),
+                next((l.strip() for l in text.splitlines() if l.strip().startswith("review:")), _last_line(text)))
     res = {"verdict": "pass" if rc == 0 else "fail", "line": summ, "board": board}
     try:
         items = json.load(open(os.path.join(d, "review.json")))

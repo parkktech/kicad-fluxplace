@@ -141,3 +141,10 @@ A ps limit with no known layer delay is reported as PAIR_DELAY_UNKNOWN, never co
 
 Layer rules: a present but featureless copper layer is WARN (`GERBER_LAYER_EMPTY`);
 featureless mask/silk is INFO; a missing copper/mask/silk file or an empty Edge.Cuts is FAIL.
+
+## INCOMPLETE
+
+A check that could not run or left items ungraded (codes in `review.INCOMPLETE_CODES`: `*_UNAVAILABLE`, `*_NOT_EVALUATED`,
+`*_DELAY_UNKNOWN`, `POLICY_UNCHECKED`, `PINMAP_UNVERIFIED`, `RF_NO_STACKUP`, ...) makes the review say
+`review: INCOMPLETE - not covered: CODE xN` and exit 1, distinct from pass and fail. Cover it with `[review] waive` (with a
+reason) or `--allow-incomplete` (exit 0, line still printed). `--fail-on never` never exits 1.

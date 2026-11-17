@@ -108,7 +108,17 @@ def drc_scope(board_path, report_path=None):
         except Exception as e:
             out["report"] = {"path": report_path, "error": str(e)}
 
+    inc = []                                   # what this scope check could not establish (-> exit 1, not a pass)
+    if report_path and not os.path.exists(report_path):
+        inc.append(f"report {report_path} not found")
+    if isinstance(out.get("report"), dict) and out["report"].get("error"):
+        inc.append(f"report unreadable: {out['report']['error']}")
     crit = out["fab_critical_ignored"]
+    if not sev:
+        inc.append("no rule_severities found")
+    elif crit:
+        inc.append(f"{len(crit)} fab-critical check(s) ignored")
+    out["incomplete"] = inc
     if not sev:
         out["verdict"] = "UNKNOWN — no rule_severities found; KiCad defaults apply"
     elif crit:
