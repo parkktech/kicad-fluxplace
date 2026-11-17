@@ -146,6 +146,7 @@ TIER_TITLE = {
     "suite":    "SUITE — the wider KiCad toolchain (install separately)",
 }
 
+FREEROUTING_MIN = (2, 5, 0)
 FREEROUTING_PATHS = (
     "~/tools/freerouting-*.jar",
     "~/freerouting*.jar",
@@ -223,6 +224,12 @@ def check_one(req):
         jar = find_freerouting()
         ok = jar is not None
         detail = jar or "no freerouting jar found"
+        if jar:
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", os.path.basename(jar))
+            if m and tuple(int(x) for x in m.groups()) < FREEROUTING_MIN:
+                ok = False
+                detail = "found freerouting %s at %s; need >= %s (the router flags are 2.5.0 flags)" % (
+                    ".".join(m.groups()), jar, ".".join(map(str, FREEROUTING_MIN)))
 
     elif kind == "env":
         missing = [v for v in req["env"] if not os.environ.get(v)]

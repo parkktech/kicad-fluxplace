@@ -51,10 +51,11 @@ route-diagnose    read-only: explain why nets stayed...
 open-nets         list open connections
 window            region as data + PNG
 probe             check a path
-lay               lay a path, guarded
+lay               guarded lay
 copy-net          restore a net
+via-min           raise small vias
 shove             remove copper
-unlay             remove copper by id
+unlay             remove copper by ID
 suggest           grid-search a path
 session           hand-route session
 anchor-check      evaluate every allowed rotation of each...

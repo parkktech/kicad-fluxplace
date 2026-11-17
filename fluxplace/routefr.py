@@ -165,6 +165,9 @@ def router_flags(S, timeout_s, fanout_on):
 
 
 def command(loc, dsn, ses, S, timeout_s, tmpdir, fanout_on, sidecars=()):
+    v = jar_version(loc.get("jar"))
+    if v is not None and v < MIN_VERSION:                      # the flags below are 2.5.0 flags
+        raise RuntimeError(f"Freerouting {vstr(v)} at {loc.get('jar')} is too old: {vstr(MIN_VERSION)} or newer is required ({WHY_MIN})")
     return [loc["java"], "-Djava.awt.headless=true", f"-Djava.io.tmpdir={tmpdir}", "-Xss256m",
             f"-XX:ActiveProcessorCount={S['threads']}", "-jar", loc["jar"], "-de", dsn, *sidecars, "-do", ses,
             *router_flags(S, timeout_s, fanout_on)]

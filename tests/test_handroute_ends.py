@@ -142,3 +142,32 @@ def test_copy_net_refuses_locked_and_writes_nothing(tmp_path):
     assert not R["accepted"] and "locked" in R["reason"] and not os.path.exists(out)
     R = H.copy_net(s, dst, "NOPE", out=out)
     assert not R["accepted"] and not os.path.exists(out)
+
+
+def test_via_min_raises_all_small_vias_bisecting_on_drc(tmp_path):
+    from collections import Counter
+    from fluxplace import viamin
+    B = Brd()
+    B.edge(-2, -8, 24, 8)
+    for x, d in ((1, 0.4), (5, 0.45), (9, 0.6), (13, 0.3)):
+        v = pcbnew.PCB_VIA(B.b)
+        v.SetPosition(V(x, 0))
+        v.SetWidth(mm(d))
+        v.SetDrill(mm(0.2))
+        B.b.Add(v)
+    src = B.save(tmp_path)
+    out = str(tmp_path / "o.kicad_pcb")
+
+    def fake_drc(path, cli):          # the via at x = 5 may not be raised: DRC "sees" a new violation then
+        b = pcbnew.LoadBoard(path)
+        k = Counter()
+        for t in b.GetTracks():
+            if t.GetPosition().x == mm(5) and t.GetWidth() >= mm(0.5):
+                k[("hole_clearance", ("x",))] += 1
+        return k, (sum(k.values()), 0)
+
+    r = viamin.via_min(src, out, report=fake_drc)
+    assert (r["floor_mm"], r["vias"], r["below"], r["changed"], r["kept"], r["rejected"]) == (0.5, 4, 3, 2, 1, 1)
+    assert r["rejected_at"] == [[5.0, 0.0]]
+    w = {round(t.GetPosition().x * 1e-6): round(t.GetWidth() * 1e-6, 3) for t in pcbnew.LoadBoard(out).GetTracks()}
+    assert w == {1: 0.5, 5: 0.45, 9: 0.6, 13: 0.5}

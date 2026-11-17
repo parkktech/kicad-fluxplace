@@ -189,6 +189,17 @@ def cmd_copy_net(a):
     return 0 if r["accepted"] else 1
 
 
+def cmd_via_min(a):
+    from . import viamin
+    g = _write_guard(a, a.out)
+    if g is not None:
+        return g
+    r = viamin.via_min(a.board, a.out, a.constraints)
+    r["summary"] = f"via-min: {r['changed']} raised to {r['floor_mm']} mm, {r['kept']} already ok, {r['rejected']} rejected by DRC, {r['locked_skipped']} locked"
+    _emit(a, r, lambda: r["summary"], None, None)
+    return 0
+
+
 def cmd_shove(a, op="shove"):
     from . import handroute as H
     g = _write_guard(a, a.out or a.board)
@@ -309,7 +320,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_probe)
 
-    p = sub.add_parser("lay", help="lay a path, guarded")
+    p = sub.add_parser("lay", help="guarded lay")
     common(p)
     geom(p)
     p.add_argument("--net", required=True)
@@ -330,8 +341,14 @@ def register(sub):
     guards(p)
     p.set_defaults(fn=cmd_copy_net)
 
+    p = sub.add_parser("via-min", help="raise small vias")
+    common(p)
+    p.add_argument("--out", required=True)
+    guards(p)
+    p.set_defaults(fn=cmd_via_min)
+
     for name, h in (("shove", "remove copper"),
-                    ("unlay", "remove copper by id")):
+                    ("unlay", "remove copper by ID")):
         p = sub.add_parser(name, help=h)
         common(p)
         p.add_argument("--net", required=True, help="net whose copper is removed")
