@@ -8,3 +8,6 @@
 - An anchor (or group) whose `rotations` lists exactly one non-zero rotation is applied when feasible,
   regardless of `anchor_tolerance_pct`. A feasible better rotation skipped for the threshold is reported:
   `skipped J2 rotation 180: gain 29.4% is below anchor_tolerance_pct 15%`.
+- `place --strategy routable --refine` crashed with `KeyError` in `preroute.congestion`: a pad beyond the
+  outline's grid indexed a cell that does not exist. Such pads block no cell, ratsnest ends are clamped to
+  the edge cell, and the new WARN `PLACE_OUTSIDE_OUTLINE` (plus `congestion.outside_refs`) names the parts.
