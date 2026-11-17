@@ -103,6 +103,16 @@ def test_wait_stall_and_cli_exit_codes(tmp_path, capsys):
     assert e.value.code == 3
 
 
+def test_final_warn_is_terminal_and_not_success(tmp_path, capsys):
+    sp = tmp_path / "w.status.json"
+    sp.write_text(json.dumps({"state": "warn", "open": {"USB_DP": 1}, "out": str(tmp_path / "none.kicad_pcb")}))
+    reason, st = RS.wait(str(sp), 1, poll=0.1)
+    assert reason == "warn" and st["open"] == {"USB_DP": 1}
+    with pytest.raises(SystemExit) as e:
+        cli.main(["route-wait", str(sp), "--timeout", "1", "--no-diagnose"])
+    assert e.value.code == 1 and "route-wait: warn" in capsys.readouterr().out
+
+
 def test_dead_writer_is_reported(tmp_path):
     sp = tmp_path / "d.status.json"
     sp.write_text(json.dumps({"state": "running", "pid": 2 ** 22 - 3}))

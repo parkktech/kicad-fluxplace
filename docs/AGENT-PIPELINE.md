@@ -39,6 +39,8 @@ takes only an ORDER hint from the plan (`[route] plan_map`, docs/commands/route.
 
 ## Rules (learned the expensive way)
 
+- Before a placement or routing run, read `docs/ROUTING-PLAYBOOK.md`: order of work, repair ladder, known limits.
+
 1. **One board owner at a time.** Exactly one agent writes a given board or workdir. Stages are sequential;
    never run two stages, or two pipelines, on the same `W`. Parallel exploration copies the board to its own `W`.
 2. **Never poll logs.** No `tail`, `grep`, `sleep` loops on router logs (one agent made 292 calls that way).

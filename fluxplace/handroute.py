@@ -590,8 +590,15 @@ def _apply_prims(b, M, net, prims, width, via):
             b.Add(t)
             added.append(("seg", p[1], p[2], p[3], t.m_Uuid.AsString()))
         else:
+            pos = P(p[1])
+            old = next((t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetCode() == pnet.GetNetCode()
+                        and t.GetPosition() == pos and t.GetWidth() == int(round(via[0] * 1e6))
+                        and t.GetDrill() == int(round(via[1] * 1e6))), None)
+            if old is not None:
+                added.append(("via-existing", p[1], old.m_Uuid.AsString()))
+                continue
             v = pcbnew.PCB_VIA(b)
-            v.SetPosition(P(p[1]))
+            v.SetPosition(pos)
             v.SetViaType(pcbnew.VIATYPE_THROUGH)
             v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
             v.SetWidth(int(round(via[0] * 1e6)))
@@ -680,6 +687,17 @@ def _locked_sig(M):
     return sig
 
 
+def _edit_violation_keys(new, net, loose=()):
+    out = {}
+    for k, v in new.items():
+        if k[0].startswith("U") or k[0] in loose:
+            continue
+        if k[0] == "track_not_centered_on_via" and not any(f"[{net}]" in d for d in k[1]):
+            continue
+        out[k] = v
+    return out
+
+
 def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
     -> result dict {accepted, reason, measure, info}."""
@@ -708,7 +726,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         new = cand["keys"] - base["keys"]
         # a shove leaves loose ends by design (the caller re-lays); the commit gate judges the end state
         loose = ("track_dangling", "via_dangling") if op in ("shove", "unlay") else ()
-        new_nonu = {k: v for k, v in new.items() if not k[0].startswith("U") and k[0] not in loose}
+        new_nonu = _edit_violation_keys(new, net, loose)
         new_u = {n: (base["unc_by_net"].get(n, 0), c) for n, c in cand["unc_by_net"].items() if c > base["unc_by_net"].get(n, 0)}
         before_n = base["unc_by_net"].get(net, 0)
         after_n = cand["unc_by_net"].get(net, 0)
@@ -1016,6 +1034,14 @@ def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
             "limiting_obstacles": sorted(cnt.values(), key=lambda e: -e["border_cells"])[:12], "via_sites_in_window": int(viaok.sum())}
 
 
+def _endpoints_join(pr, ia, ib):
+    joins = pr.get("ends_join") or []
+    if len(joins) != 2 or any(not j.get("touches") for j in joins):
+        return False
+    return ((ia is None or joins[0]["touches"].get("island") == ia)
+            and (ib is None or joins[-1]["touches"].get("island") == ib))
+
+
 def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, width=None, via=None, pitch=0.05, margin=2.0,
             via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False):
     """Grid A* between two islands of `net`: sources = the island of the item nearest src_pt, targets = the island nearest dst_pt (or the
@@ -1221,9 +1247,11 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                 last = {"violations": [{"kind": "degenerate"}]}
                 continue
             pr = probe_prims(M, net, prims, w, (vd, vdr), any_angle)
-            if pr["ok"]:
+            if pr["ok"] and _endpoints_join(pr, ia, ib):
                 return {"found": True, "path": cand, "length_mm": round(sum(it.get("len", 0) for it in pr["items"]), 3), "vias": sum(1 for p in prims if p[0] == "via"),
                         "width": w, "via": [vd, vdr], "probe": "OK", "grid_margin_extra": extra, "pitch": pit, "expanded": pops}
+            if pr["ok"]:
+                pr = dict(pr, violations=[{"kind": "endpoint_not_connected", "at": [j["at"] for j in pr.get("ends_join", []) if not j.get("touches")]}])
             last = pr
             pathstr = cand
     return {"found": False, "reason": "grid path failed exact probe after margin retries", "path": pathstr, "violations": last["violations"][:4]}

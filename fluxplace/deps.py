@@ -17,8 +17,10 @@ report says which, rather than failing later with an ImportError from inside a
 subprocess.
 """
 
+import glob
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -100,13 +102,12 @@ REQUIREMENTS = [
          label="Java runtime", why="runs the freerouting jar",
          pip=None, hint="apt install default-jre-headless"),
     dict(key="freerouting", kind="jar", tier="route",
-         label="freerouting 2.3.0+ jar (2.5.0 supported, opt-in via FREEROUTING_JAR)",
+         label="freerouting 2.5.0+ jar",
          why="the autorouter behind `tournament` and the auto pipeline",
          pip=None,
-         hint="Download freerouting-2.3.0.jar from "
+         hint="Download freerouting-2.5.0.jar from "
               "https://github.com/freerouting/freerouting/releases and put it at "
-              "~/tools/freerouting-2.3.0.jar (2.2.4 dies silently on headless jobs "
-              "— use 2.3.0 or newer)."),
+              "~/tools/freerouting-2.5.0.jar (older jars can lose sessions on headless jobs)."),
 
     # ---- sourcing --------------------------------------------------------
     dict(key="digikey", kind="env", env=("DIGIKEY_CLIENT_ID", "DIGIKEY_CLIENT_SECRET"),
@@ -146,10 +147,9 @@ TIER_TITLE = {
 }
 
 FREEROUTING_PATHS = (
-    "~/tools/freerouting-2.3.0.jar",
-    "~/tools/freerouting.jar",
-    "~/freerouting.jar",
-    "/opt/freerouting/freerouting.jar",
+    "~/tools/freerouting-*.jar",
+    "~/freerouting*.jar",
+    "/opt/freerouting/freerouting*.jar",
 )
 
 
@@ -167,15 +167,20 @@ def _has_module(name):
 
 
 def find_freerouting():
-    """Return the first freerouting jar we can find, or None."""
-    env = os.environ.get("FREEROUTING_JAR")
-    if env and os.path.exists(os.path.expanduser(env)):
-        return os.path.expanduser(env)
-    for p in FREEROUTING_PATHS:
-        p = os.path.expanduser(p)
-        if os.path.exists(p):
-            return p
-    return None
+    """Return the explicitly selected jar, else the highest installed version."""
+    for key in ("FLUXPLACE_FREEROUTING_JAR", "FREEROUTING_JAR"):
+        env = os.environ.get(key)
+        if env and os.path.exists(os.path.expanduser(env)):
+            return os.path.expanduser(env)
+    candidates = []
+    for pattern in FREEROUTING_PATHS:
+        candidates.extend(glob.glob(os.path.expanduser(pattern)))
+
+    def version(path):
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", os.path.basename(path))
+        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+    return max(candidates, key=version) if candidates else None
 
 
 def kicad_cli_version(binary="kicad-cli"):

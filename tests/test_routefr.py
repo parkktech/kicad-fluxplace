@@ -162,10 +162,27 @@ def test_flags_fanout_switch_and_neckdown():
     S = FR.settings({"route": {"freerouting": {"threads": 6, "passes": 40}}})
     off = FR.router_flags(S, 1500, False)
     assert "--router.fanout.enabled=false" in off and "--router.automatic_neckdown=false" in off
-    assert "--router.job_timeout=00:25:00" in off and "--router.autorouter.max_passes=40" in off and off[off.index("-mt") + 1] == "6"
+    assert "--router.job_timeout=00:25:00" in off and "--router.autorouter.max_passes=40" in off and "--router.max_threads=6" in off
     assert "--router.fanout.enabled=false" not in FR.router_flags(S, 60, True)
     with pytest.raises(ValueError, match="auto, on or off"):
         FR.settings({"route": {"freerouting": {"fanout": "maybe"}}})
+
+
+def test_command_passes_kicad_rule_sidecars_only_when_supported(tmp_path):
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text("x")
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text("{}")
+    dru = tmp_path / "b.kicad_dru"
+    dru.write_text("(version 1)")
+    S = FR.settings(None, threads=1)
+    old = {"java": "java", "jar": "freerouting-2.5.0.jar"}
+    assert FR.rule_sidecars(str(board), old) == []
+    cmd = FR.command(old, "in.dsn", "out.ses", S, 60, str(tmp_path), False, FR.rule_sidecars(str(board), old))
+    assert cmd[cmd.index("-de") + 1:cmd.index("-do")] == ["in.dsn"]
+    new = {"java": "java", "jar": "freerouting-2.6.0.jar"}
+    cmd = FR.command(new, "in.dsn", "out.ses", S, 60, str(tmp_path), False, FR.rule_sidecars(str(board), new))
+    assert cmd[cmd.index("-de") + 1:cmd.index("-do")] == ["in.dsn", str(pro), str(dru)]
 
 
 # ------------------------------------------------------------------ locate / select

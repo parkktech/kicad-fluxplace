@@ -1254,20 +1254,33 @@ def cmd_pairs(a):
     return 0 if rep["verdict"] == "PAIRS_OK" else 1
 
 
+def _stage_status(path, state, message="", **fields):
+    from . import routestatus as RS
+    st = {"stage": "pairs", "state": state, "pid": os.getpid(), "current_step": str(message)[:240], "updated": time.time()}
+    st.update(fields)
+    RS._atomic(path, st)
+
+
 def stage(c, n, board):
-    """pipeline stage (constructive flow, after fan-out): never blocks; incomplete pairs stay with the router (WARN)."""
+    """pipeline stage (constructive flow, after fan-out): incomplete pairs stay with the router (WARN); a stage error fails."""
     if not params(c.cons)["enabled"]:
         return {"verdict": "skipped", "line": "[pairlay] enabled = false", "board": board}
     d = c.dir(n, "pairs")
     out = os.path.join(d, "board.kicad_pcb")
+    spath = os.path.join(d, "progress.json")
+    _stage_status(spath, "running", "starting", board=out)
     try:
         cs_args = c.cs() + c.qs()
     except AttributeError:                                  # a bare context (tests): no fan-out re-escape, no rip of stubs
         cs_args = None
     try:
-        rep = run(board, c.cons, c.spec, out, cs_args=cs_args)
-    except Exception as e:                                  # noqa: BLE001 - the router still has every pair
-        return {"verdict": "pass", "line": f"WARN pairs not laid ({type(e).__name__}: {str(e)[:80]})", "board": board}
+        rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out))
+    except Exception as e:                                  # noqa: BLE001 - an unmeasured board must not advance as if the stage ran
+        msg = f"pairs failed ({type(e).__name__}: {str(e)[:160]})"
+        with open(os.path.join(d, "stage.log"), "a") as fh:
+            fh.write(msg + "\n")
+        _stage_status(spath, "failed", msg, board=board)
+        return {"verdict": "fail", "line": msg, "board": board, "next": ["pairs stage raised; no pair report was produced"]}
     try:
         rep["completion"] = complete_fanout(out, board, c.cs() + c.qs(), c.cons, c.spec, rep)
     except Exception as e:                                  # noqa: BLE001 - the laid pairs stand
@@ -1280,6 +1293,8 @@ def stage(c, n, board):
         import shutil
         shutil.copy(fm, os.path.join(d, "board.fluxmap.json"))
     line = format_text(rep).splitlines()[0]
+    _stage_status(spath, "done" if rep["verdict"] == "PAIRS_OK" else "warn", line, board=out,
+                  complete=rep["complete"], total=rep["total"], report=os.path.join(d, "board.pairs.json"))
     res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out}
     if rep["verdict"] != "PAIRS_OK":
         S = pad_questions(rep, out, c.cons, getattr(c, "answers", None), getattr(c, "assume", False))

@@ -5,7 +5,6 @@ import math
 import os
 import shutil
 import subprocess
-from collections import Counter
 
 from . import drcguard as DG
 
@@ -22,8 +21,7 @@ def _report(board, cli="kicad-cli"):
 
 
 def _keys(d):
-    vio = [v for v in d.get("violations", []) if v.get("type") != CENTRED]
-    return Counter([DG.key_of(v) for v in vio] + [DG.key_of(u, "U") for u in d.get("unconnected_items", [])])
+    return DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED)[0]
 
 
 def _snap(src, dst, skip):
@@ -68,5 +66,7 @@ def run(src, dst, iters=6, log=print):
         skip |= ids
     if last:
         shutil.copy(last[0], dst)
-        shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro")
+        src_pro, dst_pro = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
+        if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
+            shutil.copy(src_pro, dst_pro)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "iters": i + 1, "centred_left": last[2] if last else None}

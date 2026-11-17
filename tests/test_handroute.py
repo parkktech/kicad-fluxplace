@@ -114,6 +114,45 @@ LOWER = "F.Cu: 4,-3 6.7,-0.3 13.3,-0.3 16,-3"
 UPPER = "F.Cu: 2,0 2.3,0.3 17.7,0.3 18,0"
 
 
+def test_edit_guard_scopes_only_foreign_via_centring_flicker():
+    from collections import Counter
+    foreign = ("track_not_centered_on_via", ("Track [GND_ISO] on F.Cu, length # mm", "Via [GND_ISO] on F.Cu - B.Cu"))
+    own = ("track_not_centered_on_via", ("Track [USB_DP_CM5] on F.Cu, length # mm",))
+    other = ("clearance", ("Track [GND_ISO] on F.Cu, length # mm",))
+    new = Counter({foreign: 1, own: 1, other: 1})
+    kept = H._edit_violation_keys(new, "USB_DP_CM5")
+    assert foreign not in kept and kept[own] == 1 and kept[other] == 1
+    assert H._edit_violation_keys(Counter({foreign: 1}), "GND_ISO") == {foreign: 1}
+    assert H._edit_violation_keys(Counter({foreign: 1}), "GND") == {}
+
+
+def test_suggest_requires_both_intended_endpoint_islands():
+    pr = {"ends_join": [{"touches": {"island": 1}}, {"touches": {"island": 2}}]}
+    assert H._endpoints_join(pr, 1, 2)
+    assert not H._endpoints_join(pr, 1, 3)
+    assert not H._endpoints_join({"ends_join": [{"touches": {"island": 1}}, {"touches": None}]}, 1, 2)
+    assert H._endpoints_join(pr, None, None)
+
+
+def test_apply_reuses_exact_same_net_via(tmp_path):
+    B = Brd()
+    B.edge(-2, -8, 22, 8)
+    B.pad("A1", "A", 2, 0)
+    v = pcbnew.PCB_VIA(B.b)
+    v.SetPosition(V(5, 5))
+    v.SetViaType(pcbnew.VIATYPE_THROUGH)
+    v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+    v.SetWidth(mm(0.5))
+    v.SetDrill(mm(0.3))
+    v.SetNet(B.net("A"))
+    B.b.Add(v)
+    path = B.save(tmp_path)
+    M = H._model(path)
+    prims = H.G.parse_path("via 5,5", M.cu)
+    added = H._apply_prims(M.b, M, "A", prims, 0.25, (0.5, 0.3))
+    assert added[0][0] == "via-existing" and len(list(M.b.GetTracks())) == 1
+
+
 def test_probe_clearance_numbers(tmp_path):
     p = gap_board(tmp_path)
     # B straight at y = -0.3 next to A at y = 0: edge gap = 0.3 - 0.125 - 0.125 = 0.05 (need 0.2)

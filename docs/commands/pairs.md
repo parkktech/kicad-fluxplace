@@ -80,3 +80,9 @@ on a copy that is kept only when it completes a pair and every pair it ripped is
 | `a-mismatch` | connected, legs differ in layer sequence / vias (copper kept: connected beats open) |
 
 Not done: a coupled run that goes uncoupled in the MIDDLE to squeeze past an obstacle (only the terminal break-outs are bounded-uncoupled).
+
+For a bounded first pass, `[pairlay] max_nodes`, `nodes_per_mm` and `negotiate_passes` limit search work, and `fallback = false` skips the expensive b(i)-b(iii) trials. Pending pairs still receive state `c` and an atomic whole-pair handoff; no partial locked copper is kept. This is the appropriate way to get a complete report on a congested board before choosing between more pair work and the general router.
+
+An exception in the stage is a `fail`, never a `pass` with the input board. A killed or timed-out stage has no complete `board.pairs.json` and is not a resumption checkpoint; rerun it with a bounded configuration rather than treating its partial board as finished work.
+
+Monitor `W/<n>-pairs/progress.json` with `fluxplace route-status`. It carries the latest pair/negotiation message and ends `done`, `warn` (some pairs handed off), or `failed`; a writer killed without a final update is reported `dead` by the status reader.

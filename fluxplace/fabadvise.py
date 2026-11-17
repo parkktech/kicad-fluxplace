@@ -57,7 +57,7 @@ def features(facts, cons):
          "track_requested": min(track_req) if track_req else None,
          "space_requested": min(space_req) if space_req else None,
          "pair_gaps": pair_gaps,
-         "via_sizes": Counter((v.get("dia_mm"), v.get("drill_mm")) for v in vias), "via_requested": vreq,
+         "via_sizes": Counter(f"{v.get('dia_mm')}/{v.get('drill_mm')}" for v in vias), "via_requested": vreq,
          "n_vias": len(vias), "n_holes": len(vias) + len(pth),
          "drill_min": min([v["drill_mm"] for v in vias_all if v.get("drill_mm")] + [p["drill_mm"] for p in pth if p.get("drill_mm")], default=None),
          "via_ring_min": min(((v["dia_mm"] - v["drill_mm"]) / 2 for v in vias_all if v.get("dia_mm") and v.get("drill_mm")), default=None),
@@ -203,7 +203,7 @@ def format_text(res, name=""):
          f"space requested {_fmt(f['space_requested'])}, pair gaps {', '.join(f'{k}{_fmt(v)}' for k, v in f['pair_gaps'].items()) or '-'}; "
          f"drill min {_fmt(f['drill_min'])}, via ring {_fmt(f['via_ring_min'])}, PTH ring {_fmt(f['pth_ring_min'])}; "
          f"impedance {'yes' if f['impedance'] else 'no'}",
-         "  vias on board (dia/drill: n): " + (", ".join(f"{d}/{r}: {n}" for (d, r), n in sorted(f["via_sizes"].items(), key=lambda kv: -kv[1])) or "none routed"),
+         "  vias on board (dia/drill: n): " + (", ".join(f"{k}: {n}" for k, n in sorted(f["via_sizes"].items(), key=lambda kv: -kv[1])) or "none routed"),
          "  price: vendors publish price-step wording only (quote form for prices) - price not published; tiers ranked by that wording",
          f"  {'tier':22s} {'rank':4s} verdict"]
     for r in res["tiers"]:

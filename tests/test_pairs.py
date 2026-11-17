@@ -178,6 +178,8 @@ def test_pipeline_stage_sits_between_fanout_and_plan_route_and_route_skips_laid_
     res = PP.FUNCS["pairs"](c, 5, b)
     assert res["verdict"] == "pass" and res["board"].endswith(os.path.join("5-pairs", "board.kicad_pcb")) and "1/1 complete" in res["line"]
     assert os.path.exists(os.path.join(os.path.dirname(res["board"]), "board.pairs.json"))
+    progress = json.load(open(tmp_path / "5-pairs" / "progress.json"))
+    assert progress["state"] == "done" and progress["complete"] == progress["total"] == 1
     # the route stage's work list is the nets with open connections: the laid pair is not in it, and its copper is locked
     B = RD.load(res["board"])
     todo = sorted(n for n, k in RC.text_open(B).items() if k)
@@ -185,6 +187,21 @@ def test_pipeline_stage_sits_between_fanout_and_plan_route_and_route_skips_laid_
     assert all(s["locked"] for s in B["segs"] if s["net"] in ("D_P", "D_N"))
     off = types.SimpleNamespace(cons={"pairlay": {"enabled": False}}, spec=None, dir=c.dir)
     assert PP.FUNCS["pairs"](off, 5, b)["verdict"] == "skipped"
+
+
+def test_pipeline_stage_fails_loudly_when_pair_run_raises(tmp_path, monkeypatch):
+    import types
+    from fluxplace import pipeline as PP
+    from fluxplace import pairs as PR
+    b = tmp_path / "in.kicad_pcb"
+    b.write_text("input")
+    c = types.SimpleNamespace(cons={}, spec=None, dir=lambda n, name: (os.makedirs(str(tmp_path / f"{n}-{name}"), exist_ok=True), str(tmp_path / f"{n}-{name}"))[1])
+    monkeypatch.setattr(PR, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("synthetic pair failure")))
+    res = PP.FUNCS["pairs"](c, 5, str(b))
+    assert res["verdict"] == "fail" and res["board"] == str(b)
+    assert "no pair report" in res["next"][0]
+    assert "synthetic pair failure" in (tmp_path / "5-pairs" / "stage.log").read_text()
+    assert json.load(open(tmp_path / "5-pairs" / "progress.json"))["state"] == "failed"
 
 
 def test_unnamed_drilled_hole_is_an_obstacle(tmp_path):

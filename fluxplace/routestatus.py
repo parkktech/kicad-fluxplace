@@ -286,6 +286,10 @@ def one_line(st):
     elif st.get("freerouting"):
         f = st["freerouting"]
         bits.append(f"freerouting pass {f.get('pass')} unrouted {f.get('unrouted')}")
+    if isinstance(st.get("open"), dict):
+        bits.append(f"{sum(st['open'].values())} open connections in {len(st['open'])} net(s)")
+    if st.get("stage") == "pairs" and st.get("total") is not None:
+        bits.append(f"pairs {st.get('complete', 0)}/{st['total']} complete")
     bits.append(f"{st.get('elapsed_s', 0)}s")
     if st.get("eta_s") is not None and st["state"] == "running":
         bits.append(f"eta {st['eta_s']}s")
@@ -318,7 +322,7 @@ def one_line(st):
 
 def wait(spath, timeout, until="done", stall_s=None, poll=2.0):
     """Block until ``until`` ('done' | 'stall' | 'checkpoint') or the timeout.
-    -> (reason, status) where reason is done|failed|stall|checkpoint|timeout|missing."""
+    -> (reason, status) where reason is done|warn|failed|stall|checkpoint|timeout|missing."""
     t0 = time.time()
     st = load(spath)
     n0 = (st or {}).get("checkpoint_n", 0)
@@ -331,6 +335,8 @@ def wait(spath, timeout, until="done", stall_s=None, poll=2.0):
             s = st["state"]
             if s in ("done",):
                 return "done", st
+            if s in ("warn",):
+                return "warn", st
             if s in ("failed", "timeout", "dead"):
                 return "failed", st
             lim = stall_s if stall_s is not None else st.get("stall_limit_s", DEFAULT_STALL_S)

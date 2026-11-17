@@ -153,8 +153,8 @@ def hms(seconds):
 
 def router_flags(S, timeout_s, fanout_on):
     """The Freerouting arguments after `-de/-do` (recorded in the stage record)."""
-    f = [f"--router.autorouter.max_passes={int(S['passes'])}", "--gui.enabled=false", "-mt", str(S["threads"]),
-         f"--router.job_timeout={hms(timeout_s)}"]
+    f = [f"--router.autorouter.max_passes={int(S['passes'])}", "--gui.enabled=false",
+         f"--router.max_threads={int(S['threads'])}", f"--router.job_timeout={hms(timeout_s)}"]
     if not fanout_on:
         f.append("--router.fanout.enabled=false")
     if not S["neckdown"]:
@@ -164,10 +164,17 @@ def router_flags(S, timeout_s, fanout_on):
     return f
 
 
-def command(loc, dsn, ses, S, timeout_s, tmpdir, fanout_on):
+def command(loc, dsn, ses, S, timeout_s, tmpdir, fanout_on, sidecars=()):
     return [loc["java"], "-Djava.awt.headless=true", f"-Djava.io.tmpdir={tmpdir}", "-Xss256m",
-            f"-XX:ActiveProcessorCount={S['threads']}", "-jar", loc["jar"], "-de", dsn, "-do", ses,
+            f"-XX:ActiveProcessorCount={S['threads']}", "-jar", loc["jar"], "-de", dsn, *sidecars, "-do", ses,
             *router_flags(S, timeout_s, fanout_on)]
+
+
+def rule_sidecars(board, loc=None):
+    """KiCad sidecars only for releases that accept them; 2.5.0 accepts DSN/SES/RULES, not kicad_pro/dru."""
+    if loc and (jar_version(loc["jar"]) or (0, 0, 0)) <= (2, 5, 0):
+        return []
+    return [p for ext in (".kicad_pro", ".kicad_dru") if os.path.exists(p := os.path.splitext(board)[0] + ext)]
 
 
 # ------------------------------------------------------------------ DSN text
@@ -529,7 +536,7 @@ def load_violations(board, workdir, loc, S, planes=(), floor_track=0.0, floor_cl
         text, _ = fix_dsn(fh.read(), planes, floor_track, floor_clearance, ())
     with open(dsn, "w", errors="surrogateescape") as fh:
         fh.write(text)
-    cmd = command(loc, dsn, ses, dict(S, passes=0), tmo_s, os.path.join(seg, "jvmtmp"), False)
+    cmd = command(loc, dsn, ses, dict(S, passes=0), tmo_s, os.path.join(seg, "jvmtmp"), False, rule_sidecars(board, loc))
     os.makedirs(os.path.join(seg, "jvmtmp"), exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
     with open(flog, "wb") as lf:
@@ -700,7 +707,7 @@ def route_board(board, out, workdir, *, loc, planes, floor_track, floor_clearanc
                 break
             left = max(1.0, left)
             Sk = dict(S, passes=rec["segment_passes"])
-            jr = run_jvm(command(loc, dsn, ses, Sk, left, tmpdir, fanout_on), flog, left, S["grace_s"], ses,
+            jr = run_jvm(command(loc, dsn, ses, Sk, left, tmpdir, fanout_on, rule_sidecars(cur, loc)), flog, left, S["grace_s"], ses,
                          cwd=seg, tick=tick, poll=poll)
             log = parse_log(open(flog, errors="replace").read()) if os.path.exists(flog) else parse_log("")
             jvm_s += jr["elapsed"]

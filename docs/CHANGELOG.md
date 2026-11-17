@@ -1,5 +1,11 @@
 # Change log (moved from the README)
 
+## 2026-11-16 - whole-chain monitoring and budgets, version-aware Freerouting inputs
+
+`krt-whole` now honors one total `--route-budget` across its plane/pair/single-ended calls, streams each call through the standard status writer, rejects stale output from earlier runs, and records per-step caps, logs and `--json-out` paths. Final `warn` means open connections remain; `route-status` prints them. Freerouting's JVM command passes `.kicad_pro` and `.kicad_dru` only for releases that support them (2.5.0 accepts DSN/SES/RULES, not those sidecars) and uses the non-deprecated `--router.max_threads` setting. `[route] whole_post` (default true) adds iterative via-centre snap, guarded plane ties and a saved zone refill to the whole chain. `snapiter` accepts in-place boards and uses the shared zone-flicker-safe DRC key set. A `pairs` stage exception is now a `fail`, never a `pass` with the input board; `[pairlay] fallback = false` gives a bounded main pass with atomic state-c handoff, and `W/<n>-pairs/progress.json` exposes live stage state through `route-status`. Tests cover the total budget, stale-output rejection, status completion, sidecar ordering, in-place snapping, zone-fill flicker and pair-stage failure.
+
+`krt-whole` now also runs the pair/RF quality audit on its final board: zero opens with mismatched pairs, RF violations or an unavailable quality audit is `warn`, not `done`, with `not_done` in status and the result record. `route-wait` treats final `warn` as terminal and exits 1 instead of timing out. Hand-route suggestions require both endpoints to touch the intended islands on reachable layers instead of reporting geometric clearance alone as success. Hand-edit guards ignore only foreign-net via-centring refill flicker (exact net match); other new violations and edited-net errors still reject. `_apply_prims` reuses an exact same-net, same-size via instead of duplicating its hole. `fab-advise` serializes via sizes as JSON-safe strings instead of crashing on tuple keys.
+
 ## 2026-11-15 - one board, two fabs: `[fab] profile` list, common stackup, verified capability rows
 
 `fabcaps.limits` takes a list of profiles (strictest per rule, provenance per limit; `constraints.fab_profile` returns `profiles`,

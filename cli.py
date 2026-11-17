@@ -2984,7 +2984,7 @@ def cmd_route_wait(a):
         print(f"route-wait: status file {sp} unreadable")
         raise SystemExit(3)
     line = f"route-wait: {reason} - {RS.one_line(st)}"
-    if reason in ("done", "failed", "stall", "timeout") and not a.no_diagnose and st.get("out"):
+    if reason in ("done", "warn", "failed", "stall", "timeout") and not a.no_diagnose and st.get("out"):
         try:
             cons, spec = _text_ctx(a)
             dpath, nf = RS.diagnose_result(st, cons or None, spec)
@@ -2995,7 +2995,7 @@ def cmd_route_wait(a):
     if st.get("out") and os.path.exists(st["out"]):
         line += f"  | result {st['out']}"
     print(line)
-    raise SystemExit({"done": 0, "checkpoint": 0, "stall": 0, "failed": 1, "timeout": 2}.get(reason, 3))
+    raise SystemExit({"done": 0, "checkpoint": 0, "stall": 0, "warn": 1, "failed": 1, "timeout": 2}.get(reason, 3))
 
 
 def cmd_pipeline(a):

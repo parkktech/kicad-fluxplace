@@ -27,10 +27,10 @@ def _ctx(tmp_path, monkeypatch, rcs):
     monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {"USB_DP": 1})
     monkeypatch.setattr(K.RR, "rules", lambda *a, **k: dict(R))
     c = types.SimpleNamespace(a=types.SimpleNamespace(router_py="py", router_dir="/r", track=0.15, clearance=0.127),
-                              cons={"pairs": {"USB_": {}}}, work=str(tmp_path), state={}, dir=lambda n, nm: str(tmp_path))
+                              cons={"pairs": {"USB_": {}}, "route": {"whole_post": False}}, work=str(tmp_path), state={}, dir=lambda n, nm: str(tmp_path))
     calls = []
 
-    def runner(cmd, log):
+    def runner(cmd, log, **kw):
         calls.append(cmd)
         rc = rcs.pop(0)
         if rc in (0, 3):
@@ -45,12 +45,77 @@ def test_chain_accepts_exit3(tmp_path, monkeypatch):
     assert [os.path.basename(x[1]) for x in calls] == ["route_planes.py", "route_diff.py", "route.py"]
     assert calls[1][calls[1].index("--nets") + 1:calls[1].index("--layers")] == ["USB_DM", "USB_DP"]
     assert r["verdict"] == "warn" and "USB_DP" in r["line"]
+    assert "--json-out" in calls[1] and "--json-out" in calls[2]
 
 
 def test_chain_stops_on_failure(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 1, 0])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     assert r["verdict"] == "fail" and len(calls) == 2
+
+
+def test_chain_rejects_stale_output(tmp_path, monkeypatch):
+    c, _calls, _unused = _ctx(tmp_path, monkeypatch, [])
+    (tmp_path / "2-diff.kicad_pcb").write_text("stale")
+    calls = []
+
+    def runner(cmd, log, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            open(cmd[3], "w").write("fresh")
+        return 0, 1.0
+
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert r["verdict"] == "fail" and len(calls) == 2
+
+
+def test_chain_uses_one_total_budget(tmp_path, monkeypatch):
+    c, _calls, _unused = _ctx(tmp_path, monkeypatch, [])
+    c.a.route_budget = 42
+    caps = []
+
+    def runner(cmd, log, **kw):
+        caps.append(kw["cap_s"])
+        open(cmd[3], "w").write("y")
+        return 0, 1.0
+
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert r["verdict"] == "warn" and all(0 < cap <= 42 for cap in caps)
+    assert sum(r["steps"][i]["s"] for i in range(len(caps))) <= 42
+    import json
+    st = json.load(open(tmp_path / "routed.kicad_pcb.status.json"))
+    assert st["state"] == "warn" and st["open"] == {"USB_DP": 1}
+
+
+def test_zero_open_with_pair_or_rf_failures_is_warn_not_done(tmp_path, monkeypatch):
+    c, _calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {})
+    from fluxplace import routediag as RD, netclass as NC, qualaudit as QA
+    monkeypatch.setattr(RD, "load", lambda b: {})
+    monkeypatch.setattr(NC, "classify", lambda *a: {})
+    monkeypatch.setattr(QA, "status_fields", lambda *a, **k: {
+        "not_done": {"count": 2, "pairs": [{"pair": "USB_DP/USB_DM", "cause": "skew"}], "rf": []},
+        "nets_routed": 0, "nets_open0": 2})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert r["verdict"] == "warn" and "NOT DONE 2" in r["line"]
+    import json
+    st = json.load(open(tmp_path / "routed.kicad_pcb.status.json"))
+    assert st["state"] == "warn" and st["not_done"]["count"] == 2
+
+
+def test_chain_runs_guarded_cleanup_when_enabled(tmp_path, monkeypatch):
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    c.cons["route"]["whole_post"] = True
+    seen = []
+
+    def post(best, d, planes, rules):
+        seen.append((best, planes, rules["via"]))
+        return {"snap": {"moved": 40, "centred_left": 7}, "ties": {"placed": 2}}
+
+    monkeypatch.setattr(K, "_post", post)
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert len(seen) == 1 and seen[0][1] == [("GND", "In1.Cu")]
+    assert r["post"]["snap"]["moved"] == 40 and "guarded plane ties 2" in r["line"]
 
 
 def test_stub_ok_keeps_clearance(tmp_path):
