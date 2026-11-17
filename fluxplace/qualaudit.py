@@ -6,6 +6,8 @@ RF      per layer, the width of every RF segment (longer than `min_segment_mm`, 
         <= `max_vias` (class or `[nets.X] max_vias`).
         Declared geometry, first present wins: `[nets.X] width_mm`, the map's `rf_geometry` ({net or "*": width | {layer: width}}),
         `[rf] width_mm` (a width, or {layer = width}); tolerance `[rf] width_tol_mm` (0.02).
+A via count over a limit the constraints state ([nets.X] / [rf] max_vias; level stays WARN unless the net has its own entry)
+is NOT DONE too (cause via_count) unless `[review] waive` has RF_VIA_COUNT:^NET: for it.
 A pair or RF net out of tolerance is NOT DONE: it does not count toward "nets routed", and the cause is reported.
 `autotune` calls `tune` for pairs whose only failure is skew (bounded by `[route] tune_rounds`, 3, and `tune_pairs`, 8)."""
 import math
@@ -65,11 +67,12 @@ def rf_grade(net, tr, stackup, planes, cons, fmap=None):
     tol = float(rf.get("tolerance_pct", 10.0))
     wtol = float(rf.get("width_tol_mm", 0.02))
     per_net = (cons or {}).get("nets", {})
+    stated = "max_vias" in per_net.get(net, {}) or "max_vias" in rf       # a limit the constraints state, not the default
     lim = int(per_net.get(net, {}).get("max_vias", rf.get("max_vias", 1)))
     min_seg, neck = float(rf.get("min_segment_mm", 1.0)), float(rf.get("neck_max_mm", 1.5))
     out = []
     if tr.get("vias", 0) > lim:
-        out.append({"level": "FAIL" if net in per_net else "WARN", "code": "RF_VIA_COUNT", "kind": "vias",
+        out.append({"level": "FAIL" if net in per_net else "WARN", "code": "RF_VIA_COUNT", "kind": "vias", "explicit": stated,
                     "msg": f"{net}: {tr['vias']} vias (limit {lim}) — every layer transition is an impedance discontinuity"})
     worst = None
     for layer, w, mm in tr.get("segments", []):
@@ -110,9 +113,15 @@ def rf_names(B, cons):
     return names or {p["net"] for p in B["pads"] if p["net"] and is_rf(p["net"])}
 
 
-def rf_rows(B, cons, stackup, planes, fmap=None):
+def rf_rows(B, cons, stackup, planes, fmap=None, nets=None):
+    """Findings of EVERY RF net of the board (or of `nets` when given), one row per finding, each row carrying its own `net`.
+    It is a whole-board call: calling it once per net and reading row 0 gives the first net's finding for every net.
+    Filter on `row["net"]` or pass `nets=[net]`."""
     rows = []
+    want = None if nets is None else set(nets)
     for net in sorted(rf_names(B, cons)):
+        if want is not None and net not in want:
+            continue
         if not any(p["net"] == net for p in B["pads"]):
             continue
         for f in rf_grade(net, tracks_of(B, net), stackup, planes, cons, fmap):
@@ -137,14 +146,27 @@ def _ctx(board, B, cons):
     return stackup, planes, fmap
 
 
+def via_stated(row):
+    """A via-count finding against a limit the constraints state ([nets.X] / [rf] max_vias) counts as NOT DONE even at level WARN."""
+    return row["code"] == "RF_VIA_COUNT" and bool(row.get("explicit"))
+
+
+def via_waived(cons, row):
+    """`[review] waive = ["RF_VIA_COUNT:^NET:"]`: the review waiver form (CODE:REGEX against the message, which starts "NET: ")."""
+    from . import review as R
+    return R._waived({"code": row["code"], "msg": row["msg"]}, ((cons or {}).get("review") or {}).get("waive"))
+
+
 def not_done(B, cls, cons, open_nets, board=None, ctx=None):
     """-> {pairs: [{pair, cause}], rf: [{net, cause}], nets: set} for a board in the middle of routing. Open nets are not here
     (they are open); a pair with one open leg is half-routed, reported by pairaudit."""
     stackup, planes, fmap = ctx or _ctx(board, B, cons)
     pairs = [{"pair": r["pair"], "cause": r["why"] or r["status"], "causes": r["causes"], "status": r["status"]}
              for r in pair_rows(B, cls, cons, open_nets) if r["status"] in ("mismatch", "half")]
-    rf = [{"net": r["net"], "cause": r["msg"], "code": r["code"]} for r in rf_rows(B, cons, stackup, planes, fmap)
-          if r["level"] == "FAIL" and r["net"] not in open_nets]
+    rf = [{"net": r["net"], "cause": "via_count" if r["code"] == "RF_VIA_COUNT" else r["msg"], "code": r["code"], "msg": r["msg"]}
+          for r in rf_rows(B, cons, stackup, planes, fmap)
+          if r["net"] not in open_nets and (r["level"] == "FAIL" or via_stated(r))
+          and not (r["code"] == "RF_VIA_COUNT" and via_waived(cons, r))]
     nets = {x for r in pairs for x in r["pair"].split("/")} | {r["net"] for r in rf}
     return {"pairs": pairs, "rf": rf, "nets": nets}
 

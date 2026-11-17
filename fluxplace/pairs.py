@@ -18,6 +18,8 @@ import fnmatch
 import json
 import math
 import os
+import re
+import sys
 import time
 import uuid
 
@@ -1209,10 +1211,30 @@ def complete_fanout(board, src_board, cs_args, cons, spec, rep, log=lambda m: No
     return out
 
 
+def cmd_only(a, cons, spec):
+    """pairs --only: re-route named pairs whole on a routed board (pairsonly.py). Exit 0 all done, 1 some kept / refused /
+    unmatched, 2 stopped by --budget or a signal (--out is the best accepted board)."""
+    from . import pairsonly as PO
+    out = a.out or os.path.splitext(a.board)[0] + ".pairs.kicad_pcb"
+    if os.path.abspath(out) == os.path.abspath(a.board):
+        raise SystemExit("pairs: --out must differ from the input board")
+    rep = PO.reroute(a.board, out, [x for x in a.only.split(",") if x.strip()], cons, spec, budget=a.budget,
+                     allow_shove=a.allow_shove, log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
+    rp = out + ".pairsonly.json"
+    json.dump(rep, open(rp, "w"), indent=1)
+    print(PO.format_text(rep))
+    print(f"full report: {rp}\nwrote {out}")
+    if rep["stopped"] in ("budget", "signal"):
+        return 2
+    return 0 if all(r["status"] in ("rerouted", "already_ok") for r in rep["pairs"]) and not rep["unmatched"] and rep["pairs"] else 1
+
+
 def cmd_pairs(a):
     from . import constraints as C
     cons = C.load(a.constraints)
     spec = json.load(open(a.spec)) if a.spec else None
+    if getattr(a, "only", None):
+        return cmd_only(a, cons, spec)
     out = None if a.plan_only else (a.out or os.path.splitext(a.board)[0] + ".pairs.kicad_pcb")
     if out and os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
@@ -1311,6 +1333,13 @@ def add_parser(sub):
     p.add_argument("--out", default=None, help="output board (default <board>.pairs.kicad_pcb)")
     p.add_argument("--plan-only", dest="plan_only", action="store_true", help="centre-line corridors only; writes no copper")
     p.add_argument("--nets", default=None, help="comma-separated nets: only the pairs of these nets")
+    p.add_argument("--only", default=None, metavar="A,B",
+                   help="re-route these pairs whole on a ROUTED board (pair names as the audit prints them, a net name or prefix); "
+                        "a pair is kept as it was unless the new one is connected, in tolerance and DRC/open-clean")
+    p.add_argument("--allow-shove", dest="allow_shove", action="store_true",
+                   help="with --only: when blocked, remove the unlocked signal-net neighbours the blocker report names and report the nets opened")
+    p.add_argument("--budget", type=float, default=None, metavar="S",
+                   help="with --only: wall-clock seconds (default 120 x named pairs); out of time or SIGTERM writes the best accepted board")
     p.add_argument("--complete-fanout", dest="complete_fanout", action="store_true",
                    help="afterwards: ordinary escapes for the pads of unlaid pairs, and the blocked fan-out pins tried again")
     from . import questions as QS
@@ -1328,3 +1357,90 @@ def guard_limit(cons, net):
     from . import constraints as C
     lim, _src = C.skew_limit_checked(cons, net)
     return float("inf") if lim is None else lim
+
+
+# ------------------------------------------------ cross-check against an external pair router
+_OK_OUTCOMES = {"coupled"}
+_BAD_LISTS = ("failed_diff_pairs", "partial_diff_pairs", "member_incomplete_pairs", "single_ended_diff_pairs", "uncoupled_diff_pairs")
+
+
+def _stem_of(stem, p, n):
+    """the router names a pair by its common stem ("BT3_D" for BT3_DP / BT3_DM): both nets start with it and add <= 3 characters."""
+    return bool(stem) and p.startswith(stem) and n.startswith(stem) and len(p) - len(stem) <= 3 and len(n) - len(stem) <= 3
+
+
+def _read_maybe(x):
+    """dict | JSON path | log text | log path | None -> (dict or None, text)."""
+    if isinstance(x, dict):
+        return x, ""
+    if isinstance(x, (str, os.PathLike)):
+        s = str(x)
+        txt = open(s, errors="replace").read() if "\n" not in s and os.path.isfile(s) else s
+        try:
+            d = json.loads(txt)
+            return (d if isinstance(d, dict) else None), ""
+        except ValueError:
+            return None, txt
+    return None, ""
+
+
+def crosscheck_external(pairs, summary=None, log=None):
+    """The pairs fluxplace knows that the external pair router did NOT recognise or did NOT route as a pair.
+    pairs: [(p, n)] (pairaudit.pair_list). summary: the router's `--json-out` dict or path (pair_reports, routed_diff_pairs,
+    failed/partial/member_incomplete/single_ended/uncoupled lists, routed_single ...); log: its log text or path ("Routing diff pair
+    STEM", "No differential pairs found ... Patterns provided: [...]"). Either may be missing.
+    -> [{pair, p, n, reason, detail}], reason "not_recognised" (the router never saw it as a pair: absent, routed as two
+    single nets, or its patterns matched no pair) or "not_routed_as_pair" (recognised, but not coupled / incomplete / fell back to
+    single-ended). A pair the router did route coupled and complete is not listed. Hand the rows to fluxplace's own pair layer
+    (`run(board, cons, spec, out, only={nets})` or `pairsonly.reroute`)."""
+    d, t1 = _read_maybe(summary)
+    d2, t2 = _read_maybe(log)
+    d = d or d2 or {}
+    text = t1 + "\n" + t2
+    stems = set(re.findall(r"Routing diff pair (\S+)", text))
+    nomatch = set()
+    if "No differential pairs found" in text:
+        m = re.search(r"Patterns provided: (\[[^\]]*\])", text)
+        try:
+            nomatch = set(__import__("ast").literal_eval(m.group(1))) if m else set()
+        except (ValueError, SyntaxError):
+            nomatch = set()
+    reports = {frozenset((r.get("p_net"), r.get("n_net"))): r for r in d.get("pair_reports", []) or []}
+    single = set(d.get("routed_single", []) or []) | set(d.get("failed_single", []) or []) | set(d.get("open_single", []) or [])
+    bad = {k: list(d.get(k, []) or []) for k in _BAD_LISTS}
+    good = list(d.get("routed_diff_pairs", []) or [])
+    out = []
+    for p, n in pairs:
+        row = {"pair": f"{p}/{n}", "p": p, "n": n}
+        r = reports.get(frozenset((p, n)))
+        stem = next((s for s in good + sum(bad.values(), []) + sorted(stems) if _stem_of(s, p, n)), None)
+        if r:
+            probs = []
+            if r.get("outcome") not in _OK_OUTCOMES:
+                probs.append(f"outcome {r.get('outcome')}" + (f" at {r['failure_stage']}" if r.get("failure_stage") else ""))
+            if r.get("incomplete_members"):
+                probs.append("members incomplete: " + ", ".join(map(str, r["incomplete_members"])))
+            if r.get("no_coupled_trunk"):
+                probs.append("no coupled trunk")
+            if r.get("member_audit_mismatch"):
+                probs.append("member audit mismatch")
+            if r.get("se_fallback"):
+                probs.append("single-ended fallback")
+            if r.get("failure_reason"):
+                probs.append(str(r["failure_reason"])[:120])
+            if probs:
+                out.append(dict(row, reason="not_routed_as_pair", detail="; ".join(probs)))
+            continue
+        if stem is not None:
+            hit = [k for k, v in bad.items() if stem in v]
+            if hit:
+                out.append(dict(row, reason="not_routed_as_pair", detail=f"{stem} listed in {', '.join(hit)}"))
+            continue                                       # recognised and routed (stem in routed_diff_pairs or in the log)
+        if p in nomatch or n in nomatch:
+            why = "the router's --nets patterns matched no differential pair (net names without _P/_N, -P/-N, P/N or +/-)"
+        elif p in single or n in single:
+            why = "routed as single-ended nets, not as a pair"
+        else:
+            why = "absent from the router's summary and log"
+        out.append(dict(row, reason="not_recognised", detail=why))
+    return out

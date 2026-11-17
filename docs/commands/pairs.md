@@ -86,3 +86,20 @@ For a bounded first pass, `[pairlay] max_nodes`, `nodes_per_mm` and `negotiate_p
 An exception in the stage is a `fail`, never a `pass` with the input board. A killed or timed-out stage has no complete `board.pairs.json` and is not a resumption checkpoint; rerun it with a bounded configuration rather than treating its partial board as finished work.
 
 Monitor `W/<n>-pairs/progress.json` with `fluxplace route-status`. It carries the latest pair/negotiation message and ends `done`, `warn` (some pairs handed off), or `failed`; a writer killed without a final update is reported `dead` by the status reader.
+
+## `pairs --only A,B`: re-route named pairs whole on a routed board (`pairsonly.py`)
+```
+fluxplace pairs BOARD --only A_P/A_N,CSI --constraints C --out O [--allow-shove] [--budget S] [-v]
+```
+Names: a pair as the audit prints it (either order), a net name, a prefix or a glob. Per pair: both legs' unlocked copper is removed
+(a LOCKED item refuses that pair and is named: `refused_locked`), the pair is laid with the coupled pair layer, everything else is a
+fixed obstacle. A pair already complete is not touched (`already_ok`). The new pair is accepted only if it is connected, the pair
+audit grades it complete (same layers and vias, skew in limit), no other net has more open connections, and DRC shows no violation
+key the board did not already have; otherwise the original copper stays exactly (`kept_original`, with the reason: blocked corridor
+and the obstacles that bind it, or the failed check). The laid copper is locked, as in the pairs stage.
+`--allow-shove` (off): when blocked, the unlocked copper of the NON-pair, non-RF, non-power, non-clock neighbour nets named by the
+blocker report is removed, the pair is laid, and the nets it opened are reported (`OPENED`; not laid again, use the hand-route
+tools). Off, the report lists the neighbours it could remove.
+`--budget S` (default 120 x named pairs): out of time or SIGTERM / SIGINT writes the best accepted board to `--out`, removes the
+temp and lock files; pairs not reached are `not_reached`. Output `--out` + `<out>.pairsonly.json`. Exit 0 all rerouted / already ok,
+1 some kept / refused / unmatched, 2 stopped.
