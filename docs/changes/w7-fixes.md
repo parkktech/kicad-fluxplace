@@ -37,3 +37,11 @@ Breakout serialization requires the resolved diameter and has no 0.45 mm fallbac
 `test_params_use_route_and_fab_via_resolver`, `test_lay_writes_locked_lanes_and_vias`,
 `test_route_constraints_raise_hand_route_via_floors`, `test_tie_vias_use_route_rule_sizes`, the enlarged floating-plane
 tie test, and `test_open_board_project_via_floor_uses_shared_resolver` (55 selected tests passed).
+
+## Router project rules
+
+The KRT chain carried a project only when the destination did not have one, allowing router-relaxed rules to replace the
+approved input. After every successful external step, `_restore_project` now restores the input `.kicad_pro` byte-for-byte,
+records the changed sections per step, and adds `router project rules discarded: ...` to the result. Router commands carry
+the resolved approved via size/drill. `test_router_relaxed_project_is_discarded_after_every_step` uses a fake router that
+relaxes via, hole and net-class rules at all three steps (17 module tests passed).

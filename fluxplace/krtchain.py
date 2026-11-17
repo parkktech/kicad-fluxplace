@@ -110,6 +110,28 @@ def _carry(src, dst):
         shutil.copy(s, t)
 
 
+def _restore_project(source_board, output_board):
+    """Discard router-written project settings; the approved input project is the only rule source."""
+    import json
+    import shutil
+    src = os.path.splitext(source_board)[0] + ".kicad_pro"
+    dst = os.path.splitext(output_board)[0] + ".kicad_pro"
+    if not os.path.exists(src):
+        return []
+    changed = ["missing"]
+    if os.path.exists(dst):
+        if open(src, "rb").read() == open(dst, "rb").read():
+            return []
+        try:
+            a = json.load(open(src))
+            b = json.load(open(dst))
+            changed = [k for k in ("board", "net_settings") if a.get(k) != b.get(k)] or ["project metadata"]
+        except (OSError, ValueError, TypeError):
+            changed = ["unreadable router project"]
+    shutil.copy(src, dst)
+    return changed
+
+
 def _post(best, d, planes, R):
     """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill."""
     from . import snapiter as SI, planetie as PT, opengate as OG
@@ -153,7 +175,7 @@ def run(c, n, board, runner=run_step):
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
-    cur, rows = best, []
+    cur, rows, discarded = best, [], []
     for i, (name, build) in enumerate(steps, 1):
         dst = os.path.join(d, f"{i}-{name}.kicad_pcb".replace("*", "x"))
         _carry(cur, dst)
@@ -174,6 +196,10 @@ def run(c, n, board, runner=run_step):
             _status(spath, "failed", rows, left, rc)
             return {"verdict": "fail", "board": cur, "line": f"krt-whole: step {name} rc={rc} after {secs}s (total budget {budget:g}s)",
                     "next": tail, "steps": rows}
+        changed = _restore_project(board, dst)
+        if changed:
+            rows[-1]["router_project_discarded"] = changed
+            discarded.append({"step": name, "sections": changed})
         cur = dst
     shutil_copy(cur, best)
     post, post_error = None, None
@@ -197,6 +223,8 @@ def run(c, n, board, runner=run_step):
         quality = {"not_done": {"count": 1, "pairs": [], "rf": [], "audit_error": str(e)[:120]},
                    "nets_routed": 0, "nets_open0": len(names)}
     line = f"krt-whole: sizes " + "/".join(f"{v:g}" for v in sizes.values()) + f" (track/clr/via/drill); {sum(left.values())} unconnected in {sum(r['s'] for r in rows):.0f}s, budget {budget:g}s, steps " + ", ".join(f"{r['step']}={r['rc']}" for r in rows)
+    if discarded:
+        line += "; router project rules discarded: " + ", ".join(f"{d['step']} ({'/'.join(d['sections'])})" for d in discarded)
     if post:
         line += f"; snap {post['snap']['moved']} end(s), {post['snap']['centred_left']} off-centre left; guarded plane ties {post['ties']['placed']}"
     if post_error:
@@ -215,7 +243,7 @@ def run(c, n, board, runner=run_step):
         line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "router_project_discarded": discarded},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))
