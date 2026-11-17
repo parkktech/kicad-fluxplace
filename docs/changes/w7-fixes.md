@@ -12,7 +12,13 @@ Measured on copies of the W7 boards (wall seconds; pre-fix filtered `open-nets` 
 |---|---:|---:|
 | `open-nets` on stackup | 6.48 | 5.97 |
 | corrected RF `probe` on stackup | 2.09 | 2.09 |
+| net-only RF `suggest` | 1.66 | 2.64 |
+| accepted RF `lay` in a session | 14.21 | 19.26 |
+| `via-min --budget 300` | 5.90 | 6.13 |
+| `hand-repair --budget 300` (including guarded commit) | 316.94 | 321.59 |
 
+Via-min wrote its board/report with 57 locked vias correctly unchanged. Both hand-repair runs wrote JSON with
+`budget_exhausted: true` and rejected commit (no connection closed), rather than timing out or losing the report.
 The synthetic native-warning reproduction timed out at 10 s before the fix and completed in 0.19 s after it.
 Regression: `tests/test_quietlog.py::test_native_warning_writer_does_not_deadlock_reader`.
 
