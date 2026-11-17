@@ -50,10 +50,10 @@ Solve the net with the fewest options first, not the shortest one.
 
 | need | command |
 |---|---|
-| where am I after a context compaction or in a new session | `progress brief WORKDIR` (accepted board, numbers, blockers, verdict, what not to retry) |
-| record an accepted board and its numbers | `progress checkpoint BOARD --measure --note T` after every accepted step |
-| record a blocker | `progress block ITEM --reason T` |
-| am I looping | `progress show` (progressing / stalled / looping, exit 0 / 1 / 2) |
+| where am I after a context compaction or in a new session | `progress brief --workdir W` (accepted board, numbers, blockers, verdict, what not to retry) |
+| record an accepted board and its numbers | `progress checkpoint BOARD --workdir W --measure --note T` after every accepted step |
+| record a blocker | `progress block ITEM --workdir W --reason T` |
+| am I looping | `progress show --workdir W` (progressing / stalled / looping, exit 0 / 1 / 2) |
 | what did I run and what failed | `calls --tail N --failed` (every command is logged to `.fluxplace/calls.jsonl`) |
 | why did a lay or probe fail, in one line | `--brief` on `probe`, `lay`, `shove`, `suggest`, `session commit`; `probe` gives the direction and shift that clears a miss |
 | is my plan stale | pass the `board_rev` from `suggest`/`probe` to `lay --expect-rev` |
