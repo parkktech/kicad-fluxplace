@@ -19,7 +19,7 @@ first board/project (else first folder/file) named in the arguments, else `~/.ca
 pcbnew prints `property.h(..): assert "m_choices.GetCount() > 0" failed ...` from C code thousands of times
 (one log reached 146 MB). `fluxplace/quietlog.py` drops it:
 
-- the CLI filters its own fd 2 (pipe + reader thread, restored at exit, also on exceptions); one line
+- the CLI filters its own fd 2 (pipe + helper-process reader, restored at exit, also on exceptions); one line
   `[fluxplace] dropped N repeated KiCad assert lines` is printed at the end. Other lines are never dropped.
 - `quietlog.filter_file(path)` / `filter_text(text)` clean a subprocess log after it finishes (used for the Cypress log).
 - Known-noise patterns are the list `quietlog.NOISE`; add more there.

@@ -7,8 +7,8 @@ The assert is printed by C code straight to fd 2, thousands of times; one log re
 import atexit
 import os
 import re
+import subprocess
 import sys
-import threading
 
 # known-noise patterns (matched against one line, no newline); extend this list
 NOISE = [re.compile(r"property\.h\(\d+\): assert .*m_choices")]
@@ -98,34 +98,45 @@ def filter_file(path, chunk=1 << 20):
 _active = None
 
 
+def _write_all(fd, b):
+    while b:
+        try:
+            n = os.write(fd, b)
+        except InterruptedError:
+            continue
+        b = b[n:]
+
+
+def _pump_main(r, out):
+    filt = LineFilter()
+    try:
+        while True:
+            b = os.read(r, 65536)
+            if not b:
+                break
+            _write_all(out, filt.feed(b))
+        _write_all(out, filt.finish())
+    except OSError:
+        pass
+    finally:
+        os.close(r)
+        os.close(out)
+
+
 class _Stderr:
     def __init__(self):
         self.saved = os.dup(2)
         self.r, self.w = os.pipe()
-        self.filt = LineFilter()
         self.done = False
         sys.stderr.flush()
+        # A Python reader thread deadlocks when native KiCad fills the pipe while holding the GIL: the writer waits for
+        # the reader and the reader waits for the GIL. A helper process has an independent GIL and always drains.
+        code = "import sys; from fluxplace import quietlog; quietlog._pump_main(int(sys.argv[1]), int(sys.argv[2]))"
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        self.p = subprocess.Popen([sys.executable, "-c", code, str(self.r), str(self.saved)], pass_fds=(self.r, self.saved),
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self.saved, close_fds=True, env=env)
         os.dup2(self.w, 2)
-        self.t = threading.Thread(target=self._pump, daemon=True)
-        self.t.start()
-
-    def _write(self, b):
-        while b:
-            try:
-                n = os.write(self.saved, b)
-            except InterruptedError:
-                continue
-            b = b[n:]
-
-    def _pump(self):
-        try:
-            while True:
-                b = os.read(self.r, 65536)
-                if not b:
-                    break
-                self._write(self.filt.feed(b))
-        except OSError:
-            pass
 
     def stop(self):
         if self.done:
@@ -136,10 +147,13 @@ class _Stderr:
         except Exception:                                  # noqa: BLE001
             pass
         try:
-            os.dup2(self.saved, 2)                          # fd 2 is the real stderr again
-            os.close(self.w)                                # a child still holding the pipe cannot block us below
-            self.t.join(5)
-            self._write(self.filt.finish())
+            os.dup2(self.saved, 2)
+            os.close(self.w)
+            try:
+                self.p.wait(5)
+            except subprocess.TimeoutExpired:
+                self.p.terminate()
+                self.p.wait(5)
         except OSError:
             pass
         for fd in (self.r, self.saved):
@@ -155,8 +169,7 @@ def install_stderr(force=False):
     global _active
     if _active is not None and not _active.done:
         return _active
-    # Opt-in since 2026-11-17: on a real routed board the fd-2 pipe filter made hand-route commands hang (open-nets 13 s raw,
-    # no result in 150 s filtered), which looked like tool timeouts. Off unless FLUXPLACE_QUIET_STDERR=1 until that is fixed.
+    # Kept opt-in for compatibility; the helper-process pump fixes the native-writer/GIL deadlock found on a routed board.
     if not force and os.environ.get("FLUXPLACE_QUIET_STDERR") != "1":
         return None
     if raw_requested() or (not force and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)):
