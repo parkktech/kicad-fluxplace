@@ -153,3 +153,14 @@ def test_rail_cap_near_any_pin_or_bulk_is_not_far(tmp_path):
     cl, _ = CL.build(RD.load(g.board(tmp_path, b)))
     far = {s["ref"] for _, s in CL.far_parts(cl)}
     assert "C510" not in far and "C511" not in far
+
+
+def test_congestion_clamps_parts_outside_the_outline(tmp_path):
+    # a part beyond the outline used to index a cell outside the grid (KeyError); it is clamped and reported
+    b = g.two("R1", 10, 10, "A", "A2") + g.two("R2", 50, 150, "A", "A3") + g.two("R3", -20, 40, "B", "B2") \
+        + g.two("R4", 90, 40, "B", "B3")
+    p = g.board(tmp_path, b)
+    f, card = run(p)
+    assert card["congestion"]["outside_refs"] == ["R2", "R3"]
+    hit = [x for x in f if x["code"] == "PLACE_OUTSIDE_OUTLINE"]
+    assert hit and "R2" in hit[0]["msg"] and "R3" in hit[0]["msg"]

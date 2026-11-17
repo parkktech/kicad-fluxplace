@@ -2332,8 +2332,23 @@ def cmd_anchor_check(a):
     if a.apply:
         if not a.out:
             raise SystemExit("anchor-check --apply needs --out")
-        mv = AN.moves_for_best(B, res, cons, spec, tol)
-        BW.move_file(a.board, a.out, mv)
+        notes = []
+        mv = AN.moves_for_best(B, res, cons, spec, tol, notes=notes)      # B now holds the analysed poses
+        for n in notes:
+            print(f"anchor-check --apply: {n}")
+        tmp = os.path.join(os.path.dirname(os.path.abspath(a.out)), f".anchorchk-{os.getpid()}.kicad_pcb")
+        try:
+            done = BW.move_file(a.board, tmp, mv, post=False)
+            bad = AN.verify_written(RD.load(tmp), B, mv)
+            if bad:
+                raise SystemExit("anchor-check --apply: written board differs from the analysed poses, "
+                                 "nothing written:\n  " + "\n  ".join(bad))
+            os.replace(tmp, a.out)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        if done:
+            BW.run_post_write(a.out, done)
         print(f"anchor-check --apply: rotated {', '.join(sorted(mv)) or 'nothing'}; wrote {a.out}")
 
 
@@ -4321,6 +4336,8 @@ def _main(argv=None):
         text, ok = CC.report()
         print(text)
         raise SystemExit(0 if ok else 1)
+    from fluxplace import reportdir as RDIR
+    RDIR.set_dir(getattr(a, "report_dir", None))
     _silk_hook(a)
     guard = _guard_begin(a)
     try:

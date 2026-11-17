@@ -86,3 +86,75 @@ def test_cli_anchor_check(tmp_path):
     assert r.returncode == 0 and "ANCHOR_MISORIENTED" in r.stdout and "rotated J" in r.stdout
     B = RD.load(str(out))
     assert sorted(B["parts"][x]["angle"] % 360 for x in ("J1", "J2")) == [0, 180]
+
+
+def _apply(tmp_path, p, cons_toml, name="o.kicad_pcb"):
+    c = tmp_path / "c.toml"
+    c.write_text(cons_toml)
+    out = tmp_path / name
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "cli.py"), "anchor-check", p, "--apply",
+                        "--constraints", str(c), "--out", str(out)], capture_output=True, text=True,
+                       env={**os.environ, "FLUXPLACE_NO_CALL_LOG": "1"})
+    return r, out
+
+
+import pytest
+
+
+@pytest.mark.parametrize("side", ["F", "B"])
+@pytest.mark.parametrize("d", [0, 90, 180, 270])
+@pytest.mark.parametrize("start", [0.0, 90.0])
+def test_apply_single_rotation_matches_analysis(tmp_path, side, d, start):
+    # a lone anchor with ONE configured rotation: applied once (a delta from the current angle), at the
+    # analysed pose, whatever the tolerance; the written board re-reads to the evaluated box
+    p = g.board(tmp_path, conn("J1", 50, 40, list("ABCDEF"), angle=start) if side == "F" else
+                g.fp("J1", 50, 40, [g.pad(str(i + 1), 0, (i - 2.5) * 5, n, 0.8, 0.6) for i, n in enumerate("ABCDEF")],
+                     angle=start, side="B", court=(-1, -15, 1, 15)))
+    B = RD.load(p)
+    want = GM.moved(B["parts"]["J1"], 50, 40, start + d)
+    r, out = _apply(tmp_path, p, f"[placement.anchor.J1]\nrotations = [{d}]\n[preroute]\nanchor_tolerance_pct = 10000\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    W = RD.load(str(out))["parts"]["J1"]
+    assert (W["angle"] - (start + d)) % 360 == 0 and W["pos"] == (50, 40)
+    assert all(abs(a - b) < 0.05 for a, b in zip(W["court"], want[1]))
+    assert GM.inside(W["court"], RD.load(str(out))["bbox"])
+
+
+def test_apply_skips_threshold_with_note_but_not_explicit(tmp_path):
+    body = conn("J1", 20, 40, list("ABCDEF")) + conn("J2", 40, 40, list("ABCDEF"))
+    p = g.board(tmp_path, body)
+    # several allowed rotations: threshold decides, and the skip is reported
+    r, out = _apply(tmp_path, p, "[placement.anchor.J2]\nrotations = [0, 180]\n")
+    assert r.returncode == 0 and "rotated nothing" in r.stdout
+    assert RD.load(str(out))["parts"]["J2"]["angle"] % 360 == 0
+    # one explicit rotation: applied despite the default 15 % threshold
+    r, out = _apply(tmp_path, p, "[placement.anchor.J2]\nrotations = [180]\n", "o2.kicad_pcb")
+    assert "J2" in r.stdout.split("rotated ")[1].split(";")[0] and RD.load(str(out))["parts"]["J2"]["angle"] % 360 == 180
+    # threshold skip names part, rotation, gain and threshold
+    p2 = g.board(tmp_path, conn("J1", 20, 40, list("ABCDEF")) + conn("J2", 40, 40, list("FEDCBA")),
+                 name="p2.kicad_pcb")
+    notes = []
+    B = RD.load(p2)
+    AN.moves_for_best(B, None, {"placement": {"anchor": {"J2": {"rotations": [0, 180]}}}}, None, 1e9, notes=notes)
+    n = next(x for x in notes if "J2" in x)
+    assert "180" in n and "29." in n and "1e+09" in n
+
+
+def test_verify_written_flags_a_different_pose(tmp_path):
+    p = g.board(tmp_path, conn("J1", 50, 40, list("ABCDEF")))
+    B = RD.load(p)
+    a = AN.detect(B)[0]
+    mv = {"J1": (50.0, 40.0, 90.0)}
+    W = RD.load(p)                                    # "written" board still at 0 deg
+    assert any("J1" in m for m in AN.verify_written(W, B, mv)) is False   # B unmoved too: equal
+    for ref, (x, y, ang, _p, _c) in AN.rotated(B, a, 90).items():
+        GM.place(B["parts"][ref], x, y, ang)
+    assert any("wrote" in m for m in AN.verify_written(W, B, mv))
+    assert not AN.verify_written(B, B, mv)
+
+
+def test_moves_for_best_turns_an_anchor_once(tmp_path):
+    p = g.board(tmp_path, conn("J1", 50, 40, list("ABCDEF")))
+    B = RD.load(p)
+    mv = AN.moves_for_best(B, None, {"placement": {"anchor": {"J1": {"rotations": [90]}}}}, None, 0.0)
+    assert mv["J1"][2] == 90.0

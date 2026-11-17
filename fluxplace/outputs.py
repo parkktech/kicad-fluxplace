@@ -32,6 +32,8 @@ import re
 import sys
 import tempfile
 
+from . import reportdir as RD
+
 MAX_LINES = 40
 MAX_BYTES = 3000
 DEFAULT_TOP = 10
@@ -277,8 +279,8 @@ def _report_base(a, cmd):
             d = os.path.dirname(os.path.abspath(v))
             if os.path.isdir(d):
                 stem = os.path.splitext(os.path.basename(v))[0]
-                return os.path.join(d, f"{stem}.{cmd}")
-    return os.path.join(os.getcwd(), f"fluxplace.{cmd}")
+                return RD.redirect(a, os.path.join(d, f"{stem}.{cmd}"))
+    return RD.redirect(a, os.path.join(os.getcwd(), f"fluxplace.{cmd}"))
 
 
 def _write(base, ext, text):
@@ -376,6 +378,8 @@ def run_compact(cmd, a, fn):
     else:
         text, _ = compact_text(cmd, raw, rc, top=top, paths=paths)
     print(text)
+    if quiet:
+        RD.announce(*paths)
     if rc:
         raise SystemExit(err_msg and 1 or rc)
     return None
@@ -396,6 +400,11 @@ def add_flags(ap, sub):
                        default=DEFAULT_TOP if dflt else argparse.SUPPRESS,
                        help="worst N items in the compact report (default %d)" % DEFAULT_TOP)
     _add(ap, True)
+    for p in [ap] + list(sub.choices.values()):
+        p.add_argument("--report-dir", dest="report_dir", metavar="DIR",
+                       default=None if p is ap else argparse.SUPPRESS,
+                       help="write default report files (<stem>.<cmd>.txt/.json) here, not beside the board "
+                            "(env FLUXPLACE_REPORT_DIR)")
     for name in COMPACT_CMDS:
         p = sub.choices.get(name)
         if p is None:

@@ -151,7 +151,8 @@ def cmd_part_diff(a):
     for ref, (rows, bad) in sorted(tables.items()):
         lines += table(ref, rows, bad)
     lines += [f"  {x['level']:4s} {x['code']} {x['msg']}"[:230] for x in findings]
-    stem = os.path.splitext(a.spec or a.specs[-1])[0]
+    from . import reportdir as RD
+    stem = RD.redirect(a, os.path.splitext(a.spec or a.specs[-1])[0])
     try:
         with open(stem + ".part-diff.txt", "w") as fh:
             fh.write("\n".join(lines) + "\n")

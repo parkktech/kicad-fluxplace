@@ -45,7 +45,8 @@ def load(a, need_board=False):
 
 
 def _stem(a):
-    return os.path.splitext(getattr(a, "board", None) or a.spec)[0]
+    from . import reportdir as RD
+    return RD.redirect(a, os.path.splitext(getattr(a, "board", None) or a.spec)[0])
 
 
 def _session(a, cons, cmd):
@@ -69,6 +70,9 @@ def cmd_parts(a):
             raise SystemExit("parts --fix needs --out (the input spec is never overwritten)")
         sp2, done = P.apply_fix(spec, res, res.get("data"), sess)
     path = P.write_report(res, _stem(a), extra={"fixed": done})
+    if path:
+        from . import reportdir as RD
+        RD.announce(path, path[:-4] + ".json")
     if a.json:
         print(json.dumps({"totals": P.totals(res["findings"]), "counts": P.counts(res["findings"]), "skipped": res["skipped"],
                           "unchecked": res["unchecked"], "findings": res["findings"]}, indent=1))
@@ -237,7 +241,7 @@ def cmd_parts_fetch(a):
     from . import dsfetch as D, parts as P
     ds = a.datasheets
     spec = json.load(open(a.spec)) if a.spec else None
-    mpns = list(a.mpns)
+    mpns = [m.strip() for x in a.mpns for m in str(x).split(",") if m.strip()]   # comma- and space-separated alike
     if spec:
         from . import partdocs as PD
         ds = ds or P.resolve_dir(((__import__("fluxplace.constraints", fromlist=["load"]).load(a.constraints) or {}).get("docs") or {}).get("datasheets"),

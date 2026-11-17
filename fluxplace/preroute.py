@@ -347,7 +347,16 @@ def congestion(B, cls, cons=None):
     slots = cell / (B["track"] + B["clearance"])
     blocked = defaultdict(float)             # (i, j) -> blocked fraction summed over layers
     per_layer = nl
+    outside = set()                          # refs with a pad beyond the outline's grid: clamped, reported
+
+    def cell_of(x, y):
+        i, j = int((x - x0) // cell), int((y - y0) // cell)
+        return min(max(i, 0), nx - 1), min(max(j, 0), ny - 1), not (0 <= i < nx and 0 <= j < ny)
+
     for p in B["pads"]:
+        if cell_of(p["x"], p["y"])[2]:
+            outside.add(p["ref"])
+            continue                         # a pad off the board blocks no routing cell
         area = max(0.0, 4 * p["ex"] * p["ey"])
         i, j = int((p["x"] - x0) / cell), int((p["y"] - y0) / cell)
         frac = area / (cell * cell)
@@ -366,8 +375,8 @@ def congestion(B, cls, cons=None):
     H, V = defaultdict(float), defaultdict(float)
 
     def cells(a, b, hfirst):
-        ai, aj = int((a[0] - x0) / cell), int((a[1] - y0) / cell)
-        bi, bj = int((b[0] - x0) / cell), int((b[1] - y0) / cell)
+        ai, aj, _ = cell_of(*a)
+        bi, bj, _ = cell_of(*b)
         mid = (bi, aj) if hfirst else (ai, bj)
         hs, vs = [], []
         for (p, q) in (((ai, aj), mid), (mid, (bi, bj))):
@@ -395,7 +404,7 @@ def congestion(B, cls, cons=None):
         if o > 0:
             over[c] = o
     return {"cells": len(cap), "cell_mm": cell, "layers": nl,
-            "layer_names": layer_split(B, cons)[0] if not isinstance(pc.get("signal_layers"), int) else [], "overflow_cells": len(over),
+            "layer_names": layer_split(B, cons)[0] if not isinstance(pc.get("signal_layers"), int) else [], "overflow_cells": len(over), "outside_refs": sorted(outside),
             "overflow": round(sum(over.values()), 1), "demand": len(edges),
             "worst": sorted(((round(o, 1), round(x0 + (i + .5) * cell, 1), round(y0 + (j + .5) * cell, 1))
                              for (i, j), o in over.items()), reverse=True)[:10]}
@@ -555,6 +564,11 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
         f.append(_f(WARN, "PLACE_ESCAPE_UNRESERVED", f"escape reservation could not run: {e}"))
     cg = congestion(B, cls, cons)
     f += congestion_findings(cg, cons)
+    if cg.get("outside_refs"):
+        f.append(_f(WARN, "PLACE_OUTSIDE_OUTLINE",
+                    f"{len(cg['outside_refs'])} part(s) have pads outside the board outline's routing grid "
+                    f"(congestion clamps them to the edge): {', '.join(cg['outside_refs'])}",
+                    refs=cg["outside_refs"], value=len(cg["outside_refs"])))
     edges = routed_edges(B, cls)
     xc = ratsnest_crossings(edges)
     f.append(_f(WARN, "RATSNEST_CROSSINGS", f"{xc} crossing(s) between ratsnest edges of different nets",
