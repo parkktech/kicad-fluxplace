@@ -172,3 +172,17 @@ def test_post_exception_keeps_board_and_warns(tmp_path, monkeypatch):
     assert open(r["board"]).read() != "half written"
     assert json.load(open(tmp_path / "routed.kicad_pcb.status.json"))["post_error"]["type"] == "RuntimeError"
     assert json.load(open(tmp_path / "result.json"))["post_error"]["message"] == "tie failed"
+
+
+def test_pairs_missed_by_external_router_are_reported(tmp_path, monkeypatch):
+    c, _calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {})
+    from fluxplace import routediag as RD, netclass as NC, qualaudit as QA, pairs as PRS, pairaudit as PA
+    monkeypatch.setattr(RD, "load", lambda b: {})
+    monkeypatch.setattr(NC, "classify", lambda *a: {})
+    monkeypatch.setattr(QA, "status_fields", lambda *a, **k: {"not_done": {"count": 0, "pairs": [], "rf": []}, "nets_routed": 0, "nets_open0": 0})
+    monkeypatch.setattr(PA, "pair_list", lambda cls: [("A_P", "A_N")])
+    monkeypatch.setattr(PRS, "crosscheck_external", lambda pairs, summary=None, log=None: [{"pair": "A_P/A_N", "reason": "not_recognised"}])
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    had_diff = any(s["step"] == "diff" for s in r["steps"])
+    assert ("pair router missed 1 pair" in r["line"]) == had_diff

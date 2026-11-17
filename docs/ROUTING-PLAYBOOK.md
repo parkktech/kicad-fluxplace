@@ -46,15 +46,37 @@ came from placement and stage order. Commands for the repair part are in [AI-FIN
 
 Solve the net with the fewest options first, not the shortest one.
 
+## Tools for a long run (added 2026-11-16)
+
+| need | command |
+|---|---|
+| where am I after a context compaction or in a new session | `progress brief WORKDIR` (accepted board, numbers, blockers, verdict, what not to retry) |
+| record an accepted board and its numbers | `progress checkpoint BOARD --measure --note T` after every accepted step |
+| record a blocker | `progress block ITEM --reason T` |
+| am I looping | `progress show` (progressing / stalled / looping, exit 0 / 1 / 2) |
+| what did I run and what failed | `calls --tail N --failed` (every command is logged to `.fluxplace/calls.jsonl`) |
+| why did a lay or probe fail, in one line | `--brief` on `probe`, `lay`, `shove`, `suggest`, `session commit`; `probe` gives the direction and shift that clears a miss |
+| is my plan stale | pass the `board_rev` from `suggest`/`probe` to `lay --expect-rev` |
+| close the easy opens without hand work | `hand-repair` (ladder steps 1 and 2 on a session copy; unproven on a real board) |
+| put a removed net back exactly | `copy-net SRC DST --net N` |
+| re-route named pairs whole | `pairs --only A,B` (restores the original if the result is not better; `--allow-shove` names what it opened) |
+| tune with a time limit | `tune --budget S` (keeps the best accepted board on budget end or an outer timeout) |
+| vias below the fab minimum | `via-min BOARD --out O` |
+
+The whole-board chain now also lists pairs the external pair router missed (`pairs_missed` in its result), keeps the routed
+board if the cleanup step fails (`post_error`, verdict `warn`), and counts an RF net over its stated via limit as not done.
+
 ## Known limits (state on 2026-11-16)
 
 Not built yet; a run has to do these by hand or accept the cost:
 - Steps 2, 4, 5 and 6 of the order above are not enforced by the pipeline. The pairs stage runs before the whole-board
   router, but pair corridors are not reserved during placement and RF nets are not routed first.
 - Channel capacity is not checked at placement.
-- Pairs that the router laid one leg at a time could not be fixed afterwards: length tuning cannot fix legs that differ in
-  layers or via count, and a fresh pair route came out worse. Get pairs right before ordinary copper goes in.
-- The RF via limit is a warning and is not counted in `not_done`. Check via counts on RF nets yourself.
-- The external pair router may not recognise a pair by its net names. Compare the pairs it reports with fluxplace's list.
+- Pairs that the router laid one leg at a time were not fixable by length tuning (legs differed in layers and via count),
+  and a fresh pair route came out worse. `pairs --only` now exists for this but is unproven on a real board. Get pairs
+  right before ordinary copper goes in.
+- No keep-out for a mounted daughter card (no through-hole pin ends and no part taller than the standoff gap inside the
+  card outline on the card's side), and no hardware keep-out (screw head, standoff) around mounting holes beyond the pad.
+- The pipeline does not write an accepted board back to the project's source board. Say which file is current.
 - There is no cross-board corpus manifest by default (`~/.config/fluxplace/corpus.toml`), so a change proven on one board
   is not proven in general until one is set up.

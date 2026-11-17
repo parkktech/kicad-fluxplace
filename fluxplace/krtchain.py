@@ -201,14 +201,26 @@ def run(c, n, board, runner=run_step):
         line += f"; snap {post['snap']['moved']} end(s), {post['snap']['centred_left']} off-centre left; guarded plane ties {post['ties']['placed']}"
     if post_error:
         line += f"; POST ERROR {post_error['type']}: {post_error['message']} (routed board kept, cleanup skipped)"
+    missed = []
+    try:                                                    # pairs the external pair router did not see or did not route coupled
+        from . import pairs as PRS, pairaudit as PA, routediag as RD2, netclass as NC2
+        drow = next((r for r in rows if r["step"] == "diff"), None)
+        if drow:
+            Bm = RD2.load(best)
+            missed = PRS.crosscheck_external(PA.pair_list(NC2.classify(Bm, c.cons, getattr(c, "spec", None))),
+                                             summary=drow.get("summary"), log=drow.get("log"))
+    except Exception as e:                                  # noqa: BLE001 - a report, never a reason to lose the board
+        missed = [{"pair": "?", "reason": "crosscheck_error", "detail": str(e)[:120]}]
+    if missed:
+        line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
-    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, **({"post_error": post_error} if post_error else {})))
+    _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, **({"post_error": post_error} if post_error else {})))
     return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality}
 
 
