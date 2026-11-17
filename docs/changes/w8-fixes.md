@@ -11,3 +11,7 @@ Hand-laid and copied copper had no supported way to become locked. `lay --lock` 
 ## Recorded locked-copper re-escape
 
 A pad sealed by locked copper had no guarded repair-ladder step. `suggest --explore --include-locked` now reports board-locked candidates separately in `locked_explore`. Session-only `shove --allow-locked --ids ...` requires every locked item to be named and records exact geometry before unlocking/removing it. Commit requires the recorded opened connections to be closed and, conservatively, all current copper of every affected net to be locked; original locked geometry on other nets remains protected.
+
+## Explore connected-run verification
+
+Explore skipped a connected run during its search but reported only the originally named segment, so the emitted path was not valid after that single-segment shove. It now deduplicates the same `_chain` removal unit used by `shove --chain`, exact-probes with that whole unit absent, and reports every UUID. Ordinary candidates exclude runs containing locked copper; locked runs remain separate under `locked_explore`. On the W8 repair checkpoint, the candidate now names eight segments and passes probe after the real eight-item shove.

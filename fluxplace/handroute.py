@@ -1281,7 +1281,8 @@ def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
                 best = (m, o)
         if best:
             o = best[1]
-            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "layer": lays[k], "locked": o.locked, "border_cells": 0})
+            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "uuid": o.id,
+                                      "layer": lays[k], "locked": o.locked, "border_cells": 0})
             e["border_cells"] += 1
     return {"reached_cells": {l: {"bbox": [round(v, 2) for v in r[:4]], "cells": r[4]} for l, r in per.items()},
             "limiting_obstacles": sorted(cnt.values(), key=lambda e: -e["border_cells"])[:12], "via_sites_in_window": int(viaok.sum())}
@@ -1434,31 +1435,44 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                 return plain
             if explore:
                 res = {"found": False, "reason": f"no grid path at width {w}", "sealed_by": _seal_report(M, net, dist, lays, free, xs, ys, w, pit, viaok), "explore": []}
-                cands = [e for e in res["sealed_by"]["limiting_obstacles"] if not e["locked"] and e["kind"] in ("track", "via")][:6]
-                idsets = []
-                for e in cands:
-                    ob = next(o for o in M.obs if o.id.startswith(e["id"]) and o.kind in ("track", "via"))
-                    idsets.append(({c.id for c in _chain(M, ob)} if ob.kind == "track" else {ob.id}, e))
-                combos = [([e], ids) for ids, e in idsets]
-                for i in range(len(idsets)):
-                    for j in range(i + 1, len(idsets)):
-                        combos.append(([idsets[i][1], idsets[j][1]], idsets[i][0] | idsets[j][0]))
-                for es, ids in combos:
+
+                def removal_item(o):
+                    item = {"net": o.net, "id": _sid(o.id), "uuid": o.id, "kind": o.kind, "locked": o.locked}
+                    if o.locked:
+                        item["lock_origin"] = "board"
+                    return item
+
+                units, seen_units = [], set()
+                for e in res["sealed_by"]["limiting_obstacles"]:
+                    if e["kind"] not in ("track", "via"):
+                        continue
+                    ob = next(o for o in M.obs if o.id == e["uuid"])
+                    copper = _chain(M, ob) if ob.kind == "track" else [ob]
+                    ids = frozenset(o.id for o in copper)
+                    if ids not in seen_units:
+                        seen_units.add(ids)
+                        units.append({"ids": ids, "remove": [removal_item(o) for o in sorted(copper, key=lambda o: o.id)]})
+                units = units[:6]
+                unlocked = [u for u in units if not any(x["locked"] for x in u["remove"])]
+                combos = [([u], u["ids"], u["remove"]) for u in unlocked]
+                for i in range(len(unlocked)):
+                    for j in range(i + 1, len(unlocked)):
+                        us = [unlocked[i], unlocked[j]]
+                        items = {x["uuid"]: x for u in us for x in u["remove"]}
+                        combos.append((us, unlocked[i]["ids"] | unlocked[j]["ids"], [items[k] for k in sorted(items)]))
+                for us, ids, items in combos:
                     r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
                                 avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | ids), explore=False)
-                    res["explore"].append({"remove": [{"net": e["net"], "id": e["id"], "kind": e["kind"]} for e in es], "then_found": bool(r.get("found")),
+                    res["explore"].append({"remove": items, "then_found": bool(r.get("found")),
                                            "path": r.get("path"), "length_mm": r.get("length_mm")})
-                    if r.get("found") and len(es) == 1:
+                    if r.get("found") and len(us) == 1:
                         break
                 if include_locked:
                     res["locked_explore"] = []
-                    locked_cands = [e for e in res["sealed_by"]["limiting_obstacles"] if e["locked"] and e["kind"] in ("track", "via")][:6]
-                    for e in locked_cands:
-                        ob = next(o for o in M.obs if o.id.startswith(e["id"]) and o.net == e["net"] and o.kind == e["kind"])
+                    for u in [u for u in units if any(x["locked"] for x in u["remove"])]:
                         r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
-                                    avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | {ob.id}), explore=False)
-                        item = {"net": e["net"], "id": e["id"], "kind": e["kind"], "locked": True, "lock_origin": "board"}
-                        res["locked_explore"].append({"remove": [item], "then_found": bool(r.get("found")),
+                                    avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | u["ids"]), explore=False)
+                        res["locked_explore"].append({"remove": u["remove"], "then_found": bool(r.get("found")),
                                                       "path": r.get("path"), "length_mm": r.get("length_mm")})
                 res["reason"] = plain["reason"]
                 return res
