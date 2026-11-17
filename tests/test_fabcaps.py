@@ -265,3 +265,13 @@ def test_constraints_stackup_profile_drives_review_and_flags_board_mismatch():
             for l in ST.PROFILES["pcbway-6l-1.6-2116"]["layers"]]
     assert R.apply_constraint_stackup({"stackup": same}, cons)[1] == []
     assert R.apply_constraint_stackup({"stackup": old}, {})[0]["stackup"] is old        # no [stackup]: board file untouched
+
+
+def test_fabadvise_via_sizes_keys_are_strings_and_result_is_json():
+    import json
+    f = _facts([_tr("N", "F.Cu", 0.2, 5.0)], [{"net": "V", "dia_mm": 0.45, "drill_mm": 0.2, "x": 0, "y": 0},
+                                              {"net": "V", "dia_mm": 0.6, "drill_mm": 0.3, "x": 1, "y": 0}])
+    res = FA.advise(f, {})
+    assert all(isinstance(k, str) for k in res["features"]["via_sizes"])
+    assert res["features"]["via_sizes"] == {"0.45/0.2": 1, "0.6/0.3": 1}
+    json.dumps(res)
