@@ -64,38 +64,55 @@ def _relay(work, cons, net, start, kw):
 
 def repair(work, out, constraints=None, max_attempts=2, budget=900.0, layers=None, report=None, pitch=0.05):
     t0 = time.time()
-    S = H.Sess(work)
-    if not S.exists:
-        raise RuntimeError("repair needs a session on WORK (session begin SRC --work WORK)")
-    start = os.path.join(S.dir, "start.kicad_pcb")
-    kw = {"pitch": pitch, "layers": layers.split(",") if isinstance(layers, str) else layers}
-    names = {c["net"] for c in H.open_nets(work, constraints)["connections"]}
-    pairs = _pairs(constraints, names | set(_unc(work)))
-    rows, done = [], set()
-    while time.time() - t0 < budget:
-        conns = H.open_nets(work, constraints)["connections"]
-        todo = [(i, c) for i, c in enumerate(conns) if _key(c) not in done]
-        if not todo:
-            break
-        scored = []
-        for i, c in todo:
-            if c["net"] in pairs:
-                done.add(_key(c))
-                rows.append({"net": c["net"], "a": c["a"].get("pin"), "b": c["b"].get("pin"), "status": "pair", "note": "pair net: needs the pair re-route, not handled here"})
+    rows = []
+    res = {"connections": rows, "closed": 0, "blocked": 0, "pairs": 0, "elapsed_s": 0.0, "budget_s": budget}
+
+    def save():
+        res["elapsed_s"] = round(time.time() - t0, 1)
+        res["closed"] = sum(1 for r in rows if r["status"] == "closed")
+        res["blocked"] = sum(1 for r in rows if r["status"] == "blocked")
+        res["pairs"] = sum(1 for r in rows if r["status"] == "pair")
+        if report:
+            json.dump(res, open(report, "w"), indent=1, default=str)
+
+    try:
+        S = H.Sess(work)
+        if not S.exists:
+            raise RuntimeError("repair needs a session on WORK (session begin SRC --work WORK)")
+        start = os.path.join(S.dir, "start.kicad_pcb")
+        kw = {"pitch": pitch, "layers": layers.split(",") if isinstance(layers, str) else layers}
+        names = {c["net"] for c in H.open_nets(work, constraints)["connections"]}
+        pairs = _pairs(constraints, names | set(_unc(work)))
+        done = set()
+        while time.time() - t0 < budget:
+            conns = H.open_nets(work, constraints)["connections"]
+            todo = [(i, c) for i, c in enumerate(conns) if _key(c) not in done]
+            if not todo:
+                break
+            scored = []
+            for i, c in todo:
+                if time.time() - t0 >= budget:
+                    break
+                if c["net"] in pairs:
+                    done.add(_key(c))
+                    rows.append({"net": c["net"], "a": c["a"].get("pin"), "b": c["b"].get("pin"), "status": "pair", "note": "pair net: needs the pair re-route, not handled here"})
+                    continue
+                scored.append((_rank(c, H.suggest(work, c["net"], conn=i, constraints=constraints, **kw)), i, c))
+            if not scored:
                 continue
-            scored.append((_rank(c, H.suggest(work, c["net"], conn=i, constraints=constraints, **kw)), i, c))
-        if not scored:
-            continue
-        scored.sort(key=lambda t: t[0])
-        _, i, c = scored[0]
-        key = _key(c)
-        done.add(key)
-        rows.append(_one(work, constraints, key, c, start, kw, max_attempts, pairs, t0, budget))
-    sc = H.session_commit(work, out, constraints)
-    res = {"connections": rows, "closed": sum(1 for r in rows if r["status"] == "closed"), "blocked": sum(1 for r in rows if r["status"] == "blocked"),
-           "pairs": sum(1 for r in rows if r["status"] == "pair"), "elapsed_s": round(time.time() - t0, 1), "commit": sc}
-    if report:
-        json.dump(res, open(report, "w"), indent=1, default=str)
+            scored.sort(key=lambda t: t[0])
+            _, i, c = scored[0]
+            key = _key(c)
+            done.add(key)
+            rows.append(_one(work, constraints, key, c, start, kw, max_attempts, pairs, t0, budget))
+            save()
+        res["budget_exhausted"] = time.time() - t0 >= budget
+        res["commit"] = H.session_commit(work, out, constraints)
+    except Exception as e:
+        res["error"] = {"type": type(e).__name__, "message": str(e)}
+        save()
+        raise
+    save()
     return res
 
 

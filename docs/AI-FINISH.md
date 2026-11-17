@@ -18,13 +18,15 @@ Measurement is `kicad-cli pcb drc --refill-zones` with the `.kicad_pro` beside t
 | `shove B --net M (--ids a,b \| --window X,Y,W,H) [--chain]` / `unlay` | removes UNLOCKED copper of net M; reports the connection it opened. Refuses (and names the items) if any selected copper is locked |
 | `suggest B --conn I` or `--net N --from x,y --to x,y` | grid A* between two islands of the net (all layers, vias, octilinear). Returns a path only when both ends touch the intended islands on reachable layers, or the measured seal: region reached per layer and the foreign obstacles that bound it. `--relax` lets the search cross unlocked foreign copper and lists them as blockers; `--explore` re-runs with each limiting unlocked obstacle (and pairs) removed |
 | `copy-net SRC DST --net N (--out O \| in a session)` | restores a removed net: DST's unlocked copper of N (refused if any locked) is replaced by SRC's, matched by net NAME, rebuilt on DST's own net; copied count must equal SRC's; then the `lay` DRC + connectivity guard. Details: [commands/repair-cmds.md](commands/repair-cmds.md) |
-| `via-min B --out O` | raises every via below the floor (constraints/fab/project) to it, one batch, bisected on any new DRC violation key; reports changed/kept/rejected. [commands/repair-cmds.md](commands/repair-cmds.md) |
+| `via-min B --out O [--budget S --report R]` | raises vias below the floor, one batch, bisected on any new DRC violation key; keeps verified changes on budget end and reports changed/kept/rejected/not-reached. Partial output exits 0. [commands/repair-cmds.md](commands/repair-cmds.md) |
 | `hand-repair W --out O` | ladder steps 1-2 on a session: per open connection suggest/lay, else explore + remove the cheapest unlocked blockers + re-lay them; whole attempt undone if anything stays open; pairs reported; ends with `session commit`. [commands/repair-cmds.md](commands/repair-cmds.md) |
 | `session begin SRC --work W` / `undo` / `status` / `ledger` / `commit W --out O` | edits on W with an undo stack; `commit` accepts the whole set only if vs the start: unconnected is lower, no new DRC key, no locked copper changed, no net more open, pad nets unchanged. Ledger: `W.session/ledger.{json,txt}` |
 
 Path syntax: `"F.Cu: x1,y1 x2,y2 x3,y3; via x,y; In2.Cu: x3,y3 x4,y4"`. A via sits between two chunks at their shared point;
 `"via x,y"` alone lays a stitching via. An exact same-net, same-size via already at that point is reused, not duplicated.
 Segments are 45/90 (stubs under 0.1 mm exempt). Ids are the first 8 hex chars shown by `window`.
+`lay`, `shove` and `copy-net` have `--timeout S` (default 600): timeout prints `no verdict: timed out after S s, nothing
+written`, restores the destination and session, and exits 2. `hand-repair` writes its JSON report on budget end and errors.
 
 ## Procedure
 

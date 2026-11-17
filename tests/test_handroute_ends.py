@@ -171,3 +171,33 @@ def test_via_min_raises_all_small_vias_bisecting_on_drc(tmp_path):
     assert r["rejected_at"] == [[5.0, 0.0]]
     w = {round(t.GetPosition().x * 1e-6): round(t.GetWidth() * 1e-6, 3) for t in pcbnew.LoadBoard(out).GetTracks()}
     assert w == {1: 0.5, 5: 0.45, 9: 0.6, 13: 0.5}
+
+
+def test_via_min_budget_writes_verified_prefix_and_marks_remainder(tmp_path):
+    import os
+    import time
+    from collections import Counter
+    from fluxplace import viamin
+    B = Brd()
+    B.edge(-2, -8, 24, 8)
+    for x in (1, 5, 9):
+        v = pcbnew.PCB_VIA(B.b)
+        v.SetPosition(V(x, 0))
+        v.SetWidth(mm(0.4))
+        v.SetDrill(mm(0.2))
+        B.b.Add(v)
+    src = B.save(tmp_path)
+    out = str(tmp_path / "partial.kicad_pcb")
+    calls = []
+
+    def fake_drc(path, cli):
+        calls.append(path)
+        time.sleep(0.02)
+        raised = [t for t in pcbnew.LoadBoard(path).GetTracks() if t.GetWidth() >= mm(0.5)]
+        return Counter({("clearance", ("all-at-once",)): 1}) if len(raised) == 3 else Counter(), (0, 0)
+
+    r = viamin.via_min(src, out, report=fake_drc, budget=0.06)
+    assert r["changed"] == 1 and r["rejected"] == 0 and r["not_reached"] == 2
+    assert r["budget_exhausted"] and os.path.exists(out)
+    assert [t.GetWidth() for t in pcbnew.LoadBoard(out).GetTracks()] == [mm(0.5), mm(0.4), mm(0.4)]
+    assert len(calls) == 3
