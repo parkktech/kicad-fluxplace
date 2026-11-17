@@ -1,4 +1,4 @@
-# Repair commands (`copy-net`, `via-min`, `repair`)
+# Repair commands (`copy-net`, `via-min`, `hand-repair`)
 
 Same guards as `lay`: `--expect-rev`, KiCad-open lock check, DRC "no new violation key" + connectivity guard, nothing written on failure.
 
@@ -14,7 +14,7 @@ Raises EVERY via whose diameter is below the floor (project min via size raised 
 unchanged, locked vias skipped. All raises are tried as one batch; a batch that adds any DRC violation key (multiset rule of
 `drcguard`) is bisected until single vias are kept or rejected. Output counts: changed, kept (already >= floor), rejected, locked_skipped.
 
-## repair WORK --out O [--max-attempts 2] [--budget 900] [--report R.json]
+## hand-repair WORK --out O [--max-attempts 2] [--budget 900] [--report R.json]
 
 Steps 1-2 of the repair ladder in [ROUTING-PLAYBOOK.md](../ROUTING-PLAYBOOK.md) on a session WORK board. Open connections, most
 constrained first (fewest via sites, smallest reached region from `suggest`): `suggest` then `lay`; else `suggest --explore`, remove

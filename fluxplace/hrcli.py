@@ -302,11 +302,11 @@ def register(sub):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
 
-    p = sub.add_parser("open-nets", help="list open connections")
+    p = sub.add_parser("open-nets", help="list open nets")
     common(p)
     p.set_defaults(fn=cmd_open_nets)
 
-    p = sub.add_parser("window", help="region as data + PNG")
+    p = sub.add_parser("window", help="region data + PNG")
     common(p)
     geom(p)
     p.add_argument("--at", default=None, help="window centre X,Y mm")
@@ -352,13 +352,13 @@ def register(sub):
     guards(p)
     p.set_defaults(fn=cmd_copy_net)
 
-    p = sub.add_parser("via-min", help="raise small vias")
+    p = sub.add_parser("via-min", help="raise vias")
     common(p)
     p.add_argument("--out", required=True)
     guards(p)
     p.set_defaults(fn=cmd_via_min)
 
-    p = sub.add_parser("repair", help="close open nets")
+    p = sub.add_parser("hand-repair", help="close open nets")
     common(p)
     p.add_argument("--out", required=True, help="committed board (WORK is the session work board)")
     p.add_argument("--max-attempts", type=int, default=2, help="per connection")
@@ -381,7 +381,7 @@ def register(sub):
         guards(p)
         p.set_defaults(fn=cmd_shove if name == "shove" else cmd_unlay)
 
-    p = sub.add_parser("suggest", help="grid-search a path")
+    p = sub.add_parser("suggest", help="grid search")
     common(p)
     geom(p)
     p.add_argument("--net", default=None)
@@ -398,7 +398,7 @@ def register(sub):
     brief(p)
     p.set_defaults(fn=cmd_suggest)
 
-    p = sub.add_parser("session", help="hand-route session")
+    p = sub.add_parser("session", help="hand-route")
     p.add_argument("action", choices=["begin", "undo", "status", "ledger", "commit"])
     p.add_argument("work", help="begin: the SOURCE board; others: the WORK board")
     p.add_argument("--work", dest="work_out", default=None, help="begin: the WORK board to create")

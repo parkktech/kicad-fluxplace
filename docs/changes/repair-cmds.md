@@ -7,4 +7,4 @@
 - `krtchain.run`: an exception in the post step (snap / plane ties) keeps the routed board, records `post_error`, verdict `warn`.
 - Freerouting < 2.5.0 is refused in `routefr.command` (as `locate` already did) and `deps` reports it not ok with the found version.
 - New `via-min BOARD --out O [--constraints C]`: raise every via below the min size, DRC-guarded, batch then bisect.
-- New `repair WORK --out O`: deterministic ladder steps 1-2 (suggest/lay, explore + remove blockers + re-lay) on a session, undo per failed attempt, JSON report, ends with session commit.
+- New `hand-repair WORK --out O`: deterministic ladder steps 1-2 (suggest/lay, explore + remove blockers + re-lay) on a session, undo per failed attempt, JSON report, ends with session commit.
