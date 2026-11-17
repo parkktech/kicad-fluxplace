@@ -153,3 +153,22 @@ def test_cli_size_beats_constraints(tmp_path):
 def test_legacy_default_lifted_by_floor(tmp_path):
     assert _sized(tmp_path, {"route": FLOOR})[:4] == ["--track-width", "0.2", "--clearance", "0.127"]   # clearance on the wire = the floor (request_clearance)
     assert _sized(tmp_path, {"route": {"min_track_mm": 0.25}})[:2] == ["--track-width", "0.25"]
+
+
+def test_post_exception_keeps_board_and_warns(tmp_path, monkeypatch):
+    import json
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    c.cons["route"]["whole_post"] = True
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {})
+
+    def post(best, d, planes, rules):
+        open(best, "w").write("half written")
+        raise RuntimeError("tie failed")
+
+    monkeypatch.setattr(K, "_post", post)
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert r["verdict"] == "warn" and r["post"] is None
+    assert r["post_error"] == {"type": "RuntimeError", "message": "tie failed"} and "POST ERROR RuntimeError" in r["line"]
+    assert open(r["board"]).read() != "half written"
+    assert json.load(open(tmp_path / "routed.kicad_pcb.status.json"))["post_error"]["type"] == "RuntimeError"
+    assert json.load(open(tmp_path / "result.json"))["post_error"]["message"] == "tie failed"
