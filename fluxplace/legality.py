@@ -37,6 +37,7 @@ from collections import defaultdict
 
 from . import geom as GM
 from . import legalise as LG
+from . import placerules as PR
 
 _CONN = re.compile(r"^(J|P|CN|X)\d")
 _MECH = ("MH", "MK", "FID", "TP")
@@ -47,8 +48,10 @@ def _pairs(cons):
     return {frozenset(p) for p in ((cons or {}).get("placement") or {}).get("allow_overlap", []) or []}
 
 
-def no_tht_regions(cons):
-    """[(name, rect, allow)] from [placement.no_tht.NAME]."""
+def no_tht_regions(cons, B=None):
+    """[(name, rect, allow)] from [placement.no_tht.NAME] (and the [placement.module.*] expansions)."""
+    from . import placerules as PR
+    PR.expand(cons, B)
     out = []
     for name, k in sorted((((cons or {}).get("placement") or {}).get("no_tht") or {}).items()):
         if isinstance(k, dict) and k.get("rect"):
@@ -87,7 +90,9 @@ class Legal:
         self.M = LG._Model(B, self.cons, fixed, B["bbox"])
         self.allow = _pairs(self.cons)
         self.edge = edge_mounted(B, self.cons)
-        self.tht_regions = no_tht_regions(self.cons)
+        self.tht_regions = no_tht_regions(self.cons, B)
+        self.hw = PR.hardware(B, self.cons)
+        self.hw_allow = ((PR.hardware_cfg(self.cons) or {}).get("allow")) or []
         self.hash = GM.Hash(5.0)
         self.phash = GM.Hash(2.0)
         self.pclr = float((self.cons.get("placement") or {}).get("pad_clearance_mm", B.get("clearance", 0.1)))
@@ -246,9 +251,15 @@ class Legal:
             out.append(("pad_short", d))
         for o in sorted({o for o, _k, _e in self.hole_issues(ref, court, pads)}):
             out.append(("hole", o))
-        for name, rect in self.M.forbidden_named(ref):
+        for name, rect in self.M.forbidden_named(ref, exact=True):
             if GM.overlap(court, rect, -0.001):
                 out.append(("forbidden", name))
+        for h, c, d in self.hw:                       # [placement.hardware]: exact circle, courtyard and pads
+            if h == ref or self._hw_exempt(ref, h) or any(fnmatch.fnmatch(ref, g) for g in self.hw_allow):
+                continue
+            boxes = [(q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"]) for q in pads]
+            if PR.circle_hit((c, d / 2), court, boxes) is not None:
+                out.append(("hardware", h))
         for name, rect, allow in self.tht_regions:
             if any(fnmatch.fnmatch(ref, g) for g in allow):
                 continue
@@ -257,9 +268,12 @@ class Legal:
                 out.append(("no_tht", name))
         return out
 
+    def _hw_exempt(self, ref, hole):
+        return frozenset((ref, hole)) in self.allow
+
     def issues(self, refs=None):
         """{kind: [description]} over `refs` (default every part). Overlap pairs listed once."""
-        res = {"overlap": [], "outside": [], "forbidden": [], "no_tht": [], "pad_short": [], "hole": []}
+        res = {"overlap": [], "outside": [], "forbidden": [], "no_tht": [], "pad_short": [], "hole": [], "hardware": []}
         for ref in sorted(refs or self.B["parts"]):
             for kind, d in self.part_issues(ref):
                 if kind in ("overlap", "hole"):
@@ -269,6 +283,8 @@ class Legal:
                 elif kind == "pad_short":
                     a, b = d.split("/")
                     res[kind].append(f"{a}/{b}" if a < b else f"{b}/{a}")
+                elif kind == "hardware":
+                    res[kind].append(f"{ref} in {d}")
                 elif kind == "outside":
                     res[kind].append(ref + (" (pads)" if d else ""))
                 else:
@@ -298,8 +314,9 @@ def findings(B, cons=None):
     out = []
     why = {"overlap": "courtyard overlap on the same side", "outside": "outside the board outline",
            "forbidden": "in a forbidden region", "no_tht": "through-hole pad in a no-through-hole region",
-           "pad_short": "pad closer than the clearance to another net's pad"}
-    for kind in ("overlap", "outside", "forbidden", "no_tht", "pad_short"):
+           "pad_short": "pad closer than the clearance to another net's pad",
+           "hardware": "inside a hardware keep-out circle (mounting hole washer)"}
+    for kind in ("overlap", "outside", "forbidden", "no_tht", "pad_short", "hardware"):
         v = res[kind]
         if v:
             refs = sorted({x.replace("/", " ").split(" ")[0].split(".")[0] for x in v if x} |

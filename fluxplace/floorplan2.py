@@ -428,7 +428,7 @@ class Plan:
                     continue
                 if kind == "outside" and r in self.known_out:
                     continue
-                if kind in ("outside", "forbidden", "no_tht", "pad_short"):
+                if kind in ("outside", "forbidden", "no_tht", "pad_short", "hardware"):
                     return False
         return self.claims_ok(i) and self.intent.ok(i)
 

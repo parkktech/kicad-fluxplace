@@ -71,7 +71,9 @@ def keepout_rects(B, cons):
     reason = "..."}`: no part BODY of that side inside the rectangle. A body is on the side its courtyard is on (the
     placement layer); through-hole pads do not count on the other side (the no_tht rectangles govern
     them) and mounting holes (no pads or only NPTH pads) are never bodies."""
+    from . import placerules as PR
     out = []
+    PR.expand(cons, B)                                     # [placement.module.*] with a margin outline needs the board
     for name, k in sorted(((cons or {}).get("placement", {}) or {}).get("keepout", {}).items()):
         if isinstance(k, dict) and k.get("rect"):
             side = str(k.get("side", "both")).upper()
@@ -90,6 +92,8 @@ def keepout_rects(B, cons):
             side = str(k.get("side", "both")).upper()
             out.append((tuple(rect), {"F", "B"} if side in ("BOTH", "") else {side[0]},
                         list(k.get("allow", [])), k.get("max_height_mm"), k.get("name", "keepout")))
+    for rect, ref in PR.hardware_squares(B, cons):         # [placement.hardware]: the circle's bounding square (gate: exact circle)
+        out.append((rect, {"F", "B"}, [ref], None, "hardware:" + ref))
     return out
 
 
@@ -151,13 +155,13 @@ class _Model:
         """Rects this part must stay out of."""
         return [r for _n, r in self.forbidden_named(ref)]
 
-    def forbidden_named(self, ref):
-        """[(name, rect)] this part must stay out of."""
+    def forbidden_named(self, ref, exact=False):
+        """[(name, rect)] this part must stay out of. `exact` leaves out the hardware squares (the gate checks the circle)."""
         part = self.B["parts"][ref]
         sd = self.body_side(ref)
         out = []
         for r, ks, allow, mh, name in self.ko:
-            if any(fnmatch.fnmatch(ref, g) for g in allow):
+            if any(fnmatch.fnmatch(ref, g) for g in allow) or (exact and name.startswith("hardware:")):
                 continue
             if sd & ks and (part["tht"] or mh is None):
                 out.append((name, r))

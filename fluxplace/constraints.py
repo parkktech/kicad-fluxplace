@@ -112,8 +112,9 @@ def load(path):
     """Parse the TOML; returns the raw dict ({} for None path)."""
     if not path:
         return {}
+    from . import placerules as PR
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        return PR.expand(tomllib.load(f))          # [placement.module.*] with an explicit outline -> keep-out / no_tht
 
 
 def power_width_mm(cons, net, default_mm):
