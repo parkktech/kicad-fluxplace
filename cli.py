@@ -1866,6 +1866,12 @@ def cmd_drcfix(a):
                                               for i in u.get("items", [])))
 
 
+def _tune_refill(out, res):
+    if res.get("stopped") != "signal" and res.get("accepted", 0) > 0:
+        from fluxplace import opengate as OG
+        OG.refill(out)
+
+
 def cmd_tune(a):
     """DRC-guarded differential-pair length tuning: hairpin shortcuts on the
     long side, serpentine meanders on the short side, every step accepted
@@ -1889,9 +1895,7 @@ def cmd_tune(a):
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
                         log=lambda m: print(m, flush=True))
-    from fluxplace import opengate as OG
-    if res.get("stopped") != "signal":
-        OG.refill(out)                               # a routed board is saved with fresh zone fills
+    _tune_refill(out, res)
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
@@ -1919,7 +1923,6 @@ def _tune_finish(a, out, res, bad, unit):
 def _tune_match(a):
     """tune --match: lengthen the short members of [match.*] groups, one DRC-guarded bump at a time."""
     from fluxplace import tune as TU, constraints as C, lengthmatch as LM, review as RV
-    from fluxplace import opengate as OG
     cons = C.load(a.constraints)
     groups = LM.groups(cons)
     if a.match != "all":
@@ -1964,8 +1967,7 @@ def _tune_match(a):
     rep = TU.tune_match(a.board, out, groups, net_lengths, targets,
                         kicad_cli=a.kicad_cli, max_rounds=a.rounds, clearance_of=clr, budget=budget,
                         stall=a.stall, result=res, log=lambda m: print(m, flush=True))
-    if res.get("stopped") != "signal":
-        OG.refill(out)
+    _tune_refill(out, res)
     bad = [r for r in rep if r["status"] != "ok"]
     for r in rep:
         print(f"  {r['group']}/{r['net']}: {r.get('before')} -> {r.get('after')} {r['unit']} [{r['basis']}] "

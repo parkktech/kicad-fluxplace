@@ -73,6 +73,7 @@ def test_nothing_accepted_copies_the_input(tmp_path, monkeypatch):
     res = {}
     TU.tune_pairs(src, out, {"DATA_1": "DATA_0"}, 0.2, budget=TU.Budget(10, clock=clock), result=res, log=lambda m: None)
     assert res["stopped"] == "budget" and _ntracks(out) == _ntracks(src) and _leftovers(tmp_path) == []
+    assert res["accepted"] == 0 and open(out, "rb").read() == open(src, "rb").read()
 
 
 def test_stall_stops_a_pair_after_n_rejected_tries(tmp_path, monkeypatch):
@@ -124,3 +125,14 @@ def test_tune_match_budget_stop_reports_not_reached(tmp_path, monkeypatch):
     rep = TU.tune_match(src, out, [g], lens, {"DATA": (tgt, 0.2)}, budget=TU.Budget(50, clock=clock), result=res, log=lambda m: None)
     assert res["stopped"] == "budget" and any(r["status"] == "not_reached" for r in rep)
     assert len(rep) == len(NAMES) and _leftovers(tmp_path) == []
+
+
+def test_cli_skips_zone_refill_when_no_track_was_accepted(monkeypatch):
+    import cli
+    from fluxplace import opengate as OG
+    calls = []
+    monkeypatch.setattr(OG, "refill", lambda path: calls.append(path))
+    cli._tune_refill("unchanged", {"accepted": 0, "stopped": None})
+    assert calls == []
+    cli._tune_refill("changed", {"accepted": 1, "stopped": None})
+    assert calls == ["changed"]

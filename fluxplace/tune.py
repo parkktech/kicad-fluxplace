@@ -403,6 +403,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     lim = limit_mm if callable(limit_mm) else (lambda m: limit_mm)
     stalls, reached, need = set(), set(), {}
     stopped = None
+    accepted = 0
     base = None
     try:
         with bud:
@@ -416,12 +417,13 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
             stats = {}
 
             def attempt(mutate, tries):
-                nonlocal base
+                nonlocal base, accepted
                 bud.check()
                 if tries[0] >= bud.stall:
                     raise Stalled()
                 n0 = stats.get("drc_runs", 0)
                 ok, base = _guarded(board_path, work, mutate, kicad_cli, base, log, stats, bud)
+                accepted += bool(ok)
                 tries[0] = 0 if ok else tries[0] + (stats.get("drc_runs", 0) - n0)
                 return ok
 
@@ -500,7 +502,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         log(f"  final DRC: {base[1][0]} violations, {base[1][1]} unconnected")
     if result is not None:
         result.update(stopped=stopped, elapsed_s=round(bud.elapsed(), 1), budget_s=bud.seconds, pairs=out_rows,
-                      out=out_path, needs_reroute=sum(1 for r in out_rows if r["status"] == "needs_reroute"))
+                      out=out_path, accepted=accepted, needs_reroute=sum(1 for r in out_rows if r["status"] == "needs_reroute"))
     return report
 
 
@@ -690,9 +692,11 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
     bud = budget if isinstance(budget, Budget) else Budget(budget, stall)
     work = out_path + ".work.kicad_pcb"
     total_runs, report, stopped, base, base0, stalled = 0, [], None, None, None, False
+    accepted = 0
     done = set()
 
     def tune_net(g, net, base):
+        nonlocal accepted
         """-> (row, base); raises Stopped. A net that makes `stall` DRC-guarded tries in a row without an accepted bump stops."""
         target, tol = targets[g["name"]]
         unit = g["unit"]
@@ -737,6 +741,7 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                             kicad_cli, base, log, stats, bud)
                         tries = 0 if ok else tries + stats.get("drc_runs", 0) - n0
                         if ok:
+                            accepted += 1
                             break
                     if ok:
                         break
@@ -796,5 +801,5 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
             f"(baseline {base0[1][0]} / {base0[1][1]}); DRC runs total {total_runs}")
     if result is not None:
         result.update(stopped=stopped, elapsed_s=round(bud.elapsed(), 1), budget_s=bud.seconds, out=out_path,
-                      groups=report)
+                      accepted=accepted, groups=report)
     return report

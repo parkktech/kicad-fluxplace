@@ -21,7 +21,11 @@ def _report(board, cli="kicad-cli"):
 
 
 def _keys(d):
-    return DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED)[0]
+    keys = DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED)[0]
+    for v in d.get("violations", []):
+        if v.get("type") == "clearance" and DG._zone_item(v):
+            keys[DG.key_of(v)] += 1
+    return keys
 
 
 def _snap(src, dst, skip):

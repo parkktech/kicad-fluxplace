@@ -88,3 +88,13 @@ connectivity. `diagnose_result` and direct `route-diagnose` now call `routeconn.
 `router-log ... (not connectivity)`; unmeasured status says `open connections not measured`. Regressions:
 `test_diagnose_uses_kicad_connectivity_not_copper_heuristic` and `test_status_log_counter_is_not_claimed_as_open_count`
 (25 selected tests passed). On the real snapped board the report measures four opens with their four net names in 5.81 s.
+
+## Tune identity and snap clearance guard
+
+The tune CLI refilled and saved zones even with zero accepted tracks, changing the board and its DRC result. Both tuning
+modes now report `accepted`; `_tune_refill` runs only for a positive count, so no-acceptance output is byte-identical to
+the input. Snapiter used the correct input baseline but inherited drcguard's Zone-item noise exclusion, which hid new
+clearance errors. Its `_keys` now re-includes zone-related clearance keys while leaving other flicker filtering intact.
+Regressions: raw-byte assertion in `test_nothing_accepted_copies_the_input`,
+`test_cli_skips_zone_refill_when_no_track_was_accepted`, and `test_zone_clearance_increase_is_not_ignored_by_snap_guard`
+(19 selected tests passed).
