@@ -244,7 +244,7 @@ def cmd_lay(a):
     if g is not None:
         return g
     r = _timed("fluxplace.handroute:lay", (a.board, a.net, a.path, a.out, a.constraints, a.width, _via(a), a.any_angle, a.partial),
-               {}, a.timeout, _edit_paths(a.board, a.out))
+               {"lock": a.lock}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"lay {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "lay")
     return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
@@ -254,9 +254,21 @@ def cmd_copy_net(a):
     g = _write_guard(a, a.out or a.board)
     if g is not None:
         return g
-    r = _timed("fluxplace.handroute:copy_net", (a.src, a.board, a.net, a.out, a.constraints), {}, a.timeout, _edit_paths(a.board, a.out))
+    r = _timed("fluxplace.handroute:copy_net", (a.src, a.board, a.net, a.out, a.constraints), {"lock": a.lock}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"copy-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "copy-net")
+    return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
+
+
+def cmd_lock_net(a):
+    g = _write_guard(a, a.out or a.board)
+    if g is not None:
+        return g
+    ids = [i for i in (a.ids or "").split(",") if i] or None
+    r = _timed("fluxplace.handroute:lock_net", (a.board, a.net, a.out, ids, a.unlock, a.constraints), {},
+               a.timeout, _edit_paths(a.board, a.out))
+    r.pop("cand_unc_pairs", None)
+    _emit(a, r, lambda: f"lock-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or ""), "lock-net")
     return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
 
 
@@ -379,7 +391,7 @@ def register(sub):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
         p.add_argument("--timeout", type=float, default=600.0,
-                       help="lay/shove/copy-net hard cap; expiry restores all destinations and exits 2 (default 600; 0 disables)")
+                       help="guarded-edit hard cap; expiry restores all destinations and exits 2 (default 600; 0 disables)")
 
     p = sub.add_parser("open-nets", help="list open nets")
     common(p)
@@ -418,6 +430,7 @@ def register(sub):
     p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board)")
     p.add_argument("--any-angle", action="store_true")
     p.add_argument("--partial", action="store_true", help="do not require the net's open count to fall")
+    p.add_argument("--lock", action="store_true", help="lock newly laid tracks/vias on acceptance")
     brief(p)
     guards(p)
     p.set_defaults(fn=cmd_lay)
@@ -427,9 +440,20 @@ def register(sub):
     common(p)
     p.add_argument("--net", required=True)
     p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board = DST)")
+    p.add_argument("--lock", action="store_true", help="lock copied tracks/vias on acceptance")
     brief(p)
     guards(p)
     p.set_defaults(fn=cmd_copy_net)
+
+    p = sub.add_parser("lock-net", help="lock or unlock net copper")
+    common(p)
+    p.add_argument("--net", required=True)
+    p.add_argument("--ids", default=None, help="comma list of track/via UUID prefixes; default all copper of the net")
+    p.add_argument("--unlock", action="store_true")
+    p.add_argument("--out", default=None, help="output board (omit inside a session)")
+    brief(p)
+    guards(p)
+    p.set_defaults(fn=cmd_lock_net)
 
     p = sub.add_parser("via-min", help="raise vias")
     common(p)

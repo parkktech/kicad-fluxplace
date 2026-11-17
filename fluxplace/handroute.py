@@ -612,7 +612,7 @@ def _print_probe(R):
 
 
 # ======================================================================================================= edits
-def _apply_prims(b, M, net, prims, width, via):
+def _apply_prims(b, M, net, prims, width, via, lock=False):
     pcbnew = M.pcbnew
     pnet = b.FindNet(net)
     if pnet is None:
@@ -627,6 +627,7 @@ def _apply_prims(b, M, net, prims, width, via):
             t.SetWidth(int(round(width * 1e6)))
             t.SetLayer(M.lid[p[1]])
             t.SetNet(pnet)
+            t.SetLocked(lock)
             b.Add(t)
             added.append(("seg", p[1], p[2], p[3], t.m_Uuid.AsString()))
         else:
@@ -644,6 +645,7 @@ def _apply_prims(b, M, net, prims, width, via):
             v.SetWidth(int(round(via[0] * 1e6)))
             v.SetDrill(int(round(via[1] * 1e6)))
             v.SetNet(pnet)
+            v.SetLocked(lock)
             b.Add(v)
             added.append(("via", p[1], v.m_Uuid.AsString()))
     return added
@@ -719,12 +721,16 @@ def _snap(path):
     return AU.snapshot(path, checks=False, project=os.path.splitext(path)[0] + ".kicad_pro")
 
 
-def _locked_sig(M):
+def _copper_sig(M, locked_only=False):
     sig = set()
     for o in M.obs:
-        if o.locked and o.kind in ("track", "via"):
+        if o.kind in ("track", "via") and (o.locked or not locked_only):
             sig.add((o.kind, o.net, tuple(sorted(o.layers))[:1], tuple(round(v, 3) for v in (*o.g[1], *o.g[2])), round(o.g[3], 3)))
     return sig
+
+
+def _locked_sig(M):
+    return _copper_sig(M, locked_only=True)
 
 
 def _edit_violation_keys(new, net, loose=()):
@@ -835,7 +841,7 @@ def _record(S, res, in_session, out):
         Sx.log(ent)
 
 
-def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli"):
+def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli", lock=False):
     def mutate(b, M):
         prims = G.parse_path(path, M.cu)
         if net not in {o.net for o in M.obs if o.net}:
@@ -846,8 +852,8 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         pr = probe_prims(M, net, prims, w, vv, any_angle)
         if not pr["ok"]:
             raise ValueError("probe failed: " + json.dumps(pr["violations"][:4]))
-        added = _apply_prims(b, M, net, prims, w, vv)
-        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w}
+        added = _apply_prims(b, M, net, prims, w, vv, lock)
+        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
     return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli)
 
 
@@ -855,7 +861,7 @@ def _net_copper(b, net):
     return [t for t in b.GetTracks() if t.GetNetname() == net]
 
 
-def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
+def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli", lock=False):
     """Replace the copper of `net` on board `dst` (unlocked tracks/arcs/vias, refused if any is locked) by the copper of the same net NAME
     on board `src`; items are rebuilt explicitly on dst's own net (no Duplicate(): it keeps the source net codes). The copied count must equal
     the source count; then the same DRC + connectivity guard as `lay`. Writes nothing on failure."""
@@ -873,7 +879,6 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
             raise ValueError(f"destination has locked copper of net {net!r}: {sum(1 for t in old if t.IsLocked())} item(s); unlock or leave it")
         for t in old:
             b.Remove(t)
-        lid = {sb.GetLayerName(l): l for l in sb.GetEnabledLayers().Seq()}
         for t in items:
             cls = t.GetClass()
             if cls == "PCB_VIA":
@@ -897,13 +902,48 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
                 n.SetWidth(t.GetWidth())
                 n.SetLayer(t.GetLayer())
             n.SetNet(dn)
-            n.SetLocked(t.IsLocked())
+            n.SetLocked(lock or t.IsLocked())
             b.Add(n)
         got = len(_net_copper(b, net))
         if got != len(items):
             raise ValueError(f"copied item count {got} != source count {len(items)}")
-        return {"removed": len(old), "copied": got, "source": src}
+        info = {"removed": len(old), "copied": got, "source": src}
+        if lock:
+            info["locked"] = True
+        return info
     return _edit(dst, out, mutate, "copy-net", net, f"from {os.path.basename(src)}", constraints, False, False, kicad_cli)
+
+
+def lock_net(board, net, out=None, ids=None, unlock=False, constraints=None, kicad_cli="kicad-cli"):
+    """Lock or unlock all (or explicitly selected) tracks/vias of a net without changing geometry or any DRC key."""
+    def mutate(b, M):
+        items = _net_copper(b, net)
+        if not items:
+            raise ValueError(f"no tracks/vias of net {net!r}")
+        selected = items
+        if ids:
+            selected = []
+            for ident in ids:
+                hits = [t for t in items if t.m_Uuid.AsString().startswith(ident)]
+                if not hits:
+                    raise ValueError(f"no track/via of net {net} with id {ident}")
+                if len(hits) > 1:
+                    raise ValueError(f"ambiguous id {ident}: use a longer UUID prefix")
+                selected.extend(hits)
+        changed = []
+        for t in selected:
+            if t.IsLocked() == unlock:
+                uid = t.m_Uuid.AsString()
+                t.SetLocked(not unlock)
+                changed.append({"id": _sid(uid), "uuid": uid, "kind": "via" if t.GetClass() == "PCB_VIA" else "track",
+                                "locked": not unlock})
+        return {"selected": len(selected), "changed": changed, "locked": not unlock}
+
+    def unchanged(M, cand, base):
+        return "DRC keys changed" if cand["keys"] != base["keys"] else None
+
+    what = f"ids={ids} unlock={unlock}"
+    return _edit(board, out, mutate, "lock-net", net, what, constraints, False, False, kicad_cli, unchanged)
 
 
 def _chain(M, seed):
@@ -1020,8 +1060,8 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
     if worse:
         reasons.append("net(s) lost connectivity (open before -> after): " + ", ".join(f"{n} {x}->{y}" for n, (x, y) in worse.items()))
     Ma, Mb = G.Model(start), G.Model(S.work)
-    if _locked_sig(Ma) != _locked_sig(Mb):
-        reasons.append("locked copper changed")
+    if not _locked_sig(Ma).issubset(_copper_sig(Mb)):
+        reasons.append("locked copper geometry changed")
     from . import audit as AU
     d = AU.connectivity_diff(_snap(start), _snap(S.work))
     if not d["ok"]:
