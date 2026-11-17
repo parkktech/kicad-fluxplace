@@ -119,8 +119,27 @@ def _item_desc(it):
     kind = m.group(1).lower() if m else "item"
     lm = re.search(r" on ([A-Za-z0-9_.]+Cu)", d)
     pin = re.match(r"Pad (\S+) \[[^\]]*\] of (\S+)", d)
-    return {"kind": kind, "id": it.get("uuid", "")[:8], "x": it["pos"]["x"], "y": it["pos"]["y"], "layer": lm.group(1) if lm else None,
+    uid = it.get("uuid", "")
+    return {"kind": kind, "id": _sid(uid), "uuid": uid, "x": it["pos"]["x"], "y": it["pos"]["y"], "layer": lm.group(1) if lm else None,
             "pin": f"{pin.group(2)}.{pin.group(1)}" if pin else None, "text": d}
+
+
+def _endpoint_ob(M, net, side):
+    """Resolve a DRC endpoint without assuming that its display-length UUID prefix is unique."""
+    kind = side["kind"]
+    if kind not in ("pad", "track", "via"):
+        return None
+    candidates = [o for o in M.obs if o.net == net and o.kind == kind]
+    uid = side.get("uuid")
+    exact = next((o for o in candidates if o.id == uid), None)
+    if exact:
+        return exact
+    if side.get("layer"):
+        candidates = [o for o in candidates if side["layer"] in o.layers]
+    pt = (side["x"], side["y"])
+    if not candidates:
+        return None
+    return min(candidates, key=lambda o: G.ob_gap(pt, pt, 0.0, o)[0])
 
 
 def _island_dist(M, net, i, j):
@@ -164,9 +183,9 @@ def open_nets(board, constraints=None, raw=None, M=None):
                                 side["island"] = g["id"]
                     side["locked"] = None
                     continue
-                ob = next((o for o in M.obs if o.id.startswith(side["id"]) and o.kind != "hole"), None) if side["id"] else None
+                ob = _endpoint_ob(M, net, side)
                 side["locked"] = bool(ob.locked) if ob else None
-                if ob and ob.kind in ("pad", "track", "via"):
+                if ob:
                     isl, omap = M.islands(net)
                     side["island"] = omap.get(ob.id)
             ia, ib = a.get("island"), b.get("island")
