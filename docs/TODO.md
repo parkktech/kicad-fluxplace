@@ -38,6 +38,16 @@
 - What worked and should become the pipeline's default order: re-escape of the regions that ended open, then RF first on
   outer layers with `lay --lock` (all four RF nets in spec for the first time), before pairs and ordinary copper.
 
+## Parts gate must include 3D models before placement (owner, 2026-11-17)
+
+- A placement run must not start while any part lacks a real 3D model: the owner cannot judge mechanical fit (connector
+  face, module keep-outs, enclosure) from a board without bodies. The parts-first rule covers stock, datasheet, pinmap and
+  model; the pipeline's parts gate was waived with `--allow-undocumented`/`--allow-incomplete` in every run, which hid it.
+  Make "model present and file resolvable" a hard placement precondition that the allow flags do not waive.
+- Board copies in work folders broke every `${KIPRJMOD}`-relative model path (130 of 341 parts showed no body). The
+  pipeline must keep model paths resolvable when it copies a board (write the copy beside the project, or check and
+  report unresolved models on every copy).
+
 ## Smaller items
 
 - Cross-board corpus manifest (`~/.config/fluxplace/corpus.toml`) so changes are proven on more than one board.
