@@ -19,3 +19,9 @@ Explore skipped a connected run during its search but reported only the original
 ## Pair-router missed classification
 
 `pairs_missed` treated absence from the external router summary as unfinished even when the bounded pairs stage had completed and locked the pair; route-only state could also omit the earlier report path. The route stage now falls back to `board.pairs.json` beside its input and partitions stage-complete pairs plus pairs whose two legs have real, fully locked copper and no input open into `pairs_already_done`. W8's original list partitions from 32 missed to 17 missed plus the expected 15 already complete.
+
+## Native assertion volume and stderr timing
+
+The second repeated native line came both from fluxplace's own via-width reads and from external tools. Via-specific reads now pass a layer (including the per-model `hrgeom` read and hand-route, plane, snap, tune and via-min call sites), and the via assertion joined `quietlog.NOISE`. Streamed external-router logs skip noise for progress parsing and are filtered on completion/timeout; stage, corpus, Cypress and freerouting log paths use the same filter. `FLUXPLACE_RAW_STDERR=1` preserves raw output.
+
+Console filtering was benchmarked on W8 copies with the via fixes already applied (seconds, raw / filtered): open-nets 9.295 / 9.468; probe 3.297 / 3.341; suggest 3.801 / 3.758; via-min 15.588 / 15.900; real route-stage pipeline with a 0.05 s dry budget 10.22 / 9.18. All corresponding exit codes matched and no via assertion remained. The accepted session lay was 15.705 / 22.733 in the first run and, over three repeats, median 16.202 / 20.644 (+27.4%; ranges 15.685-16.603 / 20.310-23.169). Direct non-spawn lay showed no such penalty, but the required spawn-based command did. Therefore console filtering remains opt-in with `FLUXPLACE_QUIET_STDERR=1`, per the 20% stop rule; router/helper-log filtering remains on unless raw mode is selected.

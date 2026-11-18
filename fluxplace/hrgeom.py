@@ -368,7 +368,7 @@ class Model:
             if cls == "PCB_VIA":
                 p = t.GetPosition()
                 c = (p.x * 1e-6, p.y * 1e-6)
-                dia = t.GetWidth() * 1e-6
+                dia = t.GetWidth(pcbnew.F_Cu) * 1e-6
                 drill = t.GetDrillValue() * 1e-6
                 self.obs.append(Ob("via", net, allcu, ("seg", c, c, dia / 2), self._clr(net), self.hole_clr, id=tid, locked=t.IsLocked(),
                                    extra={"dia": dia, "drill": drill}))

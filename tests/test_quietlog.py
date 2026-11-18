@@ -3,6 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fluxplace import quietlog as Q
 
 NOISE = './kicad/include/properties/property.h(607): assert "m_choices.GetCount() > 0" failed in PROPERTY_ENUM(): No enum choices defined'
+VIA_NOISE = './kicad/pcbnew/pcb_track.cpp(387): assert ""false"" failed in GetWidth(): Warning: PCB_VIA::GetWidth called without a layer argument'
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
 
@@ -17,6 +18,10 @@ def test_filter_split_across_chunks():
     data = f"x\n{NOISE}\ny\n".encode()
     out = b"".join(f.feed(data[i:i + 7]) for i in range(0, len(data), 7)) + f.finish()
     assert out.startswith(b"x\ny\n") and f.dropped == 1
+
+
+def test_filter_drops_via_width_assertion():
+    assert Q.filter_text(f"before\n{VIA_NOISE}\nafter\n") == "before\nafter\n[fluxplace] dropped 1 repeated KiCad assert lines\n"
 
 
 def test_no_noise_no_count_line():
@@ -75,6 +80,15 @@ def test_install_disabled_under_pytest():
     assert Q.install_stderr() is None
 
 
+def test_console_filter_requires_opt_in_outside_pytest():
+    code = "import os,sys; sys.path.insert(0,%r); from fluxplace import quietlog; assert quietlog.install_stderr() is None; os.write(2,(%r+'\\n').encode())" % (ROOT, NOISE)
+    env = dict(os.environ)
+    for key in ("FLUXPLACE_RAW_STDERR", "FLUXPLACE_QUIET_STDERR", "PYTEST_CURRENT_TEST"):
+        env.pop(key, None)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and NOISE in r.stderr
+
+
 PCBNEW_CHILD = r"""
 import sys
 sys.path.insert(0, %r)
@@ -100,4 +114,17 @@ def test_native_warning_writer_does_not_deadlock_reader():
     r = subprocess.run([sys.executable, "-c", PCBNEW_CHILD % ROOT], capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, r.stderr[-1000:]
     assert r.stdout.strip() == "completed"
-    assert "GetWidth called without a layer argument" in r.stderr
+    assert "GetWidth called without a layer argument" not in r.stderr
+    assert "repeated KiCad assert lines" in r.stderr
+
+
+def test_native_warning_filter_opt_in_is_deadlock_free():
+    code = (PCBNEW_CHILD % ROOT).replace("install_stderr(force=True)", "install_stderr()")
+    env = dict(os.environ, FLUXPLACE_QUIET_STDERR="1")
+    env.pop("FLUXPLACE_RAW_STDERR", None)
+    env.pop("PYTEST_CURRENT_TEST", None)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=20, env=env)
+    assert r.returncode == 0, r.stderr[-1000:]
+    assert r.stdout.strip() == "completed"
+    assert "GetWidth called without a layer argument" not in r.stderr
+    assert "repeated KiCad assert lines" in r.stderr

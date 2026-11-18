@@ -76,6 +76,19 @@ def test_run_logged_writes_status_and_waits(tmp_path):
     assert "reroute" in RS.one_line(st) and "\n" not in RS.one_line(st)
 
 
+def test_run_logged_filters_native_assertions_from_router_log(tmp_path):
+    noise = './kicad/pcbnew/pcb_track.cpp(387): assert ""false"" failed in GetWidth(): Warning: PCB_VIA::GetWidth called without a layer argument'
+    script = tmp_path / "noisy.py"
+    script.write_text("import sys\nfor l in %r:\n    print(l, flush=True)\nopen(sys.argv[1], 'w').write('x')\n" % ([noise] * 100 + KRT.splitlines()))
+    out = str(tmp_path / "out.kicad_pcb")
+    log = str(tmp_path / "router.log")
+    r = RS.run_logged([sys.executable, str(script), out], out=out, log_path=log, every=0.1)
+    assert r.returncode == 0 and "RETRY FAILED" in r.stdout
+    assert "GetWidth called without" not in r.stdout
+    assert "dropped 100 repeated KiCad assert lines" in r.stdout
+    assert open(log).read() == r.stdout
+
+
 def test_timeout_kills_and_raises(tmp_path):
     out = str(tmp_path / "o.kicad_pcb")
     with pytest.raises(__import__("subprocess").TimeoutExpired):

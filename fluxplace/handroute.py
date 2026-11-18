@@ -633,7 +633,7 @@ def _apply_prims(b, M, net, prims, width, via, lock=False):
         else:
             pos = P(p[1])
             old = next((t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetCode() == pnet.GetNetCode()
-                        and t.GetPosition() == pos and t.GetWidth() == int(round(via[0] * 1e6))
+                        and t.GetPosition() == pos and t.GetWidth(pcbnew.F_Cu) == int(round(via[0] * 1e6))
                         and t.GetDrill() == int(round(via[1] * 1e6))), None)
             if old is not None:
                 added.append(("via-existing", p[1], old.m_Uuid.AsString()))
@@ -895,7 +895,7 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli", l
                 n.SetPosition(t.GetPosition())
                 n.SetViaType(t.GetViaType())
                 n.SetLayerPair(t.TopLayer(), t.BottomLayer())
-                n.SetWidth(t.GetWidth())
+                n.SetWidth(t.GetWidth(pc.F_Cu))
                 n.SetDrill(t.GetDrill())
             elif cls == "PCB_ARC":
                 n = pc.PCB_ARC(b)
@@ -990,7 +990,7 @@ def _removed_track_record(t, o):
            "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]) if o.kind == "track" else None,
            "was_locked": t.IsLocked(), "lock_origin": "board" if t.IsLocked() else None}
     if cls == "PCB_VIA":
-        geometry = {"type": "via", "x": t.GetPosition().x, "y": t.GetPosition().y, "width": t.GetWidth(),
+        geometry = {"type": "via", "x": t.GetPosition().x, "y": t.GetPosition().y, "width": t.GetWidth(t.TopLayer()),
                     "drill": t.GetDrill(), "via_type": int(t.GetViaType()), "top_layer": t.TopLayer(), "bottom_layer": t.BottomLayer()}
     else:
         geometry = {"type": "arc" if cls == "PCB_ARC" else "track", "start": [t.GetStart().x, t.GetStart().y],

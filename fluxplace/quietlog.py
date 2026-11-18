@@ -1,6 +1,6 @@
-"""Drop known-noise lines (the pcbnew property.h assert) from stderr and from captured subprocess logs.
+"""Drop repeated native KiCad assertions from stderr and from captured subprocess logs.
 
-The assert is printed by C code straight to fd 2, thousands of times; one log reached 146 MB of it. Three entry points:
+The assertions are printed by C code straight to fd 2, thousands of times; one log reached 176 MB. Three entry points:
 `LineFilter` (the pure filter), `install_stderr()` (the process's own fd 2, restored at exit), `filter_file()` /
 `filter_text()` (a log a subprocess wrote). Off with FLUXPLACE_RAW_STDERR=1. Non-matching lines are never lost.
 """
@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 # known-noise patterns (matched against one line, no newline); extend this list
-NOISE = [re.compile(r"property\.h\(\d+\): assert .*m_choices")]
+NOISE = [re.compile(r"property\.h\(\d+\): assert .*m_choices"),
+         re.compile(r"pcb_track\.cpp\(\d+\): assert .*PCB_VIA::GetWidth called without a layer argument")]
 LABEL = "KiCad assert"
 
 
@@ -169,7 +170,7 @@ def install_stderr(force=False):
     global _active
     if _active is not None and not _active.done:
         return _active
-    # Kept opt-in for compatibility; the helper-process pump fixes the native-writer/GIL deadlock found on a routed board.
+    # Opt-in: the spawn-based guarded-lay benchmark remains over 20% slower with the pump enabled.
     if not force and os.environ.get("FLUXPLACE_QUIET_STDERR") != "1":
         return None
     if raw_requested() or (not force and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)):

@@ -570,7 +570,7 @@ def _obstacles(board, layer, net_code, clear_mm):
             if not t.IsOnLayer(layer):
                 continue
             p = t.GetPosition()
-            obs.append(([(p.x / 1e6, p.y / 1e6)], t.GetWidth() / 2e6))
+            obs.append(([(p.x / 1e6, p.y / 1e6)], t.GetWidth(layer) / 2e6))
         elif cls in ("PCB_TRACK", "PCB_ARC") and t.GetLayer() == layer:
             a, b = t.GetStart(), t.GetEnd()
             pts = [(a.x / 1e6, a.y / 1e6), (b.x / 1e6, b.y / 1e6)]
@@ -701,7 +701,8 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
         target, tol = targets[g["name"]]
         unit = g["unit"]
         wb = pcbnew.LoadBoard(work)
-        width = max([t.GetWidth() / 1e6 for t in wb.GetTracks() if t.GetNetname() == net] or [0.0])
+        width = max([(t.GetWidth(pcbnew.F_Cu) if t.GetClass() == "PCB_VIA" else t.GetWidth()) / 1e6
+                     for t in wb.GetTracks() if t.GetNetname() == net] or [0.0])
         spacing = g["spacing_mm"] or 3.0 * max(width, clearance_of(net))
         period = 2.0 * spacing                               # two legs per bump: leg gap = spacing
         row = {"group": g["name"], "net": net, "target": target, "tol": tol, "unit": unit, "spacing_mm": spacing}

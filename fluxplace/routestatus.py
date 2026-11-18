@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-from . import routediag as RD
+from . import routediag as RD, quietlog as Q
 
 STATUS_EVERY = 3.0          # seconds between status writes (at most)
 DEFAULT_STALL_S = 600.0
@@ -159,7 +159,8 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
             return
         off[0] += cut + 1
         for ln in data[: cut + 1].decode(errors="replace").splitlines():
-            parser.feed(ln)
+            if not Q.is_noise(ln):
+                parser.feed(ln)
 
     def write(final=None, rc=None):
         nonlocal last_w
@@ -218,6 +219,8 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
         if proc.poll() is None:
             _kill(proc)
         raise
+    finally:
+        Q.filter_file(lpath)
     write("done" if rc == 0 else "failed", rc)
     text = open(lpath, errors="replace").read()
     return subprocess.CompletedProcess(cmd, rc, stdout=text, stderr="")

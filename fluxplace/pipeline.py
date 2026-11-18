@@ -142,7 +142,8 @@ def _run_cli(argv, logpath):
         except Exception as e:                              # report, never crash the pipeline
             buf.write(f"\n{type(e).__name__}: {e}\n")
             rc = 99
-    text = buf.getvalue()
+    from . import quietlog
+    text = quietlog.filter_text(buf.getvalue())
     with open(logpath, "a") as fh:
         fh.write("$ fluxplace " + " ".join(map(str, argv)) + "\n" + text + "\n")
     return rc, text

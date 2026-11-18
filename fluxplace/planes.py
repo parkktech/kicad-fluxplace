@@ -26,6 +26,10 @@ def _mm(v):
     return pcbnew.FromMM(v)
 
 
+def _width(t):
+    return t.GetWidth(pcbnew.F_Cu) if t.GetClass() == "PCB_VIA" else t.GetWidth()
+
+
 def pour(board, netname="GND", layers=None, clearance=0.25, min_thickness=0.2,
          solid=True):
     """Add a full-board pour of `netname` on each layer that doesn't already
@@ -85,7 +89,7 @@ def stitch(board, netname="GND", pitch=3.0, via_d=0.6, via_drill=0.3,
     for t in board.GetTracks():
         if t.GetNetCode() == nc:
             continue
-        a = t.GetStart(); c = t.GetEnd(); w = t.GetWidth() // 2 + K
+        a = t.GetStart(); c = t.GetEnd(); w = _width(t) // 2 + K
         obst.append((min(a.x, c.x) - w, min(a.y, c.y) - w,
                      max(a.x, c.x) + w, max(a.y, c.y) + w))
     B = _mm(5.0)
@@ -163,7 +167,7 @@ def via_stub_ends(board, netnames=("GND",), via_d=0.6, via_drill=0.3,
                 continue
             a = t.GetStart(); b = t.GetEnd()
             segs.append((a.x, a.y, b.x, b.y,
-                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+                         _width(t) // 2 + _mm(via_d) // 2 + K))
 
         def _seg_hit(x, y):
             for ax, ay, bx, by, r in segs:
@@ -246,7 +250,7 @@ def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
             continue
         a = t.GetStart(); b = t.GetEnd()
         segs.append((a.x, a.y, b.x, b.y,
-                     t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+                     _width(t) // 2 + _mm(via_d) // 2 + K))
     # hole-to-hole, any net (same-net holes are not obstacles above): a drill within the fab's hole spacing is refused,
     # including the vias placed earlier in this call
     holes = [(p.GetPosition().x, p.GetPosition().y, p.GetDrillSize().x // 2) for f in board.GetFootprints() for p in f.Pads()
@@ -316,7 +320,7 @@ def tie_tracks_to_plane(board, netname, plane_layer, pitch=6.0, via_d=0.6,
         if t.GetNetCode() != nc:
             a = t.GetStart(); b = t.GetEnd()
             segs.append((a.x, a.y, b.x, b.y,
-                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+                         _width(t) // 2 + _mm(via_d) // 2 + K))
         elif t.GetClass() == "PCB_VIA":
             p = t.GetPosition()
             vias_here.append((p.x, p.y))
@@ -408,7 +412,7 @@ def tie_floating_clusters(board, netname, plane_layer, via_d=0.6,
         if t.GetNetCode() != nc:
             a = t.GetStart(); b = t.GetEnd()
             segs.append((a.x, a.y, b.x, b.y,
-                         t.GetWidth() // 2 + _mm(via_d) // 2 + K))
+                         _width(t) // 2 + _mm(via_d) // 2 + K))
 
     def clear_at(x, y):
         if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):
@@ -620,7 +624,7 @@ def finalize_dfm(board, rules=None, clamp_vias=True, graze_repair=True,
     if clamp_vias:
         floor_d = _mm(r["min_via_d"])
         for t in board.GetTracks():
-            if t.GetClass() == "PCB_VIA" and t.GetWidth() < floor_d:
+            if t.GetClass() == "PCB_VIA" and t.GetWidth(pcbnew.F_Cu) < floor_d:
                 t.SetWidth(_mm(max(r["min_via_d"], 0.45)))
                 if t.GetDrillValue() > _mm(0.25):
                     t.SetDrill(_mm(0.25))
@@ -638,7 +642,7 @@ def finalize_dfm(board, rules=None, clamp_vias=True, graze_repair=True,
             if t.GetClass() != "PCB_VIA":
                 continue
             vx, vy = t.GetPosition().x, t.GetPosition().y
-            vr = t.GetWidth() // 2
+            vr = t.GetWidth(pcbnew.F_Cu) // 2
             worst = None
             for (px, py, hx, hy, nc) in pads:
                 if nc == t.GetNetCode():
@@ -652,8 +656,8 @@ def finalize_dfm(board, rules=None, clamp_vias=True, graze_repair=True,
             if worst is None:
                 continue
             need = CL - worst
-            if t.GetWidth() - 2 * need >= floor_d:
-                t.SetWidth(int(t.GetWidth() - 2 * need) - _mm(0.005))
+            if t.GetWidth(pcbnew.F_Cu) - 2 * need >= floor_d:
+                t.SetWidth(int(t.GetWidth(pcbnew.F_Cu) - 2 * need) - _mm(0.005))
                 shrunk += 1
             else:
                 grazing.append((pcbnew.ToMM(vx), pcbnew.ToMM(vy),

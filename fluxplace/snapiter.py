@@ -40,7 +40,7 @@ def _snap(src, dst, skip):
             p = get()
             for v in vias:
                 if v.GetNetCode() == t.GetNetCode() and v.IsOnLayer(t.GetLayer()) and v.GetPosition() != p and \
-                        math.hypot(p.x - v.GetPosition().x, p.y - v.GetPosition().y) <= v.GetWidth() / 2:
+                        math.hypot(p.x - v.GetPosition().x, p.y - v.GetPosition().y) <= v.GetWidth(pcbnew.F_Cu) / 2:
                     put(v.GetPosition())
                     n += 1
                     break
