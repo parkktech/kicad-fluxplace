@@ -1,6 +1,10 @@
 # Change log (moved from the README)
 
 
+## 2026-11-18 - pour-connected pads are not keepout_trapped
+
+A pad inside a track-forbidding rule area is not trapped when a filled zone of its own net, on a layer the pad is on, touches the pad and the rule area allows copper pours (`copperpour` not `not_allowed`). `legality.poured_pad` is the shared test; the route gate (`legality.collisions`) and `preroute.keepout_trapped` both use it. Without such a pour, or with another net's pour, the FAIL stays. Tests: `tests/test_placecheck_gate.py`.
+
 ## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
 
 `placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.

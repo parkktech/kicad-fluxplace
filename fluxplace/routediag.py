@@ -130,6 +130,8 @@ def load(path, track=None, clearance=None, project=None):
                     k[:2] == ["vias", "not_allowed"] for k in keep if isinstance(k, list)),
                 "no_pads": bool(keep) and any(
                     k[:2] == ["pads", "not_allowed"] for k in keep if isinstance(k, list)),
+                "no_pours": bool(keep) and any(
+                    k[:2] == ["copperpour", "not_allowed"] for k in keep if isinstance(k, list)),
                 "no_footprints": bool(keep) and any(
                     k[:2] == ["footprints", "not_allowed"] for k in keep if isinstance(k, list)),
                 "fills": [((BF._atoms(BF._first(fz, "layer")) or [""])[0],

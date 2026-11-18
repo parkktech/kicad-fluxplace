@@ -436,6 +436,19 @@ def _bbox(pts, r=0.0):
     return (min(p[0] for p in pts) - r, min(p[1] for p in pts) - r, max(p[0] for p in pts) + r, max(p[1] for p in pts) + r)
 
 
+def poured_pad(B, q):
+    """A filled pour of the pad's own net, on a layer the pad is on, touches the pad: the pad is connected through the pour
+    (a track-forbidding rule area does not trap it when the area also allows pours; the caller checks that)."""
+    core, r = GM.pad_shape(q)
+    for z in B["zones"]:
+        if z["keepout"] or z["net"] != q["net"] or not z.get("fills"):
+            continue
+        for layer, pts in z["fills"]:
+            if layer in q["layers"] and len(pts) >= 3 and GM.core_gap(core, pts) - r < 0.01:
+                return True
+    return False
+
+
 def collisions(B, cons=None, relevance=None):
     """Fast geometric pre-route collision check (no DRC run). -> [finding] grouped by footprint pair:
     {level FAIL|WARN|INFO, code COLLISION, pair, kinds {kind: n}, relevance [tags], examples, msg, refs}.
@@ -519,7 +532,8 @@ def collisions(B, cons=None, relevance=None):
             if z.get("no_pads"):
                 hit(key, "keepout", f"pad {q['ref']}.{q['num'] or '-'}[{q['net'] or '-'}] in {area} (pads not allowed)")
             elif z["no_tracks"] and q["net"] and not q.get("np"):
-                hit(key, "keepout_trapped", f"pad {q['ref']}.{q['num']}[{q['net']}] in {area} (tracks not allowed)")
+                if z.get("no_pours") or not poured_pad(B, q):   # a pour of its net, on the pad's layer, connects it
+                    hit(key, "keepout_trapped", f"pad {q['ref']}.{q['num']}[{q['net']}] in {area} (tracks not allowed)")
         if z.get("no_footprints"):
             for ref, p in P.items():
                 if ref == z.get("owner") or ref.upper() in (z["name"] or "").upper():

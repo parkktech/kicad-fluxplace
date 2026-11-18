@@ -147,6 +147,8 @@ def keepout_trapped(B):
             if (z["keepout"] and z["no_tracks"] and z["pts"] and p["layers"] <= z["layers"]
                     and GM.poly_has(z["pts"], p["x"], p["y"])
                     and p["ref"].upper() not in z["name"].upper()):   # the zone's own antenna
+                if p["net"] and not z.get("no_pours") and LGL.poured_pad(B, p):
+                    break                                              # connected through a pour the rule area allows
                 by[(p["ref"], z["name"])].append(p["num"])
                 break
     return [_f(FAIL, "KEEPOUT_TRAPPED",
