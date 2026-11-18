@@ -61,6 +61,33 @@ def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnec
     return keys_from_report(d, keep, unconnected)
 
 
+_ZONE_DESC = re.compile(r"^Zone \[([^\]]*)\] on ([^,\s]+)")
+
+
+def open_split(d):
+    """Unconnected items of a kicad-cli DRC dict, split: `islands` {(net, layer): n} for a zone (pour) island that
+    touches no same-net pad, via or track, and `track_opens` for every other open (track, via, pad)."""
+    islands, opens = Counter(), 0
+    for u in d.get("unconnected_items", []):
+        m = next((_ZONE_DESC.match(str(i.get("description", ""))) for i in u.get("items") or []
+                  if _ZONE_DESC.match(str(i.get("description", "")))), None)
+        if m:
+            islands[(m.group(1), m.group(2))] += 1
+        else:
+            opens += 1
+    return {"islands": dict(islands), "track_opens": opens}
+
+
+def island_lines(split):
+    """The final-summary lines for an open_split: track opens, then one ZONE_ISLAND row per island and the fix."""
+    out = [f"open connections: {split['track_opens']} track/via open(s), {sum(split['islands'].values())} zone island(s)"]
+    out += [f"ZONE_ISLAND {net} {layer} x{n}" for (net, layer), n in sorted(split["islands"].items())]
+    if split["islands"]:
+        out.append("  fix: fluxplace pour-island BOARD --net NET --out OUT (one guarded stitching via per island); "
+                   "a zone island is not a track open")
+    return out
+
+
 def new_keys(base_keys, keys):
     """Keys the candidate has more of than the base (the only rejection cause)."""
     return Counter(keys) - Counter(base_keys)

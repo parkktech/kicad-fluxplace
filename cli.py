@@ -3111,7 +3111,12 @@ def cmd_progress(a):
             raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
         wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
         print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
-        from fluxplace import modelpaths as MP
+        from fluxplace import modelpaths as MP, drcguard as DG
+        if cp.get("islands") is not None:                   # zone islands are listed apart from track opens
+            split = {"track_opens": cp["metrics"].get("track_opens", 0),
+                     "islands": {(n, l): c for n, l, c in cp["islands"]}}
+            for ln in DG.island_lines(split):
+                print(ln)
         for ln in MP.warn_lines(MP.scan(cp["board"])):
             print(ln)
         print(f"brief: fluxplace progress brief --workdir {wd}")

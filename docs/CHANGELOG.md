@@ -13,6 +13,10 @@ A pad inside a track-forbidding rule area is not trapped when a filled zone of i
 
 `measure` (DRC of a temp copy) also counts `shorting_items` as the `shorts` metric. `progress checkpoint` refuses a board whose `shorts` is higher than the last accepted checkpoint's, writing nothing; `--allow-new-shorts` accepts it. A checkpoint is measured when `--measure` is given or when the last accepted checkpoint recorded `shorts`, so the comparison needs a measured predecessor. Tests: `tests/test_progress.py`.
 
+## 2026-11-18 - final DRC summary lists zone islands apart from track opens
+
+`drcguard.open_split` splits a DRC report's unconnected items into zone islands (`Zone [NET] on LAYER`) and track/via opens. `progress checkpoint --measure` prints `ZONE_ISLAND <net> <layer> xN` rows with the track-open count and the `fluxplace pour-island BOARD --net NET` fix; the checkpoint records `track_opens` and `zone_islands` metrics. The fab package DRC scope note lists the same rows. The pipeline itself prints no final DRC line in this code; the two places above are the summaries that exist. Tests: `tests/test_zone_islands.py`.
+
 ## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
 
 `placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.

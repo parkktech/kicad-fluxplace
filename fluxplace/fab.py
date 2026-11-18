@@ -163,6 +163,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
             d = json.load(open(drc_path))
             nviol = len(d.get("violations", []))
             nunc = len(d.get("unconnected_items", []))
+            from . import drcguard as DG
+            _split = DG.open_split(d)
             ignored = [c.get("key") for c in d.get("ignored_checks", []) if c.get("key")]
             verdict = "PASS" if (nviol == 0 and nunc == 0) else "REVIEW"
             if ignored:
@@ -171,6 +173,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
                               + "\n".join("               - %s" % k for k in sorted(ignored)))
             else:
                 scope_note = "scope        : every rule evaluated; no checks ignored"
+            if _split["islands"] or _split["track_opens"]:   # zone islands are not track opens: listed apart
+                scope_note += "\n" + "\n".join("               " + ln for ln in DG.island_lines(_split))
         except Exception:
             pass
     done["drc"] = verdict

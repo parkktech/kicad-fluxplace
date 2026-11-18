@@ -94,7 +94,11 @@ def measure(board, timeout=900, cli=None):
         if not isinstance(j.get("violations"), list):
             raise RuntimeError("DRC report has no violations list")
         shorts = sum(1 for v in j["violations"] if v.get("type") == "shorting_items")
-        return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"]), "shorts": shorts}
+        from . import drcguard as DG
+        split = DG.open_split(j)
+        return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"]), "shorts": shorts,
+                "track_opens": split["track_opens"], "zone_islands": sum(split["islands"].values()),
+                "islands": [[net, layer, n] for (net, layer), n in sorted(split["islands"].items())]}
 
 
 def checkpoint(board, workdir=None, note="", metrics=None, do_measure=False, measure_fn=None, allow_new_shorts=False):
@@ -108,12 +112,17 @@ def checkpoint(board, workdir=None, note="", metrics=None, do_measure=False, mea
     m = dict(metrics or {})
     st = load(workdir)
     prev = st["history"][-1]["metrics"] if st["history"] else {}
+    islands = None
     if do_measure or "shorts" in prev:
-        m.update((measure_fn or measure)(board))
+        got = dict((measure_fn or measure)(board))
+        islands = got.pop("islands", None)                  # a list, kept on the checkpoint, not in the metrics
+        m.update(got)
     if "shorts" in prev and "shorts" in m and m["shorts"] > prev["shorts"] and not allow_new_shorts:
         raise ValueError(f"refused: {m['shorts']} shorting_items vs {prev['shorts']} at the last accepted checkpoint "
                          f"(new shorts; --allow-new-shorts to accept anyway)")
     cp = {"ts": now(), "board": board, "rev": rev(board), "metrics": m, "note": note or ""}
+    if islands is not None:
+        cp["islands"] = islands
     st["history"].append(cp)
     st["accepted"] = {"board": board, "rev": cp["rev"], "ts": cp["ts"], "note": cp["note"]}
     save(workdir, st)

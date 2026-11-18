@@ -183,4 +183,4 @@ def test_measure_counts_shorting_items(tmp_path):
         m = PG.measure(b, cli="kicad-cli")
     finally:
         sp.run = old
-    assert m == {"unconnected": 1, "errors": 3, "shorts": 2}
+    assert m["unconnected"] == 1 and m["errors"] == 3 and m["shorts"] == 2 and m["track_opens"] == 1 and m["zone_islands"] == 0
