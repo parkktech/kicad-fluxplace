@@ -55,6 +55,7 @@
 - Model paths: `placement-check` and `progress checkpoint` warn MODEL_PATH_UNRESOLVED with the count and fix hint (W11 lesson 3). Open: the pipeline still writes the work copy without lib/ beside it.
 - `progress checkpoint` refuses new DRC shorting_items vs the last accepted checkpoint (`--allow-new-shorts` overrides) (W11 lesson 4).
 - Final DRC summaries (`progress checkpoint --measure`, fab package scope) list `ZONE_ISLAND <net> <layer>` apart from track opens and point at `pour-island` (W11 lesson 5).
+- Thermal areas: `fluxplace thermal` (pre/post) from `[thermal.NAME]` (W11 lesson 6). Not wired into the pipeline stage order yet; run it by hand after `planes` (pre) and after routing (post).
 - `placement-check` now runs the route stage's collision gate (part-against-part courtyard / copper / through-hole
   overlaps). Found when a connector moved to the board edge covered two of its own resistors: placement-check said OK,
   the router refused 80 minutes later.

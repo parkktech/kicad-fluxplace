@@ -17,6 +17,12 @@ A pad inside a track-forbidding rule area is not trapped when a filled zone of i
 
 `drcguard.open_split` splits a DRC report's unconnected items into zone islands (`Zone [NET] on LAYER`) and track/via opens. `progress checkpoint --measure` prints `ZONE_ISLAND <net> <layer> xN` rows with the track-open count and the `fluxplace pour-island BOARD --net NET` fix; the checkpoint records `track_opens` and `zone_islands` metrics. The fab package DRC scope note lists the same rows. The pipeline itself prints no final DRC line in this code; the two places above are the summaries that exist. Tests: `tests/test_zone_islands.py`.
 
+## 2026-11-18 - thermal areas: `[thermal.NAME]` and `fluxplace thermal --stage pre|post`
+
+New generic command (`fluxplace/thermal.py`, docs/commands/thermal.md). A `[thermal.NAME]` block gives rect or polygon, side, net (GND default), via diameter/drill/pitch, exclude_refs and mask_open. `pre` lays locked through vias of the net on a pitch grid, skipping sites within clearance of copper, holes or its own vias, and adds a no-tracks rule area on the side with a cut-out of pad half-size + 1.0 mm around each exclude_refs pad. `post` opens the solder mask on that side around every non-net via, pad and track (+0.25 mm), dropping slivers under 0.5 mm. It generalises W11 `02-thermal.py`, `02b-h201-clear.py` and `03-thermal-mask.py`; no constants from that board are in code. Measured on a scratch copy of W11 planes: 158 vias placed, 9 cut-outs, 35 vias carved on the mask. Refuses a second pre run. Tests: `tests/test_thermal.py`.
+
+Note for pcbnew users: the zone and mask shape keep pointers to their polygon, and `FindNet`/pad wrappers must outlive the board call; `thermal` keeps every added object alive until the save (a missing reference segfaulted the save).
+
 ## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
 
 `placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.

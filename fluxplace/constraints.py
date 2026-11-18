@@ -460,6 +460,8 @@ COORD_KEYS = (
     ("placement.group.*.centre", "xy", "[placement.group.NAME] centre = [x, y]"),
     ("intent.region.rect", "xy", "[[intent.region]] rect = [x0, y0, x1, y1]"),
     ("plan.pour.region", "xy", "[[plan.pour]] region = [x0, y0, x1, y1] | [[x, y], ...]"),
+    ("thermal.*.rect", "xy", "[thermal.NAME] rect = [x0, y0, x1, y1]"),
+    ("thermal.*.polygon", "xy", "[thermal.NAME] polygon = [[x, y], ...]"),
 )
 
 # key names that mean "a position" when they hold numbers; anything with one of
