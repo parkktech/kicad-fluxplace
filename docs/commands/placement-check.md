@@ -3,7 +3,7 @@
 ```
 fluxplace placement-check BOARD --constraints C [--spec S] [--json] [-q]
 ```
-Read-only. One row per rule, with the offending parts; exit 1 when any rule fails. Writes `<board>.placement-check.json`.
+Read-only. Includes the route stage's collision gate (part-against-part and board rule areas that forbid pads/tracks/footprints). One row per rule, with the offending parts; exit 1 when any rule fails. Writes `<board>.placement-check.json`.
 
 | rule | source | fails when |
 |---|---|---|

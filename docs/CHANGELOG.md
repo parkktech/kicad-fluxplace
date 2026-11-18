@@ -1,5 +1,10 @@
 # Change log (moved from the README)
 
+
+## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
+
+`placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.
+
 ## 2026-11-16 - whole-chain monitoring and budgets, version-aware Freerouting inputs
 
 `krt-whole` now honors one total `--route-budget` across its plane/pair/single-ended calls, streams each call through the standard status writer, rejects stale output from earlier runs, and records per-step caps, logs and `--json-out` paths. Final `warn` means open connections remain; `route-status` prints them. Freerouting's JVM command passes `.kicad_pro` and `.kicad_dru` only for releases that support them (2.5.0 accepts DSN/SES/RULES, not those sidecars) and uses the non-deprecated `--router.max_threads` setting. `[route] whole_post` (default true) adds iterative via-centre snap, guarded plane ties and a saved zone refill to the whole chain. `snapiter` accepts in-place boards and uses the shared zone-flicker-safe DRC key set. A `pairs` stage exception is now a `fail`, never a `pass` with the input board; `[pairlay] fallback = false` gives a bounded main pass with atomic state-c handoff, and `W/<n>-pairs/progress.json` exposes live stage state through `route-status`. Tests cover the total budget, stale-output rejection, status completion, sidecar ordering, in-place snapping, zone-fill flicker and pair-stage failure.

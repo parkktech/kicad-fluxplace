@@ -50,6 +50,7 @@
 
 ## Done 2026-11-18
 
+- `placement-check` and `pairs` run the route collision gate with rule areas (W11 lesson 1): the board that the route stage refused now fails placement-check.
 - `placement-check` now runs the route stage's collision gate (part-against-part courtyard / copper / through-hole
   overlaps). Found when a connector moved to the board edge covered two of its own resistors: placement-check said OK,
   the router refused 80 minutes later.

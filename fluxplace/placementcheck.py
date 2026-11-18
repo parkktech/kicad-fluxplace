@@ -105,15 +105,28 @@ def compute(B, cons):
     under = PR.under_report(B, cons)
     # the same collision gate the route stage and route-ready apply (courtyard / pad / hole / keep-out overlaps between
     # parts): a placement that passes the rules above but collides would otherwise only be refused at the router
-    _ok, coll = LY.collision_gate(B, cons)
-    parts = set(B.get("parts") or {})
-    def _two_parts(x):                       # part against part only: rule-area findings are the keep-out rows above
-        pr = list(x.get("pair") or x.get("refs") or [])
-        return len(pr) == 2 and (not parts or all(r in parts for r in pr)) and "rule area" not in x["msg"]
-    collisions = [{"level": x["level"], "refs": list(x.get("pair") or x.get("refs") or []), "msg": x["msg"]}
-                  for x in coll if x["level"] == "FAIL" and _two_parts(x)]
+    # rule areas drawn on the board (KiCad keep-outs: pads / tracks / footprints) are checked by the same gate, so a
+    # board the route stage will refuse for a rule area fails here too
+    covered = {(r["name"], v["ref"]) for r in rules for v in r["violations"]}
+    for u in under:                                         # a too-tall part under a module is already an under row
+        for p_ in u["parts"]:
+            if p_["verdict"] != "ok":
+                covered |= {(u["module"], p_["ref"]), ("module." + u["module"], p_["ref"])}
+    collisions = []
+    for x in gate_failures(B, cons):                        # a module's expanded keep-out is already a keep-out row
+        pr = x["refs"]
+        if len(pr) == 2 and pr[1].startswith("@") and (pr[1][1:], pr[0]) in covered:
+            continue
+        collisions.append(x)
     n = sum(len(r["violations"]) for r in rules) + sum(p["verdict"] != "ok" for u in under for p in u["parts"]) + len(collisions)
     return {"ok": n == 0, "violations": n, "rules": rules, "under": under, "collisions": collisions, "quadrants": quadrants(B)}
+
+
+def gate_failures(B, cons):
+    """FAIL rows of the route stage's collision gate (legality.collisions), as placement-check and pairs report them."""
+    _ok, coll = LY.collision_gate(B, cons)
+    return [{"level": x["level"], "refs": list(x.get("pair") or x.get("refs") or []), "msg": x["msg"]}
+            for x in coll if x["level"] == "FAIL"]
 
 
 def residual(board, cons):

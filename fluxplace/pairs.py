@@ -1242,6 +1242,12 @@ def cmd_pairs(a):
     if out and os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
     only = set(x.strip() for x in a.nets.split(",") if x.strip()) if a.nets else None
+    if not a.plan_only:                    # the route stage's collision gate, before any pairs work: same rows, same message
+        from . import placementcheck as PCK, routediag as RD
+        fails = PCK.gate_failures(RD.load(a.board), cons)
+        if fails:
+            raise SystemExit(f"pairs: refused - {len(fails)} FAIL collision row(s) the route stage would also refuse "
+                             f"(placement-check lists them):\n" + "\n".join(f"  COLLISION {x['msg'][:150]}" for x in fails[:6]))
     import sys
     cs0 = (["--constraints", a.constraints] if a.constraints else []) + (["--spec", a.spec] if a.spec else [])
     for x in getattr(a, "answer", None) or []:
