@@ -3105,7 +3105,8 @@ def cmd_progress(a):
         if not tgt:
             raise SystemExit("progress checkpoint: give the board")
         try:
-            st, cp = PG.checkpoint(tgt, a.workdir, a.note, PG.parse_metrics(a.metric), a.measure)
+            st, cp = PG.checkpoint(tgt, a.workdir, a.note, PG.parse_metrics(a.metric), a.measure,
+                                   allow_new_shorts=a.allow_new_shorts)
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
         wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
@@ -4196,6 +4197,8 @@ def build_parser():
     ppg.add_argument("--note", default="")
     ppg.add_argument("--metric", action="append", default=[], metavar="K=V", help="a number to record, repeatable")
     ppg.add_argument("--measure", action="store_true", help="checkpoint: DRC a temp copy for unconnected and errors")
+    ppg.add_argument("--allow-new-shorts", action="store_true",
+                     help="checkpoint: accept a board whose DRC shorting_items went up since the last accepted checkpoint")
     ppg.add_argument("--reason", default=None, help="block: why")
     ppg.add_argument("--json", action="store_true")
     ppg.add_argument("--max-chars", type=int, default=2500, help="brief: size cap")

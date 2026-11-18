@@ -93,19 +93,26 @@ def measure(board, timeout=900, cli=None):
             j = json.load(fh)
         if not isinstance(j.get("violations"), list):
             raise RuntimeError("DRC report has no violations list")
-        return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"])}
+        shorts = sum(1 for v in j["violations"] if v.get("type") == "shorting_items")
+        return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"]), "shorts": shorts}
 
 
-def checkpoint(board, workdir=None, note="", metrics=None, do_measure=False, measure_fn=None):
-    """Append a checkpoint, set `accepted`. -> (state, checkpoint)."""
+def checkpoint(board, workdir=None, note="", metrics=None, do_measure=False, measure_fn=None, allow_new_shorts=False):
+    """Append a checkpoint, set `accepted`. -> (state, checkpoint).
+    Shorts gate: when the previous accepted checkpoint recorded `shorts` (DRC shorting_items), the board is measured too,
+    and it is refused (ValueError, nothing written) when shorts went up, unless allow_new_shorts."""
     board = os.path.abspath(board)
     if not os.path.isfile(board):
         raise FileNotFoundError(board)
     workdir = workdir or os.path.dirname(board)
     m = dict(metrics or {})
-    if do_measure:
-        m.update((measure_fn or measure)(board))
     st = load(workdir)
+    prev = st["history"][-1]["metrics"] if st["history"] else {}
+    if do_measure or "shorts" in prev:
+        m.update((measure_fn or measure)(board))
+    if "shorts" in prev and "shorts" in m and m["shorts"] > prev["shorts"] and not allow_new_shorts:
+        raise ValueError(f"refused: {m['shorts']} shorting_items vs {prev['shorts']} at the last accepted checkpoint "
+                         f"(new shorts; --allow-new-shorts to accept anyway)")
     cp = {"ts": now(), "board": board, "rev": rev(board), "metrics": m, "note": note or ""}
     st["history"].append(cp)
     st["accepted"] = {"board": board, "rev": cp["rev"], "ts": cp["ts"], "note": cp["note"]}

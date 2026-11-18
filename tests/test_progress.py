@@ -149,3 +149,38 @@ def test_brief_truncation_keeps_first_three_and_drops_oldest_history(tmp_path):
     assert "3. blockers" in t_small                      # items 1-3 survive any cap
     full, _ = PG.brief(str(tmp_path))
     assert full.count("\n  ") >= 5
+
+
+def test_checkpoint_refuses_new_shorts_unless_allowed(tmp_path):
+    # W11 lesson 4: a checkpoint whose DRC has more shorting_items than the last accepted one is refused
+    b = _board(tmp_path)
+    PG.checkpoint(b, None, "w10", {}, True, measure_fn=lambda p: {"unconnected": 2, "errors": 5, "shorts": 0})
+    with pytest.raises(ValueError, match="refused: 3 shorting_items vs 0"):
+        PG.checkpoint(b, None, "w11", {}, False, measure_fn=lambda p: {"unconnected": 1, "errors": 3, "shorts": 3})
+    assert len(PG.load(str(tmp_path))["history"]) == 1               # nothing written on refusal
+    st, cp = PG.checkpoint(b, None, "w11 accepted", {}, False, measure_fn=lambda p: {"shorts": 3},
+                           allow_new_shorts=True)
+    assert len(st["history"]) == 2 and cp["metrics"]["shorts"] == 3
+    # equal or fewer shorts are accepted without the flag
+    st, _ = PG.checkpoint(b, None, "fewer", {}, False, measure_fn=lambda p: {"shorts": 1})
+    assert len(st["history"]) == 3
+
+
+def test_measure_counts_shorting_items(tmp_path):
+    import json as J
+    rep = {"violations": [{"type": "shorting_items"}, {"type": "clearance"}, {"type": "shorting_items"}],
+           "unconnected_items": [{}]}
+    b = _board(tmp_path)
+
+    def fake_cli(cmd, **kw):
+        out = cmd[cmd.index("--output") + 1]
+        open(out, "w").write(J.dumps(rep))
+        return type("R", (), {"returncode": 0})()
+    import subprocess as sp
+    old = sp.run
+    sp.run = fake_cli
+    try:
+        m = PG.measure(b, cli="kicad-cli")
+    finally:
+        sp.run = old
+    assert m == {"unconnected": 1, "errors": 3, "shorts": 2}

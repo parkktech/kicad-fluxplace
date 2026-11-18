@@ -9,6 +9,10 @@ A pad inside a track-forbidding rule area is not trapped when a filled zone of i
 
 `fluxplace/modelpaths.py` resolves every `(model "...")` path of a board: `${KIPRJMOD}` is the board's folder, `${KICAD*_3DMODEL_DIR}` is a library path and is skipped. Unresolved paths print one `WARN MODEL_PATH_UNRESOLVED: n of m` line with the fix hint; the command still exits 0 (WARN, not FAIL). `placement-check --json` carries a `model_paths` object. The work copy itself is not changed. Tests: `tests/test_placecheck_gate.py`.
 
+## 2026-11-18 - progress checkpoint refuses new shorts
+
+`measure` (DRC of a temp copy) also counts `shorting_items` as the `shorts` metric. `progress checkpoint` refuses a board whose `shorts` is higher than the last accepted checkpoint's, writing nothing; `--allow-new-shorts` accepts it. A checkpoint is measured when `--measure` is given or when the last accepted checkpoint recorded `shorts`, so the comparison needs a measured predecessor. Tests: `tests/test_progress.py`.
+
 ## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
 
 `placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.
