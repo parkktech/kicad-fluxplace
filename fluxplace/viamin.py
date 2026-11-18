@@ -25,7 +25,7 @@ def via_min(board, out, constraints=None, kicad_cli="kicad-cli", report=None, lo
     mm = lambda v: int(round(v * 1e6))      # noqa: E731
     b = pcbnew.LoadBoard(board)
     allv = _vias(b)
-    low = [v for v in allv if v.GetWidth() < mm(floor) - 1]
+    low = [v for v in allv if v.GetWidth(pcbnew.F_Cu) < mm(floor) - 1]
     cand = [v for v in low if not v.IsLocked()]
     budget = float(budget) if budget is not None else max(60.0, 3.0 * len(cand))
     t0 = time.monotonic()
@@ -48,7 +48,7 @@ def via_min(board, out, constraints=None, kicad_cli="kicad-cli", report=None, lo
         if time.monotonic() >= deadline:
             unreached(group)
             return
-        old = [v.GetWidth() for v in group]
+        old = [v.GetWidth(pcbnew.F_Cu) for v in group]
         for v in group:
             v.SetWidth(mm(floor))
         pcbnew.SaveBoard(tmp, b)

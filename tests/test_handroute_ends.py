@@ -71,6 +71,24 @@ def test_explore_reports_then_found_for_corridor_needing_extension(tmp_path):
     assert ok and ok[0]["remove"][0]["net"] == "X" and ok[0]["path"]
 
 
+def test_explore_reports_and_probes_whole_connected_blocker_run(tmp_path):
+    board = Brd()
+    board.edge(-2, -8, 24, 8)
+    board.pad("A1", "A", 2, 0)
+    board.pad("A2", "A", 18, 0)
+    board.track("X", [(10, -7), (10, 0), (10, 7)])
+    src = board.save(tmp_path)
+    r = H.suggest(src, "A", src_pt=(2, 0), dst_pt=(18, 0), layers=["F.Cu"], pitch=0.05, explore=True)
+    found = [e for e in r["explore"] if e["then_found"]]
+    assert len(found) == 1 and len(found[0]["remove"]) == 2
+    expected = {x["uuid"] for x in found[0]["remove"]}
+    out = str(tmp_path / "shoved.kicad_pcb")
+    shoved = H.shove(src, "X", out=out, ids=[found[0]["remove"][0]["uuid"]], chain=True)
+    assert shoved["accepted"], shoved.get("reason")
+    assert {x["uuid"] for x in shoved["info"]["removed"]} == expected
+    assert H.probe(out, "A", found[0]["path"])["ok"]
+
+
 def test_probe_clear_dir_and_shift_in_summary(tmp_path):
     from fluxplace import hrcli
     from test_handroute import gap_board

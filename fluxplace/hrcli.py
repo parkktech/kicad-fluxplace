@@ -244,7 +244,7 @@ def cmd_lay(a):
     if g is not None:
         return g
     r = _timed("fluxplace.handroute:lay", (a.board, a.net, a.path, a.out, a.constraints, a.width, _via(a), a.any_angle, a.partial),
-               {}, a.timeout, _edit_paths(a.board, a.out))
+               {"lock": a.lock}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"lay {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "lay")
     return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
@@ -254,9 +254,21 @@ def cmd_copy_net(a):
     g = _write_guard(a, a.out or a.board)
     if g is not None:
         return g
-    r = _timed("fluxplace.handroute:copy_net", (a.src, a.board, a.net, a.out, a.constraints), {}, a.timeout, _edit_paths(a.board, a.out))
+    r = _timed("fluxplace.handroute:copy_net", (a.src, a.board, a.net, a.out, a.constraints), {"lock": a.lock}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"copy-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "copy-net")
+    return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
+
+
+def cmd_lock_net(a):
+    g = _write_guard(a, a.out or a.board)
+    if g is not None:
+        return g
+    ids = [i for i in (a.ids or "").split(",") if i] or None
+    r = _timed("fluxplace.handroute:lock_net", (a.board, a.net, a.out, ids, a.unlock, a.constraints), {},
+               a.timeout, _edit_paths(a.board, a.out))
+    r.pop("cand_unc_pairs", None)
+    _emit(a, r, lambda: f"lock-net {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or ""), "lock-net")
     return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
 
 
@@ -291,7 +303,7 @@ def cmd_shove(a, op="shove"):
         return g
     args = (a.board, a.net, a.out, [i for i in (a.ids or "").split(",") if i] or None, _box(a.window) if a.window else None,
             a.chain, a.constraints)
-    r = _timed("fluxplace.handroute:shove", args, {"op": op}, a.timeout, _edit_paths(a.board, a.out))
+    r = _timed("fluxplace.handroute:shove", args, {"op": op, "allow_locked": a.allow_locked}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
 
     def text():
@@ -315,7 +327,7 @@ def cmd_suggest(a):
     dp = tuple(float(x) for x in a.dst.split(",")) if a.dst else None
     try:
         r = H.suggest(a.board, a.net, sp, dp, a.conn, a.constraints, a.width, _via(a), a.pitch, a.margin, a.via_cost,
-                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore)
+                      a.layers.split(",") if a.layers else None, relax=a.relax, relax_cost=a.relax_cost, explore=a.explore, include_locked=getattr(a, "include_locked", False))
     except Exception as e:
         r = {"found": False, "reason": f"internal error: {type(e).__name__}: {e}"}
     _emit(a, r, lambda: ("suggest: none - " + r["reason"] + "\n  " + "\n  ".join(f"remove {[(x['net'], x['id']) for x in e['remove']]} -> found={e['then_found']} {e['path'] or ''}" for e in r["explore"]) if r.get("explore") is not None else f"suggest(relaxed): {r['path']}\n  blockers: " + ", ".join(f"{b['kind']} {b['id']} {b['net']} {b['layer']}x{b['cells']}" for b in r["blockers"]) if r.get("blockers") is not None else f"suggest: {r['path']}\n  length {r['length_mm']} mm, {r['vias']} via(s), probe OK" if r.get("found") else f"suggest: none - {r['reason']}"), "suggest", _rev(a))
@@ -379,7 +391,7 @@ def register(sub):
         p.add_argument("--expect-rev", default=None, help="board_rev from probe/suggest: refuse to write if the board changed since")
         p.add_argument("--force-open", action="store_true", help="write even if KiCad has the board open (lock file present)")
         p.add_argument("--timeout", type=float, default=600.0,
-                       help="lay/shove/copy-net hard cap; expiry restores all destinations and exits 2 (default 600; 0 disables)")
+                       help="guarded-edit hard cap; expiry restores all destinations and exits 2 (default 600; 0 disables)")
 
     p = sub.add_parser("open-nets", help="list open nets")
     common(p)
@@ -418,6 +430,7 @@ def register(sub):
     p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board)")
     p.add_argument("--any-angle", action="store_true")
     p.add_argument("--partial", action="store_true", help="do not require the net's open count to fall")
+    p.add_argument("--lock", action="store_true", help="lock newly laid tracks/vias on acceptance")
     brief(p)
     guards(p)
     p.set_defaults(fn=cmd_lay)
@@ -427,9 +440,20 @@ def register(sub):
     common(p)
     p.add_argument("--net", required=True)
     p.add_argument("--out", default=None, help="output board (omit inside a session: edits the session WORK board = DST)")
+    p.add_argument("--lock", action="store_true", help="lock copied tracks/vias on acceptance")
     brief(p)
     guards(p)
     p.set_defaults(fn=cmd_copy_net)
+
+    p = sub.add_parser("lock-net", help="lock or unlock net copper")
+    common(p)
+    p.add_argument("--net", required=True)
+    p.add_argument("--ids", default=None, help="comma list of track/via UUID prefixes; default all copper of the net")
+    p.add_argument("--unlock", action="store_true")
+    p.add_argument("--out", default=None, help="output board (omit inside a session)")
+    brief(p)
+    guards(p)
+    p.set_defaults(fn=cmd_lock_net)
 
     p = sub.add_parser("via-min", help="raise vias")
     common(p)
@@ -457,6 +481,7 @@ def register(sub):
         p.add_argument("--ids", default=None, help="comma list of track/via ids (8+ hex chars) from `window`")
         p.add_argument("--window", default=None, help="X,Y,W,H: all copper of the net touching it")
         p.add_argument("--chain", action="store_true", help="extend each track to its whole run (to pad / via / branch)")
+        p.add_argument("--allow-locked", action="store_true", help="session only: explicitly named locked items are unlocked, removed and recorded")
         p.add_argument("--out", default=None)
         brief(p)
         guards(p)
@@ -475,6 +500,7 @@ def register(sub):
     p.add_argument("--via-cost", type=float, default=2.0, help="mm-equivalent cost of a via")
     p.add_argument("--relax-cost", type=float, default=1.5, help="mm-equivalent cost per grid cell crossing an unlocked foreign track/via (higher = fewer blockers)")
     p.add_argument("--explore", action="store_true", help="when no path: try removing each limiting UNLOCKED track/via (singles, then pairs) and report what would free it")
+    p.add_argument("--include-locked", action="store_true", help="with --explore: report locked candidates separately in locked_explore")
     p.add_argument("--relax", action="store_true", help="let the path cross UNLOCKED foreign tracks/vias at a cost and list them as blockers")
     brief(p)
     p.set_defaults(fn=cmd_suggest)

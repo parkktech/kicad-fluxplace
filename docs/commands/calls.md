@@ -16,11 +16,13 @@ first board/project (else first folder/file) named in the arguments, else `~/.ca
 
 # Quiet log (stderr noise filter)
 
-pcbnew prints `property.h(..): assert "m_choices.GetCount() > 0" failed ...` from C code thousands of times
-(one log reached 146 MB). `fluxplace/quietlog.py` drops it:
+pcbnew can print its property-enum and `PCB_VIA::GetWidth called without a layer argument` assertions thousands of times
+(one W8 log reached 176 MB). `fluxplace/quietlog.py` drops both:
 
 - the CLI filters its own fd 2 (pipe + helper-process reader, restored at exit, also on exceptions); one line
   `[fluxplace] dropped N repeated KiCad assert lines` is printed at the end. Other lines are never dropped.
-- `quietlog.filter_file(path)` / `filter_text(text)` clean a subprocess log after it finishes (used for the Cypress log).
+- `quietlog.filter_file(path)` / `filter_text(text)` clean external-router, stage and helper logs without unbounded memory.
 - Known-noise patterns are the list `quietlog.NOISE`; add more there.
-- OFF by default since 2026-11-17 (on a real routed board the fd-2 filter made hand-route commands hang); opt in with `FLUXPLACE_QUIET_STDERR=1`. `FLUXPLACE_RAW_STDERR=1` forces it off; automatically off under pytest.
+- Console filtering is opt-in with `FLUXPLACE_QUIET_STDERR=1`: the W8 spawn-based session-lay benchmark was over 20%
+  slower with it enabled. `FLUXPLACE_RAW_STDERR=1` forces all filtering off; automatically off under pytest. External-router,
+  stage and helper log filtering is on unless raw mode is set.

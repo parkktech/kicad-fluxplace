@@ -382,6 +382,8 @@ def run_jvm(cmd, log_path, timeout_s, grace_s, ses, cwd=None, tick=None, poll=2.
                     p.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     pass
+    from . import quietlog
+    quietlog.filter_file(log_path)
     res["elapsed"] = round(time.time() - t0, 1)
     return res
 

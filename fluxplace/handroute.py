@@ -5,13 +5,13 @@ engineer does (docs/AI-FINISH.md). Small, deterministic, JSON out; the decisions
   window(board, ...)          one region as data (+ PNG/SVG): pads, tracks, vias, free corridors, free via sites
   probe(board, net, path)     check a proposed path without writing anything
   lay(...)                    apply a probed path, DRC + connectivity guard, write only on success
-  shove / unlay(...)          remove an UNLOCKED net's copper and report the connection that opened
+  shove / unlay(...)          remove copper; locked removal needs explicit IDs and a session record
   session_*                   begin / undo / status / commit with a ledger of every attempt
   suggest(...)                grid search for a legal path between two islands (a proposal; probe decides)
 
 Rules of record: the floors come from the board's own design rules, raised by `--constraints` ([route] and the [fab]
-profile); nothing is ever laid below them. Locked copper is never changed. Measurement is kicad-cli DRC with zones
-refilled, the project file beside the board."""
+profile); nothing is ever laid below them. Locked copper changes only by explicit guarded commands. Measurement is
+kicad-cli DRC with zones refilled, the project file beside the board."""
 import heapq
 import json
 import math
@@ -107,10 +107,10 @@ def _resolve(M, ident):
     return full
 
 
-def _model(board, constraints=None):
+def _model(board, constraints=None, refill=True):
     if not os.path.exists(os.path.splitext(board)[0] + ".kicad_pro"):
         print(f"warning: no {os.path.splitext(os.path.basename(board))[0]}.kicad_pro beside the board: default rules apply", file=sys.stderr)
-    return G.Model(board, constraints)
+    return G.Model(board, constraints, refill=refill)
 
 
 def _item_desc(it):
@@ -119,8 +119,27 @@ def _item_desc(it):
     kind = m.group(1).lower() if m else "item"
     lm = re.search(r" on ([A-Za-z0-9_.]+Cu)", d)
     pin = re.match(r"Pad (\S+) \[[^\]]*\] of (\S+)", d)
-    return {"kind": kind, "id": it.get("uuid", "")[:8], "x": it["pos"]["x"], "y": it["pos"]["y"], "layer": lm.group(1) if lm else None,
+    uid = it.get("uuid", "")
+    return {"kind": kind, "id": _sid(uid), "uuid": uid, "x": it["pos"]["x"], "y": it["pos"]["y"], "layer": lm.group(1) if lm else None,
             "pin": f"{pin.group(2)}.{pin.group(1)}" if pin else None, "text": d}
+
+
+def _endpoint_ob(M, net, side):
+    """Resolve a DRC endpoint without assuming that its display-length UUID prefix is unique."""
+    kind = side["kind"]
+    if kind not in ("pad", "track", "via"):
+        return None
+    candidates = [o for o in M.obs if o.net == net and o.kind == kind]
+    uid = side.get("uuid")
+    exact = next((o for o in candidates if o.id == uid), None)
+    if exact:
+        return exact
+    if side.get("layer"):
+        candidates = [o for o in candidates if side["layer"] in o.layers]
+    pt = (side["x"], side["y"])
+    if not candidates:
+        return None
+    return min(candidates, key=lambda o: G.ob_gap(pt, pt, 0.0, o)[0])
 
 
 def _island_dist(M, net, i, j):
@@ -164,9 +183,9 @@ def open_nets(board, constraints=None, raw=None, M=None):
                                 side["island"] = g["id"]
                     side["locked"] = None
                     continue
-                ob = next((o for o in M.obs if o.id.startswith(side["id"]) and o.kind != "hole"), None) if side["id"] else None
+                ob = _endpoint_ob(M, net, side)
                 side["locked"] = bool(ob.locked) if ob else None
-                if ob and ob.kind in ("pad", "track", "via"):
+                if ob:
                     isl, omap = M.islands(net)
                     side["island"] = omap.get(ob.id)
             ia, ib = a.get("island"), b.get("island")
@@ -593,7 +612,7 @@ def _print_probe(R):
 
 
 # ======================================================================================================= edits
-def _apply_prims(b, M, net, prims, width, via):
+def _apply_prims(b, M, net, prims, width, via, lock=False):
     pcbnew = M.pcbnew
     pnet = b.FindNet(net)
     if pnet is None:
@@ -608,12 +627,13 @@ def _apply_prims(b, M, net, prims, width, via):
             t.SetWidth(int(round(width * 1e6)))
             t.SetLayer(M.lid[p[1]])
             t.SetNet(pnet)
+            t.SetLocked(lock)
             b.Add(t)
             added.append(("seg", p[1], p[2], p[3], t.m_Uuid.AsString()))
         else:
             pos = P(p[1])
             old = next((t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetCode() == pnet.GetNetCode()
-                        and t.GetPosition() == pos and t.GetWidth() == int(round(via[0] * 1e6))
+                        and t.GetPosition() == pos and t.GetWidth(pcbnew.F_Cu) == int(round(via[0] * 1e6))
                         and t.GetDrill() == int(round(via[1] * 1e6))), None)
             if old is not None:
                 added.append(("via-existing", p[1], old.m_Uuid.AsString()))
@@ -625,6 +645,7 @@ def _apply_prims(b, M, net, prims, width, via):
             v.SetWidth(int(round(via[0] * 1e6)))
             v.SetDrill(int(round(via[1] * 1e6)))
             v.SetNet(pnet)
+            v.SetLocked(lock)
             b.Add(v)
             added.append(("via", p[1], v.m_Uuid.AsString()))
     return added
@@ -668,6 +689,10 @@ def _write_text_ledger(L, path):
             lines.append(f"    why: {e['reason']}")
         if ms:
             lines.append("    " + "  ".join(f"{k}={v}" for k, v in ms.items()))
+        for item in e.get("removed_locked", []):
+            lines.append("    unlocked-and-removed: " + json.dumps(item, sort_keys=True))
+        for opened in e.get("opened", []):
+            lines.append("    opened: " + json.dumps(opened, sort_keys=True))
     open(path, "w").write("\n".join(lines) + "\n")
 
 
@@ -700,12 +725,16 @@ def _snap(path):
     return AU.snapshot(path, checks=False, project=os.path.splitext(path)[0] + ".kicad_pro")
 
 
-def _locked_sig(M):
+def _copper_sig(M, locked_only=False):
     sig = set()
     for o in M.obs:
-        if o.locked and o.kind in ("track", "via"):
+        if o.kind in ("track", "via") and (o.locked or not locked_only):
             sig.add((o.kind, o.net, tuple(sorted(o.layers))[:1], tuple(round(v, 3) for v in (*o.g[1], *o.g[2])), round(o.g[3], 3)))
     return sig
+
+
+def _locked_sig(M):
+    return _copper_sig(M, locked_only=True)
 
 
 def _edit_violation_keys(new, net, loose=()):
@@ -719,7 +748,7 @@ def _edit_violation_keys(new, net, loose=()):
     return out
 
 
-def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None):
+def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
     -> result dict {accepted, reason, measure, info}."""
     S = Sess(out if out else board)
@@ -730,7 +759,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
     src = board
     base_raw = json.load(open(os.path.join(S.dir, "cur_drc.json"))) if in_session else drc_raw(src, kicad_cli)
     base = summarize_drc(base_raw)
-    M = _model(src, constraints)
+    M = _model(src, constraints, refill=refill)
     res = {"op": op, "net": net, "what": what, "accepted": False}
     try:
         b = M.b
@@ -808,6 +837,11 @@ def _push_undo(S):
 
 def _record(S, res, in_session, out):
     ent = {k: res.get(k) for k in ("op", "net", "what", "accepted", "reason", "measure")}
+    removed = (res.get("info") or {}).get("removed") or []
+    removed_locked = [x for x in removed if isinstance(x, dict) and x.get("unlocked_and_removed")] if isinstance(removed, list) else []
+    if removed_locked:
+        ent["removed_locked"] = removed_locked
+        ent["opened"] = res.get("opened") or []
     if in_session:
         S.log(ent)
     elif out:
@@ -816,7 +850,7 @@ def _record(S, res, in_session, out):
         Sx.log(ent)
 
 
-def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli"):
+def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli", lock=False):
     def mutate(b, M):
         prims = G.parse_path(path, M.cu)
         if net not in {o.net for o in M.obs if o.net}:
@@ -827,8 +861,8 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         pr = probe_prims(M, net, prims, w, vv, any_angle)
         if not pr["ok"]:
             raise ValueError("probe failed: " + json.dumps(pr["violations"][:4]))
-        added = _apply_prims(b, M, net, prims, w, vv)
-        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w}
+        added = _apply_prims(b, M, net, prims, w, vv, lock)
+        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
     return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli)
 
 
@@ -836,7 +870,7 @@ def _net_copper(b, net):
     return [t for t in b.GetTracks() if t.GetNetname() == net]
 
 
-def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
+def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli", lock=False):
     """Replace the copper of `net` on board `dst` (unlocked tracks/arcs/vias, refused if any is locked) by the copper of the same net NAME
     on board `src`; items are rebuilt explicitly on dst's own net (no Duplicate(): it keeps the source net codes). The copied count must equal
     the source count; then the same DRC + connectivity guard as `lay`. Writes nothing on failure."""
@@ -854,7 +888,6 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
             raise ValueError(f"destination has locked copper of net {net!r}: {sum(1 for t in old if t.IsLocked())} item(s); unlock or leave it")
         for t in old:
             b.Remove(t)
-        lid = {sb.GetLayerName(l): l for l in sb.GetEnabledLayers().Seq()}
         for t in items:
             cls = t.GetClass()
             if cls == "PCB_VIA":
@@ -862,7 +895,7 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
                 n.SetPosition(t.GetPosition())
                 n.SetViaType(t.GetViaType())
                 n.SetLayerPair(t.TopLayer(), t.BottomLayer())
-                n.SetWidth(t.GetWidth())
+                n.SetWidth(t.GetWidth(pc.F_Cu))
                 n.SetDrill(t.GetDrill())
             elif cls == "PCB_ARC":
                 n = pc.PCB_ARC(b)
@@ -878,13 +911,55 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli"):
                 n.SetWidth(t.GetWidth())
                 n.SetLayer(t.GetLayer())
             n.SetNet(dn)
-            n.SetLocked(t.IsLocked())
+            n.SetLocked(lock or t.IsLocked())
             b.Add(n)
         got = len(_net_copper(b, net))
         if got != len(items):
             raise ValueError(f"copied item count {got} != source count {len(items)}")
-        return {"removed": len(old), "copied": got, "source": src}
+        info = {"removed": len(old), "copied": got, "source": src}
+        if lock:
+            info["locked"] = True
+        return info
     return _edit(dst, out, mutate, "copy-net", net, f"from {os.path.basename(src)}", constraints, False, False, kicad_cli)
+
+
+def _lock_drc_unchanged(cand, base):
+    violation_keys = lambda s: Counter({k: v for k, v in s["keys"].items() if not k[0].startswith("U")})  # noqa: E731
+    if violation_keys(cand) != violation_keys(base):
+        return "DRC keys changed"
+    if cand["unc_by_net"] != base["unc_by_net"]:
+        return "open connections by net changed"
+    return None
+
+
+def lock_net(board, net, out=None, ids=None, unlock=False, constraints=None, kicad_cli="kicad-cli"):
+    """Lock or unlock all (or explicitly selected) tracks/vias of a net without changing geometry, DRC errors or opens per net."""
+    def mutate(b, M):
+        items = _net_copper(b, net)
+        if not items:
+            raise ValueError(f"no tracks/vias of net {net!r}")
+        selected = items
+        if ids:
+            selected = []
+            for ident in ids:
+                hits = [t for t in items if t.m_Uuid.AsString().startswith(ident)]
+                if not hits:
+                    raise ValueError(f"no track/via of net {net} with id {ident}")
+                if len(hits) > 1:
+                    raise ValueError(f"ambiguous id {ident}: use a longer UUID prefix")
+                selected.extend(hits)
+        changed = []
+        for t in selected:
+            if t.IsLocked() == unlock:
+                uid = t.m_Uuid.AsString()
+                t.SetLocked(not unlock)
+                changed.append({"id": _sid(uid), "uuid": uid, "kind": "via" if t.GetClass() == "PCB_VIA" else "track",
+                                "locked": not unlock})
+        return {"selected": len(selected), "changed": changed, "locked": not unlock}
+
+    what = f"ids={ids} unlock={unlock}"
+    return _edit(board, out, mutate, "lock-net", net, what, constraints, False, False, kicad_cli,
+                 lambda M, cand, base: _lock_drc_unchanged(cand, base), refill=False)
 
 
 def _chain(M, seed):
@@ -914,10 +989,33 @@ def _chain(M, seed):
     return list(chain.values())
 
 
-def shove(board, net, out=None, ids=None, window_box=None, chain=False, constraints=None, kicad_cli="kicad-cli", op="shove"):
-    """Remove UNLOCKED copper of `net` (named ids, or everything of the net in a window). Reports the connection it opened."""
+def _removed_track_record(t, o):
+    uid = t.m_Uuid.AsString()
+    cls = t.GetClass()
+    rec = {"kind": o.kind, "id": _sid(uid), "uuid": uid, "net": t.GetNetname(),
+           "layer": next(iter(o.layers)) if o.kind == "track" else "via",
+           "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]) if o.kind == "track" else None,
+           "was_locked": t.IsLocked(), "lock_origin": "board" if t.IsLocked() else None}
+    if cls == "PCB_VIA":
+        geometry = {"type": "via", "x": t.GetPosition().x, "y": t.GetPosition().y, "width": t.GetWidth(t.TopLayer()),
+                    "drill": t.GetDrill(), "via_type": int(t.GetViaType()), "top_layer": t.TopLayer(), "bottom_layer": t.BottomLayer()}
+    else:
+        geometry = {"type": "arc" if cls == "PCB_ARC" else "track", "start": [t.GetStart().x, t.GetStart().y],
+                    "end": [t.GetEnd().x, t.GetEnd().y], "width": t.GetWidth(), "layer": t.GetLayer()}
+        if cls == "PCB_ARC":
+            geometry["mid"] = [t.GetMid().x, t.GetMid().y]
+    rec["geometry"] = geometry
+    if t.IsLocked():
+        rec["unlocked_and_removed"] = True
+    return rec
+
+
+def shove(board, net, out=None, ids=None, window_box=None, chain=False, constraints=None, kicad_cli="kicad-cli", op="shove", allow_locked=False):
+    """Remove copper of `net`; locked items need an explicit, session-only opt-in and are logged with full geometry."""
     def mutate(b, M):
-        sel, blocked = {}, []
+        if allow_locked and (out is not None or not ids or window_box):
+            raise ValueError("--allow-locked requires a session and explicit --ids (no --window or --out)")
+        sel, named = {}, set()
         if ids:
             for i in ids:
                 hit = [o for o in _resolve(M, i) if o.kind in ("track", "via")]
@@ -927,6 +1025,7 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
                     if o.net != net:
                         raise ValueError(f"{i} belongs to net {o.net}, not {net}")
                     sel[o.id] = o
+                    named.add(o.id)
         if window_box:
             x, y, w, h = window_box
             for o in M.in_box((x, y, x + w, y + h)):
@@ -940,17 +1039,22 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         if not sel:
             raise ValueError("nothing selected: no copper of that net matched")
         locked = [o for o in sel.values() if o.locked]
-        if locked:
+        unnamed = [o for o in locked if o.id not in named]
+        if allow_locked and unnamed:
+            raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id) for o in unnamed))
+        if locked and not allow_locked:
             raise ValueError("refused, locked copper selected: " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in locked[:6]))
         removed = []
         for t in list(b.GetTracks()):
             if t.m_Uuid.AsString() in sel:
-                o = sel[t.m_Uuid.AsString()]
-                removed.append({"kind": o.kind, "id": _sid(o.id), "layer": next(iter(o.layers)) if o.kind == "track" else "via",
-                                "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]) if o.kind == "track" else None})
+                rec = _removed_track_record(t, sel[t.m_Uuid.AsString()])
+                removed.append(rec)
+                if rec["was_locked"]:
+                    t.SetLocked(False)
                 b.Delete(t)
         return {"removed": removed}
-    return _edit(board, out, mutate, op, net, f"ids={ids} window={window_box} chain={chain}", constraints, False, False, kicad_cli)
+    what = f"ids={ids} window={window_box} chain={chain} allow_locked={allow_locked}"
+    return _edit(board, out, mutate, op, net, what, constraints, False, False, kicad_cli)
 
 
 def session_undo(work):
@@ -984,8 +1088,30 @@ def session_status(work):
             "ledger": os.path.join(S.dir, "ledger.txt")}
 
 
+def _active_locked_reescapes(S):
+    path = os.path.join(S.dir, "ledger.json")
+    ledger = json.load(open(path)) if os.path.exists(path) else []
+    active, edit = {}, 0
+    for ent in ledger:
+        op = ent.get("op")
+        if op == "undo" and ent.get("accepted"):
+            m = re.search(r"edit (\d+) reverted", ent.get("what", ""))
+            if m:
+                active.pop(int(m.group(1)), None)
+            continue
+        if op == "commit" or not ent.get("accepted"):
+            continue
+        edit += 1
+        active[edit] = ent
+    return [ent for ent in active.values() if ent.get("removed_locked")]
+
+
+def _open_pair_key(items):
+    return tuple(sorted(i.get("uuid", "") for i in items))
+
+
 def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
-    """Accept the whole set only if, vs the start board: fewer unconnected, no new DRC key, no locked copper changed, no net lost connectivity."""
+    """Guard the whole session, including closure and relocking of every active locked-copper re-escape."""
     S = Sess(work)
     start = os.path.join(S.dir, "start.kicad_pcb")
     sraw = json.load(open(os.path.join(S.dir, "start_drc.json")))
@@ -1001,13 +1127,31 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
     if worse:
         reasons.append("net(s) lost connectivity (open before -> after): " + ", ".join(f"{n} {x}->{y}" for n, (x, y) in worse.items()))
     Ma, Mb = G.Model(start), G.Model(S.work)
-    if _locked_sig(Ma) != _locked_sig(Mb):
-        reasons.append("locked copper changed")
+    reescapes = _active_locked_reescapes(S)
+    reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}
+    original_locked = {sig for sig in _locked_sig(Ma) if sig[1] not in reescape_nets}
+    if not original_locked.issubset(_copper_sig(Mb)):
+        reasons.append("locked copper geometry changed")
+    current_pairs = {(net, _open_pair_key(u["items"])) for net, us in b["pairs"].items() for u in us}
+    unresolved = set()
+    for ent in reescapes:
+        for opened in ent.get("opened", []):
+            key = _open_pair_key([opened["a"], opened["b"]])
+            if (ent["net"], key) in current_pairs:
+                unresolved.add(ent["net"])
+    if unresolved:
+        reasons.append("locked re-escape left opened connection(s): " + ", ".join(sorted(unresolved)))
+    unlocked = {o.net for o in Mb.obs if o.net in reescape_nets and o.kind in ("track", "via") and not o.locked}
+    if unlocked:
+        reasons.append("locked re-escape has restored/re-laid copper still unlocked: " + ", ".join(sorted(unlocked)))
+    unrestored = {net for net in reescape_nets if not any(o.net == net and o.kind in ("track", "via") for o in Mb.obs)}
+    if unrestored:
+        reasons.append("locked re-escape has no restored copper: " + ", ".join(sorted(unrestored)))
     from . import audit as AU
     d = AU.connectivity_diff(_snap(start), _snap(S.work))
     if not d["ok"]:
         reasons.append("connectivity guard: " + "; ".join(d["violations"][:3]))
-    res = {"accepted": not reasons, "reasons": reasons,
+    res = {"accepted": not reasons, "reasons": reasons, "locked_reescape": sorted(reescape_nets),
            "start": {"unconnected": a["unconnected"], "errors": a["errors"], "by_net": a["unc_by_net"]},
            "work": {"unconnected": b["unconnected"], "errors": b["errors"], "by_net": b["unc_by_net"]}, "out": None, "ledger": os.path.join(S.dir, "ledger.txt")}
     if not reasons:
@@ -1144,7 +1288,8 @@ def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
                 best = (m, o)
         if best:
             o = best[1]
-            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "layer": lays[k], "locked": o.locked, "border_cells": 0})
+            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "uuid": o.id,
+                                      "layer": lays[k], "locked": o.locked, "border_cells": 0})
             e["border_cells"] += 1
     return {"reached_cells": {l: {"bbox": [round(v, 2) for v in r[:4]], "cells": r[4]} for l, r in per.items()},
             "limiting_obstacles": sorted(cnt.values(), key=lambda e: -e["border_cells"])[:12], "via_sites_in_window": int(viaok.sum())}
@@ -1170,7 +1315,8 @@ def _auto_endpoints(M, net, isl):
 
 
 def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, width=None, via=None, pitch=0.05, margin=2.0,
-            via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False):
+            via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False,
+            include_locked=False):
     """Grid A* between two islands of `net`: sources = the island of the item nearest src_pt, targets = the island nearest dst_pt (or the
     connection's two islands). A proposal as a path string, already probed; reports the measured reason when none exists."""
     import numpy as np
@@ -1296,22 +1442,45 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                 return plain
             if explore:
                 res = {"found": False, "reason": f"no grid path at width {w}", "sealed_by": _seal_report(M, net, dist, lays, free, xs, ys, w, pit, viaok), "explore": []}
-                cands = [e for e in res["sealed_by"]["limiting_obstacles"] if not e["locked"] and e["kind"] in ("track", "via")][:6]
-                idsets = []
-                for e in cands:
-                    ob = next(o for o in M.obs if o.id.startswith(e["id"]) and o.kind in ("track", "via"))
-                    idsets.append(({c.id for c in _chain(M, ob)} if ob.kind == "track" else {ob.id}, e))
-                combos = [([e], ids) for ids, e in idsets]
-                for i in range(len(idsets)):
-                    for j in range(i + 1, len(idsets)):
-                        combos.append(([idsets[i][1], idsets[j][1]], idsets[i][0] | idsets[j][0]))
-                for es, ids in combos:
+
+                def removal_item(o):
+                    item = {"net": o.net, "id": _sid(o.id), "uuid": o.id, "kind": o.kind, "locked": o.locked}
+                    if o.locked:
+                        item["lock_origin"] = "board"
+                    return item
+
+                units, seen_units = [], set()
+                for e in res["sealed_by"]["limiting_obstacles"]:
+                    if e["kind"] not in ("track", "via"):
+                        continue
+                    ob = next(o for o in M.obs if o.id == e["uuid"])
+                    copper = _chain(M, ob) if ob.kind == "track" else [ob]
+                    ids = frozenset(o.id for o in copper)
+                    if ids not in seen_units:
+                        seen_units.add(ids)
+                        units.append({"ids": ids, "remove": [removal_item(o) for o in sorted(copper, key=lambda o: o.id)]})
+                units = units[:6]
+                unlocked = [u for u in units if not any(x["locked"] for x in u["remove"])]
+                combos = [([u], u["ids"], u["remove"]) for u in unlocked]
+                for i in range(len(unlocked)):
+                    for j in range(i + 1, len(unlocked)):
+                        us = [unlocked[i], unlocked[j]]
+                        items = {x["uuid"]: x for u in us for x in u["remove"]}
+                        combos.append((us, unlocked[i]["ids"] | unlocked[j]["ids"], [items[k] for k in sorted(items)]))
+                for us, ids, items in combos:
                     r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
                                 avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | ids), explore=False)
-                    res["explore"].append({"remove": [{"net": e["net"], "id": e["id"], "kind": e["kind"]} for e in es], "then_found": bool(r.get("found")),
+                    res["explore"].append({"remove": items, "then_found": bool(r.get("found")),
                                            "path": r.get("path"), "length_mm": r.get("length_mm")})
-                    if r.get("found") and len(es) == 1:
+                    if r.get("found") and len(us) == 1:
                         break
+                if include_locked:
+                    res["locked_explore"] = []
+                    for u in [u for u in units if any(x["locked"] for x in u["remove"])]:
+                        r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
+                                    avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | u["ids"]), explore=False)
+                        res["locked_explore"].append({"remove": u["remove"], "then_found": bool(r.get("found")),
+                                                      "path": r.get("path"), "length_mm": r.get("length_mm")})
                 res["reason"] = plain["reason"]
                 return res
         seq = [goal]

@@ -86,6 +86,8 @@ def _run(argv, cwd, log, timeout):
         code, text = p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         code, text = None, f"TIMEOUT after {timeout}s\n"
+    from . import quietlog
+    text = quietlog.filter_text(text)
     with open(log, "w") as f:
         f.write(text)
     return {"exit": code, "runtime_s": round(time.time() - t0, 2),

@@ -51,6 +51,7 @@ window            region data + PNG
 probe             check a path
 lay               guarded lay
 copy-net          restore a net
+lock-net          lock or unlock net copper
 via-min           raise vias
 hand-repair       close open nets
 shove             remove copper

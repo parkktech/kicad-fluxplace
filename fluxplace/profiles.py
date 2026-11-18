@@ -126,7 +126,7 @@ def check_board(board_path, profile, pcbnew=None):
     for t in b.GetTracks():
         cls = t.GetClass()
         if cls == "PCB_VIA":
-            w = t.GetWidth() / 1e6
+            w = t.GetWidth(pcbnew.F_Cu) / 1e6
             d = t.GetDrillValue() / 1e6
             vmin = w if vmin is None else min(vmin, w)
             dmin = d if dmin is None else min(dmin, d)

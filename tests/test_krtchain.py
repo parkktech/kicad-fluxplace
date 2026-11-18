@@ -209,3 +209,55 @@ def test_pairs_missed_by_external_router_are_reported(tmp_path, monkeypatch):
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     had_diff = any(s["step"] == "diff" for s in r["steps"])
     assert ("pair router missed 1 pair" in r["line"]) == had_diff
+
+
+def test_route_reads_completed_pairs_report_beside_router_input(tmp_path, monkeypatch):
+    import json
+    c, _calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    opens = iter(({"USB_DP": 1}, {}, {}, {}, {}))
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: next(opens, {}))
+    (tmp_path / "in.pairs.json").write_text(json.dumps({"pairs": [{"pair": ["USB_DP", "USB_DM"], "status": "complete"}]}))
+    from fluxplace import routediag as RD, netclass as NC, qualaudit as QA, pairs as PRS, pairaudit as PA
+    monkeypatch.setattr(RD, "load", lambda b: {})
+    monkeypatch.setattr(NC, "classify", lambda *a: {})
+    monkeypatch.setattr(QA, "status_fields", lambda *a, **k: {"not_done": {"count": 0, "pairs": [], "rf": []}, "nets_routed": 0, "nets_open0": 0})
+    monkeypatch.setattr(PA, "pair_list", lambda cls: [("USB_DP", "USB_DM")])
+    monkeypatch.setattr(PRS, "crosscheck_external", lambda pairs, summary=None, log=None: [
+        {"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM", "reason": "not_recognised"}])
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    result = json.load(open(tmp_path / "result.json"))
+    assert result["pairs_missed"] == []
+    assert result["pairs_already_done"] == [{"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM",
+                                            "reason": "pairs_stage_complete"}]
+    assert "pairs already done 1" in r["line"] and "pair router missed" not in r["line"]
+
+
+def test_pairs_missed_excludes_stage_complete_and_locked_connected(monkeypatch):
+    rows = [{"pair": f"{stem}_P/{stem}_N", "p": f"{stem}_P", "n": f"{stem}_N", "reason": "not_recognised"}
+            for stem in ("A", "B", "C")]
+    report = {"pairs": [{"pair": ["A_P", "A_N"], "status": "complete"},
+                        {"pair": ["C_P", "C_N"], "status": "handoff"}]}
+    monkeypatch.setattr(K, "_input_locked_connected", lambda board, opens, pairs: {frozenset(("B_P", "B_N"))})
+    missed, done = K._partition_missed(rows, report, "input.kicad_pcb", {"C_N": 1})
+    assert [row["pair"] for row in missed] == ["C_P/C_N"]
+    assert [(row["pair"], row["reason"]) for row in done] == [("A_P/A_N", "pairs_stage_complete"),
+                                                               ("B_P/B_N", "input_connected_locked")]
+
+
+def test_input_locked_connected_requires_copper_locks_and_no_open_leg(monkeypatch):
+    class Track:
+        def __init__(self, net, locked=True):
+            self.net, self.locked = net, locked
+
+        def GetNetname(self):
+            return self.net
+
+        def IsLocked(self):
+            return self.locked
+
+    tracks = [Track("A_P"), Track("A_N"), Track("B_P"), Track("B_N", False), Track("C_P"), Track("C_N"), Track("D_P")]
+    board = types.SimpleNamespace(GetTracks=lambda: tracks)
+    monkeypatch.setattr(K, "_pcb", lambda: types.SimpleNamespace(LoadBoard=lambda path: board))
+    pairs = {frozenset((f"{stem}_P", f"{stem}_N")) for stem in ("A", "B", "C", "D")}
+    done = K._input_locked_connected("synthetic.kicad_pcb", {"C_N": 1}, pairs)
+    assert done == {frozenset(("A_P", "A_N"))}
