@@ -116,11 +116,14 @@ def test_placement_check_reports_every_rule_and_exits_1(tmp_path, capsys):
     assert by[("keepout", "module.m")][0]["face"] == "B"          # T1 is on F: a B keep-out concerns B bodies only
     assert by[("no_tht", "module.m")][0]["pad"] == "1" and by[("no_tht", "module.m")][0]["fixed"] is True
     assert set(res["quadrants"]) == {"NW", "NE", "SW", "SE"} and res["quadrants"]["NW"]["F_pct"] > 0
-    assert res["ok"] is False and res["violations"] == 3
+    # 3 rule violations + 2 part collisions this board has on purpose (C2 on H1's pad, T1's courtyard over C3)
+    assert res["ok"] is False and res["violations"] == 5
+    assert sorted(sorted(c["refs"]) for c in res["collisions"]) == [["C2", "H1"], ["C3", "T1"]]
 
 
 def test_placement_check_ok_exit_0(tmp_path, capsys):
-    brd = _check_board(tmp_path)
+    # a board with no rule violation AND no part collision (the _check_board parts overlap on purpose)
+    brd = g.board(tmp_path, g.two("C1", 15, 20, "A", "B", court=(-1, -1, 1, 1)) + g.two("C2", 30, 20, "C", "D", court=(-1, -1, 1, 1)))
     cons = tmp_path / "c.toml"
     cons.write_text('[placement.module.m]\nrefs = ["X"]\nside = "B"\noutline = [0, 0, 5, 5]\n')
     cli.main(["placement-check", brd, "--constraints", str(cons)])
@@ -165,3 +168,25 @@ def test_placement_check_reports_height_verdicts(tmp_path, capsys):
     assert u["limit_mm"] == 2.3 and [(p["ref"], p["verdict"]) for p in u["parts"]] == [
         ("C1", "ok"), ("C2", "too tall"), ("C3", "height unknown")]
     assert u["parts"][0]["source"].startswith("[placement.heights]") and res["violations"] == 2
+
+
+def test_placement_check_includes_the_route_stage_collision_gate(tmp_path, capsys):
+    # two parts whose courtyards overlap on the same side: no keep-out rule is broken, but the route stage would refuse
+    body = g.two("R1", 20, 20, "A", "B", court=(-2, -1, 2, 1)) + g.two("R2", 21, 20, "C", "D", court=(-2, -1, 2, 1))
+    brd = g.board(tmp_path, body)
+    cons = tmp_path / "c.toml"
+    cons.write_text("[placement]\n")
+    with pytest.raises(SystemExit):
+        cli.main(["placement-check", brd, "--constraints", str(cons), "--json"])
+    res = json.loads(capsys.readouterr().out)
+    assert not res["ok"] and res["collisions"] and any({"R1", "R2"} <= set(c["refs"]) or "R1" in c["msg"] for c in res["collisions"])
+
+
+def test_placement_check_clean_board_has_no_collisions(tmp_path, capsys):
+    body = g.two("R1", 15, 20, "A", "B", court=(-1, -1, 1, 1)) + g.two("R2", 30, 20, "C", "D", court=(-1, -1, 1, 1))
+    brd = g.board(tmp_path, body)
+    cons = tmp_path / "c.toml"
+    cons.write_text("[placement]\n")
+    cli.main(["placement-check", brd, "--constraints", str(cons), "--json"])
+    res = json.loads(capsys.readouterr().out)
+    assert res["ok"] and res["collisions"] == []

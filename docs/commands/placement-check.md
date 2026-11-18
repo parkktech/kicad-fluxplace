@@ -45,3 +45,5 @@ from `[placement.heights]` (ref or footprint-name glob -> mm, first match), else
 (`intent.height`); no 3D-model or STEP parsing. It expands to a `[[intent.region]]` with `max_height_mm`, the mechanism the
 placers and the legaliser already honour per part, so gate and placers agree. `placement-check` lists each part under such a
 module with height, source and verdict `ok` / `too tall` / `height unknown`; the last two count as violations.
+
+It also runs the collision gate the route stage applies (`legality.collision_gate`): parts whose courtyards overlap on the same side, copper of different nets overlapping, through-hole conflicts. Only part-against-part findings are listed there; rule-area findings appear in the keep-out rows. Any collision is a violation (exit 1).

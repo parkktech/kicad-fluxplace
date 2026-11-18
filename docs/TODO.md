@@ -48,6 +48,12 @@
   pipeline must keep model paths resolvable when it copies a board (write the copy beside the project, or check and
   report unresolved models on every copy).
 
+## Done 2026-11-18
+
+- `placement-check` now runs the route stage's collision gate (part-against-part courtyard / copper / through-hole
+  overlaps). Found when a connector moved to the board edge covered two of its own resistors: placement-check said OK,
+  the router refused 80 minutes later.
+
 ## Smaller items
 
 - Cross-board corpus manifest (`~/.config/fluxplace/corpus.toml`) so changes are proven on more than one board.

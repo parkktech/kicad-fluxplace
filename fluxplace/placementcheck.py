@@ -12,6 +12,7 @@ import os
 
 from . import geom as GM
 from . import legalise as LG
+from . import legality as LY
 from . import placerules as PR
 
 SIDES = ("F", "B")
@@ -102,8 +103,17 @@ def compute(B, cons):
                                  "fixed": r2 in fixed})
             rule("hardware", ref, {"centre": list(c), "diameter_mm": d}, rows)
     under = PR.under_report(B, cons)
-    n = sum(len(r["violations"]) for r in rules) + sum(p["verdict"] != "ok" for u in under for p in u["parts"])
-    return {"ok": n == 0, "violations": n, "rules": rules, "under": under, "quadrants": quadrants(B)}
+    # the same collision gate the route stage and route-ready apply (courtyard / pad / hole / keep-out overlaps between
+    # parts): a placement that passes the rules above but collides would otherwise only be refused at the router
+    _ok, coll = LY.collision_gate(B, cons)
+    parts = set(B.get("parts") or {})
+    def _two_parts(x):                       # part against part only: rule-area findings are the keep-out rows above
+        pr = list(x.get("pair") or x.get("refs") or [])
+        return len(pr) == 2 and (not parts or all(r in parts for r in pr)) and "rule area" not in x["msg"]
+    collisions = [{"level": x["level"], "refs": list(x.get("pair") or x.get("refs") or []), "msg": x["msg"]}
+                  for x in coll if x["level"] == "FAIL" and _two_parts(x)]
+    n = sum(len(r["violations"]) for r in rules) + sum(p["verdict"] != "ok" for u in under for p in u["parts"]) + len(collisions)
+    return {"ok": n == 0, "violations": n, "rules": rules, "under": under, "collisions": collisions, "quadrants": quadrants(B)}
 
 
 def residual(board, cons):
@@ -153,6 +163,10 @@ def lines(res):
         for p in u["parts"]:
             h = "?" if p["height_mm"] is None else f"{p['height_mm']:g} mm"
             out.append(f"    {p['ref']:8s} {p['face']}  {h:8s} {p['source']:28s} {p['verdict']}")
+    c = res.get("collisions") or []
+    out.append(f"collision gate {'FAIL ' + str(len(c)) if c else 'ok'}  (same check as the route stage)")
+    for x in c:
+        out.append(f"    {x['msg']}")
     out.append("quadrant courtyard coverage (courtyard / quadrant area):")
     for n, q in res["quadrants"].items():
         out.append(f"  {n}  F {q['F_pct']:5.1f}%  B {q['B_pct']:5.1f}%  total {q['total_pct']:5.1f}%  ({q['area_mm2']:.0f} mm2)")
@@ -173,7 +187,7 @@ def cmd_placement_check(a):
         print(f"placement-check: {'OK' if res['ok'] else 'FAIL'} - {res['violations']} violation(s) over "
               f"{len(res['rules'])} rule(s)")
         for ln in lines(res):
-            if not getattr(a, "quiet", False) or ln.startswith(("keepout", "no_tht", "hardware")) and " ok " not in ln:
+            if not getattr(a, "quiet", False) or ln.startswith(("keepout", "no_tht", "hardware", "collision", "    ")) and " ok " not in ln:
                 print(ln)
         print(f"full report: {out}")
     if not res["ok"]:
