@@ -200,6 +200,47 @@ def _trial(rep, out, cons_v, spec, run_fn, tag, state, log, src=None, victims=()
     return len(new) if ok else 0
 
 
+def _effort_reasons(row):
+    why = row.get("why") or ""
+    reasons = []
+    if "search budget" in why:
+        reasons.append("budget_reached")
+    if "no path for the coupled centre line" in why or "no corridor" in why:
+        reasons.append("no_corridor")
+    if any(text in why for text in ("no clear break-out", "no two terminals", "single terminal", "unpaired pad")):
+        reasons.append("escape_blocked")
+    if "taken back: pair audit" in why:
+        reasons.append("audit_rejected")
+    return reasons or ["unsolved"]
+
+
+def handoff_effort(rep, P):
+    """Annotate handed-off pairs with measured causes and configuration-skipped effort; never changes routing decisions."""
+    counts = {}
+    for r in rep["pairs"]:
+        if not r.get("handoff"):
+            continue
+        reasons = _effort_reasons(r)
+        skipped = not P.get("fallback", True) or P.get("fb_trials", 12) <= 0
+        if skipped:
+            reasons.append("fallback_trials_skipped_by_configuration")
+        r["handoff_reason"] = reasons[0]
+        r["handoff_reasons"] = reasons
+        r["handoff_detail"] = {"why": r.get("why") or "", "measured_blockers": list(r.get("blockers") or []),
+                               "fallback_trial_records": len(r.get("tried") or []),
+                               "fallback_trials_skipped_by_configuration": skipped}
+        for reason in reasons:
+            counts[reason] = counts.get(reason, 0) + 1
+    ordered = ["budget_reached", "no_corridor", "escape_blocked", "audit_rejected", "fallback_trials_skipped_by_configuration"]
+    ordered += sorted(k for k in counts if k not in ordered)
+    labels = {"budget_reached": "budget reached", "no_corridor": "no corridor", "escape_blocked": "escape blocked",
+              "audit_rejected": "audit rejected", "fallback_trials_skipped_by_configuration": "fallback trials skipped by configuration",
+              "unsolved": "unsolved"}
+    summary = "pairs handoff effort: " + "; ".join(f"{labels.get(k, k.replace('_', ' '))} {counts.get(k, 0)}" for k in ordered)
+    rep["handoff_effort"] = {"counts": {k: counts.get(k, 0) for k in ordered}, "summary": summary}
+    return rep["handoff_effort"]
+
+
 def ladder(rep, out, cons, spec, P, run_fn, cs_args=None, escape=None, log=lambda m: None):
     """run the fallback ladder on the written board `out` for the pending pairs of `rep` (edited in place), then set every
     remaining pending pair to state c with handoff = True.  -> rep."""
@@ -236,6 +277,7 @@ def ladder(rep, out, cons, spec, P, run_fn, cs_args=None, escape=None, log=lambd
                 steps.append(("b(iii)", _hold_trial(rep, [r for r in pending(rep) if r["pair"] in prs], out, cv, spec, run_fn, f"iii{g}", "b(iii)", log)))
     for r in pending(rep):
         r["state"], r["handoff"] = "c", True
+    handoff_effort(rep, P)
     rep["fallback"] = {"steps": steps, "secs": round(__import__("time").time() - t0, 1)}
     return rep
 

@@ -1122,6 +1122,8 @@ def format_text(rep, top=None):
         out.append("pairs states: " + ", ".join(f"{k} {v}" for k, v in rep["states"].items() if v)
                    + (f"; fallback {rep['fallback']['secs']} s" if rep.get("fallback") else "")
                    + (f"; {len(rep['handoff']) // 2} pair(s) handed to the router as ordinary nets (c)" if rep.get("handoff") else ""))
+    if rep.get("handoff_effort"):
+        out.append(rep["handoff_effort"]["summary"])
     for r in rows[: top or len(rows)]:
         nm = "/".join(r["pair"])
         if r["status"] == "complete" and "length" in r:
@@ -1136,7 +1138,8 @@ def format_text(rep, top=None):
         else:
             out.append(f"PAIR_NOT_LAID {nm} [{r['status']}/{r['plan']}, {r.get('secs', 0)} s] {r['why'] or 'open connections remain'}"
                        + (f"; blocked by {', '.join(r['blockers'][:5])}" if r.get("blockers") else "")
-                       + (f"; PAIR_HANDOFF state c: two ordinary nets of class {r['class']} for the router, ladder tried {', '.join(r.get('tried', [])) or '-'}" if r.get("handoff") else ""))
+                       + (f"; PAIR_HANDOFF state c: two ordinary nets of class {r['class']} for the router, ladder tried {', '.join(r.get('tried', [])) or '-'}" if r.get("handoff") else "")
+                       + (f"; effort {', '.join(r['handoff_reasons'])}" if r.get("handoff_reasons") else ""))
     return "\n".join(out)
 
 

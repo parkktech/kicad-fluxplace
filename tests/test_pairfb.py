@@ -24,6 +24,33 @@ def test_unlaid_pair_is_state_c_and_handed_to_the_router(tmp_path):
     assert "PAIR_NOT_LAID D_N/D_P" in t and "PAIR_HANDOFF state c" in t and "pairs states: c 1" in t
 
 
+def test_handoff_effort_reports_measured_causes_and_configuration_skip(tmp_path):
+    rows = [
+        {"pair": ["B_P", "B_N"], "why": "A>B: search budget for the coupled centre line", "blockers": []},
+        {"pair": ["C_P", "C_N"], "why": "A>B: no path for the coupled centre line", "blockers": ["track X F.Cu"]},
+        {"pair": ["E_P", "E_N"], "why": "A>B: no clear break-out for A.1", "blockers": ["pad A.2 (Y)"]},
+        {"pair": ["A_P", "A_N"], "why": "taken back: pair audit says vias 2 vs 1", "blockers": []},
+    ]
+    rep = {"pairs": [dict(row, status="open", plan="not-laid", state=None, tried=[], secs=0, **{"class": "Default"}) for row in rows],
+           "verdict": "PAIRS_WARN", "complete": 0, "total": 4, "secs": 0, "signal_layers": [], "plan_only": False}
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("fallback must be skipped by configuration")
+
+    params = PR.params({"pairlay": {"fallback": False}})
+    FB.ladder(rep, str(tmp_path / "unused.kicad_pcb"), {}, None, params, unexpected)
+    counts = rep["handoff_effort"]["counts"]
+    assert counts == {"budget_reached": 1, "no_corridor": 1, "escape_blocked": 1, "audit_rejected": 1,
+                      "fallback_trials_skipped_by_configuration": 4}
+    assert all(r["handoff_detail"]["fallback_trials_skipped_by_configuration"] for r in rep["pairs"])
+    corridor = next(r for r in rep["pairs"] if r["handoff_reason"] == "no_corridor")
+    assert corridor["handoff_detail"]["measured_blockers"] == ["track X F.Cu"]
+    text = PR.format_text(rep)
+    assert text.count("pairs handoff effort:") == 1
+    assert "budget reached 1; no corridor 1; escape blocked 1; audit rejected 1; fallback trials skipped by configuration 4" in text
+    assert "effort no_corridor, fallback_trials_skipped_by_configuration" in text
+
+
 def test_half_laid_pair_leaves_no_partial_copper(tmp_path):
     # TX section is clear, the RX section (J1 side) is caged: the TX copper is not kept as a half-routed pair
     caps = PB.fp("C1", 30, 20, [PB.pad("1", 0, -0.5, "TX_P", 0.5, 0.5), PB.pad("2", 0, 0.5, "RX_P", 0.5, 0.5)]) + \
