@@ -107,10 +107,10 @@ def _resolve(M, ident):
     return full
 
 
-def _model(board, constraints=None):
+def _model(board, constraints=None, refill=True):
     if not os.path.exists(os.path.splitext(board)[0] + ".kicad_pro"):
         print(f"warning: no {os.path.splitext(os.path.basename(board))[0]}.kicad_pro beside the board: default rules apply", file=sys.stderr)
-    return G.Model(board, constraints)
+    return G.Model(board, constraints, refill=refill)
 
 
 def _item_desc(it):
@@ -748,7 +748,7 @@ def _edit_violation_keys(new, net, loose=()):
     return out
 
 
-def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None):
+def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
     -> result dict {accepted, reason, measure, info}."""
     S = Sess(out if out else board)
@@ -759,7 +759,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
     src = board
     base_raw = json.load(open(os.path.join(S.dir, "cur_drc.json"))) if in_session else drc_raw(src, kicad_cli)
     base = summarize_drc(base_raw)
-    M = _model(src, constraints)
+    M = _model(src, constraints, refill=refill)
     res = {"op": op, "net": net, "what": what, "accepted": False}
     try:
         b = M.b
@@ -923,8 +923,17 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli", l
     return _edit(dst, out, mutate, "copy-net", net, f"from {os.path.basename(src)}", constraints, False, False, kicad_cli)
 
 
+def _lock_drc_unchanged(cand, base):
+    violation_keys = lambda s: Counter({k: v for k, v in s["keys"].items() if not k[0].startswith("U")})  # noqa: E731
+    if violation_keys(cand) != violation_keys(base):
+        return "DRC keys changed"
+    if cand["unc_by_net"] != base["unc_by_net"]:
+        return "open connections by net changed"
+    return None
+
+
 def lock_net(board, net, out=None, ids=None, unlock=False, constraints=None, kicad_cli="kicad-cli"):
-    """Lock or unlock all (or explicitly selected) tracks/vias of a net without changing geometry or any DRC key."""
+    """Lock or unlock all (or explicitly selected) tracks/vias of a net without changing geometry, DRC errors or opens per net."""
     def mutate(b, M):
         items = _net_copper(b, net)
         if not items:
@@ -948,11 +957,9 @@ def lock_net(board, net, out=None, ids=None, unlock=False, constraints=None, kic
                                 "locked": not unlock})
         return {"selected": len(selected), "changed": changed, "locked": not unlock}
 
-    def unchanged(M, cand, base):
-        return "DRC keys changed" if cand["keys"] != base["keys"] else None
-
     what = f"ids={ids} unlock={unlock}"
-    return _edit(board, out, mutate, "lock-net", net, what, constraints, False, False, kicad_cli, unchanged)
+    return _edit(board, out, mutate, "lock-net", net, what, constraints, False, False, kicad_cli,
+                 lambda M, cand, base: _lock_drc_unchanged(cand, base), refill=False)
 
 
 def _chain(M, seed):

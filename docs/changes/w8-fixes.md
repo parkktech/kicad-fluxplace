@@ -6,7 +6,7 @@ DRC endpoint UUIDs were truncated to eight characters before model lookup. Those
 
 ## Guarded copper locking
 
-Hand-laid and copied copper had no supported way to become locked. `lay --lock` and `copy-net --lock` lock new items on acceptance, and `lock-net` locks or unlocks a whole net or explicit item IDs with unchanged geometry/connectivity/DRC keys, `--expect-rev`, the KiCad-open guard and session ledger records. Session commit protects the geometry of originally locked copper while allowing explicit lock-state changes.
+Hand-laid and copied copper had no supported way to become locked. `lay --lock` and `copy-net --lock` lock new items on acceptance, and `lock-net` locks or unlocks a whole net or explicit item IDs with unchanged geometry/connectivity/DRC keys, `--expect-rev`, the KiCad-open guard and session ledger records. Session commit protects the geometry of originally locked copper while allowing explicit lock-state changes. Lock-only edits skip zone refill and compare exact non-connectivity DRC keys plus opens per net, ignoring only KiCad's unstable choice of endpoint pairs for the same opens. The real W8 RF_EXT command was accepted with all five segments locked.
 
 ## Recorded locked-copper re-escape
 

@@ -56,6 +56,31 @@ def test_lock_net_selected_id_and_unlock_preserve_geometry(tmp_path):
     assert _geometry(src) == _geometry(unlocked)
 
 
+def test_lock_drc_guard_ignores_only_open_endpoint_relabeling():
+    base = {"keys": {("Uunconnected_items", ("old endpoint",)): 1, ("clearance", ("track",)): 1}, "unc_by_net": {"A": 1}}
+    relabeled = {"keys": {("Uunconnected_items", ("new endpoint",)): 1, ("clearance", ("track",)): 1}, "unc_by_net": {"A": 1}}
+    assert H._lock_drc_unchanged(relabeled, base) is None
+    changed_error = {"keys": {("Uunconnected_items", ("new endpoint",)): 1, ("clearance", ("other",)): 1}, "unc_by_net": {"A": 1}}
+    assert H._lock_drc_unchanged(changed_error, base) == "DRC keys changed"
+    changed_open = dict(relabeled, unc_by_net={"A": 2})
+    assert H._lock_drc_unchanged(changed_open, base) == "open connections by net changed"
+
+
+def test_lock_net_skips_zone_refill(tmp_path, monkeypatch):
+    src = gap_board(tmp_path)
+    seen = []
+    original = H._model
+
+    def model(board, constraints=None, refill=True):
+        seen.append(refill)
+        return original(board, constraints, refill=refill)
+
+    monkeypatch.setattr(H, "_model", model)
+    r = H.lock_net(src, "A", out=str(tmp_path / "no-refill.kicad_pcb"))
+    assert r["accepted"], r.get("reason")
+    assert seen == [False]
+
+
 def test_session_unlock_is_recorded_and_commit_preserves_geometry(tmp_path):
     src = gap_board(tmp_path, a_locked=True)
     work = str(tmp_path / "session.kicad_pcb")
