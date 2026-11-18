@@ -25,6 +25,19 @@
 - Channel capacity check at placement for nets that must share a layer.
 - Ground stitching vias after RF corridors are reserved.
 
+## From the W9 run (2026-11-17), fix next
+
+- The pairs STAGE keeps nothing when it is stopped: twice an hour of work was discarded at an outer timeout. It must take
+  a `--budget`, handle SIGTERM/SIGINT, and write the best completed set with a complete report (as `tune` does).
+- Fallback trials need their own budget and a stall stop (quit when a trial completes nothing). Measured: about 15 min
+  per trial, 1 pair gained in trial 1, 0 in trial 2, 12 trials configured.
+- The fallback's internal fan-out stopped to ask a layer-role question in an unattended stage. Inside a stage it must
+  take the answer from the constraints or defaults, or fail at once with a clear message.
+- Measured value of effort: full-effort main pass 18/35 pairs against 15/35 bounded; most hand-offs are "escape
+  blocked" (fan-out lays each leg's escape separately), so pair-aware escapes are the larger gain.
+- What worked and should become the pipeline's default order: re-escape of the regions that ended open, then RF first on
+  outer layers with `lay --lock` (all four RF nets in spec for the first time), before pairs and ordinary copper.
+
 ## Smaller items
 
 - Cross-board corpus manifest (`~/.config/fluxplace/corpus.toml`) so changes are proven on more than one board.
