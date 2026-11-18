@@ -69,3 +69,29 @@ def test_trapped_stays_fail_without_a_pour_or_when_pours_are_not_allowed(tmp_pat
     assert LGL.collision_gate(B)[0] is False
     B, _ = _trapped_gnd(tmp_path, _pour("VIN", 0, 0, 60, 60), name="c.kicad_pcb")   # another net's pour does not count
     assert LGL.collision_gate(B)[0] is False
+
+
+def test_model_paths_resolve_or_warn(tmp_path, capsys):
+    from fluxplace import modelpaths as MP
+    brd = tmp_path / "w.kicad_pcb"
+    lib = tmp_path.parent / "lib3d"
+    lib.mkdir(exist_ok=True)
+    (lib / "x.step").write_text("ISO")
+    brd.write_text('(kicad_pcb (footprint "R" (model "${KIPRJMOD}/../lib3d/x.step") (model "${KIPRJMOD}/../lib3d/gone.step") '
+                   '(model "${KICAD8_3DMODEL_DIR}/Lib/y.wrl")))')
+    res = MP.scan(str(brd))
+    assert res["total"] == 2 and res["unresolved"] == ["${KIPRJMOD}/../lib3d/gone.step"]
+    assert MP.warn_lines(res)[0].startswith("WARN MODEL_PATH_UNRESOLVED: 1 of 2")
+    assert MP.warn_lines({"total": 2, "unresolved": []}) == []
+
+
+def test_placement_check_warns_on_unresolved_model_but_exits_0(tmp_path, capsys):
+    import pcbgen as G
+    path = G.board(tmp_path, FP("R1", 15, 20, [P("1", 0, 0, "A")]), name="w.kicad_pcb")
+    txt = open(path).read().rstrip()
+    open(path, "w").write(txt[:-1] + '(footprint "X" (model "${KIPRJMOD}/nolib/gone.step")))\n')
+    cons = tmp_path / "c.toml"
+    cons.write_text("[placement]\n")
+    cli.main(["placement-check", path, "--constraints", str(cons)])          # a WARN only: exit 0
+    out = capsys.readouterr().out
+    assert "WARN MODEL_PATH_UNRESOLVED: 1 of 1" in out and "fix:" in out

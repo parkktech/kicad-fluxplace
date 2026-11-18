@@ -3110,6 +3110,9 @@ def cmd_progress(a):
             raise SystemExit(f"progress checkpoint: {type(e).__name__}: {e}")
         wd = a.workdir or os.path.dirname(os.path.abspath(tgt))
         print(f"progress: checkpoint {len(st['history'])} accepted {cp['board']} rev {cp['rev']} {PG._mline(cp['metrics'])}")
+        from fluxplace import modelpaths as MP
+        for ln in MP.warn_lines(MP.scan(cp["board"])):
+            print(ln)
         print(f"brief: fluxplace progress brief --workdir {wd}")
         return
     if act == "block":

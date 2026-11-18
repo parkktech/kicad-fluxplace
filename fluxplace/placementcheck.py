@@ -13,6 +13,7 @@ import os
 from . import geom as GM
 from . import legalise as LG
 from . import legality as LY
+from . import modelpaths as MP
 from . import placerules as PR
 
 SIDES = ("F", "B")
@@ -191,6 +192,7 @@ def cmd_placement_check(a):
     cons, _spec = PC._ctx(a)
     B = RD.load(a.board)
     res = compute(B, cons)
+    res["model_paths"] = MP.scan(a.board)
     out = os.path.splitext(a.board)[0] + ".placement-check.json"
     with open(out, "w") as fh:
         json.dump(res, fh, indent=1)
@@ -202,6 +204,8 @@ def cmd_placement_check(a):
         for ln in lines(res):
             if not getattr(a, "quiet", False) or ln.startswith(("keepout", "no_tht", "hardware", "collision", "    ")) and " ok " not in ln:
                 print(ln)
+        for ln in MP.warn_lines(res["model_paths"]):
+            print(ln)
         print(f"full report: {out}")
     if not res["ok"]:
         raise SystemExit(1)

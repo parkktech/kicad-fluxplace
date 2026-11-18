@@ -5,6 +5,10 @@
 
 A pad inside a track-forbidding rule area is not trapped when a filled zone of its own net, on a layer the pad is on, touches the pad and the rule area allows copper pours (`copperpour` not `not_allowed`). `legality.poured_pad` is the shared test; the route gate (`legality.collisions`) and `preroute.keepout_trapped` both use it. Without such a pour, or with another net's pour, the FAIL stays. Tests: `tests/test_placecheck_gate.py`.
 
+## 2026-11-18 - MODEL_PATH_UNRESOLVED: 3D model paths checked in placement-check and progress checkpoint
+
+`fluxplace/modelpaths.py` resolves every `(model "...")` path of a board: `${KIPRJMOD}` is the board's folder, `${KICAD*_3DMODEL_DIR}` is a library path and is skipped. Unresolved paths print one `WARN MODEL_PATH_UNRESOLVED: n of m` line with the fix hint; the command still exits 0 (WARN, not FAIL). `placement-check --json` carries a `model_paths` object. The work copy itself is not changed. Tests: `tests/test_placecheck_gate.py`.
+
 ## 2026-11-18 - fail fast: placement-check and pairs run the route collision gate, rule areas included
 
 `placement-check` now reports every FAIL row of the route stage's collision gate, including the board's track/pad-forbidding rule areas (`keepout_trapped`, "inside a rule area that forbids it"), not only part-against-part overlaps. Rows already listed as keep-out or under-height violations are not counted twice. `pairs` (not `--plan-only`) refuses before any work with the same COLLISION rows. Tests: `tests/test_placecheck_gate.py`.
