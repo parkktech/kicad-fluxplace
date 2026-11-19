@@ -17,3 +17,10 @@ makes progress.
   `repairregion`, `handrepair`, `patch`, `snapiter`, `pairs`) and extend one.
 - **Every gap the flow cannot close** gets a row in `docs/ONE-SHOT-LEDGER.md` (cause, fix, result measured on a board).
 - Stay board-agnostic: no board refs, net names or constants in the code.
+
+## Measure every change until routing is bullet-proof (owner rule, 2026-11-19)
+- Every repair attempt -> `.fluxplace/attempts.jsonl`; every `close`/variant run -> `docs/corpus/runs.jsonl` (one line, committed).
+- Every measurement ends with: the `python3 -m fluxplace.gaps --report` table, a ledger row naming the top refusal
+  reason and the fix proposed for it, and that fix as the next recipe item. No phase is done without its measured line.
+- A change is kept only when the runs log shows the board (later: the corpus score) not worse. The goal metric is the
+  share of runs with `full_pass` (0 opens, 0 shorts, 0 unwaived errors, hs pairs complete, review pass) in one call.
