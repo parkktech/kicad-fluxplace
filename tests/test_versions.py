@@ -22,6 +22,7 @@ def fake(monkeypatch):
         m.update(table.get(os.path.basename(board), {}))
         return dict(m)
     monkeypatch.setattr(VS, "measure", measure)
+    monkeypatch.setattr(VS, "copper_fingerprint", lambda p: os.path.basename(p))
     return table
 
 
@@ -264,3 +265,47 @@ def test_commit_does_not_sweep_in_other_staged_files(tmp_path):
     assert "docs/resume/boards.json" in shown and "other.txt" not in shown
     staged = subprocess.run(["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"], capture_output=True, text=True).stdout
     assert "other.txt" in staged
+
+
+def test_accept_identical_copper_exit4_changes_nothing(tmp_path, fake, monkeypatch):
+    root = git_repo(tmp_path)
+    init(root)
+    b2 = board(root, "W1/stageB/copy.kicad_pcb")
+    monkeypatch.setattr(VS, "copper_fingerprint", lambda p: "same-copper")
+    before = (reg(root), commits(root), open(root / "docs/resume/RESUME-W1.md").read(),
+              os.path.realpath(root / "W1/CURRENT.kicad_pcb"))
+    with pytest.raises(SystemExit) as e:
+        call(root, "accept", b2, "--note", "duplicate")
+    assert e.value.code == 4
+    after = (reg(root), commits(root), open(root / "docs/resume/RESUME-W1.md").read(),
+             os.path.realpath(root / "W1/CURRENT.kicad_pcb"))
+    assert after == before
+
+
+def test_accept_changed_copper_still_accepts(tmp_path, fake, monkeypatch):
+    root = git_repo(tmp_path)
+    init(root)
+    b2 = board(root, "W1/stageB/moved.kicad_pcb")
+    monkeypatch.setattr(VS, "copper_fingerprint", lambda p: "copper-" + os.path.basename(p))
+    call(root, "accept", b2, "--note", "moved")
+    assert os.path.realpath(root / "W1/CURRENT.kicad_pcb") == os.path.realpath(b2)
+    assert len(reg(root)["versions"]["W1"]["history"]) == 2
+
+
+def test_copper_fingerprint_follows_copper_only(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+
+    def make(name, x2):
+        b = pcbnew.BOARD()
+        t = pcbnew.PCB_TRACK(b)
+        t.SetStart(pcbnew.VECTOR2I(0, 0))
+        t.SetEnd(pcbnew.VECTOR2I(x2, 0))
+        t.SetWidth(200000)
+        t.SetLayer(pcbnew.F_Cu)
+        b.Add(t)
+        p = str(tmp_path / name)
+        b.Save(p)
+        return p
+    a, same, moved = make("a.kicad_pcb", 1000000), make("same.kicad_pcb", 1000000), make("moved.kicad_pcb", 2000000)
+    assert VS.copper_fingerprint(a) == VS.copper_fingerprint(same)
+    assert VS.copper_fingerprint(a) != VS.copper_fingerprint(moved)

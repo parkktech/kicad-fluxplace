@@ -50,6 +50,8 @@ one `RESUME-<version>.md` per version.
 
 - `accept` refuses when opens (`unconnected`), shorts or errors rose against the last accepted entry; `--allow-worse`
   overrides (with a note). The board must sit inside the active version folder.
+- `accept` compares the copper of the board with CURRENT first (`copper_fingerprint`: tracks, arcs, vias, footprints;
+  zones not hashed). Identical copper prints `no change: ...` and exits **4**; nothing is recorded, moved or committed.
 - The progress checkpoint refuses new DRC shorts the same way (`--allow-worse` = allow).
 - `new` copies the source board to `<version>/start.kicad_pcb`, closes the old resume NOW with a pointer, and
   switches `active`.

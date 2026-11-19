@@ -10,6 +10,7 @@ NOW block, rewritten before and after every step.
   versions step "what starts now"           write NOW "Step in progress" (before a step), commit
   versions accept BOARD --note N [--next X] [--allow-worse]
                                             measure (DRC), refuse if opens/shorts/errors rose, set CURRENT, NOW, commit
+                                            exit 4: "no change" (same copper as CURRENT); nothing is written
   versions reject BOARD --note N            record a tried-and-rejected board, commit
   versions new VERSION --from BOARD --reason R [--decisions a,b]
                                             new version folder (+ config links), start board, RESUME file, old one closed
@@ -22,6 +23,7 @@ version folder), commit (true: git add + commit the registry and resume dir afte
 start-context).
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -87,6 +89,29 @@ def save(r):
 
 def active(r):
     return r["active"], r["versions"][r["active"]]
+
+
+def _xy(p):
+    return (int(p.x), int(p.y))
+
+
+def copper_fingerprint(path):
+    """sha1 of a board's copper (pcbnew, nm): tracks and arcs (class, net, layer, start, end, width, mid),
+    vias (net, pos, diameter, drill), footprints (ref, pos, rotation, layer). Zones are not hashed."""
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    rows = []
+    for t in b.GetTracks():
+        cls = t.GetClass()
+        if cls == "PCB_VIA":
+            rows.append(("via", t.GetNetname(), _xy(t.GetPosition()), t.GetWidth(pcbnew.F_Cu),
+                         t.GetWidth(pcbnew.B_Cu), t.GetDrillValue()))
+        else:
+            mid = _xy(t.GetMid()) if cls == "PCB_ARC" else None
+            rows.append((cls, t.GetNetname(), t.GetLayer(), _xy(t.GetStart()), _xy(t.GetEnd()), t.GetWidth(), mid))
+    for f in b.GetFootprints():
+        rows.append(("fp", f.GetReference(), _xy(f.GetPosition()), round(f.GetOrientationDegrees(), 6), f.GetLayer()))
+    return hashlib.sha1(json.dumps(sorted(repr(r) for r in rows)).encode()).hexdigest()
 
 
 def measure(board):
@@ -221,6 +246,11 @@ def cmd_accept(a):
     b = os.path.abspath(a.board)
     if not rel(b).startswith(v + os.sep):
         sys.exit("refused: %s is not inside the active version %s/" % (rel(b), v))
+    cur = e.get("current")
+    if cur and os.path.exists(os.path.join(ROOT, cur)) and \
+            copper_fingerprint(b) == copper_fingerprint(os.path.join(ROOT, cur)):
+        print("no change: %s has the same copper as CURRENT (%s)" % (rel(b), cur))
+        sys.exit(4)
     m = measure(b)
     islands = m.pop("islands", None)
     prev = e["history"][-1]["metrics"] if e.get("history") else None
@@ -394,6 +424,7 @@ def add_subparsers(pv):
     p = vs.add_parser("accept", parents=[common], help="measure, refuse if worse, set CURRENT, NOW, commit")
     p.add_argument("board"); p.add_argument("--note", required=True); p.add_argument("--next")
     p.add_argument("--allow-worse", action="store_true"); p.set_defaults(f=cmd_accept)
+    p.epilog = "exit 4: no change (the board has the same copper as CURRENT); nothing is recorded or moved"
     p = vs.add_parser("reject", parents=[common], help="record a rejected board")
     p.add_argument("board"); p.add_argument("--note", required=True); p.set_defaults(f=cmd_reject)
     p = vs.add_parser("new", parents=[common], help="new board version from a board file")
