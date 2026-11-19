@@ -141,7 +141,7 @@ def _snapshot(path):
     return _SNAP[key]
 
 
-def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps):
+def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None):
     """Phase 1 guard (mode repair). The first failing rule gives `why`. base_m["gaps"] supplies the base score (R4)."""
     diff = audit.connectivity_diff(_snapshot(base_board), audit.snapshot(cand_board))
     if not diff["ok"]:
@@ -149,6 +149,9 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps):
     if cand_m["shorts"] > base_m["shorts"]:
         return False, "R1 shorts up"
     new = drcguard.new_keys(base_m["err_keys"], cand_m["err_keys"])
+    # own-kind keys may change description when the repair moves copper (partial via snap); R4 still requires
+    # the score to fall. Phase 2 replaces this with drcguard.accept trades (D1).
+    new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
     if new:
         return False, f"R2 new DRC key {next(iter(new))[0]}"[:120]
     if not score(cand_m, cand_gaps) < score(base_m, base_m.get("gaps") or []):
@@ -205,28 +208,36 @@ def _clean_board(p):
         _rm(q)
 
 
-def _layers(board):
-    """(copper layer names, names of layers a full-board zone covers). Rule areas are skipped."""
+def _track_len_by_layer(board):
+    """{layer name: total track + arc length, mm} over the board's tracks (vias excluded)."""
     import pcbnew
     b = pcbnew.LoadBoard(board)
-    cu = [b.GetLayerName(lid) for lid in b.GetEnabledLayers().CuStack()]
-    edge = b.GetBoardEdgesBoundingBox().GetArea()
-    full = set()
-    for z in b.Zones():
-        if z.GetIsRuleArea() or not edge or z.GetBoundingBox().GetArea() < 0.8 * edge:
+    out = {}
+    for t in b.GetTracks():
+        if t.IsVia():
             continue
-        full.update(b.GetLayerName(lid) for lid in z.GetLayerSet().Seq())
-    return cu, full
+        name = b.GetLayerName(t.GetLayer())
+        out[name] = out.get(name, 0.0) + t.GetLength() / 1e6
+    return out
 
 
 def copper_layers(board):
-    return _layers(board)[0]
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    return [b.GetLayerName(lid) for lid in b.GetEnabledLayers().CuStack()]
 
 
 def signal_layers(board):
-    """Copper layers minus every layer that a full-board zone covers. No layer names in code."""
-    cu, full = _layers(board)
-    return [n for n in cu if n not in full]
+    """Copper layers that carry at least 5 % of the board's track length. A plane layer carries almost none,
+    and this rule does not depend on zones: boards whose layers are all full pours still resolve. If no layer
+    passes (no tracks, or too many layers to pass), every copper layer counts as signal."""
+    cu = copper_layers(board)
+    lens = _track_len_by_layer(board)
+    total = sum(lens.values())
+    if total <= 0:
+        return cu
+    sig = [n for n in cu if lens.get(n, 0.0) >= 0.05 * total]
+    return sig or cu
 
 
 def _r_joingaps(base, out, gaps, ctx):
@@ -287,6 +298,28 @@ def _r_region(base, out, gaps, ctx):
                             constraints=ctx["cons_path"], kicad_cli=ctx["kicad_cli"], log=ctx["log"]))
 
 
+def _r_krt(base, out, gaps, ctx):
+    """KRT single-net re-route (the proven router), run as the pipeline's route command on the open nets."""
+    import types
+    from . import routerloc as RL, routerules as RR, pipeline as P, krtchain as KC
+    try:
+        rl = RL.resolve()
+    except RuntimeError:
+        return {"status": "krt not found"}
+    R = RR.rules(ctx["cons"], base, default=RR.DEFAULT_SIZE)
+    a = types.SimpleNamespace(router_py=rl["py"], router_dir=rl["dir"], layers=signal_layers(base),
+                              track=None, clearance=None)
+    rflags = RR.flags(R, rl["dir"], ctx["work"])
+    cmd = P._route_cmd(a, base, out, [KC.glob_escape(n) for n in _nets(gaps)], R=R, rflags=rflags)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
+                              cwd=ctx["work"])
+    except subprocess.TimeoutExpired:
+        _rm(out)
+        return {"status": "krt timeout"}
+    return {"status": "ran", "rc": proc.returncode}
+
+
 def _r_drcfix(base, out, gaps, ctx):
     from . import drcfix as DF
     return _brief(DF.loop(base, out, kicad_cli=ctx["kicad_cli"], cons=ctx["cons"], log=ctx["log"]))
@@ -303,7 +336,7 @@ def _r_snapiter(base, out, gaps, ctx):
 
 
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
-         "handrepair": _r_handrepair, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
+         "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
@@ -311,12 +344,12 @@ DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["pourisland", "region"],
-    "open-free": ["patch", "handrepair", "region", "patch_rip"],
+    "open-free": ["patch", "handrepair", "krt", "region", "patch_rip"],
     "clearance": ["drcfix", "region"],
     "dangling": ["launder"],
     "via-offcentre": ["snapiter"],
 }
-LEVEL = {"region": "L1", "patch_rip": "L1"}  # every other rung is L0
+LEVEL = {"region": "L1", "patch_rip": "L1", "krt": "L0"}  # every other rung is L0
 
 
 def _tool():
@@ -344,8 +377,12 @@ def _cons_hash(path):
     return hashlib.sha1(open(path, "rb").read()).hexdigest()
 
 
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, log=print):
+          attempts=None, runs=None, log=print):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
     os.makedirs(work, exist_ok=True)
@@ -364,6 +401,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     m = dict(measure(best, kicad_cli))
     m["gaps"] = classify(m["drc"], cons)
     start = _vitals(m)
+    board_fp0 = versions.copper_fingerprint(best)
+    if runs is None and calllog.enabled():
+        runs = os.path.join(_repo_root(), "docs", "corpus", "runs.jsonl")
+    tries = []
 
     state_path = os.path.join(work, "gaps.json")
     memo = set()
@@ -409,7 +450,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = dict(measure(out, kicad_cli))
                     runs = 1
                     cm["gaps"] = classify(cm["drc"], cons)
-                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"])
+                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind)
                     if ok:
                         _copy(out, best)
                         m = cm
@@ -437,6 +478,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                "drc_runs": runs, "precheck": None, "ai_tokens": 0}
         if explicit or calllog.enabled():
             calllog.append(rec, attempts)
+        tries.append({"result": result, "method": rung, "kind": kind, "why": why, "s": rec["s"]})
         n_att += 1
         last[kind] = {"method": rung, "why": why}
         return result in ("closed", "partial")
@@ -478,6 +520,19 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
            "minutes": round((time.time() - t0) / 60, 1), "start": start, "end": _vitals(m),
            "attempts": n_att, "left": left}
     _write_json(os.path.join(work, "stop.json"), res)
+    if runs:
+        ok = [t for t in tries if t["result"] in ("closed", "partial")]
+        refused = Counter(t["why"] for t in tries if t["result"] == "refused")
+        methods = Counter(t["method"] for t in ok)
+        os.makedirs(os.path.dirname(runs), exist_ok=True)
+        calllog.append({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id, "tool": tool,
+                        "board": os.path.basename(board), "board_fp": board_fp0[:8] if len(board_fp0) > 8
+                        else board_fp0, "stage": "close", "variant": None, "start": start,
+                        "end": _vitals(m), "stop": stop, "minutes": res["minutes"], "attempts": n_att,
+                        "closed": len(ok), "methods_closed": dict(methods),
+                        "top_refusals": [[w, n] for w, n in refused.most_common(3)],
+                        "full_pass": m["opens"] == 0 and m["shorts"] == 0 and m["errors"] == 0,
+                        "ai_tokens": 0}, runs)
     date, rows = time.strftime("%Y-%m-%d"), []
     for kind in ORDER + ["other"]:
         n = sum(1 for g in m["gaps"] if g["kind"] == kind)
@@ -489,16 +544,77 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     return dict(res, best=best)
 
 
+def report(paths, runs=None):
+    """Rows per (method, kind) from attempts.jsonl files. close% = (closed + partial) over tries that were not
+    skipped; skipped tries are counted but do not enter the denominator. s/close = seconds of the non-skipped
+    tries per success. top-why = most frequent why among non-skipped tries."""
+    cells = {}
+    for path in paths:
+        with open(path) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                cell = cells.setdefault((r["method"], r["gap"]["kind"]), {"r": Counter(), "s": 0.0, "why": Counter()})
+                cell["r"][r["result"]] += 1
+                if r["result"] != "skipped":
+                    cell["s"] += float(r.get("s") or 0)
+                    cell["why"][str(r.get("why") or "")[:40]] += 1
+    rows = []
+    for (method, kind), c in cells.items():
+        r = c["r"]
+        tried = sum(r.values()) - r["skipped"]
+        won = r["closed"] + r["partial"]
+        rows.append({"method": method, "kind": kind, "tries": sum(r.values()), "closed": r["closed"],
+                     "partial": r["partial"], "refused": r["refused"], "error": r["error"],
+                     "skipped": r["skipped"], "close_pct": round(100.0 * won / tried, 1) if tried else 0.0,
+                     "s_per_close": round(c["s"] / won, 1) if won else None,
+                     "top_why": c["why"].most_common(1)[0][0] if c["why"] else ""})
+    rows.sort(key=lambda x: (-x["close_pct"], -x["tries"], x["method"], x["kind"]))
+    return rows
+
+
+def runs_summary(path):
+    """(runs, full passes) from a runs.jsonl file."""
+    n = k = 0
+    with open(path) as fh:
+        for line in fh:
+            if line.strip():
+                n += 1
+                k += bool(json.loads(line).get("full_pass"))
+    return n, k
+
+
+def print_report(rows, runs=None):
+    head = f"{'method':<12}{'kind':<14}{'tries':>6}{'closed':>8}{'partial':>8}{'refused':>8}{'error':>6}" \
+           f"{'skipped':>8}{'close%':>8}{'s/close':>9}  top-why"
+    print(head)
+    for x in rows:
+        sc = "-" if x["s_per_close"] is None else f"{x['s_per_close']:.1f}"
+        print(f"{x['method']:<12}{x['kind']:<14}{x['tries']:>6}{x['closed']:>8}{x['partial']:>8}"
+              f"{x['refused']:>8}{x['error']:>6}{x['skipped']:>8}{x['close_pct']:>7.1f}%{sc:>9}  {x['top_why'][:40]}")
+    if runs:
+        n, k = runs_summary(runs)
+        print(f"runs: {n}, full passes: {k}")
+
+
 def _main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(prog="python3 -m fluxplace.gaps")
-    ap.add_argument("board")
-    ap.add_argument("--work", required=True)
+    ap.add_argument("board", nargs="?")
+    ap.add_argument("--work")
+    ap.add_argument("--report", nargs="+", metavar="ATTEMPTS")
+    ap.add_argument("--runs", metavar="RUNS_JSONL")
     ap.add_argument("--constraints")
     ap.add_argument("--classify-only", action="store_true")
     ap.add_argument("--kicad-cli", default="kicad-cli")
     a = ap.parse_args(argv)
     t0 = time.time()
+    if a.report:
+        print_report(report(a.report, a.runs), a.runs)
+        return 0
+    if not a.board or not a.work:
+        ap.error("board and --work are required unless --report is given")
     if a.classify_only:
         gaps = classify(measure(a.board, a.kicad_cli)["drc"], C.load(a.constraints))
         for (k, c), n in sorted(Counter((g["kind"], g["class"]) for g in gaps).items()):

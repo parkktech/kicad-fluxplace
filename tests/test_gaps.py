@@ -175,11 +175,12 @@ def test_close_flat_and_memo(monkeypatch, loop):
     res2 = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res2["stop"] == "flat"
     lines = [json.loads(x) for x in open(loop["attempts"])]
-    assert [x["result"] for x in lines[:4]] == ["refused"] * 4
-    assert [x["why"] for x in lines[:4]] == ["no change"] * 4
-    assert all(x["drc_runs"] == 0 for x in lines[:4])
-    assert [x["why"] for x in lines[-4:]] == ["memo"] * 4
-    assert all(x["result"] == "skipped" for x in lines[-4:])
+    k = len(GP.DISPATCH["open-free"])
+    assert [x["result"] for x in lines[:k]] == ["refused"] * k
+    assert [x["why"] for x in lines[:k]] == ["no change"] * k
+    assert all(x["drc_runs"] == 0 for x in lines[:k])
+    assert [x["why"] for x in lines[-k:]] == ["memo"] * k
+    assert all(x["result"] == "skipped" for x in lines[-k:])
 
 
 def test_attempt_line_schema(monkeypatch, loop):
@@ -209,7 +210,7 @@ def test_stop_json(monkeypatch, loop):
     res = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     stop = json.load(open(os.path.join(loop["work"], "stop.json")))
     assert {"stop", "exit", "level", "minutes", "start", "end", "attempts", "left"} <= set(stop)
-    assert stop["attempts"] == 4 and stop["level"] == "L0"
+    assert stop["attempts"] == len(GP.DISPATCH["open-free"]) and stop["level"] == "L0"
     assert len(stop["left"]) == 1
     left = stop["left"][0]
     assert left["kind"] == "open-free" and left["last_method"] == "patch_rip" and left["why"] == "no change"
@@ -316,3 +317,125 @@ def test_next_kind_tried_after_accept(monkeypatch, tmp_path, guard):
     lines = [json.loads(x) for x in open(attempts)]
     assert lines[0]["method"] == "patch" and lines[0]["result"] == "closed"
     assert lines[1]["gap"]["kind"] == "clearance" and lines[1]["method"] == "drcfix"
+
+
+def _fake_layers(monkeypatch, layers, lens):
+    monkeypatch.setattr(GP, "copper_layers", lambda board: list(layers))
+    monkeypatch.setattr(GP, "_track_len_by_layer", lambda board: dict(lens))
+
+
+def test_signal_layers_drops_tiny_planes(monkeypatch):
+    _fake_layers(monkeypatch, ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+                 {"F.Cu": 100.0, "B.Cu": 90.0, "In1.Cu": 0.5, "In2.Cu": 0.2})
+    sig = GP.signal_layers("x")
+    assert sig == ["F.Cu", "B.Cu"]
+    planes = set(GP.copper_layers("x")) - set(sig)
+    assert planes == {"In1.Cu", "In2.Cu"}
+
+
+def test_signal_layers_all_tiny_returns_all(monkeypatch):
+    _fake_layers(monkeypatch, ["F.Cu", "B.Cu"], {})
+    assert GP.signal_layers("x") == ["F.Cu", "B.Cu"]
+    # 25 equal layers: each carries 4 %, under the 5 % bar, so no layer passes
+    layers = [f"L{i}" for i in range(25)]
+    _fake_layers(monkeypatch, layers, {n: 1.0 for n in layers})
+    assert GP.signal_layers("x") == layers
+
+
+def test_accept_own_kind_key_passes_r2(guard):
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    key = ("track_not_centered_on_via", ("Track [SIG3] on B.Cu",))
+    cand = _mm(opens=2, err_keys=[key], gaps=[_g("b")])
+    assert GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], "via-offcentre") == (True, "")
+    ok, why = GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], "clearance")
+    assert not ok and why == "R2 new DRC key track_not_centered_on_via"
+
+
+def test_krt_not_found_no_board(monkeypatch, tmp_path):
+    from fluxplace import routerloc as RL
+    def missing(*a, **k):
+        raise RuntimeError("no krt")
+    monkeypatch.setattr(RL, "resolve", missing)
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [_g("a")], {"cons": {}, "work": str(tmp_path),
+                                                                          "budget_s": 60})
+    assert res == {"status": "krt not found"}
+    assert not out.exists()
+
+
+def test_krt_command_carries_nets_and_layers(monkeypatch, tmp_path):
+    import subprocess
+    from fluxplace import routerloc as RL, routerules as RR, adaptive, batchroute as BR
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(adaptive, "krt_extra", lambda d, s: [])
+    monkeypatch.setattr(BR, "has_fanout", lambda src: False)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    seen = {}
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        open(cmd[cmd.index("--output") + 1], "w").write("routed")
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    gap = dict(_g("a"), nets=["NET[0]"])
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [gap],
+                    {"cons": {}, "work": str(tmp_path), "budget_s": 60})
+    cmd = seen["cmd"]
+    assert res == {"status": "ran", "rc": 0} and out.exists()
+    assert cmd[cmd.index("--nets") + 1:] == ["NET[[]0]"]
+    assert cmd.index("--layers") < cmd.index("F.Cu") < cmd.index("B.Cu") < cmd.index("--nets")
+    assert seen["kw"]["cwd"] == str(tmp_path)
+
+
+def test_krt_before_region_in_open_free():
+    d = GP.DISPATCH["open-free"]
+    assert d.index("krt") < d.index("region")
+    assert GP.LEVEL["krt"] == "L0"
+
+
+RUN_KEYS = {"ts", "run", "tool", "board", "board_fp", "stage", "variant", "start", "end", "stop", "minutes",
+            "attempts", "closed", "methods_closed", "top_refusals", "full_pass", "ai_tokens"}
+
+
+def test_runs_line_keys_and_full_pass(monkeypatch, loop, tmp_path):
+    runs = str(tmp_path / "runs.jsonl")
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
+    GP.close(loop["board"], loop["work"], attempts=loop["attempts"], runs=runs, log=lambda m: None)
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
+    GP.close(loop["board"], str(tmp_path / "w2"), attempts=loop["attempts"], runs=runs, log=lambda m: None)
+    lines = [json.loads(x) for x in open(runs)]
+    assert len(lines) == 2
+    assert set(lines[0]) == RUN_KEYS
+    assert lines[0]["full_pass"] is True and lines[0]["stop"] == "clean" and lines[0]["closed"] == 1
+    assert lines[0]["methods_closed"] == {"patch": 1} and lines[0]["board"] == "in.kicad_pcb"
+    assert lines[1]["full_pass"] is False and lines[1]["stop"] == "flat"
+    assert lines[1]["top_refusals"] == [["no change", len(GP.DISPATCH["open-free"])]]
+
+
+def test_report_rows_and_skipped_excluded(tmp_path):
+    def rec(method, kind, result, why="", s=1.0):
+        return {"method": method, "gap": {"kind": kind}, "result": result, "why": why, "s": s}
+    rows_in = [rec("patch", "open-free", "closed", "{}", 2.0),
+               rec("patch", "open-free", "refused", "R4 score not lower", 1.0),
+               rec("patch", "open-free", "refused", "R4 score not lower", 1.0),
+               rec("patch", "open-free", "skipped", "memo", 0.0),
+               rec("patch", "open-free", "skipped", "memo", 0.0),
+               rec("krt", "open-free", "error", "RuntimeError: x", 3.0)]
+    f = tmp_path / "attempts.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in rows_in))
+    rows = GP.report([str(f)])
+    assert [(r["method"], r["kind"]) for r in rows] == [("patch", "open-free"), ("krt", "open-free")]
+    p = rows[0]
+    assert (p["tries"], p["closed"], p["refused"], p["skipped"]) == (5, 1, 2, 2)
+    assert p["close_pct"] == 33.3                       # 1 of 3 non-skipped tries
+    assert p["top_why"] == "R4 score not lower"
+    assert p["s_per_close"] == 4.0                      # 4 s of non-skipped tries / 1 close
+    k = rows[1]
+    assert k["close_pct"] == 0.0 and k["error"] == 1 and k["top_why"] == "RuntimeError: x"
+    runs = tmp_path / "runs.jsonl"
+    runs.write_text(json.dumps({"full_pass": True}) + "\n" + json.dumps({"full_pass": False}) + "\n")
+    assert GP.runs_summary(str(runs)) == (2, 1)
