@@ -375,7 +375,7 @@ def load_ai_action(path, base):
         print(f"ai: unreadable action file {os.path.basename(path)}: {e}", file=sys.stderr)
         return out
     try:
-        copper = copper_layers(base)
+        copper = signal_layers(base)   # routes go on signal layers only (planes stay planes)
     except Exception:
         copper = []
     if _num(a.get("tokens")):
@@ -448,7 +448,7 @@ def gap_packet(base, gap, ctx):
                 "rules": r.get("rules")}
         W = HR.window(base, conn=i, constraints=cp, margin=2.0)
         mid = ((r["a"]["x"] + r["b"]["x"]) / 2, (r["a"]["y"] + r["b"]["y"]) / 2)
-        win = {"box": W.get("window"), "layers": W.get("layers"),
+        win = {"box": W.get("window"), "layers": signal_layers(base),
                "tracks": _near(W.get("tracks") or [], mid, ("a", "b")),
                "vias": _near(W.get("vias") or [], mid, ("pos",)),
                "via_sites": [[round(s[0], 2), round(s[1], 2)]
@@ -560,6 +560,11 @@ def _apply_ai(base, out, a, ctx, sid):
             _clean_board(t)
 
 
+def ai_key(gap):
+    """Stable key of a gap for AI packet/action files and the AI budget: kind and first net."""
+    return f"{gap['kind']}:{(gap.get('nets') or ['?'])[0]}"
+
+
 def _r_ai(base, out, gaps, ctx):
     """AI rung on the first gap. No action file: write the gap packet and stop (status packet). An action file:
     apply it as one transaction; close guards the board like any other rung."""
@@ -567,9 +572,10 @@ def _r_ai(base, out, gaps, ctx):
         return {"status": "ai off"}
     gap = gaps[0]
     used = ctx["ai_used"]
-    if used.get(gap["id"], 0) >= AI_BUDGET:
+    key = ai_key(gap)          # kind + net: DRC lists an open's two items in either order, so the full id is not stable
+    if used.get(key, 0) >= AI_BUDGET:
         return {"status": "ai budget"}
-    sid = critroute._safe(gap["id"])[:80]
+    sid = critroute._safe(key)[:80]
     os.makedirs(ctx["ai_dir"], exist_ok=True)
     act = os.path.join(ctx["ai_dir"], sid + ".action.json")
     if not os.path.exists(act):
@@ -578,7 +584,7 @@ def _r_ai(base, out, gaps, ctx):
         return {"status": "packet"}
     a = load_ai_action(act, base)
     os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
-    used[gap["id"]] = used.get(gap["id"], 0) + 1
+    used[key] = used.get(key, 0) + 1
     status, commit, why = _apply_ai(base, out, a, ctx, sid)
     return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"]}
 

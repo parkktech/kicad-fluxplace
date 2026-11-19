@@ -51,7 +51,7 @@ def test_packet_no_connection_keys_and_size(monkeypatch, tmp_path):
     os.makedirs(ctx["ai_dir"])
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"), [GAP], ctx)
     assert res == {"status": "packet"}
-    pk = os.path.join(ctx["ai_dir"], critroute._safe(GAP["id"]) + ".packet.json")
+    pk = os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP)) + ".packet.json")
     raw = open(pk, "rb").read()
     p = json.loads(raw)
     assert set(p) == PKT_KEYS and p["conn"] is None and p["window"] is None and p["v"] == 1
@@ -59,6 +59,7 @@ def test_packet_no_connection_keys_and_size(monkeypatch, tmp_path):
 
 
 def test_packet_clips_to_4096(monkeypatch, tmp_path):
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
     monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": [_conn()]})
     tracks = [{"id": f"{i:064d}", "net": "SIG2", "layer": "F.Cu", "locked": False,
                "a": [20.0 + i * 0.01, 20.0], "b": [21.0, 20.0]} for i in range(60)]
@@ -79,6 +80,7 @@ def test_packet_clips_to_4096(monkeypatch, tmp_path):
 
 
 def test_packet_krt_filtered_to_net(monkeypatch, tmp_path):
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
     monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": [_conn()]})
     monkeypatch.setattr(HR, "window", lambda *a, **k: {"window": [0, 0, 1, 1], "layers": ["F.Cu"], "tracks": [],
                                                        "vias": [], "via_sites": {"sites": []}})
@@ -102,7 +104,7 @@ def test_packet_tried_lines_for_this_gap(monkeypatch, tmp_path):
 # ---- action file ----
 
 def test_load_ai_action_drops_invalid(monkeypatch, tmp_path):
-    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
     acts = [{"do": "zap"}, {"do": "rip", "net": "N", "ids": []}, {"do": "rip", "net": "N", "ids": ["zz"]},
             {"do": "nudge", "ref": "R1", "dx": 2.0, "dy": 0, "rot": 0},
             {"do": "nudge", "ref": "R1", "dx": 0.5, "dy": 0, "rot": 0},
@@ -171,14 +173,14 @@ def apply_env(monkeypatch, tmp_path):
 
 def _write_action(ai_dir, acts):
     os.makedirs(ai_dir, exist_ok=True)
-    p = os.path.join(ai_dir, critroute._safe(GAP["id"]) + ".action.json")
+    p = os.path.join(ai_dir, critroute._safe(GP.ai_key(GAP)) + ".action.json")
     with open(p, "w") as fh:
         json.dump({"actions": acts, "tokens": 40, "why": "reroute"}, fh)
     return p
 
 
 def test_apply_order_and_temps(apply_env, monkeypatch, tmp_path):
-    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
     monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
     ctx = _ctx(tmp_path)
     _write_action(ctx["ai_dir"], [
@@ -194,12 +196,12 @@ def test_apply_order_and_temps(apply_env, monkeypatch, tmp_path):
         < order.index("suggest") < order.index("lay") < order.index("commit")
     assert ("shove", "SIG9", "unlay", ["abcdef12"]) in c
     assert ("move", [("R1")]) == c[0] or c[0][0] == "move"
-    assert os.listdir(ctx["ai_dir"]) == [critroute._safe(GAP["id"]) + ".action.used.json"]
-    assert ctx["ai_used"] == {GAP["id"]: 1}
+    assert os.listdir(ctx["ai_dir"]) == [critroute._safe(GP.ai_key(GAP)) + ".action.used.json"]
+    assert ctx["ai_used"] == {GP.ai_key(GAP): 1}
 
 
 def test_nudge_refused_on_fixed_or_big_part(apply_env, monkeypatch, tmp_path):
-    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
     apply_env["state"]["fixed"] = ["R1"]
     ctx = _ctx(tmp_path)
     _write_action(ctx["ai_dir"], [{"do": "nudge", "ref": "R1", "dx": 0.5, "dy": 0.0, "rot": 0.0},
@@ -209,7 +211,7 @@ def test_nudge_refused_on_fixed_or_big_part(apply_env, monkeypatch, tmp_path):
 
 
 def test_give_up_skips_session(apply_env, monkeypatch, tmp_path):
-    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
     ctx = _ctx(tmp_path)
     _write_action(ctx["ai_dir"], [{"do": "give_up", "why": "no room"}])
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
@@ -217,9 +219,9 @@ def test_give_up_skips_session(apply_env, monkeypatch, tmp_path):
 
 
 def test_ai_budget_after_two_applied(apply_env, monkeypatch, tmp_path):
-    ctx = _ctx(tmp_path, ai_used={GAP["id"]: 2})
+    ctx = _ctx(tmp_path, ai_used={GP.ai_key(GAP): 2})
     os.makedirs(ctx["ai_dir"])
-    open(os.path.join(ctx["ai_dir"], critroute._safe(GAP["id"]) + ".action.json"), "w").write("{}")
+    open(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP)) + ".action.json"), "w").write("{}")
     assert GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx) == {"status": "ai budget"}
     assert apply_env["calls"] == []
 
