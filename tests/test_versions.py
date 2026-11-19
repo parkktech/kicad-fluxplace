@@ -245,3 +245,22 @@ def test_real_registry_format_reads_with_boards_missing(tmp_path, capsys):
     call(tmp_path, "start-context", "--hook-json")
     assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert open(REAL, "rb").read() == before
+
+
+def test_commit_does_not_sweep_in_other_staged_files(tmp_path):
+    import subprocess
+    from fluxplace import versions as V
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True)
+    res = tmp_path / "docs" / "resume"
+    res.mkdir(parents=True)
+    (res / "boards.json").write_text("{}")
+    (tmp_path / "other.txt").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "other.txt"], check=True)
+    V.ROOT, V.REG, V.RES = str(tmp_path), str(res / "boards.json"), str(res)
+    V.commit("registry only", {})
+    shown = subprocess.run(["git", "-C", str(tmp_path), "show", "--name-only", "--format="], capture_output=True, text=True).stdout
+    assert "docs/resume/boards.json" in shown and "other.txt" not in shown
+    staged = subprocess.run(["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"], capture_output=True, text=True).stdout
+    assert "other.txt" in staged

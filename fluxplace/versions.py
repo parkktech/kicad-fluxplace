@@ -149,7 +149,8 @@ def commit(msg, cfg):
             return
         files = [REG] + [os.path.join(RES, f) for f in os.listdir(RES)]
         subprocess.run(["git", "-C", ROOT, "add", "--"] + files, capture_output=True)
-        subprocess.run(["git", "-C", ROOT, "commit", "-q", "-m", msg], capture_output=True)
+        # only these paths: never sweep in whatever else the user has staged
+        subprocess.run(["git", "-C", ROOT, "commit", "-q", "-m", msg, "--"] + files, capture_output=True)
     except OSError:
         return
 
