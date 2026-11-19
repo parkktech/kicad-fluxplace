@@ -1,6 +1,11 @@
 # Change log (moved from the README)
 
 
+## 2026-11-19 - fp-check: footprint defects caught before placement, never waived
+
+`fluxplace/fpcheck.py` measures every footprint with pcbnew (exact edge-to-edge via `SHAPE.Collide`): pad/pad and pad/hole clearance, keep-out self-conflict, courtyard. A spec `landpattern.pads` / `vendor_footprint` table is checked pad by pad (`LANDPATTERN_PAD_*`); the summary `landpattern` could not see one corner pad 0.55 mm off. The parts gate and `route-ready` run it; `review` and `route-ready` refuse waivers for `FP_*` / `LANDPATTERN_*`; `--allow-undocumented` does not pass it. Only `landpattern.allow` (a manufacturer dimension, file present, value within 0.03 mm) is accepted. Tests: `tests/test_fpcheck.py`. Docs: [commands/fp-check.md](commands/fp-check.md).
+
+
 ## 2026-11-18 - pour-connected pads are not keepout_trapped
 
 A pad inside a track-forbidding rule area is not trapped when a filled zone of its own net, on a layer the pad is on, touches the pad and the rule area allows copper pours (`copperpour` not `not_allowed`). `legality.poured_pad` is the shared test; the route gate (`legality.collisions`) and `preroute.keepout_trapped` both use it. Without such a pour, or with another net's pour, the FAIL stays. Tests: `tests/test_placecheck_gate.py`.

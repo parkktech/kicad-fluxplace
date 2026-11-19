@@ -1,5 +1,7 @@
 # `route-ready` - the pre-route gate
 
+Footprint geometry (`FP_*`, see [fp-check.md](fp-check.md)) is checked here too, and is never waived.
+
 ### 8. One objective, hard budgets, side/height/connector/stale checks
 
 * **Single score** (`preroute.score`, printed by `route-ready`, minimised by `routable`):

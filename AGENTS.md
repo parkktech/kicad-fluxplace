@@ -32,7 +32,7 @@ Unsure: `fluxplace doctor`.
 | diff-pair tuning | `tune --board B --out O` | `--constraints` |
 | part count | `bom-opt --spec S` | `--constraints` |
 | docs/sourcing | `spec-check`, `sourcing`, `datasheets` | `--no-api` offline |
-| gates | `ready`, `parts`, `closure`, `part-diff`, `magnetics` | docs |
+| gates | `ready`, `parts`, `fp-check`, `closure`, `part-diff` | docs |
 | fab package | `fab`, `deliver`, `pcbway` | after `review` |
 | toolchain, context | `doctor`, `doctor --context` | |
 | which board, resume | `versions status` | `step accept reject new start-context` |
