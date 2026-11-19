@@ -240,7 +240,7 @@ def test_real_registry_format_reads_with_boards_missing(tmp_path, capsys):
     capsys.readouterr()
     call(tmp_path, "status")
     out = capsys.readouterr().out
-    assert "ACTIVE BOARD VERSION: W11" in out
+    assert "ACTIVE BOARD VERSION: %s" % json.load(open(REAL))["active"] in out   # live project state: never hardcode
     assert "WARNING: CURRENT board missing on disk" in out
     assert "WARNING: no resume file for the active version" in out
     call(tmp_path, "start-context", "--hook-json")
