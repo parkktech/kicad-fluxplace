@@ -3095,6 +3095,12 @@ def cmd_calls(a):
             print(CL.line(r))
 
 
+def cmd_versions(a):
+    """versions status|step|accept|reject|new|init|start-context: the board-version registry (which board is current)."""
+    from fluxplace import versions as VS
+    return VS.run(a)
+
+
 def cmd_progress(a):
     """progress checkpoint|block|show|brief: accepted board, metric history, blockers, progressing/stalled/looping."""
     import json as _json
@@ -4212,6 +4218,11 @@ def build_parser():
     ppg.add_argument("--max-calls", type=int, default=60, help="stalled: calls since the last checkpoint (default 60)")
     ppg.set_defaults(fn=cmd_progress)
 
+    from fluxplace import versions as VS
+    pvr = sub.add_parser("versions", help="board-version registry: which board is current, step/accept/reject/new")
+    VS.add_subparsers(pvr)
+    pvr.set_defaults(fn=cmd_versions)
+
     sub.choices["doctor"].add_argument(
         "--context", action="store_true",
         help="measure the agent-context footprint (MCP tools/list, AGENTS.md, README, command output) against budgets")
@@ -4243,7 +4254,7 @@ def _silk_hook(a):
 
 # commands that never write a board: no connectivity snapshot is taken for them
 _GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
-                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress"}
+                    "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress", "versions"}
 
 
 def _guard_ledger_on(a):
