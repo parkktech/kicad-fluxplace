@@ -96,3 +96,9 @@ def test_calls_command(tmp_path, capsys):
     assert "rc=2" in out and "lint x" in out
     cli.main(["calls", str(p), "--json"])
     assert json.loads(capsys.readouterr().out)[0]["rc"] == 2
+
+
+def test_attempts_path_beside_calls(on):
+    b = _board(on)
+    assert CL.attempts_path(b) == os.path.join(os.path.dirname(CL.log_path([b])), "attempts.jsonl")
+    assert os.path.basename(CL.attempts_path(b)) == "attempts.jsonl"

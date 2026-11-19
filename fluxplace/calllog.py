@@ -57,6 +57,11 @@ def log_path(argv, cwd=None):
     return default_path()
 
 
+def attempts_path(board):
+    """.fluxplace/attempts.jsonl beside the board (same location rule as calls.jsonl)."""
+    return os.path.join(os.path.dirname(log_path([board])), "attempts.jsonl")
+
+
 def append(rec, path, max_bytes=None):
     max_bytes = max_bytes or int(os.environ.get("FLUXPLACE_CALL_LOG_MAX", MAX_BYTES))
     os.makedirs(os.path.dirname(path), exist_ok=True)

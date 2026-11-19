@@ -167,3 +167,9 @@ def test_fanout_and_plan_route_stages_do_not_say_pass_on_their_own_fail(tmp_path
     assert r["verdict"] == "fail" and "FANOUT_PIN_BLOCKED" in " ".join(r["next"])
     r = PL.st_plan_route(c, 5, b)
     assert r["verdict"] == "warn" and r["line"].startswith("WARN")
+
+
+def test_close_follows_route_in_both_flows():
+    for flow in (PL.STAGES, PL.CONSTRUCTIVE):
+        assert flow[flow.index("route") + 1] == "close"
+    assert PL.FUNCS["close"] is PL.st_close

@@ -23,9 +23,9 @@ import time
 
 from . import routeconn as RC
 
-STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "tune", "silk", "review"]
+STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "close", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "close", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -864,6 +864,19 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     return rec
 
 
+def st_close(c, n, board):
+    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json."""
+    from . import gaps as GP, calllog as CL
+    att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    try:
+        res = GP.close(board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, log=lambda m: None)
+    except (Exception, SystemExit) as e:
+        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e)[:80]}", "board": board}
+    line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
+            f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
+    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
+
+
 def st_tune(c, n, board):
     d = c.dir(n, "tune")
     out = os.path.join(d, "board.kicad_pcb")
@@ -1075,7 +1088,7 @@ def st_pairs(c, n, board):
 
 FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
-         "route-ready": st_route_ready, "route": st_route, "tune": st_tune, "silk": st_silk, "review": st_review}
+         "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "silk": st_silk, "review": st_review}
 
 
 # ------------------------------------------------------------------ connectivity invariant + ledger
