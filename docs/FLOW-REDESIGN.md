@@ -309,6 +309,19 @@ Rules of the climb:
 - A level is entered only with its trigger in the attempt log. No level is skipped and none is entered on a guess.
 - L2 runs without asking inside decision D4 (at most 3 pads, unfixed, within the `closure` nudge limit). L3-L5 never
   move a part in `[placement] fixed` or `[lock.at]`. Whether L3-L4 may move unfixed parts without asking is question Q2.
+- **Is size the problem? (cause check before L4/L5, owner 2026-11-19).** Before any side move or growth, the flow
+  measures density at the stalled gaps, not over the whole board. Courtyard coverage alone misleads: a big module
+  covers 100 % of its cells and is easy to route around, while a 0.5 mm-pitch IC at 40 % may not be. So per gap
+  cluster, compare three numbers:
+  (a) courtyard and ring coverage per side (`density.py` grid);
+  (b) routing demand, meaning pins and net crossings per mm² against the channel capacity of the free layers
+      (`globalroute` congestion on that box);
+  (c) the cause the router recorded (sealed by locked copper, pair break-out, keep-out, via sites).
+  Growth is proposed only when (b) is over capacity, with no free capacity within reach on the other side or nearby.
+  When the area has spare capacity, the stall is a placement, fan-out, order or rule problem, and the flow stays at
+  L1-L3. The growth question cites (a)-(c). Measured on W14 CURRENT (2026-11-19): F.Cu 53.5 % and B.Cu 24.8 %, both
+  under the 60 % target. The worst cells are the CM5 module courtyards at 100-146 %. So W14 is not short of area
+  overall; its stalls look local, which is (b)/(c) territory and unproven until measured.
 - **L5 growth asks the owner with a concrete proposal (DECIDED 2026-11-19).** Once the size is in use (after the
   intake size search), growth is a question (exit 3, `questions.py`; an `outline_grow` event for a frontend), never
   silent. The question names the edge(s) and millimetres, the evidence, and how likely the growth is to finish routing,
