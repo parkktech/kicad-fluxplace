@@ -23,26 +23,11 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
 ORDER = ["short", "open-gap", "open-pour", "open-free", "clearance", "dangling", "via-offcentre"]
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
-_CACHE = {}
 
 
 def measure(board, kicad_cli="kicad-cli"):
-    """One DRC per board (cached on abspath, mtime, size; last 4 kept). `errors` excludes unconnected items."""
-    p = os.path.abspath(board)
-    st = os.stat(p)
-    key = (p, st.st_mtime_ns, st.st_size)
-    if key in _CACHE:
-        return _CACHE[key]
-    d = drcguard.drc_json(p, kicad_cli)
-    vs = d.get("violations") or []
-    err = [v for v in vs if v.get("severity") == "error"]
-    m = {"drc": d, "opens": len(d.get("unconnected_items") or []),
-         "shorts": sum(1 for v in vs if v.get("type") == "shorting_items"),
-         "errors": len(err), "err_keys": Counter(drcguard.key_of(v) for v in err)}
-    _CACHE[key] = m
-    while len(_CACHE) > 4:
-        _CACHE.pop(next(iter(_CACHE)))
-    return m
+    """The plain drcguard.measure result (callers set m["gaps"] themselves)."""
+    return drcguard.measure(board, kicad_cli)
 
 
 def _nets_of(items):
@@ -141,25 +126,12 @@ def _snapshot(path):
     return _SNAP[key]
 
 
-def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None):
-    """Phase 1 guard (mode repair). The first failing rule gives `why`. base_m["gaps"] supplies the base score (R4)."""
-    diff = audit.connectivity_diff(_snapshot(base_board), audit.snapshot(cand_board))
-    if not diff["ok"]:
-        return False, ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
-    if cand_m["shorts"] > base_m["shorts"]:
-        return False, "R1 shorts up"
-    new = drcguard.new_keys(base_m["err_keys"], cand_m["err_keys"])
-    # own-kind keys may change description when the repair moves copper (partial via snap); R4 still requires
-    # the score to fall. Phase 2 replaces this with drcguard.accept trades (D1).
-    new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
-    if new:
-        return False, f"R2 new DRC key {next(iter(new))[0]}"[:120]
-    if not score(cand_m, cand_gaps) < score(base_m, base_m.get("gaps") or []):
-        return False, "R4 score not lower"
-    cand_ids = {g["id"] for g in cand_gaps}
-    if not any(t not in cand_ids for t in target_ids):
-        return False, "target gap still there"
-    return True, ""
+def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
+    """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4)."""
+    cand_m["gap_ids"] = {g["id"] for g in cand_gaps}
+    return drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
+                           score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
+                           snap=_snapshot, protect=protect)
 
 
 # ---- rungs: fn(base, out, gaps, ctx) -> brief summary dict; writes `out` only when it has a candidate ----
@@ -400,6 +372,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     budget_s = budget_min * 60
     m = dict(measure(best, kicad_cli))
     m["gaps"] = classify(m["drc"], cons)
+    protect = drcguard.protected_nets(cons, drcguard.snap_nets(_snapshot(best)))
     start = _vitals(m)
     board_fp0 = versions.copper_fingerprint(best)
     if runs is None and calllog.enabled():
@@ -450,7 +423,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = dict(measure(out, kicad_cli))
                     runs = 1
                     cm["gaps"] = classify(cm["drc"], cons)
-                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind)
+                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind, protect)
                     if ok:
                         _copy(out, best)
                         m = cm

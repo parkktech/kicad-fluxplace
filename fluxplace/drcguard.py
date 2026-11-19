@@ -67,6 +67,41 @@ def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnec
     return keys_from_report(drc_json(board_path, kicad_cli, timeout), keep, unconnected)
 
 
+def measure_from_report(d, severity="error"):
+    """Measure dict from a raw kicad-cli DRC dict (no DRC run). `keys` and `err_keys` are the same Counter.
+    severity "error": keys of every error-severity violation (no zone filter; the old gaps err_keys).
+    severity "all": keys of every violation except zone violations (today's session_commit key set).
+    `errors` counts non-zone violations of the chosen severity (every severity for "all")."""
+    from . import drcfull
+    vs = d.get("violations") or []
+    unc = d.get("unconnected_items") or []
+    err = [v for v in vs if v.get("severity") == "error"]
+    if severity == "all":
+        keys = keys_from_report(d, unconnected=False)[0]
+    else:
+        keys = Counter(key_of(v) for v in err)
+    chosen = [v for v in vs if severity == "all" or v.get("severity") == "error"]
+    return {"opens": len(unc), "opens_by_net": Counter(drcfull.net_of(u) for u in unc),
+            "shorts": sum(1 for v in vs if v.get("type") == "shorting_items"),
+            "errors": sum(1 for v in chosen if not _zone_item(v)), "keys": keys, "err_keys": keys}
+
+
+_CACHE = {}
+
+
+def measure(board, kicad_cli="kicad-cli"):
+    """One DRC per board (cached on abspath, mtime, size; last 4 kept). `errors` excludes unconnected items."""
+    p = os.path.abspath(board)
+    st = os.stat(p)
+    key = (p, st.st_mtime_ns, st.st_size)
+    if key not in _CACHE:
+        d = drc_json(p, kicad_cli)
+        _CACHE[key] = dict(measure_from_report(d), drc=d)
+        while len(_CACHE) > 4:
+            _CACHE.pop(next(iter(_CACHE)))
+    return _CACHE[key]
+
+
 _ZONE_DESC = re.compile(r"^Zone \[([^\]]*)\] on ([^,\s]+)")
 
 
@@ -97,6 +132,67 @@ def island_lines(split):
 def new_keys(base_keys, keys):
     """Keys the candidate has more of than the base (the only rejection cause)."""
     return Counter(keys) - Counter(base_keys)
+
+
+def protected_nets(cons, names):
+    """Nets no trade may open (R5): the [rf] nets plus every pair leg (krtchain.pair_nets; none on failure)."""
+    from . import krtchain
+    rf = set(((cons or {}).get("rf") or {}).get("nets") or [])
+    try:
+        pairs = set(krtchain.pair_nets(cons, sorted(names), None))
+    except Exception:
+        pairs = set()
+    return rf | pairs
+
+
+def snap_nets(snap):
+    """Net names of an audit.snapshot: every pad net and every copper net, empty name dropped."""
+    names = {n for ns in (snap.get("pads") or {}).values() for n in ns} | set(snap.get("copper") or {})
+    return sorted(n for n in names if n)
+
+
+MODES = ("repair", "build", "edit")
+
+
+def accept(base, cand, mode="repair", target=(), kind=None, base_board=None, cand_board=None, score=None,
+           locked_ok=None, snap=None, protect=()):
+    """Guard a candidate measure against its base; first failing rule gives `why`. Rules and modes:
+    docs/recipes/PHASE2-guard.md. mode: repair (R0-R5, score, target), build (R0, R1, R3, R5, opens), edit (R0, R1,
+    R3, R5). R5: no protected net gains opens. Other trades are allowed: no rule compares opens per plain net.
+    Unknown mode raises ValueError. -> (ok, why)."""
+    from . import audit
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}")
+    if base_board and cand_board:
+        snap = snap or (lambda p: audit.snapshot(p, checks=False))
+        diff = audit.connectivity_diff(snap(base_board), snap(cand_board))
+        if not diff["ok"]:
+            return False, ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
+    if cand["shorts"] > base["shorts"]:
+        return False, "R1 shorts up"
+    if protect:
+        bo, co = base.get("opens_by_net") or {}, cand.get("opens_by_net") or {}
+        for n in sorted(protect):
+            if co.get(n, 0) > bo.get(n, 0):
+                return False, f"R5 protected net opened {n} {bo.get(n, 0)}->{co.get(n, 0)}"[:120]
+    if mode == "repair":
+        new = new_keys(base.get("keys", base.get("err_keys")), cand.get("keys", cand.get("err_keys")))
+        if kind is not None:
+            from .gaps import KIND_OF_TYPE
+            new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
+        if new:
+            return False, f"R2 new DRC key {next(iter(new))[0]}"[:120]
+    if locked_ok is not None and not locked_ok():
+        return False, "R3 locked copper changed"
+    if mode == "repair":
+        sc = score or (lambda m: [m["shorts"], m["opens"], m["errors"]])
+        if not sc(cand) < sc(base):
+            return False, "R4 score not lower"
+        if target and "gap_ids" in cand and not any(t not in cand["gap_ids"] for t in target):
+            return False, "target gap still there"
+    elif mode == "build" and not cand["opens"] < base["opens"]:
+        return False, "R4 opens not lower"
+    return True, ""
 
 
 def check(candidate, base, kicad_cli="kicad-cli", log=print, stats=None, report=None, keep=None):

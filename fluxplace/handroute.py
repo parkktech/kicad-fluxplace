@@ -1119,14 +1119,14 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
     wraw = drc_raw(S.work, kicad_cli)
     a, b = summarize_drc(sraw), summarize_drc(wraw)
     reasons = []
-    if b["unconnected"] >= a["unconnected"]:
-        reasons.append(f"unconnected not lower: {a['unconnected']} -> {b['unconnected']}")
-    new = Counter({k: v for k, v in (b["keys"] - a["keys"]).items() if not k[0].startswith("U")})
-    if new:
-        reasons.append(f"{sum(new.values())} new DRC key(s), e.g. {sorted(new)[0][0]} {list(sorted(new)[0][1])[:2]}")
-    worse = {n: (a["unc_by_net"].get(n, 0), c) for n, c in b["unc_by_net"].items() if c > a["unc_by_net"].get(n, 0)}
-    if worse:
-        reasons.append("net(s) lost connectivity (open before -> after): " + ", ".join(f"{n} {x}->{y}" for n, (x, y) in worse.items()))
+    from . import drcguard as DG
+    from . import constraints as CN
+    cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
+    protect = DG.protected_nets(cons, DG.snap_nets(_snap(start)))
+    ok, why = DG.accept(DG.measure_from_report(sraw, severity="all"), DG.measure_from_report(wraw, severity="all"),
+                        "repair", base_board=start, cand_board=S.work, snap=_snap, protect=protect)
+    if not ok:
+        reasons.append(why)
     Ma, Mb = G.Model(start), G.Model(S.work)
     reescapes = _active_locked_reescapes(S)
     reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}

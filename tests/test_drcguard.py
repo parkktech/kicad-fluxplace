@@ -91,3 +91,149 @@ def test_tune_pairs_guard_uses_the_shared_rule(tmp_path, monkeypatch):
     ok, _ = TU._guarded(src, src, lambda bd: True, "kicad-cli", (Counter({("drc_gap", ("a",)): 1}), (1, 0)),
                         lambda m: None)
     assert ok is True
+
+
+# ---- drcguard.accept (PHASE2-guard recipe): one test per rule and mode, the trade case, measure_from_report ----
+from fluxplace import audit as AU  # noqa: E402
+
+
+def _m(opens=0, shorts=0, errors=0, keys=(), by_net=None, gap_ids=None):
+    k = Counter(keys)
+    m = {"opens": opens, "shorts": shorts, "errors": errors, "keys": k, "err_keys": k,
+         "opens_by_net": Counter(by_net or {})}
+    if gap_ids is not None:
+        m["gap_ids"] = set(gap_ids)
+    return m
+
+
+CLR = ("clearance", ("Pad 1 of U3",))
+
+
+def test_r0_connectivity_uses_snap_and_first_violation(monkeypatch):
+    monkeypatch.setattr(AU, "connectivity_diff", lambda b, a, expect=(): {"ok": False, "violations": ["moved U1"]})
+    seen = []
+    snap = lambda p: seen.append(p) or {}
+    assert DG.accept(_m(), _m(), base_board="a", cand_board="b", snap=snap) == (False, "R0 moved U1")
+    assert seen == ["a", "b"]
+
+
+def test_r0_skipped_without_both_boards():
+    def boom(p):
+        raise AssertionError("snapshot must not run")
+    assert DG.accept(_m(), _m(), "edit", base_board="a", snap=boom) == (True, "")
+
+
+def test_r0_default_snapshot_is_unchecked(monkeypatch):
+    seen = []
+    monkeypatch.setattr(AU, "snapshot", lambda p, checks=True, project=None: seen.append(checks) or {})
+    monkeypatch.setattr(AU, "connectivity_diff", lambda b, a, expect=(): {"ok": True, "violations": []})
+    assert DG.accept(_m(), _m(), "edit", base_board="a", cand_board="b") == (True, "")
+    assert seen == [False, False]
+
+
+def test_r1_shorts_up_in_every_mode():
+    for mode in ("repair", "build", "edit"):
+        assert DG.accept(_m(shorts=1), _m(shorts=2), mode) == (False, "R1 shorts up")
+    assert DG.accept(_m(shorts=2), _m(shorts=1), "edit") == (True, "")
+
+
+def test_r2_repair_blocks_new_key_unless_kind_matches():
+    base = _m(opens=2, keys=[CLR])
+    cand = _m(opens=1, keys=[CLR, CLR])          # second instance of the same key is new
+    assert DG.accept(base, cand, "repair", kind="short") == (False, "R2 new DRC key clearance")
+    assert DG.accept(base, cand, "repair", kind=None) == (False, "R2 new DRC key clearance")
+    assert DG.accept(base, cand, "repair", kind="clearance") == (True, "")
+
+
+def test_r2_not_checked_in_build_or_edit():
+    base = _m(opens=2)
+    cand = _m(opens=1, keys=[CLR])
+    assert DG.accept(base, cand, "build") == (True, "")
+    assert DG.accept(base, cand, "edit") == (True, "")
+
+
+def test_r3_locked_copper():
+    assert DG.accept(_m(), _m(), "edit", locked_ok=lambda: False) == (False, "R3 locked copper changed")
+    assert DG.accept(_m(), _m(), "edit", locked_ok=lambda: True) == (True, "")
+
+
+def test_r4_repair_score_must_fall():
+    assert DG.accept(_m(opens=2), _m(opens=2), "repair") == (False, "R4 score not lower")
+    assert DG.accept(_m(opens=2), _m(opens=1), "repair") == (True, "")
+    assert DG.accept(_m(opens=2), _m(opens=1), "repair", score=lambda m: [0]) == (False, "R4 score not lower")
+
+
+def test_r4_build_opens_must_fall_and_edit_unchecked():
+    assert DG.accept(_m(opens=2), _m(opens=2), "build") == (False, "R4 opens not lower")
+    assert DG.accept(_m(opens=2), _m(opens=1), "build") == (True, "")
+    assert DG.accept(_m(opens=2), _m(opens=3), "edit") == (True, "")
+
+
+def test_target_gap_must_disappear_when_listed():
+    base, cand = _m(opens=3), _m(opens=2, gap_ids={"b"})
+    assert DG.accept(base, cand, "repair", target=("b",)) == (False, "target gap still there")
+    assert DG.accept(base, cand, "repair", target=("a",)) == (True, "")
+    assert DG.accept(base, _m(opens=2), "repair", target=("b",)) == (True, "")   # no gap_ids key: skipped
+
+
+def test_trade_one_net_opens_two_close_score_falls_accepted():
+    base = _m(opens=3, by_net={"A": 1, "B": 1, "C": 1})
+    cand = _m(opens=2, by_net={"C": 1, "D": 1})
+    assert DG.accept(base, cand, "repair") == (True, "")
+
+
+def test_measure_from_report_fixture():
+    d = {"violations": [
+        {"type": "shorting_items", "severity": "error",
+         "items": [{"description": "Track [N1] on F.Cu"}, {"description": "Track [N2] on F.Cu"}]},
+        {"type": "clearance", "severity": "warning", "items": [{"description": "Pad 1 of U3"}]},
+        {"type": "track_dangling", "severity": "error", "items": [{"description": "Zone [GND] on F.Cu"}]},
+    ], "unconnected_items": [
+        {"description": "x", "items": [{"description": "Pad 1 [N1] of R1 on F.Cu"}]},
+        {"description": "x", "items": [{"description": "Pad 2 [N2] of R2 on F.Cu"}]},
+    ]}
+    v0, v2 = d["violations"][0], d["violations"][2]
+    e = DG.measure_from_report(d)
+    assert e["opens"] == 2 and e["opens_by_net"] == Counter({"N1": 1, "N2": 1})
+    assert e["shorts"] == 1 and e["errors"] == 1      # the zone error is keyed but not counted
+    assert e["keys"] is e["err_keys"]
+    assert e["keys"] == Counter({DG.key_of(v0): 1, DG.key_of(v2): 1})
+    a = DG.measure_from_report(d, severity="all")
+    assert a["keys"] == Counter({DG.key_of(v0): 1, DG.key_of(d["violations"][1]): 1})   # warning in, zone violation out
+    assert a["errors"] == 2                            # warning counted under "all", zone still out
+
+
+def test_r5_refuses_trade_that_opens_protected_net():
+    base = _m(opens=3, by_net={"A": 1, "B": 1, "C": 1})
+    assert DG.accept(base, _m(opens=2, by_net={"C": 1, "P": 1}), "repair", protect=("P",)) == \
+        (False, "R5 protected net opened P 0->1")
+    assert DG.accept(base, _m(opens=2, by_net={"C": 1, "P": 1}), "build", protect=("P",))[1] == \
+        "R5 protected net opened P 0->1"
+    assert DG.accept(base, _m(opens=2, by_net={"C": 1, "P": 1}), "edit", protect=("P",))[1] == \
+        "R5 protected net opened P 0->1"
+
+
+def test_r5_accepts_same_trade_on_plain_net():
+    base = _m(opens=3, by_net={"A": 1, "B": 1, "C": 1})
+    assert DG.accept(base, _m(opens=2, by_net={"C": 1, "D": 1}), "repair", protect=("P",)) == (True, "")
+
+
+def test_protected_nets_rf_and_pairs():
+    cons = {"rf": {"nets": ["RF1"]}, "pairs": {"USB_": {}}}
+    assert DG.protected_nets(cons, ["USB_DP", "USB_DN", "GND"]) == {"RF1", "USB_DP", "USB_DN"}
+    assert DG.protected_nets({}, ["GND"]) == set()
+
+
+def test_unknown_mode_raises():
+    with pytest.raises(ValueError):
+        DG.accept(_m(), _m(), "fix")
+
+
+def test_zone_violation_not_counted_in_errors():
+    d = {"violations": [
+        {"type": "track_dangling", "severity": "error", "items": [{"description": "Zone [GND] on F.Cu"}]},
+        {"type": "clearance", "severity": "error", "items": [{"description": "Pad 1 of U3"}]},
+        {"type": "clearance", "severity": "warning", "items": [{"description": "Pad 2 of U3"}]},
+    ], "unconnected_items": []}
+    assert DG.measure_from_report(d)["errors"] == 1
+    assert DG.measure_from_report(d, severity="all")["errors"] == 2
