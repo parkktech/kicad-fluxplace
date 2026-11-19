@@ -309,3 +309,31 @@ def test_copper_fingerprint_follows_copper_only(tmp_path):
     a, same, moved = make("a.kicad_pcb", 1000000), make("same.kicad_pcb", 1000000), make("moved.kicad_pcb", 2000000)
     assert VS.copper_fingerprint(a) == VS.copper_fingerprint(same)
     assert VS.copper_fingerprint(a) != VS.copper_fingerprint(moved)
+
+
+def test_copper_fingerprint_follows_zone_outline(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+
+    def make(name, corner_x):
+        b = pcbnew.BOARD()
+        t = pcbnew.PCB_TRACK(b)
+        t.SetStart(pcbnew.VECTOR2I(0, 0))
+        t.SetEnd(pcbnew.VECTOR2I(1000000, 0))
+        t.SetWidth(200000)
+        t.SetLayer(pcbnew.F_Cu)
+        b.Add(t)
+        z = pcbnew.ZONE(b)
+        z.SetLayer(pcbnew.F_Cu)
+        o = pcbnew.SHAPE_POLY_SET()
+        o.NewOutline()
+        for x, y in [(0, 5000000), (corner_x, 5000000), (corner_x, 9000000)]:
+            o.Append(x, y)
+        z.SetOutline(o)
+        b.Add(z)
+        p = str(tmp_path / name)
+        b.Save(p)
+        return p
+    a = make("zone-a.kicad_pcb", 4000000)
+    moved = make("zone-moved.kicad_pcb", 4500000)
+    assert VS.copper_fingerprint(a) != VS.copper_fingerprint(moved)
+    assert VS.copper_fingerprint(a) == VS.copper_fingerprint(make("zone-same.kicad_pcb", 4000000))

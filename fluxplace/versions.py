@@ -97,7 +97,8 @@ def _xy(p):
 
 def copper_fingerprint(path):
     """sha1 of a board's copper (pcbnew, nm): tracks and arcs (class, net, layer, start, end, width, mid),
-    vias (net, pos, diameter, drill), footprints (ref, pos, rotation, layer). Zones are not hashed."""
+    vias (net, pos, diameter, drill), footprints (ref, pos, rotation, layer), zones (net, layers, priority, keepout,
+    outline points rounded to 0.001 mm). Zone fill is not hashed: it varies run to run."""
     import pcbnew
     b = pcbnew.LoadBoard(path)
     rows = []
@@ -111,6 +112,13 @@ def copper_fingerprint(path):
             rows.append((cls, t.GetNetname(), t.GetLayer(), _xy(t.GetStart()), _xy(t.GetEnd()), t.GetWidth(), mid))
     for f in b.GetFootprints():
         rows.append(("fp", f.GetReference(), _xy(f.GetPosition()), round(f.GetOrientationDegrees(), 6), f.GetLayer()))
+    for z in b.Zones():
+        ol = z.Outline()
+        pts = sorted((round(c.x / 1e6, 3), round(c.y / 1e6, 3))
+                     for i in range(ol.OutlineCount())
+                     for c in (ol.Outline(i).CPoint(j) for j in range(ol.Outline(i).PointCount())))
+        rows.append(("zone", z.GetNetname(), tuple(z.GetLayerSet().Seq()), z.GetAssignedPriority(),
+                     bool(z.GetIsRuleArea()), pts))
     return hashlib.sha1(json.dumps(sorted(repr(r) for r in rows)).encode()).hexdigest()
 
 
