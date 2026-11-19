@@ -213,7 +213,7 @@ def test_stop_json(monkeypatch, loop):
     assert stop["attempts"] == len(GP.DISPATCH["open-free"]) and stop["level"] == "L0"
     assert len(stop["left"]) == 1
     left = stop["left"][0]
-    assert left["kind"] == "open-free" and left["last_method"] == "patch_rip" and left["why"] == "no change"
+    assert left["kind"] == "open-free" and left["last_method"] == "ai" and left["why"] == "no change"
     assert "| open-free x1 left |" in open(os.path.join(loop["work"], "ledger-rows.md")).read()
     assert res["best"] == os.path.join(loop["work"], "best.kicad_pcb")
 
@@ -384,7 +384,7 @@ def test_krt_command_carries_nets_and_layers(monkeypatch, tmp_path):
     res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [gap],
                     {"cons": {}, "work": str(tmp_path), "budget_s": 60})
     cmd = seen["cmd"]
-    assert res == {"status": "ran", "rc": 0} and out.exists()
+    assert res == {"status": "ran", "rc": 0, "failed": 0, "open": 0} and out.exists()
     assert cmd[cmd.index("--nets") + 1:] == ["NET[[]0]"]
     assert cmd.index("--layers") < cmd.index("F.Cu") < cmd.index("B.Cu") < cmd.index("--nets")
     assert seen["kw"]["cwd"] == str(tmp_path)

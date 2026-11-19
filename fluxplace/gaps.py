@@ -14,7 +14,7 @@ import sys
 import time
 from collections import Counter
 
-from . import audit, calllog, constraints as C, drcfull, drcguard, joingaps, krtchain, versions
+from . import audit, calllog, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "clearance": "clearance", "hole_clearance": "clearance", "hole_to_hole": "clearance",
@@ -270,26 +270,47 @@ def _r_region(base, out, gaps, ctx):
                             constraints=ctx["cons_path"], kicad_cli=ctx["kicad_cli"], log=ctx["log"]))
 
 
-def _r_krt(base, out, gaps, ctx):
-    """KRT single-net re-route (the proven router), run as the pipeline's route command on the open nets."""
+def _krt_cmd(base, out, nets, ctx, layers=None):
+    """The KRT route command for `nets` (the pipeline's route command, the proven router). None when KRT is not found."""
     import types
     from . import routerloc as RL, routerules as RR, pipeline as P, krtchain as KC
     try:
         rl = RL.resolve()
     except RuntimeError:
-        return {"status": "krt not found"}
+        return None
     R = RR.rules(ctx["cons"], base, default=RR.DEFAULT_SIZE)
-    a = types.SimpleNamespace(router_py=rl["py"], router_dir=rl["dir"], layers=signal_layers(base),
+    a = types.SimpleNamespace(router_py=rl["py"], router_dir=rl["dir"], layers=layers or signal_layers(base),
                               track=None, clearance=None)
     rflags = RR.flags(R, rl["dir"], ctx["work"])
-    cmd = P._route_cmd(a, base, out, [KC.glob_escape(n) for n in _nets(gaps)], R=R, rflags=rflags)
+    return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], R=R, rflags=rflags)
+
+
+def _r_krt(base, out, gaps, ctx):
+    """KRT single-net re-route (the proven router) on the open nets. Passes --json-out; ctx["krt_last"] names the summary."""
+    cmd = _krt_cmd(base, out, _nets(gaps), ctx)
+    if cmd is None:
+        return {"status": "krt not found"}
+    js = out + ".krt.json"
+    i = cmd.index("--nets")
+    cmd[i:i] = ["--json-out", js]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
                               cwd=ctx["work"])
     except subprocess.TimeoutExpired:
         _rm(out)
         return {"status": "krt timeout"}
-    return {"status": "ran", "rc": proc.returncode}
+    res = {"status": "ran", "rc": proc.returncode, "failed": 0, "open": 0}
+    if os.path.exists(js):
+        ctx["krt_last"] = js
+        try:
+            with open(js) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            d = {}
+        d = d if isinstance(d, dict) else {}
+        res["failed"] = len(d.get("failed_single") or [])
+        res["open"] = len(d.get("open_single") or [])
+    return res
 
 
 def _r_drcfix(base, out, gaps, ctx):
@@ -307,21 +328,276 @@ def _r_snapiter(base, out, gaps, ctx):
     return _brief(SI.run(base, out, log=ctx["log"]))
 
 
+PACKET_BYTES = 4096
+AI_BUDGET = 2                                   # action files applied per gap id per work dir
+_HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
+_PACKET_ACTIONS = ("rip {net, ids}; nudge {ref, dx, dy, rot}; route {nets, layers}; give_up {why}. "
+                   "No copper coordinates.")
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _ai_action(x, copper):
+    """The validated action, or None (dropped)."""
+    if not isinstance(x, dict):
+        return None
+    do = x.get("do")
+    if do == "rip":
+        ids = x.get("ids")
+        if (isinstance(x.get("net"), str) and x["net"] and isinstance(ids, list) and 0 < len(ids) <= 12
+                and all(isinstance(i, str) and _HEX_ID.match(i) for i in ids)):
+            return {"do": "rip", "net": x["net"], "ids": list(ids)}
+    elif do == "nudge":
+        if (isinstance(x.get("ref"), str) and x["ref"] and all(_num(x.get(k)) for k in ("dx", "dy", "rot"))
+                and abs(x["dx"]) <= 1.0 and abs(x["dy"]) <= 1.0):
+            return {"do": "nudge", "ref": x["ref"], "dx": x["dx"], "dy": x["dy"], "rot": x["rot"]}
+    elif do == "route":
+        nets, layers = x.get("nets"), x.get("layers")
+        if (isinstance(nets, list) and 0 < len(nets) <= 6 and all(isinstance(n, str) and n for n in nets)
+                and (layers is None or (isinstance(layers, list) and all(l in copper for l in layers)))):
+            return {"do": "route", "nets": list(nets), "layers": list(layers) if layers else None}
+    elif do == "give_up":
+        return {"do": "give_up", "why": str(x.get("why") or "")[:200]}
+    return None
+
+
+def load_ai_action(path, base):
+    """{"actions", "tokens", "why"} from an AI action file. Invalid actions are dropped with a log line. Never raises."""
+    out = {"actions": [], "tokens": 0, "why": ""}
+    try:
+        with open(path) as fh:
+            a = json.load(fh)
+        if not isinstance(a, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError) as e:
+        print(f"ai: unreadable action file {os.path.basename(path)}: {e}", file=sys.stderr)
+        return out
+    try:
+        copper = copper_layers(base)
+    except Exception:
+        copper = []
+    if _num(a.get("tokens")):
+        out["tokens"] = int(a["tokens"])
+    out["why"] = str(a.get("why") or "")[:200]
+    for x in a.get("actions") if isinstance(a.get("actions"), list) else []:
+        v = _ai_action(x, copper)
+        if v is None:
+            print(f"ai: dropped action {str(x)[:120]}", file=sys.stderr)
+        else:
+            out["actions"].append(v)
+    return out
+
+
+def _xy(p):
+    return (p[0], p[1]) if isinstance(p, (list, tuple)) and len(p) >= 2 else None
+
+
+def _near(items, mid, pts, n=20):
+    """The `n` items nearest `mid` (distance of their points named by `pts`), slimmed and rounded to 0.01."""
+    def dist(it):
+        d = [math.hypot(q[0] - mid[0], q[1] - mid[1]) for q in (_xy(it.get(k)) for k in pts) if q]
+        return min(d) if d else float("inf")
+    out = []
+    for it in sorted(items, key=dist)[:n]:
+        s = {k: it.get(k) for k in ("id", "net", "layer", "locked")}
+        for k in ("a", "b", "pos"):
+            q = _xy(it.get(k))
+            if q:
+                s[k] = [round(q[0], 2), round(q[1], 2)]
+        out.append(s)
+    return out
+
+
+def _on_net(e, net):
+    if not net:
+        return False
+    return e.get("net") == net if isinstance(e, dict) else net in str(e)
+
+
+def _clip_packet(p):
+    """Drop krt, then halve the window's tracks and vias until the packet fits PACKET_BYTES."""
+    def size():
+        return len(json.dumps(p).encode())
+    if size() > PACKET_BYTES:
+        p["krt"] = {"failed": [], "open": []}
+    while size() > PACKET_BYTES and p["window"] and (p["window"]["tracks"] or p["window"]["vias"]):
+        for k in ("tracks", "vias"):
+            p["window"][k] = p["window"][k][: len(p["window"][k]) // 2]
+    return p
+
+
+def gap_packet(base, gap, ctx):
+    """Repair packet for one gap (<= PACKET_BYTES): its first open connection of the net, the copper window around
+    it, the obstacles that seal it, the KRT failures on the net, and the attempts already made on this gap."""
+    from . import handroute as HR
+    cp = ctx.get("cons_path")
+    net = gap.get("net") or (gap.get("nets") or [None])[0]
+    i = None
+    conns = []
+    if net:
+        conns = HR.open_nets(base, constraints=cp)["connections"]
+        i = next((k for k, r in enumerate(conns) if r.get("net") == net), None)
+    conn = win = None
+    sealed = []
+    if i is not None:
+        r = conns[i]
+        ends = lambda p: {k: p.get(k) for k in ("x", "y", "layer", "pin", "id")}
+        conn = {"i": i, "a": ends(r["a"]), "b": ends(r["b"]), "straight_mm": r.get("straight_mm"),
+                "rules": r.get("rules")}
+        W = HR.window(base, conn=i, constraints=cp, margin=2.0)
+        mid = ((r["a"]["x"] + r["b"]["x"]) / 2, (r["a"]["y"] + r["b"]["y"]) / 2)
+        win = {"box": W.get("window"), "layers": W.get("layers"),
+               "tracks": _near(W.get("tracks") or [], mid, ("a", "b")),
+               "vias": _near(W.get("vias") or [], mid, ("pos",)),
+               "via_sites": [[round(s[0], 2), round(s[1], 2)]
+                             for s in ((W.get("via_sites") or {}).get("sites") or [])[:10]]}
+        lim = (HR.suggest(base, net, conn=i, constraints=cp).get("sealed_by") or {}).get("limiting_obstacles") or []
+        sealed = [{k: e.get(k) for k in ("id", "net", "layer", "locked", "border_cells")} for e in lim[:8]]
+    krt = {"failed": [], "open": []}
+    js = ctx.get("krt_last")
+    if js and os.path.exists(js):
+        try:
+            with open(js) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            d = {}
+        d = d if isinstance(d, dict) else {}
+        for key, dst in (("failed_single", "failed"), ("open_single", "open")):
+            krt[dst] = [e for e in (d.get(key) or []) if _on_net(e, net)][:5]
+    tried = []
+    try:
+        with open(ctx.get("attempts")) as fh:
+            rows = fh.readlines()
+    except (OSError, TypeError):
+        rows = []
+    for ln in rows:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and (rec.get("gap") or {}).get("id") == gap["id"]:
+            tried.append({"method": rec.get("method"), "result": rec.get("result"),
+                          "why": str(rec.get("why") or "")[:120]})
+    p = {"v": 1, "gap": {"id": gap["id"], "kind": gap["kind"], "class": gap.get("class"), "net": net},
+         "conn": conn, "window": win, "sealed_by": sealed, "krt": krt, "tried": tried[-6:],
+         "actions": _PACKET_ACTIONS}
+    return _clip_packet(p)
+
+
+def _route_net(w, net, layers, ctx):
+    """KRT re-route of `net` on the session board, then suggest + lay for each of its open connections."""
+    from . import handroute as HR
+    dst = w + ".krt.kicad_pcb"
+    _clean_board(dst)
+    cmd = _krt_cmd(w, dst, [net], ctx, layers)
+    if cmd is not None:
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+        except subprocess.TimeoutExpired:
+            pass
+        if os.path.exists(dst):
+            shutil.copy(dst, w)
+    key = lambda r: (r["a"]["x"], r["a"]["y"], r["b"]["x"], r["b"]["y"])
+    tried = set()
+    for _ in range(50):
+        conns = HR.open_nets(w)["connections"]
+        todo = [(i, r) for i, r in enumerate(conns) if r.get("net") == net and key(r) not in tried]
+        if not todo:
+            break
+        i, r = todo[0]
+        tried.add(key(r))
+        sug = HR.suggest(w, net, conn=i, layers=layers)
+        if sug.get("found") and sug.get("path"):
+            HR.lay(w, net, sug["path"], constraints=ctx["cons_path"])
+
+
+def _apply_ai(base, out, a, ctx, sid):
+    """One transaction on copies: nudges, then a session with rips and routes, then session_commit (the guard).
+    Returns (status, commit, why). Temps are removed in every case."""
+    from . import handroute as HR, routediag as RD, legality as LGL, routable as RB, boardwrite as BW
+    cons, cp, ai_dir = ctx["cons"], ctx["cons_path"], ctx["ai_dir"]
+    acts = a["actions"]
+    give = next((x for x in acts if x["do"] == "give_up"), None)
+    if give:
+        return "give_up", False, give["why"]
+    cur = base
+    w = os.path.join(ai_dir, sid + ".work.kicad_pcb")
+    tmps = [w]
+    try:
+        fixed = set(RB._fixed_set(RD.load(base), cons))
+        for i, x in enumerate(v for v in acts if v["do"] == "nudge"):
+            part = RD.load(cur)["parts"].get(x["ref"])
+            if part is None or len(part["pads"]) > 3 or x["ref"] in fixed or part.get("locked"):
+                print(f"ai: nudge {x['ref']} refused (fixed, locked, or more than 3 pads)", file=sys.stderr)
+                continue
+            px, py = part["pos"]
+            tmp = os.path.join(ai_dir, f"{sid}.nudge{i}.kicad_pcb")
+            tmps.append(tmp)
+            _clean_board(tmp)
+            _sidecars(cur, tmp)
+            if not BW.move_file(cur, tmp, {x["ref"]: (px + x["dx"], py + x["dy"], part.get("angle", 0) + x["rot"])}):
+                continue
+            if LGL.Legal(RD.load(tmp), cons).part_issues(x["ref"]):
+                print(f"ai: nudge {x['ref']} refused (courtyard or outline issue)", file=sys.stderr)
+                continue
+            cur = tmp
+        _clean_board(w)
+        _sidecars(cur, w)
+        HR.session_begin(cur, w)
+        for x in acts:
+            if x["do"] == "rip":
+                HR.shove(w, x["net"], ids=x["ids"], op="unlay", constraints=cp)
+        for x in acts:
+            if x["do"] == "route":
+                for net in x["nets"]:
+                    _route_net(w, net, x["layers"] or signal_layers(w), ctx)
+        r = HR.session_commit(w, out, constraints=cp)
+        return "applied", bool(r.get("accepted")), str((r.get("reasons") or [""])[0])
+    finally:
+        for t in tmps:
+            _clean_board(t)
+
+
+def _r_ai(base, out, gaps, ctx):
+    """AI rung on the first gap. No action file: write the gap packet and stop (status packet). An action file:
+    apply it as one transaction; close guards the board like any other rung."""
+    if ctx.get("ai_mode") == "off":
+        return {"status": "ai off"}
+    gap = gaps[0]
+    used = ctx["ai_used"]
+    if used.get(gap["id"], 0) >= AI_BUDGET:
+        return {"status": "ai budget"}
+    sid = critroute._safe(gap["id"])[:80]
+    os.makedirs(ctx["ai_dir"], exist_ok=True)
+    act = os.path.join(ctx["ai_dir"], sid + ".action.json")
+    if not os.path.exists(act):
+        with open(os.path.join(ctx["ai_dir"], sid + ".packet.json"), "w") as fh:
+            fh.write(json.dumps(gap_packet(base, gap, ctx)))
+        return {"status": "packet"}
+    a = load_ai_action(act, base)
+    os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
+    used[gap["id"]] = used.get(gap["id"], 0) + 1
+    status, commit, why = _apply_ai(base, out, a, ctx, sid)
+    return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"]}
+
+
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
-         "snapiter": _r_snapiter}
+         "snapiter": _r_snapiter, "ai": _r_ai}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
-    "open-pour": ["pourisland", "region"],
-    "open-free": ["patch", "handrepair", "krt", "region", "patch_rip"],
+    "open-pour": ["pourisland", "region", "ai"],
+    "open-free": ["patch", "handrepair", "krt", "region", "patch_rip", "ai"],
     "clearance": ["drcfix", "region"],
     "dangling": ["launder"],
     "via-offcentre": ["snapiter"],
 }
-LEVEL = {"region": "L1", "patch_rip": "L1", "krt": "L0"}  # every other rung is L0
+LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt": "L0"}  # every other rung is L0
 
 
 def _tool():
@@ -381,9 +657,11 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     state_path = os.path.join(work, "gaps.json")
     memo = set()
+    ai_used = {}
     try:
         with open(state_path) as fh:
             st = json.load(fh)
+        ai_used = {k: int(v) for k, v in (st.get("ai_used") or {}).items()}
         if st.get("tool") == tool and st.get("cons_hash") == cons_hash:
             memo = {tuple(x) for x in st.get("memo", [])}
     except (OSError, ValueError, AttributeError):
@@ -391,13 +669,15 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def save(r):
         _write_json(state_path, {"gaps": m["gaps"], "memo": sorted(list(k) for k in memo), "round": r,
-                                 "tool": tool, "cons_hash": cons_hash})
+                                 "tool": tool, "cons_hash": cons_hash, "ai_used": ai_used})
 
     stop, level, n_att, last = None, "L0", 0, {}
+    n_packets, krt_state = 0, {}
+    ai_mode = (cons.get("ai") or {}).get("mode", "packet")
 
     def attempt(r, kind, rung, targets):
         """One try. Returns True when the candidate was accepted (m is then the new base)."""
-        nonlocal m, n_att, level
+        nonlocal m, n_att, level, n_packets
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         key = (kind, rung, fp)
@@ -412,11 +692,18 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
                 _sidecars(best, out)
                 ctx = {"cons": cons, "cons_path": cons_path, "kicad_cli": kicad_cli, "work": work,
-                       "budget_s": max(0.0, budget_s - (time.time() - t0)), "log": log}
+                       "budget_s": max(0.0, budget_s - (time.time() - t0)), "log": log, "attempts": attempts,
+                       "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
+                       "krt_last": krt_state.get("last")}
                 summ = RUNGS[rung](best, out, targets, ctx) or {}
-                if not os.path.exists(out):
+                if ctx.get("krt_last"):
+                    krt_state["last"] = ctx["krt_last"]
+                if not os.path.exists(out) and summ.get("status") == "packet":
+                    result, why = "packet", "action file pending"
+                elif not os.path.exists(out):
                     result = "refused"
-                    why = str(summ.get("status") or summ.get("reason") or "no board written")[:120]
+                    why_ai = summ.get("why") if rung == "ai" else None
+                    why = str(why_ai or summ.get("status") or summ.get("reason") or "no board written")[:120]
                 elif versions.copper_fingerprint(out) == fp:
                     result, why = "refused", "no change"
                 else:
@@ -440,6 +727,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 result, why = "error", f"{type(e).__name__}: {e}"[:120]
             finally:
                 _clean_board(out)
+        if result == "packet":
+            n_packets += 1
         if result == "refused":
             memo.add(key)
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id,
@@ -448,7 +737,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                "gap": {"id": targets[0]["id"], "kind": kind, "class": targets[0]["class"], "n": len(targets)},
                "method": rung, "tier": {"scope": "board", "effort": 1}, "in": {"nets": len(nets)},
                "result": result, "why": why, "score": [vec0, after], "s": round(time.time() - t_try, 1),
-               "drc_runs": runs, "precheck": None, "ai_tokens": 0}
+               "drc_runs": runs, "precheck": None,
+               "ai_tokens": int(summ.get("tokens") or 0) if rung == "ai" else 0}
         if explicit or calllog.enabled():
             calllog.append(rec, attempts)
         tries.append({"result": result, "method": rung, "kind": kind, "why": why, "s": rec["s"]})
@@ -461,6 +751,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             stop = "clean"
             break
         hit = False
+        packets_before = n_packets
         for kind in ORDER:
             targets = [g for g in m["gaps"] if g["kind"] == kind]
             if not targets or kind not in DISPATCH:
@@ -479,7 +770,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         if stop:
             break
         if not hit:
-            stop = "flat"
+            stop = "packets" if n_packets > packets_before else "flat"
             break
     else:
         stop = "rounds"
@@ -489,7 +780,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         l = last.get(g["kind"], {})
         left.append({"id": g["id"], "kind": g["kind"], "class": g["class"],
                      "last_method": l.get("method"), "why": l.get("why")})
-    res = {"stop": stop, "exit": 0 if stop == "clean" else 2, "level": level,
+    res = {"stop": stop, "exit": {"clean": 0, "packets": 5}.get(stop, 2), "level": level,
            "minutes": round((time.time() - t0) / 60, 1), "start": start, "end": _vitals(m),
            "attempts": n_att, "left": left}
     _write_json(os.path.join(work, "stop.json"), res)
