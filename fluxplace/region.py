@@ -219,7 +219,9 @@ def check(before_path, after_path, scope, ripped=()):
     ca = Counter(i["key"] for i in ai)
     rip = Counter(ripped)
     removed = cb - ca
-    added = ca - cb
+    # added = after-copper that is not an untouched input item. A ripped item the router re-creates identically
+    # is new copper (it must sit in scope and the area), not a protected one.
+    added = ca - (cb - rip)
     viol = []
     for k, n in (removed - rip).items():
         viol.append(f"protected copper changed/removed x{n}: {_show(k)}")
@@ -248,6 +250,14 @@ def _rip_selected(item, scope):
     if scope["nets"] is not None and item["net"] not in scope["nets"]:
         return False
     return all(_inside(scope["area"], x, y) for x, y in item["pts"])
+
+
+def _geo_of(via, net, layer, pts):
+    return ("via" if via else "trk", net, layer, tuple(sorted((round(x, 3), round(y, 3)) for x, y in pts)))
+
+
+def _geo_item(i):
+    return _geo_of(i["kind"] == "via", i["net"], None if i["kind"] == "via" else i["layer"], i["pts"])
 
 
 def _show(k):
@@ -296,8 +306,9 @@ def _pad_positions(B):
 
 # ------------------------------------------------------------- routing run
 def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, passes=3,
-        timeout=900, rip=False, log=print, tamper=None):
+        timeout=900, rip=False, keep_locked=False, log=print, tamper=None):
     """Route the scope with Freerouting, copy back the new in-scope copper only, prove protection.
+    keep_locked: the rip step skips locked tracks and vias (they stay, and the proof never counts them as ripped).
     -> the proof fields of check() (ok, violations, hash_before, hash_after, removed, added) plus
        added_tracks, added_vias, added_mm, nets_kept, nets_dropped, in_scope_before/after (open clusters per
        net), open_before/after, diagnose (routediag.diagnose of what is still open in scope), out.
@@ -315,6 +326,7 @@ def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, p
     # 1. baseline: the input, optionally with the in-scope copper inside the area ripped out
     board = pcbnew.LoadBoard(board_path)
     before_items, B0 = fingerprint(board_path)
+    locked_geo = set()
     if rip:
         area = scope["area"]
         for t in list(board.GetTracks()):
@@ -325,6 +337,10 @@ def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, p
                 pts = [(t.GetPosition().x / 1e6, t.GetPosition().y / 1e6)]
             else:
                 pts = [(t.GetStart().x / 1e6, t.GetStart().y / 1e6), (t.GetEnd().x / 1e6, t.GetEnd().y / 1e6)]
+            if keep_locked and t.IsLocked():
+                locked_geo.add(_geo_of(t.GetClass() == "PCB_VIA", n, None if t.GetClass() == "PCB_VIA"
+                                       else t.GetLayerName(), pts))
+                continue
             if all(_inside(area, x, y) for x, y in pts):
                 RP._remove(board, t)
     pcbnew.SaveBoard(base_file, board)
@@ -333,7 +349,8 @@ def run(board_path, out_path, scope, *, planes=("In1.Cu", "In4.Cu"), jar=None, p
     # that pcbnew drops on the re-save is a protection failure, not a pre-authorised removal
     ripped = Counter()
     if rip:
-        ripped = Counter(i["key"] for i in before_items if _rip_selected(i, scope))
+        ripped = Counter(i["key"] for i in before_items if _rip_selected(i, scope)
+                         and _geo_item(i) not in locked_geo)
     base_keys = Counter(i["key"] for i in base_items)
 
     groups = {}

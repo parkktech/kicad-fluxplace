@@ -48,8 +48,8 @@ def keys_from_report(d, keep=None, unconnected=True):
     return Counter(keys), (len(vio), len(unc))
 
 
-def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnected=True):
-    """Run kicad-cli DRC (all severities, zones refilled) -> (keys, (violations, unconnected))."""
+def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
+    """The raw kicad-cli DRC dict (all severities, zones refilled)."""
     out = board_path + ".drc.json"
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
                     "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
@@ -58,7 +58,12 @@ def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnec
         raise RuntimeError("DRC produced no report")
     d = json.load(open(out))
     os.unlink(out)
-    return keys_from_report(d, keep, unconnected)
+    return d
+
+
+def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnected=True):
+    """Run kicad-cli DRC (all severities, zones refilled) -> (keys, (violations, unconnected))."""
+    return keys_from_report(drc_json(board_path, kicad_cli, timeout), keep, unconnected)
 
 
 _ZONE_DESC = re.compile(r"^Zone \[([^\]]*)\] on ([^,\s]+)")

@@ -379,7 +379,7 @@ def cmd_place(a):
 
 
 # ---- fit-sheet (fluxplace/sheet.py) ----------------------------------------
-_HINT_CMDS = {"finish": "out", "repair": "out", "tune": "out", "drc-fix": "out",
+_HINT_CMDS = {"finish": "out", "repair": "out", "repair-region": "out", "tune": "out", "drc-fix": "out",
               "patch": "out", "sync-nets": "out", "replace-footprint": "out"}
 
 
@@ -1838,6 +1838,30 @@ def cmd_finish(a):
         print(f"  finish REJECTED by DRC: {v} violations, {u} unconnected "
               f"(was {base[0]} / {base[1]}); scratch left at {tmp}")
         raise SystemExit(1)
+
+
+def cmd_repair_region(a):
+    """`repair-region`: rip the opens and their unlocked blockers in one area, re-route together, keep only if
+    the board got strictly better (fluxplace/repairregion.py)."""
+    import os as _os
+    from fluxplace import repairregion as RRG
+    if _os.path.abspath(a.out) == _os.path.abspath(a.board):
+        raise SystemExit("repair-region: --out must differ from --board (the input is never overwritten)")
+    res = RRG.repair(a.board, a.out, nets=a.nets, margin=a.margin, tries=a.tries, constraints=a.constraints,
+                     planes=a.planes, jar=a.jar, passes=a.passes, timeout=a.timeout, kicad_cli=a.kicad_cli,
+                     log=lambda m: print(m, flush=True))
+    if res["status"] == "nothing":
+        print("  repair-region: nothing to repair" + (f" (skipped: {res['skipped']})" if res["skipped"] else ""))
+        return
+    if res["status"] == "kept":
+        print(f"  repair-region KEPT: opens {res['opens_before']} -> {res['opens_after']}, "
+              f"area {res['area']}, {len(res['ripped_nets'])} net(s) ripped in {res['tries']} try(s) -> {a.out}")
+        return
+    print(f"  repair-region FAILED after {res['tries']} tries: opens {res['opens_before']}, area {res['area']}; "
+          f"output not written; log {_os.path.splitext(a.out)[0]}.repair-region.log")
+    for s_ in res["sealing"]:
+        print("  sealing: " + s_)
+    raise SystemExit(1)
 
 
 def cmd_drcfix(a):
@@ -3896,6 +3920,24 @@ def build_parser():
                      help="freerouting wall-clock cap in seconds")
     pfn.add_argument("--kicad-cli", default="kicad-cli")
     pfn.set_defaults(fn=cmd_finish)
+
+    prr = sub.add_parser("repair-region",
+                         help="rip the opens and their unlocked blockers in one area, re-route together with "
+                              "freerouting; keep only if opens fall with no new shorts or violations")
+    prr.add_argument("--board", required=True)
+    prr.add_argument("--out", required=True)
+    prr.add_argument("--nets", nargs="*", default=None,
+                     help="restrict targets to these net names or regexes")
+    prr.add_argument("--margin", type=float, default=2.0, help="mm around the open items (default 2)")
+    prr.add_argument("--tries", type=int, default=3, help="area grows 1.5x per failed try (default 3)")
+    prr.add_argument("--constraints", default=None)
+    prr.add_argument("--planes", nargs="*", default=["In1.Cu", "In4.Cu"],
+                     help="plane layers declared (type power) in the DSN")
+    prr.add_argument("--jar", default=None)
+    prr.add_argument("--passes", type=int, default=3)
+    prr.add_argument("--timeout", type=int, default=900, help="freerouting wall-clock cap in seconds")
+    prr.add_argument("--kicad-cli", default="kicad-cli")
+    prr.set_defaults(fn=cmd_repair_region)
 
     pdf = sub.add_parser("drc-fix",
                          help="fix the DRC noise a repair leaves behind: rip "

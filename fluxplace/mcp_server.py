@@ -153,6 +153,7 @@ POLICY = {
     "pcbway":            ("write", "PCBWay order worksheet and assembly instructions from the board."),
     "repair":            ("write", "Copper repairs the review gate asks for: pair loops, RF widths, pin remap, text."),
     "finish":            ("long",  "Route a scope (nets / parts / area) with freerouting; only new in-scope copper is kept; protection proven."),
+    "repair-region":     ("long",  "Rip opens and their unlocked blockers in one area, re-route together; kept only if opens fall, no new shorts/violations."),
     "drc-fix":           ("write", "Fix DRC noise a repair leaves behind; loops until the count stops falling."),
     "tune":              ("long",  "DRC-guarded differential-pair length tuning to the [pairs.*] skew limits."),
     "models":            ("write", "Fetch real vendor STEP models via distributor APIs and wire them to footprints."),
