@@ -479,8 +479,7 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
                for p in old.Pads() if p.GetNetname()}
     if net_by_pin:
         pin_net.update(net_by_pin)
-    if old.IsFlipped():
-        new.Flip(new.GetPosition(), False)
+    was_flipped, old_rot, old_pos = old.IsFlipped(), old.GetOrientation(), old.GetPosition()
     new.SetOrientation(old.GetOrientation())
     new.SetPosition(old.GetPosition())
     new.SetReference(ref)
@@ -503,6 +502,10 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
     new_nums = {p.GetPadName() for p in new.Pads()}
     board.Remove(old)
     board.Add(new)
+    if was_flipped:                     # Flip on a footprint with no parent board segfaults (KiCad 10): flip after Add,
+        new.Flip(new.GetPosition(), False)   # using values captured before `old` left the board
+        new.SetOrientation(old_rot)
+        new.SetPosition(old_pos)
     return {"assigned": assigned,
             "unnetted_pads": sorted(set(unnetted), key=lambda s: (len(s), s)),
             "pins_without_pads": sorted(set(pin_net) - new_nums,
