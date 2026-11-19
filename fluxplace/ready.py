@@ -198,11 +198,11 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     lines.append(_line("parts", FAIL if t["FAIL"] else PASS,
                        f"{len(parts_res['rows'])} part(s): {t['FAIL']} FAIL, {t['WARN']} WARN" + (f" ({'; '.join(unc)})" if unc else ""),
                        [f"{x['code']} {x['msg']}" for x in P._spread([x for x in f if x["level"] == "FAIL"], 4)] if t["FAIL"] else []))
-    g = PG.gate(spec, cons, facts, parts_res, qty=P.build_quantity(cons))
+    g = PG.gate(spec, cons, facts, parts_res, qty=P.build_quantity(cons), ds_dir=ds_dir)
     detail["gate"] = g
     if g["ok"]:
         lines.append(_line("parts gate", PASS, PG.summary_line(g)[len("parts gate: "):]))
-    elif allow_undocumented:
+    elif allow_undocumented and not g["geometry"]:      # footprint geometry is never bypassed (fpcheck)
         lines.append(_line("parts gate", WAIVED, PG.bypass_note(g)))
         for l in lines:
             if l["name"] == "parts" and l["status"] == FAIL:      # the same documentation failures, already waived loudly above
@@ -313,7 +313,8 @@ def cmd_ready(a):
         print("parts gate: refusing to continue (--allow-incomplete does not bypass it; --allow-undocumented, recorded, does)")
         raise SystemExit(1)
     other = bool(nfail or nopen)
-    if (other and a.allow_incomplete) or (not other and detail["gate"]["parts"] and getattr(a, "allow_undocumented", False)):
+    if (other and a.allow_incomplete) or (not other and detail["gate"]["parts"] and getattr(a, "allow_undocumented", False)
+                                          and not detail["gate"]["geometry"]):
         if board:
             try:
                 with open(notready_path(board), "w") as fh:

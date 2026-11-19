@@ -9,7 +9,8 @@ MODULES += ("intent", "intentdraft")          # placement intent: gate + draft (
 MODULES += ("wlrefine",)
 MODULES += ("placementcheck",)                # keep-out / hardware / module rule report (docs/commands/placement-check.md)
 MODULES += ("thermal",)                       # [thermal.NAME]: locked GND vias + rule area (pre), mask opening (post)
-MODULES += ("blocks",)                        # functional-block inventory (fluxplace/blocks.py)                      # wire-length refinement of a legal placement
+MODULES += ("blocks",)
+MODULES += ("fpcheck",)                     # fp-check: footprint geometry + pad table (docs/commands/fp-check.md)                        # functional-block inventory (fluxplace/blocks.py)                      # wire-length refinement of a legal placement
 
 
 def add_parsers(sub):

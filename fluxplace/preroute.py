@@ -524,7 +524,8 @@ def _on_pad(B, q, net):
     return False
 
 
-def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False, surface=None):
+def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=True, collide=False, surface=None,
+        board_path=None):
     """-> (findings, scorecard). Findings already have waivers applied.  plan=True adds the PLAN_* findings
     (escape planner + global router, copper of the board respected) and card["plan"].  collide=True adds the
     grouped COLLISION findings (legality.collisions; the gates set it, the optimisers' score does not need it)."""
@@ -577,6 +578,10 @@ def run(B, cons=None, spec=None, waivers=(), anchors=True, plan=False, escape=Tr
                 value=xc))
     waivers = list(waivers) + list((cons.get("review") or {}).get("waive", []))
     f = [x for x in f if not R._waived(x, waivers)]
+    from . import fpcheck as FC                     # footprint geometry: never waived (FP_* / LANDPATTERN_*)
+    if board_path:
+        f += FC.check_board(board_path, cons)
+    f += FC.refused_waivers(waivers)
     pads = NC.net_pads(B)
     weighted = sum(info["weight"] * NC.mst_length([NC.pad_xy(p) for p in pads[n]])
                    for n, info in cls.items())

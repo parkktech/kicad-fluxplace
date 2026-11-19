@@ -115,7 +115,7 @@ def _open_count(board, B):
 def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR, opengate as OG
     B = RD.load(board)
-    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board))
+    f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board), board_path=board)
     codes = {}
     for x in f:
         if x["level"] == "FAIL":

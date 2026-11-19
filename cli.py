@@ -2308,7 +2308,7 @@ def cmd_route_ready(a):
         if any(x["level"] == "FAIL" for x in f):
             raise SystemExit(1)
         return
-    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons), collide=True)
+    f, card = PR.run(B, cons, spec, waivers=a.waive, plan=PR.use_plan(cons), collide=True, board_path=a.board)
     if getattr(a, "relevance", None):           # display filter only: the verdict still counts every finding
         keep = {t.strip() for t in a.relevance.split(",") if t.strip()}
         shown = [x for x in f if x["code"] != "COLLISION" or set(x.get("relevance", ())) & keep]

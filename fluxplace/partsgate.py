@@ -48,10 +48,24 @@ def model_state(ref, facts):
     return False, "3D model is a stand-in or does not resolve to a file"
 
 
-def gate(spec, cons, facts, res, qty=None):
-    """-> {"ok", "qty", "parts": {ref: [{need, code, detail}]}, "by_need": {need: n}, "unchecked": [..], "n_parts"}.
-    `res` is parts.evaluate()'s result (findings, rows, stock_data)."""
+def gate(spec, cons, facts, res, qty=None, ds_dir=None):
+    """-> {"ok", "qty", "parts": {ref: [{need, code, detail}]}, "by_need": {need: n}, "unchecked": [..], "n_parts",
+    "geometry": [FP_*/LANDPATTERN_PAD_* FAIL findings]}.
+    `res` is parts.evaluate()'s result (findings, rows, stock_data).
+    Footprint geometry (fpcheck: FP_*, landpattern pad tables) is a "package" blocker. It is NEVER bypassed:
+    `--allow-undocumented` does not pass FP_* / LANDPATTERN_PAD_* failures (ready refuses them)."""
+    from . import fpcheck as FC
     out = {}
+    geometry = []
+    geo_unchecked = []
+    for f in FC.gate_findings(spec, cons, facts, ds_dir=ds_dir):
+        if f["code"] == "FP_UNCHECKED":
+            geo_unchecked.append(f["msg"])
+        if f["level"] != P.FAIL or not FC.is_geometry(f["code"]):
+            continue
+        geometry.append(f)
+        for r in f.get("refs") or [f"FP:{f.get('fp', '?')}"]:
+            out.setdefault(r, []).append({"need": "package", "code": f["code"], "detail": f["msg"]})
     for f in res["findings"]:
         need = _CODE_NEED.get(f["code"])
         if need is None or (f["level"] == P.INFO and f["code"] != "PART_GENERIC"):
@@ -76,11 +90,13 @@ def gate(spec, cons, facts, res, qty=None):
                         "detail": f"{ref}: {detail}"})
         if not got:
             del out[ref]
+    unchecked += geo_unchecked
     by_need = {}
     for items in out.values():
         for n in {g["need"] for g in items}:
             by_need[n] = by_need.get(n, 0) + 1
-    return {"ok": not out, "qty": qty, "parts": out, "by_need": by_need, "unchecked": unchecked, "n_parts": len(res["rows"])}
+    return {"ok": not out, "qty": qty, "parts": out, "by_need": by_need, "unchecked": unchecked,
+            "n_parts": len(res["rows"]), "geometry": geometry}
 
 
 def summary_line(g):

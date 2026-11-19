@@ -942,6 +942,17 @@ def _num_in_text(text, value_mm):
     return any(re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text) for f in forms if f)
 
 
+def project_drawn(project_libs, ds_dir=None):
+    """{footprint name: .pretty dir} for the project-drawn footprints ([docs] project_libs, resolved as is or from
+    the datasheets dir up two levels). Shared by the landpattern citation check and the parts gate's FP_* checks."""
+    out = {}
+    for d in project_libs or ():
+        for cand in (d, os.path.join(ds_dir or "", "..", "..", d)):
+            for f in glob.glob(os.path.join(cand, "*.kicad_mod")):
+                out.setdefault(os.path.splitext(os.path.basename(f))[0], cand)
+    return out
+
+
 def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
     """A footprint drawn for the project must cite the drawing it was
     transcribed from, and the drawing must agree with the pads.
@@ -964,11 +975,7 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
     spec_parts = {c["ref"]: c for c in (spec or {}).get("components", [])}
     # project_libs are .pretty directories (generated boards carry no lib
     # nickname on their footprints, so the name is matched against the files)
-    drawn = set()
-    for d in project_libs:
-        for cand in (d, os.path.join(ds_dir or "", "..", "..", d)):
-            drawn |= {os.path.splitext(os.path.basename(f))[0]
-                      for f in glob.glob(os.path.join(cand, "*.kicad_mod"))}
+    drawn = set(project_drawn(project_libs, ds_dir))
     for ref, p in sorted(facts["parts"].items()):
         fp = p.get("footprint", "")
         name = fp.split(":")[-1]
@@ -1029,6 +1036,8 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
             out.append(_f(FAIL, "LANDPATTERN_NOT_ON_PAGE",
                           f"{ref}: pitch {lp['pitch']} mm is not printed on {src}",
                           refs=[ref]))
+    from . import fpcheck as FC
+    out += FC.table_findings(facts, spec, ds_dir)     # landpattern.pads / vendor_footprint (LANDPATTERN_PAD_*)
     return out
 
 
@@ -1959,6 +1968,9 @@ def check_silk(facts, cons, spec=None):
 
 
 def _waived(fnd, waivers):
+    """A waiver never applies to a footprint defect (FP_* / LANDPATTERN_*): fpcheck.REFUSED says why."""
+    if fnd["code"].startswith(("FP_", "LANDPATTERN_")):
+        return False
     for w in waivers or ():
         code, _, rx = w.partition(":")
         if fnd["code"] != code:
@@ -2079,6 +2091,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += RP.check_return_path(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
+    from . import fpcheck as FC
+    out += FC.refused_waivers(waivers)
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
     return out
 
