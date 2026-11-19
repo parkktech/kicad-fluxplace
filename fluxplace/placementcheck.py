@@ -125,9 +125,11 @@ def compute(B, cons):
 
 def gate_failures(B, cons):
     """FAIL rows of the route stage's collision gate (legality.collisions), as placement-check and pairs report them."""
+    from . import review as RV
     _ok, coll = LY.collision_gate(B, cons)
+    waivers = list(((cons or {}).get("review") or {}).get("waive", []))   # the same waivers as the route stage's gate
     return [{"level": x["level"], "refs": list(x.get("pair") or x.get("refs") or []), "msg": x["msg"]}
-            for x in coll if x["level"] == "FAIL"]
+            for x in coll if x["level"] == "FAIL" and not RV._waived(x, waivers)]
 
 
 def residual(board, cons):
