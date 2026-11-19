@@ -856,6 +856,18 @@ def refill_zones(board):
     filler.Fill(board.Zones())
 
 
+def _new_violation_points(drc, new_v):
+    """(x, y) in mm of every item of every violation and unconnected item in a kicad-cli DRC dict whose
+    drcguard key (unconnected prefixed 'U') is in new_v. kicad-cli item pos is in mm (1e6 nm = 1 mm)."""
+    pts = []
+    for prefix, rows in (("", drc.get("violations", [])), ("U", drc.get("unconnected_items", []))):
+        for v in rows:
+            if DG.key_of(v, prefix) in new_v:
+                pts += [(float(i["pos"]["x"]), float(i["pos"]["y"]))
+                        for i in v.get("items") or [] if "pos" in i]
+    return pts
+
+
 def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
                 track_w=0.2, clearance=0.15, via_mm=0.6, drill_mm=0.3,
                 skip_nets=("GND",), net_widths=None, cell=0.25, log=print,
@@ -970,7 +982,7 @@ def patch_board(board_path, out_path, kicad_cli="kicad-cli", layers=None,
             return
         # SUBSET: drop only the added copper near NEW violations
         new_v = _vkeys(drc1) - _vkeys(drc0)
-        bad_pts = [pt for _, items in new_v for pt in items]
+        bad_pts = _new_violation_points(drc1, new_v)
         for t, items in list(new_v)[:4]:
             log(f"      new-violation {t} at {items}")
         drop = []
