@@ -1969,7 +1969,8 @@ def check_silk(facts, cons, spec=None):
 
 def _waived(fnd, waivers):
     """A waiver never applies to a footprint defect (FP_* / LANDPATTERN_*): fpcheck.REFUSED says why."""
-    if fnd["code"].startswith(("FP_", "LANDPATTERN_")):
+    from . import fpcheck as FC
+    if FC.is_geometry(fnd["code"]):
         return False
     for w in waivers or ():
         code, _, rx = w.partition(":")
@@ -2050,6 +2051,13 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
         out += check_docs(facts, spec, ds_dir or "", strict=strict)
         out += check_landpattern(facts, spec, ds_dir or "",
                                  project_libs=docs.get("project_libs", ()), strict=strict)
+    bp = facts.get("board_path") or facts.get("board")
+    if isinstance(bp, str) and bp.endswith(".kicad_pcb") and os.path.exists(bp):
+        try:                                   # footprint internal geometry, on every review (never waived)
+            from . import fpcheck as FC
+            out += [_f(f["level"], f["code"], f["msg"], f.get("refs", [])) for f in FC.check_board(bp, cons)]
+        except Exception as e:                 # noqa: BLE001 - a check that cannot run is reported, never a pass
+            out.append(_f(WARN, "FP_UNCHECKED", f"footprint geometry NOT CHECKED: {type(e).__name__}: {e}"))
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)

@@ -32,8 +32,10 @@ REFUSED = "footprint defects are fixed in the footprint from the manufacturer's 
 
 
 def is_geometry(code):
-    """True for the codes that block the parts gate and are never waived."""
-    return code.startswith("FP_") or code.startswith("LANDPATTERN_PAD_") or code == "LANDPATTERN_VENDOR_MISSING"
+    """True for the codes that block the parts gate and are never waived: footprint geometry, not documentation
+    (LANDPATTERN_UNCITED / _SOURCE_MISSING / _PAGE_UNREADABLE stay waivable with a reason)."""
+    return (code.startswith("FP_") or code.startswith("LANDPATTERN_PAD_")
+            or code in ("LANDPATTERN_VENDOR_MISSING", "LANDPATTERN_MISMATCH"))
 
 
 def _f(level, code, msg, refs=(), **extra):
@@ -82,6 +84,7 @@ class _P:
     def __init__(self, pcbnew, pad, cu_ids):
         self.pad = pad
         self.num = pad.GetNumber()
+        self.net = pad.GetNetname() if hasattr(pad, "GetNetname") else ""
         self.label = self.num if self.num else "NPTH"
         self.npth = pad.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
         self.cu = [L for L in pad.GetLayerSet().Seq() if L in cu_ids]
@@ -120,9 +123,11 @@ def check_footprint(pcbnew, fp, ref="", clr=DEFAULT_CLEARANCE_MM, hole=DEFAULT_H
             if worst[0] >= clr:
                 continue
             layer = _layer_name(pcbnew, worst[1])
-            if a.num and a.num == b.num:
+            same_num = bool(a.num and a.num == b.num)
+            if same_num or (a.net and a.net == b.net):         # merged copper by design (e.g. USB-C A1/B12 both GND)
+                why = "same pad number" if same_num else f"same net {a.net}"
                 out.append(_f(INFO, "FP_PAD_CLEARANCE",
-                              f"{who} pads {a.label} and {b.label} (same pad number: merged copper by design, exempt) "
+                              f"{who} pads {a.label} and {b.label} ({why}: merged copper by design, exempt) "
                               f"on {layer}: {worst[0]:.3f} mm, floor {clr:.3f} mm", refs, pads=[a.label, b.label],
                               actual=round(worst[0], 4), floor=clr))
                 continue
@@ -348,7 +353,7 @@ def refused_waivers(waivers):
     out = []
     for w in waivers or ():
         code, _, rx = str(w).partition(":")
-        if code.startswith(GUARD_PREFIXES):
+        if is_geometry(code):
             out.append(_f(INFO, "FP_WAIVER_REFUSED", f"waiver {w!r} refused: {REFUSED}"))
     return out
 

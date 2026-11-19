@@ -267,7 +267,7 @@ def test_parts_gate_blocks_fp_failure_and_allow_undocumented_cannot_pass_it(tmp_
     assert any(x["code"] == "FP_PAD_CLEARANCE" for x in g["geometry"])
     assert any(it["code"] == "FP_PAD_CLEARANCE" and it["need"] == "package" for it in g["parts"]["U1"])
     assert FC.is_geometry("FP_PAD_CLEARANCE") and FC.is_geometry("LANDPATTERN_PAD_MISMATCH")
-    assert not FC.is_geometry("LANDPATTERN_MISMATCH") and not FC.is_geometry("MODEL_STANDIN")
+    assert FC.is_geometry("LANDPATTERN_MISMATCH") and not FC.is_geometry("MODEL_STANDIN")
     assert "--allow-undocumented" in PG.gate.__doc__
 
 
@@ -276,3 +276,9 @@ def test_unloadable_board_is_not_checked_not_passed(tmp_path):
     bad.write_text("(kicad_pcb (not a real board")
     out = FC.check_board(str(bad))
     assert [x["code"] for x in out] == ["FP_UNCHECKED"] and out[0]["level"] == "WARN"
+
+
+def test_waiver_guard_is_geometry_only():
+    from fluxplace import fpcheck as FC
+    assert FC.is_geometry("FP_PAD_CLEARANCE") and FC.is_geometry("LANDPATTERN_PAD_MISMATCH") and FC.is_geometry("LANDPATTERN_MISMATCH")
+    assert not FC.is_geometry("LANDPATTERN_PAGE_UNREADABLE") and not FC.is_geometry("LANDPATTERN_UNCITED")
