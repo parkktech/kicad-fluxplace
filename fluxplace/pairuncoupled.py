@@ -16,14 +16,13 @@ def _pt_seg(p, a, b):
     return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
 
 
-def uncoupled(B, net, other, reach, step=0.2):
-    """mm of `net`'s copper with no copper of `other` within `reach` on the same layer."""
+def uncoupled_samples(B, net, other, reach, step=0.2):
+    """(x, y, mm) per sample of `net`'s copper with no copper of `other` within `reach` on the same layer."""
     mine = [s for s in B["segs"] if s["net"] == net]
     theirs = {}
     for s in B["segs"]:
         if s["net"] == other:
             theirs.setdefault(s["layer"], []).append(s)
-    un = 0.0
     for s in mine:
         L = math.hypot(s["b"][0] - s["a"][0], s["b"][1] - s["a"][1])
         k = max(1, int(L / step + 0.999))
@@ -32,8 +31,26 @@ def uncoupled(B, net, other, reach, step=0.2):
             f = (i + 0.5) / k
             p = (s["a"][0] + (s["b"][0] - s["a"][0]) * f, s["a"][1] + (s["b"][1] - s["a"][1]) * f)
             if not any(_pt_seg(p, o["a"], o["b"]) <= reach for o in cand):
-                un += L / k
-    return un
+                yield p[0], p[1], L / k
+
+
+def uncoupled(B, net, other, reach, step=0.2):
+    """mm of `net`'s copper with no copper of `other` within `reach` on the same layer."""
+    return sum(mm for _x, _y, mm in uncoupled_samples(B, net, other, reach, step))
+
+
+def breakout_ends(B, pair, terms, width, gap):
+    """uncoupled mm of each leg per terminal: every uncoupled sample is assigned to its nearest terminal ->
+    {terminal name: {"P": mm, "N": mm}} (terminals with no uncoupled copper are left out)."""
+    if not terms:
+        return {}
+    reach = COUPLE * (width + gap)
+    out = {}
+    for leg, other, key in ((pair[0], pair[1], "P"), (pair[1], pair[0], "N")):
+        for x, y, mm in uncoupled_samples(B, leg, other, reach):
+            t = min(terms, key=lambda t: math.hypot(x - t["c"][0], y - t["c"][1]))
+            out.setdefault(t["name"], {"P": 0.0, "N": 0.0})[key] += mm
+    return {k: {"P": round(v["P"], 2), "N": round(v["N"], 2)} for k, v in out.items()}
 
 
 def measure(B, pair, width, gap, limit_mm):

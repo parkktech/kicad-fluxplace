@@ -230,3 +230,82 @@ def test_real_drc_guard_path(tmp_path):
     assert rep["pairs"][0]["status"] in ("rerouted", "kept_original") and left(tmp_path) == []
     if rep["pairs"][0]["status"] == "kept_original":
         assert rep["pairs"][0]["reason"].startswith("new DRC violation")        # synthetic board: the guard may say so; it never crashes
+
+
+def split_ic(ref, x, y, p, n, mid):
+    """a column of three pads: P, a third (mid) pad, N, 1.9 mm between P and N (the ESD part the pair must leave)."""
+    return PB.fp(ref, x, y, [PB.pad("1", 0, 0, p, 0.3, 0.5), PB.pad("2", 0, 0.95, mid, 0.3, 0.5), PB.pad("3", 0, 1.9, n, 0.3, 0.5)])
+
+
+def split_board():
+    return split_ic("U1", 20, 20, "USB_DP", "USB_DM", "GND") + PB.fp("J1", 35, 20, [PB.pad("1", 0, 0, "USB_DP", 0.3, 0.5),
+                                                                                       PB.pad("2", 0, 1.9, "USB_DM", 0.3, 0.5)])
+
+
+def _blocked_coupled_lay(calls):
+    """pairs.plan, except that the coupled centre line without a gate ring fails with the real closest-approach text."""
+    from fluxplace import pairs as PR
+
+    def lay(board, cons, spec, only):
+        calls.append(cons)
+        if "ring_mm" not in (cons.get("pairlay") or {}):
+            pair = sorted(only)
+            e = {"pair": pair, "status": "not-laid", "blockers": [],
+                 "why": "U1>J1: search budget for the coupled centre line (0.62 mm envelope + 0.130 clearance); "
+                        "closest approach (20.0, 20.9) F.Cu, 1.7 mm short of J1"}
+            return {"pairs": [e], "laid": {}, "strip": [], "kill": [], "keep": [], "B": RD.load(board)}
+        return PR.plan(board, cons, spec, only=only, log=lambda m: None)
+    return lay
+
+
+def test_uncoupled_limit_resolution_and_zero_disables():
+    from fluxplace import pairfb as FB
+    pr = ("USB_DP", "USB_DM")
+    assert FB.uncoupled_limit({}, pr) == 5.0
+    assert FB.uncoupled_limit({"pairlay": {"max_uncoupled_mm": 3}}, pr) == 3.0
+    assert FB.uncoupled_limit({"pairlay": {"max_uncoupled_mm": 3}, "pairs": {"USB": {"max_uncoupled_mm": 2}}}, pr) == 2.0
+    assert FB.uncoupled_limit({"pairs": {"USB": {"max_uncoupled_mm": 0}}}, pr) == 0.0
+    assert FB.uncoupled_limit({"pairlay": {"max_uncoupled_mm": 0}}, pr) == 0.0
+    assert FB.uncoupled_limit({"pairs": {"USB": {"max_uncoupled_mm": 0}}, "pairlay": {"max_uncoupled_mm": 4}}, pr) == 0.0
+    assert PO.breakout_ring(5.0) == 4.0 and PO.breakout_ring(0.2) == 0.5
+
+
+def test_breakout_ends_split_each_leg_by_nearest_terminal():
+    from fluxplace import pairuncoupled as PU
+    B = {"copper": ["F.Cu"], "pads": [], "vias": [], "segs": [
+        {"net": "A_P", "a": (0.0, 0.0), "b": (2.0, 0.0), "layer": "F.Cu", "w": 0.15},       # near terminal T0, uncoupled
+        {"net": "A_N", "a": (0.0, 0.8), "b": (2.0, 0.8), "layer": "F.Cu", "w": 0.15},
+        {"net": "A_P", "a": (2.0, 0.0), "b": (20.0, 0.0), "layer": "F.Cu", "w": 0.15},     # coupled 0.5 mm apart: not counted (P 1.8: the sample at 1.9 mm is inside the reach)
+        {"net": "A_N", "a": (2.0, 0.5), "b": (20.0, 0.5), "layer": "F.Cu", "w": 0.15},
+    ]}
+    terms = [{"name": "U1", "c": (0.0, 0.4)}, {"name": "J1", "c": (20.0, 0.25)}]
+    ends = PU.breakout_ends(B, ("A_P", "A_N"), terms, 0.15, 0.2)
+    assert ends["U1"] == {"P": 1.8, "N": 2.0} and "J1" not in ends and PU.breakout_ends(B, ("A_P", "A_N"), [], 0.15, 0.2) == {}
+
+
+def test_blocked_coupled_line_is_retried_with_bounded_break_outs(tmp_path):
+    calls = []
+    src = PB.write(tmp_path, split_board())
+    out = str(tmp_path / "o.kicad_pcb")
+    rep = PO.reroute(src, out, ["USB_DP/USB_DM"], {}, None, drc=no_drc(), log=lambda m: None, lay=_blocked_coupled_lay(calls))
+    r = rep["pairs"][0]
+    assert len(calls) == 2 and "ring_mm" not in (calls[0].get("pairlay") or {}) and calls[1]["pairlay"]["ring_mm"] == 4.0
+    assert calls[1]["pairlay"]["max_uncoupled_mm"] == 5.0 and calls[1]["pairlay"]["skew_frac"] == 1.0
+    assert r["status"] == "rerouted", r
+    assert r["breakout_retry"] and r["breakout_limit"] == 5.0
+    assert r["after"]["audit"] == "complete" and r["after"]["vias"] == [0, 0]
+    for end, leg in r["breakout"].items():
+        assert leg["P"] <= 5.0 and leg["N"] <= 5.0, (end, leg)
+    assert "breakout U1: P " in PO.format_text(rep) and "(limit 5.0)" in PO.format_text(rep)
+    assert left(tmp_path) == []
+
+
+def test_zero_limit_allows_no_break_out_retry(tmp_path):
+    calls = []
+    src = PB.write(tmp_path, split_board())
+    cons = {"pairs": {"USB": {"max_uncoupled_mm": 0}}}
+    rep = PO.reroute(src, str(tmp_path / "o.kicad_pcb"), ["USB_DP/USB_DM"], cons, None, drc=no_drc(), log=lambda m: None,
+                     lay=_blocked_coupled_lay(calls))
+    r = rep["pairs"][0]
+    assert len(calls) == 1 and r["status"] == "kept_original" and r["breakout_limit"] == 0.0
+    assert "closest approach" in r["reason"] and "breakout_retry" not in r

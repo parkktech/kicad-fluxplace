@@ -100,6 +100,12 @@ and the obstacles that bind it, or the failed check). The laid copper is locked,
 `--allow-shove` (off): when blocked, the unlocked copper of the NON-pair, non-RF, non-power, non-clock neighbour nets named by the
 blocker report is removed, the pair is laid, and the nets it opened are reported (`OPENED`; not laid again, use the hand-route
 tools). Off, the report lists the neighbours it could remove.
+Break-out retry: when the coupled centre line cannot reach a terminal (`closest approach ... short of`, `no clear break-out`), the
+pair is laid again with a bounded uncoupled break-out at the terminals (the b(iii) machinery of `pairfb.py`): each leg runs single-ended
+from its pad to a coupling point at most `max_uncoupled_mm` long, then couples. The limit is `[pairs.FAMILY] max_uncoupled_mm`, else
+`[pairlay] max_uncoupled_mm`, default 5 mm; an explicit `0` disables the retry for that family. The retry result is kept only if every
+leg's break-out is within the limit and the pair passes the checks above (a longer one is `kept_original`). The per-end lengths are on
+the pair line and in `.pairsonly.json` (`breakout`, `breakout_limit`), e.g. `breakout U8: P 1.4 mm, N 1.1 mm (limit 5.0)`.
 `--budget S` (default 120 x named pairs): out of time or SIGTERM / SIGINT writes the best accepted board to `--out`, removes the
 temp and lock files; pairs not reached are `not_reached`. Output `--out` + `<out>.pairsonly.json`. Exit 0 all rerouted / already ok,
 1 some kept / refused / unmatched, 2 stopped.

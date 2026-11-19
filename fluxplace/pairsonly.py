@@ -23,11 +23,28 @@ import os
 import re
 import shutil
 
+from . import pairfb as FB
+from . import pairuncoupled as PU
 from . import tune as TU
+
+BREAKOUT_WHY = ("closest approach", "no clear break-out")      # the coupled centre line cannot reach a terminal: retry with break-outs
 
 PER_PAIR_S = 120            # default budget = named pairs x this (a lay plus one DRC run, with a retry for --allow-shove)
 SHOVABLE = ("signal", "slow", "bypass")
-__all__ = ["resolve", "locked_items", "shove_nets", "reroute", "format_text", "PER_PAIR_S"]
+__all__ = ["resolve", "locked_items", "shove_nets", "breakout_ring", "reroute", "format_text", "PER_PAIR_S"]
+
+
+def breakout_ring(limit):
+    """gate ring (mm) of the break-out retry: the coupled part starts about this far from each terminal, so the uncoupled leg
+    stays within `limit` (the pad-to-gate allowance of about 1 mm is the rest). The measured result is checked against the limit."""
+    return max(0.5, limit - 1.0)
+
+
+def _bo_text(r):
+    """per-end break-out lengths of a re-routed pair, for the report line: '; breakout U8: P 1.4 mm, N 1.1 mm (limit 5.0)'."""
+    lim = r.get("breakout_limit")
+    return "".join(f"; breakout {k}: P {v['P']} mm, N {v['N']} mm (limit {lim:.1f})" for k, v in (r.get("breakout") or {}).items()
+                   if v["P"] or v["N"])
 
 
 def resolve(names, pairs):
@@ -182,6 +199,17 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 put_pre(stripped)
                 res = lay(pre, cons, spec, set(pr))
                 e = next((x for x in res["pairs"] if tuple(x["pair"]) == pr), None) or {"status": "not-laid", "why": "pair not found by the pair layer"}
+                bo_lim = FB.uncoupled_limit(cons, pr)
+                row["breakout_limit"], bo_ring = bo_lim, None
+                if e["status"] != "laid" and bo_lim > 0 and any(t in e.get("why", "") for t in BREAKOUT_WHY):
+                    # b(iii) machinery (pairfb): the same pair lay with a gate ring for the break-outs, every leg bounded by the limit
+                    bo_ring = breakout_ring(bo_lim)
+                    res_b = lay(pre, FB.variant(cons, ring_mm=bo_ring, max_uncoupled_mm=bo_lim, skew_frac=1.0), spec, set(pr))
+                    eb = next((x for x in res_b["pairs"] if tuple(x["pair"]) == pr), None) or {"status": "not-laid", "why": "pair not found"}
+                    if eb["status"] == "laid":
+                        res, e = res_b, eb
+                    else:
+                        bo_ring, row["breakout_why"] = None, eb.get("why", "")
                 shoved = []
                 if e["status"] != "laid":
                     row["blockers"] = list(e.get("blockers", []))
@@ -214,6 +242,8 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 opn = RC.text_open(B2)
                 a = PA.audit(B2, [pr], cons, {n for n, k in opn.items() if k})[pr]
                 prof = _profile_row(B2, pr)
+                rr = PR.rules_for(pre, res["B"], cons, R, pr[0], Pm, proj)
+                ends = PU.breakout_ends(B2, pr, PR.terminals(B2, pr[0], pr[1], Pm["pad_max"])[0], rr["w"], rr["gap"])
                 unlocked_result = locked_items(open(try_, errors="replace").read(), pr, locked=False) if lk else []
                 why = "pair result was not locked again" if unlocked_result else None
                 if a["status"] == "unknown" and why is None:
@@ -226,6 +256,10 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                     worse = sorted(n for n, k in opn.items() if n not in pr and n not in shoved and k > open0.get(n, 0))
                     if worse:
                         why = "opens other net(s): " + ", ".join(worse[:6])
+                if why is None and bo_ring is not None:
+                    over = [(k, leg, v[leg]) for k, v in ends.items() for leg in "PN" if v[leg] > bo_lim + 1e-9]
+                    if over:
+                        why = f"break-out {over[0][0]} {over[0][1]} leg {over[0][2]} mm over the {bo_lim:g} mm limit"
                 if why is None:
                     keys, _cnt = run_drc(try_)
                     new = DG.new_keys(base[0], keys)
@@ -242,9 +276,10 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 base, open0 = (keys, _cnt), opn
                 aud0[pr] = a
                 row.update(status="rerouted", reason="", after=dict(prof, audit=a["status"], why=a["why"]), opened=sorted(
-                    n for n, k in opn.items() if n in shoved and k), relocked=bool(lk))
+                    n for n, k in opn.items() if n in shoved and k), relocked=bool(lk), breakout=ends,
+                    breakout_retry=bo_ring is not None)
                 log(f"  {name}: rerouted, P {prof['p_mm']} / N {prof['n_mm']} mm, skew {prof['skew']}, vias {prof['vias']}"
-                    + (f"; opened {', '.join(row['opened'])}" if row["opened"] else ""))
+                    + (f"; opened {', '.join(row['opened'])}" if row["opened"] else "") + _bo_text(row))
     except TU.Stopped as s:
         stopped = s.reason
         for r in rows.values():                              # the pair in progress: its original copper is what the output holds
@@ -288,7 +323,7 @@ def format_text(rep):
         a = r.get("after") or {}
         if r["status"] == "rerouted":
             lines.append(f"  {r['pair']}: rerouted, P {a['p_mm']} / N {a['n_mm']} mm, skew {a['skew']}, vias {a['vias']}"
-                         + (f"; OPENED {', '.join(r['opened'])} (not re-laid)" if r["opened"] else ""))
+                         + (f"; OPENED {', '.join(r['opened'])} (not re-laid)" if r["opened"] else "") + _bo_text(r))
         else:
             lines.append(f"  {r['pair']}: {r['status']}" + (f", {r['reason']}" if r.get("reason") else "")
                          + (f"; neighbours that could be removed with --allow-shove: {', '.join(r['shove_candidates'])}" if r.get("shove_candidates") and not r.get("shoved") else ""))
