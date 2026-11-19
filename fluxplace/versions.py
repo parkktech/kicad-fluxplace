@@ -119,6 +119,19 @@ def copper_fingerprint(path):
                      for c in (ol.Outline(i).CPoint(j) for j in range(ol.Outline(i).PointCount())))
         rows.append(("zone", z.GetNetname(), tuple(z.GetLayerSet().Seq()), z.GetAssignedPriority(),
                      bool(z.GetIsRuleArea()), pts))
+    # board drawings on fabricated layers (copper, mask, paste, silk, edge): e.g. a mask opening added after routing is a
+    # real change. Documentation layers (User.*, Cmts, Dwgs, Eco, Margin, Fab, CrtYd) are ignored.
+    doc = {"Dwgs.User", "Cmts.User", "Eco1.User", "Eco2.User", "Margin", "F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd"}
+    for d in b.GetDrawings():
+        if d.GetClass() != "PCB_SHAPE" or b.GetLayerName(d.GetLayer()) in doc or b.GetLayerName(d.GetLayer()).startswith("User."):
+            continue
+        poly = []
+        if d.GetShape() == pcbnew.SHAPE_T_POLY:
+            ps = d.GetPolyShape()
+            poly = sorted((round(c.x / 1e6, 3), round(c.y / 1e6, 3))
+                          for i in range(ps.OutlineCount()) for c in (ps.Outline(i).CPoint(j) for j in range(ps.Outline(i).PointCount())))
+        rows.append(("shape", b.GetLayerName(d.GetLayer()), int(d.GetShape()), _xy(d.GetStart()), _xy(d.GetEnd()),
+                     d.GetWidth(), bool(d.IsAnyFill()), poly))
     return hashlib.sha1(json.dumps(sorted(repr(r) for r in rows)).encode()).hexdigest()
 
 

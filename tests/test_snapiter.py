@@ -58,3 +58,16 @@ def test_zone_clearance_increase_is_not_ignored_by_snap_guard(tmp_path, monkeypa
     rec = SI.run(str(src), str(src))
     assert rec["moved"] == 0 and rec["excluded"] == 2
     assert src.read_text() == "original"
+
+
+def test_open_keys_count_per_net_not_description():
+    from fluxplace import snapiter as SI, drcguard as DG
+    def rep(desc):
+        return {"violations": [], "unconnected_items": [{"type": "unconnected_items", "items": [
+            {"description": desc}, {"description": "Track [NETA] on B.Cu, length 0.1500 mm"}]}]}
+    base = SI._keys(rep("Pad 3 [NETA] of U1 on F.Cu"))
+    moved = SI._keys(rep("Via [NETA] on F.Cu - B.Cu"))          # same open, different items after a snap
+    assert not DG.new_keys(base, moved)
+    two = rep("Pad 3 [NETA] of U1 on F.Cu"); two["unconnected_items"].append(
+        {"type": "unconnected_items", "items": [{"description": "Pad 1 [NETB] of R1 on F.Cu"}, {"description": "Pad 2 [NETB] of R2 on F.Cu"}]})
+    assert DG.new_keys(base, SI._keys(two))                      # a new open on another net is still caught

@@ -1,6 +1,7 @@
 """Via-centre snap with a DRC acceptance rule: every track end inside a same-net via's copper moves to the via centre; the
 tracks named by any NEW violation (drcguard keys, unconnected included) keep their ends; repeat until nothing new appears."""
 import json
+import re
 import math
 import os
 import shutil
@@ -20,11 +21,24 @@ def _report(board, cli="kicad-cli"):
     return d
 
 
+_NET = re.compile(r"\[([^\]]+)\]")
+
+
+def _unc_nets(u):
+    """net names of an unconnected item (from its item descriptions, e.g. 'Track [NET] on B.Cu, ...')."""
+    return sorted({m.group(1) for it in u.get("items") or [] for m in [_NET.search(str(it.get("description", "")))] if m})
+
+
 def _keys(d):
-    keys = DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED)[0]
+    # Opens are counted per NET, not keyed by item description: moving a track end to a via centre changes which
+    # items an existing open names (and their lengths), which made every iteration look like a new open (W9/W13).
+    keys = DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED, unconnected=False)[0]
     for v in d.get("violations", []):
         if v.get("type") == "clearance" and DG._zone_item(v):
             keys[DG.key_of(v)] += 1
+    for u in d.get("unconnected_items", []):
+        for n in _unc_nets(u) or ["?"]:
+            keys[("Unet", n)] += 1
     return keys
 
 
@@ -59,7 +73,7 @@ def run(src, dst, iters=6, log=print):
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))
         bad = [v for v in d["violations"] if v["type"] != CENTRED and DG.key_of(v) in new]
-        bad += [u for u in d.get("unconnected_items", []) if DG.key_of(u, "U") in new]
+        bad += [u for u in d.get("unconnected_items", []) if any(("Unet", n) in new for n in _unc_nets(u) or ["?"])]
         ids = {it["uuid"] for v in bad for it in v["items"] if "uuid" in it}
         log(f"snap iter {i}: moved {moved}, skipped {len(skip)}, new keys {sum(new.values())}")
         if not new:

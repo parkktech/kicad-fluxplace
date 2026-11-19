@@ -337,3 +337,22 @@ def test_copper_fingerprint_follows_zone_outline(tmp_path):
     moved = make("zone-moved.kicad_pcb", 4500000)
     assert VS.copper_fingerprint(a) != VS.copper_fingerprint(moved)
     assert VS.copper_fingerprint(a) == VS.copper_fingerprint(make("zone-same.kicad_pcb", 4000000))
+
+
+def test_copper_fingerprint_follows_mask_drawing(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    from fluxplace import versions as V
+
+    def board(path, with_mask):
+        b = pcbnew.BOARD()
+        t = pcbnew.PCB_TRACK(b); t.SetStart(pcbnew.VECTOR2I(0, 0)); t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(5), 0))
+        t.SetLayer(pcbnew.F_Cu); b.Add(t)
+        if with_mask:
+            s = pcbnew.PCB_SHAPE(b); s.SetShape(pcbnew.SHAPE_T_RECT); s.SetLayer(pcbnew.B_Mask); s.SetFilled(True)
+            s.SetStart(pcbnew.VECTOR2I(0, 0)); s.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(3), pcbnew.FromMM(3))); b.Add(s)
+        b.Save(str(path))
+    board(tmp_path / "a.kicad_pcb", False)
+    board(tmp_path / "b.kicad_pcb", True)
+    board(tmp_path / "c.kicad_pcb", False)
+    a, bb, c = (V.copper_fingerprint(str(tmp_path / n)) for n in ("a.kicad_pcb", "b.kicad_pcb", "c.kicad_pcb"))
+    assert a == c and a != bb
