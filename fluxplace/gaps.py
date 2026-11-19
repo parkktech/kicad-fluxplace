@@ -214,7 +214,7 @@ def _track_len_by_layer(board):
     b = pcbnew.LoadBoard(board)
     out = {}
     for t in b.GetTracks():
-        if t.IsVia():
+        if t.Type() == pcbnew.PCB_VIA_T:
             continue
         name = b.GetLayerName(t.GetLayer())
         out[name] = out.get(name, 0.0) + t.GetLength() / 1e6
