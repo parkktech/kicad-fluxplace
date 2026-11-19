@@ -23,13 +23,13 @@ import time
 
 from . import routeconn as RC
 
-STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "route", "close", "tune", "silk", "review"]
+STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "plan-route", "route", "close", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "critroute", "plan-route", "route", "close", "tune", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
-VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped")   # warn: ran, its own gate line says FAIL, does not block
+VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped", "packets")   # warn: ran, its own gate line says FAIL, does not block
 
 
 # ------------------------------------------------------------------ state
@@ -1080,13 +1080,19 @@ def st_relieve(c, n, board):
             "board": out if os.path.exists(out) else board}
 
 
+def st_critroute(c, n, board):
+    """AI pre-route of critical nets (critroute.py): verdict "packets" stops the pipeline with exit 5 until actions exist."""
+    from . import critroute as CR
+    return CR.stage(c, n, board)
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
+FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "silk": st_silk, "review": st_review}
 
@@ -1342,6 +1348,12 @@ def run(a):
         save_state(work, st)
         print(("NOT READY " if nr else "") + f"[{i + 1}/{len(STAGES_)}] {name}: {res['verdict']} - {_clip(res.get('line', ''), 120)} "
               f"({time.time() - t:.0f}s)", flush=True)
+        if res["verdict"] == "packets":
+            rc = 5
+            for l in res.get("next", [])[:40]:
+                print(l)
+            print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
+            break
         if res["verdict"] == "questions":
             rc = 3
             for l in res.get("next", [])[:40]:

@@ -345,7 +345,7 @@ def test_pipeline_freerouting_then_per_net_finish_and_stage_record(tmp_path, fak
     fr = r["fr"]
     assert fr["jar"] == loc["jar"] and fr["v"] == "2.5.0" and "--router.job_timeout=" in fr["flags"]
     assert fr["curve"] == [[1, 1.0, 2, 0], [2, 3.0, 1, 0]] and fr["open"][:2] == [3, 2] and fr["locked_same"] is True
-    res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "6-route", "result.json")))
+    res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "7-route", "result.json")))
     assert res["router"] == "freerouting" and res["open_start"] == 3 and res["open_end"] == 1   # A by Freerouting, B by the per-net router
     assert res["times"]["ladder_min"] > 0 and "freerouting 2.5.0 2 pass(es)" in r["line"] or "freerouting" in res["line"]
     # resumable: the same range again on the same workdir
@@ -382,7 +382,7 @@ def test_per_net_finish_audits_only_its_own_copper_not_freerouting_s(tmp_path, f
     set_cfg(ses=ses_text([("A", "F.Cu", 0.2, [(18, 19.365), (18, 19.065), (25, 19.065), (25, 50), (50, 50), (50, 39.365), (58, 39.365)])]))
     a = _pipe_args(tmp_path, b, loc)
     PL.run(a)
-    res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "6-route", "result.json")))
+    res = json.load(open(os.path.join(a.workdir, "1-route" if os.path.isdir(os.path.join(a.workdir, "1-route")) else "7-route", "result.json")))
     assert res["open_end"] == 1, res["line"]                  # A by Freerouting, B by the per-net router
     assert "RULE_VIOLATION" not in res["line"] and "0 checkpoint(s)" not in res["line"], res["line"]   # closed by the batch, not a ladder rescue
 

@@ -72,8 +72,8 @@ def test_range_and_handoff_through_state_json(tmp_path):
     st = PL.load_state(a.workdir)
     r = st["stages"]["route"]
     assert r["verdict"] == "fail" and "STUCK" in " ".join(st["next"])   # unrouted net reported with numbers
-    assert os.path.exists(os.path.join(a.workdir, "6-route", "board.kicad_pcb"))
-    assert os.path.exists(os.path.join(a.workdir, "6-route", "routed.kicad_pcb.status.json"))
+    assert os.path.exists(os.path.join(a.workdir, "7-route", "board.kicad_pcb"))
+    assert os.path.exists(os.path.join(a.workdir, "7-route", "routed.kicad_pcb.status.json"))
     assert len(open(PL.state_path(a.workdir)).read()) <= PL.STATE_MAX
 
 
@@ -125,7 +125,7 @@ def test_route_rerun_on_existing_workdir_and_router_record(tmp_path):
     assert rec["router"]["dir"] == str(tmp_path / "krt") and rec["router"]["source"] == "flag"
     a3 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
     PL.run(a3)                                              # board == the stage's own output: no SameFileError
-    assert os.path.exists(os.path.join(a.workdir, "6-route", "board.kicad_pcb"))
+    assert os.path.exists(os.path.join(a.workdir, "7-route", "board.kicad_pcb"))
 
 
 def test_cli_status_and_missing_state(tmp_path, capsys):
@@ -173,3 +173,15 @@ def test_close_follows_route_in_both_flows():
     for flow in (PL.STAGES, PL.CONSTRUCTIVE):
         assert flow[flow.index("route") + 1] == "close"
     assert PL.FUNCS["close"] is PL.st_close
+
+
+def test_critroute_order_and_packets_exit_5(tmp_path, monkeypatch):
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("pairs") + 1] == "critroute"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("critroute") + 1] == "plan-route"
+    assert PL.STAGES[PL.STAGES.index("critroute") + 1] == "route"
+    assert "packets" in PL.VERDICTS
+    monkeypatch.setitem(PL.FUNCS, "critroute", lambda c, n, board: {"verdict": "packets", "line": "p", "board": board})
+    b = _board(tmp_path)
+    a = _args(tmp_path, b, from_stage="critroute", to_stage="critroute")
+    assert PL.run(a) == 5
+    assert PL.load_state(a.workdir)["stages"]["critroute"]["verdict"] == "packets"

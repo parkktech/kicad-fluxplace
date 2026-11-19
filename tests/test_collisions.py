@@ -140,4 +140,4 @@ def test_pipeline_route_stage_blocks_on_collision(tmp_path):
     assert PL.run(a) == 1
     st = PL.load_state(a.workdir)
     assert st["stages"]["route"]["verdict"] == "blocked" and "collision gate" in st["stages"]["route"]["line"]
-    assert os.path.exists(os.path.join(a.workdir, "6-route", "collisions.json"))
+    assert os.path.exists(os.path.join(a.workdir, "7-route", "collisions.json"))
