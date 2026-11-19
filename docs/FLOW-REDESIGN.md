@@ -309,6 +309,17 @@ Rules of the climb:
 - A level is entered only with its trigger in the attempt log. No level is skipped and none is entered on a guess.
 - L2 runs without asking inside decision D4 (at most 3 pads, unfixed, within the `closure` nudge limit). L3-L5 never
   move a part in `[placement] fixed` or `[lock.at]`. Whether L3-L4 may move unfixed parts without asking is question Q2.
+- **L5 growth asks the owner with a concrete proposal (DECIDED 2026-11-19).** Once the size is in use (after the
+  intake size search), growth is a question (exit 3, `questions.py`; an `outline_grow` event for a frontend), never
+  silent. The question names the edge(s) and millimetres, the evidence, and how likely the growth is to finish routing,
+  e.g. "Grow width +1 mm (right edge) and length +3 mm (bottom edge) to finish routing? 6 opens and 2 pairs left
+  cluster at x 150-165, y 40-60, where B.Cu is at 0.78 density. Estimated chance to finish: 85 % (12 of 14 similar
+  corpus growths finished). Board becomes 105 x 97 mm, inside the 110 x 100 mm envelope. [yes / no / other size]".
+  The number must come from `attempts.jsonl` and corpus outcomes of earlier growths with similar gap density per mm
+  added (2.12, 2.14). Never use the plan-route estimate alone (7-27 % accurate). With too little data the question
+  says "no calibrated estimate yet (n similar growths)" instead of a percentage. Before asking, the flow tries the
+  candidate sizes on scratch copies (`planopts.search`) and offers the smallest one that measurably routed, if one
+  did. The answer is recorded in `[answers]`. "Yes up to N mm" pre-approves later growth within N mm.
 - After a climb the memo is cleared only for gaps inside the rework box.
 - Each level has a share of `[flow] budget_min`; an unused share passes down.
 - Side flips are not searched by `floorplan2` today ("every block keeps its side", its docstring). L4 is new glue
@@ -748,7 +759,7 @@ ladder from the cheapest level up. Events and the AI rung need the loop to be st
 | D5 | The 7 superseded wrappers (`auto`, `compact`, `plan`, `gather`, `analyze`, `eval`, `route`) | DECIDED 2026-11-19: behind the `x` debug namespace; not deleted, the logic is kept |
 | D6 | High-speed pair not complete after every rung | DECIDED 2026-11-19: keep routing, exit 1, `fab` refuses |
 
-### 7.2 Open questions from this revision
+### 7.2 Open questions from this revision (recommendations used as defaults until the owner overrides; L5 growth decided as an owner prompt, see 2.9)
 
 | # | question | recommendation |
 |---|---|---|
