@@ -2,12 +2,12 @@
 
 Unsure: `fluxplace doctor`.
 ## Output rules
-- Analysis commands print a verdict line, counts, worst 10 (`--top N`) and the full-report path
+- Analysis commands print a verdict line, counts, worst 10 (`--top N`) and the report path
   (`<board stem>.<cmd>.txt/.json`). `--full` = all, `-q` = verdict line.
 - Exit: 0 ok, 1 FAIL; `route-wait` 2 timeout, 3 no status. Other commands: 3 = open questions
   (`<board>.questions.json`): relay to the user, wait; never answer them, never `--assume-defaults` for deliverables.
-- `help-brief CMD` = 15 lines per command (alone: one each). Skip README/docs/commands.
-- No time-box on whole-board routing: batch routing (`docs/commands/route.md`).
+- `help-brief CMD`: 15 lines. Skip README/docs/commands.
+- No time-box on whole-board routing (`docs/commands/route.md`).
 - Never overwrite the input board (`--out`). One agent owns a board/workdir.
 
 ## Commands by task
@@ -35,12 +35,13 @@ Unsure: `fluxplace doctor`.
 | gates | `ready`, `parts`, `closure`, `part-diff`, `magnetics` | docs |
 | fab package | `fab`, `deliver`, `pcbway` | after `review` |
 | toolchain, context | `doctor`, `doctor --context` | |
+| which board, resume | `versions status` | `step accept reject new start-context` |
 
 `--constraints` TOML, `--spec` JSON. Global flags (`--no-sourcing`, `--full`, `-q`, `--top`) precede the subcommand.
 
 ## Pipeline
-`docs/AGENT-PIPELINE.md`: one subagent per stage, commands, briefs, stop conditions.
-Stages: floorplan-check, anchor-check, place (`--objective plan`), route-ready (gate, runs plan-route), route, tune, review.
+`docs/AGENT-PIPELINE.md`: one subagent per stage, with stop conditions.
+Stages: floorplan-check, anchor-check, place (`--objective plan`), route-ready (gate), route, tune, review.
 Order: map, place, plan-route gate, route, audit; `--flow constructive`: modules, floorplan, fanout (gate), pairs, route. Hand off `W/state.json` (<2 KB) + the stage command.
 
 ## MCP
