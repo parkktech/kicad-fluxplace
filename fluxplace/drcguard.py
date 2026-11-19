@@ -56,7 +56,8 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
                     board_path], capture_output=True, text=True, timeout=timeout)
     if not os.path.exists(out):
         raise RuntimeError("DRC produced no report")
-    d = json.load(open(out))
+    from . import drcfull as DF
+    d = DF.complete(board_path, json.load(open(out)), fill=True)
     os.unlink(out)
     return d
 

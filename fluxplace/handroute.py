@@ -54,7 +54,8 @@ def drc_raw(board, kicad_cli="kicad-cli", timeout=600):
                    capture_output=True, text=True, timeout=timeout)
     if not os.path.exists(out):
         raise RuntimeError("kicad-cli produced no DRC report for " + board)
-    d = json.load(open(out))
+    from . import drcfull as DF
+    d = DF.complete(board, json.load(open(out)), fill=True)
     os.unlink(out)
     return d
 

@@ -55,7 +55,8 @@ def _drc(board, refill_zones, cli="kicad-cli"):
         subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         if not os.path.exists(out):
             raise RuntimeError("kicad-cli drc produced no report")
-        d = json.load(open(out))
+        from . import drcfull as DF
+        d = DF.complete(board, json.load(open(out)), fill=refill_zones)
     zc = 0
     for v in d.get("violations", []):
         if v.get("type") in ("clearance", "shorting_items", "starved_thermal", "isolated_copper") and \
@@ -82,7 +83,8 @@ def unconnected_nets(board, cli="kicad-cli"):
                         "-o", out, board], capture_output=True, text=True, timeout=900)
         if not os.path.exists(out):
             raise RuntimeError("kicad-cli drc produced no report")
-        d = json.load(open(out))
+        from . import drcfull as DF
+        d = DF.complete(board, json.load(open(out)), fill=True)
     c = Counter()
     for v in d.get("unconnected_items", []):
         net = None

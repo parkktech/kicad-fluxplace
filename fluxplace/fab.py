@@ -160,7 +160,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
     ignored, scope_note = [], ""
     if os.path.exists(drc_path):
         try:
-            d = json.load(open(drc_path))
+            from . import drcfull as DF
+            d = DF.complete(board, json.load(open(drc_path)))
             nviol = len(d.get("violations", []))
             nunc = len(d.get("unconnected_items", []))
             from . import drcguard as DG

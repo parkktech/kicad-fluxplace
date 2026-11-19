@@ -186,8 +186,11 @@ def _p_pairs(r, rep):
     return m
 
 
-def _p_drc(r, rep):
+def _p_drc(r, rep, board=None):
     d = _j(rep)
+    if board:
+        from . import drcfull as DF
+        d = DF.complete(board, d)
     viol = d.get("violations", [])
     errs = [v for v in viol if v.get("severity") == "error"]
     m = {"drc.errors": len(errs), "drc.warnings": sum(1 for v in viol if v.get("severity") == "warning"),
@@ -297,7 +300,7 @@ def run_board(ent, work, tier, rules):
          lambda r: _p_pairs(r, rep(".pairs.plan.json")))
     drc_json = os.path.join(out, "drc.json")
     step("drc", [_kicad_cli(), "pcb", "drc", "--format", "json", "--output", drc_json, board],
-         lambda r: _p_drc(r, drc_json))
+         lambda r: _p_drc(r, drc_json, board))
     routed = res["metrics"].get("drc.unconnected") == 0 and "drc.unconnected" in res["metrics"]
     try:
         pm = _pcb_metrics(board)
@@ -327,7 +330,7 @@ def run_board(ent, work, tier, rules):
         if outs:   # newest board the pipeline wrote: DRC + copper metrics under the routed. prefix
             drc_r = os.path.join(out, "drc-routed.json")
             step("drc-routed", [_kicad_cli(), "pcb", "drc", "--format", "json", "--output", drc_r, outs[-1]],
-                 lambda r: {f"routed.{k}": v for k, v in _p_drc(r, drc_r).items()})
+                 lambda r: {f"routed.{k}": v for k, v in _p_drc(r, drc_r, outs[-1]).items()})
             res["metrics"].update({f"routed.{k}": v for k, v in _pcb_metrics(outs[-1]).items()})
 
     # inputs must be untouched: a changed original is an error, never a silent pass

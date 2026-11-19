@@ -33,7 +33,8 @@ def drc_unrouted(board, kicad_cli="kicad-cli"):
     out = board + ".drc.json"
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
                     "--output", out, board], capture_output=True, text=True)
-    d = json.load(open(out))
+    from . import drcfull as DF
+    d = DF.complete(board, json.load(open(out)))
     nets = set()
     for u in d.get("unconnected_items", []):
         for it in u.get("items", []):

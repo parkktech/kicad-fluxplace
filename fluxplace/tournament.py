@@ -343,7 +343,8 @@ def drc_count(board_path, kicad_cli="kicad-cli"):
         subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
                         "--severity-error", "-o", rpt, board_path],
                        capture_output=True, text=True, timeout=600)
-        d = json.load(open(rpt))
+        from . import drcfull as DF
+        d = DF.complete(board_path, json.load(open(rpt)))
         return (len(d.get("violations", [])),
                 len(d.get("unconnected_items", [])))
     except Exception:

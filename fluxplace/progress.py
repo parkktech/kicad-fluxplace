@@ -91,6 +91,8 @@ def measure(board, timeout=900, cli=None):
                        capture_output=True, timeout=timeout)
         with open(rep) as fh:
             j = json.load(fh)
+        from . import drcfull as DF
+        j = DF.complete(tb, j, fill=True)
         if not isinstance(j.get("violations"), list):
             raise RuntimeError("DRC report has no violations list")
         shorts = sum(1 for v in j["violations"] if v.get("type") == "shorting_items")

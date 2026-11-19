@@ -174,7 +174,8 @@ def drc_full(board_path, kicad_cli="kicad-cli", out_path=None, log=print):
         if not os.path.exists(rpt):
             return {"error": "no DRC report produced"}
         with open(rpt) as fh:
-            rep = json.load(fh)
+            from . import drcfull as DF
+            rep = DF.complete(tboard, json.load(fh))
 
         by_type = {}
         for v in rep.get("violations", []):

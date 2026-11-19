@@ -35,7 +35,8 @@ def unconnected_pads(board_path, nets, cli="/usr/bin/kicad-cli", workdir=None):
     subprocess.run([cli, "pcb", "drc", "--refill-zones", "--format", "json", "--severity-all", "--output", out, board_path],
                    capture_output=True, text=True, timeout=900)
     try:
-        items = json.load(open(out)).get("unconnected_items", [])
+        from . import drcfull as DF
+        items = DF.complete(board_path, json.load(open(out)), fill=True).get("unconnected_items", [])
     except (OSError, ValueError):
         return {}
     want = set(nets)

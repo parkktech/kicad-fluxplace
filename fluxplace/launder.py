@@ -53,8 +53,9 @@ def _drc(board_path, kicad_cli):
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
                     "--output", out, board_path],
                    capture_output=True, timeout=600)
+    from . import drcfull as DF
     with open(out) as f:
-        d = json.load(f)
+        d = DF.complete(board_path, json.load(f))
     os.unlink(out)
     return d
 

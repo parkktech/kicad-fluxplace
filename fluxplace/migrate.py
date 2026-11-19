@@ -382,7 +382,8 @@ def converge(board_path, kicad_cli="kicad-cli", max_rounds=6, log=print):
             return {"converged": False, "reason": "DRC produced no report",
                     "history": history}
         with open(rpt) as fh:
-            rep = json.load(fh)
+            from . import drcfull as DF
+            rep = DF.complete(board_path, json.load(fh))
         dangling = [v for v in rep.get("violations", [])
                     if v.get("type") in ("track_dangling", "via_dangling")]
         unconn = rep.get("unconnected_items", [])

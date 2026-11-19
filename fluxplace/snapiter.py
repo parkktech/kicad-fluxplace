@@ -16,7 +16,8 @@ def _report(board, cli="kicad-cli"):
     out = board + ".drc.json"
     subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "--refill-zones", "-o", out, board],
                    capture_output=True, timeout=900)
-    d = json.load(open(out))
+    from . import drcfull as DF
+    d = DF.complete(board, json.load(open(out)), fill=True)
     os.unlink(out)
     return d
 
