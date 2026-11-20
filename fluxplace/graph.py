@@ -95,16 +95,18 @@ _PAIR_RULES = (
 )
 
 
-def diff_pairs(signal_nets):
+def diff_pairs(signal_nets, exclude=()):
     """{slave_net: master_net} for differential pairs found by naming convention.
-    The P/DP side is the master; its partner routes hugged against it."""
+    The P/DP side is the master; its partner routes hugged against it.
+    `exclude`: nets the owner declared plain signals (constraints.not_pairs); a mapping touching one is dropped."""
     names = set(signal_nets)
+    skip = set(exclude)
     pairs = {}
     for n in sorted(names):   # sorted: set order is salted, and pair order steers routing
         for pat, rep in _PAIR_RULES:
             if pat.search(n):
                 partner = pat.sub(rep, n)
-                if partner in names and partner != n:
+                if partner in names and partner != n and n not in skip and partner not in skip:
                     pairs[partner] = n
                 break
     return pairs

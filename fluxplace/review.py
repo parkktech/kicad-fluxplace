@@ -224,6 +224,12 @@ def _ps_note(facts, master, skew_mm, limit_mm):
     return f" [{skew_mm * pp:.1f} ps / limit {limit_mm * pp:.1f} ps]"
 
 
+def pair_gated(cons, master):
+    """A pair is gated (stop-ship on skew/asymmetry) when its master is in a [pairs.*] family or a high-speed family."""
+    fams = tuple((cons or {}).get("pairs", {}))
+    return master.startswith(fams) or master.upper().split("_")[0] in _HS_FAMILIES
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -240,8 +246,7 @@ def _pairs_from_audit(facts, cons):
         rows = QA.pair_rows(B, cls, cons or {}, opn)
     except Exception:
         return None
-    fams = tuple((cons or {}).get("pairs", {}))
-    gated = lambda m: m.startswith(fams) or m.upper().split("_")[0] in _HS_FAMILIES
+    gated = lambda m: pair_gated(cons, m)
     if any(r["status"] == "unknown" and gated(r["p"]) for r in rows):
         return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
     out = []
@@ -270,7 +275,7 @@ def check_pairs(facts, cons):
     if audited is not None:
         return audited
     tracks = facts.get("net_tracks", {})
-    pairs = G.diff_pairs(list(facts["net_pads"]))
+    pairs = G.diff_pairs(list(facts["net_pads"]), exclude=C.not_pairs(cons))
     if not pairs:
         return []
     lengths = {n: t["length"] for n, t in tracks.items()}
@@ -285,11 +290,10 @@ def check_pairs(facts, cons):
             return float("inf")
     finds, _ = SI.pair_skew_findings(lengths, pairs, warn_mm=lim)
     out = []
-    fams = tuple((cons or {}).get("pairs", {}))
+    # skew is a stop-ship for high-speed pairs and for any family the
+    # engineer wrote a [pairs.*] rule for; on an audio pair it is advice
     def gated(master):
-        # skew is a stop-ship for high-speed pairs and for any family the
-        # engineer wrote a [pairs.*] rule for; on an audio pair it is advice
-        return master.startswith(fams) or master.upper().split("_")[0] in _HS_FAMILIES
+        return pair_gated(cons, master)
     for level, code, msg in finds:
         master = msg.split("/")[0]
         hard = code == "PAIR_SKEW" and gated(master)

@@ -44,11 +44,13 @@ def plane_plan(board):
 
 def pair_nets(cons, names, report):
     """nets of every pair: the pairs report's legs, else the [pairs.*] families' P/N tails."""
+    from . import constraints as C
+    nopair = C.not_pairs(cons)
     legs = [x for p in (report or {}).get("pairs") or [] for x in (p.get("pair") or [])]
     if legs:
-        return sorted(set(legs))
+        return sorted(set(legs) - nopair)
     fams = list(((cons or {}).get("pairs") or {}))
-    return sorted(x for x in names if any(x.startswith(f) for f in fams))
+    return sorted(x for x in names if any(x.startswith(f) for f in fams) and x not in nopair)
 
 
 def _missed_legs(row):

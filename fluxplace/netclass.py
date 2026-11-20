@@ -185,16 +185,18 @@ def pin_names(spec):
 
 def _pairs(names, cons):
     """{net: partner} for every net that is half of a differential pair."""
-    m = G.diff_pairs(names)
+    from . import constraints as C
+    nopair = C.not_pairs(cons)
+    m = G.diff_pairs(names, exclude=nopair)
     out = {}
     for slave, master in m.items():
         out[slave], out[master] = master, slave
     fams = list((cons or {}).get("pairs", {}))
     for n in names:
-        if n in out or not any(n.startswith(f) for f in fams):
+        if n in out or n in nopair or not any(n.startswith(f) for f in fams):
             continue
         for a, b in (("_P", "_N"), ("P", "N"), ("DP", "DM"), ("+", "-")):
-            if n.endswith(a) and n[:-len(a)] + b in names:
+            if n.endswith(a) and n[:-len(a)] + b in names and n[:-len(a)] + b not in nopair:
                 out[n] = n[:-len(a)] + b
                 out[n[:-len(a)] + b] = n
     return out

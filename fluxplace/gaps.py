@@ -22,7 +22,8 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "track_not_centered_on_via": "via-offcentre"}
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
-ORDER = ["short", "mask-opening", "open-gap", "open-pour", "open-free", "clearance", "dangling", "via-offcentre"]
+ORDER = ["short", "mask-opening", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "open-gap",
+         "open-pour", "open-free", "clearance", "dangling", "via-offcentre", "pin-escape"]
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 
@@ -49,8 +50,77 @@ def _class(nets, rf, pairs):
     return "plain"
 
 
-def classify(d, cons=None):
-    """DRC dict -> sorted gap list. Gap: id, kind, class, nets, at, layer, evidence."""
+def _pair_audit(board, cons):
+    """(B, cls, rows) of the routing pair audit, built as review._pairs_from_audit builds it."""
+    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC
+    B = RD.load(board)
+    cls = NC.classify(B, cons or {})
+    try:
+        opn = set(RC.open_by_net(board))
+    except Exception:
+        opn = set(RC.text_open(B))
+    return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
+
+
+def review_gaps(board, cons):
+    """Review findings as gap rows (classify's shape, plus "base" = id base the caller assigns). Each source is
+    isolated: a failing source contributes nothing."""
+    from . import power, boardfile, review, preroute, routediag
+    cons = cons or {}
+    not_p = C.not_pairs(cons)
+    out = []
+    try:
+        for f in power.check(boardfile.facts_from_file(board), cons):
+            if f.get("code") not in ("POWER_WIDTH", "POWER_VIAS"):
+                continue
+            net = (f.get("refs") or [""])[0]
+            kind = "power-width" if f["code"] == "POWER_WIDTH" else "power-vias"
+            out.append({"base": f"{kind}:{net}", "kind": kind, "class": "power", "nets": [net], "at": None,
+                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or [])})
+    except Exception:
+        pass
+    try:
+        rows = _pair_audit(board, cons)[2]
+    except Exception:
+        rows = []
+    for r in rows:
+        p, n, st, causes = r["p"], r["n"], r["status"], r.get("causes") or []
+        if p in not_p or n in not_p:
+            continue
+        if st in ("half", "open"):
+            kind = "pair-open"
+        elif st == "mismatch" and any(c in ("layers", "vias") for c in causes):
+            kind = "pair-asym"
+        elif st == "mismatch" and causes == ["skew"]:
+            kind = "pair-skew"
+        else:
+            continue                         # ok / unknown rows are not graded
+        out.append({"base": f"{kind}:{p}/{n}", "kind": kind,
+                    "class": "hs-pair" if review.pair_gated(cons, p) else "pair", "nets": [p, n], "at": None,
+                    "layer": None, "evidence": str(r.get("why") or "")[:120], "refs": [p, n]})
+    try:
+        B = routediag.load(board)
+        for f in preroute.pin_escape_blocked(B):
+            if f.get("code") != "PIN_ESCAPE_BLOCKED":
+                continue
+            ref = (f.get("refs") or [""])[0]
+            out.append({"base": f"pin-escape:{ref}", "kind": "pin-escape", "class": "plain", "nets": [], "at": None,
+                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or [])})
+    except Exception:
+        pass
+    return out
+
+
+def protect_nets(board, cons, gaps):
+    """drcguard.protected_nets minus the legs of every pair whose audit is incomplete (pair-open/asym/skew gap)."""
+    prot = drcguard.protected_nets(cons, drcguard.snap_nets(_snapshot(board)))
+    bad = {n for g in gaps if g["kind"] in ("pair-open", "pair-asym", "pair-skew") for n in g["nets"]}
+    return prot - bad
+
+
+def classify(d, cons=None, board=None):
+    """DRC dict -> sorted gap list. Gap: id, kind, class, nets, at, layer, evidence.
+    `board`: the board the DRC dict was measured on; when given, review gaps are added too."""
     cons = cons or {}
     rf = set((cons.get("rf") or {}).get("nets") or [])
     unc = d.get("unconnected_items") or []
@@ -106,16 +176,23 @@ def classify(d, cons=None):
         k = ORDER.index(g["kind"]) if g["kind"] in ORDER else len(ORDER)
         return (k, CLASS_RANK[g["class"]], g["id"])
 
+    if board is not None:
+        for g in review_gaps(board, cons):
+            add(g.pop("base"), g)
     gaps.sort(key=key)
     return gaps
 
 
 def score(m, gaps):
-    """R4 vector: [hs_pair, rf, shorts, opens, pair, errors, quality]. hs_pair is 0 until phase 3."""
+    """Vector: [hs_pair, rf, shorts, opens, power, pair, pin_escape, errors, quality] (R4 plus D71cj a terms).
+    hs_pair / pair: pair-open|asym|skew gaps of a gated / plain pair; power: power-width|power-vias; rf: any rf gap."""
     def n(pred):
         return sum(1 for g in gaps if pred(g))
-    return [0, n(lambda g: g["class"] == "rf"), m["shorts"], m["opens"],
-            n(lambda g: g["class"] == "pair"), m["errors"],
+    return [n(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
+            n(lambda g: g["class"] == "rf"), m["shorts"], m["opens"],
+            n(lambda g: g["kind"] in ("power-width", "power-vias")),
+            n(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
+            n(lambda g: g["kind"] == "pin-escape"), m["errors"],
             n(lambda g: g["kind"] in ("dangling", "via-offcentre", "other"))]
 
 
@@ -942,8 +1019,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     t0 = time.time()
     budget_s = budget_min * 60
     m = dict(measure(best, kicad_cli))
-    m["gaps"] = classify(m["drc"], cons)
-    protect = drcguard.protected_nets(cons, drcguard.snap_nets(_snapshot(best)))
+    m["gaps"] = classify(m["drc"], cons, board=best)
+    protect = protect_nets(best, cons, m["gaps"])
     start = _vitals(m)
     board_fp0 = versions.copper_fingerprint(best)
     if runs is None and calllog.enabled():
@@ -972,7 +1049,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def attempt(r, kind, rung, targets):
         """One try. Returns True when the candidate was accepted (m is then the new base)."""
-        nonlocal m, n_att, level, n_packets
+        nonlocal m, n_att, level, n_packets, protect
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         key = (kind, rung, fp)
@@ -1005,7 +1082,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 else:
                     cm = dict(measure(out, kicad_cli))
                     runs = 1
-                    cm["gaps"] = classify(cm["drc"], cons)
+                    cm["gaps"] = classify(cm["drc"], cons, board=out)
                     final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind, protect)
                     names = _cleanup_rungs(m, cm, kind) if (not ok and why.startswith("R2 ")) else []
@@ -1024,11 +1101,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                                 final = nxt
                         cm = dict(measure(final, kicad_cli))
                         runs += 1
-                        cm["gaps"] = classify(cm["drc"], cons)
+                        cm["gaps"] = classify(cm["drc"], cons, board=final)
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind, protect)
                     if ok:
                         _copy(final, best)
                         m = cm
+                        protect = protect_nets(best, cons, m["gaps"])
                         _sidecars(final, best)
                         cur_ids = {g["id"] for g in m["gaps"]}
                         result = "closed" if all(g["id"] not in cur_ids for g in targets) else "partial"

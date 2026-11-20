@@ -210,6 +210,11 @@ def clamp_drill_mm(drill_mm, cons, log=None, what=""):
     return _clamp_floor(drill_mm, cons, "min_drill_mm", log, what)
 
 
+def not_pairs(cons):
+    """Nets the owner declared plain signals although their names look like a pair (top-level `not_pairs = [...]`)."""
+    return set((cons or {}).get("not_pairs") or [])
+
+
 def pour_nets(cons):
     """Power nets the engineer says ride a plane/pour — the router should not
     also draw them as fat traces."""

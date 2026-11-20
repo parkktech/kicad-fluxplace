@@ -137,19 +137,20 @@ def new_keys(base_keys, keys):
 def protected_nets(cons, names):
     """Nets no trade may open (R5) and whose copper stays locked: the [rf] nets, nets named as RF (review.is_rf),
     every pair leg from the constraints (krtchain.pair_nets) and every leg found by naming (graph.diff_pairs)."""
-    from . import krtchain, graph, review
+    from . import krtchain, graph, review, constraints as C
     names = sorted(names)
+    nopair = C.not_pairs(cons)
     rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
     try:
         pairs = set(krtchain.pair_nets(cons, names, None))
     except Exception:
         pairs = set()
     try:
-        dp = graph.diff_pairs(names)
+        dp = graph.diff_pairs(names, exclude=nopair)
         pairs |= set(dp) | set(dp.values())
     except Exception:
         pass
-    return rf | pairs
+    return rf | (pairs - nopair)
 
 
 def snap_nets(snap):
