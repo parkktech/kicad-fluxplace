@@ -157,16 +157,30 @@ SPINE_MM = 1.0      # D71cj: a pour rail is routed as a spine this wide, then po
 def route_widths(cons, layers=None, track_mm=0.15, exclude=()):
     """{net: router width mm} for every [power.*] rail with a current figure: pour rails -> min(SPINE_MM, need),
     other rails -> their IPC width; never below `track_mm` (the signal width). Rails with no current figure are left out.
-    `[route] power_spine_mm` overrides SPINE_MM. `exclude`: plane nets the caller knows (zones on the board), not rails."""
-    spine = float(((cons or {}).get("route") or {}).get("power_spine_mm", SPINE_MM))
+    `[route] power_spine_mm` overrides SPINE_MM; `[route] power_spine = "ipc-outer"` gives pour rails their IPC outer width
+    (rounded up to 0.05 mm) instead of the spine (the caller routes them on outer layers only, see rail_layers). `exclude`: plane nets the caller knows (zones on the board), not rails."""
+    rt = (cons or {}).get("route") or {}
+    spine = float(rt.get("power_spine_mm", SPINE_MM))
+    ipc_outer = rt.get("power_spine") == "ipc-outer"     # D71cl run 2: pour rails at their IPC outer width (outer layers only)
     out = {}
     for n, r in plan(cons, layers=layers).items():
         if r is None or r.get("track_mm") is None or n in exclude:
             continue
         need = float(r["track_mm"])
-        w = min(spine, need) if r["pour"] else need
+        if r["pour"] and ipc_outer and r.get("width_outer"):
+            w = _ceil05(float(r["width_outer"]))
+        else:
+            w = min(spine, need) if r["pour"] else need
         out[n] = round(max(w, float(track_mm)), 2)
     return out
+
+
+def rail_layers(cons, sig):
+    """Layers the rails step routes on: outer copper only under `[route] power_spine = "ipc-outer"`, else `sig`."""
+    if ((cons or {}).get("route") or {}).get("power_spine") == "ipc-outer":
+        outer = [x for x in sig if x in ("F.Cu", "B.Cu")]
+        return outer or list(sig)
+    return list(sig)
 
 
 def is_pour(cons, net):

@@ -172,3 +172,13 @@ def test_pour_guard_drops_when_shorts_rise(monkeypatch, tmp_path):
     rec = PW.pour_rails(src, CONS_POUR, out, layers=4)
     assert rec["dropped"] and rec["added"] == [] and "shorts 0 -> 1" in rec["dropped_reason"]
     assert not (tmp_path / "out.kicad_pcb").exists()
+
+
+def test_route_widths_ipc_outer_and_rail_layers():
+    from fluxplace import power
+    cons = {"power": {"V5A": {"max_current_ma": 5000, "pour": True}}, "route": {"power_spine": "ipc-outer"}}
+    w = power.route_widths(cons, layers=6, track_mm=0.15)["V5A"]
+    r = power.rail(cons, "V5A", layers=6)
+    assert w >= r["width_outer"] and w < r["width_outer"] + 0.051 and w > power.SPINE_MM
+    assert power.rail_layers(cons, ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]) == ["F.Cu", "B.Cu"]
+    assert power.rail_layers({}, ["F.Cu", "In2.Cu"]) == ["F.Cu", "In2.Cu"]

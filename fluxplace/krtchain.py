@@ -258,7 +258,7 @@ def run(c, n, board, runner=run_step):
     rail_nets = sorted(rails)
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
     if rail_nets:
-        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, rails, o[:-10] + ".json", nets=rail_nets)))
+        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=rail_nets)))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
         return _run_pairgroups(c, d, s, o, failed_legs, max(60.0, min(CAP_S, budget - (time.time() - t0))))
