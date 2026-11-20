@@ -126,6 +126,26 @@ def _snapshot(path):
     return _SNAP[key]
 
 
+# R2 cleanup: a candidate refused only for new mechanical DRC keys is cleaned by these rungs (in this order)
+CLEANUP = {"via-offcentre": "snapiter", "dangling": "launder"}
+
+
+def _new_kinds(base_m, cand_m, kind):
+    """Kinds of every DRC key type the candidate adds over the base (drcguard.accept's R2 set, all keys, not the first)."""
+    new = drcguard.new_keys(base_m.get("keys", base_m.get("err_keys")), cand_m.get("keys", cand_m.get("err_keys")))
+    if kind is not None:
+        new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
+    return {KIND_OF_TYPE.get(k[0], "other") for k in new}
+
+
+def _cleanup_rungs(base_m, cand_m, kind):
+    """Cleanup rung names for an R2 refusal, [] unless every new key is a mechanical kind."""
+    kinds = _new_kinds(base_m, cand_m, kind)
+    if not kinds or not kinds <= set(CLEANUP):
+        return []
+    return [CLEANUP[k] for k in CLEANUP if k in kinds]
+
+
 def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
     """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4)."""
     cand_m["gap_ids"] = {g["id"] for g in cand_gaps}
@@ -626,21 +646,116 @@ def _r_ai(base, out, gaps, ctx):
     return {"status": "packet", "n": n}
 
 
+def _rip_window(src, dst, box, nets):
+    """Copy src to dst without the unlocked tracks and vias of `nets` lying in box [x0, y0, x1, y1] (mm). A track
+    counts when both ends are inside, a via when its centre is. Returns the number of items removed."""
+    import pcbnew
+    b = pcbnew.LoadBoard(src)
+    x0, y0, x1, y1 = box
+    inside = lambda p: x0 <= pcbnew.ToMM(p.x) <= x1 and y0 <= pcbnew.ToMM(p.y) <= y1
+    n = 0
+    for t in list(b.GetTracks()):
+        if t.GetNetname() not in nets or t.IsLocked():
+            continue
+        if t.GetClass() == "PCB_VIA":
+            hit = inside(t.GetPosition())
+        else:
+            hit = inside(t.GetStart()) and inside(t.GetEnd())
+        if hit:
+            b.Delete(t)
+            n += 1
+    pcbnew.SaveBoard(dst, b)
+    _sidecars(src, dst)
+    return n
+
+
+KRT_REGION_MAX = 6                      # gaps per krt_region call
+KRT_REGION_MARGINS = (1.5, 3.0)         # window margin (mm) tried in order
+
+
+def _r_krt_region(base, out, gaps, ctx):
+    """Rip the unlocked, unprotected copper around each open gap (one pcbnew pass per window on copies), then run the
+    KRT re-route with the gap nets plus the ripped nets on the cleared board. The 3.0 mm window is tried when the 1.5 mm
+    candidate still leaves a gap open. Output = KRT's board; close measures and guards it."""
+    from . import handroute as HR
+    cp, protect = ctx.get("cons_path"), set(ctx.get("protect") or ())
+    targets = []
+    for g in gaps[:KRT_REGION_MAX]:
+        net = (g.get("nets") or [None])[0]
+        if net:
+            targets.append(net)
+    if not targets:
+        return {"status": "no net"}
+    _sidecars(base, out)
+    rip = out + ".rip.kicad_pcb"
+    last = {"status": "no conn"}
+    for margin in KRT_REGION_MARGINS:
+        boxes, ripped = [], set()
+        for net in targets:
+            conns = HR.open_nets(base, constraints=cp)["connections"]
+            i = next((k for k, r in enumerate(conns) if r.get("net") == net), None)
+            if i is None:
+                continue
+            W = HR.window(base, conn=i, constraints=cp, margin=margin)
+            boxes.append(W["window"])
+            for t in (W.get("tracks") or []) + (W.get("vias") or []):
+                n = t.get("net")
+                if n and not t.get("locked") and n not in protect and n not in targets:
+                    ripped.add(n)
+        if not boxes:
+            return {"status": "no conn"}
+        nets = set(targets) | ripped
+        cur = base
+        try:
+            for k, box in enumerate(boxes):
+                nxt = f"{out}.ch{k}.kicad_pcb"
+                _clean_board(nxt)
+                _rip_window(cur, nxt, box, nets)
+                if cur != base:
+                    _clean_board(cur)
+                cur = nxt
+            _clean_board(rip)
+            if cur != rip:
+                shutil.copy(cur, rip)
+                _sidecars(cur, rip)
+            cmd = _krt_cmd(rip, out, sorted(nets), ctx, signal_layers(base))
+            if cmd is None:
+                return {"status": "krt not found"}
+            _rm(out)
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+            except subprocess.TimeoutExpired:
+                _rm(out)
+                return {"status": "krt timeout", "margin": margin}
+        finally:
+            _clean_board(rip)
+            for k in range(len(boxes)):
+                _clean_board(f"{out}.ch{k}.kicad_pcb")
+        last = {"status": "ran", "nets": len(ripped), "margin": margin}
+        if not os.path.exists(out):
+            last = {"status": "krt no output", "margin": margin}
+            continue
+        still = {r.get("net") for r in HR.open_nets(out, constraints=cp)["connections"]}
+        if not (set(targets) & still):
+            break
+    return last
+
+
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
-         "snapiter": _r_snapiter, "ai": _r_ai}
+         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["pourisland", "region", "ai"],
-    "open-free": ["patch", "handrepair", "krt", "region", "patch_rip", "ai"],
+    "open-free": ["patch", "handrepair", "krt", "krt_region", "region", "patch_rip", "ai"],
     "clearance": ["drcfix", "region"],
     "dangling": ["launder"],
     "via-offcentre": ["snapiter"],
 }
-LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt": "L0"}  # every other rung is L0
+LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0"}  # every other rung is L0
 
 
 def _tool():
@@ -778,7 +893,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         key = (kind, rung, fp)
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
-        after, runs, why, summ = None, 0, "", {}
+        after, runs, why, summ, cleanup = None, 0, "", {}, []
         if key in memo:
             result, why = "skipped", "memo"
         else:
@@ -806,11 +921,30 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = dict(measure(out, kicad_cli))
                     runs = 1
                     cm["gaps"] = classify(cm["drc"], cons)
+                    final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind, protect)
+                    names = _cleanup_rungs(m, cm, kind) if (not ok and why.startswith("R2 ")) else []
+                    if names:
+                        # cleanup: one pass per rung on the candidate; a rung that writes nothing keeps the file
+                        for name in names:
+                            nxt = f"{out}.{name}.kicad_pcb"
+                            _clean_board(nxt)
+                            _sidecars(final, nxt)
+                            try:
+                                _call_rung(name, final, nxt, [], ctx)
+                            except Exception:
+                                pass
+                            cleanup.append(name)
+                            if os.path.exists(nxt):
+                                final = nxt
+                        cm = dict(measure(final, kicad_cli))
+                        runs += 1
+                        cm["gaps"] = classify(cm["drc"], cons)
+                        ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind, protect)
                     if ok:
-                        _copy(out, best)
+                        _copy(final, best)
                         m = cm
-                        _sidecars(out, best)
+                        _sidecars(final, best)
                         cur_ids = {g["id"] for g in m["gaps"]}
                         result = "closed" if all(g["id"] not in cur_ids for g in targets) else "partial"
                         after = score(m, m["gaps"])
@@ -833,7 +967,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                "gap": {"id": targets[0]["id"], "kind": kind, "class": targets[0]["class"], "n": len(targets)},
                "method": rung, "tier": {"scope": "board", "effort": 1}, "in": {"nets": len(nets)},
                "result": result, "why": why, "score": [vec0, after], "s": round(time.time() - t_try, 1),
-               "drc_runs": runs, "precheck": None,
+               "drc_runs": runs, "precheck": None, "cleanup": cleanup,
                "ai_tokens": int(summ.get("tokens") or 0) if rung == "ai" else 0}
         if explicit or calllog.enabled():
             calllog.append(rec, attempts)

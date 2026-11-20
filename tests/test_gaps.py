@@ -189,7 +189,7 @@ def test_attempt_line_schema(monkeypatch, loop):
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
     _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     keys = {"ts", "run", "board_fp", "tool", "stage", "level", "gap", "method", "tier", "in", "result", "why",
-            "score", "s", "drc_runs", "precheck", "ai_tokens"}
+            "score", "s", "drc_runs", "precheck", "ai_tokens", "cleanup"}
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert lines and all(set(x) == keys for x in lines)
     assert lines[0]["gap"]["kind"] == "open-free" and lines[0]["stage"] == "close"
@@ -510,3 +510,146 @@ def test_close_records_crashed_rung_as_error(monkeypatch, loop):
     rows = [json.loads(x) for x in open(loop["attempts"])]
     assert rows and all(r["result"] == "error" for r in rows[:5])
     assert "signal 11" in rows[0]["why"]
+
+
+# ---- R2 cleanup (snapiter / launder on the candidate) ----
+
+def _cl_measure(board, kicad_cli="kicad-cli"):
+    s = open(board).read()
+    unc = [FREE] if "open" in s else []
+    keys = Counter()
+    if "offc" in s:
+        keys[("track_not_centered_on_via", "k")] += 1
+    if "clr" in s:
+        keys[("clearance", "k")] += 1
+    return {"drc": {"violations": [], "unconnected_items": unc}, "opens": len(unc), "shorts": 0, "errors": 0,
+            "err_keys": keys, "keys": keys}
+
+
+def _spy(name, calls, write):
+    def fn(base, out, gaps, ctx):
+        calls.append(name)
+        open(out, "w").write(write)
+        return {"status": "ok"}
+    return fn
+
+
+def _cleanup_setup(monkeypatch, loop, patch_write):
+    monkeypatch.setattr(GP, "measure", _cl_measure)
+    open(loop["board"], "w").write("open")
+    calls = []
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
+    monkeypatch.setitem(GP.RUNGS, "patch", _spy("patch", calls, patch_write))
+    monkeypatch.setitem(GP.RUNGS, "snapiter", _spy("snapiter", calls, "fixed"))
+    monkeypatch.setitem(GP.RUNGS, "launder", _spy("launder", calls, "fixed"))
+    return calls
+
+
+def test_r2_offcentre_cleaned_by_snapiter_then_accepted(monkeypatch, loop):
+    calls = _cleanup_setup(monkeypatch, loop, "fixed offc")
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    rows = [json.loads(x) for x in open(loop["attempts"])]
+    assert rows[0]["method"] == "patch" and rows[0]["result"] == "closed"
+    assert rows[0]["cleanup"] == ["snapiter"] and calls == ["patch", "snapiter"]
+    assert rows[0]["drc_runs"] == 2 and res["stop"] == "clean"
+
+
+def test_r2_clearance_no_cleanup(monkeypatch, loop):
+    calls = _cleanup_setup(monkeypatch, loop, "fixed clr")
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    row = json.loads(open(loop["attempts"]).readline())
+    assert row["result"] == "refused" and row["why"].startswith("R2 new DRC key clearance")
+    assert row["cleanup"] == [] and calls == ["patch"]
+
+
+def test_r4_no_cleanup(monkeypatch, loop):
+    calls = _cleanup_setup(monkeypatch, loop, "open x")
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    row = json.loads(open(loop["attempts"]).readline())
+    assert row["result"] == "refused" and row["why"].startswith("R4 ")
+    assert row["cleanup"] == [] and calls == ["patch"]
+
+
+def test_cleanup_rung_writing_nothing_keeps_file(monkeypatch, loop):
+    calls = _cleanup_setup(monkeypatch, loop, "fixed offc")
+    monkeypatch.setitem(GP.RUNGS, "snapiter", lambda b, o, g, c: calls.append("snapiter-nothing") or {})
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    row = json.loads(open(loop["attempts"]).readline())
+    assert row["cleanup"] == ["snapiter"] and row["result"] == "refused" and row["why"].startswith("R2 ")
+
+
+# ---- krt_region: rip the window, KRT re-route (fakes only) ----
+
+def _region_fakes(monkeypatch, tmp_path, first_margin_fixes):
+    from fluxplace import handroute as HR
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("open")
+    margins, rips, krt = [], [], []
+
+    def open_nets(path, constraints=None, **k):
+        text = open(path).read() if os.path.exists(path) else ""
+        return {"connections": [{"net": "G1"}] if "open" in text else []}
+
+    def window(board, conn=None, constraints=None, margin=1.5, **k):
+        margins.append(margin)
+        return {"window": [0, 0, 1, 1], "layers": ["F.Cu"],
+                "tracks": [{"net": "X", "locked": False}, {"net": "P1", "locked": False},
+                           {"net": "Y", "locked": True}, {"net": "G1", "locked": False}],
+                "vias": [{"net": "Z", "locked": False}]}
+
+    def rip(src, dst, box, nets):
+        rips.append((box, sorted(nets)))
+        open(dst, "w").write(open(src).read() + " ripped")
+        return 1
+
+    def krt_cmd(board, out, nets, ctx, layers=None):
+        krt.append((sorted(nets), layers))
+        return ["krt", out]
+
+    def run(cmd, **k):
+        ok = len(krt) == 1 and first_margin_fixes
+        open(cmd[1], "w").write("fixed" if ok or len(krt) > 1 else "open")
+        return _cp(0)
+    monkeypatch.setattr(HR, "open_nets", open_nets)
+    monkeypatch.setattr(HR, "window", window)
+    monkeypatch.setattr(GP, "_rip_window", rip)
+    monkeypatch.setattr(GP, "_krt_cmd", krt_cmd)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP.subprocess, "run", run)
+    ctx = {"cons": {}, "cons_path": None, "work": str(tmp_path), "budget_s": 60, "protect": {"P1"},
+           "kicad_cli": "kicad-cli"}
+    return base, ctx, margins, rips, krt
+
+
+def test_krt_region_excludes_protected_locked_and_gap_nets(monkeypatch, tmp_path):
+    base, ctx, margins, rips, krt = _region_fakes(monkeypatch, tmp_path, first_margin_fixes=True)
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_region(str(base), str(out), [dict(_g("a"), nets=["G1"])], ctx)
+    assert res == {"status": "ran", "nets": 2, "margin": 1.5}
+    assert margins == [1.5]
+    assert rips == [([0, 0, 1, 1], ["G1", "X", "Z"])]           # P1 protected, Y locked, G1 is the gap net itself
+    assert krt == [(["G1", "X", "Z"], ["F.Cu", "B.Cu"])]
+    assert open(out).read() == "fixed"
+    assert not [p for p in os.listdir(tmp_path) if ".rip." in p]
+
+
+def test_krt_region_tries_three_mm_when_gap_stays_open(monkeypatch, tmp_path):
+    base, ctx, margins, rips, krt = _region_fakes(monkeypatch, tmp_path, first_margin_fixes=False)
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_region(str(base), str(out), [dict(_g("a"), nets=["G1"])], ctx)
+    assert res == {"status": "ran", "nets": 2, "margin": 3.0}
+    assert margins == [1.5, 3.0] and len(krt) == 2 and len(rips) == 2
+    assert open(out).read() == "fixed"
+
+
+def test_krt_region_no_connection_no_run(monkeypatch, tmp_path):
+    base, ctx, margins, rips, krt = _region_fakes(monkeypatch, tmp_path, first_margin_fixes=True)
+    res = GP._r_krt_region(str(base), str(tmp_path / "o.kicad_pcb"), [dict(_g("a"), nets=["NOPE"])], ctx)
+    assert res == {"status": "no conn"} and krt == [] and rips == []
+
+
+def test_krt_region_rung_registered_after_krt():
+    d = GP.DISPATCH["open-free"]
+    assert d.index("krt") < d.index("krt_region") < d.index("region")
+    assert GP.LEVEL["krt_region"] == "L1" and "krt_region" in GP.RUNGS
