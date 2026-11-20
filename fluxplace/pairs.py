@@ -282,7 +282,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         t0, t1 = runs[0]["t0"], runs[-1]["t1"]
         skew = PL.piece_len(cp) - PL.piece_len(cn) + ta.get("bias", 0.0) + tb.get("bias", 0.0)
         fb = lambda pad, e, layer, net: PL.stub(grid.B, items, ctx["base_n"], ctx["ign"], pad, e, layer, wl[layer], net, clr, ctx["skip"])
-        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], bias=skew, fallback=fb)
+        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], bias=skew, fallback=fb, gap=geo[runs[0]["layer"]][1])
         if ba[0] is None:
             items.rollback(mark)
             reason, blockers = ba[1], [ba[2]["label"]] if ba[2] else []
@@ -290,7 +290,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             continue
         _claim(items, ba[0], nets[0])
         _claim(items, ba[1], nets[1])
-        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], bias=skew + ba[2], fallback=fb)
+        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], bias=skew + ba[2], fallback=fb, gap=geo[runs[-1]["layer"]][1])
         if bb[0] is None:
             items.rollback(mark)
             reason, blockers = bb[1], [bb[2]["label"]] if bb[2] else []

@@ -207,14 +207,18 @@ class Items:
             return -1.0
         return min(seg_seg(a, b, pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts)))
 
-    def gap_seg(self, a, b, w, layer, net, need, skip_old=()):
-        """(smallest gap, item) of a new track to foreign copper on its layer; only gaps under `need` are searched."""
+    def gap_seg(self, a, b, w, layer, net, need, skip_old=(), mate=None):
+        """(smallest gap, item) of a new track to foreign copper on its layer; only gaps under `need` are searched.
+        `mate` = (partner net, slack): the partner leg's NEW copper is judged against the pair gap, which may sit below
+        the routing clearance (gap 0.127 against clearance 0.130), so `slack` (clearance - gap) is added to its gap."""
         r = w / 2 + need + 0.6
         best, who = 1e9, None
         for it in self._near(min(a[0], b[0]) - r, min(a[1], b[1]) - r, max(a[0], b[0]) + r, max(a[1], b[1]) + r):
             if layer not in it["layers"] or (it["net"] and it["net"] == net) or (it["old"] and (it["net"] in skip_old or it.get("dead"))):
                 continue
             g = self._dist(it, a, b) - w / 2
+            if mate and it["net"] == mate[0] and not it["old"] and it["k"] != "pad":
+                g += mate[1]
             if g < best:
                 best, who = g, it
         return best, who

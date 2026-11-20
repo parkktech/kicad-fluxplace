@@ -322,11 +322,11 @@ def piece_len(pieces):
     return sum(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1]) for p in pieces if p[0] == "seg")
 
 
-def check(items, pieces, net, clr, skip_old):
-    """worst exact gap of the pieces to foreign copper -> (gap, item)."""
+def check(items, pieces, net, clr, skip_old, mate=None):
+    """worst exact gap of the pieces to foreign copper -> (gap, item). `mate`: see Items.gap_seg."""
     worst, who = 1e9, None
     for p in pieces:
-        g, it = items.gap_seg(p[2], p[3], p[4], p[1], net, clr, skip_old) if p[0] == "seg" else items.gap_via(p[1], p[2], p[3], net, clr, skip_old)
+        g, it = items.gap_seg(p[2], p[3], p[4], p[1], net, clr, skip_old, mate) if p[0] == "seg" else items.gap_via(p[1], p[2], p[3], net, clr, skip_old)
         if g < worst:
             worst, who = g, it
     return worst, who
@@ -401,15 +401,19 @@ def _eff(pts, pad):
     return G.length(pts[max(inside, default=0):])
 
 
-def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fallback=None):
+def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fallback=None, gap=None):
     """break-outs of both legs at one terminal -> ([pieces P], [pieces N], length P - length N) | (None, reason, item).
     pads = (pad P, pad N), ends = (leg end P, leg end N).  Dog-legs first (the pair of candidates with the least
-    |skew + bias| wins); `fallback(pad, e, net)` grid-routes a leg the dog-legs cannot reach."""
+    |skew + bias| wins); `fallback(pad, e, net)` grid-routes a leg the dog-legs cannot reach.
+    `gap`: the pair's own gap on this layer. A break-out ends on its leg, which runs one gap from the partner leg; when
+    the gap is below `clr` every candidate would be refused by its own partner, so the two legs are held to the gap."""
+    slack = max(0.0, clr - gap) if gap is not None else 0.0
+
     def dog(k):
         ok, worst = [], (None, None)
         for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t):
             pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
-            g, it = check(items, pcs, nets[k], clr, skip_old)
+            g, it = check(items, pcs, nets[k], clr, skip_old, (nets[1 - k], slack) if slack else None)
             if g >= clr - 1e-6:
                 ok.append((pts, pcs, _eff(pts, pads[k])))
             elif worst[0] is None or g > worst[0]:
@@ -422,7 +426,7 @@ def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fall
     best = None
     for a in cands[0]:
         for b in cands[1]:
-            if min(G.seg_seg(p[2], p[3], q[2], q[3]) for p in a[1] for q in b[1]) < w + clr - 1e-6:
+            if min(G.seg_seg(p[2], p[3], q[2], q[3]) for p in a[1] for q in b[1]) < w + clr - slack - 1e-6:
                 continue
             key = (round(abs(a[2] - b[2] + bias), 3), a[2] + b[2])
             if best is None or key < best[0]:
