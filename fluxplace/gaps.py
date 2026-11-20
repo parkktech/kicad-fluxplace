@@ -20,7 +20,9 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "clearance": "clearance", "hole_clearance": "clearance", "hole_to_hole": "clearance",
                 "track_dangling": "dangling", "via_dangling": "dangling",
                 "track_not_centered_on_via": "via-offcentre"}
-ORDER = ["short", "open-gap", "open-pour", "open-free", "clearance", "dangling", "via-offcentre"]
+MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
+MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
+ORDER = ["short", "mask-opening", "open-gap", "open-pour", "open-free", "clearance", "dangling", "via-offcentre"]
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 
@@ -89,12 +91,16 @@ def classify(d, cons=None):
     for v in vs:
         items = v.get("items") or []
         kind = KIND_OF_TYPE.get(v.get("type"), "other")
+        evidence = str(v.get("description") or "")[:120]
+        if v.get("type") == "solder_mask_bridge" and any(
+                str(i.get("description") or "").startswith(MASK_POLY) for i in items):
+            kind, evidence = "mask-opening", MASK_OPENING_EVIDENCE
         nets = _nets_of(items)
         p0 = _pos(items[0]) if items else None
         add(kind + ":" + json.dumps(drcguard.key_of(v)),
             {"kind": kind, "class": _class(nets, rf, pairs), "nets": nets,
              "at": [round(p0[0], 2), round(p0[1], 2)] if p0 else None, "layer": None,
-             "evidence": str(v.get("description") or "")[:120]})
+             "evidence": evidence})
 
     def key(g):
         k = ORDER.index(g["kind"]) if g["kind"] in ORDER else len(ORDER)

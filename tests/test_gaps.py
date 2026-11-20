@@ -653,3 +653,15 @@ def test_krt_region_rung_registered_after_krt():
     d = GP.DISPATCH["open-free"]
     assert d.index("krt") < d.index("krt_region") < d.index("region")
     assert GP.LEVEL["krt_region"] == "L1" and "krt_region" in GP.RUNGS
+
+
+def test_classify_mask_opening_bridge():
+    v = {"type": "solder_mask_bridge", "severity": "error", "description": "Solder mask bridge",
+         "items": [{"description": "Polygon on F.Mask", "pos": {"x": 1, "y": 1}},
+                   {"description": "Track [SIG_A] on F.Cu", "pos": {"x": 2, "y": 2}}]}
+    gs = GP.classify({"violations": [v], "unconnected_items": []}, {})
+    assert gs[0]["kind"] == "mask-opening" and gs[0]["id"].startswith("mask-opening:")
+    assert gs[0]["evidence"] == GP.MASK_OPENING_EVIDENCE and "mask-opening" not in GP.DISPATCH
+    assert GP.ORDER.index("mask-opening") == GP.ORDER.index("short") + 1
+    plain = dict(v, items=[{"description": "Track [SIG_A] on F.Cu", "pos": {"x": 2, "y": 2}}] * 2)
+    assert GP.classify({"violations": [plain], "unconnected_items": []}, {})[0]["kind"] == "short"

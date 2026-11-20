@@ -356,3 +356,19 @@ def test_copper_fingerprint_follows_mask_drawing(tmp_path):
     board(tmp_path / "c.kicad_pcb", False)
     a, bb, c = (V.copper_fingerprint(str(tmp_path / n)) for n in ("a.kicad_pcb", "b.kicad_pcb", "c.kicad_pcb"))
     assert a == c and a != bb
+
+
+def test_copper_fingerprint_follows_lock_state(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    b = pcbnew.BOARD()
+    t = pcbnew.PCB_TRACK(b)
+    t.SetStart(pcbnew.VECTOR2I(0, 0))
+    t.SetEnd(pcbnew.VECTOR2I(1000000, 0))
+    t.SetWidth(200000)
+    t.SetLayer(pcbnew.F_Cu)
+    b.Add(t)
+    unlocked, locked = str(tmp_path / "u.kicad_pcb"), str(tmp_path / "l.kicad_pcb")
+    b.Save(unlocked)
+    t.SetLocked(True)
+    b.Save(locked)
+    assert VS.copper_fingerprint(unlocked) != VS.copper_fingerprint(locked)

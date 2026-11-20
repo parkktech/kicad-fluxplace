@@ -179,6 +179,26 @@ def _sidecar(src, dst):
         shutil.copy(m, os.path.splitext(dst)[0] + ".fluxmap.json")
 
 
+def _stage_link(work, name, board):
+    """Stable W/<stage>.kicad_pcb (relative symlink, copy if symlinks fail) to a stage's board, and the same for its
+    .kicad_pro if present. Scripts read W/<stage>.kicad_pcb, never <n>-<stage>/, because stage numbers shift when stages
+    are inserted."""
+    pairs = [(board, os.path.join(work, f"{name}.kicad_pcb"))]
+    pro = os.path.splitext(board)[0] + ".kicad_pro"
+    if os.path.exists(pro):
+        pairs.append((pro, os.path.join(work, f"{name}.kicad_pro")))
+    for src, dst in pairs:
+        src, dst = os.path.abspath(src), os.path.abspath(dst)
+        if os.path.realpath(src) == os.path.realpath(dst):      # a stage re-run on its own stable link
+            continue
+        if os.path.lexists(dst):
+            os.remove(dst)
+        try:
+            os.symlink(os.path.relpath(src, os.path.dirname(dst)), dst)
+        except OSError:
+            shutil.copy(src, dst)
+
+
 def _last_line(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     return lines[0] if lines else ""
@@ -412,7 +432,40 @@ def _collision_report(c, d, board):
             "lines": [f"COLLISION {x['msg'][:150]}" for x in bad]}
 
 
+def mask_openings(board_path):
+    """Count of board-level polygon shapes on F.Mask/B.Mask (a mask opening drawn on the board) in a .kicad_pcb, read
+    with pcbnew. 0 if the board cannot be read: the warning built from it is advisory, never a gate."""
+    try:
+        import pcbnew
+        b = pcbnew.LoadBoard(board_path)
+    except Exception:                                    # noqa: BLE001
+        return 0
+    if b is None:                                        # pcbnew returns None for a missing or unparsable file
+        return 0
+    layers = (pcbnew.F_Mask, pcbnew.B_Mask)
+    return sum(1 for d in b.GetDrawings() if d.GetClass() == "PCB_SHAPE" and d.GetLayer() in layers
+               and d.GetShape() == pcbnew.SHAPE_T_POLY)
+
+
+MASK_WARN = ("WARN mask opening present before routing: re-cut it after route "
+             "(copper routed through it bridges the mask)")
+
+
+def mask_warning(n_masks):
+    """The advisory 'next' line for mask openings present before routing ([] if none)."""
+    return [MASK_WARN] if n_masks else []
+
+
 def st_route(c, n, board):
+    """Routing stage (see _st_route): a board-level mask opening present before routing adds a WARN line; never blocks."""
+    warn = mask_warning(mask_openings(board))            # read before any routing
+    res = _st_route(c, n, board)
+    if warn and isinstance(res, dict):
+        res["next"] = list(res.get("next") or []) + warn
+    return res
+
+
+def _st_route(c, n, board):
     """Batch routing with checkpoints (batchroute.py): fan-out first, then power, critical, rest, local nets
     first; one time-boxed router call per batch, a checkpoint board after each, a leftovers pass, then the
     stall loop. Time-boxed by --route-budget; the result is never less routed than the input."""
@@ -1312,6 +1365,8 @@ def run(a):
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
         led.after(name, i + 1, res)
+        if res.get("board") and os.path.exists(res["board"]):
+            _stage_link(work, name, res["board"])
         if res.get("board") and res["board"] != prev:
             from . import questions as QS
             QS.inherit(prev, res["board"])

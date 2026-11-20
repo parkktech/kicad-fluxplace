@@ -96,8 +96,8 @@ def _xy(p):
 
 
 def copper_fingerprint(path):
-    """sha1 of a board's copper (pcbnew, nm): tracks and arcs (class, net, layer, start, end, width, mid),
-    vias (net, pos, diameter, drill), footprints (ref, pos, rotation, layer), zones (net, layers, priority, keepout,
+    """sha1 of a board's copper (pcbnew, nm): tracks and arcs (class, net, layer, start, end, width, mid, locked),
+    vias (net, pos, diameter, drill, locked; an unlock or lock step is a real change), footprints (ref, pos, rotation, layer), zones (net, layers, priority, keepout,
     outline points rounded to 0.001 mm). Zone fill is not hashed: it varies run to run."""
     import pcbnew
     b = pcbnew.LoadBoard(path)
@@ -106,10 +106,11 @@ def copper_fingerprint(path):
         cls = t.GetClass()
         if cls == "PCB_VIA":
             rows.append(("via", t.GetNetname(), _xy(t.GetPosition()), t.GetWidth(pcbnew.F_Cu),
-                         t.GetWidth(pcbnew.B_Cu), t.GetDrillValue()))
+                         t.GetWidth(pcbnew.B_Cu), t.GetDrillValue(), bool(t.IsLocked())))
         else:
             mid = _xy(t.GetMid()) if cls == "PCB_ARC" else None
-            rows.append((cls, t.GetNetname(), t.GetLayer(), _xy(t.GetStart()), _xy(t.GetEnd()), t.GetWidth(), mid))
+            rows.append((cls, t.GetNetname(), t.GetLayer(), _xy(t.GetStart()), _xy(t.GetEnd()), t.GetWidth(), mid,
+                         bool(t.IsLocked())))
     for f in b.GetFootprints():
         rows.append(("fp", f.GetReference(), _xy(f.GetPosition()), round(f.GetOrientationDegrees(), 6), f.GetLayer()))
     for z in b.Zones():

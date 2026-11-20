@@ -1,5 +1,5 @@
 """Staged pipeline: state.json handoff, stage ranges, na stages, route stage with a fake router."""
-import argparse, json, os, sys
+import argparse, json, os, shutil, sys
 import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -185,3 +185,46 @@ def test_critroute_order_and_packets_exit_5(tmp_path, monkeypatch):
     a = _args(tmp_path, b, from_stage="critroute", to_stage="critroute")
     assert PL.run(a) == 5
     assert PL.load_state(a.workdir)["stages"]["critroute"]["verdict"] == "packets"
+
+
+def test_stage_board_has_stable_relative_link(tmp_path, monkeypatch):
+    def fake(c, n, board):
+        d = c.dir(n, "critroute")
+        dst = os.path.join(d, "board.kicad_pcb")
+        shutil.copy(board, dst)
+        open(os.path.join(d, "board.kicad_pro"), "w").write("{}")
+        return {"verdict": "pass", "line": "fake", "board": dst}
+    monkeypatch.setitem(PL.FUNCS, "critroute", fake)
+    a = _args(tmp_path, _board(tmp_path), from_stage="critroute", to_stage="critroute")
+    assert PL.run(a) == 0
+    link = os.path.join(a.workdir, "critroute.kicad_pcb")
+    assert os.path.islink(link) and not os.path.isabs(os.readlink(link))
+    assert os.path.realpath(link) == os.path.realpath(os.path.join(a.workdir, "6-critroute", "board.kicad_pcb"))
+    assert os.path.islink(os.path.join(a.workdir, "critroute.kicad_pro"))
+    assert PL.run(a) == 0                                # re-run replaces the link, no error
+    assert os.path.islink(link)
+
+
+def test_mask_warning_line_and_helper(tmp_path, monkeypatch):
+    assert PL.mask_warning(0) == [] and PL.mask_warning(2) == [PL.MASK_WARN]
+    assert PL.MASK_WARN.startswith("WARN mask opening present before routing")
+    assert PL.mask_openings(str(tmp_path / "missing.kicad_pcb")) == 0
+    pcbnew = pytest.importorskip("pcbnew")
+    b = pcbnew.BOARD()
+    s = pcbnew.PCB_SHAPE(b)
+    s.SetShape(pcbnew.SHAPE_T_POLY)
+    s.SetLayer(pcbnew.B_Mask)
+    ps = pcbnew.SHAPE_POLY_SET()
+    ps.NewOutline()
+    for x, y in [(0, 0), (3000000, 0), (3000000, 3000000), (0, 3000000)]:
+        ps.Append(x, y)
+    s.SetPolyShape(ps)
+    b.Add(s)
+    b.Save(str(tmp_path / "m.kicad_pcb"))
+    assert PL.mask_openings(str(tmp_path / "m.kicad_pcb")) == 1
+    monkeypatch.setattr(PL, "mask_openings", lambda b: 1)
+    monkeypatch.setattr(PL, "_st_route", lambda c, n, board: {"verdict": "pass", "line": "x", "next": ["kept"]})
+    res = PL.st_route(None, 7, "board.kicad_pcb")
+    assert res["next"] == ["kept", PL.MASK_WARN] and res["verdict"] == "pass"
+    monkeypatch.setattr(PL, "mask_openings", lambda b: 0)
+    assert PL.st_route(None, 7, "board.kicad_pcb")["next"] == ["kept"]
