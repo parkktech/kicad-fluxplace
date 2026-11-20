@@ -663,8 +663,60 @@ def _repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
+
+_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir")
+JOB_OUT_KRT = "_krt_last"
+
+
+def _call_rung(name, base, out, gaps, ctx):
+    """Run one rung. `ai` and ctx["inproc"] runs stay in-process; every other rung runs in a child process
+    (`python -m fluxplace.gaps --rung-job JOB`) so a native crash is a RuntimeError, not a dead close run."""
+    if name == "ai" or ctx.get("inproc"):
+        return RUNGS[name](base, out, gaps, ctx)
+    job, jout = out + ".job.json", out + ".job.out.json"
+    try:
+        with open(job, "w") as fh:
+            json.dump({"name": name, "base": base, "out": out, "gaps": gaps,
+                       "ctx": {k: ctx.get(k) for k in _CTX_JSON_KEYS}}, fh, default=str)
+        try:
+            p = subprocess.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
+                               text=True, timeout=ctx["budget_s"] + 120, cwd=_repo_root())
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("rung timeout")
+        if not os.path.exists(jout):
+            if p.returncode < 0:
+                raise RuntimeError(f"rung crashed (signal {-p.returncode})")
+            if p.returncode > 0:
+                raise RuntimeError(f"rung exit {p.returncode}")
+            raise RuntimeError("rung wrote no result")
+        with open(jout) as fh:
+            res = json.load(fh)
+        krt = res.pop(JOB_OUT_KRT, None)
+        if krt:
+            ctx["krt_last"] = krt
+        return res
+    finally:
+        _rm(job)
+        _rm(jout)
+
+
+def _rung_job(job_path):
+    """Child entry (`--rung-job`): run one rung from its job file and write the summary to JOB.out.json."""
+    with open(job_path) as fh:
+        j = json.load(fh)
+    cj = j["ctx"]
+    cons = C.load(cj.get("cons_path")) if cj.get("cons_path") else {}
+    ctx = dict(cj, cons=cons, log=lambda m: print(m, file=sys.stderr), inproc=True)
+    summ = RUNGS[j["name"]](j["base"], j["out"], j["gaps"], ctx) or {}
+    summ = dict(summ, **{JOB_OUT_KRT: ctx.get("krt_last")})
+    with open(j["out"] + ".job.out.json", "w") as fh:
+        json.dump(summ, fh, default=str)
+    return 0
+
+
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, runs=None, log=print):
+          attempts=None, runs=None, log=print, inproc=False):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
     os.makedirs(work, exist_ok=True)
@@ -729,7 +781,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                        "budget_s": max(0.0, budget_s - (time.time() - t0)), "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
                        "krt_last": krt_state.get("last"), "protect": protect}
-                summ = RUNGS[rung](best, out, targets, ctx) or {}
+                ctx["inproc"] = inproc
+                summ = _call_rung(rung, best, out, targets, ctx) or {}
                 if ctx.get("krt_last"):
                     krt_state["last"] = ctx["krt_last"]
                 if not os.path.exists(out) and summ.get("status") == "packet":
@@ -899,6 +952,7 @@ def print_report(rows, runs=None):
 def _main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(prog="python3 -m fluxplace.gaps")
+    ap.add_argument("--rung-job", help=argparse.SUPPRESS)
     ap.add_argument("board", nargs="?")
     ap.add_argument("--work")
     ap.add_argument("--report", nargs="+", metavar="ATTEMPTS")
@@ -907,6 +961,8 @@ def _main(argv=None):
     ap.add_argument("--classify-only", action="store_true")
     ap.add_argument("--kicad-cli", default="kicad-cli")
     a = ap.parse_args(argv)
+    if a.rung_job:
+        return _rung_job(a.rung_job)
     t0 = time.time()
     if a.report:
         print_report(report(a.report, a.runs), a.runs)

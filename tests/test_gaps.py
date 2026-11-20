@@ -7,6 +7,8 @@ import types
 from fluxplace import gaps as GP
 from fluxplace import pipeline as PL
 from fluxplace import calllog as CL
+import functools
+_close = functools.partial(GP.close, inproc=True)
 
 DRC = {
     "violations": [
@@ -161,7 +163,7 @@ def _rung(mode):
 
 def test_close_accepts_and_stops_clean(monkeypatch, loop):
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
-    res = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res["stop"] == "clean" and res["exit"] == 0
     assert open(res["best"]).read() == "fixed"
     assert res["end"]["opens"] == 0 and res["start"]["opens"] == 1
@@ -170,9 +172,9 @@ def test_close_accepts_and_stops_clean(monkeypatch, loop):
 def test_close_flat_and_memo(monkeypatch, loop):
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
-    res = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res["stop"] == "flat" and res["exit"] == 2
-    res2 = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    res2 = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res2["stop"] == "flat"
     lines = [json.loads(x) for x in open(loop["attempts"])]
     k = len(GP.DISPATCH["open-free"])
@@ -185,7 +187,7 @@ def test_close_flat_and_memo(monkeypatch, loop):
 
 def test_attempt_line_schema(monkeypatch, loop):
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
-    GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     keys = {"ts", "run", "board_fp", "tool", "stage", "level", "gap", "method", "tier", "in", "result", "why",
             "score", "s", "drc_runs", "precheck", "ai_tokens"}
     lines = [json.loads(x) for x in open(loop["attempts"])]
@@ -196,7 +198,7 @@ def test_attempt_line_schema(monkeypatch, loop):
 def test_rung_error_caught(monkeypatch, loop):
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, _rung("raise"))
-    res = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert res["stop"] == "flat"
     assert {x["result"] for x in lines} == {"error"}
@@ -207,7 +209,7 @@ def test_rung_error_caught(monkeypatch, loop):
 def test_stop_json(monkeypatch, loop):
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
-    res = GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     stop = json.load(open(os.path.join(loop["work"], "stop.json")))
     assert {"stop", "exit", "level", "minutes", "start", "end", "attempts", "left"} <= set(stop)
     assert stop["attempts"] == len(GP.DISPATCH["open-free"]) and stop["level"] == "L0"
@@ -234,7 +236,7 @@ def _count_rung(base, out, gaps, ctx):
 def test_rung_systemexit_is_error_and_loop_continues(monkeypatch, loop):
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, _rung("exit"))
-    GP.close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert {x["result"] for x in lines} == {"error"}
     assert lines[0]["why"] == "SystemExit: bye"
@@ -257,7 +259,7 @@ def test_st_close_warns_when_close_raises(monkeypatch, tmp_path):
 
 def test_close_budget_stop(monkeypatch, loop):
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
-    res = GP.close(loop["board"], loop["work"], budget_min=1e-9, attempts=loop["attempts"], log=lambda m: None)
+    res = _close(loop["board"], loop["work"], budget_min=1e-9, attempts=loop["attempts"], log=lambda m: None)
     assert res["stop"] == "budget" and res["exit"] == 2
 
 
@@ -267,7 +269,7 @@ def test_close_rounds_stop(monkeypatch, tmp_path, guard):
     board = tmp_path / "in.kicad_pcb"
     board.write_text("n=2")
     monkeypatch.setitem(GP.RUNGS, "patch", _count_rung)
-    res = GP.close(str(board), str(tmp_path / "w"), max_rounds=1, attempts=str(tmp_path / "a.jsonl"),
+    res = _close(str(board), str(tmp_path / "w"), max_rounds=1, attempts=str(tmp_path / "a.jsonl"),
                    log=lambda m: None)
     assert res["stop"] == "rounds"
     assert res["end"]["opens"] == 1 and res["start"]["opens"] == 2
@@ -280,15 +282,15 @@ def test_memo_dropped_when_cons_changes(monkeypatch, loop, tmp_path):
     c1.write_text("a = 1\n")
     c2.write_text("a = 2\n")
     cons = {"flow": {}}
-    GP.close(loop["board"], loop["work"], cons_path=str(c1), cons=cons, attempts=loop["attempts"],
+    _close(loop["board"], loop["work"], cons_path=str(c1), cons=cons, attempts=loop["attempts"],
              log=lambda m: None)
     n1 = len(open(loop["attempts"]).readlines())
-    GP.close(loop["board"], loop["work"], cons_path=str(c2), cons=cons, attempts=loop["attempts"],
+    _close(loop["board"], loop["work"], cons_path=str(c2), cons=cons, attempts=loop["attempts"],
              log=lambda m: None)
     lines = [json.loads(x) for x in open(loop["attempts"])][n1:]
     assert lines and all(x["why"] != "memo" for x in lines)
     n2 = len(open(loop["attempts"]).readlines())
-    GP.close(loop["board"], loop["work"], cons_path=str(c2), cons=cons, attempts=loop["attempts"],
+    _close(loop["board"], loop["work"], cons_path=str(c2), cons=cons, attempts=loop["attempts"],
              log=lambda m: None)
     lines = [json.loads(x) for x in open(loop["attempts"])][n2:]
     assert lines and all(x["why"] == "memo" for x in lines)
@@ -313,7 +315,7 @@ def test_next_kind_tried_after_accept(monkeypatch, tmp_path, guard):
     monkeypatch.setitem(GP.RUNGS, "drcfix", _rung("same"))
     monkeypatch.setitem(GP.RUNGS, "region", _rung("same"))
     attempts = str(tmp_path / "a.jsonl")
-    GP.close(str(board), str(tmp_path / "w"), attempts=attempts, log=lambda m: None)
+    _close(str(board), str(tmp_path / "w"), attempts=attempts, log=lambda m: None)
     lines = [json.loads(x) for x in open(attempts)]
     assert lines[0]["method"] == "patch" and lines[0]["result"] == "closed"
     assert lines[1]["gap"]["kind"] == "clearance" and lines[1]["method"] == "drcfix"
@@ -403,10 +405,10 @@ RUN_KEYS = {"ts", "run", "tool", "board", "board_fp", "stage", "variant", "start
 def test_runs_line_keys_and_full_pass(monkeypatch, loop, tmp_path):
     runs = str(tmp_path / "runs.jsonl")
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
-    GP.close(loop["board"], loop["work"], attempts=loop["attempts"], runs=runs, log=lambda m: None)
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], runs=runs, log=lambda m: None)
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
-    GP.close(loop["board"], str(tmp_path / "w2"), attempts=loop["attempts"], runs=runs, log=lambda m: None)
+    _close(loop["board"], str(tmp_path / "w2"), attempts=loop["attempts"], runs=runs, log=lambda m: None)
     lines = [json.loads(x) for x in open(runs)]
     assert len(lines) == 2
     assert set(lines[0]) == RUN_KEYS
@@ -439,3 +441,72 @@ def test_report_rows_and_skipped_excluded(tmp_path):
     runs = tmp_path / "runs.jsonl"
     runs.write_text(json.dumps({"full_pass": True}) + "\n" + json.dumps({"full_pass": False}) + "\n")
     assert GP.runs_summary(str(runs)) == (2, 1)
+
+
+# ---- out-of-process rungs (_call_rung) ----
+
+def _cp(rc):
+    return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
+
+
+def _rung_ctx(tmp_path, **kw):
+    c = {"cons": {}, "cons_path": None, "kicad_cli": "kicad-cli", "work": str(tmp_path), "budget_s": 60,
+         "ai_mode": "packet", "ai_dir": str(tmp_path / "ai"), "log": lambda m: None}
+    c.update(kw)
+    return c
+
+
+def test_call_rung_signal_crash_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(GP.subprocess, "run", lambda *a, **k: _cp(-11))
+    out = str(tmp_path / "o.kicad_pcb")
+    with pytest.raises(RuntimeError, match="signal 11"):
+        GP._call_rung("patch", str(tmp_path / "in.kicad_pcb"), out, [_g("a")], _rung_ctx(tmp_path))
+    assert not os.path.exists(out + ".job.json")
+
+
+def test_call_rung_exit_and_timeout(monkeypatch, tmp_path):
+    import subprocess
+    out = str(tmp_path / "o.kicad_pcb")
+    monkeypatch.setattr(GP.subprocess, "run", lambda *a, **k: _cp(3))
+    with pytest.raises(RuntimeError, match="rung exit 3"):
+        GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
+
+    def slow(*a, **k):
+        assert k["timeout"] == 60 + 120
+        raise subprocess.TimeoutExpired(cmd="x", timeout=k["timeout"])
+    monkeypatch.setattr(GP.subprocess, "run", slow)
+    with pytest.raises(RuntimeError, match="rung timeout"):
+        GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
+
+
+def test_call_rung_child_round_trip_returns_krt_last(monkeypatch, tmp_path):
+    """The child entry (--rung-job) runs the rung from its job file; the parent gets the summary and krt_last."""
+    def fake_rung(base, out, gaps, ctx):
+        open(out, "w").write("child wrote")
+        ctx["krt_last"] = str(tmp_path / "k.krt.json")
+        return {"status": "ok", "n": len(gaps)}
+    monkeypatch.setitem(GP.RUNGS, "fakechild", fake_rung)
+
+    def run_child(cmd, **k):
+        assert cmd[1:] == ["-m", "fluxplace.gaps", "--rung-job", cmd[-1]]
+        assert k["cwd"] == GP._repo_root()
+        assert GP._main(["--rung-job", cmd[-1]]) == 0
+        return _cp(0)
+    monkeypatch.setattr(GP.subprocess, "run", run_child)
+    ctx = _rung_ctx(tmp_path)
+    out = str(tmp_path / "o.kicad_pcb")
+    res = GP._call_rung("fakechild", str(tmp_path / "in.kicad_pcb"), out, [_g("a"), _g("b")], ctx)
+    assert res == {"status": "ok", "n": 2} and open(out).read() == "child wrote"
+    assert ctx["krt_last"] == str(tmp_path / "k.krt.json")
+    assert not os.path.exists(out + ".job.json") and not os.path.exists(out + ".job.out.json")
+
+
+def test_close_records_crashed_rung_as_error(monkeypatch, loop):
+    """A crashed rung is an attempt with result error; the loop goes on with the other rungs."""
+    def crash(name, base, out, gaps, ctx):
+        raise RuntimeError("rung crashed (signal 11)")
+    monkeypatch.setattr(GP, "_call_rung", crash)
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    rows = [json.loads(x) for x in open(loop["attempts"])]
+    assert rows and all(r["result"] == "error" for r in rows[:5])
+    assert "signal 11" in rows[0]["why"]
