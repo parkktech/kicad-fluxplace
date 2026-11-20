@@ -54,3 +54,127 @@ def test_no_power_flags_when_no_rail_in_batch_or_pair():
 def test_batch_order_puts_rails_first_widest_first():
     assert BR.rails_first(["SIG1", "A", "B", "SIG2"], {"A": 0.7, "B": 1.0}) == ["B", "A", "SIG1", "SIG2"]
     assert BR.rails_first(["SIG1", "A"], None) == ["SIG1", "A"]
+
+
+# --- rail corridor pour (D71cj D, PHASE3B items 2-4) ---
+import pytest  # noqa: E402
+
+
+def test_rail_priorities_above_existing_distinct_largest_highest():
+    p = PW.rail_priorities([0, 1, 3], ["VBAT", "V5"])          # nets in descending current
+    assert p == {"VBAT": 5, "V5": 4} and min(p.values()) > 3
+    assert PW.rail_priorities([], ["A"]) == {"A": 1}
+
+
+def test_rail_outline_two_segments_one_polygon():
+    pytest.importorskip("shapely")
+    rings = PW.rail_outline([(0, 0, 5, 0, 1.0), (5, 0, 5, 4, 1.0)], over=2.0)
+    assert len(rings) == 1                                       # joined at (5, 0): one union, not two rectangles
+    xs = [x for x, _y in rings[0]]
+    ys = [y for _x, y in rings[0]]
+    assert min(xs) == pytest.approx(-2.5, abs=1e-6) and max(xs) == pytest.approx(7.5, abs=1e-6)
+    assert min(ys) == pytest.approx(-2.5, abs=1e-6) and max(ys) == pytest.approx(6.5, abs=1e-6)
+
+
+def test_rail_outline_disjoint_is_two_rings():
+    pytest.importorskip("shapely")
+    assert len(PW.rail_outline([(0, 0, 1, 0, 0.2), (10, 0, 11, 0, 0.2)], over=0.5)) == 2
+    assert PW.rail_outline([], over=1.0) == []
+
+
+def test_pour_without_shapely_pours_nothing(monkeypatch, tmp_path):
+    pytest.importorskip("pcbnew")
+    import sys
+    monkeypatch.setitem(sys.modules, "shapely", None)           # import shapely -> ImportError
+    cons = {"power": {"VBAT": {"max_current_ma": 2000, "max_v": 4.2, "pour": True}}}
+    rec = PW.pour_rails(str(tmp_path / "missing.kicad_pcb"), cons, str(tmp_path / "out.kicad_pcb"))
+    assert rec["skip_all"] == "no shapely" and rec["added"] == [] and not rec["dropped"]
+
+
+def _rail_board(path, zone_net=None):
+    """VBAT spine on F.Cu (4 mm from the outline edge), optional existing zone of `zone_net` at priority 2."""
+    from test_routerules_syn import _board
+    import pcbnew as P
+    _board(path, tracks=[(2, 6, 18, 6, "VBAT")])
+    if zone_net:
+        b = P.LoadBoard(path)
+        b.Add(P.NETINFO_ITEM(b, zone_net))
+        z = P.ZONE(b)
+        z.SetLayer(P.F_Cu)
+        z.SetNetCode(b.FindNet(zone_net).GetNetCode())
+        z.SetAssignedPriority(2)
+        poly = P.SHAPE_POLY_SET()
+        poly.NewOutline()
+        for x, y in ((1, 1), (19, 1), (19, 11), (1, 11)):
+            poly.Append(P.FromMM(x), P.FromMM(y))
+        z.SetOutline(poly)
+        b.Add(z)
+        b.Save(path)
+    return path
+
+
+def _stub_dg(monkeypatch, before, after):
+    from fluxplace import drcguard as DG, planes as PL
+    seq = iter([before, after])
+    monkeypatch.setattr(DG, "measure", lambda p, **k: dict(next(seq)))
+    monkeypatch.setattr(PL, "refill", lambda b: None)
+
+
+CLEAN = {"opens": 0, "shorts": 0, "errors": 0}
+CONS_POUR = {"power": {"VBAT": {"max_current_ma": 2000, "max_v": 4.2, "pour": True}}}
+
+
+def test_pour_writes_named_zone_and_keeps_when_guard_holds(monkeypatch, tmp_path):
+    pytest.importorskip("shapely")
+    pcbnew = pytest.importorskip("pcbnew")
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"))
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.pour_rails(src, CONS_POUR, out, layers=4)
+    assert rec["added"] == ["VBAT/F.Cu"] and rec["kept"] == rec["added"] and not rec["dropped"]
+    z = [z for z in pcbnew.LoadBoard(out).Zones() if z.GetZoneName() == "fluxplace-rail:VBAT"]
+    assert len(z) == 1 and z[0].GetAssignedPriority() == 1       # no existing zone: base 0 + 1
+
+
+def test_pour_skips_rail_with_existing_zone(monkeypatch, tmp_path):
+    pytest.importorskip("shapely")
+    pytest.importorskip("pcbnew")
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: {"VBAT"})
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"), zone_net="VBAT")
+    rec = PW.pour_rails(src, CONS_POUR, str(tmp_path / "out.kicad_pcb"), layers=4)
+    assert rec["added"] == [] and rec["skipped"] == {"VBAT": "board already has a zone of this net"}
+
+
+def test_pour_priority_above_existing_and_rerun_removes_named(monkeypatch, tmp_path):
+    pytest.importorskip("shapely")
+    pcbnew = pytest.importorskip("pcbnew")
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"), zone_net="GND")
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.pour_rails(src, CONS_POUR, out, layers=4)
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    rec = PW.pour_rails(out, CONS_POUR, str(tmp_path / "out2.kicad_pcb"), layers=4)   # re-run on its own output
+    zs = pcbnew.LoadBoard(str(tmp_path / "out2.kicad_pcb")).Zones()
+    named = [z for z in zs if (z.GetZoneName() or "").startswith("fluxplace-rail:")]
+    assert len(named) == 1 and rec["added"] == ["VBAT/F.Cu"]
+    gnd = [z for z in zs if z.GetNetname() == "GND"]
+    assert gnd and named[0].GetAssignedPriority() > max(z.GetAssignedPriority() for z in gnd)
+
+
+def test_pour_guard_drops_when_shorts_rise(monkeypatch, tmp_path):
+    pytest.importorskip("shapely")
+    pytest.importorskip("pcbnew")
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
+    _stub_dg(monkeypatch, CLEAN, dict(CLEAN, shorts=1))
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"))
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.pour_rails(src, CONS_POUR, out, layers=4)
+    assert rec["dropped"] and rec["added"] == [] and "shorts 0 -> 1" in rec["dropped_reason"]
+    assert not (tmp_path / "out.kicad_pcb").exists()

@@ -576,9 +576,11 @@ def _st_route(c, n, board):
     todo = sorted(conn(board))
     cls = NC.classify(B, c.cons, c.spec)
     from . import power as PWR
-    from . import escapeplan as EP
-    plane_set = set(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))
-    PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=plane_set)     # D71cj: rail widths
+    from . import gaps as GP
+    try:                                                 # D71cj: rail widths; a net with a zone on the board is not a rail
+        PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=GP._zone_nets(board))
+    except Exception:                                    # noqa: BLE001 - no widths is a worse route, not a failed stage
+        PW = {}
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
@@ -685,6 +687,15 @@ def _st_route(c, n, board):
         _sidecar(board, best)
     with open(os.path.join(d, "planetie.txt"), "w") as fh:
         fh.write("\n".join(PT.lines(ptr)) + "\n")
+    # D71cj D: rail corridor pours before the final measurement, so opens / verdict / owners describe the poured board
+    pour = {"added": [], "dropped": False, "skipped": {}}
+    try:
+        pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"), layers=len(B["copper"]))
+        if pour["added"]:
+            shutil.copy(os.path.join(d, "poured.kicad_pcb"), best)
+            _sidecar(board, best)
+    except Exception as e:                               # noqa: BLE001 - the routed board stands without the pour
+        pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     final_open = _unc_nets(best, conn)               # per net, kicad-cli after refill: the one open-connection definition
     final = sorted(final_open)
     diag = None
@@ -765,11 +776,11 @@ def _st_route(c, n, board):
     except Exception as e:                              # noqa: BLE001 - numbers are advice
         line += f", pairs_uncoupled not measured ({type(e).__name__})"
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
-    from . import power as PWR      # D71cj D: [power] pour rails get their copper pour after routing (guarded)
-    pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"))
     if pour["added"]:
-        shutil.copy(os.path.join(d, "poured.kicad_pcb"), best)
         line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
+        out["line"] = line
+    elif pour["dropped"]:
+        line += f"; rail pour dropped ({pour['dropped_reason']})"
         out["line"] = line
     out["pour_rails"] = pour
     if fin:

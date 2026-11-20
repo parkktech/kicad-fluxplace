@@ -261,3 +261,57 @@ def test_input_locked_connected_requires_copper_locks_and_no_open_leg(monkeypatc
     pairs = {frozenset((f"{stem}_P", f"{stem}_N")) for stem in ("A", "B", "C", "D")}
     done = K._input_locked_connected("synthetic.kicad_pcb", {"C_N": 1}, pairs)
     assert done == {frozenset(("A_P", "A_N"))}
+
+
+def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    c.cons["power"] = {"VBAT": {"max_current_ma": 2000, "max_v": 4.2}, "GND": {"max_current_ma": 500}}
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    names = [s["step"] for s in r["steps"]]
+    assert names == ["plane-GND", "rails", "diff", "route"]
+    rails_cmd = calls[1]
+    assert os.path.basename(rails_cmd[1]) == "route.py"
+    assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
+    assert rails_cmd[rails_cmd.index("--power-nets") + 1] == "VBAT"
+    assert r["rails"]["routed"] == ["VBAT"] and r["rails"]["widths"]["VBAT"] > 0.15
+    # the same rail on a board with a zone of its net: no rails step, no rail width
+    c2, calls2, runner2 = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    c2.cons["power"] = c.cons["power"]
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND", "VBAT"})
+    r2 = K.run(c2, 5, str(tmp_path / "in.kicad_pcb"), runner2)
+    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "diff", "route"] and r2["rails"]["routed"] == []
+
+
+def test_no_rails_no_step(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "diff", "route"]
+
+
+def test_pour_runs_before_final_measurement(tmp_path, monkeypatch):
+    from fluxplace import power as PWR
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
+    events = []
+    monkeypatch.setattr(PWR, "pour_rails", lambda b, cons, out, layers=None: events.append("pour") or {"added": [], "dropped": False, "skipped": {}})
+    real = K.RC.open_by_net
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: events.append("measure") or real(b, **k))
+    K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert events[-2:] == ["pour", "measure"]
+
+
+def test_rail_refused_and_inner_report(tmp_path, monkeypatch):
+    import json
+    summ = tmp_path / "5-rails.json"
+    summ.write_text(json.dumps({"failed_single": [{"net": "VBAT", "pad_entry_refused": {"span_mm": 1.0}},
+                                                  {"net": "SIG", "pad_entry_refused": {}}]}))
+    rows = [{"step": "rails", "summary": str(summ)}]
+    assert K._rail_refused(["VBAT", "V5"], rows) == ["VBAT"]
+    assert K._rail_refused(["VBAT"], [{"step": "rails", "summary": None}]) == []
+    monkeypatch.setattr(K, "_rail_inner", K._rail_inner)
+    from fluxplace import power as PWR
+    monkeypatch.setattr(PWR, "rail_inner_mm", lambda b, nets: {"VBAT": 3.2})
+    assert K._rail_inner("x", ["VBAT"]) == {"VBAT": 3.2}

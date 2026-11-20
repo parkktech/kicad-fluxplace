@@ -243,60 +243,143 @@ def check(facts, cons):
     return out
 
 
-def pour_rails(board_path, cons, out, layers=None):
-    """D71cj D: a [power] rail with `pour = true` (or a required width over the pour limit) gets a copper pour after routing:
-    one zone per outer copper layer that carries its tracks; outline = bounding box of the rail's tracks and pads on that
-    layer grown by `[route] power_pour_over_mm`; priority 1, thermal relief; filled with planes.refill and saved to `out`.
-    Guard: DRC shorts rise -> nothing is written (`dropped`). -> {added: [net/layer], dropped, shorts_before, shorts_after}"""
+RAIL_ZONE = "fluxplace-rail:"
+
+
+def rail_outline(segs, over):
+    """[(x1, y1, x2, y2, width) mm] of one net on one layer -> [exterior ring [(x, y) mm]] of the union of every segment
+    grown by half its width plus `over` (the copper the pour adds beside the spine). Needs shapely (ImportError otherwise)."""
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    if not segs:
+        return []
+    u = unary_union([LineString([(x1, y1), (x2, y2)]).buffer(over + w / 2.0, cap_style=1) for x1, y1, x2, y2, w in segs])
+    return [list(g.exterior.coords)[:-1] for g in getattr(u, "geoms", [u]) if not g.is_empty]
+
+
+def rail_priorities(existing, nets_desc):
+    """{net: priority} above every existing zone priority, distinct; nets_desc is ordered by descending current, so the
+    largest current gets the highest priority (KiCad: the higher priority wins an overlap)."""
+    base = max(list(existing) or [0])
+    n = len(nets_desc)
+    return {net: base + n - i for i, net in enumerate(nets_desc)}
+
+
+def _spine_segments(b, nc, L):
+    """[(x1, y1, x2, y2, width) mm] of net code `nc` on copper layer `L` (plain tracks only)."""
     import pcbnew
-    from . import planes as PL
-    from . import drcguard as DG
-    rec = {"added": [], "dropped": False, "shorts_before": None, "shorts_after": None}
-    rails = sorted(n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm"))
-    if not rails:
-        return rec
-    over = float(((cons or {}).get("route") or {}).get("power_pour_over_mm", POUR_OVER_MM))
+    out = []
+    for t in b.GetTracks():
+        if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == nc and t.GetLayer() == L:
+            s, e = t.GetStart(), t.GetEnd()
+            out.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y), pcbnew.ToMM(e.x), pcbnew.ToMM(e.y), pcbnew.ToMM(t.GetWidth())))
+    return out
+
+
+def rail_inner_mm(board_path, rails):
+    """{net: mm} of track length on inner copper layers for each rail (spines that do not reach the outer pour)."""
+    import pcbnew
     b = pcbnew.LoadBoard(board_path)
-    rec["shorts_before"] = DG.measure(board_path)["shorts"]
-    zones = []
+    inner = [x for x in b.GetEnabledLayers().CuStack() if x not in (pcbnew.F_Cu, pcbnew.B_Cu)]
+    out = {}
     for net in rails:
         ni = b.FindNet(net)
         if ni is None:
             continue
-        nc = ni.GetNetCode()
-        trk = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == nc]
-        pads = [p for fp in b.GetFootprints() for p in fp.Pads() if p.GetNetCode() == nc]
+        mm = sum(pcbnew.ToMM(t.GetLength()) for t in b.GetTracks()
+                 if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == ni.GetNetCode() and t.GetLayer() in inner)
+        if mm > 0:
+            out[net] = round(mm, 2)
+    return out
+
+
+def pour_rails(board_path, cons, out, layers=None):
+    """D71cj D: a [power] rail that is routed as a spine (no zone of its net on the board) gets a corridor pour: per outer
+    copper layer that carries its spine, one zone named `fluxplace-rail:<net>` whose outline is the spine grown by
+    `[route] power_pour_over_mm`, pad connection solid, priority above every existing zone (GND/plane zones keep theirs).
+    Re-run: zones with the same name are removed first. Shapely missing -> nothing poured ("no shapely").
+    Guard: DRC shorts, opens and errors must all be no higher after the pour, else nothing is written (`dropped`).
+    -> {added: [net/layer], kept, skipped: {net: reason}, dropped, dropped_reason, before/after measures}"""
+    import pcbnew
+    from . import planes as PL
+    from . import drcguard as DG
+    from . import gaps as GP
+    rec = {"added": [], "kept": [], "skipped": {}, "dropped": False, "dropped_reason": None, "skip_all": None,
+           "shorts_before": None, "shorts_after": None, "before": None, "after": None}
+    pw = (cons or {}).get("power") or {}
+    rails = sorted((n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm")),
+                   key=lambda n: -(current_a(pw.get(n)) or 0.0))
+    if not rails:
+        return rec
+    try:
+        import shapely  # noqa: F401
+    except ImportError:
+        rec["skip_all"] = "no shapely"
+        return rec
+    over = float(((cons or {}).get("route") or {}).get("power_pour_over_mm", POUR_OVER_MM))
+    zoned = GP._zone_nets(board_path)
+    b = pcbnew.LoadBoard(board_path)
+    for z in [z for z in b.Zones() if (z.GetZoneName() or "").startswith(RAIL_ZONE)]:
+        b.Remove(z)
+    others = [z for z in b.Zones() if z.GetNetname() not in rails]
+    prio = rail_priorities([z.GetAssignedPriority() for z in b.Zones()], [n for n in rails if n not in zoned])
+    ref = others[0] if others else None
+    work = []
+    for net in rails:
+        if net in zoned:
+            rec["skipped"][net] = "board already has a zone of this net"
+            continue
+        ni = b.FindNet(net)
+        if ni is None:
+            rec["skipped"][net] = "net not on board"
+            continue
         for L in (pcbnew.F_Cu, pcbnew.B_Cu):
-            on_l = [t for t in trk if t.GetLayer() == L]
-            if not on_l:
+            segs = _spine_segments(b, ni.GetNetCode(), L)
+            if not segs:
                 continue
-            boxes = [t.GetBoundingBox() for t in on_l] + [p.GetBoundingBox() for p in pads if p.IsOnLayer(L)]
-            x1 = min(bx.GetLeft() for bx in boxes) - pcbnew.FromMM(over)
-            y1 = min(bx.GetTop() for bx in boxes) - pcbnew.FromMM(over)
-            x2 = max(bx.GetRight() for bx in boxes) + pcbnew.FromMM(over)
-            y2 = max(bx.GetBottom() for bx in boxes) + pcbnew.FromMM(over)
+            rings = rail_outline(segs, over)
+            if not rings:
+                continue
             z = pcbnew.ZONE(b)
             z.SetLayer(L)
-            z.SetNetCode(nc)
+            z.SetNetCode(ni.GetNetCode())
+            z.SetZoneName(f"{RAIL_ZONE}{net}")
             z.SetIsFilled(False)
-            z.SetAssignedPriority(1)
-            z.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+            z.SetAssignedPriority(prio[net])
+            z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+            if ref is not None:
+                z.SetMinThickness(ref.GetMinThickness())
+                z.SetLocalClearance(ref.GetLocalClearance())
+                z.SetThermalReliefGap(ref.GetThermalReliefGap())
+                z.SetThermalReliefSpokeWidth(ref.GetThermalReliefSpokeWidth())
             poly = pcbnew.SHAPE_POLY_SET()
-            poly.NewOutline()
-            for (x, y) in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
-                poly.Append(int(x), int(y))
+            for ring in rings:
+                poly.NewOutline()
+                for x, y in ring:
+                    poly.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
             z.SetOutline(poly)
             b.Add(z)
-            zones.append((z, poly))
+            work.append(z)
             rec["added"].append(f"{net}/{b.GetLayerName(L)}")
-    if not zones:
+    if not work:
         return rec
+    m = DG.measure(board_path)                           # the input file is untouched so far
+    rec["before"] = {k: m[k] for k in ("opens", "shorts", "errors")}
+    rec["shorts_before"] = rec["before"]["shorts"]
     PL.refill(b)
     b.Save(out)
-    rec["shorts_after"] = DG.measure(out)["shorts"]
-    if rec["shorts_after"] > rec["shorts_before"]:
-        rec.update(dropped=True, added=[])
+    src, dst = os.path.splitext(board_path)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_pro"
+    if os.path.exists(src):
+        import shutil
+        shutil.copy(src, dst)
+    m = DG.measure(out)
+    rec["after"] = {k: m[k] for k in ("opens", "shorts", "errors")}
+    rec["shorts_after"] = rec["after"]["shorts"]
+    worse = [k for k in ("shorts", "opens", "errors") if rec["after"][k] > rec["before"][k]]
+    if worse:
+        rec.update(dropped=True, dropped_reason=", ".join(f"{k} {rec['before'][k]} -> {rec['after'][k]}" for k in worse), added=[])
         if os.path.exists(out):
             os.remove(out)
+    else:
+        rec["kept"] = list(rec["added"])
     return rec
-

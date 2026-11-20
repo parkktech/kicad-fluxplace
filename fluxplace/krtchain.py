@@ -108,9 +108,10 @@ def cmd_diff(py, rdir, src, dst, nets, sig, base, summary=None):
     return cmd + (["--json-out", summary] if summary else [])
 
 
-def cmd_route(py, rdir, src, dst, sig, base, power, summary=None):
+def cmd_route(py, rdir, src, dst, sig, base, power, summary=None, nets=("*",)):
     pw = ["--power-nets", *[glob_escape(n) for n in power], "--power-nets-widths", *[f"{w:g}" for w in power.values()]] if power else []
-    cmd = [py, os.path.join(rdir, "py_router", "route.py"), src, dst, "--nets", "*", *pw, "--layers", *sig, *base, "--keep-input-copper"]
+    cmd = [py, os.path.join(rdir, "py_router", "route.py"), src, dst, "--nets", *[glob_escape(n) if n != "*" else n for n in nets],
+           *pw, "--layers", *sig, *base, "--keep-input-copper"]
     return cmd + (["--json-out", summary] if summary else [])
 
 
@@ -213,15 +214,24 @@ def run(c, n, board, runner=run_step):
     pn = pair_nets(c.cons, allnets, rep)
     opn = {x for x in pn if x in names or x in hand}                 # a pair is incomplete when either leg is open
     diff = sorted(x for x in pn if any(_diffnamed(x, y) and (x in opn or y in opn) for y in pn))
+    from . import power as PWR      # D71cj: [power] rails at their width; a net with a zone on the board is not a rail
+    from . import gaps as GP
+    nl = len(sig) + len({lay for _n, lay in planes})
+    rails_error = None
+    try:
+        rails = PWR.route_widths(c.cons, layers=nl, track_mm=R["track"], exclude=GP._zone_nets(board))
+    except Exception as e:                                   # noqa: BLE001 - no rail widths is a worse route, not a failed stage
+        rails = {}
+        rails_error = str(e)[:120]
+    rail_nets = sorted(rails)
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
+    if rail_nets:
+        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, rails, o[:-10] + ".json", nets=rail_nets)))
     if diff:
         steps.append(("diff", lambda s, o: cmd_diff(a.router_py, a.router_dir, s, o, diff, sig, base, o[:-10] + ".json")))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
-    from . import power as PWR      # D71cj: [power] rails at their width (plane entries win for plane nets)
-    rails = PWR.route_widths(c.cons, layers=len(sig) + len({lay for _n, lay in planes}), track_mm=R["track"],
-                             exclude={x for x, _ in planes})
-    power = {**rails, **power}
+    power = {**rails, **power}                               # plane entries win for plane nets
     steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json")))
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
@@ -240,7 +250,7 @@ def run(c, n, board, runner=run_step):
         else:
             rc, secs = runner(build(cur, dst), log, cap_s=cap, status_path=spath, step=name)
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -265,6 +275,15 @@ def run(c, n, board, runner=run_step):
         finally:
             if os.path.exists(keep):
                 os.remove(keep)
+    pour = {"added": [], "dropped": False, "skipped": {}}     # D71cj D: rail corridor pours, guarded; before the report below
+    try:
+        pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"), layers=nl)
+        if pour["added"]:
+            shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
+    except Exception as e:                                   # noqa: BLE001 - the routed board stands without the pour
+        pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
+                 "pour": pour, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
     left = RC.open_by_net(best)
     try:
         from . import qualaudit as QA, routediag as RD, netclass as NC
@@ -295,22 +314,52 @@ def run(c, n, board, runner=run_step):
         line += f"; pairs already done {len(already_done)} pair(s), not missed"
     if missed:
         line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
-    if quality["not_done"]["count"]:
-        line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    from . import power as PWR      # D71cj D: [power] pour rails get their copper pour after routing (guarded)
-    pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"))
     if pour["added"]:
-        shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
         line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
     elif pour["dropped"]:
-        line += f"; rail pour dropped (shorts {pour['shorts_before']} -> {pour['shorts_after']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "pour_rails": pour},
+        line += f"; rail pour dropped ({pour['dropped_reason']})"
+    if rails_rec["rail_refused"]:
+        line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
+    if quality["not_done"]["count"]:
+        line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec}
+
+
+def _rail_refused(rail_nets, rows):
+    """Rail nets KRT refused a neck-down for (--escalation off): the refusal records in the rail-carrying steps' summaries."""
+    import json
+    hit = set()
+
+    def walk(x, owner=None):
+        if isinstance(x, dict):
+            if "pad_entry_refused" in x:
+                hit.add(str(x.get("net") or owner))
+            for k, v in x.items():
+                walk(v, k)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, owner)
+    for r in rows:
+        if r["step"] in ("rails", "route", "diff") and r.get("summary") and os.path.exists(r["summary"]):
+            try:
+                walk(json.load(open(r["summary"])))
+            except (OSError, ValueError):
+                pass
+    return sorted(n for n in hit if n in set(rail_nets))
+
+
+def _rail_inner(board, rail_nets):
+    from . import power as PWR
+    try:
+        return PWR.rail_inner_mm(board, rail_nets)
+    except Exception as e:                                   # noqa: BLE001
+        return {"error": str(e)[:120]}
 
 
 def shutil_copy(src, dst):
