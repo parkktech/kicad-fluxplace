@@ -169,7 +169,7 @@ def test_pipeline_stage_sits_between_fanout_and_plan_route_and_route_skips_laid_
     from fluxplace import pipeline as PP
     from fluxplace import routeconn as RC
     i = PP.CONSTRUCTIVE.index("pairs")
-    assert PP.CONSTRUCTIVE[i - 1] == "pour-tie" and PP.CONSTRUCTIVE[i - 2] == "fanout" and PP.CONSTRUCTIVE[i + 1] == "critroute" and PP.CONSTRUCTIVE[i + 2] == "plan-route" \
+    assert PP.CONSTRUCTIVE[i - 1] == "pour-tie" and PP.CONSTRUCTIVE[i - 2] == "fanout" and PP.CONSTRUCTIVE[i + 1] == "tune" and PP.CONSTRUCTIVE[i + 2] == "critroute" and PP.CONSTRUCTIVE[i + 3] == "plan-route" \
         and "pairs" not in PP.STAGES
     body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 20, 40, "D_P", "D_N") + \
         PB.fp("R1", 60, 20, [PB.pad("1", 0, 0, "SIG")]) + PB.fp("R2", 60, 30, [PB.pad("1", 0, 0, "SIG")])

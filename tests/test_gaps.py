@@ -750,11 +750,13 @@ def test_classify_reports_failed_review_sources(monkeypatch):
 def test_accept_review_failure_and_sev_drop_target(monkeypatch):
     calls = []
     monkeypatch.setattr(GP.drcguard, "accept", lambda base, cand, mode, target, *a, **k: calls.append(list(target)) or (True, ""))
-    base = {"gaps": [{"id": "pair:X_P/X_N", "sev": 3, "nets": ["X_P", "X_N"], "kind": "pair-open"}], "review_failed": []}
-    assert GP._accept(base, "b", {"review_failed": ["pairs"]}, "c", ["pair:X_P/X_N"], [], "pair-open") == \
+    z = {"shorts": 0, "opens": 0, "errors": 0}
+    base = dict(z, gaps=[{"id": "pair:X_P/X_N", "sev": 3, "nets": ["X_P", "X_N"], "kind": "pair-open", "class": "pair"}],
+                review_failed=[])
+    assert GP._accept(base, "b", dict(z, review_failed=["pairs"]), "c", ["pair:X_P/X_N"], [], "pair-open") == \
         (False, "review source failed: pairs")
-    lower = [{"id": "pair:X_P/X_N", "sev": 1, "nets": ["X_P", "X_N"], "kind": "pair-skew"}]
-    assert GP._accept(base, "b", {"review_failed": []}, "c", ["pair:X_P/X_N"], lower, "pair-open") == (True, "")
+    lower = [{"id": "pair:X_P/X_N", "sev": 1, "nets": ["X_P", "X_N"], "kind": "pair-skew", "class": "pair"}]
+    assert GP._accept(base, "b", dict(z, review_failed=[]), "c", ["pair:X_P/X_N"], lower, "pair-open") == (True, "")
     assert calls[-1] == []                      # sev dropped 3 -> 1: the target no longer has to disappear
 
 
@@ -803,3 +805,92 @@ def test_relax_nets_are_incomplete_pair_legs_and_only_they_are_relaxed(monkeypat
     # a pair-kind try relaxes only its own target legs; a plain try keeps every protected net
     assert GP._r5_set("pair-skew", [{"nets": ["Y_P", "Y_N"]}], prot, {"Y_P", "Y_N"}) == {"X_P", "X_N", "RF1"}
     assert GP._r5_set("open-gap", [{"nets": ["Y_P", "Y_N"]}], prot, {"Y_P", "Y_N"}) == prot
+
+
+def test_score_terms_named_and_match_score():
+    m = _mm(opens=2, gaps=[_g("a", kind="power-width"), _g("b", kind="pair-skew", cls="hs-pair")])
+    m["gaps"][1]["sev"] = 1
+    m["gaps"][0]["mag"] = 0.25
+    t = GP.score_terms(m, m["gaps"])
+    assert list(t) == ["hs_pair", "rf", "shorts", "opens", "power", "power_mag", "pair", "pin_escape", "errors", "quality"]
+    assert GP.score(m, m["gaps"]) == list(t.values())
+    assert t["power"] == 1 and t["power_mag"] == 0.25 and t["hs_pair"] == 1 and t["opens"] == 2
+
+
+def test_r6_refuses_power_worse_even_with_fewer_opens(guard):
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    power = dict(_g("p", kind="power-width"), mag=0.1)
+    ok, why = _accept(guard, base, _mm(opens=2, gaps=[_g("b"), power]))
+    assert ok is False and why.startswith("R6 power worse 0->1")
+
+
+def test_r6_refuses_rf_and_passes_equal_terms(guard):
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    rf = dict(_g("r", cls="rf"))
+    assert _accept(guard, base, _mm(opens=2, gaps=[_g("b"), rf]))[1].startswith("R6 rf worse")
+    assert _accept(guard, base, _mm(opens=2, gaps=[_g("b")])) == (True, "")
+
+
+def test_refill_runs_before_every_measure(monkeypatch, loop):
+    import fluxplace.opengate as OG
+    events = []
+    monkeypatch.setattr(OG, "refill", lambda p, out=None: events.append("refill:" + p) or 0)
+
+    def rec_measure(board, kicad_cli="kicad-cli"):
+        events.append("measure:" + board)
+        return _fake_measure(board, kicad_cli)
+    monkeypatch.setattr(GP, "measure", rec_measure)
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] == "clean"
+    measures = [i for i, e in enumerate(events) if e.startswith("measure:")]
+    assert len(measures) >= 2
+    for i in measures:
+        assert events[i - 1] == "refill:" + events[i].split(":", 1)[1]
+
+
+def test_refill_failure_refuses_candidate_never_accepts(monkeypatch, loop):
+    import fluxplace.opengate as OG
+
+    def refill(p, out=None):
+        if "close" in p:
+            raise RuntimeError("fill helper died")
+        return 0
+    monkeypatch.setattr(OG, "refill", refill)
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] != "clean" and res["end"]["opens"] == res["start"]["opens"] == 1
+    lines = [json.loads(x) for x in open(loop["attempts"])]
+    assert any(x["result"] == "refused" and x["why"].startswith("refill failed") for x in lines)
+    assert not any(x["result"] in ("closed", "partial") for x in lines)
+
+
+def test_no_gain_rounds_stop(monkeypatch, loop):
+    def counting(base, out, gaps, ctx):
+        shutil.copy(base, out)
+        with open(out, "a") as fh:
+            fh.write("#%d" % counting.n)
+        counting.n += 1
+        return {"mode": "count"}
+    counting.n = 0
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, counting)
+    monkeypatch.setattr(GP, "_accept", lambda *a, **k: (True, ""))      # accepted every round, score never drops
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] == "no gain 5 rounds" and res["attempts"] == GP.NO_GAIN_ROUNDS == 5
+
+
+def test_no_gain_rounds_overridable_by_flow(monkeypatch, loop):
+    def counting(base, out, gaps, ctx):
+        shutil.copy(base, out)
+        with open(out, "a") as fh:
+            fh.write("#%d" % counting.n)
+        counting.n += 1
+        return {"mode": "count"}
+    counting.n = 0
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, counting)
+    monkeypatch.setattr(GP, "_accept", lambda *a, **k: (True, ""))
+    cons = {"flow": {"no_gain_rounds": 2}}
+    res = _close(loop["board"], loop["work"], cons=cons, attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] == "no gain 2 rounds" and res["attempts"] == 2

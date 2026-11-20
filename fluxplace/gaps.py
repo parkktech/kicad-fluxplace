@@ -213,8 +213,8 @@ def classify(d, cons=None, board=None, failed_out=None):
     return gaps
 
 
-def score(m, gaps):
-    """Vector: [hs_pair, rf, shorts, opens, power, power_mag, pair, pin_escape, errors, quality] (R4 plus D71cj a terms).
+def score_terms(m, gaps):
+    """Named score terms, in score() order: hs_pair, rf, shorts, opens, power, power_mag, pair, pin_escape, errors, quality.
     hs_pair / pair: SUM of sev over pair-open|asym|skew gaps of a gated / plain pair; power: power-width|power-vias
     count; power_mag: their summed mag (narrow mm, missing vias); rf: any rf gap."""
     def n(pred):
@@ -222,13 +222,18 @@ def score(m, gaps):
 
     def sev(pred):
         return sum(g.get("sev", 0) for g in gaps if pred(g))
-    return [sev(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
-            n(lambda g: g["class"] == "rf"), m["shorts"], m["opens"],
-            n(lambda g: g["kind"] in ("power-width", "power-vias")),
-            sum(g.get("mag", 0) for g in gaps if g["kind"] in ("power-width", "power-vias")),
-            sev(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
-            n(lambda g: g["kind"] == "pin-escape"), m["errors"],
-            n(lambda g: g["kind"] in ("dangling", "via-offcentre", "other"))]
+    return {"hs_pair": sev(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
+            "rf": n(lambda g: g["class"] == "rf"), "shorts": m["shorts"], "opens": m["opens"],
+            "power": n(lambda g: g["kind"] in ("power-width", "power-vias")),
+            "power_mag": sum(g.get("mag", 0) for g in gaps if g["kind"] in ("power-width", "power-vias")),
+            "pair": sev(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
+            "pin_escape": n(lambda g: g["kind"] == "pin-escape"), "errors": m["errors"],
+            "quality": n(lambda g: g["kind"] in ("dangling", "via-offcentre", "other"))}
+
+
+def score(m, gaps):
+    """Lexicographic vector: score_terms() values in order (R4)."""
+    return list(score_terms(m, gaps).values())
 
 
 _SNAP = {}
@@ -264,6 +269,9 @@ def _cleanup_rungs(base_m, cand_m, kind):
     return [CLEANUP[k] for k in CLEANUP if k in kinds]
 
 
+R6_TERMS = ("hs_pair", "rf", "power", "power_mag")
+
+
 def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
     """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4).
     A candidate that failed a review source the base did not is refused; a pair target whose sev dropped counts as
@@ -271,6 +279,10 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
     new_failed = sorted(set(cand_m.get("review_failed") or []) - set(base_m.get("review_failed") or []))
     if new_failed:
         return False, ("review source failed: " + ", ".join(new_failed))[:120]
+    sb, sc = score_terms(base_m, base_m.get("gaps") or []), score_terms(cand_m, cand_gaps)
+    for t in R6_TERMS:                                  # never-worse: score() is lexicographic, so no trade on these
+        if sc[t] > sb[t]:
+            return False, f"R6 {t} worse {sb[t]:g}->{sc[t]:g}"[:120]
     base_sev = {g["id"]: g["sev"] for g in base_m.get("gaps") or [] if "sev" in g}
     cand_sev = {g["id"]: g["sev"] for g in cand_gaps if "sev" in g}
     target_ids = [t for t in target_ids if not (t in base_sev and t in cand_sev and cand_sev[t] < base_sev[t])]
@@ -278,6 +290,20 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
     return drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
                            score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
                            snap=_snapshot, protect=protect)
+
+
+class _RefillError(RuntimeError):
+    """A candidate whose zones could not be refilled: refused as "refill failed", never accepted."""
+
+
+def _remeasure(path, kicad_cli="kicad-cli"):
+    """Refill every zone of `path` and save it (opengate.refill), then measure. Measures never see stale zone fills."""
+    from . import opengate as OG
+    try:
+        OG.refill(path)
+    except Exception as e:
+        raise _RefillError("refill failed: " + str(e)[:80]) from e
+    return dict(measure(path, kicad_cli))
 
 
 # ---- rungs: fn(base, out, gaps, ctx) -> brief summary dict; writes `out` only when it has a candidate ----
@@ -431,6 +457,7 @@ def _krt_cmd(base, out, nets, ctx, layers=None):
     return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], R=R, rflags=rflags)
 
 
+NO_GAIN_ROUNDS = 5                              # close() stops after this many rounds without a lower score ([flow] no_gain_rounds)
 KRT_WINDOW_MM = 1.5                             # margin of the gap window whose nets KRT may rip and re-route
 KRT_MAX = 8                                     # gaps per _r_krt call
 
@@ -1084,7 +1111,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     cons_hash = _cons_hash(cons_path)
     t0 = time.time()
     budget_s = budget_min * 60
-    m = dict(measure(best, kicad_cli))
+    m = _remeasure(best, kicad_cli)
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     relax = relax_nets(m["gaps"])
@@ -1112,6 +1139,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     stop, level, n_att, last = None, "L0", 0, {}
     n_packets, krt_state = 0, {}
+    no_gain = int((cons.get("flow") or {}).get("no_gain_rounds", NO_GAIN_ROUNDS))
+    best_vec, stale = score(m, m["gaps"]), 0
     ai_mode = (cons.get("ai") or {}).get("mode", "packet")
 
     def attempt(r, kind, rung, targets):
@@ -1147,7 +1176,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 elif versions.copper_fingerprint(out) == fp:
                     result, why = "refused", "no change"
                 else:
-                    cm = dict(measure(out, kicad_cli))
+                    cm = _remeasure(out, kicad_cli)
                     runs = 1
                     _classify_into(cm, cons, out)
                     final = out
@@ -1167,7 +1196,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                             cleanup.append(name)
                             if os.path.exists(nxt):
                                 final = nxt
-                        cm = dict(measure(final, kicad_cli))
+                        cm = _remeasure(final, kicad_cli)
                         runs += 1
                         _classify_into(cm, cons, final)
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
@@ -1186,6 +1215,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                             level = max(level, LEVEL[rung])
                     else:
                         result = "refused"
+            except _RefillError as e:
+                result, why = "refused", str(e)[:120]
             except (Exception, SystemExit) as e:
                 result, why = "error", f"{type(e).__name__}: {e}"[:120]
             finally:
@@ -1240,6 +1271,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             break
         if not hit:
             stop = "packets" if n_packets > packets_before else "flat"
+            break
+        vec = score(m, m["gaps"])
+        stale = 0 if vec < best_vec else stale + 1
+        best_vec = min(best_vec, vec)
+        if stale >= no_gain:
+            stop = f"no gain {no_gain} rounds"
             break
     else:
         stop = "rounds"

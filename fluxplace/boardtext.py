@@ -72,6 +72,14 @@ def is_locked(blk):
     return bool(re.search(r"\(locked(?: yes)?\)", blk))
 
 
+def lock_nets(text, nets):
+    """text with every unlocked (segment|via|arc) on `nets` marked (locked yes) -> (text, count). Other blocks untouched."""
+    hits = [(i, j, blk) for i, j, _k, blk in scan(text) if net_name(blk) in nets and not is_locked(blk)]
+    for i, j, blk in reversed(hits):
+        text = text[:i] + re.sub(r"^\((segment|via|arc)", lambda m: m.group(0) + "\n\t\t(locked yes)", blk, count=1) + text[j + 1:]
+    return text, len(hits)
+
+
 def remove_blocks(text, keys):
     """text without the forms whose key is in `keys` (the whole line is dropped)."""
     keys = set(keys)

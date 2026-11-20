@@ -282,6 +282,8 @@ def shortcut(board, net, max_gap_mm=1.5, min_saving_mm=3.0, log=print):
             victims.append(item)
             if item.GetClass() == "PCB_TRACK":
                 width = item.GetWidth()
+    if any(it.IsLocked() for it in victims):          # locked copper (tuned pairs, fan-out, RF) is never shortcut
+        return 0.0
     for it in victims:
         RP._remove(board, it)
     seg = pcbnew.PCB_TRACK(board)

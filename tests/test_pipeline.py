@@ -175,8 +175,19 @@ def test_close_follows_route_in_both_flows():
     assert PL.FUNCS["close"] is PL.st_close
 
 
+def test_tune_locks_pair_copper_only(monkeypatch):
+    from fluxplace import boardtext as BT
+    seg = lambda net, y: f'\t(segment\n\t\t(start 1 {y})\n\t\t(end 2 {y})\n\t\t(width 0.2)\n\t\t(layer "F.Cu")\n\t\t(net "{net}")\n\t\t(uuid "u{y}")\n\t)\n'
+    text = "(kicad_pcb\n" + seg("D_P", 1) + seg("SIG", 2) + '\t(via\n\t\t(at 3 3)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n\t\t(net "D_N")\n\t)\n)\n'
+    out, n = BT.lock_nets(text, {"D_P", "D_N"})
+    assert n == 2 and out.count("(locked yes)") == 2
+    assert [BT.is_locked(b) for _i, _j, _k, b in BT.scan(out)] == [True, False, True]
+    assert BT.lock_nets(out, {"D_P", "D_N"})[1] == 0           # idempotent
+
 def test_critroute_order_and_packets_exit_5(tmp_path, monkeypatch):
-    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("pairs") + 1] == "critroute"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("pairs") + 1] == "tune"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("tune") + 1] == "critroute"
+    assert PL.CONSTRUCTIVE.count("tune") == 1 and "tune" not in PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("route"):]
     assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("critroute") + 1] == "plan-route"
     assert PL.STAGES[PL.STAGES.index("critroute") + 1] == "route"
     assert "packets" in PL.VERDICTS
