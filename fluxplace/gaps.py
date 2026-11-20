@@ -105,7 +105,8 @@ def review_gaps(board, cons, opn=None):
             continue                         # ok / unknown rows are not graded
         out.append({"base": f"pair:{p}/{n}", "kind": kind, "sev": SEV[kind],
                     "class": "hs-pair" if review.pair_gated(cons, p) else "pair", "nets": [p, n], "at": None,
-                    "layer": None, "evidence": str(r.get("why") or "")[:120], "refs": [p, n]})
+                    "layer": None, "evidence": str(r.get("why") or "")[:120], "refs": [p, n],
+                    "skew": r.get("skew"), "limit": r.get("limit")})
     partners = {x: y for r in rows for x, y in ((r["p"], r["n"]), (r["n"], r["p"]))}
     try:
         for f in preroute.pin_escape_blocked(B or routediag.load(board), only_nets=opn, partners=partners):
@@ -668,19 +669,29 @@ def _r_snapiter(base, out, gaps, ctx):
 
 
 PACKET_BYTES = 4096
-AI_BUDGET = 2                                   # action files applied per gap id per work dir
+AI_BUDGET = 4                                   # PHASE3F B5: action files applied per gap id per work dir ([ai] budget)
+AI_ACTIONS_MAX = 8                              # PHASE3F B2: valid actions kept per action file
+FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedback.json size cap
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = ("rip {net, ids}; rip_locked {net, ids} (plain locked copper only; pairs/rf refused); "
-                   "nudge {ref, dx, dy, rot}; route {nets, layers}; give_up {why}. No copper coordinates.")
+                   "nudge {ref, dx, dy, rot}; route {nets, layers}; path {net, path, lock} (AI-FINISH path syntax, "
+                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (validated; not implemented yet); "
+                   "swap_pins {ref, pads, why} (proposal only, never applied); give_up {why}. "
+                   "Copper coordinates only via path / pair_path.")
 AI_PACKETS = 6                                  # packets written per _r_ai call
+
+
+def _ai_budget(cons):
+    """PHASE3F B5: [ai] budget overrides AI_BUDGET (action files applied per gap id)."""
+    return int(((cons or {}).get("ai") or {}).get("budget", AI_BUDGET))
 
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def _ai_action(x, copper):
-    """The validated action, or None (dropped)."""
+def _ai_action(x, copper, hs_legs=()):
+    """The validated action, or None (dropped). `hs_legs`: legs of high-speed pairs (only pair_path may touch them)."""
     if not isinstance(x, dict):
         return None
     do = x.get("do")
@@ -703,14 +714,34 @@ def _ai_action(x, copper):
         if (isinstance(nets, list) and 0 < len(nets) <= 6 and all(isinstance(n, str) and n for n in nets)
                 and (layers is None or (isinstance(layers, list) and all(l in copper for l in layers)))):
             return {"do": "route", "nets": list(nets), "layers": list(layers) if layers else None}
+    elif do == "path":                              # PHASE3F B2
+        from . import hrgeom as HG
+        net, path = x.get("net"), x.get("path")
+        if (isinstance(net, str) and net and net not in hs_legs and isinstance(path, str) and 0 < len(path) <= 800):
+            try:
+                HG.parse_path(path, copper)
+            except Exception:
+                return None
+            return {"do": "path", "net": net, "path": path, "lock": bool(x.get("lock"))}
+    elif do == "pair_path":
+        pair, layer, wps = x.get("pair"), x.get("layer"), x.get("waypoints")
+        if (isinstance(pair, list) and len(pair) == 2 and all(isinstance(n, str) and n for n in pair)
+                and isinstance(layer, str) and layer in copper and isinstance(wps, list) and 2 <= len(wps) <= 40
+                and all(isinstance(q, list) and len(q) == 2 and all(_num(c) for c in q) for q in wps)):
+            return {"do": "pair_path", "pair": list(pair), "layer": layer, "waypoints": [list(q) for q in wps]}
+    elif do == "swap_pins":
+        pads = x.get("pads")
+        if (isinstance(x.get("ref"), str) and x["ref"] and isinstance(pads, list) and len(pads) == 2
+                and all(isinstance(q, str) and q for q in pads)):
+            return {"do": "swap_pins", "ref": x["ref"], "pads": list(pads), "why": str(x.get("why") or "")[:200]}
     elif do == "give_up":
         return {"do": "give_up", "why": str(x.get("why") or "")[:200]}
     return None
 
 
-def load_ai_action(path, base, protect=()):
+def load_ai_action(path, base, protect=(), hs_legs=()):
     """{"actions", "tokens", "why"} from an AI action file. Invalid actions are dropped with a log line. Never raises.
-    `protect` (drcguard.protected_nets: rf nets and pair legs) may not be rip_locked."""
+    `protect` (drcguard.protected_nets: rf nets and pair legs) may not be rip_locked. At most AI_ACTIONS_MAX are kept."""
     out = {"actions": [], "tokens": 0, "why": ""}
     try:
         with open(path) as fh:
@@ -728,9 +759,12 @@ def load_ai_action(path, base, protect=()):
         out["tokens"] = int(a["tokens"])
     out["why"] = str(a.get("why") or "")[:200]
     for x in a.get("actions") if isinstance(a.get("actions"), list) else []:
-        v = _ai_action(x, copper)
+        v = _ai_action(x, copper, hs_legs)
         if v is not None and v["do"] == "rip_locked" and v["net"] in protect:
             v = None
+        if v is not None and len(out["actions"]) >= AI_ACTIONS_MAX:
+            print(f"ai: action file over {AI_ACTIONS_MAX} actions, dropped {str(x)[:120]}", file=sys.stderr)
+            continue
         if v is None:
             print(f"ai: dropped action {str(x)[:120]}", file=sys.stderr)
         else:
@@ -776,32 +810,98 @@ def _clip_packet(p):
     return p
 
 
-def gap_packet(base, gap, ctx):
-    """Repair packet for one gap (<= PACKET_BYTES): its first open connection of the net, the copper window around
-    it, the obstacles that seal it, the KRT failures on the net, and the attempts already made on this gap."""
+def _pair_block(base, cons, gap):
+    """PHASE3F B1: the pair's family, its per-layer (width, gap) from zgeom (the geometry the pairs stage lays) and the
+    family skew limit. Empty geometry when the board has no stackup for the family. Never raises."""
+    from . import zgeom as ZG
+    pn = gap.get("nets") or []
+    p, n = (pn + [None, None])[:2]
+    fam = ZG.family_of(cons, p) if p else None
+    geo = {}
+    try:
+        rows, planes, _src = ZG.resolve_stack(cons, base)
+        cu = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
+        sig = [l for l in cu if l not in set(planes)]
+        if fam and rows:
+            tab = ZG.family_table(cons, rows, planes, sig, fam, board=base)
+            geo = {l: {"width": g["w"], "gap": g["gap"]} for l, g in tab.items() if g.get("gap")}
+    except Exception as e:
+        print(f"ai: pair geometry unavailable for {p}: {e}", file=sys.stderr)
+    lim = gap.get("limit")                              # the audit's limit for this pair; else the family's
+    if lim is None and fam:
+        lim = ((cons or {}).get("pairs") or {}).get(fam, {}).get("skew_mm")
+    return {"p": p, "n": n, "class": gap.get("class"), "family": fam, "geometry": geo,
+            "skew_mm": gap.get("skew"), "skew_limit_mm": lim}    # skew_mm: measured |P - N| (None when a leg is open)
+
+
+def _window_png(base, cp, ai_dir, sid, tag, **kw):
+    """HR.window with a PNG at ai_dir/<sid>.<tag>.png when both are given. A render failure is logged and the view is
+    recomputed without the picture. Returns (window dict, [png paths])."""
+    from . import handroute as HR
+    png = os.path.join(ai_dir, f"{sid}.{tag}.png") if ai_dir and sid else None
+    if png is None:
+        return HR.window(base, constraints=cp, **kw), []
+    try:
+        W = HR.window(base, constraints=cp, png=png, **kw)
+        return W, list(W.get("images") or [])
+    except Exception as e:
+        print(f"ai: {tag} picture failed for {sid}: {e}", file=sys.stderr)
+        return HR.window(base, constraints=cp, **kw), []
+
+
+def gap_packet(base, gap, ctx, sid=None):
+    """Repair packet v2 for one gap (<= PACKET_BYTES): its first open connection of the net, the copper window around
+    it (PNG views: connection and the pad pocket with less free room), the direct corridors, the obstacles that seal it,
+    the KRT failures on the net, the attempts already made on this gap and the feedback of the last applied action."""
     from . import handroute as HR
     cp = ctx.get("cons_path")
+    cons = ctx.get("cons") or {}
+    ai_dir = ctx.get("ai_dir")
     net = gap.get("net") or (gap.get("nets") or [None])[0]
     i = None
     conns = []
+    raw = None
     if net:
-        conns = HR.open_nets(base, constraints=cp)["connections"]
+        try:                                        # ONE DRC for the whole packet: `i` indexes this list, and a second
+            raw = HR.drc_raw(base)                  # DRC (refill) can order the connections differently
+        except Exception:
+            raw = None
+        conns = HR.open_nets(base, constraints=cp, raw=raw)["connections"]
         i = next((k for k, r in enumerate(conns) if r.get("net") == net), None)
-    conn = win = None
+    conn = win = corr = None
+    pngs = []
     sealed = []
     if i is not None:
         r = conns[i]
         ends = lambda p: {k: p.get(k) for k in ("x", "y", "layer", "pin", "id")}
         conn = {"i": i, "a": ends(r["a"]), "b": ends(r["b"]), "straight_mm": r.get("straight_mm"),
                 "rules": r.get("rules")}
-        W = HR.window(base, conn=i, constraints=cp, margin=2.0)
+        if r.get("closest"):                        # the window frames the islands' closest approach, not the DRC ends
+            conn["closest"] = {k: r["closest"].get(k) for k in ("gap_mm", "a", "b", "a_item", "b_item")}
+        W, got = _window_png(base, cp, ai_dir, sid, "conn", conn=i, margin=2.0, raw=raw)
+        pngs += got
         mid = ((r["a"]["x"] + r["b"]["x"]) / 2, (r["a"]["y"] + r["b"]["y"]) / 2)
         win = {"box": W.get("window"), "layers": signal_layers(base),
                "tracks": _near(W.get("tracks") or [], mid, ("a", "b")),
                "vias": _near(W.get("vias") or [], mid, ("pos",)),
                "via_sites": [[round(s[0], 2), round(s[1], 2)]
                              for s in ((W.get("via_sites") or {}).get("sites") or [])[:10]]}
-        lim = (HR.suggest(base, net, conn=i, constraints=cp).get("sealed_by") or {}).get("limiting_obstacles") or []
+        cv = W.get("connection_view") or {}
+        free = W.get("free_corridors") or {}
+        sig = set(win["layers"])                    # planes are not corridors: signal layers only
+        corr = {"direct": [l for l in cv.get("direct_corridor_layers") or [] if l in sig],
+                "max_track_mm": {l: c[0]["max_track_mm"] for l, c in free.items() if c and l in sig}}
+        room = {t: len((cv.get(t) or {}).get("free_component_by_layer") or {}) for t in ("a", "b")}
+        side = "a" if room["a"] <= room["b"] else "b"         # the end with less free room (ties: a)
+        end = r[side]
+        if r.get("closest") and r["closest"].get(side):       # same place as the connection view
+            end = {"x": r["closest"][side][0], "y": r["closest"][side][1]}
+        if ai_dir and sid:
+            try:
+                pngs += _window_png(base, cp, ai_dir, sid, "pocket", at=(end["x"], end["y"]), size=(4, 4))[1]
+            except Exception as e:
+                print(f"ai: pocket view failed for {sid}: {e}", file=sys.stderr)
+        lim = (HR.suggest(base, net, conn=i, constraints=cp, raw=raw).get("sealed_by") or {}).get("limiting_obstacles") or []
         sealed = [{k: e.get(k) for k in ("id", "net", "layer", "locked", "border_cells")} for e in lim[:8]]
     krt = {"failed": [], "open": []}
     js = ctx.get("krt_last")
@@ -828,9 +928,18 @@ def gap_packet(base, gap, ctx):
         if isinstance(rec, dict) and (rec.get("gap") or {}).get("id") == gap["id"]:
             tried.append({"method": rec.get("method"), "result": rec.get("result"),
                           "why": str(rec.get("why") or "")[:120]})
-    p = {"v": 1, "gap": {"id": gap["id"], "kind": gap["kind"], "class": gap.get("class"), "net": net},
-         "conn": conn, "window": win, "sealed_by": sealed, "krt": krt, "tried": tried[-6:],
-         "actions": _PACKET_ACTIONS}
+    fb = None
+    if ai_dir and sid:
+        try:
+            with open(os.path.join(ai_dir, sid + ".feedback.json")) as fh:
+                fb = json.load(fh)
+        except (OSError, ValueError):
+            fb = None
+    p = {"v": 2, "gap": {"id": gap["id"], "kind": gap["kind"], "class": gap.get("class"), "net": net},
+         "board": base, "conn": conn, "window": win, "corridors": corr, "png": pngs, "sealed_by": sealed,
+         "krt": krt, "tried": tried[-6:], "feedback": fb, "actions": _PACKET_ACTIONS}
+    if str(gap.get("kind", "")).startswith("pair-") and len(gap.get("nets") or []) == 2:
+        p["pair"] = _pair_block(base, cons, gap)
     return _clip_packet(p)
 
 
@@ -859,6 +968,54 @@ def _route_net(w, net, layers, ctx):
         sug = HR.suggest(w, net, conn=i, layers=layers)
         if sug.get("found") and sug.get("path"):
             HR.lay(w, net, sug["path"], constraints=ctx["cons_path"])
+
+
+def _viol_row(v):
+    return {k: v[k] for k in ("kind", "net", "with", "layer", "need", "margin", "at") if k in v}
+
+
+def _ai_path(w, x, cp):
+    """PHASE3F B3: lay one agent path on the session. A refusal does not end the transaction; its probe goes to feedback."""
+    from . import handroute as HR
+    row = {"do": "path", "net": x["net"], "ok": False, "why": ""}
+    try:
+        res = HR.lay(w, x["net"], x["path"], constraints=cp, lock=bool(x.get("lock"))) or {}
+        row["ok"] = bool(res.get("accepted"))           # lay reports a refusal in its result; it does not raise
+        row["why"] = "" if row["ok"] else str(res.get("reason") or "refused")[:160]
+    except Exception as e:
+        row["why"] = str(e)[:160]
+    if not row["ok"]:
+        try:
+            pr = HR.probe(w, x["net"], x["path"], constraints=cp)
+            row["probe"] = [_viol_row(v) for v in (pr.get("violations") or [])[:3]]
+        except Exception:
+            row["probe"] = []
+    return row
+
+
+def _write_swap(ai_dir, sid, gap_id, x):
+    """PHASE3F B3: a pin swap changes the netlist, so it is only written as a proposal (never applied by close)."""
+    with open(os.path.join(ai_dir, sid + ".swap.json"), "w") as fh:
+        json.dump({"gap_id": gap_id, "action": x, "note": "pin swap: needs the part spec and the schematic"}, fh)
+
+
+def _feedback_note(ai_dir, sid, **kw):
+    """PHASE3F B4: merge `kw` into ai_dir/<sid>.feedback.json (<= FEEDBACK_BYTES; oldest actions dropped first)."""
+    path = os.path.join(ai_dir, sid + ".feedback.json")
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+        d = d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        d = {}
+    d.update(kw)
+    while len(json.dumps(d).encode()) > FEEDBACK_BYTES and d.get("actions"):
+        d["actions"] = d["actions"][1:]
+    if len(json.dumps(d).encode()) > FEEDBACK_BYTES:
+        d = {k: str(v)[:200] for k, v in d.items()}
+    os.makedirs(ai_dir, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(json.dumps(d))
 
 
 def _apply_ai(base, out, a, ctx, sid):
@@ -894,12 +1051,24 @@ def _apply_ai(base, out, a, ctx, sid):
         _clean_board(w)
         _sidecars(cur, w)
         HR.session_begin(cur, w)
+        feed = []                                   # PHASE3F B4: per action {do, ok, why}
         for x in acts:
             if x["do"] == "rip":
                 HR.shove(w, x["net"], ids=x["ids"], op="unlay", constraints=cp)
             elif x["do"] == "rip_locked":
                 # session-only opt-in: needs explicit ids, no window, no out (handroute.shove)
                 HR.shove(w, x["net"], ids=x["ids"], op="unlay", constraints=cp, allow_locked=True)
+        for x in acts:                              # PHASE3F B3: paths after the rips, then pair centre lines
+            if x["do"] == "path":
+                feed.append(_ai_path(w, x, cp))
+        for x in acts:
+            if x["do"] == "pair_path":
+                from . import pairsonly as PS
+                res = PS.lay_centreline(w, None, x["pair"], x["layer"], x["waypoints"], cons)
+                feed.append({"do": "pair_path", "ok": bool(res.get("laid")), "why": str(res.get("why") or "")[:160]})
+            elif x["do"] == "swap_pins":
+                _write_swap(ai_dir, sid, a.get("gap_id"), x)
+                feed.append({"do": "swap_pins", "ok": False, "why": "proposal written, not applied"})
         routes = [dict(x, nets=list(x["nets"])) for x in acts if x["do"] == "route"]
         routed = {n for r in routes for n in r["nets"]}
         ripped = [n for n in dict.fromkeys(x["net"] for x in acts if x["do"] == "rip_locked") if n not in routed]
@@ -912,7 +1081,9 @@ def _apply_ai(base, out, a, ctx, sid):
             for net in r["nets"]:
                 _route_net(w, net, r["layers"] or signal_layers(w), ctx)
         r = HR.session_commit(w, out, constraints=cp)
-        return "applied", bool(r.get("accepted")), str((r.get("reasons") or [""])[0])
+        ok, reason = bool(r.get("accepted")), str((r.get("reasons") or [""])[0])
+        _feedback_note(ai_dir, sid, actions=feed, commit=ok, commit_why=reason[:160])
+        return "applied", ok, reason
     finally:
         for t in tmps:
             _clean_board(t)
@@ -920,6 +1091,39 @@ def _apply_ai(base, out, a, ctx, sid):
 
 def ctx_dir_ai(work):
     return os.path.join(work, "ai")
+
+
+def _packet_rows(work, gaps, used, budget):
+    """PHASE3F B6: the handoff list for the caller: one row per open AI-eligible gap that has a packet on disk."""
+    ai_dir, rows = ctx_dir_ai(work), []
+    for g in gaps:
+        if "ai" not in DISPATCH.get(g["kind"], []):
+            continue
+        key = ai_key(g)
+        sid = critroute._safe(key)[:80]
+        pk = os.path.join(ai_dir, sid + ".packet.json")
+        if not os.path.exists(pk):
+            continue
+        try:
+            with open(pk) as fh:
+                png = json.load(fh).get("png") or []
+        except (OSError, ValueError):
+            png = []
+        rows.append({"gap_id": g["id"], "packet": pk, "png": png, "action": os.path.join(ai_dir, sid + ".action.json"),
+                     "budget_left": max(0, budget - used.get(key, 0))})
+    return rows
+
+
+def _proposal_rows(ai_dir):
+    """PHASE3F B3/B6: swap_pins proposals written by the AI rung (never applied by close)."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(ai_dir, "*.swap.json"))):
+        try:
+            with open(f) as fh:
+                out.append(json.load(fh))
+        except (OSError, ValueError):
+            pass
+    return out
 
 
 def _ai_pending(ai_dir, gaps):
@@ -939,11 +1143,12 @@ def _r_ai(base, out, gaps, ctx):
     if ctx.get("ai_mode") == "off":
         return {"status": "ai off"}
     used = ctx["ai_used"]
+    budget = _ai_budget(ctx.get("cons"))                       # PHASE3F B5
     os.makedirs(ctx["ai_dir"], exist_ok=True)
     todo, seen = [], set()
     for g in gaps:                 # one entry per AI key: DRC can list two gaps of one net under one key
         key = ai_key(g)
-        if key not in seen and used.get(key, 0) < AI_BUDGET:
+        if key not in seen and used.get(key, 0) < budget:
             seen.add(key)
             todo.append((g, key, critroute._safe(key)[:80]))
     if not todo:
@@ -952,15 +1157,16 @@ def _r_ai(base, out, gaps, ctx):
         act = os.path.join(ctx["ai_dir"], sid + ".action.json")
         if not os.path.exists(act):
             continue
-        a = load_ai_action(act, base, ctx.get("protect", ()))
+        a = load_ai_action(act, base, ctx.get("protect", ()), hs_legs=ctx.get("hs_legs", ()))
         os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
         used[key] = used.get(key, 0) + 1
+        a["gap_id"] = gap["id"]
         status, commit, why = _apply_ai(base, out, a, ctx, sid)
         return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"], "gap_id": gap["id"]}
     n = 0
     for gap, key, sid in todo[:AI_PACKETS]:
         with open(os.path.join(ctx["ai_dir"], sid + ".packet.json"), "w") as fh:
-            fh.write(json.dumps(gap_packet(base, gap, ctx)))
+            fh.write(json.dumps(gap_packet(base, gap, ctx, sid=sid)))
         n += 1
     return {"status": "packet", "n": n}
 
@@ -1269,7 +1475,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                        "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons)),
                        "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
-                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback}
+                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback,
+                       "hs_legs": sorted({n for g in m["gaps"] if g.get("class") == "hs-pair" for n in g.get("nets", [])})}
                 ctx["inproc"] = inproc
                 summ = _call_rung(rung, best, out, targets, ctx) or {}
                 if ctx.get("krt_last"):
@@ -1332,6 +1539,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
         if result == "packet":
             n_packets += 1
+        if rung == "ai" and result == "refused" and summ.get("gap_id"):   # PHASE3F B4: refusal reason for the next packet
+            tg = next((g for g in targets if g["id"] == summ["gap_id"]), None)
+            if tg is not None:
+                _feedback_note(ctx_dir_ai(work), critroute._safe(ai_key(tg))[:80], refused=str(why)[:160])
         if result == "refused":
             memo.add(key)
         if rung == "pairgroup" and result == "refused":      # PHASE3F A5: a refused non-gated pair goes to the router
@@ -1430,7 +1641,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                      "last_method": l.get("method"), "why": l.get("why")})
     res = {"stop": stop, "exit": {"clean": 0, "packets": 5}.get(stop, 2), "level": level,
            "minutes": round((time.time() - t0) / 60, 1), "start": start, "end": _vitals(m),
-           "attempts": n_att, "left": left}
+           "attempts": n_att, "left": left,
+           "packets": _packet_rows(work, m["gaps"], ai_used, _ai_budget(cons)),       # PHASE3F B6
+           "proposals": _proposal_rows(ctx_dir_ai(work))}
     _write_json(os.path.join(work, "stop.json"), res)
     if runs:
         ok = [t for t in tries if t["result"] in ("closed", "partial")]

@@ -31,7 +31,7 @@ BREAKOUT_WHY = ("closest approach", "no clear break-out")      # the coupled cen
 
 PER_PAIR_S = 120            # default budget = named pairs x this (a lay plus one DRC run, with a retry for --allow-shove)
 SHOVABLE = ("signal", "slow", "bypass")
-__all__ = ["resolve", "locked_items", "shove_nets", "breakout_ring", "reroute", "groups", "regroup", "format_text", "PER_PAIR_S"]
+__all__ = ["resolve", "locked_items", "shove_nets", "breakout_ring", "reroute", "groups", "regroup", "format_text", "PER_PAIR_S", "lay_centreline"]
 
 
 def breakout_ring(limit):
@@ -310,6 +310,13 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     if result is not None:
         result.update(rep)
     return rep
+
+
+def lay_centreline(board, out, pair, layer, waypoints, cons=None):
+    """PHASE3F B3 (agent pair_path). NOT IMPLEMENTED: reroute() builds legs from pairlay.astar runs, not from a polyline,
+    so a centre line needs its own leg builder. Returns laid False with the reason; writes nothing."""
+    return {"laid": False, "why": "not implemented: pairlay.legs takes A* runs, not a centre-line polyline",
+            "p_mm": None, "n_mm": None}
 
 
 def groups(B, cls, pairs):
