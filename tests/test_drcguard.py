@@ -237,3 +237,9 @@ def test_zone_violation_not_counted_in_errors():
     ], "unconnected_items": []}
     assert DG.measure_from_report(d)["errors"] == 1
     assert DG.measure_from_report(d, severity="all")["errors"] == 2
+
+
+def test_protected_nets_naming_pairs_and_rf_names():
+    from fluxplace import drcguard as DG
+    got = DG.protected_nets({}, ["USB_DP", "USB_DM", "BT1_RF", "GPIO3"])
+    assert {"USB_DP", "USB_DM", "BT1_RF"} <= got and "GPIO3" not in got

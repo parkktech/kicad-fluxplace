@@ -135,13 +135,20 @@ def new_keys(base_keys, keys):
 
 
 def protected_nets(cons, names):
-    """Nets no trade may open (R5): the [rf] nets plus every pair leg (krtchain.pair_nets; none on failure)."""
-    from . import krtchain
-    rf = set(((cons or {}).get("rf") or {}).get("nets") or [])
+    """Nets no trade may open (R5) and whose copper stays locked: the [rf] nets, nets named as RF (review.is_rf),
+    every pair leg from the constraints (krtchain.pair_nets) and every leg found by naming (graph.diff_pairs)."""
+    from . import krtchain, graph, review
+    names = sorted(names)
+    rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
     try:
-        pairs = set(krtchain.pair_nets(cons, sorted(names), None))
+        pairs = set(krtchain.pair_nets(cons, names, None))
     except Exception:
         pairs = set()
+    try:
+        dp = graph.diff_pairs(names)
+        pairs |= set(dp) | set(dp.values())
+    except Exception:
+        pass
     return rf | pairs
 
 
