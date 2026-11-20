@@ -31,7 +31,7 @@ BREAKOUT_WHY = ("closest approach", "no clear break-out")      # the coupled cen
 
 PER_PAIR_S = 120            # default budget = named pairs x this (a lay plus one DRC run, with a retry for --allow-shove)
 SHOVABLE = ("signal", "slow", "bypass")
-__all__ = ["resolve", "locked_items", "shove_nets", "breakout_ring", "reroute", "format_text", "PER_PAIR_S"]
+__all__ = ["resolve", "locked_items", "shove_nets", "breakout_ring", "reroute", "groups", "regroup", "format_text", "PER_PAIR_S"]
 
 
 def breakout_ring(limit):
@@ -310,6 +310,105 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     if result is not None:
         result.update(rep)
     return rep
+
+
+def groups(B, cls, pairs):
+    """PHASE3C A: connector groups for the failed pairs -> {group: [(p, n), ...]}, groups by size descending.
+    A pair's group is the footprint (ref) with the most pads of that pair, if that ref has >= 4 of the pair's pads or
+    holds pads of >= 2 different pairs; tie -> the ref with more pairs overall, then the ref name. A pair with no such ref
+    is its own group, named "P/N". `cls` is accepted for the call shape; the pads of `B` decide."""
+    per, touch = {}, {}
+    for pr in pairs:
+        per[pr] = {}
+        for q in B["pads"]:
+            if not q.get("np") and q["net"] in pr:
+                per[pr][q["ref"]] = per[pr].get(q["ref"], 0) + 1
+                touch.setdefault(q["ref"], set()).add(pr)
+    out = {}
+    for pr in pairs:
+        cands = [(-c, -len(touch[r]), r) for r, c in per[pr].items() if c >= 4 or len(touch[r]) >= 2]
+        g = min(cands)[2] if cands else f"{pr[0]}/{pr[1]}"
+        out.setdefault(g, []).append(pr)
+    return dict(sorted(out.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+
+def _complete(board, members, cons):
+    """how many of `members` pairaudit grades complete on `board` (the same open-net set reroute uses)."""
+    from . import routediag as RD, routeconn as RC, pairaudit as PA
+    B = RD.load(board)
+    opn = RC.text_open(B)
+    aud = PA.audit(B, list(members), cons, {n for n, k in opn.items() if k})
+    return sum(1 for p in members if aud[p]["status"] == "complete")
+
+
+def regroup(board, out, cons, spec, pairs, log=print, budget_s=None):
+    """PHASE3C B: re-lay the failed pairs one connector group at a time (`reroute`, shove + unlock, the group's own copper
+    only). A group's board is kept only when more of its pairs are complete than before the call. A group still failing
+    whose family has no `gap_mm` is retried once with that family's gap_mm = the fab profile's min clearance (rounded up
+    to 0.01 mm) and `gap_retry` is recorded. -> {board, groups: {ref: {pairs, laid, failed, gap_retry}}, failed: [(p, n)]}."""
+    import copy
+    import math
+    import shutil
+    import time
+    from . import routediag as RD, netclass as NC, constraints as C, zgeom as ZG
+    cons = cons or {}
+    pairs = [tuple(p) for p in pairs]
+    B0 = RD.load(board)
+    grp = groups(B0, NC.classify(B0, cons, spec), pairs)
+    total = float(budget_s) if budget_s else float(PER_PAIR_S * max(1, len(pairs)))
+    t0 = time.monotonic()
+    cur, res, final, tmps = board, {}, {}, []
+    gap = max(0.01, math.ceil(float(C.fab_profile(cons)["min_clearance_mm"]) * 100 - 1e-9) / 100)
+    names = lambda ps: [f"{p}/{n}" for p, n in ps]
+    for i, (g, members) in enumerate(grp.items()):
+        left = total - (time.monotonic() - t0)
+        if left <= 0:
+            log(f"  regroup: budget spent before group {g}")
+            res[g] = {"pairs": names(members), "laid": [], "failed": names(members), "gap_retry": False}
+            continue
+        step = max(1.0, left / (len(grp) - i))
+        before = _complete(cur, members, cons)
+        tmp = f"{out}.g{i}.kicad_pcb"
+        tmps.append(tmp)
+        rep = reroute(cur, tmp, names(members), cons, spec, budget=step, allow_shove=True, unlock=True, log=log)
+        st = {r["pair"]: r["status"] for r in rep["pairs"]}
+        if sum(st.get(x) in ("rerouted", "already_ok") for x in names(members)) > before:
+            cur = tmp
+        gap_retry = False
+        fails = [p for p in members if st.get(f"{p[0]}/{p[1]}") not in ("rerouted", "already_ok")]
+        fams = {ZG.family_of(cons, p[0]) for p in fails} - {None}
+        fams = {f for f in fams if "gap_mm" not in (cons.get("pairs", {}).get(f) or {})}
+        if fails and fams and left - (time.monotonic() - t0) > 1:
+            cons2 = copy.deepcopy(cons)
+            for f in fams:
+                cons2["pairs"][f]["gap_mm"] = gap
+            tmp2 = f"{out}.g{i}r.kicad_pcb"
+            tmps.append(tmp2)
+            before2 = _complete(cur, members, cons)
+            rep2 = reroute(cur, tmp2, names(fails), cons2, spec, budget=max(1.0, left - (time.monotonic() - t0)), allow_shove=True,
+                           unlock=True, log=log)
+            st2 = {r["pair"]: r["status"] for r in rep2["pairs"]}
+            if _complete(tmp2, members, cons) > before2:
+                cur, gap_retry = tmp2, True
+                st.update(st2)
+            log(f"  regroup {g}: gap_mm {gap:g} retry on {', '.join(sorted(fams))}: {'kept' if gap_retry else 'no gain'}")
+        ok = [x for x in names(members) if st.get(x) in ("rerouted", "already_ok")]
+        for x in names(members):
+            final[x] = st.get(x, "not_reached")
+        res[g] = {"pairs": names(members), "laid": [x for x in ok if st.get(x) == "rerouted"],
+                  "failed": [x for x in names(members) if x not in ok], "gap_retry": gap_retry}
+        log(f"  regroup {g}: {len(ok)}/{len(members)} complete")
+    shutil.copy(cur, out)
+    for ext in (".kicad_pro", ".kicad_dru"):
+        if os.path.exists(os.path.splitext(board)[0] + ext):
+            shutil.copy(os.path.splitext(board)[0] + ext, os.path.splitext(out)[0] + ext)
+    for t in tmps:
+        for ext in ("", ".kicad_pro", ".kicad_dru", ".kicad_prl"):
+            q = os.path.splitext(t)[0] + ext if ext else t
+            if os.path.exists(q) and q != out:
+                os.unlink(q)
+    failed = [p for g in res.values() for p in [tuple(x.split("/", 1)) for x in g["failed"]]]
+    return {"board": out, "groups": res, "failed": failed}
 
 
 def format_text(rep):

@@ -1,8 +1,10 @@
 """route stage, `[route] router = "krt-whole"`: the four-call KiCadRoutingTools chain, nothing else.
 
   1-2  route_planes.py  one call per plane (net, layer) of the board's zones
+  r    [power] rails    spine routes of the [power] rails at their width (PHASE3B)
+  p    pairgroups       Python step (PHASE3C): failed pairs re-laid per connector group; skipped when none is incomplete
   3    route_diff.py    the pair nets that are still open
-  4    route.py         every net, plane nets as --power-nets, --keep-input-copper
+  4    route.py         every net but the legs of pairs p could not lay, plane nets as --power-nets, --keep-input-copper
 
 Each call reads the previous call's board and writes the next (the .kicad_pro travels along).  Exit 0 and 3 (some
 feature delivered below the requested size, never below the floor) are accepted; anything else stops the chain."""
@@ -188,6 +190,36 @@ def _post(best, d, planes, R):
     return {"snap": snap, "ties": ties}
 
 
+def _run_pairgroups(c, d, src, dst, failed_legs, budget_s):
+    """PHASE3C C.1 `pairgroups`: regroup the incomplete pairs (pairaudit) per connector group -> dst. No incomplete pair:
+    dst is a copy of src. Legs of the pairs still failed go to `failed_legs` (the route step leaves them to the pair stage).
+    A failure copies src and records the error: the routed board stands. Always returns rc 0."""
+    import json
+    from . import pairsonly as PO, pairaudit as PA, netclass as NC, routediag as RD, constraints as C
+    spec = getattr(c, "spec", None)
+    lines = []
+    try:
+        B = RD.load(src)
+        pairs = PA.pair_list(NC.classify(B, c.cons, spec))
+        nopair = C.not_pairs(c.cons)
+        opn = {x for x, k in RC.text_open(B).items() if k}
+        aud = PA.audit(B, pairs, c.cons, opn) if pairs else {}
+        todo = [p for p in pairs if aud[p]["status"] != "complete" and not (set(p) & nopair)]
+        if todo:
+            rep = PO.regroup(src, dst, c.cons, spec, todo, log=lines.append, budget_s=budget_s)
+            failed_legs.update(x for p in rep["failed"] for x in p)
+        else:
+            shutil_copy(src, dst)
+            rep = {"skipped": "no incomplete pair"}
+    except Exception as e:                                   # noqa: BLE001 - a worse route, never a lost board
+        shutil_copy(src, dst)
+        rep = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        lines.append(rep["error"])
+    open(os.path.splitext(dst)[0] + ".json", "w").write(json.dumps(rep, indent=1, default=list))
+    open(os.path.splitext(dst)[0] + ".log", "w").write("\n".join(lines) + "\n")
+    return 0
+
+
 def run(c, n, board, runner=run_step):
     """the route stage in krt-whole mode -> stage result dict.  `runner(cmd, log)` -> (rc, s): replaceable in tests."""
     import json
@@ -227,12 +259,18 @@ def run(c, n, board, runner=run_step):
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
     if rail_nets:
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, rails, o[:-10] + ".json", nets=rail_nets)))
+    failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
+    def _pairgroups(s, o):
+        return _run_pairgroups(c, d, s, o, failed_legs, max(60.0, min(CAP_S, budget - (time.time() - t0))))
+    steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
+    def _route_nets():
+        return sorted(allnets - failed_legs) if failed_legs else ("*",)
     if diff:
         steps.append(("diff", lambda s, o: cmd_diff(a.router_py, a.router_dir, s, o, diff, sig, base, o[:-10] + ".json")))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
-    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json")))
+    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets())))
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
@@ -248,9 +286,14 @@ def run(c, n, board, runner=run_step):
         if cap <= 0:
             rc, secs = 124, 0.0
         else:
-            rc, secs = runner(build(cur, dst), log, cap_s=cap, status_path=spath, step=name)
+            cmd = build(cur, dst)
+            if callable(cmd):                                # a Python step: fn(src, dst) -> rc
+                t1 = time.time()
+                rc, secs = cmd(cur, dst), round(time.time() - t1, 1)
+            else:
+                rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name)
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails", "pairgroups") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)

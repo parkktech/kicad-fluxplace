@@ -368,6 +368,7 @@ def handoff_nets(state, work):
 
 
 def router_skip(todo, controlled, handoff, mode):
-    """nets the whole-board router is told to leave alone: the controlled nets (pairs, RF, clocks) except the pairs handed over
-    by the pairs stage (state c), which it routes as ordinary nets of their class."""
-    return [n for n in todo if n in controlled and n not in handoff] if mode == "exclude" else []
+    """nets the whole-board router is told to leave alone: the controlled nets (pairs, RF, clocks). PHASE3C D71cj (c): a pair
+    leg is never routed as a plain net, handed-over pairs (`handoff`, state c) included; the pairgroups step re-lays them
+    per connector group first. `handoff` stays in the signature for the call sites."""
+    return [n for n in todo if n in controlled] if mode == "exclude" else []

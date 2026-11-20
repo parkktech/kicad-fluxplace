@@ -67,28 +67,26 @@ def test_rail_priorities_above_existing_distinct_largest_highest():
 
 
 def test_rail_outline_two_segments_one_polygon():
-    pytest.importorskip("shapely")
     rings = PW.rail_outline([(0, 0, 5, 0, 1.0), (5, 0, 5, 4, 1.0)], over=2.0)
     assert len(rings) == 1                                       # joined at (5, 0): one union, not two rectangles
     xs = [x for x, _y in rings[0]]
     ys = [y for _x, y in rings[0]]
-    assert min(xs) == pytest.approx(-2.5, abs=1e-6) and max(xs) == pytest.approx(7.5, abs=1e-6)
-    assert min(ys) == pytest.approx(-2.5, abs=1e-6) and max(ys) == pytest.approx(6.5, abs=1e-6)
+    assert min(xs) == pytest.approx(-2.5, abs=2e-3) and max(xs) == pytest.approx(7.5, abs=2e-3)   # round caps: pcbnew arc error 1 um
+    assert min(ys) == pytest.approx(-2.5, abs=2e-3) and max(ys) == pytest.approx(6.5, abs=2e-3)
 
 
 def test_rail_outline_disjoint_is_two_rings():
-    pytest.importorskip("shapely")
     assert len(PW.rail_outline([(0, 0, 1, 0, 0.2), (10, 0, 11, 0, 0.2)], over=0.5)) == 2
     assert PW.rail_outline([], over=1.0) == []
 
 
-def test_pour_without_shapely_pours_nothing(monkeypatch, tmp_path):
+def test_pour_needs_no_shapely_and_missing_board_is_not_a_crash(monkeypatch, tmp_path):
     pytest.importorskip("pcbnew")
     import sys
-    monkeypatch.setitem(sys.modules, "shapely", None)           # import shapely -> ImportError
+    monkeypatch.setitem(sys.modules, "shapely", None)           # PHASE3C E: the outline is pcbnew's, shapely is not imported
     cons = {"power": {"VBAT": {"max_current_ma": 2000, "max_v": 4.2, "pour": True}}}
-    rec = PW.pour_rails(str(tmp_path / "missing.kicad_pcb"), cons, str(tmp_path / "out.kicad_pcb"))
-    assert rec["skip_all"] == "no shapely" and rec["added"] == [] and not rec["dropped"]
+    with pytest.raises(Exception):                              # the board is missing: an error, not a skip for shapely
+        PW.pour_rails(str(tmp_path / "missing.kicad_pcb"), cons, str(tmp_path / "out.kicad_pcb"))
 
 
 def _rail_board(path, zone_net=None):
@@ -125,7 +123,6 @@ CONS_POUR = {"power": {"VBAT": {"max_current_ma": 2000, "max_v": 4.2, "pour": Tr
 
 
 def test_pour_writes_named_zone_and_keeps_when_guard_holds(monkeypatch, tmp_path):
-    pytest.importorskip("shapely")
     pcbnew = pytest.importorskip("pcbnew")
     from fluxplace import gaps as GP
     monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
@@ -139,7 +136,6 @@ def test_pour_writes_named_zone_and_keeps_when_guard_holds(monkeypatch, tmp_path
 
 
 def test_pour_skips_rail_with_existing_zone(monkeypatch, tmp_path):
-    pytest.importorskip("shapely")
     pytest.importorskip("pcbnew")
     from fluxplace import gaps as GP
     monkeypatch.setattr(GP, "_zone_nets", lambda p: {"VBAT"})
@@ -150,7 +146,6 @@ def test_pour_skips_rail_with_existing_zone(monkeypatch, tmp_path):
 
 
 def test_pour_priority_above_existing_and_rerun_removes_named(monkeypatch, tmp_path):
-    pytest.importorskip("shapely")
     pcbnew = pytest.importorskip("pcbnew")
     from fluxplace import gaps as GP
     monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
@@ -168,7 +163,6 @@ def test_pour_priority_above_existing_and_rerun_removes_named(monkeypatch, tmp_p
 
 
 def test_pour_guard_drops_when_shorts_rise(monkeypatch, tmp_path):
-    pytest.importorskip("shapely")
     pytest.importorskip("pcbnew")
     from fluxplace import gaps as GP
     monkeypatch.setattr(GP, "_zone_nets", lambda p: set())

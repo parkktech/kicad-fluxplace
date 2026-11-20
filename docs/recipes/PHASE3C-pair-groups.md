@@ -60,3 +60,14 @@ For the given failed pairs (list of (p, n)):
 ## Report (under 35 lines)
 `git diff --stat`, test counts, the group map `groups()` gives on /var/kicad/utv-comms-bridge/W14/stageB/rn400/pairs-rn.kicad_pcb
 (constraints /var/kicad/utv-comms-bridge/W14/inputs/constraints.toml) for its incomplete pairs, deviations.
+
+## E. (extra) pour_rails without shapely
+`/usr/bin/python3` has no shapely, so `power.pour_rails` skips every pour. Replace the shapely buffer/union with pcbnew's
+own geometry: for each rail track on the layer, `t.TransformShapeToPolygon(poly_set, layer, clearance=int(pcbnew.FromMM(buf)), ...)`
+(check the exact signature in this KiCad 10 build with `help(pcbnew.PCB_TRACK.TransformShapeToPolygon)`), merge with
+`poly_set.Simplify()` (or `BooleanAdd`), and build the zone outline from the resulting outlines (`poly_set.Outline(i)`).
+Keep the rest of pour_rails unchanged. Test without the shapely shim: tests/test_power.py must pass and the skipped
+shapely tests must now run. Do one real dry pour (no routing) on a COPY of
+/var/kicad/utv-comms-bridge/W14/CURRENT.kicad_pcb (+ .kicad_pro) in /var/kicad/fluxplace-wt/phase3a/.scratch/ with
+constraints /var/kicad/utv-comms-bridge/W14/inputs/constraints.toml and report: zones added per rail/layer, guard
+before/after opens/shorts/errors, kept or dropped and why.

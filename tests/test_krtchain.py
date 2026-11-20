@@ -65,9 +65,10 @@ def test_router_relaxed_project_is_discarded_after_every_step(tmp_path, monkeypa
 
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), relaxed_runner)
     assert json.load(open(tmp_path / "board.kicad_pro")) == approved
-    assert json.load(open(tmp_path / "3-route.kicad_pro")) == approved
+    assert json.load(open(tmp_path / "4-route.kicad_pro")) == approved
     assert "router project rules discarded:" in r["line"]
-    assert len(r["steps"]) == 3 and all(s["router_project_discarded"] for s in r["steps"])
+    routed = [s for s in r["steps"] if s["step"] != "pairgroups"]           # pairgroups is a Python step, no router project
+    assert len(routed) == 3 and all(s["router_project_discarded"] for s in routed)
     assert all(cmd[cmd.index("--via-size") + 1] == "0.46" for cmd in calls)
 
 
@@ -270,7 +271,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     names = [s["step"] for s in r["steps"]]
-    assert names == ["plane-GND", "rails", "diff", "route"]
+    assert names == ["plane-GND", "rails", "pairgroups", "diff", "route"]
     rails_cmd = calls[1]
     assert os.path.basename(rails_cmd[1]) == "route.py"
     assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
@@ -281,7 +282,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     c2.cons["power"] = c.cons["power"]
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND", "VBAT"})
     r2 = K.run(c2, 5, str(tmp_path / "in.kicad_pcb"), runner2)
-    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "diff", "route"] and r2["rails"]["routed"] == []
+    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "pairgroups", "diff", "route"] and r2["rails"]["routed"] == []
 
 
 def test_no_rails_no_step(tmp_path, monkeypatch):
@@ -289,7 +290,7 @@ def test_no_rails_no_step(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "diff", "route"]
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "diff", "route"]
 
 
 def test_pour_runs_before_final_measurement(tmp_path, monkeypatch):

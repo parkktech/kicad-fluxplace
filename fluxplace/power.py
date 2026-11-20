@@ -248,13 +248,26 @@ RAIL_ZONE = "fluxplace-rail:"
 
 def rail_outline(segs, over):
     """[(x1, y1, x2, y2, width) mm] of one net on one layer -> [exterior ring [(x, y) mm]] of the union of every segment
-    grown by half its width plus `over` (the copper the pour adds beside the spine). Needs shapely (ImportError otherwise)."""
-    from shapely.geometry import LineString
-    from shapely.ops import unary_union
+    grown by half its width plus `over` (the copper the pour adds beside the spine). PHASE3C E: pcbnew's own geometry
+    (SHAPE_SEGMENT outline, BooleanAdd, Simplify), so no shapely is needed; a segment of width w grown by `over` is one
+    segment of width w + 2 * over, which is the same outline as shapely's buffer(over + w / 2, round caps)."""
+    import pcbnew
     if not segs:
         return []
-    u = unary_union([LineString([(x1, y1), (x2, y2)]).buffer(over + w / 2.0, cap_style=1) for x1, y1, x2, y2, w in segs])
-    return [list(g.exterior.coords)[:-1] for g in getattr(u, "geoms", [u]) if not g.is_empty]
+    poly = pcbnew.SHAPE_POLY_SET()
+    for x1, y1, x2, y2, w in segs:
+        part = pcbnew.SHAPE_POLY_SET()
+        seg = pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)),
+                                   pcbnew.VECTOR2I(pcbnew.FromMM(x2), pcbnew.FromMM(y2)),
+                                   pcbnew.FromMM(w + 2.0 * over))
+        seg.TransformToPolygon(part, pcbnew.FromMM(0.001), pcbnew.ERROR_INSIDE)
+        poly.BooleanAdd(part)
+    poly.Simplify()
+    rings = []
+    for i in range(poly.OutlineCount()):
+        ol = poly.Outline(i)
+        rings.append([(pcbnew.ToMM(ol.CPoint(k).x), pcbnew.ToMM(ol.CPoint(k).y)) for k in range(ol.PointCount())])
+    return rings
 
 
 def rail_priorities(existing, nets_desc):
@@ -297,11 +310,10 @@ def pour_rails(board_path, cons, out, layers=None):
     """D71cj D: a [power] rail that is routed as a spine (no zone of its net on the board) gets a corridor pour: per outer
     copper layer that carries its spine, one zone named `fluxplace-rail:<net>` whose outline is the spine grown by
     `[route] power_pour_over_mm`, pad connection solid, priority above every existing zone (GND/plane zones keep theirs).
-    Re-run: zones with the same name are removed first. Shapely missing -> nothing poured ("no shapely").
+    Re-run: zones with the same name are removed first. Geometry is pcbnew's own (PHASE3C E): no shapely needed.
     Guard: DRC shorts, opens and errors must all be no higher after the pour, else nothing is written (`dropped`).
     -> {added: [net/layer], kept, skipped: {net: reason}, dropped, dropped_reason, before/after measures}"""
     import pcbnew
-    from . import planes as PL
     from . import drcguard as DG
     from . import gaps as GP
     rec = {"added": [], "kept": [], "skipped": {}, "dropped": False, "dropped_reason": None, "skip_all": None,
@@ -310,11 +322,6 @@ def pour_rails(board_path, cons, out, layers=None):
     rails = sorted((n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm")),
                    key=lambda n: -(current_a(pw.get(n)) or 0.0))
     if not rails:
-        return rec
-    try:
-        import shapely  # noqa: F401
-    except ImportError:
-        rec["skip_all"] = "no shapely"
         return rec
     over = float(((cons or {}).get("route") or {}).get("power_pour_over_mm", POUR_OVER_MM))
     zoned = GP._zone_nets(board_path)
@@ -352,22 +359,24 @@ def pour_rails(board_path, cons, out, layers=None):
                 z.SetLocalClearance(ref.GetLocalClearance())
                 z.SetThermalReliefGap(ref.GetThermalReliefGap())
                 z.SetThermalReliefSpokeWidth(ref.GetThermalReliefSpokeWidth())
-            poly = pcbnew.SHAPE_POLY_SET()
-            for ring in rings:
-                poly.NewOutline()
+            for ring in rings:                                # AddOutline copies the chain; SetOutline(local poly) left a
+                ch = pcbnew.SHAPE_LINE_CHAIN()                # dangling pointer (segfault on the second zone, PHASE3C E)
                 for x, y in ring:
-                    poly.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
-            z.SetOutline(poly)
+                    ch.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+                ch.SetClosed(True)
+                z.Outline().AddOutline(ch)
             b.Add(z)
             work.append(z)
             rec["added"].append(f"{net}/{b.GetLayerName(L)}")
+    rec["attempted"] = list(rec["added"])               # the zones built before the guard (kept or dropped)
     if not work:
         return rec
     m = DG.measure(board_path)                           # the input file is untouched so far
     rec["before"] = {k: m[k] for k in ("opens", "shorts", "errors")}
     rec["shorts_before"] = rec["before"]["shorts"]
-    PL.refill(b)
-    b.Save(out)
+    b.Save(out)                                          # unfilled; the zone fill runs in a fresh helper process (opengate.refill):
+    from . import opengate as OG                         # in-process ZONE_FILLER segfaults after a second new zone (PHASE3C E)
+    OG.refill(out)
     src, dst = os.path.splitext(board_path)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_pro"
     if os.path.exists(src):
         import shutil

@@ -898,7 +898,7 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     from . import pairfb as PFB
-    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
+    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage handed over (state c): still never plain nets for the router (PHASE3C)
     skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)

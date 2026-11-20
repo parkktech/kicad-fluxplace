@@ -946,9 +946,29 @@ def _r_krt_region(base, out, gaps, ctx):
     return last
 
 
+def _r_pairgroup(base, out, gaps, ctx):
+    """PHASE3C C.3: the pairs of the target gaps re-laid per connector group (pairsonly.regroup). No candidate when
+    nothing is laid: `out` is removed, so the attempt is 'no output' and the board stays."""
+    from . import pairsonly as PO, routediag as RD, netclass as NC, pairaudit as PA
+    want = {n for g in gaps if g["kind"].startswith("pair-") for n in g["nets"]}
+    cons = ctx["cons"]
+    B = RD.load(base)
+    pairs = [p for p in PA.pair_list(NC.classify(B, cons, None)) if set(p) & want]
+    if not pairs:
+        return {"status": "no pair"}
+    rep = PO.regroup(base, out, cons, None, pairs, log=ctx["log"], budget_s=ctx["budget_s"])
+    laid = sum(len(g["laid"]) for g in rep["groups"].values())
+    if not laid:
+        if os.path.exists(out):
+            os.remove(out)
+        return {"status": "nothing laid", "pairs": len(pairs)}
+    return {"status": "ran", "laid": laid, "failed": len(rep["failed"]), "pairs": len(pairs)}
+
+
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
-         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune}
+         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
+         "pairgroup": _r_pairgroup}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
@@ -959,8 +979,11 @@ DISPATCH = {
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
+    "pair-open": ["pairgroup"],
+    "pair-asym": ["pairgroup"],
+    "pair-skew": ["pairgroup"],     # no "tune" rung: tune_pairs needs a master/slave map and a skew limit the rung ctx lacks
 }
-LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0"}  # every other rung is L0
+LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
 
 def _tool():

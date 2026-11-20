@@ -138,10 +138,10 @@ def test_blocker_nets_and_uncoupled_limit():
     assert FB.uncoupled_limit({}, ("X_P", "X_N")) == FB.DEFAULT_UNCOUPLED_MM
 
 
-def test_router_skip_keeps_handed_over_pairs_off_the_skip_list(tmp_path):
+def test_router_skip_keeps_handed_over_pairs_on_the_skip_list(tmp_path):
     todo = ["A_P", "A_N", "B_P", "B_N", "RF1", "X"]
     ctl = {n: "pair" for n in todo[:4]} | {"RF1": "rf"}
-    assert FB.router_skip(todo, ctl, {"B_P", "B_N"}, "exclude") == ["A_P", "A_N", "RF1"]
+    assert FB.router_skip(todo, ctl, {"B_P", "B_N"}, "exclude") == ["A_P", "A_N", "B_P", "B_N", "RF1"]     # PHASE3C: handed-over legs too
     assert FB.router_skip(todo, ctl, set(), "route") == []
     d = tmp_path / "5-pairs"
     d.mkdir()
