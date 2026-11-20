@@ -390,3 +390,33 @@ def test_fanout_alternative_routes_a_blocked_pin_to_a_via_site(tmp_path):
     assert clean(B, {"SIG"}) >= 0.15 - 1e-6
     off = {"pins": [{"ref": "U1", "pin": "1", "net": "SIG", "ok": False}], "params": res["params"]}
     assert FA.rescue(b, off, {"escape": {"alternatives": False}}, None)["left"] == 1
+
+
+# ---- break-out of a pair whose gap is below the routing clearance (W14: the three USB pairs, gap 0.127 against 0.130) ----
+
+def _breakout_case(gap, pass_gap):
+    from fluxplace import pairgeo as G, pairlay as PL
+    w, clr = 0.153, 0.130
+    items = G.Items(["F.Cu", "B.Cu"])
+    pads = tuple({"ref": "J1", "num": n, "x": x, "y": 0.0, "w": 0.2, "h": 0.7, "angle": 0.0, "net": net, "layers": ["F.Cu"]}
+                 for n, x, net in (("1", -0.2, "D_P"), ("2", 0.2, "D_N")))
+    half = (w + gap) / 2
+    ends = ((-half, 1.5), (half, 1.5))                       # the coupled legs start 1.5 mm above the pads
+    for (x, _y), net in zip(ends, ("D_P", "D_N")):           # ... and are already claimed, as lay_section does
+        items.seg((x, 1.5), (x, 6.0), w, "F.Cu", net)
+    return PL.breakout(items, pads, ends, (0.0, 1.0), "F.Cu", w, ("D_P", "D_N"), clr, (), gap=gap if pass_gap else None)
+
+
+def test_breakout_reaches_legs_closer_than_the_clearance():
+    got = _breakout_case(0.127, True)
+    assert got[0] is not None, got                           # both legs broken out
+    assert abs(got[2]) < 0.01                                # symmetric pads: no skew
+
+
+def test_breakout_without_the_gap_is_refused_by_its_own_partner():
+    got = _breakout_case(0.127, False)                       # the old behaviour, kept when no gap is given
+    assert got[0] is None and "break-out" in got[1]
+
+
+def test_breakout_gap_above_clearance_is_unchanged():
+    assert _breakout_case(0.25, False)[0] is not None and _breakout_case(0.25, True)[0] is not None
