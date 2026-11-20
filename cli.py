@@ -1920,6 +1920,8 @@ def cmd_tune(a):
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
                         log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
+    from fluxplace import tune as TU
+    TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")

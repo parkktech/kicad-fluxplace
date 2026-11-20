@@ -309,3 +309,23 @@ def test_zero_limit_allows_no_break_out_retry(tmp_path):
     r = rep["pairs"][0]
     assert len(calls) == 1 and r["status"] == "kept_original" and r["breakout_limit"] == 0.0
     assert "closest approach" in r["reason"] and "breakout_retry" not in r
+
+
+def test_rerouted_pair_on_discarded_group_board_counts_failed(tmp_path, monkeypatch):
+    """PHASE3E 4b: a group board that does not gain is discarded, so its "rerouted" pairs are failed, not laid."""
+    from fluxplace import netclass as NC, constraints as C, zgeom as ZG
+    board = tmp_path / "in.kicad_pcb"
+    board.write_text("x")
+    pa, pb = ("A_P", "A_N"), ("B_P", "B_N")
+    monkeypatch.setattr(RD, "load", lambda p: None)
+    monkeypatch.setattr(NC, "classify", lambda *a, **k: None)
+    monkeypatch.setattr(PO, "groups", lambda B, cls, pairs: {"U1": [pa, pb]})
+    monkeypatch.setattr(PO, "_complete", lambda board_, members, cons: 5)     # the group board never gains (5 complete before)
+    monkeypatch.setattr(C, "fab_profile", lambda cons: {"min_clearance_mm": 0.127})
+    monkeypatch.setattr(ZG, "family_of", lambda cons, p: None)
+
+    def fake_reroute(cur, tmp, names, cons, spec, budget=None, **k):
+        return {"pairs": [{"pair": n, "status": "rerouted"} for n in names]}
+    monkeypatch.setattr(PO, "reroute", fake_reroute)
+    rep = PO.regroup(str(board), str(tmp_path / "out.kicad_pcb"), {}, None, [pa, pb], log=lambda m: None)
+    assert rep["groups"]["U1"]["laid"] == [] and sorted(rep["failed"]) == sorted([pa, pb])

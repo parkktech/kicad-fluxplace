@@ -133,6 +133,17 @@ def _lock_of(path):
     return os.path.join(os.path.dirname(path), "~" + os.path.basename(path) + ".lck")
 
 
+def lock_tuned(path, pairs):
+    """PHASE3E 8: the tuned pairs' copper is locked in `path` (later stages route around it). The one place both the
+    `tune` CLI and the krt stage (pipeline.st_tune) lock; pairs = {master: slave}. -> locked segment/via/arc count."""
+    from . import boardtext as BT
+    src = open(path, errors="surrogateescape").read()
+    src, n = BT.lock_nets(src, set(pairs) | set(pairs.values()))
+    with open(path, "w", errors="surrogateescape") as fh:
+        fh.write(src)
+    return n
+
+
 def cleanup_work(work):
     """Remove every temp file a tune run makes for `work` (the working copy, its .try copy, DRC reports, project sidecars and
     the KiCad lock files of those copies). Safe to call twice."""

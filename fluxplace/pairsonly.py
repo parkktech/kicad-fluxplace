@@ -372,26 +372,34 @@ def regroup(board, out, cons, spec, pairs, log=print, budget_s=None):
         tmps.append(tmp)
         rep = reroute(cur, tmp, names(members), cons, spec, budget=step, allow_shove=True, unlock=True, log=log)
         st = {r["pair"]: r["status"] for r in rep["pairs"]}
+        live = {x for x in names(members) if st.get(x) == "rerouted"}   # "rerouted" lives only on a kept group board
         if sum(st.get(x) in ("rerouted", "already_ok") for x in names(members)) > before:
             cur = tmp
+        else:
+            live = set()
         gap_retry = False
         fails = [p for p in members if st.get(f"{p[0]}/{p[1]}") not in ("rerouted", "already_ok")]
         fams = {ZG.family_of(cons, p[0]) for p in fails} - {None}
         fams = {f for f in fams if "gap_mm" not in (cons.get("pairs", {}).get(f) or {})}
-        if fails and fams and left - (time.monotonic() - t0) > 1:
+        remaining = total - (time.monotonic() - t0)              # once per check: elapsed is not subtracted twice
+        if fails and fams and remaining > 1:
             cons2 = copy.deepcopy(cons)
             for f in fams:
                 cons2["pairs"][f]["gap_mm"] = gap
             tmp2 = f"{out}.g{i}r.kicad_pcb"
             tmps.append(tmp2)
             before2 = _complete(cur, members, cons)
-            rep2 = reroute(cur, tmp2, names(fails), cons2, spec, budget=max(1.0, left - (time.monotonic() - t0)), allow_shove=True,
+            rep2 = reroute(cur, tmp2, names(fails), cons2, spec, budget=max(1.0, remaining), allow_shove=True,
                            unlock=True, log=log)
             st2 = {r["pair"]: r["status"] for r in rep2["pairs"]}
             if _complete(tmp2, members, cons) > before2:
                 cur, gap_retry = tmp2, True
+                live |= {x for x in names(fails) if st2.get(x) == "rerouted"}
                 st.update(st2)
             log(f"  regroup {g}: gap_mm {gap:g} retry on {', '.join(sorted(fams))}: {'kept' if gap_retry else 'no gain'}")
+        for x in names(members):                             # a "rerouted" pair whose group board was discarded is failed
+            if st.get(x) == "rerouted" and x not in live:
+                st[x] = "board_discarded"
         ok = [x for x in names(members) if st.get(x) in ("rerouted", "already_ok")]
         for x in names(members):
             final[x] = st.get(x, "not_reached")

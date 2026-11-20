@@ -968,13 +968,10 @@ def st_tune(c, n, board):
     if rc != 0:
         return {"verdict": "fail", "line": _last_line(text) or f"exit {rc}", "board": board,
                 "next": ["tune failed: " + os.path.join(d, "stage.log")]}
-    from . import boardtext as BT, graph as G
+    from . import boardtext as BT, graph as G, tune as TU
     src = open(out, errors="surrogateescape").read()
     names = {BT.net_name(b) for _i, _j, _k, b in BT.scan(src)} - {None}
-    pairs = G.diff_pairs(names)
-    src, _n = BT.lock_nets(src, set(pairs) | set(pairs.values()))   # tuned pair copper is locked: later stages route around it
-    with open(out, "w", errors="surrogateescape") as fh:
-        fh.write(src)
+    TU.lock_tuned(out, G.diff_pairs(names))                       # tuned pair copper is locked: later stages route around it
     return {"verdict": "fail" if over else "pass", "board": out,
             "line": f"{len(over)} pair(s) still over skew" if over else "pairs within skew",
             "next": [_clip(l.strip(), 100) for l in over[:3]]}

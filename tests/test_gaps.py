@@ -894,3 +894,64 @@ def test_no_gain_rounds_overridable_by_flow(monkeypatch, loop):
     cons = {"flow": {"no_gain_rounds": 2}}
     res = _close(loop["board"], loop["work"], cons=cons, attempts=loop["attempts"], log=lambda m: None)
     assert res["stop"] == "no gain 2 rounds" and res["attempts"] == 2
+
+
+def test_ctx_protect_round_trips_job_json(monkeypatch, tmp_path):
+    """PHASE3E 1: the protect set is written sorted and rebuilt as a set in the child rung."""
+    seen = {}
+
+    def fake_run(argv, **kw):
+        job = argv[-1]
+        seen["job"] = json.load(open(job))
+        out = seen["job"]["out"]
+        json.dump({}, open(out + ".job.out.json", "w"))
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(GP.subprocess, "run", fake_run)
+    ctx = {"budget_s": 60, "protect": {"A_P", "A_N"}, "cons_path": None, "kicad_cli": "kicad-cli"}
+    GP._call_rung("krt", str(tmp_path / "b.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [], ctx)
+    assert seen["job"]["ctx"]["protect"] == ["A_N", "A_P"]
+    got = {}
+    monkeypatch.setitem(GP.RUNGS, "krt", lambda base, out, gaps, c: got.update(protect=c["protect"]) or {})
+    job = tmp_path / "j.job.json"
+    json.dump(seen["job"], open(job, "w"))
+    GP._rung_job(str(job))
+    assert got["protect"] == {"A_P", "A_N"} and isinstance(got["protect"], set)
+
+
+def test_pairgroup_rung_budget_is_per_pair_capped_by_close_budget(monkeypatch, tmp_path):
+    """PHASE3E 7: budget = PER_PAIR_S x pairs, never more than the close budget left."""
+    from fluxplace import pairsonly as PO, routediag as RD, netclass as NC, pairaudit as PA
+    monkeypatch.setattr(RD, "load", lambda p: None)
+    monkeypatch.setattr(NC, "classify", lambda *a, **k: None)
+    monkeypatch.setattr(PA, "pair_list", lambda _c: [("A_P", "A_N"), ("B_P", "B_N")])
+    seen = []
+    monkeypatch.setattr(PO, "regroup", lambda base, out, cons, spec, pairs, log=None, budget_s=None:
+                        seen.append(budget_s) or {"groups": {}, "failed": []})
+    gaps = [{"kind": "pair-skew", "nets": ["A_P", "A_N", "B_P", "B_N"]}]
+    ctx = {"cons": {}, "log": lambda m: None, "budget_s": 10000.0}
+    GP._r_pairgroup(str(tmp_path / "b"), str(tmp_path / "o"), gaps, ctx)
+    ctx["budget_s"] = 50.0
+    GP._r_pairgroup(str(tmp_path / "b"), str(tmp_path / "o"), gaps, ctx)
+    assert seen == [2 * PO.PER_PAIR_S, 50.0]
+
+
+def test_no_gain_counts_quality_only_rounds(monkeypatch, loop):
+    """PHASE3E 9: accepts that only lower `quality` (the last score term) are no gain and stop the close."""
+    def counting(base, out, gaps, ctx):
+        shutil.copy(base, out)
+        with open(out, "a") as fh:
+            fh.write("#%d" % counting.n)
+        counting.n += 1
+        return {"mode": "count"}
+    counting.n = 0
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, counting)
+    accepts = {"n": 0}
+
+    def accept(*a, **k):
+        accepts["n"] += 1
+        return True, ""
+    monkeypatch.setattr(GP, "_accept", accept)
+    monkeypatch.setattr(GP, "score", lambda m, gaps: [0] * 9 + [-accepts["n"]])
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] == "no gain 5 rounds" and res["attempts"] == GP.NO_GAIN_ROUNDS == 5

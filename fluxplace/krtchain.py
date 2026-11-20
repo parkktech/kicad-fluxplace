@@ -190,14 +190,17 @@ def _post(best, d, planes, R):
     return {"snap": snap, "ties": ties}
 
 
-def _run_pairgroups(c, d, src, dst, failed_legs, budget_s):
+def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=()):
     """PHASE3C C.1 `pairgroups`: regroup the incomplete pairs (pairaudit) per connector group -> dst. No incomplete pair:
     dst is a copy of src. Legs of the pairs still failed go to `failed_legs` (the route step leaves them to the pair stage).
-    A failure copies src and records the error: the routed board stands. Always returns rc 0."""
+    PHASE3E 4: budget = PER_PAIR_S x incomplete pairs, capped by budget_s (the stage budget left). Any exception puts
+    every leg of every incomplete pair (all `pair_legs` until the audit ran) in failed_legs: a crashed step never
+    plain-routes a pair. A failure copies src and records the error: the routed board stands. Always returns rc 0."""
     import json
     from . import pairsonly as PO, pairaudit as PA, netclass as NC, routediag as RD, constraints as C
     spec = getattr(c, "spec", None)
     lines = []
+    legs = set(pair_legs)
     try:
         B = RD.load(src)
         pairs = PA.pair_list(NC.classify(B, c.cons, spec))
@@ -205,15 +208,20 @@ def _run_pairgroups(c, d, src, dst, failed_legs, budget_s):
         opn = {x for x, k in RC.text_open(B).items() if k}
         aud = PA.audit(B, pairs, c.cons, opn) if pairs else {}
         todo = [p for p in pairs if aud[p]["status"] != "complete" and not (set(p) & nopair)]
+        legs = {x for p in todo for x in p}
         if todo:
-            rep = PO.regroup(src, dst, c.cons, spec, todo, log=lines.append, budget_s=budget_s)
+            budget = min(PO.PER_PAIR_S * len(todo), float(budget_s))
+            if budget <= 0:
+                raise RuntimeError("no stage budget left for pairgroups")
+            rep = PO.regroup(src, dst, c.cons, spec, todo, log=lines.append, budget_s=budget)
             failed_legs.update(x for p in rep["failed"] for x in p)
         else:
             shutil_copy(src, dst)
             rep = {"skipped": "no incomplete pair"}
     except Exception as e:                                   # noqa: BLE001 - a worse route, never a lost board
+        failed_legs.update(legs)
         shutil_copy(src, dst)
-        rep = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        rep = {"error": f"{type(e).__name__}: {str(e)[:160]}", "failed_legs": sorted(legs)}
         lines.append(rep["error"])
     open(os.path.splitext(dst)[0] + ".json", "w").write(json.dumps(rep, indent=1, default=list))
     open(os.path.splitext(dst)[0] + ".log", "w").write("\n".join(lines) + "\n")
@@ -256,12 +264,16 @@ def run(c, n, board, runner=run_step):
         rails = {}
         rails_error = str(e)[:120]
     rail_nets = sorted(rails)
+    pour_rail_nets = [n for n in rail_nets if PWR.is_pour(c.cons, n)]     # PHASE3E 5: only pour rails are outer-only
+    other_rail_nets = [n for n in rail_nets if n not in pour_rail_nets]
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
-    if rail_nets:
-        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=rail_nets)))
+    if pour_rail_nets:
+        steps.append(("rails-pour", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=pour_rail_nets)))
+    if other_rail_nets:
+        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets)))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
-        return _run_pairgroups(c, d, s, o, failed_legs, max(60.0, min(CAP_S, budget - (time.time() - t0))))
+        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn)
     steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
     def _route_nets():
         return sorted(allnets - failed_legs) if failed_legs else ("*",)
@@ -293,7 +305,7 @@ def run(c, n, board, runner=run_step):
             else:
                 rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name)
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails", "pairgroups") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails", "rails-pour", "pairgroups") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -389,7 +401,7 @@ def _rail_refused(rail_nets, rows):
             for v in x:
                 walk(v, owner)
     for r in rows:
-        if r["step"] in ("rails", "route", "diff") and r.get("summary") and os.path.exists(r["summary"]):
+        if r["step"] in ("rails", "rails-pour", "route", "diff") and r.get("summary") and os.path.exists(r["summary"]):
             try:
                 walk(json.load(open(r["summary"])))
             except (OSError, ValueError):

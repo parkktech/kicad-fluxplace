@@ -379,30 +379,65 @@ def pour_rails(board_path, cons, out, layers=None):
                     ch.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
                 ch.SetClosed(True)
                 z.Outline().AddOutline(ch)
-            b.Add(z)
-            work.append(z)
-            rec["added"].append(f"{net}/{b.GetLayerName(L)}")
-    rec["attempted"] = list(rec["added"])               # the zones built before the guard (kept or dropped)
+            work.append((f"{net}/{b.GetLayerName(L)}", z))
+    rec["attempted"] = [lab for lab, _ in work]          # the zones built before the guard (kept or dropped)
     if not work:
         return rec
+    from . import opengate as OG
     m = DG.measure(board_path)                           # the input file is untouched so far
-    rec["before"] = {k: m[k] for k in ("opens", "shorts", "errors")}
-    rec["shorts_before"] = rec["before"]["shorts"]
-    b.Save(out)                                          # unfilled; the zone fill runs in a fresh helper process (opengate.refill):
-    from . import opengate as OG                         # in-process ZONE_FILLER segfaults after a second new zone (PHASE3C E)
-    OG.refill(out)
+    base = _guard_measure(m, DG)
+    rec["before"] = base
+    rec["shorts_before"] = base["shorts"]
     src, dst = os.path.splitext(board_path)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_pro"
-    if os.path.exists(src):
+    if os.path.exists(src):                              # before the first refill
         import shutil
         shutil.copy(src, dst)
-    m = DG.measure(out)
-    rec["after"] = {k: m[k] for k in ("opens", "shorts", "errors")}
-    rec["shorts_after"] = rec["after"]["shorts"]
-    worse = [k for k in ("shorts", "opens", "errors") if rec["after"][k] > rec["before"][k]]
-    if worse:
-        rec.update(dropped=True, dropped_reason=", ".join(f"{k} {rec['before'][k]} -> {rec['after'][k]}" for k in worse), added=[])
-        if os.path.exists(out):
-            os.remove(out)
-    else:
-        rec["kept"] = list(rec["added"])
+
+    def trial(z):                                        # zone added to the accepted board, unfilled save, helper refill
+        b.Add(z)
+        b.Save(out)                                      # unfilled; the zone fill runs in a fresh helper process (opengate.refill):
+        OG.refill(out)                                   # in-process ZONE_FILLER segfaults after a second new zone (PHASE3C E)
+        return _guard_measure(DG.measure(out), DG)
+
+    def drop(z):                                         # back to the accepted set (kept zones only)
+        b.Remove(z)
+        b.Save(out)
+        OG.refill(out)
+
+    kept, dropped, cur = pour_guard(work, base, trial, drop)
+    rec["kept"], rec["added"] = list(kept), list(kept)
+    rec["after"] = cur
+    rec["shorts_after"] = cur["shorts"]
+    rec["zones"] = [{"zone": lab, "kept": True} for lab in kept] + [{"zone": lab, "kept": False, "reason": why}
+                                                                  for lab, why in dropped]
+    if dropped:
+        rec.update(dropped=True, dropped_reason="; ".join(f"{lab}: {why}" for lab, why in dropped))
+    if not kept and os.path.exists(out):
+        os.remove(out)
     return rec
+
+
+GUARD_KEYS = ("shorts", "errors", "track_opens")         # a zone is refused when any of these rises (zone islands are not here)
+
+
+def _guard_measure(m, DG):
+    """The pour guard's view of a DRC measure: track/via/pad opens only (zone islands are close()'s pourisland job)."""
+    return {"opens": m["opens"], "shorts": m["shorts"], "errors": m["errors"],
+            "track_opens": DG.open_split(m.get("drc") or {})["track_opens"]}
+
+
+def pour_guard(items, base, trial, drop):
+    """PHASE3E 2: rails poured ONE ZONE AT A TIME. items = [(label, zone)]; trial(zone) adds it to the accepted board
+    and returns the guard measure; drop(zone) removes it again. A zone is kept only when no GUARD_KEY rose against
+    the accepted state. -> (kept labels, [(label, reason)] dropped, measure of the final accepted board)"""
+    cur, kept, dropped = base, [], []
+    for label, z in items:
+        m = trial(z)
+        worse = [k for k in GUARD_KEYS if m[k] > cur[k]]
+        if worse:
+            drop(z)
+            dropped.append((label, ", ".join(f"{k} {cur[k]} -> {m[k]}" for k in worse)))
+        else:
+            kept.append(label)
+            cur = m
+    return kept, dropped, cur

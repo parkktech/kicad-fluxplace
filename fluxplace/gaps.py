@@ -983,7 +983,10 @@ def _r_pairgroup(base, out, gaps, ctx):
     pairs = [p for p in PA.pair_list(NC.classify(B, cons, None)) if set(p) & want]
     if not pairs:
         return {"status": "no pair"}
-    rep = PO.regroup(base, out, cons, None, pairs, log=ctx["log"], budget_s=ctx["budget_s"])
+    budget = min(PO.PER_PAIR_S * len(pairs), float(ctx["budget_s"]))     # PHASE3E 7: per pair, capped by the close budget left
+    if budget <= 0:
+        return {"status": "no budget", "pairs": len(pairs)}
+    rep = PO.regroup(base, out, cons, None, pairs, log=ctx["log"], budget_s=budget)
     laid = sum(len(g["laid"]) for g in rep["groups"].values())
     if not laid:
         if os.path.exists(out):
@@ -1044,7 +1047,7 @@ def _repo_root():
 
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
 
-_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir")
+_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect")
 JOB_OUT_KRT = "_krt_last"
 
 
@@ -1055,9 +1058,11 @@ def _call_rung(name, base, out, gaps, ctx):
         return RUNGS[name](base, out, gaps, ctx)
     job, jout = out + ".job.json", out + ".job.out.json"
     try:
+        cj = {k: ctx.get(k) for k in _CTX_JSON_KEYS}
+        if cj.get("protect") is not None:
+            cj["protect"] = sorted(cj["protect"])          # a set is not JSON; the child rebuilds it
         with open(job, "w") as fh:
-            json.dump({"name": name, "base": base, "out": out, "gaps": gaps,
-                       "ctx": {k: ctx.get(k) for k in _CTX_JSON_KEYS}}, fh, default=str)
+            json.dump({"name": name, "base": base, "out": out, "gaps": gaps, "ctx": cj}, fh, default=str)
         try:
             p = subprocess.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
                                text=True, timeout=ctx["budget_s"] + 120, cwd=_repo_root())
@@ -1085,6 +1090,8 @@ def _rung_job(job_path):
     with open(job_path) as fh:
         j = json.load(fh)
     cj = j["ctx"]
+    if cj.get("protect") is not None:
+        cj["protect"] = set(cj["protect"])
     cons = C.load(cj.get("cons_path")) if cj.get("cons_path") else {}
     ctx = dict(cj, cons=cons, log=lambda m: print(m, file=sys.stderr), inproc=True)
     summ = RUNGS[j["name"]](j["base"], j["out"], j["gaps"], ctx) or {}
@@ -1111,7 +1118,11 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     cons_hash = _cons_hash(cons_path)
     t0 = time.time()
     budget_s = budget_min * 60
-    m = _remeasure(best, kicad_cli)
+    try:
+        m = _remeasure(best, kicad_cli)
+    except Exception as e:                               # PHASE3E 3: the initial measure must not kill close()
+        log(f"initial refill failed ({str(e)[:80]}); measuring the copy unrefilled")
+        m = dict(measure(best, kicad_cli))
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     relax = relax_nets(m["gaps"])
@@ -1140,7 +1151,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     stop, level, n_att, last = None, "L0", 0, {}
     n_packets, krt_state = 0, {}
     no_gain = int((cons.get("flow") or {}).get("no_gain_rounds", NO_GAIN_ROUNDS))
-    best_vec, stale = score(m, m["gaps"]), 0
+    stale = 0
     ai_mode = (cons.get("ai") or {}).get("mode", "packet")
 
     def attempt(r, kind, rung, targets):
@@ -1149,6 +1160,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         key = (kind, rung, fp)
+        if rung == "pairgroup":                              # PHASE3E 7: per pair, so an unrelated accept re-lays nothing
+            key = (kind, rung, "pairs:" + ",".join(sorted(nets)))
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         after, runs, why, summ, cleanup = None, 0, "", {}, []
@@ -1246,6 +1259,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             break
         hit = False
         packets_before = n_packets
+        round_vec0 = score(m, m["gaps"])                 # PHASE3E 9: the round's start, for the no-gain counter
         for kind in ORDER:
             targets = [g for g in m["gaps"] if g["kind"] == kind]
             if not targets or kind not in DISPATCH:
@@ -1273,8 +1287,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             stop = "packets" if n_packets > packets_before else "flat"
             break
         vec = score(m, m["gaps"])
-        stale = 0 if vec < best_vec else stale + 1
-        best_vec = min(best_vec, vec)
+        # PHASE3E 9: a round is a gain only when a term other than `quality` (the last slot) went down; accepts that
+        # only polish quality count as no gain, so slow polishing stops
+        gain = any(v < v0 for v, v0 in zip(vec[:-1], round_vec0[:-1]))
+        stale = 0 if gain else stale + 1
         if stale >= no_gain:
             stop = f"no gain {no_gain} rounds"
             break

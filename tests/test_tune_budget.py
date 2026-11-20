@@ -136,3 +136,15 @@ def test_cli_skips_zone_refill_when_no_track_was_accepted(monkeypatch):
     assert calls == []
     cli._tune_refill("changed", {"accepted": 1, "stopped": None})
     assert calls == ["changed"]
+
+
+def test_lock_tuned_locks_only_the_tuned_pair_copper(tmp_path):
+    """PHASE3E 8: the one lock helper both `tune` and the krt tune step use."""
+    from fluxplace import tune as TU2
+    p = tmp_path / "b.kicad_pcb"
+    seg = '(segment\n\t\t(start 0 0)\n\t\t(end 1 0)\n\t\t(width 0.2)\n\t\t(layer "F.Cu")\n\t\t(net "%s")\n\t)\n'
+    p.write_text("(kicad_pcb\n\t" + seg % "P" + "\t" + seg % "N" + "\t" + seg % "X" + ")\n")
+    assert TU2.lock_tuned(str(p), {"P": "N"}) == 2
+    from fluxplace import boardtext as BT
+    txt = p.read_text()
+    assert {BT.net_name(b) for _i, _j, _k, b in BT.scan(txt) if BT.is_locked(b)} == {"P", "N"}

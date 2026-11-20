@@ -271,7 +271,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     names = [s["step"] for s in r["steps"]]
-    assert names == ["plane-GND", "rails", "pairgroups", "diff", "route"]
+    assert names == ["plane-GND", "rails-pour", "pairgroups", "diff", "route"]      # VBAT is a pour rail (PHASE3E 5)
     rails_cmd = calls[1]
     assert os.path.basename(rails_cmd[1]) == "route.py"
     assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
@@ -316,3 +316,53 @@ def test_rail_refused_and_inner_report(tmp_path, monkeypatch):
     from fluxplace import power as PWR
     monkeypatch.setattr(PWR, "rail_inner_mm", lambda b, nets: {"VBAT": 3.2})
     assert K._rail_inner("x", ["VBAT"]) == {"VBAT": 3.2}
+
+
+def test_ipc_outer_routes_non_pour_rail_on_all_signal_layers(tmp_path, monkeypatch):
+    """PHASE3E 5: outer-only (ipc-outer) is for pour rails; a non-pour 0.15 mm rail is routed on every signal layer."""
+    from fluxplace import power as PWR, gaps as GP
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0, 0])
+    c.cons["route"] = {"power_spine": "ipc-outer", "whole_post": False}
+    c.cons["power"] = {"V5A": {"pour": True}, "SIG5": {}}
+    sig = ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]
+    monkeypatch.setattr(K, "plane_plan", lambda b: (sig, [("GND", "In1.Cu")]))
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: set())
+    monkeypatch.setattr(PWR, "route_widths", lambda cons, **k: {"V5A": 1.0, "SIG5": 0.15})
+    monkeypatch.setattr(PWR, "is_pour", lambda cons, n: n == "V5A")
+    monkeypatch.setattr(PWR, "pour_rails", lambda *a, **k: {"added": [], "dropped": False, "skipped": {}})
+    monkeypatch.setattr(K, "_rail_inner", lambda b, n: {})
+    monkeypatch.setattr(K, "_rail_refused", lambda n, rows: [])
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    names = [s["step"] for s in r["steps"]]
+    assert "rails-pour" in names and "rails" in names
+    rails_cmds = {n: calls[names.index(n)] for n in ("rails-pour", "rails")}
+    layers = lambda cmd: cmd[cmd.index("--layers") + 1:next(i for i in range(cmd.index("--layers") + 1, len(cmd)) if cmd[i].startswith("--"))]
+    assert layers(rails_cmds["rails-pour"]) == ["F.Cu", "B.Cu"]
+    assert layers(rails_cmds["rails"]) == sig
+    assert "V5A" in rails_cmds["rails-pour"] and "SIG5" in rails_cmds["rails"]
+
+
+def test_pairgroups_budget_and_failed_legs_on_exception(tmp_path, monkeypatch):
+    """PHASE3E 4: budget = PER_PAIR_S x incomplete pairs (capped); a crash puts every pair leg in failed_legs."""
+    import types as T
+    from fluxplace import pairsonly as PO, pairaudit as PA, netclass as NC, routediag as RD, constraints as C
+    src, dst = str(tmp_path / "s.kicad_pcb"), str(tmp_path / "d.kicad_pcb")
+    open(src, "w").write("x")
+    c = T.SimpleNamespace(cons={}, spec=None)
+    monkeypatch.setattr(PA, "pair_list", lambda _c: [("A_P", "A_N"), ("B_P", "B_N")])
+    monkeypatch.setattr(NC, "classify", lambda *a, **k: None)
+    monkeypatch.setattr(C, "not_pairs", lambda cons: set())
+    monkeypatch.setattr(K.RC, "text_open", lambda B: {})
+    monkeypatch.setattr(PA, "audit", lambda B, pairs, cons, opn: {p: {"status": "open"} for p in pairs})
+    seen = []
+    monkeypatch.setattr(PO, "regroup", lambda *a, log=None, budget_s=None, **k: seen.append(budget_s) or {"failed": [], "groups": {}})
+    monkeypatch.setattr(RD, "load", lambda p: None)
+    failed = set()
+    K._run_pairgroups(c, str(tmp_path), src, dst, failed, 10_000.0)
+    assert seen == [2 * PO.PER_PAIR_S]
+    K._run_pairgroups(c, str(tmp_path), src, dst, failed, 30.0)
+    assert seen[-1] == 30.0
+    monkeypatch.setattr(RD, "load", lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    failed = set()
+    K._run_pairgroups(c, str(tmp_path), src, dst, failed, 100.0, pair_legs={"A_P", "A_N", "B_P", "B_N"})
+    assert failed == {"A_P", "A_N", "B_P", "B_N"} and os.path.exists(dst)

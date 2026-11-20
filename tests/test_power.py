@@ -182,3 +182,28 @@ def test_route_widths_ipc_outer_and_rail_layers():
     assert w >= r["width_outer"] and w < r["width_outer"] + 0.051 and w > power.SPINE_MM
     assert power.rail_layers(cons, ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]) == ["F.Cu", "B.Cu"]
     assert power.rail_layers({}, ["F.Cu", "In2.Cu"]) == ["F.Cu", "In2.Cu"]
+
+
+def test_pour_guard_one_zone_at_a_time(monkeypatch):
+    """PHASE3E 2: a zone that adds a track open is dropped; a zone that adds only a zone-island open is kept."""
+    from fluxplace import power as P
+    base = {"opens": 0, "shorts": 0, "errors": 0, "track_opens": 0}
+    added, dropped = [], []
+
+    def trial(z):
+        added.append(z)
+        return {"A": dict(base, track_opens=1, opens=1), "B": dict(base, opens=1)}[z]
+
+    kept, why, cur = P.pour_guard([("A/F.Cu", "A"), ("B/B.Cu", "B")], base, trial, dropped.append)
+    assert kept == ["B/B.Cu"] and [lab for lab, _ in why] == ["A/F.Cu"] and "track_opens 0 -> 1" in why[0][1]
+    assert dropped == ["A"] and added == ["A", "B"]
+    assert cur["opens"] == 1 and cur["track_opens"] == 0
+
+
+def test_pour_guard_measure_splits_zone_islands():
+    from fluxplace import power as P, drcguard as DG
+    d = {"unconnected_items": [
+        {"items": [{"description": "Zone [VBAT] on F.Cu"}]},
+        {"items": [{"description": "Track [VBAT]"}]}]}
+    m = P._guard_measure({"opens": 2, "shorts": 0, "errors": 0, "drc": d}, DG)
+    assert m["track_opens"] == 1 and m["opens"] == 2
