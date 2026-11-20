@@ -129,8 +129,11 @@ def relax_nets(gaps):
     return {n for g in gaps if g["kind"] in ("pair-open", "pair-asym", "pair-skew") for n in g["nets"]}
 
 
-def _r5_set(kind, targets, protect, relax):
-    """R5 set handed to the guard: a pair-kind try may relax the legs of its own target pairs; other kinds keep all."""
+def _r5_set(kind, targets, protect, relax, fallback=()):
+    """R5 set handed to the guard: a pair-kind try may relax the legs of its own target pairs; other kinds keep all.
+    PHASE3F A5: an open-free try may route the fallback pair legs among its targets (they are not protected then)."""
+    if kind == "open-free":
+        return protect - (set(fallback) & set(_nets(targets)))
     if kind is None or not kind.startswith("pair-"):
         return protect
     return protect - (relax & set(_nets(targets)))
@@ -269,7 +272,7 @@ def _cleanup_rungs(base_m, cand_m, kind):
     return [CLEANUP[k] for k in CLEANUP if k in kinds]
 
 
-R6_TERMS = ("hs_pair", "rf", "power", "power_mag")
+R6_TERMS = ("hs_pair", "rf", "power")
 
 
 def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
@@ -283,6 +286,12 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
     for t in R6_TERMS:                                  # never-worse: score() is lexicographic, so no trade on these
         if sc[t] > sb[t]:
             return False, f"R6 {t} worse {sb[t]:g}->{sc[t]:g}"[:120]
+    # PHASE3F A4: power_mag is judged per net; a rail may gain copper when that closes its own open
+    bm, cm = _mag_by_net(base_m.get("gaps") or []), _mag_by_net(cand_gaps)
+    bo, co = base_m.get("opens_by_net") or {}, cand_m.get("opens_by_net") or {}
+    for n in sorted(set(bm) | set(cm)):
+        if cm.get(n, 0) > bm.get(n, 0) and co.get(n, 0) >= bo.get(n, 0):
+            return False, f"R6 power_mag worse {n} {bm.get(n, 0):g}->{cm.get(n, 0):g}"[:120]
     base_sev = {g["id"]: g["sev"] for g in base_m.get("gaps") or [] if "sev" in g}
     cand_sev = {g["id"]: g["sev"] for g in cand_gaps if "sev" in g}
     target_ids = [t for t in target_ids if not (t in base_sev and t in cand_sev and cand_sev[t] < base_sev[t])]
@@ -290,6 +299,16 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
     return drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
                            score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
                            snap=_snapshot, protect=protect)
+
+
+def _mag_by_net(gs):
+    """{net: summed power-width/power-vias mag} of a gap list (PHASE3F A4)."""
+    out = {}
+    for g in gs:
+        if g["kind"] in ("power-width", "power-vias"):
+            k = (g.get("nets") or [g["id"]])[0]
+            out[k] = out.get(k, 0) + g.get("mag", 0)
+    return out
 
 
 class _RefillError(RuntimeError):
@@ -442,8 +461,31 @@ def _r_region(base, out, gaps, ctx):
                             constraints=ctx["cons_path"], kicad_cli=ctx["kicad_cli"], log=ctx["log"]))
 
 
+def _rail_widths(base, cons, layers, track_mm):
+    """PHASE3F A4: {rail net: width mm} (power.route_widths, zone nets excluded as in the pipeline); {} when unreadable."""
+    from . import power as PWR
+    try:                                                # layers = copper count (stackup weights), as krtchain passes it;
+        return PWR.route_widths(cons, layers=len(copper_layers(base)), track_mm=track_mm, exclude=_plane_nets(base))
+    except Exception:                                   # noqa: BLE001 - no rail widths is a worse route, not a failed rung
+        return {}
+
+
+def _plane_nets(board):
+    """Nets with a zone on a plane (non-signal) copper layer. A rail that only has corridor pours on signal layers is
+    still a rail: it keeps its width and is never a rip candidate (review fix: _zone_nets dropped every poured rail)."""
+    try:
+        import pcbnew
+        b = pcbnew.LoadBoard(board)
+        planes = [b.GetLayerID(n) for n in set(copper_layers(board)) - set(signal_layers(board))]
+        return {z.GetNetname() for z in b.Zones() if z.GetNetname() and not z.GetIsRuleArea()
+                and any(z.IsOnLayer(l) for l in planes)}
+    except Exception:                                   # noqa: BLE001
+        return set()
+
+
 def _krt_cmd(base, out, nets, ctx, layers=None):
-    """The KRT route command for `nets` (the pipeline's route command, the proven router). None when KRT is not found."""
+    """The KRT route command for `nets` (the pipeline's route command, the proven router). None when KRT is not found.
+    Rails route at their [power] width (`--power-nets`), not at signal width (PHASE3F A4)."""
     import types
     from . import routerloc as RL, routerules as RR, pipeline as P, krtchain as KC
     try:
@@ -451,12 +493,35 @@ def _krt_cmd(base, out, nets, ctx, layers=None):
     except RuntimeError:
         return None
     R = RR.rules(ctx["cons"], base, default=RR.DEFAULT_SIZE)
-    a = types.SimpleNamespace(router_py=rl["py"], router_dir=rl["dir"], layers=layers or signal_layers(base),
-                              track=None, clearance=None)
+    lyrs = layers or signal_layers(base)
+    a = types.SimpleNamespace(router_py=rl["py"], router_dir=rl["dir"], layers=lyrs, track=None, clearance=None)
     rflags = RR.flags(R, rl["dir"], ctx["work"])
-    return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], R=R, rflags=rflags)
+    pw = _rail_widths(base, ctx["cons"], lyrs, R["track"])
+    return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], power_nets=pw, R=R, rflags=rflags)
 
 
+RUNG_CAP_S = 900                                # PHASE3F A1: one rung gets at most this much of the close budget ([flow] rung_cap_min, minutes)
+
+
+def _rung_cap(cons):
+    return float((((cons or {}).get("flow") or {}).get("rung_cap_min", RUNG_CAP_S / 60))) * 60
+
+
+SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
+SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup")   # the rungs whose candidate depends on the gap list
+SPLIT_WHY = ("R1 ", "R2 ", "R4 ", "R5 ", "R6 ", "target gap still there")
+
+
+def _guard_refusal(why):
+    """True when a refusal came from the repair guard (a batch that a split may still close), not from a rung."""
+    return str(why).startswith(SPLIT_WHY)
+
+
+def _halves(gs):
+    """PHASE3F A3: two halves of a gap batch; neighbours stay together (sorted by 5 mm cell, then id)."""
+    o = sorted(gs, key=lambda g: (tuple(round(c / 5.0) for c in (g.get("at") or (0, 0))), g["id"]))
+    k = len(o) // 2
+    return [o[:k], o[k:]]
 NO_GAIN_ROUNDS = 5                              # close() stops after this many rounds without a lower score ([flow] no_gain_rounds)
 KRT_WINDOW_MM = 1.5                             # margin of the gap window whose nets KRT may rip and re-route
 KRT_MAX = 8                                     # gaps per _r_krt call
@@ -488,6 +553,14 @@ def _zone_nets(board):
         return set()
 
 
+def _pair_fallback_legs(ctx):
+    """PHASE3F A5: {leg: partner} for the non-gated pairs the pair builder refused (ctx["pair_fallback"], [p, n] each)."""
+    out = {}
+    for p, n in (ctx.get("pair_fallback") or []):
+        out[p], out[n] = n, p
+    return out
+
+
 def _r_krt(base, out, gaps, ctx):
     """KRT (the proven router) on the open nets, one net per call, each call on the board the previous one left.
     The nets with unlocked copper inside the gap window (zone nets and ctx["protect"] excluded) are passed as
@@ -500,26 +573,32 @@ def _r_krt(base, out, gaps, ctx):
     cp, protect = ctx.get("cons_path"), set(ctx.get("protect") or ())
     if _krt_cmd(base, out, ["x"], ctx) is None:
         return {"status": "krt not found"}
-    targets = [n for n in dict.fromkeys(_nets(gaps)) if n not in protect][:KRT_MAX]   # a pair leg is never routed alone
+    fb = _pair_fallback_legs(ctx)           # PHASE3F A5: a refused non-gated pair is routed by KRT, both legs in one call
+    targets = [n for n in dict.fromkeys(_nets(gaps)) if n not in protect or n in fb][:KRT_MAX]   # other pair legs: never alone
     if not targets:
         return {"status": "no plain net"}
-    skip = protect | _zone_nets(base) | set(targets)
+    skip = protect | _zone_nets(base) | set(targets) | set(_rail_widths(base, ctx["cons"], signal_layers(base), 0.0))
     res = {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 0, "ripped": 0}
-    cur, tmps, t0 = base, [], time.time()
+    cur, tmps, t0, done = base, [], time.time(), set()
     try:
         for k, net in enumerate(targets):
             if time.time() - t0 > ctx["budget_s"]:            # out of budget: what is closed so far is written
                 res["status"] = "budget"
                 break
+            if net in done:
+                continue
+            legs = next((list(pr) for pr in ctx.get("pair_fallback") or [] if net in pr), [net])   # [p, n] order
+            done |= set(legs)
             before = _krt_open(cur, cp)
-            rip = _krt_rip(cur, net, cp, skip)
+            anchor = next((x for x in legs if x in before), net)  # the window is the open leg's
+            rip = _krt_rip(cur, anchor, cp, skip)
             if rip is None:
                 continue
             nxt, js = f"{out}.n{k}.kicad_pcb", f"{out}.krt{k}.json"     # js outlives the temp board (AI packet)
             tmps.append(nxt)
             _clean_board(nxt)
             _sidecars(cur, nxt)
-            cmd = _krt_cmd(cur, nxt, [net], ctx)
+            cmd = _krt_cmd(cur, nxt, legs, ctx)
             at = cmd.index("--nets")
             cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in rip]] if rip else [])
             try:
@@ -543,10 +622,10 @@ def _r_krt(base, out, gaps, ctx):
             if not os.path.exists(nxt):
                 continue
             after = _krt_open(nxt, cp)
-            if net in after or (after - before):
-                continue                                      # not closed, or a trade: the previous board stands
+            if set(legs) & after or (after - before):
+                continue                                      # not closed (a pair: either leg), or a trade: previous stands
             cur = nxt
-            res["closed"] += 1
+            res["closed"] += len(legs)
         if cur != base:
             _copy(cur, out)
             _sidecars(cur, out)
@@ -573,6 +652,14 @@ def _r_prune(base, out, gaps, ctx):
     from . import launder as LA
     r = LA.prune_board(base, out, set(ctx.get("protect") or ()))
     return {"status": "pruned" if r["removed"] else "nothing dead", "removed": r["removed"], "nets": len(r["nets"])}
+
+
+def _r_maskcut(base, out, gaps, ctx):
+    """PHASE3F A7: the board-level mask openings re-cut after routing (thermal.recut); copper is not touched."""
+    from . import thermal as TH
+    r = TH.recut(base, ctx["cons"], out)
+    return {"status": "ran" if os.path.exists(out) else "no change", "blocks": r["blocks"], "inferred": r["inferred"],
+            "skipped": len(r["skipped"])}
 
 
 def _r_snapiter(base, out, gaps, ctx):
@@ -920,6 +1007,7 @@ def _r_krt_region(base, out, gaps, ctx):
         return {"status": "no net"}
     _sidecars(base, out)
     rip = out + ".rip.kicad_pcb"
+    rails = set(_rail_widths(base, ctx["cons"], signal_layers(base), 0.0))     # PHASE3F A4: a rail is never ripped
     last = {"status": "no conn"}
     for margin in KRT_REGION_MARGINS:
         boxes, ripped = [], set()
@@ -932,7 +1020,7 @@ def _r_krt_region(base, out, gaps, ctx):
             boxes.append(W["window"])
             for t in (W.get("tracks") or []) + (W.get("vias") or []):
                 n = t.get("net")
-                if n and not t.get("locked") and n not in protect and n not in targets:
+                if n and not t.get("locked") and n not in protect and n not in targets and n not in rails:
                     ripped.add(n)
         if not boxes:
             return {"status": "no conn"}
@@ -998,7 +1086,7 @@ def _r_pairgroup(base, out, gaps, ctx):
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
-         "pairgroup": _r_pairgroup}
+         "pairgroup": _r_pairgroup, "maskcut": _r_maskcut}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
@@ -1009,6 +1097,7 @@ DISPATCH = {
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
+    "mask-opening": ["maskcut"],            # PHASE3F A7: re-cut after routing; the close guard judges it
     "pair-open": ["pairgroup"],
     "pair-asym": ["pairgroup"],
     "pair-skew": ["pairgroup"],     # no "tune" rung: tune_pairs needs a master/slave map and a skew limit the rung ctx lacks
@@ -1047,7 +1136,7 @@ def _repo_root():
 
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
 
-_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect")
+_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect", "pair_fallback")
 JOB_OUT_KRT = "_krt_last"
 
 
@@ -1135,10 +1224,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     state_path = os.path.join(work, "gaps.json")
     memo = set()
     ai_used = {}
+    fallback = []                                        # PHASE3F A5: [p, n] of refused non-gated pairs (KRT legs)
     try:
         with open(state_path) as fh:
             st = json.load(fh)
         ai_used = {k: int(v) for k, v in (st.get("ai_used") or {}).items()}
+        fallback = [list(x) for x in st.get("fallback", [])]
         if st.get("tool") == tool and st.get("cons_hash") == cons_hash:
             memo = {tuple(x) for x in st.get("memo", [])}
     except (OSError, ValueError, AttributeError):
@@ -1146,7 +1237,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def save(r):
         _write_json(state_path, {"gaps": m["gaps"], "memo": sorted(list(k) for k in memo), "round": r,
-                                 "tool": tool, "cons_hash": cons_hash, "ai_used": ai_used})
+                                 "tool": tool, "cons_hash": cons_hash, "ai_used": ai_used, "fallback": fallback})
 
     stop, level, n_att, last = None, "L0", 0, {}
     n_packets, krt_state = 0, {}
@@ -1154,7 +1245,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     stale = 0
     ai_mode = (cons.get("ai") or {}).get("mode", "packet")
 
-    def attempt(r, kind, rung, targets):
+    def attempt(r, kind, rung, targets, sub=False):
         """One try. Returns True when the candidate was accepted (m is then the new base)."""
         nonlocal m, n_att, level, n_packets, protect, relax
         nets = _nets(targets)
@@ -1162,9 +1253,11 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         key = (kind, rung, fp)
         if rung == "pairgroup":                              # PHASE3E 7: per pair, so an unrelated accept re-lays nothing
             key = (kind, rung, "pairs:" + ",".join(sorted(nets)))
+        if sub:                                              # PHASE3F A3: a split half has its own memo key
+            key = (kind, rung, fp, "sub:" + hashlib.sha1(",".join(sorted(g["id"] for g in targets)).encode()).hexdigest())
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
-        after, runs, why, summ, cleanup = None, 0, "", {}, []
+        after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None
         if key in memo:
             result, why = "skipped", "memo"
         else:
@@ -1173,9 +1266,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
                 _sidecars(best, out)
                 ctx = {"cons": cons, "cons_path": cons_path, "kicad_cli": kicad_cli, "work": work,
-                       "budget_s": max(0.0, budget_s - (time.time() - t0)), "log": log, "attempts": attempts,
+                       "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons)),
+                       "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
-                       "krt_last": krt_state.get("last"), "protect": protect}
+                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback}
                 ctx["inproc"] = inproc
                 summ = _call_rung(rung, best, out, targets, ctx) or {}
                 if ctx.get("krt_last"):
@@ -1192,9 +1286,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = _remeasure(out, kicad_cli)
                     runs = 1
                     _classify_into(cm, cons, out)
+                    cand = score(cm, cm["gaps"])          # PHASE3F A2: what the candidate cost, accepted or not
                     final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind,
-                                      _r5_set(kind, targets, protect, relax))
+                                      _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
                     names = _cleanup_rungs(m, cm, kind) if (not ok and why.startswith("R2 ")) else []
                     if names:
                         # cleanup: one pass per rung on the candidate; a rung that writes nothing keeps the file
@@ -1212,8 +1307,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         cm = _remeasure(final, kicad_cli)
                         runs += 1
                         _classify_into(cm, cons, final)
+                        cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
-                                          _r5_set(kind, targets, protect, relax))
+                                          _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
                     if ok:
                         _copy(final, best)
                         m = cm
@@ -1238,12 +1334,17 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             n_packets += 1
         if result == "refused":
             memo.add(key)
+        if rung == "pairgroup" and result == "refused":      # PHASE3F A5: a refused non-gated pair goes to the router
+            for g in targets:
+                if g["class"] == "pair" and len(g["nets"]) == 2 and g["nets"] not in fallback:
+                    fallback.append(list(g["nets"]))
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id,
                "board_fp": fp[:8] if len(fp) > 8 else fp, "tool": tool, "stage": "close",
                "level": LEVEL.get(rung, "L0"),
                "gap": {"id": targets[0]["id"], "kind": kind, "class": targets[0]["class"], "n": len(targets)},
                "method": rung, "tier": {"scope": "board", "effort": 1}, "in": {"nets": len(nets)},
-               "result": result, "why": why, "score": [vec0, after], "s": round(time.time() - t_try, 1),
+               "result": result, "why": why, "score": [vec0, after], "cand": cand,
+               "s": round(time.time() - t_try, 1),
                "drc_runs": runs, "precheck": None, "cleanup": cleanup,
                "ai_tokens": int(summ.get("tokens") or 0) if rung == "ai" else 0}
         if explicit or calllog.enabled():
@@ -1252,6 +1353,31 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         n_att += 1
         last[kind] = {"method": rung, "why": why}
         return result in ("closed", "partial")
+
+    def sub_attempt(r, kind, rung, ts, left):
+        """PHASE3F A3: a refused batch (guard reason) is tried as two halves; a refused half is split again while
+        `left[0]` (SPLIT_MAX) and the close budget allow. Returns True when any sub-attempt was accepted."""
+        got = False
+        for h in _halves(ts):
+            ids = {g["id"] for g in h}
+            cur = [g for g in m["gaps"] if g["id"] in ids and g["kind"] == kind]   # re-read: an accepted half moved m
+            if not cur or left[0] <= 0 or time.time() - t0 > budget_s:
+                continue
+            left[0] -= 1
+            ok = attempt(r, kind, rung, cur, sub=True)
+            got = ok or got
+            if not ok and len(cur) > 1 and tries[-1]["result"] == "refused" and _guard_refusal(tries[-1]["why"]):
+                got = sub_attempt(r, kind, rung, cur, left) or got
+        return got
+
+    def attempt_split(r, kind, rung, targets):
+        """attempt(), then the split of a refused batch (PHASE3F A3)."""
+        acc = attempt(r, kind, rung, targets)
+        if rung not in SPLIT_RUNGS:                      # whole-board rungs and `ai` ignore the subset: a split repeats them
+            return acc
+        if acc or len(targets) < 2 or tries[-1]["result"] != "refused" or not _guard_refusal(tries[-1]["why"]):
+            return acc
+        return sub_attempt(r, kind, rung, targets, [SPLIT_MAX])
 
     for r in range(max_rounds):
         if not any(g["kind"] in DISPATCH for g in m["gaps"]):
@@ -1268,7 +1394,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 if time.time() - t0 > budget_s:
                     stop = "budget"
                     break
-                accepted = attempt(r, kind, rung, targets)
+                accepted = attempt_split(r, kind, rung, targets)
                 save(r)
                 extra = len(targets) if rung == "ai" else 0   # every pending AI action gets its try this round
                 while (extra and not accepted and _ai_pending(ctx_dir_ai(work), targets)

@@ -210,7 +210,7 @@ def test_attempt_line_schema(monkeypatch, loop):
     monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
     _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     keys = {"ts", "run", "board_fp", "tool", "stage", "level", "gap", "method", "tier", "in", "result", "why",
-            "score", "s", "drc_runs", "precheck", "ai_tokens", "cleanup"}
+            "score", "cand", "s", "drc_runs", "precheck", "ai_tokens", "cleanup"}
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert lines and all(set(x) == keys for x in lines)
     assert lines[0]["gap"]["kind"] == "open-free" and lines[0]["stage"] == "close"
@@ -715,7 +715,7 @@ def test_classify_mask_opening_bridge():
                    {"description": "Track [SIG_A] on F.Cu", "pos": {"x": 2, "y": 2}}]}
     gs = GP.classify({"violations": [v], "unconnected_items": []}, {})
     assert gs[0]["kind"] == "mask-opening" and gs[0]["id"].startswith("mask-opening:")
-    assert gs[0]["evidence"] == GP.MASK_OPENING_EVIDENCE and "mask-opening" not in GP.DISPATCH
+    assert gs[0]["evidence"] == GP.MASK_OPENING_EVIDENCE and GP.DISPATCH["mask-opening"] == ["maskcut"]
     assert GP.ORDER.index("mask-opening") == GP.ORDER.index("short") + 1
     plain = dict(v, items=[{"description": "Track [SIG_A] on F.Cu", "pos": {"x": 2, "y": 2}}] * 2)
     assert GP.classify({"violations": [plain], "unconnected_items": []}, {})[0]["kind"] == "short"
@@ -955,3 +955,262 @@ def test_no_gain_counts_quality_only_rounds(monkeypatch, loop):
     monkeypatch.setattr(GP, "score", lambda m, gaps: [0] * 9 + [-accepts["n"]])
     res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res["stop"] == "no gain 5 rounds" and res["attempts"] == GP.NO_GAIN_ROUNDS == 5
+
+
+def _ctx_spy(monkeypatch, seen):
+    def fn(base, out, gaps, ctx):
+        seen.append(ctx["budget_s"])
+        return {"status": "none"}
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, fn)
+
+
+def test_rung_cap_default_900_s(monkeypatch, loop):
+    seen = []
+    _ctx_spy(monkeypatch, seen)
+    _close(loop["board"], loop["work"], budget_min=84, attempts=loop["attempts"], log=lambda m: None)
+    assert seen[0] == GP.RUNG_CAP_S == 900
+
+
+def test_rung_cap_flow_override_minutes(monkeypatch, loop):
+    seen = []
+    _ctx_spy(monkeypatch, seen)
+    _close(loop["board"], loop["work"], cons={"flow": {"rung_cap_min": 5}}, budget_min=84,
+           attempts=loop["attempts"], log=lambda m: None)
+    assert seen[0] == 300
+
+
+def test_rung_cap_keeps_small_remaining_budget(monkeypatch, loop):
+    seen = []
+    _ctx_spy(monkeypatch, seen)
+    _close(loop["board"], loop["work"], budget_min=100 / 60, attempts=loop["attempts"], log=lambda m: None)
+    assert seen[0] == pytest.approx(100, abs=1)
+
+
+def test_attempt_cand_is_refused_candidate_vector(monkeypatch, loop):
+    def changed(base, out, gaps, ctx):                  # writes a different board that keeps the open: refused
+        open(out, "w").write("changed")
+        return {"status": "ok"}
+    monkeypatch.setitem(GP.RUNGS, "patch", changed)
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    first = json.loads(open(loop["attempts"]).readline())
+    assert first["method"] == "patch" and first["result"] == "refused"
+    assert isinstance(first["cand"], list) and len(first["cand"]) == len(first["score"][0])
+
+
+def test_attempt_cand_null_when_rung_wrote_no_board(monkeypatch, loop):
+    monkeypatch.setitem(GP.RUNGS, "patch", lambda base, out, gaps, ctx: {"status": "none"})
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    first = json.loads(open(loop["attempts"]).readline())
+    assert first["method"] == "patch" and first["cand"] is None
+
+
+def _ids_measure(board, kicad_cli="kicad-cli"):
+    """Stub board: the file holds a JSON list of open gap ids."""
+    ids = json.load(open(board))
+    gaps = [_g(i) for i in ids]
+    return {"drc": {}, "opens": len(ids), "shorts": 0, "errors": 0, "err_keys": Counter(), "gaps": gaps}
+
+
+def _split_setup(monkeypatch, loop, rung):
+    monkeypatch.setattr(GP, "_remeasure", _ids_measure)
+    monkeypatch.setattr(GP, "_classify_into", lambda mm, cons, board: None)
+    monkeypatch.setattr(GP, "_protect", lambda board, cons: set())
+    monkeypatch.setattr(GP, "_clean_board", lambda p: None)
+    open(loop["board"], "w").write(json.dumps(["g1", "g2", "g3", "g4"]))
+    monkeypatch.setitem(GP.DISPATCH, "open-free", ["krt"])
+    monkeypatch.setitem(GP.RUNGS, "krt", rung)
+
+
+def _split_accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, *rest):
+    """Guard stub: a candidate that still holds gap g3 while g3 was a target is refused (R6), else accepted."""
+    ids = {x["id"] for x in cand_gaps}
+    if "g3" in ids and "g3" in set(target_ids):
+        return False, "R6 power worse 1->2"
+    return True, ""
+
+
+def test_split_refused_batch_closes_all_but_the_bad_gap(monkeypatch, loop):
+    calls = []
+
+    def rung(base, out, gaps, ctx):
+        calls.append([g["id"] for g in gaps])
+        keep = [i for i in json.load(open(base)) if i not in {g["id"] for g in gaps} or i == "g3"]
+        json.dump(keep, open(out, "w"))
+        return {"status": "ok"}
+    _split_setup(monkeypatch, loop, rung)
+    monkeypatch.setattr(GP, "_accept", _split_accept)
+    res = _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    assert [x["id"] for x in res["left"]] == ["g3"]
+    assert len(calls) <= 1 + GP.SPLIT_MAX
+    assert calls[0] == ["g1", "g2", "g3", "g4"]
+
+
+def test_split_not_done_for_nothing_laid(monkeypatch, loop):
+    calls = []
+
+    def rung(base, out, gaps, ctx):
+        calls.append([g["id"] for g in gaps])
+        return {"status": "nothing laid"}
+    _split_setup(monkeypatch, loop, rung)
+    _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    assert calls == [["g1", "g2", "g3", "g4"]]
+
+
+def test_r6_power_mag_refused_per_net_when_rail_opens_are_equal(guard):
+    base = _mm(opens=1, gaps=[_g("a"), dict(_g("p", kind="power-width"), mag=1, nets=["RAILX"])])
+    base["opens_by_net"] = Counter({"RAILX": 1})
+    cand = _mm(opens=1, gaps=[_g("b"), dict(_g("p", kind="power-width"), mag=2, nets=["RAILX"])])
+    cand["opens_by_net"] = Counter({"RAILX": 1})
+    ok, why = _accept(guard, base, cand)
+    assert ok is False and why == "R6 power_mag worse RAILX 1->2"
+
+
+def test_r6_power_mag_allowed_when_rail_closes_its_own_open(guard):
+    base = _mm(opens=3, gaps=[_g("a"), dict(_g("p", kind="power-width"), mag=1, nets=["RAILX"])])
+    base["opens_by_net"] = Counter({"RAILX": 3})
+    cand = _mm(opens=1, gaps=[_g("b"), dict(_g("p", kind="power-width"), mag=2, nets=["RAILX"])])
+    cand["opens_by_net"] = Counter({"RAILX": 1})
+    ok, why = _accept(guard, base, cand)
+    assert ok is True and "power_mag" not in why
+
+
+def test_krt_command_routes_rail_at_its_width(monkeypatch, tmp_path):
+    from fluxplace import routerloc as RL, routerules as RR, power as PWR
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(PWR, "route_widths", lambda cons, layers=None, track_mm=0.15, exclude=(): {"VCCRAIL": 0.6})
+    cmd = GP._krt_cmd(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), ["VCCRAIL"],
+                      {"cons": {}, "work": str(tmp_path)})
+    assert cmd[cmd.index("--power-nets") + 1] == "VCCRAIL"
+    assert cmd[cmd.index("--power-nets-widths") + 1] == "0.6"
+    cmd = GP._krt_cmd(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), ["SIG"],
+                      {"cons": {}, "work": str(tmp_path)})
+    assert "--power-nets" not in cmd
+
+
+def test_rail_is_never_a_krt_rip_candidate(monkeypatch, tmp_path):
+    import subprocess
+    from fluxplace import routerloc as RL, routerules as RR, adaptive, batchroute as BR, power as PWR
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(adaptive, "krt_extra", lambda d, s: [])
+    monkeypatch.setattr(BR, "has_fanout", lambda src: False)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(PWR, "route_widths", lambda cons, layers=None, track_mm=0.15, exclude=(): {"VCCRAIL": 0.6})
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (open(cmd[cmd.index("--output") + 1], "w").write("x"),
+                                                          types.SimpleNamespace(returncode=0))[1])
+    skips = []
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: skips.append(set(skip)) or [])
+    opens = iter([{"A"}, set()] * 2)
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
+    gap = dict(_g("a"), nets=["A"])
+    GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [gap],
+              {"cons": {}, "work": str(tmp_path), "budget_s": 60})
+    assert skips and "VCCRAIL" in skips[0]
+
+
+def test_pair_refused_by_pairgroup_goes_to_fallback(monkeypatch, loop):
+    pair_gap = dict(_g("pg", kind="pair-open", cls="pair"), nets=["PX", "NX"])
+    calls = []
+
+    def refuse(base, out, gaps, ctx):
+        return {"status": "nothing laid"}
+    monkeypatch.setitem(GP.RUNGS, "pairgroup", refuse)
+    monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
+    monkeypatch.setattr(GP, "_remeasure", lambda p, kicad_cli="kicad-cli": {"drc": {}, "opens": 2, "shorts": 0,
+                                                                              "errors": 0, "err_keys": Counter(),
+                                                                              "gaps": [pair_gap]})
+    monkeypatch.setattr(GP, "_classify_into", lambda mm, cons, board: None)
+    monkeypatch.setattr(GP, "_protect", lambda board, cons: set())
+    monkeypatch.setattr(GP, "_clean_board", lambda p: None)
+    _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    st = json.load(open(os.path.join(loop["work"], "gaps.json")))
+    assert st["fallback"] == [["PX", "NX"]]
+
+
+def test_hs_pair_refused_is_never_in_fallback(monkeypatch, loop):
+    pair_gap = dict(_g("pg", kind="pair-open", cls="hs-pair"), nets=["PX", "NX"])
+    monkeypatch.setitem(GP.RUNGS, "pairgroup", lambda base, out, gaps, ctx: {"status": "nothing laid"})
+    monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
+    monkeypatch.setattr(GP, "_remeasure", lambda p, kicad_cli="kicad-cli": {"drc": {}, "opens": 2, "shorts": 0,
+                                                                              "errors": 0, "err_keys": Counter(),
+                                                                              "gaps": [pair_gap]})
+    monkeypatch.setattr(GP, "_classify_into", lambda mm, cons, board: None)
+    monkeypatch.setattr(GP, "_protect", lambda board, cons: set())
+    monkeypatch.setattr(GP, "_clean_board", lambda p: None)
+    _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    st = json.load(open(os.path.join(loop["work"], "gaps.json")))
+    assert st["fallback"] == []
+
+
+def _fb_krt_env(monkeypatch, tmp_path, opens_seq):
+    import subprocess
+    from fluxplace import routerloc as RL, routerules as RR, adaptive, batchroute as BR
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(adaptive, "krt_extra", lambda d, s: [])
+    monkeypatch.setattr(BR, "has_fanout", lambda src: False)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[cmd.index("--nets") + 1:])
+        open(cmd[cmd.index("--output") + 1], "w").write("routed")
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    opens = iter(opens_seq)
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])
+    return calls
+
+
+def test_fallback_pair_routed_in_one_krt_call(monkeypatch, tmp_path):
+    calls = _fb_krt_env(monkeypatch, tmp_path, [{"PX", "NX"}, set()])
+    gaps = [dict(_g("a"), nets=["PX"]), dict(_g("b"), nets=["NX"])]
+    ctx = {"cons": {}, "work": str(tmp_path), "budget_s": 60, "protect": {"PX", "NX"},
+           "pair_fallback": [["PX", "NX"]]}
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), gaps, ctx)
+    assert calls == [["PX", "NX"]]
+    assert res["closed"] == 2 and (tmp_path / "o.kicad_pcb").exists()
+
+
+def test_fallback_pair_one_leg_open_keeps_previous_board(monkeypatch, tmp_path):
+    calls = _fb_krt_env(monkeypatch, tmp_path, [{"PX", "NX"}, {"NX"}])
+    gaps = [dict(_g("a"), nets=["PX"]), dict(_g("b"), nets=["NX"])]
+    ctx = {"cons": {}, "work": str(tmp_path), "budget_s": 60, "protect": {"PX", "NX"},
+           "pair_fallback": [["PX", "NX"]]}
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), gaps, ctx)
+    assert calls == [["PX", "NX"]]
+    assert res["closed"] == 0 and not (tmp_path / "o.kicad_pcb").exists()
+
+
+def test_r5_relaxes_fallback_legs_for_open_free(guard):
+    prot = {"PX", "NX", "RF1"}
+    tg = [dict(_g("a"), nets=["PX"])]
+    assert GP._r5_set("open-free", tg, prot, set(), {"PX", "NX"}) == {"NX", "RF1"}
+    assert GP._r5_set("open-free", tg, prot, set(), set()) == prot
+
+
+def test_mask_opening_gaps_dispatch_to_maskcut(monkeypatch, tmp_path):
+    from fluxplace import thermal as TH
+    seen = {}
+
+    def fake_recut(board, cons, out):
+        seen["args"] = (board, out)
+        open(out, "w").write("recut")
+        return {"blocks": 0, "inferred": 1, "skipped": [], "log": []}
+    monkeypatch.setattr(TH, "recut", fake_recut)
+    out = tmp_path / "o.kicad_pcb"
+    res = GP._r_maskcut(str(tmp_path / "in.kicad_pcb"), str(out), [], {"cons": {}})
+    assert res == {"status": "ran", "blocks": 0, "inferred": 1, "skipped": 0} and out.exists()
+    assert "maskcut" in GP.RUNGS and GP.DISPATCH["mask-opening"] == ["maskcut"]

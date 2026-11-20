@@ -26,8 +26,9 @@ from . import routediag as RD
 CUT_MM, GROW_MM, SLIVER_MM = 1.0, 0.25, 0.5
 
 
-def spec(name, cfg):
-    """Validated, unit-checked block -> dict (raises ValueError with the block name)."""
+def spec(name, cfg, pre=True):
+    """Validated, unit-checked block -> dict (raises ValueError with the block name). `via` is required only for the
+    pre stage (PHASE3F A7: a post / recut-only block may omit it)."""
     side = str(cfg.get("side", "")).upper()
     if side not in ("F", "B"):
         raise ValueError(f"[thermal.{name}]: side must be \"F\" or \"B\"")
@@ -42,18 +43,18 @@ def spec(name, cfg):
         raise ValueError(f"[thermal.{name}]: give polygon or rect")
     via = cfg.get("via") or {}
     missing = [k for k in ("diameter", "drill", "pitch") if k not in via]
-    if missing:
+    if missing and pre:
         raise ValueError(f"[thermal.{name}]: via needs {', '.join(missing)}")
     return {"name": name, "side": side, "pts": pts, "net": str(cfg.get("net", "GND")),
-            "via": {k: float(via[k]) for k in ("diameter", "drill", "pitch")},
+            "via": {k: float(via[k]) for k in ("diameter", "drill", "pitch") if k in via} or None,
             "exclude": [str(r) for r in cfg.get("exclude_refs", []) or []],
             "mask": bool(cfg.get("mask_open", False)),
             "clr": cfg.get("clearance_mm"), "cut": float(cfg.get("cut_mm", CUT_MM)),
             "grow": float(cfg.get("grow_mm", GROW_MM)), "sliver": float(cfg.get("sliver_mm", SLIVER_MM))}
 
 
-def blocks(cons):
-    return [spec(n, c) for n, c in sorted(((cons or {}).get("thermal") or {}).items()) if isinstance(c, dict)]
+def blocks(cons, pre=True):
+    return [spec(n, c, pre) for n, c in sorted(((cons or {}).get("thermal") or {}).items()) if isinstance(c, dict)]
 
 
 def _circle(cx, cy, r, n=72):
@@ -146,6 +147,8 @@ def _pre(PN, b, sp, log, board_clearance, keep):
         raise ValueError(f"[thermal.{sp['name']}]: net {sp['net']!r} is not on the board")
     keep.append(net)                         # vias point at this net object: its wrapper must outlive the function
     cuts = _cuts(PN, b, sp)
+    if sp["via"] is None:
+        raise ValueError(f"[thermal.{sp['name']}]: via needs diameter, drill, pitch")
     v = sp["via"]
     r = v["diameter"] / 2
     edge = float(sp["clr"]) if sp["clr"] is not None else board_clearance
@@ -198,20 +201,18 @@ def _pre(PN, b, sp, log, board_clearance, keep):
                f"skipped (copper or hole within {edge:g} mm) {near_cu}; rule area on {sp['side']} with {len(cuts)} cut-out(s)")
 
 
-def _post(PN, b, sp, log, keep):
-    layer = PN.B_Cu if sp["side"] == "B" else PN.F_Cu
-    mask = PN.B_Mask if sp["side"] == "B" else PN.F_Mask
-    cuts = _cuts(PN, b, sp)
-    area = _area(PN, sp, cuts)
-    xs = [p[0] for p in sp["pts"]]
-    ys = [p[1] for p in sp["pts"]]
-    box = (min(xs) - 0.5, min(ys) - 0.5, max(xs) + 0.5, max(ys) + 0.5)
-    g = sp["grow"]
+def _corner(PN):
     CORNER = getattr(PN.SHAPE_POLY_SET, "CORNER_STRATEGY_ROUND_ALL_CORNERS", None)
-    if CORNER is None:
-        CORNER = PN.CORNER_STRATEGY_ROUND_ALL_CORNERS
+    return CORNER if CORNER is not None else PN.CORNER_STRATEGY_ROUND_ALL_CORNERS
+
+
+def _carve(PN, b, area, layer, net, box, grow):
+    """PHASE3F A7 (shared by the block path and the inferred path): subtract from `area` the copper of every item not of
+    `net` on `layer` inside `box` (mm): vias, tracks and pads grown by `grow`, and the filled zones of other nets on the
+    layer (inflated by `grow`). -> counts {via, track, pad, zone}."""
+    CORNER = _corner(PN)
     carve = PN.SHAPE_POLY_SET()
-    n = {"via": 0, "pad": 0, "track": 0}
+    n = {"via": 0, "pad": 0, "track": 0, "zone": 0}
 
     def rect(cx, cy, hx, hy, ang=0.0):
         c, s = math.cos(ang), math.sin(ang)
@@ -223,14 +224,14 @@ def _post(PN, b, sp, log, keep):
         return box[0] <= x <= box[2] and box[1] <= y <= box[3]
 
     for t in b.GetTracks():
-        if t.GetNetname() == sp["net"]:
+        if t.GetNetname() == net:
             continue
         if t.Type() == PN.PCB_VIA_T:
             p = t.GetPosition()
             x, y = PN.ToMM(p.x), PN.ToMM(p.y)
             if inbox(x, y):
                 carve.NewOutline()
-                r = PN.ToMM(t.GetWidth(PN.F_Cu)) / 2 + g
+                r = PN.ToMM(t.GetWidth(PN.F_Cu)) / 2 + grow
                 for px, py in _circle(x, y, r, 24):
                     carve.Append(PN.FromMM(px), PN.FromMM(py))
                 n["via"] += 1
@@ -240,11 +241,11 @@ def _post(PN, b, sp, log, keep):
             L = math.hypot(ex - sx, ey - sy)
             if L == 0 or not (inbox(sx, sy) or inbox(ex, ey)):
                 continue
-            h = PN.ToMM(t.GetWidth()) / 2 + g
+            h = PN.ToMM(t.GetWidth()) / 2 + grow
             rect((sx + ex) / 2, (sy + ey) / 2, L / 2 + h, h, math.atan2(ey - sy, ex - sx))
             n["track"] += 1
     for pd in [p for f in b.GetFootprints() for p in f.Pads()]:
-        if pd.GetNetname() == sp["net"]:
+        if pd.GetNetname() == net:
             continue
         if not pd.GetLayerSet().Contains(layer) and pd.GetAttribute() != PN.PAD_ATTRIB_NPTH:
             continue
@@ -252,14 +253,31 @@ def _post(PN, b, sp, log, keep):
         x0, y0, x1, y1 = PN.ToMM(bb.GetLeft()), PN.ToMM(bb.GetTop()), PN.ToMM(bb.GetRight()), PN.ToMM(bb.GetBottom())
         if x1 < box[0] or x0 > box[2] or y1 < box[1] or y0 > box[3]:
             continue
-        rect((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2 + g, (y1 - y0) / 2 + g)
+        rect((x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2 + grow, (y1 - y0) / 2 + grow)
         n["pad"] += 1
+    for z in b.Zones():                      # foreign-net zone fills on this copper layer (the 18 zone bridges of W14)
+        if z.GetIsRuleArea() or z.GetNetname() == net or not z.IsOnLayer(layer):
+            continue
+        zb = z.GetBoundingBox()
+        if PN.ToMM(zb.GetRight()) < box[0] or PN.ToMM(zb.GetLeft()) > box[2] or \
+                PN.ToMM(zb.GetBottom()) < box[1] or PN.ToMM(zb.GetTop()) > box[3]:
+            continue
+        fills = PN.SHAPE_POLY_SET(z.GetFilledPolysList(layer))
+        fills.Inflate(PN.FromMM(grow), CORNER, PN.FromMM(0.01), False)
+        carve.Append(fills)
+        n["zone"] += 1
     if carve.OutlineCount():
         carve.Simplify()
         area.BooleanSubtract(carve)
+    return n
+
+
+def _mask_shape(PN, b, area, mask, sliver, keep):
+    """Sliver cut of `area` and a filled board-level polygon on `mask` (the mask opening). -> the kept poly set."""
+    CORNER = _corner(PN)
     kept = PN.SHAPE_POLY_SET(area)
-    kept.Deflate(PN.FromMM(sp["sliver"] / 2), CORNER, PN.FromMM(0.01))
-    kept.Inflate(PN.FromMM(sp["sliver"] / 2), CORNER, PN.FromMM(0.01), False)
+    kept.Deflate(PN.FromMM(sliver / 2), CORNER, PN.FromMM(0.01))
+    kept.Inflate(PN.FromMM(sliver / 2), CORNER, PN.FromMM(0.01), False)
     shp = PN.PCB_SHAPE(b)
     shp.SetShape(PN.SHAPE_T_POLY)
     shp.SetLayer(mask)
@@ -268,9 +286,105 @@ def _post(PN, b, sp, log, keep):
     shp.SetPolyShape(kept)
     b.Add(shp)
     keep += [shp, kept]
+    return kept
+
+
+def _post(PN, b, sp, log, keep):
+    layer = PN.B_Cu if sp["side"] == "B" else PN.F_Cu
+    mask = PN.B_Mask if sp["side"] == "B" else PN.F_Mask
+    cuts = _cuts(PN, b, sp)
+    area = _area(PN, sp, cuts)
+    xs = [p[0] for p in sp["pts"]]
+    ys = [p[1] for p in sp["pts"]]
+    box = (min(xs) - 0.5, min(ys) - 0.5, max(xs) + 0.5, max(ys) + 0.5)
+    g = sp["grow"]
+    n = _carve(PN, b, area, layer, sp["net"], box, g)
+    kept = _mask_shape(PN, b, area, mask, sp["sliver"], keep)
     log.append(f"thermal {sp['name']} post: mask opening on {sp['side']}; carved around {n['via']} via(s), "
-               f"{n['pad']} pad(s), {n['track']} track(s) (+{g:g} mm); {kept.OutlineCount()} outline(s) after the "
-               f"{sp['sliver']:g} mm sliver cut")
+               f"{n['pad']} pad(s), {n['track']} track(s), {n['zone']} zone fill(s) (+{g:g} mm); {kept.OutlineCount()} "
+               f"outline(s) after the {sp['sliver']:g} mm sliver cut")
+
+
+def _infer_net(PN, b, poly, layer, step=0.5):
+    """PHASE3F A7: the net owning the most copper area on `layer` inside `poly` (zone fills and pads), sampled on a
+    `step` mm grid. None when no copper lies inside."""
+    bb = poly.BBox()
+    x0, y0, x1, y1 = PN.ToMM(bb.GetLeft()), PN.ToMM(bb.GetTop()), PN.ToMM(bb.GetRight()), PN.ToMM(bb.GetBottom())
+    zones = [(z.GetNetname(), PN.SHAPE_POLY_SET(z.GetFilledPolysList(layer))) for z in b.Zones()
+             if not z.GetIsRuleArea() and z.GetNetname() and z.IsOnLayer(layer)]
+    pads = [(pd.GetNetname(), pd.GetBoundingBox()) for f in b.GetFootprints() for pd in f.Pads()
+            if pd.GetNetname() and pd.GetLayerSet().Contains(layer)]
+    count = {}
+    nx, ny = int((x1 - x0) / step) + 1, int((y1 - y0) / step) + 1
+    for i in range(nx):
+        for j in range(ny):
+            x, y = x0 + i * step, y0 + j * step
+            pt = PN.VECTOR2I(PN.FromMM(x), PN.FromMM(y))
+            if not poly.Collide(pt):
+                continue
+            hit = {net for net, fills in zones if fills.Collide(pt)}
+            hit |= {net for net, bx in pads if bx.Contains(pt)}
+            for net in hit:
+                count[net] = count.get(net, 0) + 1
+    return max(count, key=count.get) if count else None
+
+
+def recut(board, cons, out):
+    """PHASE3F A7: re-cut the mask openings after routing (copper is not touched).
+    1. every [thermal.NAME] block with mask_open: the board-level filled polygons of its side whose bounding box overlaps
+       the block are removed, then a fresh opening is made from the block (_post).
+    2. every other board-level filled polygon on F.Mask / B.Mask: its net = the net owning the most copper inside it;
+       no copper -> skipped (untouched); else it is carved round the foreign copper (_carve) and replaced.
+    -> {"blocks", "inferred", "skipped": [reason], "log": [line]}. Writes `out` only when a polygon changed."""
+    import pcbnew as PN
+    if os.path.abspath(out) == os.path.abspath(board):
+        raise ValueError("--out must differ from the input board")
+    res = {"blocks": 0, "inferred": 0, "skipped": [], "log": []}
+    specs = [sp for sp in blocks(cons, pre=False) if sp["mask"]]
+    b = PN.LoadBoard(board)
+    keep = []
+    layers = (PN.F_Mask, PN.B_Mask)
+    polys = [d for d in b.GetDrawings() if d.GetClass() == "PCB_SHAPE" and d.GetLayer() in layers
+             and d.GetShape() == PN.SHAPE_T_POLY and d.IsPolyShapeValid()]
+    for sp in specs:                          # 1. block path
+        mask = PN.B_Mask if sp["side"] == "B" else PN.F_Mask
+        xs = [p[0] for p in sp["pts"]]
+        ys = [p[1] for p in sp["pts"]]
+        for d in list(polys):
+            if d.GetLayer() != mask:
+                continue
+            bb = d.GetBoundingBox()
+            if PN.ToMM(bb.GetRight()) < min(xs) or PN.ToMM(bb.GetLeft()) > max(xs) or \
+                    PN.ToMM(bb.GetBottom()) < min(ys) or PN.ToMM(bb.GetTop()) > max(ys):
+                continue
+            b.Remove(d)
+            polys.remove(d)
+        _post(PN, b, sp, res["log"], keep)
+        res["blocks"] += 1
+    for d in polys:                           # 2. inferred path (the polygons the blocks did not replace)
+        layer = PN.B_Cu if d.GetLayer() == PN.B_Mask else PN.F_Cu
+        poly = d.GetPolyShape()
+        bb = poly.BBox()
+        at = (round(PN.ToMM(bb.GetLeft()), 2), round(PN.ToMM(bb.GetTop()), 2))
+        net = _infer_net(PN, b, poly, layer)
+        if net is None:
+            res["skipped"].append(f"polygon at {at}: no copper inside, untouched")
+            continue
+        box = (PN.ToMM(bb.GetLeft()) - 0.5, PN.ToMM(bb.GetTop()) - 0.5, PN.ToMM(bb.GetRight()) + 0.5,
+               PN.ToMM(bb.GetBottom()) + 0.5)
+        area = PN.SHAPE_POLY_SET(poly)
+        n = _carve(PN, b, area, layer, net, box, GROW_MM)
+        b.Remove(d)
+        _mask_shape(PN, b, area, d.GetLayer(), SLIVER_MM, keep)
+        res["inferred"] += 1
+        res["log"].append(f"polygon at {at} on {'B' if layer == PN.B_Cu else 'F'}: net {net}; carved around "
+                          f"{n['via']} via(s), {n['pad']} pad(s), {n['track']} track(s), {n['zone']} zone fill(s)")
+    if res["blocks"] or res["inferred"]:
+        PN.SaveBoard(out, b)
+        src_pro = os.path.splitext(board)[0] + ".kicad_pro"
+        if os.path.exists(src_pro):
+            shutil.copy(src_pro, os.path.splitext(out)[0] + ".kicad_pro")
+    return res
 
 
 def run(board, cons, out, stage="pre"):
@@ -278,7 +392,7 @@ def run(board, cons, out, stage="pre"):
     import pcbnew as PN
     if os.path.abspath(out) == os.path.abspath(board):
         raise ValueError("--out must differ from the input board")
-    specs = blocks(cons)
+    specs = blocks(cons, pre=(stage == "pre"))
     if not specs:
         raise ValueError("no [thermal.NAME] block in the constraints")
     b = PN.LoadBoard(board)

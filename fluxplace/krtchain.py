@@ -337,6 +337,16 @@ def run(c, n, board, runner=run_step):
             shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the pour
         pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    mask = {"blocks": 0, "inferred": 0, "skipped": 0, "written": False}   # PHASE3F A7: mask openings re-cut after the copper
+    try:
+        from . import thermal as TH
+        mk = os.path.join(d, "maskcut.kicad_pcb")
+        mr = TH.recut(best, c.cons, mk)
+        if os.path.exists(mk):
+            shutil_copy(mk, best)
+            mask.update(blocks=mr["blocks"], inferred=mr["inferred"], skipped=len(mr["skipped"]), written=True)
+    except Exception as e:                                   # noqa: BLE001 - the routed board stands without the re-cut
+        mask["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
                  "pour": pour, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
     left = RC.open_by_net(best)
@@ -369,6 +379,8 @@ def run(c, n, board, runner=run_step):
         line += f"; pairs already done {len(already_done)} pair(s), not missed"
     if missed:
         line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
+    if mask["blocks"] or mask["inferred"]:
+        line += f"; mask re-cut {mask['blocks'] + mask['inferred']}"
     if pour["added"]:
         line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
     elif pour["dropped"]:
@@ -377,7 +389,7 @@ def run(c, n, board, runner=run_step):
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "mask": mask},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))

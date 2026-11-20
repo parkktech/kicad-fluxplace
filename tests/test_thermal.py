@@ -150,3 +150,75 @@ def test_refusals(tmp_path):
     cli.main(["thermal", brd, "--constraints", cons, "--out", pre])
     with pytest.raises(SystemExit, match="pre runs once"):
         cli.main(["thermal", pre, "--constraints", cons, "--out", str(tmp_path / "again.kicad_pcb")])
+
+
+def _mask_polys(b, layer):
+    return [d for d in b.GetDrawings() if d.GetLayer() == layer and d.Type() == pcbnew.PCB_SHAPE_T and d.IsPolyShapeValid()]
+
+
+def _rect_poly(b, layer, x0, y0, x1, y1):
+    """A board-level filled polygon on `layer` (a stale mask opening drawn before routing)."""
+    shp = pcbnew.PCB_SHAPE(b)
+    shp.SetShape(pcbnew.SHAPE_T_POLY)
+    shp.SetLayer(layer)
+    shp.SetFilled(True)
+    shp.SetWidth(0)
+    ps = pcbnew.SHAPE_POLY_SET()
+    ps.NewOutline()
+    for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+        ps.Append(MM(x), MM(y))
+    shp.SetPolyShape(ps)
+    b.Add(shp)
+
+
+def test_recut_block_path_replaces_the_old_polygon(tmp_path):
+    from fluxplace import thermal as TH, constraints as C
+    b = pcbnew.LoadBoard(_board(tmp_path))
+    _rect_poly(b, pcbnew.B_Mask, 12, 12, 38, 38)               # old board-level opening inside the block
+    old = str(tmp_path / "old.kicad_pcb")
+    pcbnew.SaveBoard(old, b)
+    out = str(tmp_path / "re.kicad_pcb")
+    res = TH.recut(old, C.load(_cons(tmp_path)), out)
+    assert res["blocks"] == 1 and res["inferred"] == 0
+    assert len(_mask_polys(pcbnew.LoadBoard(out), pcbnew.B_Mask)) == 1
+
+
+def test_recut_inferred_path_names_a_net_and_carves_the_polygon(tmp_path):
+    from fluxplace import thermal as TH
+    b = pcbnew.LoadBoard(_board(tmp_path))
+    _rect_poly(b, pcbnew.F_Mask, 50, 50, 70, 70)                # polygon over the R1 GND and A pads (F.Cu)
+    old = str(tmp_path / "old.kicad_pcb")
+    pcbnew.SaveBoard(old, b)
+    out = str(tmp_path / "re.kicad_pcb")
+    res = TH.recut(old, {}, out)
+    assert res["blocks"] == 0 and res["inferred"] == 1 and not res["skipped"]
+    assert " net " in res["log"][0] and ("net GND" in res["log"][0] or "net A" in res["log"][0])
+    after = _mask_polys(pcbnew.LoadBoard(out), pcbnew.F_Mask)
+    assert len(after) == 1 and after[0].GetPolyShape().Area() > 0
+
+
+def test_recut_polygon_over_no_copper_is_skipped(tmp_path):
+    from fluxplace import thermal as TH
+    b = pcbnew.LoadBoard(_board(tmp_path))
+    _rect_poly(b, pcbnew.B_Mask, 80, 5, 90, 15)                 # far from every pad, track and zone
+    old = str(tmp_path / "old.kicad_pcb")
+    pcbnew.SaveBoard(old, b)
+    out = str(tmp_path / "re.kicad_pcb")
+    res = TH.recut(old, {}, out)
+    assert res["inferred"] == 0 and len(res["skipped"]) == 1 and "no copper" in res["skipped"][0]
+    assert not os.path.exists(out)
+
+
+def test_recut_no_block_no_polygon_writes_nothing(tmp_path):
+    from fluxplace import thermal as TH
+    out = str(tmp_path / "re.kicad_pcb")
+    res = TH.recut(_board(tmp_path), {}, out)
+    assert res == {"blocks": 0, "inferred": 0, "skipped": [], "log": []} and not os.path.exists(out)
+
+
+def test_spec_via_required_only_for_pre():
+    from fluxplace import thermal as TH
+    cfg = {"rect": [0, 0, 10, 10], "side": "B", "mask_open": True}
+    assert TH.spec("p", cfg, pre=False)["via"] is None
+    with pytest.raises(ValueError, match="via needs"):
+        TH.spec("p", cfg)
