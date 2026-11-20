@@ -173,10 +173,13 @@ def _lane(p, part, L, w):
     return (p["x"] - w / 2, p["y"] - p["ey"] - L, p["x"] + w / 2, p["y"] - p["ey"])
 
 
-def pin_escape_blocked(B):
+def pin_escape_blocked(B, only_nets=None, partners=None):
     """A fine-pitch (<= 0.5 mm) IC pad whose outward lane (track wide, track +
     clearance long) contains another net's pad, another part's courtyard, a
-    track-forbidding rule area or existing copper of another net."""
+    track-forbidding rule area or existing copper of another net.
+    only_nets: grade only pads of these nets (routed boards: the open nets). partners: {net: partner net}; copper of
+    a pad's partner is not a blocker (a pair's own legs)."""
+    partners = partners or {}
     L, w = B["track"] + B["clearance"], B["track"]
     pads = GM.Hash(2.0)
     for i, q in enumerate(B["pads"]):
@@ -199,19 +202,21 @@ def pin_escape_blocked(B):
         for p in part["pads"]:
             if not p["net"] or p["w"] * p["h"] > 1.5:
                 continue
+            if only_nets is not None and p["net"] not in only_nets:
+                continue
             lane = _lane(p, part, L, w)
             why = None
             for k in pads.hits(lane, "x"):
                 q = B["pads"][k]
                 if q["ref"] == ref and q["num"] == p["num"]:
                     continue
-                if q["net"] != p["net"] and q["layers"] & p["layers"]:
+                if q["net"] != p["net"] and q["net"] != partners.get(p["net"]) and q["layers"] & p["layers"]:
                     why = f"pad {q['ref']}.{q['num']}"
                     break
             if not why:
                 for k in segs.hits(lane, "x"):
                     s = B["segs"][k]
-                    if s["net"] != p["net"] and s["layer"] in p["layers"] and _seg_in(lane, s):
+                    if s["net"] not in (p["net"], partners.get(p["net"])) and s["layer"] in p["layers"] and _seg_in(lane, s):
                         why = f"copper of {s['net']}"
                         break
             if not why:

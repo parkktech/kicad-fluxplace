@@ -50,25 +50,31 @@ def _class(nets, rf, pairs):
     return "plain"
 
 
-def _pair_audit(board, cons):
-    """(B, cls, rows) of the routing pair audit, built as review._pairs_from_audit builds it."""
+def _pair_audit(board, cons, opn=None):
+    """(B, cls, rows) of the routing pair audit, built as review._pairs_from_audit builds it. `opn`: open-net set
+    (classify passes the DRC unconnected set); None -> routeconn.open_by_net."""
     from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC
     B = RD.load(board)
     cls = NC.classify(B, cons or {})
-    try:
-        opn = set(RC.open_by_net(board))
-    except Exception:
-        opn = set(RC.text_open(B))
+    if opn is None:
+        try:
+            opn = set(RC.open_by_net(board))
+        except Exception:
+            opn = set(RC.text_open(B))
     return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
 
 
-def review_gaps(board, cons):
-    """Review findings as gap rows (classify's shape, plus "base" = id base the caller assigns). Each source is
-    isolated: a failing source contributes nothing."""
+SEV = {"pair-open": 3, "pair-asym": 2, "pair-skew": 1}     # severity of an incomplete pair (score sums it)
+
+
+def review_gaps(board, cons, opn=None):
+    """Review findings as gap rows (classify's shape, plus "base" = id base the caller assigns) -> (rows, failed).
+    `failed` names the sources that raised (power, pairs, pin-escape): their rows are missing, never clean.
+    `opn`: open nets; pin-escape grades only their pads (None -> every pad)."""
     from . import power, boardfile, review, preroute, routediag
     cons = cons or {}
     not_p = C.not_pairs(cons)
-    out = []
+    out, failed = [], []
     try:
         for f in power.check(boardfile.facts_from_file(board), cons):
             if f.get("code") not in ("POWER_WIDTH", "POWER_VIAS"):
@@ -76,13 +82,15 @@ def review_gaps(board, cons):
             net = (f.get("refs") or [""])[0]
             kind = "power-width" if f["code"] == "POWER_WIDTH" else "power-vias"
             out.append({"base": f"{kind}:{net}", "kind": kind, "class": "power", "nets": [net], "at": None,
-                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or [])})
+                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or []),
+                        "mag": round(float(f.get("value") or 0))})
     except Exception:
-        pass
+        failed.append("power")
+    B, rows = None, []
     try:
-        rows = _pair_audit(board, cons)[2]
+        B, _cls, rows = _pair_audit(board, cons, opn)
     except Exception:
-        rows = []
+        failed.append("pairs")
     for r in rows:
         p, n, st, causes = r["p"], r["n"], r["status"], r.get("causes") or []
         if p in not_p or n in not_p:
@@ -95,36 +103,55 @@ def review_gaps(board, cons):
             kind = "pair-skew"
         else:
             continue                         # ok / unknown rows are not graded
-        out.append({"base": f"{kind}:{p}/{n}", "kind": kind,
+        out.append({"base": f"pair:{p}/{n}", "kind": kind, "sev": SEV[kind],
                     "class": "hs-pair" if review.pair_gated(cons, p) else "pair", "nets": [p, n], "at": None,
                     "layer": None, "evidence": str(r.get("why") or "")[:120], "refs": [p, n]})
+    partners = {x: y for r in rows for x, y in ((r["p"], r["n"]), (r["n"], r["p"]))}
     try:
-        B = routediag.load(board)
-        for f in preroute.pin_escape_blocked(B):
+        for f in preroute.pin_escape_blocked(B or routediag.load(board), only_nets=opn, partners=partners):
             if f.get("code") != "PIN_ESCAPE_BLOCKED":
                 continue
             ref = (f.get("refs") or [""])[0]
             out.append({"base": f"pin-escape:{ref}", "kind": "pin-escape", "class": "plain", "nets": [], "at": None,
                         "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or [])})
     except Exception:
-        pass
-    return out
+        failed.append("pin-escape")
+    return out, failed
 
 
-def protect_nets(board, cons, gaps):
-    """drcguard.protected_nets minus the legs of every pair whose audit is incomplete (pair-open/asym/skew gap)."""
-    prot = drcguard.protected_nets(cons, drcguard.snap_nets(_snapshot(board)))
-    bad = {n for g in gaps if g["kind"] in ("pair-open", "pair-asym", "pair-skew") for n in g["nets"]}
-    return prot - bad
+def _protect(board, cons):
+    """R5 set: rf nets and every pair leg (drcguard.protected_nets of the board's nets)."""
+    return drcguard.protected_nets(cons, drcguard.snap_nets(_snapshot(board)))
 
 
-def classify(d, cons=None, board=None):
+def relax_nets(gaps):
+    """Legs of every incomplete pair (pair-open/asym/skew gap): the only pair legs an R5 check may relax."""
+    return {n for g in gaps if g["kind"] in ("pair-open", "pair-asym", "pair-skew") for n in g["nets"]}
+
+
+def _r5_set(kind, targets, protect, relax):
+    """R5 set handed to the guard: a pair-kind try may relax the legs of its own target pairs; other kinds keep all."""
+    if kind is None or not kind.startswith("pair-"):
+        return protect
+    return protect - (relax & set(_nets(targets)))
+
+
+def _classify_into(mm, cons, board):
+    """Set mm["gaps"] (with board review gaps) and mm["review_failed"] (the review sources that raised)."""
+    failed = []
+    mm["gaps"] = classify(mm["drc"], cons, board=board, failed_out=failed)
+    mm["review_failed"] = failed
+
+
+def classify(d, cons=None, board=None, failed_out=None):
     """DRC dict -> sorted gap list. Gap: id, kind, class, nets, at, layer, evidence.
-    `board`: the board the DRC dict was measured on; when given, review gaps are added too."""
+    `board`: the board the DRC dict was measured on; when given, review gaps are added too (failed_out, a list,
+    receives the names of the review sources that raised)."""
     cons = cons or {}
     rf = set((cons.get("rf") or {}).get("nets") or [])
     unc = d.get("unconnected_items") or []
     vs = d.get("violations") or []
+    opn = set().union(*(_nets_of(u.get("items") or []) for u in unc)) if unc else set()
     names = set()
     for x in unc + vs:
         names.update(_nets_of(x.get("items") or []))
@@ -177,21 +204,29 @@ def classify(d, cons=None, board=None):
         return (k, CLASS_RANK[g["class"]], g["id"])
 
     if board is not None:
-        for g in review_gaps(board, cons):
+        rg, failed = review_gaps(board, cons, opn=opn)
+        if failed_out is not None:
+            failed_out.extend(failed)
+        for g in rg:
             add(g.pop("base"), g)
     gaps.sort(key=key)
     return gaps
 
 
 def score(m, gaps):
-    """Vector: [hs_pair, rf, shorts, opens, power, pair, pin_escape, errors, quality] (R4 plus D71cj a terms).
-    hs_pair / pair: pair-open|asym|skew gaps of a gated / plain pair; power: power-width|power-vias; rf: any rf gap."""
+    """Vector: [hs_pair, rf, shorts, opens, power, power_mag, pair, pin_escape, errors, quality] (R4 plus D71cj a terms).
+    hs_pair / pair: SUM of sev over pair-open|asym|skew gaps of a gated / plain pair; power: power-width|power-vias
+    count; power_mag: their summed mag (narrow mm, missing vias); rf: any rf gap."""
     def n(pred):
         return sum(1 for g in gaps if pred(g))
-    return [n(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
+
+    def sev(pred):
+        return sum(g.get("sev", 0) for g in gaps if pred(g))
+    return [sev(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
             n(lambda g: g["class"] == "rf"), m["shorts"], m["opens"],
             n(lambda g: g["kind"] in ("power-width", "power-vias")),
-            n(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
+            sum(g.get("mag", 0) for g in gaps if g["kind"] in ("power-width", "power-vias")),
+            sev(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
             n(lambda g: g["kind"] == "pin-escape"), m["errors"],
             n(lambda g: g["kind"] in ("dangling", "via-offcentre", "other"))]
 
@@ -230,7 +265,15 @@ def _cleanup_rungs(base_m, cand_m, kind):
 
 
 def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
-    """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4)."""
+    """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4).
+    A candidate that failed a review source the base did not is refused; a pair target whose sev dropped counts as
+    progress (it is removed from the target list)."""
+    new_failed = sorted(set(cand_m.get("review_failed") or []) - set(base_m.get("review_failed") or []))
+    if new_failed:
+        return False, ("review source failed: " + ", ".join(new_failed))[:120]
+    base_sev = {g["id"]: g["sev"] for g in base_m.get("gaps") or [] if "sev" in g}
+    cand_sev = {g["id"]: g["sev"] for g in cand_gaps if "sev" in g}
+    target_ids = [t for t in target_ids if not (t in base_sev and t in cand_sev and cand_sev[t] < base_sev[t])]
     cand_m["gap_ids"] = {g["id"] for g in cand_gaps}
     return drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
                            score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
@@ -1019,8 +1062,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     t0 = time.time()
     budget_s = budget_min * 60
     m = dict(measure(best, kicad_cli))
-    m["gaps"] = classify(m["drc"], cons, board=best)
-    protect = protect_nets(best, cons, m["gaps"])
+    _classify_into(m, cons, best)
+    protect = _protect(best, cons)
+    relax = relax_nets(m["gaps"])
     start = _vitals(m)
     board_fp0 = versions.copper_fingerprint(best)
     if runs is None and calllog.enabled():
@@ -1049,7 +1093,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def attempt(r, kind, rung, targets):
         """One try. Returns True when the candidate was accepted (m is then the new base)."""
-        nonlocal m, n_att, level, n_packets, protect
+        nonlocal m, n_att, level, n_packets, protect, relax
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         key = (kind, rung, fp)
@@ -1082,9 +1126,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 else:
                     cm = dict(measure(out, kicad_cli))
                     runs = 1
-                    cm["gaps"] = classify(cm["drc"], cons, board=out)
+                    _classify_into(cm, cons, out)
                     final = out
-                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind, protect)
+                    ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind,
+                                      _r5_set(kind, targets, protect, relax))
                     names = _cleanup_rungs(m, cm, kind) if (not ok and why.startswith("R2 ")) else []
                     if names:
                         # cleanup: one pass per rung on the candidate; a rung that writes nothing keeps the file
@@ -1101,12 +1146,14 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                                 final = nxt
                         cm = dict(measure(final, kicad_cli))
                         runs += 1
-                        cm["gaps"] = classify(cm["drc"], cons, board=final)
-                        ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind, protect)
+                        _classify_into(cm, cons, final)
+                        ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
+                                          _r5_set(kind, targets, protect, relax))
                     if ok:
                         _copy(final, best)
                         m = cm
-                        protect = protect_nets(best, cons, m["gaps"])
+                        protect = _protect(best, cons)
+                        relax = relax_nets(m["gaps"])
                         _sidecars(final, best)
                         cur_ids = {g["id"] for g in m["gaps"]}
                         result = "closed" if all(g["id"] not in cur_ids for g in targets) else "partial"
@@ -1282,7 +1329,7 @@ def _main(argv=None):
     if not a.board or not a.work:
         ap.error("board and --work are required unless --report is given")
     if a.classify_only:
-        gaps = classify(measure(a.board, a.kicad_cli)["drc"], C.load(a.constraints))
+        gaps = classify(measure(a.board, a.kicad_cli)["drc"], C.load(a.constraints), board=a.board)
         for (k, c), n in sorted(Counter((g["kind"], g["class"]) for g in gaps).items()):
             print(f"{k} {c} {n}")
         os.makedirs(a.work, exist_ok=True)

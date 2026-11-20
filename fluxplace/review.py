@@ -227,7 +227,8 @@ def _ps_note(facts, master, skew_mm, limit_mm):
 def pair_gated(cons, master):
     """A pair is gated (stop-ship on skew/asymmetry) when its master is in a [pairs.*] family or a high-speed family."""
     fams = tuple((cons or {}).get("pairs", {}))
-    return master.startswith(fams) or master.upper().split("_")[0] in _HS_FAMILIES
+    fam = re.sub(r"\d+$", "", master.upper().split("_")[0])      # USB3_..., PCIE2_... gate as USB, PCIE
+    return master.startswith(fams) or fam in _HS_FAMILIES
 
 
 def _pairs_from_audit(facts, cons):

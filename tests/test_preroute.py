@@ -78,6 +78,17 @@ def test_pin_escape_blocked_by_neighbour_courtyard_and_copper(tmp_path):
     assert "PIN_ESCAPE_BLOCKED" in codes(f3)
 
 
+def test_pin_escape_only_nets_and_partners(tmp_path):
+    ic = g.ic("U1", 20, 20, ["A", "B", "C", "D", "E", "F"], pitch=0.4)
+    near = g.two("R1", 17.2, 19.2, "X", "Y", court=(-1.0, -0.5, 1.0, 0.5))
+    seg = "(segment (start 17.5 18.5) (end 17.5 22) (width 0.15) (layer \"F.Cu\") (net \"ZZ\"))\n"
+    B = RD.load(g.board(tmp_path, ic + near))
+    assert PR.pin_escape_blocked(B) and PR.pin_escape_blocked(B, only_nets=set()) == []
+    far = g.two("R1", 12, 12, "X", "Y", court=(-1.0, -0.5, 1.0, 0.5))
+    B2 = RD.load(g.board(tmp_path, ic + far + seg, name="e.kicad_pcb"))
+    assert PR.pin_escape_blocked(B2, partners={n: "ZZ" for n in "ABCDEF"}) == []
+
+
 def test_ratsnest_crossings_and_congestion(tmp_path):
     b = (g.two("R1", 10, 10, "A", "A2") + g.two("R2", 50, 50, "A", "A3")
          + g.two("R3", 50, 10, "B", "B2") + g.two("R4", 10, 50, "B", "B3"))

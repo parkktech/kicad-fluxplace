@@ -189,6 +189,19 @@ def test_qfn_with_a_thermal_pad(tmp_path):
     assert all(s["depth"] > 0.8 for s in res["templates"]["U1"]["sides"])
 
 
+def test_lay_twice_gives_no_duplicate_uuids(tmp_path):
+    import re
+    path = G.board(tmp_path, conn("J1", 50, 40))
+    B = RD.load(path)
+    res = BO.solve(B, {}, None)
+    for p in res["pins"].values():
+        p["pts"] = [p["pad"]] + p["pts"]
+    txt, _, _ = BO.lay_text(open(path).read(), res["pins"], 0.2, 0.46)
+    txt2, _, _ = BO.lay_text(txt, res["pins"], 0.2, 0.46)
+    ids = re.findall(r'\(uuid "([^"]+)"\)', txt2)
+    assert len(ids) == len(set(ids)) and len(ids) > len(re.findall(r'\(uuid "([^"]+)"\)', txt))
+
+
 def test_lay_writes_locked_lanes_and_vias(tmp_path):
     path = G.board(tmp_path, conn("J1", 50, 40))
     B = RD.load(path)

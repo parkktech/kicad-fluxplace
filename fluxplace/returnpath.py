@@ -28,6 +28,7 @@ import re
 from collections import defaultdict
 
 from . import boardfile as BF
+from . import constraints as C
 from . import graph as G
 from . import routediag as RD
 
@@ -236,7 +237,7 @@ def controlled_nets(facts, cons):
     from . import review as R
     cons = cons or {}
     nets = set(facts.get("net_pads") or {})
-    pairs = G.diff_pairs(sorted(nets))
+    pairs = G.diff_pairs(sorted(nets), exclude=C.not_pairs(cons))
     out = set(pairs) | set(pairs.values()) | {n for n in nets if R.is_rf(n)}
     for rx in (cons.get("review") or {}).get("return_path_nets", []) or []:
         out |= {n for n in nets if re.search(rx, n)}

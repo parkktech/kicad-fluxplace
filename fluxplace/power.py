@@ -225,13 +225,13 @@ def check(facts, cons):
         if bad:
             tot = sum(d["len"] for d in bad.values())
             det = "; ".join(f"{l} {d['len']:.1f} mm at {d['min_w']:g} < {d['need']:.2f}" for l, d in sorted(bad.items()))
-            out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net],
+            out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
                         "msg": f"{net}: {tot:.1f} mm of track narrower than the {r['current_a']:g} A copper needs "
                                f"({r['width_source']}, {r['oz_outer']:g}/{r['oz_inner']:g} oz): {det}"})
         nv = sum(1 for v in facts.get("vias") or [] if v["net"] == net)
         nvn = r.get("vias_needed")
         if nvn and 0 < nv < nvn:
-            out.append({"level": "FAIL", "code": "POWER_VIAS", "refs": [net],
+            out.append({"level": "FAIL", "code": "POWER_VIAS", "refs": [net], "value": nvn - nv,
                         "msg": f"{net}: {nv} via(s) carry {r['current_a']:g} A, needs {nvn} x {r['via_drill_mm']:g} mm "
                                f"({r['via_amps']:g} A each, dT {r['rise_c']:g} C)"})
     unk = unknown_rails(cons, facts.get("net_pads"))

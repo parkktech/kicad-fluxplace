@@ -726,11 +726,36 @@ from fluxplace import power as _PW, boardfile as _BF, preroute as _PR, routediag
 
 
 def test_score_counts_new_kinds():
-    gaps = [{"kind": "power-width", "class": "power"}, {"kind": "power-vias", "class": "power"},
-            {"kind": "pair-open", "class": "hs-pair"}, {"kind": "pair-skew", "class": "pair"},
+    gaps = [{"kind": "power-width", "class": "power", "mag": 2}, {"kind": "power-vias", "class": "power", "mag": 1},
+            {"kind": "pair-open", "class": "hs-pair", "sev": 3}, {"kind": "pair-skew", "class": "pair", "sev": 1},
             {"kind": "pin-escape", "class": "plain"}, {"kind": "short", "class": "plain"}]
     m = {"shorts": 1, "opens": 2, "errors": 3}
-    assert GP.score(m, gaps) == [1, 0, 1, 2, 2, 1, 1, 3, 0]
+    # [hs_pair sev, rf, shorts, opens, power count, power mag, pair sev, pin_escape, errors, quality]
+    assert GP.score(m, gaps) == [3, 0, 1, 2, 2, 3, 1, 1, 3, 0]
+
+
+def test_pair_gated_strips_trailing_digits():
+    from fluxplace import review as RV
+    assert RV.pair_gated({}, "USB3_M2_TX_P") and RV.pair_gated({}, "PCIE2_RX_P")
+    assert not RV.pair_gated({}, "SENSE_ADC_P")
+
+
+def test_classify_reports_failed_review_sources(monkeypatch):
+    monkeypatch.setattr(GP, "review_gaps", lambda board, cons, opn=None: ([], ["pairs"]))
+    out = []
+    GP.classify(DRC, {}, board="b.kicad_pcb", failed_out=out)
+    assert out == ["pairs"]
+
+
+def test_accept_review_failure_and_sev_drop_target(monkeypatch):
+    calls = []
+    monkeypatch.setattr(GP.drcguard, "accept", lambda base, cand, mode, target, *a, **k: calls.append(list(target)) or (True, ""))
+    base = {"gaps": [{"id": "pair:X_P/X_N", "sev": 3, "nets": ["X_P", "X_N"], "kind": "pair-open"}], "review_failed": []}
+    assert GP._accept(base, "b", {"review_failed": ["pairs"]}, "c", ["pair:X_P/X_N"], [], "pair-open") == \
+        (False, "review source failed: pairs")
+    lower = [{"id": "pair:X_P/X_N", "sev": 1, "nets": ["X_P", "X_N"], "kind": "pair-skew"}]
+    assert GP._accept(base, "b", {"review_failed": []}, "c", ["pair:X_P/X_N"], lower, "pair-open") == (True, "")
+    assert calls[-1] == []                      # sev dropped 3 -> 1: the target no longer has to disappear
 
 
 def test_classify_without_board_adds_no_review_gaps(monkeypatch):
@@ -745,31 +770,36 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
         {"pair": "Z_P/Z_N", "p": "Z_P", "n": "Z_N", "status": "unknown", "causes": [], "why": "?"},
         {"pair": "SENSE_ADC_P/SENSE_ADC_N", "p": "SENSE_ADC_P", "n": "SENSE_ADC_N", "status": "open", "causes": [], "why": "x"},
     ]
-    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons: (None, {}, rows))
+    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, rows))
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
     monkeypatch.setattr(_PW, "check", lambda facts, cons: [
         {"code": "POWER_WIDTH", "refs": ["VBAT"], "msg": "VBAT narrow"},
         {"code": "POWER_CURRENT_UNKNOWN", "refs": ["X"], "msg": "warn"}])
     monkeypatch.setattr(_RD, "load", lambda board: None)
-    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U3"], "msg": "U3 blocked"}])
+    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U3"], "msg": "U3 blocked"}])
     cons = {"not_pairs": ["SENSE_ADC_P", "SENSE_ADC_N"]}
-    got = {(g["kind"], g["class"], g["evidence"]) for g in GP.review_gaps("b.kicad_pcb", cons)}
+    rows_out, failed = GP.review_gaps("b.kicad_pcb", cons)
+    got = {(g["kind"], g["class"], g["evidence"]) for g in rows_out}
     assert got == {("pair-open", "hs-pair", "one leg open"), ("pair-skew", "pair", "skew 2 mm"),
                    ("power-width", "power", "VBAT narrow"), ("pin-escape", "plain", "U3 blocked")}
+    assert failed == [] and {g["base"] for g in rows_out if g["kind"].startswith("pair")} == {
+        "pair:USB_D_P/USB_D_N", "pair:Y_P/Y_N"}
 
 
 def test_review_gaps_isolates_failing_source(monkeypatch):
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
     monkeypatch.setattr(_PW, "check", lambda facts, cons: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons: (None, {}, []))
+    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, []))
     monkeypatch.setattr(_RD, "load", lambda board: None)
-    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U9"], "msg": "m"}])
-    assert [g["kind"] for g in GP.review_gaps("b.kicad_pcb", {})] == ["pin-escape"]
+    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U9"], "msg": "m"}])
+    rows_out, failed = GP.review_gaps("b.kicad_pcb", {})
+    assert [g["kind"] for g in rows_out] == ["pin-escape"] and failed == ["power"]
 
 
-def test_protect_nets_drops_incomplete_pair_legs_only(monkeypatch):
-    monkeypatch.setattr(GP, "_snapshot", lambda board: {})
-    monkeypatch.setattr(GP.drcguard, "snap_nets", lambda snap: [])
-    monkeypatch.setattr(GP.drcguard, "protected_nets", lambda cons, names: {"X_P", "X_N", "Y_P", "Y_N", "RF1"})
+def test_relax_nets_are_incomplete_pair_legs_and_only_they_are_relaxed(monkeypatch):
     gaps = [{"kind": "pair-skew", "class": "pair", "nets": ["Y_P", "Y_N"]}]
-    assert GP.protect_nets("b.kicad_pcb", {}, gaps) == {"X_P", "X_N", "RF1"}
+    assert GP.relax_nets(gaps) == {"Y_P", "Y_N"}
+    prot = {"X_P", "X_N", "Y_P", "Y_N", "RF1"}
+    # a pair-kind try relaxes only its own target legs; a plain try keeps every protected net
+    assert GP._r5_set("pair-skew", [{"nets": ["Y_P", "Y_N"]}], prot, {"Y_P", "Y_N"}) == {"X_P", "X_N", "RF1"}
+    assert GP._r5_set("open-gap", [{"nets": ["Y_P", "Y_N"]}], prot, {"Y_P", "Y_N"}) == prot
