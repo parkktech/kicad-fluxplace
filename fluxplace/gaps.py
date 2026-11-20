@@ -579,6 +579,15 @@ def _apply_ai(base, out, a, ctx, sid):
             _clean_board(t)
 
 
+def ctx_dir_ai(work):
+    return os.path.join(work, "ai")
+
+
+def _ai_pending(ai_dir, gaps):
+    """True when an unapplied action file exists for one of `gaps`."""
+    return any(os.path.exists(os.path.join(ai_dir, critroute._safe(ai_key(g))[:80] + ".action.json")) for g in gaps)
+
+
 def ai_key(gap):
     """Stable key of a gap for AI packet/action files and the AI budget: kind and first net."""
     return f"{gap['kind']}:{(gap.get('nets') or ['?'])[0]}"
@@ -849,6 +858,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     break
                 accepted = attempt(r, kind, rung, targets)
                 save(r)
+                extra = len(targets) if rung == "ai" else 0   # every pending AI action gets its try this round
+                while (extra and not accepted and _ai_pending(ctx_dir_ai(work), targets)
+                       and time.time() - t0 <= budget_s):
+                    extra -= 1
+                    accepted = attempt(r, kind, rung, targets)
+                    save(r)
                 if accepted:
                     hit = True
                     break

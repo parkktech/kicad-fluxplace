@@ -4,8 +4,10 @@ from collections import Counter
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import types
+import functools
 from fluxplace import gaps as GP, critroute, handroute as HR, routediag as RD, routable as RB, legality as LGL
 from fluxplace import boardwrite as BW, routerloc as RL, routerules as RR, adaptive, batchroute as BR
+_close = functools.partial(GP.close, inproc=True)
 
 PKT_KEYS = {"v", "gap", "conn", "window", "sealed_by", "krt", "tried", "actions"}
 GAP = {"id": "open-free:SIG2:1:2", "kind": "open-free", "class": "plain", "nets": ["SIG2"]}
@@ -285,7 +287,7 @@ def close_env(monkeypatch, tmp_path):
 
 def test_close_packets_stop_exit5_and_not_memoised(close_env):
     cons = {"ai": {"mode": "packet"}}
-    res = GP.close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons,
+    res = _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons,
                    log=lambda m: None)
     assert res["stop"] == "packets" and res["exit"] == 5
     assert json.load(open(os.path.join(close_env["work"], "stop.json")))["exit"] == 5
@@ -295,12 +297,12 @@ def test_close_packets_stop_exit5_and_not_memoised(close_env):
     pk = glob.glob(os.path.join(close_env["work"], "ai", "*.packet.json"))
     assert len(pk) == 1
     os.remove(pk[0])
-    GP.close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons, log=lambda m: None)
+    _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons, log=lambda m: None)
     assert os.path.exists(pk[0])
 
 
 def test_close_ai_off_flat_not_packets(close_env):
-    res = GP.close(close_env["board"], close_env["work"], attempts=close_env["attempts"],
+    res = _close(close_env["board"], close_env["work"], attempts=close_env["attempts"],
                    cons={"ai": {"mode": "off"}}, log=lambda m: None)
     assert res["stop"] == "flat" and res["exit"] == 2
     assert not os.path.exists(os.path.join(close_env["work"], "ai"))
