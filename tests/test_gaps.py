@@ -148,6 +148,27 @@ def loop(monkeypatch, tmp_path, guard):
     return {"board": str(board), "work": str(tmp_path / "work"), "attempts": str(tmp_path / "attempts.jsonl")}
 
 
+@pytest.fixture(autouse=True)
+def _no_prune(monkeypatch, request):
+    """The loop tests below script the routing rungs; `prune` (first rung for open-free and dangling) is left out of the
+    dispatch for them and has its own tests."""
+    if "prune" in request.node.name:
+        return
+    for kind in ("open-free", "dangling"):
+        monkeypatch.setitem(GP.DISPATCH, kind, [r for r in GP.DISPATCH[kind] if r != "prune"])
+
+
+def test_prune_is_first_rung_for_open_free_and_dangling():
+    assert GP.DISPATCH["open-free"][0] == "prune" and GP.DISPATCH["dangling"][0] == "prune"
+    assert "prune" in GP.RUNGS
+
+
+def test_prune_unreadable_board_removes_nothing(tmp_path):
+    from fluxplace import launder as LA
+    assert LA.prune_board(str(tmp_path / "missing.kicad_pcb"), str(tmp_path / "o.kicad_pcb")) == {"removed": 0, "nets": []}
+    assert not (tmp_path / "o.kicad_pcb").exists()
+
+
 def _rung(mode):
     def fn(base, out, gaps, ctx):
         if mode == "raise":
@@ -381,15 +402,48 @@ def test_krt_command_carries_nets_and_layers(monkeypatch, tmp_path):
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
     monkeypatch.setattr(subprocess, "run", fake_run)
+    opens = iter([{"NET[0]"}, set()])                                  # open before the call, closed after it
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: ["BLOCK[1]", "OTHER"])
     gap = dict(_g("a"), nets=["NET[0]"])
     out = tmp_path / "out.kicad_pcb"
     res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [gap],
                     {"cons": {}, "work": str(tmp_path), "budget_s": 60})
     cmd = seen["cmd"]
-    assert res == {"status": "ran", "rc": 0, "failed": 0, "open": 0} and out.exists()
+    assert res == {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 1, "ripped": 0} and out.exists()
     assert cmd[cmd.index("--nets") + 1:] == ["NET[[]0]"]
+    i = cmd.index("--rip-existing-nets")                               # the window nets are KRT's rip candidates
+    assert cmd[i + 1:i + 3] == ["BLOCK[[]1]", "OTHER"] and i < cmd.index("--nets")
     assert cmd.index("--layers") < cmd.index("F.Cu") < cmd.index("B.Cu") < cmd.index("--nets")
     assert seen["kw"]["cwd"] == str(tmp_path)
+
+
+def test_krt_keeps_previous_board_on_a_trade_and_skips_pair_legs(monkeypatch, tmp_path):
+    import subprocess
+    from fluxplace import routerloc as RL, routerules as RR, adaptive, batchroute as BR
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(adaptive, "krt_extra", lambda d, s: [])
+    monkeypatch.setattr(BR, "has_fanout", lambda src: False)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd[cmd.index("--nets") + 1:])
+        open(cmd[cmd.index("--output") + 1], "w").write("routed")
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    opens = iter([{"A", "P_N"}, {"P_N", "LOST"}])                      # A closes, another net opens: a trade
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])
+    out = tmp_path / "out.kicad_pcb"
+    gaps = [dict(_g("a"), nets=["P_N"]), dict(_g("b"), nets=["A"])]
+    ctx = {"cons": {}, "work": str(tmp_path), "budget_s": 60, "protect": {"P_N"}}
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), gaps, ctx)
+    assert calls == [["A"]]                                            # the pair leg is never routed alone
+    assert res["closed"] == 0 and not out.exists()
+    assert GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), gaps[:1], ctx) == {"status": "no plain net"}
 
 
 def test_krt_before_region_in_open_free():

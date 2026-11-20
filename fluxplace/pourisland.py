@@ -17,6 +17,41 @@ def _start(records, net, at):
     return sides[0]["x"], sides[0]["y"]
 
 
+def island_sites(b, net, step=0.4, per_island=12):
+    """Via sites inside the untied pour islands of `net`: a fill outline that holds a pad of the net but no via and no
+    through-hole pad of it has no path to the other layers. KiCad reports such an open at the zone's anchor corner, not
+    at the island, so the sites are taken from the fill itself: grid points inside the outline, nearest its pads first.
+    -> [(x, y)] in mm."""
+    import pcbnew
+    vias = [t.GetPosition() for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetname() == net]
+    pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
+    out = []
+    for z in b.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != net:
+            continue
+        for lid in z.GetLayerSet().CuStack():
+            ps = z.GetFilledPolysList(lid)
+            for i in range(ps.OutlineCount()):
+                if any(ps.Contains(v, i) for v in vias) or any(p.HasHole() and ps.Contains(p.GetPosition(), i) for p in pads):
+                    continue
+                own = [p.GetPosition() for p in pads if p.IsOnLayer(lid) and ps.Contains(p.GetPosition(), i)]
+                if not own:
+                    continue
+                bb = ps.Outline(i).BBox()
+                st = pcbnew.FromMM(step)
+                pts = []
+                x = bb.GetLeft() + st // 2
+                while x < bb.GetRight():
+                    y = bb.GetTop() + st // 2
+                    while y < bb.GetBottom():
+                        if ps.Contains(pcbnew.VECTOR2I(x, y), i):
+                            pts.append((min((x - o.x) ** 2 + (y - o.y) ** 2 for o in own), x, y))
+                        y += st
+                    x += st
+                out += [(pcbnew.ToMM(x), pcbnew.ToMM(y)) for _d, x, y in sorted(pts)[:per_island]]
+    return out
+
+
 def repair(board, out, net, constraints=None, at=None, max_sites=24):
     """Join an open same-net pour island with one guarded via. Writes `out` only when its open count falls."""
     import pcbnew
@@ -32,6 +67,9 @@ def repair(board, out, net, constraints=None, at=None, max_sites=24):
     sites = [(0.0, x, y)]
     for radius in (0.3, 0.6, 1.0, 1.5):
         sites += [(radius, x + radius * math.cos(k * math.pi / 4), y + radius * math.sin(k * math.pi / 4)) for k in range(8)]
+    if at is None:
+        sites = [(0.0, ix, iy) for ix, iy in island_sites(b, net)] + sites
+        max_sites += len(sites) - 33
     reasons = []
     for _radius, cx, cy in sites[:max_sites]:
         pos = pcbnew.VECTOR2I(pcbnew.FromMM(cx), pcbnew.FromMM(cy))

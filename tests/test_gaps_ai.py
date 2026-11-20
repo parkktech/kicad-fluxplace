@@ -1,3 +1,4 @@
+import os
 """gaps.py phase 2b: AI packet, action file load and apply, budgets, KRT json-out, packets stop. Fakes only."""
 import hashlib, json, os, sys
 from collections import Counter
@@ -260,13 +261,16 @@ def test_krt_json_out_before_nets(monkeypatch, tmp_path):
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
     monkeypatch.setattr(subprocess, "run", fake_run)
+    opens = iter([{"N"}, set()])
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])
     ctx = {"cons": {}, "work": str(tmp_path), "budget_s": 60}
     out = tmp_path / "out.kicad_pcb"
     res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [dict(GAP, nets=["N"])], ctx)
     cmd = seen["cmd"]
     assert cmd.index("--json-out") < cmd.index("--nets")
-    assert res == {"status": "ran", "rc": 0, "failed": 1, "open": 0}
-    assert ctx["krt_last"] == str(out) + ".krt.json"
+    assert res == {"status": "ran", "rc": 0, "failed": 1, "open": 0, "closed": 1, "ripped": 0}
+    assert ctx["krt_last"] == str(out) + ".krt0.json" and os.path.exists(ctx["krt_last"])
 
 
 # ---- close loop ----

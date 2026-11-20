@@ -311,3 +311,115 @@ def _worker(board_in, board_out, picks_json):
 if __name__ == "__main__":
     import sys as _sys
     _worker(_sys.argv[1], _sys.argv[2], _sys.argv[3])
+
+
+# ------------------------------------------------- dead-copper prune ----
+
+def _pt_seg(p, a, c):
+    ax, ay = a
+    dx, dy = c[0] - ax, c[1] - ay
+    q = dx * dx + dy * dy
+    t = 0.0 if q == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / q))
+    return ((p[0] - ax - t * dx) ** 2 + (p[1] - ay - t * dy) ** 2) ** 0.5
+
+
+def dead_copper(b, protect=()):
+    """Unlocked tracks/vias that carry nothing, from KiCad's own connectivity (no DRC list, no bisect):
+
+      island   a group of tracks/vias connected to no pad
+      stub     a track whose connections all sit at one spot along it (the rest is a free end), and a via left with at
+               most one connection; repeated until none is left
+
+    Nets that own a zone are skipped (a via or track may be tied only through the fill), and so are locked items and
+    the nets in `protect`. KiCad's `track_dangling` list is not used: it also names tracks that end off a pad centre,
+    and deleting those opens nets (measured: 192 candidates, 7 -> 48 opens).
+    -> list of board items."""
+    import pcbnew
+    conn = b.GetConnectivity()
+    zoned = {z.GetNetname() for z in b.Zones() if z.GetNetname()}
+    def uid(o):                                      # not m_Uuid: routed boards carry duplicate UUIDs (W14: 119 pairs)
+        a, c = o.GetStart(), o.GetEnd()
+        return (o.GetClass(), o.GetNetCode(), o.GetLayer(), a.x, a.y, c.x, c.y)
+    N = {}
+    for t in b.GetTracks():
+        net = t.GetNetname()
+        if not net or net in protect or net in zoned:
+            continue
+        via = t.Type() == pcbnew.PCB_VIA_T
+        N[uid(t)] = {"o": t, "via": via, "net": net, "a": t.GetStart(), "c": t.GetStart() if via else t.GetEnd(),
+                     "nb": [uid(x) for x in conn.GetConnectedTracks(t)], "pads": list(conn.GetConnectedPads(t)),
+                     "alive": True}
+    # islands
+    seen = set()
+    for k in N:
+        if k in seen:
+            continue
+        grp, todo = [], [k]
+        seen.add(k)
+        while todo:
+            x = todo.pop()
+            grp.append(x)
+            for y in N[x]["nb"]:
+                if y in N and y not in seen:
+                    seen.add(y)
+                    todo.append(y)
+        if not any(N[x]["pads"] for x in grp) and not any(N[x]["o"].IsLocked() for x in grp):
+            for x in grp:
+                N[x]["alive"] = False
+
+    def spots(n):
+        """Positions along track n (0 = start, 1 = end) where something alive attaches."""
+        a, c = n["a"], n["c"]
+        dx, dy = c.x - a.x, c.y - a.y
+        q = float(dx * dx + dy * dy) or 1.0
+        par = lambda p: max(0.0, min(1.0, ((p.x - a.x) * dx + (p.y - a.y) * dy) / q))
+        out = []
+        for p in n["pads"]:
+            hit = [e for e, pt in ((0.0, a), (1.0, c)) if p.HitTest(pt)]
+            out += hit or [par(p.GetPosition())]
+        for y in n["nb"]:
+            m = N.get(y)
+            if m is None or not m["alive"]:
+                continue
+            hit = [e for e, pt in ((0.0, a), (1.0, c)) if m["o"].HitTest(pt)]
+            out += hit or [par(pt) for pt in {(m["a"].x, m["a"].y): m["a"], (m["c"].x, m["c"].y): m["c"]}.values()
+                           if n["o"].HitTest(pt)] or [0.5]
+        return out
+
+    changed = True
+    while changed:
+        changed = False
+        for n in N.values():
+            if not n["alive"] or n["o"].IsLocked():
+                continue
+            if n["via"]:
+                k = len(n["pads"]) + sum(1 for y in n["nb"] if y in N and N[y]["alive"])
+                free = k <= 1 and not n["pads"]
+            else:
+                s = spots(n)
+                free = not s or max(s) - min(s) < 1e-6
+            if free:
+                n["alive"] = False
+                changed = True
+    return [n["o"] for n in N.values() if not n["alive"] and not n["o"].IsLocked()]
+
+
+def prune_board(board_in, board_out, protect=()):
+    """Delete `dead_copper` and refill. -> {"removed": n, "nets": [...]}; writes board_out only when n > 0."""
+    import pcbnew
+    from .patch import refill_zones
+    try:
+        b = pcbnew.LoadBoard(board_in)
+    except Exception:
+        b = None
+    if b is None:                                    # unreadable board: nothing to prune (refill would crash on it)
+        return {"removed": 0, "nets": []}
+    refill_zones(b)
+    dead = dead_copper(b, protect)
+    nets = sorted({t.GetNetname() for t in dead})
+    for t in dead:
+        b.Remove(t)
+    if dead:
+        refill_zones(b)
+        pcbnew.SaveBoard(board_out, b)
+    return {"removed": len(dead), "nets": nets}

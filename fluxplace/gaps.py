@@ -311,31 +311,101 @@ def _krt_cmd(base, out, nets, ctx, layers=None):
     return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], R=R, rflags=rflags)
 
 
-def _r_krt(base, out, gaps, ctx):
-    """KRT single-net re-route (the proven router) on the open nets. Passes --json-out; ctx["krt_last"] names the summary."""
-    cmd = _krt_cmd(base, out, _nets(gaps), ctx)
-    if cmd is None:
-        return {"status": "krt not found"}
-    js = out + ".krt.json"
-    i = cmd.index("--nets")
-    cmd[i:i] = ["--json-out", js]
+KRT_WINDOW_MM = 1.5                             # margin of the gap window whose nets KRT may rip and re-route
+KRT_MAX = 8                                     # gaps per _r_krt call
+
+
+def _krt_open(board, cp):
+    """Names of the nets with an open connection on `board`."""
+    from . import handroute as HR
+    return {r.get("net") for r in HR.open_nets(board, constraints=cp)["connections"]}
+
+
+def _krt_rip(board, net, cp, skip):
+    """Nets with unlocked copper inside the window of `net`'s first open connection, `skip` removed. None: not open."""
+    from . import handroute as HR
+    conns = HR.open_nets(board, constraints=cp)["connections"]
+    i = next((n for n, r in enumerate(conns) if r.get("net") == net), None)
+    if i is None:
+        return None
+    W = HR.window(board, conn=i, constraints=cp, margin=KRT_WINDOW_MM)
+    return sorted({t.get("net") for t in (W.get("tracks") or []) + (W.get("vias") or [])
+                   if t.get("net") and not t.get("locked")} - set(skip))
+
+
+def _zone_nets(board):
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
-                              cwd=ctx["work"])
-    except subprocess.TimeoutExpired:
-        _rm(out)
-        return {"status": "krt timeout"}
-    res = {"status": "ran", "rc": proc.returncode, "failed": 0, "open": 0}
-    if os.path.exists(js):
-        ctx["krt_last"] = js
-        try:
-            with open(js) as fh:
-                d = json.load(fh)
-        except (OSError, ValueError):
-            d = {}
-        d = d if isinstance(d, dict) else {}
-        res["failed"] = len(d.get("failed_single") or [])
-        res["open"] = len(d.get("open_single") or [])
+        import pcbnew
+        return {z.GetNetname() for z in pcbnew.LoadBoard(board).Zones() if z.GetNetname()}
+    except Exception:
+        return set()
+
+
+def _r_krt(base, out, gaps, ctx):
+    """KRT (the proven router) on the open nets, one net per call, each call on the board the previous one left.
+    The nets with unlocked copper inside the gap window (zone nets and ctx["protect"] excluded) are passed as
+    `--rip-existing-nets`: KRT may rip them when they block the target and re-routes or restores each one itself
+    (custody), and its improvement gate reverts a run that opens another net. A net's result is kept only when the
+    net is closed and no other net has opened. Measured on W14: SIM_RST closed with its 4 window nets as candidates;
+    with every net as a candidate a 47 mm net was ripped and lost; without candidates the same net was `no change`.
+    Passes --json-out; ctx["krt_last"] names the last summary."""
+    from . import krtchain as KC
+    cp, protect = ctx.get("cons_path"), set(ctx.get("protect") or ())
+    if _krt_cmd(base, out, ["x"], ctx) is None:
+        return {"status": "krt not found"}
+    targets = [n for n in dict.fromkeys(_nets(gaps)) if n not in protect][:KRT_MAX]   # a pair leg is never routed alone
+    if not targets:
+        return {"status": "no plain net"}
+    skip = protect | _zone_nets(base) | set(targets)
+    res = {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 0, "ripped": 0}
+    cur, tmps, t0 = base, [], time.time()
+    try:
+        for k, net in enumerate(targets):
+            if time.time() - t0 > ctx["budget_s"]:            # out of budget: what is closed so far is written
+                res["status"] = "budget"
+                break
+            before = _krt_open(cur, cp)
+            rip = _krt_rip(cur, net, cp, skip)
+            if rip is None:
+                continue
+            nxt, js = f"{out}.n{k}.kicad_pcb", f"{out}.krt{k}.json"     # js outlives the temp board (AI packet)
+            tmps.append(nxt)
+            _clean_board(nxt)
+            _sidecars(cur, nxt)
+            cmd = _krt_cmd(cur, nxt, [net], ctx)
+            at = cmd.index("--nets")
+            cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in rip]] if rip else [])
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
+                                      cwd=ctx["work"])
+            except subprocess.TimeoutExpired:
+                res["status"] = "krt timeout"
+                break
+            res["rc"] = proc.returncode
+            if os.path.exists(js):
+                ctx["krt_last"] = js
+                try:
+                    with open(js) as fh:
+                        d = json.load(fh)
+                except (OSError, ValueError):
+                    d = {}
+                d = d if isinstance(d, dict) else {}
+                res["failed"] += len(d.get("failed_single") or [])
+                res["open"] += len(d.get("open_single") or [])
+                res["ripped"] += len(d.get("preexisting_rips") or [])
+            if not os.path.exists(nxt):
+                continue
+            after = _krt_open(nxt, cp)
+            if net in after or (after - before):
+                continue                                      # not closed, or a trade: the previous board stands
+            cur = nxt
+            res["closed"] += 1
+        if cur != base:
+            _copy(cur, out)
+            _sidecars(cur, out)
+    finally:
+        for t in tmps:
+            _clean_board(t)
     return res
 
 
@@ -347,6 +417,15 @@ def _r_drcfix(base, out, gaps, ctx):
 def _r_launder(base, out, gaps, ctx):
     from . import launder as LA
     return _brief(LA.launder_board(base, out, kicad_cli=ctx["kicad_cli"], dangling=True, log=ctx["log"]))
+
+
+def _r_prune(base, out, gaps, ctx):
+    """Delete copper that connects nothing (launder.dead_copper: padless islands and free-end stubs, from KiCad's
+    connectivity). An open whose far side is a padless island closes; the stubs it removes free room for the routing
+    rungs that follow."""
+    from . import launder as LA
+    r = LA.prune_board(base, out, set(ctx.get("protect") or ()))
+    return {"status": "pruned" if r["removed"] else "nothing dead", "removed": r["removed"], "nets": len(r["nets"])}
 
 
 def _r_snapiter(base, out, gaps, ctx):
@@ -749,16 +828,16 @@ def _r_krt_region(base, out, gaps, ctx):
 
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
-         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai}
+         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["pourisland", "region", "ai"],
-    "open-free": ["patch", "handrepair", "krt", "krt_region", "region", "patch_rip", "ai"],
+    "open-free": ["prune", "patch", "handrepair", "krt", "krt_region", "region", "patch_rip", "ai"],
     "clearance": ["drcfix", "region"],
-    "dangling": ["launder"],
+    "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
 }
 LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0"}  # every other rung is L0
