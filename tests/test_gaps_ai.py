@@ -50,7 +50,7 @@ def test_packet_no_connection_keys_and_size(monkeypatch, tmp_path):
     ctx = _ctx(tmp_path)
     os.makedirs(ctx["ai_dir"])
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"), [GAP], ctx)
-    assert res == {"status": "packet"}
+    assert res == {"status": "packet", "n": 1} and "rip_locked" in json.loads(open(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP)) + ".packet.json")).read())["actions"]
     pk = os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP)) + ".packet.json")
     raw = open(pk, "rb").read()
     p = json.loads(raw)
@@ -147,8 +147,14 @@ def apply_env(monkeypatch, tmp_path):
             return []
     monkeypatch.setattr(LGL, "Legal", Legal)
     monkeypatch.setattr(HR, "session_begin", lambda b, w, *a, **k: calls.append(("begin", os.path.basename(w))))
-    monkeypatch.setattr(HR, "shove", lambda b, net, **k: calls.append(("shove", net, k.get("op"), k.get("ids"))))
-    monkeypatch.setattr(GP, "_krt_cmd", lambda *a, **k: ["krt", "--nets", "SIG2"])
+    monkeypatch.setattr(HR, "shove", lambda b, net, **k: calls.append(("shove", net, k.get("op"), k.get("ids"),
+                                                                       k.get("allow_locked", False))))
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+
+    def krt_cmd(b, out, nets, ctx, layers=None):
+        calls.append(("krtcmd", list(nets)))
+        return ["krt", "--nets", "SIG2"]
+    monkeypatch.setattr(GP, "_krt_cmd", krt_cmd)
 
     def run(cmd, **k):
         calls.append(("krt", cmd[0]))
@@ -189,12 +195,12 @@ def test_apply_order_and_temps(apply_env, monkeypatch, tmp_path):
         {"do": "route", "nets": ["SIG2"], "layers": None}])
     out = str(tmp_path / "out.kicad_pcb")
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), out, [GAP], ctx)
-    assert res == {"status": "applied", "commit": True, "why": "", "tokens": 40}
+    assert res == {"status": "applied", "commit": True, "why": "", "tokens": 40, "gap_id": GAP["id"]}
     c = apply_env["calls"]
     order = [e[0] for e in c]
     assert order.index("move") < order.index("begin") < order.index("shove") < order.index("krt") \
         < order.index("suggest") < order.index("lay") < order.index("commit")
-    assert ("shove", "SIG9", "unlay", ["abcdef12"]) in c
+    assert ("shove", "SIG9", "unlay", ["abcdef12"], False) in c
     assert ("move", [("R1")]) == c[0] or c[0][0] == "move"
     assert os.listdir(ctx["ai_dir"]) == [critroute._safe(GP.ai_key(GAP)) + ".action.used.json"]
     assert ctx["ai_used"] == {GP.ai_key(GAP): 1}
@@ -298,3 +304,71 @@ def test_close_ai_off_flat_not_packets(close_env):
                    cons={"ai": {"mode": "off"}}, log=lambda m: None)
     assert res["stop"] == "flat" and res["exit"] == 2
     assert not os.path.exists(os.path.join(close_env["work"], "ai"))
+
+
+# ---- rip_locked, multi-gap _r_ai (phase 2b.1) ----
+
+def _gap(net):
+    return {"id": f"open-free:{net}:1:2", "kind": "open-free", "class": "plain", "nets": [net]}
+
+
+def test_rip_locked_protected_net_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
+    f = tmp_path / "a.json"
+    f.write_text(json.dumps({"actions": [
+        {"do": "rip_locked", "net": "CLK", "ids": ["abcdef12"]},
+        {"do": "rip_locked", "net": "SIG9", "ids": ["abcdef12"]},
+        {"do": "rip_locked", "net": "SIG9", "ids": []}]}))
+    a = GP.load_ai_action(str(f), "b", protect={"CLK"})
+    assert a["actions"] == [{"do": "rip_locked", "net": "SIG9", "ids": ["abcdef12"]}]
+
+
+def test_rip_locked_plain_net_shoves_allow_locked_and_routes(apply_env, monkeypatch, tmp_path):
+    ctx = _ctx(tmp_path)
+    _write_action(ctx["ai_dir"], [{"do": "rip_locked", "net": "SIG9", "ids": ["abcdef12"]}])
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    assert res["status"] == "applied" and res["commit"] is True
+    c = apply_env["calls"]
+    assert ("shove", "SIG9", "unlay", ["abcdef12"], True) in c
+    assert ("krtcmd", ["SIG9"]) in c and c.index(("krtcmd", ["SIG9"])) > c.index(("shove", "SIG9", "unlay", ["abcdef12"], True))
+
+
+def test_rip_locked_net_appended_to_last_route(apply_env, tmp_path):
+    ctx = _ctx(tmp_path)
+    _write_action(ctx["ai_dir"], [{"do": "rip_locked", "net": "SIG9", "ids": ["abcdef12"]},
+                                  {"do": "route", "nets": ["SIG2"], "layers": None}])
+    GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    c = apply_env["calls"]
+    assert ("krtcmd", ["SIG2"]) in c and ("krtcmd", ["SIG9"]) in c
+
+
+def test_packets_for_three_gaps_one_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": []})
+    ctx = _ctx(tmp_path)
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"),
+                   [_gap("N1"), _gap("N2"), _gap("N3")], ctx)
+    assert res == {"status": "packet", "n": 3}
+    names = sorted(os.listdir(ctx["ai_dir"]))
+    assert names == sorted(critroute._safe(GP.ai_key(_gap(n))) + ".packet.json" for n in ("N1", "N2", "N3"))
+
+
+def test_packets_capped_at_six_per_call(monkeypatch, tmp_path):
+    monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": []})
+    ctx = _ctx(tmp_path)
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"),
+                   [_gap(f"N{i}") for i in range(7)], ctx)
+    assert res == {"status": "packet", "n": 6} and len(os.listdir(ctx["ai_dir"])) == 6
+
+
+def test_existing_action_for_second_gap_applied(apply_env, tmp_path):
+    ctx = _ctx(tmp_path)
+    os.makedirs(ctx["ai_dir"])
+    g2 = _gap("N2")
+    with open(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(g2)) + ".action.json"), "w") as fh:
+        json.dump({"actions": [{"do": "route", "nets": ["N2"], "layers": None}], "tokens": 7, "why": "x"}, fh)
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"),
+                   [_gap("N1"), g2, _gap("N3")], ctx)
+    assert res == {"status": "applied", "commit": True, "why": "", "tokens": 7, "gap_id": g2["id"]}
+    assert ("krtcmd", ["N2"]) in apply_env["calls"]
+    assert ctx["ai_used"] == {GP.ai_key(g2): 1}
+    assert not [f for f in os.listdir(ctx["ai_dir"]) if f.endswith(".packet.json")]

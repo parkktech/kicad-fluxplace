@@ -92,3 +92,20 @@ Apply:
 ## Done when
 
 Full suite passes. Report diff stat, the pytest line, and every recipe point that did not match the code.
+
+## 2b.1 follow-up (as built at HEAD 2c64e4d + this change)
+
+- AI files and the budget are keyed by `ai_key(gap)` = `kind:first net` (not the gap id).
+- AI route layers are validated against `signal_layers` (planes are not routed into).
+- New action `{"do": "rip_locked", "net", "ids"}` (at most 12 hex ids). `load_ai_action(path, base, protect)` drops it
+  when `net` is in `protect` (`drcguard.protected_nets`: rf nets and pair legs; close puts it in ctx as `protect`).
+  Applied with `handroute.shove(w, net, ids=ids, op="unlay", constraints=cons_path, allow_locked=True)`: shove needs
+  explicit ids, no window and no `out`, which the session apply satisfies. Every rip_locked net must be routed in the
+  same transaction: a net missing from the route actions is appended to the last route action (or a route action is
+  added). `session_commit` runs the locked re-escape checks.
+- Packet `actions` text lists `rip_locked {net, ids} (plain locked copper only; pairs/rf refused)`.
+- `_r_ai` takes every gap of the kind. It applies the first gap, in list order, that has an action file and budget left,
+  and returns `{"status": "applied", ..., "gap_id"}`. Otherwise it writes a packet for each gap with budget left, one per
+  AI key, at most 6 per call, and returns `{"status": "packet", "n": count}`. No budget left for any gap gives `ai budget`.
+- Acceptance is unchanged: `drcguard` refuses only when every target gap is still present, so one applied gap among several is
+  accepted and the attempt is `partial`.

@@ -331,8 +331,9 @@ def _r_snapiter(base, out, gaps, ctx):
 PACKET_BYTES = 4096
 AI_BUDGET = 2                                   # action files applied per gap id per work dir
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
-_PACKET_ACTIONS = ("rip {net, ids}; nudge {ref, dx, dy, rot}; route {nets, layers}; give_up {why}. "
-                   "No copper coordinates.")
+_PACKET_ACTIONS = ("rip {net, ids}; rip_locked {net, ids} (plain locked copper only; pairs/rf refused); "
+                   "nudge {ref, dx, dy, rot}; route {nets, layers}; give_up {why}. No copper coordinates.")
+AI_PACKETS = 6                                  # packets written per _r_ai call
 
 
 def _num(v):
@@ -349,6 +350,11 @@ def _ai_action(x, copper):
         if (isinstance(x.get("net"), str) and x["net"] and isinstance(ids, list) and 0 < len(ids) <= 12
                 and all(isinstance(i, str) and _HEX_ID.match(i) for i in ids)):
             return {"do": "rip", "net": x["net"], "ids": list(ids)}
+    elif do == "rip_locked":
+        ids = x.get("ids")
+        if (isinstance(x.get("net"), str) and x["net"] and isinstance(ids, list) and 0 < len(ids) <= 12
+                and all(isinstance(i, str) and _HEX_ID.match(i) for i in ids)):
+            return {"do": "rip_locked", "net": x["net"], "ids": list(ids)}
     elif do == "nudge":
         if (isinstance(x.get("ref"), str) and x["ref"] and all(_num(x.get(k)) for k in ("dx", "dy", "rot"))
                 and abs(x["dx"]) <= 1.0 and abs(x["dy"]) <= 1.0):
@@ -363,8 +369,9 @@ def _ai_action(x, copper):
     return None
 
 
-def load_ai_action(path, base):
-    """{"actions", "tokens", "why"} from an AI action file. Invalid actions are dropped with a log line. Never raises."""
+def load_ai_action(path, base, protect=()):
+    """{"actions", "tokens", "why"} from an AI action file. Invalid actions are dropped with a log line. Never raises.
+    `protect` (drcguard.protected_nets: rf nets and pair legs) may not be rip_locked."""
     out = {"actions": [], "tokens": 0, "why": ""}
     try:
         with open(path) as fh:
@@ -383,6 +390,8 @@ def load_ai_action(path, base):
     out["why"] = str(a.get("why") or "")[:200]
     for x in a.get("actions") if isinstance(a.get("actions"), list) else []:
         v = _ai_action(x, copper)
+        if v is not None and v["do"] == "rip_locked" and v["net"] in protect:
+            v = None
         if v is None:
             print(f"ai: dropped action {str(x)[:120]}", file=sys.stderr)
         else:
@@ -549,10 +558,20 @@ def _apply_ai(base, out, a, ctx, sid):
         for x in acts:
             if x["do"] == "rip":
                 HR.shove(w, x["net"], ids=x["ids"], op="unlay", constraints=cp)
-        for x in acts:
-            if x["do"] == "route":
-                for net in x["nets"]:
-                    _route_net(w, net, x["layers"] or signal_layers(w), ctx)
+            elif x["do"] == "rip_locked":
+                # session-only opt-in: needs explicit ids, no window, no out (handroute.shove)
+                HR.shove(w, x["net"], ids=x["ids"], op="unlay", constraints=cp, allow_locked=True)
+        routes = [dict(x, nets=list(x["nets"])) for x in acts if x["do"] == "route"]
+        routed = {n for r in routes for n in r["nets"]}
+        ripped = [n for n in dict.fromkeys(x["net"] for x in acts if x["do"] == "rip_locked") if n not in routed]
+        if ripped:                                  # a locked rip must be re-routed in this transaction
+            if routes:
+                routes[-1]["nets"] += ripped
+            else:
+                routes.append({"do": "route", "nets": ripped, "layers": None})
+        for r in routes:
+            for net in r["nets"]:
+                _route_net(w, net, r["layers"] or signal_layers(w), ctx)
         r = HR.session_commit(w, out, constraints=cp)
         return "applied", bool(r.get("accepted")), str((r.get("reasons") or [""])[0])
     finally:
@@ -566,27 +585,36 @@ def ai_key(gap):
 
 
 def _r_ai(base, out, gaps, ctx):
-    """AI rung on the first gap. No action file: write the gap packet and stop (status packet). An action file:
-    apply it as one transaction; close guards the board like any other rung."""
+    """AI rung over the gaps of one kind. The first gap (list order) with an action file and budget left is applied
+    as one transaction (status applied, gap_id names it). Otherwise a packet is written for each gap with budget left
+    (at most AI_PACKETS per call): status packet, n = count. close guards the board like any other rung."""
     if ctx.get("ai_mode") == "off":
         return {"status": "ai off"}
-    gap = gaps[0]
     used = ctx["ai_used"]
-    key = ai_key(gap)          # kind + net: DRC lists an open's two items in either order, so the full id is not stable
-    if used.get(key, 0) >= AI_BUDGET:
-        return {"status": "ai budget"}
-    sid = critroute._safe(key)[:80]
     os.makedirs(ctx["ai_dir"], exist_ok=True)
-    act = os.path.join(ctx["ai_dir"], sid + ".action.json")
-    if not os.path.exists(act):
+    todo, seen = [], set()
+    for g in gaps:                 # one entry per AI key: DRC can list two gaps of one net under one key
+        key = ai_key(g)
+        if key not in seen and used.get(key, 0) < AI_BUDGET:
+            seen.add(key)
+            todo.append((g, key, critroute._safe(key)[:80]))
+    if not todo:
+        return {"status": "ai budget"}
+    for gap, key, sid in todo:
+        act = os.path.join(ctx["ai_dir"], sid + ".action.json")
+        if not os.path.exists(act):
+            continue
+        a = load_ai_action(act, base, ctx.get("protect", ()))
+        os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
+        used[key] = used.get(key, 0) + 1
+        status, commit, why = _apply_ai(base, out, a, ctx, sid)
+        return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"], "gap_id": gap["id"]}
+    n = 0
+    for gap, key, sid in todo[:AI_PACKETS]:
         with open(os.path.join(ctx["ai_dir"], sid + ".packet.json"), "w") as fh:
             fh.write(json.dumps(gap_packet(base, gap, ctx)))
-        return {"status": "packet"}
-    a = load_ai_action(act, base)
-    os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
-    used[key] = used.get(key, 0) + 1
-    status, commit, why = _apply_ai(base, out, a, ctx, sid)
-    return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"]}
+        n += 1
+    return {"status": "packet", "n": n}
 
 
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
@@ -700,7 +728,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 ctx = {"cons": cons, "cons_path": cons_path, "kicad_cli": kicad_cli, "work": work,
                        "budget_s": max(0.0, budget_s - (time.time() - t0)), "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
-                       "krt_last": krt_state.get("last")}
+                       "krt_last": krt_state.get("last"), "protect": protect}
                 summ = RUNGS[rung](best, out, targets, ctx) or {}
                 if ctx.get("krt_last"):
                     krt_state["last"] = ctx["krt_last"]
