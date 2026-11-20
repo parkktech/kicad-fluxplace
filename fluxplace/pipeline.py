@@ -389,6 +389,11 @@ def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R
     from . import batchroute as BR
     if BR.has_fanout(src):
         cmd += ["--no-stub-layer-swap"]              # the router may not re-layer the locked fan-out stubs
+    if power_nets and not pair:                      # D71cj: [power] rails route at their width (power.route_widths)
+        from . import krtchain as KC
+        pn = [n for n in only if n in power_nets]
+        if pn:
+            cmd += ["--power-nets", *[KC.glob_escape(n) for n in pn], "--power-nets-widths", *[f"{power_nets[n]:g}" for n in pn]]
     return cmd + ["--nets", *only]
 
 
@@ -516,7 +521,7 @@ def _st_route(c, n, board):
 
     def build(s, o, only, lim, pair=False):
         pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
-        return _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+        return _route_cmd(a, s, o, only, power_nets=PW, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
                           gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
     run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
@@ -570,6 +575,10 @@ def _st_route(c, n, board):
     B = RD.load(board)
     todo = sorted(conn(board))
     cls = NC.classify(B, c.cons, c.spec)
+    from . import power as PWR
+    from . import escapeplan as EP
+    plane_set = set(EP.plane_nets(B, c.cons, cls, EP.plan_params(c.cons)))
+    PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=plane_set)     # D71cj: rail widths
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
@@ -604,7 +613,7 @@ def _st_route(c, n, board):
     else:
         res = BR.route_batches(start_board, d, rtodo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                total_budget=left_rounds(), status_path=spath, extra=extra, log=lambda m: None,
-                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()))
+                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()), widths=PW)
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
     state["ckpts"] += len(res["checkpoints"])
@@ -619,7 +628,7 @@ def _st_route(c, n, board):
             k[0] += 1
             r = BR.route_batches(b_in, os.path.join(d, f"stall-batches-{k[0]}"), only, run, cons=c.cons,
                                  spec=c.spec, total_budget=min(timeout, left_rounds()), status_path=spath,
-                                 extra=extra, log=lambda m: None, rules=R, conn=conn)
+                                 extra=extra, log=lambda m: None, rules=R, conn=conn, widths=PW)
             shutil.copy(r["board"], b_out)
             _sidecar(b_in, b_out)
             state["timeouts"] += r["timeouts"]
@@ -645,7 +654,7 @@ def _st_route(c, n, board):
 
             def build2(s_, o_, only, lim, pair=False):
                 pair = pair and len(only) == 2 and diff_named(*only)
-                return _route_cmd(a2, s_, o_, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+                return _route_cmd(a2, s_, o_, only, power_nets=PW, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
                                   gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
             return BR.make_runner(build2, a.router_dir, extra, spath, S)
         lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, lleft, B, c.cons, c.spec, cls, a.layers,
@@ -756,6 +765,13 @@ def _st_route(c, n, board):
     except Exception as e:                              # noqa: BLE001 - numbers are advice
         line += f", pairs_uncoupled not measured ({type(e).__name__})"
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
+    from . import power as PWR      # D71cj D: [power] pour rails get their copper pour after routing (guarded)
+    pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"))
+    if pour["added"]:
+        shutil.copy(os.path.join(d, "poured.kicad_pcb"), best)
+        line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
+        out["line"] = line
+    out["pour_rails"] = pour
     if fin:
         out["finish"] = fin
     with open(os.path.join(d, "result.json"), "w") as fh:

@@ -218,6 +218,10 @@ def run(c, n, board, runner=run_step):
         steps.append(("diff", lambda s, o: cmd_diff(a.router_py, a.router_dir, s, o, diff, sig, base, o[:-10] + ".json")))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
+    from . import power as PWR      # D71cj: [power] rails at their width (plane entries win for plane nets)
+    rails = PWR.route_widths(c.cons, layers=len(sig) + len({lay for _n, lay in planes}), track_mm=R["track"],
+                             exclude={x for x, _ in planes})
+    power = {**rails, **power}
     steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json")))
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
@@ -293,7 +297,14 @@ def run(c, n, board, runner=run_step):
         line += f"; pair router missed {len(missed)} pair(s): " + ", ".join(str(m.get("pair")) for m in missed[:6]) + " (use `pairs --only`)"
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded},
+    from . import power as PWR      # D71cj D: [power] pour rails get their copper pour after routing (guarded)
+    pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"))
+    if pour["added"]:
+        shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
+        line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
+    elif pour["dropped"]:
+        line += f"; rail pour dropped (shorts {pour['shorts_before']} -> {pour['shorts_after']})"
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "pour_rails": pour},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if left:
         line += "; open: " + ", ".join(sorted(left))

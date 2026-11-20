@@ -272,10 +272,17 @@ def order_finish(B, work, open0, cls=None, retry_last=()):
     return sorted(dict.fromkeys(work), key=key)
 
 
+def rails_first(order, widths=None):
+    """D71cj: the power rails (widths: {net: mm}) lead the order, widest first; the rest keep their order."""
+    if not widths:
+        return list(order)
+    return sorted((n for n in order if n in widths), key=lambda n: -widths[n]) + [n for n in order if n not in widths]
+
+
 def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cls=None, first=(),
                   power=(), batch_nets=None, batch_timeout=None, total_budget=None,
                   leftover_timeout=None, status_path=None, extra=None, log=print, min_slice=5.0,
-                  rules=None, conn=None, drc_cli="kicad-cli", hybrid=False, retry_last=()):
+                  rules=None, conn=None, drc_cli="kicad-cli", hybrid=False, retry_last=(), widths=None):
     """Route the OPEN CONNECTIONS of `nets` onto copies of `board` in batches. `run` as from make_runner.
 
     The work list is real connectivity (routeconn: pads still not joined by copper/pour), so a net with
@@ -318,6 +325,7 @@ def route_batches(board, workdir, nets, run, *, cons=None, spec=None, B=None, cl
     order = order_nets(B, work, cls, first_eff, power, hint, fanout=fo, phases=ph)
     if hybrid:
         order = order_finish(B, work, open0, cls, retry_last)
+    order = rails_first(order, widths)
     order_info = order_summary(order, ph)
     pace = Pace(tmo, size) if hybrid else None
     tried = set()

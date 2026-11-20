@@ -17,6 +17,7 @@ Per `[power."NET"]` (fields: max_current_ma | load_a | current_a, max_v | nomina
 A rail with no current figure is UNKNOWN (width None, falls back to the caller's default): review lists it.
 """
 import math
+import os
 
 DEFAULT_RISE_C = 10.0
 POUR_OVER_MM = 2.0
@@ -150,6 +151,24 @@ def track_width_mm(cons, net, default_mm=None):
     return r["track_mm"]
 
 
+SPINE_MM = 1.0      # D71cj: a pour rail is routed as a spine this wide, then poured
+
+
+def route_widths(cons, layers=None, track_mm=0.15, exclude=()):
+    """{net: router width mm} for every [power.*] rail with a current figure: pour rails -> min(SPINE_MM, need),
+    other rails -> their IPC width; never below `track_mm` (the signal width). Rails with no current figure are left out.
+    `[route] power_spine_mm` overrides SPINE_MM. `exclude`: plane nets the caller knows (zones on the board), not rails."""
+    spine = float(((cons or {}).get("route") or {}).get("power_spine_mm", SPINE_MM))
+    out = {}
+    for n, r in plan(cons, layers=layers).items():
+        if r is None or r.get("track_mm") is None or n in exclude:
+            continue
+        need = float(r["track_mm"])
+        w = min(spine, need) if r["pour"] else need
+        out[n] = round(max(w, float(track_mm)), 2)
+    return out
+
+
 def is_pour(cons, net):
     r = rail(cons, net)
     return bool(r and r["pour"])
@@ -222,3 +241,62 @@ def check(facts, cons):
                            f"rating / load datasheets): " + ", ".join(f"{n}" + (f" {v:g}V" if v else "") for n, v, _w in unk[:24])
                            + (f" (+{len(unk) - 24})" if len(unk) > 24 else "")})
     return out
+
+
+def pour_rails(board_path, cons, out, layers=None):
+    """D71cj D: a [power] rail with `pour = true` (or a required width over the pour limit) gets a copper pour after routing:
+    one zone per outer copper layer that carries its tracks; outline = bounding box of the rail's tracks and pads on that
+    layer grown by `[route] power_pour_over_mm`; priority 1, thermal relief; filled with planes.refill and saved to `out`.
+    Guard: DRC shorts rise -> nothing is written (`dropped`). -> {added: [net/layer], dropped, shorts_before, shorts_after}"""
+    import pcbnew
+    from . import planes as PL
+    from . import drcguard as DG
+    rec = {"added": [], "dropped": False, "shorts_before": None, "shorts_after": None}
+    rails = sorted(n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm"))
+    if not rails:
+        return rec
+    over = float(((cons or {}).get("route") or {}).get("power_pour_over_mm", POUR_OVER_MM))
+    b = pcbnew.LoadBoard(board_path)
+    rec["shorts_before"] = DG.measure(board_path)["shorts"]
+    zones = []
+    for net in rails:
+        ni = b.FindNet(net)
+        if ni is None:
+            continue
+        nc = ni.GetNetCode()
+        trk = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == nc]
+        pads = [p for fp in b.GetFootprints() for p in fp.Pads() if p.GetNetCode() == nc]
+        for L in (pcbnew.F_Cu, pcbnew.B_Cu):
+            on_l = [t for t in trk if t.GetLayer() == L]
+            if not on_l:
+                continue
+            boxes = [t.GetBoundingBox() for t in on_l] + [p.GetBoundingBox() for p in pads if p.IsOnLayer(L)]
+            x1 = min(bx.GetLeft() for bx in boxes) - pcbnew.FromMM(over)
+            y1 = min(bx.GetTop() for bx in boxes) - pcbnew.FromMM(over)
+            x2 = max(bx.GetRight() for bx in boxes) + pcbnew.FromMM(over)
+            y2 = max(bx.GetBottom() for bx in boxes) + pcbnew.FromMM(over)
+            z = pcbnew.ZONE(b)
+            z.SetLayer(L)
+            z.SetNetCode(nc)
+            z.SetIsFilled(False)
+            z.SetAssignedPriority(1)
+            z.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+            poly = pcbnew.SHAPE_POLY_SET()
+            poly.NewOutline()
+            for (x, y) in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+                poly.Append(int(x), int(y))
+            z.SetOutline(poly)
+            b.Add(z)
+            zones.append((z, poly))
+            rec["added"].append(f"{net}/{b.GetLayerName(L)}")
+    if not zones:
+        return rec
+    PL.refill(b)
+    b.Save(out)
+    rec["shorts_after"] = DG.measure(out)["shorts"]
+    if rec["shorts_after"] > rec["shorts_before"]:
+        rec.update(dropped=True, added=[])
+        if os.path.exists(out):
+            os.remove(out)
+    return rec
+
