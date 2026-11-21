@@ -1209,9 +1209,37 @@ def _proposal_rows(ai_dir):
     return out
 
 
+def _ai_pending_names(ai_dir, gaps):
+    """Sorted basenames of the unapplied action files (existing `<sid>.action.json` only) for `gaps`."""
+    names = set()
+    for g in gaps:
+        name = critroute._safe(ai_key(g))[:80] + ".action.json"
+        if os.path.exists(os.path.join(ai_dir, name)):
+            names.add(name)
+    return sorted(names)
+
+
 def _ai_pending(ai_dir, gaps):
     """True when an unapplied action file exists for one of `gaps`."""
-    return any(os.path.exists(os.path.join(ai_dir, critroute._safe(ai_key(g))[:80] + ".action.json")) for g in gaps)
+    return bool(_ai_pending_names(ai_dir, gaps))
+
+
+# PHASE3G-H2: an hs-pair gap takes centre lines, rips, give-ups and a stub path; other classes keep every action
+AI_PAIR_HS_KINDS = ("pair_path", "rip", "give_up", "path")
+
+
+def _ai_filter_pair(gap, actions):
+    """Actions a pair gap may apply. An hs-pair gap keeps AI_PAIR_HS_KINDS only; a low-speed "pair" gap (and any
+    other class) keeps all validated actions. Dropped kinds are reported on stderr."""
+    if gap.get("class") != "hs-pair":
+        return list(actions)
+    kept = []
+    for x in actions:
+        if x["do"] in AI_PAIR_HS_KINDS:
+            kept.append(x)
+        else:
+            print(f"ai: hs-pair gap {gap['id']}: dropped {x['do']} action (pair_path, rip, give_up, path only)", file=sys.stderr)
+    return kept
 
 
 def ai_key(gap):
@@ -1244,14 +1272,7 @@ def _r_ai(base, out, gaps, ctx):
         if not os.path.exists(act):
             continue
         a = load_ai_action(act, base, ctx.get("protect", ()), hs_legs=ctx.get("hs_legs", ()))
-        if str(gap["kind"]).startswith("pair-"):           # PHASE3G G1: a pair gap takes centre lines, rips and give-ups only
-            kept = []
-            for x in a["actions"]:
-                if x["do"] in ("pair_path", "rip", "give_up"):
-                    kept.append(x)
-                else:
-                    print(f"ai: pair gap {gap['id']}: dropped {x['do']} action (pair_path, rip, give_up only)", file=sys.stderr)
-            a["actions"] = kept
+        a["actions"] = _ai_filter_pair(gap, a["actions"])   # PHASE3G G1 / H2: hs-pair gaps are restricted, low-speed pairs are not
         os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
         used[key] = used.get(key, 0) + 1
         a["gap_id"] = gap["id"]
@@ -1558,6 +1579,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             key = (kind, rung, "pairs:" + ",".join(sorted(nets)))
         if sub:                                              # PHASE3F A3: a split half has its own memo key
             key = (kind, rung, fp, "sub:" + hashlib.sha1(",".join(sorted(g["id"] for g in targets)).encode()).hexdigest())
+        if rung == "ai":                                     # PHASE3G-H2: an answer file refused once must not block the next one
+            key = key + ("ai:" + ",".join(_ai_pending_names(ctx_dir_ai(work), targets)),)
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None

@@ -131,6 +131,7 @@ reference plane changes gets one return via of the reference net within `[review
 `return_via_missing` (the review WARNs). A refusal reports `at` [x, y] and `blocker` {label, net, layer}; the feedback row keeps
 them with `stripped` {items, locked}), `swap_pins {ref, pads, why}` (proposal only),
 `give_up {why}`. Budget: `[ai] budget` (default 4 applied action files per gap key per work dir).
+Pair gaps: an hs-pair gap (`class` hs-pair) applies `pair_path`, `rip`, `give_up` and `path` only (a `path` on an hs leg is a stub join <= 2 mm); a low-speed `pair` gap applies every validated kind. The AI rung's memo key names the pending action files, so each answer file gets its try.
 
 Order inside one transaction: nudges, rips, `path`s, `pair_path`s, `route`s, then `session_commit`; close's guard
 (R0-R6) then judges the candidate like any rung.

@@ -568,9 +568,9 @@ def test_ai_key_of_pair_gap_is_the_pair():
     assert GP.ai_key({"kind": "open-free", "nets": ["SIG2"]}) == "open-free:SIG2"
 
 
-def test_pair_gap_drops_path_and_route_keeps_pair_path(tmp_path, monkeypatch):
+def test_hs_pair_gap_drops_route_keeps_path_and_pair_path(tmp_path, monkeypatch):
     from fluxplace import critroute
-    gap = {"id": "pair-skew:P/N", "kind": "pair-skew", "class": "pair", "nets": ["P", "N"]}
+    gap = {"id": "pair-skew:P/N", "kind": "pair-skew", "class": "hs-pair", "nets": ["P", "N"]}
     ctx = _ctx(tmp_path)
     sid = critroute._safe(GP.ai_key(gap))[:80]
     act = tmp_path / "ai" / (sid + ".action.json")
@@ -587,7 +587,7 @@ def test_pair_gap_drops_path_and_route_keeps_pair_path(tmp_path, monkeypatch):
         return "applied", True, ""
     monkeypatch.setattr(GP, "_apply_ai", fake_apply)
     GP._r_ai(str(tmp_path / "b.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [gap], ctx)
-    assert seen["acts"] == ["pair_path", "give_up"]
+    assert seen["acts"] == ["path", "pair_path", "give_up"]
 
 
 # ---- PHASE3G G1b a/b: layer-change waypoints validated, refusal detail in the feedback row ----------------------------
@@ -618,3 +618,24 @@ def test_pair_path_refusal_detail_reaches_feedback_row(apply_env, tmp_path, monk
     row = fb["actions"][-1]
     assert row["do"] == "pair_path" and row["ok"] is False and row["at"] == [1.2, 3.4]
     assert row["blocker"] == {"label": "via X", "net": "X", "layer": "F.Cu"} and "stripped" in row
+
+
+def test_ai_pending_names_sorted_existing_only(tmp_path):
+    g1 = {"id": "open-free:SIG2:1:2", "kind": "open-free", "class": "plain", "nets": ["SIG2"]}
+    g2 = {"id": "open-free:AAA:1:2", "kind": "open-free", "class": "plain", "nets": ["AAA"]}
+    g3 = {"id": "open-free:ZZZ:1:2", "kind": "open-free", "class": "plain", "nets": ["ZZZ"]}
+    for g in (g1, g2):
+        open(os.path.join(tmp_path, GP.critroute._safe(GP.ai_key(g))[:80] + ".action.json"), "w").write("{}")
+    assert GP._ai_pending_names(str(tmp_path), [g1, g3, g2]) == sorted(
+        [GP.critroute._safe(GP.ai_key(g1))[:80] + ".action.json", GP.critroute._safe(GP.ai_key(g2))[:80] + ".action.json"])
+    assert GP._ai_pending_names(str(tmp_path), [g3]) == []
+    assert GP._ai_pending(str(tmp_path), [g3]) is False
+    assert GP._ai_pending(str(tmp_path), [g1]) is True
+
+
+def test_ai_filter_pair_hs_and_low_speed():
+    hs = {"id": "pair-open:USB_P:USB_N", "kind": "pair-open", "class": "hs-pair", "nets": ["USB_P", "USB_N"]}
+    lo = {"id": "pair-open:I2C_P:I2C_N", "kind": "pair-open", "class": "pair", "nets": ["I2C_P", "I2C_N"]}
+    acts = [{"do": "route"}, {"do": "path"}, {"do": "pair_path"}, {"do": "rip"}, {"do": "nudge"}, {"do": "give_up"}]
+    assert [x["do"] for x in GP._ai_filter_pair(hs, acts)] == ["path", "pair_path", "rip", "give_up"]
+    assert [x["do"] for x in GP._ai_filter_pair(lo, acts)] == [x["do"] for x in acts]
