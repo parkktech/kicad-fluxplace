@@ -124,7 +124,12 @@ Files:
 
 Action kinds: `rip {net, ids}`, `rip_locked {net, ids}`, `nudge {ref, dx, dy, rot}`, `route {nets, layers}`,
 `path {net, path, lock}` (AI-FINISH path syntax, <= 800 chars, not for hs-pair legs), `pair_path {pair, layer, waypoints}`
-(2-40 points; validated, `lay_centreline` reports "not implemented" for now), `swap_pins {ref, pads, why}` (proposal only),
+(2-40 points; waypoints `[x, y]` or `[x, y, "Layer"]`. A named layer other than the current one is a LAYER CHANGE at that point
+(a via pair is placed there); at most 4 changes, never on the last point; each run 45/90 and >= 1.0 mm; the start pad must be on
+the first layer (else refused: "pad REF.NUM is not on LAYER: start the centre line on the pad's layer"); a change where the
+reference plane changes gets one return via of the reference net within `[review] return_via_mm`, or the result lists
+`return_via_missing` (the review WARNs). A refusal reports `at` [x, y] and `blocker` {label, net, layer}; the feedback row keeps
+them with `stripped` {items, locked}), `swap_pins {ref, pads, why}` (proposal only),
 `give_up {why}`. Budget: `[ai] budget` (default 4 applied action files per gap key per work dir).
 
 Order inside one transaction: nudges, rips, `path`s, `pair_path`s, `route`s, then `session_commit`; close's guard

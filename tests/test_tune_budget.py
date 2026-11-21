@@ -251,3 +251,81 @@ def test_bump_polyline_fixed_side_puts_every_bump_on_one_side():
     from fluxplace import tune as TU
     pts = TU._bump_polyline(30.0, 3, 0.5, 0.8, side=-1)
     assert min(p[1] for p in pts) == pytest.approx(-0.5) and max(p[1] for p in pts) == pytest.approx(0.0)
+
+
+# ------------------------------------------- PHASE3G G1b c: tune grades the pad-to-pad path (pairaudit), not raw copper
+def _fcu_pad(b, net, x, y, sx=0.6, sy=0.6):
+    import pcbnew
+    fp = pcbnew.FOOTPRINT(b)
+    fp.SetReference(f"U{len(b.GetFootprints())}")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+    pad = pcbnew.PAD(fp)
+    pad.SetNumber("1")
+    pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    pad.SetLayerSet(pcbnew.LSET.AllCuMask())
+    pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(sx), pcbnew.FromMM(sy)))
+    pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+    pad.SetNet(net)
+    fp.Add(pad)
+    b.Add(fp)
+
+
+def _path_board(tmp_path, name="pb.kicad_pcb"):
+    """P: straight 20 mm leg at y=10. N: 20 mm leg at y=20 that runs 1 mm INTO its far pad (3 mm long, centre x=30):
+    the track's end is inside the pad, so raw copper is 21 mm but the pad-to-pad path is 20 mm.
+    S (y=30): a 20 mm leg with a 25 mm same-net stub branching at x=20 (the stub is off the pad-to-pad path)."""
+    import pcbnew
+    b = pcbnew.BOARD()
+    nets = {n: pcbnew.NETINFO_ITEM(b, n) for n in ("P", "N", "S")}
+    for n in nets.values():
+        b.Add(n)
+    _fcu_pad(b, nets["P"], 10, 10); _fcu_pad(b, nets["P"], 30, 10)
+    _pcb_track(b, nets["P"], 10, 10, 30, 10)
+    _fcu_pad(b, nets["N"], 10, 20); _fcu_pad(b, nets["N"], 30, 20, sx=3.0)
+    _pcb_track(b, nets["N"], 10, 20, 30, 20)
+    _pcb_track(b, nets["N"], 30, 20, 31, 20)
+    _fcu_pad(b, nets["S"], 10, 30); _fcu_pad(b, nets["S"], 30, 30)
+    _pcb_track(b, nets["S"], 10, 30, 20, 30)
+    _pcb_track(b, nets["S"], 20, 30, 30, 30)
+    _pcb_track(b, nets["S"], 20, 30, 20, 55)
+    path = str(tmp_path / name)
+    b.Save(path)
+    return path
+
+
+def test_path_len_counts_pad_to_pad_path_not_copper_inside_a_pad(tmp_path):
+    from fluxplace import tune as TU
+    import pcbnew
+    src = _path_board(tmp_path)
+    assert TU.path_len(src, "P") == pytest.approx(20.0, abs=0.01)
+    assert TU.path_len(src, "N") == pytest.approx(TU.path_len(src, "P"), abs=0.01)   # equal on the audit's number
+    raw_n = sum(t.GetLength() for t in pcbnew.LoadBoard(src).GetTracks() if t.GetNetname() == "N") / 1e6
+    assert raw_n == pytest.approx(21.0, abs=0.01)                                       # the raw sum is not the path
+
+
+def test_tune_pairs_leaves_pair_alone_when_path_lengths_agree(tmp_path, monkeypatch):
+    from fluxplace import tune as TU
+    src = _path_board(tmp_path)
+    _fake_drc(monkeypatch)
+    out, res = str(tmp_path / "out.kicad_pcb"), {}
+    TU.tune_pairs(src, out, {"N": "P"}, 0.1, result=res, log=lambda m: None)
+    row = res["pairs"][0]
+    assert row["status"] == "ok" and row["skew"] == pytest.approx(0.0, abs=0.01)
+    assert _ntracks(out) == _ntracks(src)                                              # NO change made
+
+
+def test_path_segs_excludes_same_net_stub_and_tune_ignores_it(tmp_path, monkeypatch):
+    from fluxplace import tune as TU
+    import pcbnew
+    src = _path_board(tmp_path)
+    keys = TU.path_segs(src, "S")
+    stub = TU.seg_key((20, 30), (20, 55), "F.Cu")
+    assert keys is not None and stub not in keys and len(keys) == 2                    # the two leg pieces only
+    assert TU.path_len(src, "S") == pytest.approx(20.0, abs=0.01)                      # stub not counted on the path
+    # meander_to with the path restriction bumps a leg piece, never the 25 mm stub (it is the longest straight)
+    b = pcbnew.LoadBoard(src)
+    before_stub = [t for t in b.GetTracks() if t.GetNetname() == "S" and t.GetLength() / 1e6 > 24.0]
+    added = TU.meander_to(b, "S", 1.0, amp_mm=0.6, period_mm=0.8, candidate=0, clearance_mm=0.1, on_path=keys)
+    assert added == pytest.approx(1.0, abs=0.02)
+    assert [t for t in b.GetTracks() if t.GetNetname() == "S" and t.GetLength() / 1e6 > 24.0] == before_stub

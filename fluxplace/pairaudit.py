@@ -24,26 +24,29 @@ def _range(v, copper):
     return set(copper) if not ls else set(ls)
 
 
-def profile(B, net):
-    """{path: bool, layers: [layer sequence], vias: int, length: mm} between the net's two farthest pads."""
+def profile(B, net, want_path=False):
+    """{path: bool, layers: [layer sequence], vias: int, length: mm} between the net's two farthest pads.
+    want_path (PHASE3G G1b c): also "segs": indices into B["segs"] of the track segments ON that path (a stub or a branch
+    of the net is not on it), so the tuner can add length only where the pad-to-pad length counts it."""
     pads = [p for p in B["pads"] if p["net"] == net and not p.get("np")]
     if len(pads) < 2:
-        return {"path": False, "layers": [], "vias": 0, "length": 0.0}
+        return _none_path(want_path)
     cu = B["copper"]
-    segs = [s for s in B["segs"] if s["net"] == net]
+    seg_idx = [i for i, s in enumerate(B["segs"]) if s["net"] == net]
+    segs = [B["segs"][i] for i in seg_idx]
     vias = [v for v in B["vias"] if v["net"] == net]
     best = max(((math.hypot(p["x"] - q["x"], p["y"] - q["y"]), i, j) for i, p in enumerate(pads) for j, q in enumerate(pads) if i < j))
     _d, ia, ib = best
     np_, ns = len(pads), len(segs)
     adj = {}
 
-    def link(u, v, w=0.0, layer=None):
-        adj.setdefault(u, []).append((v, w, layer))
-        adj.setdefault(v, []).append((u, w, layer))
+    def link(u, v, w=0.0, layer=None, sid=None):
+        adj.setdefault(u, []).append((v, w, layer, sid))
+        adj.setdefault(v, []).append((u, w, layer, sid))
     ends = []
     for k, s in enumerate(segs):
         a, b = np_ + 2 * k, np_ + 2 * k + 1
-        link(a, b, math.hypot(s["a"][0] - s["b"][0], s["a"][1] - s["b"][1]), s["layer"])
+        link(a, b, math.hypot(s["a"][0] - s["b"][0], s["a"][1] - s["b"][1]), s["layer"], k)
         ends += [(a, s["a"], s["layer"]), (b, s["b"], s["layer"])]
     vn = [np_ + 2 * ns + j for j in range(len(vias))]
     vl = [_range(v, cu) for v in vias]
@@ -71,22 +74,34 @@ def profile(B, net):
             continue
         if u == ib:
             break
-        for v, w, lay in adj.get(u, ()):
+        for v, w, lay, sid in adj.get(u, ()):
             nd = d + w
             if nd < dist.get(v, math.inf):
-                dist[v], prev[v] = nd, (u, lay)
+                dist[v], prev[v] = nd, (u, lay, sid)
                 heapq.heappush(heap, (nd, v))
     if ib not in dist:
-        return {"path": False, "layers": [], "vias": 0, "length": 0.0}
-    layers, nv, u = [], 0, ib
+        return _none_path(want_path)
+    layers, nv, on, u = [], 0, [], ib
     while u != ia:
-        pu, lay = prev[u]
+        pu, lay, sid = prev[u]
         if lay and (not layers or layers[-1] != lay):
             layers.append(lay)
+        if sid is not None:
+            on.append(seg_idx[sid])
         if u in vn:
             nv += 1
         u = pu
-    return {"path": True, "layers": layers[::-1], "vias": nv, "length": round(dist[ib], 4)}
+    out = {"path": True, "layers": layers[::-1], "vias": nv, "length": round(dist[ib], 4)}
+    if want_path:
+        out["segs"] = sorted(on)
+    return out
+
+
+def _none_path(want_path):
+    out = {"path": False, "layers": [], "vias": 0, "length": 0.0}
+    if want_path:
+        out["segs"] = []
+    return out
 
 
 def pair_list(cls):

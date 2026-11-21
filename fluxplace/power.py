@@ -478,16 +478,21 @@ def _pad_min_at(pads, net, x, y):
     return min(hit) if hit else None
 
 
-def widen(board, cons, out, nets=None):
+def widen(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
     the segment's own copper skipped; the probe model is built once, so widenings do not see each other: the close guard
     judges the result). A segment that ends in a pad narrower than its new width is split max(W, 0.5 mm) from that pad and
     only the far part is widened. Rails that check() exempts (pour rail with a same-net zone) are left alone.
-    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net": {net: {"widened_mm", "left_mm"}}}"""
+    PHASE3G G1b d: a LOCKED rail track is a candidate too, unless its net is in `protect` (drcguard.protected_nets: pair legs,
+    RF). Its width changes in place and it stays locked; a necked split part inherits the lock.
+    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net": {net: {"widened_mm", "left_mm"}},
+    "skipped": {"locked_mm", "pour_zone_mm", "by_net": {net: {"locked_mm", "pour_zone_mm"}}}} (skipped = narrow copper
+    left alone: locked copper of a protected net, copper inside a same-net pour zone; mm of track length)."""
     import pcbnew
     from . import gaps as GP, handroute as HR
-    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}}
+    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}, "skipped": {"locked_mm": 0.0, "pour_zone_mm": 0.0, "by_net": {}}}
+    protect = set(protect or ())
     rails = _rails_on(board, cons, nets)
     if not rails:
         return rec
@@ -497,13 +502,15 @@ def widen(board, cons, out, nets=None):
     pads = [(p.GetNetname(), p.GetBoundingBox(), min(pcbnew.ToMM(p.GetSize().x), pcbnew.ToMM(p.GetSize().y)))
             for p in b.GetPads() if p.GetNetname()]
     tot = lambda net: rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
+
+    def skip(net, kind, mm):
+        rec["skipped"][kind] += mm
+        rec["skipped"]["by_net"].setdefault(net, {"locked_mm": 0.0, "pour_zone_mm": 0.0})[kind] += mm
     changed = 0
     for t in list(b.GetTracks()):
         net = t.GetNetname()
         r = rails.get(net)
-        if t.GetClass() != "PCB_TRACK" or r is None or t.IsLocked():
-            continue
-        if r["pour"] and net in zone_nets:
+        if t.GetClass() != "PCB_TRACK" or r is None:
             continue
         lay = b.GetLayerName(t.GetLayer())
         need = _need_on(r, lay)
@@ -513,6 +520,12 @@ def widen(board, cons, out, nets=None):
         s, e = t.GetStart(), t.GetEnd()
         a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
         L = math.hypot(z[0] - a[0], z[1] - a[1])
+        if r["pour"] and net in zone_nets:
+            skip(net, "pour_zone_mm", L)
+            continue
+        if t.IsLocked() and net in protect:
+            skip(net, "locked_mm", L)
+            continue
         near = next((k for k, pt in enumerate((a, z)) if (_pad_min_at(pads, net, *pt) or need) < need - 1e-6), None)
         step = max(need, 0.5)
         split = None
@@ -548,6 +561,7 @@ def widen(board, cons, out, nets=None):
             nt.SetWidth(pcbnew.FromMM(cur))
             nt.SetLayer(t.GetLayer())
             nt.SetNetCode(t.GetNetCode())
+            nt.SetLocked(t.IsLocked())                     # the necked split inherits the lock
             b.Add(nt)
             sp = pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1]))
             t.SetStart(sp) if near == 0 else t.SetEnd(sp)
@@ -559,6 +573,10 @@ def widen(board, cons, out, nets=None):
         changed += 1
     for n in list(rec["by_net"]):
         rec["by_net"][n] = {k: round(v, 3) for k, v in rec["by_net"][n].items()}
+    sk = rec["skipped"]
+    sk["locked_mm"], sk["pour_zone_mm"] = round(sk["locked_mm"], 3), round(sk["pour_zone_mm"], 3)
+    for n in list(sk["by_net"]):
+        sk["by_net"][n] = {k: round(v, 3) for k, v in sk["by_net"][n].items()}
     rec["widened_mm"], rec["left_mm"] = round(rec["widened_mm"], 3), round(rec["left_mm"], 3)
     if changed:
         pcbnew.SaveBoard(out, b)

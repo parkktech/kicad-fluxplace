@@ -171,6 +171,15 @@ def layer_cost(copper, sig, P, gated):
     return [1.0 if l in (copper[0], copper[-1]) else inner for l in sig]
 
 
+def via_half_pitch(via, via_gap, dist, step):
+    """PHASE3G G1b a: the via-pair grid -> (kv_s, kv_d, hv): kv in grid steps (straight / diagonal) and hv = half the via-pair
+    pitch per direction index. The one definition the pairs stage (lay_section) and the centre line (pairsonly.lay_centreline)
+    both use. dist = the pair's half pitch on the layer."""
+    hvmin = max((via + via_gap) / 2, dist)
+    kv_s, kv_d = math.ceil(hvmin / step - 1e-9), math.ceil(hvmin / (step * math.sqrt(2)) - 1e-9)
+    return kv_s, kv_d, [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
+
+
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
@@ -185,9 +194,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
     for t, ls in zip((ta, tb), lays):
         if not ls:
             return {"ok": False, "reason": f"{t['name']}: the two pads share no signal layer", "blockers": []}
-    hvmin = max((rule["via"] + rule["via_gap"]) / 2, dist)
-    kv_s, kv_d = math.ceil(hvmin / step - 1e-9), math.ceil(hvmin / (step * math.sqrt(2)) - 1e-9)
-    hv = [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
+    kv_s, kv_d, hv = via_half_pitch(rule["via"], rule["via_gap"], dist, step)
     K = max(2, math.ceil(max(2 * dist * PL.T22, max(hv) - dist + dist * PL.T22) / step + 0.3))
     viaok = None
     banned = set()

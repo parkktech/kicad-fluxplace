@@ -264,18 +264,86 @@ def test_widen_necks_a_narrow_pad_end_and_widens_only_the_far_part(tmp_path):
     assert abs(far_piece[0][3] - 18) < 1e-3
 
 
-def test_locked_rail_track_is_not_widened_and_nothing_is_written(tmp_path):
-    pytest.importorskip("pcbnew")
+def _lock_all(src):
     import pcbnew as P
-    from test_routerules_syn import _board
-    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
     b = P.LoadBoard(src)
     for t in b.GetTracks():
         t.SetLocked(True)
     P.SaveBoard(src, b)
+
+
+def _locked_flags(path, net):
+    import pcbnew as P
+    return [t.IsLocked() for t in P.LoadBoard(path).GetTracks() if t.GetNetname() == net and t.GetClass() == "PCB_TRACK"]
+
+
+def test_locked_rail_track_is_not_widened_by_default_protect_empty_keeps_lock(tmp_path):
+    """PHASE3G G1b d: the cause of the old skip was `t.IsLocked()`; now a locked rail track of an unprotected net is widened
+    in place and stays locked."""
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    _lock_all(src)
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.widen(src, G4_CONS, out)
+    need = _g4_need()
+    assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and rec["skipped"]["locked_mm"] == 0
+    assert [round(w, 4) for w, *_ in _g4_tracks(out, "VBAT")] == [round(need, 4)]
+    assert _locked_flags(out, "VBAT") == [True]
+
+
+def test_locked_rail_track_of_protected_net_is_skipped_and_counted(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    from fluxplace import drcguard as DG
+    cons = dict(G4_CONS, rf={"nets": ["VBAT"]})                 # RF net: protected_nets keeps its copper locked
+    names = ["VBAT", "SIG"]
+    assert "VBAT" in DG.protected_nets(cons, names)
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    _lock_all(src)
+    out = tmp_path / "out.kicad_pcb"
+    rec = PW.widen(src, cons, str(out), protect=DG.protected_nets(cons, names))
+    assert rec["widened_mm"] == 0 and not out.exists()
+    assert rec["skipped"]["locked_mm"] == pytest.approx(16.0, abs=0.01)
+    assert rec["skipped"]["by_net"]["VBAT"] == {"locked_mm": pytest.approx(16.0, abs=0.01), "pour_zone_mm": 0.0}
+
+
+def test_protected_pair_leg_named_net_is_left_alone_when_passed_in_protect(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    cons = dict(G4_CONS, pairs=[{"p": "VBAT", "n": "VBAT_N"}])
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 8, 18, 8, "VBAT_N")])
+    _lock_all(src)
+    out = tmp_path / "out.kicad_pcb"
+    rec = PW.widen(src, cons, str(out), protect={"VBAT"})
+    assert rec["widened_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["locked_mm"] > 0
+
+
+def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    need = _g4_need()
+    src = _board(str(tmp_path / "in.kicad_pcb"), pads=[("U1", 2, 6, "VBAT")], tracks=[(2, 6, 18, 6, "VBAT")])
+    _lock_all(src)
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert _locked_flags(out, "VBAT") == [True, True]
+    assert len(_g4_tracks(out, "VBAT")) == 2 and any(abs(t[0] - round(need, 4)) < 1e-3 for t in _g4_tracks(out, "VBAT"))
+
+
+def test_pour_zone_skip_is_counted_per_net(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    from fluxplace import gaps as GP
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    rail = dict(PW.plan(G4_CONS)["VBAT"], pour=True)
+    monkeypatch.setattr(PW, "_rails_on", lambda board, cons, nets=None: {"VBAT": rail})
+    monkeypatch.setattr(GP, "_zone_nets", lambda board: {"VBAT"})
     out = tmp_path / "out.kicad_pcb"
     rec = PW.widen(src, G4_CONS, str(out))
     assert rec["widened_mm"] == 0 and not out.exists()
+    assert rec["skipped"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
+    assert rec["skipped"]["locked_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
 
 
 def test_add_vias_places_the_missing_via_beside_the_existing_one(tmp_path, monkeypatch):

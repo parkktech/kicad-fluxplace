@@ -580,3 +580,33 @@ def test_pair_gap_drops_path_and_route_keeps_pair_path(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_apply_ai", fake_apply)
     GP._r_ai(str(tmp_path / "b.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [gap], ctx)
     assert seen["acts"] == ["pair_path", "give_up"]
+
+
+# ---- PHASE3G G1b a/b: layer-change waypoints validated, refusal detail in the feedback row ----------------------------
+def test_pair_path_layer_changes_validated(monkeypatch, tmp_path):
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    ok3 = [[1, 2, "F.Cu"], [1, 6, "B.Cu"], [1, 9, "F.Cu"], [1, 12]]                # two changes, runs 4 / 3 / 3 mm
+    alt = [[0, i, "F.Cu" if i % 2 == 0 else "B.Cu"] for i in range(7)]           # a change at every point: 6 > 4
+    short = [[0, 0, "F.Cu"], [0, 0.5, "B.Cu"], [0, 1.0, "F.Cu"], [0, 3.0]]           # a 0.5 mm run
+    last_change = [[0, 0], [0, 3], [0, 6, "B.Cu"]]                                   # a change on the last point
+    bad_layer = [[0, 0], [0, 3, "In9.Cu"], [0, 6]]
+    acts = [{"do": "pair_path", "pair": ["P", "N"], "layer": "F.Cu", "waypoints": w}
+            for w in (ok3, alt, short, last_change, bad_layer)]
+    f = tmp_path / "a.json"
+    f.write_text(json.dumps({"actions": acts}))
+    got = GP.load_ai_action(str(f), "b")["actions"]
+    assert [x["waypoints"] for x in got] == [ok3]
+
+
+def test_pair_path_refusal_detail_reaches_feedback_row(apply_env, tmp_path, monkeypatch):
+    from fluxplace import pairsonly as PS
+    ctx = _ctx(tmp_path)
+    _write_action(ctx["ai_dir"], [{"do": "pair_path", "pair": ["P", "N"], "layer": "F.Cu", "waypoints": [[1, 2], [3, 4]]}])
+    detail = {"laid": False, "why": "P centre line 0.05 mm from via X (exact check)", "p_mm": None, "n_mm": None,
+              "at": [1.2, 3.4], "blocker": {"label": "via X", "net": "X", "layer": "F.Cu"}, "stripped": None}
+    monkeypatch.setattr(PS, "lay_centreline", lambda *a, **k: detail)
+    GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    fb = json.load(open(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP))[:80] + ".feedback.json")))
+    row = fb["actions"][-1]
+    assert row["do"] == "pair_path" and row["ok"] is False and row["at"] == [1.2, 3.4]
+    assert row["blocker"] == {"label": "via X", "net": "X", "layer": "F.Cu"} and "stripped" in row

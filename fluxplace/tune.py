@@ -189,6 +189,39 @@ def _finalize(work, out_path):
     cleanup_work(work)
 
 
+def _profile(src, net, want_path=False):
+    """pairaudit.profile of a board file path (or an already loaded routediag board dict)."""
+    from . import routediag as RD, pairaudit as PA
+    B = src if isinstance(src, dict) else RD.load(src)
+    return PA.profile(B, net, want_path)
+
+
+def path_len(src, net):
+    """PHASE3G G1b c: the pad-to-pad path length of `net` (pairaudit's number, the one the audit and review grade).
+    None when the net has no path between its two farthest pads (a leg open): the caller must not tune it."""
+    p = _profile(src, net)
+    return p["length"] if p["path"] else None
+
+
+def seg_key(a, b, layer):
+    """Identity of a track segment that does not depend on the reader: the rounded (mm, 3 dp) ends, unordered, and layer."""
+    ends = sorted([(round(a[0], 3), round(a[1], 3)), (round(b[0], 3), round(b[1], 3))])
+    return (ends[0], ends[1], layer)
+
+
+def path_segs(src, net):
+    """Set of seg_key of the track segments on `net`'s pad-to-pad path (pairaudit's walk), None when there is no path.
+    meander_to / entry_jog take it as `on_path`: a stub or branch of the net is never lengthened (or it adds no path length)."""
+    B = src if isinstance(src, dict) else None
+    if B is None:
+        from . import routediag as RD
+        B = RD.load(src)
+    p = _profile(B, net, want_path=True)
+    if not p["path"]:
+        return None
+    return {seg_key(B["segs"][i]["a"], B["segs"][i]["b"], B["segs"][i]["layer"]) for i in p["segs"]}
+
+
 def classify_pairs(board_path, pairs):
     """{master: reason} for the pairs {slave: master} whose legs cannot be tuned: a leg open, or the legs run through
     different layer sequences / via counts (pairaudit.profile). Length tuning cannot fix those; they need a re-route
@@ -472,13 +505,16 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                 reached.add(master)
                 try:
                     for rnd in range(max_rounds):
-                        b = pcbnew.LoadBoard(work)
-                        m = RP.measure(b)
-                        lm, ls = m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]
+                        B = _load_routediag(work)
+                        lm, ls = _profile(B, master)["length"], _profile(B, slave)["length"]
+                        if not (_profile(B, master)["path"] and _profile(B, slave)["path"]):
+                            log(f"    {master}/{slave}: a leg has no pad-to-pad path: not tuned")
+                            break
                         skew = lm - ls
                         if abs(skew) <= lim(master):
                             break
                         longer, shorter = (master, slave) if skew > 0 else (slave, master)
+                        on_path = path_segs(B, shorter)
                         log(f"  {master}/{slave}: skew {skew:+.2f} mm (limit {lim(master)}) round {rnd + 1}")
                         ok = False
                         for gap in (1.5, 3.0):                      # 1. shorten the long side
@@ -492,7 +528,8 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                             for amp, pitch in ((amp_mm, 0.7), (amp_mm * 0.6, 0.5), (0.35, 0.45)):
                                 ok = attempt(lambda bd, c=cand, a=amp, p=pitch: meander_to(
                                     bd, shorter, need_mm, amp_mm=a, period_mm=p, candidate=c, log=log,
-                                    clearance_mm=_min_clear(bd), away_from=longer, locked_ok=True) > 0, tries)
+                                    clearance_mm=_min_clear(bd), away_from=longer, locked_ok=True,
+                                    on_path=on_path) > 0, tries)
                                 if ok:
                                     break
                             if ok:
@@ -500,7 +537,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                         if not ok:                                   # no straight has room: a pad-entry jog
                             ok = attempt(lambda bd: entry_jog(bd, shorter, need_mm, away_from=longer,
                                                               clearance_mm=_min_clear(bd), locked_ok=True,
-                                                              log=log) > 0, tries)
+                                                              log=log, on_path=on_path) > 0, tries)
                         if ok:
                             continue
                         log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} mm")
@@ -522,11 +559,10 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     if stopped is None and stalls and set(reached) <= stalls:      # PHASE3G G2c: one stalled pair does not end the run
         stopped = "stall"
     report = []
-    pb = pcbnew.LoadBoard(out_path)
-    m = RP.measure(pb)
+    B_out = _load_routediag(out_path)
     out_rows = []
     for slave, master in sorted(pairs.items()):
-        lm, ls = m.get(master, (0, 0))[0], m.get(slave, (0, 0))[0]
+        lm, ls = _profile(B_out, master)["length"], _profile(B_out, slave)["length"]
         report.append((master, slave, lm, ls))
         limit = lim(master)
         row = {"pair": f"{master}/{slave}", "p_mm": round(lm, 3), "n_mm": round(ls, 3), "skew": round(lm - ls, 3),
@@ -695,15 +731,16 @@ def candidate_clear(board, pts, layer, net_code, width_mm, clear_mm):
 
 # ------------------------------------------------------------------ paths
 def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
-               candidate=0, log=print, clearance_mm=None, stats=None, away_from=None, locked_ok=False):
+               candidate=0, log=print, clearance_mm=None, stats=None, away_from=None, locked_ok=False, on_path=None):
     """Lengthen `net` by exactly `need_mm` with accordion bumps on its `candidate`-th longest straight segment that
     has room (period_mm = 2 x bump width). Returns the length added (0.0 when no segment has room).
     PHASE3G G2b: away_from = a net name: every bump goes to the side away from that net's nearest copper (its
     partner leg), no alternation. locked_ok: locked copper of `net` is eligible (the pair being tuned); the new
-    segments keep the lock flag of the segment they replace. Other nets' locks are never touched."""
+    segments keep the lock flag of the segment they replace. Other nets' locks are never touched.
+    PHASE3G G1b d/4: on_path = path_segs(...) of `net`: only segments on its pad-to-pad path are candidates (None = all)."""
     import pcbnew
     lockers = [t for t in board.GetTracks() if t.GetNetname() == net and t.GetClass() == "PCB_TRACK"
-               and (locked_ok or not t.IsLocked())]
+               and (locked_ok or not t.IsLocked()) and _on(board, t, on_path)]
     lockers.sort(key=lambda t: -t.GetLength())
     straights = [t for t in lockers
                  if bump_plan(t.GetLength() / 1e6, need_mm, amp_mm, period_mm, margin_mm) is not None]
@@ -746,7 +783,7 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
     return added
 
 
-def entry_jog(board, net, need_mm, away_from=None, clearance_mm=None, locked_ok=False, log=print):
+def entry_jog(board, net, need_mm, away_from=None, clearance_mm=None, locked_ok=False, log=print, on_path=None):
     """PHASE3G G2b, last resort when no straight of `net` has room for a bump: on a leg's segment that ends at a
     pad or via of `net` (the uncoupled break-out part), replace the segment by a 45-degree dog-leg of offset h.
     The added length is 2 h (sqrt 2 - 1), so h = need / (2 (sqrt 2 - 1)). The pad/via end stays where it is.
@@ -765,7 +802,8 @@ def entry_jog(board, net, need_mm, away_from=None, clearance_mm=None, locked_ok=
             ends.append((p.x / 1e6, p.y / 1e6))
     cands = []
     for t in board.GetTracks():
-        if t.GetNetname() != net or t.GetClass() != "PCB_TRACK" or (t.IsLocked() and not locked_ok):
+        if t.GetNetname() != net or t.GetClass() != "PCB_TRACK" or (t.IsLocked() and not locked_ok) \
+                or not _on(board, t, on_path):
             continue
         s, e = t.GetStart(), t.GetEnd()
         S, E = (s.x / 1e6, s.y / 1e6), (e.x / 1e6, e.y / 1e6)
@@ -806,6 +844,19 @@ def entry_jog(board, net, need_mm, away_from=None, clearance_mm=None, locked_ok=
         log(f"      {net}: entry jog h={h:.3f} on {board.GetLayerName(layer)} adds {added:.3f} mm (asked {need_mm:.3f})")
         return added
     return 0.0
+
+
+def _on(board, t, on_path):
+    """True when track `t` is on the path (on_path None = no restriction)."""
+    if on_path is None:
+        return True
+    s, e = t.GetStart(), t.GetEnd()
+    return seg_key((s.x / 1e6, s.y / 1e6), (e.x / 1e6, e.y / 1e6), board.GetLayerName(t.GetLayer())) in on_path
+
+
+def _load_routediag(path):
+    from . import routediag as RD
+    return RD.load(path)
 
 
 def _guarded_set(board_path, work, mutate, kicad_cli, base, log, stats, bud=None):
@@ -868,6 +919,8 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                     avg = val / max(cur.get("mm") or 1e-9, 1e-9)
                     need = need / avg
                 ok = False
+                # PHASE3G G1b c/3: a pad-to-pad net lengthens only on its path (a stub is not length on the path)
+                onp = path_segs(work, net) if cur.get("basis") == "pad-to-pad" else None
                 for cand in range(4):
                     for amp, frac in ((g["amplitude_mm"], 1.0), (g["amplitude_mm"], 0.5), (g["amplitude_mm"] * 0.5, 1.0)):
                         if tries >= bud.stall:
@@ -877,7 +930,7 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
                             board_path, work,
                             lambda bd, c=cand, a=amp, f=frac: meander_to(
                                 bd, net, need * f, amp_mm=a, period_mm=period,
-                                candidate=c, log=log, clearance_mm=clearance_of(net), stats=stats) > 0,
+                                candidate=c, log=log, clearance_mm=clearance_of(net), stats=stats, on_path=onp) > 0,
                             kicad_cli, base, log, stats, bud)
                         tries = 0 if ok else tries + stats.get("drc_runs", 0) - n0
                         if ok:

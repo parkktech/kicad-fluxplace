@@ -666,8 +666,9 @@ def _r_maskcut(base, out, gaps, ctx):
 def _r_powerwiden(base, out, gaps, ctx):
     """PHASE3G G4.1: narrow rail copper widened in place (power.widen); no output when nothing widened."""
     from . import power as PW
-    r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps))
-    return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"]}
+    r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps), protect=set(ctx.get("protect") or ()))
+    return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"],
+            "skipped": r["skipped"]}
 
 
 def _r_railpour(base, out, gaps, ctx):
@@ -696,7 +697,10 @@ FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedb
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = ("rip {net, ids}; rip_locked {net, ids} (plain locked copper only; pairs/rf refused); "
                    "nudge {ref, dx, dy, rot}; route {nets, layers}; path {net, path, lock} (AI-FINISH path syntax, "
-                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only); "
+                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only; "
+                   "waypoints [x, y] or [x, y, \"Layer\"]: a named layer other than the current one is a via change, <= 4, never on "
+                   "the last point; the start pad must be on the first layer; each run >= 1 mm; a change where the reference plane "
+                   "changes gets a return via, else return_via_missing); "
                    "swap_pins {ref, pads, why} (proposal only, never applied); give_up {why}. "
                    "Copper coordinates only via path / pair_path.")
 AI_PACKETS = 6                                  # packets written per _r_ai call
@@ -745,11 +749,35 @@ def _ai_action(x, copper, hs_legs=()):
                 return None
             return {"do": "path", "net": net, "path": path, "lock": bool(x.get("lock"))}
     elif do == "pair_path":
+        # PHASE3G G1b a: waypoints [x, y] or [x, y, "Layer"]; a named layer other than the current one is a layer change
         pair, layer, wps = x.get("pair"), x.get("layer"), x.get("waypoints")
-        if (isinstance(pair, list) and len(pair) == 2 and all(isinstance(n, str) and n for n in pair)
-                and isinstance(layer, str) and layer in copper and isinstance(wps, list) and 2 <= len(wps) <= 40
-                and all(isinstance(q, list) and len(q) == 2 and all(_num(c) for c in q) for q in wps)):
-            return {"do": "pair_path", "pair": list(pair), "layer": layer, "waypoints": [list(q) for q in wps]}
+        if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(n, str) and n for n in pair)
+                and isinstance(layer, str) and layer in copper and isinstance(wps, list) and 2 <= len(wps) <= 40):
+            return None
+        out = []
+        for q in wps:
+            if not (isinstance(q, list) and len(q) in (2, 3) and all(_num(c) for c in q[:2])):
+                return None
+            if len(q) == 3 and not (isinstance(q[2], str) and q[2] in copper):
+                return None
+            out.append([q[0], q[1]] + ([q[2]] if len(q) == 3 else []))
+        lays, cur = [], layer
+        for q in out:
+            cur = q[2] if len(q) == 3 else cur
+            lays.append(cur)
+        chg = [i for i in range(1, len(out)) if lays[i] != lays[i - 1]]
+        if len(chg) > 4:                                # at most 4 layer changes per centre line
+            return None
+        for s, e in zip([0] + chg, chg + [len(out) - 1]):   # each run: 45/90 segments, at least 1.0 mm long
+            run = 0.0
+            for a, b in zip(out[s:e + 1], out[s + 1:e + 1]):
+                dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+                if (dx < 1e-6 and dy < 1e-6) or (min(dx, dy) > 1e-6 and abs(dx - dy) > 1e-6):
+                    return None
+                run += math.hypot(dx, dy)
+            if run < 1.0:
+                return None
+        return {"do": "pair_path", "pair": list(pair), "layer": layer, "waypoints": out}
     elif do == "swap_pins":
         pads = x.get("pads")
         if (isinstance(x.get("ref"), str) and x["ref"] and isinstance(pads, list) and len(pads) == 2
@@ -1114,7 +1142,8 @@ def _apply_ai(base, out, a, ctx, sid):
             if x["do"] == "pair_path":
                 from . import pairsonly as PS
                 res = PS.lay_centreline(w, None, x["pair"], x["layer"], x["waypoints"], cons)
-                feed.append({"do": "pair_path", "ok": bool(res.get("laid")), "why": str(res.get("why") or "")[:160]})
+                feed.append({"do": "pair_path", "ok": bool(res.get("laid")), "why": str(res.get("why") or "")[:160],
+                             "at": res.get("at"), "blocker": res.get("blocker"), "stripped": res.get("stripped")})
             elif x["do"] == "swap_pins":
                 _write_swap(ai_dir, sid, a.get("gap_id"), x)
                 feed.append({"do": "swap_pins", "ok": False, "why": "proposal written, not applied"})

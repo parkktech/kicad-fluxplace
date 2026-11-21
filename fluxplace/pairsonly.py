@@ -312,30 +312,73 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     return rep
 
 
+def _dir_index(u):
+    """index of the pairlay direction equal to the unit vector u (45/90 only), else None."""
+    from . import pairlay as PL
+    for i, v in enumerate(PL.DVEC):
+        if abs(v[0] - u[0]) < 1e-6 and abs(v[1] - u[1]) < 1e-6:
+            return i
+    return None
+
+
 def lay_centreline(board, out, pair, layer, waypoints, cons=None):
     """PHASE3G G1 (agent pair_path): one coupled centre line through `waypoints` (45/90 segments only), laid as the pair's two
-    legs at the family geometry of `layer` (zgeom.family_table, as gaps._pair_block reads it), each leg joined to its pad by a
-    break-out (pairlay.breakout, the pairs stage's own), skew compensated (pairlay.bump) against the pair's limit.
+    legs at the family geometry of each layer (zgeom.family_table, as gaps._pair_block reads it), each leg joined to its pad by
+    a break-out (pairlay.breakout, the pairs stage's own), skew compensated (pairlay.bump) against the pair's limit.
+    PHASE3G G1b a: waypoints are [x, y] or [x, y, "Layer"]; a waypoint naming another layer than the current one is a LAYER
+    CHANGE at that point (a via pair, pairlay.legs fans the two legs out to it and back in; at most 4, never on the last point).
+    The start break-out must find the start pad on the first run's layer (else refused, naming the pad). Every change where the
+    reference plane changes gets ONE return via of the reference net at a free site within `[review] return_via_mm` of the via
+    pair (returnpath's own test); none fits -> laid anyway, listed in `return_via_missing`.
     The sign of each leg (which leg is on the left of travel) is the one with the shorter total break-out.
     Old copper: every copper of the pair's two nets goes (the locked pair copper is replaced too, as reroute --unlock does);
     the new copper is locked. `out` None edits `board` in place (the session work file of gaps._apply_ai); nothing is written
-    unless laid. -> {"laid", "why", "p_mm", "n_mm", "layer", "sign"}."""
+    unless laid. -> {"laid", "why", "p_mm", "n_mm", "layer", "layers", "vias", "sign", "stripped": {"items", "locked"},
+    "return_via_missing": [[x, y]]} on success; on refusal {"laid": False, "why", "p_mm", "n_mm", "at": [x, y] | None,
+    "blocker": {"label", "net", "layer"} | None, "refusals": [{"sign", "why", "at", "blocker"}]}."""
     import math
-    from . import routediag as RD, routerules as RR, pairs as PR, pairlay as PL, pairgeo as G, zgeom as ZG
+    from . import routediag as RD, routerules as RR, pairs as PR, pairlay as PL, pairgeo as G, zgeom as ZG, returnpath as RP
 
-    def no(why):
-        return {"laid": False, "why": why, "p_mm": None, "n_mm": None}
+    def no(why, at=None, blocker=None):
+        return {"laid": False, "why": why[:300], "p_mm": None, "n_mm": None, "at": at, "blocker": blocker}
+
+    def blk(it, pieces, at=None):
+        """{"at", "blocker"} of an item that refuses `pieces` (its copper point nearest to them, or `at`)."""
+        if it is None:
+            return {"at": at, "blocker": None}
+        here = at or G.blocker_at(it, pieces)
+        lays = set(it.get("layers") or ())
+        on = [p[1] for p in pieces if p[0] == "seg" and p[1] in lays]
+        lay = on[0] if on else (sorted(lays)[0] if lays else None)
+        return {"at": [round(here[0], 3), round(here[1], 3)],
+                "blocker": {"label": it["label"], "net": it.get("net") or None, "layer": lay}}
 
     cons = cons or {}
-    pts = [(float(q[0]), float(q[1])) for q in waypoints]
-    if len(pts) < 2:
+    if len(waypoints) < 2:
         return no("need at least 2 waypoints")
+    pts, lays, cur = [], [], layer
+    for q in waypoints:
+        pts.append((float(q[0]), float(q[1])))
+        if len(q) > 2 and q[2]:
+            cur = q[2]
+        lays.append(cur)
     for k, (a, b) in enumerate(zip(pts, pts[1:])):
         dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
         if dx < 1e-6 and dy < 1e-6:
-            return no(f"segment {k} has zero length")
+            return no(f"segment {k} has zero length", at=list(a))
         if min(dx, dy) > 1e-6 and abs(dx - dy) > 1e-6:
-            return no(f"segment {k} is not 45/90")
+            return no(f"segment {k} is not 45/90", at=list(a))
+    chg = [i for i in range(1, len(pts)) if lays[i] != lays[i - 1]]
+    if chg and chg[-1] == len(pts) - 1:
+        return no("the last waypoint cannot change layer: the end pad is on the last run's layer", at=list(pts[-1]))
+    if len(chg) > 4:
+        return no("more than 4 layer changes", at=list(pts[chg[4]]))
+    runs = []
+    for s, e in zip([0] + chg, chg + [len(pts) - 1]):
+        rp = pts[s:e + 1]
+        t0, t1 = G.unit(rp[0], rp[1]), G.unit(rp[-2], rp[-1])
+        runs.append({"layer": lays[s], "pts": rp, "t0": t0, "t1": t1, "d": _dir_index(t1)})
+    vias = [{"at": pts[c], "t": runs[j]["t1"], "d": runs[j]["d"]} for j, c in enumerate(chg)]
     P_net, N_net = pair
     nets = [P_net, N_net]
     try:                                                # the family table the pairs stage lays (gaps._pair_block reads the same)
@@ -346,9 +389,16 @@ def lay_centreline(board, out, pair, layer, waypoints, cons=None):
         tab = ZG.family_table(cons, rows, planes, sig, fam, board=board) if fam and rows else {}
     except Exception as e:                              # noqa: BLE001 - a stackup the family table cannot read: refuse, write nothing
         return no(f"pair geometry unavailable: {e}")
-    g = tab.get(layer) or {}
-    if not g.get("w") or not g.get("gap"):
-        return no(f"no pair geometry for {layer}")
+    dist, wmap = {}, {}
+    for r in runs:
+        g = tab.get(r["layer"]) or {}
+        if not g.get("w") or not g.get("gap"):
+            return no(f"no pair geometry for {r['layer']}")
+        dist[r["layer"]] = (float(g["w"]) + float(g["gap"])) / 2
+        wmap[r["layer"]] = float(g["w"])
+    g0 = tab[runs[0]["layer"]]
+    w0, gap0 = wmap[runs[0]["layer"]], float(g0["gap"])
+    dist_max = max([(float(g["w"]) + float(g["gap"])) / 2 for g in tab.values() if g.get("w") and g.get("gap")] or [max(dist.values())])
     B = RD.load(board)
     try:
         B = dict(B, pads=B["pads"] + G.holes(board, B["copper"]))
@@ -357,45 +407,58 @@ def lay_centreline(board, out, pair, layer, waypoints, cons=None):
     R = RR.rules(cons, board, B=B)
     Pm = PR.params(cons)
     rule = PR.rules_for(board, B, cons, R, P_net, Pm)
-    clr, w, gap = rule["clr"], float(g["w"]), float(g["gap"])
-    dist, wmap = {layer: (w + gap) / 2}, {layer: w}
+    clr, via_d = rule["clr"], rule["via"]
+    hv = PR.via_half_pitch(via_d, rule["via_gap"], dist_max, Pm["step"])[2] if vias else []
     terms, _lone = PR.terminals(B, P_net, N_net, Pm["pad_max"])
     if len(terms) < 1:
         return no("no P and N pad pair to join")
     ta = min(terms, key=lambda t: math.hypot(t["c"][0] - pts[0][0], t["c"][1] - pts[0][1]))
     tb = min(terms, key=lambda t: math.hypot(t["c"][0] - pts[-1][0], t["c"][1] - pts[-1][1]))
     if ta is tb:
-        return no("start and end waypoints reach the same pad pair")
-    run = {"layer": layer, "pts": pts, "t0": G.unit(pts[0], pts[1]), "t1": G.unit(pts[-2], pts[-1]), "d": 0}
-    t0, t1 = run["t0"], run["t1"]
-    slack = max(0.0, clr - gap)                         # the pair's own gap may sit below the routing clearance (mate, as pairs.py)
+        return no("start and end waypoints reach the same pad pair", at=list(pts[0]))
+    for t, r, verb in ((ta, runs[0], "start"), (tb, runs[-1], "end")):
+        for pad in (t["p"], t["n"]):
+            if r["layer"] not in pad["layers"]:
+                return no(f"pad {pad['ref']}.{pad['num']} is not on {r['layer']}: {verb} the centre line on the pad's layer",
+                          at=list(t["c"]))
+    nets_set = set(nets)
+    stripped = {"items": sum(1 for s in B["segs"] if s["net"] in nets_set) + sum(1 for v in B["vias"] if v["net"] in nets_set),
+                "locked": sum(1 for s in B["segs"] if s["net"] in nets_set and s["locked"])
+                + sum(1 for v in B["vias"] if v["net"] in nets_set and v["locked"])}
+    t0, t1 = runs[0]["t0"], runs[-1]["t1"]
+    slack = max(0.0, clr - gap0)                        # the pair's own gap may sit below the routing clearance (mate, as pairs.py)
     limit = PR.guard_limit(cons, P_net)
-    items = G.Items.of_board(B, old_nets=set(nets))
-    skip, base_n = set(nets), items.mark()
-    fb = lambda pad, e, lay, net: PL.stub(B, items, base_n, set(), pad, e, lay, w, net, clr, skip)
+    items = G.Items.of_board(B, old_nets=nets_set)
+    skip, base_n = nets_set, items.mark()
+    via_lim = RP.return_via_limit(cons)
+    Pl = RP.Planes(board, B["copper"]) if vias else None
+    fb = lambda pad, e, lay, net: PL.stub(B, items, base_n, set(), pad, e, lay, wmap[lay], net, clr, skip)
 
     def attempt(sp):
-        cp, p0, p1 = PL.legs([run], [], dist, {}, wmap, 0.0, sp)
-        cn, n0, n1 = PL.legs([run], [], dist, {}, wmap, 0.0, -sp)
+        cp, p0, p1 = PL.legs(runs, vias, dist, hv, wmap, via_d, sp)
+        cn, n0, n1 = PL.legs(runs, vias, dist, hv, wmap, via_d, -sp)
         mark = items.mark()
         try:
             g1, it1 = PL.check(items, cp, P_net, clr, skip)
             if g1 < clr - 1e-6:
-                return None, f"{P_net} centre line {g1:.3f} mm from {it1['label']} (exact check)", [it1["label"]]
+                return None, f"{P_net} centre line {g1:.3f} mm from {it1['label']} (exact check)", blk(it1, cp)
             PR._claim(items, cp, P_net)
             g2, it2 = PL.check(items, cn, N_net, clr, skip, (P_net, slack))
             if g2 < clr - 1e-6:
-                return None, f"{N_net} centre line {g2:.3f} mm from {it2['label']} (exact check)", [it2["label"]]
+                return None, f"{N_net} centre line {g2:.3f} mm from {it2['label']} (exact check)", blk(it2, cn)
             PR._claim(items, cn, N_net)
             skew0 = PL.piece_len(cp) - PL.piece_len(cn) + ta.get("bias", 0.0) + tb.get("bias", 0.0)   # terminal bias, as pairs.py
-            ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, layer, w, nets, clr, skip, bias=skew0, fallback=fb, gap=gap)
+            ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], w0, nets, clr, skip, bias=skew0,
+                             fallback=fb, gap=gap0)
             if ba[0] is None:
-                return None, ba[1], [ba[2]["label"]] if ba[2] else []
+                return None, ba[1], blk(ba[2], [("seg", runs[0]["layer"], ta["c"], ta["c"], w0)], ta["c"])
             PR._claim(items, ba[0], P_net)
             PR._claim(items, ba[1], N_net)
-            bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), layer, w, nets, clr, skip, bias=skew0 + ba[2], fallback=fb, gap=gap)
+            wl = wmap[runs[-1]["layer"]]
+            bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], wl, nets, clr, skip,
+                             bias=skew0 + ba[2], fallback=fb, gap=float(tab[runs[-1]["layer"]]["gap"]))
             if bb[0] is None:
-                return None, bb[1], [bb[2]["label"]] if bb[2] else []
+                return None, bb[1], blk(bb[2], [("seg", runs[-1]["layer"], tb["c"], tb["c"], wl)], tb["c"])
             PR._claim(items, bb[0], P_net)
             PR._claim(items, bb[1], N_net)
             skew = skew0 + ba[2] + bb[2]
@@ -408,31 +471,73 @@ def lay_centreline(board, out, pair, layer, waypoints, cons=None):
                 else:
                     cp = bumped
                 if left > Pm["skew_frac"] * limit:
-                    return None, f"skew {left:.2f} mm over the {limit:g} mm limit after compensation", []
+                    return None, f"skew {left:.2f} mm over the {limit:g} mm limit after compensation", {"at": list(pts[0]), "blocker": None}
+            # PHASE3G G1b a: one return via per layer change where the reference plane changes (returnpath's test, one site)
+            rv, rv_missing, placed = [], [], []
+            for j, v in enumerate(vias):
+                need = RP.ref_need(Pl, {runs[j]["layer"], runs[j + 1]["layer"]})
+                if not need:
+                    continue
+                missing, _n = RP.return_missing(Pl, B["vias"] + [{"net": n, "x": x, "y": y} for n, x, y in placed],
+                                                v["at"][0], v["at"][1], P_net, need, via_lim)
+                if not missing:
+                    continue
+                rnets = missing[0][1]
+                ref_net = sorted(rnets)[0] if rnets else None
+                site = None
+                ax, ay = v["at"]
+                # the 8 neighbours at via pitch + clearance, nearest ring first; rings step 0.1 mm out to the limit (the first
+                # ring sits inside the pair's own via pieces for a straight run, so one ring alone rarely fits)
+                pitch = via_d + clr
+                rings = [pitch + 0.1 * k for k in range(int(max(0.0, via_lim - pitch) / 0.1) + 1)] if ref_net is not None else []
+                for rad in rings:
+                    for ux, uy in PL.DVEC:
+                        c = (ax + ux * rad, ay + uy * rad)
+                        g, _it = PL.check(items, [("via", c[0], c[1], via_d)], ref_net, clr, skip)
+                        if g >= clr - 1e-6:
+                            site = c
+                            break
+                    if site is not None:
+                        break
+                if site is None:
+                    rv_missing.append([round(ax, 3), round(ay, 3)])
+                    continue
+                piece = ("via", site[0], site[1], via_d)
+                PR._claim(items, [piece], ref_net)
+                rv.append((ref_net, piece))
+                placed.append((ref_net, site[0], site[1]))
             Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
             bo = sum(PL.piece_len(x) for x in (ba[0], ba[1], bb[0], bb[1]))
-            return {"P": Pp, "N": Np, "bo": bo, "p_mm": round(PL.piece_len(Pp), 3), "n_mm": round(PL.piece_len(Np), 3), "sign": sp}, None, []
+            return {"P": Pp, "N": Np, "bo": bo, "p_mm": round(PL.piece_len(Pp), 3), "n_mm": round(PL.piece_len(Np), 3), "sign": sp,
+                    "rv": rv, "rv_missing": rv_missing}, None, None
         finally:
             items.rollback(mark)
 
-    got, why = [], []
+    got, refusals = [], []
     for sp in (1, -1):
-        r, msg, blk = attempt(sp)
+        r, msg, info = attempt(sp)
         if r is not None:
             got.append(r)
         else:
-            why.append(msg)
+            refusals.append({"sign": sp, "why": msg, "at": (info or {}).get("at"), "blocker": (info or {}).get("blocker")})
     if not got:
-        return {"laid": False, "why": "; ".join(why)[:300], "p_mm": None, "n_mm": None}
+        first = refusals[0]
+        return {"laid": False, "why": "; ".join(f"{x['why']}" for x in refusals)[:300], "p_mm": None, "n_mm": None,
+                "at": first["at"], "blocker": first["blocker"], "refusals": refusals}
     best = min(got, key=lambda r: r["bo"])
-    res = {"strip": nets, "kill": [], "keep": [], "laid": {P_net: best["P"], N_net: best["N"]}, "B": B}
+    laid = {P_net: best["P"], N_net: best["N"]}
+    for net, piece in best["rv"]:
+        laid.setdefault(net, []).append(piece)
+    res = {"strip": nets, "kill": [], "keep": [], "laid": laid, "B": B}
     if out is None:
         tmp = board + ".centre.tmp.kicad_pcb"
         PR.write(board, tmp, res, lambda net: rule["drill"])
         os.replace(tmp, board)
     else:
         PR.write(board, out, res, lambda net: rule["drill"])
-    return {"laid": True, "why": "", "p_mm": best["p_mm"], "n_mm": best["n_mm"], "layer": layer, "sign": best["sign"]}
+    return {"laid": True, "why": "", "p_mm": best["p_mm"], "n_mm": best["n_mm"], "layer": runs[0]["layer"],
+            "layers": [r["layer"] for r in runs], "vias": len(vias), "sign": best["sign"], "stripped": stripped,
+            "return_via_missing": best["rv_missing"]}
 
 
 def groups(B, cls, pairs):
