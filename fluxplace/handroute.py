@@ -143,6 +143,45 @@ def _endpoint_ob(M, net, side):
     return min(candidates, key=lambda o: G.ob_gap(pt, pt, 0.0, o)[0])
 
 
+def _fill_point(fp):
+    """PHASE3H B4: a point inside fill polygon `fp` (grid search over its bbox), or None."""
+    import numpy as np
+    from . import hrgeom as _G
+    x0, y0, x1, y1 = fp["bb"]
+    X, Y = np.meshgrid(np.linspace(x0, x1, 21)[1:-1], np.linspace(y0, y1, 21)[1:-1])
+    P = np.column_stack([X.ravel(), Y.ravel()])
+    ins = _G.in_fill(P, fp)
+    if not ins.any():
+        return None
+    k = int(np.argmax(ins))
+    return float(P[k][0]), float(P[k][1])
+
+
+def _zone_islands(M, net, a, b):
+    """PHASE3H B4: both DRC ends on one zone (same layer): side a moves to a point inside the smallest island of that
+    zone/layer, side b to one inside the largest; the sides keep their island ids and fill ids (island_fills)."""
+    isl, _ = M.islands(net)
+    zi, lay = a["zone"], a["layer"]
+    cands = []
+    for g in isl:
+        ent = [(z, l, f) for (z, l, f) in g["zones"] if z == zi and l == lay]
+        if ent:
+            area = sum((M.zones[z]["fills"][l][f]["bb"][2] - M.zones[z]["fills"][l][f]["bb"][0])
+                       * (M.zones[z]["fills"][l][f]["bb"][3] - M.zones[z]["fills"][l][f]["bb"][1]) for z, l, f in ent)
+            cands.append((area, g, ent))
+    if len(cands) < 2:
+        return
+    cands.sort(key=lambda c: c[0])
+    for side, (_, g, ent) in ((a, cands[0]), (b, cands[-1])):
+        pts = [q for q in (_fill_point(M.zones[z]["fills"][l][f]) for z, l, f in ent) if q]
+        if not pts:
+            return
+        side["drc"] = [side["x"], side["y"]]
+        side["x"], side["y"] = round(pts[0][0], 4), round(pts[0][1], 4)
+        side["island"] = g["id"]
+        side["island_fills"] = [list(e) for e in ent]
+
+
 def _island_dist(M, net, i, j):
     isl, _ = M.islands(net)
     best = None
@@ -181,7 +220,7 @@ def open_nets(board, constraints=None, raw=None, M=None):
                     for g in isl:
                         for (zi, zl, fi) in g["zones"]:
                             if zl == side["layer"] and _G.in_fill(P, M.zones[zi]["fills"][zl][fi])[0]:
-                                side["island"] = g["id"]
+                                side["island"], side["zone"] = g["id"], zi
                     side["locked"] = None
                     continue
                 ob = _endpoint_ob(M, net, side)
@@ -189,6 +228,9 @@ def open_nets(board, constraints=None, raw=None, M=None):
                 if ob:
                     isl, omap = M.islands(net)
                     side["island"] = omap.get(ob.id)
+            if a["kind"] == "zone" and b["kind"] == "zone" and a.get("zone") is not None \
+                    and a.get("zone") == b.get("zone") and a["layer"] == b["layer"]:
+                _zone_islands(M, net, a, b)
             ia, ib = a.get("island"), b.get("island")
             if ia is not None and ib is not None and ia != ib:
                 best = _island_dist(M, net, ia, ib)
@@ -1111,8 +1153,10 @@ def _open_pair_key(items):
     return tuple(sorted(i.get("uuid", "") for i in items))
 
 
-def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
-    """Guard the whole session, including closure and relocking of every active locked-copper re-escape."""
+def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="repair"):
+    """Guard the whole session, including closure and relocking of every active locked-copper re-escape.
+    PHASE3H B1: mode "repair" (default) also judges R2/R4 (DRC keys, score); mode "edit" judges only R0/R1/R3/R5 and
+    the locked checks, and leaves R2/R4/R6 to the caller (close's _accept)."""
     S = Sess(work)
     start = os.path.join(S.dir, "start.kicad_pcb")
     sraw = json.load(open(os.path.join(S.dir, "start_drc.json")))
@@ -1124,7 +1168,7 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli"):
     cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
     protect = DG.protected_nets(cons, DG.snap_nets(_snap(start)))
     ok, why = DG.accept(DG.measure_from_report(sraw, severity="all"), DG.measure_from_report(wraw, severity="all"),
-                        "repair", base_board=start, cand_board=S.work, snap=_snap, protect=protect)
+                        mode, base_board=start, cand_board=S.work, snap=_snap, protect=protect)
     if not ok:
         reasons.append(why)
     Ma, Mb = G.Model(start), G.Model(S.work)
