@@ -17,8 +17,32 @@ def _resolve(path, board_dir):
     return os.path.normpath(os.path.join(board_dir, path))
 
 
+ANCESTOR_LEVELS = 4
+
+
+def ancestor_hit(path, board_dir, resolve=None, levels=ANCESTOR_LEVELS):
+    """A `${KIPRJMOD}` path that misses the board's own folder, retried with each ancestor folder of the board
+    (1..levels up, nearest first) as `${KIPRJMOD}`. -> (file, folder) of the first hit, or None. The run folder
+    of a board is one level deeper than the folder its lib/ paths were written for. `resolve(path, folder)`
+    defaults to `_resolve`."""
+    if "${KIPRJMOD}" not in path:
+        return None
+    resolve = resolve or _resolve
+    d = os.path.abspath(board_dir)
+    for _ in range(levels):
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+        f = resolve(path, d)
+        if f and os.path.isfile(f):
+            return f, d
+    return None
+
+
 def scan(board):
-    """-> {"total": n model paths, "unresolved": [path as written]} for a .kicad_pcb file."""
+    """-> {"total": n model paths, "unresolved": [path as written]} for a .kicad_pcb file. A path that resolves
+    through an ancestor folder (ancestor_hit) is resolved."""
     with open(board, encoding="utf-8", errors="replace") as fh:
         paths = _MODEL.findall(fh.read())
     d = os.path.dirname(os.path.abspath(board))
@@ -28,7 +52,7 @@ def scan(board):
         if r is None:
             continue
         total += 1
-        if not os.path.isfile(r):
+        if not os.path.isfile(r) and ancestor_hit(p, d) is None:
             bad.append(p)
     return {"total": total, "unresolved": sorted(set(bad))}
 

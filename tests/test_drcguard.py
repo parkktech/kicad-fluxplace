@@ -243,3 +243,36 @@ def test_protected_nets_naming_pairs_and_rf_names():
     from fluxplace import drcguard as DG
     got = DG.protected_nets({}, ["USB_DP", "USB_DM", "BT1_RF", "GPIO3"])
     assert {"USB_DP", "USB_DM", "BT1_RF"} <= got and "GPIO3" not in got
+
+
+def test_keys_per_net_same_open_named_two_ways_is_equal():
+    # PHASE3G G2a: KiCad names a different item pair for the same open net from run to run; the key is the net
+    def unc(desc_a, desc_b):
+        return {"unconnected_items": [{"type": "unconnected_items", "items": [
+            {"description": desc_a}, {"description": desc_b}]}], "violations": []}
+    a = unc("Track [NET_A] on B.Cu, length 10.0000 mm", "Pad 1 of U1 [NET_A]")
+    b = unc("Via [NET_A] on B.Cu", "Pad 2 of J1 [NET_A]")
+    assert DG.keys_per_net(a) == DG.keys_per_net(b) == {("Unet", "NET_A"): 1}
+    new_open = unc("Track [NET_B] on F.Cu", "Pad 3 of R1 [NET_B]")
+    assert set(DG.keys_per_net(new_open)) - set(DG.keys_per_net(a)) == {("Unet", "NET_B")}
+    # a zone clearance item is still counted; keep() restricts the violations
+    d = {"violations": [{"type": "clearance", "items": [{"description": "Zone [GND] on F.Cu"},
+                                                        {"description": "Track [SIG] on F.Cu"}]},
+                        {"type": "track_not_centered_on_via", "items": [{"description": "Via [SIG]"}]}],
+         "unconnected_items": []}
+    assert sum(DG.keys_per_net(d).values()) == 1 + 1
+    assert sum(DG.keys_per_net(d, keep=lambda v: v.get("type") != "track_not_centered_on_via").values()) == 1
+
+
+def test_tune_drc_report_keys_mask_polygon_bridges_by_net(monkeypatch):
+    # PHASE3G G2a: one mask polygon named by different item pairs on each run -> keyed (type, net of other item)
+    from collections import Counter
+    def bridge(other_desc):
+        return {"type": "solder_mask_bridge", "items": [
+            {"description": "Polygon on F.Mask, length 1.0 mm"}, {"description": other_desc}]}
+    run1 = {"violations": [bridge("Pad 1 of U1 [NET_A]"), bridge("Pad 2 of U1 [NET_A]")], "unconnected_items": []}
+    run2 = {"violations": [bridge("Pad 7 of R3 [NET_A]"), bridge("Pad 9 of R4 [NET_A]")], "unconnected_items": []}
+    for run in (run1, run2):
+        monkeypatch.setattr(DG, "drc_json", lambda *a, _r=run, **k: _r)
+        keys, counts = TU.drc_report("x.kicad_pcb")
+        assert keys == Counter({("solder_mask_bridge", ("NET_A",)): 2}) and counts == (2, 0)

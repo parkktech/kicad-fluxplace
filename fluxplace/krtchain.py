@@ -105,9 +105,52 @@ def cmd_planes(py, rdir, src, dst, net, layer, base):
     return [py, os.path.join(rdir, "py_router", "route_planes.py"), src, dst, "--nets", glob_escape(net), "--plane-layers", layer, *base]
 
 
-def cmd_diff(py, rdir, src, dst, nets, sig, base, summary=None):
+def cmd_diff(py, rdir, src, dst, nets, sig, base, summary=None, width=None, gap=None):
+    """route_diff over `nets` on `sig`. PHASE3G G3b: width / gap (mm) replace the signal width of `base` for this call."""
+    if width is not None:
+        base = _without_width(base)
+        base = [*base, "--track-width", f"{width:g}", *(["--diff-pair-gap", f"{gap:g}"] if gap is not None else [])]
     cmd = [py, os.path.join(rdir, "py_router", "route_diff.py"), src, dst, "--nets", *nets, "--layers", *sig, *base, "--keep-input-copper"]
     return cmd + (["--json-out", summary] if summary else [])
+
+
+def _without_width(base):
+    out, skip = [], False
+    for x in base:
+        if skip:
+            skip = False
+            continue
+        if x == "--track-width":
+            skip = True
+            continue
+        out.append(x)
+    return out
+
+
+def diff_groups(cons, board, nets, sig):
+    """PHASE3G G3b: [(nets, layers, width | None, gap | None)], one route_diff call per group. A controlled pair family
+    is routed at its table width (zgeom.family_table on the board's stackup) on the layers whose width and gap equal the
+    outer layer's, so inner layers no longer get the signal leg width. width None: the signal width (no family, or no
+    stackup to grade against)."""
+    from . import zgeom as ZG, pairs as PS, routediag as RD, review as RV
+    rows, planes = [], []
+    try:
+        rows = RV.parse_stackup_text(open(board, errors="replace").read())
+        planes = PS.pair_layers(RD.load(board), cons)[1]
+    except Exception:                                    # noqa: BLE001 - no stackup: signal width everywhere (the old call)
+        rows = []
+    groups = {}
+    for n in sorted(nets):
+        fam = ZG.family_of(cons, n) if rows else None
+        tab = ZG.family_table(cons, rows, planes, sig, fam, board=board) if fam else {}
+        if not tab or sig[0] not in tab:
+            key = (None, None, tuple(sig))
+        else:
+            o = tab[sig[0]]
+            lay = tuple(l for l in sig if l in tab and tab[l]["w"] == o["w"] and tab[l]["gap"] == o["gap"])
+            key = (round(o["w"], 4), round(o["gap"], 4), lay)
+        groups.setdefault(key, []).append(n)
+    return [(ns, list(k[2]), k[0], k[1]) for k, ns in groups.items()]
 
 
 def cmd_route(py, rdir, src, dst, sig, base, power, summary=None, nets=("*",)):
@@ -278,7 +321,10 @@ def run(c, n, board, runner=run_step):
     def _route_nets():
         return sorted(allnets - failed_legs) if failed_legs else ("*",)
     if diff:
-        steps.append(("diff", lambda s, o: cmd_diff(a.router_py, a.router_dir, s, o, diff, sig, base, o[:-10] + ".json")))
+        for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
+            steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
+                          lambda s, o, gnets=gnets, glay=glay, gw=gw, ggap=ggap: cmd_diff(
+                              a.router_py, a.router_dir, s, o, gnets, glay, base, o[:-10] + ".json", width=gw, gap=ggap)))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
@@ -305,7 +351,7 @@ def run(c, n, board, runner=run_step):
             else:
                 rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name)
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("diff", "route", "rails", "rails-pour", "pairgroups") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -367,11 +413,14 @@ def run(c, n, board, runner=run_step):
     missed, already_done = [], []
     try:                                                    # pairs the external pair router did not see or did not route coupled
         from . import pairs as PRS, pairaudit as PA, routediag as RD2, netclass as NC2
-        drow = next((r for r in rows if r["step"] == "diff"), None)
-        if drow:
+        drows = [r for r in rows if r["step"].startswith("diff")]     # PHASE3G G3b: one diff step per geometry group
+        if drows:
             Bm = RD2.load(best)
-            missed = PRS.crosscheck_external(PA.pair_list(NC2.classify(Bm, c.cons, getattr(c, "spec", None))),
-                                             summary=drow.get("summary"), log=drow.get("log"))
+            plist = PA.pair_list(NC2.classify(Bm, c.cons, getattr(c, "spec", None)))
+            per = [PRS.crosscheck_external(plist, summary=r.get("summary"), log=r.get("log")) for r in drows]
+            seen_by = [{str(m.get("pair")) for m in ms} for ms in per]
+            # a pair is missed only when EVERY diff step missed it (each step sees only its own group's nets)
+            missed = [m for m in per[0] if all(str(m.get("pair")) in sb for sb in seen_by)]
             missed, already_done = _partition_missed(missed, rep, board, names)
     except Exception as e:                                  # noqa: BLE001 - a report, never a reason to lose the board
         missed = [{"pair": "?", "reason": "crosscheck_error", "detail": str(e)[:120]}]
@@ -413,7 +462,7 @@ def _rail_refused(rail_nets, rows):
             for v in x:
                 walk(v, owner)
     for r in rows:
-        if r["step"] in ("rails", "rails-pour", "route", "diff") and r.get("summary") and os.path.exists(r["summary"]):
+        if (r["step"] in ("rails", "rails-pour", "route") or r["step"].startswith("diff")) and r.get("summary") and os.path.exists(r["summary"]):
             try:
                 walk(json.load(open(r["summary"])))
             except (OSError, ValueError):

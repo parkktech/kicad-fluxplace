@@ -17,6 +17,7 @@ uses. A change DRC rejects is simply not made; the report says so.
 """
 import json
 import math
+import re
 import os
 import shutil
 import subprocess
@@ -48,9 +49,32 @@ def drc_counts(board_path, kicad_cli="kicad-cli", timeout=600):
     return len(d.get("violations", [])), len(d.get("unconnected_items", []))
 
 
+_MASK_POLY = re.compile(r"^Polygon on \S+\.Mask")
+
+
+def _mask_poly(v):
+    """A solder_mask_bridge violation that names a mask polygon (its item set changes run to run)."""
+    return v.get("type") == "solder_mask_bridge" and any(_MASK_POLY.search(str(i.get("description", "")))
+                                                         for i in v.get("items") or [])
+
+
+def _mask_key(v):
+    """(type, net of the other item): one mask polygon flickers between item pairs, the net does not."""
+    other = [i for i in v.get("items") or [] if not _MASK_POLY.search(str(i.get("description", "")))]
+    nets = [m.group(1) for i in other for m in [DG._NET.search(str(i.get("description", "")))] if m]
+    return (str(v.get("type", "")), tuple(nets) or ("?",))
+
+
 def drc_report(board_path, kicad_cli="kicad-cli", timeout=600):
-    """(keys, (violations, unconnected)): see fluxplace/drcguard.py for the identity and noise rule."""
-    return DG.drc_keys(board_path, kicad_cli, timeout)
+    """(keys, (violations, unconnected)): see fluxplace/drcguard.py for the identity and noise rule. PHASE3G G2a:
+    opens keyed per net (DG.keys_per_net) and mask-polygon bridges keyed by (type, net of the other item), so the
+    acceptance guard does not reject a step for key flicker."""
+    d = DG.drc_json(board_path, kicad_cli, timeout)
+    keys = DG.keys_per_net(d, keep=lambda v: not _mask_poly(v))
+    for v in d.get("violations", []):
+        if _mask_poly(v):
+            keys[_mask_key(v)] += 1
+    return keys, (len(d.get("violations", [])), len(d.get("unconnected_items", [])))
 
 
 # ------------------------------------------------------- budget, stall, clean exit
@@ -463,18 +487,20 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                                 break
                         if ok:
                             continue
-                        need_mm = abs(skew)                          # 2. lengthen the short side
+                        need_mm = abs(skew) - 0.5 * lim(master)   # 2. lengthen the short side: land inside the tolerance
                         for cand in range(6):
                             for amp, pitch in ((amp_mm, 0.7), (amp_mm * 0.6, 0.5), (0.35, 0.45)):
-                                for frac in (1.0, 0.5, 0.25):
-                                    ok = attempt(lambda bd, c=cand, a=amp, p=pitch, f=frac: meander(
-                                        bd, shorter, need_mm * f, amp_mm=a, pitch_mm=p, candidate=c, log=log) > 0, tries)
-                                    if ok:
-                                        break
+                                ok = attempt(lambda bd, c=cand, a=amp, p=pitch: meander_to(
+                                    bd, shorter, need_mm, amp_mm=a, period_mm=p, candidate=c, log=log,
+                                    clearance_mm=_min_clear(bd), away_from=longer, locked_ok=True) > 0, tries)
                                 if ok:
                                     break
                             if ok:
                                 break
+                        if not ok:                                   # no straight has room: a pad-entry jog
+                            ok = attempt(lambda bd: entry_jog(bd, shorter, need_mm, away_from=longer,
+                                                              clearance_mm=_min_clear(bd), locked_ok=True,
+                                                              log=log) > 0, tries)
                         if ok:
                             continue
                         log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} mm")
@@ -491,7 +517,9 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     if not os.path.exists(work):                                     # stopped while copying: the input is the result
         shutil.copy(board_path, work)
     _finalize(work, out_path)
-    if stopped is None and stalls:
+    if os.path.abspath(out_path) != os.path.abspath(board_path):   # the output carries the input's project rules: a later
+        _copy_sidecars(board_path, out_path)                       # pcbnew save would otherwise write a default .kicad_pro
+    if stopped is None and stalls and set(reached) <= stalls:      # PHASE3G G2c: one stalled pair does not end the run
         stopped = "stall"
     report = []
     pb = pcbnew.LoadBoard(out_path)
@@ -521,15 +549,16 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
 
 
 # ------------------------------------------------------- length matching
-def _bump_polyline(L, n, amp, period):
+def _bump_polyline(L, n, amp, period, side=None):
     """Local polyline (s along the segment, t across) of n rectangular bumps centred on a segment of length L.
     Bump i rises on its left leg at s_i, runs across its width (period / 2) and drops on its right leg; the copper
-    between bumps is a straight run along the axis, so no leg reverses direction (no acute tip for DRC)."""
+    between bumps is a straight run along the axis, so no leg reverses direction (no acute tip for DRC).
+    side = +1 / -1: every bump on that side of the axis (PHASE3G G2b); None: the sides alternate."""
     w = period / 2.0
     s0 = (L - n * period) / 2.0
     pts = [(0.0, 0.0), (s0, 0.0)]
     for i in range(n):
-        sg = 1.0 if i % 2 == 0 else -1.0
+        sg = (1.0 if i % 2 == 0 else -1.0) if side is None else float(side)
         x0 = s0 + i * period
         x1 = x0 + w
         pts += [(x0, 0.0), (x0, sg * amp), (x1, sg * amp), (x1, 0.0)]
@@ -547,6 +576,32 @@ def bump_plan(L, need_mm, amp_max, period, margin):
     if n * period + 2 * margin > L:
         return None
     return n, a
+
+
+def _partner_side(board, layer, away_from, mid, nvec):
+    """PHASE3G G2b: the side (+1 / -1 along nvec) that points AWAY from the nearest copper of net `away_from` on
+    `layer` (its track midpoint nearest to `mid`). +1 when that net has no copper there."""
+    best = None
+    for t in board.GetTracks():
+        if t.GetNetname() != away_from or t.GetClass() != "PCB_TRACK" or t.GetLayer() != layer:
+            continue
+        a, b = t.GetStart(), t.GetEnd()
+        q = ((a.x + b.x) / 2e6, (a.y + b.y) / 2e6)
+        d = math.hypot(q[0] - mid[0], q[1] - mid[1])
+        if best is None or d < best[0]:
+            best = (d, q)
+    if best is None:
+        return 1.0
+    off = (best[1][0] - mid[0]) * nvec[0] + (best[1][1] - mid[1]) * nvec[1]
+    return -1.0 if off > 0 else 1.0
+
+
+def _min_clear(board):
+    """The board's minimum copper clearance (mm), or None when this pcbnew does not report it."""
+    try:
+        return float(board.GetDesignSettings().m_MinClearance) / 1e6 or None
+    except Exception:                                    # noqa: BLE001 - no design-settings access
+        return None
 
 
 def _arc_samples(a, m, b, n=16):
@@ -640,12 +695,15 @@ def candidate_clear(board, pts, layer, net_code, width_mm, clear_mm):
 
 # ------------------------------------------------------------------ paths
 def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
-               candidate=0, log=print, clearance_mm=None, stats=None):
-    """Lengthen `net` by exactly `need_mm` with accordion bumps on its `candidate`-th longest UNLOCKED straight
-    segment that has room (period_mm = 2 x bump width). Returns the length added (0.0 when no segment has room)."""
+               candidate=0, log=print, clearance_mm=None, stats=None, away_from=None, locked_ok=False):
+    """Lengthen `net` by exactly `need_mm` with accordion bumps on its `candidate`-th longest straight segment that
+    has room (period_mm = 2 x bump width). Returns the length added (0.0 when no segment has room).
+    PHASE3G G2b: away_from = a net name: every bump goes to the side away from that net's nearest copper (its
+    partner leg), no alternation. locked_ok: locked copper of `net` is eligible (the pair being tuned); the new
+    segments keep the lock flag of the segment they replace. Other nets' locks are never touched."""
     import pcbnew
     lockers = [t for t in board.GetTracks() if t.GetNetname() == net and t.GetClass() == "PCB_TRACK"
-               and not t.IsLocked()]
+               and (locked_ok or not t.IsLocked())]
     lockers.sort(key=lambda t: -t.GetLength())
     straights = [t for t in lockers
                  if bump_plan(t.GetLength() / 1e6, need_mm, amp_mm, period_mm, margin_mm) is not None]
@@ -658,8 +716,12 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
     n, a = bump_plan(L, need_mm, amp_mm, period_mm, margin_mm)
     ux, uy = (ex - sx) / L, (ey - sy) / L
     nx, ny = -uy, ux
-    pts = [(sx + u * ux + t * nx, sy + u * uy + t * ny) for u, t in _bump_polyline(L, n, a, period_mm)]
     width, layer, code = seg.GetWidth(), seg.GetLayer(), seg.GetNetCode()
+    side = None
+    if away_from:
+        side = _partner_side(board, layer, away_from, ((sx + ex) / 2, (sy + ey) / 2), (nx, ny))
+    pts = [(sx + u * ux + t * nx, sy + u * uy + t * ny) for u, t in _bump_polyline(L, n, a, period_mm, side)]
+    locked = seg.IsLocked()
     if clearance_mm is not None:                       # geometric pre-check: no DRC run for a bump that cannot pass
         if stats is not None:
             stats["geom_checked"] = stats.get("geom_checked", 0) + 1
@@ -676,11 +738,74 @@ def meander_to(board, net, need_mm, amp_mm=0.6, period_mm=0.8, margin_mm=0.6,
         t.SetLayer(layer)
         t.SetWidth(width)
         t.SetNetCode(code)
+        t.SetLocked(locked)
         board.Add(t)
         added += math.hypot(x1 - x0, y1 - y0)
     added -= L
     log(f"      {net}: accordion x{n} on {board.GetLayerName(layer)} adds {added:.3f} mm (asked {need_mm:.3f})")
     return added
+
+
+def entry_jog(board, net, need_mm, away_from=None, clearance_mm=None, locked_ok=False, log=print):
+    """PHASE3G G2b, last resort when no straight of `net` has room for a bump: on a leg's segment that ends at a
+    pad or via of `net` (the uncoupled break-out part), replace the segment by a 45-degree dog-leg of offset h.
+    The added length is 2 h (sqrt 2 - 1), so h = need / (2 (sqrt 2 - 1)). The pad/via end stays where it is.
+    away_from: the dog-leg bends away from that net's copper. Returns the length added (0.0 when refused)."""
+    import pcbnew
+    h = need_mm / (2.0 * (math.sqrt(2.0) - 1.0))
+    ends = []
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if pad.GetNetname() == net:
+                p = pad.GetPosition()
+                ends.append((p.x / 1e6, p.y / 1e6))
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA" and t.GetNetname() == net:
+            p = t.GetPosition()
+            ends.append((p.x / 1e6, p.y / 1e6))
+    cands = []
+    for t in board.GetTracks():
+        if t.GetNetname() != net or t.GetClass() != "PCB_TRACK" or (t.IsLocked() and not locked_ok):
+            continue
+        s, e = t.GetStart(), t.GetEnd()
+        S, E = (s.x / 1e6, s.y / 1e6), (e.x / 1e6, e.y / 1e6)
+        L = math.hypot(E[0] - S[0], E[1] - S[1])
+        if L < 2 * h + 0.3:                             # room for the two 45-degree legs and a straight run
+            continue
+        for T, O in ((E, S), (S, E)):
+            if any(math.hypot(T[0] - q[0], T[1] - q[1]) < 0.02 for q in ends):
+                cands.append((L, t, O, T))
+                break
+    cands.sort(key=lambda c: -c[0])
+    for L, seg, O, T in cands:
+        Lr = math.hypot(T[0] - O[0], T[1] - O[1])
+        ux, uy = (T[0] - O[0]) / Lr, (T[1] - O[1]) / Lr
+        nx, ny = -uy, ux
+        side = 1.0
+        if away_from:
+            side = _partner_side(board, seg.GetLayer(), away_from, ((O[0] + T[0]) / 2, (O[1] + T[1]) / 2), (nx, ny))
+        loc = [(0.0, 0.0), (h, side * h), (Lr - h, side * h), (Lr, 0.0)]
+        pts = [(O[0] + x * ux + y * nx, O[1] + x * uy + y * ny) for x, y in loc]
+        width, layer, code = seg.GetWidth(), seg.GetLayer(), seg.GetNetCode()
+        if clearance_mm is not None and not candidate_clear(board, pts, layer, code, width / 1e6, clearance_mm):
+            continue
+        locked = seg.IsLocked()
+        RP._remove(board, seg)
+        added = 0.0
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            t = pcbnew.PCB_TRACK(board)
+            t.SetStart(pcbnew.VECTOR2I(int(round(x0 * 1e6)), int(round(y0 * 1e6))))
+            t.SetEnd(pcbnew.VECTOR2I(int(round(x1 * 1e6)), int(round(y1 * 1e6))))
+            t.SetLayer(layer)
+            t.SetWidth(width)
+            t.SetNetCode(code)
+            t.SetLocked(locked)
+            board.Add(t)
+            added += math.hypot(x1 - x0, y1 - y0)
+        added -= Lr
+        log(f"      {net}: entry jog h={h:.3f} on {board.GetLayerName(layer)} adds {added:.3f} mm (asked {need_mm:.3f})")
+        return added
+    return 0.0
 
 
 def _guarded_set(board_path, work, mutate, kicad_cli, base, log, stats, bud=None):
@@ -801,6 +926,8 @@ def tune_match(board_path, out_path, groups_, net_lengths, targets, kicad_cli="k
     if not os.path.exists(work):
         shutil.copy(board_path, work)
     _finalize(work, out_path)
+    if os.path.abspath(out_path) != os.path.abspath(board_path):   # the output carries the input's project rules: a later
+        _copy_sidecars(board_path, out_path)                       # pcbnew save would otherwise write a default .kicad_pro
     if stopped is None and stalled:
         stopped = "stall"
     if stopped in ("budget", "signal"):                      # nets nobody reached: reported, not silently missing

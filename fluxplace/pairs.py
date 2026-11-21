@@ -38,6 +38,7 @@ def params(cons):
             "via_cost": float(e.get("via_cost_mm", 20.0)), "turn_cost": float(e.get("turn_cost_mm", 0.4)),
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
             "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)),
+            "inner_cost_gated": float(e.get("inner_cost", 3.0)),        # PHASE3G G3d: gated pairs stay outer unless blocked
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
             "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
             "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
@@ -163,6 +164,13 @@ def _gates(grid, allowed, li_list, term, R, outward, lats):
     return out
 
 
+def layer_cost(copper, sig, P, gated):
+    """A* length factor per signal layer: outer layers 1.0; inner layers P["inner_cost"], or P["inner_cost_gated"] for a
+    gated pair (review.pair_gated: a route stays on the outer layers unless blocked; a cost, not a ban)."""
+    inner = P["inner_cost_gated"] if gated else P["inner_cost"]
+    return [1.0 if l in (copper[0], copper[-1]) else inner for l in sig]
+
+
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
@@ -220,7 +228,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         else:
             states, info = PL.astar(grid.nx, grid.ny, sig, allowed, vm if nl > 1 else None, seeds, goals, H, 4, K, step,
                                     P["turn_cost"], P["via_cost"], int(budget_x * (P["nodes"] + P["nodes_per_mm"] * span)),
-                                    [1.0 if l in (grid.B["copper"][0], grid.B["copper"][-1]) else P["inner_cost"] for l in sig],
+                                    layer_cost(grid.B["copper"], sig, P, ctx["gated"](nets)),
                                     ccost=cost) if seeds else (None, {"reason": "no gate with a matching polarity"})
         if not states:
             reason = f"{info['reason']} for the coupled centre line ({env:.2f} mm envelope + {clr:.3f} clearance)"
@@ -788,7 +796,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     def mk_ctx():
         grid = PL.Grid(B, sig, clr, edge, P["step"], pair_nets)
         items = G.Items.of_board(B, old_nets=pair_nets, edge_extra=max(0.0, edge - clr))
+        from . import review as RV                       # PHASE3G G3d
         return {"grid": grid, "items": items, "P": P, "base_n": items.mark(), "skip": pair_nets, "min_clearance": R.get("min_clearance", 0.0),
+                "gated": lambda pr: RV.pair_gated(cons, pr[0]),
                 "closed": lambda pr: not open0.get(pr[0]) and not open0.get(pr[1]), "info": info, "rules": rules,
                 "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
                 "limit": lambda net: guard_limit(cons, net),

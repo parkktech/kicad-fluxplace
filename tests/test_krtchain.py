@@ -366,3 +366,31 @@ def test_pairgroups_budget_and_failed_legs_on_exception(tmp_path, monkeypatch):
     failed = set()
     K._run_pairgroups(c, str(tmp_path), src, dst, failed, 100.0, pair_legs={"A_P", "A_N", "B_P", "B_N"})
     assert failed == {"A_P", "A_N", "B_P", "B_N"} and os.path.exists(dst)
+
+
+def test_diff_step_carries_family_width_on_outer_layers_only(tmp_path, monkeypatch):
+    # PHASE3G G3b: a controlled family is routed at its table width on the layers whose width and gap equal the
+    # outer layer's; a net with no family keeps the signal width (no --track-width override) on all signal layers
+    import pytest
+    from fluxplace import zgeom as Z, pairs as PS, routediag as RD, review as RV
+    from test_zgeom import ROWS, SIG, PLANES, CONS
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text("")
+    monkeypatch.setattr(RV, "parse_stackup_text", lambda raw: ROWS)
+    monkeypatch.setattr(PS, "pair_layers", lambda B, cons: (SIG, PLANES))
+    monkeypatch.setattr(RD, "load", lambda p: None)
+    groups = K.diff_groups(CONS, str(board), ["ETH_TX_P", "ETH_TX_N", "FOO_1"], SIG)
+    by = {tuple(sorted(ns)): (lay, w, g) for ns, lay, w, g in groups}
+    lay, w, g = by[("ETH_TX_N", "ETH_TX_P")]
+    tab = Z.family_table(CONS, ROWS, PLANES, SIG, "ETH_", board=str(board))
+    assert "In2.Cu" not in lay and "In3.Cu" not in lay and set(lay) == {"F.Cu", "B.Cu"}
+    assert w == pytest.approx(tab["F.Cu"]["w"], abs=1e-4) and g == pytest.approx(tab["F.Cu"]["gap"], abs=1e-4)
+    assert by[("FOO_1",)] == (SIG, None, None)
+    base = ["--track-width", "0.15", "--escalation", "off"]
+    cmd = K.cmd_diff("py", "/r", "s", "o", ["ETH_TX_P", "ETH_TX_N"], lay, base, None, width=w, gap=g)
+    assert cmd.count("--track-width") == 1 and cmd[cmd.index("--track-width") + 1] == f"{w:g}"
+    assert cmd[cmd.index("--diff-pair-gap") + 1] == f"{g:g}"
+    assert cmd[cmd.index("--layers") + 1:cmd.index("--layers") + 1 + len(lay)] == lay
+    plain = K.cmd_diff("py", "/r", "s", "o", ["FOO_1"], SIG, base, None)
+    assert plain.count("--track-width") == 1 and plain[plain.index("--track-width") + 1] == "0.15"
+    assert "--diff-pair-gap" not in plain

@@ -48,6 +48,30 @@ def keys_from_report(d, keep=None, unconnected=True):
     return Counter(keys), (len(vio), len(unc))
 
 
+_NET = re.compile(r"\[([^\]]+)\]")
+
+
+def unc_nets(u):
+    """Net names of an unconnected item (from its item descriptions, e.g. 'Track [NET] on B.Cu, ...')."""
+    return sorted({m.group(1) for it in u.get("items") or [] for m in [_NET.search(str(it.get("description", "")))] if m})
+
+
+def keys_per_net(d, keep=None):
+    """Counter of keys for a kicad-cli JSON dict with OPENS counted per NET (key ("Unet", net)), not by item
+    description: moving a track end changes which items an existing open names, and that read as a new open
+    every run (W9/W13). Clearance items on a zone are counted (keys_from_report leaves zone items out).
+    keep(v) -> bool restricts the violations; unconnected items are always counted per net. (PHASE3G G2a: the
+    body of snapiter._keys minus its CENTRED filter.)"""
+    keys = keys_from_report(d, keep=keep, unconnected=False)[0]
+    for v in d.get("violations", []):
+        if v.get("type") == "clearance" and _zone_item(v):
+            keys[key_of(v)] += 1
+    for u in d.get("unconnected_items", []):
+        for n in unc_nets(u) or ["?"]:
+            keys[("Unet", n)] += 1
+    return keys
+
+
 def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
     """The raw kicad-cli DRC dict (all severities, zones refilled)."""
     out = board_path + ".drc.json"

@@ -47,8 +47,11 @@ def test_budget_stop_writes_best_accepted_board_and_cleans_up(tmp_path, monkeypa
     t, clock = _clock()
     _fake_drc(monkeypatch, on_call=lambda n: t.__setitem__(0, 1000.0) if n == 2 else None)   # budget gone after 1st accepted bump
     out, res = str(tmp_path / "out.kicad_pcb"), {}
-    rep = TU.tune_pairs(src, out, {"DATA_1": "DATA_0"}, 0.2, budget=TU.Budget(100, clock=clock), result=res, log=lambda m: None)
-    assert res["stopped"] == "budget" and res["pairs"][0]["status"] == "over" and res["pairs"][0]["reason"] == "budget"
+    # two pairs: one accepted bump lands a pair inside its limit (PHASE3G G2b), so the budget ends on the second pair
+    rep = TU.tune_pairs(src, out, {"DATA_1": "DATA_0", "DATA_3": "DATA_2"}, 0.2, budget=TU.Budget(100, clock=clock),
+                        result=res, log=lambda m: None)
+    assert res["stopped"] == "budget" and res["pairs"][0]["status"] == "ok"
+    assert res["pairs"][1]["status"] == "over" and res["pairs"][1]["reason"] == "budget"
     assert _ntracks(out) > _ntracks(src)                       # the accepted step is in the output
     assert _leftovers(tmp_path) == []
     assert rep[0][0] == "DATA_0"
@@ -59,9 +62,10 @@ def test_sigterm_during_drc_leaves_a_usable_out_and_no_temp_files(tmp_path, monk
     old = signal.getsignal(signal.SIGTERM)
     _fake_drc(monkeypatch, on_call=lambda n: os.kill(os.getpid(), signal.SIGTERM) if n == 3 else None)
     out, res = str(tmp_path / "out.kicad_pcb"), {}
-    TU.tune_pairs(src, out, {"DATA_1": "DATA_0"}, 0.2, budget=TU.Budget(None), result=res, log=lambda m: None)
+    TU.tune_pairs(src, out, {"DATA_1": "DATA_0", "DATA_3": "DATA_2"}, 0.2, budget=TU.Budget(None), result=res,
+                  log=lambda m: None)
     assert res["stopped"] == "signal" and os.path.exists(out)
-    assert _ntracks(out) > _ntracks(src)                       # two accepted bumps before the signal
+    assert _ntracks(out) > _ntracks(src)                       # the first pair's accepted bump before the signal
     assert _leftovers(tmp_path) == [] and signal.getsignal(signal.SIGTERM) is old
 
 
@@ -148,3 +152,102 @@ def test_lock_tuned_locks_only_the_tuned_pair_copper(tmp_path):
     from fluxplace import boardtext as BT
     txt = p.read_text()
     assert {BT.net_name(b) for _i, _j, _k, b in BT.scan(txt) if BT.is_locked(b)} == {"P", "N"}
+
+
+# ------------------------------------------------ PHASE3G G2b: away-from-partner bumps, entry jog, lock flags
+def _pcb_track(b, ni, x0, y0, x1, y1, w=0.15, locked=False):
+    import pcbnew
+    t = pcbnew.PCB_TRACK(b)
+    t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x0), pcbnew.FromMM(y0)))
+    t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetWidth(pcbnew.FromMM(w))
+    t.SetNet(ni)
+    t.SetLocked(locked)
+    b.Add(t)
+    return t
+
+
+def _pair_board(tmp_path, p_locked=False):
+    """Two parallel F.Cu legs: P at y=10, its partner N at y=10.3 (0.15 mm apart edge to edge), x 10..40."""
+    import pcbnew
+    b = pcbnew.BOARD()
+    nets = {}
+    for n in ("P", "N", "X"):
+        nets[n] = pcbnew.NETINFO_ITEM(b, n)
+        b.Add(nets[n])
+    _pcb_track(b, nets["P"], 10, 10, 40, 10, locked=p_locked)
+    _pcb_track(b, nets["N"], 10, 10.3, 40, 10.3)
+    return b, nets
+
+
+def _add_pad(b, net, x, y):
+    import pcbnew
+    fp = pcbnew.FOOTPRINT(b)
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+    pad = pcbnew.PAD(fp)
+    pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    pad.SetLayerSet(pcbnew.LSET.FrontMask())
+    pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(0.6), pcbnew.FromMM(0.6)))
+    pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)))
+    pad.SetNet(net)
+    fp.Add(pad)
+    b.Add(fp)
+
+
+def _track_ys(b, net):
+    return [(t.GetStart().y / 1e6, t.GetEnd().y / 1e6) for t in b.GetTracks() if t.GetNetname() == net]
+
+
+def test_meander_to_adds_exact_need_and_bumps_away_from_partner(tmp_path):
+    from fluxplace import tune as TU
+    b, _ = _pair_board(tmp_path)
+    before = sum(t.GetLength() for t in b.GetTracks() if t.GetNetname() == "P") / 1e6
+    added = TU.meander_to(b, "P", 1.0, amp_mm=0.6, period_mm=0.8, candidate=0, clearance_mm=0.1, away_from="N")
+    assert added == pytest.approx(1.0, abs=0.01)
+    after = sum(t.GetLength() for t in b.GetTracks() if t.GetNetname() == "P") / 1e6
+    assert after - before == pytest.approx(1.0, abs=0.01)
+    # every new point lies on the side of the original leg away from the partner (partner at +y)
+    ys = [y for pair in _track_ys(b, "P") for y in pair]
+    assert max(ys) <= 10.0 + 1e-6 and min(ys) < 9.9
+
+
+def test_meander_to_refuses_locked_leg_unless_allowed_and_keeps_lock(tmp_path):
+    from fluxplace import tune as TU
+    b, _ = _pair_board(tmp_path, p_locked=True)
+    assert TU.meander_to(b, "P", 1.0, clearance_mm=0.1, away_from="N") == 0.0      # default: locked copper is not edited
+    added = TU.meander_to(b, "P", 1.0, clearance_mm=0.1, away_from="N", locked_ok=True)
+    assert added == pytest.approx(1.0, abs=0.01)
+    p_tracks = [t for t in b.GetTracks() if t.GetNetname() == "P"]
+    assert len(p_tracks) > 1 and all(t.IsLocked() for t in p_tracks)              # replacement keeps the lock flag
+    n_tracks = [t for t in b.GetTracks() if t.GetNetname() == "N"]
+    assert len(n_tracks) == 1 and not n_tracks[0].IsLocked()                       # the partner is untouched
+
+
+def test_entry_jog_adds_exact_need_at_a_pad_end(tmp_path):
+    import pcbnew
+    from fluxplace import tune as TU
+    b, nets = _pair_board(tmp_path)
+    _add_pad(b, nets["P"], 40, 10)
+    added = TU.entry_jog(b, "P", 0.2, away_from="N", clearance_mm=0.1)
+    assert added == pytest.approx(0.2, abs=0.01)
+    ys = [y for pair in _track_ys(b, "P") for y in pair]
+    assert min(ys) < 9.95 and max(ys) <= 10.0 + 1e-6                               # the bend is away from N
+
+
+def test_entry_jog_refused_when_foreign_track_is_in_the_way(tmp_path):
+    from fluxplace import tune as TU
+    b, nets = _pair_board(tmp_path)
+    # X runs through the 45-degree bend zone (offset ~0.24 mm on the side away from N)
+    _pcb_track(b, nets["X"], 25, 9.76, 36, 9.76)
+    _add_pad(b, nets["P"], 40, 10)
+    n0 = len([t for t in b.GetTracks() if t.GetNetname() == "P"])
+    assert TU.entry_jog(b, "P", 0.2, away_from="N", clearance_mm=0.1) == 0.0      # refused by the foreign track
+    assert len([t for t in b.GetTracks() if t.GetNetname() == "P"]) == n0
+
+
+def test_bump_polyline_fixed_side_puts_every_bump_on_one_side():
+    from fluxplace import tune as TU
+    pts = TU._bump_polyline(30.0, 3, 0.5, 0.8, side=-1)
+    assert min(p[1] for p in pts) == pytest.approx(-0.5) and max(p[1] for p in pts) == pytest.approx(0.0)

@@ -95,6 +95,7 @@ import os
 import re
 
 from . import bomopt as BO
+from . import modelpaths as MP
 from . import constraints as C
 from . import graph as G
 from . import si as SI
@@ -477,6 +478,23 @@ def z0_on_layer(w, geom):
     return 2 * z1 * z2 / (z1 + z2), "stripline"
 
 
+def _pair_legs(facts, cons, names):
+    """PHASE3G G3a: the nets that are a leg of a differential pair: pairaudit.pair_list over netclass.classify when the
+    board is readable, else the name rule (_pairs) over `names`. constraints.not_pairs always removes its nets."""
+    from . import constraints as C, netclass as NC, pairaudit as PA, routediag as RD
+    legs = None
+    path = facts.get("board_path") or facts.get("board")
+    if isinstance(path, str) and os.path.isfile(path):
+        try:
+            cls = NC.classify(RD.load(path), cons or {})
+            legs = {n for pr in PA.pair_list(cls) for n in pr}
+        except Exception:                                     # noqa: BLE001 - unreadable board: the name rule
+            legs = None
+    if legs is None:
+        legs = set(NC._pairs(set(names), cons))
+    return legs - C.not_pairs(cons)
+
+
 def check_pair_geometry(facts, cons):
     """Controlled-impedance pair families graded against zgeom.pair_geometry (the geometry the pairs stage lays):
     PAIR_GEOMETRY (info: width/gap/impedance per layer), PAIR_IMPEDANCE_UNREACHABLE (FAIL: no allowed layer meets the target),
@@ -507,9 +525,11 @@ def check_pair_geometry(facts, cons):
         out.append(_f(INFO, "PAIR_GEOMETRY", f"{fam} {v['impedance_diff']} ohm: {line}"))
         if v.get("width_mm") and v.get("gap_mm"):
             continue                                              # explicit geometry is kept; the table above reports its impedance
-        for net, tr in sorted((facts.get("net_tracks") or {}).items()):
-            if not net.startswith(fam) or ZG.family_of(cons, net) != fam:
-                continue
+        nt = facts.get("net_tracks") or {}
+        legs = _pair_legs(facts, cons, nt)
+        for net, tr in sorted(nt.items()):
+            if not net.startswith(fam) or ZG.family_of(cons, net) != fam or net not in legs:
+                continue                                      # PHASE3G G3a: a single-ended net with a family prefix is not graded
             bad = None
             for layer, w, mm in tr.get("segments", []):
                 g = tab.get(layer)
@@ -1099,6 +1119,8 @@ def check_models(facts, board_path=None):
     entry in `refs`) with `re.search`, and "^ANT1 " needs that space to
     land right after the ref, not swallowed by a colon."""
     out = []
+    via = {}                                          # model path -> ancestor folder it resolves from (G5a)
+    bp = board_path or facts.get("board_path", "")
     for ref, p in sorted(facts["parts"].items()):
         if p.get("mech") or "models" not in p:   # hand-built facts carry no model list
             continue
@@ -1116,7 +1138,14 @@ def check_models(facts, board_path=None):
                               f"the rule is a real vendor/EasyEDA body (fluxplace models --fetch)",
                               refs=[ref]))
                 continue
-            full = resolve_model(m, board_path or facts.get("board_path", ""))
+            full = resolve_model(m, bp)
+            if not os.path.exists(full) and bp:
+                # PHASE3G G5a: a run-folder copy one level below the folder its lib/ paths were written for
+                hit = MP.ancestor_hit(m, os.path.dirname(os.path.abspath(bp)),
+                                      resolve=lambda q, d: resolve_model(q, os.path.join(d, "_")))
+                if hit:
+                    via[m] = hit[1]
+                    full = hit[0]
             if not os.path.exists(full):
                 base, ext = os.path.splitext(full)
                 alt = [e for e in (".step", ".stp", ".wrl") if os.path.exists(base + e)]
@@ -1139,6 +1168,10 @@ def check_models(facts, board_path=None):
                               f"parse into geometry (STEP with <50 points, or a WRL with "
                               f"no Shape/IndexedFaceSet) — renders as a missing body",
                               refs=[ref]))
+    if via:
+        dirs = sorted(set(via.values()))
+        out.append(_f(INFO, "MODEL_PATH_VIA_ANCESTOR",
+                      f"{len(via)} model paths resolve from {', '.join(dirs)}; a board opened here shows no bodies"))
     return out
 
 

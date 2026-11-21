@@ -778,3 +778,30 @@ def test_patch_apply_path_via_is_through(tmp_path):
     vias = [a for a in added if a.GetClass() == "PCB_VIA"]
     assert vias, "expected apply_path to create a via on the layer change"
     assert all(v.GetViaType() == pcbnew.VIATYPE_THROUGH for v in vias)
+
+
+def test_model_path_resolves_through_ancestor_is_info_not_fail(tmp_path):
+    # PHASE3G G5a: lib/ sits beside W14/; the board is in W14/stageD/B (two folders below lib's parent).
+    # ${KIPRJMOD}/../lib/... misses the board's own folder and resolves from the ancestor W14 -> one INFO.
+    from fluxplace import review as R
+    from fluxplace import modelpaths as MP
+    lib = tmp_path / "lib" / "3dmodels"
+    lib.mkdir(parents=True)
+    (lib / "x.step").write_text(_valid_step_text())
+    run = tmp_path / "W14" / "stageD" / "B"
+    run.mkdir(parents=True)
+    board = run / "b.kicad_pcb"
+    facts = {"board_path": str(board), "parts": {
+        "U1": {"footprint": "X", "models": ["${KIPRJMOD}/../lib/3dmodels/x.step"], "mech": False},
+        "U2": {"footprint": "Y", "models": ["${KIPRJMOD}/../lib/3dmodels/gone.step"], "mech": False},
+    }}
+    finds = R.check_models(facts)
+    assert [(f["code"], f["refs"][0]) for f in finds if f["level"] == "FAIL"] == [("MODEL_FILE_MISSING", "U2")]
+    info = [f for f in finds if f["code"] == "MODEL_PATH_VIA_ANCESTOR"]
+    assert len(info) == 1 and info[0]["level"] == "INFO"
+    assert "1 model paths resolve from" in info[0]["msg"] and str(tmp_path / "W14") in info[0]["msg"]
+    # the board-level scan used by placement-check agrees: the ancestor-resolved path is not unresolved
+    board.write_text('(kicad_pcb (footprint "X" (model "${KIPRJMOD}/../lib/3dmodels/x.step")))\n')
+    assert MP.scan(str(board))["unresolved"] == []
+    assert MP.ancestor_hit("${KIPRJMOD}/../lib/3dmodels/x.step", str(run))[1] == str(tmp_path / "W14")
+    assert MP.ancestor_hit("${KIPRJMOD}/../lib/3dmodels/x.step", str(tmp_path / "elsewhere")) is None

@@ -25,25 +25,13 @@ def _report(board, cli="kicad-cli"):
     return d
 
 
-_NET = re.compile(r"\[([^\]]+)\]")
-
-
-def _unc_nets(u):
-    """net names of an unconnected item (from its item descriptions, e.g. 'Track [NET] on B.Cu, ...')."""
-    return sorted({m.group(1) for it in u.get("items") or [] for m in [_NET.search(str(it.get("description", "")))] if m})
+_unc_nets = DG.unc_nets
 
 
 def _keys(d):
-    # Opens are counted per NET, not keyed by item description: moving a track end to a via centre changes which
-    # items an existing open names (and their lengths), which made every iteration look like a new open (W9/W13).
-    keys = DG.keys_from_report(d, keep=lambda v: v.get("type") != CENTRED, unconnected=False)[0]
-    for v in d.get("violations", []):
-        if v.get("type") == "clearance" and DG._zone_item(v):
-            keys[DG.key_of(v)] += 1
-    for u in d.get("unconnected_items", []):
-        for n in _unc_nets(u) or ["?"]:
-            keys[("Unet", n)] += 1
-    return keys
+    # Opens are counted per NET, not keyed by item description (drcguard.keys_per_net; W9/W13). PHASE3G G2a: the body
+    # moved there; this keeps only the CENTRED filter.
+    return DG.keys_per_net(d, keep=lambda v: v.get("type") != CENTRED)
 
 
 def _pair_clr(x, y, layer, mm, dflt):
