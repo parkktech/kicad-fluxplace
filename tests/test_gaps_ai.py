@@ -121,7 +121,7 @@ def test_load_ai_action_drops_invalid(monkeypatch, tmp_path):
     assert a["tokens"] == 812 and a["why"] == "try"
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
-    assert GP.load_ai_action(str(bad), "b") == {"actions": [], "tokens": 0, "why": ""}
+    assert GP.load_ai_action(str(bad), "b") == {"actions": [], "tokens": 0, "why": "", "dropped": []}
 
 
 # ---- apply ----
@@ -207,7 +207,7 @@ def test_apply_order_and_temps(apply_env, monkeypatch, tmp_path):
     assert ("shove", "SIG9", "unlay", ["abcdef12"], False) in c
     assert ("move", [("R1")]) == c[0] or c[0][0] == "move"
     assert sorted(f for f in os.listdir(ctx["ai_dir"]) if not f.endswith(".feedback.json")) == [
-        critroute._safe(GP.ai_key(GAP)) + ".action.used.json"]
+        critroute._safe(GP.ai_key(GAP)) + ".action.used.1.json"]
     assert ctx["ai_used"] == {GP.ai_key(GAP): 1}
 
 
@@ -362,7 +362,7 @@ def test_packets_for_three_gaps_one_call(monkeypatch, tmp_path):
 
 def test_packets_capped_at_six_per_call(monkeypatch, tmp_path):
     monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": []})
-    ctx = _ctx(tmp_path)
+    ctx = _ctx(tmp_path, cons={"ai": {"packets": 6}})
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"),
                    [_gap(f"N{i}") for i in range(7)], ctx)
     assert res == {"status": "packet", "n": 6} and len(os.listdir(ctx["ai_dir"])) == 6
@@ -463,10 +463,10 @@ def test_ai_action_new_kinds_validated(monkeypatch, tmp_path):
 
 def test_ai_action_path_hs_leg_stub_join():
     cu = ["F.Cu", "B.Cu"]
-    stub = GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 0.8,0"}, cu, hs_legs={"LEG"})
+    stub = GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 0.8,0"}, cu, hs_legs={"LEG"})[0]
     assert stub == {"do": "path", "net": "LEG", "path": "F.Cu: 0,0 0.8,0", "lock": False}      # 0.8 mm: kept
-    assert GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"}) is None  # 5 mm: dropped
-    assert GP._ai_action({"do": "path", "net": "SIG2", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"})["net"] == "SIG2"
+    assert GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"})[0] is None  # 5 mm: dropped
+    assert GP._ai_action({"do": "path", "net": "SIG2", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"})[0]["net"] == "SIG2"
 
 
 def test_ai_action_file_capped_at_eight(monkeypatch, tmp_path):
@@ -552,7 +552,7 @@ def test_close_stop_lists_packets_then_second_close_applies(close_env, apply_env
     res2 = _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons, log=lambda m: None)
     gs = json.load(open(os.path.join(close_env["work"], "gaps.json")))
     assert gs["ai_used"] == {GP.ai_key(GAP): 1}
-    assert os.path.exists(os.path.join(close_env["work"], "ai", sid + ".action.used.json"))
+    assert os.path.exists(os.path.join(close_env["work"], "ai", sid + ".action.used.1.json"))
     assert ("krtcmd", ["SIG2"]) in apply_env["calls"] and res2["stop"] in ("packets", "flat", "clean")
 
 
@@ -639,3 +639,183 @@ def test_ai_filter_pair_hs_and_low_speed():
     acts = [{"do": "route"}, {"do": "path"}, {"do": "pair_path"}, {"do": "rip"}, {"do": "nudge"}, {"do": "give_up"}]
     assert [x["do"] for x in GP._ai_filter_pair(hs, acts)] == ["path", "pair_path", "rip", "give_up"]
     assert [x["do"] for x in GP._ai_filter_pair(lo, acts)] == [x["do"] for x in acts]
+
+
+# ---- PHASE3H Part A: loop, loader, budget (audit 1-14) ----
+
+def _free(n):
+    return {"description": "Missing connection", "items": [
+        {"description": f"Pad 2 [{n}]", "pos": {"x": 20, "y": 20}}, {"description": f"Pad 3 [{n}]", "pos": {"x": 25, "y": 20}}]}
+
+
+def _measure3(board, kicad_cli="kicad-cli"):
+    text = open(board).read()
+    items = [_free(n) for n in ("SIG2", "SIG3", "SIG4") if f"closed:{n}" not in text]
+    return {"drc": {"violations": [], "unconnected_items": items}, "opens": len(items), "shorts": 0, "errors": 0,
+            "err_keys": Counter()}
+
+
+def _sid(key):
+    return critroute._safe(key)[:80]
+
+
+def test_a1_pair_leg_dropped_and_least_used_first(apply_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(HR, "session_commit", lambda w, out, **k: {"accepted": False, "reasons": ["R2 new DRC key"]})
+    monkeypatch.setattr(GP, "gap_packet", lambda base, gap, ctx, sid=None: {"gap": gap["id"]})
+    nets = [f"N{i}" for i in range(30)]
+    pair = {"id": "pair-skew:N3/N31", "kind": "pair-skew", "class": "pair", "nets": ["N3", "N31"]}
+    gaps = [_gap(n) for n in nets] + [pair]
+    ctx = _ctx(tmp_path, pair_gap_legs=["N3", "N31"])
+    ai = os.path.join(ctx["ai_dir"])
+    os.makedirs(ai)
+    for n in ("N0", "N1", "N2", "N4", "N5", "N6"):           # six answers; each call applies one, refused by the guard
+        json.dump({"actions": [{"do": "route", "nets": [n], "layers": None}]}, open(os.path.join(ai, _sid(f"open-free:{n}") + ".action.json"), "w"))
+    for _ in range(6):
+        res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), gaps, ctx)
+        assert res["status"] == "applied" and res["commit"] is False
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), gaps, ctx)
+    assert res == {"status": "packet", "n": 24}
+    packets = {f for f in os.listdir(ai) if f.endswith(".packet.json")}
+    # least used first: N7..N29 (unused) and the pair N3/N31 fill the 24; the answered N0..N6 wait; N3 (a pair leg) has no open-free packet
+    want = {_sid(f"open-free:N{i}") + ".packet.json" for i in range(7, 30)} | {_sid("pair:N3/N31") + ".packet.json"}
+    assert packets == want
+    assert _sid("open-free:N3") + ".packet.json" not in packets
+
+
+def test_a2_accept_passes_no_targets_when_one_lost_sev(monkeypatch):
+    def gap(i, kind, sev, nets):
+        return {"id": i, "kind": kind, "class": "pair", "sev": sev, "nets": nets}
+    base_m = {"opens": 2, "shorts": 0, "errors": 0, "err_keys": Counter(), "keys": Counter(),
+              "opens_by_net": {"P1": 1, "Q1": 1}, "gaps": [gap("A", "pair-open", 5, ["P1", "P2"]), gap("B", "pair-open", 5, ["Q1", "Q2"])]}
+    cand_gaps = [gap("A", "pair-open", 5, ["P1", "P2"]), gap("B", "pair-asym", 3, ["Q1", "Q2"])]
+    cand_m = {"opens": 1, "shorts": 0, "errors": 0, "err_keys": Counter(), "keys": Counter(),
+              "opens_by_net": {"P1": 1, "Q1": 0}, "gaps": cand_gaps}
+    assert GP._accept(base_m, None, cand_m, None, ["A", "B"], cand_gaps, "pair-open") == (True, "")
+
+
+def test_a3_pending_answers_drained_before_any_rung(close_env, monkeypatch):
+    from fluxplace import opengate as OG
+    import glob
+    monkeypatch.setattr(GP, "measure", _measure3)
+    monkeypatch.setattr(OG, "refill", lambda p: None)
+    calls = []
+
+    def fake_call(name, base, out, gaps, ctx):
+        calls.append(name)
+        if name != "ai":
+            return {}
+        ai_dir = ctx["ai_dir"]
+        pend = sorted(f for f in os.listdir(ai_dir) if f.endswith(".action.json")) if os.path.isdir(ai_dir) else []
+        if not pend:
+            return {"status": "packet", "n": 0}
+        p = os.path.join(ai_dir, pend[0])
+        close = json.load(open(p))["close"]
+        os.replace(p, p[:-len(".json")] + ".used.1.json")
+        open(out, "w").write(open(base).read() + "".join(f"closed:{n}" for n in close))
+        return {"status": "applied"}
+    monkeypatch.setattr(GP, "_call_rung", fake_call)
+    ai_dir = os.path.join(close_env["work"], "ai")
+    os.makedirs(ai_dir)
+    for i, n in enumerate(["SIG2", "SIG3", "SIG4"]):      # the first (SIG2) closes its gap; the other two are refused
+        json.dump({"close": ["SIG2"] if i == 0 else ["SIG9"]},
+                  open(os.path.join(ai_dir, _sid(f"open-free:{n}") + ".action.json"), "w"))
+    _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons={"ai": {"mode": "packet"}},
+           log=lambda m: None)
+    assert calls[:3] == ["ai", "ai", "ai"]                  # all three answers before any non-ai rung
+    assert "prune" in calls and calls.index("prune") > 2
+    assert glob.glob(os.path.join(ai_dir, "*.action.json")) == []
+
+
+def test_a4_invalid_answer_applies_nothing(apply_env, tmp_path):
+    ctx = _ctx(tmp_path)
+    _write_action(ctx["ai_dir"], [{"do": "rip", "net": "SIG9", "ids": ["abcdef12"]},
+                                  {"do": "route", "nets": [f"N{i}" for i in range(7)], "layers": None}])
+    out = str(tmp_path / "o.kicad_pcb")
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), out, [GAP], ctx)
+    assert res["status"] == "invalid" and res["commit"] is False
+    assert apply_env["calls"] == [] and not os.path.exists(out)
+    fb = json.load(open(os.path.join(ctx["ai_dir"], _sid(GP.ai_key(GAP)) + ".feedback.json")))
+    assert "route: nets > 6" in json.dumps(fb["dropped"]) and fb["refused"] == "action invalid"
+    assert ctx["ai_used"] == {}
+
+
+def test_a5_packet_text_states_every_limit():
+    t = GP._PACKET_ACTIONS
+    for v in (GP.AI_ROUTE_NETS, GP.AI_RIP_IDS, GP.AI_NUDGE_MM, GP.AI_MAX_ACTIONS, GP.AI_PAIR_WPTS):
+        assert str(v) in t
+    for phrase in ('{"actions":[...],"why","tokens"}', "signal layers", "one net per rip", "needs rot", "<= 3 pads",
+                   "not fixed", "nudge -> rip -> path -> pair_path -> route", 'path "via x,y"'):
+        assert phrase in t
+    assert len(json.dumps(t)) < 1500
+
+
+def test_a6_interrupt_leaves_answer_pending(apply_env, monkeypatch, tmp_path):
+    ctx = _ctx(tmp_path)
+    p = _write_action(ctx["ai_dir"], [{"do": "route", "nets": ["SIG2"], "layers": None}])
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(GP, "_apply_ai", boom)
+    with pytest.raises(KeyboardInterrupt):
+        GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    assert os.path.exists(p) and ctx["ai_used"] == {}
+
+
+def test_a6_error_consumes_answer_uncharged(apply_env, monkeypatch, tmp_path):
+    ctx = _ctx(tmp_path)
+    p = _write_action(ctx["ai_dir"], [{"do": "route", "nets": ["SIG2"], "layers": None}])
+
+    def boom(*a, **k):
+        raise RuntimeError("router died")
+    monkeypatch.setattr(GP, "_apply_ai", boom)
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)
+    assert res["status"] == "error" and "router died" in res["why"]
+    assert not os.path.exists(p) and os.path.exists(p[:-len(".json")] + ".used.1.json")
+    assert ctx["ai_used"] == {}
+
+
+def test_a7_refused_answer_gives_packets_stop_with_feedback(close_env, apply_env, monkeypatch):
+    monkeypatch.setattr(HR, "window", _win_fake([]))
+    monkeypatch.setattr(HR, "session_commit", lambda w, out, **k: {"accepted": False, "reasons": ["R2 new DRC key"]})
+    ai_dir = os.path.join(close_env["work"], "ai")
+    _write_action(ai_dir, [{"do": "route", "nets": ["SIG2"], "layers": None}])
+    open(os.path.join(ai_dir, "zz.action.json"), "w").write("{}")
+    res = _close(close_env["board"], close_env["work"], attempts=close_env["attempts"],
+                 cons={"ai": {"mode": "packet"}}, log=lambda m: None)
+    assert res["stop"] == "packets" and res["exit"] == 5
+    assert res["ignored"] == [{"file": os.path.join(ai_dir, "zz.action.json"), "reason": "no such gap"}]
+    sid = _sid(GP.ai_key(GAP))
+    assert json.load(open(os.path.join(ai_dir, sid + ".feedback.json")))["commit"] is False
+    assert json.load(open(os.path.join(ai_dir, sid + ".packet.json")))["feedback"]["commit"] is False
+
+
+def test_a8_answer_rewritten_on_same_board_is_applied(close_env, apply_env, monkeypatch):
+    calls = []
+
+    def commit(w, out, **k):
+        calls.append(1)
+        return {"accepted": False, "reasons": ["R2 new DRC key"]}
+    monkeypatch.setattr(HR, "session_commit", commit)
+    monkeypatch.setattr(HR, "window", _win_fake([]))
+    ai_dir = os.path.join(close_env["work"], "ai")
+    cons = {"ai": {"mode": "packet"}}
+    _write_action(ai_dir, [{"do": "route", "nets": ["SIG2"], "layers": None}])
+    _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons, log=lambda m: None)
+    assert len(calls) == 1
+    _write_action(ai_dir, [{"do": "route", "nets": ["SIG2"], "layers": None}])
+    _close(close_env["board"], close_env["work"], attempts=close_env["attempts"], cons=cons, log=lambda m: None)
+    assert len(calls) == 2 and os.path.exists(os.path.join(ai_dir, _sid(GP.ai_key(GAP)) + ".action.used.2.json"))
+
+
+def test_a9_give_up_not_charged_and_over_budget_feedback(apply_env, tmp_path):
+    ctx = _ctx(tmp_path)
+    _write_action(ctx["ai_dir"], [{"do": "give_up", "why": "no room"}])
+    assert GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [GAP], ctx)["status"] == "give_up"
+    assert ctx["ai_used"] == {}
+    ctx2 = _ctx(tmp_path / "b", ai_used={GP.ai_key(GAP): 4})
+    _write_action(ctx2["ai_dir"], [{"do": "route", "nets": ["SIG2"], "layers": None}])
+    assert GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o2.kicad_pcb"), [GAP], ctx2) == {"status": "ai budget"}
+    fb = json.load(open(os.path.join(ctx2["ai_dir"], _sid(GP.ai_key(GAP)) + ".feedback.json")))
+    assert fb["refused"] == "ai budget 4/4"
+    assert apply_env["calls"] == []
