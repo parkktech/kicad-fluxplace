@@ -285,3 +285,41 @@ def test_cli_json_roundtrip(tmp_path):
     assert r.returncode == 0 and d["ok"]
     r = subprocess.run([sys.executable, cli, "probe", p, "--net", "B", "--path", "F.Cu: 6.7,-0.3 13.3,-0.3", "--width", "0.25"], capture_output=True, text=True)
     assert r.returncode == 1 and "VIOLATION" in r.stdout
+
+
+def test_stitch_site_lands_inside_small_island(monkeypatch):
+    """PHASE3H-C: the stitch site search stays inside the split-off L-shaped island and starts at the pad nearest it."""
+    def inside_L(x, y):
+        return (0 <= x <= 2 and 0 <= y <= 0.5) or (0 <= x <= 0.5 and 0 <= y <= 2)
+    sites = H._outline_sites(inside_L, (0, 0, 2, 2), ref=[(1.9, 0.2)], step=0.4, per=12)
+    assert sites and all(inside_L(x, y) for x, y in sites)
+    assert sites[0] == (1.8, 0.2)
+    pair = H._pick_pair([(0.2, 0.2), (0.4, 0.2), (1.8, 0.2)], 0)
+    assert pair == [(0.2, 0.2), (1.8, 0.2)]
+    assert H._pick_pair([(0.2, 0.2)], 3) == []
+
+
+def test_lay_stitch_false_is_unchanged_refusal(tmp_path, monkeypatch):
+    """PHASE3H-C: stitch=False never reaches the stitch hook; a refused lay stays refused and writes nothing."""
+    def boom(*a, **k):
+        raise AssertionError("stitch hook must not run")
+    monkeypatch.setattr(H, "_stitch_attempts", boom)
+    p = gap_board(tmp_path)
+    out = str(tmp_path / "o.kicad_pcb")
+    r = H.lay(p, "B", LOWER, out=out, width=0.25, stitch=False)
+    assert not r["accepted"] and "probe failed" in r["reason"] and "stitched" not in r
+    assert not os.path.exists(out)
+    # a refusal raised inside mutate never reaches the guard or the hook, with or without a stitch hook
+    r2 = H._edit(p, str(tmp_path / "o2.kicad_pcb"), lambda b, M: (_ for _ in ()).throw(ValueError("refused")), "lay", "B", "x",
+                 stitch=boom)
+    assert not r2["accepted"] and r2["reason"] == "refused"
+    assert not os.path.exists(str(tmp_path / "o2.kicad_pcb"))
+
+
+def test_tmp_beside_is_unique_per_call(tmp_path):
+    """Temp boards come from mkstemp beside the board, so repeated runs never share (or unlink) one slot."""
+    p = gap_board(tmp_path)
+    t1, t2 = H._tmp_beside(p, "hrtry"), H._tmp_beside(p, "hrtry")
+    assert t1 != t2 and os.path.dirname(t1) == os.path.dirname(os.path.abspath(p))
+    H._drop_tmp(t1)
+    H._drop_tmp(t2)

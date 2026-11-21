@@ -17,6 +17,19 @@ def _start(records, net, at):
     return sides[0]["x"], sides[0]["y"]
 
 
+def outline_index(b, net):
+    """-> {layer id: [(area, filled poly set, outline index)]}: the filled outlines of `net`'s copper pours, per layer."""
+    rows = {}
+    for z in b.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != net:
+            continue
+        for lid in z.GetLayerSet().CuStack():
+            ps = z.GetFilledPolysList(lid)
+            for i in range(ps.OutlineCount()):
+                rows.setdefault(lid, []).append((abs(ps.Outline(i).Area()), ps, i))
+    return rows
+
+
 def island_sites(b, net, step=0.4, per_island=12):
     """Via sites inside the untied pour islands of `net`: a fill outline that holds a pad of the net but no via and no
     through-hole pad of it has no path to the other layers. KiCad reports such an open at the zone's anchor corner, not

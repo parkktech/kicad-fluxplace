@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 
@@ -27,37 +28,49 @@ from . import hrgeom as G
 
 
 # ======================================================================================================= DRC / state
+def _unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def _tmp_beside(board, tag):
-    """A scratch copy slot next to `board` with the project/rules sidecars copied so kicad-cli sees the same rules."""
+    """A unique scratch board next to `board` (mkstemp: repeated or concurrent runs never share a slot), with the
+    project/rules sidecars copied so kicad-cli sees the same rules. The file exists (empty); the caller fills it."""
     d, base = os.path.split(os.path.abspath(board))
     stem = os.path.splitext(base)[0]
-    tmp = os.path.join(d, f"{stem}.{tag}.kicad_pcb")
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=f"{stem}.{tag}.", suffix=".kicad_pcb")
+    os.close(fd)
+    os.chmod(tmp, 0o644)
+    tstem = os.path.splitext(tmp)[0]
     for ext in (".kicad_pro", ".kicad_dru"):
         side = os.path.join(d, stem + ext)
         if os.path.exists(side):
-            shutil.copy(side, os.path.join(d, f"{stem}.{tag}{ext}"))
+            shutil.copy(side, tstem + ext)
     return tmp
 
 
 def _drop_tmp(tmp):
     stem = os.path.splitext(tmp)[0]
     for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_prl"):
-        if os.path.exists(stem + ext):
-            os.unlink(stem + ext)
+        _unlink_quiet(stem + ext)
 
 
 def drc_raw(board, kicad_cli="kicad-cli", timeout=600):
-    out = board + ".drc.json"
-    if os.path.exists(out):
-        os.unlink(out)
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones", "-o", out, board],
-                   capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(out):
-        raise RuntimeError("kicad-cli produced no DRC report for " + board)
-    from . import drcfull as DF
-    d = DF.complete(board, json.load(open(out)), fill=True)
-    os.unlink(out)
-    return d
+    # a unique report slot: two runs on one board must not unlink each other's report (the pour-island missing-file crash)
+    fd, out = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(board)), prefix=os.path.basename(board) + ".", suffix=".drc.json")
+    os.close(fd)
+    try:
+        subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones", "-o", out, board],
+                       capture_output=True, text=True, timeout=timeout)
+        if os.path.getsize(out) == 0:
+            raise RuntimeError("kicad-cli produced no DRC report for " + board)
+        from . import drcfull as DF
+        with open(out) as fh:
+            return DF.complete(board, json.load(fh), fill=True)
+    finally:
+        _unlink_quiet(out)
 
 
 _NETRE = re.compile(r"\[([^\]]*)\]")
@@ -791,9 +804,40 @@ def _edit_violation_keys(new, net, loose=()):
     return out
 
 
-def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True):
+def _zone_nets(b):
+    return {z.GetNetname() for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname()}
+
+
+def _stitch_ok(J, base, net):
+    """PHASE3H-C acceptance: the stitched candidate has no refusal, the target's opens fell, and no net is more open."""
+    if J["reasons"]:
+        return False
+    if J["cand"]["unc_by_net"].get(net, 0) >= base["unc_by_net"].get(net, 0):
+        return False
+    return all(c <= base["unc_by_net"].get(n, 0) for n, c in J["cand"]["unc_by_net"].items())
+
+
+def _place_vias(b, M, att):
+    for n, x, y, vv in att:
+        _apply_prims(b, M, n, [("via", (x, y))], 0, vv)
+
+
+def _drop_vias(b, M, att):
+    pcbnew = M.pcbnew
+    for n, x, y, vv in att:
+        pnet = b.FindNet(n)
+        pos = pcbnew.VECTOR2I(int(round(x * 1e6)), int(round(y * 1e6)))
+        for t in [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetPosition() == pos and pnet is not None
+                  and t.GetNetCode() == pnet.GetNetCode()]:
+            b.Remove(t)
+
+
+def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True,
+          stitch=None):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
-    -> result dict {accepted, reason, measure, info}."""
+    stitch(b, M, nets) -> iterable of attempts [(net, x, y, via_dims)...]: used only when the refusal is a lay that opened
+    connections of zone nets alone; each attempt's vias go into the same in-memory board and the same guard decides (PHASE3H-C).
+    -> result dict {accepted, reason, measure, info, stitched?}."""
     S = Sess(out if out else board)
     in_session = out is None
     if in_session and not S.exists:
@@ -812,9 +856,10 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         _record(S, res, in_session, out)
         return res
     tmp = _tmp_beside(src, "hrtry")
-    M.pcbnew.SaveBoard(tmp, b)
-    try:
-        cand_raw = drc_raw(tmp, kicad_cli)
+
+    def judge(path):
+        from . import audit as AU
+        cand_raw = drc_raw(path, kicad_cli)
         cand = summarize_drc(cand_raw)
         new = cand["keys"] - base["keys"]
         # a shove leaves loose ends by design (the caller re-lays); the commit gate judges the end state
@@ -830,9 +875,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         if new_nonu:
             ex = sorted(new_nonu)[0]
             reasons.append(f"new DRC violation(s): {len(new_nonu)}, e.g. {ex[0]} {list(ex[1])[:2]}")
-        snap_a, snap_b = _snap(src), _snap(tmp)
-        from . import audit as AU
-        diff = AU.connectivity_diff(snap_a, snap_b)
+        diff = AU.connectivity_diff(_snap(src), _snap(path))
         if not diff["ok"]:
             reasons.append("connectivity guard: " + "; ".join(diff["violations"][:3]))
         if op == "lay" and new_u:
@@ -843,9 +886,30 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
             r = extra_check(M, cand, base)
             if r:
                 reasons.append(r)
+        return {"cand_raw": cand_raw, "cand": cand, "reasons": reasons, "meas": meas, "new_u": new_u}
+
+    try:
+        M.pcbnew.SaveBoard(tmp, b)
+        J = judge(tmp)
+        stitched = []
+        if stitch and len(J["reasons"]) == 1 and J["new_u"] and set(J["new_u"]) <= _zone_nets(b):
+            # the lay alone split a zone of other nets: stitch those islands in the same transaction, judged by the same guard
+            for att in stitch(b, M, sorted(J["new_u"])):
+                _place_vias(b, M, att)
+                M.pcbnew.SaveBoard(tmp, b)
+                J2 = judge(tmp)
+                if _stitch_ok(J2, base, net):
+                    J, stitched = J2, [{"net": n, "x": round(x, 4), "y": round(y, 4)} for n, x, y, _vv in att]
+                    break
+                _drop_vias(b, M, att)
+                M.pcbnew.SaveBoard(tmp, b)
+        meas, reasons = J["meas"], J["reasons"]
+        cand_raw, cand = J["cand_raw"], J["cand"]
         res["measure"] = meas
         res["cand_unc_pairs"] = cand["pairs"].get(net, [])
         res["info"] = info
+        if stitched:
+            res["stitched"] = stitched
         if reasons:
             res["reason"] = " | ".join(reasons)
         else:
@@ -880,6 +944,8 @@ def _push_undo(S):
 
 def _record(S, res, in_session, out):
     ent = {k: res.get(k) for k in ("op", "net", "what", "accepted", "reason", "measure")}
+    if res.get("stitched"):
+        ent["stitched"] = res["stitched"]
     removed = (res.get("info") or {}).get("removed") or []
     removed_locked = [x for x in removed if isinstance(x, dict) and x.get("unlocked_and_removed")] if isinstance(removed, list) else []
     if removed_locked:
@@ -893,7 +959,77 @@ def _record(S, res, in_session, out):
         Sx.log(ent)
 
 
-def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli", lock=False):
+def _outline_sites(contains, bb, ref, step=0.4, per=12):
+    """PHASE3H-C: grid points (mm) inside one filled outline, nearest the reference points `ref` first.
+    contains(x, y) -> bool; bb = (x0, y0, x1, y1) mm; ref = [(x, y)] (the outline's own pads, or its centre)."""
+    x0, y0, x1, y1 = bb
+    pts = []
+    x = x0 + step / 2
+    while x < x1:
+        y = y0 + step / 2
+        while y < y1:
+            if contains(x, y):
+                pts.append((min((x - rx) ** 2 + (y - ry) ** 2 for rx, ry in ref), round(x, 4), round(y, 4)))
+            y += step
+        x += step
+    return [(x, y) for _d, x, y in sorted(pts)[:per]]
+
+
+def _split_sites(b, net, step=0.4, per=12):
+    """PHASE3H-C: via sites inside the split-off piece of `net`'s zones: on each layer that now has two or more filled
+    outlines of the net, the smallest one (the new island). -> [(x, y)] mm, nearest that island's own pads first."""
+    import pcbnew
+    from . import pourisland as PI
+    out = []
+    for lid, outs in PI.outline_index(b, net).items():
+        if len(outs) < 2:
+            continue
+        _area, ps, i = min(outs, key=lambda r: r[0])
+        bb = ps.Outline(i).BBox()
+        own = [(pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)) for f in b.GetFootprints() for p in f.Pads()
+               if p.GetNetname() == net and p.IsOnLayer(lid) and ps.Contains(p.GetPosition(), i)]
+        ref = own or [(pcbnew.ToMM(bb.GetCenter().x), pcbnew.ToMM(bb.GetCenter().y))]
+        box = (pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()), pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()))
+        out += _outline_sites(lambda x, y: ps.Contains(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), i), box, ref, step, per)
+    return out
+
+
+def _pick_pair(sites, j, sep=1.0):
+    """PHASE3H-C: attempt j's stitching set for one net: site j, plus one more site at least `sep` mm away (up to 2 vias)."""
+    if j >= len(sites):
+        return []
+    pick = [sites[j]]
+    for s in sites:
+        if len(pick) == 2:
+            break
+        if math.hypot(s[0] - pick[0][0], s[1] - pick[0][1]) >= sep:
+            pick.append(s)
+    return pick
+
+
+def _stitch_attempts(b, M, nets, via=None, tries=3):
+    """PHASE3H-C: yields attempts [(net, x, y, via_dims)...]: up to 2 vias per zone net in its split-off island, `tries` ways."""
+    import pcbnew
+    f = pcbnew.ZONE_FILLER(b)
+    zs = pcbnew.ZONES()
+    for z in b.Zones():
+        zs.append(z)
+    f.Fill(zs)
+    per = {}
+    for n in nets:
+        rule = M.net_rule(n)
+        per[n] = (via or (rule["via_dia"], rule["via_drill"]), _split_sites(b, n))
+    for j in range(tries):
+        att = []
+        for n in nets:
+            vv, sites = per[n]
+            att += [(n, x, y, vv) for x, y in _pick_pair(sites, j)]
+        if att:
+            yield att
+
+
+def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli", lock=False,
+        stitch=False):
     def mutate(b, M):
         prims = G.parse_path(path, M.cu)
         if net not in {o.net for o in M.obs if o.net}:
@@ -906,7 +1042,8 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
             raise ValueError("probe failed: " + json.dumps(pr["violations"][:4]))
         added = _apply_prims(b, M, net, prims, w, vv, lock)
         return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
-    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli)
+    hook = (lambda b, M, nets: _stitch_attempts(b, M, nets, via)) if stitch else None
+    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook)
 
 
 def _net_copper(b, net):

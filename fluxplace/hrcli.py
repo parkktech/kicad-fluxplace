@@ -244,7 +244,7 @@ def cmd_lay(a):
     if g is not None:
         return g
     r = _timed("fluxplace.handroute:lay", (a.board, a.net, a.path, a.out, a.constraints, a.width, _via(a), a.any_angle, a.partial),
-               {"lock": a.lock}, a.timeout, _edit_paths(a.board, a.out))
+               {"lock": a.lock, "stitch": a.stitch}, a.timeout, _edit_paths(a.board, a.out))
     r.pop("cand_unc_pairs", None)
     _emit(a, r, lambda: f"lay {a.net}: {'ACCEPTED' if r['accepted'] else 'REJECTED'}  " + (r.get("reason") or "") + "\n  " + "  ".join(f"{k}={v}" for k, v in r.get("measure", {}).items()), "lay")
     return 2 if r.get("timed_out") else 0 if r["accepted"] else 1
@@ -431,6 +431,7 @@ def register(sub):
     p.add_argument("--any-angle", action="store_true")
     p.add_argument("--partial", action="store_true", help="do not require the net's open count to fall")
     p.add_argument("--lock", action="store_true", help="lock newly laid tracks/vias on acceptance")
+    p.add_argument("--stitch", action="store_true", help="if the lay only splits zone(s) of other nets, add up to 2 stitching vias per split-off island in the same guarded edit")
     brief(p)
     guards(p)
     p.set_defaults(fn=cmd_lay)
