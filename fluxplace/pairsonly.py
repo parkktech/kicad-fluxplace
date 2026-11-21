@@ -313,10 +313,126 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
 
 
 def lay_centreline(board, out, pair, layer, waypoints, cons=None):
-    """PHASE3F B3 (agent pair_path). NOT IMPLEMENTED: reroute() builds legs from pairlay.astar runs, not from a polyline,
-    so a centre line needs its own leg builder. Returns laid False with the reason; writes nothing."""
-    return {"laid": False, "why": "not implemented: pairlay.legs takes A* runs, not a centre-line polyline",
-            "p_mm": None, "n_mm": None}
+    """PHASE3G G1 (agent pair_path): one coupled centre line through `waypoints` (45/90 segments only), laid as the pair's two
+    legs at the family geometry of `layer` (zgeom.family_table, as gaps._pair_block reads it), each leg joined to its pad by a
+    break-out (pairlay.breakout, the pairs stage's own), skew compensated (pairlay.bump) against the pair's limit.
+    The sign of each leg (which leg is on the left of travel) is the one with the shorter total break-out.
+    Old copper: every copper of the pair's two nets goes (the locked pair copper is replaced too, as reroute --unlock does);
+    the new copper is locked. `out` None edits `board` in place (the session work file of gaps._apply_ai); nothing is written
+    unless laid. -> {"laid", "why", "p_mm", "n_mm", "layer", "sign"}."""
+    import math
+    from . import routediag as RD, routerules as RR, pairs as PR, pairlay as PL, pairgeo as G, zgeom as ZG
+
+    def no(why):
+        return {"laid": False, "why": why, "p_mm": None, "n_mm": None}
+
+    cons = cons or {}
+    pts = [(float(q[0]), float(q[1])) for q in waypoints]
+    if len(pts) < 2:
+        return no("need at least 2 waypoints")
+    for k, (a, b) in enumerate(zip(pts, pts[1:])):
+        dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+        if dx < 1e-6 and dy < 1e-6:
+            return no(f"segment {k} has zero length")
+        if min(dx, dy) > 1e-6 and abs(dx - dy) > 1e-6:
+            return no(f"segment {k} is not 45/90")
+    P_net, N_net = pair
+    nets = [P_net, N_net]
+    try:                                                # the family table the pairs stage lays (gaps._pair_block reads the same)
+        fam = ZG.family_of(cons, P_net)
+        rows, planes, _src = ZG.resolve_stack(cons, board)
+        cu = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
+        sig = [l for l in cu if l not in set(planes)]
+        tab = ZG.family_table(cons, rows, planes, sig, fam, board=board) if fam and rows else {}
+    except Exception as e:                              # noqa: BLE001 - a stackup the family table cannot read: refuse, write nothing
+        return no(f"pair geometry unavailable: {e}")
+    g = tab.get(layer) or {}
+    if not g.get("w") or not g.get("gap"):
+        return no(f"no pair geometry for {layer}")
+    B = RD.load(board)
+    try:
+        B = dict(B, pads=B["pads"] + G.holes(board, B["copper"]))
+    except (OSError, ValueError, IndexError):
+        pass
+    R = RR.rules(cons, board, B=B)
+    Pm = PR.params(cons)
+    rule = PR.rules_for(board, B, cons, R, P_net, Pm)
+    clr, w, gap = rule["clr"], float(g["w"]), float(g["gap"])
+    dist, wmap = {layer: (w + gap) / 2}, {layer: w}
+    terms, _lone = PR.terminals(B, P_net, N_net, Pm["pad_max"])
+    if len(terms) < 1:
+        return no("no P and N pad pair to join")
+    ta = min(terms, key=lambda t: math.hypot(t["c"][0] - pts[0][0], t["c"][1] - pts[0][1]))
+    tb = min(terms, key=lambda t: math.hypot(t["c"][0] - pts[-1][0], t["c"][1] - pts[-1][1]))
+    if ta is tb:
+        return no("start and end waypoints reach the same pad pair")
+    run = {"layer": layer, "pts": pts, "t0": G.unit(pts[0], pts[1]), "t1": G.unit(pts[-2], pts[-1]), "d": 0}
+    t0, t1 = run["t0"], run["t1"]
+    slack = max(0.0, clr - gap)                         # the pair's own gap may sit below the routing clearance (mate, as pairs.py)
+    limit = PR.guard_limit(cons, P_net)
+    items = G.Items.of_board(B, old_nets=set(nets))
+    skip, base_n = set(nets), items.mark()
+    fb = lambda pad, e, lay, net: PL.stub(B, items, base_n, set(), pad, e, lay, w, net, clr, skip)
+
+    def attempt(sp):
+        cp, p0, p1 = PL.legs([run], [], dist, {}, wmap, 0.0, sp)
+        cn, n0, n1 = PL.legs([run], [], dist, {}, wmap, 0.0, -sp)
+        mark = items.mark()
+        try:
+            g1, it1 = PL.check(items, cp, P_net, clr, skip)
+            if g1 < clr - 1e-6:
+                return None, f"{P_net} centre line {g1:.3f} mm from {it1['label']} (exact check)", [it1["label"]]
+            PR._claim(items, cp, P_net)
+            g2, it2 = PL.check(items, cn, N_net, clr, skip, (P_net, slack))
+            if g2 < clr - 1e-6:
+                return None, f"{N_net} centre line {g2:.3f} mm from {it2['label']} (exact check)", [it2["label"]]
+            PR._claim(items, cn, N_net)
+            skew0 = PL.piece_len(cp) - PL.piece_len(cn) + ta.get("bias", 0.0) + tb.get("bias", 0.0)   # terminal bias, as pairs.py
+            ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, layer, w, nets, clr, skip, bias=skew0, fallback=fb, gap=gap)
+            if ba[0] is None:
+                return None, ba[1], [ba[2]["label"]] if ba[2] else []
+            PR._claim(items, ba[0], P_net)
+            PR._claim(items, ba[1], N_net)
+            bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), layer, w, nets, clr, skip, bias=skew0 + ba[2], fallback=fb, gap=gap)
+            if bb[0] is None:
+                return None, bb[1], [bb[2]["label"]] if bb[2] else []
+            PR._claim(items, bb[0], P_net)
+            PR._claim(items, bb[1], N_net)
+            skew = skew0 + ba[2] + bb[2]
+            if abs(skew) > limit:                       # the short leg gets the bumps, on the side away from its partner
+                short, net_s, side = (cn, N_net, -sp) if skew > 0 else (cp, P_net, sp)
+                bumped, left = PL.bump(items, short, net_s, abs(skew), side, clr, skip, 0, len(short),
+                                       hmax=max(0.6, min(2.0, abs(skew) / 6)))
+                if skew > 0:
+                    cn = bumped
+                else:
+                    cp = bumped
+                if left > Pm["skew_frac"] * limit:
+                    return None, f"skew {left:.2f} mm over the {limit:g} mm limit after compensation", []
+            Pp, Np = ba[0] + cp + bb[0], ba[1] + cn + bb[1]
+            bo = sum(PL.piece_len(x) for x in (ba[0], ba[1], bb[0], bb[1]))
+            return {"P": Pp, "N": Np, "bo": bo, "p_mm": round(PL.piece_len(Pp), 3), "n_mm": round(PL.piece_len(Np), 3), "sign": sp}, None, []
+        finally:
+            items.rollback(mark)
+
+    got, why = [], []
+    for sp in (1, -1):
+        r, msg, blk = attempt(sp)
+        if r is not None:
+            got.append(r)
+        else:
+            why.append(msg)
+    if not got:
+        return {"laid": False, "why": "; ".join(why)[:300], "p_mm": None, "n_mm": None}
+    best = min(got, key=lambda r: r["bo"])
+    res = {"strip": nets, "kill": [], "keep": [], "laid": {P_net: best["P"], N_net: best["N"]}, "B": B}
+    if out is None:
+        tmp = board + ".centre.tmp.kicad_pcb"
+        PR.write(board, tmp, res, lambda net: rule["drill"])
+        os.replace(tmp, board)
+    else:
+        PR.write(board, out, res, lambda net: rule["drill"])
+    return {"laid": True, "why": "", "p_mm": best["p_mm"], "n_mm": best["n_mm"], "layer": layer, "sign": best["sign"]}
 
 
 def groups(B, cls, pairs):

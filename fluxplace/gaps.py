@@ -509,7 +509,7 @@ def _rung_cap(cons):
 
 
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
-SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup")   # the rungs whose candidate depends on the gap list
+SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden")   # the rungs whose candidate depends on the gap list
 SPLIT_WHY = ("R1 ", "R2 ", "R4 ", "R5 ", "R6 ", "target gap still there")
 
 
@@ -663,6 +663,27 @@ def _r_maskcut(base, out, gaps, ctx):
             "skipped": len(r["skipped"])}
 
 
+def _r_powerwiden(base, out, gaps, ctx):
+    """PHASE3G G4.1: narrow rail copper widened in place (power.widen); no output when nothing widened."""
+    from . import power as PW
+    r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps))
+    return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"]}
+
+
+def _r_railpour(base, out, gaps, ctx):
+    """PHASE3G G4.1: rails that have a current figure but no zone get their corridor pour (power.pour_rails, guarded)."""
+    from . import power as PW
+    r = PW.pour_rails(base, ctx["cons"], out, layers=len(copper_layers(base)))
+    return {"status": "ran" if os.path.exists(out) else "no change", "kept": len(r.get("kept") or []), "dropped": bool(r.get("dropped"))}
+
+
+def _r_powervias(base, out, gaps, ctx):
+    """PHASE3G G4.2: rails short of their parallel vias get the missing vias beside existing ones (power.add_vias)."""
+    from . import power as PW
+    r = PW.add_vias(base, ctx["cons"], out, nets=_nets(gaps), cons_path=ctx.get("cons_path"))
+    return {"status": "ran" if os.path.exists(out) else "no change", "added": sum(r["added"].values()), "refused": sum(r["refused"].values())}
+
+
 def _r_snapiter(base, out, gaps, ctx):
     from . import snapiter as SI
     return _brief(SI.run(base, out, log=ctx["log"]))
@@ -675,7 +696,7 @@ FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedb
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = ("rip {net, ids}; rip_locked {net, ids} (plain locked copper only; pairs/rf refused); "
                    "nudge {ref, dx, dy, rot}; route {nets, layers}; path {net, path, lock} (AI-FINISH path syntax, "
-                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (validated; not implemented yet); "
+                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only); "
                    "swap_pins {ref, pads, why} (proposal only, never applied); give_up {why}. "
                    "Copper coordinates only via path / pair_path.")
 AI_PACKETS = 6                                  # packets written per _r_ai call
@@ -834,6 +855,30 @@ def _pair_block(base, cons, gap):
             "skew_mm": gap.get("skew"), "skew_limit_mm": lim}    # skew_mm: measured |P - N| (None when a leg is open)
 
 
+def _pair_ends(base, cons, gap, ai_dir, sid, cp):
+    """PHASE3G G1: a pair gap with no open connection: the two terminals farthest apart framed as windows (PNG each),
+    and both legs' layer sequence and length from the pair audit (pairaudit.profile). Never raises."""
+    from . import routediag as RD, pairaudit as PA, pairs as PR
+    out = {"ends": [], "legs": {}}
+    p, n = gap["nets"]
+    try:
+        B = RD.load(base)
+        terms, _lone = PR.terminals(B, p, n, PR.params(cons)["pad_max"])
+        if terms:
+            a, b = max(((x, y) for x in terms for y in terms), key=lambda xy: math.hypot(xy[0]["c"][0] - xy[1]["c"][0],
+                                                                                        xy[0]["c"][1] - xy[1]["c"][1]))
+            for k, t in enumerate((a, b) if a is not b else (a,)):
+                out["ends"].append({"name": t["name"], "at": [round(t["c"][0], 2), round(t["c"][1], 2)]})
+                if ai_dir and sid:
+                    out.setdefault("png", []).extend(_window_png(base, cp, ai_dir, sid, f"pairend{k}", at=t["c"], size=(4, 4))[1])
+        for net in (p, n):
+            pr = PA.profile(B, net)
+            out["legs"][net] = {"layers": pr.get("layers"), "length": pr.get("length"), "vias": pr.get("vias")}
+    except Exception as e:                               # noqa: BLE001 - the packet still goes without the ends
+        print(f"ai: pair ends unavailable for {p}/{n}: {e}", file=sys.stderr)
+    return out
+
+
 def _window_png(base, cp, ai_dir, sid, tag, **kw):
     """HR.window with a PNG at ai_dir/<sid>.<tag>.png when both are given. A render failure is logged and the view is
     recomputed without the picture. Returns (window dict, [png paths])."""
@@ -940,6 +985,10 @@ def gap_packet(base, gap, ctx, sid=None):
          "krt": krt, "tried": tried[-6:], "feedback": fb, "actions": _PACKET_ACTIONS}
     if str(gap.get("kind", "")).startswith("pair-") and len(gap.get("nets") or []) == 2:
         p["pair"] = _pair_block(base, cons, gap)
+        if i is None:                                # PHASE3G G1: both legs closed (asym / skew): frame the pair's end pads
+            pe = _pair_ends(base, cons, gap, ai_dir, sid, cp)
+            pngs += pe.pop("png", [])                # the packet's picture list (p["png"] is this same list)
+            p["pair"].update(pe)
     return _clip_packet(p)
 
 
@@ -1132,7 +1181,10 @@ def _ai_pending(ai_dir, gaps):
 
 
 def ai_key(gap):
-    """Stable key of a gap for AI packet/action files and the AI budget: kind and first net."""
+    """Stable key of a gap for AI packet/action files and the AI budget: kind and first net. PHASE3G G1: a pair gap is
+    keyed by its pair (one packet per pair, whatever its kind)."""
+    if str(gap["kind"]).startswith("pair-") and len(gap.get("nets") or []) == 2:
+        return f"pair:{gap['nets'][0]}/{gap['nets'][1]}"
     return f"{gap['kind']}:{(gap.get('nets') or ['?'])[0]}"
 
 
@@ -1158,6 +1210,14 @@ def _r_ai(base, out, gaps, ctx):
         if not os.path.exists(act):
             continue
         a = load_ai_action(act, base, ctx.get("protect", ()), hs_legs=ctx.get("hs_legs", ()))
+        if str(gap["kind"]).startswith("pair-"):           # PHASE3G G1: a pair gap takes centre lines, rips and give-ups only
+            kept = []
+            for x in a["actions"]:
+                if x["do"] in ("pair_path", "rip", "give_up"):
+                    kept.append(x)
+                else:
+                    print(f"ai: pair gap {gap['id']}: dropped {x['do']} action (pair_path, rip, give_up only)", file=sys.stderr)
+            a["actions"] = kept
         os.replace(act, os.path.join(ctx["ai_dir"], sid + ".action.used.json"))
         used[key] = used.get(key, 0) + 1
         a["gap_id"] = gap["id"]
@@ -1292,7 +1352,8 @@ def _r_pairgroup(base, out, gaps, ctx):
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
-         "pairgroup": _r_pairgroup, "maskcut": _r_maskcut}
+         "pairgroup": _r_pairgroup, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
+         "powervias": _r_powervias}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
@@ -1304,9 +1365,11 @@ DISPATCH = {
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
     "mask-opening": ["maskcut"],            # PHASE3F A7: re-cut after routing; the close guard judges it
-    "pair-open": ["pairgroup"],
-    "pair-asym": ["pairgroup"],
-    "pair-skew": ["pairgroup"],     # no "tune" rung: tune_pairs needs a master/slave map and a skew limit the rung ctx lacks
+    "power-width": ["powerwiden", "railpour"],     # PHASE3G G4: widen in place, then pour, then (power-vias) vias
+    "power-vias": ["powervias"],
+    "pair-open": ["pairgroup", "ai"],     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
+    "pair-asym": ["pairgroup", "ai"],
+    "pair-skew": ["pairgroup", "ai"],     # no "tune" rung: tune_pairs needs a master/slave map and a skew limit the rung ctx lacks
 }
 LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 

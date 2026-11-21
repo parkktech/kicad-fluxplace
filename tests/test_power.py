@@ -207,3 +207,95 @@ def test_pour_guard_measure_splits_zone_islands():
         {"items": [{"description": "Track [VBAT]"}]}]}
     m = P._guard_measure({"opens": 2, "shorts": 0, "errors": 0, "drc": d}, DG)
     assert m["track_opens"] == 1 and m["opens"] == 2
+
+
+# ---- PHASE3G G4: rail rungs (widen in place, vias) -----------------------------------------------------------------
+G4_CONS = {"power": {"VBAT": {"max_current_ma": 2000}}}
+
+
+def _g4_need():
+    r = PW.plan(G4_CONS)["VBAT"]
+    return PW._need_on(r, "F.Cu")
+
+
+def _g4_tracks(path, net):
+    import pcbnew as P
+    b = P.LoadBoard(path)
+    return sorted([(P.ToMM(t.GetWidth()), P.ToMM(t.GetStart().x), P.ToMM(t.GetStart().y), P.ToMM(t.GetEnd().x), P.ToMM(t.GetEnd().y))
+                   for t in b.GetTracks() if t.GetNetname() == net and t.GetClass() == "PCB_TRACK"])
+
+
+def test_widen_lone_narrow_rail_track_to_need(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.widen(src, G4_CONS, out)
+    need = _g4_need()
+    assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and rec["left_mm"] == 0
+    ws = [w for w, *_ in _g4_tracks(out, "VBAT")]
+    assert ws and min(ws) == pytest.approx(round(need, 4), abs=1e-3)
+
+
+def test_widen_beside_foreign_track_takes_the_reduced_width(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    need = _g4_need()
+    d = 0.375 * need + 0.075 + 0.2 + 0.05                     # foreign track: 0.75 need clears it, the full need does not
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 6 + d, 18, 6 + d, "SIG")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    w = min(w for w, *_ in _g4_tracks(out, "VBAT"))
+    assert 0.5 * need - 1e-3 <= w < need - 1e-6
+
+
+def test_widen_necks_a_narrow_pad_end_and_widens_only_the_far_part(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    need = _g4_need()
+    src = _board(str(tmp_path / "in.kicad_pcb"), pads=[("U1", 2, 6, "VBAT")], tracks=[(2, 6, 18, 6, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    trs = _g4_tracks(out, "VBAT")
+    pad_piece = [t for t in trs if abs(t[0] - 0.15) < 1e-3]     # the piece at the pad keeps the old width
+    far_piece = [t for t in trs if abs(t[0] - round(need, 4)) < 1e-3]
+    assert len(pad_piece) == 1 and len(far_piece) == 1
+    assert abs(pad_piece[0][1] - 2) < 1e-3 and abs(pad_piece[0][3] - (2 + need)) < 1e-3   # split max(W, 0.5) from the pad
+    assert abs(far_piece[0][3] - 18) < 1e-3
+
+
+def test_locked_rail_track_is_not_widened_and_nothing_is_written(tmp_path):
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    b = P.LoadBoard(src)
+    for t in b.GetTracks():
+        t.SetLocked(True)
+    P.SaveBoard(src, b)
+    out = tmp_path / "out.kicad_pcb"
+    rec = PW.widen(src, G4_CONS, str(out))
+    assert rec["widened_mm"] == 0 and not out.exists()
+
+
+def test_add_vias_places_the_missing_via_beside_the_existing_one(tmp_path, monkeypatch):
+    from fluxplace import handroute as HR, routediag as RD
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text("(kicad_pcb)\n")
+    out = str(tmp_path / "out.kicad_pcb")
+    monkeypatch.setattr(PW, "_rails_on", lambda board, cons, nets=None: {"VBAT": {"vias_needed": 2}})
+    monkeypatch.setattr(RD, "load", lambda p: {"vias": [{"net": "VBAT", "x": 10.0, "y": 6.0}], "copper": ["F.Cu", "B.Cu"]})
+    monkeypatch.setattr(HR, "window", lambda board, at=None, **k: {"via_sites": {"sites": [[30.0, 1.0, 0.5], [12.0, 8.0, 0.1]]}})
+    laid = []
+
+    def lay(board, net, path, out=None, constraints=None, **k):
+        laid.append((net, path))
+        if path.startswith("via 30"):                    # the best site is refused by its probe: the next one is tried
+            return {"accepted": False, "reason": "probe failed"}
+        open(out, "w").write("(kicad_pcb)\n")
+        return {"accepted": True}
+    monkeypatch.setattr(HR, "lay", lay)
+    rec = PW.add_vias(str(src), G4_CONS, out)
+    assert rec["added"] == {"VBAT": 1} and rec["refused"] == {"VBAT": 1}
+    assert [p for _n, p in laid] == ["via 30.000,1.000", "via 12.000,8.000"]
+    assert os.path.exists(out)

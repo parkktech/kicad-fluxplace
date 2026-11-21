@@ -441,3 +441,178 @@ def pour_guard(items, base, trial, drop):
             kept.append(label)
             cur = m
     return kept, dropped, cur
+
+
+# ---- PHASE3G G4: rail rungs (widen in place, pour, vias) ---------------------------------------------------------
+WIDEN_FRACS = (1.0, 0.75, 0.5)       # widths tried as fractions of the layer's need, widest first (never below the current width)
+VIA_SITE_TRIES = 12                  # via lay attempts per rail (each one is a probe + guard run)
+
+
+def _stack_oz(board):
+    from . import review as RV
+    try:
+        return oz_from_stackup(RV.parse_stackup_text(open(board, errors="replace").read()))
+    except (OSError, ValueError):
+        return None
+
+
+def _rails_on(board, cons, nets=None):
+    """the [power] rails of `board` with a current figure, sized exactly as check() sizes them -> {net: plan row}."""
+    from . import gaps as GP
+    layers = len(GP.copper_layers(board))
+    return {n: r for n, r in plan(cons, layers=layers, oz=_stack_oz(board)).items()
+            if r and r.get("track_mm") is not None and (nets is None or n in nets)}
+
+
+def _need_on(r, layer):
+    """the width check() asks on this layer: outer / inner weight, else the rail's track width."""
+    need = r["width_outer"] if layer in ("F.Cu", "B.Cu") else r["width_inner"]
+    return r["track_mm"] if need is None else need
+
+
+def _pad_min_at(pads, net, x, y):
+    """the narrowest dimension (mm) of a same-net pad whose box holds (x, y), or None. `pads`: [(net, box, min dim)]."""
+    import pcbnew
+    pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    hit = [m for n, box, m in pads if n == net and box.Contains(pt)]
+    return min(hit) if hit else None
+
+
+def widen(board, cons, out, nets=None):
+    """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
+    widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
+    the segment's own copper skipped; the probe model is built once, so widenings do not see each other: the close guard
+    judges the result). A segment that ends in a pad narrower than its new width is split max(W, 0.5 mm) from that pad and
+    only the far part is widened. Rails that check() exempts (pour rail with a same-net zone) are left alone.
+    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net": {net: {"widened_mm", "left_mm"}}}"""
+    import pcbnew
+    from . import gaps as GP, handroute as HR
+    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}}
+    rails = _rails_on(board, cons, nets)
+    if not rails:
+        return rec
+    zone_nets = GP._zone_nets(board)
+    b = pcbnew.LoadBoard(board)
+    M = HR._model(board)                                 # the board's own rules (constraints: a file path, not used here)
+    pads = [(p.GetNetname(), p.GetBoundingBox(), min(pcbnew.ToMM(p.GetSize().x), pcbnew.ToMM(p.GetSize().y)))
+            for p in b.GetPads() if p.GetNetname()]
+    tot = lambda net: rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
+    changed = 0
+    for t in list(b.GetTracks()):
+        net = t.GetNetname()
+        r = rails.get(net)
+        if t.GetClass() != "PCB_TRACK" or r is None or t.IsLocked():
+            continue
+        if r["pour"] and net in zone_nets:
+            continue
+        lay = b.GetLayerName(t.GetLayer())
+        need = _need_on(r, lay)
+        cur = pcbnew.ToMM(t.GetWidth())
+        if cur >= need - 1e-6:
+            continue
+        s, e = t.GetStart(), t.GetEnd()
+        a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
+        L = math.hypot(z[0] - a[0], z[1] - a[1])
+        near = next((k for k, pt in enumerate((a, z)) if (_pad_min_at(pads, net, *pt) or need) < need - 1e-6), None)
+        step = max(need, 0.5)
+        split = None
+        if near is not None:                             # necked: the near part (step long) keeps the old width
+            if L < step + 0.05:
+                tot(net)["left_mm"] += L
+                rec["left_mm"] += L
+                continue
+            near_pt, far = (a, z) if near == 0 else (z, a)
+            u = ((far[0] - near_pt[0]) / L, (far[1] - near_pt[1]) / L)
+            split = (near_pt[0] + u[0] * step, near_pt[1] + u[1] * step)
+            lo, hi = split, far
+        else:
+            lo, hi = a, z
+        chosen = None
+        for f in WIDEN_FRACS:
+            W = round(need * f, 4)
+            if W <= cur + 1e-6:
+                break
+            if HR.probe_prims(M, net, [("seg", lay, lo, hi)], width=W, skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
+                chosen = W
+                break
+        if chosen is None:
+            tot(net)["left_mm"] += L
+            rec["left_mm"] += L
+            continue
+        wide_mm = math.hypot(hi[0] - lo[0], hi[1] - lo[1])
+        if split is not None:
+            left_mm = step
+            nt = pcbnew.PCB_TRACK(b)                       # the near part: its own track at the old width
+            nt.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(near_pt[0]), pcbnew.FromMM(near_pt[1])))
+            nt.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1])))
+            nt.SetWidth(pcbnew.FromMM(cur))
+            nt.SetLayer(t.GetLayer())
+            nt.SetNetCode(t.GetNetCode())
+            b.Add(nt)
+            sp = pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1]))
+            t.SetStart(sp) if near == 0 else t.SetEnd(sp)
+            tot(net)["left_mm"] += left_mm
+            rec["left_mm"] += left_mm
+        t.SetWidth(pcbnew.FromMM(chosen))
+        tot(net)["widened_mm"] += wide_mm
+        rec["widened_mm"] += wide_mm
+        changed += 1
+    for n in list(rec["by_net"]):
+        rec["by_net"][n] = {k: round(v, 3) for k, v in rec["by_net"][n].items()}
+    rec["widened_mm"], rec["left_mm"] = round(rec["widened_mm"], 3), round(rec["left_mm"], 3)
+    if changed:
+        pcbnew.SaveBoard(out, b)
+        GP._sidecars(board, out)
+    return rec
+
+
+def add_vias(board, cons, out, nets=None, cons_path=None):
+    """PHASE3G G4.2: a rail short of its parallel vias (check()'s vias_needed) gets the missing same-net vias at free sites
+    beside its existing vias (handroute.window at each via, best margin first). Each via is one handroute.lay of
+    'via x,y' (its own probe and guard; a refused site is skipped). Writes `out` only when a via was added.
+    -> {"missing": {net: n}, "added": {net: n}, "refused": {net: n}}"""
+    from . import gaps as GP, handroute as HR, routediag as RD
+    rec = {"missing": {}, "added": {}, "refused": {}}
+    rails = _rails_on(board, cons, nets)
+    B = RD.load(board)
+    cur, tmps, k = board, [], 0
+    try:
+        for net in sorted(rails):
+            need_n = rails[net].get("vias_needed")
+            have = [(v["x"], v["y"]) for v in B["vias"] if v["net"] == net]
+            if not need_n or not have or len(have) >= need_n:
+                continue
+            missing = need_n - len(have)
+            rec["missing"][net] = missing
+            sites = []
+            for x, y in have:                              # sites beside each existing via, best margin first
+                W = HR.window(cur, at=(x, y), size=(4, 4), net=net, constraints=cons_path)
+                sites += [(s[0], s[1]) for s in ((W.get("via_sites") or {}).get("sites") or [])]
+            seen, done, tries = set(), 0, 0
+            for x, y in sites:
+                if done >= missing or tries >= VIA_SITE_TRIES:
+                    break
+                key = (round(x, 2), round(y, 2))
+                if key in seen or any(math.hypot(x - hx, y - hy) < 0.3 for hx, hy in seen):
+                    continue
+                seen.add(key)
+                tries += 1
+                k += 1
+                nxt = f"{out}.via{k}.kicad_pcb"
+                tmps.append(nxt)
+                res = HR.lay(cur, net, f"via {x:.3f},{y:.3f}", out=nxt, constraints=cons_path) or {}
+                if res.get("accepted") and os.path.exists(nxt):
+                    cur = nxt
+                    done += 1
+                else:
+                    rec["refused"][net] = rec["refused"].get(net, 0) + 1
+            if done:
+                rec["added"][net] = done
+        if cur != board:                                   # the last accepted board is the output
+            os.replace(cur, out)
+            tmps.remove(cur)
+            GP._sidecars(board, out)
+    finally:
+        for q in tmps:
+            GP._rm(q)
+    return rec

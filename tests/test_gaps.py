@@ -1214,3 +1214,23 @@ def test_mask_opening_gaps_dispatch_to_maskcut(monkeypatch, tmp_path):
     res = GP._r_maskcut(str(tmp_path / "in.kicad_pcb"), str(out), [], {"cons": {}})
     assert res == {"status": "ran", "blocks": 0, "inferred": 1, "skipped": 0} and out.exists()
     assert "maskcut" in GP.RUNGS and GP.DISPATCH["mask-opening"] == ["maskcut"]
+
+
+# ---- PHASE3G G4: power rungs dispatch; a power_mag drop with equal power is a lower score -----------------------
+def test_power_gaps_dispatch_to_the_power_rungs():
+    from fluxplace import gaps as GP
+    assert GP.DISPATCH["power-width"] == ["powerwiden", "railpour"]
+    assert GP.DISPATCH["power-vias"] == ["powervias"]
+    for r in ("powerwiden", "railpour", "powervias"):
+        assert r in GP.RUNGS
+    assert "powerwiden" in GP.SPLIT_RUNGS
+
+
+def test_power_mag_falling_with_equal_power_is_a_lower_score():
+    from fluxplace import gaps as GP
+    m = {"shorts": 0, "opens": 0, "errors": 0}
+    base = [{"id": "a", "kind": "power-width", "class": "power", "nets": ["V"], "mag": 2.0},
+            {"id": "b", "kind": "pair-open", "class": "plain", "nets": ["P", "N"], "sev": 3}]
+    cand = [dict(base[0], mag=1.0), base[1]]
+    assert GP.score(m, cand) < GP.score(m, base)
+    assert GP.score_terms(m, cand)["power"] == GP.score_terms(m, base)["power"]

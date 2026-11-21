@@ -492,7 +492,7 @@ def test_path_and_pair_path_order_and_refusal_keeps_transaction(apply_env, tmp_p
     assert c.index(("lay", "SIG2", "F.Cu: 1,2 3,4")) < c.index(("krtcmd", ["SIG9"])) < c.index(("commit",))
     fb = json.load(open(os.path.join(ctx["ai_dir"], critroute._safe(GP.ai_key(GAP))[:80] + ".feedback.json")))
     assert [(x["do"], x["ok"]) for x in fb["actions"]] == [("path", False), ("path", True), ("pair_path", False)]
-    assert fb["actions"][2]["why"].startswith("not implemented") and fb["commit"] is True
+    assert fb["actions"][2]["why"].startswith("no pair geometry") and fb["commit"] is True   # PHASE3G G1: real builder, no stackup here
 
 
 def test_swap_pins_writes_proposal_only(apply_env, tmp_path):
@@ -546,3 +546,37 @@ def test_close_stop_lists_packets_then_second_close_applies(close_env, apply_env
     assert gs["ai_used"] == {GP.ai_key(GAP): 1}
     assert os.path.exists(os.path.join(close_env["work"], "ai", sid + ".action.used.json"))
     assert ("krtcmd", ["SIG2"]) in apply_env["calls"] and res2["stop"] in ("packets", "flat", "clean")
+
+
+# ---- PHASE3G G1: pair gaps reach the ai rung; pair actions are filtered; one packet key per pair -----------------
+def test_pair_gaps_dispatch_to_ai_after_pairgroup():
+    for k in ("pair-open", "pair-asym", "pair-skew"):
+        assert GP.DISPATCH[k] == ["pairgroup", "ai"]
+
+
+def test_ai_key_of_pair_gap_is_the_pair():
+    g = {"id": "pair-skew:P/N", "kind": "pair-skew", "nets": ["P", "N"]}
+    assert GP.ai_key(g) == "pair:P/N"
+    assert GP.ai_key({"kind": "open-free", "nets": ["SIG2"]}) == "open-free:SIG2"
+
+
+def test_pair_gap_drops_path_and_route_keeps_pair_path(tmp_path, monkeypatch):
+    from fluxplace import critroute
+    gap = {"id": "pair-skew:P/N", "kind": "pair-skew", "class": "pair", "nets": ["P", "N"]}
+    ctx = _ctx(tmp_path)
+    sid = critroute._safe(GP.ai_key(gap))[:80]
+    act = tmp_path / "ai" / (sid + ".action.json")
+    act.parent.mkdir(parents=True, exist_ok=True)
+    act.write_text("{}")                                  # the file is read through load_ai_action (patched below)
+    seen = {}
+    monkeypatch.setattr(GP, "load_ai_action", lambda *a, **k: {"actions": [
+        {"do": "path", "net": "P", "path": "F.Cu: 1,1 2,1", "lock": False},
+        {"do": "route", "nets": ["N"], "layers": None},
+        {"do": "pair_path", "pair": ["P", "N"], "layer": "F.Cu", "waypoints": [[1, 1], [1, 5]]},
+        {"do": "give_up", "why": "x"}], "tokens": 0, "why": ""})
+    def fake_apply(base, out, a, c, sid):
+        seen["acts"] = [x["do"] for x in a["actions"]]
+        return "applied", True, ""
+    monkeypatch.setattr(GP, "_apply_ai", fake_apply)
+    GP._r_ai(str(tmp_path / "b.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [gap], ctx)
+    assert seen["acts"] == ["pair_path", "give_up"]

@@ -329,3 +329,70 @@ def test_rerouted_pair_on_discarded_group_board_counts_failed(tmp_path, monkeypa
     monkeypatch.setattr(PO, "reroute", fake_reroute)
     rep = PO.regroup(str(board), str(tmp_path / "out.kicad_pcb"), {}, None, [pa, pb], log=lambda m: None)
     assert rep["groups"]["U1"]["laid"] == [] and sorted(rep["failed"]) == sorted([pa, pb])
+
+
+# ---- PHASE3G G1: lay_centreline (agent pair_path) -------------------------------------------------------------------
+def _cl_board(tmp_path, extra=""):
+    body = duo("U1", 10, 20, "P", "N") + duo("J1", 10, 40, "P", "N") + extra
+    return PB.write(tmp_path, body)
+
+
+@pytest.fixture
+def cl_geo(monkeypatch):
+    """the family table the pairs stage would read: w 0.2 / gap 0.2 on F.Cu and B.Cu (stackup stubbed)."""
+    from fluxplace import zgeom as ZG
+    tab = {"F.Cu": {"w": 0.2, "gap": 0.2}, "B.Cu": {"w": 0.2, "gap": 0.2}}
+    monkeypatch.setattr(ZG, "resolve_stack", lambda cons, board=None, **k: ([{"name": "F.Cu", "type": "copper"}], [], "stub"))
+    monkeypatch.setattr(ZG, "family_table", lambda cons, rows, planes, sig, fam, **k: {l: tab[l] for l in sig if l in tab})
+    monkeypatch.setattr(ZG, "family_of", lambda cons, net: "P_")
+    return tab
+
+
+WPS = [(10.25, 23), (10.25, 30), (10.25, 37)]          # straight, 3 mm off each pad pair (break-outs join the pads)
+
+
+def test_centreline_lays_two_legs_at_width_plus_gap(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    out = str(tmp_path / "cl.kicad_pcb")
+    r = PO.lay_centreline(src, out, ("P", "N"), "F.Cu", WPS, {})
+    assert r["laid"], r
+    B = RD.load(out)
+    segs = [s for s in B["segs"] if s["net"] in ("P", "N") and s["a"][0] == s["b"][0] and abs(s["b"][1] - s["a"][1]) > 5]
+    xp = [s["a"][0] for s in segs if s["net"] == "P"]
+    xn = [s["a"][0] for s in segs if s["net"] == "N"]
+    assert xp and xn
+    assert abs(abs(xp[0] - xn[0]) - 0.4) < 0.01                       # offset between the legs = width + gap
+    assert all(abs(s["w"] - 0.2) < 1e-6 for s in B["segs"] if s["net"] in ("P", "N"))
+    assert all(s["locked"] for s in B["segs"] if s["net"] in ("P", "N"))  # new copper locked like reroute
+    assert r["p_mm"] and r["n_mm"]
+
+
+def test_centreline_refuses_non_45_waypoint_and_writes_nothing(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    out = tmp_path / "cl.kicad_pcb"
+    r = PO.lay_centreline(src, str(out), ("P", "N"), "F.Cu", [(10.25, 23), (12, 30), (10.25, 37)], {})
+    assert not r["laid"] and "segment 0 is not 45/90" in r["why"]
+    assert not out.exists()
+
+
+def test_centreline_refuses_foreign_track_on_the_line(tmp_path, cl_geo):
+    foreign = seg((5, 28), (15, 28), "X")
+    src = _cl_board(tmp_path, foreign)
+    before = open(src).read()
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert not r["laid"] and "exact check" in r["why"]
+    assert open(src).read() == before                                # in-place edit: nothing written when refused
+
+
+def test_centreline_missing_layer_geometry_is_refused(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    r = PO.lay_centreline(src, str(tmp_path / "x.kicad_pcb"), ("P", "N"), "In5.Cu", WPS, {})
+    assert not r["laid"] and r["why"] == "no pair geometry for In5.Cu"
+
+
+def test_centreline_in_place_edit_replaces_pair_copper(tmp_path, cl_geo):
+    src = _cl_board(tmp_path, seg((1, 1), (2, 1), "P", locked=True))  # an old locked stub of the pair
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert r["laid"], r
+    B = RD.load(src)
+    assert not [s for s in B["segs"] if s["a"] == (1.0, 1.0)]         # the replaced copper is gone
