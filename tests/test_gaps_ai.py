@@ -461,6 +461,14 @@ def test_ai_action_new_kinds_validated(monkeypatch, tmp_path):
     assert a["actions"][0] == {"do": "path", "net": "SIG2", "path": "F.Cu: 1,2 3,4", "lock": True}
 
 
+def test_ai_action_path_hs_leg_stub_join():
+    cu = ["F.Cu", "B.Cu"]
+    stub = GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 0.8,0"}, cu, hs_legs={"LEG"})
+    assert stub == {"do": "path", "net": "LEG", "path": "F.Cu: 0,0 0.8,0", "lock": False}      # 0.8 mm: kept
+    assert GP._ai_action({"do": "path", "net": "LEG", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"}) is None  # 5 mm: dropped
+    assert GP._ai_action({"do": "path", "net": "SIG2", "path": "F.Cu: 0,0 5,0"}, cu, hs_legs={"LEG"})["net"] == "SIG2"
+
+
 def test_ai_action_file_capped_at_eight(monkeypatch, tmp_path):
     monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu"])
     f = tmp_path / "a.json"

@@ -26,6 +26,8 @@ ORDER = ["short", "mask-opening", "power-width", "power-vias", "pair-open", "pai
          "open-pour", "open-free", "clearance", "dangling", "via-offcentre", "pin-escape"]
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
+# a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
+HS_STUB_MM = 2.0
 
 
 def measure(board, kicad_cli="kicad-cli"):
@@ -697,7 +699,7 @@ FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedb
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = ("rip {net, ids}; rip_locked {net, ids} (plain locked copper only; pairs/rf refused); "
                    "nudge {ref, dx, dy, rot}; route {nets, layers}; path {net, path, lock} (AI-FINISH path syntax, "
-                   "<= 800 chars, not hs-pair legs); pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only; "
+                   "<= 800 chars; hs-pair legs only as a stub join <= 2 mm); pair_path {pair, layer, waypoints} (45/90 centre line, both legs laid, pair gaps only; "
                    "waypoints [x, y] or [x, y, \"Layer\"]: a named layer other than the current one is a via change, <= 4, never on "
                    "the last point; the start pad must be on the first layer; each run >= 1 mm; a change where the reference plane "
                    "changes gets a return via, else return_via_missing); "
@@ -742,10 +744,13 @@ def _ai_action(x, copper, hs_legs=()):
     elif do == "path":                              # PHASE3F B2
         from . import hrgeom as HG
         net, path = x.get("net"), x.get("path")
-        if (isinstance(net, str) and net and net not in hs_legs and isinstance(path, str) and 0 < len(path) <= 800):
+        if isinstance(net, str) and net and isinstance(path, str) and 0 < len(path) <= 800:
             try:
-                HG.parse_path(path, copper)
+                prims = HG.parse_path(path, copper)
             except Exception:
+                return None
+            if net in hs_legs and sum(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1])
+                                      for p in prims if p[0] == "seg") > HS_STUB_MM:
                 return None
             return {"do": "path", "net": net, "path": path, "lock": bool(x.get("lock"))}
     elif do == "pair_path":

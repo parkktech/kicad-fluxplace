@@ -123,7 +123,7 @@ Files:
   `proposals` = the swap files.
 
 Action kinds: `rip {net, ids}`, `rip_locked {net, ids}`, `nudge {ref, dx, dy, rot}`, `route {nets, layers}`,
-`path {net, path, lock}` (AI-FINISH path syntax, <= 800 chars, not for hs-pair legs), `pair_path {pair, layer, waypoints}`
+`path {net, path, lock}` (AI-FINISH path syntax, <= 800 chars, hs-pair legs only as a stub join <= 2 mm), `pair_path {pair, layer, waypoints}`
 (2-40 points; waypoints `[x, y]` or `[x, y, "Layer"]`. A named layer other than the current one is a LAYER CHANGE at that point
 (a via pair is placed there); at most 4 changes, never on the last point; each run 45/90 and >= 1.0 mm; the start pad must be on
 the first layer (else refused: "pad REF.NUM is not on LAYER: start the centre line on the pad's layer"); a change where the
