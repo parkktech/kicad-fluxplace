@@ -299,6 +299,23 @@ def test_stitch_site_lands_inside_small_island(monkeypatch):
     assert H._pick_pair([(0.2, 0.2)], 3) == []
 
 
+def test_stitch_trigger_nets_come_from_unc_by_net():
+    """PHASE3H-C2: the stitch trigger is the set of nets whose unconnected count rose (keys are net names); the target
+    net and nets that did not rise are excluded; a fall is not an opened net."""
+    base = {"SENSE_N_DIV": 1, "GND": 1, "+3V3": 3}
+    cand = {"SENSE_N_DIV": 0, "GND": 2, "+3V3": 2, "MIC_P": 1}
+    assert H._opened_nets(cand, base) == {"GND": (1, 2), "MIC_P": (0, 1)}
+    assert H._opened_nets({"GND": 1}, {"GND": 1}) == {}
+    assert set(H._opened_nets({"GND": 2}, {})) <= {"GND", "+3V3"}
+
+
+def test_seg_dist_point_to_segment():
+    """PHASE3H-C2: distance used by the stitch-site clearance check (perpendicular foot and end clamp)."""
+    assert H._seg_dist(0, 1, -1, 0, 1, 0) == pytest.approx(1.0)
+    assert H._seg_dist(0, 2, 0, 0, 4, 0) == pytest.approx(2.0)
+    assert H._seg_dist(5, 0, 0, 0, 4, 0) == pytest.approx(1.0)
+
+
 def test_lay_stitch_false_is_unchanged_refusal(tmp_path, monkeypatch):
     """PHASE3H-C: stitch=False never reaches the stitch hook; a refused lay stays refused and writes nothing."""
     def boom(*a, **k):

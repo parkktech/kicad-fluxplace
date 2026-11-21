@@ -804,6 +804,11 @@ def _edit_violation_keys(new, net, loose=()):
     return out
 
 
+def _opened_nets(cand_unc, base_unc):
+    """PHASE3H-C: {net: (before, after)} for every net whose unconnected count rose (keys are net names, not items)."""
+    return {n: (base_unc.get(n, 0), c) for n, c in cand_unc.items() if c > base_unc.get(n, 0)}
+
+
 def _zone_nets(b):
     return {z.GetNetname() for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname()}
 
@@ -865,7 +870,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         # a shove leaves loose ends by design (the caller re-lays); the commit gate judges the end state
         loose = ("track_dangling", "via_dangling") if op in ("shove", "unlay") else ()
         new_nonu = _edit_violation_keys(new, net, loose)
-        new_u = {n: (base["unc_by_net"].get(n, 0), c) for n, c in cand["unc_by_net"].items() if c > base["unc_by_net"].get(n, 0)}
+        new_u = _opened_nets(cand["unc_by_net"], base["unc_by_net"])
         before_n = base["unc_by_net"].get(net, 0)
         after_n = cand["unc_by_net"].get(net, 0)
         meas = {"unconnected": f"{base['unconnected']}->{cand['unconnected']}", f"open[{net}]": f"{before_n}->{after_n}",
@@ -1007,8 +1012,38 @@ def _pick_pair(sites, j, sep=1.0):
     return pick
 
 
+def _seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _via_site_clear(b, M, net, x, y, vd, vdr):
+    """PHASE3H-C: a stitching via at (x, y) is legal if the probe against the pre-lay obstacles is clean and no copper of
+    another net (track, via) on the in-memory board, including the new lay track, is inside its radius plus clearance."""
+    import pcbnew
+    if not probe_prims(M, net, [("via", (x, y))], None, (vd, vdr))["ok"]:
+        return False
+    clr, r = M.net_rule(net)["clearance"], vd / 2
+    for t in b.GetTracks():
+        if t.GetNetname() == net:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            c = t.GetPosition()
+            d = math.hypot(pcbnew.ToMM(c.x) - x, pcbnew.ToMM(c.y) - y)
+            if d < r + pcbnew.ToMM(t.GetWidth(pcbnew.F_Cu)) / 2 + clr:
+                return False
+        elif t.GetClass() == "PCB_TRACK":
+            a, e = t.GetStart(), t.GetEnd()
+            d = _seg_dist(x, y, pcbnew.ToMM(a.x), pcbnew.ToMM(a.y), pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
+            if d < r + pcbnew.ToMM(t.GetWidth()) / 2 + clr:
+                return False
+    return True
+
+
 def _stitch_attempts(b, M, nets, via=None, tries=3):
-    """PHASE3H-C: yields attempts [(net, x, y, via_dims)...]: up to 2 vias per zone net in its split-off island, `tries` ways."""
+    """PHASE3H-C: yields attempts [(net, x, y, via_dims)...]: up to 2 legal vias per zone net in its split-off island."""
     import pcbnew
     f = pcbnew.ZONE_FILLER(b)
     zs = pcbnew.ZONES()
@@ -1018,7 +1053,9 @@ def _stitch_attempts(b, M, nets, via=None, tries=3):
     per = {}
     for n in nets:
         rule = M.net_rule(n)
-        per[n] = (via or (rule["via_dia"], rule["via_drill"]), _split_sites(b, n))
+        vv = via or (rule["via_dia"], rule["via_drill"])
+        sites = [(x, y) for x, y in _split_sites(b, n) if _via_site_clear(b, M, n, x, y, *vv)]
+        per[n] = (vv, sites)
     for j in range(tries):
         att = []
         for n in nets:
