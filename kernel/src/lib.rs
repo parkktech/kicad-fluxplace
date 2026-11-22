@@ -2,6 +2,7 @@
 //! Reply shape: {"ok": true, ...} or {"ok": false, "error": "..."}.
 
 pub mod board;
+pub mod clear;
 pub mod dru;
 pub mod geom;
 pub mod index;
@@ -148,6 +149,26 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
         }
         "items" => items_op(h, &v),
+        "need" => {
+            let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
+            let id = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as usize);
+            let (Some(a), Some(c)) = (id("a").and_then(|i| h.board.items.get(i)), id("b").and_then(|i| h.board.items.get(i))) else {
+                return json!({"ok": false, "error": "need: a and b must be item ids"});
+            };
+            let layer = v.get("layer").and_then(Value::as_str).unwrap_or("");
+            let n = clear::need(&cx, a, c, layer);
+            json!({"ok": true, "mm": n.nm as f64 / 1e6, "rule": n.rule})
+        }
+        "check" => {
+            let t0 = std::time::Instant::now();
+            let ids: Option<Vec<u32>> = v.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|u| u as u32)).collect());
+            let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
+            let vs = clear::check(&cx, ids.as_deref());
+            let verdict = if vs.is_empty() { "accept" } else { "refuse" };
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            json!({"ok": true, "verdict": verdict, "violations": vs.iter().map(|x| clear::violation_json(&h.board, x)).collect::<Vec<_>>(),
+                   "opens": {}, "pour": [], "warnings": ["connectivity not checked (K11)"], "ms": ms})
+        }
         "net_rule" => {
             let net = v.get("net").and_then(Value::as_str).unwrap_or("");
             let r = h.rules.net_rule(net);

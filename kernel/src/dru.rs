@@ -28,7 +28,7 @@ impl Tri {
             Tri::True
         }
     }
-    fn or(self, o: Tri) -> Tri {
+    pub fn or(self, o: Tri) -> Tri {
         if self == Tri::True || o == Tri::True {
             Tri::True
         } else if self == Tri::May || o == Tri::May {
