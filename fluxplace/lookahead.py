@@ -241,7 +241,9 @@ def _run(code, timeout=900):
     """Run a pcbnew script in a fresh interpreter -> its stdout's last line; raises when it did not print OK."""
     import subprocess
     rc = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
-    last = (rc.stdout.strip().splitlines() or [""])[-1]
+    import re as _re                       # Fable: SWIG "memory leak" warnings share stdout with no newline ("...memorOK 1170")
+    m = _re.search(r"OK(?: [^\n]*)?\s*$", rc.stdout or "")
+    last = m.group(0).strip() if m else ""
     if rc.returncode != 0 or not last.startswith("OK"):
         raise RuntimeError(f"pcbnew step failed (rc {rc.returncode}): {(rc.stderr or rc.stdout)[-300:]}")
     return last
