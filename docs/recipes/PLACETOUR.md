@@ -99,3 +99,31 @@ in /tmp/claude-1000/-var-kicad-utv-comms-bridge/d2ff5aac-8e84-4a93-af0a-815465e0
 `candidates()` count and kinds on that blame with tier-1 survivors.
 
 Report: per item commit hash, tests, deviations; smoke numbers.
+
+## P7 (Fable, from run 1 data): free the parts, carry their fan-out, fix turn/nudge
+
+Measured on W15 (input a5-u500): only 94 of 345 parts are movable. 231 parts are blocked only because their own LOCKED
+fan-out stubs/vias end on their pads (the base's fan-out was locked by lock policy). Route_review's congested areas come
+back with `parts: []` (so nudge never fires), and its turned rows already give the target pose in `swap_pose`
+(R22 rot -90 -> swap_pose rot 90) while P2 adds 180 to `rot` (wrong for parts not at 0/180, and R22/R604 were blocked
+anyway by locked stubs).
+
+- `_pieces(B)`: connected copper pieces (segments + vias joined end-to-end / end-on-via within half width, per net, same
+  layer or through a via). A piece is a STUB of ref R when every pad it touches belongs to R (it touches no other part's
+  pad). `_movable` no longer blocks a part for locked copper that is only stubs of that part; locked copper touching two
+  or more parts (real routes, pairs, RF) still blocks every part it touches.
+- Moves CARRY the moved parts' stub pieces rigidly: same translation, and the same rotation about the footprint origin
+  as the part's angle change (segment start/end/mid, via at). Implement as a text transform in `_apply` (new helper in
+  boardwrite next to `move_file`, e.g. `carry_copper(text, moves_by_ref, pieces)`: rewrite the `(start x y)`, `(end x y)`,
+  `(mid x y)`, `(at x y)` of the listed items by uuid; keep `(locked yes)`). Stubs are no longer removed for moved parts;
+  `move_routed` keeps its meaning only for unlocked non-stub copper. A carried stub that now collides is caught by the
+  tier-1 gates (add `legality.collision_gate` copper check if it does not see tracks: then add a cheap check that no
+  carried segment/via comes closer than the netclass clearance to foreign copper/pads, using routediag geometry).
+- `blame_of`: congested areas with empty `parts` get the parts whose pads lie inside the box grown by 2 mm (computed in
+  `candidates` from B, since blame_of has no board).
+- turn: use `swap_pose` (x, y, rot) from route_review as the target, not rot + 180.
+- Tests: stub detection (one-part piece vs two-part piece), carry transform for a translate and a 90 deg turn (coords exact
+  to 1e-4), hot-area part fill, turn uses swap_pose.
+- Then re-run the P6 smoke steps (judge NOT needed: reuse the review.json in
+  /tmp/claude-1000/-var-kicad-utv-comms-bridge/d2ff5aac-8e84-4a93-af0a-815465e0cb44/scratchpad/p1/judge) and report movable
+  count, candidate kinds, tier-1 survivors.
