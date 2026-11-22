@@ -87,6 +87,10 @@ board, summed over nets; no extra load). A caller that passes its own count keep
 
 `id` = first 12 hex chars of sha1 of the item's geometry + net. Stable across snapshots of the same copper.
 
+`metrics` (full snapshots only): `{vias, track_mm: {layer: mm}, net_mm: {net name: mm} (signal nets only: not
+ground, not power), parts, pads, density}` (pads per mm2 of bbox). Arcs are measured as the a-mid-b polyline. The
+`stage_end` event carries the same `metrics`, taken from the forced stage-end snapshot (events are emitted after it).
+
 ## Delta (`NNNNNN.delta.json`)
 
 ```

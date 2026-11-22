@@ -63,7 +63,9 @@ def test_stage_end_writes_stage_end_and_forced_full_snapshot(tmp_path, monkeypat
     b = _board(tmp_path / "route.kicad_pcb")
     pipeline._ev_stage_end(9, "route", {"verdict": "pass", "line": "ok"}, b, 2.46)
     kinds = [r["kind"] for r in _rows(tmp_path)]
-    assert kinds[0] == "stage_end" and kinds[1] == "eta" and "snapshot" in kinds
+    assert kinds[:3] == ["snapshot", "stage_end", "eta"]
+    stage_end = [r for r in _rows(tmp_path) if r["kind"] == "stage_end"][0]
+    assert stage_end["metrics"]["track_mm"]["F.Cu"] == 4.0 and stage_end["metrics"]["vias"] == 0
     snap = [r for r in _rows(tmp_path) if r["kind"] == "snapshot"][0]
     assert snap["full"] is True and snap["reason"] == "stage_end"
     assert os.path.exists(os.path.join(str(tmp_path), snap["path"]))

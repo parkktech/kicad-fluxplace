@@ -44,6 +44,8 @@ def _full(seq, tracks, parts, opens):
             "pads": [{"ref": "U1", "num": "1", "x": 10.0, "y": 10.0, "w": 0.5, "h": 0.5, "rot": 0,
                       "shape": "rect", "layers": ["F.Cu"], "net": "1"}],
             "tracks": tracks, "vias": [{"id": "000000000001", "x": 5.0, "y": 5.0, "d": 0.6, "n": "0", "lk": False}],
+            "metrics": {"vias": 1, "track_mm": {"F.Cu": 24.0}, "net_mm": {"VBUS": 4.0, "CAN_H": 8.0},
+                        "parts": 2, "pads": 1, "density": 0.0004},
             "zones": [{"l": "B.Cu", "n": "0", "pts": [[0, 0], [100, 0], [100, 80], [0, 80]]}], "opens": opens}
 
 

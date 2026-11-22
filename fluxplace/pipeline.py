@@ -1419,12 +1419,13 @@ def _ev_stage(kind, i, name, **kw):
 
 def _ev_stage_end(i, name, res, board, secs):
     from . import events as EV, snapshot as SN
+    metrics = None
+    if board and os.path.exists(board) and SN.active_take(board, "stage_end", force=True):
+        metrics = SN.active_metrics()       # the forced stage-end snapshot's board metrics
     EV.emit("stage_end", stage=name, n=i, name=name, verdict=res.get("verdict"),
-            line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board)
+            line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board, metrics=metrics)
     from . import eta as ETA
     ETA.stage_end(name, secs, res.get("verdict"))
-    if board and os.path.exists(board):
-        SN.active_take(board, "stage_end", force=True)
 
 
 def run(a):

@@ -6,6 +6,7 @@ Snapper never raises: a snapshot failure is swallowed so a stage is never failed
 """
 import hashlib
 import json
+import math
 import os
 import time
 
@@ -81,7 +82,38 @@ def _build(B, seq, board_path=""):
     return {"v": 1, "seq": seq, "ts": round(time.time(), 3), "board": board_path,
             "bbox": [_r(bx0), _r(by0), _r(bx1), _r(by1)], "layers": list(B["copper"]),
             "edge": [_pt(e[0]) for e in B["edge"]], "nets": nets, "parts": parts, "pads": pads,
-            "tracks": tracks, "vias": vias, "zones": zones, "opens": _text_opens(B)}
+            "tracks": tracks, "vias": vias, "zones": zones, "opens": _text_opens(B),
+            "metrics": _metrics(B)}
+
+
+def _is_signal(net):
+    from . import lint as LT                      # lazy: keeps snapshot import light
+    from . import netclass as NC
+    return not NC.is_ground(net) and not LT._is_power(net)
+
+
+def _arc_mm(s):
+    """Track length in mm: a-b straight, or a-mid-b polyline when the segment has a mid point (arc)."""
+    a, b, m = s["a"], s["b"], s.get("mid")
+    if m:
+        return math.hypot(m[0] - a[0], m[1] - a[1]) + math.hypot(b[0] - m[0], b[1] - m[1])
+    return math.hypot(b[0] - a[0], b[1] - a[1])
+
+
+def _metrics(B):
+    """Board metrics from the loaded B (no extra load): vias, track mm per layer and per signal net, parts, pads,
+    density = pads per mm2 of the board bbox. Net names are the keys (signal nets only for net_mm)."""
+    track_mm, net_mm = {}, {}
+    for s in B["segs"]:
+        mm = _arc_mm(s)
+        track_mm[s["layer"]] = track_mm.get(s["layer"], 0.0) + mm
+        if s["net"] and _is_signal(s["net"]):
+            net_mm[s["net"]] = net_mm.get(s["net"], 0.0) + mm
+    x0, y0, x1, y1 = B["bbox"]
+    area = max(1e-9, (x1 - x0) * (y1 - y0))
+    return {"vias": len(B["vias"]), "track_mm": {k: _r(v, 2) for k, v in sorted(track_mm.items())},
+            "net_mm": {k: _r(v, 2) for k, v in sorted(net_mm.items())}, "parts": len(B["parts"]),
+            "pads": len(B["pads"]), "density": _r(len(B["pads"]) / area, 4)}
 
 
 def _text_opens(B):
@@ -144,6 +176,7 @@ class Snapper:
         self.prev = None          # last full dict (in memory)
         self.since_full = 0       # deltas since last full
         self.last_t = 0.0
+        self.last_metrics = None  # metrics of the newest full snapshot (stage_end event field)
 
     def take(self, board_path, reason, force=False, opens=None):
         """Write a snapshot of board_path. Returns the relative path written, or None (throttled / failed)."""
@@ -166,6 +199,7 @@ class Snapper:
                 _write(os.path.join(self.work, rel), cur)
                 _write(os.path.join(self.dir, "latest.json"), cur)
                 self.prev, self.since_full = cur, 0
+                self.last_metrics = cur["metrics"]
                 is_full = True
             else:
                 rel = os.path.join("snap", "%06d.delta.json" % seq)
@@ -184,6 +218,11 @@ _ACTIVE = None   # the Snapper of the running pipeline (in-process hooks only)
 def set_active(sn):
     global _ACTIVE
     _ACTIVE = sn
+
+
+def active_metrics():
+    """Metrics of the newest full snapshot taken by the active Snapper (None when none)."""
+    return _ACTIVE.last_metrics if _ACTIVE is not None else None
 
 
 def active_take(board_path, reason, force=False, opens=None):

@@ -49,6 +49,21 @@ def test_caller_opens_wins(tmp_path, monkeypatch):
     assert json.load(open(work / "snap" / "latest.json"))["opens"] == 7
 
 
+def test_full_snapshot_metrics(tmp_path):
+    b = _board(tmp_path / "m.kicad_pcb", _fp("U1", 10, 10) + _fp("U2", 20, 10) + _seg((10, 10), (20, 10), "N1") +
+               _seg((20, 10), (20, 14), "GND"))
+    m = SN.full(b, str(tmp_path / "m.json"), 1)["metrics"]
+    assert m["vias"] == 0 and m["parts"] == 2 and m["pads"] == 2
+    assert abs(m["track_mm"]["F.Cu"] - 14.0) < 1e-6
+    assert m["net_mm"] == {"N1": 10.0}                  # GND is not a signal net
+    assert m["density"] > 0
+
+
+def test_arc_length_uses_mid_point(tmp_path):
+    s = {"a": (0.0, 0.0), "b": (2.0, 0.0), "mid": (1.0, 1.0)}
+    assert abs(SN._arc_mm(s) - 2 * (2 ** 0.5)) < 1e-9
+
+
 def test_delta_one_add_one_del(tmp_path):
     b = _board(tmp_path / "a.kicad_pcb", _seg((1, 1), (5, 1), "N1") + _seg((5, 1), (5, 5), "N2"))
     prev = SN.full(b, str(tmp_path / "f1.json"), 1)
