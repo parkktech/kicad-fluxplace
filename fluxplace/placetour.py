@@ -332,3 +332,168 @@ def tier1(base_path, cands, cons, spec, P, outdir, base_state):
     return survivors, dropped
 
 
+# ------------------------------------------------------------------ P4 tournament stage
+def _worker(jobfile):
+    """one judge job in a fresh interpreter (LA._run_jobs entry "placetour:_worker"): KRT judge + blame + key + PNG -> result.json."""
+    from . import constraints as C
+    job = json.load(open(jobfile))
+    out = {"tag": job["tag"], "routed": None, "blame": None, "key": None, "png": None, "secs": None, "error": None}
+    try:
+        acfg = job["a"]
+        a = SimpleNamespace(**acfg)
+        cons = C.load(acfg["constraints"]) if acfg.get("constraints") else {}
+        spec = json.load(open(acfg["spec"])) if acfg.get("spec") else None
+        P = params(cons)
+        P["judge_min"] = float(job["judge_min"])
+        j = judge(a, job["board"], job["dir"], P, cons, spec)
+        key = judge_key(j["routed"], j["blame"], cons)
+        out.update(routed=j["routed"], blame=j["blame"], secs=j["secs"], key=list(key))
+        if j["routed"]:
+            fit = {"id": job["tag"], "key": list(key), "critical": job.get("critical", [])}
+            out["png"] = LA.render(j["routed"], [], fit, os.path.join(job["dir"], "judge.png"))
+    except Exception as e:                                # noqa: BLE001 - one judge failing is a row, not a stage crash
+        out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    with open(job["result"], "w") as fh:
+        json.dump(out, fh)
+
+
+def _row(r, cid, kind, moved, t1key, jkey, png, verdict):
+    return {"round": r, "id": cid, "variant": f"{kind} moved={moved} t1={tuple(t1key) if t1key else '-'}", "fit": jkey,
+            "png": png, "verdict": verdict}
+
+
+def _report(path, P, start, end, accepted, removed_refs, groups, rounds_log):
+    L = ["# PLACETOUR report", "", "| | input | output |", "|---|---|---|"]
+    names = ("judge opens (signal)", "hot areas", "hot occupancy", "vias", "detour sum")
+    for i, nm in enumerate(names):
+        L.append(f"| {nm} | {start[i]} | {end[i]} |")
+    L += ["", "## rounds", "| round | candidates | tier-1 survivors | judged | winner | judge key | verdict |", "|---|---|---|---|---|---|---|"]
+    L += [f"| {x['round']} | {x['cands']} | {x['surv']} | {x['judged']} | {x['winner']} | {x['key']} | {x['verdict']} |" for x in rounds_log]
+    L += ["", "## accepted moves", "| round | kind | ref | from | to | rot |", "|---|---|---|---|---|---|"]
+    L += [f"| {m['round']} | {m['why']} | {m['ref']} | {m['from']} | {m['to']} | {m['rot']} |" for m in accepted]
+    L += ["", "## refs whose attached copper was removed (fan-out again)", ", ".join(sorted(removed_refs)) or "none", ""]
+    L += ["## group members (treated as fixed in v1)", ", ".join(sorted(groups)) or "none", ""]
+    with open(path, "w") as fh:
+        fh.write("\n".join(L) + "\n")
+
+
+def _png(routed, cid, key, crit, path):
+    return LA.render(routed, [], {"id": cid, "key": list(key), "critical": crit}, path)
+
+
+def stage(c, n, board):
+    """placetour stage: tournament of part moves judged by KRT --quick 2 (see module doc). Output: the winner's moved board."""
+    P = params(c.cons)
+    if not P["enabled"]:
+        return {"verdict": "skipped", "line": "[placetour] enabled = false", "board": board}
+    t_stage = time.time()
+    d = c.dir(n, "placetour")
+    spath, table = os.path.join(d, "progress.json"), os.path.join(d, "TOURNAMENT.md")
+    a, cons, spec = c.a, c.cons, c.spec
+    acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py", "freerouting_jar", "java")}
+    crit = LA.critical_nets(board, cons, spec)
+    budget = float(((cons or {}).get("flow") or {}).get("budget_min") or 0)
+    timing, rows, accepted, rounds_log, removed_refs = {}, [], [], [], set()
+    _progress(spath, "running", "round 0: judge the input")
+    j0 = judge(a, board, os.path.join(d, "r0-input"), P, cons, spec)
+    key0 = judge_key(j0["routed"], j0["blame"], cons)
+    best = {"board": board, "blame": j0["blame"], "key": key0, "routed": j0["routed"]}
+    png0 = _png(j0["routed"] or board, "input", key0, crit, os.path.join(d, "input.png"))
+    rows.append(_row(0, "input", "input", "-", None, key0, png0, "reference"))
+    if j0["routed"]:
+        SN.active_take(j0["routed"], "placetour r0 judge input", force=True, opens=key0[0])
+    EV.artifact("png", png0, "input")
+    EV.iteration("place", 0, n=P["max_rounds"], metrics={"opens": key0[0], "hot": key0[1], "vias": key0[3]}, note="input")
+    LA._table(table, rows)
+    stale, rounds, stop = 0, 0, "no round ran"
+    for r in range(1, P["max_rounds"] + 1):
+        if budget and time.time() - t_stage > budget * 60:
+            stop = "flow budget_min"
+            break
+        rounds = r
+        Bb = RD.load(best["board"])
+        _progress(spath, "running", f"round {r}: candidates", timing=timing, rounds=r - 1)
+        cands = candidates(Bb, best["blame"], cons, P, seed=100 * r, spec=spec)
+        rdir = os.path.join(d, f"r{r}")
+        surv, _dropped = tier1(best["board"], cands, cons, spec, P, rdir, gate_state(Bb, cons, spec))
+        top = surv[:P["judge_top"]]
+        _progress(spath, "running", f"round {r}: {len(cands)} candidates, {len(surv)} tier-1, judging {len(top)}",
+                  timing=timing, rounds=r - 1)
+        jobs = []
+        for _key1, cnd, p, _rem in top:
+            jd = LA._mk(os.path.join(rdir, "judge", cnd["id"]))
+            job = {"tag": f"r{r}-{cnd['id']}", "board": p, "dir": jd, "result": os.path.join(jd, "result.json"), "a": acfg,
+                   "judge_min": P["judge_min"], "critical": crit}
+            job["jobfile"] = os.path.join(LA._mk(os.path.join(rdir, "jobs")), f"{cnd['id']}.json")
+            with open(job["jobfile"], "w") as fh:
+                json.dump(job, fh)
+            jobs.append(job)
+        t_judge = time.time()
+        results = LA._run_jobs(jobs, P, P["judge_min"] * 60 + 600, entry="placetour:_worker") if jobs else []
+        timing[f"round{r}_judge_s"] = round(time.time() - t_judge, 1)
+        winner = None
+        for (key1, cnd, p, rem), job, res in zip(top, jobs, results):
+            jk = tuple(res["key"]) if res.get("key") else None
+            if res.get("routed"):
+                SN.active_take(res["routed"], f"placetour r{r} judge {cnd['id']}", force=True, opens=jk[0])
+            if res.get("png"):
+                EV.artifact("png", res["png"], job["tag"])
+            verdict = "fail: " + str(res.get("error") or "no routed copy") if jk is None else "kept"
+            if jk is not None and (winner is None or jk < winner[0]):
+                winner = (jk, cnd, p, rem, res)
+            rows.append(_row(r, job["tag"], cnd["kind"], _moved(cnd["moves"]), key1, jk, res.get("png"), verdict))
+        improved = winner is not None and tuple(winner[0]) < tuple(best["key"])
+        if improved:
+            jk, cnd, p, rem, res = winner
+            rows[-len(jobs) + [j["tag"] for j in jobs].index(f"r{r}-{cnd['id']}")]["verdict"] = "winner"
+            for ref, v in cnd["moves"].items():
+                accepted.append({"round": r, "why": cnd["kind"], "ref": ref, "rot": v[2],
+                                 "from": (round(Bb["parts"][ref]["pos"][0], 3), round(Bb["parts"][ref]["pos"][1], 3), Bb["parts"][ref]["angle"]),
+                                 "to": (round(v[0], 3), round(v[1], 3), v[2])})
+            A = RL.attached_copper(Bb)
+            for i in rem["segs"]:
+                removed_refs |= {ref for _k, ref, _n in A["segs"][i] if ref in cnd["moves"]}
+            for i in rem["vias"]:
+                removed_refs |= {ref for ref, _n in A["vias"][i] if ref in cnd["moves"]}
+            best = {"board": p, "blame": res["blame"], "key": jk, "routed": res["routed"]}
+            stale = 0
+            SN.active_take(p, f"placetour r{r} winner", force=True, opens=jk[0])
+            EV.emit("parts", stage="placetour", i=r, refs=sorted(cnd["moves"]), why=cnd["kind"])
+        else:
+            stale += 1
+        best_key = best["key"]
+        winner_id = winner[1]["id"] if (winner and improved) else "-"
+        rounds_log.append({"round": r, "cands": len(cands), "surv": len(surv), "judged": len(jobs), "winner": winner_id,
+                           "key": tuple(best_key), "verdict": "improved" if improved else "no gain"})
+        EV.iteration("place", r, n=P["max_rounds"], metrics={"candidates": len(cands), "tier1": len(surv), "judged": len(jobs),
+                                                             "opens": best_key[0], "hot": best_key[1], "vias": best_key[3],
+                                                             "stale": stale}, note=winner_id)
+        timing[f"round{r}_s"] = round(time.time() - t_stage, 1)
+        LA._table(table, rows)
+        _progress(spath, "running", f"round {r} done: best key {tuple(best_key)}", rounds=r, timing=timing)
+        if best_key[0] == 0 and best_key[1] == 0:
+            stop = "clean (no opens, no hot area)"
+            break
+        if stale >= P["no_gain_rounds"]:
+            stop = f"no gain for {stale} round(s)"
+            break
+        stop = "max_rounds"
+    out = os.path.join(d, "board.kicad_pcb")
+    shutil.copy(best["board"], out)
+    LA._copy_sidecar(best["board"], out)
+    rep = os.path.join(d, "placetour.md")
+    groups = [r for g in ((cons.get("placement") or {}).get("group") or {}).values() for r in g.get("refs", [])]
+    _report(rep, P, key0, best["key"], accepted, removed_refs, groups, rounds_log)
+    timing["stage_s"] = round(time.time() - t_stage, 1)
+    moved = sorted({m["ref"] for m in accepted})
+    line = (f"placetour: {rounds} rounds, judge key {tuple(key0)} -> {tuple(best['key'])}, {len(moved)} parts moved, "
+            f"{stop}, {timing['stage_s']} s")
+    _progress(spath, "done", line, board=out, rounds=rounds, timing=timing, reason=stop)
+    nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
+    if removed_refs:
+        nxt.append("re-escape moved parts: fanout --parts " + ",".join(sorted(removed_refs)))
+    return {"verdict": "pass" if best["routed"] else "warn", "line": line, "board": out, "next": nxt}
+
+
+def _moved(moves):
+    return ",".join(sorted(moves))[:80] or "-"

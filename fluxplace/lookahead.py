@@ -706,10 +706,12 @@ def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None, adopt
     return job
 
 
-def _spawn(job, timeout):
+def _spawn(job, timeout, entry="lookahead:_worker"):
+    """one job in a fresh interpreter: entry = "module:function" (default: this module's candidate worker)."""
     import subprocess
+    mod, fn = entry.split(":")
     code = (f"import sys; sys.path.insert(0, {REPO!r}); "
-            f"from fluxplace import lookahead as LA; LA._worker({job['jobfile']!r})")
+            f"from fluxplace import {mod} as M; M.{fn}({job['jobfile']!r})")
     try:
         subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -720,11 +722,11 @@ def _spawn(job, timeout):
         return {"tag": job["tag"], "error": "worker produced no result"}
 
 
-def _run_jobs(jobs, P, timeout):
+def _run_jobs(jobs, P, timeout, entry="lookahead:_worker"):
     """candidates of one round, up to [lookahead] jobs at a time; each candidate is its own interpreter (threads only wait)."""
     import concurrent.futures as cf
     with cf.ThreadPoolExecutor(max_workers=max(1, P["jobs"])) as ex:
-        return list(ex.map(lambda j: _spawn(j, timeout), jobs))
+        return list(ex.map(lambda j: _spawn(j, timeout, entry), jobs))
 
 
 def _worker(jobfile):

@@ -168,3 +168,95 @@ def test_tier1_drops_gate_worsening_and_ranks_rest(monkeypatch, tmp_path):
     surv, dropped = PT.tier1(base, cands, {}, None, PT.params({}), str(tmp_path / "t1"), {"collision": 0})
     assert [s[1]["id"] for s in surv] == ["good2", "good1"]                       # ranked by predictor key, best first
     assert [d[0]["id"] for d in dropped] == ["bad"] and dropped[0][1] == "worse: collision"
+
+
+def _stage_ctx(tmp_path, cons_extra=None):
+    from types import SimpleNamespace
+    cons = {"placetour": dict({"enabled": True, "max_rounds": 3, "no_gain_rounds": 1, "judge_top": 2}, **(cons_extra or {}))}
+    a = SimpleNamespace(constraints=None, spec=None, router_dir="/r", router_py="/py", freerouting_jar=None, java=None)
+    work = tmp_path / "w"
+    work.mkdir()
+    def stage_dir(n, name):
+        d = work / f"{n}-{name}"
+        d.mkdir(exist_ok=True)
+        return str(d)
+    return SimpleNamespace(cons=cons, spec=None, a=a, dir=stage_dir)
+
+
+def _script_stage(monkeypatch, tmp_path, rounds, keys):
+    """stage with scripted candidates: rounds = [[ids surviving tier 1 in order]], keys = {id: judge key}."""
+    from fluxplace import placetour as PTm
+    board = str(tmp_path / "in.kicad_pcb")
+    open(board, "w").write("input")
+    state = {"r": -1}
+
+    def fake_tier1(base, cands, cons, spec, P, outdir, base_state):
+        state["r"] += 1
+        surv = []
+        os.makedirs(outdir, exist_ok=True)
+        for i, cid in enumerate(rounds[state["r"]]):
+            p = os.path.join(outdir, f"{cid}.kicad_pcb")
+            open(p, "w").write(f"moved-{cid}")
+            surv.append((tuple(keys[cid]), {"id": cid, "kind": "nudge", "moves": {"U1": (1.0, 1.0, 0)}}, p,
+                         {"segs": [], "vias": []}))
+        return surv, []
+
+    def fake_jobs(jobs, P, timeout, entry="lookahead:_worker"):
+        out = []
+        for j in jobs:
+            cid = j["tag"].split("-", 1)[1]
+            out.append({"tag": j["tag"], "routed": f"/routed/{cid}", "blame": {"k": keys[cid]}, "key": list(keys[cid]),
+                        "png": None})
+        return out
+
+    monkeypatch.setattr(PTm, "judge", lambda a, b, outdir, P, cons=None, spec=None, log=None:
+                        {"routed": "/routed/input", "blame": {"k": keys["input"]}, "source": "route_review", "secs": 0})
+    monkeypatch.setattr(PTm, "judge_key", lambda routed, blame, cons=None: tuple(blame["k"]))
+    monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None: [{"id": "x", "kind": "nudge", "moves": {}}])
+    monkeypatch.setattr(PTm, "tier1", fake_tier1)
+    monkeypatch.setattr(PTm, "gate_state", lambda B, cons, spec: {"collision": 0})
+    monkeypatch.setattr(PTm.RD, "load", lambda p: _board())
+    monkeypatch.setattr(PTm.LA, "_run_jobs", fake_jobs)
+    monkeypatch.setattr(PTm.LA, "critical_nets", lambda b, cons, spec=None: [])
+    monkeypatch.setattr(PTm.LA, "render", lambda board_, rects, fit, path: path)
+    monkeypatch.setattr(PTm.SN, "active_take", lambda *a, **k: None)
+    return board
+
+
+def test_stage_skipped_when_disabled(tmp_path):
+    from fluxplace import placetour as PTm
+    from types import SimpleNamespace
+    c = SimpleNamespace(cons={}, spec=None, a=None, dir=lambda n, name: str(tmp_path))
+    r = PTm.stage(c, 3, "in.kicad_pcb")
+    assert r["verdict"] == "skipped" and r["board"] == "in.kicad_pcb"
+
+
+def test_stage_keeps_winner_moved_board_and_stops_on_no_gain(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5), "B": (4, 0, 0.0, 0, 0.5), "C": (3, 0, 0.0, 0, 0.5),
+            "D": (3, 0, 0.0, 0, 0.5)}
+    board = _script_stage(monkeypatch, tmp_path, [["A", "B"], ["C", "D"]], keys)
+    c = _stage_ctx(tmp_path)
+    r = PTm.stage(c, 3, board)
+    assert r["verdict"] == "pass"
+    out = r["board"]
+    assert open(out).read() == "moved-A"                                       # the winner's moved board, not the judge copy
+    d = c.dir(3, "placetour")
+    prog = __import__("json").load(open(os.path.join(d, "progress.json")))
+    assert prog["state"] == "done" and prog["rounds"] == 2 and prog["reason"] == "no gain for 1 round(s)"
+    md = open(os.path.join(d, "placetour.md")).read()
+    assert "| 1 | nudge | U1 | (10, 10, 0.0) | (1.0, 1.0, 0) | 0 |" in md
+    table = open(os.path.join(d, "TOURNAMENT.md")).read()
+    assert "| r1-A |" in table and "winner" in table
+
+
+def test_stage_stops_at_max_rounds(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (9, 0, 0.0, 0, 0.0), "A": (8, 0, 0.0, 0, 0.0), "B": (7, 0, 0.0, 0, 0.0), "C": (6, 0, 0.0, 0, 0.0),
+            "D": (5, 0, 0.0, 0, 0.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], ["B"], ["C"]], keys)
+    c = _stage_ctx(tmp_path, {"no_gain_rounds": 9})
+    r = PTm.stage(c, 3, board)
+    prog = __import__("json").load(open(os.path.join(c.dir(3, "placetour"), "progress.json")))
+    assert prog["rounds"] == 3 and prog["reason"] == "max_rounds"
+    assert open(r["board"]).read() == "moved-C"
