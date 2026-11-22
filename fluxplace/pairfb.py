@@ -367,6 +367,19 @@ def handoff_nets(state, work):
         return set()
 
 
+def gated_open_legs(cons, pair_legs, open_names, extra=()):
+    """PHASE3I F1: both legs of every gated pair (review.pair_gated) that has a leg open (or in `extra`, the handed-over
+    nets). Pairs come from naming over `pair_legs`; `not_pairs` nets are never a pair."""
+    from . import graph, review, constraints as C
+    pairs = graph.diff_pairs(pair_legs, exclude=C.not_pairs(cons))
+    hit = set(open_names) | set(extra)
+    out = set()
+    for slave, master in pairs.items():
+        if review.pair_gated(cons, master) and (slave in hit or master in hit):
+            out.update((slave, master))
+    return out
+
+
 def handoff_hs_nets(state, work, cons=None):
     """PHASE3I B1: the legs of handed-over pairs that are gated (high-speed). They never reach the plain router."""
     from . import review as RV

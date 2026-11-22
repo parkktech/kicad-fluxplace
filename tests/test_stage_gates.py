@@ -57,3 +57,18 @@ def test_scope_gaps_keeps_only_gate_kinds():
     mm2 = {"gaps": [{"kind": "open-gap", "class": "plain"}]}
     GP._scope_gaps(mm2, None)
     assert len(mm2["gaps"]) == 1
+
+
+def test_gated_open_legs_gated_plain_and_not_pairs():
+    """PHASE3I F1: both legs of an open gated pair; a plain pair and a not_pairs-declared pair are never returned."""
+    from fluxplace import krtchain as K
+    nets = ["USB_DP", "USB_DM", "LED_P", "LED_N", "ZZ_P", "ZZ_N"]
+    cons = {"pairs": {"USB": {"skew": 0.1}}}
+    assert PFB.gated_open_legs(cons, nets, ["USB_DM"]) == {"USB_DP", "USB_DM"}
+    assert PFB.gated_open_legs(cons, nets, ["LED_N"]) == set()                       # plain pair: not gated
+    assert PFB.gated_open_legs({**cons, "not_pairs": ["USB_DP"]}, nets, ["USB_DM"]) == set()
+    assert PFB.gated_open_legs(cons, nets, [], extra=["USB_DP"]) == {"USB_DP", "USB_DM"}   # handed-over leg
+    assert K.route_net_set(nets, set(), {"USB_DP", "USB_DM"}, []) == ("*",)            # nothing excluded
+    got = K.route_net_set(nets, {"ZZ_P"}, {"USB_DP", "USB_DM"}, ["USB_DP"])
+    assert got == sorted(set(nets) - {"ZZ_P", "USB_DP"}) and "USB_DM" in got          # still-open leg excluded
+    assert K.route_net_set(nets, set(), {"USB_DP", "USB_DM"}, []) == ("*",)            # pair completed: back in

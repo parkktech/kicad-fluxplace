@@ -899,7 +899,7 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     from . import pairfb as PFB
     hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage handed over (state c): still never plain nets for the router (PHASE3C)
-    hs_hand = PFB.handoff_hs_nets(getattr(c, "state", None), getattr(c, "work", ""), c.cons)   # PHASE3I B1: a gated pair the pairs gate did not close is never a plain net
+    hs_hand = PFB.gated_open_legs(c.cons, todo, set(conn(board)), hand)   # PHASE3I F1/B1: a gated pair leg still open is never a plain net
     skip = sorted(set(PFB.router_skip(todo, ctl, hand, FS["pairs"])) | (set(todo) & hs_hand))
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)

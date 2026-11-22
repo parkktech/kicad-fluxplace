@@ -40,12 +40,12 @@ def _ctx(tmp_path, monkeypatch, rcs):
 
 
 def test_chain_accepts_exit3(tmp_path, monkeypatch):
-    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 3])
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 3])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [os.path.basename(x[1]) for x in calls] == ["route_planes.py", "route_diff.py", "route.py"]
-    assert calls[1][calls[1].index("--nets") + 1:calls[1].index("--layers")] == ["USB_DM", "USB_DP"]
-    assert r["verdict"] == "warn" and "USB_DP" in r["line"]
-    assert "--json-out" in calls[1] and "--json-out" in calls[2]
+    assert [os.path.basename(x[1]) for x in calls] == ["route_planes.py", "route.py"]    # gated USB pair: no KRT diff step (F1)
+    assert calls[1][calls[1].index("--nets") + 1:calls[1].index("--power-nets")] == ["X"]   # both legs out (open + pairgroups failure)
+    assert r["verdict"] == "warn" and "USB_DP" in r["line"] and r["hs_excluded"] == ["USB_DP"]
+    assert "--json-out" in calls[1]
 
 
 def test_router_relaxed_project_is_discarded_after_every_step(tmp_path, monkeypatch):
@@ -65,10 +65,10 @@ def test_router_relaxed_project_is_discarded_after_every_step(tmp_path, monkeypa
 
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), relaxed_runner)
     assert json.load(open(tmp_path / "board.kicad_pro")) == approved
-    assert json.load(open(tmp_path / "4-route.kicad_pro")) == approved
+    assert json.load(open(tmp_path / "3-route.kicad_pro")) == approved
     assert "router project rules discarded:" in r["line"]
     routed = [s for s in r["steps"] if s["step"] != "pairgroups"]           # pairgroups is a Python step, no router project
-    assert len(routed) == 3 and all(s["router_project_discarded"] for s in routed)
+    assert len(routed) == 2 and all(s["router_project_discarded"] for s in routed)
     assert all(cmd[cmd.index("--via-size") + 1] == "0.46" for cmd in calls)
 
 
@@ -215,20 +215,21 @@ def test_pairs_missed_by_external_router_are_reported(tmp_path, monkeypatch):
 def test_route_reads_completed_pairs_report_beside_router_input(tmp_path, monkeypatch):
     import json
     c, _calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
-    opens = iter(({"USB_DP": 1}, {}, {}, {}, {}))
+    opens = iter(({"LED_P": 1}, {}, {}, {}, {}))
     monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: next(opens, {}))
-    (tmp_path / "in.pairs.json").write_text(json.dumps({"pairs": [{"pair": ["USB_DP", "USB_DM"], "status": "complete"}]}))
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["LED_P", "LED_N", "X"])
+    (tmp_path / "in.pairs.json").write_text(json.dumps({"pairs": [{"pair": ["LED_P", "LED_N"], "status": "complete"}]}))
     from fluxplace import routediag as RD, netclass as NC, qualaudit as QA, pairs as PRS, pairaudit as PA
     monkeypatch.setattr(RD, "load", lambda b: {})
     monkeypatch.setattr(NC, "classify", lambda *a: {})
     monkeypatch.setattr(QA, "status_fields", lambda *a, **k: {"not_done": {"count": 0, "pairs": [], "rf": []}, "nets_routed": 0, "nets_open0": 0})
-    monkeypatch.setattr(PA, "pair_list", lambda cls: [("USB_DP", "USB_DM")])
+    monkeypatch.setattr(PA, "pair_list", lambda cls: [("LED_P", "LED_N")])
     monkeypatch.setattr(PRS, "crosscheck_external", lambda pairs, summary=None, log=None: [
-        {"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM", "reason": "not_recognised"}])
+        {"pair": "LED_P/LED_N", "p": "LED_P", "n": "LED_N", "reason": "not_recognised"}])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     result = json.load(open(tmp_path / "result.json"))
     assert result["pairs_missed"] == []
-    assert result["pairs_already_done"] == [{"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM",
+    assert result["pairs_already_done"] == [{"pair": "LED_P/LED_N", "p": "LED_P", "n": "LED_N",
                                             "reason": "pairs_stage_complete"}]
     assert "pairs already done 1" in r["line"] and "pair router missed" not in r["line"]
 
@@ -271,7 +272,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     names = [s["step"] for s in r["steps"]]
-    assert names == ["plane-GND", "rails-pour", "pairgroups", "diff", "route"]      # VBAT is a pour rail (PHASE3E 5)
+    assert names == ["plane-GND", "rails-pour", "pairgroups", "route"]      # VBAT is a pour rail (PHASE3E 5)
     rails_cmd = calls[1]
     assert os.path.basename(rails_cmd[1]) == "route.py"
     assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
@@ -282,7 +283,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     c2.cons["power"] = c.cons["power"]
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND", "VBAT"})
     r2 = K.run(c2, 5, str(tmp_path / "in.kicad_pcb"), runner2)
-    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "pairgroups", "diff", "route"] and r2["rails"]["routed"] == []
+    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "pairgroups", "route"] and r2["rails"]["routed"] == []
 
 
 def test_no_rails_no_step(tmp_path, monkeypatch):
@@ -290,7 +291,7 @@ def test_no_rails_no_step(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "diff", "route"]
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "route"]
 
 
 def test_pour_runs_before_final_measurement(tmp_path, monkeypatch):

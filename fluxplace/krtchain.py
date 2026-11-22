@@ -271,6 +271,13 @@ def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=()):
     return 0
 
 
+def route_net_set(allnets, failed_legs, hs_block, still_open):
+    """PHASE3I F1: the nets the whole-board router may take. `("*",)` only when nothing is excluded; else every net but the
+    pairgroups failures and the gated pair legs still open (a pair the pairs steps completed is no longer excluded)."""
+    excluded = set(failed_legs) | (set(hs_block) & set(still_open))
+    return ("*",) if not excluded else sorted(set(allnets) - excluded)
+
+
 def run(c, n, board, runner=run_step):
     """the route stage in krt-whole mode -> stage result dict.  `runner(cmd, log)` -> (rc, s): replaceable in tests."""
     import json
@@ -297,6 +304,8 @@ def run(c, n, board, runner=run_step):
     pn = pair_nets(c.cons, allnets, rep)
     opn = {x for x in pn if x in names or x in hand}                 # a pair is incomplete when either leg is open
     diff = sorted(x for x in pn if any(_diffnamed(x, y) and (x in opn or y in opn) for y in pn))
+    hs_block = PFB.gated_open_legs(c.cons, pn, names, hand)          # PHASE3I F1: gated pair legs are the pair builder's, not KRT's
+    diff = [x for x in diff if x not in hs_block]
     from . import power as PWR      # D71cj: [power] rails at their width; a net with a zone on the board is not a rail
     from . import gaps as GP
     nl = len(sig) + len({lay for _n, lay in planes})
@@ -318,8 +327,11 @@ def run(c, n, board, runner=run_step):
     def _pairgroups(s, o):
         return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn)
     steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
-    def _route_nets():
-        return sorted(allnets - failed_legs) if failed_legs else ("*",)
+    hs_rec = {"excluded": []}
+    def _route_nets(src):
+        still = set(RC.open_by_net(src))                     # re-read after pairgroups: a pair it completed is back in
+        hs_rec["excluded"] = sorted(hs_block & still)
+        return route_net_set(allnets, failed_legs, hs_block, still)
     if diff:
         for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
@@ -328,7 +340,7 @@ def run(c, n, board, runner=run_step):
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
-    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets())))
+    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s))))
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
@@ -440,11 +452,13 @@ def run(c, n, board, runner=run_step):
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
     json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "mask": mask},
               open(os.path.join(d, "result.json"), "w"), indent=1)
+    if hs_rec["excluded"]:
+        line += f"; {len(hs_rec['excluded'])} gated pair leg(s) left to the pairs gate: " + ", ".join(hs_rec["excluded"][:6])
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "hs_excluded": hs_rec["excluded"]}
 
 
 def _rail_refused(rail_nets, rows):

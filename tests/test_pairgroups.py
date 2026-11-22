@@ -143,9 +143,9 @@ def test_pairgroups_step_collects_failed_legs_and_survives_errors(tmp_path, monk
 
 def test_route_nets_exclude_failed_pair_legs(tmp_path, monkeypatch):
     c, calls, runner = TK._ctx(tmp_path, monkeypatch, [0, 0, 0])
-    monkeypatch.setattr(K, "_run_pairgroups", lambda c_, d, s, o, failed, b: (failed.add("USB_DP"), shutil.copy(s, o), 0)[2])
+    monkeypatch.setattr(K, "_run_pairgroups", lambda c_, d, s, o, failed, b, **kw: (failed.add("USB_DP"), shutil.copy(s, o), 0)[2])
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "diff", "route"]
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "route"]     # gated USB legs: no KRT diff (F1)
     route = calls[-1]
     nets = route[route.index("--nets") + 1:route.index("--layers")] if "--layers" in route else []
     assert "USB_DP" not in nets and "USB_DM" in nets and "X" in nets
@@ -153,7 +153,7 @@ def test_route_nets_exclude_failed_pair_legs(tmp_path, monkeypatch):
 
 def test_gaps_pairgroup_rung_and_dispatch(tmp_path, monkeypatch):
     assert GP.DISPATCH["pair-open"] == ["pairgroup", "ai"] and GP.DISPATCH["pair-asym"] == ["pairgroup", "ai"]   # PHASE3G G1
-    assert GP.DISPATCH["pair-skew"] == ["pairgroup", "ai"] and GP.LEVEL["pairgroup"] == "L1"
+    assert GP.DISPATCH["pair-skew"] == ["pairgroup", "tune", "ai"] and GP.LEVEL["pairgroup"] == "L1"
     monkeypatch.setattr(RD, "load", lambda p: {})
     monkeypatch.setattr(NC, "classify", lambda *a, **k: {})
     monkeypatch.setattr(PA, "pair_list", lambda cls: [("A_P", "A_N"), ("Q_P", "Q_N")])
