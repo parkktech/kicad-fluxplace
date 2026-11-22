@@ -163,3 +163,17 @@ def test_loader_matches_legacy_on_real_board(path):
     if not os.path.isfile(path):
         pytest.skip("board not present")
     assert _compare(path) == []
+
+
+STICKHUB = "/usr/share/kicad/demos/stickhub/StickHub.kicad_pcb"
+
+
+@pytest.mark.parametrize("path,limit_ms,stale", [
+    (REAL[0], 2000, True), (REAL[1], 1000, False), (STICKHUB, 1000, False)])
+def test_load_time_and_fill_stale_on_real_boards(path, limit_ms, stale):
+    if not os.path.isfile(path):
+        pytest.skip("board not present")
+    with K.Kernel(path) as k:
+        info = k.call("info")
+    assert info["load_ms"] < limit_ms, info["load_ms"]
+    assert info["fill_stale"] is stale
