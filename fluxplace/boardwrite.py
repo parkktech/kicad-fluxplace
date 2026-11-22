@@ -170,3 +170,49 @@ def strip_indexed(text, seg_idx, via_idx):
             k -= 1
         text = text[:k] + text[e:]
     return text
+
+
+_PT_NODE = re.compile(r"\((start|end|mid|at)(\s+)(-?[\d.eE+-]+)(\s+)(-?[\d.eE+-]+)")
+
+
+def carry_copper(text, moves_by_ref, pieces):
+    """Carry stub copper rigidly with its part. `moves_by_ref` = {ref: (old_pose, new_pose)}, poses (x, y, angle_deg) as
+    routediag reads them; `pieces` = [{"ref", "segs": [track index], "vias": [via index]}] in routediag order. Each listed
+    track/arc/via moves by the part's translation and turns about the footprint origin by the angle change (KiCad
+    convention, same as apply_moves). Keys and locks are untouched. -> text (same node count and order)."""
+    from .boardfile import _rot
+    owner_s, owner_v = {}, {}
+    for pc in pieces:
+        if pc["ref"] not in moves_by_ref:
+            continue
+        for i in pc["segs"]:
+            owner_s[i] = pc["ref"]
+        for j in pc["vias"]:
+            owner_v[j] = pc["ref"]
+    if not owner_s and not owner_v:
+        return text
+
+    def xf(x, y, ref):
+        (ox, oy, oa), (nx, ny, na) = moves_by_ref[ref]
+        dx, dy = _rot(x - ox, y - oy, na - oa)
+        return nx + dx, ny + dy
+
+    root_end = _end(text, text.index("("))
+    edits, si, vi = [], 0, 0
+    for cs, ce in _children(text, 0, root_end):
+        ref = None
+        if text.startswith(("(segment", "(arc"), cs):
+            ref = owner_s.get(si)
+            si += 1
+        elif text.startswith("(via", cs):
+            ref = owner_v.get(vi)
+            vi += 1
+        if ref is None:
+            continue
+        for m in _PT_NODE.finditer(text, cs, ce):
+            x, y = xf(float(m.group(3)), float(m.group(5)), ref)
+            new = f"({m.group(1)}{m.group(2)}{_num(x)}{m.group(4)}{_num(y)}"
+            edits.append((m.start(), m.end(), new))
+    for s, e, new in sorted(edits, reverse=True):
+        text = text[:s] + new + text[e:]
+    return text
