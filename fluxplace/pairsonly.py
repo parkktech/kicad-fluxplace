@@ -128,6 +128,12 @@ def _cleanup(work):
             pass
 
 
+def _cleanup_one(path):
+    for x in (path, os.path.splitext(path)[0] + ".kicad_pro", os.path.splitext(path)[0] + ".kicad_dru"):
+        if os.path.exists(x):
+            os.remove(x)
+
+
 def _sidecars(src, dst):
     for ext in (".kicad_pro", ".kicad_dru"):
         s = os.path.splitext(src)[0] + ext
@@ -135,8 +141,14 @@ def _sidecars(src, dst):
             shutil.copy(s, os.path.splitext(dst)[0] + ext)
 
 
+def _blocker_pairs(labels, pairs):
+    """PHASE3I B5b: the pairs (of `pairs`) one of whose legs the blocker labels name (whole-token match)."""
+    toks = set(re.split(r"[\s,;()|]+", " ".join(labels)))
+    return [p for p in pairs if any(leg in toks for leg in p)]
+
+
 def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budget=None, allow_shove=False,
-            log=print, lay=None, drc=None, result=None, unlock=False):
+            log=print, lay=None, drc=None, result=None, unlock=False, force=(), group=True):
     """-> report {out, stopped, elapsed_s, budget_s, unmatched, pairs: [row]}; row.status is rerouted | kept_original |
     refused_locked | already_ok | not_reached. `lay(board_path, cons, spec, only=set)` defaults to pairs.plan, `drc(path)` ->
     (keys, counts) to a kicad-cli DRC; both can be replaced (tests)."""
@@ -188,7 +200,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                                reason=f"{len(lk)} locked item(s): " + "; ".join(lk[:6]) + (" ..." if len(lk) > 6 else "") + " (use --unlock to re-route and re-lock this pair)")
                     log(f"  {name}: refused, {row['reason']}")
                     continue
-                if aud0[pr]["status"] == "complete":
+                if aud0[pr]["status"] == "complete" and name not in force:
                     row.update(status="already_ok", reason="already connected, matched and in tolerance: not touched")
                     continue
                 if lk:
@@ -280,6 +292,36 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                     breakout_retry=bo_ring is not None)
                 log(f"  {name}: rerouted, P {prof['p_mm']} / N {prof['n_mm']} mm, skew {prof['skew']}, vias {prof['vias']}"
                     + (f"; opened {', '.join(row['opened'])}" if row["opened"] else "") + _bo_text(row))
+            # PHASE3I B5b: a pair blocked by one in-tolerance (complete, not named) pair is re-laid as a group: the blocker is
+            # re-laid whole, then the blocked pair; both are kept only when both end complete, else the board is restored.
+            for row in [r for r in rows.values() if group and r["status"] == "kept_original" and r.get("blockers")]:
+                cands = [p for p in _blocker_pairs(row["blockers"], PA.pair_list(cls)) if p not in sel]
+                if len(cands) != 1:
+                    continue
+                bname = f"{cands[0][0]}/{cands[0][1]}"
+                opn_now = RC.text_open(RD.load(work))
+                if PA.audit(RD.load(work), [cands[0]], cons, {n for n, k in opn_now.items() if k})[cands[0]]["status"] != "complete":
+                    continue
+                snap, out2 = work + ".grp.kicad_pcb", work + ".grp2.kicad_pcb"
+                shutil.copy(work, snap)
+                _sidecars(work, snap)
+                sub = reroute(work, out2, [bname, row["pair"]], cons, spec, kicad_cli, None, allow_shove, log, lay, drc,
+                              unlock=unlock, force=(bname,), group=False)
+                got = {r["pair"]: r["status"] for r in sub["pairs"]}
+                if got.get(bname) == "rerouted" and got.get(row["pair"]) == "rerouted":
+                    os.replace(out2, work)
+                    _sidecars(out2, work)
+                    row.update(status="rerouted", reason="", grouped_with=bname)
+                    rows[bname] = {"pair": bname, "status": "rerouted", "reason": "", "grouped_with": row["pair"], "blockers": [],
+                                   "shoved": [], "opened": [], "before": {}, "after": {}}
+                    log(f"  {row['pair']}: rerouted as a group with {bname} (blocker re-laid whole)")
+                else:
+                    shutil.copy(snap, work)
+                    row["group_refused"] = f"{bname}: {got.get(bname, 'not reached')}, {row['pair']}: {got.get(row['pair'], 'not reached')}"
+                    log(f"  {row['pair']}: kept_original, group with {bname} refused ({row['group_refused']})")
+                for ext in ("", ".pre"):
+                    _cleanup_one(out2 + ext)
+                _cleanup_one(snap)
     except TU.Stopped as s:
         stopped = s.reason
         for r in rows.values():                              # the pair in progress: its original copper is what the output holds
@@ -306,7 +348,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
         if os.path.exists(src) and not os.path.exists(dst):
             shutil.copy(src, dst)
     rep = {"board": board, "out": out, "stopped": stopped, "elapsed_s": round(bud.elapsed(), 1), "budget_s": bud.seconds,
-           "allow_shove": bool(allow_shove), "unlock": bool(unlock), "unmatched": unmatched, "pairs": [rows[f"{p[0]}/{p[1]}"] for p in sel]}
+           "allow_shove": bool(allow_shove), "unlock": bool(unlock), "unmatched": unmatched, "pairs": [rows[f"{p[0]}/{p[1]}"] for p in sel] + [r for k, r in rows.items() if k not in {f"{p[0]}/{p[1]}" for p in sel}]}
     if result is not None:
         result.update(rep)
     return rep
