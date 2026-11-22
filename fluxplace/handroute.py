@@ -749,6 +749,8 @@ def _write_text_ledger(L, path):
             lines.append("    unlocked-and-removed: " + json.dumps(item, sort_keys=True))
         for opened in e.get("opened", []):
             lines.append("    opened: " + json.dumps(opened, sort_keys=True))
+        if e.get("args") is not None:                        # PHASE3I F5 (R12): replay() lays with the original arguments
+            lines.append("    args: " + json.dumps(e["args"], sort_keys=True))
         if e.get("stitched"):                                # PHASE3I B2: replay() re-applies a stitched lay with stitch=True
             lines.append("    stitched: " + json.dumps(e["stitched"], sort_keys=True))
     open(path, "w").write("\n".join(lines) + "\n")
@@ -841,7 +843,7 @@ def _drop_vias(b, M, att):
 
 
 def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True,
-          stitch=None):
+          stitch=None, args=None):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
     stitch(b, M, nets) -> iterable of attempts [(net, x, y, via_dims)...]: used only when the refusal is a lay that opened
     connections of zone nets alone; each attempt's vias go into the same in-memory board and the same guard decides (PHASE3H-C).
@@ -856,6 +858,8 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
     base = summarize_drc(base_raw)
     M = _model(src, constraints, refill=refill)
     res = {"op": op, "net": net, "what": what, "accepted": False}
+    if args is not None:
+        res["args"] = args
     try:
         b = M.b
         info = mutate(b, M)
@@ -954,6 +958,8 @@ def _record(S, res, in_session, out):
     ent = {k: res.get(k) for k in ("op", "net", "what", "accepted", "reason", "measure")}
     if res.get("stitched"):
         ent["stitched"] = res["stitched"]
+    if res.get("args") is not None:
+        ent["args"] = res["args"]
     removed = (res.get("info") or {}).get("removed") or []
     removed_locked = [x for x in removed if isinstance(x, dict) and x.get("unlocked_and_removed")] if isinstance(removed, list) else []
     if removed_locked:
@@ -1092,7 +1098,8 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         added = _apply_prims(b, M, net, prims, w, vv, lock)
         return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
     hook = (lambda b, M, nets: _stitch_attempts(b, M, nets, via)) if stitch else None
-    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook)
+    args = {"width": width, "via": list(via) if via else None, "any_angle": any_angle, "lock": lock}   # PHASE3I F5 (R12)
+    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args)
 
 
 def _net_copper(b, net):
@@ -1243,16 +1250,19 @@ _LAY_ROW = re.compile(r"^#\d+ .*\blay +ACCEPT net=(\S+)\s+(.*)$")
 
 
 def accepted_lays(ledger):
-    """PHASE3I B2: the ACCEPT `lay` rows of a session ledger.txt -> [(net, path, stitched)] in ledger order.
-    A row's `    stitched:` line marks it stitched. The path is the row's `what` text, exactly as lay was given it."""
+    """PHASE3I B2: the ACCEPT `lay` rows of a session ledger.txt -> [(net, path, stitched, args)] in ledger order.
+    A row's `    stitched:` line marks it stitched; its `    args:` line (PHASE3I F5) holds the lay arguments ({} for an
+    older ledger). The path is the row's `what` text, exactly as lay was given it."""
     out = []
     for line in open(ledger, errors="replace"):
         line = line.rstrip("\n")
         m = _LAY_ROW.match(line)
         if m:
-            out.append([m.group(1), m.group(2).strip(), False])
+            out.append([m.group(1), m.group(2).strip(), False, {}])
         elif line.startswith("    stitched:") and out:
             out[-1][2] = True
+        elif line.startswith("    args:") and out:
+            out[-1][3] = json.loads(line[len("    args:"):])
     return [tuple(r) for r in out]
 
 
@@ -1272,22 +1282,52 @@ def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
     from . import constraints as CN
     cons = CN.load(constraints) if isinstance(constraints, str) else constraints
     n, cur = _merge_current(dst)
-    applied, requeue = [], []
-    for net, path, stitched in accepted_lays(ledger):
+    before, applied, requeue, mine = cur, [], [], []
+    for net, path, stitched, args in accepted_lays(ledger):
         if net_rx and not re.search(net_rx, net):
             continue
         out = os.path.join(dst, f"m{n + 1}.kicad_pcb")
+        kw = dict(args or {})
+        if isinstance(kw.get("via"), list):
+            kw["via"] = tuple(kw["via"])
         try:
-            res = lay(cur, net, path, out=out, constraints=cons, kicad_cli=kicad_cli, stitch=stitched)
+            res = lay(cur, net, path, out=out, constraints=cons, kicad_cli=kicad_cli, stitch=stitched, **kw)
             ok, why = bool(res.get("accepted")), res.get("reason", "")
         except (ValueError, RuntimeError) as e:
             ok, why = False, str(e)[:200]
         if ok and os.path.exists(out):
             applied.append(net)
+            mine.append((net, path))
             n, cur = n + 1, out
         else:
             requeue.append({"net": net, "path": path, "why": why or "refused"})
+    if mine and cur != before:                     # PHASE3I F5 (R6): this ledger judged once against the board before it
+        why = _r6_refusal(before, cur, cons, kicad_cli)
+        if why:                                    # refused: the board goes back to before this ledger, every row requeued
+            for net, path in mine:
+                requeue.append({"net": net, "path": path, "why": why})
+            del applied[len(applied) - len(mine):]
+            cur = before
     return {"applied": applied, "requeue": requeue, "board": cur}
+
+
+def _r6_refusal(base, cand, cons, kicad_cli="kicad-cli", protect=()):
+    """PHASE3I F5 (R6, shared by session_commit and replay): the close guard's R6 test of `cand` against `base`, on copies
+    (the two boards are never refilled or saved). -> the refusal reason, or None when the candidate is not worse."""
+    from . import gaps as GP
+    tmp = tempfile.mkdtemp(prefix="r6-", dir=os.path.dirname(os.path.abspath(cand)))
+    try:
+        b0, c0 = os.path.join(tmp, "base.kicad_pcb"), os.path.join(tmp, "cand.kicad_pcb")
+        _copy_board(base, b0)
+        _copy_board(cand, c0)
+        base_m = GP._remeasure(b0, kicad_cli)
+        GP._classify_into(base_m, cons or {}, b0)
+        cand_m = GP._remeasure(c0, kicad_cli)
+        GP._classify_into(cand_m, cons or {}, c0)
+        ok6, why6 = GP._accept(base_m, b0, cand_m, c0, [], cand_m["gaps"], None, protect)
+        return None if ok6 else why6
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def merge_sessions(ledgers, dst, constraints=None, kicad_cli="kicad-cli"):
@@ -1425,13 +1465,8 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="rep
     if not ok:
         reasons.append(why)
     elif mode == "repair":                          # PHASE3I B4: R6 (hs_pair/rf/power/power_mag) judged as close judges it
-        from . import gaps as GP
-        base_m = GP._remeasure(start, kicad_cli)
-        GP._classify_into(base_m, cons, start)
-        cand_m = GP._remeasure(S.work, kicad_cli)
-        GP._classify_into(cand_m, cons, S.work)
-        ok6, why6 = GP._accept(base_m, start, cand_m, S.work, [], cand_m["gaps"], None, protect)
-        if not ok6:
+        why6 = _r6_refusal(start, S.work, cons, kicad_cli, protect)     # PHASE3I F5 (R11): on copies
+        if why6:
             reasons.append(why6)
     Ma, Mb = G.Model(start), G.Model(S.work)
     reescapes = _active_locked_reescapes(S)

@@ -1697,6 +1697,10 @@ def _r_ai_session(base, out, gaps, ctx):
     budget = _ai_budget(ctx.get("cons"))
     used = ctx["ai_used"]
     regs = _sessions_load(ai_dir)
+    for reg in regs:                                          # PHASE3I F5 (merge phase): the oldest answered region first
+        if reg.get("status") == "open" and os.path.exists(os.path.join(ai_dir, reg["rid"] + ".done.json")) \
+                and any(g["id"] in reg.get("gaps", []) for g in gaps):
+            return _r_ai_merge(base, out, gaps, ctx, regs, reg)
     busy = {gid for r in regs if r.get("status") == "open" for gid in r.get("gaps", [])}
     todo = [g for g in gaps if g["id"] not in busy and used.get(ai_key(g), 0) < budget]
     by_id = {g["id"]: g for g in todo}
@@ -1738,6 +1742,45 @@ def _r_ai_session(base, out, gaps, ctx):
         made.append(brief)
     _write_json(os.path.join(ai_dir, "sessions.json"), regs)
     return {"status": "packet", "n": len(made), "briefs": made} if made else {"status": "no packet", "n": 0}
+
+
+def _r_ai_merge(base, out, gaps, ctx, regs, reg):
+    """PHASE3I F5 (B2, merge phase): one answered region. Its session ledger is replayed onto ai/merge/<rid>/ from the
+    board the region was briefed on (H.replay: every lay through the guard again). Nothing applied -> the region is
+    refused, its gaps get the reasons, the done file is retired. Else `out` is the merged board (close's guard judges it
+    like any rung; a guard refusal leaves base untouched and the gaps free for a new brief), the requeued rows are
+    feedback notes, and the region's gaps are charged one AI try each."""
+    from . import handroute as HR
+    ai_dir, used = ctx["ai_dir"], ctx["ai_used"]
+    done = os.path.join(ai_dir, reg["rid"] + ".done.json")
+    with open(done) as fh:
+        ledger = json.load(fh)["ledger"]
+    mdir = os.path.join(ai_dir, "merge", reg["rid"])
+    os.makedirs(mdir, exist_ok=True)
+    HR._copy_board(base, os.path.join(mdir, "m0.kicad_pcb"))
+    r = HR.replay(ledger, mdir, constraints=ctx.get("cons"))
+    grp = [g for g in gaps if g["id"] in reg["gaps"]]
+    sids = {g["id"]: critroute._safe(ai_key(g))[:80] for g in grp}
+    if not r["applied"]:
+        why = r["requeue"][0]["why"] if r["requeue"] else "nothing to merge"
+        for g in grp:
+            _feedback_note(ai_dir, sids[g["id"]], refused=f"merge: {why}"[:160])
+        reg["status"] = "refused"
+        out_status = {"status": "refused", "why": str(why)[:160]}
+    else:
+        HR._copy_board(r["board"], out)
+        reg["status"] = "merged"
+        for row in r["requeue"]:
+            for g in grp:
+                if row["net"] in (g.get("nets") or []):
+                    _feedback_note(ai_dir, sids[g["id"]], refused=str(row["why"])[:160])
+        for g in grp:
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
+        out_status = {"status": "applied", "applied": len(r["applied"]), "requeue": len(r["requeue"]),
+                      "gap_id": grp[0]["id"] if grp else None}
+    _consume(done)
+    _write_json(os.path.join(ai_dir, "sessions.json"), regs)
+    return out_status
 
 
 def _r_tune(base, out, gaps, ctx):
