@@ -551,6 +551,8 @@ def _halves(gs):
     o = sorted(gs, key=lambda g: (tuple(round(c / 5.0) for c in (g.get("at") or (0, 0))), g["id"]))
     k = len(o) // 2
     return [o[:k], o[k:]]
+STALL_MIN = 30                                   # PHASE3I B3: a pass with no accept for [flow] stall_min stops "stalled"
+WINDOW_MM = 3.0                                  # PHASE3I B3: copper window around a gap for its memo key
 NO_GAIN_ROUNDS = 5                              # close() stops after this many rounds without a lower score ([flow] no_gain_rounds)
 KRT_WINDOW_MM = 1.5                             # margin of the gap window whose nets KRT may rip and re-route
 KRT_MAX = 8                                     # gaps per _r_krt call
@@ -1396,6 +1398,44 @@ def _ai_pending_names(ai_dir, gaps):
     return sorted(names)
 
 
+def window_hash(board, at, r=WINDOW_MM):
+    """PHASE3I B3: sha1 of the tracks and vias whose ends lie within `r` mm of `at` (the gap window). A gap with no
+    position, or a board that cannot be read, falls back to the whole-board copper fingerprint."""
+    if not at:
+        return versions.copper_fingerprint(board)
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    if b is None:                                    # not a readable board: the file bytes are the key (conservative)
+        return hashlib.sha1(open(board, "rb").read()).hexdigest()
+    cx, cy, R = pcbnew.FromMM(at[0]), pcbnew.FromMM(at[1]), pcbnew.FromMM(r)
+
+    def inside(p):
+        return abs(p.x - cx) <= R and abs(p.y - cy) <= R
+    rows = []
+    for t in b.GetTracks():
+        if t.Type() == pcbnew.PCB_VIA_T:
+            if inside(t.GetPosition()):
+                rows.append(["via", t.GetNetname(), t.GetLayer(), t.GetPosition().x, t.GetPosition().y, t.GetWidth(), t.GetDrill()])
+        elif inside(t.GetStart()) or inside(t.GetEnd()):
+            rows.append(["trk", t.GetNetname(), t.GetLayer(), t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y, t.GetWidth()])
+    return hashlib.sha1(json.dumps(sorted(rows, key=str)).encode()).hexdigest()
+
+
+def _rank(kind, rungs, yields):
+    """PHASE3I B3: rung order for a kind by measured yield in this work dir (accepts over tries, unmeasured neutral).
+    `ai` (L1) moves ahead of the other L1 router rungs once an L0 rung has failed here at least once."""
+    row = yields.get(kind, {})
+    rate = {r: (row.get(r, [0, 0])[1] + 0.5) / (row.get(r, [0, 0])[0] + 1) for r in rungs}
+    order = sorted(rungs, key=lambda r: -rate[r])
+    failed_l0 = any(LEVEL.get(r, "L0") == "L0" and row.get(r, [0, 0])[0] > 0 and row[r][1] == 0 for r in rungs if r != "ai")
+    if "ai" in order and failed_l0:
+        l1 = [r for r in order if r != "ai" and LEVEL.get(r, "L0") == "L1"]
+        if l1:
+            order.remove("ai")
+            order.insert(order.index(l1[0]), "ai")
+    return order
+
+
 def _ai_pending(ai_dir, gaps):
     """True when an unapplied action file exists for one of `gaps`."""
     return bool(_ai_pending_names(ai_dir, gaps))
@@ -1787,12 +1827,16 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     state_path = os.path.join(work, "gaps.json")
     memo = set()
     ai_used = {}
+    yields = {}
+    stall_s = float((cons.get("flow") or {}).get("stall_min", STALL_MIN)) * 60
+    last_acc = [t0]
     fallback = []                                        # PHASE3F A5: [p, n] of refused non-gated pairs (KRT legs)
     try:
         with open(state_path) as fh:
             st = json.load(fh)
         ai_used = {k: int(v) for k, v in (st.get("ai_used") or {}).items() if st.get("tool") == tool}   # PHASE3H A9
         fallback = [list(x) for x in st.get("fallback", [])]
+        yields = {k: {r: list(v) for r, v in d.items()} for k, d in (st.get("yields") or {}).items()}
         if st.get("tool") == tool and st.get("cons_hash") == cons_hash:
             memo = {tuple(x) for x in st.get("memo", [])}
     except (OSError, ValueError, AttributeError):
@@ -1800,7 +1844,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def save(r):
         _write_json(state_path, {"gaps": m["gaps"], "memo": sorted(list(k) for k in memo), "round": r,
-                                 "tool": tool, "cons_hash": cons_hash, "ai_used": ai_used, "fallback": fallback})
+                                 "tool": tool, "cons_hash": cons_hash, "ai_used": ai_used, "fallback": fallback,
+                                 "yields": yields})
 
     stop, level, n_att, last = None, "L0", 0, {}
     n_packets, krt_state = 0, {}
@@ -1813,14 +1858,17 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         nonlocal m, n_att, level, n_packets, protect, relax
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
-        key = (kind, rung, fp)
-        if rung == "pairgroup":                              # PHASE3E 7: per pair, so an unrelated accept re-lays nothing
-            key = (kind, rung, "pairs:" + ",".join(sorted(nets)))
+        # PHASE3I B3: memo key = rung, kind, gap signature and the copper in each gap window (not the whole board)
+        sigs = sorted(f"{g['kind']}|{','.join(sorted(g.get('nets') or []))}|{g.get('at')}" for g in targets)
+        wins = sorted(window_hash(best, g.get("at")) for g in targets)
+        key = (rung, kind, hashlib.sha1(json.dumps([sigs, wins]).encode()).hexdigest())
         if sub:                                              # PHASE3F A3: a split half has its own memo key
-            key = (kind, rung, fp, "sub:" + hashlib.sha1(",".join(sorted(g["id"] for g in targets)).encode()).hexdigest())
+            key = key + ("sub:" + hashlib.sha1(",".join(sorted(g["id"] for g in targets)).encode()).hexdigest(),)
         ai_names = _ai_pending_names(ctx_dir_ai(work), targets) if rung == "ai" else []
         if rung == "ai":                                     # PHASE3G-H2: an answer file refused once must not block the next one
-            key = key + ("ai:" + ",".join(ai_names),)
+            # PHASE3I B3: an answer is keyed by its content, so a rewritten answer with the same name is tried again
+            key = key + ("ai:" + ",".join(f"{n}@{hashlib.sha1(open(os.path.join(ctx_dir_ai(work), n), 'rb').read()).hexdigest()[:12]}"
+                                          for n in ai_names),)
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None
@@ -1902,6 +1950,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
         if result == "packet":
             n_packets += 1
+        if result != "skipped":                              # PHASE3I B3: per-kind, per-rung yield in this work dir
+            yl = yields.setdefault(kind, {}).setdefault(rung, [0, 0])
+            yl[0] += 1
+            if result in ("closed", "partial"):
+                yl[1] += 1
+                last_acc[0] = time.time()
         if rung == "ai" and result in ("closed", "partial") and summ.get("gap_id"):   # PHASE3H B5: an accept clears the refusal
             tg = next((g for g in targets if g["id"] == summ["gap_id"]), None)
             if tg is not None:
@@ -1986,9 +2040,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             targets = [g for g in m["gaps"] if g["kind"] == kind]
             if not targets or kind not in DISPATCH:
                 continue
-            for rung in DISPATCH[kind]:
+            for rung in _rank(kind, DISPATCH[kind], yields):
                 if time.time() - t0 > budget_s:
                     stop = "budget"
+                    break
+                if time.time() - last_acc[0] > stall_s:      # PHASE3I B3: no accept for stall_min: stop, do not re-run
+                    stop = "stalled"
                     break
                 accepted = attempt_split(r, kind, rung, targets)
                 save(r)
