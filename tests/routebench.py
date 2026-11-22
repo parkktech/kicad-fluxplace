@@ -358,12 +358,14 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--baseline")
+    ap.add_argument("--no-jsonl", action="store_true", help="smoke runs: do not append to the corpus jsonl")
     args = ap.parse_args(argv)
     boards, _rules = C.load_manifest(args.manifest)
     boards = [b for b in boards if b.get("bench") and (not args.board or b["name"] in args.board)]
     engines = args.engine or ["krt", "freerouting"]
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    rows, md = run_all(boards, engines, args.work, args.out, C.git_sha(), ts)
+    rows, md = run_all(boards, engines, args.work, args.out, C.git_sha(), ts,
+                       jsonl=None if args.no_jsonl else JSONL)
     print(md, end="")
     if args.baseline:
         with open(args.baseline, encoding="utf-8") as fh:
