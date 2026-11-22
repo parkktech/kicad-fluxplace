@@ -1,0 +1,167 @@
+"""Lookahead: ghost-route demand map and reserved channels (pure text, no pcbnew, no router).
+
+A ghost route is the board routed unlocked as a throw-away. Its non-critical copper shows where the other nets run:
+cells with many distinct nets are bus channels, cells next to a net's own pads are escape channels. The channels are
+reserved (rule areas) before the critical pairs are laid around them. See docs/recipes/LOOKAHEAD.md.
+"""
+import math
+
+from . import routediag as RD
+
+DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
+            "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 3, "max_rounds": 4, "no_gain_rounds": 2,
+            "variants": [[2, 3.0], [1, 3.0], [3, 2.0]]}
+_FLOAT = ("cell_mm", "escape_mm", "pair_clear_mm", "max_area_frac")
+_INT = ("min_nets", "ghost_budget_min", "jobs", "max_rounds", "no_gain_rounds")
+
+
+def params(cons):
+    """[lookahead] table of constraints.toml -> the stage parameters (defaults from the recipe). Stage is off unless enabled = true."""
+    e = dict((cons or {}).get("lookahead") or {})
+    P = dict(DEFAULTS)
+    P.update(e)
+    P["enabled"] = e.get("enabled") is True
+    for k in _FLOAT:
+        P[k] = float(P[k])
+    for k in _INT:
+        P[k] = int(P[k])
+    P["variants"] = [(int(a), float(b)) for a, b in P["variants"]]
+    return P
+
+
+def critical_nets(board_path, cons, spec=None):
+    """Legs of every pair pairs.stage lays (the same list: pairaudit.pair_list over netclass.classify) plus [power] rails
+    (the same helper krtchain uses: power.route_widths)."""
+    from . import netclass as NC, pairaudit as PA, power as PWR
+    B = RD.load(board_path)
+    cls = NC.classify(B, cons or {}, spec)
+    legs = {n for pr in PA.pair_list(cls) for n in pr}
+    return legs | set(PWR.route_widths(cons or {}, track_mm=0.15))
+
+
+def _cell_of(x, y, x0, y0, c):
+    return int(math.floor((x - x0) / c)), int(math.floor((y - y0) / c))
+
+
+def demand(board_path, critical, P):
+    """Per-cell demand map of a (ghost) board -> {"cells": {(layer, ix, iy): {"nets", "crit", "escape", "pad_dist"}},
+    "origin": (x0, y0), "cell": c}.  `pad_dist` = {net: distance of the cell centre to the nearest pad of that net}, kept so
+    reservations() can apply any escape_mm; `escape` uses P["escape_mm"]."""
+    B = RD.load(board_path)
+    crit = set(critical)
+    plane = {z["net"] for z in B["zones"] if z.get("net")}
+    cu = list(B["copper"])
+    x0, y0, _x1, _y1 = B["bbox"]
+    c = float(P["cell_mm"])
+    cells = {}
+
+    def mark(layer, x, y, net):
+        ix, iy = _cell_of(x, y, x0, y0, c)
+        cl = cells.setdefault((layer, ix, iy), {"nets": set(), "crit": set(), "escape": False, "pad_dist": {}})
+        if net in crit:
+            cl["crit"].add(net)
+        elif net and net not in plane:
+            cl["nets"].add(net)
+
+    def raster(layer, pts, net):
+        # step cell/2 along each polyline leg; a zero-length leg marks its single cell
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            n = max(1, int(math.ceil(math.hypot(bx - ax, by - ay) / (c / 2))))
+            for i in range(n + 1):
+                t = i / n
+                mark(layer, ax + (bx - ax) * t, ay + (by - ay) * t, net)
+
+    for s in B["segs"]:
+        net = s["net"]
+        if s["layer"] not in cu or (net not in crit and (not net or net in plane)):
+            continue
+        raster(s["layer"], [s["a"], s["mid"], s["b"]] if s.get("mid") else [s["a"], s["b"]], net)
+    for v in B["vias"]:
+        idx = sorted(cu.index(l) for l in v["layers"] if l in cu) or [0, len(cu) - 1]
+        for layer in cu[idx[0]:idx[-1] + 1]:
+            raster(layer, [(v["x"], v["y"]), (v["x"], v["y"])], v["net"])
+
+    pads = {}
+    for p in B["pads"]:
+        if p["net"]:
+            pads.setdefault(p["net"], []).append((p["x"], p["y"]))
+    for (layer, ix, iy), cl in cells.items():
+        cx, cy = x0 + (ix + 0.5) * c, y0 + (iy + 0.5) * c
+        for n in cl["nets"]:
+            if n in pads:
+                cl["pad_dist"][n] = min(math.hypot(cx - px, cy - py) for px, py in pads[n])
+        cl["escape"] = any(d <= P["escape_mm"] for d in cl["pad_dist"].values())
+    return {"cells": cells, "origin": (x0, y0), "cell": c}
+
+
+def reservations(D, B, critical, P, min_nets=None, escape_mm=None):
+    """Channels to reserve from a demand map -> [{"layer", "rect": (x0, y0, x1, y1), "nets", "demand"}]."""
+    mn = P["min_nets"] if min_nets is None else min_nets
+    em = P["escape_mm"] if escape_mm is None else escape_mm
+    x0, y0 = D["origin"]
+    c = D["cell"]
+    crit = set(critical)
+    cpads = [(p["x"], p["y"]) for p in B["pads"] if p["net"] in crit]
+    clear = P["pair_clear_mm"]
+    cand = []
+    for (layer, ix, iy), cl in D["cells"].items():
+        if cl["crit"]:
+            continue
+        esc = any(d <= em for d in cl["pad_dist"].values())
+        if not ((esc and cl["nets"]) or len(cl["nets"]) >= mn):
+            continue
+        cx, cy = x0 + (ix + 0.5) * c, y0 + (iy + 0.5) * c
+        if any(math.hypot(cx - px, cy - py) <= clear for px, py in cpads):
+            continue
+        cand.append((layer, ix, iy, cl, esc))
+    cand.sort(key=lambda t: (-len(t[3]["nets"]), not t[4], t[0], t[2], t[1]))
+
+    bx0, by0, bx1, by1 = B["bbox"]
+    cap = P["max_area_frac"] * max(bx1 - bx0, 0.0) * max(by1 - by0, 0.0)
+    used, by_layer = {}, {}
+    for layer, ix, iy, cl, _esc in cand:
+        if used.get(layer, 0.0) + c * c > cap:
+            continue
+        used[layer] = used.get(layer, 0.0) + c * c
+        by_layer.setdefault(layer, {})[(ix, iy)] = cl
+
+    out = []
+    for layer in sorted(by_layer):
+        cells = by_layer[layer]
+        rows = {}
+        for (ix, iy) in cells:
+            rows.setdefault(iy, []).append(ix)
+        runs_at = {}                                       # row -> [(first ix, last ix)] of adjacent cells
+        for iy, xs in rows.items():
+            xs = sorted(xs)
+            s = p = xs[0]
+            runs = runs_at.setdefault(iy, [])
+            for ix in xs[1:]:
+                if ix == p + 1:
+                    p = ix
+                    continue
+                runs.append((s, p))
+                s = p = ix
+            runs.append((s, p))
+        active, done = {}, []                              # equal runs in consecutive rows stack into one rectangle
+        for iy in sorted(runs_at):
+            nxt = {}
+            for key in runs_at[iy]:
+                span = active.pop(key, None)
+                if span is not None and span[1] == iy - 1:
+                    span[1] = iy
+                    nxt[key] = span
+                else:
+                    if span is not None:
+                        done.append((key, span))
+                    nxt[key] = [iy, iy]
+            done += list(active.items())
+            active = nxt
+        done += list(active.items())
+        for (s, e), (r0, r1) in done:
+            members = [cells[(ix, iy)] for iy in range(r0, r1 + 1) for ix in range(s, e + 1)]
+            nets = sorted({n for cl in members for n in cl["nets"]})
+            out.append({"layer": layer,
+                        "rect": (x0 + s * c, y0 + r0 * c, min(x0 + (e + 1) * c, bx1), min(y0 + (r1 + 1) * c, by1)),
+                        "nets": nets, "demand": sum(len(cl["nets"]) for cl in members)})
+    return out
