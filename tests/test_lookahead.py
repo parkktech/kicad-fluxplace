@@ -1,5 +1,6 @@
 """LOOKAHEAD stage: demand map, reservations, ghost/fitness/render helpers and the round loop (no pcbnew, no router)."""
 import json
+import subprocess
 import os
 import sys
 import types
@@ -192,7 +193,7 @@ def test_ghost_command_flags_and_result(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "", "")
     monkeypatch.setattr(subprocess, "run", fake_run)
     a = SimpleNamespace(constraints="/c.toml", spec="/s.json", router_dir="/r", router_py="/rp")
-    got = LA.ghost(a, str(src), str(tmp_path / "out"), 40)
+    got = LA.ghost(a, str(src), str(tmp_path / "out"), 40, lean=False)
     cmd = seen["cmd"]
     assert cmd[0] == LA.PY and cmd[1].endswith("cli.py") and "pipeline" in cmd
     for flag in ("--flow", "--from", "--to", "--router", "--router-dir", "--router-py", "--constraints", "--spec",
@@ -215,7 +216,7 @@ def test_ghost_partial_board_after_hard_cap_is_kept(monkeypatch, tmp_path):
         (rd / "board.kicad_pcb").write_text("(kicad_pcb partial)")
         raise subprocess.TimeoutExpired(cmd, 1)
     monkeypatch.setattr(subprocess, "run", cap)
-    got = LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(out), 1)
+    got = LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(out), 1, lean=False)
     assert got and got.endswith("board.kicad_pcb")
 
 
@@ -228,7 +229,7 @@ def test_ghost_returns_none_on_timeout(monkeypatch, tmp_path):
     def boom(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
     monkeypatch.setattr(subprocess, "run", boom)
-    assert LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(tmp_path / "o"), 1) is None
+    assert LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(tmp_path / "o"), 1, lean=False) is None
 
 
 def _fit_fixture(monkeypatch, opens_by_net, unc, pair_status, B=None):
@@ -287,7 +288,7 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     monkeypatch.setattr(LA, "critical_pairs", lambda board, cons, spec=None: [("A", "B")])
     monkeypatch.setattr(LA, "corridors", lambda B, pairs, P: ({}, {}))
     monkeypatch.setattr(LA, "adopt_pairs", lambda gb, pairs, cons: [("A", "B")])
-    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None: str(fixture))
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None, lean=True, threads=8: str(fixture))
     monkeypatch.setattr(LA, "global_demand", lambda board, cons, spec, P, crit: {"cells": {}, "origin": (0.0, 0.0), "cell": 1.0})
     monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
                         {"key": (0, 0, 5, 0, 0, 0.0), "opens": 5, "pairs_complete": 0, "pairs_total": 1, "blockers": {}})
@@ -479,12 +480,12 @@ def test_ghost_router_flags(monkeypatch, tmp_path):
     src.write_text("x")
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
     a = SimpleNamespace(router_dir="/r", router_py="/rp", freerouting_jar="/fr.jar", java="/jdk/bin/java")
-    LA.ghost(a, str(src), str(tmp_path / "o1"), 4, router="freerouting")
+    LA.ghost(a, str(src), str(tmp_path / "o1"), 4, router="freerouting", lean=False)
     cmd = seen["cmd"]
     assert cmd[cmd.index("--router") + 1] == "freerouting" and cmd[cmd.index("--freerouting-jar") + 1] == "/fr.jar"
     assert "--router-dir" not in cmd and "--router-py" not in cmd
     seen.clear()
-    LA.ghost(a, str(src), str(tmp_path / "o2"), 4)
+    LA.ghost(a, str(src), str(tmp_path / "o2"), 4, lean=False)
     assert seen["cmd"][seen["cmd"].index("--router") + 1] == "krt-whole" and "--router-dir" in seen["cmd"]
 
 
@@ -493,7 +494,7 @@ def test_stage_runs_each_ghost_and_drops_a_failed_one(monkeypatch, tmp_path):
         return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
     c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
     real = LA.ghost
-    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None:
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None, lean=True, threads=8:
                         None if router == "freerouting" else real(a, board, outdir, budget, router))
     out = LA.stage(c, 7, "in.kicad_pcb")
     assert out["verdict"] == "pass"
@@ -534,7 +535,7 @@ def test_freerouting_ghost_gets_passes_override_when_constraints_lack_the_table(
     seen = {}
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
     a = SimpleNamespace(router_dir="/r", router_py="/rp", constraints=str(cons), spec=None, freerouting_jar="/fr.jar", java=None)
-    LA.ghost(a, str(src), str(tmp_path / "o"), 8, router="freerouting", passes=4)
+    LA.ghost(a, str(src), str(tmp_path / "o"), 8, router="freerouting", passes=4, lean=False)
     cc = seen["cmd"][seen["cmd"].index("--constraints") + 1]
     assert cc.endswith("constraints.ghost.toml") and "[route.freerouting]\npasses = 4" in open(cc).read()
 
@@ -633,3 +634,99 @@ def test_only_soft_candidates_carry_the_adopt_list(monkeypatch, tmp_path):
     hard = [j for j in jobs if j["kind"] == "hard"]
     assert soft and all(j["adopt"] and j["adopt"][0]["pairs"] == [["A", "B"]] for j in soft)
     assert hard and all(j["adopt"] is None for j in hard)
+
+
+# ---- L9 lean ghosts: one KRT route.py call on the signal nets; Freerouting DSN -> java -> SES ----
+
+def _lean_fixture(monkeypatch, tmp_path, pads):
+    from types import SimpleNamespace
+    from fluxplace import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routeconn as RC
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text("(kicad_pcb)")
+    monkeypatch.setattr(RD, "load", lambda path, **kw: board() | {"pads": pads})
+    monkeypatch.setattr(RC, "text_open", lambda B, **kw: {})
+    monkeypatch.setattr(RR, "rules_for", lambda cons, path, a, **kw: {"r": 1})
+    monkeypatch.setattr(KC, "base_flags", lambda R, d: ["--base"])
+    monkeypatch.setattr(KC, "plane_plan", lambda path: (["F.Cu", "B.Cu"], [("GND", "In1.Cu")]))
+    a = SimpleNamespace(router_dir="/krt", router_py="/py", constraints=None, spec=None)
+    return a, str(src)
+
+
+def _pad(net, i):
+    return {"net": net, "x": float(i), "y": 0.0, "layers": {"F.Cu"}, "ref": "U1", "num": str(i)}
+
+
+def test_lean_krt_is_one_route_call_on_non_plane_nets(monkeypatch, tmp_path):
+    from fluxplace import routestatus as RS
+    pads = [_pad("A", 1), _pad("A", 2), _pad("B", 3), _pad("GND", 4), _pad("GND", 5)]
+    a, src = _lean_fixture(monkeypatch, tmp_path, pads)
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        open(kw["out"], "w").write("(kicad_pcb routed)")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(RS, "run_logged", fake_run)
+    out = LA.ghost(a, src, str(tmp_path / "g"), 3, lean=True)
+    cmd = seen["cmd"]
+    assert cmd[1].endswith("py_router/route.py") or "route.py" in cmd[1]
+    assert cmd[cmd.index("--nets") + 1:cmd.index("--layers")] == ["A"]          # plane net GND and the 1-pad net B left out
+    assert cmd[cmd.index("--layers") + 1: cmd.index("--layers") + 3] == ["F.Cu", "B.Cu"]
+    assert "--power-nets" not in cmd and "--keep-input-copper" in cmd and "--base" in cmd
+    assert out.endswith("krt-lean.kicad_pcb") and os.path.exists(os.path.join(str(tmp_path / "g"), "ghost.stats.json"))
+
+
+def test_lean_krt_falls_back_to_the_named_checkpoint_at_the_cap(monkeypatch, tmp_path):
+    from fluxplace import routestatus as RS
+    pads = [_pad("A", 1), _pad("A", 2)]
+    a, src = _lean_fixture(monkeypatch, tmp_path, pads)
+    outdir = tmp_path / "g"
+    ck = outdir / "checkpoint-3.kicad_pcb"
+    outdir.mkdir()
+    ck.write_text("(kicad_pcb ckpt)")
+
+    def capped(cmd, **kw):
+        (outdir / "krt.status.json").write_text(json.dumps({"checkpoint": str(ck)}))
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(RS, "run_logged", capped)
+    assert LA.ghost(a, src, str(outdir), 3, lean=True) == str(ck)
+    # no checkpoint named: None
+    (outdir / "krt.status.json").write_text(json.dumps({"checkpoint": None}))
+    monkeypatch.setattr(RS, "run_logged", lambda cmd, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd, 1)))
+    assert LA.ghost(a, src, str(tmp_path / "g2"), 3, lean=True) is None
+
+
+def test_lean_freerouting_export_declares_planes_and_runs_passes(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from fluxplace import routefr as RF
+    pads = [_pad("A", 1), _pad("A", 2)]
+    a, src = _lean_fixture(monkeypatch, tmp_path, pads)
+    a.freerouting_jar, a.java = "/fr.jar", "java"
+    seen = {}
+
+    def helper(cmd, args, workdir, timeout=1800):
+        if cmd == "export":
+            open(args["dsn"], "w").write("(pcb)")
+            return {"ok": True}
+        seen["import"] = args
+        open(args["out"], "w").write("(kicad_pcb fr)")
+        return {}
+    monkeypatch.setattr(RF, "_helper", helper)
+    monkeypatch.setattr(RF, "locate", lambda jar, java, env=None: {"jar": jar, "java": java})
+    monkeypatch.setattr(RF, "jar_version", lambda jar: None)
+    def fake_fix(text, planes=(), **kw):
+        seen["planes"] = list(planes)
+        return text, {}
+
+    def fake_jvm(cmd, log, t, g, ses, **kw):
+        seen["cmd"] = cmd
+        return {"rc": 0, "killed": False}
+    monkeypatch.setattr(RF, "fix_dsn", fake_fix)
+    monkeypatch.setattr(RF, "ses_ok", lambda path: True)
+    monkeypatch.setattr(RF, "run_jvm", fake_jvm)
+    out = LA.ghost(a, src, str(tmp_path / "f"), 4, router="freerouting", passes=4, lean=True, threads=2)
+    cmd = seen["cmd"]
+    assert "--router.autorouter.max_passes=4" in cmd and "-de" in cmd and "-do" in cmd
+    assert "--router.max_threads=2" in cmd
+    assert seen["planes"] == ["GND"]                              # plane nets declared power: not routed
+    assert out and out.endswith("fr-lean.kicad_pcb") and seen["import"]["skip_nets"] == []

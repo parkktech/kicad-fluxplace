@@ -322,9 +322,134 @@ def strip(board_in, board_out):
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
-    """Route a copy of `board` unlocked, throw-away: `pipeline ... --from route --to route --router <router>`
-    (krt-whole or freerouting; flags as W15/scripts-route.sh, passed through from `a`). -> routed board path, or None."""
+def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None, lean=True, threads=8):
+    """Route a copy of `board` unlocked, throw-away. lean (default, L9): the router alone on the signal nets (lean_krt /
+    lean_freerouting); lean=False: the pipeline route stage (the verify ghost, which must route like the real flow).
+    -> routed board path, or None. ghost.out keeps the tail of every subprocess; ghost.stats.json the numbers."""
+    if lean:
+        if router == "freerouting":
+            return lean_freerouting(a, board, outdir, budget_min, passes or 4, threads)
+        return lean_krt(a, board, outdir, budget_min)
+    return _pipeline_ghost(a, board, outdir, budget_min, router, passes)
+
+
+def _ghost_copy(board, outdir):
+    import shutil
+    from . import pipeline as PL
+    os.makedirs(outdir, exist_ok=True)
+    copy = os.path.join(outdir, "in.kicad_pcb")
+    shutil.copy(board, copy)
+    PL._sidecar(board, copy)
+    return copy
+
+
+def _ghost_out(outdir, text):
+    with open(os.path.join(outdir, "ghost.out"), "a") as fh:
+        fh.write(text[-20000:] + "\n")
+
+
+def _ghost_stats(copy, out, outdir, secs):
+    """nets routed, opens before/after (text count), seconds -> ghost.stats.json (the efficiency log reads it)."""
+    from . import routediag as RD, routeconn as RC
+    before = RD.load(copy)
+    st = {"secs": secs, "opens_before": len(RC.text_open(before)), "nets_routed": 0, "opens_after": None}
+    if out and os.path.exists(out):
+        after = RD.load(out)
+        had = {s["net"] for s in before["segs"]}
+        st["nets_routed"] = len({s["net"] for s in after["segs"] if s["net"]} - had)
+        st["opens_after"] = len(RC.text_open(after))
+    with open(os.path.join(outdir, "ghost.stats.json"), "w") as fh:
+        json.dump(st, fh)
+    return st
+
+
+def _signal_nets(copy):
+    """(signal layers, plane nets) of the copy: planes are the board-spanning inner zones (krtchain.plane_plan)."""
+    from . import krtchain as KC
+    sig, planes = KC.plane_plan(copy)
+    return sig, {n for n, _l in planes}
+
+
+def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
+    """One router process under the wall cap (routestatus.run_logged); -> (completed, secs). TimeoutExpired -> None."""
+    import subprocess
+    from . import routestatus as RS
+    t = time.time()
+    status, log = os.path.join(outdir, f"{tag}.status.json"), os.path.join(outdir, f"{tag}.log")
+    try:
+        r = RS.run_logged(cmd, cwd=cwd, timeout=cap_s, out=out, log_path=log, status_path=status)
+        _ghost_out(outdir, f"[{tag}] rc {r.returncode}\n" + (r.stdout or "")[-4000:])
+        return True, round(time.time() - t, 1)
+    except subprocess.TimeoutExpired:
+        _ghost_out(outdir, f"[{tag}] wall cap {cap_s:g} s")
+        return False, round(time.time() - t, 1)
+
+
+def lean_krt(a, board, outdir, budget_min):
+    """KRT lean ghost: ONE route.py call over every non-plane net with >= 2 pads on the signal layers; no planes, rails,
+    pairgroups or diff steps. At the cap, the checkpoint the status json names (if it exists), else None."""
+    import json as _json
+    from types import SimpleNamespace
+    from . import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routestatus as RS
+    copy = _ghost_copy(board, outdir)
+    sig, plane_nets = _signal_nets(copy)
+    cons = C.load(a.constraints) if getattr(a, "constraints", None) else {}
+    R = RR.rules_for(cons, copy, SimpleNamespace(track=getattr(a, "track", None), clearance=getattr(a, "clearance", None)))
+    base = KC.base_flags(R, outdir)
+    cnt = {}
+    for p in RD.load(copy)["pads"]:
+        if p["net"]:
+            cnt[p["net"]] = cnt.get(p["net"], 0) + 1
+    nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets)
+    out = os.path.join(outdir, "krt-lean.kicad_pcb")
+    cmd = KC.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, {}, nets=nets)
+    ok, secs = _run_capped(cmd, a.router_dir, outdir, "krt", out, budget_min * 60)
+    res = None
+    if ok and os.path.exists(out):
+        res = out
+    else:
+        try:
+            ckpt = (_json.load(open(os.path.join(outdir, "krt.status.json"))) or {}).get("checkpoint")
+        except (OSError, ValueError):
+            ckpt = None
+        res = ckpt if ckpt and os.path.exists(ckpt) else None
+    _ghost_stats(copy, res, outdir, secs)
+    return res
+
+
+def lean_freerouting(a, board, outdir, budget_min, passes, threads):
+    """Freerouting lean ghost: DSN export of the copy (planes declared power, so not routed), java -jar with -mp passes and
+    -mt threads (routefr.command/run_jvm, the flags of the recorded 2.5.0 help), import of the session. Wall cap as a safety
+    (+50%); the passes end the run. -> routed board or None."""
+    from . import routefr as RF
+    copy = _ghost_copy(board, outdir)
+    sig, plane_nets = _signal_nets(copy)
+    loc = RF.locate(getattr(a, "freerouting_jar", None), getattr(a, "java", None))
+    dsn, ses = os.path.join(outdir, "in.dsn"), os.path.join(outdir, "out.ses")
+    ex = RF._helper("export", {"board": copy, "dsn": dsn}, outdir)
+    if not ex.get("ok"):
+        raise RuntimeError("Specctra DSN export failed")
+    with open(dsn, errors="surrogateescape") as fh:
+        text, _rep = RF.fix_dsn(fh.read(), planes=sorted(plane_nets))
+    with open(dsn, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    S = {"passes": int(passes), "threads": int(threads), "neckdown": False, "analytics": False}
+    cap = budget_min * 60
+    cmd = RF.command(loc, dsn, ses, S, cap, outdir, False)
+    t = time.time()
+    res = RF.run_jvm(cmd, os.path.join(outdir, "freerouting.log"), cap, cap * 0.5, ses, cwd=outdir)
+    _ghost_out(outdir, f"[fr] rc {res.get('rc')} killed {res.get('killed')}")
+    out = None
+    if RF.ses_ok(ses):
+        out = os.path.join(outdir, "fr-lean.kicad_pcb")
+        RF._helper("import", {"board": copy, "ses": ses, "out": out, "skip_nets": []}, outdir)
+    if not (out and os.path.exists(out)):
+        out = None
+    _ghost_stats(copy, out, outdir, round(time.time() - t, 1))
+    return out
+
+
+def _pipeline_ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
     import glob
     import shutil
     import subprocess
@@ -652,7 +777,7 @@ def _worker(jobfile):
 
 def _verify_full(a, locked, cand, crit, cons, P, tag, area, rects):
     """tier 2: KRT verify ghost of the locked board (ghost_min.verify) -> (ghost board, full fitness with opens, png)."""
-    g = ghost(a, locked, os.path.join(cand, "verify"), P["ghost_min"]["verify"], "krt-whole")
+    g = ghost(a, locked, os.path.join(cand, "verify"), P["ghost_min"]["verify"], "krt-whole", lean=False)
     if not g:
         return None, None, None
     fit = fitness(g, crit, cons, reserved_area=area, escape_mm=P["escape_mm"])
@@ -831,7 +956,8 @@ def _ghost_round0(a, board, d, P, routers):
 
     def one(r):
         if r == "freerouting":
-            return ghost(a, board, os.path.join(d, "ghost0-freerouting"), P["ghost_min"]["fr"], r, passes=P["ghost_passes_fr"])
+            return ghost(a, board, os.path.join(d, "ghost0-freerouting"), P["ghost_min"]["fr"], r, passes=P["ghost_passes_fr"],
+                         threads=max(1, 32 // max(1, P["jobs"])))
         return ghost(a, board, os.path.join(d, f"ghost0-{r}"), P["ghost_min"]["krt"], r)
     with cf.ThreadPoolExecutor(max_workers=max(1, min(P["jobs"], len(routers)))) as ex:
         futs = {r: ex.submit(one, r) for r in routers}
@@ -862,6 +988,9 @@ def stage(c, n, board):
     timing["router_ghosts_s"] = round(time.time() - t0, 1)
     for r in routers:
         g = gouts.get(r)
+        gs = os.path.join(d, f"ghost0-{r}", "ghost.stats.json")
+        if os.path.exists(gs):
+            timing.setdefault("ghost_stats", {})[r] = json.load(open(gs))
         if not g:
             rows.append(_row(0, f"ghost-{r}", "unlocked", None, None, "fail: no routed board"))
             continue
