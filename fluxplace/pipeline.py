@@ -1423,7 +1423,12 @@ def _ev_begin(a, work):
                      "pads": len(B["pads"]), "layers": len(B["copper"]), "area_mm2": round(area, 1),
                      "density": round(len(B["pads"]) / area, 4)}
         stages = list(FLOWS.get(flow, STAGES))
-        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats, nested=nested)
+        fr, to = getattr(a, "from_stage", None), getattr(a, "to_stage", None)     # EV1: which stages this run skips
+        i0 = stages.index(fr) if fr in stages else 0
+        i1 = stages.index(to) if to in stages else len(stages) - 1
+        skipped = stages[:i0] + stages[i1 + 1:]
+        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats, nested=nested,
+                from_stage=stages[i0] if stages else None, to_stage=stages[i1] if stages else None, skipped=skipped)
         from . import eta as ETA
         ETA.set_run(feats, stages)
         board_in = st.get("board0") or board             # the input board: may live outside W
@@ -1431,7 +1436,9 @@ def _ev_begin(a, work):
             board_in = os.path.abspath(a.board)
         _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "board_in": board_in,
                              "flow": flow,
-                             "stages": stages, "features": feats, "nested": nested, "started": time.time(),
+                             "stages": stages, "from_stage": stages[i0] if stages else None,
+                             "to_stage": stages[i1] if stages else None, "skipped": skipped,
+                             "features": feats, "nested": nested, "started": time.time(),
                              "ended": None, "verdict": None})
     except Exception:
         pass

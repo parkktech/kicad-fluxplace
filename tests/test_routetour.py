@@ -47,13 +47,17 @@ def test_run_picks_best_full_and_passes_flags(tmp_path, monkeypatch):
     def fake_krt_run(sub, n, board):
         name = os.path.basename(sub._root)
         seen[name] = list(sub.krt_extra)
-        return {"board": f"/full/{name}.pcb", "verdict": "pass", "line": "x"}
+        out = tmp_path / "full" / f"{name}.pcb"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(name)
+        return {"board": str(out), "verdict": "pass", "line": "x"}
     monkeypatch.setattr(K, "run", fake_krt_run)
 
     r = RT.run(c, 1, str(tmp_path / "in.kicad_pcb"))
     assert lean_extra == {"p": [], "q": ["--bus"], "r": ["--via-cost", "40"]}
     assert seen == {"q": ["--bus"], "r": ["--via-cost", "40"]}   # top 2 by judge key (opens): q (1), r (2); p (3) cut
-    assert r["board"] == "/full/r.pcb"                           # full key: r (0 errors) beats q (1 error)
+    assert r["board"] == os.path.join(c.dir(1, "route"), "board.kicad_pcb")   # winner copied into the stage dir
+    assert open(r["board"]).read() == "r"                        # full key: r (0 errors) beats q (1 error)
     assert r["line"].startswith("routetour winner r ")
     txt = open(os.path.join(c.dir(1, "route"), "TOURNAMENT.md")).read()
     assert "| judge | p |" in txt and "| full | r |" in txt and "winner: r" in txt
@@ -101,3 +105,17 @@ def test_krtchain_cmd_route_gets_krt_extra(tmp_path, monkeypatch):
     diff_calls = [x for x in calls if x[1].endswith("route_diff.py")]
     assert route_calls and all("--via-cost" in x for x in route_calls)
     assert all("--via-cost" not in x for x in diff_calls)
+
+
+def test_run_fails_cleanly_when_no_finalist_board(tmp_path, monkeypatch):
+    cons = {"route": {"tournament": {"enabled": True, "top": 1, "variants": [{"name": "p", "flags": []}]}}}
+    c = types.SimpleNamespace(a=types.SimpleNamespace(), cons=cons, dir=lambda n, nm: str(tmp_path / f"{n}-{nm}"),
+                              work=str(tmp_path), state={})
+    os.makedirs(c.dir(1, "route"), exist_ok=True)
+    monkeypatch.setattr(LA, "lean_krt", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    def crash(sub, n, board):
+        raise RuntimeError("krt died")
+    monkeypatch.setattr(K, "run", crash)
+    r = RT.run(c, 1, str(tmp_path / "in.kicad_pcb"))
+    assert r["verdict"] == "fail" and "no finalist" in r["line"]

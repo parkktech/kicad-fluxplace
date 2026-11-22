@@ -69,8 +69,12 @@ def run(c, n, board):
         t0 = time.time()
         vd = os.path.join(d, "judge", v["name"])
         os.makedirs(vd, exist_ok=True)
-        routed = LA.lean_krt(c.a, board, vd, P["judge_min"], extra=v["flags"])
-        blame = PT._review(c.a, routed, os.path.join(vd, "review.json")) if routed else None
+        try:
+            routed = LA.lean_krt(c.a, board, vd, P["judge_min"], extra=v["flags"])
+            blame = PT._review(c.a, routed, os.path.join(vd, "review.json")) if routed else None
+        except Exception as e:                                # noqa: BLE001 - one variant failing is a row, not a crash
+            routed, blame = None, None
+            open(os.path.join(vd, "error.txt"), "w").write(f"{type(e).__name__}: {e}\n")
         return {"phase": "judge", "name": v["name"], "flags": v["flags"], "key": PT.judge_key(routed, blame, c.cons),
                 "secs": round(time.time() - t0, 1), "board": routed}
     _progress(spath, "running", f"judge {len(P['variants'])} variants")
@@ -83,7 +87,10 @@ def run(c, n, board):
     def full(r):
         t0 = time.time()
         sub = _Sub(c, os.path.join(d, "full", r["name"]), r["flags"])
-        res = KC.run(sub, n, board)
+        try:
+            res = KC.run(sub, n, board)
+        except Exception as e:                                # noqa: BLE001 - the other finalist still stands
+            res = {"verdict": "fail", "board": None, "line": f"{r['name']} crashed {type(e).__name__}: {str(e)[:120]}"}
         out = res.get("board")
         return {"phase": "full", "name": r["name"], "flags": r["flags"], "key": full_key(out) + (r["key"][3],),
                 "secs": round(time.time() - t0, 1), "board": out, "res": res}
@@ -95,9 +102,20 @@ def run(c, n, board):
     rows += [{k: v for k, v in r.items() if k != "res"} for r in fulls]
     _table(tpath, rows)
     win = fulls[0]
+    if not win.get("board") or not os.path.exists(win["board"]):
+        return {"verdict": "fail", "board": board, "line": "routetour: no finalist produced a board",
+                "next": [f"see {tpath}"]}
+    import shutil
+    best = os.path.join(d, "board.kicad_pcb")                  # the stage's own board: later stages and dashboards look here
+    shutil.copy(win["board"], best)
+    for ext in (".kicad_pro", ".kicad_prl"):
+        side = os.path.splitext(win["board"])[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(best)[0] + ext)
     with open(tpath, "a") as fh:
         fh.write(f"\nwinner: {win['name']} {win['flags']} key {win['key']} board {win['board']}\n")
     _progress(spath, "done", f"winner {win['name']} key {win['key']}", board=win["board"])
     res = dict(win["res"])
+    res["board"] = best
     res["line"] = f"routetour winner {win['name']} (shorts, opens, errors, vias) {win['key']}; " + str(res.get("line", ""))
     return res
