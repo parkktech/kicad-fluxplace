@@ -541,9 +541,17 @@ def _r_patch_rip(base, out, gaps, ctx):
     return _brief(PT.patch_board(base, out, rip=True, cons=ctx["cons"], log=ctx["log"]))
 
 
+def _protect_levels(board, cons):
+    """PHASE3I F6: {net: lock level} of every net of `board` (lockpolicy.level)."""
+    from . import lockpolicy as LP, drcguard as DG, handroute as HR
+    names = DG.snap_nets(HR._snap(board))
+    return {n: LP.level(n, cons, names) for n in names}
+
+
 def _r_handrepair(base, out, gaps, ctx):
-    from . import handroute as HR, handrepair as HP
+    from . import handroute as HR, handrepair as HP, lockpolicy as LP, routeconn as RC
     w = os.path.join(ctx["work"], "hr-work.kicad_pcb")
+    soft = sorted(n for n, lv in _protect_levels(base, ctx["cons"]).items() if lv == LP.SOFT)   # PHASE3I F6
     try:
         layers = signal_layers(base)
         if not layers:
@@ -551,9 +559,23 @@ def _r_handrepair(base, out, gaps, ctx):
         _clean_board(w)
         HR.session_begin(base, w, ctx["kicad_cli"])
         r = HP.repair(w, out, constraints=ctx["cons_path"], budget=min(900, ctx["budget_s"]), layers=layers)
+        if soft and os.path.exists(out):
+            # a soft-locked net whose copper was ripped is written only when the same rung re-laid it (no new opens)
+            ripped = [n for n in soft if _rows_count(out, n) < _rows_count(base, n)]
+            opn_b, opn_o = RC.open_by_net(base), RC.open_by_net(out)
+            lost = [n for n in ripped if opn_o.get(n, 0) > opn_b.get(n, 0)]
+            if lost:
+                os.remove(out)
+                return {"status": "refused", "why": "soft-locked copper ripped and not re-laid: " + ", ".join(lost)[:120]}
     finally:
         _clean_board(w)
     return _brief(r)
+
+
+def _rows_count(board, net):
+    """track, arc and via items of `net` on `board` (cached board rows)."""
+    rows = _board_rows(board)
+    return sum(1 for t in rows["tracks"] if t[0] == net) + sum(1 for v in rows["vias"] if v[0] == net)
 
 
 def _r_region(base, out, gaps, ctx):

@@ -225,6 +225,17 @@ def _ps_note(facts, master, skew_mm, limit_mm):
     return f" [{skew_mm * pp:.1f} ps / limit {limit_mm * pp:.1f} ps]"
 
 
+def pin_escape_blocked(board, cons=None):
+    """PHASE3I F6: the "REF.pad" set of every fine-pitch pad whose escape lane is blocked on `board` (preroute's
+    PIN_ESCAPE_BLOCKED check). The lock writers compare it before and after a lock."""
+    from . import preroute, routediag
+    out = set()
+    for f in preroute.pin_escape_blocked(routediag.load(board)):
+        if f.get("code") == "PIN_ESCAPE_BLOCKED":
+            out |= set(f.get("pins") or [])
+    return out
+
+
 def pair_gated(cons, master):
     """A pair is gated (stop-ship on skew/asymmetry) when its master is in a [pairs.*] family or a high-speed family."""
     fams = tuple((cons or {}).get("pairs", {}))

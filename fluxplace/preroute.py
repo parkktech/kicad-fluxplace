@@ -232,11 +232,13 @@ def pin_escape_blocked(B, only_nets=None, partners=None):
         if hits:
             n = sum(len(v) for v in hits.values())
             top = sorted(hits.items(), key=lambda kv: -len(kv[1]))[:3]
-            out.append(_f(FAIL, "PIN_ESCAPE_BLOCKED",
-                          f"{ref}: {n} fine-pitch pin(s) blocked within {L:.2f} mm "
-                          f"(track {B['track']:g} + clearance {B['clearance']:g}): "
-                          + "; ".join(f"{k} (pin {','.join(v[:4])})" for k, v in top),
-                          refs=[ref], value=n, limit=0))
+            f = _f(FAIL, "PIN_ESCAPE_BLOCKED",
+                   f"{ref}: {n} fine-pitch pin(s) blocked within {L:.2f} mm "
+                   f"(track {B['track']:g} + clearance {B['clearance']:g}): "
+                   + "; ".join(f"{k} (pin {','.join(v[:4])})" for k, v in top),
+                   refs=[ref], value=n, limit=0)
+            f["pins"] = sorted(f"{ref}.{x}" for v in hits.values() for x in v)     # PHASE3I F6: "REF.pad" of the blocked pins
+            out.append(f)
     return out
 
 

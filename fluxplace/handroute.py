@@ -895,7 +895,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         if op == "lay" and require_close and not partial and after_n >= before_n:
             reasons.append(f"target not closed: open connections of {net} {before_n} -> {after_n}")
         if extra_check:
-            r = extra_check(M, cand, base)
+            r = extra_check(M, cand, base, path) if getattr(extra_check, "wants_path", False) else extra_check(M, cand, base)
             if r:
                 reasons.append(r)
         return {"cand_raw": cand_raw, "cand": cand, "reasons": reasons, "meas": meas, "new_u": new_u}
@@ -1078,6 +1078,7 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         stitch=False):
     from . import power as PW
     from . import constraints as CN
+    from . import review as RV
     cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
     need = PW.track_width_mm(cons, net)            # PHASE3I B4: a [power] net is laid at its required width, never less
     def mutate(b, M):
@@ -1099,7 +1100,14 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
     hook = (lambda b, M, nets: _stitch_attempts(b, M, nets, via)) if stitch else None
     args = {"width": width, "via": list(via) if via else None, "any_angle": any_angle, "lock": lock}   # PHASE3I F5 (R12)
-    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args)
+    pins_before = RV.pin_escape_blocked(board) if lock else set()
+
+    def lock_pins(M, cand, base, cpath):                   # PHASE3I F6: a locked lay may not close the last escape of a pad
+        new = RV.pin_escape_blocked(cpath) - pins_before
+        return ("lock blocks the last escape of " + ", ".join(sorted(new)[:6])) if new else None
+    lock_pins.wants_path = True
+    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args,
+                 extra_check=lock_pins if lock else None)
 
 
 def _net_copper(b, net):
@@ -1377,13 +1385,20 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         # soft and free locked copper may be ripped by the ordinary edit guard (the caller re-lays soft copper).
         from . import constraints as CN_lp, lockpolicy as LP
         cons_lp = CN_lp.load(constraints) if isinstance(constraints, str) else (constraints or {})
-        hard = [o for o in locked if o.net in LP.hard_locked({o.net}, cons_lp, {o.net for o in M.obs if o.net})]
+        names_lp = sorted({o.net for o in M.obs if o.net})
+        lv = {o.net: LP.level(o.net, cons_lp, names_lp) for o in locked}       # PHASE3I F6: hard / soft / free
+        hard = [o for o in locked if lv[o.net] == LP.HARD]
         if hard and not allow_locked:
-            raise ValueError("refused, hard-locked copper selected (high-speed pair or RF): " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in hard[:6]))
+            raise ValueError("refused, hard-locked copper selected (high-speed pair, RF or controlled net): " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in hard[:6]))
+        if out is not None and not allow_locked and any(lv[o.net] == LP.SOFT for o in locked):
+            raise ValueError("soft-locked copper is ripped only in a session, where commit checks the re-lay")
         removed = []
         for t in list(b.GetTracks()):
             if t.m_Uuid.AsString() in sel:
                 rec = _removed_track_record(t, sel[t.m_Uuid.AsString()])
+                if rec["was_locked"]:
+                    rec["level"] = lv.get(rec["net"], LP.FREE)
+                    rec["unlocked_and_removed"] = True                # PHASE3I F6: soft and free rips are recorded too
                 removed.append(rec)
                 if rec["was_locked"]:
                     t.SetLocked(False)
@@ -1471,6 +1486,15 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="rep
     Ma, Mb = G.Model(start), G.Model(S.work)
     reescapes = _active_locked_reescapes(S)
     reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}
+    for net in sorted({x["net"] for ent in reescapes for x in ent["removed_locked"] if x.get("level") == "soft"}):
+        # PHASE3I F6: a soft-locked net is committed only when its open count did not rise, its pair is complete and its
+        # re-laid copper is locked (the re-lay is in the same session)
+        if b["unc_by_net"].get(net, 0) > a["unc_by_net"].get(net, 0):
+            reasons.append(f"soft-locked copper of {net} ripped and not re-laid (open {a['unc_by_net'].get(net, 0)}->{b['unc_by_net'].get(net, 0)})")
+        elif b["pairs"].get(net):
+            reasons.append(f"soft-locked copper of {net} ripped: its pair is not complete")
+        elif not any(o.net == net and o.kind in ("track", "via") and o.locked for o in Mb.obs):
+            reasons.append(f"soft-locked copper of {net} ripped: the re-laid copper is not locked")
     original_locked = {sig for sig in _locked_sig(Ma) if sig[1] not in reescape_nets}
     if not original_locked.issubset(_copper_sig(Mb)):
         reasons.append("locked copper geometry changed")
