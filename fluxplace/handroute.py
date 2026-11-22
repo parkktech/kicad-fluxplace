@@ -112,13 +112,37 @@ def _parse_xy(s, n=2):
     return v
 
 
-def _sid(i):
-    return i[:8]
+def _id_len(M=None):
+    """PHASE3I F9 (R19): the shortest id prefix (>= 8) under which every item id of the model is unique (cached on M)."""
+    if M is None:
+        return 8
+    n = getattr(M, "_idlen", None)
+    if n is None:
+        ids = [o.id for o in M.obs if o.id]
+        n = 8
+        while n < 36 and len({i[:n] for i in ids}) < len(set(ids)):
+            n += 1
+        M._idlen = n
+    return n
+
+
+def _sid(i, M=None):
+    return i[:_id_len(M)]
 
 
 def _resolve(M, ident):
-    full = [o for o in M.obs if o.id.startswith(ident)]
-    return full
+    """PHASE3I F9 (R19): the items named by `ident`. A full id wins; a prefix must match exactly one item, else
+    ValueError listing up to 8 matches (full id, kind, net, layer, position)."""
+    exact = [o for o in M.obs if o.id == ident]
+    if exact:
+        return exact
+    hits = [o for o in M.obs if o.id and o.id.startswith(ident)]
+    if len(hits) > 1:
+        def desc(o):
+            lay = next(iter(o.layers)) if getattr(o, "layers", None) else "-"
+            return f"{o.id} {o.kind} {o.net} {lay} at {_fmtp(o.g[1]) if o.g else '-'}"
+        raise ValueError(f"id {ident} is not unique: " + "; ".join(desc(o) for o in hits[:8]))
+    return hits
 
 
 def _model(board, constraints=None, refill=True):
@@ -249,7 +273,7 @@ def open_nets(board, constraints=None, raw=None, M=None):
                 best = _island_dist(M, net, ia, ib)
                 if best:
                     rec["closest"] = {"gap_mm": round(best[0], 3), "a": _fmtp(best[1]), "b": _fmtp(best[2]),
-                                      "a_item": best[3].ref or _sid(best[3].id), "b_item": best[4].ref or _sid(best[4].id)}
+                                      "a_item": best[3].ref or _sid(best[3].id, M), "b_item": best[4].ref or _sid(best[4].id, M)}
             out.append(rec)
     out.sort(key=lambda r: r["straight_mm"])
     return {"board": board, "open": len(out), "unconnected_drc": summarize_drc(raw)["unconnected"], "connections": out}
@@ -371,11 +395,11 @@ def window(board, at=None, size=None, net=None, conn=None, layers=None, constrai
         elif o.kind == "track" and o.layers & set(lays):
             lay = next(iter(o.layers))
             isl = M.islands(o.net)[1].get(o.id) if o.net else None
-            tracks.append({"id": _sid(o.id), "net": o.net, "layer": lay, "w": round(o.extra["width"], 4), "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]),
+            tracks.append({"id": _sid(o.id, M), "net": o.net, "layer": lay, "w": round(o.extra["width"], 4), "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]),
                            "locked": o.locked, "island": isl})
         elif o.kind == "via":
             isl = M.islands(o.net)[1].get(o.id) if o.net else None
-            vias.append({"id": _sid(o.id), "net": o.net, "pos": _fmtp(o.g[1]), "dia": round(o.extra["dia"], 3), "drill": round(o.extra["drill"], 3),
+            vias.append({"id": _sid(o.id, M), "net": o.net, "pos": _fmtp(o.g[1]), "dia": round(o.extra["dia"], 3), "drill": round(o.extra["drill"], 3),
                          "locked": o.locked, "island": isl})
         elif o.kind == "ko":
             ko.append({"name": o.desc, "layers": sorted(o.layers, key=cu.index), "no_tracks": o.extra["no_tracks"], "no_vias": o.extra["no_vias"],
@@ -549,7 +573,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                 need = (o.clr if o.kind in ("edge",) else 0.0 if o.kind == "ko" else o.clr if o.kind == "hole" else M.need(net, o))
                 margin = gap - need
                 lab = o.ref or (f"{o.kind} {o.net}" if o.net else o.kind)
-                cand = {"item": lab, "kind": o.kind, "net": o.net, "id": _sid(o.id) if o.id else None, "gap": round(gap, 4), "need": round(need, 4),
+                cand = {"item": lab, "kind": o.kind, "net": o.net, "id": _sid(o.id, M) if o.id else None, "gap": round(gap, 4), "need": round(need, 4),
                         "margin": round(margin, 4), "at": _fmtp(pt) if pt else None, "locked": o.locked}
                 if best is None or margin < best["margin"]:
                     best = cand
@@ -582,7 +606,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                         need = 0.0 if o.kind == "ko" else (o.clr if o.kind == "edge" else M.need(net, o))
                     margin = gap - need
                     lab = o.ref or (f"{o.kind} {o.net}" if o.net else o.kind)
-                    cand = {"item": lab, "kind": o.kind, "layer": lay, "net": o.net, "id": _sid(o.id) if o.id else None, "gap": round(gap, 4),
+                    cand = {"item": lab, "kind": o.kind, "layer": lay, "net": o.net, "id": _sid(o.id, M) if o.id else None, "gap": round(gap, 4),
                             "need": round(need, 4), "margin": round(margin, 4), "at": _fmtp(pt) if pt else None, "locked": o.locked}
                     if best is None or margin < best["margin"]:
                         best = cand
@@ -636,7 +660,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
             for o in in_box((pt[0] - 0.01, pt[1] - 0.01, pt[0] + 0.01, pt[1] + 0.01), lay):
                 if o.net == net and o.kind in ("pad", "track", "via") and G.ob_gap(pt, pt, 0.0, o)[0] <= 1e-3:
                     isl = M.islands(net)[1].get(o.id)
-                    hit = {"item": o.ref or o.kind, "id": _sid(o.id), "island": isl}
+                    hit = {"item": o.ref or o.kind, "id": _sid(o.id, M), "island": isl}
                     break
             if hit:
                 break
@@ -782,6 +806,10 @@ def session_begin(board, work, kicad_cli="kicad-cli"):
                            "give this agent its own work path; the existing session is untouched")
     os.makedirs(os.path.join(S.dir, "undo"), exist_ok=True)
     _copy_board(board, work)
+    from . import boardtext as BT
+    rc = BT.reuuid_collisions(work)                       # PHASE3I F9: the work copy only, before the start copy
+    if rc["collisions"]:
+        print(f"session: {rc['collisions']} item-id collision(s), {rc['changed']} uuid(s) renewed on the work copy", file=sys.stderr)
     shutil.copy(work, os.path.join(S.dir, "start.kicad_pcb"))
     raw = drc_raw(work, kicad_cli)
     json.dump(raw, open(os.path.join(S.dir, "start_drc.json"), "w"))
@@ -1404,7 +1432,7 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         locked = [o for o in sel.values() if o.locked]
         unnamed = [o for o in locked if o.id not in named]
         if allow_locked and unnamed:
-            raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id) for o in unnamed))
+            raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id, M) for o in unnamed))
         # PHASE3I B5: the lock policy follows the net's class. Hard (gated pair legs, RF) needs the explicit opt-in;
         # soft and free locked copper may be ripped by the ordinary edit guard (the caller re-lays soft copper).
         from . import constraints as CN_lp, lockpolicy as LP
@@ -1413,7 +1441,7 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         lv = {o.net: LP.level(o.net, cons_lp, names_lp) for o in locked}       # PHASE3I F6: hard / soft / free
         hard = [o for o in locked if lv[o.net] == LP.HARD]
         if hard and not allow_locked:
-            raise ValueError("refused, hard-locked copper selected (high-speed pair, RF or controlled net): " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in hard[:6]))
+            raise ValueError("refused, hard-locked copper selected (high-speed pair, RF or controlled net): " + ", ".join(f"{o.kind} {_sid(o.id, M)} at {_fmtp(o.g[1])}" for o in hard[:6]))
         if out is not None and not allow_locked and any(lv[o.net] == LP.SOFT for o in locked):
             raise ValueError("soft-locked copper is ripped only in a session, where commit checks the re-lay")
         removed = []
@@ -1678,7 +1706,7 @@ def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
                 best = (m, o)
         if best:
             o = best[1]
-            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "uuid": o.id,
+            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id, M), "uuid": o.id,
                                       "layer": lays[k], "locked": o.locked, "border_cells": 0})
             e["border_cells"] += 1
     return {"reached_cells": {l: {"bbox": [round(v, 2) for v in r[:4]], "cells": r[4]} for l, r in per.items()},
@@ -1887,7 +1915,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                             if o.kind in ("track", "via") and not o.locked and o.net != net:
                                 gap, _ = G.ob_gap(pt, pt, vd / 2, o)
                                 if gap - M.need(net, o) < -G.EPS or gap + (vd / 2 - vdr / 2) - M.hole_clr < -G.EPS:
-                                    b = blockers.setdefault(o.id, {"id": _sid(o.id), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
+                                    b = blockers.setdefault(o.id, {"id": _sid(o.id, M), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
                                                                    "at": _fmtp(pt), "cells": 0, "blocks": "via"})
                                     b["cells"] += 1
                 if soft[lays[k]][iy, ix]:
@@ -1896,7 +1924,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                         if o.kind in ("track", "via") and not o.locked and o.net != net:
                             gap, _ = G.ob_gap(pt, pt, w / 2, o)
                             if gap - M.need(net, o) < -G.EPS:
-                                b = blockers.setdefault(o.id, {"id": _sid(o.id), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
+                                b = blockers.setdefault(o.id, {"id": _sid(o.id, M), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
                                                                "at": _fmtp(pt), "cells": 0})
                                 b["cells"] += 1
         # to path string: chunks per layer, vias between; collapse collinear

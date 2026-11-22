@@ -514,7 +514,7 @@ def lay_text(text, pins, drill, via):
 
     def u():                                            # deterministic ids, marked so the generic fan-out knows these pads are escaped
         cnt[0] += 1
-        return MARK + str(uuid.uuid5(uuid.NAMESPACE_URL, f"breakout/{seed}/{cnt[0]}"))[len(MARK):]
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"breakout/{seed}/{cnt[0]}"))[:-8] + MARK     # PHASE3I F9: marker at the tail
     for key in sorted(pins, key=lambda k: (k[0], pins[k]["side"], pins[k]["row"], k[1])):
         r = pins[key]
         for a, b in zip(r["pts"], r["pts"][1:]):

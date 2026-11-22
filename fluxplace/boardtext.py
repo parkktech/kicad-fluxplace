@@ -165,3 +165,31 @@ def unnet_copper(text, net, keep_segs, keep_vias):
         last = j + 1
     out.append(text[last:])
     return "".join(out)
+
+
+def reuuid_collisions(board):
+    """PHASE3I F9 (R19): every item uuid whose first 8 hex repeat an earlier one's gets a new uuid4-headed uuid (the breakout
+    MARK tail kept when the old one carried the mark), and every reference to it is rewritten in the file. Call on a work
+    copy only. -> {"collisions": colliding groups, "changed": uuids renewed}."""
+    import collections
+    import re
+    import uuid as UU
+    from . import breakout as BO
+    text = open(board, errors="surrogateescape").read()
+    found = list(dict.fromkeys(re.findall(r'"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"', text)))
+    groups = collections.defaultdict(list)
+    for u in found:
+        groups[u[:8].lower()].append(u)
+    changed = {}
+    for us in groups.values():
+        for old in us[1:]:
+            new = str(UU.uuid4())
+            if old[:8].lower() == BO.MARK or old[-8:].lower() == BO.MARK:
+                new = new[:-8] + BO.MARK
+            changed[old] = new
+    if changed:
+        for old, new in changed.items():
+            text = text.replace(old, new)
+        with open(board, "w", errors="surrogateescape") as fh:
+            fh.write(text)
+    return {"collisions": sum(1 for us in groups.values() if len(us) > 1), "changed": len(changed)}

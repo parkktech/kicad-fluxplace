@@ -496,7 +496,8 @@ class Fan:
         if not hasattr(self, "_bo"):
             self._bo = {}
             for t in self.b.GetTracks():
-                if t.GetClass() == "PCB_TRACK" and t.m_Uuid.AsString().startswith(BREAKOUT_UUID):
+                u = t.m_Uuid.AsString()          # PHASE3I F9: the marker is the uuid tail (legacy boards: the head)
+                if t.GetClass() == "PCB_TRACK" and (u.endswith(BREAKOUT_UUID) or u.startswith(BREAKOUT_UUID)):
                     self._bo.setdefault(t.GetNetname(), []).append(t.GetStart())
         return any(p.HitTest(pt) for pt in self._bo.get(net, ()))
 

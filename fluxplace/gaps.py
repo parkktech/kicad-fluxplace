@@ -2065,6 +2065,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     best = os.path.join(work, "best.kicad_pcb")
     _copy(board, best)
     _sidecars(board, best)
+    from . import boardtext as BT                       # PHASE3I F9: item ids unique on the work copy (never the input)
+    rc = BT.reuuid_collisions(best)
+    if rc["collisions"]:
+        log(f"close: {rc['collisions']} item-id collision(s), {rc['changed']} uuid(s) renewed on the work copy")
     cons = cons or C.load(cons_path)
     budget_min = budget_min or (cons.get("flow") or {}).get("budget_min", 120)
     explicit = attempts is not None
