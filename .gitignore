@@ -42,3 +42,5 @@ fluxplace.*.txt
 fluxplace.*.json
 *.status.json
 .partdata_cache.json
+kernel/target/
+fluxplace/_fpkernel.so
