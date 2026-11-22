@@ -355,7 +355,7 @@ def _worker(jobfile):
     except Exception as e:                                # noqa: BLE001 - one judge failing is a row, not a stage crash
         out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
     with open(job["result"], "w") as fh:
-        json.dump(out, fh)
+        json.dump(out, fh, default=sorted)
 
 
 def _row(r, cid, kind, moved, t1key, jkey, png, verdict):
@@ -424,10 +424,10 @@ def stage(c, n, board):
         for _key1, cnd, p, _rem in top:
             jd = LA._mk(os.path.join(rdir, "judge", cnd["id"]))
             job = {"tag": f"r{r}-{cnd['id']}", "board": p, "dir": jd, "result": os.path.join(jd, "result.json"), "a": acfg,
-                   "judge_min": P["judge_min"], "critical": crit}
+                   "judge_min": P["judge_min"], "critical": sorted(crit)}
             job["jobfile"] = os.path.join(LA._mk(os.path.join(rdir, "jobs")), f"{cnd['id']}.json")
             with open(job["jobfile"], "w") as fh:
-                json.dump(job, fh)
+                json.dump(job, fh, default=sorted)
             jobs.append(job)
         t_judge = time.time()
         results = LA._run_jobs(jobs, P, P["judge_min"] * 60 + 600, entry="placetour:_worker") if jobs else []
