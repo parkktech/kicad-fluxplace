@@ -199,3 +199,30 @@ Candidate fitness in two tiers:
 Rounds: `max_rounds` default 3, `no_gain_rounds` 1. Target wall time: round 0 <= 10 min, each later round <= 20 min,
 whole stage <= 60 min. Print and write to progress.json the wall time per ghost / candidate / tier so the efficiency
 log can be fed from it. `jobs` default 4 (32 cores, 62 GB: one JVM or KRT call each, pair lays use the rest).
+
+## L9 (Fable, after run 1): lean ghosts, not the pipeline route stage
+
+Run 1 (W15/stageL, 11-22 09:20) measured: both router ghosts were useless. KRT ghost (pipeline route stage, 8 min):
+planes + rails-pour + rails used the whole budget (rails step rc 124), zero signal nets, opens 463. FR ghost (pipeline
+route stage): pre-steps + gate + batch ladder left one 4-min FR window that timed out before pass 1 (fr_pass 0), opens 426.
+A ghost must spend its whole budget routing SIGNAL nets. Replace `ghost()`'s pipeline subprocess with two lean paths
+(keep the signature and return value; ghost.out keeps the tail of every subprocess):
+
+- `krt`: `R = routerules.rules_for(cons, board, a)`; `base = krtchain.base_flags(R, outdir)`; signal layers = the
+  board's copper minus plane layers (`krtchain.plane_plan(board)` gives the planes); ONE call
+  `krtchain.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, power={}, nets=["*"])` with every plane net
+  excluded (route.py `--nets` takes globs; if it has no exclude option, pass the explicit list of non-plane nets with >= 2
+  pads from routediag.load). No planes, no rails, no pairgroups, no diff: pair legs and rails route as plain nets (the
+  ghost wants their natural paths). Run it with `routestatus.run_logged(cmd, ..., timeout=ghost_min*60)` like
+  `krtchain.run_step` does; at the cap, use the router's checkpoint file if the status json names one (route.py writes
+  checkpoints, see routestatus.py:183), else None.
+- `freerouting`: fr_helper.py `export` (DSN of the copy; run it with /usr/bin/python3 like routefr does, grep
+  `_helper(` in routefr.py), then `java -jar <jar> -de in.dsn -do out.ses -mp <ghost_passes.fr> -mt <threads>`
+  (threads = 32 // jobs; flags per W4/freerouting-2.5.0-help.txt; reuse routefr.command/run_jvm if they take these
+  directly), wall cap ghost_min.fr; FR writes the .ses only at the end, so cap = passes, not time: set -mp so it ends
+  (default 4) and the wall cap as a safety only (+50%). Then fr_helper `import` {board: copy, ses, out}. No pre-route
+  gate, no ladder, no batches.
+- Both: budgets from L8 (`ghost_min.krt` 8, `ghost_passes.fr` 4). Log per ghost to progress.json: secs, nets routed,
+  opens before/after (routeconn text count), so the next run shows whether a ghost earned its minutes.
+- Tests: command lists built for both paths (monkeypatched subprocess), checkpoint fallback, plane nets excluded.
+- Do not touch the verify ghost (tier 2): it stays the pipeline route stage (it must route like the real flow).
