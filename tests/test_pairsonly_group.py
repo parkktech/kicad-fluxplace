@@ -56,3 +56,15 @@ def test_group_refused_when_the_blocker_does_not_end_complete(tmp_path):
     a = {r["pair"]: r for r in rep["pairs"]}["A_N/A_P"]
     assert a["status"] == "kept_original" and "group_refused" in a
     assert BT.blocks(open(src).read()) == BT.blocks(open(out).read())   # the board is restored exactly
+
+
+def test_hard_locked_blocker_is_not_grouped_without_unlock(tmp_path):
+    """PHASE3I F7: a blocker whose locked copper is hard (no constraints: fail closed) is not re-laid without unlock."""
+    body = bad_pair("A", 20) + duo("UD", 60, 20, "D_P", "D_N") + duo("JD", 60, 40, "D_P", "D_N") \
+        + seg((60, 20), (60, 40), "D_P", locked=True) + seg((60.5, 20), (60.5, 40), "D_N", locked=True)
+    src = PB.write(tmp_path, body)
+    out = str(tmp_path / "o.kicad_pcb")
+    rep = PO.reroute(src, out, ["A_P"], {}, None, drc=no_drc(), lay=_lay_factory(), log=lambda m: None)
+    a = {r["pair"]: r for r in rep["pairs"]}["A_N/A_P"]
+    assert a["status"] == "kept_original" and "blocker hard-locked" in a["group_refused"]
+    assert BT.blocks(open(src).read()) == BT.blocks(open(out).read())

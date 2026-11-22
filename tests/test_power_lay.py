@@ -1,5 +1,5 @@
 """PHASE3I B4: a [power] net is laid at its required width (lay default, refusal below it) and session_commit judges R6
-through the close guard (G._accept) in repair mode. Uses the gap_board fixture of test_handroute (kicad-cli, no router)."""
+through the close guard (G._accept, real) in repair mode; only the measure is stubbed. Uses the gap_board fixture of test_handroute (kicad-cli, no router)."""
 import os
 import sys
 
@@ -40,8 +40,33 @@ def test_session_commit_repair_judges_r6_through_close_guard(tmp_path, monkeypat
     p = B.save(str(tmp_path))
     work = str(tmp_path / "work.kicad_pcb")
     H.session_begin(p, work)
-    from fluxplace import drcguard as DG
-    monkeypatch.setattr(DG, "accept", lambda *a, **k: (True, ""))      # the R2/R4 guard passes; R6 is the only judge
-    monkeypatch.setattr(G, "_accept", lambda *a, **k: (False, "R6 power worse 1->2"))
+    assert H.lay(work, "B", LOWER, width=0.25)["accepted"]      # a real gain: the R2/R4 guard passes, R6 is the judge
+    real = G._remeasure
+
+    def measure(path, kicad_cli="kicad-cli"):              # the candidate carries one more power gap than the start
+        m = real(path, kicad_cli)
+        m["gaps"] = list(m.get("gaps") or [])
+        if os.path.basename(path) == "cand.kicad_pcb":
+            m["gaps"] = m["gaps"] + [{"id": "pw1", "kind": "power-width", "class": "power", "nets": ["B"], "at": None,
+                                            "sev": 0, "mag": 0}]
+        return m
+    monkeypatch.setattr(G, "_remeasure", measure)
+    monkeypatch.setattr(G, "_classify_into", lambda *a, **k: None)
     c = H.session_commit(work, str(tmp_path / "out.kicad_pcb"))
-    assert not c["accepted"] and "R6 power worse 1->2" in c["reasons"]
+    assert not c["accepted"] and any(x.startswith("R6 power worse") for x in c["reasons"])
+
+
+def test_neck_down_accepted_at_a_pad_and_refused_mid_rail(tmp_path, cons_path):
+    """PHASE3I F7 (R15): a [power] net narrower than its width is accepted only short and at a pad of the net."""
+    B = Brd()
+    B.edge(-2, -8, 22, 8)
+    B.pad("B1", "B", 4, -3)
+    B.pad("B2", "B", 16, -3)
+    B.pad("B3", "B", 4.8, -3)                              # the short neck joins B1 to B3: no dangling end
+    p = B.save(str(tmp_path))
+    cons = str(tmp_path / "neck.toml")
+    open(cons, "w").write("[power.B]\nwidth_mm = 0.3\n")          # need 0.3; 0.2 is the fab track floor
+    r = H.lay(p, "B", "F.Cu: 4,-3 4.8,-3", out=str(tmp_path / "neck.kicad_pcb"), width=0.2, constraints=cons)
+    assert r["accepted"] and r.get("neck") is True, r.get("reason")
+    r2 = H.lay(p, "B", "F.Cu: 9,-3 10,-3", out=str(tmp_path / "mid.kicad_pcb"), width=0.2, constraints=cons)
+    assert not r2["accepted"] and "below the 0.3 mm" in r2["reason"]

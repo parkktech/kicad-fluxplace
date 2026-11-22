@@ -112,13 +112,37 @@ def _parse_xy(s, n=2):
     return v
 
 
-def _sid(i):
-    return i[:8]
+def _id_len(M=None):
+    """PHASE3I F9 (R19): the shortest id prefix (>= 8) under which every item id of the model is unique (cached on M)."""
+    if M is None:
+        return 8
+    n = getattr(M, "_idlen", None)
+    if n is None:
+        ids = [o.id for o in M.obs if o.id]
+        n = 8
+        while n < 36 and len({i[:n] for i in ids}) < len(set(ids)):
+            n += 1
+        M._idlen = n
+    return n
+
+
+def _sid(i, M=None):
+    return i[:_id_len(M)]
 
 
 def _resolve(M, ident):
-    full = [o for o in M.obs if o.id.startswith(ident)]
-    return full
+    """PHASE3I F9 (R19): the items named by `ident`. A full id wins; a prefix must match exactly one item, else
+    ValueError listing up to 8 matches (full id, kind, net, layer, position)."""
+    exact = [o for o in M.obs if o.id == ident]
+    if exact:
+        return exact
+    hits = [o for o in M.obs if o.id and o.id.startswith(ident)]
+    if len(hits) > 1:
+        def desc(o):
+            lay = next(iter(o.layers)) if getattr(o, "layers", None) else "-"
+            return f"{o.id} {o.kind} {o.net} {lay} at {_fmtp(o.g[1]) if o.g else '-'}"
+        raise ValueError(f"id {ident} is not unique: " + "; ".join(desc(o) for o in hits[:8]))
+    return hits
 
 
 def _model(board, constraints=None, refill=True):
@@ -249,7 +273,7 @@ def open_nets(board, constraints=None, raw=None, M=None):
                 best = _island_dist(M, net, ia, ib)
                 if best:
                     rec["closest"] = {"gap_mm": round(best[0], 3), "a": _fmtp(best[1]), "b": _fmtp(best[2]),
-                                      "a_item": best[3].ref or _sid(best[3].id), "b_item": best[4].ref or _sid(best[4].id)}
+                                      "a_item": best[3].ref or _sid(best[3].id, M), "b_item": best[4].ref or _sid(best[4].id, M)}
             out.append(rec)
     out.sort(key=lambda r: r["straight_mm"])
     return {"board": board, "open": len(out), "unconnected_drc": summarize_drc(raw)["unconnected"], "connections": out}
@@ -371,11 +395,11 @@ def window(board, at=None, size=None, net=None, conn=None, layers=None, constrai
         elif o.kind == "track" and o.layers & set(lays):
             lay = next(iter(o.layers))
             isl = M.islands(o.net)[1].get(o.id) if o.net else None
-            tracks.append({"id": _sid(o.id), "net": o.net, "layer": lay, "w": round(o.extra["width"], 4), "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]),
+            tracks.append({"id": _sid(o.id, M), "net": o.net, "layer": lay, "w": round(o.extra["width"], 4), "a": _fmtp(o.g[1]), "b": _fmtp(o.g[2]),
                            "locked": o.locked, "island": isl})
         elif o.kind == "via":
             isl = M.islands(o.net)[1].get(o.id) if o.net else None
-            vias.append({"id": _sid(o.id), "net": o.net, "pos": _fmtp(o.g[1]), "dia": round(o.extra["dia"], 3), "drill": round(o.extra["drill"], 3),
+            vias.append({"id": _sid(o.id, M), "net": o.net, "pos": _fmtp(o.g[1]), "dia": round(o.extra["dia"], 3), "drill": round(o.extra["drill"], 3),
                          "locked": o.locked, "island": isl})
         elif o.kind == "ko":
             ko.append({"name": o.desc, "layers": sorted(o.layers, key=cu.index), "no_tracks": o.extra["no_tracks"], "no_vias": o.extra["no_vias"],
@@ -549,7 +573,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                 need = (o.clr if o.kind in ("edge",) else 0.0 if o.kind == "ko" else o.clr if o.kind == "hole" else M.need(net, o))
                 margin = gap - need
                 lab = o.ref or (f"{o.kind} {o.net}" if o.net else o.kind)
-                cand = {"item": lab, "kind": o.kind, "net": o.net, "id": _sid(o.id) if o.id else None, "gap": round(gap, 4), "need": round(need, 4),
+                cand = {"item": lab, "kind": o.kind, "net": o.net, "id": _sid(o.id, M) if o.id else None, "gap": round(gap, 4), "need": round(need, 4),
                         "margin": round(margin, 4), "at": _fmtp(pt) if pt else None, "locked": o.locked}
                 if best is None or margin < best["margin"]:
                     best = cand
@@ -582,7 +606,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
                         need = 0.0 if o.kind == "ko" else (o.clr if o.kind == "edge" else M.need(net, o))
                     margin = gap - need
                     lab = o.ref or (f"{o.kind} {o.net}" if o.net else o.kind)
-                    cand = {"item": lab, "kind": o.kind, "layer": lay, "net": o.net, "id": _sid(o.id) if o.id else None, "gap": round(gap, 4),
+                    cand = {"item": lab, "kind": o.kind, "layer": lay, "net": o.net, "id": _sid(o.id, M) if o.id else None, "gap": round(gap, 4),
                             "need": round(need, 4), "margin": round(margin, 4), "at": _fmtp(pt) if pt else None, "locked": o.locked}
                     if best is None or margin < best["margin"]:
                         best = cand
@@ -636,7 +660,7 @@ def probe_prims(M, net, prims, width=None, via=None, any_angle=False, skip_ids=(
             for o in in_box((pt[0] - 0.01, pt[1] - 0.01, pt[0] + 0.01, pt[1] + 0.01), lay):
                 if o.net == net and o.kind in ("pad", "track", "via") and G.ob_gap(pt, pt, 0.0, o)[0] <= 1e-3:
                     isl = M.islands(net)[1].get(o.id)
-                    hit = {"item": o.ref or o.kind, "id": _sid(o.id), "island": isl}
+                    hit = {"item": o.ref or o.kind, "id": _sid(o.id, M), "island": isl}
                     break
             if hit:
                 break
@@ -749,9 +773,21 @@ def _write_text_ledger(L, path):
             lines.append("    unlocked-and-removed: " + json.dumps(item, sort_keys=True))
         for opened in e.get("opened", []):
             lines.append("    opened: " + json.dumps(opened, sort_keys=True))
+        if e.get("args") is not None:                        # PHASE3I F5 (R12): replay() lays with the original arguments
+            lines.append("    args: " + json.dumps(e["args"], sort_keys=True))
         if e.get("stitched"):                                # PHASE3I B2: replay() re-applies a stitched lay with stitch=True
             lines.append("    stitched: " + json.dumps(e["stitched"], sort_keys=True))
     open(path, "w").write("\n".join(lines) + "\n")
+
+
+def _pad_centres(M, net):
+    """centre (mm) of every pad of `net` on the model (mean of the pad outline)."""
+    out = []
+    for o in M.obs:
+        if o.kind == "pad" and o.net == net and o.g and o.g[0] == "poly" and o.g[1]:
+            pts = o.g[1]
+            out.append((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)))
+    return out
 
 
 def _copy_board(src, dst):
@@ -770,6 +806,10 @@ def session_begin(board, work, kicad_cli="kicad-cli"):
                            "give this agent its own work path; the existing session is untouched")
     os.makedirs(os.path.join(S.dir, "undo"), exist_ok=True)
     _copy_board(board, work)
+    from . import boardtext as BT
+    rc = BT.reuuid_collisions(work)                       # PHASE3I F9: the work copy only, before the start copy
+    if rc["collisions"]:
+        print(f"session: {rc['collisions']} item-id collision(s), {rc['changed']} uuid(s) renewed on the work copy", file=sys.stderr)
     shutil.copy(work, os.path.join(S.dir, "start.kicad_pcb"))
     raw = drc_raw(work, kicad_cli)
     json.dump(raw, open(os.path.join(S.dir, "start_drc.json"), "w"))
@@ -841,7 +881,7 @@ def _drop_vias(b, M, att):
 
 
 def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True,
-          stitch=None):
+          stitch=None, args=None):
     """The common edit path. mutate(pcbnew_board, Model) -> info dict (raises ValueError to refuse). Writes `out` only when accepted.
     stitch(b, M, nets) -> iterable of attempts [(net, x, y, via_dims)...]: used only when the refusal is a lay that opened
     connections of zone nets alone; each attempt's vias go into the same in-memory board and the same guard decides (PHASE3H-C).
@@ -856,6 +896,8 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
     base = summarize_drc(base_raw)
     M = _model(src, constraints, refill=refill)
     res = {"op": op, "net": net, "what": what, "accepted": False}
+    if args is not None:
+        res["args"] = args
     try:
         b = M.b
         info = mutate(b, M)
@@ -891,7 +933,7 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
         if op == "lay" and require_close and not partial and after_n >= before_n:
             reasons.append(f"target not closed: open connections of {net} {before_n} -> {after_n}")
         if extra_check:
-            r = extra_check(M, cand, base)
+            r = extra_check(M, cand, base, path) if getattr(extra_check, "wants_path", False) else extra_check(M, cand, base)
             if r:
                 reasons.append(r)
         return {"cand_raw": cand_raw, "cand": cand, "reasons": reasons, "meas": meas, "new_u": new_u}
@@ -954,6 +996,8 @@ def _record(S, res, in_session, out):
     ent = {k: res.get(k) for k in ("op", "net", "what", "accepted", "reason", "measure")}
     if res.get("stitched"):
         ent["stitched"] = res["stitched"]
+    if res.get("args") is not None:
+        ent["args"] = res["args"]
     removed = (res.get("info") or {}).get("removed") or []
     removed_locked = [x for x in removed if isinstance(x, dict) and x.get("unlocked_and_removed")] if isinstance(removed, list) else []
     if removed_locked:
@@ -1072,6 +1116,7 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         stitch=False):
     from . import power as PW
     from . import constraints as CN
+    from . import review as RV
     cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
     need = PW.track_width_mm(cons, net)            # PHASE3I B4: a [power] net is laid at its required width, never less
     def mutate(b, M):
@@ -1080,19 +1125,41 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
             raise ValueError(f"unknown net {net!r}")
         rule = M.net_rule(net)
         w = width or rule["width"]
+        neck = False
         if need is not None:
             if width is None:
                 w = max(w, need)
             elif width < need - 1e-9:
-                raise ValueError(f"width {width:g} mm is below the {need:g} mm that [power.{net}] needs")
+                # PHASE3I F7 (R15): a neck-down is accepted only short and at a pad of the net (one end within reach of it)
+                reach = max(1.0, 2 * need)
+                seg = [p for p in prims if p[0] == "seg"]
+                length = sum(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1]) for p in seg)
+                ends = [seg[0][2], seg[-1][3]] if seg else []
+                centres = _pad_centres(M, net)
+                near = any(math.hypot(e[0] - c[0], e[1] - c[1]) <= reach for e in ends for c in centres)
+                if not (seg and length <= reach and near):
+                    raise ValueError(f"width {width:g} mm is below the {need:g} mm that [power.{net}] needs")
+                neck = True
         vv = via or (rule["via_dia"], rule["via_drill"])
         pr = probe_prims(M, net, prims, w, vv, any_angle)
         if not pr["ok"]:
             raise ValueError("probe failed: " + json.dumps(pr["violations"][:4]))
         added = _apply_prims(b, M, net, prims, w, vv, lock)
-        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
+        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock,
+                "neck": neck}
     hook = (lambda b, M, nets: _stitch_attempts(b, M, nets, via)) if stitch else None
-    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook)
+    args = {"width": width, "via": list(via) if via else None, "any_angle": any_angle, "lock": lock}   # PHASE3I F5 (R12)
+    pins_before = RV.pin_escape_blocked(board) if lock else set()
+
+    def lock_pins(M, cand, base, cpath):                   # PHASE3I F6: a locked lay may not close the last escape of a pad
+        new = RV.pin_escape_blocked(cpath) - pins_before
+        return ("lock blocks the last escape of " + ", ".join(sorted(new)[:6])) if new else None
+    lock_pins.wants_path = True
+    res = _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args,
+                extra_check=lock_pins if lock else None)
+    if (res.get("info") or {}).get("neck"):
+        res["neck"] = True                                 # PHASE3I F7 (R15)
+    return res
 
 
 def _net_copper(b, net):
@@ -1243,16 +1310,19 @@ _LAY_ROW = re.compile(r"^#\d+ .*\blay +ACCEPT net=(\S+)\s+(.*)$")
 
 
 def accepted_lays(ledger):
-    """PHASE3I B2: the ACCEPT `lay` rows of a session ledger.txt -> [(net, path, stitched)] in ledger order.
-    A row's `    stitched:` line marks it stitched. The path is the row's `what` text, exactly as lay was given it."""
+    """PHASE3I B2: the ACCEPT `lay` rows of a session ledger.txt -> [(net, path, stitched, args)] in ledger order.
+    A row's `    stitched:` line marks it stitched; its `    args:` line (PHASE3I F5) holds the lay arguments ({} for an
+    older ledger). The path is the row's `what` text, exactly as lay was given it."""
     out = []
     for line in open(ledger, errors="replace"):
         line = line.rstrip("\n")
         m = _LAY_ROW.match(line)
         if m:
-            out.append([m.group(1), m.group(2).strip(), False])
+            out.append([m.group(1), m.group(2).strip(), False, {}])
         elif line.startswith("    stitched:") and out:
             out[-1][2] = True
+        elif line.startswith("    args:") and out:
+            out[-1][3] = json.loads(line[len("    args:"):])
     return [tuple(r) for r in out]
 
 
@@ -1272,22 +1342,55 @@ def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
     from . import constraints as CN
     cons = CN.load(constraints) if isinstance(constraints, str) else constraints
     n, cur = _merge_current(dst)
-    applied, requeue = [], []
-    for net, path, stitched in accepted_lays(ledger):
+    before, applied, requeue, mine, written = cur, [], [], [], []
+    for net, path, stitched, args in accepted_lays(ledger):
         if net_rx and not re.search(net_rx, net):
             continue
         out = os.path.join(dst, f"m{n + 1}.kicad_pcb")
+        kw = dict(args or {})
+        if isinstance(kw.get("via"), list):
+            kw["via"] = tuple(kw["via"])
         try:
-            res = lay(cur, net, path, out=out, constraints=cons, kicad_cli=kicad_cli, stitch=stitched)
+            res = lay(cur, net, path, out=out, constraints=cons, kicad_cli=kicad_cli, stitch=stitched, **kw)
             ok, why = bool(res.get("accepted")), res.get("reason", "")
         except (ValueError, RuntimeError) as e:
             ok, why = False, str(e)[:200]
         if ok and os.path.exists(out):
             applied.append(net)
+            mine.append((net, path))
+            written.append(out)
             n, cur = n + 1, out
         else:
             requeue.append({"net": net, "path": path, "why": why or "refused"})
+    if mine and cur != before:                     # PHASE3I F5 (R6): this ledger judged once against the board before it
+        why = _r6_refusal(before, cur, cons, kicad_cli)
+        if why:                                    # refused: the board goes back to before this ledger, every row requeued
+            for net, path in mine:
+                requeue.append({"net": net, "path": path, "why": why})
+            del applied[len(applied) - len(mine):]
+            for p in written:                      # M1: the m<N> files this ledger wrote are removed, not left above `before`
+                _unlink_quiet(p)
+            cur = before
     return {"applied": applied, "requeue": requeue, "board": cur}
+
+
+def _r6_refusal(base, cand, cons, kicad_cli="kicad-cli", protect=()):
+    """PHASE3I F5 (R6, shared by session_commit and replay): the close guard's R6 test of `cand` against `base`, on copies
+    (the two boards are never refilled or saved). -> the refusal reason, or None when the candidate is not worse."""
+    from . import gaps as GP
+    tmp = tempfile.mkdtemp(prefix="r6-", dir=os.path.dirname(os.path.abspath(cand)))
+    try:
+        b0, c0 = os.path.join(tmp, "base.kicad_pcb"), os.path.join(tmp, "cand.kicad_pcb")
+        _copy_board(base, b0)
+        _copy_board(cand, c0)
+        base_m = GP._remeasure(b0, kicad_cli)
+        GP._classify_into(base_m, cons or {}, b0)
+        cand_m = GP._remeasure(c0, kicad_cli)
+        GP._classify_into(cand_m, cons or {}, c0)
+        ok6, why6 = GP._accept(base_m, b0, cand_m, c0, [], cand_m["gaps"], None, protect)
+        return None if ok6 else why6
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def merge_sessions(ledgers, dst, constraints=None, kicad_cli="kicad-cli"):
@@ -1332,18 +1435,25 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         locked = [o for o in sel.values() if o.locked]
         unnamed = [o for o in locked if o.id not in named]
         if allow_locked and unnamed:
-            raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id) for o in unnamed))
+            raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id, M) for o in unnamed))
         # PHASE3I B5: the lock policy follows the net's class. Hard (gated pair legs, RF) needs the explicit opt-in;
         # soft and free locked copper may be ripped by the ordinary edit guard (the caller re-lays soft copper).
         from . import constraints as CN_lp, lockpolicy as LP
         cons_lp = CN_lp.load(constraints) if isinstance(constraints, str) else (constraints or {})
-        hard = [o for o in locked if o.net in LP.hard_locked({o.net}, cons_lp, {o.net for o in M.obs if o.net})]
+        names_lp = sorted({o.net for o in M.obs if o.net})
+        lv = {o.net: LP.level(o.net, cons_lp, names_lp) for o in locked}       # PHASE3I F6: hard / soft / free
+        hard = [o for o in locked if lv[o.net] == LP.HARD]
         if hard and not allow_locked:
-            raise ValueError("refused, hard-locked copper selected (high-speed pair or RF): " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in hard[:6]))
+            raise ValueError("refused, hard-locked copper selected (high-speed pair, RF or controlled net): " + ", ".join(f"{o.kind} {_sid(o.id, M)} at {_fmtp(o.g[1])}" for o in hard[:6]))
+        if out is not None and not allow_locked and any(lv[o.net] == LP.SOFT for o in locked):
+            raise ValueError("soft-locked copper is ripped only in a session, where commit checks the re-lay")
         removed = []
         for t in list(b.GetTracks()):
             if t.m_Uuid.AsString() in sel:
                 rec = _removed_track_record(t, sel[t.m_Uuid.AsString()])
+                if rec["was_locked"]:
+                    rec["level"] = lv.get(rec["net"], LP.FREE)
+                    rec["unlocked_and_removed"] = True                # PHASE3I F6: soft and free rips are recorded too
                 removed.append(rec)
                 if rec["was_locked"]:
                     t.SetLocked(False)
@@ -1425,17 +1535,21 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="rep
     if not ok:
         reasons.append(why)
     elif mode == "repair":                          # PHASE3I B4: R6 (hs_pair/rf/power/power_mag) judged as close judges it
-        from . import gaps as GP
-        base_m = GP._remeasure(start, kicad_cli)
-        GP._classify_into(base_m, cons, start)
-        cand_m = GP._remeasure(S.work, kicad_cli)
-        GP._classify_into(cand_m, cons, S.work)
-        ok6, why6 = GP._accept(base_m, start, cand_m, S.work, [], cand_m["gaps"], None, protect)
-        if not ok6:
+        why6 = _r6_refusal(start, S.work, cons, kicad_cli, protect)     # PHASE3I F5 (R11): on copies
+        if why6:
             reasons.append(why6)
     Ma, Mb = G.Model(start), G.Model(S.work)
     reescapes = _active_locked_reescapes(S)
     reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}
+    for net in sorted({x["net"] for ent in reescapes for x in ent["removed_locked"] if x.get("level") == "soft"}):
+        # PHASE3I F6: a soft-locked net is committed only when its open count did not rise, its pair is complete and its
+        # re-laid copper is locked (the re-lay is in the same session)
+        if b["unc_by_net"].get(net, 0) > a["unc_by_net"].get(net, 0):
+            reasons.append(f"soft-locked copper of {net} ripped and not re-laid (open {a['unc_by_net'].get(net, 0)}->{b['unc_by_net'].get(net, 0)})")
+        elif b["pairs"].get(net):
+            reasons.append(f"soft-locked copper of {net} ripped: its pair is not complete")
+        elif not any(o.net == net and o.kind in ("track", "via") and o.locked for o in Mb.obs):
+            reasons.append(f"soft-locked copper of {net} ripped: the re-laid copper is not locked")
     original_locked = {sig for sig in _locked_sig(Ma) if sig[1] not in reescape_nets}
     if not original_locked.issubset(_copper_sig(Mb)):
         reasons.append("locked copper geometry changed")
@@ -1595,7 +1709,7 @@ def _seal_report(M, net, reached, lays, free, xs, ys, w, pit, viaok):
                 best = (m, o)
         if best:
             o = best[1]
-            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id), "uuid": o.id,
+            e = cnt.setdefault(o.id, {"item": o.ref or f"{o.kind} {o.net}", "kind": o.kind, "net": o.net, "id": _sid(o.id, M), "uuid": o.id,
                                       "layer": lays[k], "locked": o.locked, "border_cells": 0})
             e["border_cells"] += 1
     return {"reached_cells": {l: {"bbox": [round(v, 2) for v in r[:4]], "cells": r[4]} for l, r in per.items()},
@@ -1804,7 +1918,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                             if o.kind in ("track", "via") and not o.locked and o.net != net:
                                 gap, _ = G.ob_gap(pt, pt, vd / 2, o)
                                 if gap - M.need(net, o) < -G.EPS or gap + (vd / 2 - vdr / 2) - M.hole_clr < -G.EPS:
-                                    b = blockers.setdefault(o.id, {"id": _sid(o.id), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
+                                    b = blockers.setdefault(o.id, {"id": _sid(o.id, M), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
                                                                    "at": _fmtp(pt), "cells": 0, "blocks": "via"})
                                     b["cells"] += 1
                 if soft[lays[k]][iy, ix]:
@@ -1813,7 +1927,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                         if o.kind in ("track", "via") and not o.locked and o.net != net:
                             gap, _ = G.ob_gap(pt, pt, w / 2, o)
                             if gap - M.need(net, o) < -G.EPS:
-                                b = blockers.setdefault(o.id, {"id": _sid(o.id), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
+                                b = blockers.setdefault(o.id, {"id": _sid(o.id, M), "net": o.net, "kind": o.kind, "layer": next(iter(o.layers)) if o.kind == "track" else "via",
                                                                "at": _fmtp(pt), "cells": 0})
                                 b["cells"] += 1
         # to path string: chunks per layer, vias between; collapse collinear

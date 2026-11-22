@@ -542,9 +542,17 @@ def _r_patch_rip(base, out, gaps, ctx):
     return _brief(PT.patch_board(base, out, rip=True, cons=ctx["cons"], log=ctx["log"]))
 
 
+def _protect_levels(board, cons):
+    """PHASE3I F6: {net: lock level} of every net of `board` (lockpolicy.level)."""
+    from . import lockpolicy as LP, drcguard as DG, handroute as HR
+    names = DG.snap_nets(HR._snap(board))
+    return {n: LP.level(n, cons, names) for n in names}
+
+
 def _r_handrepair(base, out, gaps, ctx):
-    from . import handroute as HR, handrepair as HP
+    from . import handroute as HR, handrepair as HP, lockpolicy as LP, routeconn as RC
     w = os.path.join(ctx["work"], "hr-work.kicad_pcb")
+    soft = sorted(n for n, lv in _protect_levels(base, ctx["cons"]).items() if lv == LP.SOFT)   # PHASE3I F6
     try:
         layers = signal_layers(base)
         if not layers:
@@ -552,9 +560,23 @@ def _r_handrepair(base, out, gaps, ctx):
         _clean_board(w)
         HR.session_begin(base, w, ctx["kicad_cli"])
         r = HP.repair(w, out, constraints=ctx["cons_path"], budget=min(900, ctx["budget_s"]), layers=layers)
+        if soft and os.path.exists(out):
+            # a soft-locked net whose copper was ripped is written only when the same rung re-laid it (no new opens)
+            ripped = [n for n in soft if _rows_count(out, n) < _rows_count(base, n)]
+            opn_b, opn_o = RC.open_by_net(base), RC.open_by_net(out)
+            lost = [n for n in ripped if opn_o.get(n, 0) > opn_b.get(n, 0)]
+            if lost:
+                os.remove(out)
+                return {"status": "refused", "why": "soft-locked copper ripped and not re-laid: " + ", ".join(lost)[:120]}
     finally:
         _clean_board(w)
     return _brief(r)
+
+
+def _rows_count(board, net):
+    """track, arc and via items of `net` on `board` (cached board rows)."""
+    rows = _board_rows(board)
+    return sum(1 for t in rows["tracks"] if t[0] == net) + sum(1 for v in rows["vias"] if v[0] == net)
 
 
 def _r_region(base, out, gaps, ctx):
@@ -1698,6 +1720,10 @@ def _r_ai_session(base, out, gaps, ctx):
     budget = _ai_budget(ctx.get("cons"))
     used = ctx["ai_used"]
     regs = _sessions_load(ai_dir)
+    for reg in regs:                                          # PHASE3I F5 (merge phase): the oldest answered region first
+        if reg.get("status") == "open" and os.path.exists(os.path.join(ai_dir, reg["rid"] + ".done.json")) \
+                and any(g["id"] in reg.get("gaps", []) for g in gaps):
+            return _r_ai_merge(base, out, gaps, ctx, regs, reg)
     busy = {gid for r in regs if r.get("status") == "open" for gid in r.get("gaps", [])}
     todo = [g for g in gaps if g["id"] not in busy and used.get(ai_key(g), 0) < budget]
     by_id = {g["id"]: g for g in todo}
@@ -1739,6 +1765,61 @@ def _r_ai_session(base, out, gaps, ctx):
         made.append(brief)
     _write_json(os.path.join(ai_dir, "sessions.json"), regs)
     return {"status": "packet", "n": len(made), "briefs": made} if made else {"status": "no packet", "n": 0}
+
+
+def _r_ai_merge(base, out, gaps, ctx, regs, reg):
+    """PHASE3I F5 (B2, merge phase): one answered region. Its session ledger is replayed onto ai/merge/<rid>/ from the
+    board the region was briefed on (H.replay: every lay through the guard again). Nothing applied -> the region is
+    refused, its gaps get the reasons, the done file is retired. Else `out` is the merged board (close's guard judges it
+    like any rung; a guard refusal leaves base untouched and the gaps free for a new brief), the requeued rows are
+    feedback notes, and the region's gaps are charged one AI try each."""
+    from . import handroute as HR
+    ai_dir, used = ctx["ai_dir"], ctx["ai_used"]
+    done = os.path.join(ai_dir, reg["rid"] + ".done.json")
+    grp = [g for g in gaps if g["id"] in reg["gaps"]]
+    sids = {g["id"]: critroute._safe(ai_key(g))[:80] for g in grp}
+    try:
+        with open(done) as fh:
+            ledger = json.load(fh)["ledger"]
+        if not isinstance(ledger, str) or not os.path.isfile(ledger):
+            raise ValueError("ledger path missing")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # L1: an unreadable done file refuses its region (charged like any refused merge), never raises
+        why = f"done file unreadable: {type(e).__name__}"
+        for g in grp:
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
+            _feedback_note(ai_dir, sids[g["id"]], refused=f"merge: {why}"[:160])
+        reg["status"] = "refused"
+        _consume(done)
+        _write_json(os.path.join(ai_dir, "sessions.json"), regs)
+        return {"status": "refused", "why": why}
+    mdir = os.path.join(ai_dir, "merge", reg["rid"])
+    shutil.rmtree(mdir, ignore_errors=True)               # H2: a reused merge dir never keeps stale m<N> files
+    os.makedirs(mdir, exist_ok=True)
+    HR._copy_board(base, os.path.join(mdir, "m0.kicad_pcb"))
+    r = HR.replay(ledger, mdir, constraints=ctx.get("cons"))
+    if not r["applied"]:
+        why = r["requeue"][0]["why"] if r["requeue"] else "nothing to merge"
+        for g in grp:
+            _feedback_note(ai_dir, sids[g["id"]], refused=f"merge: {why}"[:160])
+        reg["status"] = "refused"
+        for g in grp:                                       # L2: a refused merge is charged one AI try per gap
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
+        out_status = {"status": "refused", "why": str(why)[:160]}
+    else:
+        HR._copy_board(r["board"], out)
+        reg["status"] = "merged"
+        for row in r["requeue"]:
+            for g in grp:
+                if row["net"] in (g.get("nets") or []):
+                    _feedback_note(ai_dir, sids[g["id"]], refused=str(row["why"])[:160])
+        for g in grp:
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
+        out_status = {"status": "applied", "applied": len(r["applied"]), "requeue": len(r["requeue"]),
+                      "gap_id": grp[0]["id"] if grp else None}
+    _consume(done)
+    _write_json(os.path.join(ai_dir, "sessions.json"), regs)
+    return out_status
 
 
 def _r_tune(base, out, gaps, ctx):
@@ -2001,6 +2082,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     best = os.path.join(work, "best.kicad_pcb")
     _copy(board, best)
     _sidecars(board, best)
+    from . import boardtext as BT                       # PHASE3I F9: item ids unique on the work copy (never the input)
+    rc = BT.reuuid_collisions(best)
+    if rc["collisions"]:
+        log(f"close: {rc['collisions']} item-id collision(s), {rc['changed']} uuid(s) renewed on the work copy")
     cons = cons or C.load(cons_path)
     budget_min = budget_min or (cons.get("flow") or {}).get("budget_min", 120)
     explicit = attempts is not None
