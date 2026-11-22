@@ -67,6 +67,19 @@ class Kernel:
             raise KernelError(f"{op}: {reply.get('error')}")
         return reply
 
+    def raster(self, bbox, pitch, layer, net="", kind="track"):
+        """Slack field on the legacy grid: (nx, ny, row-major list of floats, mm). Pitch and bbox in mm."""
+        import ctypes as ct
+        x0, y0, x1, y1 = bbox
+        nx = int(round((x1 - x0) / pitch)) + 1
+        ny = int(round((y1 - y0) / pitch)) + 1
+        buf = (ct.c_float * (nx * ny))()
+        req = json.dumps({"bbox": list(bbox), "pitch": pitch, "layer": layer, "net": net, "kind": kind}).encode()
+        n = _load().fpk_raster(self._h, req, buf, nx * ny)
+        if n < 0:
+            raise KernelError(f"raster: {_last_error()}")
+        return nx, ny, list(buf)
+
     def close(self):
         if self._h:
             _load().fpk_close(self._h)

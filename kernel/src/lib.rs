@@ -4,6 +4,7 @@
 pub mod board;
 pub mod clear;
 pub mod conn;
+pub mod path;
 pub mod dru;
 pub mod geom;
 pub mod index;
@@ -15,6 +16,7 @@ pub mod tx;
 pub mod sexpr;
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -212,6 +214,23 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
             json!({"ok": true, "islands": isl, "opens": opens, "dangling": conn::dangling(&h.board, net),
                    "ms": t0.elapsed().as_secs_f64() * 1e3})
         }
+        "check_path" => {
+            let prims = match path::parse_prims(v.get("prims").unwrap_or(&Value::Null)) {
+                Ok(p) => p,
+                Err(e) => return json!({"ok": false, "error": e}),
+            };
+            let net_name = v.get("net").and_then(Value::as_str).unwrap_or("");
+            let net = h.board.intern_net(net_name);
+            let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
+            let mmv = |x: f64| (x * 1e6).round() as i64;
+            let width = v.get("width").and_then(Value::as_f64).map(mmv).unwrap_or(h.rules.net_rule(net_name).width);
+            let via = v.get("via").and_then(Value::as_array).and_then(|a| Some((mmv(a.first()?.as_f64()?), mmv(a.get(1)?.as_f64()?))));
+            let skip: HashSet<u32> = v.get("skip_ids").and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_u64).map(|x| x as u32).collect()).unwrap_or_default();
+            let any = v.get("any_angle").and_then(Value::as_bool).unwrap_or(false);
+            // the probe-style result (its own "ok") travels under "probe": the reply "ok" is the request status
+            json!({"ok": true, "probe": path::check_path(&cx, &prims, net, width, via, &skip, any)})
+        }
         "need" => {
             let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
             let id = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as usize);
@@ -249,6 +268,10 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
             json!({"ok": true, "verdict": verdict, "violations": vs.iter().map(|x| clear::violation_json(&h.board, x)).collect::<Vec<_>>(),
                    "opens": opens, "pour": [], "warnings": [], "ms": ms})
         }
+        "stats" => json!({"ok": true, "items": h.board.items.len(),
+                          "live": h.board.items.iter().filter(|i| i.alive).count(),
+                          "index_entries": h.board.index.len(), "zones": h.board.zones.len(),
+                          "tx_depth": h.board.tx.marks.len()}),
         "net_rule" => {
             let net = v.get("net").and_then(Value::as_str).unwrap_or("");
             let r = h.rules.net_rule(net);
@@ -315,12 +338,34 @@ pub extern "C" fn fpk_call(h: *mut Handle, req_json: *const c_char) -> *mut c_ch
 }
 
 #[no_mangle]
-pub extern "C" fn fpk_raster(_h: *mut Handle, _req_json: *const c_char, _buf: *mut f32, _len: usize) -> i64 {
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        set_error("fpk_raster: not implemented before K12");
-        -1i64
+pub extern "C" fn fpk_raster(h: *mut Handle, req_json: *const c_char, buf: *mut f32, len: usize) -> i64 {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<i64, String> {
+        if h.is_null() {
+            return Err("null handle".into());
+        }
+        let req: Value = serde_json::from_str(cstr_arg(req_json, "request")?).map_err(|e| format!("request: {e}"))?;
+        let h = unsafe { &mut *h };
+        let bb = req.get("bbox").and_then(Value::as_array).filter(|a| a.len() == 4).ok_or("bbox needs 4 numbers")?;
+        let mmv = |v: &Value| v.as_f64().map(|x| (x * 1e6).round() as i64).ok_or("bbox value");
+        let bbox = [mmv(&bb[0])?, mmv(&bb[1])?, mmv(&bb[2])?, mmv(&bb[3])?];
+        let pitch = req.get("pitch").and_then(Value::as_f64).map(|x| (x * 1e6).round() as i64).ok_or("pitch")?;
+        let layer = req.get("layer").and_then(Value::as_str).and_then(|l| h.board.layer_bit(l)).ok_or("layer")?;
+        let net_name = req.get("net").and_then(Value::as_str).unwrap_or("");
+        let net = h.board.intern_net(net_name);
+        let kind = board::Kind::parse(req.get("kind").and_then(Value::as_str).unwrap_or("track")).ok_or("kind")?;
+        let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
+        let (nx, ny, vals) = path::slack_field(&cx, bbox, pitch, layer, net, kind);
+        if vals.len() > len {
+            return Err(format!("buffer holds {len} cells, raster needs {}", vals.len()));
+        }
+        unsafe { std::ptr::copy_nonoverlapping(vals.as_ptr(), buf, vals.len()) };
+        Ok((nx * ny) as i64)
     }));
-    r.unwrap_or(-1)
+    match r {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => { set_error(&e); -1 }
+        Err(_) => { set_error("panic in fpk_raster"); -1 }
+    }
 }
 
 #[no_mangle]
