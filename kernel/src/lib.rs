@@ -1,7 +1,9 @@
 //! C ABI and JSON dispatch. Every entry point runs under catch_unwind: no panic crosses the boundary.
 //! Reply shape: {"ok": true, ...} or {"ok": false, "error": "..."}.
 
+pub mod board;
 pub mod geom;
+pub mod load;
 pub mod sexpr;
 
 use serde_json::{json, Value};
@@ -18,11 +20,13 @@ fn set_error(msg: &str) {
     LAST_ERROR.with(|e| *e.borrow_mut() = CString::new(clean).unwrap());
 }
 
-/// Opaque handle. K3 onward holds the loaded board here.
+/// Opaque handle: the loaded board (K3) plus the open options.
 pub struct Handle {
     path: String,
     #[allow(dead_code)]
     opts: Value,
+    board: board::Board,
+    load_ms: f64,
 }
 
 fn cstr_arg<'a>(p: *const c_char, what: &str) -> Result<&'a str, String> {
@@ -42,7 +46,35 @@ fn open_inner(path: &str, opts_json: &str) -> Result<Handle, String> {
     } else {
         serde_json::from_str(opts_json).map_err(|e| format!("opts: {e}"))?
     };
-    Ok(Handle { path: path.to_string(), opts })
+    let t0 = std::time::Instant::now();
+    let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let board = load::load(&src).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Handle { path: path.to_string(), opts, board, load_ms: t0.elapsed().as_secs_f64() * 1e3 })
+}
+
+/// items: optional filters bbox [x0,y0,x1,y1] (mm), layer (name), net (name), kinds (names), ids (u32 list).
+fn items_op(h: &Handle, v: &Value) -> Value {
+    let b = &h.board;
+    let bbox = v.get("bbox").and_then(Value::as_array).and_then(|a| {
+        let f: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
+        (f.len() == 4).then(|| f.iter().map(|x| (x * 1e6).round() as i64).collect::<Vec<_>>())
+    });
+    let layer = v.get("layer").and_then(Value::as_str).and_then(|l| b.layer_bit(l));
+    let net = v.get("net").and_then(Value::as_str).and_then(|n| b.net_ids.get(n).copied());
+    let kinds: Option<Vec<board::Kind>> = v.get("kinds").and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).filter_map(board::Kind::parse).collect());
+    let ids: Option<Vec<u64>> = v.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect());
+    if v.get("net").is_some() && net.is_none() {
+        return json!({"ok": true, "items": []});
+    }
+    let out: Vec<Value> = b.items.iter().filter(|it| it.alive).filter(|it| {
+        bbox.as_ref().map_or(true, |bx| it.bbox[0] <= bx[2] && it.bbox[2] >= bx[0] && it.bbox[1] <= bx[3] && it.bbox[3] >= bx[1])
+            && layer.map_or(true, |l| it.layers & (1u64 << l) != 0)
+            && net.map_or(true, |n| it.net == n)
+            && kinds.as_ref().map_or(true, |k| k.contains(&it.kind))
+            && ids.as_ref().map_or(true, |s| s.contains(&(it.id as u64)))
+    }).map(|it| board::item_json(b, it)).collect();
+    json!({"ok": true, "items": out})
 }
 
 /// Dispatch one JSON request. K0 ops: ping, info (stub), panic (test hook: proves catch_unwind works).
@@ -57,7 +89,14 @@ pub fn dispatch(h: &Handle, req: &str) -> Value {
     };
     match op {
         "ping" => json!({"ok": true, "pong": true}),
-        "info" => json!({"ok": true, "path": h.path, "todo": "C1 K3 (board load)"}),
+        "info" => {
+            let b = &h.board;
+            let live = b.items.iter().filter(|i| i.alive).count();
+            json!({"ok": true, "path": h.path, "file_version": b.file_version, "layers": b.copper,
+                   "nets": b.nets.len() - 1, "items": live, "load_ms": h.load_ms,
+                   "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
+        }
+        "items" => items_op(h, &v),
         "panic" => panic!("forced panic (test hook)"),
         other => json!({"ok": false, "error": format!("unknown op: {other}")}),
     }
@@ -130,7 +169,7 @@ mod tests {
 
     #[test]
     fn ping_and_unknown_op() {
-        let h = Handle { path: "x".into(), opts: json!({}) };
+        let h = Handle { path: "x".into(), opts: json!({}), board: board::Board::new(vec![]), load_ms: 0.0 };
         assert_eq!(dispatch(&h, r#"{"op":"ping"}"#)["pong"], true);
         assert_eq!(dispatch(&h, r#"{"op":"nope"}"#)["ok"], false);
         assert_eq!(dispatch(&h, "not json")["ok"], false);

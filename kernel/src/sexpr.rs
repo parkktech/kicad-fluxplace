@@ -289,6 +289,8 @@ mod tests {
         let Ok(src) = std::fs::read_to_string(&path) else { return };
         let t0 = std::time::Instant::now();
         parse(&src).unwrap();
-        assert!(t0.elapsed().as_millis() < 400, "parse took {:?}", t0.elapsed());
+        // 400 ms is the release-build budget; the debug profile (cargo test) gets a loose bound.
+        let limit = if cfg!(debug_assertions) { 2000 } else { 400 };
+        assert!(t0.elapsed().as_millis() < limit, "parse took {:?}", t0.elapsed());
     }
 }
