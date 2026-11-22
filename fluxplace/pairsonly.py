@@ -153,7 +153,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     refused_locked | already_ok | not_reached. `lay(board_path, cons, spec, only=set)` defaults to pairs.plan, `drc(path)` ->
     (keys, counts) to a kicad-cli DRC; both can be replaced (tests)."""
     from . import pairs as PR, pairaudit as PA, routediag as RD, routeconn as RC, netclass as NC, routerules as RR
-    from . import drcguard as DG, qualaudit as QA
+    from . import drcguard as DG, qualaudit as QA, gaps as GP
     cons = cons or {}
     lay = lay or (lambda b, c, s, only: PR.plan(b, c, s, only=only, log=lambda m: None))
     B0 = RD.load(board)
@@ -183,6 +183,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
         with bud:
             shutil.copy(board, work)
             _sidecars(board, work)
+            zoff = GP.impedance_off_nets(work, cons)
             base = run_drc(work)
             open0 = RC.text_open(RD.load(work))
             aud0 = PA.audit(RD.load(work), sel, cons, {n for n, k in open0.items() if k})
@@ -200,7 +201,9 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                                reason=f"{len(lk)} locked item(s): " + "; ".join(lk[:6]) + (" ..." if len(lk) > 6 else "") + " (use --unlock to re-route and re-lock this pair)")
                     log(f"  {name}: refused, {row['reason']}")
                     continue
-                if aud0[pr]["status"] == "complete" and name not in force:
+                if set(pr) & zoff:
+                    row["impedance_off"] = sorted(set(pr) & zoff)
+                if aud0[pr]["status"] == "complete" and not (set(pr) & zoff) and name not in force:
                     row.update(status="already_ok", reason="already connected, matched and in tolerance: not touched")
                     continue
                 if lk:

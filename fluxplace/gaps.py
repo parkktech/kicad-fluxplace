@@ -70,6 +70,16 @@ def _pair_audit(board, cons, opn=None):
 SEV = {"pair-open": 3, "pair-asym": 2, "pair-skew": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
 
 
+def impedance_off_nets(board, cons):
+    """net names with a PAIR_IMPEDANCE_OFF finding (routed copper of a pair off its target); empty set on any exception."""
+    from . import review, boardfile
+    try:
+        facts = boardfile.facts_from_file(board)
+        return {(f.get("refs") or [""])[0] for f in review.check_pair_geometry(facts, cons) if f.get("code") == "PAIR_IMPEDANCE_OFF"}
+    except Exception:
+        return set()
+
+
 def review_gaps(board, cons, opn=None):
     """Review findings as gap rows (classify's shape, plus "base" = id base the caller assigns) -> (rows, failed).
     `failed` names the sources that raised (power, pairs, pin-escape): their rows are missing, never clean.
