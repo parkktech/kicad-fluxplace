@@ -127,3 +127,123 @@ def judge_key(routed_board, blame, cons=None):
             round(sum(c["detour"] for c in blame["costly"]), 4))
 
 
+# ------------------------------------------------------------------ P2 move generator
+def _movable(B, cons, P):
+    """Parts a move may touch: not fixed, not group members (v1: treated as fixed), not locked, not with locked copper;
+    parts with attached copper only when move_routed."""
+    pl = (cons or {}).get("placement") or {}
+    grp = {r for g in (pl.get("group") or {}).values() for r in g.get("refs", [])}
+    A = RL.attached_copper(B)
+    locked_cu = set()
+    for i, ends in A["segs"].items():
+        if B["segs"][i].get("locked"):
+            locked_cu |= {ref for _k, ref, _n in ends}
+    for i, pads in A["vias"].items():
+        if B["vias"][i].get("locked"):
+            locked_cu |= {ref for ref, _n in pads}
+    blocked = set(RB._fixed_set(B, cons)) | grp | locked_cu | {r for r, p in B["parts"].items() if p.get("locked")}
+    if not P["move_routed"]:
+        blocked |= set(RL.routed_refs(B))
+    return sorted(r for r in B["parts"] if r not in blocked)
+
+
+def _legal(B, cons, targets, mov):
+    """legaliser with every non-movable part as an obstacle; the moves that really change a pose (None when it cannot)."""
+    fixed = sorted(set(B["parts"]) - set(mov))
+    try:
+        pos, _rep = LG.legalise(B, targets, fixed=fixed, cons=cons, strict=False)
+    except Exception:                                    # noqa: BLE001 - one move that cannot be legalised is no candidate
+        return None
+    out = {r: tuple(pos[r]) for r in targets if r in pos}
+    out = {r: v for r, v in out.items() if (abs(v[0] - B["parts"][r]["pos"][0]) > 1e-3 or abs(v[1] - B["parts"][r]["pos"][1]) > 1e-3
+                                              or abs(v[2] - B["parts"][r]["angle"]) > 1e-3)}
+    return out or None
+
+
+def _key(moves):
+    return tuple(sorted((r, round(v[0], 3), round(v[1], 3), round(v[2], 2)) for r, v in moves.items()))
+
+
+def candidates(B, blame, cons, P, seed=0, spec=None):
+    """-> up to P["cands"] candidates {id, kind, moves {ref: (x, y, rot)}}, round-robin over the kinds, deduplicated."""
+    mov = set(_movable(B, cons, P))
+    pool = {k: [] for k in KINDS}
+    seen = set()
+
+    def add(kind, moves):
+        if not moves:
+            return
+        k = _key(moves)
+        if k not in seen:
+            seen.add(k)
+            pool[kind].append(moves)
+
+    def pos(r):
+        return B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]
+
+    # turn: the route_review turned parts (+180 deg), all at once and each alone for the 3 biggest savings
+    tr = sorted((t for t in blame["turned"] if t["ref"] in mov), key=lambda t: (-t["saves"], t["ref"]))
+    if tr:
+        add("turn", {t["ref"]: (t["x"], t["y"], (t["rot"] + 180) % 360) for t in tr})
+        for t in tr[:3]:
+            add("turn", {t["ref"]: (t["x"], t["y"], (t["rot"] + 180) % 360)})
+    # relieve: the predictor's moves with only the hot-area and open-net parts movable, seeds seed..seed+2
+    tgt = (set(r for h in blame["hot"][:3] for r in h["refs"]) | set(r for o in blame["open"] for r in o["refs"])) & mov
+    if tgt:
+        for s in range(seed, seed + 3):
+            Bc = copy.deepcopy(B)
+            for r in Bc["parts"]:
+                if r not in tgt:
+                    Bc["parts"][r]["locked"] = True
+            mv, st = PP.plan_place(Bc, cons, spec, seed=s, log=lambda m: None, max_evals=200, rotation=True)
+            flips = set(st.get("flips", []))
+            add("relieve", {r: tuple(v) for r, v in mv.items() if r in mov and r not in flips})
+    # nudge: every movable part of the top 3 hot areas pushed away from the area centroid by each nudge_mm
+    for h in blame["hot"][:3]:
+        x0, y0, x1, y1 = h["bbox"]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        refs = [r for r in h["refs"] if r in mov]
+        for d in P["nudge_mm"]:
+            tg = {}
+            for r in refs:
+                x, y, a = pos(r)
+                L = math.hypot(x - cx, y - cy) or 1e-6
+                tg[r] = (x + (x - cx) / L * d, y + (y - cy) / L * d, a)
+            add("nudge", _legal(B, cons, tg, mov) if tg else None)
+    # rot: the 4 movable small parts with the largest detour, 90 and 180 deg
+    pick = []
+    for c in blame["costly"]:
+        for r in c["refs"]:
+            if r in mov and r not in pick and len(B["parts"][r]["pads"]) <= 16:
+                pick.append(r)
+        if len(pick) >= 4:
+            break
+    for k in (90, 180):
+        if pick:
+            tg = {r: (pos(r)[0], pos(r)[1], (pos(r)[2] + k) % 360) for r in pick[:4]}
+            add("rot", _legal(B, cons, tg, mov))
+    # pull: costly nets with detour > 1.5 move their small movable parts halfway to the net's pad centroid
+    for c in blame["costly"]:
+        if c["detour"] <= 1.5:
+            continue
+        pts = [(q["x"], q["y"]) for q in B["pads"] if q["net"] == c["net"]]
+        if not pts:
+            continue
+        gx, gy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+        tg = {}
+        for r in c["refs"]:
+            if r in mov and len(B["parts"][r]["pads"]) <= 16:
+                x, y, a = pos(r)
+                tg[r] = (x + (gx - x) / 2, y + (gy - y) / 2, a)
+        if tg:
+            add("pull", _legal(B, cons, tg, mov))
+
+    out = []
+    while len(out) < P["cands"] and any(pool.values()):
+        for k in KINDS:
+            if pool[k] and len(out) < P["cands"]:
+                n = len(out)
+                out.append({"id": f"{k}{n:02d}", "kind": k, "moves": pool[k].pop(0)})
+    return out
+
+

@@ -65,3 +65,71 @@ def test_params_defaults_and_enable():
     P = PT.params({})
     assert P["enabled"] is False and P["max_rounds"] == 10 and P["judge_top"] == 4 and P["move_routed"] is True
     assert PT.params({"placetour": {"enabled": True, "max_rounds": "3"}})["max_rounds"] == 3
+
+
+def _board():
+    """synthetic board: U1 (16 pads) and R2 (2 pads) in a hot area, F1 fixed, R7 turned."""
+    def part(x, y, n, side="F"):
+        return {"pos": (x, y), "angle": 0.0, "pads": [{"num": str(i)} for i in range(n)], "side": side, "tht": False,
+                "court": (x - 1, y - 1, x + 1, y + 1), "locked": False}
+    parts = {"U1": part(10, 10, 16), "R2": part(12, 10, 2), "F1": part(20, 20, 2), "R7": part(30, 30, 2)}
+    pads = [{"ref": "U1", "num": "1", "net": "SIG1", "x": 9, "y": 10, "ex": 0.2, "ey": 0.2},
+            {"ref": "R2", "num": "1", "net": "SIG1", "x": 12, "y": 10, "ex": 0.2, "ey": 0.2},
+            {"ref": "R7", "num": "1", "net": "SIG2", "x": 30, "y": 30, "ex": 0.2, "ey": 0.2},
+            {"ref": "F1", "num": "1", "net": "SIG2", "x": 20, "y": 20, "ex": 0.2, "ey": 0.2}]
+    return {"parts": parts, "segs": [], "vias": [], "pads": pads, "bbox": (0.0, 0.0, 50.0, 50.0)}
+
+
+def _blame():
+    return {"open": [{"net": "SIG1", "refs": ["R2", "U1"]}], "costly": [{"net": "SIG1", "vias": 0, "detour": 2.0, "refs": ["U1", "R2"]}],
+            "hot": [{"cells": 4, "occ": 0.9, "refs": ["U1", "R2", "F1"], "nets": ["SIG1"], "bbox": [8.0, 8.0, 14.0, 12.0], "vias": 0}],
+            "turned": [{"ref": "R7", "x": 30.0, "y": 30.0, "rot": 90, "saves": 1.5}], "source": "route_review"}
+
+
+def _identity_legalise(calls):
+    def fake(B, targets, fixed=(), cons=None, strict=True, **k):
+        calls.append(set(fixed))
+        return dict(targets), {}
+    return fake
+
+
+def test_candidates_never_move_fixed_or_group_parts(monkeypatch):
+    B = _board()
+    calls = []
+    monkeypatch.setattr(PT.RB, "_fixed_set", lambda B, cons: {"F1"})
+    monkeypatch.setattr(PT.LG, "legalise", _identity_legalise(calls))
+    monkeypatch.setattr(PT.PP, "plan_place", lambda Bc, cons, spec, **k: ({"F1": (1, 1, 0), "U1": (11.0, 10.0, 0)}, {"flips": []}))
+    cands = PT.candidates(B, _blame(), {"placement": {"group": {"g": {"refs": ["R7"]}}}}, PT.params({"placetour": {"cands": 50}}))
+    assert cands
+    for c in cands:
+        assert "F1" not in c["moves"] and "R7" not in c["moves"]                  # fixed and group member never move
+    assert calls and all("F1" in fx for fx in calls)                             # legaliser: fixed parts are obstacles
+
+
+def test_candidates_dedupe_and_round_robin(monkeypatch):
+    B = _board()
+    monkeypatch.setattr(PT.RB, "_fixed_set", lambda B, cons: set())
+    monkeypatch.setattr(PT.LG, "legalise", _identity_legalise([]))
+    monkeypatch.setattr(PT.PP, "plan_place", lambda Bc, cons, spec, **k: ({}, {"flips": []}))
+    cands = PT.candidates(B, _blame(), {}, PT.params({"placetour": {"cands": 12}}))
+    keys = [PT._key(c["moves"]) for c in cands]
+    assert len(keys) == len(set(keys))                                           # identical move sets are dropped
+    turn = [c for c in cands if c["kind"] == "turn"]
+    assert len(turn) == 1 and turn[0]["moves"] == {"R7": (30.0, 30.0, 270)}      # one turned part: +180 deg, once
+    assert cands[0]["kind"] == "turn"
+    small = PT.candidates(B, _blame(), {}, PT.params({"placetour": {"cands": 2}}))
+    assert len(small) == 2 and small[0]["kind"] == "turn"                       # round-robin starts with the cheapest kind
+
+
+def test_nudge_moves_hot_parts_away_from_centroid(monkeypatch):
+    B = _board()
+    monkeypatch.setattr(PT.RB, "_fixed_set", lambda B, cons: {"F1"})
+    monkeypatch.setattr(PT.LG, "legalise", _identity_legalise([]))
+    monkeypatch.setattr(PT.PP, "plan_place", lambda Bc, cons, spec, **k: ({}, {"flips": []}))
+    b = _blame()
+    b["turned"] = []
+    cands = PT.candidates(B, b, {}, PT.params({"placetour": {"cands": 50, "nudge_mm": [1.0]}}))
+    nudge = [c for c in cands if c["kind"] == "nudge"]
+    assert nudge, "a hot area with movable parts gives a nudge"
+    x, y, _a = nudge[0]["moves"]["R2"]
+    assert x > 12.0 and "F1" not in nudge[0]["moves"]                            # pushed away from centroid (10,10)
