@@ -1,6 +1,7 @@
 """LOOKAHEAD stage: demand map, reservations, ghost/fitness/render helpers and the round loop (no pcbnew, no router)."""
 import os
 import sys
+import types
 
 import pytest
 
@@ -254,3 +255,114 @@ def test_render_writes_png_fixture(load, tmp_path):
     out = str(tmp_path / "c.png")
     assert LA.render("x.kicad_pcb", rects, fit, out) == out
     assert open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+# ---- L5 tournament: every external call monkeypatched (ghost, fitness, render, demand, reservations, workers) ----
+
+def _tour_setup(monkeypatch, tmp_path, plan):
+    """plan(round, job) -> fit dict (key, opens, pairs_complete, pairs_total, blockers) for each candidate result."""
+    from types import SimpleNamespace
+    fixture = tmp_path / "ghost0.kicad_pcb"
+    fixture.write_text("(kicad_pcb)")
+    monkeypatch.setattr(LA, "critical_nets", lambda board, cons, spec=None: {"A", "B"})
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget: str(fixture))
+    monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
+                        {"key": (0, 0, 5, 0, 0, 0.0), "opens": 5, "pairs_complete": 0, "pairs_total": 1, "blockers": {}})
+    monkeypatch.setattr(LA, "render", lambda board, rects, fit, path: (open(path, "w").write("x"), path)[1])
+    monkeypatch.setattr(LA, "demand", lambda board, crit, P: {"cells": {}, "origin": (0.0, 0.0), "cell": 1.0})
+    monkeypatch.setattr(LA.RD, "load", lambda path, **kw: board())
+    monkeypatch.setattr(LA, "reservations", lambda D, B, crit, P, min_nets=None, escape_mm=None:
+                        [{"layer": "F.Cu", "rect": (0.0, 0.0, 1.0, 1.0), "nets": ["N"], "demand": 1}])
+    jobs_seen = []
+    rounds = {"n": 0}
+
+    def fake_run_jobs(jobs, P, timeout):
+        rounds["n"] += 1
+        res = []
+        for job in jobs:
+            jobs_seen.append(job)
+            locked = tmp_path / f"{job['tag']}-locked.kicad_pcb"
+            locked.write_text("(kicad_pcb)")
+            fit = dict(plan(rounds["n"], job), id=job["tag"])
+            res.append({"tag": job["tag"], "kind": job["kind"], "variant": job["variant"], "locked": str(locked),
+                        "png": str(tmp_path / f"{job['tag']}.png"), "fit": fit})
+        return res
+    monkeypatch.setattr(LA, "_run_jobs", fake_run_jobs)
+    d = tmp_path / "stage"
+    c = SimpleNamespace(cons={"lookahead": {"enabled": True, "max_rounds": 4, "no_gain_rounds": 2}}, spec=None,
+                        a=SimpleNamespace(constraints=None, spec=None, router_dir="/r", router_py="/rp"),
+                        dir=lambda n, name: str(_mkd(d / f"{n}-{name}")))
+    return c, jobs_seen, rounds
+
+
+def _mkd(p):
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def test_stage_skipped_when_disabled(tmp_path):
+    from types import SimpleNamespace
+    c = SimpleNamespace(cons={}, spec=None, a=None, dir=lambda n, name: str(_mkd(tmp_path / f"{n}-{name}")))
+    assert LA.stage(c, 7, "in.kicad_pcb") == {"verdict": "skipped", "line": "[lookahead] enabled = false", "board": "in.kicad_pcb"}
+
+
+def test_tournament_winner_stops_when_clean(monkeypatch, tmp_path):
+    def plan(r, job):
+        if job["tag"] == "r1-1":
+            return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+        return {"key": (-1, 0, 2, 0, 0, 0.0), "opens": 2, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert out["verdict"] == "pass" and rounds["n"] == 1
+    assert "winner r1-1" in out["line"] and "pairs 1/1" in out["line"] and "ghost opens 0 (round-0 ghost opens 5)" in out["line"]
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    for tag in ("ghost0", "r1-0", "r1-1", "winner"):
+        assert tag in table
+    assert os.path.exists(out["board"]) and os.path.exists(os.path.join(c.dir(7, "lookahead"), "progress.json"))
+
+
+def test_tournament_no_gain_stops_after_two_rounds(monkeypatch, tmp_path):
+    def plan(r, job):
+        if r == 1:
+            return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 2,
+                    "blockers": {"A|B": 3, "C|D": 1}}
+        return {"key": (-1, 0, 4, 0, 0, 0.0), "opens": 4, "pairs_complete": 1, "pairs_total": 2, "blockers": {"A|B": 3}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert out["verdict"] == "pass" and rounds["n"] == 3          # round 2 and 3 never beat round 1: no_gain_rounds = 2
+    assert "winner r1-0" in out["line"]
+
+
+def test_blockers_drive_repair_candidates_in_round_two(monkeypatch, tmp_path):
+    def plan(r, job):
+        if r == 1:
+            return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 2,
+                    "blockers": {"A|B": 3, "C|D": 1, "E|F": 9}}
+        return {"key": (0, 0, 9, 0, 0, 0.0), "opens": 9, "pairs_complete": 0, "pairs_total": 2, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    LA.stage(c, 7, "in.kicad_pcb")
+    r2 = [j for j in jobs if j["tag"].startswith("r2-")]
+    repairs = [j for j in r2 if j["kind"] == "repair"]
+    assert [tuple(j["pair"]) for j in repairs] == [("E", "F"), ("A", "B")]     # top 2 blockers by count
+    assert all(tuple(j["variant"]) == (1, 4.0) for j in repairs)               # min_nets 1, escape_mm + 1
+    fresh = [j for j in r2 if j["kind"] == "fresh"]
+    assert len(fresh) == 1 and tuple(fresh[0]["variant"]) == (1, 3.0)         # round-1 winner's variant, min_nets - 1
+    assert all(j["board"] == "in.kicad_pcb" or j["board"].endswith("-locked.kicad_pcb") for j in r2)
+
+
+def test_lay_fresh_lays_again_only_when_incomplete(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(LA, "apply", lambda bi, bo, rects: calls.append(("apply", bo)) or bo)
+    monkeypatch.setattr(LA, "strip", lambda bi, bo: calls.append(("strip", bo)) or bo)
+    states = iter([("laid1", 1, 2), ("laid2", 2, 2)])
+    monkeypatch.setattr(LA, "_pairs_stage", lambda sub, n, board: calls.append(("pairs", n, board)) or next(states))
+    sub = types.SimpleNamespace()
+    out = LA._lay_fresh(sub, str(tmp_path), "in", [])
+    assert [c[0] for c in calls] == ["apply", "pairs", "strip", "pairs", "strip"]
+    assert calls[3][2].endswith("stripped.kicad_pcb") and out.endswith("locked.kicad_pcb")
+
+
+def test_tournament_stage_registered_before_pairs():
+    from fluxplace import pipeline as PL
+    i = PL.CONSTRUCTIVE.index("lookahead")
+    assert PL.CONSTRUCTIVE[i + 1] == "pairs" and "lookahead" in PL.FUNCS

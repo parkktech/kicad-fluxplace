@@ -25,7 +25,7 @@ from . import routeconn as RC
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "tune", "critroute", "plan-route", "route", "close", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "lookahead", "pairs", "tune", "critroute", "plan-route", "route", "close", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -1206,7 +1206,13 @@ def st_pairs(c, n, board):
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
+def st_lookahead(c, n, board):
+    """ghost-route demand, reserved channels and the lock tournament (lookahead.py); skipped unless [lookahead] enabled."""
+    from . import lookahead as LA
+    return LA.stage(c, n, board)
+
+
+FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "lookahead": st_lookahead, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
          "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "silk": st_silk, "review": st_review}
 

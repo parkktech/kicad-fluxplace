@@ -4,8 +4,11 @@ A ghost route is the board routed unlocked as a throw-away. Its non-critical cop
 cells with many distinct nets are bus channels, cells next to a net's own pads are escape channels. The channels are
 reserved (rule areas) before the critical pairs are laid around them. See docs/recipes/LOOKAHEAD.md.
 """
+import json
 import math
 import os
+import shutil
+import time
 
 from . import routediag as RD
 
@@ -382,3 +385,245 @@ def render(board, rects, fit, path):
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
+
+
+def _mk(p):
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def _progress(path, state, message="", **fields):
+    from . import routestatus as RS
+    st = {"stage": "lookahead", "state": state, "pid": os.getpid(), "current_step": str(message)[:240], "updated": time.time()}
+    st.update(fields)
+    RS._atomic(path, st)
+
+
+def _vtxt(kind, variant, pair):
+    mn, em = variant
+    return f"{kind} min_nets={mn} esc={em:g}" + (f" {pair[0]}/{pair[1]}" if pair else "")
+
+
+def _table(path, rows):
+    lines = ["| round | id | variant | fitness | png | verdict |", "|---|---|---|---|---|---|"]
+    for r in rows:
+        fit = "-" if r["fit"] is None else str(tuple(r["fit"]))
+        lines.append(f"| {r['round']} | {r['id']} | {r['variant']} | {fit} | {r['png']} | {r['verdict']} |")
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _pairs_stage(sub, n, board):
+    """pairs.stage on a sub-context -> (laid board, complete, total) from its board.pairs.json report."""
+    from . import pairs as PR
+    r = PR.stage(sub, n, board)
+    if r.get("verdict") == "fail":
+        raise RuntimeError(r.get("line", "pairs stage failed"))
+    rep_path = os.path.join(sub.dir(n, "pairs"), "board.pairs.json")
+    rep = json.load(open(rep_path)) if os.path.exists(rep_path) else {}
+    return r.get("board", board), int(rep.get("complete", 0)), int(rep.get("total", 0))
+
+
+def _lay_fresh(sub, cand, board, rects):
+    """apply the reserved rects, lay the pairs (pairs.stage); incomplete -> strip and lay once more; strip -> locked board."""
+    applied = os.path.join(cand, "applied.kicad_pcb")
+    apply(board, applied, rects)
+    cur, comp, total = _pairs_stage(sub, 1, applied)
+    if comp < total:
+        cur, _c, _t = _pairs_stage(sub, 2, strip(cur, os.path.join(cand, "stripped.kicad_pcb")))
+    return strip(cur, os.path.join(cand, "locked.kicad_pcb"))
+
+
+def _lay_repair(sub, cand, board, rects, pair, cons, spec):
+    """the locked board with one pair's copper unlocked and removed (pairsonly.unlock_items + pairaudit.strip_legs), the
+    rects applied, and only that pair laid again (pairs.run only=)."""
+    from . import pairs as PR, pairsonly as PO, pairaudit as PA
+    text = open(board, errors="surrogateescape").read()
+    text, _nu = PO.unlock_items(text, list(pair))
+    text, _nr = PA.strip_legs(text, list(pair))
+    ripped = os.path.join(cand, "ripped.kicad_pcb")
+    with open(ripped, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    _copy_sidecar(board, ripped)
+    applied = apply(ripped, os.path.join(cand, "applied.kicad_pcb"), rects)
+    out = os.path.join(cand, "relaid.kicad_pcb")
+    PR.run(applied, cons, spec, out, only=list(pair))
+    return strip(out, os.path.join(cand, "locked.kicad_pcb"))
+
+
+def _copy_sidecar(src, dst):
+    from . import pipeline as PL
+    PL._sidecar(src, dst)
+
+
+def _verify(a, locked, cand, crit, cons, P, rects, tag):
+    """ghost of the locked board (verify) -> (ghost board, fitness dict with id, png) or (None, None, None)."""
+    g = ghost(a, locked, os.path.join(cand, "ghost"), P["ghost_budget_min"])
+    if not g:
+        return None, None, None
+    area = sum((r["rect"][2] - r["rect"][0]) * (r["rect"][3] - r["rect"][1]) for r in rects)
+    fit = fitness(g, crit, cons, reserved_area=area, escape_mm=P["escape_mm"])
+    fit["id"] = tag
+    png = render(g, rects, fit, os.path.join(cand, "ghost.png"))
+    return g, fit, png
+
+
+def _job(d, tag, kind, variant, base, rects, pair, acfg, crit):
+    cand = _mk(os.path.join(d, tag))
+    cs = (["--constraints", acfg["constraints"]] if acfg.get("constraints") else []) + \
+         (["--spec", acfg["spec"]] if acfg.get("spec") else [])
+    job = {"tag": tag, "kind": kind, "variant": list(variant), "board": base, "dir": cand,
+           "rects": [{"layer": r["layer"], "rect": list(r["rect"]), "nets": r["nets"], "demand": r["demand"]} for r in rects],
+           "pair": list(pair) if pair else None, "a": acfg, "cs": cs, "critical": sorted(crit),
+           "result": os.path.join(cand, "result.json")}
+    jobfile = os.path.join(_mk(os.path.join(d, "jobs")), f"{tag}.json")
+    job["jobfile"] = jobfile
+    with open(jobfile, "w") as fh:
+        json.dump(job, fh)
+    return job
+
+
+def _spawn(job, timeout):
+    import subprocess
+    code = (f"import sys; sys.path.insert(0, {REPO!r}); "
+            f"from fluxplace import lookahead as LA; LA._worker({job['jobfile']!r})")
+    try:
+        subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        return json.load(open(job["result"]))
+    except (OSError, ValueError):
+        return {"tag": job["tag"], "error": "worker produced no result"}
+
+
+def _run_jobs(jobs, P, timeout):
+    """candidates of one round, up to [lookahead] jobs at a time; each candidate is its own interpreter (threads only wait)."""
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=max(1, P["jobs"])) as ex:
+        return list(ex.map(lambda j: _spawn(j, timeout), jobs))
+
+
+def _worker(jobfile):
+    """one candidate, in a fresh interpreter: lay (fresh or repair), verify by ghost, fitness, render -> result.json."""
+    from types import SimpleNamespace
+    from . import constraints as C
+    job = json.load(open(jobfile))
+    out = {"tag": job["tag"], "variant": job["variant"], "kind": job["kind"], "locked": None, "ghost": None,
+           "png": None, "fit": None}
+    try:
+        acfg = job["a"]
+        cons = C.load(acfg["constraints"]) if acfg.get("constraints") else {}
+        spec = json.load(open(acfg["spec"])) if acfg.get("spec") else None
+        P = params(cons)
+        cand = _mk(job["dir"])
+        rects = [{"layer": r["layer"], "rect": tuple(r["rect"]), "nets": r["nets"], "demand": r["demand"]}
+                 for r in job["rects"]]
+        sub = SimpleNamespace(cons=cons, spec=spec, dir=lambda n, name: _mk(os.path.join(cand, f"{n}-{name}")),
+                              cs=lambda: list(job["cs"]), qs=lambda: [])
+        if job["kind"] == "repair":
+            locked = _lay_repair(sub, cand, job["board"], rects, job["pair"], cons, spec)
+        else:
+            locked = _lay_fresh(sub, cand, job["board"], rects)
+        a = SimpleNamespace(**acfg)
+        g, fit, png = _verify(a, locked, cand, set(job["critical"]), cons, P, rects, job["tag"])
+        out.update(locked=locked, ghost=g, png=png, fit=fit)
+    except Exception as e:                                       # noqa: BLE001 - one candidate failing is a row, not a stage crash
+        out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    with open(job["result"], "w") as fh:
+        json.dump(out, fh)
+
+
+def _specs(r, best, best_variant, P):
+    """(kind, (min_nets, escape_mm), pair) per candidate of round r."""
+    if r == 1:
+        return [("fresh", tuple(v), None) for v in P["variants"]]
+    if best is None:
+        return []
+    out = []
+    for name, _n in sorted(best["fit"].get("blockers", {}).items(), key=lambda kv: (-kv[1], kv[0]))[:2]:
+        p, q = name.split("|")
+        out.append(("repair", (1, P["escape_mm"] + 1.0), (p, q)))
+    if best_variant:
+        mn, em = best_variant
+        out.append(("fresh", (max(mn - 1, 1), em), None))
+    return out
+
+
+def _row(r, tag, variant, fit, png, verdict):
+    return {"round": r, "id": tag, "variant": variant, "fit": tuple(fit["key"]) if fit else None,
+            "png": png or "-", "verdict": verdict}
+
+
+def stage(c, n, board):
+    """lookahead stage (constructive flow, before pairs): ghost demand -> reserved channels -> pairs laid around them
+    -> ghost verify -> ranked tournament (TOURNAMENT.md, one PNG per candidate). Output = the winner's locked board."""
+    P = params(c.cons)
+    if not P["enabled"]:
+        return {"verdict": "skipped", "line": "[lookahead] enabled = false", "board": board}
+    d = c.dir(n, "lookahead")
+    spath, table = os.path.join(d, "progress.json"), os.path.join(d, "TOURNAMENT.md")
+    a = c.a
+    acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py")}
+    crit = critical_nets(board, c.cons, c.spec)
+    _progress(spath, "running", "round 0: ghost")
+    g0 = ghost(a, board, os.path.join(d, "ghost0"), P["ghost_budget_min"])
+    if not g0:
+        _progress(spath, "failed", "round-0 ghost produced no board")
+        return {"verdict": "fail", "line": "lookahead: round-0 ghost produced no routed board", "board": board}
+    fit0 = fitness(g0, crit, c.cons, escape_mm=P["escape_mm"])
+    fit0["id"] = "ghost0"
+    png0 = render(g0, [], fit0, os.path.join(d, "ghost0.png"))
+    rows = [_row(0, "ghost0", "unlocked", fit0, png0, "reference")]
+    _table(table, rows)
+    B0, D = RD.load(g0), demand(g0, crit, P)
+    best, best_variant, stale, rounds, cands = None, None, 0, 0, 0
+    for r in range(1, P["max_rounds"] + 1):
+        rounds = r
+        specs = _specs(r, best, best_variant, P)
+        if not specs:
+            break
+        jobs = []
+        for i, (kind, variant, pair) in enumerate(specs):
+            mn, em = variant
+            rects = reservations(D, B0, crit, P, min_nets=mn, escape_mm=em)
+            base = best["locked"] if kind == "repair" else board
+            jobs.append(_job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit))
+        _progress(spath, "running", f"round {r}: {len(jobs)} candidates")
+        results = _run_jobs(jobs, P, P["ghost_budget_min"] * 60 + 1800)
+        cands += len(results)
+        ok = [x for x in results if x.get("fit")]
+        rb = min(ok, key=lambda x: tuple(x["fit"]["key"]), default=None)
+        improved = rb is not None and (best is None or tuple(rb["fit"]["key"]) < tuple(best["fit"]["key"]))
+        for job, x in zip(jobs, results):
+            vt = _vtxt(job["kind"], tuple(job["variant"]), job["pair"])
+            if x.get("fit") is None:
+                verdict = "fail: " + str(x.get("error", "no ghost"))[:80]
+            else:
+                verdict = "winner" if (x is rb and improved) else "kept"
+            rows.append(_row(r, job["tag"], vt, x.get("fit"), x.get("png"), verdict))
+        if improved:
+            best = {"fit": rb["fit"], "locked": rb["locked"], "png": rb["png"], "id": rb["tag"], "variant": rb["variant"]}
+            stale = 0
+        else:
+            stale += 1
+        if r == 1 and best is not None:
+            best_variant = tuple(best["variant"])
+        _table(table, rows)
+        _progress(spath, "running", f"round {r} done: best {best['id'] if best else '-'}", rounds=r, candidates=cands)
+        done = best is not None and best["fit"]["opens"] == 0 and best["fit"]["pairs_complete"] == best["fit"]["pairs_total"]
+        if best is None or done or stale >= P["no_gain_rounds"]:
+            break
+    if best is None:
+        _progress(spath, "failed", "no candidate produced a board")
+        return {"verdict": "fail", "line": "lookahead: no candidate produced a routed board", "board": board,
+                "next": [f"TOURNAMENT.md: {table}"]}
+    out = os.path.join(d, "board.kicad_pcb")
+    shutil.copy(best["locked"], out)
+    _copy_sidecar(best["locked"], out)
+    f = best["fit"]
+    line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']}: "
+            f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} (round-0 ghost opens {fit0['opens']})")
+    _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands)
+    return {"verdict": "pass", "line": line, "board": out,
+            "next": [f"TOURNAMENT.md: {table}", f"winner png: {best['png']}"]}
