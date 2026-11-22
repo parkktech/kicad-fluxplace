@@ -100,6 +100,7 @@ pub struct Board {
     pub nets: Vec<String>,
     pub net_ids: HashMap<String, u32>,
     pub items: Vec<Item>,
+    pub index: crate::index::Index,
     pub unsupported: Vec<Unsupported>,
 }
 
@@ -163,6 +164,7 @@ impl Board {
 
     pub fn add_item(&mut self, mut it: Item) -> u32 {
         it.id = self.items.len() as u32;
+        self.index.insert(it.id, it.bbox, it.layers);
         self.items.push(it);
         self.items.len() as u32 - 1
     }

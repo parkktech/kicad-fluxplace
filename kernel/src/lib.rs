@@ -3,6 +3,7 @@
 
 pub mod board;
 pub mod geom;
+pub mod index;
 pub mod load;
 pub mod load_fp;
 pub mod load_zone;
