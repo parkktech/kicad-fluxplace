@@ -247,3 +247,88 @@ def candidates(B, blame, cons, P, seed=0, spec=None):
     return out
 
 
+# ------------------------------------------------------------------ P3 tier-1 gates
+def _ko_hits(B, cons, ko):
+    """(ref, keepout name) of parts whose courtyard overlaps a keepout rect on their side (not allowed, not hardware)."""
+    hits = []
+    for rect, sides, allow, mh, name in ko:
+        for r, p in B["parts"].items():
+            if any(fnmatch.fnmatch(r, g) for g in allow) or p["side"] not in sides:
+                continue
+            if not (p["tht"] or mh is None):
+                continue
+            x0, y0, x1, y1 = p["court"]
+            if x0 < rect[2] and rect[0] < x1 and y0 < rect[3] and rect[1] < y1:
+                hits.append((r, name))
+    return hits
+
+
+def gate_state(B, cons, spec):
+    """Gate values of one board: counts for the FAIL/WARN gates, sets for the named hard rows. Worse = higher count / new member."""
+    _ok, cf = LGL.collision_gate(B, cons)
+    rows = IT.check(B, cons, spec) if IT.enabled(cons) else []
+    pos = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in B["parts"].items()}
+    return {"collision": sum(1 for x in cf if x["level"] == "FAIL"),
+            "intent": frozenset(f"{r['kind']}:{r['name']}" for r in rows if r["hard"] and not r["met"]),
+            "connector": len(PC.connector_blocked(B, cons)),
+            "side": len(PC.side_policy(B, cons, spec)),
+            "height": len(PC.height_regions(B, cons)),
+            "keepout": frozenset(_ko_hits(B, cons, LG.keepout_rects(B, cons))),
+            "outline": frozenset(LG.check_outline(B, pos))}
+
+
+def worse_gates(st, base):
+    """Names of the gates where `st` is worse than `base`."""
+    out = []
+    for k, v in st.items():
+        b = base[k]
+        if isinstance(v, int):
+            if v > b:
+                out.append(k)
+        elif not v <= b:
+            out.append(k)
+    return out
+
+
+def _apply(board_path, moves, out_path, move_routed):
+    """Moves on a copy (text, post-write hook off). With move_routed the copper that ends on a moved part's pads is dropped.
+    -> (ok, problems, removed {'segs', 'vias'}) where ok is the connectivity guard."""
+    B = RD.load(board_path)
+    rs, rv = [], []
+    if move_routed:
+        A = RL.attached_copper(B)
+        rs = sorted(i for i, ends in A["segs"].items() if any(ref in moves for _k, ref, _n in ends))
+        rv = sorted(i for i, pads in A["vias"].items() if any(ref in moves for ref, _n in pads))
+    tmp = out_path + ".moved"
+    BW.move_file(board_path, tmp, moves, post=False)
+    if rs or rv:
+        text = BW.strip_indexed(open(tmp, errors="surrogateescape").read(), set(rs), set(rv))[0]
+        with open(out_path, "w", errors="surrogateescape") as fh:
+            fh.write(text)
+        os.remove(tmp)
+    else:
+        os.replace(tmp, out_path)
+    ok, probs = RL.guard(board_path, out_path, removed={"segs": rs, "vias": rv})
+    return ok, probs, {"segs": rs, "vias": rv}
+
+
+def tier1(base_path, cands, cons, spec, P, outdir, base_state):
+    """-> (survivors [(rank key, cand, moved board path, removed)] best first, dropped [(cand, reason)])."""
+    os.makedirs(outdir, exist_ok=True)
+    survivors, dropped = [], []
+    for c in cands:
+        p = os.path.join(outdir, f"{c['id']}.kicad_pcb")
+        ok, probs, removed = _apply(base_path, c["moves"], p, P["move_routed"])
+        if not ok:
+            dropped.append((c, "guard: " + "; ".join(probs[:2])))
+            continue
+        B1 = RD.load(p)
+        worse = worse_gates(gate_state(B1, cons, spec), base_state)
+        if worse:
+            dropped.append((c, "worse: " + ",".join(worse)))
+            continue
+        survivors.append((tuple(PL.rank_key(PL.run(B1, cons, spec, ignore_routing=False))), c, p, removed))
+    survivors.sort(key=lambda t: t[0])
+    return survivors, dropped
+
+

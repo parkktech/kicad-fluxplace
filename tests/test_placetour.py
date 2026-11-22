@@ -133,3 +133,38 @@ def test_nudge_moves_hot_parts_away_from_centroid(monkeypatch):
     assert nudge, "a hot area with movable parts gives a nudge"
     x, y, _a = nudge[0]["moves"]["R2"]
     assert x > 12.0 and "F1" not in nudge[0]["moves"]                            # pushed away from centroid (10,10)
+
+
+def test_worse_gates_counts_and_new_members():
+    base = {"collision": 1, "intent": frozenset({"pos:a"}), "connector": 0, "side": 0, "height": 0,
+            "keepout": frozenset(), "outline": frozenset()}
+    same = dict(base)
+    assert PT.worse_gates(same, base) == []
+    assert PT.worse_gates(dict(base, collision=2), base) == ["collision"]
+    assert PT.worse_gates(dict(base, intent=frozenset({"pos:a", "pos:b"})), base) == ["intent"]
+    assert PT.worse_gates(dict(base, intent=frozenset()), base) == []              # a fixed row is not worse
+    assert PT.worse_gates(dict(base, outline=frozenset({"R2"})), base) == ["outline"]
+
+
+def test_tier1_drops_gate_worsening_and_ranks_rest(monkeypatch, tmp_path):
+    base = str(tmp_path / "base.kicad_pcb")
+    open(base, "w").write("x")
+    gates = {"good1": {"collision": 0}, "bad": {"collision": 3}, "good2": {"collision": 0}}
+
+    def fake_apply(board, moves, out, move_routed):
+        open(out, "w").write("x")
+        return True, [], {"segs": [], "vias": []}
+
+    def fake_state(B, cons, spec):
+        return {"collision": gates[B["name"]]["collision"]}
+
+    keys = {"good1": (2,), "good2": (1,)}
+    monkeypatch.setattr(PT, "_apply", fake_apply)
+    monkeypatch.setattr(PT.RD, "load", lambda p: {"name": os.path.basename(p).split(".")[0]})
+    monkeypatch.setattr(PT, "gate_state", lambda B, cons, spec: fake_state(B, cons, spec))
+    monkeypatch.setattr(PT.PL, "run", lambda B, cons, spec, ignore_routing=False: {"name": B["name"]})
+    monkeypatch.setattr(PT.PL, "rank_key", lambda R: keys[R["name"]])
+    cands = [{"id": n, "kind": "nudge", "moves": {}} for n in ("good1", "bad", "good2")]
+    surv, dropped = PT.tier1(base, cands, {}, None, PT.params({}), str(tmp_path / "t1"), {"collision": 0})
+    assert [s[1]["id"] for s in surv] == ["good2", "good1"]                       # ranked by predictor key, best first
+    assert [d[0]["id"] for d in dropped] == ["bad"] and dropped[0][1] == "worse: collision"
