@@ -12,6 +12,7 @@ import time
 
 from . import routediag as RD
 from . import events as EV
+from . import snapshot as SN
 
 DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
             "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 4, "max_rounds": 3, "no_gain_rounds": 1,
@@ -1020,6 +1021,7 @@ def _land_source(r, g, d, crit, cons, P, pl, rows):
     B = RD.load(g)
     corr, _why = corridors(B, pl, P)
     rows.append(_row(0, f"ghost-{r}", "unlocked", fit, png, "reference"))
+    SN.active_take(g, f"ghost {r}", force=True)
     return {"D": demand(g, crit, P), "corr": corr, "B": B, "path": g, "fit": fit}, fit
 
 
@@ -1171,6 +1173,9 @@ def stage(c, n, board):
         _progress(spath, "running", f"round {r}: {len(jobs)} candidates (tier 1)", timing=timing)
         results = _run_jobs(jobs, P, P["ghost_min"]["krt"] * 60 + 1800)
         cands += len(results)
+        for job, x in zip(jobs, results):                  # L11: the locked board of every candidate that laid
+            if x.get("locked"):
+                SN.active_take(x["locked"], f"cand {job['tag']} locked", force=True)
         t_verify = time.time()
         okc = [(j, x) for j, x in zip(jobs, results) if x.get("fit")]
         okc.sort(key=lambda jx: tuple(jx[1]["fit"]["key"]))
@@ -1185,6 +1190,8 @@ def stage(c, n, board):
         by_tag = {}
         for (j, x), v in zip(top, verified):
             by_tag[j["tag"]] = (x, v)
+            if v.get("ghost"):
+                SN.active_take(v["ghost"], f"cand {j['tag']} verify", force=True)
         vrank = []
         for tag, (x, v) in by_tag.items():
             if v.get("fit"):

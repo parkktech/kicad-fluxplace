@@ -824,3 +824,16 @@ def test_a_ghost_still_running_at_stage_end_is_killed_and_logged(monkeypatch, tm
     table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
     assert "timeout (stage done)" in table
     gate.set()
+
+
+def test_live_snapshots_per_ghost_landing_and_candidate_result(monkeypatch, tmp_path):
+    from fluxplace import snapshot as SN
+    reasons = []
+    monkeypatch.setattr(SN, "active_take", lambda board, reason, force=False, opens=None: reasons.append(reason))
+    keys = {"krt-whole": (-1, 0, 0, 0, 0, 0.0), "freerouting": (-1, 0, 0, 0, 0, 0.0),
+            "opens": {"krt-whole": 0, "freerouting": 0}}
+    plan = lambda r, job: {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds, gate, log = _stream(monkeypatch, tmp_path, keys, plan, gate_fr=False)
+    LA.stage(c, 7, "in.kicad_pcb")
+    assert "ghost krt-whole" in reasons and "ghost freerouting" in reasons
+    assert "cand r1-0 locked" in reasons
