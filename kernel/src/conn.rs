@@ -130,9 +130,10 @@ pub fn components(b: &Board, net: u32) -> Vec<Comp> {
     out
 }
 
-/// Opens of a net: components holding at least one pad, minus one (0 for a net with at most one such component).
+/// Opens of a net: every component of the net minus one, pad-less stubs included (kicad-cli counts each as an
+/// unconnected item; K14 false accepts on a floating new track). 0 for a net with at most one component.
 pub fn opens(b: &Board, net: u32) -> usize {
-    components(b, net).iter().filter(|c| c.pads > 0).count().saturating_sub(1)
+    components(b, net).len().saturating_sub(1)
 }
 
 /// Track and arc endpoints that touch no other copper of the net and no zone fill.
