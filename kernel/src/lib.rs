@@ -2,6 +2,7 @@
 //! Reply shape: {"ok": true, ...} or {"ok": false, "error": "..."}.
 
 pub mod board;
+pub mod dru;
 pub mod geom;
 pub mod index;
 pub mod load;
@@ -31,6 +32,7 @@ pub struct Handle {
     opts: Value,
     board: board::Board,
     rules: rules::Rules,
+    dru: dru::Dru,
     load_ms: f64,
 }
 
@@ -64,7 +66,20 @@ fn open_inner(path: &str, opts_json: &str) -> Result<Handle, String> {
         }
     };
     let rules = rules::load(project.as_deref())?;
-    Ok(Handle { path: path.to_string(), opts, board, rules, load_ms: t0.elapsed().as_secs_f64() * 1e3 })
+    // custom rules: the "dru" option (null = none), else the .kicad_dru beside the board
+    let dru_path = match opts.get("dru") {
+        Some(Value::Null) => None,
+        Some(Value::String(p)) => Some(std::path::PathBuf::from(p)),
+        _ => Some(std::path::Path::new(path).with_extension("kicad_dru")),
+    };
+    let dru = match dru_path.filter(|p| p.is_file()) {
+        None => dru::Dru { coverage: "none".into(), ..Default::default() },
+        Some(p) => {
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+            dru::parse(&text).map_err(|e| format!("{}: {e}", p.display()))?
+        }
+    };
+    Ok(Handle { path: path.to_string(), opts, board, rules, dru, load_ms: t0.elapsed().as_secs_f64() * 1e3 })
 }
 
 fn floors_json(f: &rules::Floors, tag: &str) -> Value {
@@ -129,6 +144,7 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
                    "nets": b.nets.len() - 1, "items": live, "load_ms": h.load_ms,
                    "zones": b.zones.len(), "fill_stale": b.fill_stale,
                    "rules": rules_json(&h.rules),
+                   "dru": {"rules": h.dru.rules.len(), "coverage": h.dru.coverage, "unsupported": h.dru.unsupported},
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
         }
         "items" => items_op(h, &v),
@@ -231,7 +247,7 @@ mod tests {
 
     #[test]
     fn ping_and_unknown_op() {
-        let mut h = Handle { path: "x".into(), opts: json!({}), board: board::Board::new(vec![]), rules: rules::Rules::fallback(), load_ms: 0.0 };
+        let mut h = Handle { path: "x".into(), opts: json!({}), board: board::Board::new(vec![]), rules: rules::Rules::fallback(), dru: dru::Dru::default(), load_ms: 0.0 };
         assert_eq!(dispatch(&mut h, r#"{"op":"ping"}"#)["pong"], true);
         assert_eq!(dispatch(&mut h, r#"{"op":"nope"}"#)["ok"], false);
         assert_eq!(dispatch(&mut h, "not json")["ok"], false);
