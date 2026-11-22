@@ -128,3 +128,9 @@ def artifact(type_, path, label=""):
             emit("artifact", type=type_, path=_rel(path), label=str(label)[:MAX_STR])
     except Exception:
         pass
+
+
+if __name__ == "__main__":                       # python3 -m fluxplace.events --sample OUT | --replay W [--speed N] OUT
+    import sys
+    from .events_sample import main as _main
+    sys.exit(_main(sys.argv[1:]))

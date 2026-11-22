@@ -1,0 +1,1 @@
+{"v": 1, "seq": 2, "base": 1, "add": {"tracks": [{"id": "a1b2c3d4e5f6", "l": "F.Cu", "n": "0", "w": 0.15, "a": [0.0, 2.0], "b": [9.0, 9.0], "m": null, "lk": false}], "vias": []}, "del": {"tracks": ["000000000000"], "vias": []}, "parts": [{"ref": "U1", "x": 10.2, "y": 10.0, "rot": 0, "side": "top", "crt": [8, 8, 12, 12], "value": "MCU"}], "opens": 2}
