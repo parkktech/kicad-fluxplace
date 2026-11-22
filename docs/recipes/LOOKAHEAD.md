@@ -167,3 +167,35 @@ Owner: "KRT and Freerouting as throwaways and see what each wants to do, to have
 - Later rounds keep `src` from the winner; the blocker re-lay variants (L5 step 3) use the demand map of the winner's
   src (consensus/union use the merged map).
 - Keep `jobs` as the cap on concurrent router processes (each JVM / KRT call counts as one).
+
+## L8 (owner 11-22): fast. Ghosts are sketches, not finished routes; verify in tiers
+
+Owner: "run it fast, don't wait for the full route to complete, just the fastest steps to get an idea; be mindful of
+speed so boards get routed and completed quickly and at the highest quality". Supersedes the budgets of L3/L5/L7b.
+
+Ghosts (round 0, all in parallel, each hard-capped):
+- `global` ghost, always, seconds: `planroute.run(B, cons, ignore_routing=False, ...)` (planroute.py:58; the coarse
+  PathFinder of globalroute.py: per-cell demand, pairs as 3-pitch demands). Its per-(layer, cell) net use feeds D_global
+  directly (no rasterising needed: read the routed cell paths from the GlobalRoute object). This is the third idea source
+  of L7b (tag `src=global`) and the fallback when both routers fail.
+- `krt-whole` ghost: `ghost_min.krt` default 8 (route budget 480 s, no finish ladder; pass whatever pipeline flag skips
+  the ladder/close, grep `ladder\|finish` in pipeline.py st_route; if none exists, budget only).
+- `freerouting` ghost: `[route.freerouting] passes = ghost_passes.fr` (default 4) and job timeout `ghost_min.fr`
+  (default 8) on a constraints copy for the ghost only (routefr.py:124 reads `passes`).
+- Whatever copper a ghost has when its cap hits is the ghost (partial is fine: demand comes from what it laid + the
+  global ghost for the rest). Never wait for completion.
+
+Candidate fitness in two tiers:
+- Tier 1, every candidate, seconds, pure text: (a) `escapeplan.plan_escapes(B, cons, ignore_routing=False, routed_nets=...)`
+  on the candidate (pairs laid+locked): count PLAN_PIN_SEALED pins of non-critical nets = `sealed` (this replaces the
+  ghost-based sealed of L3 for tier 1), (b) `planroute.run(..., ignore_routing=False)` overflow / unroutable nets of the
+  non-critical nets around the locked copper = `overflow`, (c) pair audit (complete pairs, skew). Key:
+  (-pairs_complete, shorts, sealed, overflow, reserved_area).
+- Tier 2, only the top `verify_top` (default 2) of the round: one KRT verify ghost at `ghost_min.verify` (default 10).
+  Final key: tier-2 opens break ties within equal tier-1 keys and decide the round winner; log both in TOURNAMENT.md.
+- Pair lay per candidate: cap `pairs.stage` with the existing time/budget knobs on a constraints copy
+  (`[pairlay] fallback = false` for candidates; the fallback ran 36-77 min in W14), `workers` = 32 // jobs.
+
+Rounds: `max_rounds` default 3, `no_gain_rounds` 1. Target wall time: round 0 <= 10 min, each later round <= 20 min,
+whole stage <= 60 min. Print and write to progress.json the wall time per ghost / candidate / tier so the efficiency
+log can be fed from it. `jobs` default 4 (32 cores, 62 GB: one JVM or KRT call each, pair lays use the rest).
