@@ -136,3 +136,15 @@ def test_top_level_run_start_nested_false(tmp_path, monkeypatch):
     start = [r for r in _rows(work) if r["kind"] == "run_start"][0]
     assert start["nested"] is False
     assert json.load(open(work / "run.json"))["nested"] is False
+
+
+def test_lookahead_pct_formula_and_progress_file(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    P = {"max_rounds": 3}
+    assert lookahead._pct(P, 1, 0, 4) == 0.0
+    assert lookahead._pct(P, 2, 1, 2) == 50.0            # round 2 half landed: (1 + 0.5) / 3
+    assert lookahead._pct(P, 3, 0, 0) == 66.7            # round 3 begins: 2 / 3
+    assert lookahead._pct(P, 4, 0, 0) == 100.0           # capped
+    spath = str(tmp_path / "progress.json")
+    lookahead._progress(spath, "running", "round 2", pct=50.0)
+    assert json.load(open(spath))["pct"] == 50.0

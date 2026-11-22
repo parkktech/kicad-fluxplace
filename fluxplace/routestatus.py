@@ -186,6 +186,8 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
         done, tot = snap["nets_done"], snap["nets_total"]
         if tot and done and done < tot and parser.phase == "route":
             eta = round(el / done * (tot - done))
+        if isinstance(state, dict):                       # progress pct when the router reports nets (else null)
+            state["pct"] = round(100.0 * done / tot, 1) if tot and done is not None else None
         if os.path.exists(out):
             mt = os.path.getmtime(out)
             if mt != ckpt["mtime"]:

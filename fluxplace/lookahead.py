@@ -614,6 +614,12 @@ def _mk(p):
     return p
 
 
+def _pct(P, r, k, n):
+    """Lookahead progress: (rounds done + candidates landed / candidates in the round) / max_rounds, percent."""
+    frac = (k / float(n)) if n else 0.0
+    return round(min(100.0, ((r - 1) + frac) / float(P["max_rounds"]) * 100.0), 1)
+
+
 def _progress(path, state, message="", **fields):
     from . import routestatus as RS
     st = {"stage": "lookahead", "state": state, "pid": os.getpid(), "current_step": str(message)[:240], "updated": time.time()}
@@ -1172,7 +1178,8 @@ def stage(c, n, board):
                        adopt=adopt_list if kind == "soft" else None, jobs=P["jobs"])
             job["src"] = src
             jobs.append(job)
-        _progress(spath, "running", f"round {r}: {len(jobs)} candidates (tier 1)", timing=timing)
+        _progress(spath, "running", f"round {r}: {len(jobs)} candidates (tier 1)", timing=timing,
+                  pct=_pct(P, r, 0, len(jobs)))
         results = _run_jobs(jobs, P, P["ghost_min"]["krt"] * 60 + 1800)
         cands += len(results)
         for job, x in zip(jobs, results):                  # L11: the locked board of every candidate that laid
@@ -1201,7 +1208,7 @@ def stage(c, n, board):
         vrank.sort(key=lambda t: t[0])
         rb = vrank[0] if vrank else None
         improved = rb is not None and (best is None or rb[0] < best["rank"])
-        for job, x in zip(jobs, results):
+        for k_done, (job, x) in enumerate(zip(jobs, results), 1):
             vt = _vtxt2(job["src"], job["kind"], tuple(job["variant"]), job["pair"])
             if x.get("fit") is not None and "adopted" in x:
                 vt += f" adopt {x['adopted']}"
@@ -1216,6 +1223,8 @@ def stage(c, n, board):
             else:
                 verdict = ("winner" if (rb and rb[1] == job["tag"] and improved) else "kept") + f" (opens {vv['fit']['opens']})"
             rows.append(_row(r, job["tag"], vt, x["fit"], (vv or {}).get("png"), verdict))
+            _progress(spath, "running", f"round {r}: {k_done}/{len(jobs)} candidates landed", timing=timing,
+                      pct=_pct(P, r, k_done, len(jobs)))
         if improved:
             _tag, x, v = rb[1], rb[2], rb[3]
             src = next(j["src"] for j in jobs if j["tag"] == _tag)
@@ -1230,7 +1239,7 @@ def stage(c, n, board):
         poll()                                             # a ghost that landed during this round is queued before the stop rule
         _table(table, rows)
         _progress(spath, "running", f"round {r} done: best {best['id'] if best else '-'}", rounds=r, candidates=cands,
-                  timing=timing)
+                  timing=timing, pct=_pct(P, r + 1, 0, 0))
         if best is None:
             stop = f"round {r}: no candidate passed tier 1 and verify; nothing to keep"
             break
@@ -1261,7 +1270,7 @@ def stage(c, n, board):
     line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']} ({best['src']}): "
             f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} "
             f"(round-0 ghost opens {ref['opens'] if ref else '-'}), {timing['stage_s']} s")
-    _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands, timing=timing, reason=stop)
+    _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands, timing=timing, reason=stop, pct=100.0)
     return {"verdict": "pass", "line": line, "board": out,
             "next": [f"TOURNAMENT.md: {table}", f"winner png: {best['png']}"]}
 
