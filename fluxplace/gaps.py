@@ -22,7 +22,7 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "track_not_centered_on_via": "via-offcentre"}
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
-ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "open-gap",
+ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "pair-impedance", "open-gap",
          "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
@@ -66,7 +66,7 @@ def _pair_audit(board, cons, opn=None):
     return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
 
 
-SEV = {"pair-open": 3, "pair-asym": 2, "pair-skew": 1}     # severity of an incomplete pair (score sums it)
+SEV = {"pair-open": 3, "pair-asym": 2, "pair-skew": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
 
 
 def review_gaps(board, cons, opn=None):
@@ -111,6 +111,21 @@ def review_gaps(board, cons, opn=None):
                     "skew": r.get("skew"), "limit": r.get("limit")})
     partners = {x: y for r in rows for x, y in ((r["p"], r["n"]), (r["n"], r["p"]))}
     try:
+        from . import boardfile as BF, graph
+        facts = BF.facts_from_file(board)
+        mates = graph.diff_pairs(sorted(set(facts.get("net_tracks") or {}) | set(partners)), exclude=not_p)
+        for f in review.check_pair_geometry(facts, cons):
+            if f.get("code") != "PAIR_IMPEDANCE_OFF":
+                continue
+            net = (f.get("refs") or [""])[0]
+            other = next((a for a, b in mates.items() if b == net), None) or next((b for a, b in mates.items() if a == net), None)
+            nets = sorted({net, other} - {None})
+            out.append({"base": f"pair-impedance:{net}", "kind": "pair-impedance", "sev": SEV["pair-impedance"],
+                        "class": "hs-pair" if review.pair_gated(cons, nets[0]) else "pair", "nets": nets, "at": None,
+                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": nets})
+    except Exception:
+        failed.append("pair-impedance")
+    try:
         for f in preroute.pin_escape_blocked(B or routediag.load(board), only_nets=opn, partners=partners):
             if f.get("code") != "PIN_ESCAPE_BLOCKED":
                 continue
@@ -129,7 +144,7 @@ def _protect(board, cons):
 
 def relax_nets(gaps):
     """Legs of every incomplete pair (pair-open/asym/skew gap): the only pair legs an R5 check may relax."""
-    return {n for g in gaps if g["kind"] in ("pair-open", "pair-asym", "pair-skew") for n in g["nets"]}
+    return {n for g in gaps if g["kind"] in PAIR_KINDS for n in g["nets"]}
 
 
 def _r5_set(kind, targets, protect, relax, fallback=()):
@@ -144,7 +159,9 @@ def _r5_set(kind, targets, protect, relax, fallback=()):
 
 # PHASE3I B1: stage gates. Gap kinds that must be zero before the next constructive stage runs. Pair kinds count only
 # for gated (high-speed) pairs; low-speed pairs are left to the router. [flow.gates] in constraints overrides per stage.
-GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-skew"]}
+PAIR_KINDS = ("pair-open", "pair-asym", "pair-skew", "pair-impedance")
+GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-skew", "pair-impedance"],
+                 "route": ["power-width", "power-vias"]}          # PHASE3I F2: no `power` stage exists; rails are laid by `route`
 
 
 def gate_kinds(cons, stage):
@@ -158,7 +175,7 @@ def in_scope(g, kinds):
     """A gap is in a gate's scope when its kind is listed; pair kinds only for gated (hs-pair) pairs."""
     if kinds is None or g["kind"] not in kinds:
         return kinds is None
-    return g["kind"] not in ("pair-open", "pair-asym", "pair-skew") or g.get("class") == "hs-pair"
+    return g["kind"] not in PAIR_KINDS or g.get("class") == "hs-pair"
 
 
 def _classify_into(mm, cons, board):
@@ -1759,7 +1776,8 @@ DISPATCH = {
     "power-vias": ["powervias"],
     "pair-open": ["pairgroup", "ai"],     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
     "pair-asym": ["pairgroup", "ai"],
-    "pair-skew": ["pairgroup", "tune", "ai"],     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
+    "pair-skew": ["pairgroup", "tune", "ai"],
+    "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
 }
 LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
@@ -1872,7 +1890,6 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         log(f"initial refill failed ({str(e)[:80]}); measuring the copy unrefilled")
         m = dict(measure(best, kicad_cli))
     _classify_into(m, cons, best)
-    _scope_gaps(m, kinds)
     protect = _protect(best, cons)
     relax = relax_nets(m["gaps"])
     start = _vitals(m)
@@ -1898,6 +1915,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             memo = {tuple(x) for x in st.get("memo", [])}
     except (OSError, ValueError, AttributeError):
         pass
+
+    def vis(gs):                                         # PHASE3I F2: the gate's scope selects targets; the guard sees all gaps
+        return gs if kinds is None else [g for g in gs if in_scope(g, kinds)]
 
     def save(r):
         _write_json(state_path, {"gaps": m["gaps"], "memo": sorted(list(k) for k in memo), "round": r,
@@ -1961,7 +1981,6 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = _remeasure(out, kicad_cli)
                     runs = 1
                     _classify_into(cm, cons, out)
-                    _scope_gaps(cm, kinds)
                     cand = score(cm, cm["gaps"])          # PHASE3F A2: what the candidate cost, accepted or not
                     final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind,
@@ -1983,7 +2002,6 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         cm = _remeasure(final, kicad_cli)
                         runs += 1
                         _classify_into(cm, cons, final)
-                        _scope_gaps(cm, kinds)
                         cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
@@ -2051,7 +2069,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         got = False
         for h in _halves(ts):
             ids = {g["id"] for g in h}
-            cur = [g for g in m["gaps"] if g["id"] in ids and g["kind"] == kind]   # re-read: an accepted half moved m
+            cur = [g for g in vis(m["gaps"]) if g["id"] in ids and g["kind"] == kind]   # re-read: an accepted half moved m
             if not cur or left[0] <= 0 or time.time() - t0 > budget_s:
                 continue
             left[0] -= 1
@@ -2076,27 +2094,27 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     for kind in ORDER:
         if "ai" not in DISPATCH.get(kind, []):
             continue
-        for _ in range(len(_ai_pending_names(ctx_dir_ai(work), [g for g in m["gaps"] if g["kind"] == kind]))):
-            tg = [g for g in m["gaps"] if g["kind"] == kind]
+        for _ in range(len(_ai_pending_names(ctx_dir_ai(work), [g for g in vis(m["gaps"]) if g["kind"] == kind]))):
+            tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
             if not _ai_pending(ctx_dir_ai(work), tg) or time.time() - t0 > budget_s:
                 break
             if not attempt(0, kind, "ai", tg) and kind not in ai_refused:
                 ai_refused.append(kind)
             save(0)
     for kind in ai_refused:
-        tg = [g for g in m["gaps"] if g["kind"] == kind]
+        tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
         if tg and time.time() - t0 <= budget_s:
             attempt(0, kind, "ai", tg)
             save(0)
     for r in range(max_rounds):
-        if not any(g["kind"] in DISPATCH for g in m["gaps"]):
-            stop = "clean"
+        if kinds is None and not any(g["kind"] in DISPATCH for g in m["gaps"]) or kinds is not None and not vis(m["gaps"]):
+            stop = "clean"                               # a scoped gap with no rung keeps the gate open: stop "flat"
             break
         hit = False
         packets_before = n_packets
         round_vec0 = score(m, m["gaps"])                 # PHASE3E 9: the round's start, for the no-gain counter
         for kind in ORDER:
-            targets = [g for g in m["gaps"] if g["kind"] == kind]
+            targets = [g for g in vis(m["gaps"]) if g["kind"] == kind]
             if not targets or kind not in DISPATCH:
                 continue
             for rung in _rank(kind, DISPATCH[kind], yields):
@@ -2136,7 +2154,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         stop = "rounds"
 
     left = []
-    for g in m["gaps"]:
+    for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
         left.append({"id": g["id"], "kind": g["kind"], "class": g["class"],
                      "last_method": l.get("method"), "why": l.get("why")})
@@ -2151,7 +2169,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     res = {"stop": stop, "exit": {"clean": 0, "packets": 5}.get(stop, 2), "level": level,
            "minutes": round((time.time() - t0) / 60, 1), "start": start, "end": _vitals(m),
            "attempts": n_att, "left": left,
-           "packets": _packet_rows(work, m["gaps"], ai_used, _ai_budget(cons)),       # PHASE3F B6
+           "packets": _packet_rows(work, vis(m["gaps"]), ai_used, _ai_budget(cons)),       # PHASE3F B6
            "proposals": _proposal_rows(ctx_dir_ai(work)), "ignored": ignored}
     _write_json(os.path.join(work, "stop.json"), res)
     if runs:

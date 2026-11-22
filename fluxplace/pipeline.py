@@ -1171,6 +1171,15 @@ def st_critroute(c, n, board):
     return CR.stage(c, n, board)
 
 
+def _gate_stop(gate_dir):
+    """stop reason of a gate's stop.json, None when there is none (PHASE3I F2)."""
+    try:
+        with open(os.path.join(gate_dir, "stop.json")) as fh:
+            return json.load(fh).get("stop")
+    except (OSError, ValueError):
+        return None
+
+
 def _gate_check(c, n, name, board, kinds):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
@@ -1178,7 +1187,8 @@ def _gate_check(c, n, name, board, kinds):
     d = c.dir(n, "gate")
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
     try:
-        r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds)
+        r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds,
+                     budget_min=float((c.cons.get("flow") or {}).get("gate_budget_min", 20)))   # PHASE3I F2
     except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
         return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": []}
     stop = r["stop"]
@@ -1407,20 +1417,36 @@ def run(a):
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
     failed_on = []
+    for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
+        gk_prev = GP_.gate_kinds(c.cons, k)
+        gst = ((st["stages"].get(k) or {}).get("gate") or {})
+        if gk_prev and gst.get("stop") != "clean":
+            sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
+            print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
+            return 5
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
         prev = board
         led.before(prev)
-        res = FUNCS[name](c, i + 1, board)
-        res.setdefault("verdict", "pass")
-        led.after(name, i + 1, res)
+        gd = c.dir(i + 1, "gate")
         gk = GP_.gate_kinds(c.cons, name)
+        best_g = os.path.join(gd, "best.kicad_pcb")
+        if gk and os.path.exists(best_g) and _gate_stop(gd) == "packets":   # PHASE3I F2: packets answered; the stage is not re-run
+            rp = os.path.join(gd, "resume.kicad_pcb")
+            for ext in ("", ".kicad_pro", ".kicad_dru"):
+                if os.path.exists(best_g + ext):
+                    shutil.copy2(best_g + ext, rp + ext)
+            res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
+        else:
+            res = FUNCS[name](c, i + 1, board)
+        res.setdefault("verdict", "pass")
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
             g = _gate_check(c, i + 1, name, res.get("board") or board, gk)
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
             if g["verdict"] == "packets":
                 res["gate_packets"] = True
+        led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
         if res.get("board") and res["board"] != prev:
@@ -1432,6 +1458,8 @@ def run(a):
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
+        if res.get("gate"):
+            st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         if name == "route":
