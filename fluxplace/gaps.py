@@ -437,6 +437,27 @@ def _r_pourisland(base, out, gaps, ctx):
     return {"nets": len(_nets(gaps)), "wrote": wrote}
 
 
+def _r_edgesliver(base, out, gaps, ctx):
+    from . import edgesliver as ES
+    cur, wrote, tmps = base, False, []
+    try:
+        for i, net in enumerate(_nets(gaps)):
+            tmp = os.path.join(ctx["work"], f"es-{i}.kicad_pcb")
+            tmps.append(tmp)
+            _rm(tmp)
+            _sidecars(cur, tmp)
+            ES.repair(cur, tmp, net, constraints=ctx["cons_path"])
+            if os.path.exists(tmp):
+                cur, wrote = tmp, True
+        if wrote:
+            _copy(cur, out)
+            _sidecars(cur, out)
+    finally:
+        for t in tmps:
+            _clean_board(t)
+    return {"nets": len(_nets(gaps)), "wrote": wrote}
+
+
 def _r_patch(base, out, gaps, ctx):
     from . import patch as PT
     return _brief(PT.patch_board(base, out, rip=False, cons=ctx["cons"], log=ctx["log"]))
@@ -1622,7 +1643,7 @@ def _r_pairgroup(base, out, gaps, ctx):
     return {"status": "ran", "laid": laid, "failed": len(rep["failed"]), "pairs": len(pairs)}
 
 
-RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch, "patch_rip": _r_patch_rip,
+RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_edgesliver, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
          "pairgroup": _r_pairgroup, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
@@ -1632,7 +1653,7 @@ RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "patch": _r_patch
 DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
-    "open-pour": ["pourisland", "region", "ai"],
+    "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
     "open-free": ["prune", "patch", "handrepair", "krt", "krt_region", "region", "patch_rip", "ai"],
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],

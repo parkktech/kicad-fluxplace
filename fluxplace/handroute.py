@@ -764,7 +764,8 @@ def session_begin(board, work, kicad_cli="kicad-cli"):
     work = os.path.abspath(work)
     S = Sess(work)
     if S.exists:
-        raise RuntimeError(f"session already exists at {S.dir}")
+        raise RuntimeError(f"session already exists at {S.dir} (source {S.meta().get('source')}): "
+                           "give this agent its own work path; the existing session is untouched")
     os.makedirs(os.path.join(S.dir, "undo"), exist_ok=True)
     _copy_board(board, work)
     shutil.copy(work, os.path.join(S.dir, "start.kicad_pcb"))

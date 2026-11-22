@@ -30,7 +30,8 @@ from . import routestatus as RS
 
 def drc_unrouted(board, kicad_cli="kicad-cli"):
     """Run kicad-cli DRC; return (report, set_of_unrouted_netnames)."""
-    out = board + ".drc.json"
+    from . import drcguard as DG
+    out = DG.report_slot(board)
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
                     "--output", out, board], capture_output=True, text=True)
     from . import drcfull as DF

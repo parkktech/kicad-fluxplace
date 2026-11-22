@@ -72,13 +72,24 @@ def keys_per_net(d, keep=None):
     return keys
 
 
+def report_slot(board_path):
+    """A unique kicad-cli DRC report path beside the board (mkstemp): two runs on one board never unlink each
+    other's report (the pour-island missing-file crash)."""
+    import tempfile
+    fd, out = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(board_path)),
+                               prefix=os.path.basename(board_path) + ".", suffix=".drc.json")
+    os.close(fd)
+    return out
+
+
 def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
     """The raw kicad-cli DRC dict (all severities, zones refilled)."""
-    out = board_path + ".drc.json"
+    out = report_slot(board_path)
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
                     "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
                     board_path], capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(out):
+    if not os.path.getsize(out):
+        os.unlink(out)
         raise RuntimeError("DRC produced no report")
     from . import drcfull as DF
     d = DF.complete(board_path, json.load(open(out)), fill=True)

@@ -16,7 +16,8 @@ JOINT_MM = 0.005       # track ends this close to a snapped end move with it (th
 
 
 def _report(board, cli="kicad-cli"):
-    out = board + ".drc.json"
+    from . import drcguard as DG
+    out = DG.report_slot(board)
     subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "--refill-zones", "-o", out, board],
                    capture_output=True, timeout=900)
     from . import drcfull as DF

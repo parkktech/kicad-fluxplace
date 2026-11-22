@@ -35,7 +35,7 @@ __all__ = ["run_drc", "fix", "loop"]
 def run_drc(board_path, kicad_cli="kicad-cli"):
     import json
     import subprocess
-    out = board_path + ".drc.json"
+    out = DG.report_slot(board_path)
     subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all",
                     "--all-track-errors", "-o", out, board_path],
                    capture_output=True, text=True, timeout=900)
