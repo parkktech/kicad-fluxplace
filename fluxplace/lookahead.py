@@ -963,24 +963,73 @@ def _row(r, tag, variant, fit, png, verdict):
     return row
 
 
-def _ghost_round0(a, board, d, P, routers):
-    """the router ghosts of round 0 in parallel (one router process each; threads only wait) -> {router: path or None}."""
-    import concurrent.futures as cf
+def _one_ghost(a, board, d, P, r):
+    if r == "freerouting":
+        return ghost(a, board, os.path.join(d, "ghost0-freerouting"), P["ghost_min"]["fr"], r, passes=P["ghost_passes_fr"],
+                     threads=max(1, 32 // max(1, P["jobs"])))
+    return ghost(a, board, os.path.join(d, f"ghost0-{r}"), P["ghost_min"]["krt"], r)
 
-    def one(r):
-        if r == "freerouting":
-            return ghost(a, board, os.path.join(d, "ghost0-freerouting"), P["ghost_min"]["fr"], r, passes=P["ghost_passes_fr"],
-                         threads=max(1, 32 // max(1, P["jobs"])))
-        return ghost(a, board, os.path.join(d, f"ghost0-{r}"), P["ghost_min"]["krt"], r)
-    with cf.ThreadPoolExecutor(max_workers=max(1, min(P["jobs"], len(routers)))) as ex:
-        futs = {r: ex.submit(one, r) for r in routers}
-        return {r: f.result() for r, f in futs.items()}
+
+def _launch_ghosts(a, board, d, P, routers):
+    """Every router ghost of round 0 in the background (one process each; threads only wait). -> (executor, {router: future})."""
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(max_workers=max(1, min(P["jobs"], len(routers))))
+    return ex, {r: ex.submit(_one_ghost, a, board, d, P, r) for r in routers}
+
+
+def _kill_outdir(outdir):
+    """SIGKILL every process whose command line names `outdir` (a ghost's own router processes; its process group first).
+    -> number of processes signalled."""
+    import signal
+    n, me = 0, os.getpid()
+    key = os.fspath(outdir).encode()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read()
+        except OSError:
+            continue
+        if key not in cmd:
+            continue
+        for kill in (lambda p: os.killpg(p, signal.SIGKILL), lambda p: os.kill(p, signal.SIGKILL)):
+            try:
+                kill(int(pid))
+                n += 1
+                break
+            except (ProcessLookupError, PermissionError):
+                continue
+    return n
+
+
+def _jaccard(D1, D2):
+    """Overlap of two demand maps' reserved cells (cells with any net), |A & B| / |A | B|."""
+    A = {k for k, cl in D1["cells"].items() if cl["nets"]}
+    B = {k for k, cl in D2["cells"].items() if cl["nets"]}
+    return len(A & B) / len(A | B) if (A | B) else 1.0
+
+
+def _land_source(r, g, d, crit, cons, P, pl, rows):
+    """A router ghost landed: fitness, PNG, corridors, demand, its round-0 row, the live snapshot -> (source, fit) or (None, None)."""
+    if not g:
+        rows.append(_row(0, f"ghost-{r}", "unlocked", None, None, "fail: no routed board"))
+        return None, None
+    fit = fitness(g, crit, cons, escape_mm=P["escape_mm"])
+    fit["id"] = f"ghost-{r}"
+    png = render(g, [], fit, os.path.join(d, f"ghost-{r}.png"))
+    B = RD.load(g)
+    corr, _why = corridors(B, pl, P)
+    rows.append(_row(0, f"ghost-{r}", "unlocked", fit, png, "reference"))
+    return {"D": demand(g, crit, P), "corr": corr, "B": B, "path": g, "fit": fit}, fit
 
 
 def stage(c, n, board):
-    """lookahead stage (constructive flow, before pairs). Round 0: the KRT and Freerouting ghosts (capped, in parallel) and the
-    global ghost (seconds) are three idea sources; consensus and union are mixed sources. Rounds: soft-guided and hard
-    candidates per source, tier-1 text fitness for all, KRT verify for the top verify_top; ranked, TOURNAMENT.md, PNG each."""
+    """lookahead stage (constructive flow, before pairs). Round 0: the router ghosts run in the background, the global ghost
+    (seconds) inline; round 1 starts as soon as the FIRST router ghost lands. A ghost that lands later is compared with the
+    first (fitness key, overlap of reserved cells): better -> its candidates join the next round (and one more round runs if
+    the stage would stop); equal / worse -> one consensus candidate. A ghost still running at the end is killed.
+    Candidates: soft-guided and hard per source, tier-1 text fitness, KRT verify for the top verify_top; TOURNAMENT.md, PNG each."""
+    import concurrent.futures as cf
     import time
     P = params(c.cons)
     if not P["enabled"]:
@@ -992,73 +1041,117 @@ def stage(c, n, board):
     acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py", "freerouting_jar", "java")}
     crit = critical_nets(board, c.cons, c.spec)
     pl = critical_pairs(board, c.cons, c.spec)
-    rows, sources, ok_fit, timing = [], {}, {}, {}
+    rows, sources, ok_fit, timing = [], {}, {}, {"ghosts": {}}
     stop = "no round ran"
     routers = list(P["ghost_routers"])
-    _progress(spath, "running", "round 0: ghosts " + ", ".join(routers), timing=timing)
+    st = {"ghosts": [], "first": None, "better": [], "minor": []}     # landed router ghosts; queued candidate specs
     t0 = time.time()
-    gouts = _ghost_round0(a, board, d, P, routers)
-    timing["router_ghosts_s"] = round(time.time() - t0, 1)
+    ex, futs = _launch_ghosts(a, board, d, P, routers)
+    pending = dict(futs)
     for r in routers:
-        g = gouts.get(r)
-        gs = os.path.join(d, f"ghost0-{r}", "ghost.stats.json")
-        if os.path.exists(gs):
-            timing.setdefault("ghost_stats", {})[r] = json.load(open(gs))
-        if not g:
-            rows.append(_row(0, f"ghost-{r}", "unlocked", None, None, "fail: no routed board"))
-            continue
-        t1 = time.time()
-        fit = fitness(g, crit, c.cons, escape_mm=P["escape_mm"])
-        fit["id"] = f"ghost-{r}"
-        png = render(g, [], fit, os.path.join(d, f"ghost-{r}.png"))
-        B = RD.load(g)
-        corr, _why = corridors(B, pl, P)
-        sources[r] = {"D": demand(g, crit, P), "corr": corr, "B": B, "path": g}
-        ok_fit[r] = fit
-        timing[f"ghost-{r}_s"] = round(time.time() - t0, 1)
-        rows.append(_row(0, f"ghost-{r}", "unlocked", fit, png, "reference"))
-    ghosts = [r for r in routers if r in sources]
+        timing["ghosts"][r] = {"launched_s": round(time.time() - t0, 1), "used": "running"}
+    _progress(spath, "running", "round 0: ghosts launched " + ", ".join(routers), timing=timing)
     globals_ = []
-    if P["global_ghost"]:
+    if P["global_ghost"]:                                  # seconds: inline, before the router ghosts land
         t1 = time.time()
         try:
             sources["global"] = {"D": global_demand(board, c.cons, c.spec, P, crit), "corr": {}}
             globals_ = ["global"]
             rows.append(_row(0, "ghost-global", "planroute, demand only", None, None, "reference (no board)"))
-        except Exception as e:                                   # noqa: BLE001 - the global ghost is an idea, not a must
+        except Exception as e:                             # noqa: BLE001 - the global ghost is an idea, not a must
             rows.append(_row(0, "ghost-global", "planroute", None, None, f"fail: {type(e).__name__}"))
         timing["ghost-global_s"] = round(time.time() - t1, 1)
+
+    def late(r, src, fit):
+        """a router ghost landed after the first: compare, queue its candidates (better) or one consensus candidate."""
+        fs = sources[st["first"]]
+        ff = ok_fit[st["first"]]
+        kf, kl = tuple(fit["key"]), tuple(ff["key"])
+        verdict = "better" if kf < kl else ("equal" if kf == kl else "worse")
+        ov = round(100 * _jaccard(fs["D"], src["D"]))
+        line = (f"late ghost {r}: pairs {fit['pairs_complete']} vs {ff['pairs_complete']}, "
+                f"opens {fit['opens']} vs {ff['opens']}, overlap {ov} % -> {verdict}")
+        rows.append({"round": 0, "id": f"late-{r}", "variant": line, "fit": None, "png": "-", "verdict": verdict})
+        sources[f"consensus+{r}"] = {"D": merge_demand([fs["D"], src["D"]], "consensus", P)}
+        sources[f"union+{r}"] = {"D": merge_demand([fs["D"], src["D"]], "union", P)}
+        v0 = tuple(P["variants"][0])
+        if verdict == "better":
+            st["better"] += [("soft", tuple(v), None, r) for v in P["variants"]]
+            st["better"] += [("soft", v0, None, f"consensus+{r}"), ("soft", v0, None, f"union+{r}")]
+            timing["ghosts"][r]["used"] = "late-better"
+        else:
+            st["minor"].append(("soft", v0, None, f"consensus+{r}"))
+            timing["ghosts"][r]["used"] = "late-used-consensus" if verdict == "equal" else "late-ignored"
+        st["ghosts"].append(r)
+        _progress(spath, "running", line, timing=timing)
+
+    def land(r, fut):
+        t = round(time.time() - t0, 1)
+        try:
+            g = fut.result()
+        except Exception as e:                            # noqa: BLE001 - a crashed ghost is a failed row, not a stage crash
+            g = None
+            rows.append(_row(0, f"ghost-{r}", "unlocked", None, None, f"fail: {type(e).__name__}"))
+        tm = timing["ghosts"][r]
+        tm.update(landed_s=t, secs=round(t - tm["launched_s"], 1))
+        gs = os.path.join(d, f"ghost0-{r}", "ghost.stats.json")
+        if os.path.exists(gs):
+            tm["stats"] = json.load(open(gs))
+        src, fit = _land_source(r, g, d, crit, c.cons, P, pl, rows)
+        if src is None:
+            tm["used"] = "failed"
+            return
+        sources[r] = src
+        ok_fit[r] = fit
+        if st["first"] is None:
+            st["first"] = r
+            st["ghosts"].append(r)
+            tm["used"] = "first"
+        else:
+            late(r, src, fit)
+
+    def poll():
+        for rr, f in list(pending.items()):
+            if f.done():
+                pending.pop(rr)
+                land(rr, f)
+
+    # round 0 waits for the FIRST router ghost to land (or for every one to fail)
+    while pending and not st["ghosts"]:
+        done, _ = cf.wait(list(pending.values()), return_when=cf.FIRST_COMPLETED)
+        poll()
+    ghosts = list(st["ghosts"])
     if not ghosts and not globals_:
+        ex.shutdown(wait=False, cancel_futures=True)
         _progress(spath, "failed", "no round-0 ghost produced a board", timing=timing)
         return {"verdict": "fail", "line": "lookahead: no round-0 ghost produced a routed board", "board": board}
-    if not ghosts:
-        B0 = RD.load(board)
-    else:
-        B0 = sources[ghosts[0]]["B"]
+    B0 = sources[ghosts[0]]["B"] if ghosts else RD.load(board)
     mixed = []
     if len(ghosts) >= 2:
         Ds = [sources[g]["D"] for g in ghosts]
         sources["consensus"] = {"D": merge_demand(Ds, "consensus", P), "corr": _corr_for("consensus", sources, ghosts)}
         sources["union"] = {"D": merge_demand(Ds, "union", P), "corr": _corr_for("union", sources, ghosts)}
         mixed = ["consensus", "union"]
-    order = ghosts + globals_
-    adopt_from = {}                                   # pair -> ghost board it is copied from (router order, first wins)
-    for g in ghosts:
-        for pr in adopt_pairs(sources[g]["path"], pl, c.cons):
-            adopt_from.setdefault(tuple(pr), g)
-    adopt_lists = {}
-    for pr, g in adopt_from.items():
-        adopt_lists.setdefault(sources[g]["path"], []).append(list(pr))
-    adopt_list = [{"board": b, "pairs": prs} for b, prs in sorted(adopt_lists.items())]
     _table(table, rows)
-    ref = min(ok_fit.values(), key=lambda f: tuple(f["key"])) if ok_fit else None
     best, best_variant, stale, rounds, cands = None, None, 0, 0, 0
     for r in range(1, P["max_rounds"] + 1):
         rounds = r
-        specs = _specs(r, best, best_variant, P, ghosts, mixed, globals_)
+        poll()                                             # router ghosts that landed since the last round
+        ghosts = list(st["ghosts"])
+        order = ghosts + globals_
+        specs = _specs(r, best, best_variant, P, ghosts, mixed, globals_) + st["better"] + st["minor"]
+        st["better"], st["minor"] = [], []
         if not specs:
             break
         t_round = time.time()
+        adopt_from = {}                                    # pair -> ghost board it is copied from (landing order, first wins)
+        for g in ghosts:
+            for pr in adopt_pairs(sources[g]["path"], pl, c.cons):
+                adopt_from.setdefault(tuple(pr), g)
+        adopt_lists = {}
+        for pr, g in adopt_from.items():
+            adopt_lists.setdefault(sources[g]["path"], []).append(list(pr))
+        adopt_list = [{"board": b, "pairs": prs} for b, prs in sorted(adopt_lists.items())]
         jobs = []
         for i, (kind, variant, pair, src) in enumerate(specs):
             mn, em = variant
@@ -1125,6 +1218,7 @@ def stage(c, n, board):
         if r == 1 and best is not None:
             best_variant = tuple(best["variant"])
         timing[f"round{r}_s"] = round(time.time() - t_round, 1)
+        poll()                                             # a ghost that landed during this round is queued before the stop rule
         _table(table, rows)
         _progress(spath, "running", f"round {r} done: best {best['id'] if best else '-'}", rounds=r, candidates=cands,
                   timing=timing)
@@ -1132,18 +1226,28 @@ def stage(c, n, board):
             stop = f"round {r}: no candidate passed tier 1 and verify; nothing to keep"
             break
         done = best["fit"]["opens"] == 0 and best["fit"]["pairs_complete"] == best["fit"]["pairs_total"]
-        if done or stale >= P["no_gain_rounds"]:
+        if (done or stale >= P["no_gain_rounds"]) and not st["better"]:
             stop = "clean winner" if done else f"no gain for {stale} round(s)"
             break
         stop = "max_rounds"
+    poll()
+    for rr, f in list(pending.items()):                    # still running at the stage end: killed
+        n_kill = _kill_outdir(os.path.join(d, f"ghost0-{rr}"))
+        timing["ghosts"][rr].update(used="timeout", killed=n_kill)
+        rows.append(_row(0, f"ghost-{rr}", "unlocked", None, None, "timeout (stage done)"))
+    pending.clear()
+    ex.shutdown(wait=False, cancel_futures=True)
     timing["stage_s"] = round(time.time() - t_stage, 1)
+    ref = min(ok_fit.values(), key=lambda f: tuple(f["key"])) if ok_fit else None
     if best is None:
+        _table(table, rows)
         _progress(spath, "failed", "no candidate produced a board", timing=timing, reason=stop)
         return {"verdict": "fail", "line": "lookahead: no candidate produced a routed board", "board": board,
                 "next": [f"TOURNAMENT.md: {table}"]}
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copy(best["locked"], out)
     _copy_sidecar(best["locked"], out)
+    _table(table, rows)
     f = best["fit"]
     line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']} ({best['src']}): "
             f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} "

@@ -731,3 +731,96 @@ def test_lean_freerouting_export_declares_planes_and_runs_passes(monkeypatch, tm
     assert "--router.max_threads=2" in cmd
     assert seen["planes"] == ["GND"]                              # plane nets declared power: not routed
     assert out and out.endswith("fr-lean.kicad_pcb") and seen["import"]["skip_nets"] == []
+
+
+# ---- L10 streaming ghosts / L11 live snapshots: the router ghosts land at different times ----
+
+def _stream(monkeypatch, tmp_path, keys, plan, gate_fr=True, release=True):
+    """_tour_setup plus: KRT ghost lands at once; Freerouting blocks on `gate` until round 1 has run; `keys` = fitness
+    key per router. -> (c, jobs, rounds, gate, slow_done, log)"""
+    import threading
+    import time
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    gate, slow_done = threading.Event(), threading.Event()
+    log = {"pre_release_landed": None}
+    fixtures = {r: tmp_path / f"fix-{r}.kicad_pcb" for r in ("krt-whole", "freerouting")}
+    for f in fixtures.values():
+        f.write_text("(kicad_pcb)")
+
+    def gated_ghost(a, board, outdir, budget, router="krt-whole", passes=None, lean=True, threads=8):
+        if router == "freerouting" and gate_fr:
+            gate.wait()
+            slow_done.set()
+        return str(fixtures[router])
+    monkeypatch.setattr(LA, "ghost", gated_ghost)
+    monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0: {
+        "key": keys["freerouting" if "freerouting" in board else "krt-whole"], "opens": keys["opens"][
+            "freerouting" if "freerouting" in board else "krt-whole"], "pairs_complete": 1, "pairs_total": 1,
+        "blockers": {}})
+    orig = LA._run_jobs
+
+    def run_and_release(jobs_, P, timeout):
+        first_round = not any(j["kind"] == "verify" for j in jobs_)
+        if first_round and log["pre_release_landed"] is None:
+            log["pre_release_landed"] = slow_done.is_set()          # round 1 must not wait for the slow ghost
+            if not release:
+                return orig(jobs_, P, timeout)
+            gate.set()
+            slow_done.wait(10)
+            time.sleep(0.2)                                         # let the stage's future mark itself done
+        return orig(jobs_, P, timeout)
+    monkeypatch.setattr(LA, "_run_jobs", run_and_release)
+    return c, jobs, rounds, gate, log
+
+
+def test_late_better_ghost_queues_its_candidates_for_the_next_round(monkeypatch, tmp_path):
+    keys = {"krt-whole": (-1, 0, 3, 0, 0, 0.0), "freerouting": (-1, 0, 0, 0, 0, 0.0),
+            "opens": {"krt-whole": 3, "freerouting": 0}}
+    plan = lambda r, job: {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds, gate, log = _stream(monkeypatch, tmp_path, keys, plan)
+    try:
+        LA.stage(c, 7, "in.kicad_pcb")
+    finally:
+        gate.set()
+    assert log["pre_release_landed"] is False                     # round 1 started before the slow ghost landed
+    assert not any(j["src"] == "freerouting" for j in jobs if j["tag"].startswith("r1-"))
+    fr_later = [j for j in jobs if j["src"] == "freerouting" and j["kind"] != "verify" and not j["tag"].startswith("r1-")]
+    assert fr_later and all(j["kind"] == "soft" for j in fr_later)
+    assert any(j["src"] == "consensus+freerouting" for j in jobs) and any(j["src"] == "union+freerouting" for j in jobs)
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    assert "late ghost freerouting: pairs 1 vs 1, opens 0 vs 3" in table and "-> better" in table
+    prog = json.load(open(os.path.join(c.dir(7, "lookahead"), "progress.json")))
+    assert prog["timing"]["ghosts"]["freerouting"]["used"] == "late-better"
+    assert prog["timing"]["ghosts"]["krt-whole"]["used"] == "first"
+
+
+def test_late_worse_ghost_adds_only_the_consensus_candidate(monkeypatch, tmp_path):
+    keys = {"krt-whole": (-1, 0, 0, 0, 0, 0.0), "freerouting": (-1, 0, 4, 0, 0, 0.0),
+            "opens": {"krt-whole": 0, "freerouting": 4}}
+    plan = lambda r, job: {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds, gate, log = _stream(monkeypatch, tmp_path, keys, plan)
+    try:
+        LA.stage(c, 7, "in.kicad_pcb")
+    finally:
+        gate.set()
+    later = [j for j in jobs if j["kind"] != "verify" and not j["tag"].startswith("r1-")
+             and j["src"] in ("freerouting", "consensus+freerouting", "union+freerouting")]
+    assert [j["src"] for j in later] == ["consensus+freerouting"]           # one consensus candidate, nothing else
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    assert "-> worse" in table
+    prog = json.load(open(os.path.join(c.dir(7, "lookahead"), "progress.json")))
+    assert prog["timing"]["ghosts"]["freerouting"]["used"] == "late-ignored"
+
+
+def test_a_ghost_still_running_at_stage_end_is_killed_and_logged(monkeypatch, tmp_path):
+    keys = {"krt-whole": (-1, 0, 0, 0, 0, 0.0), "freerouting": (-1, 0, 0, 0, 0, 0.0),
+            "opens": {"krt-whole": 0, "freerouting": 0}}
+    plan = lambda r, job: {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds, gate, log = _stream(monkeypatch, tmp_path, keys, plan, release=False)
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert out["verdict"] == "pass" and rounds["n"] == 1        # clean winner after round 1: the slow ghost never landed
+    prog = json.load(open(os.path.join(c.dir(7, "lookahead"), "progress.json")))
+    assert prog["timing"]["ghosts"]["freerouting"]["used"] == "timeout"
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    assert "timeout (stage done)" in table
+    gate.set()
