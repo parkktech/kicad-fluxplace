@@ -299,7 +299,7 @@ def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 120)
     except subprocess.TimeoutExpired:
-        return None
+        pass                      # hard cap: whatever copper the ghost has is the ghost (partial is fine)
     found = sorted(glob.glob(os.path.join(outdir, "run", "*-route", "board.kicad_pcb")))
     return found[0] if found else None
 

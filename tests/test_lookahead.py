@@ -202,6 +202,23 @@ def test_ghost_command_flags_and_result(monkeypatch, tmp_path):
     assert got == str(tmp_path / "out" / "run" / "3-route" / "board.kicad_pcb")
 
 
+def test_ghost_partial_board_after_hard_cap_is_kept(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    src = tmp_path / "g.kicad_pcb"
+    src.write_text("x")
+    out = tmp_path / "o"
+
+    def cap(cmd, **kw):
+        rd = out / "run" / "2-route"
+        rd.mkdir(parents=True)
+        (rd / "board.kicad_pcb").write_text("(kicad_pcb partial)")
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(subprocess, "run", cap)
+    got = LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(out), 1)
+    assert got and got.endswith("board.kicad_pcb")
+
+
 def test_ghost_returns_none_on_timeout(monkeypatch, tmp_path):
     import subprocess
     from types import SimpleNamespace
