@@ -1333,8 +1333,13 @@ def shove(board, net, out=None, ids=None, window_box=None, chain=False, constrai
         unnamed = [o for o in locked if o.id not in named]
         if allow_locked and unnamed:
             raise ValueError("every locked item must be explicitly named: " + ", ".join(_sid(o.id) for o in unnamed))
-        if locked and not allow_locked:
-            raise ValueError("refused, locked copper selected: " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in locked[:6]))
+        # PHASE3I B5: the lock policy follows the net's class. Hard (gated pair legs, RF) needs the explicit opt-in;
+        # soft and free locked copper may be ripped by the ordinary edit guard (the caller re-lays soft copper).
+        from . import constraints as CN_lp, lockpolicy as LP
+        cons_lp = CN_lp.load(constraints) if isinstance(constraints, str) else (constraints or {})
+        hard = [o for o in locked if o.net in LP.hard_locked({o.net}, cons_lp, {o.net for o in M.obs if o.net})]
+        if hard and not allow_locked:
+            raise ValueError("refused, hard-locked copper selected (high-speed pair or RF): " + ", ".join(f"{o.kind} {_sid(o.id)} at {_fmtp(o.g[1])}" for o in hard[:6]))
         removed = []
         for t in list(b.GetTracks()):
             if t.m_Uuid.AsString() in sel:
