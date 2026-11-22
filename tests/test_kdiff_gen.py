@@ -67,15 +67,11 @@ def test_attribution_on_stub_report():
     assert res[0]["types"] and res[1]["types"] == ["clearance"]
 
 
-def test_unowned_violation_stops_run():
+def test_unowned_violation_marks_batch_unattributed():
     batch = [_stub_edit(0, ["u-a"], ["NA"])]
     rep = {"violations": [{"type": "clearance", "items": [{"uuid": "stranger"}]}], "unconnected_items": []}
-    try:
-        kdiff.classify({"violations": [], "unconnected_items": []}, rep, batch)
-    except RuntimeError as exc:
-        assert "no edit owns" in str(exc)
-    else:
-        raise AssertionError("unowned violation must raise")
+    res = kdiff.classify({"violations": [], "unconnected_items": []}, rep, batch)
+    assert res[0]["oracle"] == "unattributed" and any("unowned" in d for d in res[0]["detail"])
 
 
 def test_planted_wrong_verdict_is_false_accept_and_saved(tmp_path):

@@ -421,6 +421,7 @@ def classify(base_rep, batch_rep, batch):
                  for v in base_rep.get("violations", [])}
     owner = {u: e["id"] for e in batch for u in e["uuids"]}
     res = {e["id"]: {"oracle": "good", "types": [], "outside": []} for e in batch}
+    unowned = []
     for v in batch_rep.get("violations", []):
         us = frozenset(i.get("uuid", "") for i in v.get("items", []))
         if (v["type"], us) in base_keys:
@@ -429,7 +430,9 @@ def classify(base_rep, batch_rep, batch):
         if not ids and v["type"] in DANGLING:
             continue  # a neighbour's dangling end after a removal: a warning, not an owned violation
         if not ids:
-            raise RuntimeError(f"new violation no edit owns: {v['type']} {v.get('description', '')}")
+            if v["type"] in MODELLED:  # a modelled violation no edit owns (e.g. a pour split): batch unreliable
+                unowned.append(f"{v['type']}: {v.get('description', '')}")
+            continue  # outside-model types with no owner (silk, board-edge text) are not the edits' business
         for i in ids:
             res[i].setdefault("detail", []).append(f"{v['type']}: {v.get('description', '')}")
             if v["type"] in MODELLED:
@@ -444,12 +447,18 @@ def classify(base_rep, batch_rep, batch):
         # owner: the edit's own nets or nets within REACH of its copper (a new item can split or short a neighbour)
         owners = [e for e in batch if net in (e.get("netset") or set(e["nets"]))]
         if not owners:
-            raise RuntimeError(f"opens rise on net {net!r} ({n} vs {base_open.get(net, 0)}) no edit owns; batch: "
-                               + "; ".join(f"{e['id']} {e['kind']} {e['nets']} rm={e['removes']}" for e in batch))
+            unowned.append(f"opens on {net}: {n} vs {base_open.get(net, 0)}")  # a pour split by a new track, typically
+            continue
         for e in owners:
             res[e["id"]].setdefault("detail", []).append(f"opens on {net}: {n} vs {base_open.get(net, 0)}")
             res[e["id"]]["oracle"] = "bad"
             res[e["id"]]["types"].append("opens")
+    # an unowned new violation makes the good labels of this batch unreliable: they become unattributed
+    if unowned:
+        for r_ in res.values():
+            r_.setdefault("detail", []).extend(f"unowned {u}" for u in unowned)
+            if r_["oracle"] == "good":
+                r_["oracle"] = "unattributed"
     return res
 
 
@@ -484,6 +493,7 @@ def score(edits, kern, oracle):
                      "k_violations": r["violations"]})
     fa = [x for x in rows if x["kernel"] == "accept" and x["oracle"] == "bad"]
     good = [x for x in rows if x["oracle"] == "good"]
+    unattr = sum(x["oracle"] == "unattributed" for x in rows)
     # kicad-cli does not judge shorts on this build (K13: different_net_touch; overlap rows here): a kernel refusal with
     # a short, which the oracle does not see, is an oracle-blind refusal, reported apart from false refusals
     blind = [x for x in rows if x["kernel"] == "refuse" and x["oracle"] == "good" and "short" in x["k_types"]]
@@ -498,7 +508,7 @@ def score(edits, kern, oracle):
     m = {"edits": len(rows), "accept": sum(x["kernel"] == "accept" for x in rows),
          "refuse": sum(x["kernel"] == "refuse" for x in rows), "defer": sum(x["kernel"] == "defer" for x in rows),
          "defer_zone": sum(x["zone"] for x in rows if x["kernel"] == "defer"),
-         "oracle_good": len(good), "oracle_bad": len(rows) - len(good),
+         "oracle_good": len(good), "oracle_bad": sum(x["oracle"] == "bad" for x in rows), "unattributed": unattr,
          "false_accepts": len(fa), "false_refusals": len(fr), "false_refusal_rate": round(len(fr) / max(1, len(good)), 5),
          "band": len(bd), "oracle_blind": len(blind), "parity": round(len(parity) / len(refused_bad), 4) if refused_bad else None,
          "outside_model": dict(Counter(t for x in rows for t in x["outside"])),
@@ -553,7 +563,7 @@ def run_board(board, out, seed=1, n_edits=1000, batch_size=25, cases_dir=None, w
                 if base.with_suffix(ext).exists():
                     shutil.copy(base.with_suffix(ext), bp.with_suffix(ext))
             rep = drc_raw(bp, out / f"b{bi:04d}_drc.json", refill=True)
-            oracle.update(classify(base_rep, rep, b))
+            oracle.update(classify(base_rep, rep, b))  # verdicts; unowned rises -> "unattributed" (not counted)
             for f in (bp, out / f"b{bi:04d}_drc.json"):
                 f.unlink(missing_ok=True)
         m, rows, fa, fr, blind = score(edits, kern, oracle)
