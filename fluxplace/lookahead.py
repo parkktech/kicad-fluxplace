@@ -335,12 +335,15 @@ def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
     PL._sidecar(board, copy)
     cmd = [PY, os.path.join(REPO, "cli.py"), "pipeline", copy, "--workdir", os.path.join(outdir, "run")]
     cons_path = getattr(a, "constraints", None)
-    if passes and router == "freerouting" and cons_path:
+    if cons_path and os.path.exists(cons_path):   # a ghost is a sketch: stage gates off (Fable fix: the pairs gate stopped every ghost, exit 5)
         text = open(cons_path).read()
-        if "[route.freerouting]" not in text:
-            cons_path = os.path.join(outdir, "constraints.ghost.toml")
-            with open(cons_path, "w") as fh:
-                fh.write(text + f"\n[route.freerouting]\npasses = {int(passes)}\n")
+        if "[flow.gates]" not in text:
+            text += "\n[flow.gates]\npairs = []\nroute = []\n"
+        if passes and router == "freerouting" and "[route.freerouting]" not in text:
+            text += f"\n[route.freerouting]\npasses = {int(passes)}\n"
+        cons_path = os.path.join(outdir, "constraints.ghost.toml")
+        with open(cons_path, "w") as fh:
+            fh.write(text)
     if cons_path:
         cmd += ["--constraints", cons_path]
     if getattr(a, "spec", None):
@@ -355,7 +358,9 @@ def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
     cmd += ["--route-budget", str(int(budget_min * 60)),
             "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 120)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 120)
+        with open(os.path.join(outdir, "ghost.out"), "w") as fh:
+            fh.write("\n".join(l for l in (r.stdout + r.stderr).splitlines() if "PROPERTY_ENUM" not in l)[-20000:])
     except subprocess.TimeoutExpired:
         pass                      # hard cap: whatever copper the ghost has is the ghost (partial is fine)
     found = sorted(glob.glob(os.path.join(outdir, "run", "*-route", "board.kicad_pcb")))
