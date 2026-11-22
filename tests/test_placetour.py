@@ -260,3 +260,22 @@ def test_stage_stops_at_max_rounds(monkeypatch, tmp_path):
     prog = __import__("json").load(open(os.path.join(c.dir(3, "placetour"), "progress.json")))
     assert prog["rounds"] == 3 and prog["reason"] == "max_rounds"
     assert open(r["board"]).read() == "moved-C"
+
+
+def test_report_hint_lists_removed_copper_refs_and_group_members(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
+    monkeypatch.setattr(PTm.RL, "attached_copper", lambda B: {"segs": {0: [(0, "U1", "1")]}, "vias": {}})
+    orig_tier1 = PTm.tier1
+
+    def tier1_with_removed_track(*a, **k):                                      # the candidate's move drops track 0
+        surv, dropped = orig_tier1(*a, **k)
+        return [(s[0], s[1], s[2], {"segs": [0], "vias": []}) for s in surv], dropped
+    monkeypatch.setattr(PTm, "tier1", tier1_with_removed_track)
+    c = _stage_ctx(tmp_path, {"no_gain_rounds": 1})
+    c.cons["placement"] = {"group": {"g": {"refs": ["R7", "R8"]}}}
+    r = PTm.stage(c, 3, board)
+    assert "fanout --parts U1" in " ".join(r["next"])                             # moved part lost its copper: fan out again
+    md = open(os.path.join(c.dir(3, "placetour"), "placetour.md")).read()
+    assert "R7, R8" in md and "U1" in md
