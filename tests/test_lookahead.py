@@ -265,6 +265,8 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     fixture = tmp_path / "ghost0.kicad_pcb"
     fixture.write_text("(kicad_pcb)")
     monkeypatch.setattr(LA, "critical_nets", lambda board, cons, spec=None: {"A", "B"})
+    monkeypatch.setattr(LA, "critical_pairs", lambda board, cons, spec=None: [("A", "B")])
+    monkeypatch.setattr(LA, "corridors", lambda B, pairs, P: ({}, {}))
     monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget: str(fixture))
     monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
                         {"key": (0, 0, 5, 0, 0, 0.0), "opens": 5, "pairs_complete": 0, "pairs_total": 1, "blockers": {}})
@@ -345,7 +347,7 @@ def test_blockers_drive_repair_candidates_in_round_two(monkeypatch, tmp_path):
     repairs = [j for j in r2 if j["kind"] == "repair"]
     assert [tuple(j["pair"]) for j in repairs] == [("E", "F"), ("A", "B")]     # top 2 blockers by count
     assert all(tuple(j["variant"]) == (1, 4.0) for j in repairs)               # min_nets 1, escape_mm + 1
-    fresh = [j for j in r2 if j["kind"] == "fresh"]
+    fresh = [j for j in r2 if j["kind"] == "soft"]
     assert len(fresh) == 1 and tuple(fresh[0]["variant"]) == (1, 3.0)         # round-1 winner's variant, min_nets - 1
     assert all(j["board"] == "in.kicad_pcb" or j["board"].endswith("-locked.kicad_pcb") for j in r2)
 
@@ -366,3 +368,56 @@ def test_tournament_stage_registered_before_pairs():
     from fluxplace import pipeline as PL
     i = PL.CONSTRUCTIVE.index("lookahead")
     assert PL.CONSTRUCTIVE[i + 1] == "pairs" and "lookahead" in PL.FUNCS
+
+
+# ---- L7: soft guide (pairs ctx["guide"]), corridors, round-1 soft/hard mix ----
+
+def test_guide_cost_identity_and_merge():
+    from fluxplace import pairs as PR
+    cost = [[1, 2], [3, 4]]
+    assert PR._guide_cost({}, None, ["F.Cu"], ("A", "B"), cost) is cost        # no guide: unchanged
+    g = lambda pr, grid, sig: [[10, 250], [0, 0]]
+    merged = PR._guide_cost({"guide": g}, None, ["F.Cu", "B.Cu"], ("A", "B"), cost)
+    assert merged == [[10, 250], [3, 4]]
+    assert PR._guide_cost({"guide": g}, None, ["F.Cu"], ("A", "B"), None) == [[10, 250], [0, 0]]
+
+
+class _Grid:
+    def __init__(self, nx, ny, step=1.0):
+        self.nx, self.ny, self.step = nx, ny, step
+
+    def xy(self, j, i):
+        return (i + 0.5) * self.step, (j + 0.5) * self.step
+
+
+def test_make_guide_reserved_and_off_corridor_costs():
+    G = {"origin": (0.0, 0.0), "cell": 1.0, "res": [{"layer": "F.Cu", "rect": (0.0, 0.0, 2.0, 1.0)}],
+         "corr": {"A|B": [("F.Cu", 3, 0)]}, "res_cost": 200.0, "off_cost": 20.0}
+    guide = LA.make_guide(G)
+    out = guide(("B", "A"), _Grid(4, 1), ["F.Cu"])
+    # cells 0,1 reserved and off the corridor (200+20); cell 2 off the corridor (20); cell 3 is the corridor (0)
+    assert out == [[220, 220, 20, 0]]
+    # a pair with no corridor pays only the reservation
+    assert guide(("X", "Y"), _Grid(4, 1), ["F.Cu"]) == [[200, 200, 0, 0]]
+
+
+def test_corridors_cover_both_legs_with_halo_and_skip_open_pairs(monkeypatch):
+    from fluxplace import routeconn as RC
+    B = board(segs=[seg("A", (0.5, 0.5), (3.5, 0.5)), seg("B", (0.5, 2.5), (3.5, 2.5)), seg("C", (0.5, 6.5), (1.5, 6.5))],
+              bbox=(0.0, 0.0, 10.0, 10.0))
+    monkeypatch.setattr(RC, "text_open", lambda B, **kw: {})
+    cor, why = LA.corridors(B, [("A", "B")], dict(P0, corridor_mm=0.0))
+    assert ("F.Cu", 0, 0) in cor["A|B"] and ("F.Cu", 3, 0) in cor["A|B"] and ("F.Cu", 0, 2) in cor["A|B"]
+    assert why == {}
+    monkeypatch.setattr(RC, "text_open", lambda B, **kw: {"B": 1})
+    cor2, why2 = LA.corridors(B, [("A", "B")], dict(P0, corridor_mm=0.0))
+    assert cor2 == {} and "A|B" in why2
+
+
+def test_round_one_is_soft_variants_plus_one_hard():
+    P = LA.params({"lookahead": {"enabled": True}})
+    kinds = [k for k, _v, _p in LA._specs(1, None, None, P)]
+    assert kinds == ["soft", "soft", "soft", "hard"]
+    assert [v for k, v, _p in LA._specs(1, None, None, P) if k == "hard"] == [(2, 3.0)]
+    Ph = LA.params({"lookahead": {"enabled": True, "hard": True}})
+    assert {k for k, _v, _p in LA._specs(1, None, None, Ph)} == {"hard"}

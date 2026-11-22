@@ -180,6 +180,20 @@ def via_half_pitch(via, via_gap, dist, step):
     return kv_s, kv_d, [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
 
 
+def _guide_cost(ctx, grid, sig, nets, cost):
+    """pairs guide (lookahead, L7): per-layer extra cost of entering each cell, max-merged with the negotiation cost and
+    capped at 255. No guide in ctx -> `cost` returned unchanged (the search is byte-identical to before)."""
+    g = ctx.get("guide")
+    if not g:
+        return cost
+    arrs = g(tuple(nets), grid, sig)
+    if not arrs:
+        return cost
+    if not cost:
+        return arrs
+    return [[min(255, max(a, b)) for a, b in zip(x, y)] for x, y in zip(arrs, cost)]
+
+
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
@@ -236,7 +250,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             states, info = PL.astar(grid.nx, grid.ny, sig, allowed, vm if nl > 1 else None, seeds, goals, H, 4, K, step,
                                     P["turn_cost"], P["via_cost"], int(budget_x * (P["nodes"] + P["nodes_per_mm"] * span)),
                                     layer_cost(grid.B["copper"], sig, P, ctx["gated"](nets)),
-                                    ccost=cost) if seeds else (None, {"reason": "no gate with a matching polarity"})
+                                    ccost=_guide_cost(ctx, grid, sig, nets, cost)) if seeds else (None, {"reason": "no gate with a matching polarity"})
         if not states:
             reason = f"{info['reason']} for the coupled centre line ({env:.2f} mm envelope + {clr:.3f} clearance)"
             near = info.get("near")
@@ -739,7 +753,7 @@ def _apply(ctx, pr, c, plan_only):
         items.retire(nets=set(pr))
 
 
-def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=lambda m: None):
+def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=lambda m: None, guide=None):
     """-> {pairs: [...], laid: {net: pieces}, strip: [nets whose old copper goes], keep, kill, B, secs, order}.
     Negotiated order: a pair that fails on copper laid by this stage is moved ahead of the pair that laid it and the
     order is laid again (`[pairlay] passes`); the best result (pairs complete, then total skew) is kept."""
@@ -810,7 +824,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
                 "limit": lambda net: guard_limit(cons, net),
                 "tol": lambda net: min(0.25 * guard_limit(cons, net), 0.25),
-                "reserve": neg["reserve"], "preset": neg["preset"], "done": set()}
+                "reserve": neg["reserve"], "preset": neg["preset"], "done": set(), "guide": guide}
 
     def one_pass(order):
         ctx = mk_ctx()
@@ -1045,12 +1059,12 @@ def write(board, out, res, drill_of):
     return len(blks), len(keys)
 
 
-def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None, fallback=True, cs_args=None):
+def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None, fallback=True, cs_args=None, guide=None):
     """plan (and with `out`, write) -> report dict: complete / total, per pair length, skew, vias, layers, reasons."""
     from . import routediag as RD, pairaudit as PA, routeconn as RC, constraints as C, routerules as RR
     cons = cons or {}
-    res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log) if (plan_only or not out) else \
-        plan(board, cons, spec, only=only, log=log)
+    res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
+        plan(board, cons, spec, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
            "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"),
            "plane_layers": res["plane_layers"], "pairs": []}
@@ -1322,7 +1336,8 @@ def stage(c, n, board):
     except AttributeError:                                  # a bare context (tests): no fan-out re-escape, no rip of stubs
         cs_args = None
     try:
-        rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out))
+        rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out),
+                  guide=getattr(c, "guide", None))
     except Exception as e:                                  # noqa: BLE001 - an unmeasured board must not advance as if the stage ran
         msg = f"pairs failed ({type(e).__name__}: {str(e)[:160]})"
         with open(os.path.join(d, "stage.log"), "a") as fh:

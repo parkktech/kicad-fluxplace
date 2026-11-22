@@ -14,8 +14,9 @@ from . import routediag as RD
 
 DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
             "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 3, "max_rounds": 4, "no_gain_rounds": 2,
-            "variants": [[2, 3.0], [1, 3.0], [3, 2.0]]}
-_FLOAT = ("cell_mm", "escape_mm", "pair_clear_mm", "max_area_frac")
+            "variants": [[2, 3.0], [1, 3.0], [3, 2.0]], "res_cost": 200.0, "off_cost": 20.0, "corridor_mm": 1.0,
+            "hard": False}
+_FLOAT = ("cell_mm", "escape_mm", "pair_clear_mm", "max_area_frac", "res_cost", "off_cost", "corridor_mm")
 _INT = ("min_nets", "ghost_budget_min", "jobs", "max_rounds", "no_gain_rounds")
 
 
@@ -25,6 +26,7 @@ def params(cons):
     P = dict(DEFAULTS)
     P.update(e)
     P["enabled"] = e.get("enabled") is True
+    P["hard"] = e.get("hard") is True
     for k in _FLOAT:
         P[k] = float(P[k])
     for k in _INT:
@@ -33,13 +35,17 @@ def params(cons):
     return P
 
 
+def critical_pairs(board_path, cons, spec=None):
+    """[(p, n)] the pairs pairs.stage lays: pairaudit.pair_list over netclass.classify."""
+    from . import netclass as NC, pairaudit as PA
+    return PA.pair_list(NC.classify(RD.load(board_path), cons or {}, spec))
+
+
 def critical_nets(board_path, cons, spec=None):
-    """Legs of every pair pairs.stage lays (the same list: pairaudit.pair_list over netclass.classify) plus [power] rails
-    (the same helper krtchain uses: power.route_widths)."""
-    from . import netclass as NC, pairaudit as PA, power as PWR
-    B = RD.load(board_path)
-    cls = NC.classify(B, cons or {}, spec)
-    legs = {n for pr in PA.pair_list(cls) for n in pr}
+    """Legs of every pair pairs.stage lays (critical_pairs) plus [power] rails (the same helper krtchain uses:
+    power.route_widths)."""
+    from . import power as PWR
+    legs = {n for pr in critical_pairs(board_path, cons, spec) for n in pr}
     return legs | set(PWR.route_widths(cons or {}, track_mm=0.15))
 
 
@@ -424,10 +430,10 @@ def _pairs_stage(sub, n, board):
     return r.get("board", board), int(rep.get("complete", 0)), int(rep.get("total", 0))
 
 
-def _lay_fresh(sub, cand, board, rects):
-    """apply the reserved rects, lay the pairs (pairs.stage); incomplete -> strip and lay once more; strip -> locked board."""
-    applied = os.path.join(cand, "applied.kicad_pcb")
-    apply(board, applied, rects)
+def _lay_fresh(sub, cand, board, rects, hard=True):
+    """hard: apply the reserved rects as rule areas first; soft: no zones, the reservations are the pairs guide (sub.guide).
+    Then lay the pairs (pairs.stage); incomplete -> strip and lay once more; strip -> locked board."""
+    applied = apply(board, os.path.join(cand, "applied.kicad_pcb"), rects) if hard else board
     cur, comp, total = _pairs_stage(sub, 1, applied)
     if comp < total:
         cur, _c, _t = _pairs_stage(sub, 2, strip(cur, os.path.join(cand, "stripped.kicad_pcb")))
@@ -468,13 +474,13 @@ def _verify(a, locked, cand, crit, cons, P, rects, tag):
     return g, fit, png
 
 
-def _job(d, tag, kind, variant, base, rects, pair, acfg, crit):
+def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None):
     cand = _mk(os.path.join(d, tag))
     cs = (["--constraints", acfg["constraints"]] if acfg.get("constraints") else []) + \
          (["--spec", acfg["spec"]] if acfg.get("spec") else [])
     job = {"tag": tag, "kind": kind, "variant": list(variant), "board": base, "dir": cand,
            "rects": [{"layer": r["layer"], "rect": list(r["rect"]), "nets": r["nets"], "demand": r["demand"]} for r in rects],
-           "pair": list(pair) if pair else None, "a": acfg, "cs": cs, "critical": sorted(crit),
+           "pair": list(pair) if pair else None, "a": acfg, "cs": cs, "critical": sorted(crit), "guide": guide,
            "result": os.path.join(cand, "result.json")}
     jobfile = os.path.join(_mk(os.path.join(d, "jobs")), f"{tag}.json")
     job["jobfile"] = jobfile
@@ -524,7 +530,9 @@ def _worker(jobfile):
         if job["kind"] == "repair":
             locked = _lay_repair(sub, cand, job["board"], rects, job["pair"], cons, spec)
         else:
-            locked = _lay_fresh(sub, cand, job["board"], rects)
+            if job["kind"] == "soft":
+                sub.guide = make_guide(job["guide"])
+            locked = _lay_fresh(sub, cand, job["board"], rects, hard=job["kind"] != "soft")
         a = SimpleNamespace(**acfg)
         g, fit, png = _verify(a, locked, cand, set(job["critical"]), cons, P, rects, job["tag"])
         out.update(locked=locked, ghost=g, png=png, fit=fit)
@@ -537,7 +545,10 @@ def _worker(jobfile):
 def _specs(r, best, best_variant, P):
     """(kind, (min_nets, escape_mm), pair) per candidate of round r."""
     if r == 1:
-        return [("fresh", tuple(v), None) for v in P["variants"]]
+        if P["hard"]:
+            return [("hard", tuple(v), None) for v in P["variants"]]
+        # soft guide per variant, plus one hard variant (the first entry)
+        return [("soft", tuple(v), None) for v in P["variants"]] + [("hard", tuple(P["variants"][0]), None)]
     if best is None:
         return []
     out = []
@@ -546,7 +557,7 @@ def _specs(r, best, best_variant, P):
         out.append(("repair", (1, P["escape_mm"] + 1.0), (p, q)))
     if best_variant:
         mn, em = best_variant
-        out.append(("fresh", (max(mn - 1, 1), em), None))
+        out.append(("soft", (max(mn - 1, 1), em), None))
     return out
 
 
@@ -577,6 +588,8 @@ def stage(c, n, board):
     rows = [_row(0, "ghost0", "unlocked", fit0, png0, "reference")]
     _table(table, rows)
     B0, D = RD.load(g0), demand(g0, crit, P)
+    corr, corr_why = corridors(B0, critical_pairs(board, c.cons, c.spec), P)
+    _progress(spath, "running", "round 0 done", no_corridor=sorted(corr_why))
     best, best_variant, stale, rounds, cands = None, None, 0, 0, 0
     for r in range(1, P["max_rounds"] + 1):
         rounds = r
@@ -588,7 +601,9 @@ def stage(c, n, board):
             mn, em = variant
             rects = reservations(D, B0, crit, P, min_nets=mn, escape_mm=em)
             base = best["locked"] if kind == "repair" else board
-            jobs.append(_job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit))
+            guide = ({"origin": D["origin"], "cell": D["cell"], "res": rects, "corr": corr,
+                      "res_cost": P["res_cost"], "off_cost": P["off_cost"]} if kind == "soft" else None)
+            jobs.append(_job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit, guide=guide))
         _progress(spath, "running", f"round {r}: {len(jobs)} candidates")
         results = _run_jobs(jobs, P, P["ghost_budget_min"] * 60 + 1800)
         cands += len(results)
@@ -627,3 +642,73 @@ def stage(c, n, board):
     _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands)
     return {"verdict": "pass", "line": line, "board": out,
             "next": [f"TOURNAMENT.md: {table}", f"winner png: {best['png']}"]}
+
+
+def corridors(B, pairs, P):
+    """Per critical pair, the ghost copper of both legs on the demand grid, widened by corridor_mm ->
+    ({"p|n": sorted [(layer, ix, iy)]}, {"p|n": reason} for the pairs with no corridor). A pair whose legs are not both
+    connected on the ghost gets no corridor."""
+    from . import routeconn as RC
+    c, x0, y0 = P["cell_mm"], B["bbox"][0], B["bbox"][1]
+    halo = max(0, int(math.ceil(P["corridor_mm"] / c)))
+    open_nets = set(RC.text_open(B))
+    cu = set(B["copper"])
+    out, why = {}, {}
+    for p, n in pairs:
+        key = "|".join(sorted((p, n)))
+        if p in open_nets or n in open_nets:
+            why[key] = "legs not both connected on the ghost"
+            continue
+        legs, cells = {p, n}, set()
+        for s in B["segs"]:
+            if s["net"] in legs and s["layer"] in cu:
+                pts = [s["a"], s["mid"], s["b"]] if s.get("mid") else [s["a"], s["b"]]
+                for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                    k = max(1, int(math.ceil(math.hypot(bx - ax, by - ay) / (c / 2))))
+                    for t in range(k + 1):
+                        cells.add((s["layer"],) + _cell_of(ax + (bx - ax) * t / k, ay + (by - ay) * t / k, x0, y0, c))
+        for v in B["vias"]:
+            if v["net"] in legs:
+                for layer in v["layers"] & cu:
+                    cells.add((layer,) + _cell_of(v["x"], v["y"], x0, y0, c))
+        grown = {(l, ix + dx, iy + dy) for (l, ix, iy) in cells
+                 for dx in range(-halo, halo + 1) for dy in range(-halo, halo + 1)}
+        out[key] = sorted(grown)
+    return out, why
+
+
+def make_guide(G):
+    """Pairs guide (pairs.py ctx["guide"]) from a dict {origin, cell, res: reserved rects, corr: {"p|n": cells}, res_cost,
+    off_cost}: -> guide(pair, grid, sig) -> one cost list per signal layer over the pair's grid (nx*ny, 0..255):
+    + res_cost on reserved cells, + off_cost outside the pair's own corridor (only for pairs that have one)."""
+    x0, y0 = G["origin"]
+    c = G["cell"]
+    res_cost, off_cost = float(G.get("res_cost", 200.0)), float(G.get("off_cost", 20.0))
+    corr = {k: {tuple(x) for x in v} for k, v in (G.get("corr") or {}).items()}
+    rects = list(G.get("res") or [])
+    cache = {}
+
+    def guide(pr, grid, sig):
+        key = ("|".join(sorted(pr)), grid.nx, grid.ny, tuple(sig))
+        if key in cache:
+            return cache[key]
+        cs = corr.get("|".join(sorted(pr)))
+        nx, ny = grid.nx, grid.ny
+        out = []
+        for layer in sig:
+            rr = [r["rect"] for r in rects if r["layer"] == layer]
+            arr = [0] * (nx * ny)
+            for j in range(ny):
+                for i in range(nx):
+                    x, y = grid.xy(j, i)
+                    v = 0.0
+                    if cs is not None and (layer,) + _cell_of(x, y, x0, y0, c) not in cs:
+                        v += off_cost
+                    if any(a <= x <= b and d <= y <= e for a, d, b, e in rr):
+                        v += res_cost
+                    if v:
+                        arr[j * nx + i] = min(255, int(v))
+            out.append(arr)
+        cache[key] = out
+        return out
+    return guide
