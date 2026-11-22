@@ -241,6 +241,56 @@ def bench_engine(ent, copy, start_m, engine, work, cons, tool, sha):
     return rows
 
 
+def _ok(r):
+    return r.get("status") == "ok"
+
+
+def beats(a, b):
+    """Two rows of the same board. True when a is ok and (b is not ok, or a's end score is lexicographically
+    smaller, or the scores are equal and a is faster). Without scores: (shorts, opens, errors, wall_s)."""
+    if not _ok(a):
+        return False
+    if not _ok(b):
+        return True
+    sa, sb = a["end"].get("score"), b["end"].get("score")
+    if sa is None or sb is None:
+        key = lambda r: (r["end"]["shorts"], r["end"]["opens"], r["end"]["errors"], r["wall_s"])
+        return key(a) < key(b)
+    if sa != sb:
+        return sa < sb
+    return a["wall_s"] < b["wall_s"]
+
+
+def compare(old_rows, new_rows):
+    """Per (board, engine): old -> new, REGRESSED when the old row beats the new one. -> (lines, regressed)."""
+    old = {(r["board"], r["engine"]): r for r in old_rows}
+    lines, bad = [], False
+    for r in new_rows:
+        o = old.get((r["board"], r["engine"]))
+        if o is None:
+            continue
+        reg = beats(o, r)
+        bad = bad or reg
+        oe, ne = o.get("end") or {}, r.get("end") or {}
+        lines.append(f"{r['board']} {r['engine']}: opens {oe.get('opens')} -> {ne.get('opens')}, errors "
+                     f"{oe.get('errors')} -> {ne.get('errors')}, score {oe.get('score')} -> {ne.get('score')}, "
+                     f"wall_s {o.get('wall_s')} -> {r.get('wall_s')}" + ("  REGRESSED" if reg else ""))
+    return lines, bad
+
+
+def summary(rows):
+    out = {}
+    for eng in sorted({r["engine"] for r in rows}):
+        rs = [r for r in rows if r["engine"] == eng]
+        ok = [r for r in rs if _ok(r)]
+        comp = [r["completion"] for r in rs if r["completion"] is not None]
+        out[eng] = {"boards": len(rs), "ok": len(ok),
+                    "complete": sum(1 for r in ok if r["end"]["opens"] == 0 and r["end"]["shorts"] == 0),
+                    "mean_completion": round(sum(comp) / len(comp), 4) if comp else None,
+                    "total_wall_s": round(sum(r["wall_s"] or 0 for r in rs), 1)}
+    return out
+
+
 def write_status(out, state, done, total, current):
     with open(os.path.join(out, "routebench.status.json"), "w", encoding="utf-8") as fh:
         json.dump({"state": state, "done": done, "total": total, "current": current}, fh)
@@ -294,7 +344,7 @@ def run_all(boards, engines, work, out, tool, ts, jsonl=JSONL):
             rows += new
             done += len(new)
             write_status(out, "running", done, total, f"{ent['name']}/{eng}")
-    meta = {"ts": ts, "tool": C.git_sha(), "kicad": "10.0.5", "cpus": os.cpu_count()}
+    meta = {"ts": ts, "tool": C.git_sha(), "kicad": "10.0.5", "cpus": os.cpu_count(), "summary": summary(rows)}
     md = write_outputs(rows, out, meta, jsonl)
     write_status(out, "done", done, total, None)
     return rows, md
@@ -315,6 +365,11 @@ def main(argv=None):
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     rows, md = run_all(boards, engines, args.work, args.out, C.git_sha(), ts)
     print(md, end="")
+    if args.baseline:
+        with open(args.baseline, encoding="utf-8") as fh:
+            lines, bad = compare(json.load(fh)["rows"], rows)
+        print("\n".join(lines))
+        return 1 if bad else 0
     return 0
 
 

@@ -165,3 +165,32 @@ def test_pipeline_cmd_flags_and_constraints_only_when_present(tmp_path):
     assert cmd[cmd.index("--spec") + 1] == "/s.json"
     ent["constraints"] = "/k.toml"
     assert "--constraints" in RB._pipeline_cmd("/c.kicad_pcb", "/w", ent, "freerouting")
+
+
+def _row(board="b", engine="krt", status="ok", opens=0, shorts=0, errors=0, score=None, wall=10.0):
+    end = {"opens": opens, "shorts": shorts, "errors": errors, "score": score}
+    return {"board": board, "engine": engine, "status": status, "end": end if status == "ok" else None, "wall_s": wall}
+
+
+def test_beats_three_cases():
+    assert RB.beats(_row(score=[0, 1]), _row(score=[0, 2]))                  # lower score wins
+    assert RB.beats(_row(score=[0, 1], wall=5), _row(score=[0, 1], wall=9))  # equal score: faster wins
+    assert not RB.beats(_row(score=[0, 1], wall=9), _row(score=[0, 1], wall=5))
+    assert RB.beats(_row(score=[0]), _row(status="error"))                   # ok beats not-ok
+    assert not RB.beats(_row(status="timeout"), _row(score=[0]))
+    assert RB.beats(_row(opens=0), _row(opens=2))                            # no scores: (shorts, opens, errors, wall)
+
+
+def test_regression_is_flagged_and_equal_is_not():
+    old = [_row(score=[0, 1])]
+    lines, bad = RB.compare(old, [_row(score=[0, 2])])
+    assert bad and "REGRESSED" in lines[0]
+    lines, bad = RB.compare(old, [_row(score=[0, 1])])
+    assert not bad and "REGRESSED" not in lines[0]
+
+
+def test_summary_per_engine():
+    rows = [_row(opens=0, score=[0]), _row(opens=3, score=[1]), _row(status="error")]
+    rows[0]["completion"], rows[1]["completion"], rows[2]["completion"] = 1.0, 0.5, None
+    s = RB.summary(rows)["krt"]
+    assert s == {"boards": 3, "ok": 2, "complete": 1, "mean_completion": 0.75, "total_wall_s": 30.0}
