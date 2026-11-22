@@ -504,7 +504,9 @@ def _st_route(c, n, board):
         raise
     c.cons, c.spec = c_cons, c_spec
     if getattr(a, "route_mode", None) == "krt-whole":        # the four-call KiCadRoutingTools chain (krtchain.py)
-        from . import krtchain as KC
+        from . import krtchain as KC, routetour as RT
+        if RT.params(c.cons)["enabled"]:                     # D71ct: final-routing tournament of KRT variants
+            return RT.run(c, n, board)
         return KC.run(c, n, board)
     best = os.path.join(d, "board.kicad_pcb")
     _copy(board, best)

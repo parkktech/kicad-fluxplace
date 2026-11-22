@@ -153,10 +153,10 @@ def diff_groups(cons, board, nets, sig):
     return [(ns, list(k[2]), k[0], k[1]) for k, ns in groups.items()]
 
 
-def cmd_route(py, rdir, src, dst, sig, base, power, summary=None, nets=("*",)):
+def cmd_route(py, rdir, src, dst, sig, base, power, summary=None, nets=("*",), extra=()):
     pw = ["--power-nets", *[glob_escape(n) for n in power], "--power-nets-widths", *[f"{w:g}" for w in power.values()]] if power else []
     cmd = [py, os.path.join(rdir, "py_router", "route.py"), src, dst, "--nets", *[glob_escape(n) if n != "*" else n for n in nets],
-           *pw, "--layers", *sig, *base, "--keep-input-copper"]
+           *pw, "--layers", *sig, *base, *list(extra), "--keep-input-copper"]
     return cmd + (["--json-out", summary] if summary else [])
 
 
@@ -288,6 +288,7 @@ def run(c, n, board, runner=run_step):
     shutil_copy(board, best)
     R = RR.rules_for(c.cons, board, a)
     base = base_flags(R, d)
+    xtra = list(getattr(c, "krt_extra", None) or [])         # D71ct: variant flags, route.py calls only (not route_diff/planes)
     sig, planes = plane_plan(board)
     names = set(RC.open_by_net(board))                       # nets that are open
     rep = None
@@ -320,9 +321,9 @@ def run(c, n, board, runner=run_step):
     other_rail_nets = [n for n in rail_nets if n not in pour_rail_nets]
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
     if pour_rail_nets:
-        steps.append(("rails-pour", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=pour_rail_nets)))
+        steps.append(("rails-pour", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=pour_rail_nets, extra=xtra)))
     if other_rail_nets:
-        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets)))
+        steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
         return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn)
@@ -340,7 +341,7 @@ def run(c, n, board, runner=run_step):
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
-    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s))))
+    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s), extra=xtra)))
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
