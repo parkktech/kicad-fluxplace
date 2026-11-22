@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(not K.available(), reason="run kernel/build.sh")
 HEAD4 = ('(kicad_pcb (version 20260206) (generator "pcbnew")\n'
          '(layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
          '(gr_rect (start 0 0) (end 100 80) (layer "Edge.Cuts") (uuid "12121212-1212-4121-8121-121212121212"))\n')
-D = [-1e-6, 0.0, 1e-6]          # need - 1 um, need, need + 1 um
+D = [-1e-3, 0.0, 1e-3]          # mm: need - 1 um, need, need + 1 um
 
 
 def _tr(x0, y0, x1, y1, net, w=0.2, uuid="t", layer="F.Cu"):
