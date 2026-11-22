@@ -7,7 +7,7 @@ use crate::sexpr::{self, Kind as SK, Node};
 use std::collections::HashMap;
 
 /// Arc chord error budget (nm); the arc's r is raised by the same amount (conservative).
-const ARC_ERR_NM: f64 = 250.0;
+pub(crate) const ARC_ERR_NM: f64 = 250.0;
 
 fn line_of(src: &str, at: usize) -> usize {
     1 + src.as_bytes()[..at.min(src.len())].iter().filter(|&&b| b == b'\n').count()
@@ -267,7 +267,8 @@ fn load_arc(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     let shapes = with_r(chain(&pts, false), r);
     let mut it = Item::new(Kind::Arc, cx.uuid(b, n), net, mask, shapes);
     it.locked = is_yes(n, "locked");
-    it.extra = serde_json::json!({"width": w as f64 / 1e6, "arc": true});
+    it.extra = serde_json::json!({"width": w as f64 / 1e6, "arc": true,
+        "mid": [cx.pt(n, "mid")?.x as f64 / 1e6, cx.pt(n, "mid")?.y as f64 / 1e6]});
     b.add_item(it);
     Ok(())
 }

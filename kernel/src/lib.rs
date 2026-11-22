@@ -10,6 +10,7 @@ pub mod load;
 pub mod load_fp;
 pub mod load_zone;
 pub mod rules;
+pub mod tx;
 pub mod sexpr;
 
 use serde_json::{json, Value};
@@ -149,6 +150,56 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
         }
         "items" => items_op(h, &v),
+        "begin" => { tx::begin(&mut h.board); json!({"ok": true, "depth": tx::depth(&h.board)}) }
+        "commit" => match tx::commit(&mut h.board) {
+            Ok(d) => json!({"ok": true, "depth": d}),
+            Err(e) => json!({"ok": false, "error": e}),
+        },
+        "rollback" => match tx::rollback(&mut h.board) {
+            Ok(d) => json!({"ok": true, "depth": d}),
+            Err(e) => json!({"ok": false, "error": e}),
+        },
+        "add" => {
+            let specs = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            let (mut ids, mut uuids) = (Vec::new(), Vec::new());
+            for sp in &specs {
+                match tx::add_json(&mut h.board, sp) {
+                    Ok((i, u)) => { ids.extend(i); uuids.extend(u); }
+                    Err(e) => return json!({"ok": false, "error": format!("add: {e}")}),
+                }
+            }
+            json!({"ok": true, "ids": ids, "uuids": uuids})
+        }
+        "remove" => {
+            let mut removed = 0usize;
+            if let Some(ids) = v.get("ids").and_then(Value::as_array) {
+                for id in ids.iter().filter_map(Value::as_u64) {
+                    removed += tx::remove_id(&mut h.board, id as u32) as usize;
+                }
+            }
+            if let Some(us) = v.get("uuids").and_then(Value::as_array) {
+                for u in us.iter().filter_map(Value::as_str) {
+                    let hits: Vec<u32> = h.board.items.iter().filter(|i| i.alive && i.uuid == u).map(|i| i.id).collect();
+                    let kinds: Vec<_> = hits.iter().map(|&i| h.board.items[i as usize].kind).collect();
+                    let _ = kinds;
+                    for id in hits {
+                        removed += tx::remove_id(&mut h.board, id) as usize;
+                    }
+                }
+            }
+            json!({"ok": true, "removed": removed})
+        }
+        "emit" => {
+            let ids = v.get("ids").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut blocks = Vec::new();
+            for id in ids.iter().filter_map(Value::as_u64) {
+                match tx::emit(&h.board, id as u32) {
+                    Ok(t) => blocks.push(t),
+                    Err(e) => return json!({"ok": false, "error": format!("emit: {e}")}),
+                }
+            }
+            json!({"ok": true, "blocks": blocks})
+        }
         "need" => {
             let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
             let id = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as usize);

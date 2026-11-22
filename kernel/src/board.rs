@@ -101,6 +101,7 @@ pub struct Board {
     pub net_ids: HashMap<String, u32>,
     pub items: Vec<Item>,
     pub index: crate::index::Index,
+    pub tx: crate::tx::Tx,
     pub unsupported: Vec<Unsupported>,
 }
 
