@@ -302,3 +302,116 @@ numbers), after K18 (exit). Sonnet takes a step after two failed Haiku attempts.
 - A legacy disagreement is not automatically a kernel bug: when the kernel and `G.Model` differ, kicad-cli decides (K13's oracle), and the outcome is written in the commit message.
 - No kicad-cli call inside the kernel or `fluxplace/kernel.py`. Only `KModel` (stale refill) and the tester call it.
 - Full tester runs and anything over 2 minutes are detached scripts; the agent writes them and stops.
+
+## 13. K5b fixes (K5 gate review, Fable, 2026-11-22)
+
+Run K5b-1, K5b-2, K5b-3 in order before K6, one commit each (`ROUTER-C1-K5b-<n>: ...`). No Fable gate after them: their
+tests are the gate. K6-K14 then proceed.
+
+Measured at the gate (by-uuid differential, kernel against `G.Model(refill=False)`): W14 r5 1575 pads / 1339 holes /
+1297 vias / 11041 tracks, CM5_MINIMA_3 and StickHub: every net, layer set, ref and position equal; worst pad outline
+4.72 um (r5), 0.001 um (StickHub). The geometry conventions (rotation sign, absolute pad angle, layer order, both net
+forms, footprint zones in absolute coordinates) are right. Defects found:
+
+| # | Defect | Effect on K6-K18 |
+|---|---|---|
+| 1 | `fill_stale` is O(items x fill vertices): `load_ms` 24 978 on r5 (44 ms with the fills stripped), 3 400 on CM5 | load threshold 2 s; every r5 test |
+| 2 | `(drill (offset x y))` moves the hole. KiCad keeps the hole at the pad position and moves the copper shape | wrong pad and hole on offset pads |
+| 3 | `extra` lacks `pos, size, hole` (pad), `width` (track), `no_tracks, no_vias, no_pads` (keepout) | K12, K16 (`G.Ob` surface) |
+| 4 | Filled copper graphics and filled custom-pad primitives are outline chains (interior is not copper); primitive polygon `width` ignored | false accept inside the shape |
+| 5 | Arc and circle graphics (Edge.Cuts, copper) are chords with no error added to `r` | up to 1 um non-conservative, exactly the K14 boundary edits |
+| 6 | `gr_text` / `fp_text` on copper dropped silently; `gr_curve` / `fp_curve` listed on every layer; `fp_curve` on Edge.Cuts dropped | coverage report wrong; missing edge |
+| 7 | `(clearance 0)` on a pad is read as a local clearance of 0 (KiCad: 0 = inherit); a copper zone inside a footprint is dropped | K9 `need` |
+| 8 | The K5 test matches bounding boxes greedily: net, layers, ref and rotation sign are not tested (a rect at +37 and -37 degrees has the same box) | regressions pass unseen |
+| 9 | uuids are not unique in real files (CM5_MINIMA_3: J101.1 x4, USB701.1 x4, SW501.4, SW501.5 share uuids) | `remove` by uuid, `KModel` ids |
+
+Rulings on the reported deviations:
+
+| Deviation | Ruling |
+|---|---|
+| C0 `pairs` from the `gaps._pair_audit` rows | accept |
+| C0 `strip_nets` removes net-named copper only | accept (both engines get the same start; net-less copper is not routable work) |
+| C0 Freerouting `wall_s` = subprocess time | accept |
+| K1 400 ms limit in release builds only | accept |
+| Trapezoid = conservative rectangle, listed `unsupported` | accept; also roundrect + chamfer as the full rectangle |
+| K5 pad tolerance 10 um | reject. The kernel roundrect stays exact (KiCad's DRC uses the exact shape; only `GetEffectivePolygon` is a 5 um polygon). The test tolerance becomes **5.1 um** on the outline metric of K5b-3 (pcbnew max error 5 um + rounding); measured worst 4.72 um |
+| One hole per pad or via over all copper | accept (conservative for blind and micro vias); K13 adds a calibration case |
+| Edge `r = 0` | accept for straight edges (K13 calibrates stroke width); arcs and circles get the chord bound (K5b-2) |
+| Footprint zones in absolute coordinates | accept (r5: 11 of 11 keepouts equal pcbnew) |
+| pcbgen 4-layer header for pcbnew tests | accept |
+| No `cargo clippy` (component not installed) | accept; replaced by `RUSTFLAGS="-D warnings" cargo build --release` clean in every step (0 warnings today) |
+
+### K5b-1 `fill_stale` in bands (`load_zone.rs`, about 90 lines)
+
+1. Add `struct PolyBands { y0: i64, h: i64, rows: Vec<Vec<(Pt, Pt)>> }` with `h = 1_000_000` nm. `PolyBands::new(poly)`:
+   every polygon edge (closing edge included) is pushed into each row its y range overlaps (`row = (y - y0) / h`).
+2. `contains(p) -> bool`: even-odd ray cast along +x over the edges of `p`'s row only (every edge that crosses the line
+   `y = p.y` is in that row). Outside the y range: false.
+3. `near(a, b, r) -> bool`: true when `contains(a)`, or some edge in the rows overlapping `[min(a.y, b.y) - r, max(a.y, b.y) + r]`
+   whose x range overlaps `[min(a.x, b.x) - r, max(a.x, b.x) + r]` has `geom::seg_seg(a, b, e0, e1) <= r as f64`.
+4. `fill_stale`: build `PolyBands` once per fill. Keep the layer, net and bbox filters. Per shape: `Point(p)` ->
+   `near(p, p, r)`; `Seg(a, b)` -> `near(a, b, r)`; `Poly(v)` -> any edge `near(v[i], v[i+1], r)`. Return at the first hit.
+5. Tests. Rust: for 20 random simple polygons (a star with 50 random radii around a centre), `contains` equals
+   `geom`'s point-in-polygon on 2 000 random points, and `near` equals `core_dist(Poly, Seg) - r <= 0` on 500 random
+   segments. Python (`tests/test_kernel_loader.py`, skip when the board is absent): `info.load_ms` < 2 000 on W14 r5,
+   < 1 000 on CM5_MINIMA_3; `fill_stale` is True on r5, False on CM5_MINIMA_3 and StickHub (today's values).
+
+### K5b-2 loader fixes (`load.rs`, `load_fp.rs`, `lib.rs`, about 150 lines)
+
+1. Drill offset: the hole stays at the pad position `centre`. The copper shapes are placed at
+   `centre + rotate(offset, pad angle)`. No offset: unchanged.
+2. `extra`. Pad: `{"pos": [x, y], "size": [sx, sy], "hole": drill x or 0, "shape", "pad_angle", "type"}` (mm; `pos` =
+   the pad position = hole position). Track: `{"width"}`. Keepout: add booleans `no_tracks`, `no_vias`, `no_pads`
+   (flag == `not_allowed`) beside `keepout`. Hole of a via: `{"via": true}`; of a pad: `{"npth": bool}` (as today).
+3. Filled shapes. `(fill yes)` or `(fill solid)` on `gr_poly` / `gr_rect` / `fp_poly` / `fp_rect` on a copper layer, and
+   custom-pad primitives `gr_poly` / `gr_rect` (filled unless `(fill no)` or `(fill none)`): `Core::Poly`, `r = width / 2`.
+   A filled `gr_circle` (same three places): `Core::Point(centre)`, `r = radius + width / 2`. Edge.Cuts is never filled.
+4. Arc error. `gr_shapes` returns `(shapes, bound_nm)`: `ceil` of the `arc_polyline` bound for `gr_arc` and `gr_circle`,
+   0 otherwise. Copper graphics and pad primitives: `r = width / 2 + bound`. Edge.Cuts: `r = bound` (0 for straight edges).
+5. Text and curves. `gr_text`, `fp_text` and a visible `property` whose `(layer)` is copper: one `unsupported` row
+   (`what: "text on copper"`, `effect: "not modelled; the judge sees it"`). `gr_curve` / `fp_curve`: handled only when the
+   layer is copper or Edge.Cuts (no `unsupported` row on other layers); `fp_curve` gets the same control-point box as
+   `gr_curve`, through the footprint transform.
+6. Pad `(clearance 0)` -> `None`. Footprint zones: call `load_zone::load_zone` for every `(zone)` child of a footprint
+   (keepout or copper) and delete `load_keepout`.
+7. `info.dup_uuids`: the number of uuids carried by more than one item of kind pad, track, arc or via.
+8. Rust tests: a thru-hole rect pad `(at 1 0 90) (size 2 1) (drill 0.4 (offset 0.5 0))` under a footprint at `0 0 0` has
+   its hole at (1, 0) and its pad bbox [0.5, -1.5, 1.5, 0.5] (offset (0.5, 0) rotated by 90 = (0, -0.5)); a filled copper
+   `gr_poly` is one `Poly` shape and a point inside has gap < 0; a filled circle is `Point` with `r = radius + width / 2`;
+   an Edge.Cuts `gr_arc` has `r > 0`, a `gr_line` has `r = 0`; `gr_text` on `F.Cu` gives one `unsupported` row and on
+   `F.SilkS` none; `gr_curve` on `F.SilkS` gives none; `(clearance 0)` gives `clr_local == None`; the extra keys exist.
+   Python: `dup_uuids` > 0 on CM5_MINIMA_3 and == 0 on r5 (skip when absent).
+
+### K5b-3 strict loader differential (`tests/test_kernel_loader.py`, about 120 lines py, replaces `_unmatched` / `_compare`)
+
+1. Group kernel items by `(kind, uuid)`. For each legacy `Ob` (`edge` handled as today; `track` with `extra["arc"]` is
+   kind `arc`, `ko` is `keepout`): take the kernel items of the same key; with several (duplicate uuids), pick the one
+   whose bbox centre is nearest and use each kernel item once. No candidate = a problem.
+2. Per matched pair, a problem when:
+   - pad, track, arc, via: `net_name != ob.net`;
+   - pad, track, arc: `set(layers) != set(ob.layers)`; pad: `ref != ob.ref`;
+   - hole, via, track: any bbox side differs by more than 1.5e-6 mm;
+   - pad: `dev > 0.0051` mm, with `dev = max(|sd(p)|)` over the vertices `p` of the legacy polygon `ob.g[1]` and
+     `sd(p) = min over the kernel shapes of (distance(p, core), negative inside a Poly core) - r`. For a pad whose kernel
+     `extra.shape` is `trapezoid` the rule is `max(sd(p)) <= 0.0051` only (the kernel shape is a superset);
+   - keepout: bbox differs by more than 1e-5 mm, layer set differs, or `no_tracks / no_vias / no_pads` differ.
+   Counts per kind and the zone fill areas (0.1 %) stay as today. Report the worst `dev` in the assertion message.
+3. Fixture board, written by pcbnew so the file is authentic: text board (HEAD4) with one footprint at `20 20 0`
+   holding raw pad strings: `smd roundrect (at -2 0) (size 1.2 0.6) (roundrect_rratio 0.25)`, `smd oval (at 0 0 30) (size 1.4 0.6)`,
+   `smd rect (at 2 0) (size 1 0.5)`, `smd trapezoid (at 4 0) (size 1 0.8) (rect_delta 0 0.3)`,
+   `thru_hole rect (at 6 0) (size 2 1) (drill 0.4 (offset 0.5 0)) (layers "*.Cu")`,
+   `thru_hole oval (at 9 0) (size 1.2 2) (drill oval 0.5 1.4) (layers "*.Cu")`, and a custom pad
+   `smd custom (at 12 0) (size 0.4 0.4) (options (clearance outline) (anchor rect)) (primitives (gr_poly (pts (xy 0 0) (xy 1 0) (xy 0 1)) (width 0.1) (fill yes)))`
+   (nets A..G, `(layers "F.Cu")` where not given), plus ZONE, TRACK, KEEPOUT, the via and the arc of today's test.
+   Load it with `pcbnew.LoadBoard`, `pcbnew.SaveBoard` to `base.kicad_pcb`. Then on the loaded board rotate the
+   footprint to 37 degrees (`fp.SetOrientationDegrees(37)`), save `rot.kicad_pcb`; flip it to the back
+   (`fp.Flip(fp.GetPosition(), ...)`; find the flip-direction argument with `help(fp.Flip)`), save `flip.kicad_pcb`.
+4. Tests: the differential is empty on `base`, `rot` and `flip`, on W14 r5, CM5_MINIMA_3 and StickHub
+   (`/usr/share/kicad/demos/stickhub/StickHub.kicad_pcb`; skip when absent). A self-test proves the comparison bites:
+   a kernel item list with one pad's `net_name` changed, and one with a pad shape mirrored in x, each give a problem.
+   If pcbnew disagrees with the kernel on `rot` or `flip`, pcbnew wins: fix `load_fp.rs` in this step and say so in the commit.
+
+Notes carried to later steps: K10 `remove` by `uuids` returns an error for a uuid that `dup_uuids` counts (use ids);
+K13 calibration cases add an NPTH pad with a copper annulus, a blind via's hole on a layer outside its span, an
+Edge.Cuts line with a wide stroke, and a foreign track nearer to a stored fill than the zone clearance without touching
+it (`fill_stale` stays "overlap" unless that case shows a false accept).
