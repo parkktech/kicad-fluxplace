@@ -1,6 +1,7 @@
 //! C ABI and JSON dispatch. Every entry point runs under catch_unwind: no panic crosses the boundary.
 //! Reply shape: {"ok": true, ...} or {"ok": false, "error": "..."}.
 
+pub mod geom;
 pub mod sexpr;
 
 use serde_json::{json, Value};
