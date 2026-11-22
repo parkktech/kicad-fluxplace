@@ -756,6 +756,16 @@ def _write_text_ledger(L, path):
     open(path, "w").write("\n".join(lines) + "\n")
 
 
+def _pad_centres(M, net):
+    """centre (mm) of every pad of `net` on the model (mean of the pad outline)."""
+    out = []
+    for o in M.obs:
+        if o.kind == "pad" and o.net == net and o.g and o.g[0] == "poly" and o.g[1]:
+            pts = o.g[1]
+            out.append((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)))
+    return out
+
+
 def _copy_board(src, dst):
     shutil.copy(src, dst)
     s, d = os.path.splitext(src)[0], os.path.splitext(dst)[0]
@@ -1087,17 +1097,28 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
             raise ValueError(f"unknown net {net!r}")
         rule = M.net_rule(net)
         w = width or rule["width"]
+        neck = False
         if need is not None:
             if width is None:
                 w = max(w, need)
             elif width < need - 1e-9:
-                raise ValueError(f"width {width:g} mm is below the {need:g} mm that [power.{net}] needs")
+                # PHASE3I F7 (R15): a neck-down is accepted only short and at a pad of the net (one end within reach of it)
+                reach = max(1.0, 2 * need)
+                seg = [p for p in prims if p[0] == "seg"]
+                length = sum(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1]) for p in seg)
+                ends = [seg[0][2], seg[-1][3]] if seg else []
+                centres = _pad_centres(M, net)
+                near = any(math.hypot(e[0] - c[0], e[1] - c[1]) <= reach for e in ends for c in centres)
+                if not (seg and length <= reach and near):
+                    raise ValueError(f"width {width:g} mm is below the {need:g} mm that [power.{net}] needs")
+                neck = True
         vv = via or (rule["via_dia"], rule["via_drill"])
         pr = probe_prims(M, net, prims, w, vv, any_angle)
         if not pr["ok"]:
             raise ValueError("probe failed: " + json.dumps(pr["violations"][:4]))
         added = _apply_prims(b, M, net, prims, w, vv, lock)
-        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock}
+        return {"added": [[a[0], *[_fmtp(x) if isinstance(x, tuple) else x for x in a[1:-1]], a[-1][:8]] for a in added], "width": w, "locked": lock,
+                "neck": neck}
     hook = (lambda b, M, nets: _stitch_attempts(b, M, nets, via)) if stitch else None
     args = {"width": width, "via": list(via) if via else None, "any_angle": any_angle, "lock": lock}   # PHASE3I F5 (R12)
     pins_before = RV.pin_escape_blocked(board) if lock else set()
@@ -1106,8 +1127,11 @@ def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_
         new = RV.pin_escape_blocked(cpath) - pins_before
         return ("lock blocks the last escape of " + ", ".join(sorted(new)[:6])) if new else None
     lock_pins.wants_path = True
-    return _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args,
-                 extra_check=lock_pins if lock else None)
+    res = _edit(board, out, mutate, "lay", net, path, constraints, partial, True, kicad_cli, stitch=hook, args=args,
+                extra_check=lock_pins if lock else None)
+    if (res.get("info") or {}).get("neck"):
+        res["neck"] = True                                 # PHASE3I F7 (R15)
+    return res
 
 
 def _net_copper(b, net):

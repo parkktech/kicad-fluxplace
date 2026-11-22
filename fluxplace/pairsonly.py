@@ -302,22 +302,35 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 opn_now = RC.text_open(RD.load(work))
                 if PA.audit(RD.load(work), [cands[0]], cons, {n for n, k in opn_now.items() if k})[cands[0]]["status"] != "complete":
                     continue
+                left = bud.remaining()                       # PHASE3I F7 (R14): the sub-call gets the seconds left, no fresh budget
+                if left is not None and left <= 0:
+                    row["group_refused"] = "budget spent"
+                    continue
+                from . import lockpolicy as LP
+                lk_b = locked_items(open(work, errors="replace").read(), list(cands[0]))
+                if lk_b and not unlock and any(LP.level(n, cons, list(cands[0]) + list(row["pair"].split("/"))) == LP.HARD for n in cands[0]):
+                    row["group_refused"] = f"{bname}: blocker hard-locked"  # a hard-locked blocker is re-laid only with unlock
+                    log(f"  {row['pair']}: kept_original, group with {bname} refused (blocker hard-locked)")
+                    continue
                 snap, out2 = work + ".grp.kicad_pcb", work + ".grp2.kicad_pcb"
                 shutil.copy(work, snap)
                 _sidecars(work, snap)
-                sub = reroute(work, out2, [bname, row["pair"]], cons, spec, kicad_cli, None, allow_shove, log, lay, drc,
-                              unlock=unlock, force=(bname,), group=False)
+                sub = reroute(work, out2, [bname, row["pair"]], cons, spec, kicad_cli, left, allow_shove, log, lay, drc,
+                              unlock=unlock, force=(bname,), group=False)   # blocker first (order unchanged: see report)
                 got = {r["pair"]: r["status"] for r in sub["pairs"]}
-                if got.get(bname) == "rerouted" and got.get(row["pair"]) == "rerouted":
+                sub_rows = {r["pair"]: r for r in sub["pairs"]}
+                bb, bs = sub_rows.get(bname, {}).get("before", {}), sub_rows.get(bname, {}).get("after", {})
+                blocker_ok = not lk_b or (bs.get("skew", 0) <= bb.get("skew", 0) and sum(bs.get("vias") or [0]) <= sum(bb.get("vias") or [0]))
+                if got.get(bname) == "rerouted" and got.get(row["pair"]) == "rerouted" and blocker_ok:
                     os.replace(out2, work)
                     _sidecars(out2, work)
                     row.update(status="rerouted", reason="", grouped_with=bname)
-                    rows[bname] = {"pair": bname, "status": "rerouted", "reason": "", "grouped_with": row["pair"], "blockers": [],
-                                   "shoved": [], "opened": [], "before": {}, "after": {}}
+                    rows[bname] = dict(sub_rows[bname], grouped_with=row["pair"])      # the blocker's full row, not a stub
                     log(f"  {row['pair']}: rerouted as a group with {bname} (blocker re-laid whole)")
                 else:
                     shutil.copy(snap, work)
-                    row["group_refused"] = f"{bname}: {got.get(bname, 'not reached')}, {row['pair']}: {got.get(row['pair'], 'not reached')}"
+                    row["group_refused"] = f"{bname}: {got.get(bname, 'not reached')}, {row['pair']}: {got.get(row['pair'], 'not reached')}" \
+                        + ("" if blocker_ok else ", blocker skew/vias worse")
                     log(f"  {row['pair']}: kept_original, group with {bname} refused ({row['group_refused']})")
                 for ext in ("", ".pre"):
                     _cleanup_one(out2 + ext)
