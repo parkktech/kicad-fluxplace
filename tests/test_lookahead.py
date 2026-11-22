@@ -172,3 +172,71 @@ def test_run_raises_when_pcbnew_step_does_not_print_ok(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
     with pytest.raises(RuntimeError, match="pcbnew step failed"):
         LA._run("x")
+
+
+def test_ghost_command_flags_and_result(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    seen = {}
+    src = tmp_path / "g.kicad_pcb"
+    src.write_text("(kicad_pcb)")
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        rd = tmp_path / "out" / "run" / "3-route"
+        rd.mkdir(parents=True)
+        (rd / "board.kicad_pcb").write_text("(kicad_pcb)")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    a = SimpleNamespace(constraints="/c.toml", spec="/s.json", router_dir="/r", router_py="/rp")
+    got = LA.ghost(a, str(src), str(tmp_path / "out"), 40)
+    cmd = seen["cmd"]
+    assert cmd[0] == LA.PY and cmd[1].endswith("cli.py") and "pipeline" in cmd
+    for flag in ("--flow", "--from", "--to", "--router", "--router-dir", "--router-py", "--constraints", "--spec",
+                 "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"):
+        assert flag in cmd
+    assert cmd[cmd.index("--route-budget") + 1] == "2400" and seen["kw"]["timeout"] == 2400 + 600
+    assert got == str(tmp_path / "out" / "run" / "3-route" / "board.kicad_pcb")
+
+
+def test_ghost_returns_none_on_timeout(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    src = tmp_path / "g.kicad_pcb"
+    src.write_text("x")
+
+    def boom(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(tmp_path / "o"), 1) is None
+
+
+def _fit_fixture(monkeypatch, opens_by_net, unc, pair_status, B=None):
+    from fluxplace import gaps as GP, netclass as NC, pairaudit as PA
+    if B is None:
+        locked = dict(seg("DP", (0, 0), (5, 0)), locked=True)
+        B = board(segs=[locked])
+    monkeypatch.setattr(RD, "load", lambda path, **kw: B)
+    monkeypatch.setattr(NC, "classify", lambda B, cons, spec=None: {"DP": {}, "DN": {}})
+    monkeypatch.setattr(PA, "pair_list", lambda cls: [("DN", "DP")])
+    monkeypatch.setattr(PA, "audit", lambda B, pairs, cons, opn: {("DN", "DP"): {"status": pair_status}})
+    monkeypatch.setattr(GP, "measure", lambda board, **kw: {"opens": len(unc), "shorts": 0, "errors": 0,
+                                                             "opens_by_net": opens_by_net, "drc": {"unconnected_items": unc}})
+
+
+def test_fitness_key_and_sealed_blockers(monkeypatch):
+    unc = [{"description": "Pad 1 [N9] of U1 is unconnected", "pos": {"x": 2.0, "y": 0.2}}]
+    _fit_fixture(monkeypatch, {"N9": 1}, unc, "complete")
+    f = LA.fitness("x", {"DP", "DN"}, {}, escape_mm=0.5)
+    assert f["pairs_complete"] == 1 and f["opens"] == 1 and f["sealed"] == 1
+    assert f["blockers"] == {"DN/DP": 1}
+    assert f["key"] == (-1, 0, 1, 1, 0, 0.0)
+
+
+def test_fitness_orders_candidates_lexicographically(monkeypatch):
+    _fit_fixture(monkeypatch, {}, [], "complete")
+    good = LA.fitness("a", {"DP", "DN"}, {})["key"]
+    _fit_fixture(monkeypatch, {"N9": 1}, [{"description": "Pad [N9]", "pos": {"x": 90, "y": 90}}], "half")
+    bad = LA.fitness("b", {"DP", "DN"}, {})["key"]
+    assert good < bad
+    assert sorted([bad, good])[0] == good

@@ -5,6 +5,7 @@ cells with many distinct nets are bus channels, cells next to a net's own pads a
 reserved (rule areas) before the critical pairs are laid around them. See docs/recipes/LOOKAHEAD.md.
 """
 import math
+import os
 
 from . import routediag as RD
 
@@ -242,3 +243,76 @@ def strip(board_in, board_out):
     _run(_strip_code(board_in, board_out))
     PL._sidecar(board_in, board_out)
     return board_out
+
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def ghost(a, board, outdir, budget_min):
+    """Route a copy of `board` unlocked, throw-away: `pipeline ... --from route --to route --router krt-whole`
+    (flags as W15/scripts-route.sh, passed through from `a`). -> path of the routed board, or None."""
+    import glob
+    import shutil
+    import subprocess
+    from . import pipeline as PL
+    os.makedirs(outdir, exist_ok=True)
+    copy = os.path.join(outdir, "in.kicad_pcb")
+    shutil.copy(board, copy)
+    PL._sidecar(board, copy)
+    cmd = [PY, os.path.join(REPO, "cli.py"), "pipeline", copy, "--workdir", os.path.join(outdir, "run")]
+    for key, flag in (("constraints", "--constraints"), ("spec", "--spec")):
+        if getattr(a, key, None):
+            cmd += [flag, getattr(a, key)]
+    cmd += ["--flow", "constructive", "--from", "route", "--to", "route", "--router", "krt-whole",
+            "--router-dir", a.router_dir, "--router-py", a.router_py, "--route-budget", str(int(budget_min * 60)),
+            "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 600)
+    except subprocess.TimeoutExpired:
+        return None
+    found = sorted(glob.glob(os.path.join(outdir, "run", "*-route", "board.kicad_pcb")))
+    return found[0] if found else None
+
+
+def fitness(board, critical, cons, reserved_area=0.0, escape_mm=3.0):
+    """Board quality, lexicographic key (-pairs_complete, shorts, opens, sealed, drc_errors, reserved_area) (smaller is better).
+    sealed = opens of non-critical nets with a pad-side unconnected item within escape_mm of locked critical copper.
+    blockers = {"P/N": sealed opens next to that pair's locked copper}."""
+    from . import gaps as GP, netclass as NC, pairaudit as PA, routediag as RD
+    crit = set(critical)
+    m = GP.measure(board)
+    B = RD.load(board)
+    cls = NC.classify(B, cons or {})
+    pairs = PA.pair_list(cls)
+    res = PA.audit(B, pairs, cons or {}, set(m.get("opens_by_net") or {}))
+    complete = sum(1 for e in res.values() if e.get("status") == "complete")
+    locked = [s for s in B["segs"] if s["locked"] and s["net"] in crit]
+    locked += [v for v in B["vias"] if v["locked"] and v["net"] in crit]
+
+    def near_pair_copper(x, y):
+        hits = set()
+        for s in locked:
+            d = (RD._seg_dist(x, y, s["a"][0], s["a"][1], s["b"][0], s["b"][1]) if "a" in s
+                 else math.hypot(x - s["x"], y - s["y"]))
+            if d <= escape_mm:
+                hits.add(s["net"])
+        return hits
+
+    sealed, blockers = 0, {}
+    for it in (m.get("drc") or {}).get("unconnected_items") or []:
+        nets = set(GP._nets_of([it]))
+        pos = GP._pos(it)
+        if pos is None or not nets or nets & crit:
+            continue
+        near = near_pair_copper(*pos)
+        if not near:
+            continue
+        sealed += 1
+        for p, n in pairs:
+            if p in near or n in near:
+                k = f"{p}/{n}"
+                blockers[k] = blockers.get(k, 0) + 1
+    shorts, opens, errors = int(m.get("shorts", 0)), int(m.get("opens", 0)), int(m.get("errors", 0))
+    key = (-complete, shorts, opens, sealed, errors, float(reserved_area))
+    return {"pairs_complete": complete, "pairs_total": len(pairs), "shorts": shorts, "opens": opens, "sealed": sealed,
+            "drc_errors": errors, "reserved_area": float(reserved_area), "blockers": blockers, "key": key}
