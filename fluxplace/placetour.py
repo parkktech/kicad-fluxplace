@@ -154,7 +154,8 @@ def _legal(B, cons, targets, mov):
         pos, _rep = LG.legalise(B, targets, fixed=fixed, cons=cons, strict=False)
     except Exception:                                    # noqa: BLE001 - one move that cannot be legalised is no candidate
         return None
-    out = {r: tuple(pos[r]) for r in targets if r in pos}
+    mv = set(mov)                                        # Fable: keep the neighbours the legaliser displaced too (else collision)
+    out = {r: tuple(pos[r]) for r in pos if r in mv or r in targets}
     out = {r: v for r, v in out.items() if (abs(v[0] - B["parts"][r]["pos"][0]) > 1e-3 or abs(v[1] - B["parts"][r]["pos"][1]) > 1e-3
                                               or abs(v[2] - B["parts"][r]["angle"]) > 1e-3)}
     return out or None
