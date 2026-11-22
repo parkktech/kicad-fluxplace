@@ -33,6 +33,22 @@ def test_full_snapshot_shape_and_stable_ids(tmp_path):
     assert f1["bbox"][2] >= 0 and "F.Cu" in f1["layers"]
 
 
+def test_full_snapshot_counts_text_opens(tmp_path):
+    open_b = _board(tmp_path / "o.kicad_pcb", _fp("U1", 10, 10) + _fp("U2", 20, 10))
+    assert SN.full(open_b, str(tmp_path / "o.json"), 1)["opens"] == 1
+    closed = _board(tmp_path / "c.kicad_pcb", _fp("U1", 10, 10) + _fp("U2", 20, 10) + _seg((10, 10), (20, 10), "N1"))
+    assert SN.full(closed, str(tmp_path / "c.json"), 1)["opens"] == 0
+
+
+def test_caller_opens_wins(tmp_path, monkeypatch):
+    work = tmp_path / "W"
+    work.mkdir()
+    b = _board(work / "b.kicad_pcb", _fp("U1", 10, 10) + _fp("U2", 20, 10))
+    sn = SN.Snapper(str(work), snap_s=0.0)
+    sn.take(b, "stage_end", opens=7)
+    assert json.load(open(work / "snap" / "latest.json"))["opens"] == 7
+
+
 def test_delta_one_add_one_del(tmp_path):
     b = _board(tmp_path / "a.kicad_pcb", _seg((1, 1), (5, 1), "N1") + _seg((5, 1), (5, 5), "N2"))
     prev = SN.full(b, str(tmp_path / "f1.json"), 1)

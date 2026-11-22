@@ -39,6 +39,9 @@ All paths are under the pipeline workdir `W` (`--workdir`). Board-agnostic. Emit
 | `iteration` | loop (place/pairs/route/close/lookahead/ghost/tune), i, n (or null), metrics{} (opens, shorts, overflow, hpwl, score, pairs_complete, ...), note |
 | `log` | level (info/warn/error), text (<= 400 chars), src (router name / module) |
 | `snapshot` | path (relative to W), full (bool), reason, opens |
+
+`opens` (snapshot, delta, `stage_end`) = open connections by text connectivity (`routeconn.text_open` on the snapshot's
+board, summed over nets; no extra load). A caller that passes its own count keeps it. `null` only if the count fails.
 | `parts` | frame: [[ref, x, y, rot, side]] (placer iterations, <= 2 per second) |
 | `artifact` | type (png/report/board/table), path, label |
 | `eta` | secs_left, done_frac, model, basis |

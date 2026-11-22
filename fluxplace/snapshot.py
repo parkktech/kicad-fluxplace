@@ -11,6 +11,7 @@ import time
 
 from . import events
 from . import routediag as RD
+from . import routeconn as RC
 
 FULL_EVERY = 20
 SNAP_S = 3.0
@@ -80,7 +81,15 @@ def _build(B, seq, board_path=""):
     return {"v": 1, "seq": seq, "ts": round(time.time(), 3), "board": board_path,
             "bbox": [_r(bx0), _r(by0), _r(bx1), _r(by1)], "layers": list(B["copper"]),
             "edge": [_pt(e[0]) for e in B["edge"]], "nets": nets, "parts": parts, "pads": pads,
-            "tracks": tracks, "vias": vias, "zones": zones, "opens": None}
+            "tracks": tracks, "vias": vias, "zones": zones, "opens": _text_opens(B)}
+
+
+def _text_opens(B):
+    """Open connections by text connectivity (routeconn.text_open on the already-loaded B). None on failure."""
+    try:
+        return int(sum(RC.text_open(B).values()))
+    except Exception:
+        return None
 
 
 def _write(path, obj):
@@ -148,7 +157,8 @@ class Snapper:
             seq = self.seq
             B = RD.load(board_path)
             cur = _build(B, seq, os.path.basename(board_path))
-            cur["opens"] = opens
+            if opens is not None:            # a caller's count wins over the text connectivity count
+                cur["opens"] = opens
             want_full = (force or self.prev is None or reason == "stage_end"
                          or self.since_full >= self.full_every)
             if want_full:
@@ -162,7 +172,7 @@ class Snapper:
                 _write(os.path.join(self.work, rel), _delta_of(self.prev, cur))
                 self.since_full += 1
                 is_full = False
-            events.emit("snapshot", path=rel.replace(os.sep, "/"), full=is_full, reason=reason, opens=opens)
+            events.emit("snapshot", path=rel.replace(os.sep, "/"), full=is_full, reason=reason, opens=cur["opens"])
             return rel.replace(os.sep, "/")
         except Exception:
             return None
