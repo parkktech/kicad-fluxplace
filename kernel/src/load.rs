@@ -56,6 +56,7 @@ impl Ctx<'_> {
             [] => return Ok(0),
             [one] => match &one.kind {
                 SK::Str(s) => s.clone(),
+                SK::Num(k) if k == "0" => String::new(),
                 SK::Num(k) => self.nets_by_num.get(k).cloned().ok_or_else(|| self.err(c, &format!("unknown net {k}")))?,
                 _ => return Err(self.err(c, "bad net")),
             },
@@ -225,12 +226,9 @@ fn load_via(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     via.locked = is_yes(n, "locked");
     via.extra = serde_json::json!({"via": true, "dia": size as f64 / 1e6, "drill": drill as f64 / 1e6});
     b.add_item(via);
-    for k in 0..b.copper.len() {
-        if mask & (1u64 << k) != 0 {
-            let hole = Item::new(Kind::Hole, uuid.clone(), net, 1u64 << k, vec![Shape { core: Core::Point(at), r: drill / 2 }]);
-            b.add_item(hole);
-        }
-    }
+    // one drilled hole through every copper layer (as hrgeom does for vias and pads)
+    let hole = Item::new(Kind::Hole, uuid, net, b.all_copper_mask(), vec![Shape { core: Core::Point(at), r: drill / 2 }]);
+    b.add_item(hole);
     Ok(())
 }
 
@@ -268,7 +266,10 @@ pub(crate) fn load_graphic(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), Stri
 pub(crate) fn finish_graphic(cx: &Ctx, b: &mut Board, n: &Node, layer: &str, shapes: Vec<Shape>) -> Result<(), String> {
     if layer == "Edge.Cuts" {
         let uuid = cx.uuid(b, n);
-        b.add_item(Item::new(Kind::Edge, uuid, 0, 0, shapes));
+        // one item per segment, centre line only (r = 0), as hrgeom models outline edges
+        for s in shapes {
+            b.add_item(Item::new(Kind::Edge, uuid.clone(), 0, 0, vec![Shape { r: 0, ..s }]));
+        }
     } else if let Some(bit) = b.layer_bit(layer) {
         copper_item_for_gr(cx, b, n, shapes, 1u64 << bit);
     }
@@ -298,10 +299,12 @@ pub fn load(src: &str) -> Result<Board, String> {
             Some("arc") => load_arc(&cx, &mut b, n)?,
             Some("via") => load_via(&cx, &mut b, n)?,
             Some("footprint") => crate::load_fp::load_footprint(&cx, &mut b, n)?,
+            Some("zone") => crate::load_zone::load_zone(&cx, &mut b, n)?,
             Some(t) if t.starts_with("gr_") => load_graphic(&cx, &mut b, n)?,
             _ => {}
         }
     }
+    b.fill_stale = crate::load_zone::fill_stale(&b);
     Ok(b)
 }
 
@@ -345,7 +348,7 @@ mod tests {
         let via = b.items.iter().find(|i| i.kind == Kind::Via).unwrap();
         assert_eq!(via.layers, 0b111, "F.Cu to B.Cu spans every copper layer");
         assert_eq!(via.shapes[0].r, 300_000);
-        assert_eq!(b.items.iter().filter(|i| i.kind == Kind::Hole).count(), 3, "one hole per copper layer");
+        assert_eq!(b.items.iter().filter(|i| i.kind == Kind::Hole).count(), 1, "one hole through the stack");
     }
 
     #[test]

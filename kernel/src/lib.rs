@@ -5,6 +5,7 @@ pub mod board;
 pub mod geom;
 pub mod load;
 pub mod load_fp;
+pub mod load_zone;
 pub mod sexpr;
 
 use serde_json::{json, Value};
@@ -95,9 +96,25 @@ pub fn dispatch(h: &Handle, req: &str) -> Value {
             let live = b.items.iter().filter(|i| i.alive).count();
             json!({"ok": true, "path": h.path, "file_version": b.file_version, "layers": b.copper,
                    "nets": b.nets.len() - 1, "items": live, "load_ms": h.load_ms,
+                   "zones": b.zones.len(), "fill_stale": b.fill_stale,
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
         }
         "items" => items_op(h, &v),
+        "zones" => {
+            let b = &h.board;
+            let zones: Vec<Value> = b.zones.iter().map(|z| {
+                let fills: Vec<Value> = (0..b.copper.len() as u32).filter_map(|bit| {
+                    let polys: Vec<&Vec<geom::Pt>> = z.fills.iter().filter(|(l, _)| *l == bit).map(|(_, p)| p).collect();
+                    (!polys.is_empty()).then(|| json!({"layer": b.copper[bit as usize],
+                        "polygons": polys.len(),
+                        "area_mm2": polys.iter().map(|p| load_zone::area_mm2(p)).sum::<f64>()}))
+                }).collect();
+                json!({"uuid": z.uuid, "name": z.name, "net": b.net_name(z.net), "layers": b.layer_names(z.layers),
+                       "priority": z.priority, "fills": fills, "hatch": z.hatch,
+                       "outline_pts": z.outline.len()})
+            }).collect();
+            json!({"ok": true, "zones": zones})
+        }
         "panic" => panic!("forced panic (test hook)"),
         other => json!({"ok": false, "error": format!("unknown op: {other}")}),
     }

@@ -51,7 +51,7 @@ fn place(s: &Shape, ang: f64, base: Pt) -> Shape {
     })
 }
 
-fn xy_list(cx: &Ctx, n: &Node) -> Result<Vec<Pt>, String> {
+pub(crate) fn xy_list(cx: &Ctx, n: &Node) -> Result<Vec<Pt>, String> {
     n.kids("xy").map(|k| match k.nums().map_err(|e| cx.err(k, &e))?.as_slice() {
         [x, y] => Ok(Pt { x: *x, y: *y }),
         _ => Err(cx.err(k, "xy needs two numbers")),
@@ -59,7 +59,7 @@ fn xy_list(cx: &Ctx, n: &Node) -> Result<Vec<Pt>, String> {
 }
 
 /// Copper mask of layer names: "*.Cu" = every copper layer, "F&B.Cu" = the two outer layers, else the exact name.
-fn mask_of(b: &Board, names: &[String]) -> u64 {
+pub(crate) fn mask_of(b: &Board, names: &[String]) -> u64 {
     let all = b.all_copper_mask();
     names.iter().fold(0u64, |m, n| {
         m | if n == "*.Cu" {
@@ -72,7 +72,7 @@ fn mask_of(b: &Board, names: &[String]) -> u64 {
     })
 }
 
-fn layer_names(n: &Node) -> Vec<String> {
+pub(crate) fn layer_names(n: &Node) -> Vec<String> {
     n.first("layers").map(|c| c.atoms().iter().filter_map(|a| match &a.kind {
         SK::Str(s) | SK::Sym(s) => Some(s.clone()),
         _ => None,
@@ -100,17 +100,18 @@ pub(crate) fn load_footprint(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), St
                 let placed: Vec<Shape> = with_r(shapes, w / 2).iter().map(|s| map_core(s, &|p| xf.pt(p))).collect();
                 finish_graphic(cx, b, c, &layer, placed)?;
             }
-            Some("zone") => load_keepout(cx, b, c, &xf)?,
+            // footprint zones are stored in absolute board coordinates (not footprint-local)
+            Some("zone") => load_keepout(cx, b, c)?,
             _ => {}
         }
     }
     Ok(())
 }
 
-fn load_keepout(cx: &Ctx, b: &mut Board, z: &Node, xf: &Xf) -> Result<(), String> {
+fn load_keepout(cx: &Ctx, b: &mut Board, z: &Node) -> Result<(), String> {
     let Some(k) = z.first("keepout") else { return Ok(()) };
     let poly = z.first("polygon").ok_or_else(|| cx.err(z, "keepout without polygon"))?;
-    let pts: Vec<Pt> = xy_list(cx, poly.first("pts").unwrap_or(poly))?.into_iter().map(|p| xf.pt(p)).collect();
+    let pts: Vec<Pt> = xy_list(cx, poly.first("pts").unwrap_or(poly))?;
     let mut names = layer_names(z);
     if names.is_empty() {
         names.extend(cx.str_field(z, "layer").map(str::to_string));
@@ -318,16 +319,11 @@ fn load_pad(cx: &Ctx, b: &mut Board, p: &Node, xf: &Xf, reference: &str, fp_lock
             };
             place(&Shape { core: Core::Seg(a, z), r: dx.min(dy) / 2 }, ang, c)
         };
-        let layers = if mask != 0 { mask } else { b.all_copper_mask() };
-        for k in 0..b.copper.len() {
-            if layers & (1u64 << k) != 0 {
-                let mut h = Item::new(Kind::Hole, uuid.clone(), net, 1u64 << k, vec![hole_shape.clone()]);
-                h.ref_ = ref_.clone();
-                h.locked = fp_locked;
-                h.extra = serde_json::json!({"npth": npth});
-                b.add_item(h);
-            }
-        }
+        let mut h = Item::new(Kind::Hole, uuid.clone(), net, b.all_copper_mask(), vec![hole_shape]);
+        h.ref_ = ref_.clone();
+        h.locked = fp_locked;
+        h.extra = serde_json::json!({"npth": npth});
+        b.add_item(h);
     }
     Ok(())
 }
@@ -392,10 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_drill_is_a_capsule_on_every_span_layer() {
+    fn slot_drill_is_a_capsule_through_the_stack() {
         let b = board("0 0 0", "(pad \"1\" thru_hole oval (at 0 0) (size 1.2 0.8) (drill oval 0.6 0.4) (layers \"*.Cu\"))");
         let holes: Vec<_> = b.items.iter().filter(|i| i.kind == Kind::Hole).collect();
-        assert_eq!(holes.len(), 3, "one hole per copper layer");
+        assert_eq!(holes.len(), 1, "one hole spanning the copper stack");
+        assert_eq!(holes[0].layers, 0b111);
         assert_eq!(holes[0].shapes[0].r, 200_000);
         assert_eq!(holes[0].shapes[0].core, crate::geom::Core::Seg(
             crate::geom::Pt { x: -100_000, y: 0 }, crate::geom::Pt { x: 100_000, y: 0 }));
@@ -425,7 +422,7 @@ mod tests {
         let b = board("0 0 0", "(pad \"H\" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2) (layers \"*.Cu\"))");
         assert!(pads(&b).is_empty());
         let holes: Vec<_> = b.items.iter().filter(|i| i.kind == Kind::Hole).collect();
-        assert_eq!(holes.len(), 3);
+        assert_eq!(holes.len(), 1);
         assert_eq!(holes[0].shapes[0].r, 1_600_000);
     }
 
@@ -438,7 +435,7 @@ mod tests {
         let p = pads(&b)[0];
         assert!(matches!(p.shapes[0].core, crate::geom::Core::Poly(_)));
         let e = b.items.iter().find(|i| i.kind == Kind::Edge).unwrap();
-        // fp at (10, 0) rotated 90: the local edge (0,0)-(1,0) becomes (10,0)-(10,-1); half width 0.025
-        assert!(close(bbox_mm(&b, e.id as usize), [9.975, -1.025, 10.025, 0.025]), "{:?}", bbox_mm(&b, e.id as usize));
+        // fp at (10, 0) rotated 90: the local edge (0,0)-(1,0) becomes (10,0)-(10,-1); edges carry no stroke radius
+        assert!(close(bbox_mm(&b, e.id as usize), [10.0, -1.0, 10.0, 0.0]), "{:?}", bbox_mm(&b, e.id as usize));
     }
 }

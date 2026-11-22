@@ -69,8 +69,30 @@ pub struct Unsupported {
     pub effect: String,
 }
 
+/// A copper zone (pour). Keepout zones become Keepout items instead.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Zone {
+    pub uuid: String,
+    pub net: u32,
+    pub layers: u64,
+    pub name: String,
+    pub priority: i64,
+    pub outline: Vec<Pt>,
+    pub clearance: Option<i64>,
+    pub min_thickness: Option<i64>,
+    pub connect: String,
+    pub thermal_gap: Option<i64>,
+    pub thermal_width: Option<i64>,
+    pub island_mode: Option<i64>,
+    pub hatch: Option<String>,
+    /// (layer bit, outline) per stored filled_polygon, as the file has them.
+    pub fills: Vec<(u32, Vec<Pt>)>,
+}
+
 #[derive(Debug, Default)]
 pub struct Board {
+    pub zones: Vec<Zone>,
+    pub fill_stale: bool,
     pub file_version: String,
     /// Copper layer names in stack order: bit i of Item.layers is copper[i].
     pub copper: Vec<String>,

@@ -23,8 +23,8 @@ def test_counts_coords_and_via_span(tmp_path):
         assert info["unsupported"] == []
         items = k.call("items")["items"]
     kinds = [it["kind"] for it in items]
-    assert kinds.count("track") == 1 and kinds.count("via") == 1 and kinds.count("hole") == 3
-    assert kinds.count("edge") == 1
+    assert kinds.count("track") == 1 and kinds.count("via") == 1 and kinds.count("hole") == 1
+    assert kinds.count("edge") == 4, "one edge item per outline segment"
     track = next(it for it in items if it["kind"] == "track")
     seg = track["shapes"][0]["core"]
     assert [_nm(v) for v in seg["a"]] == [10_000_000, 10_000_000]
