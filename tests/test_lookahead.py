@@ -240,3 +240,17 @@ def test_fitness_orders_candidates_lexicographically(monkeypatch):
     bad = LA.fitness("b", {"DP", "DN"}, {})["key"]
     assert good < bad
     assert sorted([bad, good])[0] == good
+
+
+def test_render_writes_png_fixture(load, tmp_path):
+    B = board(segs=[seg("P", (1, 1), (8, 1)), seg("N1", (1, 4), (8, 4), layer="B.Cu")],
+              vias=[{"net": "P", "x": 8, "y": 1, "d": 0.6, "drill": 0.3, "layers": {"F.Cu", "B.Cu"}, "locked": True}],
+              bbox=(0.0, 0.0, 10.0, 10.0))
+    B["edge"] = [((0, 0), (10, 0)), ((10, 0), (10, 10)), ((10, 10), (0, 10)), ((0, 10), (0, 0))]
+    load(B)
+    rects = [{"layer": "F.Cu", "rect": (2.0, 5.0, 6.0, 7.0), "nets": ["N1"], "demand": 3}]
+    fit = {"id": "r1-v0", "key": (-1, 0, 2, 0, 0, 0.0), "critical": ["P"],
+           "unconnected": [{"net": "N2", "pos": (3.0, 8.0)}]}
+    out = str(tmp_path / "c.png")
+    assert LA.render("x.kicad_pcb", rects, fit, out) == out
+    assert open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n"

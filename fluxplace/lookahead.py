@@ -314,5 +314,71 @@ def fitness(board, critical, cons, reserved_area=0.0, escape_mm=3.0):
                 blockers[k] = blockers.get(k, 0) + 1
     shorts, opens, errors = int(m.get("shorts", 0)), int(m.get("opens", 0)), int(m.get("errors", 0))
     key = (-complete, shorts, opens, sealed, errors, float(reserved_area))
+    unconnected = [{"net": ",".join(sorted(GP._nets_of([it]))), "pos": GP._pos(it)}
+                   for it in (m.get("drc") or {}).get("unconnected_items") or []]
     return {"pairs_complete": complete, "pairs_total": len(pairs), "shorts": shorts, "opens": opens, "sealed": sealed,
-            "drc_errors": errors, "reserved_area": float(reserved_area), "blockers": blockers, "key": key}
+            "drc_errors": errors, "reserved_area": float(reserved_area), "blockers": blockers, "key": key,
+            "critical": sorted(crit), "unconnected": unconnected}
+
+
+MM_PER_PX = 0.05
+
+
+def render(board, rects, fit, path):
+    """PNG of one candidate (matplotlib Agg, 1 px = 0.05 mm, one column per copper layer, max 4 columns).
+    Grey outline; non-critical copper light and thin; critical copper saturated and bold; reserved rects hatched;
+    unconnected items of the fitness dict as red stubs with the net name. Title: fit["id"] and fit["key"]."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    B = RD.load(board)
+    crit = set(fit.get("critical") or ())
+    x0, y0, x1, y1 = B["bbox"]
+    w_mm, h_mm = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    layers = [l for l in B["copper"] if any(s["layer"] == l for s in B["segs"]) or any(l in v["layers"] for v in B["vias"])]
+    layers = layers[:4] or B["copper"][:1]
+    ncols = max(1, min(4, len(layers)))
+    nrows = (len(layers) + ncols - 1) // ncols
+    dpi = 25.4 / MM_PER_PX                                   # 508 dpi: 1 px = 0.05 mm
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * (w_mm / 25.4 + 0.3), nrows * (h_mm / 25.4 + 0.4)),
+                             squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    for i, layer in enumerate(layers):
+        ax = axes.flat[i]
+        ax.set_visible(True)
+        ax.set_aspect("equal")
+        ax.set_title(layer, fontsize=8)
+        for (a, b) in B["edge"] or [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]:
+            ax.plot([a[0], b[0]], [a[1], b[1]], color="grey", lw=0.8)
+        for s in B["segs"]:
+            if s["layer"] != layer:
+                continue
+            is_crit = s["net"] in crit
+            ax.plot([s["a"][0], s["b"][0]], [s["a"][1], s["b"][1]], color="#d62728" if is_crit else "#c8c8c8",
+                    lw=1.6 if is_crit else 0.4, solid_capstyle="round", zorder=3 if is_crit else 2)
+        for v in B["vias"]:
+            if layer in v["layers"]:
+                ax.add_patch(plt.Circle((v["x"], v["y"]), v["d"] / 2, color="#d62728" if v["net"] in crit else "#999999",
+                                        zorder=4))
+        for r in rects:
+            if r["layer"] != layer:
+                continue
+            rx0, ry0, rx1, ry1 = r["rect"]
+            ax.add_patch(Rectangle((rx0, ry0), rx1 - rx0, ry1 - ry0, facecolor="orange", alpha=0.18,
+                                   hatch="//", edgecolor="orange", lw=0.5, zorder=1))
+        for u in fit.get("unconnected") or []:
+            if not u.get("pos"):
+                continue
+            ux, uy = u["pos"]
+            ax.plot([ux, ux + 1.0], [uy, uy], color="red", lw=1.0, zorder=5)
+            ax.text(ux + 1.05, uy, u.get("net", ""), color="red", fontsize=5, va="center")
+        ax.set_xlim(x0 - 0.5, x1 + 0.5)
+        ax.set_ylim(y1 + 0.5, y0 - 0.5)
+        ax.tick_params(labelsize=5)
+    key = fit.get("key")
+    fig.suptitle(f"{fit.get('id', '')} {tuple(key) if key is not None else ''}", fontsize=9)
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)
+    return path
