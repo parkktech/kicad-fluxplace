@@ -33,8 +33,11 @@ def scale_of(stage, features):
 
 
 def record(features, stage, secs, verdict):
-    """Append one timing row. Never raises."""
+    """Append one timing row. Nested runs (FLUXPLACE_NESTED=1: capped lookahead ghosts/candidates) are skipped
+    so they do not pollute the route medians. Never raises."""
     try:
+        if os.environ.get("FLUXPLACE_NESTED") == "1":
+            return
         os.makedirs(os.path.dirname(TIMINGS), exist_ok=True)
         row = {"ts": round(time.time(), 1), "stage": stage, "secs": round(float(secs), 2), "verdict": verdict,
                "scale": scale_of(stage, features), "components": (features or {}).get("components"),

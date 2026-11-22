@@ -96,3 +96,43 @@ def test_hooks_never_raise_without_workdir(tmp_path, monkeypatch):
     pipeline._ev_stage_end(1, "x", {"verdict": "pass"}, str(tmp_path / "nope.kicad_pcb"), 0.1)
     SN.active_take(str(tmp_path / "nope.kicad_pcb"), "x", force=True)
     routestatus._atomic(str(tmp_path / "y.progress.json"), {"current_step": 3})
+
+
+def test_nested_run_logs_to_parent_flags_child_and_run_start(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    parent = tmp_path / "P"
+    events.init(parent, run="PR")
+    child = tmp_path / "ghost" / "W"
+    seen = {}
+
+    def fake_run(a):
+        seen["nested"] = os.environ.get("FLUXPLACE_NESTED")
+        seen["events"] = os.environ.get("FLUXPLACE_EVENTS")
+        return 0
+
+    monkeypatch.setattr(pipeline, "_run", fake_run)
+    assert pipeline.run(argparse.Namespace(workdir=str(child), board=None, flow=None)) == 0
+    assert seen["nested"] == "1"
+    assert seen["events"] == os.path.join(str(child), "events.jsonl")
+    # parent stream: exactly one nested log line naming the child W
+    plog = [r for r in _rows(parent) if r["kind"] == "log"]
+    assert len(plog) == 1 and plog[0]["src"] == "nested" and plog[0]["text"] == f"nested run {child}"
+    # child stream: its own run_start with nested true, and its own run_end
+    crows = _rows(child)
+    start = [r for r in crows if r["kind"] == "run_start"]
+    assert start and start[0]["nested"] is True
+    assert crows[-1]["kind"] == "run_end"
+    assert json.load(open(child / "run.json"))["nested"] is True
+    # env restored to the parent's stream afterwards
+    assert os.environ.get("FLUXPLACE_EVENTS") == os.path.join(str(parent), "events.jsonl")
+    assert "FLUXPLACE_NESTED" not in os.environ
+
+
+def test_top_level_run_start_nested_false(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    work = tmp_path / "W"
+    monkeypatch.setattr(pipeline, "_run", lambda a: 0)
+    pipeline.run(argparse.Namespace(workdir=str(work), board=None, flow=None))
+    start = [r for r in _rows(work) if r["kind"] == "run_start"][0]
+    assert start["nested"] is False
+    assert json.load(open(work / "run.json"))["nested"] is False

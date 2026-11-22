@@ -109,3 +109,13 @@ def test_emit_limited_drops_excess(tmp_path, monkeypatch):
         events.emit_limited("log", 20, "log", text="line")
     rows = _lines(os.path.join(str(tmp_path), "events.jsonl"))
     assert len(rows) == 20
+
+
+def test_emit_to_writes_explicit_stream(tmp_path, monkeypatch):
+    monkeypatch.delenv(events.ENV_FILE, raising=False)
+    target = tmp_path / "parent.jsonl"
+    events.emit_to(str(target), "log", level="info", text="hi", src="x")
+    rows = _lines(str(target))
+    assert rows[0]["kind"] == "log" and rows[0]["text"] == "hi"
+    assert events.ENV_FILE not in os.environ
+    events.emit_to(None, "log", text="ignored")  # no path: no-op, no raise

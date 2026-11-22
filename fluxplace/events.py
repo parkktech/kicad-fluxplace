@@ -40,30 +40,45 @@ def _trim(v):
     return v
 
 
-def emit(kind, stage=None, **fields):
-    """Append one event line. No-op when the stream is off. Never raises."""
+def _line(kind, stage, fields):
     global _seq
+    _seq += 1
+    obj = {"v": VERSION, "ts": round(time.time(), 3), "run": os.environ.get(ENV_RUN, ""),
+           "seq": _seq, "pid": os.getpid(),
+           "stage": stage if stage is not None else (os.environ.get(ENV_STAGE) or None),
+           "kind": kind}
+    obj.update(_trim(fields))
+    line = json.dumps(obj, default=str, separators=(",", ":"))
+    if len(line) > MAX_LINE:
+        obj = {k: obj[k] for k in ("v", "ts", "run", "seq", "pid", "stage", "kind")}
+        obj["truncated"] = True
+        line = json.dumps(obj, separators=(",", ":"))
+    return line
+
+
+def _append(path, line):
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, (line + "\n").encode("utf-8", "replace"))
+    finally:
+        os.close(fd)
+
+
+def emit(kind, stage=None, **fields):
+    """Append one event line to the stream named by env FLUXPLACE_EVENTS. No-op when off. Never raises."""
     try:
         path = os.environ.get(ENV_FILE)
-        if not path:
-            return
-        _seq += 1
-        obj = {"v": VERSION, "ts": round(time.time(), 3), "run": os.environ.get(ENV_RUN, ""),
-               "seq": _seq, "pid": os.getpid(),
-               "stage": stage if stage is not None else (os.environ.get(ENV_STAGE) or None),
-               "kind": kind}
-        obj.update(_trim(fields))
-        line = json.dumps(obj, default=str, separators=(",", ":"))
-        if len(line) > MAX_LINE:
-            obj = {k: obj[k] for k in ("v", "ts", "run", "seq", "pid", "stage", "kind")}
-            obj["truncated"] = True
-            line = json.dumps(obj, separators=(",", ":"))
-        data = (line + "\n").encode("utf-8", "replace")
-        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        if path:
+            _append(path, _line(kind, stage, fields))
+    except Exception:
+        pass
+
+
+def emit_to(path, kind, stage=None, **fields):
+    """Append one event line to an explicit stream file (e.g. a parent run's W/events.jsonl). Never raises."""
+    try:
+        if path:
+            _append(os.fspath(path), _line(kind, stage, fields))
     except Exception:
         pass
 

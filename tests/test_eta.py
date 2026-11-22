@@ -83,3 +83,13 @@ def test_tick_rate_limited(tmp_path):
     ETA._CTX["t_tick"] = 0.0            # 60 s have passed
     ETA.tick()
     assert os.path.exists(tmp_path / "eta.json")
+
+
+def test_record_skipped_for_nested_runs(monkeypatch, tmp_path):
+    f = {"components": 10, "nets": 4, "density": 0.5}
+    monkeypatch.setenv("FLUXPLACE_NESTED", "1")
+    ETA.record(f, "route", 900.0, "pass")
+    assert not os.path.exists(ETA.TIMINGS)
+    monkeypatch.delenv("FLUXPLACE_NESTED")
+    ETA.record(f, "route", 900.0, "pass")
+    assert len(open(ETA.TIMINGS).read().splitlines()) == 1

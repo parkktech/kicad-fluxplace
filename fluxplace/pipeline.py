@@ -1345,7 +1345,7 @@ def _apply_lock_at(a, work, board):
     return out
 
 
-_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE")
+_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE", "FLUXPLACE_NESTED")
 
 
 def _ev_call(fn, *args, **kw):
@@ -1358,6 +1358,11 @@ def _ev_call(fn, *args, **kw):
 
 def _ev_begin(a, work):
     from . import events as EV, snapshot as SN
+    parent = os.environ.get(EV.ENV_FILE)
+    nested = bool(parent)            # a pipeline started by a parent run (lookahead ghosts / candidates)
+    if nested:
+        os.environ["FLUXPLACE_NESTED"] = "1"
+        EV.emit_to(parent, "log", level="info", text=f"nested run {work}", src="nested")
     EV.init(work)
     SN.set_active(SN.Snapper(work))
     try:
@@ -1373,12 +1378,12 @@ def _ev_begin(a, work):
                      "pads": len(B["pads"]), "layers": len(B["copper"]), "area_mm2": round(area, 1),
                      "density": round(len(B["pads"]) / area, 4)}
         stages = list(FLOWS.get(flow, STAGES))
-        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats)
+        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats, nested=nested)
         from . import eta as ETA
         ETA.set_run(feats, stages)
         _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "flow": flow,
-                             "stages": stages, "features": feats, "started": time.time(), "ended": None,
-                             "verdict": None})
+                             "stages": stages, "features": feats, "nested": nested, "started": time.time(),
+                             "ended": None, "verdict": None})
     except Exception:
         pass
 
