@@ -15,7 +15,7 @@ from . import routediag as RD
 DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
             "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 3, "max_rounds": 4, "no_gain_rounds": 2,
             "variants": [[2, 3.0], [1, 3.0], [3, 2.0]], "res_cost": 200.0, "off_cost": 20.0, "corridor_mm": 1.0,
-            "hard": False}
+            "hard": False, "ghost_routers": ["krt-whole", "freerouting"], "consensus_any_layer": False}
 _FLOAT = ("cell_mm", "escape_mm", "pair_clear_mm", "max_area_frac", "res_cost", "off_cost", "corridor_mm")
 _INT = ("min_nets", "ghost_budget_min", "jobs", "max_rounds", "no_gain_rounds")
 
@@ -27,6 +27,8 @@ def params(cons):
     P.update(e)
     P["enabled"] = e.get("enabled") is True
     P["hard"] = e.get("hard") is True
+    P["consensus_any_layer"] = e.get("consensus_any_layer") is True
+    P["ghost_routers"] = [str(x) for x in P["ghost_routers"]]
     for k in _FLOAT:
         P[k] = float(P[k])
     for k in _INT:
@@ -257,9 +259,9 @@ def strip(board_in, board_out):
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def ghost(a, board, outdir, budget_min):
-    """Route a copy of `board` unlocked, throw-away: `pipeline ... --from route --to route --router krt-whole`
-    (flags as W15/scripts-route.sh, passed through from `a`). -> path of the routed board, or None."""
+def ghost(a, board, outdir, budget_min, router="krt-whole"):
+    """Route a copy of `board` unlocked, throw-away: `pipeline ... --from route --to route --router <router>`
+    (krt-whole or freerouting; flags as W15/scripts-route.sh, passed through from `a`). -> routed board path, or None."""
     import glob
     import shutil
     import subprocess
@@ -272,8 +274,14 @@ def ghost(a, board, outdir, budget_min):
     for key, flag in (("constraints", "--constraints"), ("spec", "--spec")):
         if getattr(a, key, None):
             cmd += [flag, getattr(a, key)]
-    cmd += ["--flow", "constructive", "--from", "route", "--to", "route", "--router", "krt-whole",
-            "--router-dir", a.router_dir, "--router-py", a.router_py, "--route-budget", str(int(budget_min * 60)),
+    cmd += ["--flow", "constructive", "--from", "route", "--to", "route", "--router", router]
+    if router == "freerouting":
+        for key, flag in (("freerouting_jar", "--freerouting-jar"), ("java", "--java")):
+            if getattr(a, key, None):
+                cmd += [flag, getattr(a, key)]
+    else:
+        cmd += ["--router-dir", a.router_dir, "--router-py", a.router_py]
+    cmd += ["--route-budget", str(int(budget_min * 60)),
             "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"]
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 600)
@@ -542,23 +550,85 @@ def _worker(jobfile):
         json.dump(out, fh)
 
 
-def _specs(r, best, best_variant, P):
-    """(kind, (min_nets, escape_mm), pair) per candidate of round r."""
+def merge_demand(Ds, mode, P):
+    """Mixed demand maps of two or more ghosts. consensus: cells where both ghosts used the same non-critical net (same
+    layer, or any layer with consensus_any_layer); union: cells either ghost used. Same shape as demand()."""
+    def cp(cl):
+        return {"nets": set(cl["nets"]), "crit": set(), "pad_dist": dict(cl["pad_dist"])}
+
+    def merged(a, b, keep=None):
+        nets = (a["nets"] | b["nets"]) if keep is None else set(keep)
+        pd = {}
+        for n in nets:
+            ds = [x["pad_dist"][n] for x in (a, b) if n in x["pad_dist"]]
+            if ds:
+                pd[n] = min(ds)
+        return {"nets": nets, "crit": set(), "pad_dist": pd, "escape": any(d <= P["escape_mm"] for d in pd.values())}
+
+    cells = {}
+    A = Ds[0]
+    if mode == "union":
+        for D in Ds:
+            for k, cl in D["cells"].items():
+                if cl["nets"]:
+                    cells[k] = merged(cells[k], cl) if k in cells else merged(cl, cl)
+    elif P["consensus_any_layer"]:
+        idx = {}
+        for (l, ix, iy), cl in Ds[1]["cells"].items():
+            if cl["nets"]:
+                idx.setdefault((ix, iy), []).append((l, cl))
+        for (l, ix, iy), cl in A["cells"].items():
+            for _lb, clb in idx.get((ix, iy), []):
+                common = cl["nets"] & clb["nets"]
+                if cl["nets"] and common:
+                    cells[(l, ix, iy)] = merged(cl, clb, keep=common)
+    else:
+        for k, cl in A["cells"].items():
+            clb = Ds[1]["cells"].get(k)
+            if cl["nets"] and clb and clb["nets"] & cl["nets"]:
+                cells[k] = merged(cl, clb, keep=cl["nets"] & clb["nets"])
+    return {"cells": cells, "origin": A["origin"], "cell": A["cell"]}
+
+
+def _corr_for(src, sources, order):
+    """Corridors a candidate of source `src` uses: its own ghost's, or for mixed sources the first ghost (router order) that has
+    the pair."""
+    if src in order:
+        return sources[src]["corr"]
+    out = {}
+    for g in order:
+        for k, v in sources[g]["corr"].items():
+            out.setdefault(k, v)
+    return out
+
+
+def _specs(r, best, best_variant, P, ghosts, mixed):
+    """(kind, (min_nets, escape_mm), pair, src) per candidate of round r. Round 1: soft variants per ghost, one hard variant
+    (first ghost; every variant when hard = true), one soft candidate per mixed source (consensus, union)."""
     if r == 1:
-        if P["hard"]:
-            return [("hard", tuple(v), None) for v in P["variants"]]
-        # soft guide per variant, plus one hard variant (the first entry)
-        return [("soft", tuple(v), None) for v in P["variants"]] + [("hard", tuple(P["variants"][0]), None)]
+        out = []
+        for gi, g in enumerate(ghosts):
+            for v in P["variants"]:
+                out.append(("hard" if P["hard"] else "soft", tuple(v), None, g))
+            if gi == 0 and not P["hard"]:
+                out.append(("hard", tuple(P["variants"][0]), None, g))
+        for m in mixed:
+            out.append(("soft", tuple(P["variants"][0]), None, m))
+        return out
     if best is None:
         return []
     out = []
     for name, _n in sorted(best["fit"].get("blockers", {}).items(), key=lambda kv: (-kv[1], kv[0]))[:2]:
         p, q = name.split("|")
-        out.append(("repair", (1, P["escape_mm"] + 1.0), (p, q)))
+        out.append(("repair", (1, P["escape_mm"] + 1.0), (p, q), best["src"]))
     if best_variant:
         mn, em = best_variant
-        out.append(("soft", (max(mn - 1, 1), em), None))
+        out.append(("soft", (max(mn - 1, 1), em), None, best["src"]))
     return out
+
+
+def _vtxt2(src, kind, variant, pair):
+    return f"{src} " + _vtxt(kind, variant, pair)
 
 
 def _row(r, tag, variant, fit, png, verdict):
@@ -566,59 +636,90 @@ def _row(r, tag, variant, fit, png, verdict):
             "png": png or "-", "verdict": verdict}
 
 
+def _ghost_round0(a, board, d, P, routers):
+    """all ghosts of round 0 in parallel (one router process each; threads only wait) -> {router: path or None}."""
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(max_workers=max(1, min(P["jobs"], len(routers)))) as ex:
+        futs = {r: ex.submit(ghost, a, board, os.path.join(d, f"ghost0-{r}"), P["ghost_budget_min"], r) for r in routers}
+        return {r: f.result() for r, f in futs.items()}
+
+
 def stage(c, n, board):
-    """lookahead stage (constructive flow, before pairs): ghost demand -> reserved channels -> pairs laid around them
-    -> ghost verify -> ranked tournament (TOURNAMENT.md, one PNG per candidate). Output = the winner's locked board."""
+    """lookahead stage (constructive flow, before pairs): ghost demand per router (KRT and Freerouting both as throw-away
+    ideas, plus consensus and union) -> reserved channels and soft pair guides -> pairs laid around them -> ghost verify ->
+    ranked tournament (TOURNAMENT.md, one PNG per candidate). Output = the winner's locked board."""
     P = params(c.cons)
     if not P["enabled"]:
         return {"verdict": "skipped", "line": "[lookahead] enabled = false", "board": board}
     d = c.dir(n, "lookahead")
     spath, table = os.path.join(d, "progress.json"), os.path.join(d, "TOURNAMENT.md")
     a = c.a
-    acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py")}
+    acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py", "freerouting_jar", "java")}
     crit = critical_nets(board, c.cons, c.spec)
-    _progress(spath, "running", "round 0: ghost")
-    g0 = ghost(a, board, os.path.join(d, "ghost0"), P["ghost_budget_min"])
-    if not g0:
-        _progress(spath, "failed", "round-0 ghost produced no board")
-        return {"verdict": "fail", "line": "lookahead: round-0 ghost produced no routed board", "board": board}
-    fit0 = fitness(g0, crit, c.cons, escape_mm=P["escape_mm"])
-    fit0["id"] = "ghost0"
-    png0 = render(g0, [], fit0, os.path.join(d, "ghost0.png"))
-    rows = [_row(0, "ghost0", "unlocked", fit0, png0, "reference")]
+    pl = critical_pairs(board, c.cons, c.spec)
+    rows, sources, ok_fit = [], {}, {}
+    routers = list(P["ghost_routers"])
+    _progress(spath, "running", "round 0: ghosts " + ", ".join(routers))
+    gouts = _ghost_round0(a, board, d, P, routers)
+    for r in routers:
+        g = gouts.get(r)
+        if not g:
+            rows.append(_row(0, f"ghost-{r}", "unlocked", None, None, "fail: no routed board"))
+            continue
+        fit = fitness(g, crit, c.cons, escape_mm=P["escape_mm"])
+        fit["id"] = f"ghost-{r}"
+        png = render(g, [], fit, os.path.join(d, f"ghost-{r}.png"))
+        B = RD.load(g)
+        corr, why = corridors(B, pl, P)
+        sources[r] = {"D": demand(g, crit, P), "corr": corr, "fit": fit, "B": B}
+        ok_fit[r] = fit
+        rows.append(_row(0, f"ghost-{r}", "unlocked", fit, png, "reference"))
+    ghosts = [r for r in routers if r in sources]
+    if not ghosts:
+        _progress(spath, "failed", "no round-0 ghost produced a board")
+        return {"verdict": "fail", "line": "lookahead: no round-0 ghost produced a routed board", "board": board}
+    mixed = []
+    if len(ghosts) >= 2:
+        Ds = [sources[g]["D"] for g in ghosts]
+        sources["consensus"] = {"D": merge_demand(Ds, "consensus", P), "corr": _corr_for("consensus", sources, ghosts)}
+        sources["union"] = {"D": merge_demand(Ds, "union", P), "corr": _corr_for("union", sources, ghosts)}
+        mixed = ["consensus", "union"]
     _table(table, rows)
-    B0, D = RD.load(g0), demand(g0, crit, P)
-    corr, corr_why = corridors(B0, critical_pairs(board, c.cons, c.spec), P)
-    _progress(spath, "running", "round 0 done", no_corridor=sorted(corr_why))
+    B0 = sources[ghosts[0]]["B"]
+    ref = min(ok_fit.values(), key=lambda f: tuple(f["key"]))
     best, best_variant, stale, rounds, cands = None, None, 0, 0, 0
     for r in range(1, P["max_rounds"] + 1):
         rounds = r
-        specs = _specs(r, best, best_variant, P)
+        specs = _specs(r, best, best_variant, P, ghosts, mixed)
         if not specs:
             break
         jobs = []
-        for i, (kind, variant, pair) in enumerate(specs):
+        for i, (kind, variant, pair, src) in enumerate(specs):
             mn, em = variant
-            rects = reservations(D, B0, crit, P, min_nets=mn, escape_mm=em)
+            S = sources[src]
+            rects = reservations(S["D"], B0, crit, P, min_nets=mn, escape_mm=em)
             base = best["locked"] if kind == "repair" else board
-            guide = ({"origin": D["origin"], "cell": D["cell"], "res": rects, "corr": corr,
-                      "res_cost": P["res_cost"], "off_cost": P["off_cost"]} if kind == "soft" else None)
+            guide = ({"origin": S["D"]["origin"], "cell": S["D"]["cell"], "res": rects,
+                      "corr": _corr_for(src, sources, ghosts), "res_cost": P["res_cost"], "off_cost": P["off_cost"]}
+                     if kind == "soft" else None)
             jobs.append(_job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit, guide=guide))
+            jobs[-1]["src"] = src
         _progress(spath, "running", f"round {r}: {len(jobs)} candidates")
         results = _run_jobs(jobs, P, P["ghost_budget_min"] * 60 + 1800)
         cands += len(results)
-        ok = [x for x in results if x.get("fit")]
-        rb = min(ok, key=lambda x: tuple(x["fit"]["key"]), default=None)
+        okr = [x for x in results if x.get("fit")]
+        rb = min(okr, key=lambda x: tuple(x["fit"]["key"]), default=None)
         improved = rb is not None and (best is None or tuple(rb["fit"]["key"]) < tuple(best["fit"]["key"]))
         for job, x in zip(jobs, results):
-            vt = _vtxt(job["kind"], tuple(job["variant"]), job["pair"])
+            vt = _vtxt2(job["src"], job["kind"], tuple(job["variant"]), job["pair"])
             if x.get("fit") is None:
                 verdict = "fail: " + str(x.get("error", "no ghost"))[:80]
             else:
                 verdict = "winner" if (x is rb and improved) else "kept"
             rows.append(_row(r, job["tag"], vt, x.get("fit"), x.get("png"), verdict))
         if improved:
-            best = {"fit": rb["fit"], "locked": rb["locked"], "png": rb["png"], "id": rb["tag"], "variant": rb["variant"]}
+            best = {"fit": rb["fit"], "locked": rb["locked"], "png": rb["png"], "id": rb["tag"],
+                    "variant": rb["variant"], "src": next(j["src"] for j in jobs if j["tag"] == rb["tag"])}
             stale = 0
         else:
             stale += 1
@@ -626,8 +727,10 @@ def stage(c, n, board):
             best_variant = tuple(best["variant"])
         _table(table, rows)
         _progress(spath, "running", f"round {r} done: best {best['id'] if best else '-'}", rounds=r, candidates=cands)
-        done = best is not None and best["fit"]["opens"] == 0 and best["fit"]["pairs_complete"] == best["fit"]["pairs_total"]
-        if best is None or done or stale >= P["no_gain_rounds"]:
+        if best is None:
+            break
+        done = best["fit"]["opens"] == 0 and best["fit"]["pairs_complete"] == best["fit"]["pairs_total"]
+        if done or stale >= P["no_gain_rounds"]:
             break
     if best is None:
         _progress(spath, "failed", "no candidate produced a board")
@@ -637,8 +740,9 @@ def stage(c, n, board):
     shutil.copy(best["locked"], out)
     _copy_sidecar(best["locked"], out)
     f = best["fit"]
-    line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']}: "
-            f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} (round-0 ghost opens {fit0['opens']})")
+    line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']} ({best['src']}): "
+            f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} "
+            f"(round-0 ghost opens {ref['opens']})")
     _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands)
     return {"verdict": "pass", "line": line, "board": out,
             "next": [f"TOURNAMENT.md: {table}", f"winner png: {best['png']}"]}

@@ -267,7 +267,7 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     monkeypatch.setattr(LA, "critical_nets", lambda board, cons, spec=None: {"A", "B"})
     monkeypatch.setattr(LA, "critical_pairs", lambda board, cons, spec=None: [("A", "B")])
     monkeypatch.setattr(LA, "corridors", lambda B, pairs, P: ({}, {}))
-    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget: str(fixture))
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole": str(fixture))
     monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
                         {"key": (0, 0, 5, 0, 0, 0.0), "opens": 5, "pairs_complete": 0, "pairs_total": 1, "blockers": {}})
     monkeypatch.setattr(LA, "render", lambda board, rects, fit, path: (open(path, "w").write("x"), path)[1])
@@ -318,7 +318,7 @@ def test_tournament_winner_stops_when_clean(monkeypatch, tmp_path):
     assert out["verdict"] == "pass" and rounds["n"] == 1
     assert "winner r1-1" in out["line"] and "pairs 1/1" in out["line"] and "ghost opens 0 (round-0 ghost opens 5)" in out["line"]
     table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
-    for tag in ("ghost0", "r1-0", "r1-1", "winner"):
+    for tag in ("ghost-krt-whole", "ghost-freerouting", "r1-0", "r1-1", "winner"):
         assert tag in table
     assert os.path.exists(out["board"]) and os.path.exists(os.path.join(c.dir(7, "lookahead"), "progress.json"))
 
@@ -416,8 +416,58 @@ def test_corridors_cover_both_legs_with_halo_and_skip_open_pairs(monkeypatch):
 
 def test_round_one_is_soft_variants_plus_one_hard():
     P = LA.params({"lookahead": {"enabled": True}})
-    kinds = [k for k, _v, _p in LA._specs(1, None, None, P)]
-    assert kinds == ["soft", "soft", "soft", "hard"]
-    assert [v for k, v, _p in LA._specs(1, None, None, P) if k == "hard"] == [(2, 3.0)]
+    specs = LA._specs(1, None, None, P, ["krt-whole"], [])
+    assert [k for k, _v, _p, _s in specs] == ["soft", "soft", "soft", "hard"]
+    assert [v for k, v, _p, _s in specs if k == "hard"] == [(2, 3.0)]
+    two = LA._specs(1, None, None, P, ["krt-whole", "freerouting"], ["consensus", "union"])
+    assert [s for _k, _v, _p, s in two] == ["krt-whole"] * 4 + ["freerouting"] * 3 + ["consensus", "union"]
     Ph = LA.params({"lookahead": {"enabled": True, "hard": True}})
-    assert {k for k, _v, _p in LA._specs(1, None, None, Ph)} == {"hard"}
+    assert {k for k, _v, _p, _s in LA._specs(1, None, None, Ph, ["krt-whole"], [])} == {"hard"}
+
+
+# ---- L7b: several ghosts (KRT and Freerouting as ideas), consensus and union demand ----
+
+def test_merge_demand_consensus_needs_same_net_and_union_keeps_either():
+    P = dict(P0, escape_mm=3.0)
+    def D(cells):
+        return {"cells": cells, "origin": (0.0, 0.0), "cell": 1.0}
+    cl = lambda nets, pd=None: {"nets": set(nets), "crit": set(), "pad_dist": pd or {}, "escape": False}
+    A = D({("F.Cu", 0, 0): cl({"N1"}), ("F.Cu", 1, 0): cl({"N1"}), ("F.Cu", 2, 0): cl({"N2"})})
+    Bd = D({("F.Cu", 0, 0): cl({"N1", "N9"}, {"N1": 0.5}), ("F.Cu", 1, 0): cl({"N7"}), ("F.Cu", 5, 0): cl({"N3"})})
+    cons = LA.merge_demand([A, Bd], "consensus", P)
+    assert set(cons["cells"]) == {("F.Cu", 0, 0)} and cons["cells"][("F.Cu", 0, 0)]["nets"] == {"N1"}
+    assert cons["cells"][("F.Cu", 0, 0)]["pad_dist"] == {"N1": 0.5}
+    uni = LA.merge_demand([A, Bd], "union", P)
+    assert set(uni["cells"]) == {("F.Cu", 0, 0), ("F.Cu", 1, 0), ("F.Cu", 2, 0), ("F.Cu", 5, 0)}
+    assert uni["cells"][("F.Cu", 0, 0)]["nets"] == {"N1", "N9"}
+
+
+def test_ghost_router_flags(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    seen = {}
+    src = tmp_path / "g.kicad_pcb"
+    src.write_text("x")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
+    a = SimpleNamespace(router_dir="/r", router_py="/rp", freerouting_jar="/fr.jar", java="/jdk/bin/java")
+    LA.ghost(a, str(src), str(tmp_path / "o1"), 4, router="freerouting")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--router") + 1] == "freerouting" and cmd[cmd.index("--freerouting-jar") + 1] == "/fr.jar"
+    assert "--router-dir" not in cmd and "--router-py" not in cmd
+    seen.clear()
+    LA.ghost(a, str(src), str(tmp_path / "o2"), 4)
+    assert seen["cmd"][seen["cmd"].index("--router") + 1] == "krt-whole" and "--router-dir" in seen["cmd"]
+
+
+def test_stage_runs_each_ghost_and_drops_a_failed_one(monkeypatch, tmp_path):
+    def plan(r, job):
+        return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    real = LA.ghost
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole":
+                        None if router == "freerouting" else real(a, board, outdir, budget, router))
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert out["verdict"] == "pass"
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    assert "fail: no routed board" in table and "ghost-krt-whole" in table
+    assert not any(j["src"] == "freerouting" for j in jobs)
