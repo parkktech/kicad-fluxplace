@@ -72,7 +72,8 @@ def blame_of(review):
         cur["refs"] = sorted(set(cur["refs"]) | set(n.get("parts") or []))
     hot = [{"cells": a["cells"], "occ": a["peak"], "refs": sorted(set(a.get("parts") or [])), "nets": list(a.get("nets") or []),
             "bbox": list(a["box"]), "vias": a.get("vias", 0)} for a in review.get("congested_areas", [])]
-    turned = [{"ref": t["ref"], "x": t["x"], "y": t["y"], "rot": t["rot"], "saves": t.get("saves_mm", 0.0)}
+    turned = [{"ref": t["ref"], "x": t["x"], "y": t["y"], "rot": t["rot"], "saves": t.get("saves_mm", 0.0),
+               "swap": tuple(t["swap_pose"]) if t.get("swap_pose") else None}
               for t in review.get("turned_parts", [])]
     return {"open": opens, "costly": sorted(costly.values(), key=lambda c: (-c["detour"], c["net"])),
             "hot": hot, "turned": turned, "source": "route_review"}
@@ -128,22 +129,63 @@ def judge_key(routed_board, blame, cons=None):
 
 
 # ------------------------------------------------------------------ P2 move generator
+def _pieces(B):
+    """Connected copper: [{"segs", "vias", "refs" (pads touched, sorted), "locked", "net"}]. Items join when an end (track end,
+    arc end or via centre) sits on the same net point (0.01 mm). A STUB is a piece that touches the pads of exactly one part."""
+    segs, vias = B["segs"], B["vias"]
+    n = len(segs) + len(vias)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    at = {}
+    for i, sg in enumerate(segs):
+        for x, y in (sg["a"], sg["b"]):
+            at.setdefault((sg["net"], round(x, 2), round(y, 2)), []).append(i)
+    for j, v in enumerate(vias):
+        at.setdefault((v["net"], round(v["x"], 2), round(v["y"], 2)), []).append(len(segs) + j)
+    for items in at.values():
+        for k in items[1:]:
+            union(items[0], k)
+    A = RL.attached_copper(B)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    out = []
+    for members in groups.values():
+        sg = [i for i in members if i < len(segs)]
+        vi = [i - len(segs) for i in members if i >= len(segs)]
+        refs = set()
+        for i in sg:
+            refs |= {ref for _k, ref, _n in A["segs"].get(i, [])}
+        for j in vi:
+            refs |= {ref for ref, _n in A["vias"].get(j, [])}
+        locked = any(segs[i].get("locked") for i in sg) or any(vias[j].get("locked") for j in vi)
+        net = (segs[sg[0]] if sg else vias[vi[0]])["net"]
+        out.append({"segs": sorted(sg), "vias": sorted(vi), "refs": sorted(refs), "locked": locked, "net": net})
+    return out
+
+
+def _stub_of(pc):
+    return pc["refs"][0] if len(pc["refs"]) == 1 else None
+
+
 def _movable(B, cons, P):
-    """Parts a move may touch: not fixed, not group members (v1: treated as fixed), not locked, not with locked copper;
-    parts with attached copper only when move_routed."""
+    """Parts a move may touch: not fixed, not group members (v1: treated as fixed), not locked. A part is blocked by copper
+    that joins it to another part (locked, or unlocked when not move_routed); its own stubs are carried, never blocking."""
     pl = (cons or {}).get("placement") or {}
     grp = {r for g in (pl.get("group") or {}).values() for r in g.get("refs", [])}
-    A = RL.attached_copper(B)
-    locked_cu = set()
-    for i, ends in A["segs"].items():
-        if B["segs"][i].get("locked"):
-            locked_cu |= {ref for _k, ref, _n in ends}
-    for i, pads in A["vias"].items():
-        if B["vias"][i].get("locked"):
-            locked_cu |= {ref for ref, _n in pads}
-    blocked = set(RB._fixed_set(B, cons)) | grp | locked_cu | {r for r, p in B["parts"].items() if p.get("locked")}
-    if not P["move_routed"]:
-        blocked |= set(RL.routed_refs(B))
+    blocked = set(RB._fixed_set(B, cons)) | grp | {r for r, p in B["parts"].items() if p.get("locked")}
+    for pc in _pieces(B):
+        if len(pc["refs"]) >= 2 and (pc["locked"] or not P["move_routed"]):
+            blocked |= set(pc["refs"])
     return sorted(r for r in B["parts"] if r not in blocked)
 
 
@@ -161,6 +203,12 @@ def _legal(B, cons, targets, mov):
     return out or None
 
 
+def _box_parts(B, bbox, grow=2.0):
+    """Parts with a pad inside the box grown by `grow` mm (route_review gives no parts for some congested areas)."""
+    x0, y0, x1, y1 = bbox
+    return sorted({q["ref"] for q in B["pads"] if x0 - grow <= q["x"] <= x1 + grow and y0 - grow <= q["y"] <= y1 + grow})
+
+
 def _key(moves):
     return tuple(sorted((r, round(v[0], 3), round(v[1], 3), round(v[2], 2)) for r, v in moves.items()))
 
@@ -168,6 +216,7 @@ def _key(moves):
 def candidates(B, blame, cons, P, seed=0, spec=None):
     """-> up to P["cands"] candidates {id, kind, moves {ref: (x, y, rot)}}, round-robin over the kinds, deduplicated."""
     mov = set(_movable(B, cons, P))
+    hot = [dict(h, refs=h["refs"] or _box_parts(B, h["bbox"])) for h in blame["hot"]]
     pool = {k: [] for k in KINDS}
     seen = set()
 
@@ -183,13 +232,14 @@ def candidates(B, blame, cons, P, seed=0, spec=None):
         return B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]
 
     # turn: the route_review turned parts (+180 deg), all at once and each alone for the 3 biggest savings
-    tr = sorted((t for t in blame["turned"] if t["ref"] in mov), key=lambda t: (-t["saves"], t["ref"]))
+    tr = sorted((t for t in blame["turned"] if t["ref"] in mov and t.get("swap")),
+                key=lambda t: (-t["saves"], t["ref"]))
     if tr:
-        add("turn", {t["ref"]: (t["x"], t["y"], (t["rot"] + 180) % 360) for t in tr})
+        add("turn", {t["ref"]: tuple(t["swap"]) for t in tr})
         for t in tr[:3]:
-            add("turn", {t["ref"]: (t["x"], t["y"], (t["rot"] + 180) % 360)})
+            add("turn", {t["ref"]: tuple(t["swap"])})
     # relieve: the predictor's moves with only the hot-area and open-net parts movable, seeds seed..seed+2
-    tgt = (set(r for h in blame["hot"][:3] for r in h["refs"]) | set(r for o in blame["open"] for r in o["refs"])) & mov
+    tgt = (set(r for h in hot[:3] for r in h["refs"]) | set(r for o in blame["open"] for r in o["refs"])) & mov
     if tgt:
         for s in range(seed, seed + 3):
             Bc = copy.deepcopy(B)
@@ -200,7 +250,7 @@ def candidates(B, blame, cons, P, seed=0, spec=None):
             flips = set(st.get("flips", []))
             add("relieve", {r: tuple(v) for r, v in mv.items() if r in mov and r not in flips})
     # nudge: every movable part of the top 3 hot areas pushed away from the area centroid by each nudge_mm
-    for h in blame["hot"][:3]:
+    for h in hot[:3]:
         x0, y0, x1, y1 = h["bbox"]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         refs = [r for r in h["refs"] if r in mov]
@@ -292,25 +342,68 @@ def worse_gates(st, base):
 
 
 def _apply(board_path, moves, out_path, move_routed):
-    """Moves on a copy (text, post-write hook off). With move_routed the copper that ends on a moved part's pads is dropped.
-    -> (ok, problems, removed {'segs', 'vias'}) where ok is the connectivity guard."""
+    """Moves on a copy (text, no post-write hook). Stub copper of a moved part is carried with it (boardwrite.carry_copper);
+    with move_routed the unlocked non-stub copper that touches a moved part is dropped (it would be detached).
+    -> (ok, problems, removed {'segs', 'vias'}), ok from _guard."""
     B = RD.load(board_path)
-    rs, rv = [], []
-    if move_routed:
-        A = RL.attached_copper(B)
-        rs = sorted(i for i, ends in A["segs"].items() if any(ref in moves for _k, ref, _n in ends))
-        rv = sorted(i for i, pads in A["vias"].items() if any(ref in moves for ref, _n in pads))
-    tmp = out_path + ".moved"
-    BW.move_file(board_path, tmp, moves, post=False)
+    carry, rs, rv = [], set(), set()
+    for pc in _pieces(B):
+        st = _stub_of(pc)
+        if st is not None and st in moves:
+            carry.append({"ref": st, "segs": pc["segs"], "vias": pc["vias"]})
+        elif move_routed and not pc["locked"] and any(r in moves for r in pc["refs"]):
+            rs |= set(pc["segs"])
+            rv |= set(pc["vias"])
+    moves_by_ref = {r: ((B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]), tuple(v))
+                    for r, v in moves.items()}
+    text = open(board_path, errors="surrogateescape").read()
+    text = BW.carry_copper(text, moves_by_ref, carry)
     if rs or rv:
-        text = BW.strip_indexed(open(tmp, errors="surrogateescape").read(), set(rs), set(rv))[0]
-        with open(out_path, "w", errors="surrogateescape") as fh:
-            fh.write(text)
-        os.remove(tmp)
-    else:
-        os.replace(tmp, out_path)
-    ok, probs = RL.guard(board_path, out_path, removed={"segs": rs, "vias": rv})
-    return ok, probs, {"segs": rs, "vias": rv}
+        text = BW.strip_indexed(text, rs, rv)[0]
+    text = BW.apply_moves(text, moves)[0]
+    with open(out_path, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    ok, probs = _guard(B, RD.load(out_path), carry, rs, rv)
+    return ok, probs, {"segs": sorted(rs), "vias": sorted(rv)}
+
+
+def _guard(A, Bn, carry, rs, rv):
+    """Connectivity guard for a moved board: same refs and pad->net map; the kept tracks and vias keep their net; the
+    non-carried ones keep their end points; every kept end still lands on the same pad (carried stubs included)."""
+    probs = []
+    if set(A["parts"]) != set(Bn["parts"]):
+        probs.append("ref set differs")
+    for r in sorted(set(A["parts"]) & set(Bn["parts"])):
+        pa = sorted((str(q.get("num")), str(q.get("net"))) for q in A["parts"][r]["pads"])
+        pb = sorted((str(q.get("num")), str(q.get("net"))) for q in Bn["parts"][r]["pads"])
+        if pa != pb:
+            probs.append(f"{r}: pad/net map changed")
+    if len(A["segs"]) - len(rs) != len(Bn["segs"]) or len(A["vias"]) - len(rv) != len(Bn["vias"]):
+        return False, probs + ["segment or via count changed"]
+    cs = {i for c in carry for i in c["segs"]}
+    cv = {j for c in carry for j in c["vias"]}
+    Aa, Ba = RL.attached_copper(A), RL.attached_copper(Bn)
+    ks = [i for i in range(len(A["segs"])) if i not in rs]
+    kv = [j for j in range(len(A["vias"])) if j not in rv]
+    for n, i in enumerate(ks):
+        sa, sb = A["segs"][i], Bn["segs"][n]
+        if sa["net"] != sb["net"]:
+            probs.append(f"track net changed at {sa['a']}")
+        if i not in cs and (tuple(sa["a"]), tuple(sa["b"])) != (tuple(sb["a"]), tuple(sb["b"])):
+            probs.append(f"track {sa['net']} at {sa['a']} moved without its part")
+        before = {(r, num) for _k, r, num in Aa["segs"].get(i, [])}
+        after = {(r, num) for _k, r, num in Ba["segs"].get(n, [])}
+        if before != after:
+            probs.append(f"track {sa['net']} at {sa['a']} no longer on {sorted(before - after)}")
+    for n, j in enumerate(kv):
+        va, vb = A["vias"][j], Bn["vias"][n]
+        if va["net"] != vb["net"]:
+            probs.append(f"via net changed at ({va['x']},{va['y']})")
+        if j not in cv and (va["x"], va["y"]) != (vb["x"], vb["y"]):
+            probs.append(f"via {va['net']} moved without its part")
+        if set(Aa["vias"].get(j, [])) != set(Ba["vias"].get(n, [])):
+            probs.append(f"via {va['net']} at ({va['x']},{va['y']}) no longer on its pads")
+    return not probs, probs[:50]
 
 
 def tier1(base_path, cands, cons, spec, P, outdir, base_state):

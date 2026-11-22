@@ -14,7 +14,7 @@ REVIEW = {
                         {"net": "SIG3", "pads": 2, "vias": 0, "detour": 1.6, "parts": ["R4"]}],
     "congested_areas": [{"box": [1.0, 2.0, 3.0, 4.0], "cells": 6, "peak": 0.8, "mean": 0.6, "vias": 2,
                          "parts": ["U1", "C5"], "nets": ["SIG1"]}],
-    "turned_parts": [{"ref": "R7", "x": 10.0, "y": 5.0, "rot": 90, "saves_mm": 1.5}],
+    "turned_parts": [{"ref": "R7", "x": 10.0, "y": 5.0, "rot": 90, "saves_mm": 1.5, "swap_pose": [11.0, 5.5, 180]}],
     "counts": {},
 }
 
@@ -27,7 +27,7 @@ def test_blame_parses_review_fixture():
     assert nets["SIG1"]["vias"] == 4 and nets["SIG1"]["detour"] == 2.0 and nets["SIG1"]["refs"] == ["R2", "R9", "U1"]
     assert [c["net"] for c in b["costly"]] == ["SIG1", "SIG3"]                                      # sorted by detour
     assert b["hot"] == [{"cells": 6, "occ": 0.8, "refs": ["C5", "U1"], "nets": ["SIG1"], "bbox": [1.0, 2.0, 3.0, 4.0], "vias": 2}]
-    assert b["turned"] == [{"ref": "R7", "x": 10.0, "y": 5.0, "rot": 90, "saves": 1.5}]
+    assert b["turned"] == [{"ref": "R7", "x": 10.0, "y": 5.0, "rot": 90, "saves": 1.5, "swap": (11.0, 5.5, 180)}]
 
 
 def test_judge_key_orders_by_opens_then_hot_then_vias(monkeypatch):
@@ -83,7 +83,8 @@ def _board():
 def _blame():
     return {"open": [{"net": "SIG1", "refs": ["R2", "U1"]}], "costly": [{"net": "SIG1", "vias": 0, "detour": 2.0, "refs": ["U1", "R2"]}],
             "hot": [{"cells": 4, "occ": 0.9, "refs": ["U1", "R2", "F1"], "nets": ["SIG1"], "bbox": [8.0, 8.0, 14.0, 12.0], "vias": 0}],
-            "turned": [{"ref": "R7", "x": 30.0, "y": 30.0, "rot": 90, "saves": 1.5}], "source": "route_review"}
+            "turned": [{"ref": "R7", "x": 30.0, "y": 30.0, "rot": 90, "saves": 1.5, "swap": (30.0, 30.0, 270)}],
+            "source": "route_review"}
 
 
 def _identity_legalise(calls):
@@ -279,3 +280,54 @@ def test_report_hint_lists_removed_copper_refs_and_group_members(monkeypatch, tm
     assert "fanout --parts U1" in " ".join(r["next"])                             # moved part lost its copper: fan out again
     md = open(os.path.join(c.dir(3, "placetour"), "placetour.md")).read()
     assert "R7, R8" in md and "U1" in md
+
+
+def _seg(a, b, net, locked=False):
+    return {"a": a, "b": b, "net": net, "w": 0.2, "layer": "F.Cu", "mid": None, "locked": locked}
+
+
+def _pad(ref, x, y, net):
+    return {"ref": ref, "num": "1", "net": net, "x": x, "y": y, "ex": 0.1, "ey": 0.1}
+
+
+def test_stub_detection_one_part_vs_two_part_piece():
+    from fluxplace import placetour as PTm
+    B = {"parts": {}, "vias": [], "bbox": (0, 0, 50, 50),
+         "segs": [_seg((10, 10), (12, 10), "N1", locked=True), _seg((12, 10), (14, 10), "N1", locked=True),
+                  _seg((30, 10), (32, 10), "N2"), _seg((32, 10), (34, 10), "N2")],
+         "pads": [_pad("U1", 10, 10, "N1"), _pad("R2", 14, 10, "N1"), _pad("R3", 30, 10, "N2")]}
+    pcs = sorted(PTm._pieces(B), key=lambda p: p["segs"])
+    assert pcs[0]["refs"] == ["R2", "U1"] and PTm._stub_of(pcs[0]) is None      # joins two parts: a route, not a stub
+    assert pcs[1]["refs"] == ["R3"] and PTm._stub_of(pcs[1]) == "R3"           # touches one part only: stub of R3
+
+
+def test_stub_copper_does_not_block_its_part_but_route_does(monkeypatch):
+    from fluxplace import placetour as PTm
+    B = {"parts": {"U1": {"pos": (10, 10), "angle": 0, "pads": [{}], "locked": False},
+                   "R2": {"pos": (14, 10), "angle": 0, "pads": [{}], "locked": False},
+                   "R3": {"pos": (30, 10), "angle": 0, "pads": [{}], "locked": False}},
+         "vias": [], "bbox": (0, 0, 50, 50), "fixed": (),
+         "segs": [_seg((10, 10), (12, 10), "N1", locked=True), _seg((12, 10), (14, 10), "N1", locked=True),
+                  _seg((30, 10), (32, 10), "N2", locked=True)],
+         "pads": [_pad("U1", 10, 10, "N1"), _pad("R2", 14, 10, "N1"), _pad("R3", 30, 10, "N2"), _pad("R3", 32, 10, "N2")]}
+    monkeypatch.setattr(PTm.RB, "_fixed_set", lambda B, cons: set())
+    mov = PTm._movable(B, {}, PTm.params({"placetour": {"move_routed": True}}))
+    assert "R2" not in mov and "U1" not in mov                                 # locked two-part route blocks both
+    assert "R3" in mov                                                         # only its own locked stub: movable
+
+
+def test_carry_copper_translate_and_quarter_turn_exact():
+    from fluxplace import boardwrite as BW
+    t = ('(kicad_pcb (segment (start 1 2) (end 3 2) (width 0.2) (layer "F.Cu") (net 1) (locked yes)) '
+         '(via (at 5 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1)))')
+    out = BW.carry_copper(t, {"U1": ((0, 0, 0), (10, 0, 0))}, [{"ref": "U1", "segs": [0], "vias": [0]}])
+    assert "(start 11 2)" in out and "(end 13 2)" in out and "(at 15 5)" in out and "(locked yes)" in out
+    out = BW.carry_copper(t, {"U1": ((0, 0, 0), (10, 0, 90))}, [{"ref": "U1", "segs": [0], "vias": [0]}])
+    assert "(start 12 -1)" in out and "(end 12 -3)" in out and "(at 15 -5)" in out     # KiCad: +90 turns CCW on screen
+
+
+def test_box_parts_fills_empty_hot_area_from_pads():
+    from fluxplace import placetour as PTm
+    B = {"pads": [_pad("C5", 3.0, 3.0, "N"), _pad("U9", 20, 20, "N"), _pad("R1", 4.5, 3.0, "N")]}
+    assert PTm._box_parts(B, [1.0, 2.0, 3.0, 4.0], grow=2.0) == ["C5", "R1"]    # R1 is 1.5 mm outside the box: within 2 mm
+    assert PTm._box_parts(B, [1.0, 2.0, 3.0, 4.0], grow=0.5) == ["C5"]
