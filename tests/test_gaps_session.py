@@ -55,3 +55,58 @@ def test_open_regions_get_packet_rows_and_done_files_are_pending(tmp_path, monke
     (ai / f"{regs[0]['rid']}.done.json").write_text("{}")
     assert GP._ai_pending_names(str(ai), [GAPS[0]]) == [f"{regs[0]['rid']}.done.json"]
     assert GP._ai_pending_names(str(ai), [GAPS[2]]) == []
+
+
+# ---- PHASE3M review fixes: merge dir reuse (H2), refused merge charge (L2), unreadable done file (L1) ----
+def _merge_ctx(tmp_path):
+    ai = tmp_path / "ai"
+    ai.mkdir()
+    gap = {"id": "g1", "kind": "open-gap", "nets": ["A"], "at": [1, 1]}
+    ctx = {"ai_dir": str(ai), "ai_used": {}, "cons": {}}
+    return ai, gap, ctx
+
+
+def _empty_ledger(tmp_path):
+    p = tmp_path / "empty-ledger.txt"
+    p.write_text("")
+    return str(p)
+
+
+def test_h2_reused_merge_dir_drops_stale_m_files(tmp_path):
+    from fluxplace import gaps as GP
+    ai, gap, ctx = _merge_ctx(tmp_path)
+    reg = {"rid": "r1", "gaps": ["g1"], "status": "open"}
+    (ai / "r1.done.json").write_text(json.dumps({"ledger": _empty_ledger(tmp_path)}))
+    mdir = ai / "merge" / "r1"
+    mdir.mkdir(parents=True)
+    (mdir / "m5.kicad_pcb").write_text("stale")
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("base")
+    GP._r_ai_merge(str(base), str(tmp_path / "out.kicad_pcb"), [gap], ctx, [reg], reg)
+    assert not (mdir / "m5.kicad_pcb").exists()
+    assert (mdir / "m0.kicad_pcb").exists()
+
+
+def test_l1_unreadable_done_file_refuses_the_region_and_does_not_raise(tmp_path):
+    from fluxplace import gaps as GP
+    ai, gap, ctx = _merge_ctx(tmp_path)
+    reg = {"rid": "r2", "gaps": ["g1"], "status": "open"}
+    done = ai / "r2.done.json"
+    done.write_text(json.dumps({"ledger": str(tmp_path / "missing.txt")}))
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("base")
+    r = GP._r_ai_merge(str(base), str(tmp_path / "out.kicad_pcb"), [gap], ctx, [reg], reg)
+    assert r["status"] == "refused" and reg["status"] == "refused"
+    assert not done.exists()                                  # consumed, never re-read
+
+
+def test_l2_refused_merge_charges_one_ai_try_per_gap(tmp_path):
+    from fluxplace import gaps as GP
+    ai, gap, ctx = _merge_ctx(tmp_path)
+    reg = {"rid": "r3", "gaps": ["g1"], "status": "open"}
+    (ai / "r3.done.json").write_text(json.dumps({"ledger": _empty_ledger(tmp_path)}))
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("base")
+    r = GP._r_ai_merge(str(base), str(tmp_path / "out.kicad_pcb"), [gap], ctx, [reg], reg)
+    assert r["status"] == "refused"
+    assert ctx["ai_used"][GP.ai_key(gap)] == 1

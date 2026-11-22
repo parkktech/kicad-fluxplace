@@ -74,3 +74,18 @@ def test_reuuid_collisions_renews_heads_keeps_items_and_drc_keys(tmp_path):
     assert BT.reuuid_collisions(p) == {"collisions": 0, "changed": 0}
     assert H.summarize_drc(H.drc_raw(p))["keys"] == keys_before
     assert heads.count(HEAD) == 3
+
+
+def test_l3_reuuid_replaces_every_occurrence_in_one_pass(tmp_path):
+    """PHASE3M review L3: one regex pass renews the colliding uuid at every occurrence; a uuid repeated by one item is kept."""
+    keep = "deadbeef-1111-2222-3333-444444444444"          # same item referenced 3 times: not a collision
+    dup = "deadbeef-5555-6666-7777-888888888888"           # a second item with the same 8-hex head: renewed
+    text = "".join(f'(x (uuid "{keep}"))\n' for _ in range(3)) + "".join(f'(y (uuid "{dup}"))\n' for _ in range(2))
+    p = tmp_path / "t.kicad_pcb"
+    p.write_text(text)
+    r = BT.reuuid_collisions(str(p))
+    out = p.read_text()
+    assert r == {"collisions": 1, "changed": 1}
+    assert out.count(keep) == 3 and dup not in out
+    new = re.findall(r'\(y \(uuid "([0-9a-f-]{36})"\)\)', out)
+    assert len(new) == 2 and new[0] == new[1] and new[0][:8] != "deadbeef"

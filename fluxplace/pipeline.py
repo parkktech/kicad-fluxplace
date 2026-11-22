@@ -1171,6 +1171,40 @@ def st_critroute(c, n, board):
     return CR.stage(c, n, board)
 
 
+def _file_sha1(path):
+    """PHASE3M-review H1: content fingerprint of a board (the stage input a gate verdict belongs to)."""
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for blk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def _gate_reusable(gate_dir, stage_input):
+    """H1: a packets gate's best board is reused only when its stop.json was written for this stage input."""
+    try:
+        with open(os.path.join(gate_dir, "stop.json")) as fh:
+            s = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return (s.get("stop") == "packets" and os.path.exists(os.path.join(gate_dir, "best.kicad_pcb"))
+            and s.get("input_sha1") == _file_sha1(stage_input))
+
+
+def _stamp_gate(gate_dir, stage_input):
+    """H1: record the stage input's fingerprint in the gate's stop.json."""
+    p = os.path.join(gate_dir, "stop.json")
+    try:
+        with open(p) as fh:
+            s = json.load(fh)
+        s["input_sha1"] = _file_sha1(stage_input)
+        with open(p, "w") as fh:
+            json.dump(s, fh, indent=1)
+    except (OSError, ValueError):
+        pass
+
+
 def _gate_stop(gate_dir):
     """stop reason of a gate's stop.json, None when there is none (PHASE3I F2)."""
     try:
@@ -1180,7 +1214,7 @@ def _gate_stop(gate_dir):
         return None
 
 
-def _gate_check(c, n, name, board, kinds):
+def _gate_check(c, n, name, board, kinds, src=None):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
     from . import gaps as GP, calllog as CL
@@ -1190,8 +1224,11 @@ def _gate_check(c, n, name, board, kinds):
         r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds,
                      budget_min=float((c.cons.get("flow") or {}).get("gate_budget_min", 20)))   # PHASE3I F2
     except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
-        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": []}
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
+                "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
     stop = r["stop"]
+    if src:
+        _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
@@ -1422,6 +1459,12 @@ def run(a):
     for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
         gk_prev = GP_.gate_kinds(c.cons, k)
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
+        if gk_prev and gst.get("stop") != "clean" and a.board:
+            # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
+            g = _gate_check(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
+            st["stages"].setdefault(k, {})["gate"] = {"stop": "clean" if g["verdict"] == "pass" else g["verdict"]}
+            if g["verdict"] == "pass":
+                continue
         if gk_prev and gst.get("stop") != "clean":
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
@@ -1434,17 +1477,21 @@ def run(a):
         gd = c.dir(i + 1, "gate")
         gk = GP_.gate_kinds(c.cons, name)
         best_g = os.path.join(gd, "best.kicad_pcb")
-        if gk and os.path.exists(best_g) and _gate_stop(gd) == "packets":   # PHASE3I F2: packets answered; the stage is not re-run
+        if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
             rp = os.path.join(gd, "resume.kicad_pcb")
             for ext in ("", ".kicad_pro", ".kicad_dru"):
                 if os.path.exists(best_g + ext):
                     shutil.copy2(best_g + ext, rp + ext)
             res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
         else:
+            if gk and os.path.isdir(gd) and os.listdir(gd):
+                # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
+                os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
+                gd = c.dir(i + 1, "gate")
             res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
-            g = _gate_check(c, i + 1, name, res.get("board") or board, gk)
+            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
             if g["verdict"] == "packets":
                 res["gate_packets"] = True

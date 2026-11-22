@@ -239,3 +239,54 @@ def test_mask_warning_line_and_helper(tmp_path, monkeypatch):
     assert res["next"] == ["kept", PL.MASK_WARN] and res["verdict"] == "pass"
     monkeypatch.setattr(PL, "mask_openings", lambda b: 0)
     assert PL.st_route(None, 7, "board.kicad_pcb")["next"] == ["kept"]
+
+
+# ---- PHASE3M review fixes: gate verdicts tied to their input (H1), crashed gate record (M2), --from without state (M3) ----
+def _fake_gate(monkeypatch, stop, gd, best):
+    from fluxplace import gaps as GP
+    def fake_close(board, d, *a, **k):
+        (gd / "stop.json").write_text(json.dumps({"stop": stop}))
+        return {"stop": stop, "best": str(best), "start": {"opens": 1}, "end": {"opens": 1}, "packets": []}
+    monkeypatch.setattr(GP, "close", fake_close)
+
+
+def test_h1_packets_gate_is_reused_only_for_the_input_it_was_written_for(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    a, b = tmp_path / "a.kicad_pcb", tmp_path / "b.kicad_pcb"
+    a.write_text("A"); b.write_text("B")
+    gd = tmp_path / "gate"; gd.mkdir()
+    best = gd / "best.kicad_pcb"; best.write_text("best")
+    _fake_gate(monkeypatch, "packets", gd, best)
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    g = PL._gate_check(c, 1, "pairs", str(best), ["pair-open"], src=str(a))
+    assert g["verdict"] == "packets"
+    assert PL._gate_reusable(str(gd), str(a))                 # the stop.json carries the input's fingerprint
+    assert not PL._gate_reusable(str(gd), str(b))             # another input: not reused
+
+
+def test_m2_crashed_gate_still_returns_a_gate_record(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fluxplace import gaps as GP
+    a = tmp_path / "a.kicad_pcb"; a.write_text("A")
+    gd = tmp_path / "gate"; gd.mkdir()
+    def boom(*a_, **k):
+        raise RuntimeError("probe died")
+    monkeypatch.setattr(GP, "close", boom)
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    g = PL._gate_check(c, 1, "pairs", str(a), ["pair-open"])
+    assert g["verdict"] == "fail" and g["gate"]["stop"] == "crashed" and g["gate"]["kinds"] == ["pair-open"]
+
+
+def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_path, monkeypatch):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    _fake_gate(monkeypatch, "clean", tmp_path, tmp_path / "x.kicad_pcb")
+    seen = []
+    def stage(c, n, b):
+        seen.append(n)
+        return {"verdict": "pass", "board": b, "line": "stub"}
+    monkeypatch.setattr(PL, "FUNCS", {name: stage for name in PL.STAGES})
+    a = _args(tmp_path, board, from_stage="route-ready", to_stage="route-ready")
+    rc = PL.run(a)
+    assert rc == 0 and seen                                   # ran the stage instead of exiting 5 for the missing gate

@@ -141,3 +141,16 @@ def test_cluster_regions_disjoint_nets_and_boxes():
     assert sorted(sorted(r["gaps"]) for r in regs) == [["a", "b", "c"], ["d"]]
     seen = [n for r in regs for n in r["nets"]]
     assert len(seen) == len(set(seen))                           # nets disjoint across regions
+
+
+def test_m1_r6_rollback_removes_the_m_files_the_ledger_wrote(tmp_path, monkeypatch):
+    """PHASE3M review M1: a rolled-back ledger leaves no m<N> file above the board it started from."""
+    base = _two_nets(str(tmp_path / "base"))
+    s1 = HR.session_begin(base, str(tmp_path / "s1.kicad_pcb"))
+    assert HR.lay(s1["work"], "B", B_PATH, width=0.25)["accepted"]
+    assert HR.lay(s1["work"], "C", C_PATH, width=0.25)["accepted"]
+    dst = _merge_dir(tmp_path, base)
+    monkeypatch.setattr(HR, "_r6_refusal", lambda *a, **k: "R6 worse (test)")
+    r = HR.replay(_ledger_of(s1), dst)
+    assert r["applied"] == [] and r["board"] == os.path.join(dst, "m0.kicad_pcb")
+    assert sorted(f for f in os.listdir(dst) if f.endswith(".kicad_pcb")) == ["m0.kicad_pcb"]

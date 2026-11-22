@@ -1775,19 +1775,35 @@ def _r_ai_merge(base, out, gaps, ctx, regs, reg):
     from . import handroute as HR
     ai_dir, used = ctx["ai_dir"], ctx["ai_used"]
     done = os.path.join(ai_dir, reg["rid"] + ".done.json")
-    with open(done) as fh:
-        ledger = json.load(fh)["ledger"]
+    grp = [g for g in gaps if g["id"] in reg["gaps"]]
+    sids = {g["id"]: critroute._safe(ai_key(g))[:80] for g in grp}
+    try:
+        with open(done) as fh:
+            ledger = json.load(fh)["ledger"]
+        if not isinstance(ledger, str) or not os.path.isfile(ledger):
+            raise ValueError("ledger path missing")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # L1: an unreadable done file refuses its region (charged like any refused merge), never raises
+        why = f"done file unreadable: {type(e).__name__}"
+        for g in grp:
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
+            _feedback_note(ai_dir, sids[g["id"]], refused=f"merge: {why}"[:160])
+        reg["status"] = "refused"
+        _consume(done)
+        _write_json(os.path.join(ai_dir, "sessions.json"), regs)
+        return {"status": "refused", "why": why}
     mdir = os.path.join(ai_dir, "merge", reg["rid"])
+    shutil.rmtree(mdir, ignore_errors=True)               # H2: a reused merge dir never keeps stale m<N> files
     os.makedirs(mdir, exist_ok=True)
     HR._copy_board(base, os.path.join(mdir, "m0.kicad_pcb"))
     r = HR.replay(ledger, mdir, constraints=ctx.get("cons"))
-    grp = [g for g in gaps if g["id"] in reg["gaps"]]
-    sids = {g["id"]: critroute._safe(ai_key(g))[:80] for g in grp}
     if not r["applied"]:
         why = r["requeue"][0]["why"] if r["requeue"] else "nothing to merge"
         for g in grp:
             _feedback_note(ai_dir, sids[g["id"]], refused=f"merge: {why}"[:160])
         reg["status"] = "refused"
+        for g in grp:                                       # L2: a refused merge is charged one AI try per gap
+            used[ai_key(g)] = used.get(ai_key(g), 0) + 1
         out_status = {"status": "refused", "why": str(why)[:160]}
     else:
         HR._copy_board(r["board"], out)

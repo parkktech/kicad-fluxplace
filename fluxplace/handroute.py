@@ -1342,7 +1342,7 @@ def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
     from . import constraints as CN
     cons = CN.load(constraints) if isinstance(constraints, str) else constraints
     n, cur = _merge_current(dst)
-    before, applied, requeue, mine = cur, [], [], []
+    before, applied, requeue, mine, written = cur, [], [], [], []
     for net, path, stitched, args in accepted_lays(ledger):
         if net_rx and not re.search(net_rx, net):
             continue
@@ -1358,6 +1358,7 @@ def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
         if ok and os.path.exists(out):
             applied.append(net)
             mine.append((net, path))
+            written.append(out)
             n, cur = n + 1, out
         else:
             requeue.append({"net": net, "path": path, "why": why or "refused"})
@@ -1367,6 +1368,8 @@ def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
             for net, path in mine:
                 requeue.append({"net": net, "path": path, "why": why})
             del applied[len(applied) - len(mine):]
+            for p in written:                      # M1: the m<N> files this ledger wrote are removed, not left above `before`
+                _unlink_quiet(p)
             cur = before
     return {"applied": applied, "requeue": requeue, "board": cur}
 

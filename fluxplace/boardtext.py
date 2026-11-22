@@ -188,8 +188,8 @@ def reuuid_collisions(board):
                 new = new[:-8] + BO.MARK
             changed[old] = new
     if changed:
-        for old, new in changed.items():
-            text = text.replace(old, new)
+        pat = re.compile("|".join(re.escape(k) for k in changed))     # L3: one pass, dict lookup
+        text = pat.sub(lambda m: changed[m.group(0)], text)
         with open(board, "w", errors="surrogateescape") as fh:
             fh.write(text)
     return {"collisions": sum(1 for us in groups.values() if len(us) > 1), "changed": len(changed)}

@@ -91,6 +91,9 @@ def test_allow_incomplete_continues_past_sealed_fail_and_records_it(tmp_path, mo
         return {"verdict": "pass", "line": "pairs ok", "board": board}
     monkeypatch.setitem(PL.FUNCS, "fanout", fake_fanout)
     monkeypatch.setitem(PL.FUNCS, "pairs", fake_pairs)
+    # the pairs gate is not under test here (its real DRC needs a kicad-cli report of the synthetic board): a clean gate
+    monkeypatch.setattr(PL, "_gate_check", lambda c, n, name, board, kinds, src=None: {
+        "verdict": "pass", "board": board, "line": "gate stub clean", "next": [], "gate": {"kinds": kinds, "stop": "clean", "dir": ""}})
     rc = PL.run(a)
     assert seen, "pairs must run after a sealed-pin fanout FAIL under --allow-incomplete"
     ledger = open(os.path.join(a.workdir, "LEDGER.txt")).read()
