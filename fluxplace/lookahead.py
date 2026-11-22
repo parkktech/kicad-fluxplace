@@ -632,11 +632,23 @@ def _vtxt(kind, variant, pair):
     return f"{kind} min_nets={mn} esc={em:g}" + (f" {pair[0]}/{pair[1]}" if pair else "")
 
 
+def _png_cell(png, table):
+    """png path for TOURNAMENT.md: relative to W (the stream's workdir); without a stream, relative to the table's dir."""
+    if not png or png == "-":
+        return "-"
+    rel = EV.rel_path(png)
+    if os.path.isabs(rel):
+        d = os.path.dirname(os.path.abspath(table))
+        if os.path.abspath(png).startswith(d + os.sep):
+            rel = os.path.relpath(os.path.abspath(png), d).replace(os.sep, "/")
+    return rel
+
+
 def _table(path, rows):
     lines = ["| round | id | variant | fitness | png | verdict |", "|---|---|---|---|---|---|"]
     for r in rows:
         fit = "-" if r["fit"] is None else str(tuple(r["fit"]))
-        lines.append(f"| {r['round']} | {r['id']} | {r['variant']} | {fit} | {r['png']} | {r['verdict']} |")
+        lines.append(f"| {r['round']} | {r['id']} | {r['variant']} | {fit} | {_png_cell(r['png'], path)} | {r['verdict']} |")
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     EV.artifact("table", path, "TOURNAMENT")

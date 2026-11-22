@@ -54,6 +54,9 @@ note=<candidate id>)` per judged candidate.
 board, summed over nets; no extra load). A caller that passes its own count keeps it. `null` only if the count fails.
 | `parts` | frame: [[ref, x, y, rot, side]] (placer iterations, <= 2 per second) |
 | `artifact` | type (png/report/board/table), path, label |
+
+Paths: every artifact `path` and every png in TOURNAMENT.md is relative to W (forward slashes). It is absolute only
+when the file lies outside W (or no stream is set, in which case TOURNAMENT.md pngs are relative to the table's folder).
 | `eta` | secs_left, done_frac, model, basis |
 | `run_end` | verdict, secs, board |
 

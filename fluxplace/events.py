@@ -117,13 +117,16 @@ def _workdir():
     return os.path.dirname(p) if p else ""
 
 
-def _rel(path):
-    """Artifact paths are relative to W (contract)."""
+def rel_path(path):
+    """Path relative to the workdir W (the contract for artifact paths); absolute only outside W or without a stream."""
     base = _workdir()
     p = os.fspath(path)
     if base and os.path.isabs(p) and p.startswith(base + os.sep):
         return os.path.relpath(p, base).replace(os.sep, "/")
     return p
+
+
+_rel = rel_path
 
 
 def iteration(loop, i, n=None, metrics=None, note=""):

@@ -47,6 +47,23 @@ def test_iteration_and_artifact_paths_are_relative(tmp_path, monkeypatch):
     assert rows[2]["path"] == "relative/T.md"
 
 
+def test_table_and_artifact_paths_relative_to_workdir(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    W = tmp_path / "W"
+    events.init(W, run="G5")
+    (W / "lookahead").mkdir(parents=True)
+    png = str(W / "lookahead" / "c1" / "ghost.png")
+    rows = [{"round": 1, "id": "c1", "variant": "pairs", "fit": None, "png": png, "verdict": "kept"}]
+    lookahead._table(str(W / "lookahead" / "TOURNAMENT.md"), rows)
+    text = open(W / "lookahead" / "TOURNAMENT.md").read()
+    assert "| lookahead/c1/ghost.png |" in text and str(W) not in text
+    events.artifact("png", png, "c1")
+    assert _rows(W)[-1]["path"] == "lookahead/c1/ghost.png"
+    outside = tmp_path / "elsewhere" / "x.png"
+    events.artifact("png", str(outside), "out")
+    assert _rows(W)[-1]["path"] == str(outside)       # absolute only outside W
+
+
 def test_table_writes_artifact(tmp_path, monkeypatch):
     _clean(monkeypatch)
     events.init(tmp_path, run="H3")
