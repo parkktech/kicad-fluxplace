@@ -147,3 +147,23 @@ themselves. Reservations become soft costs, not only hard keepouts.
   variant with the first entry.
 - Without a `guide`, pairs.py behaviour is byte-identical (test: the existing pairs tests pass unchanged; add one test that
   a guide raising cost on the straight path makes the fixture's path bend around).
+
+## L7b (owner 11-22): both routers are throw-away ghosts, each is a source of ideas
+
+Owner: "KRT and Freerouting as throwaways and see what each wants to do, to have more versatile ideas". Supersedes the
+"best ghost is D's source" line of L7.
+
+- Default `ghost_routers = ["krt-whole", "freerouting"]`. Round 0 runs every ghost in parallel (Freerouting: jar
+  /home/jratz/tools/freerouting-2.5.0.jar unless `--freerouting-jar` is given; pin 2.5.x per EFFICIENCY-LOG 11-22).
+  A ghost that fails or times out is logged in TOURNAMENT.md and dropped; the round goes on with the rest.
+- No ghost is "the" plan. Each ghost g gives its own demand map D_g and corridors C_g. Round-1 candidates per ghost g:
+  the soft variants of L7 built from (D_g, C_g) only, tagged `src=g` in TOURNAMENT.md. Plus mixed candidates:
+  * `consensus`: reserve only cells both ghosts used for the same non-critical net side by side (D_krt and D_fr both
+    non-empty on that layer, or on any layer when `consensus_any_layer = true`); strongest channels, smallest area.
+  * `union`: reserve cells either ghost used (with `max_area_frac`), corridors = C_g of whichever ghost had the pair
+    connected and in audit tolerance (KRT first on a tie).
+  * per pair, adopt (L7 "adopt first") from whichever ghost has that pair in tolerance; both -> the shorter one.
+- Render one PNG per ghost too (round 0), so the owner can compare what each router wanted.
+- Later rounds keep `src` from the winner; the blocker re-lay variants (L5 step 3) use the demand map of the winner's
+  src (consensus/union use the merged map).
+- Keep `jobs` as the cap on concurrent router processes (each JVM / KRT call counts as one).
