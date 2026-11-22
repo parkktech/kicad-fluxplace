@@ -226,3 +226,34 @@ A ghost must spend its whole budget routing SIGNAL nets. Replace `ghost()`'s pip
   opens before/after (routeconn text count), so the next run shows whether a ghost earned its minutes.
 - Tests: command lists built for both paths (monkeypatched subprocess), checkpoint fallback, plane nets excluded.
 - Do not touch the verify ghost (tier 2): it stays the pipeline route stage (it must route like the real flow).
+
+## L10 (owner 11-22): streaming ghosts, the first one lands -> round 1 starts; the slow one is checked when it lands
+
+Owner: "run KRT and Freeroute and start when the first one lands, let the other finish or time out in the background,
+and double check the second one when it lands to see if it had a better plan". Run 2 measured: KRT --quick 2 ghost 80 s,
+FR 1 pass > 12 min on 614 items; round 1 idled 10 min waiting for FR.
+
+- Round 0 launches every router ghost in the background (futures). The global ghost (seconds) runs inline.
+- As soon as the FIRST router ghost lands (or every router ghost failed -> global only), build sources and start round 1
+  from what is in hand. Do not wait for the others.
+- Late ghost: when another router ghost lands while rounds are running, write its round-0 TOURNAMENT row + PNG + stats at
+  once, then compare its plan with the current source: `fitness` of the ghost board (pairs complete, opens, sealed) AND
+  the channel overlap (Jaccard of the two demand maps' reserved cells). Log one line in TOURNAMENT.md / progress.json:
+  `late ghost <r>: pairs a vs b, opens x vs y, overlap z % -> better | equal | worse`.
+  * better (lexicographically lower fitness key than the ghost the running round was built from): the NEXT round gets the
+    late ghost's candidates (its own soft variants + consensus/union with the first ghost), in addition to the blocker
+    re-lays. If the stage would stop after the current round (stop rules), it runs one more round for them.
+  * equal / worse: its consensus/union with the first ghost is still added once as one extra candidate in the next round
+    (two opinions agreeing on a channel is stronger evidence), nothing else.
+- A ghost still running when the stage finishes is killed (its process group) and logged `timeout (stage done)`.
+- Timing in progress.json per ghost: launched, landed, secs, and whether it was used (`first`, `late-better`, `late-used
+  -consensus`, `late-ignored`, `timeout`).
+- Tests (monkeypatched ghosts with scripted delays): round 1 starts after the first ghost, a late better ghost adds
+  candidates to the next round, a late worse ghost adds only the consensus candidate, a still-running ghost is killed
+  at stage end.
+
+## L11 live board for the dashboard
+
+- The main lookahead process takes a forced snapshot (`snapshot.active_take(board, reason, force=True)`) of every
+  ghost board as it lands (reason `ghost <router>`) and of every candidate's locked board and verify board as results
+  come back (reason `cand <id> locked|verify`). Workers stay snapshot-free. Test with a monkeypatched active_take.
