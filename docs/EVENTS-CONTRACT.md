@@ -40,7 +40,13 @@ All paths are under the pipeline workdir `W` (`--workdir`). Board-agnostic. Emit
 `pct`: run_logged status sets it from the router's nets done / total; lookahead sets (rounds done + candidates landed
 in the round / candidates in the round) / max_rounds x 100, 100 at done; the pipeline/placetour pct is null unless a writer
 knows it. Pairs has no progress writer on this branch, so its pct is null (not wired).
-| `iteration` | loop (place/pairs/route/close/lookahead/ghost/tune), i, n (or null), metrics{} (opens, shorts, overflow, hpwl, score, pairs_complete, ...), note |
+| `iteration` | loop (place/place-cand/pairs/route/close/lookahead/ghost/tune), i, n (or null), metrics{} (opens, shorts, overflow, hpwl, score, pairs_complete, ...), note |
+
+Per-candidate events (lookahead): one `iteration(loop="lookahead", i=<candidate index in the run, 1-based>,
+metrics=<fit fields without lists/dicts/tuples>, note=<candidate tag>)` as each candidate result lands in the main
+process (results arrive per round batch). Ghosts: `loop="ghost"`, `i=<round>`, same note rule.
+Placetour (not on this branch; wired at merge): `iteration(loop="place-cand", i, metrics=<judge key fields>,
+note=<candidate id>)` per judged candidate.
 | `log` | level (info/warn/error), text (<= 400 chars), src (router name / module) |
 | `snapshot` | path (relative to W), full (bool), reason, opens |
 

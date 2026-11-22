@@ -148,3 +148,19 @@ def test_lookahead_pct_formula_and_progress_file(tmp_path, monkeypatch):
     spath = str(tmp_path / "progress.json")
     lookahead._progress(spath, "running", "round 2", pct=50.0)
     assert json.load(open(spath))["pct"] == 50.0
+
+
+def test_candidate_iteration_events_index_and_metrics(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    events.init(tmp_path, run="G3")
+    lookahead._CAND["i"] = 0
+    fit = {"pairs_complete": 2, "pairs_total": 3, "opens": 1, "key": (-2, 0, 1, 0, 0, 0.0),
+           "critical": ["CAN_H", "CAN_L"], "blockers": {"P|N": {"count": 1}}, "unconnected": []}
+    lookahead._row(1, "r1-0", "pairs", fit, None, "kept")
+    lookahead._row(1, "ghost-krt", "unlocked", None, None, "reference")
+    lookahead._row(1, "r1-1", "pairs", fit, None, "winner")
+    rows = [r for r in _rows(tmp_path) if r["kind"] == "iteration"]
+    assert [(r["loop"], r["i"]) for r in rows] == [("lookahead", 1), ("ghost", 1), ("lookahead", 2)]
+    assert rows[0]["note"] == "r1-0" and rows[0]["metrics"]["opens"] == 1
+    assert "critical" not in rows[0]["metrics"] and "blockers" not in rows[0]["metrics"]
+    assert "key" not in rows[0]["metrics"]

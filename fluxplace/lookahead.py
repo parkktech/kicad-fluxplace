@@ -958,13 +958,20 @@ def _vtxt2(src, kind, variant, pair):
     return f"{src} " + _vtxt(kind, variant, pair)
 
 
+_CAND = {"i": 0}      # candidate counter for the event stream (per process)
+
+
 def _row(r, tag, variant, fit, png, verdict):
     row = {"round": r, "id": tag, "variant": variant, "fit": tuple(fit["key"]) if fit else None,
            "png": png or "-", "verdict": verdict}
     try:                                                   # event stream (docs/EVENTS-CONTRACT.md); never raises
-        EV.iteration("ghost" if str(tag).startswith("ghost") else "lookahead", r, None,
-                     {k: v for k, v in (fit or {}).items() if k in ("pairs_complete", "pairs_total", "shorts", "opens",
-                                                                  "sealed", "drc_errors", "reserved_area")}, verdict)
+        if str(tag).startswith("ghost"):
+            loop, idx = "ghost", r
+        else:
+            _CAND["i"] += 1                                # candidate index in this run
+            loop, idx = "lookahead", _CAND["i"]
+        metrics = {k: v for k, v in (fit or {}).items() if not isinstance(v, (list, tuple, dict))}
+        EV.iteration(loop, idx, None, metrics, note=tag)
         if png:
             EV.artifact("png", png, f"{tag} {variant}")
     except Exception:
