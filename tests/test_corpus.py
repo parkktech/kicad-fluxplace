@@ -170,3 +170,14 @@ def test_end_to_end_scorecard_and_baseline_compare(tmp_path):
                        "--work", str(tmp_path / "work2"), "--baseline", str(base), "--jobs", "2"])
     assert C.main(a2) == 0
     assert (tmp_path / "out2" / "fast" / "compare.md").exists()
+
+
+def test_manifest_passes_bench_table_through_or_empty(tmp_path):
+    (tmp_path / "x.kicad_pcb").write_text("")
+    m = tmp_path / "corpus.toml"
+    m.write_text('[[board]]\nname = "a"\nboard = "x.kicad_pcb"\n'
+                 '[board.bench]\ntask = "finish"\nstrip = true\nbudget_s = 900\n'
+                 '[[board]]\nname = "b"\nboard = "x.kicad_pcb"\n')
+    boards, _ = C.load_manifest(str(m))
+    assert boards[0]["bench"] == {"task": "finish", "strip": True, "budget_s": 900}
+    assert boards[1]["bench"] == {}

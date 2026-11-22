@@ -61,7 +61,8 @@ def load_manifest(path):
         if set(tiers) - {"fast", "full"}:
             raise ValueError(f"manifest: {name}: tier must be fast and/or full, got {tiers}")
         ent = {"name": name, "tier": tiers, "notes": e.get("notes", ""),
-               "pipeline_args": list(e.get("pipeline_args", [])), "timeout_s": int(e.get("timeout_s", 900))}
+               "pipeline_args": list(e.get("pipeline_args", [])), "timeout_s": int(e.get("timeout_s", 900)),
+               "bench": dict(e.get("bench", {}))}
         for key in ("board", "spec", "constraints"):
             if key not in e:
                 if key == "board":
