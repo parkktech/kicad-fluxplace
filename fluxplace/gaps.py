@@ -1471,27 +1471,78 @@ def _ai_pending_names(ai_dir, gaps):
     return sorted(names)
 
 
-def window_hash(board, at, r=WINDOW_MM):
-    """PHASE3I B3: sha1 of the tracks and vias whose ends lie within `r` mm of `at` (the gap window). A gap with no
-    position, or a board that cannot be read, falls back to the whole-board copper fingerprint."""
-    if not at:
-        return versions.copper_fingerprint(board)
+_ROWS = {}                                      # PHASE3F/I: (abspath, mtime_ns, size) -> board rows, two entries
+
+
+def _load_rows(board):
+    """PHASE3I F3: ONE pcbnew load -> tracks/arcs, vias, pads and footprints (all nm), for the window hash."""
     import pcbnew
     b = pcbnew.LoadBoard(board)
-    if b is None:                                    # not a readable board: the file bytes are the key (conservative)
-        return hashlib.sha1(open(board, "rb").read()).hexdigest()
-    cx, cy, R = pcbnew.FromMM(at[0]), pcbnew.FromMM(at[1]), pcbnew.FromMM(r)
-
-    def inside(p):
-        return abs(p.x - cx) <= R and abs(p.y - cy) <= R
-    rows = []
+    if b is None:
+        raise ValueError("unreadable board")
+    tracks, vias = [], []
     for t in b.GetTracks():
         if t.Type() == pcbnew.PCB_VIA_T:
-            if inside(t.GetPosition()):
-                rows.append(["via", t.GetNetname(), t.GetLayer(), t.GetPosition().x, t.GetPosition().y, t.GetWidth(), t.GetDrill()])
-        elif inside(t.GetStart()) or inside(t.GetEnd()):
-            rows.append(["trk", t.GetNetname(), t.GetLayer(), t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y, t.GetWidth()])
-    return hashlib.sha1(json.dumps(sorted(rows, key=str)).encode()).hexdigest()
+            p = t.GetPosition()
+            vias.append((t.GetNetname(), t.GetLayer(), p.x, p.y, t.GetWidth(), t.GetDrill()))
+        else:
+            bb, s0, s1 = t.GetBoundingBox(), t.GetStart(), t.GetEnd()
+            tracks.append((t.GetNetname(), t.GetLayer(), s0.x, s0.y, s1.x, s1.y, t.GetWidth(),
+                           bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
+    pads, fps = [], []
+    for fp in b.GetFootprints():
+        p = fp.GetPosition()
+        fps.append((fp.GetReference(), p.x, p.y, round(fp.GetOrientationDegrees(), 3), fp.GetLayer()))
+        for pd in fp.Pads():
+            q = pd.GetPosition()
+            pads.append((pd.GetNetname(), fp.GetReference(), q.x, q.y))
+    return {"tracks": tracks, "vias": vias, "pads": pads, "fps": fps}
+
+
+def _board_rows(board):
+    """cached `_load_rows` (two boards at a time, keyed by path, mtime and size)."""
+    st = os.stat(board)
+    key = (os.path.abspath(board), st.st_mtime_ns, st.st_size)
+    if key not in _ROWS:
+        if len(_ROWS) >= 2:
+            _ROWS.pop(next(iter(_ROWS)))
+        _ROWS[key] = _load_rows(board)
+    return _ROWS[key]
+
+
+def window_hash(board, gap, r=WINDOW_MM):
+    """PHASE3I B3/F3: memo key part for one gap. The window is the bbox of the gap's net pads padded `r` mm (no pads: `at`
+    +- r; neither: the whole-board fingerprint). Hash = every track/arc whose bbox meets the window, vias and footprints
+    inside it. `gap` may be a gap dict or a bare `at` pair."""
+    import pcbnew
+    gap = gap if isinstance(gap, dict) else {"at": gap, "nets": []}
+    try:
+        rows = _board_rows(board)
+    except Exception:                                # not a readable board: the file bytes are the key (conservative)
+        return hashlib.sha1(open(board, "rb").read()).hexdigest()
+    R = pcbnew.FromMM(r)
+    nets = set(gap.get("nets") or [])
+    box = None
+    pts = [(x, y) for n, _ref, x, y in rows["pads"] if n in nets]
+    if pts:
+        box = (min(x for x, _ in pts) - R, min(y for _, y in pts) - R, max(x for x, _ in pts) + R, max(y for _, y in pts) + R)
+    elif gap.get("at"):
+        cx, cy = pcbnew.FromMM(gap["at"][0]), pcbnew.FromMM(gap["at"][1])
+        box = (cx - R, cy - R, cx + R, cy + R)
+    if box is None:
+        return versions.copper_fingerprint(board)
+    x0, y0, x1, y1 = box
+    out = []
+    for n, layer, sx, sy, ex, ey, w, l, t, rt, bt in rows["tracks"]:
+        if rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
+            out.append(["trk", n, layer, sx, sy, ex, ey, w])
+    for n, layer, x, y, w, d in rows["vias"]:
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            out.append(["via", n, layer, x, y, w, d])
+    for ref, x, y, rot, layer in rows["fps"]:
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            out.append(["fp", ref, x, y, rot, layer])
+    return hashlib.sha1(json.dumps(sorted(out, key=str)).encode()).hexdigest()
 
 
 def _rank(kind, rungs, yields):
@@ -1899,7 +1950,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     tries = []
 
     state_path = os.path.join(work, "gaps.json")
-    memo = set()
+    memo, memo_err = set(), set()                        # PHASE3I F3: an error is remembered in this pass only
     ai_used = {}
     yields = {}
     stall_s = float((cons.get("flow") or {}).get("stall_min", STALL_MIN)) * 60
@@ -1937,7 +1988,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         fp = versions.copper_fingerprint(best)
         # PHASE3I B3: memo key = rung, kind, gap signature and the copper in each gap window (not the whole board)
         sigs = sorted(f"{g['kind']}|{','.join(sorted(g.get('nets') or []))}|{g.get('at')}" for g in targets)
-        wins = sorted(window_hash(best, g.get("at")) for g in targets)
+        wins = sorted(window_hash(best, g) for g in targets)
         key = (rung, kind, hashlib.sha1(json.dumps([sigs, wins]).encode()).hexdigest())
         if sub:                                              # PHASE3F A3: a split half has its own memo key
             key = key + ("sub:" + hashlib.sha1(",".join(sorted(g["id"] for g in targets)).encode()).hexdigest(),)
@@ -1949,7 +2000,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None
-        if key in memo and not ai_names:                 # PHASE3H A8: a pending answer is always tried
+        if (key in memo or key in memo_err) and not ai_names:   # PHASE3H A8: a pending answer is always tried
             result, why = "skipped", "memo"
         else:
             try:
@@ -2027,7 +2078,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
         if result == "packet":
             n_packets += 1
-        if result != "skipped":                              # PHASE3I B3: per-kind, per-rung yield in this work dir
+        if result not in ("skipped", "packet"):              # PHASE3I B3: per-kind, per-rung yield; F3 R17: answers only
             yl = yields.setdefault(kind, {}).setdefault(rung, [0, 0])
             yl[0] += 1
             if result in ("closed", "partial"):
@@ -2041,8 +2092,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             tg = next((g for g in targets if g["id"] == summ["gap_id"]), None)
             if tg is not None:
                 _feedback_note(ctx_dir_ai(work), critroute._safe(ai_key(tg))[:80], refused=str(why)[:160])
-        if result in ("refused", "error") and not ai_names:   # PHASE3H A3 / A8
+        if result == "refused" and not ai_names:             # PHASE3H A3 / A8
             memo.add(key)
+        if result == "error" and not ai_names:               # PHASE3I F3 R7: a crash or timeout is not a refusal
+            memo_err.add(key)
         if rung == "pairgroup" and result == "refused":      # PHASE3F A5: a refused non-gated pair goes to the router
             for g in targets:
                 if g["class"] == "pair" and len(g["nets"]) == 2 and g["nets"] not in fallback:
@@ -2122,7 +2175,12 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     stop = "budget"
                     break
                 if time.time() - last_acc[0] > stall_s:      # PHASE3I B3: no accept for stall_min: stop, do not re-run
-                    stop = "stalled"
+                    for k2 in ORDER:                         # PHASE3I F3 R8: every kind with gaps gets its ai packet first
+                        tg2 = [g for g in vis(m["gaps"]) if g["kind"] == k2]
+                        if tg2 and "ai" in DISPATCH.get(k2, []):
+                            attempt(r, k2, "ai", tg2)
+                            save(r)
+                    stop = "packets" if n_packets > packets_before else "stalled"
                     break
                 accepted = attempt_split(r, kind, rung, targets)
                 save(r)
