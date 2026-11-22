@@ -400,8 +400,8 @@ def run(board, cons, out, stage="pre"):
     for sp in specs:
         if stage == "pre":
             _pre(PN, b, sp, log, RD.load(board)["clearance"], keep)
-        elif sp["mask"]:
-            _post(PN, b, sp, log, keep)
+        elif sp["mask"]:                     # PHASE3I B6: a mask opening is cut in the finish stage (recut), never before routing
+            log.append(f"thermal {sp['name']} post: deferred to the finish stage (recut); no mask opening written")
         else:
             log.append(f"thermal {sp['name']} post: skipped (mask_open is not set)")
     pours = [z for z in b.Zones() if not z.GetIsRuleArea()]   # rule areas have no fill; the filler crashes on them

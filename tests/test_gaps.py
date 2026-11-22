@@ -716,7 +716,7 @@ def test_classify_mask_opening_bridge():
     gs = GP.classify({"violations": [v], "unconnected_items": []}, {})
     assert gs[0]["kind"] == "mask-opening" and gs[0]["id"].startswith("mask-opening:")
     assert gs[0]["evidence"] == GP.MASK_OPENING_EVIDENCE and GP.DISPATCH["mask-opening"] == ["maskcut"]
-    assert GP.ORDER.index("mask-opening") == GP.ORDER.index("short") + 1
+    assert GP.ORDER.index("mask-opening") == GP.ORDER.index("open-free") + 1     # PHASE3I B6: after copper kinds
     plain = dict(v, items=[{"description": "Track [SIG_A] on F.Cu", "pos": {"x": 2, "y": 2}}] * 2)
     assert GP.classify({"violations": [plain], "unconnected_items": []}, {})[0]["kind"] == "short"
 

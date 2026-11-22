@@ -22,8 +22,8 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "track_not_centered_on_via": "via-offcentre"}
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
-ORDER = ["short", "mask-opening", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "open-gap",
-         "open-pour", "open-free", "clearance", "dangling", "via-offcentre", "pin-escape"]
+ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "open-gap",
+         "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 # a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
