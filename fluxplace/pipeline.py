@@ -1195,7 +1195,9 @@ def _gate_check(c, n, name, board, kinds):
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
-            "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]}
+            "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
+            + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
+               for p in r.get("packets") or [] if p.get("kind") == "session"]}
 
 
 def st_pairs(c, n, board):

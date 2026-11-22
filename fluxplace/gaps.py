@@ -1446,6 +1446,9 @@ def _packet_rows(work, gaps, used, budget):
             png = []
         rows.append({"gap_id": g["id"], "packet": pk, "png": png, "action": os.path.join(ai_dir, sid + ".action.json"),
                      "budget_left": max(0, budget - used.get(key, 0))})
+    for r in _sessions_load(ai_dir):                          # PHASE3I F4: one row per open session region
+        if r.get("status") == "open":
+            rows.append({"kind": "session", "region": r["rid"], "brief": r["brief"], "session": r["session"]})
     return rows
 
 
@@ -1462,12 +1465,18 @@ def _proposal_rows(ai_dir):
 
 
 def _ai_pending_names(ai_dir, gaps):
-    """Sorted basenames of the unapplied action files (existing `<sid>.action.json` only) for `gaps`."""
+    """Sorted basenames of the unapplied answers for `gaps`: `<sid>.action.json`, and PHASE3I F4 `<rid>.done.json` of an
+    open session region that holds one of the gaps."""
     names = set()
     for g in gaps:
         name = critroute._safe(ai_key(g))[:80] + ".action.json"
         if os.path.exists(os.path.join(ai_dir, name)):
             names.add(name)
+    ids = {g["id"] for g in gaps}
+    for r in _sessions_load(ai_dir):
+        done = r.get("rid", "") + ".done.json"
+        if r.get("status") == "open" and ids & set(r.get("gaps", [])) and os.path.exists(os.path.join(ai_dir, done)):
+            names.add(done)
     return sorted(names)
 
 
@@ -1607,6 +1616,8 @@ def _r_ai(base, out, gaps, ctx):
     nothing and is consumed uncharged (status invalid). close guards the board like any other rung."""
     if ctx.get("ai_mode") == "off":
         return {"status": "ai off"}
+    if ctx.get("ai_mode") == "session":                        # PHASE3I F4 (B2): regions with briefs for an agent
+        return _r_ai_session(base, out, gaps, ctx)
     used = ctx["ai_used"]
     budget = _ai_budget(ctx.get("cons"))                       # PHASE3F B5
     ai_dir = ctx["ai_dir"]
@@ -1664,6 +1675,69 @@ def _r_ai(base, out, gaps, ctx):
             fh.write(json.dumps(pk))
         n += 1
     return {"status": "packet", "n": n} if n else {"status": "no packet", "n": 0}
+
+
+def _sessions_load(ai_dir):
+    """PHASE3I F4: the regions of the session mode (ai/sessions.json); [] when there are none."""
+    try:
+        with open(os.path.join(ai_dir, "sessions.json")) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _r_ai_session(base, out, gaps, ctx):
+    """PHASE3I F4 (B2, brief phase): `[ai] mode = "session"`. The open gaps with AI budget left that are in no open region
+    are clustered (cluster_regions); each region gets its own session board and a brief for an agent, which lays copper
+    there and writes <rid>.done.json. Returns "packet" (close: result packet, exit 5); nothing is written to `out`."""
+    from . import handroute as HR
+    ai_dir = ctx["ai_dir"]
+    os.makedirs(os.path.join(ai_dir, "sessions"), exist_ok=True)
+    budget = _ai_budget(ctx.get("cons"))
+    used = ctx["ai_used"]
+    regs = _sessions_load(ai_dir)
+    busy = {gid for r in regs if r.get("status") == "open" for gid in r.get("gaps", [])}
+    todo = [g for g in gaps if g["id"] not in busy and used.get(ai_key(g), 0) < budget]
+    by_id = {g["id"]: g for g in todo}
+    made = []
+    for reg in cluster_regions(todo)[:_ai_packets(ctx.get("cons"))]:
+        grp = [by_id[i] for i in reg["gaps"]]
+        rid = critroute._safe("region-" + reg["gaps"][0])[:60]
+        n = 1
+        while os.path.exists(os.path.join(ai_dir, "sessions", f"{rid}-{n}.kicad_pcb")):
+            n += 1
+        sess = os.path.join(ai_dir, "sessions", f"{rid}-{n}.kicad_pcb")
+        h = HR.session_begin(base, sess)
+        packets, rejected = [], []
+        for g in grp:
+            sid = critroute._safe(ai_key(g))[:80]
+            if len(packets) < 3:
+                pk_path = os.path.join(ai_dir, sid + ".packet.json")
+                with open(pk_path, "w") as fh:
+                    fh.write(json.dumps(gap_packet(base, g, ctx, sid=sid)))
+                packets.append(pk_path)
+            try:
+                with open(os.path.join(ai_dir, sid + ".feedback.json")) as fh:
+                    refused = (json.load(fh) or {}).get("refused")
+            except (OSError, ValueError, AttributeError):
+                refused = None
+            if refused:
+                rejected.append({"gap": g["id"], "refused": refused})
+        brief = os.path.join(ai_dir, rid + ".brief.json")
+        _write_json(brief, {
+            "v": 1, "region": rid, "session": sess, "ledger": os.path.join(h["session"], "ledger.txt"),
+            "box": reg["box"], "nets": reg["nets"],
+            "gaps": [{"id": g["id"], "kind": g["kind"], "class": g["class"], "nets": g.get("nets") or [], "at": g.get("at")}
+                     for g in grp],
+            "packets": packets, "rejected": rejected,
+            "tactics": ["suggest", "lay", "lay --stitch", "shove (unlocked only)", "undo"],
+            "done": f"write {rid}.done.json = {{\"ledger\": <path>}} when finished"})
+        regs.append({"rid": rid, "status": "open", "gaps": reg["gaps"], "nets": reg["nets"], "box": reg["box"],
+                     "session": sess, "brief": brief, "base_fp": versions.copper_fingerprint(base)})
+        made.append(brief)
+    _write_json(os.path.join(ai_dir, "sessions.json"), regs)
+    return {"status": "packet", "n": len(made), "briefs": made} if made else {"status": "no packet", "n": 0}
 
 
 def _r_tune(base, out, gaps, ctx):
