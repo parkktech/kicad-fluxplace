@@ -1068,12 +1068,21 @@ def _stitch_attempts(b, M, nets, via=None, tries=3):
 
 def lay(board, net, path, out=None, constraints=None, width=None, via=None, any_angle=False, partial=False, kicad_cli="kicad-cli", lock=False,
         stitch=False):
+    from . import power as PW
+    from . import constraints as CN
+    cons = CN.load(constraints) if isinstance(constraints, str) else (constraints or {})
+    need = PW.track_width_mm(cons, net)            # PHASE3I B4: a [power] net is laid at its required width, never less
     def mutate(b, M):
         prims = G.parse_path(path, M.cu)
         if net not in {o.net for o in M.obs if o.net}:
             raise ValueError(f"unknown net {net!r}")
         rule = M.net_rule(net)
         w = width or rule["width"]
+        if need is not None:
+            if width is None:
+                w = max(w, need)
+            elif width < need - 1e-9:
+                raise ValueError(f"width {width:g} mm is below the {need:g} mm that [power.{net}] needs")
         vv = via or (rule["via_dia"], rule["via_drill"])
         pr = probe_prims(M, net, prims, w, vv, any_angle)
         if not pr["ok"]:
@@ -1346,6 +1355,15 @@ def session_commit(work, out, constraints=None, kicad_cli="kicad-cli", mode="rep
                         mode, base_board=start, cand_board=S.work, snap=_snap, protect=protect)
     if not ok:
         reasons.append(why)
+    elif mode == "repair":                          # PHASE3I B4: R6 (hs_pair/rf/power/power_mag) judged as close judges it
+        from . import gaps as GP
+        base_m = GP._remeasure(start, kicad_cli)
+        GP._classify_into(base_m, cons, start)
+        cand_m = GP._remeasure(S.work, kicad_cli)
+        GP._classify_into(cand_m, cons, S.work)
+        ok6, why6 = GP._accept(base_m, start, cand_m, S.work, [], cand_m["gaps"], None, protect)
+        if not ok6:
+            reasons.append(why6)
     Ma, Mb = G.Model(start), G.Model(S.work)
     reescapes = _active_locked_reescapes(S)
     reescape_nets = {x["net"] for ent in reescapes for x in ent["removed_locked"]}
