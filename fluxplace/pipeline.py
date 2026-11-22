@@ -899,7 +899,8 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     from . import pairfb as PFB
     hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage handed over (state c): still never plain nets for the router (PHASE3C)
-    skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
+    hs_hand = PFB.handoff_hs_nets(getattr(c, "state", None), getattr(c, "work", ""), c.cons)   # PHASE3I B1: a gated pair the pairs gate did not close is never a plain net
+    skip = sorted(set(PFB.router_skip(todo, ctl, hand, FS["pairs"])) | (set(todo) & hs_hand))
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)
     if bad:
@@ -1170,6 +1171,23 @@ def st_critroute(c, n, board):
     return CR.stage(c, n, board)
 
 
+def _gate_check(c, n, name, board, kinds):
+    """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
+    -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
+    from . import gaps as GP, calllog as CL
+    d = c.dir(n, "gate")
+    att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    try:
+        r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds)
+    except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": []}
+    stop = r["stop"]
+    verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
+    line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
+    return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
+            "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]}
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
@@ -1384,6 +1402,7 @@ def run(a):
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
+    from . import gaps as GP_
     rc = 0
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
@@ -1396,6 +1415,12 @@ def run(a):
         res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
         led.after(name, i + 1, res)
+        gk = GP_.gate_kinds(c.cons, name)
+        if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
+            g = _gate_check(c, i + 1, name, res.get("board") or board, gk)
+            res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
+            if g["verdict"] == "packets":
+                res["gate_packets"] = True
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
         if res.get("board") and res["board"] != prev:
@@ -1438,7 +1463,10 @@ def run(a):
             rc = 5
             for l in res.get("next", [])[:40]:
                 print(l)
-            print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
+            if res.get("gate_packets"):
+                print(f"pipeline: gate {name} is open; the flow stops here (exit 5), later stages not started")
+            else:
+                print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
             break
         if res["verdict"] == "questions":
             rc = 3

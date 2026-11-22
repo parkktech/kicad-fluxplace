@@ -142,11 +142,36 @@ def _r5_set(kind, targets, protect, relax, fallback=()):
     return protect - (relax & set(_nets(targets)))
 
 
+# PHASE3I B1: stage gates. Gap kinds that must be zero before the next constructive stage runs. Pair kinds count only
+# for gated (high-speed) pairs; low-speed pairs are left to the router. [flow.gates] in constraints overrides per stage.
+GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-skew"]}
+
+
+def gate_kinds(cons, stage):
+    """Kinds gating `stage` ([] = no gate). cons [flow.gates] = {stage: [kind, ...]} overrides the defaults."""
+    over = ((cons or {}).get("flow") or {}).get("gates") or {}
+    kinds = over[stage] if stage in over else GATE_DEFAULTS.get(stage, [])
+    return list(kinds or [])
+
+
+def in_scope(g, kinds):
+    """A gap is in a gate's scope when its kind is listed; pair kinds only for gated (hs-pair) pairs."""
+    if kinds is None or g["kind"] not in kinds:
+        return kinds is None
+    return g["kind"] not in ("pair-open", "pair-asym", "pair-skew") or g.get("class") == "hs-pair"
+
+
 def _classify_into(mm, cons, board):
     """Set mm["gaps"] (with board review gaps) and mm["review_failed"] (the review sources that raised)."""
     failed = []
     mm["gaps"] = classify(mm["drc"], cons, board=board, failed_out=failed)
     mm["review_failed"] = failed
+
+
+def _scope_gaps(mm, kinds):
+    """PHASE3I B1: keep only the gaps of a gate's scope (kinds None = every gap)."""
+    if kinds is not None:
+        mm["gaps"] = [g for g in mm["gaps"] if in_scope(g, kinds)]
 
 
 def classify(d, cons=None, board=None, failed_out=None):
@@ -1794,7 +1819,7 @@ def _rung_job(job_path):
 
 
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, runs=None, log=print, inproc=False):
+          attempts=None, runs=None, log=print, inproc=False, kinds=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
     os.makedirs(work, exist_ok=True)
@@ -1816,6 +1841,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         log(f"initial refill failed ({str(e)[:80]}); measuring the copy unrefilled")
         m = dict(measure(best, kicad_cli))
     _classify_into(m, cons, best)
+    _scope_gaps(m, kinds)
     protect = _protect(best, cons)
     relax = relax_nets(m["gaps"])
     start = _vitals(m)
@@ -1904,6 +1930,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     cm = _remeasure(out, kicad_cli)
                     runs = 1
                     _classify_into(cm, cons, out)
+                    _scope_gaps(cm, kinds)
                     cand = score(cm, cm["gaps"])          # PHASE3F A2: what the candidate cost, accepted or not
                     final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind,
@@ -1925,6 +1952,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         cm = _remeasure(final, kicad_cli)
                         runs += 1
                         _classify_into(cm, cons, final)
+                        _scope_gaps(cm, kinds)
                         cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))

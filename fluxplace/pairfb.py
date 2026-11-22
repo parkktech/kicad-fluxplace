@@ -367,6 +367,20 @@ def handoff_nets(state, work):
         return set()
 
 
+def handoff_hs_nets(state, work, cons=None):
+    """PHASE3I B1: the legs of handed-over pairs that are gated (high-speed). They never reach the plain router."""
+    from . import review as RV
+    import json
+    try:
+        d = ((state or {}).get("stages") or {}).get("pairs", {}).get("dir")
+        if not d:
+            return set()
+        rep = json.load(open(os.path.join(work, d, "board.pairs.json")))
+        return {n for r in rep.get("pairs", []) if r.get("handoff") and RV.pair_gated(cons, r["pair"][0]) for n in r["pair"]}
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+        return set()
+
+
 def router_skip(todo, controlled, handoff, mode):
     """nets the whole-board router is told to leave alone: the controlled nets (pairs, RF, clocks). PHASE3C D71cj (c): a pair
     leg is never routed as a plain net, handed-over pairs (`handoff`, state c) included; the pairgroups step re-lays them
