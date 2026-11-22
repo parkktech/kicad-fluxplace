@@ -1,0 +1,237 @@
+{
+ "date": "2026-11-22",
+ "kicad_version": "10.0.5",
+ "board": "calibration (kdiff.build), 4-layer, outline 0..200 mm",
+ "false_accept": 0,
+ "epsilon_band": {
+  "kicad_accepts_shortfall_nm": 500,
+  "kicad_flags_shortfall_nm": 1000,
+  "note": "kernel is strict (0 tolerance); kernel-only flags inside the band are false refusals"
+ },
+ "kicad_blind": {
+  "different_net_touch": "kicad-cli reports no shorting_items for an end-to-end touch of different nets on this build"
+ },
+ "rows": [
+  {
+   "case": "clr_minus_1um",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": true
+  },
+  {
+   "case": "clr_at",
+   "group": "clearance",
+   "expect_violation": false,
+   "kicad": [],
+   "kernel": [],
+   "agree": true
+  },
+  {
+   "case": "clr_plus_1um",
+   "group": "clearance",
+   "expect_violation": false,
+   "kicad": [],
+   "kernel": [],
+   "agree": true
+  },
+  {
+   "case": "eps_1nm",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": false
+  },
+  {
+   "case": "eps_10nm",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": false
+  },
+  {
+   "case": "eps_100nm",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": false
+  },
+  {
+   "case": "eps_300nm",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": false
+  },
+  {
+   "case": "eps_500nm",
+   "group": "clearance",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": false
+  },
+  {
+   "case": "local_pad_0p3_wins",
+   "group": "precedence",
+   "expect_violation": true,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": true
+  },
+  {
+   "case": "dru_lowers_0p1",
+   "group": "dru",
+   "expect_violation": false,
+   "kicad": [],
+   "kernel": [],
+   "agree": true
+  },
+  {
+   "case": "dru_raises_0p4",
+   "group": "dru",
+   "expect_violation": true,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": true
+  },
+  {
+   "case": "hole_clr_minus_1um",
+   "group": "hole",
+   "expect_violation": true,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [
+    "clearance",
+    "hole clearance"
+   ],
+   "agree": true
+  },
+  {
+   "case": "hole_copper_at",
+   "group": "hole",
+   "expect_violation": true,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [
+    "clearance"
+   ],
+   "agree": true
+  },
+  {
+   "case": "h2h_minus_1um",
+   "group": "hole",
+   "expect_violation": true,
+   "kicad": [
+    "hole to hole"
+   ],
+   "kernel": [
+    "hole clearance",
+    "hole to hole",
+    "short"
+   ],
+   "agree": true
+  },
+  {
+   "case": "edge_minus_1um",
+   "group": "edge",
+   "expect_violation": true,
+   "kicad": [
+    "edge"
+   ],
+   "kernel": [
+    "edge"
+   ],
+   "agree": true
+  },
+  {
+   "case": "edge_at",
+   "group": "edge",
+   "expect_violation": false,
+   "kicad": [],
+   "kernel": [],
+   "agree": true
+  },
+  {
+   "case": "same_net_overlap",
+   "group": "same",
+   "expect_violation": false,
+   "kicad": [],
+   "kernel": [],
+   "agree": true
+  },
+  {
+   "case": "different_net_touch",
+   "group": "short",
+   "expect_violation": true,
+   "kicad": [],
+   "kernel": [
+    "short"
+   ],
+   "agree": false
+  },
+  {
+   "case": "npth_annulus",
+   "group": "recorded",
+   "expect_violation": null,
+   "kicad": [],
+   "kernel": [],
+   "agree": null
+  },
+  {
+   "case": "blind_via_hole_outside_span",
+   "group": "recorded",
+   "expect_violation": null,
+   "kicad": [
+    "clearance"
+   ],
+   "kernel": [],
+   "agree": null
+  },
+  {
+   "case": "wide_edge_stroke",
+   "group": "not_run",
+   "expect_violation": null,
+   "kicad": [],
+   "kernel": [],
+   "agree": null
+  },
+  {
+   "case": "fill_near_no_touch",
+   "group": "recorded",
+   "expect_violation": null,
+   "kicad": [],
+   "kernel": [],
+   "agree": null
+  }
+ ]
+}
