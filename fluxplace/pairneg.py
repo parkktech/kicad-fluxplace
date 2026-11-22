@@ -10,6 +10,7 @@ import multiprocessing as mp
 import numpy as np
 
 from . import pocket as PK
+from . import events as EV
 
 _G = {}                                                    # shared with forked workers
 
@@ -97,6 +98,7 @@ def negotiate(F, layers, pair_of, search, grow, workers=4, passes=8, pres=30, hs
                 if l in occ:
                     occ[l].ravel()[idx] += 1
         hot = [pr for pr, m in core.items() if any(l in occ and (occ[l].ravel()[idx] > 1).any() for l, idx in m.items())]
+        EV.iteration("pairs", it, passes, {"complete": len(core) - len(hot), "total": len(core)})
         if not hot:
             unresolved = set()
             break

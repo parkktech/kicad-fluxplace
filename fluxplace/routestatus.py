@@ -24,6 +24,7 @@ import sys
 import time
 
 from . import routediag as RD, quietlog as Q
+from . import events as EV, snapshot as SN
 
 STATUS_EVERY = 3.0          # seconds between status writes (at most)
 DEFAULT_STALL_S = 600.0
@@ -112,6 +113,14 @@ def _atomic(path, obj):
     with open(tmp, "w") as fh:
         json.dump(obj, fh)
     os.replace(tmp, path)
+    try:  # event stream: every status/progress write becomes a rate-limited progress event
+        if isinstance(obj, dict) and os.path.basename(str(path)).endswith(("status.json", "progress.json")):
+            EV.emit_limited("progress", 2, "progress", step=obj.get("current_step"),
+                            state=obj.get("state"), pct=obj.get("pct"))
+            from . import eta as ETA
+            ETA.tick()
+    except Exception:
+        pass
 
 
 def status_path_for(out):
@@ -161,6 +170,12 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
         for ln in data[: cut + 1].decode(errors="replace").splitlines():
             if not Q.is_noise(ln):
                 parser.feed(ln)
+                try:
+                    low = ln.lower()
+                    lvl = "error" if "error" in low else "warn" if "warn" in low else "info"
+                    EV.emit_limited("log", 20, "log", level=lvl, text=ln, src=extra.get("router") if extra else stage)
+                except Exception:
+                    pass
 
     def write(final=None, rc=None):
         nonlocal last_w
@@ -191,6 +206,8 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
             state["rc"] = rc
         _atomic(spath, state)
         last_w = now
+        if final == "done" and out and str(out).endswith(".kicad_pcb") and os.path.exists(out):
+            SN.active_take(out, "router_done", force=True)
 
     os.makedirs(os.path.dirname(os.path.abspath(lpath)), exist_ok=True)
     with open(lpath, "w") as lw:

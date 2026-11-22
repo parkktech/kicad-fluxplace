@@ -1,0 +1,1 @@
+{"run": "sample-20261122-101500", "board": "sample.kicad_pcb", "flow": "classic", "stages": ["ready", "place", "route", "close"], "features": {"components": 2, "nets": 4, "pads": 1, "layers": 2, "area_mm2": 8000.0, "density": 0.0001}, "started": 1795360000.0, "ended": 1795360019.0, "verdict": "stopped"}

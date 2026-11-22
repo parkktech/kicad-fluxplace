@@ -22,6 +22,7 @@ import math
 from collections import defaultdict
 
 from . import clusters as CL
+from . import events as EV
 from . import geom as GM
 from . import netclass as NC
 
@@ -334,6 +335,11 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
                     moved_any = True
                     me = erect(k)
                 clamp(k)
+            if EV.enabled() and EV.limited("parts", 2):
+                EV.emit("parts", frame=[[str(k), round((erect(k)[0] + erect(k)[2]) / 2, 3),
+                                         round((erect(k)[1] + erect(k)[3]) / 2, 3), 0,
+                                         next(iter(sorted(E[k].sides)), "")] for k in order])
+            EV.iteration("place", iters, max_iter, {"moved": moved_any, "movables": len(order)})
             if not moved_any:
                 break
         # entities the pushing could not settle (crowded areas oscillate): nearest free seat
