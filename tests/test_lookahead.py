@@ -286,6 +286,7 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     monkeypatch.setattr(LA, "critical_nets", lambda board, cons, spec=None: {"A", "B"})
     monkeypatch.setattr(LA, "critical_pairs", lambda board, cons, spec=None: [("A", "B")])
     monkeypatch.setattr(LA, "corridors", lambda B, pairs, P: ({}, {}))
+    monkeypatch.setattr(LA, "adopt_pairs", lambda gb, pairs, cons: [("A", "B")])
     monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None: str(fixture))
     monkeypatch.setattr(LA, "global_demand", lambda board, cons, spec, P, crit: {"cells": {}, "origin": (0.0, 0.0), "cell": 1.0})
     monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
@@ -603,3 +604,32 @@ def test_lay_repair_raises_when_pairs_wrote_no_board(monkeypatch, tmp_path):
     monkeypatch.setattr(PR, "run", lambda *a, **k: {})
     with pytest.raises(RuntimeError, match="wrote no board"):
         LA._lay_repair(types.SimpleNamespace(), str(tmp_path), str(board_in), [], ("A", "B"), {}, None)
+
+
+# ---- L7 adopt-first: a complete ghost pair is copied onto the candidate as locked copper ----
+
+def test_adopt_pairs_keeps_only_complete_pairs(monkeypatch):
+    from fluxplace import pairaudit as PA, routeconn as RC, routediag as RD
+    monkeypatch.setattr(RD, "load", lambda path, **kw: board())
+    monkeypatch.setattr(RC, "text_open", lambda B, **kw: {})
+    monkeypatch.setattr(PA, "audit", lambda B, pairs, cons, opn: {("A", "B"): {"status": "complete"},
+                                                                  ("C", "D"): {"status": "mismatch"}})
+    assert LA.adopt_pairs("g.kicad_pcb", [("A", "B"), ("C", "D")], {}) == [("A", "B")]
+
+
+def test_adopt_script_copies_locked_items_by_net_name():
+    code = LA._adopt_code("/c.kicad_pcb", "/g.kicad_pcb", "/o.kicad_pcb", ["DP", "DN"])
+    compile(code, "<adopt>", "exec")
+    for needle in ("SetLocked(True)", "FindNet(nm)", "PCB_VIA", "PCB_ARC", "['DN', 'DP']", "flush=True", "/o.kicad_pcb"):
+        assert needle in code
+
+
+def test_only_soft_candidates_carry_the_adopt_list(monkeypatch, tmp_path):
+    def plan(r, job):
+        return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    LA.stage(c, 7, "in.kicad_pcb")
+    soft = [j for j in jobs if j["kind"] == "soft" and j["tag"].startswith("r1-")]
+    hard = [j for j in jobs if j["kind"] == "hard"]
+    assert soft and all(j["adopt"] and j["adopt"][0]["pairs"] == [["A", "B"]] for j in soft)
+    assert hard and all(j["adopt"] is None for j in hard)

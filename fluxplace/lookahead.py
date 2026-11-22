@@ -245,6 +245,64 @@ def _run(code, timeout=900):
     return last
 
 
+def _adopt_code(board_in, ghost_in, board_out, nets):
+    """Script text for a fresh pcbnew process: copy the tracks, arcs and vias of `nets` from the ghost board onto the
+    candidate as new locked items (new uuids), net matched by name. Prints the count last."""
+    return "\n".join([
+        "import pcbnew, os",
+        f"b = pcbnew.LoadBoard({board_in!r})",
+        f"g = pcbnew.LoadBoard({ghost_in!r})",
+        f"nets = set({sorted(nets)!r})",
+        "n = 0",
+        "for t in g.GetTracks():",
+        "    nm = t.GetNetname()",
+        "    if nm not in nets or b.FindNet(nm) is None:",
+        "        continue",
+        "    tgt = b.FindNet(nm)",
+        "    cls = t.GetClass()",
+        "    if cls == 'PCB_VIA':",
+        "        v = pcbnew.PCB_VIA(b)",
+        "        v.SetPosition(t.GetPosition())",
+        "        v.SetWidth(t.GetWidth())",
+        "        v.SetDrill(t.GetDrill())",
+        "        v.SetViaType(t.GetViaType())",
+        "        v.SetLayerPair(t.TopLayer(), t.BottomLayer())",
+        "        v.SetNet(tgt)",
+        "        v.SetLocked(True)",
+        "        b.Add(v)",
+        "    elif cls == 'PCB_ARC':",
+        "        a = pcbnew.PCB_ARC(b)",
+        "        a.SetStart(t.GetStart()); a.SetMid(t.GetMid()); a.SetEnd(t.GetEnd())",
+        "        a.SetWidth(t.GetWidth()); a.SetLayer(t.GetLayer()); a.SetNet(tgt); a.SetLocked(True)",
+        "        b.Add(a)",
+        "    else:",
+        "        tr = pcbnew.PCB_TRACK(b)",
+        "        tr.SetStart(t.GetStart()); tr.SetEnd(t.GetEnd())",
+        "        tr.SetWidth(t.GetWidth()); tr.SetLayer(t.GetLayer()); tr.SetNet(tgt); tr.SetLocked(True)",
+        "        b.Add(tr)",
+        "    n += 1",
+        f"pcbnew.SaveBoard({board_out!r}, b)",
+        "print('OK', n, flush=True)",
+        "os._exit(0)",
+    ]) + "\n"
+
+
+def adopt(board_in, ghost_in, board_out, nets):
+    """Copy the ghost's copper of `nets` onto board_in -> board_out (locked); -> number of items copied."""
+    from . import pipeline as PL
+    last = _run(_adopt_code(board_in, ghost_in, board_out, nets))
+    PL._sidecar(board_in, board_out)
+    return int(last.split()[1])
+
+
+def adopt_pairs(ghost_board, pairs, cons):
+    """Pairs the ghost lays complete and in tolerance (pairaudit over the ghost's text) -> [(p, n)] to adopt."""
+    from . import pairaudit as PA, routeconn as RC, routediag as RD
+    B = RD.load(ghost_board)
+    res = PA.audit(B, pairs, cons or {}, set(RC.text_open(B)))
+    return [pr for pr in pairs if res.get(pr, {}).get("status") == "complete"]
+
+
 def apply(board_in, board_out, rects):
     """board_in + LOOKAHEAD-<i> rule areas (one per rect) -> board_out; the .kicad_pro travels with it."""
     from . import pipeline as PL
@@ -498,13 +556,14 @@ def _verify(a, locked, cand, crit, cons, P, rects, tag):
     return g, fit, png
 
 
-def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None):
+def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None, adopt=None, jobs=None):
     cand = _mk(os.path.join(d, tag))
     cs = (["--constraints", acfg["constraints"]] if acfg.get("constraints") else []) + \
          (["--spec", acfg["spec"]] if acfg.get("spec") else [])
     job = {"tag": tag, "kind": kind, "variant": list(variant), "board": base, "dir": cand,
            "rects": [{"layer": r["layer"], "rect": list(r["rect"]), "nets": r["nets"], "demand": r["demand"]} for r in rects],
            "pair": list(pair) if pair else None, "a": acfg, "cs": cs, "critical": sorted(crit), "guide": guide,
+           "adopt": adopt, "jobs": jobs,
            "result": os.path.join(cand, "result.json")}
     jobfile = os.path.join(_mk(os.path.join(d, "jobs")), f"{tag}.json")
     job["jobfile"] = jobfile
@@ -567,9 +626,15 @@ def _worker(jobfile):
             if job["kind"] == "repair":
                 locked = _lay_repair(sub, cand, job["board"], rects, job["pair"], cons, spec)
             else:
+                base = job["board"]
                 if job["kind"] == "soft":
                     sub.guide = make_guide(job["guide"])
-                locked = _lay_fresh(sub, cand, job["board"], rects, hard=job["kind"] != "soft")
+                    for k, ad in enumerate(job.get("adopt") or []):
+                        nxt = os.path.join(cand, f"adopt-{k}.kicad_pcb")
+                        adopt(base, ad["board"], nxt, [n for pr in ad["pairs"] for n in pr])
+                        base = nxt
+                    out["adopted"] = sum(len(ad["pairs"]) for ad in job.get("adopt") or [])
+                locked = _lay_fresh(sub, cand, base, rects, hard=job["kind"] != "soft")
             out["secs"]["lay"] = round(time.time() - t0, 1)
             fast = fitness_fast(locked, crit, cons, reserved_area=area, escape_mm=P["escape_mm"])
             out.update(locked=locked, fit=fast)
@@ -801,7 +866,7 @@ def stage(c, n, board):
         png = render(g, [], fit, os.path.join(d, f"ghost-{r}.png"))
         B = RD.load(g)
         corr, _why = corridors(B, pl, P)
-        sources[r] = {"D": demand(g, crit, P), "corr": corr, "B": B}
+        sources[r] = {"D": demand(g, crit, P), "corr": corr, "B": B, "path": g}
         ok_fit[r] = fit
         timing[f"ghost-{r}_s"] = round(time.time() - t0, 1)
         rows.append(_row(0, f"ghost-{r}", "unlocked", fit, png, "reference"))
@@ -830,6 +895,14 @@ def stage(c, n, board):
         sources["union"] = {"D": merge_demand(Ds, "union", P), "corr": _corr_for("union", sources, ghosts)}
         mixed = ["consensus", "union"]
     order = ghosts + globals_
+    adopt_from = {}                                   # pair -> ghost board it is copied from (router order, first wins)
+    for g in ghosts:
+        for pr in adopt_pairs(sources[g]["path"], pl, c.cons):
+            adopt_from.setdefault(tuple(pr), g)
+    adopt_lists = {}
+    for pr, g in adopt_from.items():
+        adopt_lists.setdefault(sources[g]["path"], []).append(list(pr))
+    adopt_list = [{"board": b, "pairs": prs} for b, prs in sorted(adopt_lists.items())]
     _table(table, rows)
     ref = min(ok_fit.values(), key=lambda f: tuple(f["key"])) if ok_fit else None
     best, best_variant, stale, rounds, cands = None, None, 0, 0, 0
@@ -851,8 +924,9 @@ def stage(c, n, board):
             guide = ({"origin": S["D"]["origin"], "cell": S["D"]["cell"], "res": rects,
                       "corr": _corr_for(src, sources, order), "res_cost": P["res_cost"], "off_cost": P["off_cost"]}
                      if kind == "soft" else None)
-            job = _job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit, guide=guide)
-            job["src"], job["jobs"] = src, P["jobs"]
+            job = _job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit, guide=guide,
+                       adopt=adopt_list if kind == "soft" else None, jobs=P["jobs"])
+            job["src"] = src
             jobs.append(job)
         _progress(spath, "running", f"round {r}: {len(jobs)} candidates (tier 1)", timing=timing)
         results = _run_jobs(jobs, P, P["ghost_min"]["krt"] * 60 + 1800)
@@ -880,6 +954,8 @@ def stage(c, n, board):
         improved = rb is not None and (best is None or rb[0] < best["rank"])
         for job, x in zip(jobs, results):
             vt = _vtxt2(job["src"], job["kind"], tuple(job["variant"]), job["pair"])
+            if x.get("fit") is not None and "adopted" in x:
+                vt += f" adopt {x['adopted']}"
             if x.get("fit") is None:
                 rows.append(_row(r, job["tag"], vt, None, None, "fail: " + str(x.get("error", "no lay"))[:80]))
                 continue
