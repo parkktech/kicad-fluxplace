@@ -1345,8 +1345,105 @@ def _apply_lock_at(a, work, board):
     return out
 
 
+_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE")
+
+
+def _ev_call(fn, *args, **kw):
+    """Event-stream hook: never raises (docs/EVENTS-CONTRACT.md)."""
+    try:
+        return fn(*args, **kw)
+    except Exception:
+        return None
+
+
+def _ev_begin(a, work):
+    from . import events as EV, snapshot as SN
+    EV.init(work)
+    SN.set_active(SN.Snapper(work))
+    try:
+        st = load_state(work) or {}
+        board = os.path.abspath(a.board) if getattr(a, "board", None) else st.get("board0") or st.get("board")
+        flow = getattr(a, "flow", None) or st.get("flow") or "classic"
+        feats = {}
+        if board and os.path.exists(board):
+            from . import routediag as RD
+            B = RD.load(board)
+            area = max(1e-9, (B["bbox"][2] - B["bbox"][0]) * (B["bbox"][3] - B["bbox"][1]))
+            feats = {"components": len(B["parts"]), "nets": len({p["net"] for p in B["pads"] if p["net"]}),
+                     "pads": len(B["pads"]), "layers": len(B["copper"]), "area_mm2": round(area, 1),
+                     "density": round(len(B["pads"]) / area, 4)}
+        stages = list(FLOWS.get(flow, STAGES))
+        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats)
+        from . import eta as ETA
+        ETA.set_run(feats, stages)
+        _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "flow": flow,
+                             "stages": stages, "features": feats, "started": time.time(), "ended": None,
+                             "verdict": None})
+    except Exception:
+        pass
+
+
+def _ev_write_run(work, obj):
+    tmp = os.path.join(work, "run.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, os.path.join(work, "run.json"))
+
+
+def _ev_end(work, rc, t0, board):
+    from . import events as EV, snapshot as SN
+    verdict = {0: "pass", 1: "fail", 3: "questions", 5: "packets"}.get(rc, "error" if rc else "pass")
+    EV.emit("run_end", verdict=verdict, secs=round(time.time() - t0, 1), board=board)
+    try:
+        with open(os.path.join(work, "run.json"), encoding="utf-8") as fh:
+            obj = json.load(fh)
+        obj.update(ended=time.time(), verdict=verdict)
+        _ev_write_run(work, obj)
+    except Exception:
+        pass
+    SN.set_active(None)
+
+
+def _ev_stage(kind, i, name, **kw):
+    from . import events as EV
+    EV.emit(kind, stage=name, n=i, name=name, **kw)
+    if kind == "stage_start":
+        from . import eta as ETA
+        ETA.stage_start(name)
+
+
+def _ev_stage_end(i, name, res, board, secs):
+    from . import events as EV, snapshot as SN
+    EV.emit("stage_end", stage=name, n=i, name=name, verdict=res.get("verdict"),
+            line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board)
+    from . import eta as ETA
+    ETA.stage_end(name, secs, res.get("verdict"))
+    if board and os.path.exists(board):
+        SN.active_take(board, "stage_end", force=True)
+
+
 def run(a):
-    """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked)."""
+    """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked). Emits the event stream."""
+    work = os.path.abspath(a.workdir)
+    os.makedirs(work, exist_ok=True)
+    saved = {k: os.environ.get(k) for k in _EV_ENV}
+    t0 = time.time()
+    _ev_call(_ev_begin, a, work)
+    rc = 1
+    try:
+        rc = _run(a)
+        return rc
+    finally:
+        _ev_call(_ev_end, work, rc, t0, os.path.abspath(a.board) if getattr(a, "board", None) else None)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _run(a):
+    """Execute the stage range (body of run())."""
     work = os.path.abspath(a.workdir)
     os.makedirs(work, exist_ok=True)
     st = load_state(work)
@@ -1435,6 +1532,8 @@ def run(a):
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
+        os.environ["FLUXPLACE_STAGE"] = name
+        _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
         led.before(prev)
         gd = c.dir(i + 1, "gate")
@@ -1477,6 +1576,7 @@ def run(a):
         if res.get("engine"):
             st["stages"][name]["engine"] = res["engine"]
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board
+        _ev_call(_ev_stage_end, i + 1, name, res, board, time.time() - t)
         st["next"] = res.get("next", [])
         if res.get("scorecard"):
             st["scorecard"] = res["scorecard"]

@@ -166,3 +166,21 @@ class Snapper:
             return rel.replace(os.sep, "/")
         except Exception:
             return None
+
+
+_ACTIVE = None   # the Snapper of the running pipeline (in-process hooks only)
+
+
+def set_active(sn):
+    global _ACTIVE
+    _ACTIVE = sn
+
+
+def active_take(board_path, reason, force=False, opens=None):
+    """Snapshot through the active Snapper; no-op when none is set. Never raises."""
+    try:
+        if _ACTIVE is not None:
+            return _ACTIVE.take(board_path, reason, force=force, opens=opens)
+    except Exception:
+        pass
+    return None

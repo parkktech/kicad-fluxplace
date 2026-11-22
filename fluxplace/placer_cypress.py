@@ -25,6 +25,7 @@ import subprocess
 import time
 
 from . import clusters as CL
+from . import events as EV
 from . import cypress_io as IO
 from . import geom as GM
 from . import intent as IT
@@ -656,6 +657,7 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
             mac = (k % 2 == 0) if best is None or k < 2 else bool(best[2].get("macro_mode"))
         elif aware:
             mac = bool(S["macros"])
+        EV.iteration("place", k + 1, n_trials, {"trial": k, "macros": bool(mac)})
         Bv, cl, macros, rigid = variant(mac)
         model = IO.build_model(Bv, fixed, cls, clusters=cl, keepouts=_keepouts(M) + zb + fb_blocks, allowance=allowance,
                                unit=float(S["unit_mm"]), gap=float(S["gap_mm"]), cluster_weight=float(S["cluster_weight"]),

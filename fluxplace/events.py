@@ -86,7 +86,45 @@ def limited(key, per_s):
 def emit_limited(key, per_s, kind, stage=None, **fields):
     """emit() rate-limited by limited(key, per_s). Never raises."""
     try:
-        if os.environ.get(ENV_FILE) and limited(key, per_s):
+        if enabled() and limited(key, per_s):
             emit(kind, stage=stage, **fields)
+    except Exception:
+        pass
+
+
+def enabled():
+    """True when the stream is on (env FLUXPLACE_EVENTS set). Lets callers skip building frames."""
+    return bool(os.environ.get(ENV_FILE))
+
+
+def _workdir():
+    p = os.environ.get(ENV_FILE)
+    return os.path.dirname(p) if p else ""
+
+
+def _rel(path):
+    """Artifact paths are relative to W (contract)."""
+    base = _workdir()
+    p = os.fspath(path)
+    if base and os.path.isabs(p) and p.startswith(base + os.sep):
+        return os.path.relpath(p, base).replace(os.sep, "/")
+    return p
+
+
+def iteration(loop, i, n=None, metrics=None, note=""):
+    """iteration event (loop place/pairs/route/close/lookahead/ghost/tune). Never raises."""
+    try:
+        if os.environ.get(ENV_FILE):
+            clean = {k: v for k, v in (metrics or {}).items() if isinstance(v, (int, float, str, bool, list, type(None)))}
+            emit("iteration", loop=loop, i=i, n=n, metrics=clean, note=str(note)[:MAX_STR])
+    except Exception:
+        pass
+
+
+def artifact(type_, path, label=""):
+    """artifact event (type png/report/board/table). Never raises."""
+    try:
+        if os.environ.get(ENV_FILE):
+            emit("artifact", type=type_, path=_rel(path), label=str(label)[:MAX_STR])
     except Exception:
         pass

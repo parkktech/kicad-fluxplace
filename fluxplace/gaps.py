@@ -15,6 +15,7 @@ import time
 from collections import Counter
 
 from . import audit, calllog, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
+from . import events as EV
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "clearance": "clearance", "hole_clearance": "clearance", "hole_to_hole": "clearance",
@@ -2279,6 +2280,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         # only polish quality count as no gain, so slow polishing stops
         gain = any(v < v0 for v, v0 in zip(vec[:-1], round_vec0[:-1]))
         stale = 0 if gain else stale + 1
+        EV.iteration("close", r + 1, max_rounds, {"score": [round(x, 3) for x in vec], "opens": m["opens"],
+                                                  "shorts": m["shorts"]})
         if stale >= no_gain:
             stop = f"no gain {no_gain} rounds"
             break

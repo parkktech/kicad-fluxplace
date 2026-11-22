@@ -11,6 +11,7 @@ import shutil
 import time
 
 from . import routediag as RD
+from . import events as EV
 
 DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
             "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 4, "max_rounds": 3, "no_gain_rounds": 1,
@@ -497,6 +498,7 @@ def _table(path, rows):
         lines.append(f"| {r['round']} | {r['id']} | {r['variant']} | {fit} | {r['png']} | {r['verdict']} |")
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
+    EV.artifact("table", path, "TOURNAMENT")
 
 
 def _pairs_stage(sub, n, board):
@@ -816,8 +818,17 @@ def _vtxt2(src, kind, variant, pair):
 
 
 def _row(r, tag, variant, fit, png, verdict):
-    return {"round": r, "id": tag, "variant": variant, "fit": tuple(fit["key"]) if fit else None,
-            "png": png or "-", "verdict": verdict}
+    row = {"round": r, "id": tag, "variant": variant, "fit": tuple(fit["key"]) if fit else None,
+           "png": png or "-", "verdict": verdict}
+    try:                                                   # event stream (docs/EVENTS-CONTRACT.md); never raises
+        EV.iteration("ghost" if str(tag).startswith("ghost") else "lookahead", r, None,
+                     {k: v for k, v in (fit or {}).items() if k in ("pairs_complete", "pairs_total", "shorts", "opens",
+                                                                  "sealed", "drc_errors", "reserved_area")}, verdict)
+        if png:
+            EV.artifact("png", png, f"{tag} {variant}")
+    except Exception:
+        pass
+    return row
 
 
 def _ghost_round0(a, board, d, P, routers):
