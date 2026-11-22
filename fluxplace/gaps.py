@@ -168,6 +168,37 @@ def _classify_into(mm, cons, board):
     mm["review_failed"] = failed
 
 
+def cluster_regions(gaps, pad_mm=2.0):
+    """PHASE3I B2: open gaps -> regions with disjoint nets and non-touching boxes. A gap joins a region when it shares a
+    net with it, or its point (padded by pad_mm) touches the region's box; merged boxes grow until nothing touches.
+    -> [{"gaps": [id], "nets": [net], "box": [x0, y0, x1, y1] | None}]."""
+    def touch(a, b):
+        return a is not None and b is not None and a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+    regs = []
+    for g in gaps:
+        at = g.get("at")
+        box = [at[0] - pad_mm, at[1] - pad_mm, at[0] + pad_mm, at[1] + pad_mm] if at else None
+        regs.append({"gaps": [g["id"]], "nets": set(g.get("nets") or []), "box": box})
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(regs)):
+            for j in range(i + 1, len(regs)):
+                a, b = regs[i], regs[j]
+                if a["nets"] & b["nets"] or touch(a["box"], b["box"]):
+                    a["gaps"] += b["gaps"]
+                    a["nets"] |= b["nets"]
+                    if b["box"] is not None:
+                        a["box"] = b["box"] if a["box"] is None else [min(a["box"][0], b["box"][0]), min(a["box"][1], b["box"][1]),
+                                                                       max(a["box"][2], b["box"][2]), max(a["box"][3], b["box"][3])]
+                    del regs[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return [{"gaps": r["gaps"], "nets": sorted(r["nets"]), "box": r["box"]} for r in regs]
+
+
 def _scope_gaps(mm, kinds):
     """PHASE3I B1: keep only the gaps of a gate's scope (kinds None = every gap)."""
     if kinds is not None:

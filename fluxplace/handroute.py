@@ -749,6 +749,8 @@ def _write_text_ledger(L, path):
             lines.append("    unlocked-and-removed: " + json.dumps(item, sort_keys=True))
         for opened in e.get("opened", []):
             lines.append("    opened: " + json.dumps(opened, sort_keys=True))
+        if e.get("stitched"):                                # PHASE3I B2: replay() re-applies a stitched lay with stitch=True
+            lines.append("    stitched: " + json.dumps(e["stitched"], sort_keys=True))
     open(path, "w").write("\n".join(lines) + "\n")
 
 
@@ -1235,6 +1237,68 @@ def _removed_track_record(t, o):
     if t.IsLocked():
         rec["unlocked_and_removed"] = True
     return rec
+
+
+_LAY_ROW = re.compile(r"^#\d+ .*\blay +ACCEPT net=(\S+)\s+(.*)$")
+
+
+def accepted_lays(ledger):
+    """PHASE3I B2: the ACCEPT `lay` rows of a session ledger.txt -> [(net, path, stitched)] in ledger order.
+    A row's `    stitched:` line marks it stitched. The path is the row's `what` text, exactly as lay was given it."""
+    out = []
+    for line in open(ledger, errors="replace"):
+        line = line.rstrip("\n")
+        m = _LAY_ROW.match(line)
+        if m:
+            out.append([m.group(1), m.group(2).strip(), False])
+        elif line.startswith("    stitched:") and out:
+            out[-1][2] = True
+    return [tuple(r) for r in out]
+
+
+def _merge_current(dst):
+    """the highest m<N>.kicad_pcb of the merge dir `dst` -> (N, path)."""
+    ns = [int(m.group(1)) for f in os.listdir(dst) for m in [re.match(r"^m(\d+)\.kicad_pcb$", f)] if m]
+    if not ns:
+        raise ValueError(f"merge dir {dst} holds no m<N>.kicad_pcb")
+    n = max(ns)
+    return n, os.path.join(dst, f"m{n}.kicad_pcb")
+
+
+def replay(ledger, dst, constraints=None, kicad_cli="kicad-cli", net_rx=None):
+    """PHASE3I B2 (port of W14/scripts/replay-lays.sh): re-apply the ACCEPT lay rows of a session `ledger` onto the merge
+    dir `dst` (the highest m<N>.kicad_pcb is current; each applied lay writes m<N+1>). Every lay goes through lay's guard
+    again; a refused row is requeued, never forced. net_rx: optional regex on the net name. -> {applied, requeue, board}."""
+    from . import constraints as CN
+    cons = CN.load(constraints) if isinstance(constraints, str) else constraints
+    n, cur = _merge_current(dst)
+    applied, requeue = [], []
+    for net, path, stitched in accepted_lays(ledger):
+        if net_rx and not re.search(net_rx, net):
+            continue
+        out = os.path.join(dst, f"m{n + 1}.kicad_pcb")
+        try:
+            res = lay(cur, net, path, out=out, constraints=cons, kicad_cli=kicad_cli, stitch=stitched)
+            ok, why = bool(res.get("accepted")), res.get("reason", "")
+        except (ValueError, RuntimeError) as e:
+            ok, why = False, str(e)[:200]
+        if ok and os.path.exists(out):
+            applied.append(net)
+            n, cur = n + 1, out
+        else:
+            requeue.append({"net": net, "path": path, "why": why or "refused"})
+    return {"applied": applied, "requeue": requeue, "board": cur}
+
+
+def merge_sessions(ledgers, dst, constraints=None, kicad_cli="kicad-cli"):
+    """PHASE3I B2: replay each region session's ledger onto one merge dir, in the order given. -> {applied, requeue, board}."""
+    applied, requeue, board = [], [], None
+    for led in ledgers:
+        r = replay(led, dst, constraints=constraints, kicad_cli=kicad_cli)
+        applied += r["applied"]
+        requeue += r["requeue"]
+        board = r["board"]
+    return {"applied": applied, "requeue": requeue, "board": board}
 
 
 def shove(board, net, out=None, ids=None, window_box=None, chain=False, constraints=None, kicad_cli="kicad-cli", op="shove", allow_locked=False):
