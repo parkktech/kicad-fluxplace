@@ -135,3 +135,40 @@ def test_critical_nets_uses_pair_list_and_rails(monkeypatch):
     monkeypatch.setattr(PA, "pair_list", lambda cls: [("DN", "DP")])
     monkeypatch.setattr(PWR, "route_widths", lambda cons, **kw: {"VBAT": 1.0})
     assert LA.critical_nets("x", {}) == {"DP", "DN", "VBAT"}
+
+
+def test_apply_code_is_valid_python_and_sets_rule_area_flags():
+    rects = [{"layer": "F.Cu", "rect": (1.0, 2.0, 3.0, 4.0)}, {"layer": "B.Cu", "rect": (0.0, 0.0, 5.0, 5.0)}]
+    code = LA._apply_code("/in.kicad_pcb", "/out.kicad_pcb", rects)
+    compile(code, "<apply>", "exec")
+    for needle in ("SetIsRuleArea(True)", "SetDoNotAllowTracks", "SetDoNotAllowVias", "'F.Cu'", "/out.kicad_pcb",
+                   "LOOKAHEAD-", "(1.0, 2.0, 3.0, 4.0)"):
+        assert needle in code
+
+
+def test_strip_code_targets_only_lookahead_zones():
+    code = LA._strip_code("/in.kicad_pcb", "/out.kicad_pcb")
+    compile(code, "<strip>", "exec")
+    assert "startswith('LOOKAHEAD-')" in code and "b.Remove(z)" in code
+
+
+def test_apply_and_strip_run_fresh_process_and_copy_sidecar(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(LA, "_run", lambda code, timeout=900: calls.append(code) or "OK 1")
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text("(kicad_pcb)")
+    (tmp_path / "in.kicad_pro").write_text("{}")
+    dst = str(tmp_path / "out.kicad_pcb")
+    LA.apply(str(src), dst, [{"layer": "F.Cu", "rect": (0, 0, 1, 1)}])
+    LA.strip(str(src), str(tmp_path / "s.kicad_pcb"))
+    assert "SetIsRuleArea" in calls[0] and "startswith" in calls[1]
+    assert (tmp_path / "out.kicad_pro").exists() and (tmp_path / "s.kicad_pro").exists()
+
+
+def test_run_raises_when_pcbnew_step_does_not_print_ok(monkeypatch):
+    import subprocess
+    class R:
+        returncode, stdout, stderr = 1, "", "boom"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    with pytest.raises(RuntimeError, match="pcbnew step failed"):
+        LA._run("x")

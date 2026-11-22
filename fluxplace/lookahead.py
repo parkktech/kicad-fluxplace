@@ -165,3 +165,80 @@ def reservations(D, B, critical, P, min_nets=None, escape_mm=None):
                         "rect": (x0 + s * c, y0 + r0 * c, min(x0 + (e + 1) * c, bx1), min(y0 + (r1 + 1) * c, by1)),
                         "nets": nets, "demand": sum(len(cl["nets"]) for cl in members)})
     return out
+
+
+PY = "/usr/bin/python3"                 # pcbnew lives in the system interpreter; a fresh process per load (SWIG safety)
+ZONE_PREFIX = "LOOKAHEAD-"
+
+
+def _apply_code(board_in, board_out, rects):
+    """Script text for a fresh pcbnew process: one rule-area zone per rect (no tracks, no vias; pads, pours and
+    footprints allowed), named LOOKAHEAD-<i>, saved to board_out."""
+    items = [(i, r["layer"], tuple(float(v) for v in r["rect"])) for i, r in enumerate(rects)]
+    return "\n".join([
+        "import pcbnew, os",
+        f"b = pcbnew.LoadBoard({board_in!r})",
+        f"items = {items!r}",
+        "for i, layer, (x0, y0, x1, y1) in items:",
+        "    z = pcbnew.ZONE(b)",
+        "    z.SetIsRuleArea(True)",
+        "    for setter, val in (('SetDoNotAllowTracks', True), ('SetDoNotAllowVias', True), ('SetDoNotAllowPads', False),",
+        "                        ('SetDoNotAllowCopperPour', False), ('SetDoNotAllowFootprints', False)):",
+        "        if hasattr(z, setter):",
+        "            getattr(z, setter)(val)",
+        "    ls = pcbnew.LSET()",
+        "    ls.AddLayer(b.GetLayerID(layer))",
+        "    z.SetLayerSet(ls)",
+        f"    z.SetZoneName('{ZONE_PREFIX}' + str(i))",
+        "    pts = pcbnew.SHAPE_LINE_CHAIN()",
+        "    for px, py in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):",
+        "        pts.Append(pcbnew.FromMM(px), pcbnew.FromMM(py))",
+        "    pts.SetClosed(True)",
+        "    z.AddPolygon(pts)",
+        "    b.Add(z)",
+        f"pcbnew.SaveBoard({board_out!r}, b)",
+        "print('OK', len(items))",
+        "os._exit(0)",
+    ]) + "\n"
+
+
+def _strip_code(board_in, board_out):
+    """Script text: remove every zone whose name starts with LOOKAHEAD-, save to board_out."""
+    return "\n".join([
+        "import pcbnew, os",
+        f"b = pcbnew.LoadBoard({board_in!r})",
+        "n = 0",
+        "for z in list(b.Zones()):",
+        f"    if z.GetZoneName().startswith('{ZONE_PREFIX}'):",
+        "        b.Remove(z)",
+        "        n += 1",
+        f"pcbnew.SaveBoard({board_out!r}, b)",
+        "print('OK', n)",
+        "os._exit(0)",
+    ]) + "\n"
+
+
+def _run(code, timeout=900):
+    """Run a pcbnew script in a fresh interpreter -> its stdout's last line; raises when it did not print OK."""
+    import subprocess
+    rc = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
+    last = (rc.stdout.strip().splitlines() or [""])[-1]
+    if rc.returncode != 0 or not last.startswith("OK"):
+        raise RuntimeError(f"pcbnew step failed (rc {rc.returncode}): {(rc.stderr or rc.stdout)[-300:]}")
+    return last
+
+
+def apply(board_in, board_out, rects):
+    """board_in + LOOKAHEAD-<i> rule areas (one per rect) -> board_out; the .kicad_pro travels with it."""
+    from . import pipeline as PL
+    _run(_apply_code(board_in, board_out, rects))
+    PL._sidecar(board_in, board_out)
+    return board_out
+
+
+def strip(board_in, board_out):
+    """board_in without any LOOKAHEAD-* zone -> board_out; the .kicad_pro travels with it."""
+    from . import pipeline as PL
+    _run(_strip_code(board_in, board_out))
+    PL._sidecar(board_in, board_out)
+    return board_out
