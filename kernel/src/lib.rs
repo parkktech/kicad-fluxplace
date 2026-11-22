@@ -1,6 +1,8 @@
 //! C ABI and JSON dispatch. Every entry point runs under catch_unwind: no panic crosses the boundary.
 //! Reply shape: {"ok": true, ...} or {"ok": false, "error": "..."}.
 
+pub mod sexpr;
+
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
