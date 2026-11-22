@@ -117,15 +117,17 @@ fn copper_stack(root: &Node) -> Vec<String> {
     v.into_iter().map(|(_, n)| n).collect()
 }
 
-fn circle_shapes(c: Pt, r: i64) -> Vec<Shape> {
+fn circle_shapes(c: Pt, r: i64) -> (Vec<Shape>, i64) {
     let p = |x: i64, y: i64| Pt { x, y };
     let quarter = [p(c.x + r, c.y), p(c.x, c.y + r), p(c.x - r, c.y), p(c.x, c.y - r), p(c.x + r, c.y)];
     let mut out = Vec::new();
+    let mut bound = 0i64;
     for w in quarter.windows(3).step_by(2) {
-        let (pts, _) = arc_polyline(w[0], w[1], w[2], ARC_ERR_NM);
+        let (pts, e) = arc_polyline(w[0], w[1], w[2], ARC_ERR_NM);
+        bound = bound.max(e.ceil() as i64);
         out.extend(pts.windows(2).map(|s| Shape { core: Core::Seg(s[0], s[1]), r: 0 }));
     }
-    out
+    (out, bound)
 }
 
 pub(crate) fn chain(pts: &[Pt], closed: bool) -> Vec<Shape> {
@@ -140,35 +142,97 @@ pub(crate) fn with_r(shapes: Vec<Shape>, r: i64) -> Vec<Shape> {
     shapes.into_iter().map(|s| Shape { r, ..s }).collect()
 }
 
+/// Adds `extra` nm to the radius of every shape (copper: width / 2 + chord bound).
+pub(crate) fn add_r(shapes: Vec<Shape>, extra: i64) -> Vec<Shape> {
+    shapes.into_iter().map(|s| Shape { r: s.r + extra, ..s }).collect()
+}
+
+/// Filled when (fill yes|solid); unfilled when (fill no|none); `default` when there is no fill child.
+pub(crate) fn fill_of(n: &Node, default: bool) -> bool {
+    match n.first("fill").and_then(|f| f.str_at(1)) {
+        Some("yes") | Some("solid") => true,
+        Some("no") | Some("none") => false,
+        _ => default,
+    }
+}
+
 /// Shapes of one gr_* primitive (r = 0; the caller sets the stroke half width).
-pub(crate) fn gr_shapes(cx: &Ctx, n: &Node) -> Result<Option<Vec<Shape>>, String> {
+/// Centre-line shapes of one gr_* primitive (r = 0 unless filled circle) and the chord-error bound in nm
+/// (0 except arcs and chorded circles). `filled` makes polygons and filled circles solid cores.
+pub(crate) fn gr_shapes(cx: &Ctx, n: &Node, filled: bool) -> Result<Option<(Vec<Shape>, i64)>, String> {
     let tag = n.tag().unwrap_or("").replacen("fp_", "gr_", 1);
-    let tag = tag.as_str();
-    Ok(Some(match tag {
-        "gr_line" => chain(&[cx.pt(n, "start")?, cx.pt(n, "end")?], false),
+    Ok(Some(match tag.as_str() {
+        "gr_line" => (chain(&[cx.pt(n, "start")?, cx.pt(n, "end")?], false), 0),
         "gr_rect" => {
             let (a, b) = (cx.pt(n, "start")?, cx.pt(n, "end")?);
-            chain(&[a, Pt { x: b.x, y: a.y }, b, Pt { x: a.x, y: b.y }], true)
+            let v = vec![a, Pt { x: b.x, y: a.y }, b, Pt { x: a.x, y: b.y }];
+            if filled { (vec![Shape { core: Core::Poly(v), r: 0 }], 0) } else { (chain(&v, true), 0) }
         }
         "gr_poly" => {
             let c = n.first("pts").ok_or_else(|| cx.err(n, "gr_poly without pts"))?;
-            let pts: Vec<Pt> = c.kids("xy").map(|k| match k.nums().map_err(|e| cx.err(k, &e))?.as_slice() {
-                [x, y] => Ok(Pt { x: *x, y: *y }),
-                _ => Err(cx.err(k, "xy needs two numbers")),
-            }).collect::<Result<_, String>>()?;
-            chain(&pts, true)
+            let pts = crate::load_fp::xy_list(cx, c)?;
+            if filled { (vec![Shape { core: Core::Poly(pts), r: 0 }], 0) } else { (chain(&pts, true), 0) }
         }
         "gr_arc" => {
-            let (pts, _) = arc_polyline(cx.pt(n, "start")?, cx.pt(n, "mid")?, cx.pt(n, "end")?, ARC_ERR_NM);
-            chain(&pts, false)
+            let (pts, e) = arc_polyline(cx.pt(n, "start")?, cx.pt(n, "mid")?, cx.pt(n, "end")?, ARC_ERR_NM);
+            (chain(&pts, false), e.ceil() as i64)
         }
         "gr_circle" => {
             let c = cx.pt(n, "center")?;
             let e = cx.pt(n, "end")?;
-            circle_shapes(c, ((e.x - c.x) as f64).hypot((e.y - c.y) as f64).round() as i64)
+            let r = ((e.x - c.x) as f64).hypot((e.y - c.y) as f64).round() as i64;
+            if filled {
+                (vec![Shape { core: Core::Point(c), r }], 0)
+            } else {
+                circle_shapes(c, r)
+            }
         }
         _ => return Ok(None),
     }))
+}
+
+/// Final shapes of one graphic primitive in its own frame. Edge.Cuts: r = chord bound; copper: width / 2 + bound.
+pub(crate) fn prim_shapes(cx: &Ctx, n: &Node, edge: bool, fill_default: bool) -> Result<Option<Vec<Shape>>, String> {
+    let filled = !edge && fill_of(n, fill_default);
+    let w = stroke_width(cx, n)?;
+    let Some((shapes, bound)) = gr_shapes(cx, n, filled)? else { return Ok(None) };
+    let extra = if edge { bound } else { w / 2 + bound };
+    Ok(Some(add_r(shapes, extra)))
+}
+
+/// Curve control-point box on copper (filled, conservative) or Edge.Cuts (outline); other layers: nothing.
+pub(crate) fn curve_shapes(cx: &Ctx, b: &mut Board, n: &Node, layer: &str) -> Result<Option<Vec<Shape>>, String> {
+    let copper = b.layer_bit(layer).is_some();
+    if !copper && layer != "Edge.Cuts" {
+        return Ok(None);
+    }
+    let pts: Vec<Pt> = n.kids("pts").flat_map(|p| p.kids("xy")).filter_map(|k| {
+        let v = k.nums().ok()?;
+        match v.as_slice() {
+            [x, y] => Some(Pt { x: *x, y: *y }),
+            _ => None,
+        }
+    }).collect();
+    let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+        pts.iter().map(|p| p.x).min(), pts.iter().map(|p| p.y).min(),
+        pts.iter().map(|p| p.x).max(), pts.iter().map(|p| p.y).max()) else { return Ok(None) };
+    b.unsupported.push(Unsupported { what: n.tag().unwrap_or("curve").into(), at: cx.at(n),
+        effect: "not flattened; conservative bounding polygon of the control points".into() });
+    let bx = [Pt { x: x0, y: y0 }, Pt { x: x1, y: y0 }, Pt { x: x1, y: y1 }, Pt { x: x0, y: y1 }];
+    let w = stroke_width(cx, n)?;
+    Ok(Some(if copper {
+        vec![Shape { core: Core::Poly(bx.to_vec()), r: w / 2 }]
+    } else {
+        chain(&bx, true)
+    }))
+}
+
+/// Text on copper is not modelled: one unsupported row (the judge sees it). Text on other layers: nothing.
+pub(crate) fn text_check(cx: &Ctx, b: &mut Board, n: &Node, layer: &str) {
+    if b.layer_bit(layer).is_some() {
+        b.unsupported.push(Unsupported { what: "text on copper".into(), at: cx.at(n),
+            effect: "not modelled; the judge sees it".into() });
+    }
 }
 
 pub(crate) fn copper_item_for_gr(cx: &Ctx, b: &mut Board, n: &Node, shapes: Vec<Shape>, mask: u64) {
@@ -186,6 +250,7 @@ fn load_segment(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     let net = cx.net(b, n)?;
     let mut it = Item::new(Kind::Track, cx.uuid(b, n), net, mask, vec![Shape { core: Core::Seg(a, z), r: w / 2 }]);
     it.locked = is_yes(n, "locked");
+    it.extra = serde_json::json!({"width": w as f64 / 1e6});
     b.add_item(it);
     Ok(())
 }
@@ -227,48 +292,36 @@ fn load_via(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     via.extra = serde_json::json!({"via": true, "dia": size as f64 / 1e6, "drill": drill as f64 / 1e6});
     b.add_item(via);
     // one drilled hole through every copper layer (as hrgeom does for vias and pads)
-    let hole = Item::new(Kind::Hole, uuid, net, b.all_copper_mask(), vec![Shape { core: Core::Point(at), r: drill / 2 }]);
+    let mut hole = Item::new(Kind::Hole, uuid, net, b.all_copper_mask(), vec![Shape { core: Core::Point(at), r: drill / 2 }]);
+    hole.extra = serde_json::json!({"via": true});
     b.add_item(hole);
     Ok(())
 }
 
 pub(crate) fn load_graphic(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
-    let layer = cx.str_field(n, "layer").unwrap_or("");
-    let width = stroke_width(cx, n)?;
-    let tag = n.tag().unwrap_or("").replacen("fp_", "gr_", 1);
-    let tag = tag.as_str();
-    if tag == "gr_curve" {
-        let pts: Vec<Pt> = n.kids("pts").flat_map(|p| p.kids("xy")).filter_map(|k| {
-            let v = k.nums().ok()?;
-            match v.as_slice() {
-                [x, y] => Some(Pt { x: *x, y: *y }),
-                _ => None,
+    let layer = cx.str_field(n, "layer").unwrap_or("").to_string();
+    match n.tag().unwrap_or("") {
+        "gr_text" => text_check(cx, b, n, &layer),
+        "gr_curve" => {
+            if let Some(shapes) = curve_shapes(cx, b, n, &layer)? {
+                finish_graphic(cx, b, n, &layer, shapes)?;
             }
-        }).collect();
-        let (x0, y0) = (pts.iter().map(|p| p.x).min(), pts.iter().map(|p| p.y).min());
-        let (x1, y1) = (pts.iter().map(|p| p.x).max(), pts.iter().map(|p| p.y).max());
-        if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (x0, y0, x1, y1) {
-            let box_pts = [Pt { x: x0, y: y0 }, Pt { x: x1, y: y0 }, Pt { x: x1, y: y1 }, Pt { x: x0, y: y1 }];
-            b.unsupported.push(Unsupported { what: "gr_curve".into(), at: cx.at(n),
-                effect: "not flattened; conservative bounding polygon of the control points".into() });
-            let shapes = with_r(chain(&box_pts, true), width / 2);
-            return finish_graphic(cx, b, n, layer, shapes);
         }
-        return Ok(());
+        _ => {
+            if let Some(shapes) = prim_shapes(cx, n, layer == "Edge.Cuts", false)? {
+                finish_graphic(cx, b, n, &layer, shapes)?;
+            }
+        }
     }
-    if tag == "gr_text" {
-        return Ok(());
-    }
-    let Some(shapes) = gr_shapes(cx, n)? else { return Ok(()) };
-    finish_graphic(cx, b, n, layer, with_r(shapes, width / 2))
+    Ok(())
 }
 
 pub(crate) fn finish_graphic(cx: &Ctx, b: &mut Board, n: &Node, layer: &str, shapes: Vec<Shape>) -> Result<(), String> {
     if layer == "Edge.Cuts" {
         let uuid = cx.uuid(b, n);
-        // one item per segment, centre line only (r = 0), as hrgeom models outline edges
+        // one item per segment, centre line plus chord bound (straight edges: r = 0)
         for s in shapes {
-            b.add_item(Item::new(Kind::Edge, uuid.clone(), 0, 0, vec![Shape { r: 0, ..s }]));
+            b.add_item(Item::new(Kind::Edge, uuid.clone(), 0, 0, vec![s]));
         }
     } else if let Some(bit) = b.layer_bit(layer) {
         copper_item_for_gr(cx, b, n, shapes, 1u64 << bit);

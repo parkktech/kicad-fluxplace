@@ -28,7 +28,9 @@ pub(crate) fn load_zone(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String>
                 continue;
             }
             let mut it = Item::new(Kind::Keepout, uuid.clone(), 0, mask, vec![Shape { core: Core::Poly(pts), r: 0 }]);
-            it.extra = serde_json::json!({"keepout": flags, "name": cx.str_field(n, "name").unwrap_or("")});
+            let no = |f: &str| flags.get(f).and_then(|v| v.as_str()) == Some("not_allowed");
+            it.extra = serde_json::json!({"keepout": flags, "name": cx.str_field(n, "name").unwrap_or(""),
+                "no_tracks": no("tracks"), "no_vias": no("vias"), "no_pads": no("pads")});
             b.add_item(it);
         }
         return Ok(());

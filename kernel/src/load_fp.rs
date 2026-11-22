@@ -4,7 +4,7 @@
 
 use crate::board::{Board, Item, Kind, Unsupported};
 use crate::geom::{self, Core, Pt, Shape};
-use crate::load::{finish_graphic, gr_shapes, is_yes, stroke_width, with_r, Ctx};
+use crate::load::{curve_shapes, finish_graphic, is_yes, prim_shapes, text_check, Ctx};
 use crate::sexpr::{Kind as SK, Node};
 
 /// (at x y [angle]): the position, first two numbers.
@@ -84,47 +84,69 @@ pub(crate) fn load_footprint(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), St
     let reference = n.kids("property").find(|p| p.str_at(1) == Some("Reference"))
         .and_then(|p| p.str_at(2)).unwrap_or("").to_string();
     let locked = is_yes(n, "locked");
-    let fp_clr = cx.num_field(n, "clearance")?;
+    let fp_clr = clr_of(cx, n)?;
     for c in n.children().iter().skip(1) {
+        let layer = cx.str_field(c, "layer").unwrap_or("").to_string();
         match c.tag() {
             Some("pad") => load_pad(cx, b, c, &xf, &reference, locked, fp_clr)?,
-            Some(t) if t.starts_with("fp_") && t != "fp_text" => {
-                if t == "fp_curve" {
-                    b.unsupported.push(Unsupported { what: "fp_curve".into(), at: cx.at(c),
-                        effect: "not modelled on a footprint; dropped".into() });
-                    continue;
+            Some("fp_text") => text_check(cx, b, c, &layer),
+            Some("property") => {
+                let hidden = c.first("hide").and_then(|h| h.str_at(1)) == Some("yes");
+                if !hidden {
+                    text_check(cx, b, c, &layer);
                 }
-                let Some(shapes) = gr_shapes(cx, c)? else { continue };
-                let w = stroke_width(cx, c)?;
-                let layer = cx.str_field(c, "layer").unwrap_or("").to_string();
-                let placed: Vec<Shape> = with_r(shapes, w / 2).iter().map(|s| map_core(s, &|p| xf.pt(p))).collect();
-                finish_graphic(cx, b, c, &layer, placed)?;
             }
-            // footprint zones are stored in absolute board coordinates (not footprint-local)
-            Some("zone") => load_keepout(cx, b, c)?,
+            Some("fp_curve") => {
+                if let Some(shapes) = curve_shapes(cx, b, c, &layer)? {
+                    let placed = shapes.iter().map(|s| map_core(s, &|p| xf.pt(p))).collect();
+                    finish_graphic(cx, b, c, &layer, placed)?;
+                }
+            }
+            Some(t) if t.starts_with("fp_") => {
+                if let Some(shapes) = prim_shapes(cx, c, layer == "Edge.Cuts", false)? {
+                    let placed = shapes.iter().map(|s| map_core(s, &|p| xf.pt(p))).collect();
+                    finish_graphic(cx, b, c, &layer, placed)?;
+                }
+            }
+            // footprint zones are stored in absolute board coordinates (keepout or copper)
+            Some("zone") => crate::load_zone::load_zone(cx, b, c)?,
             _ => {}
         }
     }
     Ok(())
 }
 
-fn load_keepout(cx: &Ctx, b: &mut Board, z: &Node) -> Result<(), String> {
-    let Some(k) = z.first("keepout") else { return Ok(()) };
-    let poly = z.first("polygon").ok_or_else(|| cx.err(z, "keepout without polygon"))?;
-    let pts: Vec<Pt> = xy_list(cx, poly.first("pts").unwrap_or(poly))?;
-    let mut names = layer_names(z);
-    if names.is_empty() {
-        names.extend(cx.str_field(z, "layer").map(str::to_string));
-    }
-    let flags: serde_json::Map<String, serde_json::Value> = ["tracks", "vias", "pads", "copperpour", "footprints"]
-        .iter().map(|f| (f.to_string(), serde_json::Value::String(
-            k.first(f).and_then(|c| c.str_at(1)).unwrap_or("allowed").to_string()))).collect();
-    let uuid = cx.uuid(b, z);
-    let mut it = Item::new(Kind::Keepout, uuid, 0, mask_of(b, &names), vec![Shape { core: Core::Poly(pts), r: 0 }]);
-    it.extra = serde_json::json!({"keepout": flags});
-    b.add_item(it);
-    Ok(())
+/// (clearance 0) means "inherit": no local clearance.
+fn clr_of(cx: &Ctx, n: &Node) -> Result<Option<i64>, String> {
+    Ok(cx.num_field(n, "clearance")?.filter(|v| *v != 0))
 }
+
+struct Drill {
+    dx: i64,
+    dy: i64,
+    off: Pt,
+}
+
+fn drill_of(cx: &Ctx, p: &Node) -> Result<Option<Drill>, String> {
+    let Some(d) = p.first("drill") else { return Ok(None) };
+    let oval = d.atoms().first().map_or(false, |a| matches!(&a.kind, SK::Sym(s) if s == "oval"));
+    let v = d.nums().map_err(|e| cx.err(d, &e))?;
+    let (dx, dy) = match (oval, v.as_slice()) {
+        (true, [x, y]) => (*x, *y),
+        (false, [x]) => (*x, *x),
+        _ => return Err(cx.err(d, "drill needs a diameter or (oval x y)")),
+    };
+    let off = match d.first("offset") {
+        Some(o) => match o.nums().map_err(|e| cx.err(o, &e))?.as_slice() {
+            [x, y] => Pt { x: *x, y: *y },
+            _ => Pt { x: 0, y: 0 },
+        },
+        None => Pt { x: 0, y: 0 },
+    };
+    Ok(Some(Drill { dx, dy, off }))
+}
+
+
 
 /// Raw decimal value of a child such as (roundrect_rratio 0.25); None when absent.
 fn ratio(cx: &Ctx, n: &Node, tag: &str) -> Result<Option<f64>, String> {
@@ -204,23 +226,11 @@ fn custom_shapes(cx: &Ctx, b: &mut Board, p: &Node, sx: i64, sy: i64) -> Result<
     let mut out = Vec::new();
     if let Some(prims) = p.first("primitives") {
         for c in prims.children().iter().skip(1) {
-            match c.tag() {
-                Some("gr_poly") | Some("gr_rect") if c.first("fill").and_then(|f| f.str_at(1)) != Some("no") => {
-                    let pts = if c.tag() == Some("gr_rect") {
-                        let (a, z) = (cx.pt(c, "start")?, cx.pt(c, "end")?);
-                        vec![a, Pt { x: z.x, y: a.y }, z, Pt { x: a.x, y: z.y }]
-                    } else {
-                        xy_list(cx, c.first("pts").unwrap_or(c))?
-                    };
-                    out.push(Shape { core: Core::Poly(pts), r: 0 });
+            if c.tag().map_or(false, |t| t.starts_with("gr_")) {
+                // pad primitives are filled unless (fill no|none)
+                if let Some(s) = prim_shapes(cx, c, false, true)? {
+                    out.extend(s);
                 }
-                Some(t) if t.starts_with("gr_") => {
-                    let w = stroke_width(cx, c)?;
-                    if let Some(s) = gr_shapes(cx, c)? {
-                        out.extend(with_r(s, w / 2));
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -254,10 +264,12 @@ fn load_pad(cx: &Ctx, b: &mut Board, p: &Node, xf: &Xf, reference: &str, fp_lock
     };
     let mask = mask_of(b, &layer_names(p));
     let net = cx.net(b, p)?;
-    let clr = cx.num_field(p, "clearance")?.or(fp_clr);
+    let clr = clr_of(cx, p)?.or(fp_clr);
     let uuid = cx.uuid(b, p);
     let npth = typ == "np_thru_hole";
     let ref_ = format!("{reference}.{num}");
+    let drill = drill_of(cx, p)?;
+    let mm = |v: i64| v as f64 / 1e6;
 
     if p.first("padstack").is_some() {
         b.unsupported.push(Unsupported { what: "padstack".into(), at: cx.at(p),
@@ -273,54 +285,42 @@ fn load_pad(cx: &Ctx, b: &mut Board, p: &Node, xf: &Xf, reference: &str, fp_lock
     }
 
     if !npth && mask != 0 {
+        // copper follows the drill offset; the hole does not (KiCad keeps the hole at the pad position)
+        let copper_at = match &drill {
+            Some(d) => {
+                let r = geom::rotate(d.off, ang);
+                Pt { x: centre.x + r.x, y: centre.y + r.y }
+            }
+            None => centre,
+        };
         let local = match shape.as_str() {
             "custom" => custom_shapes(cx, b, p, sx, sy)?,
             _ => local_shapes(cx, b, p, &shape, sx, sy)?,
         };
-        let shapes = local.iter().map(|s| place(s, ang, centre)).collect();
+        let shapes = local.iter().map(|s| place(s, ang, copper_at)).collect();
         let mut it = Item::new(Kind::Pad, uuid.clone(), net, mask, shapes);
         it.ref_ = ref_.clone();
         it.locked = fp_locked;
         it.clr_local = clr;
-        it.extra = serde_json::json!({"shape": shape, "pad_angle": ang});
+        it.extra = serde_json::json!({"pos": [mm(centre.x), mm(centre.y)], "size": [mm(sx), mm(sy)],
+            "hole": drill.as_ref().map_or(0.0, |d| mm(d.dx)), "shape": shape, "pad_angle": ang, "type": typ});
         b.add_item(it);
     }
 
-    if let Some(d) = p.first("drill") {
-        let oval = d.atoms().first().map(|a| matches!(&a.kind, SK::Sym(s) if s == "oval")).unwrap_or(false);
-        let v = d.nums().map_err(|e| cx.err(d, &e))?;
-        let (dx, dy) = match (oval, v.as_slice()) {
-            (true, [x, y]) => (*x, *y),
-            (false, [x]) => (*x, *x),
-            _ => return Err(cx.err(d, "drill needs a diameter or (oval x y)")),
-        };
-        let off = match d.first("offset") {
-            Some(o) => {
-                let v = o.nums().map_err(|e| cx.err(o, &e))?;
-                match v.as_slice() {
-                    [x, y] => {
-                        let r = geom::rotate(Pt { x: *x, y: *y }, ang);
-                        Pt { x: r.x, y: r.y }
-                    }
-                    _ => Pt { x: 0, y: 0 },
-                }
-            }
-            None => Pt { x: 0, y: 0 },
-        };
-        let c = Pt { x: centre.x + off.x, y: centre.y + off.y };
-        let hole_shape = if dx == dy {
-            Shape { core: Core::Point(c), r: dx / 2 }
+    if let Some(d) = drill {
+        let hole_shape = if d.dx == d.dy {
+            Shape { core: Core::Point(centre), r: d.dx / 2 }
         } else {
-            let len = (dx - dy).abs() / 2;
-            let (a, z) = if dx > dy {
+            let len = (d.dx - d.dy).abs() / 2;
+            let (a, z) = if d.dx > d.dy {
                 (Pt { x: -len, y: 0 }, Pt { x: len, y: 0 })
             } else {
                 (Pt { x: 0, y: -len }, Pt { x: 0, y: len })
             };
-            place(&Shape { core: Core::Seg(a, z), r: dx.min(dy) / 2 }, ang, c)
+            place(&Shape { core: Core::Seg(a, z), r: d.dx.min(d.dy) / 2 }, ang, centre)
         };
-        let mut h = Item::new(Kind::Hole, uuid.clone(), net, b.all_copper_mask(), vec![hole_shape]);
-        h.ref_ = ref_.clone();
+        let mut h = Item::new(Kind::Hole, uuid, net, b.all_copper_mask(), vec![hole_shape]);
+        h.ref_ = ref_;
         h.locked = fp_locked;
         h.extra = serde_json::json!({"npth": npth});
         b.add_item(h);
@@ -437,5 +437,68 @@ mod tests {
         let e = b.items.iter().find(|i| i.kind == Kind::Edge).unwrap();
         // fp at (10, 0) rotated 90: the local edge (0,0)-(1,0) becomes (10,0)-(10,-1); edges carry no stroke radius
         assert!(close(bbox_mm(&b, e.id as usize), [10.0, -1.0, 10.0, 0.0]), "{:?}", bbox_mm(&b, e.id as usize));
+    }
+
+    fn top(body: &str) -> Board {
+        load(&format!("(kicad_pcb (version 20260206) (layers (0 \"F.Cu\" signal) (4 \"In1.Cu\" signal) \
+(31 \"B.Cu\" signal) (44 \"Edge.Cuts\" user) (37 \"F.SilkS\" user))\n{body})\n")).unwrap()
+    }
+
+    #[test]
+    fn drill_offset_moves_copper_not_hole() {
+        let b = board("0 0 0", "(pad \"1\" thru_hole rect (at 1 0 90) (size 2 1) (drill 0.4 (offset 0.5 0)) (layers \"*.Cu\"))");
+        let p = pads(&b)[0];
+        assert!(close(bbox_mm(&b, p.id as usize), [0.5, -1.5, 1.5, 0.5]));
+        let h = b.items.iter().find(|i| i.kind == Kind::Hole).unwrap();
+        assert_eq!(h.shapes[0].core, crate::geom::Core::Point(crate::geom::Pt { x: 1_000_000, y: 0 }));
+        assert_eq!(p.extra["hole"], 0.4);
+        assert_eq!(p.extra["pos"], serde_json::json!([1.0, 0.0]));
+    }
+
+    #[test]
+    fn filled_polygon_is_a_solid_core_and_filled_circle_a_point() {
+        let b = top("(gr_poly (pts (xy 0 0) (xy 2 0) (xy 0 2)) (width 0.1) (fill yes) (layer \"F.Cu\"))\n\
+(gr_circle (center 5 5) (end 6 5) (width 0.1) (fill solid) (layer \"F.Cu\"))");
+        let poly = b.items.iter().find(|i| matches!(i.shapes[0].core, crate::geom::Core::Poly(_))).unwrap();
+        assert_eq!(poly.shapes.len(), 1);
+        assert_eq!(poly.shapes[0].r, 50_000);
+        let inside = crate::geom::Shape { core: crate::geom::Core::Point(crate::geom::Pt { x: 500_000, y: 500_000 }), r: 0 };
+        assert!(crate::geom::gap(&poly.shapes[0], &inside) < 0.0);
+        let c = b.items.iter().find(|i| matches!(i.shapes[0].core, crate::geom::Core::Point(_))).unwrap();
+        assert_eq!(c.shapes[0].r, 1_050_000);
+    }
+
+    #[test]
+    fn edge_arc_has_chord_bound_and_line_none() {
+        let b = top("(gr_arc (start 0 0) (mid 1 1) (end 2 0) (width 0.05) (layer \"Edge.Cuts\"))\n\
+(gr_line (start 0 0) (end 5 0) (width 0.05) (layer \"Edge.Cuts\"))");
+        let edges: Vec<_> = b.items.iter().filter(|i| i.kind == Kind::Edge).collect();
+        assert!(edges.iter().any(|e| e.shapes[0].r > 0), "arc carries a chord bound");
+        assert!(edges.iter().any(|e| e.shapes[0].r == 0), "straight edge has r = 0");
+    }
+
+    #[test]
+    fn text_and_curves_only_where_they_matter() {
+        let on_cu = top("(gr_text \"x\" (at 0 0) (layer \"F.Cu\"))");
+        assert_eq!(on_cu.unsupported.iter().filter(|u| u.what == "text on copper").count(), 1);
+        let on_silk = top("(gr_text \"x\" (at 0 0) (layer \"F.SilkS\"))");
+        assert!(on_silk.unsupported.is_empty());
+        let curve_silk = top("(gr_curve (pts (xy 0 0) (xy 1 1) (xy 2 1) (xy 3 0)) (layer \"F.SilkS\"))");
+        assert!(curve_silk.unsupported.is_empty());
+        let curve_cu = top("(gr_curve (pts (xy 0 0) (xy 1 1) (xy 2 1) (xy 3 0)) (layer \"F.Cu\") (width 0.1))");
+        assert_eq!(curve_cu.unsupported.len(), 1);
+    }
+
+    #[test]
+    fn zero_clearance_is_inherit_and_extras_exist() {
+        let b = board("0 0 0", "(pad \"1\" smd rect (at 1 0) (size 2 1) (layers \"F.Cu\") (clearance 0))");
+        let p = pads(&b)[0];
+        assert_eq!(p.clr_local, None);
+        for k in ["pos", "size", "hole", "shape", "pad_angle", "type"] {
+            assert!(p.extra.get(k).is_some(), "pad extra {k}");
+        }
+        let t = top("(segment (start 0 0) (end 1 0) (width 0.2) (layer \"F.Cu\") (net \"A\"))");
+        let tr = t.items.iter().find(|i| i.kind == Kind::Track).unwrap();
+        assert_eq!(tr.extra["width"], 0.2);
     }
 }

@@ -177,3 +177,12 @@ def test_load_time_and_fill_stale_on_real_boards(path, limit_ms, stale):
         info = k.call("info")
     assert info["load_ms"] < limit_ms, info["load_ms"]
     assert info["fill_stale"] is stale
+
+
+@pytest.mark.parametrize("path,expect_dup", [(REAL[0], False), (REAL[1], True)])
+def test_dup_uuids_on_real_boards(path, expect_dup):
+    if not os.path.isfile(path):
+        pytest.skip("board not present")
+    with K.Kernel(path) as k:
+        n = k.call("info")["dup_uuids"]
+    assert (n > 0) is expect_dup, n

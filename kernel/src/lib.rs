@@ -94,7 +94,12 @@ pub fn dispatch(h: &Handle, req: &str) -> Value {
         "info" => {
             let b = &h.board;
             let live = b.items.iter().filter(|i| i.alive).count();
-            json!({"ok": true, "path": h.path, "file_version": b.file_version, "layers": b.copper,
+            let mut uuid_count: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+            for it in b.items.iter().filter(|i| i.alive && matches!(i.kind, board::Kind::Pad | board::Kind::Track | board::Kind::Arc | board::Kind::Via)) {
+                *uuid_count.entry(it.uuid.as_str()).or_insert(0) += 1;
+            }
+            let dup_uuids = uuid_count.values().filter(|&&n| n > 1).count();
+            json!({"ok": true, "path": h.path, "file_version": b.file_version, "layers": b.copper, "dup_uuids": dup_uuids,
                    "nets": b.nets.len() - 1, "items": live, "load_ms": h.load_ms,
                    "zones": b.zones.len(), "fill_stale": b.fill_stale,
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
