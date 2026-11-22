@@ -416,9 +416,13 @@ def lay_centreline(board, out, pair, layer, waypoints, cons=None):
         return no("need at least 2 waypoints")
     pts, lays, cur = [], [], layer
     for q in waypoints:
-        pts.append((float(q[0]), float(q[1])))
+        xy = (float(q[0]), float(q[1]))
         if len(q) > 2 and q[2]:
             cur = q[2]
+        if pts and abs(xy[0] - pts[-1][0]) < 1e-6 and abs(xy[1] - pts[-1][1]) < 1e-6:
+            lays[-1] = cur                                  # a repeated point (corridor joins) is one point; a layer change on it is kept
+            continue
+        pts.append(xy)
         lays.append(cur)
     for k, (a, b) in enumerate(zip(pts, pts[1:])):
         dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])

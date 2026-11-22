@@ -280,6 +280,23 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             return {"ok": True, "states": states, "pol": pol, "fp": fp, "gates": len(ga) + len(gb), "vias": len(vias),
                     "layers": [r["layer"] for r in runs], "cost": info.get("cost", 0.0)}
         if plan_only:
+            cp, p0, p1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], pol)          # the break-outs the lay will make must exist
+            cn, n0, n1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], -pol)
+            mark = items.mark()
+            _claim(items, cp, nets[0])
+            _claim(items, cn, nets[1])
+            fb = lambda pad, e, layer, net: PL.stub(grid.B, items, ctx["base_n"], ctx["ign"], pad, e, layer, wl[layer], net, clr, ctx["skip"])
+            ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), runs[0]["t0"], runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], fallback=fb, gap=geo[runs[0]["layer"]][1])
+            if ba[0] is not None:
+                _claim(items, ba[0], nets[0])
+                _claim(items, ba[1], nets[1])
+                bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-runs[-1]["t1"][0], -runs[-1]["t1"][1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], fallback=fb, gap=geo[runs[-1]["layer"]][1])
+            items.rollback(mark)
+            if ba[0] is None or bb[0] is None:
+                bad, side = (ba, states[0]) if ba[0] is None else (bb, states[-1])
+                reason, blockers = bad[1], [bad[2]["label"]] if bad[2] else []
+                banned |= _ban(side, grid, 0.3)
+                continue
             keepfree = []                                   # what the fan-out must leave free: both ends of the corridor and the via pairs near them
             for r, t, rev in ((runs[0], ta, False), (runs[-1], tb, True)):
                 pts = r["pts"][::-1] if rev else list(r["pts"])

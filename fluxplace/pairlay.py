@@ -332,17 +332,43 @@ def check(items, pieces, net, clr, skip_old, mate=None):
     return worst, who
 
 
-def doglegs(q, e, t, exts=(0.0, 0.15, 0.3, 0.5, 0.8, 1.2)):
-    """candidate polylines pad anchor q -> leg end e; t = the leg's direction AWAY from the terminal at e."""
+def pad_axis(pad, toward):
+    """unit vector along the pad's long axis, signed towards the point `toward` (None for a round / square pad)."""
+    w, h = pad.get("w", 0.0), pad.get("h", 0.0)
+    if abs(w - h) < 1e-6:
+        return None
+    a = math.radians(pad.get("angle") or 0.0)
+    u = (math.cos(a), math.sin(a)) if w > h else (-math.sin(a), math.cos(a))
+    d = (toward[0] - pad["x"]) * u[0] + (toward[1] - pad["y"]) * u[1]
+    return u if d >= 0 else (-u[0], -u[1])
+
+
+def _octi(d):
+    """vector d as a diagonal part then a straight part (both 45/90 aligned)."""
+    k = min(abs(d[0]), abs(d[1]))
+    dg = (math.copysign(k, d[0]), math.copysign(k, d[1]))
+    return dg, (d[0] - dg[0], d[1] - dg[1])
+
+
+def doglegs(q, e, t, exts=(0.0, 0.15, 0.3, 0.5, 0.8, 1.2), axis=None):
+    """candidate polylines pad anchor q -> leg end e; t = the leg's direction AWAY from the terminal at e.
+    `axis` (pad_axis): also candidates that leave the pad straight along its long axis first (fine pitch: a first move
+    along the pad row would run into the neighbouring pad), then go 45/90 to the leg end."""
     out = []
     for ext in exts:
         e2 = (e[0] - t[0] * ext, e[1] - t[1] * ext)
         dx, dy = e2[0] - q[0], e2[1] - q[1]
-        k = min(abs(dx), abs(dy))
-        dg = (math.copysign(k, dx), math.copysign(k, dy))
-        st = (dx - dg[0], dy - dg[1])
-        for first in (dg, st):
-            pts = G.clean([q, (q[0] + first[0], q[1] + first[1]), e2, e], 1e-4)
+        dg, st = _octi((dx, dy))
+        firsts = [[dg], [st]]
+        if axis is not None:
+            proj = dx * axis[0] + dy * axis[1]
+            lat = abs(dx * axis[1] - dy * axis[0])
+            for L in sorted({round(x, 3) for x in [proj - lat] + [0.05 * i for i in range(6, 26)] if 0.05 < x <= proj + 1e-9}):
+                p1 = (axis[0] * L, axis[1] * L)
+                for part in _octi((dx - p1[0], dy - p1[1])):
+                    firsts.append([p1, (p1[0] + part[0], p1[1] + part[1])])
+        for first in firsts:
+            pts = G.clean([q] + [(q[0] + f[0], q[1] + f[1]) for f in first] + [e2, e], 1e-4)
             if len(pts) < 2:
                 continue
             dirs = [G.unit(a, b) for a, b in zip(pts, pts[1:])] + [t]
@@ -411,7 +437,7 @@ def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fall
 
     def dog(k):
         ok, worst = [], (None, None)
-        for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t):
+        for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t, axis=pad_axis(pads[k], ends[k])):
             pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
             g, it = check(items, pcs, nets[k], clr, skip_old, (nets[1 - k], slack) if slack else None)
             if g >= clr - 1e-6:
