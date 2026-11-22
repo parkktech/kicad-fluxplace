@@ -13,21 +13,21 @@ fn line_of(src: &str, at: usize) -> usize {
     1 + src.as_bytes()[..at.min(src.len())].iter().filter(|&&b| b == b'\n').count()
 }
 
-struct Ctx<'a> {
-    src: &'a str,
-    nets_by_num: HashMap<String, String>,
+pub(crate) struct Ctx<'a> {
+    pub(crate) src: &'a str,
+    pub(crate) nets_by_num: HashMap<String, String>,
 }
 
 impl Ctx<'_> {
-    fn at(&self, n: &Node) -> String {
+    pub(crate) fn at(&self, n: &Node) -> String {
         format!("line {}", line_of(self.src, n.span.0))
     }
 
-    fn err(&self, n: &Node, msg: &str) -> String {
+    pub(crate) fn err(&self, n: &Node, msg: &str) -> String {
         format!("{}: {msg}", self.at(n))
     }
 
-    fn pt(&self, n: &Node, tag: &str) -> Result<Pt, String> {
+    pub(crate) fn pt(&self, n: &Node, tag: &str) -> Result<Pt, String> {
         let c = n.first(tag).ok_or_else(|| self.err(n, &format!("missing ({tag} x y)")))?;
         let v = c.nums().map_err(|e| self.err(c, &e))?;
         match v.as_slice() {
@@ -36,7 +36,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn num_field(&self, n: &Node, tag: &str) -> Result<Option<i64>, String> {
+    pub(crate) fn num_field(&self, n: &Node, tag: &str) -> Result<Option<i64>, String> {
         match n.first(tag) {
             None => Ok(None),
             Some(c) => c.nums().map_err(|e| self.err(c, &e))?.first().copied().map(Some)
@@ -44,12 +44,12 @@ impl Ctx<'_> {
         }
     }
 
-    fn str_field<'b>(&self, n: &'b Node, tag: &str) -> Option<&'b str> {
+    pub(crate) fn str_field<'b>(&self, n: &'b Node, tag: &str) -> Option<&'b str> {
         n.first(tag).and_then(|c| c.str_at(1))
     }
 
     /// Net of an item: (net "NAME") | (net N "NAME") | (net N) through the top-level declarations.
-    fn net(&self, b: &mut Board, n: &Node) -> Result<u32, String> {
+    pub(crate) fn net(&self, b: &mut Board, n: &Node) -> Result<u32, String> {
         let Some(c) = n.first("net") else { return Ok(0) };
         let atoms = c.atoms();
         let name = match atoms.as_slice() {
@@ -68,18 +68,29 @@ impl Ctx<'_> {
     }
 
     /// (layer name, bit) for a copper layer; None for a non-copper layer.
-    fn layer(&self, b: &Board, n: &Node) -> Result<Option<(String, u64)>, String> {
+    pub(crate) fn layer(&self, b: &Board, n: &Node) -> Result<Option<(String, u64)>, String> {
         let name = self.str_field(n, "layer").ok_or_else(|| self.err(n, "missing (layer)"))?;
         Ok(b.layer_bit(name).map(|i| (name.to_string(), 1u64 << i)))
     }
 
-    fn uuid(&self, b: &Board, n: &Node) -> String {
+    pub(crate) fn uuid(&self, b: &Board, n: &Node) -> String {
         self.str_field(n, "uuid").map(str::to_string)
             .unwrap_or_else(|| format!("00000000-0000-0000-0000-{:012x}", b.items.len() + 1))
     }
 }
 
-fn is_yes(n: &Node, tag: &str) -> bool {
+/// Stroke width of a graphic: (width w) or (stroke (width w) ...); 0 when absent.
+pub(crate) fn stroke_width(cx: &Ctx, n: &Node) -> Result<i64, String> {
+    if let Some(w) = cx.num_field(n, "width")? {
+        return Ok(w);
+    }
+    match n.first("stroke") {
+        Some(st) => Ok(cx.num_field(st, "width")?.unwrap_or(0)),
+        None => Ok(0),
+    }
+}
+
+pub(crate) fn is_yes(n: &Node, tag: &str) -> bool {
     n.first(tag).and_then(|c| c.str_at(1)) == Some("yes")
 }
 
@@ -116,7 +127,7 @@ fn circle_shapes(c: Pt, r: i64) -> Vec<Shape> {
     out
 }
 
-fn chain(pts: &[Pt], closed: bool) -> Vec<Shape> {
+pub(crate) fn chain(pts: &[Pt], closed: bool) -> Vec<Shape> {
     let mut v: Vec<Shape> = pts.windows(2).map(|w| Shape { core: Core::Seg(w[0], w[1]), r: 0 }).collect();
     if closed && pts.len() > 2 {
         v.push(Shape { core: Core::Seg(pts[pts.len() - 1], pts[0]), r: 0 });
@@ -124,13 +135,14 @@ fn chain(pts: &[Pt], closed: bool) -> Vec<Shape> {
     v
 }
 
-fn with_r(shapes: Vec<Shape>, r: i64) -> Vec<Shape> {
+pub(crate) fn with_r(shapes: Vec<Shape>, r: i64) -> Vec<Shape> {
     shapes.into_iter().map(|s| Shape { r, ..s }).collect()
 }
 
 /// Shapes of one gr_* primitive (r = 0; the caller sets the stroke half width).
-fn gr_shapes(cx: &Ctx, n: &Node) -> Result<Option<Vec<Shape>>, String> {
-    let tag = n.tag().unwrap_or("");
+pub(crate) fn gr_shapes(cx: &Ctx, n: &Node) -> Result<Option<Vec<Shape>>, String> {
+    let tag = n.tag().unwrap_or("").replacen("fp_", "gr_", 1);
+    let tag = tag.as_str();
     Ok(Some(match tag {
         "gr_line" => chain(&[cx.pt(n, "start")?, cx.pt(n, "end")?], false),
         "gr_rect" => {
@@ -158,7 +170,7 @@ fn gr_shapes(cx: &Ctx, n: &Node) -> Result<Option<Vec<Shape>>, String> {
     }))
 }
 
-fn copper_item_for_gr(cx: &Ctx, b: &mut Board, n: &Node, shapes: Vec<Shape>, mask: u64) {
+pub(crate) fn copper_item_for_gr(cx: &Ctx, b: &mut Board, n: &Node, shapes: Vec<Shape>, mask: u64) {
     let uuid = cx.uuid(b, n);
     b.add_item(Item::new(Kind::Graphic, uuid, 0, mask, shapes));
 }
@@ -222,10 +234,11 @@ fn load_via(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     Ok(())
 }
 
-fn load_graphic(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
+pub(crate) fn load_graphic(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     let layer = cx.str_field(n, "layer").unwrap_or("");
-    let width = cx.num_field(n, "width")?.or(cx.num_field(n, "stroke")?).unwrap_or(0);
-    let tag = n.tag().unwrap_or("");
+    let width = stroke_width(cx, n)?;
+    let tag = n.tag().unwrap_or("").replacen("fp_", "gr_", 1);
+    let tag = tag.as_str();
     if tag == "gr_curve" {
         let pts: Vec<Pt> = n.kids("pts").flat_map(|p| p.kids("xy")).filter_map(|k| {
             let v = k.nums().ok()?;
@@ -252,7 +265,7 @@ fn load_graphic(cx: &Ctx, b: &mut Board, n: &Node) -> Result<(), String> {
     finish_graphic(cx, b, n, layer, with_r(shapes, width / 2))
 }
 
-fn finish_graphic(cx: &Ctx, b: &mut Board, n: &Node, layer: &str, shapes: Vec<Shape>) -> Result<(), String> {
+pub(crate) fn finish_graphic(cx: &Ctx, b: &mut Board, n: &Node, layer: &str, shapes: Vec<Shape>) -> Result<(), String> {
     if layer == "Edge.Cuts" {
         let uuid = cx.uuid(b, n);
         b.add_item(Item::new(Kind::Edge, uuid, 0, 0, shapes));
@@ -284,6 +297,7 @@ pub fn load(src: &str) -> Result<Board, String> {
             Some("segment") => load_segment(&cx, &mut b, n)?,
             Some("arc") => load_arc(&cx, &mut b, n)?,
             Some("via") => load_via(&cx, &mut b, n)?,
+            Some("footprint") => crate::load_fp::load_footprint(&cx, &mut b, n)?,
             Some(t) if t.starts_with("gr_") => load_graphic(&cx, &mut b, n)?,
             _ => {}
         }

@@ -4,6 +4,7 @@
 pub mod board;
 pub mod geom;
 pub mod load;
+pub mod load_fp;
 pub mod sexpr;
 
 use serde_json::{json, Value};
