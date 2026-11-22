@@ -30,7 +30,7 @@ def params(cons):
     P["consensus_any_layer"] = e.get("consensus_any_layer") is True
     P["ghost_routers"] = [str(x) for x in P["ghost_routers"]]
     gm = dict(e.get("ghost_min") or {})
-    P["ghost_min"] = {"krt": float(gm.get("krt", 8)), "fr": float(gm.get("fr", 8)), "verify": float(gm.get("verify", 10))}
+    P["ghost_min"] = {"krt": float(gm.get("krt", 10)), "fr": float(gm.get("fr", 8)), "verify": float(gm.get("verify", 10))}
     P["ghost_passes_fr"] = int(dict(e.get("ghost_passes") or {}).get("fr", 4))
     P["verify_top"] = int(e.get("verify_top", 2))
     P["global_ghost"] = e.get("global_ghost") is not False
@@ -402,8 +402,10 @@ def lean_krt(a, board, outdir, budget_min):
             cnt[p["net"]] = cnt.get(p["net"], 0) + 1
     nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets)
     out = os.path.join(outdir, "krt-lean.kicad_pcb")
-    cmd = KC.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, {}, nets=nets)
-    ok, secs = _run_capped(cmd, a.router_dir, outdir, "krt", out, budget_min * 60)
+    # --quick 2: route to judge (main pass only; no rescue, escalation, plane finalize, cleanup, late sweeps) - about half
+    # the time of level 1, and it writes its output. The wall cap is only a safety (SIGINT does not stop it softly).
+    cmd = KC.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, {}, nets=nets) + ["--quick", "2"]
+    ok, secs = _run_capped(cmd, a.router_dir, outdir, "krt", out, budget_min * 60 + 300)
     res = None
     if ok and os.path.exists(out):
         res = out

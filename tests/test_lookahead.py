@@ -673,6 +673,7 @@ def test_lean_krt_is_one_route_call_on_non_plane_nets(monkeypatch, tmp_path):
     assert cmd[cmd.index("--nets") + 1:cmd.index("--layers")] == ["A"]          # plane net GND and the 1-pad net B left out
     assert cmd[cmd.index("--layers") + 1: cmd.index("--layers") + 3] == ["F.Cu", "B.Cu"]
     assert "--power-nets" not in cmd and "--keep-input-copper" in cmd and "--base" in cmd
+    assert cmd[cmd.index("--quick") + 1] == "2"                       # ghost mode: judge, not ship
     assert out.endswith("krt-lean.kicad_pcb") and os.path.exists(os.path.join(str(tmp_path / "g"), "ghost.stats.json"))
 
 
