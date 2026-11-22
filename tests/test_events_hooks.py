@@ -108,6 +108,7 @@ def test_run_wrapper_writes_header_and_end_and_restores_env(tmp_path, monkeypatc
     assert kinds[-1] == "run_end" and "log" in kinds
     hdr = json.load(open(work / "run.json"))
     assert hdr["verdict"] == "pass" and hdr["ended"] is not None
+    assert "board_in" in hdr
 
 
 def test_hooks_never_raise_without_workdir(tmp_path, monkeypatch):
@@ -183,3 +184,16 @@ def test_candidate_iteration_events_index_and_metrics(tmp_path, monkeypatch):
     assert rows[0]["note"] == "r1-0" and rows[0]["metrics"]["opens"] == 1
     assert "critical" not in rows[0]["metrics"] and "blockers" not in rows[0]["metrics"]
     assert "key" not in rows[0]["metrics"]
+
+
+def test_run_json_board_in_is_absolute_input_outside_w(tmp_path, monkeypatch):
+    _clean(monkeypatch, tmp_path)
+    work = tmp_path / "W"
+    (tmp_path / "elsewhere").mkdir()
+    src = _board(tmp_path / "elsewhere" / "in.kicad_pcb")
+    monkeypatch.setattr(pipeline, "_run", lambda a: 0)
+    pipeline.run(argparse.Namespace(workdir=str(work), board=src, flow=None))
+    hdr = json.load(open(work / "run.json"))
+    assert hdr["board_in"] == os.path.abspath(src)
+    assert not os.path.abspath(src).startswith(str(work) + os.sep)
+    assert hdr["board"] == os.path.abspath(src)

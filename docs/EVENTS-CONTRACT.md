@@ -109,4 +109,7 @@ and at every stage end. Snapshots are throttled to one per `[events] snap_s` (3 
 
 ## Run header (`run.json`)
 
+`board_in` = absolute input board (`--board`, or the state's board0 on resume). Boards may live outside W: `board`
+and `board_in` are absolute paths in that case, and stage_end `board` values are as the stage wrote them. `nested` as in run_start.
+
 `{run, board, flow, stages[], features{...}, started, ended, verdict}`; written at run_start and run_end.

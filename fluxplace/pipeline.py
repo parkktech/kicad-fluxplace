@@ -1381,7 +1381,11 @@ def _ev_begin(a, work):
         EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats, nested=nested)
         from . import eta as ETA
         ETA.set_run(feats, stages)
-        _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "flow": flow,
+        board_in = st.get("board0") or board             # the input board: may live outside W
+        if getattr(a, "board", None):
+            board_in = os.path.abspath(a.board)
+        _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "board_in": board_in,
+                             "flow": flow,
                              "stages": stages, "features": feats, "nested": nested, "started": time.time(),
                              "ended": None, "verdict": None})
     except Exception:
