@@ -7,6 +7,7 @@ pub mod index;
 pub mod load;
 pub mod load_fp;
 pub mod load_zone;
+pub mod rules;
 pub mod sexpr;
 
 use serde_json::{json, Value};
@@ -29,6 +30,7 @@ pub struct Handle {
     #[allow(dead_code)]
     opts: Value,
     board: board::Board,
+    rules: rules::Rules,
     load_ms: f64,
 }
 
@@ -52,7 +54,30 @@ fn open_inner(path: &str, opts_json: &str) -> Result<Handle, String> {
     let t0 = std::time::Instant::now();
     let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let board = load::load(&src).map_err(|e| format!("{path}: {e}"))?;
-    Ok(Handle { path: path.to_string(), opts, board, load_ms: t0.elapsed().as_secs_f64() * 1e3 })
+    // project: explicit "project" option (null = none), else the .kicad_pro beside the board
+    let project = match opts.get("project") {
+        Some(Value::Null) => None,
+        Some(Value::String(p)) => Some(p.clone()),
+        _ => {
+            let pro = std::path::Path::new(path).with_extension("kicad_pro");
+            pro.is_file().then(|| pro.to_string_lossy().into_owned())
+        }
+    };
+    let rules = rules::load(project.as_deref())?;
+    Ok(Handle { path: path.to_string(), opts, board, rules, load_ms: t0.elapsed().as_secs_f64() * 1e3 })
+}
+
+fn floors_json(f: &rules::Floors, tag: &str) -> Value {
+    let mm = |x: i64| x as f64 / 1e6;
+    json!({"ok": true, "tag": tag, "clr": mm(f.clr), "track": mm(f.track), "via_dia": mm(f.via_dia),
+           "via_drill": mm(f.via_drill), "hole_clr": mm(f.hole_clr), "h2h": mm(f.h2h), "edge_clr": mm(f.edge_clr),
+           "annular": mm(f.annular)})
+}
+
+fn rules_json(r: &rules::Rules) -> Value {
+    json!({"source": r.source, "floors": floors_json(&r.floors, ""),
+           "classes": r.classes.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+           "patterns": r.patterns.len(), "unsupported": r.unsupported})
 }
 
 /// items: optional filters bbox [x0,y0,x1,y1] (mm), layer (name), net (name), kinds (names), ids (u32 list).
@@ -81,7 +106,7 @@ fn items_op(h: &Handle, v: &Value) -> Value {
 }
 
 /// Dispatch one JSON request. K0 ops: ping, info (stub), panic (test hook: proves catch_unwind works).
-pub fn dispatch(h: &Handle, req: &str) -> Value {
+pub fn dispatch(h: &mut Handle, req: &str) -> Value {
     let v: Value = match serde_json::from_str(req) {
         Ok(v) => v,
         Err(e) => return json!({"ok": false, "error": format!("request: {e}")}),
@@ -103,9 +128,22 @@ pub fn dispatch(h: &Handle, req: &str) -> Value {
             json!({"ok": true, "path": h.path, "file_version": b.file_version, "layers": b.copper, "dup_uuids": dup_uuids,
                    "nets": b.nets.len() - 1, "items": live, "load_ms": h.load_ms,
                    "zones": b.zones.len(), "fill_stale": b.fill_stale,
+                   "rules": rules_json(&h.rules),
                    "unsupported": b.unsupported.iter().map(|u| json!({"what": u.what, "where": u.at, "effect": u.effect})).collect::<Vec<_>>()})
         }
         "items" => items_op(h, &v),
+        "net_rule" => {
+            let net = v.get("net").and_then(Value::as_str).unwrap_or("");
+            let r = h.rules.net_rule(net);
+            let mm = |x: i64| x as f64 / 1e6;
+            json!({"ok": true, "class": r.class, "width": mm(r.width), "clearance": mm(r.clearance),
+                   "via_dia": mm(r.via_dia), "via_drill": mm(r.via_drill), "dp_width": mm(r.dp_width), "dp_gap": mm(r.dp_gap)})
+        }
+        "set_floors" => {
+            let g = |k: &str| v.get(k).and_then(Value::as_f64).map(|x| (x * 1e6).round() as i64).unwrap_or(0);
+            h.rules.set_floors(g("clr"), g("track"), g("via_dia"), g("via_drill"));
+            floors_json(&h.rules.floors, "ok")
+        }
         "zones" => {
             let b = &h.board;
             let zones: Vec<Value> = b.zones.iter().map(|z| {
@@ -151,7 +189,7 @@ pub extern "C" fn fpk_call(h: *mut Handle, req_json: *const c_char) -> *mut c_ch
             return json!({"ok": false, "error": "null handle"});
         }
         match cstr_arg(req_json, "request") {
-            Ok(req) => dispatch(unsafe { &*h }, req),
+            Ok(req) => dispatch(unsafe { &mut *h }, req),
             Err(e) => json!({"ok": false, "error": e}),
         }
     }));
@@ -193,9 +231,9 @@ mod tests {
 
     #[test]
     fn ping_and_unknown_op() {
-        let h = Handle { path: "x".into(), opts: json!({}), board: board::Board::new(vec![]), load_ms: 0.0 };
-        assert_eq!(dispatch(&h, r#"{"op":"ping"}"#)["pong"], true);
-        assert_eq!(dispatch(&h, r#"{"op":"nope"}"#)["ok"], false);
-        assert_eq!(dispatch(&h, "not json")["ok"], false);
+        let mut h = Handle { path: "x".into(), opts: json!({}), board: board::Board::new(vec![]), rules: rules::Rules::fallback(), load_ms: 0.0 };
+        assert_eq!(dispatch(&mut h, r#"{"op":"ping"}"#)["pong"], true);
+        assert_eq!(dispatch(&mut h, r#"{"op":"nope"}"#)["ok"], false);
+        assert_eq!(dispatch(&mut h, "not json")["ok"], false);
     }
 }
