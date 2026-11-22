@@ -1339,7 +1339,8 @@ def stage(c, n, board):
         cs_args = None
     try:
         rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out),
-                  guide=getattr(c, "guide", None))
+                  guide=getattr(c, "guide", None),
+                  only=getattr(c, "only", None) or None)
     except Exception as e:                                  # noqa: BLE001 - an unmeasured board must not advance as if the stage ran
         msg = f"pairs failed ({type(e).__name__}: {str(e)[:160]})"
         with open(os.path.join(d, "stage.log"), "a") as fh:

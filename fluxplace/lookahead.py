@@ -17,7 +17,7 @@ from . import snapshot as SN
 DEFAULTS = {"enabled": False, "cell_mm": 1.0, "escape_mm": 3.0, "min_nets": 2, "pair_clear_mm": 2.0,
             "max_area_frac": 0.25, "ghost_budget_min": 40, "jobs": 4, "max_rounds": 3, "no_gain_rounds": 1,
             "variants": [[2, 3.0], [1, 3.0], [3, 2.0]], "res_cost": 200.0, "off_cost": 20.0, "corridor_mm": 1.0,
-            "hard": False, "ghost_routers": ["krt-whole", "freerouting"], "consensus_any_layer": False}
+            "hard": False, "ghost_routers": ["krt-whole", "freerouting"], "consensus_any_layer": False, "lay": "gated"}
 _FLOAT = ("cell_mm", "escape_mm", "pair_clear_mm", "max_area_frac", "res_cost", "off_cost", "corridor_mm")
 _INT = ("min_nets", "ghost_budget_min", "jobs", "max_rounds", "no_gain_rounds")
 
@@ -36,6 +36,9 @@ def params(cons):
     P["ghost_passes_fr"] = int(dict(e.get("ghost_passes") or {}).get("fr", 4))
     P["verify_top"] = int(e.get("verify_top", 2))
     P["global_ghost"] = e.get("global_ghost") is not False
+    P["lay"] = str(e.get("lay", "gated"))
+    if P["lay"] not in ("gated", "all"):
+        raise ValueError(f"[lookahead] lay must be 'gated' or 'all', got {P['lay']!r}")
     for k in _FLOAT:
         P[k] = float(P[k])
     for k in _INT:
@@ -57,6 +60,12 @@ def critical_nets(board_path, cons, spec=None):
     legs = {n for pr in critical_pairs(board_path, cons, spec) for n in pr}
     return legs | set(PWR.route_widths(cons or {}, track_mm=0.15))
 
+
+def lay_legs(pairs, cons, P):
+    """legs of the pairs the candidates lay: every pair (lay = "all") or only the gated high-speed pairs (review.pair_gated)."""
+    from . import review as RV
+    keep = [pr for pr in pairs if P["lay"] == "all" or RV.pair_gated(cons or {}, pr[0])]
+    return sorted({n for pr in keep for n in pr})
 
 def _cell_of(x, y, x0, y0, c):
     return int(math.floor((x - x0) / c)), int(math.floor((y - y0) / c))
@@ -711,14 +720,14 @@ def _verify(a, locked, cand, crit, cons, P, rects, tag):
     return g, fit, png
 
 
-def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None, adopt=None, jobs=None):
+def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None, adopt=None, jobs=None, only=None):
     cand = _mk(os.path.join(d, tag))
     cs = (["--constraints", acfg["constraints"]] if acfg.get("constraints") else []) + \
          (["--spec", acfg["spec"]] if acfg.get("spec") else [])
     job = {"tag": tag, "kind": kind, "variant": list(variant), "board": base, "dir": cand,
            "rects": [{"layer": r["layer"], "rect": list(r["rect"]), "nets": r["nets"], "demand": r["demand"]} for r in rects],
            "pair": list(pair) if pair else None, "a": acfg, "cs": cs, "critical": sorted(crit), "guide": guide,
-           "adopt": adopt, "jobs": jobs,
+           "adopt": adopt, "jobs": jobs, "only": only,
            "result": os.path.join(cand, "result.json")}
     jobfile = os.path.join(_mk(os.path.join(d, "jobs")), f"{tag}.json")
     job["jobfile"] = jobfile
@@ -779,7 +788,7 @@ def _worker(jobfile):
             cons["pairlay"]["fallback"] = False                 # candidates: no fallback search (W14: 36-77 min)
             cons["pairlay"]["workers"] = max(1, 32 // max(1, int(job.get("jobs", 4))))
             sub = SimpleNamespace(cons=cons, spec=spec, dir=lambda n, name: _mk(os.path.join(cand, f"{n}-{name}")),
-                                  cs=lambda: list(job["cs"]), qs=lambda: [])
+                                  cs=lambda: list(job["cs"]), qs=lambda: [], only=job.get("only"))
             if job["kind"] == "repair":
                 locked = _lay_repair(sub, cand, job["board"], rects, job["pair"], cons, spec)
             else:
@@ -1072,6 +1081,7 @@ def stage(c, n, board):
     acfg = {k: getattr(a, k, None) for k in ("constraints", "spec", "router_dir", "router_py", "freerouting_jar", "java")}
     crit = critical_nets(board, c.cons, c.spec)
     pl = critical_pairs(board, c.cons, c.spec)
+    only = lay_legs(pl, c.cons, P)
     rows, sources, ok_fit, timing = [], {}, {}, {"ghosts": {}}
     stop = "no round ran"
     routers = list(P["ghost_routers"])
@@ -1196,7 +1206,7 @@ def stage(c, n, board):
                       "corr": _corr_for(src, sources, order), "res_cost": P["res_cost"], "off_cost": P["off_cost"]}
                      if kind == "soft" else None)
             job = _job(d, f"r{r}-{i}", kind, variant, base, rects, pair, acfg, crit, guide=guide,
-                       adopt=adopt_list if kind == "soft" else None, jobs=P["jobs"])
+                       adopt=adopt_list if kind == "soft" else None, jobs=P["jobs"], only=only)
             job["src"] = src
             jobs.append(job)
         _progress(spath, "running", f"round {r}: {len(jobs)} candidates (tier 1)", timing=timing,
@@ -1212,7 +1222,7 @@ def stage(c, n, board):
         top = okc[:P["verify_top"]]
         vjobs = []
         for j, x in top:
-            vj = _job(d, f"{j['tag']}-v", "verify", tuple(j["variant"]), x["locked"], [], None, acfg, crit)
+            vj = _job(d, f"{j['tag']}-v", "verify", tuple(j["variant"]), x["locked"], [], None, acfg, crit, only=only)
             vj["board"], vj["src"] = x["locked"], j["src"]
             vjobs.append(vj)
         verified = _run_jobs(vjobs, P, P["ghost_min"]["verify"] * 60 + 300) if vjobs else []
