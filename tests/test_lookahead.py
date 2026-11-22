@@ -36,7 +36,8 @@ P0 = LA.params({"lookahead": {"enabled": True}})
 
 def test_params_defaults_and_overrides():
     P = LA.params(None)
-    assert P["enabled"] is False and P["cell_mm"] == 1.0 and P["min_nets"] == 2 and P["max_rounds"] == 4
+    assert P["enabled"] is False and P["cell_mm"] == 1.0 and P["min_nets"] == 2 and P["max_rounds"] == 3
+    assert P["jobs"] == 4 and P["no_gain_rounds"] == 1 and P["verify_top"] == 2 and P["ghost_min"]["verify"] == 10.0
     assert P["variants"] == [(2, 3.0), (1, 3.0), (3, 2.0)]
     Q = LA.params({"lookahead": {"enabled": True, "cell_mm": "0.5", "variants": [[1, 2]]}})
     assert Q["enabled"] is True and Q["cell_mm"] == 0.5 and Q["variants"] == [(1, 2.0)]
@@ -196,7 +197,7 @@ def test_ghost_command_flags_and_result(monkeypatch, tmp_path):
     for flag in ("--flow", "--from", "--to", "--router", "--router-dir", "--router-py", "--constraints", "--spec",
                  "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"):
         assert flag in cmd
-    assert cmd[cmd.index("--route-budget") + 1] == "2400" and seen["kw"]["timeout"] == 2400 + 600
+    assert cmd[cmd.index("--route-budget") + 1] == "2400" and seen["kw"]["timeout"] == 2400 + 120
     assert got == str(tmp_path / "out" / "run" / "3-route" / "board.kicad_pcb")
 
 
@@ -267,7 +268,8 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     monkeypatch.setattr(LA, "critical_nets", lambda board, cons, spec=None: {"A", "B"})
     monkeypatch.setattr(LA, "critical_pairs", lambda board, cons, spec=None: [("A", "B")])
     monkeypatch.setattr(LA, "corridors", lambda B, pairs, P: ({}, {}))
-    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole": str(fixture))
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None: str(fixture))
+    monkeypatch.setattr(LA, "global_demand", lambda board, cons, spec, P, crit: {"cells": {}, "origin": (0.0, 0.0), "cell": 1.0})
     monkeypatch.setattr(LA, "fitness", lambda board, crit, cons, reserved_area=0.0, escape_mm=3.0:
                         {"key": (0, 0, 5, 0, 0, 0.0), "opens": 5, "pairs_complete": 0, "pairs_total": 1, "blockers": {}})
     monkeypatch.setattr(LA, "render", lambda board, rects, fit, path: (open(path, "w").write("x"), path)[1])
@@ -279,13 +281,17 @@ def _tour_setup(monkeypatch, tmp_path, plan):
     rounds = {"n": 0}
 
     def fake_run_jobs(jobs, P, timeout):
-        rounds["n"] += 1
+        if all(j["kind"] == "verify" for j in jobs):
+            rounds["verify"] = rounds.get("verify", 0) + 1
+        else:
+            rounds["n"] += 1
         res = []
         for job in jobs:
             jobs_seen.append(job)
             locked = tmp_path / f"{job['tag']}-locked.kicad_pcb"
             locked.write_text("(kicad_pcb)")
-            fit = dict(plan(rounds["n"], job), id=job["tag"])
+            base = dict(job, tag=job["tag"][:-2]) if job["kind"] == "verify" else job
+            fit = dict(plan(rounds["n"], base), id=job["tag"])
             res.append({"tag": job["tag"], "kind": job["kind"], "variant": job["variant"], "locked": str(locked),
                         "png": str(tmp_path / f"{job['tag']}.png"), "fit": fit})
         return res
@@ -464,10 +470,62 @@ def test_stage_runs_each_ghost_and_drops_a_failed_one(monkeypatch, tmp_path):
         return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
     c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
     real = LA.ghost
-    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole":
+    monkeypatch.setattr(LA, "ghost", lambda a, board, outdir, budget, router="krt-whole", passes=None:
                         None if router == "freerouting" else real(a, board, outdir, budget, router))
     out = LA.stage(c, 7, "in.kicad_pcb")
     assert out["verdict"] == "pass"
     table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
     assert "fail: no routed board" in table and "ghost-krt-whole" in table
     assert not any(j["src"] == "freerouting" for j in jobs)
+
+
+# ---- L8: tiers (tier-1 text key, KRT verify of the top 2 with opens as tie-break), fast ghosts, global ghost ----
+
+def test_tier_two_opens_break_ties_between_equal_tier_one_keys(monkeypatch, tmp_path):
+    def plan(r, job):
+        opens = 0 if job["tag"] == "r1-1" else 3
+        return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": opens, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert "winner r1-1" in out["line"] and "ghost opens 0" in out["line"]
+
+
+def test_only_the_top_two_candidates_are_verified(monkeypatch, tmp_path):
+    def plan(r, job):
+        return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    LA.stage(c, 7, "in.kicad_pcb")
+    verify_jobs = [j for j in jobs if j["kind"] == "verify"]
+    assert rounds["verify"] == rounds["n"] and len(verify_jobs) <= 2 * rounds["verify"]   # at most top 2 per round
+    table = open(os.path.join(c.dir(7, "lookahead"), "TOURNAMENT.md")).read()
+    assert "tier1 only" in table and "(opens 1)" in table
+
+
+def test_freerouting_ghost_gets_passes_override_when_constraints_lack_the_table(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    cons = tmp_path / "c.toml"
+    cons.write_text("[power]\n")
+    src = tmp_path / "g.kicad_pcb"
+    src.write_text("x")
+    seen = {}
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
+    a = SimpleNamespace(router_dir="/r", router_py="/rp", constraints=str(cons), spec=None, freerouting_jar="/fr.jar", java=None)
+    LA.ghost(a, str(src), str(tmp_path / "o"), 8, router="freerouting", passes=4)
+    cc = seen["cmd"][seen["cmd"].index("--constraints") + 1]
+    assert cc.endswith("constraints.ghost.toml") and "[route.freerouting]\npasses = 4" in open(cc).read()
+
+
+def test_global_demand_maps_route_nodes_to_cells(monkeypatch):
+    from fluxplace import planroute as PRR
+    class GR:
+        N, layers = 4, ["F.Cu", "B.Cu"]
+        routes = {"N1": {"conns": [{"path": [0, 1, 4 + 2]}]}, "P": {"conns": [{"path": [0]}]}}
+        def xy_of(self, c):
+            return (0.5 + c, 0.5)
+    monkeypatch.setattr(PRR, "run", lambda B, cons, spec, ignore_routing=False: {"gr": GR()})
+    monkeypatch.setattr(LA.RD, "load", lambda path, **kw: board(bbox=(0.0, 0.0, 4.0, 4.0)))
+    D = LA.global_demand("x", {}, None, dict(P0), {"P"})
+    assert D["cells"][("F.Cu", 0, 0)]["nets"] == {"N1"} and D["cells"][("F.Cu", 1, 0)]["nets"] == {"N1"}
+    assert D["cells"][("B.Cu", 2, 0)]["nets"] == {"N1"}
+    assert all("P" not in cl["nets"] for cl in D["cells"].values())
