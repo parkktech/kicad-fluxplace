@@ -7,7 +7,7 @@ use crate::sexpr::{self, Kind as SK, Node};
 use std::collections::HashMap;
 
 /// Arc chord error budget (nm); the arc's r is raised by the same amount (conservative).
-const ARC_ERR_NM: f64 = 1000.0;
+const ARC_ERR_NM: f64 = 250.0;
 
 fn line_of(src: &str, at: usize) -> usize {
     1 + src.as_bytes()[..at.min(src.len())].iter().filter(|&&b| b == b'\n').count()
