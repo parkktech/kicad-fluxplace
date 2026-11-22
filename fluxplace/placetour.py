@@ -16,6 +16,7 @@ import subprocess
 import time
 from types import SimpleNamespace
 
+from . import boardfile as BF
 from . import boardwrite as BW
 from . import events as EV
 from . import intent as IT
@@ -341,6 +342,115 @@ def worse_gates(st, base):
     return out
 
 
+CELL = 2.0
+
+
+def _pt_seg(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _seg_dist(a, b, c, d):
+    """distance between segments ab and cd (0 when they cross)."""
+    def side(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    if (side(a, b, c) * side(a, b, d) < 0) and (side(c, d, a) * side(c, d, b) < 0):
+        return 0.0
+    return min(_pt_seg(c[0], c[1], a[0], a[1], b[0], b[1]), _pt_seg(d[0], d[1], a[0], a[1], b[0], b[1]),
+               _pt_seg(a[0], a[1], c[0], c[1], d[0], d[1]), _pt_seg(b[0], b[1], c[0], c[1], d[0], d[1]))
+
+
+def _pt_pad(x, y, q, B):
+    """distance from a point to the pad copper (round pads: circle; others: the rectangle at the pad's board rotation)."""
+    if q["shape"] == "circle":
+        return max(0.0, math.hypot(x - q["x"], y - q["y"]) - q["w"] / 2)
+    rot = q["angle"] + B["parts"].get(q["ref"], {}).get("angle", 0.0)
+    dx, dy = BF._rot(x - q["x"], y - q["y"], -rot)
+    return math.hypot(max(abs(dx) - q["w"] / 2, 0.0), max(abs(dy) - q["h"] / 2, 0.0))
+
+
+def _grid_add(grid, key_box, item):
+    x0, y0, x1, y1 = key_box
+    for i in range(math.floor(x0 / CELL), math.floor(x1 / CELL) + 1):
+        for j in range(math.floor(y0 / CELL), math.floor(y1 / CELL) + 1):
+            grid.setdefault((i, j), []).append(item)
+
+
+def carried_clearance(B, carried, clearance=None):
+    """Carried stub copper (tracks and vias listed in `carried` {'segs': {idx: ref}, 'vias': {idx: ref}}) must keep the
+    clearance to every FOREIGN-net pad, track and via: tracks against pads and tracks on the same layer, vias against
+    everything (all layers). Net classes are not parsed: the board's Default clearance (routediag) is used for all nets.
+    -> the ref of the first moved part whose copper is too close, or None. Uses a 2 mm grid."""
+    if not carried or (not carried["segs"] and not carried["vias"]):
+        return None
+    clr = float(clearance if clearance is not None else B.get("clearance", 0.14))
+    tol = 0.005
+    grid = {}
+    for q in B["pads"]:
+        _grid_add(grid, (q["x"] - q["ex"] - clr, q["y"] - q["ey"] - clr, q["x"] + q["ex"] + clr, q["y"] + q["ey"] + clr), ("pad", q))
+    for i, sg in enumerate(B["segs"]):
+        m = sg["w"] / 2 + clr
+        _grid_add(grid, (min(sg["a"][0], sg["b"][0]) - m, min(sg["a"][1], sg["b"][1]) - m,
+                         max(sg["a"][0], sg["b"][0]) + m, max(sg["a"][1], sg["b"][1]) + m), ("seg", i, sg))
+    for j, v in enumerate(B["vias"]):
+        m = v["d"] / 2 + clr
+        _grid_add(grid, (v["x"] - m, v["y"] - m, v["x"] + m, v["y"] + m), ("via", j, v))
+
+    def near(box, net):
+        seen = set()
+        for i in range(math.floor(box[0] / CELL), math.floor(box[2] / CELL) + 1):
+            for j in range(math.floor(box[1] / CELL), math.floor(box[3] / CELL) + 1):
+                for it in grid.get((i, j), []):
+                    obj = it[1] if it[0] == "pad" else it[2]
+                    if id(obj) in seen or obj["net"] == net:
+                        continue
+                    seen.add(id(obj))
+                    yield it
+
+    for kind, idx_map in (("seg", carried["segs"]), ("via", carried["vias"])):
+        for idx, owner in idx_map.items():
+            if kind == "seg":
+                sg = B["segs"][idx]
+                a, b, w, layer, net = sg["a"], sg["b"], sg["w"], sg["layer"], sg["net"]
+                box = (min(a[0], b[0]) - w, min(a[1], b[1]) - w, max(a[0], b[0]) + w, max(a[1], b[1]) + w)
+            else:
+                v = B["vias"][idx]
+                w = v["d"]
+                net = v["net"]
+                box = (v["x"] - w, v["y"] - w, v["x"] + w, v["y"] + w)
+            for tag, *rest in near(box, net):
+                clr_need = clr - tol
+                if tag == "pad":
+                    q = rest[0]
+                    if kind == "seg" and layer not in q["layers"]:
+                        continue
+                    if kind == "seg":                       # sampled every 0.05 mm along the track
+                        n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.05) + 1)
+                        d = min(_pt_pad(a[0] + (b[0] - a[0]) * t / (n - 1), a[1] + (b[1] - a[1]) * t / (n - 1), q, B)
+                                for t in range(n)) - w / 2
+                    else:
+                        d = _pt_pad(v["x"], v["y"], q, B) - w / 2
+                elif tag == "seg":
+                    j, o = rest
+                    if kind == "seg" and o["layer"] != layer:
+                        continue
+                    if kind == "seg":
+                        d = _seg_dist(a, b, o["a"], o["b"]) - (w + o["w"]) / 2
+                    else:
+                        d = _pt_seg(v["x"], v["y"], o["a"][0], o["a"][1], o["b"][0], o["b"][1]) - (v["d"] + o["w"]) / 2
+                else:
+                    j, o = rest
+                    if kind == "seg":
+                        d = _pt_seg(o["x"], o["y"], a[0], a[1], b[0], b[1]) - (o["d"] + w) / 2
+                    else:
+                        d = math.hypot(o["x"] - v["x"], o["y"] - v["y"]) - (o["d"] + v["d"]) / 2
+                if d < clr_need:
+                    return owner
+    return None
+
+
 def _apply(board_path, moves, out_path, move_routed):
     """Moves on a copy (text, no post-write hook). Stub copper of a moved part is carried with it (boardwrite.carry_copper);
     with move_routed the unlocked non-stub copper that touches a moved part is dropped (it would be detached).
@@ -364,7 +474,9 @@ def _apply(board_path, moves, out_path, move_routed):
     with open(out_path, "w", errors="surrogateescape") as fh:
         fh.write(text)
     ok, probs = _guard(B, RD.load(out_path), carry, rs, rv)
-    return ok, probs, {"segs": sorted(rs), "vias": sorted(rv)}
+    carried = {"segs": {i: c["ref"] for c in carry for i in c["segs"]},
+               "vias": {j: c["ref"] for c in carry for j in c["vias"]}}
+    return ok, probs, {"segs": sorted(rs), "vias": sorted(rv), "carried": carried}
 
 
 def _guard(A, Bn, carry, rs, rv):
@@ -417,6 +529,10 @@ def tier1(base_path, cands, cons, spec, P, outdir, base_state):
             dropped.append((c, "guard: " + "; ".join(probs[:2])))
             continue
         B1 = RD.load(p)
+        bad = carried_clearance(B1, removed.get("carried") or {"segs": {}, "vias": {}})
+        if bad:
+            dropped.append((c, f"carried copper clearance {bad}"))
+            continue
         worse = worse_gates(gate_state(B1, cons, spec), base_state)
         if worse:
             dropped.append((c, "worse: " + ",".join(worse)))

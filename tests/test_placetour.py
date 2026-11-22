@@ -331,3 +331,39 @@ def test_box_parts_fills_empty_hot_area_from_pads():
     B = {"pads": [_pad("C5", 3.0, 3.0, "N"), _pad("U9", 20, 20, "N"), _pad("R1", 4.5, 3.0, "N")]}
     assert PTm._box_parts(B, [1.0, 2.0, 3.0, 4.0], grow=2.0) == ["C5", "R1"]    # R1 is 1.5 mm outside the box: within 2 mm
     assert PTm._box_parts(B, [1.0, 2.0, 3.0, 4.0], grow=0.5) == ["C5"]
+
+
+def _clr_board(foreign_track_y=10.0, via_y=None, pad=None):
+    B = {"parts": {}, "bbox": (0, 0, 50, 50), "clearance": 0.14, "pads": [], "segs": [], "vias": []}
+    B["segs"].append({"a": (0.0, foreign_track_y), "b": (20.0, foreign_track_y), "w": 0.2, "layer": "F.Cu", "net": "N2",
+                      "mid": None, "locked": False})
+    B["vias"].append({"x": 10.0, "y": via_y if via_y is not None else 10.0 + 0.45, "d": 0.6, "net": "N1",
+                      "layers": {"F.Cu", "B.Cu"}, "locked": False, "drill": 0.3})
+    if pad is not None:
+        B["pads"].append(pad)
+    return B
+
+
+def test_carried_via_too_close_to_foreign_track_is_dropped():
+    from fluxplace import placetour as PTm
+    B = _clr_board(via_y=10.0 + 0.45)                        # copper gap 0.45 - 0.3 - 0.1 = 0.05 mm < 0.14 mm
+    assert PTm.carried_clearance(B, {"segs": {}, "vias": {0: "U1"}}) == "U1"
+
+
+def test_carried_via_one_mm_away_passes():
+    from fluxplace import placetour as PTm
+    B = _clr_board(via_y=11.0)                               # gap 1.0 - 0.4 = 0.6 mm
+    assert PTm.carried_clearance(B, {"segs": {}, "vias": {0: "U1"}}) is None
+
+
+def test_carried_track_near_foreign_pad_and_same_net_ignored():
+    from fluxplace import placetour as PTm
+    pad = {"ref": "R9", "num": "1", "net": "N2", "x": 5.0, "y": 11.0, "ex": 0.5, "ey": 0.25, "w": 1.0, "h": 0.5,
+           "shape": "rect", "angle": 0, "layers": {"F.Cu"}}
+    B = _clr_board(pad=pad)
+    B["segs"].append({"a": (4.0, 11.2), "b": (6.0, 11.2), "w": 0.2, "layer": "F.Cu", "net": "N1", "mid": None, "locked": False})
+    # carried track N1 at y=11.2 with half width 0.1 against the pad's top edge at y=11.25: overlaps -> violation
+    assert PTm.carried_clearance(B, {"segs": {1: "R1"}, "vias": {}}) == "R1"
+    pad2 = dict(pad, net="N1")                                 # same net as the carried track: no clearance check
+    B["pads"] = [pad2]
+    assert PTm.carried_clearance(B, {"segs": {1: "R1"}, "vias": {}}) is None
