@@ -1,4 +1,5 @@
 """LOOKAHEAD stage: demand map, reservations, ghost/fitness/render helpers and the round loop (no pcbnew, no router)."""
+import json
 import os
 import sys
 import types
@@ -231,7 +232,7 @@ def test_fitness_key_and_sealed_blockers(monkeypatch):
     _fit_fixture(monkeypatch, {"N9": 1}, unc, "complete")
     f = LA.fitness("x", {"DP", "DN"}, {}, escape_mm=0.5)
     assert f["pairs_complete"] == 1 and f["opens"] == 1 and f["sealed"] == 1
-    assert f["blockers"] == {"DN/DP": 1}
+    assert f["blockers"] == {"DN|DP": {"count": 1, "nets": ["N9"]}}
     assert f["key"] == (-1, 0, 1, 1, 0, 0.0)
 
 
@@ -333,8 +334,9 @@ def test_tournament_no_gain_stops_after_two_rounds(monkeypatch, tmp_path):
     def plan(r, job):
         if r == 1:
             return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 2,
-                    "blockers": {"A|B": 3, "C|D": 1}}
-        return {"key": (-1, 0, 4, 0, 0, 0.0), "opens": 4, "pairs_complete": 1, "pairs_total": 2, "blockers": {"A|B": 3}}
+                    "blockers": {"A|B": {"count": 3, "nets": ["X"]}, "C|D": {"count": 1, "nets": ["Y"]}}}
+        return {"key": (-1, 0, 4, 0, 0, 0.0), "opens": 4, "pairs_complete": 1, "pairs_total": 2,
+                "blockers": {"A|B": {"count": 3, "nets": ["X"]}}}
     c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
     out = LA.stage(c, 7, "in.kicad_pcb")
     assert out["verdict"] == "pass" and rounds["n"] == 3          # round 2 and 3 never beat round 1: no_gain_rounds = 2
@@ -345,7 +347,8 @@ def test_blockers_drive_repair_candidates_in_round_two(monkeypatch, tmp_path):
     def plan(r, job):
         if r == 1:
             return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 2,
-                    "blockers": {"A|B": 3, "C|D": 1, "E|F": 9}}
+                    "blockers": {"A|B": {"count": 3, "nets": ["X"]}, "C|D": {"count": 1, "nets": ["Y"]},
+                                 "E|F": {"count": 9, "nets": ["Z"]}}}
         return {"key": (0, 0, 9, 0, 0, 0.0), "opens": 9, "pairs_complete": 0, "pairs_total": 2, "blockers": {}}
     c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
     LA.stage(c, 7, "in.kicad_pcb")
@@ -384,13 +387,15 @@ def test_guide_cost_identity_and_merge():
     assert PR._guide_cost({}, None, ["F.Cu"], ("A", "B"), cost) is cost        # no guide: unchanged
     g = lambda pr, grid, sig: [[10, 250], [0, 0]]
     merged = PR._guide_cost({"guide": g}, None, ["F.Cu", "B.Cu"], ("A", "B"), cost)
-    assert merged == [[10, 250], [3, 4]]
-    assert PR._guide_cost({"guide": g}, None, ["F.Cu"], ("A", "B"), None) == [[10, 250], [0, 0]]
+    assert [list(b) for b in merged] == [[10, 250], [3, 4]]
+    assert [list(b) for b in PR._guide_cost({"guide": g}, None, ["F.Cu"], ("A", "B"), None)] == [[10, 250], [0, 0]]
 
 
 class _Grid:
     def __init__(self, nx, ny, step=1.0):
+        from types import SimpleNamespace
         self.nx, self.ny, self.step = nx, ny, step
+        self.F = SimpleNamespace(nx=nx, ny=ny, step=step, x0=0.0, y0=0.0)
 
     def xy(self, j, i):
         return (i + 0.5) * self.step, (j + 0.5) * self.step
@@ -400,11 +405,11 @@ def test_make_guide_reserved_and_off_corridor_costs():
     G = {"origin": (0.0, 0.0), "cell": 1.0, "res": [{"layer": "F.Cu", "rect": (0.0, 0.0, 2.0, 1.0)}],
          "corr": {"A|B": [("F.Cu", 3, 0)]}, "res_cost": 200.0, "off_cost": 20.0}
     guide = LA.make_guide(G)
-    out = guide(("B", "A"), _Grid(4, 1), ["F.Cu"])
+    out = [list(b) for b in guide(("B", "A"), _Grid(4, 1), ["F.Cu"])]
     # cells 0,1 reserved and off the corridor (200+20); cell 2 off the corridor (20); cell 3 is the corridor (0)
     assert out == [[220, 220, 20, 0]]
     # a pair with no corridor pays only the reservation
-    assert guide(("X", "Y"), _Grid(4, 1), ["F.Cu"]) == [[200, 200, 0, 0]]
+    assert [list(b) for b in guide(("X", "Y"), _Grid(4, 1), ["F.Cu"])] == [[200, 200, 0, 0]]
 
 
 def test_corridors_cover_both_legs_with_halo_and_skip_open_pairs(monkeypatch):
@@ -529,3 +534,55 @@ def test_global_demand_maps_route_nodes_to_cells(monkeypatch):
     assert D["cells"][("F.Cu", 0, 0)]["nets"] == {"N1"} and D["cells"][("F.Cu", 1, 0)]["nets"] == {"N1"}
     assert D["cells"][("B.Cu", 2, 0)]["nets"] == {"N1"}
     assert all("P" not in cl["nets"] for cl in D["cells"].values())
+
+
+def test_pcbnew_scripts_flush_their_ok_line():
+    for code in (LA._apply_code("/i", "/o", [{"layer": "F.Cu", "rect": (0, 0, 1, 1)}]), LA._strip_code("/i", "/o")):
+        assert "print('OK', " in code and "flush=True" in code
+
+
+def test_restrict_demand_keeps_only_the_sealed_nets():
+    cl = lambda nets: {"nets": set(nets), "crit": set(), "escape": False, "pad_dist": {n: 1.0 for n in nets}}
+    D = {"cells": {("F.Cu", 0, 0): cl({"S1", "X"}), ("F.Cu", 1, 0): cl({"X"})}, "origin": (0.0, 0.0), "cell": 1.0}
+    R = LA.restrict_demand(D, {"S1"})
+    assert list(R["cells"]) == [("F.Cu", 0, 0)] and R["cells"][("F.Cu", 0, 0)]["nets"] == {"S1"}
+
+
+def test_repair_rects_come_only_from_sealed_net_cells(monkeypatch, tmp_path):
+    real_reservations = LA.reservations
+
+    def plan(r, job):
+        if r == 1:
+            return {"key": (-1, 0, 1, 0, 0, 0.0), "opens": 1, "pairs_complete": 1, "pairs_total": 2,
+                    "blockers": {"A|B": {"count": 3, "nets": ["S1"]}}}
+        return {"key": (0, 0, 9, 0, 0, 0.0), "opens": 9, "pairs_complete": 0, "pairs_total": 2, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    monkeypatch.setattr(LA, "reservations", real_reservations)
+    cl = lambda nets: {"nets": set(nets), "crit": set(), "escape": False, "pad_dist": {}}
+    monkeypatch.setattr(LA, "demand", lambda board, crit, P: {"cells": {("F.Cu", 0, 0): cl({"S1", "X"}),
+                                                                       ("F.Cu", 4, 4): cl({"X"})},
+                                                                "origin": (0.0, 0.0), "cell": 1.0})
+    LA.stage(c, 7, "in.kicad_pcb")
+    repairs = [j for j in jobs if j["kind"] == "repair"]
+    assert repairs and all(set(n for r in j["rects"] for n in r["nets"]) <= {"S1"} for j in repairs)
+
+
+def test_no_winner_is_logged_as_the_stop_reason(monkeypatch, tmp_path):
+    def plan(r, job):
+        return {"key": (-1, 0, 0, 0, 0, 0.0), "opens": 0, "pairs_complete": 1, "pairs_total": 1, "blockers": {}}
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    monkeypatch.setattr(LA, "_run_jobs", lambda jobs, P, timeout: [{"tag": j["tag"], "error": "boom"} for j in jobs])
+    out = LA.stage(c, 7, "in.kicad_pcb")
+    assert out["verdict"] == "fail"
+    prog = json.load(open(os.path.join(c.dir(7, "lookahead"), "progress.json")))
+    assert "nothing to keep" in prog["reason"]
+
+
+def test_lay_repair_raises_when_pairs_wrote_no_board(monkeypatch, tmp_path):
+    from fluxplace import pairs as PR
+    board_in = tmp_path / "in.kicad_pcb"
+    board_in.write_text("(kicad_pcb)")
+    monkeypatch.setattr(LA, "apply", lambda bi, bo, rects: bi)
+    monkeypatch.setattr(PR, "run", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="wrote no board"):
+        LA._lay_repair(types.SimpleNamespace(), str(tmp_path), str(board_in), [], ("A", "B"), {}, None)

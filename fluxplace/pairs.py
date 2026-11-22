@@ -191,7 +191,9 @@ def _guide_cost(ctx, grid, sig, nets, cost):
         return cost
     if not cost:
         return arrs
-    return [[min(255, max(a, b)) for a, b in zip(x, y)] for x, y in zip(arrs, cost)]
+    import numpy as np
+    return [np.maximum(np.frombuffer(bytes(x), dtype=np.uint8), np.frombuffer(bytes(y), dtype=np.uint8)).tobytes()
+            for x, y in zip(arrs, cost)]
 
 
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):

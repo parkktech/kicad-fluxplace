@@ -214,7 +214,7 @@ def _apply_code(board_in, board_out, rects):
         "    z.AddPolygon(pts)",
         "    b.Add(z)",
         f"pcbnew.SaveBoard({board_out!r}, b)",
-        "print('OK', len(items))",
+        "print('OK', len(items), flush=True)",
         "os._exit(0)",
     ]) + "\n"
 
@@ -230,7 +230,7 @@ def _strip_code(board_in, board_out):
         "        b.Remove(z)",
         "        n += 1",
         f"pcbnew.SaveBoard({board_out!r}, b)",
-        "print('OK', n)",
+        "print('OK', n, flush=True)",
         "os._exit(0)",
     ]) + "\n"
 
@@ -307,7 +307,7 @@ def ghost(a, board, outdir, budget_min, router="krt-whole", passes=None):
 def fitness(board, critical, cons, reserved_area=0.0, escape_mm=3.0):
     """Board quality, lexicographic key (-pairs_complete, shorts, opens, sealed, drc_errors, reserved_area) (smaller is better).
     sealed = opens of non-critical nets with a pad-side unconnected item within escape_mm of locked critical copper.
-    blockers = {"P/N": sealed opens next to that pair's locked copper}."""
+    blockers = {"P|N": {"count": sealed opens next to that pair's locked copper, "nets": those open nets}}."""
     from . import gaps as GP, netclass as NC, pairaudit as PA, routediag as RD
     crit = set(critical)
     m = GP.measure(board)
@@ -340,8 +340,9 @@ def fitness(board, critical, cons, reserved_area=0.0, escape_mm=3.0):
         sealed += 1
         for p, n in pairs:
             if p in near or n in near:
-                k = f"{p}/{n}"
-                blockers[k] = blockers.get(k, 0) + 1
+                e = blockers.setdefault(f"{p}|{n}", {"count": 0, "nets": []})
+                e["count"] += 1
+                e["nets"] = sorted(set(e["nets"]) | set(nets))
     shorts, opens, errors = int(m.get("shorts", 0)), int(m.get("opens", 0)), int(m.get("errors", 0))
     key = (-complete, shorts, opens, sealed, errors, float(reserved_area))
     unconnected = [{"net": ",".join(sorted(GP._nets_of([it]))), "pos": GP._pos(it)}
@@ -474,7 +475,9 @@ def _lay_repair(sub, cand, board, rects, pair, cons, spec):
     _copy_sidecar(board, ripped)
     applied = apply(ripped, os.path.join(cand, "applied.kicad_pcb"), rects)
     out = os.path.join(cand, "relaid.kicad_pcb")
-    PR.run(applied, cons, spec, out, only=list(pair))
+    PR.run(applied, cons, spec, out, only=list(pair), fallback=False)
+    if not os.path.exists(out):
+        raise RuntimeError(f"repair of {pair[0]}/{pair[1]}: pairs.run wrote no board")
     return strip(out, os.path.join(cand, "locked.kicad_pcb"))
 
 
@@ -691,15 +694,30 @@ def fitness_fast(board, critical, cons, reserved_area=0.0, escape_mm=3.0):
         if f.get("code") != "PLAN_PIN_SEALED" or f.get("net") in crit:
             continue
         sealed += 1
-        nets = set(re.findall(r"(?:track|via|pad) (\S+)", " ".join(str(x) for x in f.get("blockers") or [])))
+        near = set(re.findall(r"(?:track|via|pad) (\S+)", " ".join(str(x) for x in f.get("blockers") or [])))
         for p, q in pairs:
-            if p in nets or q in nets:
-                blockers[f"{p}|{q}"] = blockers.get(f"{p}|{q}", 0) + 1
+            if p in near or q in near:
+                e = blockers.setdefault(f"{p}|{q}", {"count": 0, "nets": []})
+                e["count"] += 1
+                if f.get("net"):
+                    e["nets"] = sorted(set(e["nets"]) | {f["net"]})
     overflow = float(R["comp"].get("overflow", 0.0))
     key = (-complete, 0, sealed, overflow, float(reserved_area))
     return {"pairs_complete": complete, "pairs_total": len(pairs), "shorts": 0, "opens": None, "sealed": sealed,
             "overflow": overflow, "drc_errors": None, "reserved_area": float(reserved_area), "blockers": blockers,
             "key": key, "critical": sorted(crit), "unconnected": []}
+
+
+def restrict_demand(D, nets):
+    """D with each cell's nets cut to `nets` (cells left empty are dropped): the channels of those nets only."""
+    nets = set(nets)
+    cells = {}
+    for k, cl in D["cells"].items():
+        keep = cl["nets"] & nets
+        if keep:
+            cells[k] = {"nets": keep, "crit": set(cl["crit"]), "escape": cl["escape"],
+                        "pad_dist": {n: d for n, d in cl["pad_dist"].items() if n in keep}}
+    return {"cells": cells, "origin": D["origin"], "cell": D["cell"]}
 
 
 def _specs(r, best, best_variant, P, ghosts, mixed, globals_=()):
@@ -719,7 +737,7 @@ def _specs(r, best, best_variant, P, ghosts, mixed, globals_=()):
     if best is None:
         return []
     out = []
-    for name, _n in sorted(best["fit"].get("blockers", {}).items(), key=lambda kv: (-kv[1], kv[0]))[:2]:
+    for name, _e in sorted(best["fit"].get("blockers", {}).items(), key=lambda kv: (-kv[1]["count"], kv[0]))[:2]:
         p, q = name.split("|")
         out.append(("repair", (1, P["escape_mm"] + 1.0), (p, q), best["src"]))
     if best_variant:
@@ -766,6 +784,7 @@ def stage(c, n, board):
     crit = critical_nets(board, c.cons, c.spec)
     pl = critical_pairs(board, c.cons, c.spec)
     rows, sources, ok_fit, timing = [], {}, {}, {}
+    stop = "no round ran"
     routers = list(P["ghost_routers"])
     _progress(spath, "running", "round 0: ghosts " + ", ".join(routers), timing=timing)
     t0 = time.time()
@@ -824,7 +843,10 @@ def stage(c, n, board):
         for i, (kind, variant, pair, src) in enumerate(specs):
             mn, em = variant
             S = sources[src]
-            rects = reservations(S["D"], B0, crit, P, min_nets=mn, escape_mm=em)
+            DD = S["D"]
+            if kind == "repair":
+                DD = restrict_demand(S["D"], best["fit"]["blockers"]["|".join(pair)]["nets"])
+            rects = reservations(DD, B0, crit, P, min_nets=mn, escape_mm=em)
             base = best["locked"] if kind == "repair" else board
             guide = ({"origin": S["D"]["origin"], "cell": S["D"]["cell"], "res": rects,
                       "corr": _corr_for(src, sources, order), "res_cost": P["res_cost"], "off_cost": P["off_cost"]}
@@ -884,13 +906,16 @@ def stage(c, n, board):
         _progress(spath, "running", f"round {r} done: best {best['id'] if best else '-'}", rounds=r, candidates=cands,
                   timing=timing)
         if best is None:
+            stop = f"round {r}: no candidate passed tier 1 and verify; nothing to keep"
             break
         done = best["fit"]["opens"] == 0 and best["fit"]["pairs_complete"] == best["fit"]["pairs_total"]
         if done or stale >= P["no_gain_rounds"]:
+            stop = "clean winner" if done else f"no gain for {stale} round(s)"
             break
+        stop = "max_rounds"
     timing["stage_s"] = round(time.time() - t_stage, 1)
     if best is None:
-        _progress(spath, "failed", "no candidate produced a board", timing=timing)
+        _progress(spath, "failed", "no candidate produced a board", timing=timing, reason=stop)
         return {"verdict": "fail", "line": "lookahead: no candidate produced a routed board", "board": board,
                 "next": [f"TOURNAMENT.md: {table}"]}
     out = os.path.join(d, "board.kicad_pcb")
@@ -900,7 +925,7 @@ def stage(c, n, board):
     line = (f"lookahead: {rounds} rounds, {cands} candidates, winner {best['id']} ({best['src']}): "
             f"pairs {f['pairs_complete']}/{f['pairs_total']}, ghost opens {f['opens']} "
             f"(round-0 ghost opens {ref['opens'] if ref else '-'}), {timing['stage_s']} s")
-    _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands, timing=timing)
+    _progress(spath, "done", line, board=out, rounds=rounds, candidates=cands, timing=timing, reason=stop)
     return {"verdict": "pass", "line": line, "board": out,
             "next": [f"TOURNAMENT.md: {table}", f"winner png: {best['png']}"]}
 
@@ -938,6 +963,14 @@ def corridors(B, pairs, P):
     return out, why
 
 
+def _span(lo, hi, g0, st, n):
+    """Grid indices [i0, i1) whose cell centre (g0 + (k + 0.5) * st) lies in [lo, hi), clamped to 0..n."""
+    import math as _m
+    i0 = _m.ceil((lo - g0) / st - 0.5)
+    i1 = _m.ceil((hi - g0) / st - 0.5)
+    return max(0, min(n, i0)), max(0, min(n, i1))
+
+
 def make_guide(G):
     """Pairs guide (pairs.py ctx["guide"]) from a dict {origin, cell, res: reserved rects, corr: {"p|n": cells}, res_cost,
     off_cost}: -> guide(pair, grid, sig) -> one cost list per signal layer over the pair's grid (nx*ny, 0..255):
@@ -950,26 +983,34 @@ def make_guide(G):
     cache = {}
 
     def guide(pr, grid, sig):
+        # numpy rasterisation (Fable fix: the per-cell Python loop over a 0.1 mm whole-board grid x rects took hours)
+        import numpy as np
         key = ("|".join(sorted(pr)), grid.nx, grid.ny, tuple(sig))
         if key in cache:
             return cache[key]
         cs = corr.get("|".join(sorted(pr)))
-        nx, ny = grid.nx, grid.ny
+        F = grid.F
+        nx, ny, st, gx0, gy0 = F.nx, F.ny, F.step, F.x0, F.y0
         out = []
         for layer in sig:
-            rr = [r["rect"] for r in rects if r["layer"] == layer]
-            arr = [0] * (nx * ny)
-            for j in range(ny):
-                for i in range(nx):
-                    x, y = grid.xy(j, i)
-                    v = 0.0
-                    if cs is not None and (layer,) + _cell_of(x, y, x0, y0, c) not in cs:
-                        v += off_cost
-                    if any(a <= x <= b and d <= y <= e for a, d, b, e in rr):
-                        v += res_cost
-                    if v:
-                        arr[j * nx + i] = min(255, int(v))
-            out.append(arr)
+            v = np.zeros((ny, nx), dtype=np.float32)
+            if cs is not None:
+                own = np.zeros((ny, nx), dtype=bool)
+                for (l, ix, iy) in cs:
+                    if l != layer:
+                        continue
+                    i0, i1 = _span(x0 + ix * c, x0 + (ix + 1) * c, gx0, st, nx)
+                    j0, j1 = _span(y0 + iy * c, y0 + (iy + 1) * c, gy0, st, ny)
+                    own[j0:j1, i0:i1] = True
+                v[~own] += off_cost
+            for r in rects:
+                if r["layer"] != layer:
+                    continue
+                a_, d_, b_, e_ = r["rect"]
+                i0, i1 = _span(a_, b_, gx0, st, nx)
+                j0, j1 = _span(d_, e_, gy0, st, ny)
+                v[j0:j1, i0:i1] += res_cost
+            out.append(np.minimum(v, 255).astype(np.uint8).ravel().tobytes())
         cache[key] = out
         return out
     return guide
