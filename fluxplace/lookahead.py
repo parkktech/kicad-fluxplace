@@ -781,7 +781,7 @@ def _worker(jobfile):
 
 def _verify_full(a, locked, cand, crit, cons, P, tag, area, rects):
     """tier 2: KRT verify ghost of the locked board (ghost_min.verify) -> (ghost board, full fitness with opens, png)."""
-    g = ghost(a, locked, os.path.join(cand, "verify"), P["ghost_min"]["verify"], "krt-whole", lean=False)
+    g = ghost(a, locked, os.path.join(cand, "verify"), P["ghost_min"]["verify"], "krt-whole")   # Fable: verify = KRT --quick 2 judge too (pipeline route stage spends 10 min on rails)
     if not g:
         return None, None, None
     fit = fitness(g, crit, cons, reserved_area=area, escape_mm=P["escape_mm"])
