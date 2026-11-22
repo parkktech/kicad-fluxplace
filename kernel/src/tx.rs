@@ -15,6 +15,16 @@ pub struct Tx {
     /// (items length, log length) at each open begin
     pub marks: Vec<(usize, usize)>,
     pub seq: u64,
+    /// opens of each net before the first edit that touched it in the outermost transaction
+    pub before: std::collections::HashMap<u32, usize>,
+}
+
+/// Records the opens of `net` before an edit touches it (first touch in the outermost transaction only).
+pub fn note_net(b: &mut Board, net: u32) {
+    if !b.tx.marks.is_empty() && !b.tx.before.contains_key(&net) {
+        let o = crate::conn::opens(b, net);
+        b.tx.before.insert(net, o);
+    }
 }
 
 pub fn depth(b: &Board) -> usize {
@@ -31,6 +41,7 @@ pub fn commit(b: &mut Board) -> Result<usize, String> {
     }
     if b.tx.marks.is_empty() {
         b.tx.log.clear();
+        b.tx.before.clear();
     }
     Ok(b.tx.marks.len())
 }
@@ -51,15 +62,21 @@ pub fn rollback(b: &mut Board) -> Result<usize, String> {
         }
     }
     b.items.truncate(items_len);
+    if b.tx.marks.is_empty() {
+        b.tx.before.clear();
+    }
     Ok(b.tx.marks.len())
 }
 
 /// Marks one item dead (kept in the table for its id). Returns false when it was already dead.
 pub fn remove_id(b: &mut Board, id: u32) -> bool {
-    let Some(it) = b.items.get_mut(id as usize) else { return false };
+    let Some(it) = b.items.get(id as usize) else { return false };
     if !it.alive {
         return false;
     }
+    let net = it.net;
+    note_net(b, net);
+    let it = &mut b.items[id as usize];
     it.alive = false;
     let (bbox, layers) = (it.bbox, it.layers);
     b.index.remove(id, bbox, layers);
@@ -97,6 +114,7 @@ pub fn add_json(b: &mut Board, spec: &Value) -> Result<(Vec<u32>, Vec<String>), 
     let kind = spec.get("kind").and_then(Value::as_str).ok_or("item needs kind")?;
     let net_name = spec.get("net").and_then(Value::as_str).unwrap_or("");
     let net = b.intern_net(net_name);
+    note_net(b, net);
     let uuid = match spec.get("uuid").and_then(Value::as_str) {
         Some(u) => u.to_string(),
         None => new_uuid(b),

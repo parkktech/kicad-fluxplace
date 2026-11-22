@@ -3,6 +3,7 @@
 
 pub mod board;
 pub mod clear;
+pub mod conn;
 pub mod dru;
 pub mod geom;
 pub mod index;
@@ -200,6 +201,17 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
             }
             json!({"ok": true, "blocks": blocks})
         }
+        "islands" => {
+            let net_name = v.get("net").and_then(Value::as_str).unwrap_or("");
+            let Some(&net) = h.board.net_ids.get(net_name) else { return json!({"ok": true, "islands": [], "opens": 0, "dangling": []}) };
+            let t0 = std::time::Instant::now();
+            let comps = conn::components(&h.board, net);
+            let opens = comps.iter().filter(|c| c.pads > 0).count().saturating_sub(1);
+            let isl: Vec<Value> = comps.iter().map(|c| json!({"items": c.items, "pads": c.pads,
+                "zones": c.fills.iter().map(|(z, f)| json!([h.board.zones[*z].uuid, f])).collect::<Vec<_>>()})).collect();
+            json!({"ok": true, "islands": isl, "opens": opens, "dangling": conn::dangling(&h.board, net),
+                   "ms": t0.elapsed().as_secs_f64() * 1e3})
+        }
         "need" => {
             let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
             let id = |k: &str| v.get(k).and_then(Value::as_u64).map(|x| x as usize);
@@ -213,12 +225,29 @@ pub fn dispatch(h: &mut Handle, req: &str) -> Value {
         "check" => {
             let t0 = std::time::Instant::now();
             let ids: Option<Vec<u32>> = v.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|u| u as u32)).collect());
+            let allow_opens = v.get("allow_opens").and_then(Value::as_bool).unwrap_or(false);
             let cx = clear::Ctx { board: &h.board, rules: &h.rules, dru: &h.dru };
             let vs = clear::check(&cx, ids.as_deref());
-            let verdict = if vs.is_empty() { "accept" } else { "refuse" };
+            // opens per net touched by the check: [before, after]; before = at the first touch in the transaction
+            let nets: Vec<u32> = match &ids {
+                Some(list) => { let mut n: Vec<u32> = list.iter().filter_map(|&i| h.board.items.get(i as usize)).map(|i| i.net).collect(); n.sort_unstable(); n.dedup(); n }
+                None => (0..h.board.nets.len() as u32).collect(),
+            };
+            let mut opens = serde_json::Map::new();
+            let mut rose = false;
+            for net in nets {
+                let after = conn::opens(&h.board, net);
+                let before = h.board.tx.before.get(&net).copied().unwrap_or(after);
+                rose |= after > before;
+                if before != 0 || after != 0 {
+                    opens.insert(h.board.net_name(net).to_string(), json!([before, after]));
+                }
+            }
+            let refuse = !vs.is_empty() || (rose && !allow_opens);
+            let verdict = if refuse { "refuse" } else { "accept" };
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             json!({"ok": true, "verdict": verdict, "violations": vs.iter().map(|x| clear::violation_json(&h.board, x)).collect::<Vec<_>>(),
-                   "opens": {}, "pour": [], "warnings": ["connectivity not checked (K11)"], "ms": ms})
+                   "opens": opens, "pour": [], "warnings": [], "ms": ms})
         }
         "net_rule" => {
             let net = v.get("net").and_then(Value::as_str).unwrap_or("");
