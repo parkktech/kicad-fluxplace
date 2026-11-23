@@ -82,12 +82,15 @@ def report_slot(board_path):
     return out
 
 
-def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True):
+def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True, pro_edit=None, canary=None):
     """THE kicad-cli DRC runner (all severities, zones always refilled). Runs on a temp COPY of the board (never refills or
     rewrites the original) with its .kicad_pro/.kicad_dru beside it, and a unique report path (concurrent calls never collide).
     rules: .kicad_dru text that replaces the board's rule file. only_rules: list of rule-severity keys left on, every other
     check set to ignore in the temp project (a 2 s run for one rule). complete: complete the capped unconnected list.
-    Raises RuntimeError when kicad-cli writes no report."""
+    pro_edit(dict): edits the temp project (e.g. a tuning profile). canary: names of rules in `rules` at least one of which must fire:
+    a syntax error anywhere in a .kicad_dru silently disables EVERY rule (kicad-cli still exits 0), so a report in which none of
+    the canary rules appears raises RuntimeError("rule file ignored").
+    Raises RuntimeError when kicad-cli writes no report.  Never saves a board (BOARD.Save() would rewrite a neighbouring .kicad_pro)."""
     import shutil
     import tempfile
     stem = os.path.splitext(os.path.abspath(board_path))[0]
@@ -112,6 +115,8 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
                 rs[k] = "ignore"
             for k in only_rules:
                 rs[k] = "error"
+        if pro_edit:
+            pro_edit(pd)
         if pd:
             json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
         out = os.path.join(td, "drc.json")
@@ -120,6 +125,9 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         if not os.path.isfile(out) or not os.path.getsize(out):
             raise RuntimeError(f"DRC produced no report: {(r.stderr or r.stdout)[-200:]}")
         d = json.load(open(out))
+        if canary and not any(f"rule '{c}'" in str(v.get("description", "")) for v in d.get("violations", []) for c in canary):
+            raise RuntimeError("rule file ignored: no canary rule fired (" + ", ".join(canary[:3]) + "); a syntax error in the .kicad_dru "
+                               "disables every rule, or the nets have no copper")
         if complete:
             from . import drcfull as DF
             d = DF.complete(b, d, fill=True)

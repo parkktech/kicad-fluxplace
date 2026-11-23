@@ -34,7 +34,8 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
             f"(rule \"ln{i}\" (condition \"A.NetName == '{_q(x)}'\") (constraint length (max 0.0001mm)))\n" for i, x in enumerate(nets))
         from . import drcguard as DG
         try:
-            rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["skew_out_of_range", "length_out_of_range"], complete=False)
+            rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["skew_out_of_range", "length_out_of_range"], complete=False,
+                              canary=[f"ln{i}" for i in range(len(nets))])
         except RuntimeError as e:
             print(f"netlen: kicad-cli drc failed: {e}", file=sys.stderr)
             return None
@@ -232,6 +233,50 @@ def orient(B, p, n, meas):
     return {"ors": ors, "taps": taps, "spurs": spurs, "ends": (X, Y)}
 
 
+_RP = re.compile(r"rule 'pl(\d+)'.*?actual ([\d.]+) ps")
+
+
+def kicad_delays(board, legs, kicad_cli="kicad-cli", timeout=300):
+    """KiCad's own delay in ps per net: {net: ps}.  `legs` = {net: {"ps_per_mm": {layer: ps/mm}, "via_mm": ..., "total_mm": ...}} (the
+    leg_decomposition of each net).  A delay-only tuning profile (width and gap 0, so no geometry rule is created) carrying those
+    per-layer ps/mm and the via propagation delay goes into a TEMP .kicad_pro, every net gets a netclass naming it, and one
+    `(constraint length (max 0ps))` rule per net makes kicad-cli report the net's delay (tracks x ps/mm per layer, via span x
+    via_prop_delay, pad-to-die).  None when kicad-cli fails or the rule file is ignored (the canary rule did not fire)."""
+    nets = sorted(legs)
+    if not nets:
+        return {}
+    from . import drcguard as DG
+
+    def edit(pd):
+        entries, classes, pats = [], pd.setdefault("net_settings", {}).setdefault("classes", []), pd["net_settings"].setdefault("netclass_patterns", [])
+        profs = []
+        for i, net in enumerate(nets):
+            lg = legs[net]
+            ps = lg.get("ps_per_mm") or {}
+            mean = (sum(ps[l] * lg["layer_mm"].get(l, 0.0) for l in ps) / max(1e-9, sum(lg["layer_mm"].get(l, 0.0) for l in ps))) if ps else 0.0
+            profs.append({"profile_name": f"FXD{i}", "type": 0, "target_impedance": 0.0, "enable_time_domain_tuning": True,
+                          "layer_entries": [{"signal_layer": l, "top_reference_layer": "", "bottom_reference_layer": "", "width": 0, "diff_pair_gap": 0,
+                                             "delay": int(round(v * 1e6))} for l, v in sorted(ps.items())],
+                          "via_prop_delay": int(round(mean * 1e6)), "via_overrides": []})
+            classes.append({"name": f"FXC{i}", "tuning_profile": f"FXD{i}"})
+            pats.append({"netclass": f"FXC{i}", "pattern": net})
+        pd["tuning_profiles"] = {"meta": {"version": 0}, "tuning_profiles_impedance_geometric": profs}
+    rules = "(version 1)\n" + "".join(
+        f"(rule \"pl{i}\" (condition \"A.NetName == '{_q(x)}'\") (constraint length (max 0ps)))\n" for i, x in enumerate(nets))
+    try:
+        rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["length_out_of_range"], complete=False, pro_edit=edit,
+                          canary=[f"pl{i}" for i in range(len(nets))])
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+        print(f"netlen: kicad delay run failed: {e}", file=sys.stderr)
+        return None
+    out = {}
+    for v in rep.get("violations", []):
+        m = _RP.search(v.get("description", ""))
+        if m:
+            out[nets[int(m.group(1))]] = max(out.get(nets[int(m.group(1))], 0.0), float(m.group(2)))
+    return out
+
+
 def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=False):
     """THE skew of one pair (REFACTOR-PLAN-W16 1.1, D71cx).  -> dict
       status   "ok" | "unmeasured" (kicad-cli failed or an open leg: cannot pass) | "MEASURE_DISAGREE" (a leg's own decomposition misses
@@ -267,7 +312,20 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
         out["why"] = f"decomposition failed: {type(e).__name__}: {e}"
         return out
     out["recon"] = {"p": round(dp["total_mm"] - kl["p"], 4), "n": round(dn["total_mm"] - kl["n"], 4), "tol": RECON_TOL_MM}
-    out.update(p_ps=dp["delay_ps"], n_ps=dn["delay_ps"])
+    out.update(p_ps=dp["delay_ps"], n_ps=dn["delay_ps"], own_ps=[dp["delay_ps"], dn["delay_ps"]])
+    ps_bad = []
+    if grade_ps and dp["delay_ps"] is not None and dn["delay_ps"] is not None:
+        # D71cx (ps): KiCad's own delay is the number (a delay-only tuning profile with our stackup ps/mm); our sum per layer only reconciles it
+        kd = kicad_delays(f, {p: dp, n: dn}, kicad_cli)
+        if kd is None or p not in kd or n not in kd:
+            out["why"] = "kicad-cli delay run failed or its rule file was ignored: no own-math fallback (D71cx)"
+            return out
+        out.update(p_ps=kd[p], n_ps=kd[n])
+        tol_ps = RECON_TOL_MM * max(list(dp["ps_per_mm"].values()) + list(dn["ps_per_mm"].values()) + [1.0])
+        out["recon"].update(p_ps=round(dp["delay_ps"] - kd[p], 3), n_ps=round(dn["delay_ps"] - kd[n], 3), tol_ps=round(tol_ps, 3))
+        ps_bad = [k for k in ("p", "n") if abs(out["recon"][k + "_ps"]) > tol_ps]
+        dp = dict(dp, delay_ps=kd[p])
+        dn = dict(dn, delay_ps=kd[n])
     if joined(B, p, n):
         meas = CH.measure_paths(board, [p, n], rows, mode="all")
         out["basis"] = "path"
@@ -296,7 +354,8 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
         out["paths"] = [{"a": "", "b": "", "p": kl["p"], "n": kl["n"], "d": out["skew_mm"], "skew": abs(out["skew_mm"]),
                          "p_ps": dp["delay_ps"], "n_ps": dn["delay_ps"], "d_ps": out["skew_ps"], "stub": 0.0}]
     bad = [k for k in ("p", "n") if abs(out["recon"][k]) > RECON_TOL_MM] if (out["basis"] == "path" or grade_ps) else []
-    out["status"] = "MEASURE_DISAGREE" if bad else "ok"
-    if bad:
-        out["why"] = "own per-leg decomposition vs KiCad total: " + ", ".join(f"{k} {out['recon'][k]:+.3f} mm" for k in bad)
+    out["status"] = "MEASURE_DISAGREE" if bad or ps_bad else "ok"
+    if bad or ps_bad:
+        out["why"] = "own per-leg decomposition vs KiCad total: " + ", ".join([f"{k} {out['recon'][k]:+.3f} mm" for k in bad] +
+                                                                              [f"{k} {out['recon'][k + '_ps']:+.2f} ps" for k in ps_bad])
     return out

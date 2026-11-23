@@ -134,3 +134,42 @@ def test_via_in_end_pad_is_signal_not_a_stub(tmp_path):
     assert q["found"] and q["stub_max_mm"] == 0.0 and [s for s in q["stubs"] if s["kind"] == "via"] == []
     assert q["via_mm"] == pytest.approx(2 * 1.5, abs=0.2)             # both barrels are on the signal path
     assert PA.via_stubs(RD.load(f), ["E_P", "E_N"]) == []             # the one stub function agrees
+
+
+def test_a_ps_budget_takes_kicads_delay_from_a_delay_only_tuning_profile(tmp_path):
+    f = board(tmp_path, 4, 8)
+    r = netlen.pair_skew(RD.load(f), "E_P", "E_N", STACK, grade_ps=True)
+    assert r["status"] == "ok" and r["skew_ps"] > 6.0
+    own = r["own_ps"]
+    assert abs(r["p_ps"] - own[0]) <= r["recon"]["tol_ps"] and abs(r["n_ps"] - own[1]) <= r["recon"]["tol_ps"]        # KiCad's ps == our per-layer sum
+    d = netlen.kicad_delays(f, {n: netlen.leg_decomposition(IO.load(f), n, *netlen._rows(STACK, f)) for n in ("E_P", "E_N")})
+    assert d["E_P"] == pytest.approx(r["p_ps"], abs=0.01) and d["E_P"] - d["E_N"] == pytest.approx(r["skew_ps"], abs=0.01)
+
+
+def test_a_ps_budget_with_kicad_failing_is_unmeasured_not_own_math(tmp_path, monkeypatch):
+    f = board(tmp_path, 4, 8)
+    monkeypatch.setattr(netlen, "kicad_delays", lambda *a, **k: None)
+    r = netlen.pair_skew(RD.load(f), "E_P", "E_N", STACK, grade_ps=True)
+    assert r["status"] == "unmeasured" and r["skew_ps"] is None
+
+
+def test_a_dru_syntax_error_trips_the_canary(tmp_path):
+    from fluxplace import drcguard as DG
+    f = board(tmp_path, 4, 8)
+    good = "(version 1)\n(rule \"cn0\" (condition \"A.NetName == 'E_P'\") (constraint length (max 0.0001mm)))\n"
+    bad = good + "(rule \"cn1\" (condition \"A.NetName == 'E_N'\") (constraint skew (max 0.001mm) within_diff_pairs))\n"       # unparenthesised: drops the file
+    DG.drc_json(f, rules=good, only_rules=["length_out_of_range"], canary=["cn0"], complete=False)
+    with pytest.raises(RuntimeError, match="rule file ignored"):
+        DG.drc_json(f, rules=bad, only_rules=["length_out_of_range"], canary=["cn0"], complete=False)
+
+
+def test_kicad_counts_copper_inside_a_pad(tmp_path):
+    """D71cx question: KiCad's net length includes the copper inside the net's own pads (a 4 mm pad, a track ending 1 mm inside)."""
+    def length(end_x):
+        body = PB.fp("A", 0, 0, [PB.pad("1", 30, 30, "N", 4.0, 4.0)]) + PB.fp("B", 0, 0, [PB.pad("1", 60, 30, "N", 4.0, 4.0)]) + \
+            f'(segment (start 30 30) (end {end_x} 30) (width 0.25) (layer "F.Cu") (net "N"))\n'
+        f = tmp_path / f"p{end_x}.kicad_pcb"
+        f.write_text('(kicad_pcb (version 20260206) (generator "pcbnew")\n(layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n' + EDGE + body + ")\n")
+        return netlen.pair_lengths(str(f), [("N", "N")])[("N", "N")]["p"]
+    assert length(60) == pytest.approx(30.0, abs=0.01)             # centre to centre: the 2 mm inside each pad count
+    assert length(59) == pytest.approx(29.0, abs=0.01)             # ends 1 mm inside the far pad: that mm counts too

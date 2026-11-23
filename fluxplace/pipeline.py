@@ -1274,6 +1274,13 @@ def _commit_point(name, prev, res):
     man = BW.load_manifest(prev)
     if not man["nets"] and name not in SEED_STAGES:
         return res                                                      # nothing protected yet
+    if not man["nets"]:
+        try:                                                            # first seeding point: a board pcbnew cannot read has nothing to protect
+            import pcbnew
+            if pcbnew.LoadBoard(new) is None:
+                return res
+        except Exception:                                               # noqa: BLE001
+            return res
     rel = set(man["nets"]) if name in RELEASING_STAGES else set()
     try:
         v = BW.verify(prev, new, release=rel, manifest=man) if os.path.abspath(new) != os.path.abspath(prev) else {"ok": True}
@@ -1676,9 +1683,10 @@ def _run(a):
                 os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
                 gd = c.dir(i + 1, "gate")
             res = FUNCS[name](c, i + 1, board)
+            res.setdefault("verdict", "pass")
+            if res["verdict"] in ("pass", "warn"):
+                res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
         res.setdefault("verdict", "pass")
-        if res["verdict"] in ("pass", "warn"):
-            res = _commit_point(name, board, res)
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
             g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
