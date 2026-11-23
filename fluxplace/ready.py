@@ -242,13 +242,41 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                {"rails": f"every rail of >= {_minpads(cons)} pads has a plane/pour or an answer",
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
+        lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
                            [] if has_outline else ["board has no outline"]))
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
+        lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
     return lines, detail
+
+
+def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
+    """[the "power plan" line]: powerbudget.build on the placement as it is (D71dc/D71dd). FAIL: a rail with a [power] current and no
+    [[dcdrop]] row, or copper that cannot carry the budget; OPEN: an unresolved source or a guessed support owner. The table goes to
+    detail["power_plan"] (written as power-plan.json). Reach and support limits are information here (floorplan / preroute gate them)."""
+    from . import powerbudget as PB, elec as EL, power as PW
+    if not any(isinstance(p, dict) and PW.current_a(p) for p in ((cons or {}).get("power") or {}).values()):
+        return []
+    if rows is None:
+        return [_line("power plan", UNCHECKED, "no stackup resolved: copper reach not planned")]
+    mm = (facts or {}).get("mpn_map") or {}
+    mm = {**{c["ref"]: c["mpn"] for c in (spec or {}).get("components", []) if isinstance(c, dict) and c.get("mpn")}, **mm}
+    df = EL.load_facts(ds_dir) if ds_dir and os.path.isdir(ds_dir) else {}
+    plan = PB.build(cons, B, spec, rows, df, mm, board_path=board, planes=planes)
+    n0 = len(sess.open)
+    QS.check_power_plan(sess, B, cons, plan=plan)
+    new = sess.open[n0:]
+    detail["power_plan"] = PB.plan_json(plan)
+    bad = [f for f in plan["findings"] if f["level"] == "FAIL"]
+    if bad:
+        names = ", ".join(sorted({f["net"] for f in bad}))
+        return [_line("power plan", FAIL, f"{len(bad)} rail(s) cannot be planned ({names}); {PB.summary(plan)}",
+                      [f"{f['code']} {f['msg']}" for f in bad][:6])]
+    ids = ", ".join(q["id"] for q in new[:4]) + (f" (+{len(new) - 4})" if len(new) > 4 else "")
+    return [_line("power plan", OPEN if new else PASS, (f"{len(new)} undecided: {ids}; " if new else "") + PB.summary(plan))]
 
 
 def sync_netclasses(board, cons, log=lambda *a, **k: None, write=False):
@@ -326,6 +354,9 @@ def cmd_ready(a):
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
                        "questions": sess.open}, fh, indent=1)
+        if detail.get("power_plan"):
+            with open(stem + ".power-plan.json", "w") as fh:
+                json.dump(detail["power_plan"], fh, indent=1)
     except OSError:
         path = None
     if getattr(a, "json", False):

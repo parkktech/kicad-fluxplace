@@ -7,6 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pcbgen as G
 import cli
@@ -255,3 +256,48 @@ def test_writing_the_managed_classes_does_not_change_the_drc_error_count(tmp_pat
     e0 = errs()
     RY.sync_netclasses(b, cons, write=True)
     assert errs() == e0
+
+
+# ---- P4: the "power plan" line (powerbudget, D71dc / D71dd)
+def _plan_line(tmp_path, cons, spread=False):
+    import powerboard as PB
+    from fluxplace import routediag as RD
+    kw = {"c2": (12, 28)} if spread else {}
+    path = PB.board(tmp_path, **kw)
+    B = RD.load(path)
+    sess = QS.Session(path, cons, {}, False, "ready")
+    detail = {}
+    rows = PB.rows()
+    lines = RDY.power_plan_lines({"components": []}, cons, {}, B, None, sess, rows, ["In1.Cu", "In4.Cu"], path, detail)
+    return lines, sess, detail
+
+
+def test_power_plan_passes_on_the_fixture_and_the_json_holds_reach_and_width_rows(tmp_path):
+    import powerboard as PB
+    lines, sess, detail = _plan_line(tmp_path, PB.CONS)
+    assert [(l["name"], l["status"]) for l in lines] == [("power plan", "PASS")] and not sess.open
+    r = detail["power_plan"]["rails"]["VOUT"]
+    e = r["edges"][0]
+    assert e["reach_mm"]["max"] > 0 and e["width_req_mm"]["max"] >= 0.127 and r["copper"][0]["reach_mm"]["max"] > 0
+    assert "L_max" in lines[0]["detail"]
+    json.dumps(detail["power_plan"])
+
+
+def test_power_plan_fails_a_rail_with_a_current_and_no_dcdrop_row(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"] = []
+    lines, _s, _d = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "FAIL" and "POWER_PLAN_NO_BUDGET" in " ".join(lines[0]["blockers"])
+
+
+def test_power_plan_unknown_source_is_an_open_question(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["power"]["VOUT"].pop("source")
+    c["dcdrop"][0].pop("from")
+    c["dcdrop"][0]["to"] = ["NOPE"]
+    lines, sess, _d = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "OPEN" and any(q["id"] == "power-source:VOUT" for q in sess.open)

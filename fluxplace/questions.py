@@ -373,6 +373,37 @@ def check_rail_pour(S, B, cons, cls=None, **_):
               apply=_pour_applier(n, pads[n], B))
 
 
+def check_power_plan(S, B, cons, plan=None, **_):
+    """a planned rail with no resolved source, and a rail support part whose owner is only a guess (powerbudget.build findings).
+    The support default is the spread result, written as `[power."NET"] support` when taken."""
+    for f in (plan or {}).get("findings", []):
+        if f["code"] == "POWER_SOURCE_UNKNOWN":
+            S.ask(f"power-source:{f['net']}", "power-source", f["msg"],
+                  {"declare": "stop here and name it in the constraints (the rail has no reach check until then)",
+                   "skip": "plan the rail without a source: no edge distances, no reach limit"},
+                  "declare", "[[dcdrop]] from/to or [power.\"%s\"] source = \"REF\"" % f["net"])
+    for s in (plan or {}).get("supports", []):
+        if s["sure"] or not _planned_net(cons, s["net"]):
+            continue
+        ref, net, pin = s["ref"], s["net"], s["serves"]
+        S.ask(f"power-owner:{ref}", "power-owner", f"{ref} ({s['role']}) on planned rail {net}: its pin is a guess ({s['how']} -> {pin}, {s['dist_mm']:g} mm)",
+              {"spread": f"keep the guess: {ref} serves {pin}, limit {s['limit']['max']:g} mm", "other": "name the pin yourself"},
+              "spread", "[power.\"%s\"] support = {%s = \"IC.PAD\"}" % (net, ref), apply=_support_applier(net, ref, pin))
+
+
+def _planned_net(cons, net):
+    from . import power as PW
+    p = ((cons or {}).get("power") or {}).get(net)
+    return isinstance(p, dict) and PW.current_a(p) is not None
+
+
+def _support_applier(net, ref, pin):
+    def f(box, choice):
+        if choice == "spread":
+            box["cons"].setdefault("power", {}).setdefault(net, {}).setdefault("support", {})[ref] = pin
+    return f
+
+
 def _pour_applier(net, pads, B):
     def f(box, choice):
         pw = box["cons"].setdefault("power", {}).setdefault(net, {})
