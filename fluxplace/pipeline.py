@@ -991,7 +991,7 @@ def st_close(c, n, board):
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
     if post:
-        line += (f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}" if not post.get("refused")
+        line += (f"; post-route: deduped {post.get('deduped', 0)}, snapped {(post.get('snap') or {}).get('moved', 0)}" if not post.get("refused")
                  else f"; post-route refused ({post['refused'][:60]})")
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
 

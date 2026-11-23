@@ -314,10 +314,10 @@ def ratsnest_crossings(edges):
 
 # ------------------------------------------------------------------ congestion
 def layer_split(B, cons=None):
-    """(signal layers, plane layers) as counted by the congestion model. Override with
-    `[preroute] signal_layers = ["F.Cu", ...]` (names) or `plane_layers = [...]`.
-    Default: an INNER layer is a plane when a pour zone with a net covers >= 60 % of
-    the outline there (a pour on an outer layer is routable copper, not a plane)."""
+    """(signal layers, plane layers) as counted by the congestion model and by the pairs lay.  Decided by, in order:
+    `[preroute] signal_layers = ["F.Cu", ...]` / `plane_layers = [...]` (names); the stackup's planes (`[stackup] planes` or the profile's:
+    a layer the designer made a plane, whatever copper it also carries); else the pour test: an INNER layer is a plane when one netted
+    zone's polygon covers >= 90 % of the outline box (a partial pour, or one on an outer layer, is routable copper)."""
     pc = (cons or {}).get("preroute", {})
     cu = list(B["copper"])
     if isinstance(pc.get("signal_layers"), list):
@@ -325,15 +325,38 @@ def layer_split(B, cons=None):
         return sig, [l for l in cu if l not in sig]
     if isinstance(pc.get("plane_layers"), list):
         return [l for l in cu if l not in pc["plane_layers"]], [l for l in cu if l in pc["plane_layers"]]
+    try:
+        from . import zgeom as ZG
+        planes = [l for l in (ZG.resolve_stack(cons)[1] or []) if l in cu[1:-1]]
+    except Exception:                                    # noqa: BLE001 - no stackup in the constraints: the pour test decides
+        planes = []
+    if planes:
+        return [l for l in cu if l not in planes], [l for l in cu if l in planes]
     x0, y0, x1, y1 = B["bbox"]
     board = max((x1 - x0) * (y1 - y0), 1e-6)
     plane = set()
     for z in B["zones"]:
-        if z["net"] and not z["keepout"] and z["pts"]:
-            xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
-            if (max(xs) - min(xs)) * (max(ys) - min(ys)) >= 0.6 * board:
+        p = z["pts"]
+        if z["net"] and not z["keepout"] and len(p) >= 3:
+            a = abs(sum(p[i][0] * p[(i + 1) % len(p)][1] - p[(i + 1) % len(p)][0] * p[i][1] for i in range(len(p)))) / 2
+            if a >= 0.9 * board:
                 plane |= {l for l in z["layers"] if l in cu[1:-1]}
     return [l for l in cu if l not in plane], [l for l in cu if l in plane]
+
+
+def is_routed(B):
+    """A board whose routing is done or nearly: at most a quarter of its multi-pad nets still have an open connection.  The coarse-route
+    congestion estimate predicts the routing; on a routed board it is information, not a verdict."""
+    from . import routeconn as RC
+    nets = {}
+    for p in B["pads"]:
+        if p["net"] and not p.get("np"):
+            nets[p["net"]] = nets.get(p["net"], 0) + 1
+    multi = [n for n, k in nets.items() if k >= 2]
+    if not multi:
+        return False
+    opn = RC.text_open(B)
+    return sum(1 for n in multi if opn.get(n)) <= len(multi) / 4
 
 
 def signal_layer_count(B, cons=None):

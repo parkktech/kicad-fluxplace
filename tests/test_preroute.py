@@ -175,3 +175,22 @@ def test_congestion_clamps_parts_outside_the_outline(tmp_path):
     assert card["congestion"]["outside_refs"] == ["R2", "R3"]
     hit = [x for x in f if x["code"] == "PLACE_OUTSIDE_OUTLINE"]
     assert hit and "R2" in hit[0]["msg"] and "R3" in hit[0]["msg"]
+
+
+def test_layer_split_uses_the_stackup_planes_and_polygon_area_not_the_bounding_box(tmp_path):
+    # an L-shaped pour: bounding box = the board, polygon area 55 %: a partial pour is signal copper
+    ell = ('(zone (net 2) (net_name "P") (layers "In1.Cu") (polygon (pts (xy 0 0) (xy 100 0) (xy 100 20) (xy 20 20) (xy 20 80) (xy 0 80))))\n')
+    B = RD.load(g.board(tmp_path, ell + g.two("R1", 10, 10, "A", "B")))
+    assert PR.layer_split(B)[0] == ["F.Cu", "In1.Cu", "B.Cu"]
+    # the stackup's plane list decides when the constraints carry one, whatever the pour covers
+    assert PR.layer_split(B, {"stackup": {"planes": ["In1.Cu"]}}) == (["F.Cu", "B.Cu"], ["In1.Cu"])
+    assert PR.signal_layer_count(B, {"stackup": {"planes": ["In1.Cu"]}}) == 2
+
+
+def test_congestion_on_a_routed_board_is_information(tmp_path):
+    from fluxplace import review as RV
+    seg = '(segment (start 9.5 10) (end 10.5 10) (width 0.2) (layer "F.Cu") (net "A"))\n'
+    open_b = RD.load(g.board(tmp_path, g.two("R1", 10, 10, "A", "A")))
+    done_b = RD.load(g.board(tmp_path, g.two("R1", 10, 10, "A", "A") + seg, name="r.kicad_pcb"))
+    assert PR.is_routed(open_b) is False and PR.is_routed(done_b) is True
+    assert RV.INFO == "INFO"

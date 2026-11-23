@@ -1,4 +1,4 @@
-"""Post-route clean-up, run before the close loop (and runnable alone): off-centre track ends.
+"""Post-route clean-up, run before the close loop (and runnable alone): exact duplicate copper, off-centre track ends.
 
 `track_not_centered_on_via` (an error KiCad's DRC reports for every track end that touches a via off its centre; KRT leaves hundreds):
 snapiter.run moves the ends to the via centre where the DRC stays clean (new-violation guard per iteration; refused joints are
@@ -14,8 +14,20 @@ def _unc(board, cli):
     return TU.drc_counts(board, cli)[1]
 
 
+def dedupe_file(path):
+    """Drop exact duplicate copper (same geometry, width, layer, net; a locked copy wins) from the board file `path` in place -> n dropped.
+    Stacked duplicate vias are what the review's HOLE_TO_HOLE reports as -0.2 mm edge-to-edge."""
+    from . import dedupe as DD
+    text = open(path, errors="surrogateescape").read()
+    new, n = DD.dedupe_text(text)
+    if n:
+        with open(path, "w", errors="surrogateescape") as fh:
+            fh.write(new)
+    return n
+
+
 def clean(board, out, kicad_cli="kicad-cli"):
-    """-> {snap: {moved, excluded, iters, centred_left, refused_geom}, unconnected: [before, after], kept: bool}; `out` is always written
+    """-> {deduped: n, snap: {moved, excluded, iters, centred_left, refused_geom}, unconnected: [before, after], kept: bool}; `out` is always written
     (the input when the snap is not kept: unconnected must not rise)."""
     from . import snapiter as SI
     rep = {"snap": None, "unconnected": None, "kept": True}
@@ -25,8 +37,9 @@ def clean(board, out, kicad_cli="kicad-cli"):
             shutil.copy(s, os.path.splitext(out)[0] + ext)
     before = _unc(board, kicad_cli)
     shutil.copy(board, out)
+    rep["deduped"] = dedupe_file(out)
     try:
-        rep["snap"] = SI.run(board, out, log=lambda m: None)
+        rep["snap"] = SI.run(out, out, log=lambda m: None)
     except Exception as e:                           # noqa: BLE001 - a clean-up failure is reported, never fatal
         rep["snap"] = {"error": str(e)[:160]}
     after = _unc(out, kicad_cli)
