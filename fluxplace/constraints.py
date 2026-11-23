@@ -500,7 +500,7 @@ def _build_netclasses(d, cons, log, board):
         if not nets:
             continue
         z, w, g = _expected_geometry(cons, group, board)
-        name = uniq(f"DP_{group}_{z}R")
+        name = uniq(f"DP_{group.rstrip('_')}_{z}R")
         classes.append({"name": name, "track_width": w, "diff_pair_width": w, "diff_pair_gap": g, MANAGED_KEY: True})
         patterns += [{"netclass": name, "pattern": n} for n in nets]
     for net, pw in sorted((cons or {}).get("power", {}).items()):

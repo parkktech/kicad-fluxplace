@@ -224,11 +224,11 @@ def test_a_stage_copy_gets_managed_classes_that_match_the_leg_nets(tmp_path):
 def test_user_classes_are_kept_whole_even_when_named_like_ours(tmp_path):
     import json
     from fluxplace import ready as RY
-    user = [{"name": "Default", "clearance": 0.2}, {"name": "PWR_ETH_X", "clearance": 0.33, "track_width": 0.9}, {"name": "DP_ETH__100R", "clearance": 0.4}]
+    user = [{"name": "Default", "clearance": 0.2}, {"name": "PWR_ETH_X", "clearance": 0.33, "track_width": 0.9}, {"name": "DP_ETH_100R", "clearance": 0.4}]
     b, pro, cons = _pair_project(tmp_path, {"net_settings": {"classes": user}})
     RY.sync_netclasses(b, cons, write=True)
     cls = {c["name"]: c for c in json.load(open(pro))["net_settings"]["classes"]}
-    assert cls["PWR_ETH_X"] == user[1] and cls["DP_ETH__100R"] == user[2] and cls["Default"] == user[0]      # untouched
+    assert cls["PWR_ETH_X"] == user[1] and cls["DP_ETH_100R"] == user[2] and cls["Default"] == user[0]      # untouched
     assert sum(1 for c in cls.values() if c.get("fluxplace_managed")) >= 1                                   # ours were added under other names
 
 
