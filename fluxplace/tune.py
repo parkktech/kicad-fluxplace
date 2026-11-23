@@ -198,11 +198,15 @@ def _profile(src, net, want_path=False):
 
 
 def pair_skew(path, B, master, slave, kicad_cli="kicad-cli"):
-    """(P mm, N mm, P - N, source) of a pair on the board file `path`: KiCad's net lengths (the number the audit and the gate grade),
-    else pairaudit's pad-to-pad walk on the loaded board B (warned once per call)."""
-    from . import netlen
-    k = (netlen.pair_lengths(path, [(master, slave)], kicad_cli) or {}).get((master, slave)) if path else None
+    """(P mm, N mm, P - N, source) of a pair on the board file `path`: the D71cv definition (pairaudit.channel_paths: per signal path, pad
+    edge to pad edge, via barrel counted, worst orientation), else KiCad's net lengths, else pairaudit's pad-to-pad walk."""
+    from . import netlen, pairaudit as PA
     lm, ls = _profile(B, master)["length"], _profile(B, slave)["length"]
+    mp = PA.channel_paths(dict(B, file=path), master, slave) if path else None
+    if mp is not None:
+        w = max(mp["paths"], key=lambda r: r["skew"])
+        return w["p"], w["n"], w["d"], "path"
+    k = (netlen.pair_lengths(path, [(master, slave)], kicad_cli) or {}).get((master, slave)) if path else None
     if k is None:
         return lm, ls, lm - ls, "audit"
     if k["p"] is None:                                       # equal within 0.0001 mm

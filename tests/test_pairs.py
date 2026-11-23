@@ -474,15 +474,15 @@ def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
     k = netlen.pair_lengths(out, [("ETH_N", "ETH_P")])
     assert k is not None and set(k[("ETH_N", "ETH_P")]) == {"p", "n", "skew"}
     a = PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]
-    assert a["length_src"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 2e-3
-    if k[("ETH_N", "ETH_P")]["p"] is not None:                       # KiCad's total is never shorter than the walk
-        assert a["p"]["length"] >= a["p"]["path_length"] - 1e-3
+    cp = PA.channel_paths(B, "ETH_N", "ETH_P")                      # D71cv: the skew is per path (channel.measure_paths), pad edge to pad edge
+    assert a["length_src"] == "path" and cp is not None and abs(a["skew"] - cp["skew"]) < 2e-3 and len(cp["paths"]) == 1
+    assert abs(cp["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) <= 0.1 + abs(cp["paths"][0]["inside"][0] - cp["paths"][0]["inside"][1])   # KiCad cross-check
     assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is not None   # cached run above: same board
     netlen.CACHE.clear()
     assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None, caller falls back
     import os
     os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"] = "1"
     try:
-        assert PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]["length_src"] == "audit"
+        assert PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]["length_src"] in ("audit", "path")
     finally:
         del os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"]

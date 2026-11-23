@@ -151,6 +151,74 @@ def _dists(g, src):
     return dist
 
 
+_CH = {}
+
+
+def channel_paths(B, p, n, cons=None):
+    """THE skew definition (D71cv): per signal path, pad edge to pad edge (copper inside the net's own pads excluded), via barrel
+    height from the stackup counted, one path per orientation.  Measured by channel.measure_paths on the board file.
+    A pair with a connector that has several pads on the net (joined rows) is judged on every orientation; any other pair on its
+    longest path (a tap or a flow-through part's second pin is a stub, not a path).
+    -> {paths: [{a, b, p, n, d (P - N, signed), skew, inside}], stubs: [{path, mm}], skew: worst, stub: longest spur, d: signed worst}
+    or None (no file, an open leg, channel/pcbnew unavailable)."""
+    f = (B or {}).get("file") if isinstance(B, dict) else None
+    if not f or not os.path.isfile(f):
+        return None
+    st = os.stat(f)
+    key = (os.path.abspath(f), st.st_mtime_ns, st.st_size, p, n)
+    if key in _CH:
+        return _CH[key]
+    out = None
+    try:
+        from . import channel as CH, kicad_io as IO
+        rows, _pl, _src = CH.stack_rows(cons or {}, f)
+        if not rows:                                       # no stackup template in the constraints: the board's own (names, thickness)
+            from . import review as RV
+            rows = [dict(r, roughness_rms_um=CH.DEFAULT_ROUGHNESS_UM) for r in RV.parse_stackup_text(open(f, errors="replace").read())]
+        meas = CH.measure_paths(IO.load(f), [p, n], rows, mode="all")
+        from . import pairs as PRS                           # P pad <-> N pad pairing: pairs.terminals (same part first, then nearest), symmetric in p/n
+        mate = {}
+        for t in PRS.terminals(B, p, n, 16.0)[0]:
+            mate[f"{t['p']['ref']}.{t['p']['num']}"], mate[f"{t['n']['ref']}.{t['n']['num']}"] = f"{t['n']['ref']}.{t['n']['num']}", f"{t['p']['ref']}.{t['p']['num']}"
+        byend = {frozenset((q["a"], q["b"])): q for q in meas[n] if q.get("found")}
+        ors = [(q, byend.get(frozenset((mate.get(q["a"]), mate.get(q["b"])))), f"{q['a']}>{q['b']}") for q in meas[p]
+               if q.get("found") and q["a"].split(".")[0] != q["b"].split(".")[0]]
+        if ors and all(b is not None for _a, b, _l in ors):
+            L = lambda q: q["length_mm"] + q["via_mm"]
+            rowsout = [{"a": a["a"], "b": a["b"], "p": round(L(a), 3), "n": round(L(b), 3), "d": round(L(a) - L(b), 3),
+                        "skew": round(abs(L(a) - L(b)), 3), "inside": [a["inside_pad_total_mm"], b["inside_pad_total_mm"]],
+                        "stub": max(a["stub_max_mm"], b["stub_max_mm"])} for a, b, _l in ors]
+            refs = {}
+            for q in B["pads"]:
+                if q["net"] in (p, n) and not q.get("np"):
+                    refs.setdefault(q["ref"], set()).add((q["net"], q["num"]))
+            joined = any(len(v) > 2 and re.match(r"(J|P|X|CN|CON)\d", r.upper()) for r, v in refs.items())
+            if not joined:
+                rowsout = [max(rowsout, key=lambda r: r["p"])]
+            w = max(rowsout, key=lambda r: r["skew"])
+            out = {"paths": rowsout, "skew": w["skew"], "d": w["d"], "stub": max(r["stub"] for r in rowsout),
+                   "stubs": [{"path": f"{r['a']}>{r['b']}", "mm": r["stub"]} for r in rowsout]}
+    except Exception as e:                                 # noqa: BLE001 - pcbnew missing / odd board: the caller falls back
+        print(f"pairaudit: channel path measure failed for {p}/{n}: {e}", file=sys.stderr)
+        out = None
+    _CH[key] = out
+    return out
+
+
+def _cross_check(p, n, cp, k):
+    """2-terminal pair: warn when KiCad's whole-net skew and the per-path skew differ by more than 0.1 mm beyond the copper inside pads."""
+    if not cp or not k or len(cp["paths"]) != 1 or k["p"] is None and abs(k["skew"]) < 1e-9 and cp["skew"] < 0.1:
+        return
+    ins = cp["paths"][0]["inside"]
+    gap = abs(abs(k["skew"]) - cp["skew"])
+    if gap > 0.1 + abs(ins[0] - ins[1]):
+        key = ("xchk", p, n, round(gap, 2))
+        if key not in _NOTED:
+            _NOTED.add(key)
+            print(f"pairaudit: WARNING {p}/{n}: per-path skew {cp['skew']:.3f} mm vs KiCad net-length skew {abs(k['skew']):.3f} mm "
+                  f"(differ {gap:.2f} mm, in-pad copper allows {abs(ins[0] - ins[1]):.2f}): branches or a via the path does not use", file=sys.stderr)
+
+
 def multi_paths(B, p, n, pad_max=16.0):
     """Per signal path skew of a pair with more than two terminals where a part has several pads on the net (the two rows of a joined
     connector).  Terminals = P/N pad pairs (pairs.terminals).  A path runs between two terminals of different parts, per pad pair, P
@@ -276,10 +344,18 @@ def audit(B, pairs, cons, open_nets):
                 if k["p"] is not None:
                     pp, pn = dict(pp, length=round(k["p"], 4), path_length=pp["length"]), dict(pn, length=round(k["n"], 4), path_length=pn["length"])
                     e.update(p=pp, n=pn)
-            mp = multi_paths(B, p, n)                  # more than two terminals: judged per signal path (each orientation), spurs apart
+            mp = channel_paths(B, p, n, cons)         # THE skew: per path, pad edge to pad edge, via height in (channel.measure_paths)
+            if mp is not None:
+                e["length_src"] = "path"
+                skew = mp["skew"]
+                e.update(paths=mp["paths"], stubs=mp["stubs"], skew_signed=mp["d"])
+                _cross_check(p, n, mp, (kl or {}).get((p, n)))
+            else:
+                mp = multi_paths(B, p, n)              # no channel: the own walk for joined rows (KiCad total above for the rest)
+                if mp:
+                    skew, e["length_src"] = mp["skew"], "path"
+                    e.update(paths=mp["paths"], stubs=mp["stubs"])
             if mp:
-                skew, e["length_src"] = mp["skew"], "path"
-                e.update(paths=mp["paths"], stubs=mp["stubs"])
                 sm = C.stub_max_mm(cons or {}, p)
                 if sm is not None and mp["stub"] > sm:
                     why.append(f"spur {mp['stub']:.2f} > {sm:g} mm")
