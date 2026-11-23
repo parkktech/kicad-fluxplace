@@ -992,9 +992,10 @@ def st_silk(c, n, board):
                 "next": ["silk failed: " + os.path.join(d, "stage.log")]}
     _sidecar(board, out)
     summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
-    return {"verdict": "pass" if rc == 0 else "fail", "line": summ, "board": out,
-            "next": [] if rc == 0 else ["FAIL-level silk findings left (footprint graphics / board texts): "
-                                        + os.path.join(d, "stage.log")]}
+    # Silk never copper-touches the board and review runs check_silk itself: what --fix could not fix stays a review finding at its own
+    # severity, so a silk FAIL is a WARN here and the flow reaches review (one flow: silk fixes, review judges).
+    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out,
+            "next": [] if rc == 0 else ["silk findings left (review reports them with their severity): " + os.path.join(d, "stage.log")]}
 
 
 def st_review(c, n, board):

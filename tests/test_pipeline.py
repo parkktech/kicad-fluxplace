@@ -169,6 +169,20 @@ def test_fanout_and_plan_route_stages_do_not_say_pass_on_their_own_fail(tmp_path
     assert r["verdict"] == "warn" and r["line"].startswith("WARN")
 
 
+def test_silk_fail_findings_do_not_stop_the_flow_before_review(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    out = os.path.join(c.dir(9, "silk"), "board.kicad_pcb")
+
+    def fake(argv, log):
+        shutil.copy(b, out)
+        return 1, "silk: 8 FAIL, 7 WARN, 23 INFO (after fix)\n"
+    monkeypatch.setattr(PL, "_run_cli", fake)
+    r = PL.st_silk(c, 9, b)
+    assert r["verdict"] == "warn" and r["board"] == out and "review" in r["next"][0]
+
+
 def test_close_follows_route_in_both_flows():
     for flow in (PL.STAGES, PL.CONSTRUCTIVE):
         assert flow[flow.index("route") + 1] == "close"
