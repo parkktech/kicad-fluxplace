@@ -111,9 +111,9 @@ def test_locked_protected_and_big_parts_are_never_suggested(tmp_path):
     assert RL.suggest(B, [dict(gap(["VDD"]), kind="short")]) == []
 
 
-def run(p, tmp_path, route, count):
+def run(p, tmp_path, route, count, budget=5000):
     out = str(tmp_path / "out.kicad_pcb")
-    res = RL.relocate(p, out, [gap(["VDD"])], {"cons": {}, "protect": set(), "budget_s": 100}, route=route, open_count=count)
+    res = RL.relocate(p, out, [gap(["VDD"])], {"cons": {}, "protect": set(), "budget_s": budget}, route=route, open_count=count)
     return res, out
 
 
@@ -154,3 +154,11 @@ def test_rung_is_in_the_open_free_ladder_after_handrepair():
     from fluxplace import gaps as GP
     r = GP.DISPATCH["open-free"]
     assert r.index("handrepair") < r.index("relocate") < r.index("ai") and "relocate" in GP.RUNGS
+
+
+def test_a_spent_budget_tries_nothing_and_changes_nothing(tmp_path):
+    p = ic_board(tmp_path)
+    before = sha(p)
+    res, out = run(p, tmp_path, lambda b, o, nets, c: 1 / 0, lambda b: {"VDD": 1}, budget=60)
+    assert res["moved"] == 0 and res["tried"] == 0 and not os.path.exists(out) and sha(p) == before
+    assert res["log"][0]["result"] == "budget"

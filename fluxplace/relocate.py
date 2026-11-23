@@ -29,6 +29,8 @@ RELOC_COURT_GAP = 0.15      # mm kept between the moved courtyard and any other 
 RELOC_EDGE_MM = 0.3         # mm between the moved courtyard and the board outline
 RELOC_COPPER_MARGIN = 0.05  # extra mm over the board clearance between a moved pad and foreign copper
 RELOC_LOCKED_STUB_MM = 3.0  # locked copper (a fan-out neck-down) reached by a stub walk may stay when at most this long; it dangles
+RELOC_RESERVE_S = 180       # seconds of the rung budget kept back for the last attempt's measures (KRT's own DRC calls are not bounded by its budget)
+RELOC_PART_MIN_S = 300      # a part is started only when at least this much budget is left after the reserve (KRT: about 5 min per net)
 TOL = 0.02                  # mm: two track ends closer than this are connected
 
 
@@ -270,6 +272,9 @@ def suggest(B, gaps, cons=None, protect=(), manifest=None):
                 break
         if tgt and tgt["ref"] != m["part"]:
             out.append({"part": m["part"], "toward": tgt, "nets": m["nets"], "dist": m["dist"], "from": m["from"]})
+    # a support part going to a bigger part (an IC pin) before one going to another passive (long-haul pairs): the stable sort keeps
+    # route-diagnose's order (nets fixed, distance) inside each group
+    out.sort(key=lambda c: len(B["parts"][c["toward"]["ref"]]["pads"]) <= RELOC_PAD_MAX)
     return out
 
 
@@ -311,12 +316,15 @@ def relocate(base, out, gaps, ctx, route=None, open_count=None):
         return {"status": "no relocatable part", "moved": 0, "tried": 0}
     log = ctx.get("log") or (lambda *_: None)
     t0 = time.time()
-    cur, tmps, rows, moved = base, [], [], 0
+    budget = float(ctx.get("budget_s", 1e9))
+    cur, tmps, rows, moved, longest = base, [], [], 0, 0.0
     now = open_count(cur)
     for k, c in enumerate(cands):
-        if time.time() - t0 > ctx.get("budget_s", 1e9):
+        left = budget - (time.time() - t0) - RELOC_RESERVE_S
+        if left < max(RELOC_PART_MIN_S, 1.3 * longest):         # the next part may not fit: stop with what is kept
             rows.append({"part": c["part"], "result": "budget"})
             break
+        t_part = time.time()
         ref = c["part"]
         row = {"part": ref, "from": c["from"], "dist": c["dist"], "toward": f"{c['toward']['ref']}.{c['toward']['num']}"}
         rows.append(row)
@@ -345,27 +353,31 @@ def relocate(base, out, gaps, ctx, route=None, open_count=None):
         if not _write_moved(cur, trial, ref, spot, stub):
             row["result"] = "move failed"
             continue
-        nets = sorted({p["net"] for p in Bc["parts"][ref]["pads"] if p["net"]})
-        try:
-            route(trial, routed, nets, dict(ctx, budget_s=max(1.0, ctx.get("budget_s", 1e9) - (time.time() - t0))))
-        except Exception as e:                                              # noqa: BLE001 - a failed route drops this attempt only
-            row["result"] = f"route error {type(e).__name__}"
-            continue
+        mine = {p["net"] for p in Bc["parts"][ref]["pads"] if p["net"]}
+        after = open_count(trial)
+        nets = sorted(n for n in mine if after.get(n, 0) > 0)    # nets already whole after the move (zone pours) need no route
+        if nets:
+            try:
+                route(trial, routed, nets, dict(ctx, budget_s=max(1.0, budget - (time.time() - t0) - RELOC_RESERVE_S)))
+            except Exception as e:                                          # noqa: BLE001 - a failed route drops this attempt only
+                row["result"] = f"route error {type(e).__name__}"
+                continue
         end = routed if os.path.exists(routed) else trial
         after = open_count(end)
         worse = sorted(n for n, v in after.items() if v > now.get(n, 0))
+        row["opens"] = [sum(now.values()), sum(after.values())]
         if sum(after.values()) < sum(now.values()) and not worse:
             row["result"] = "kept"
-            row["opens"] = [sum(now.values()), sum(after.values())]
             cur, now, moved = end, after, moved + 1
+            GP._copy(cur, out)                                   # progress survives a kill of this worker
+            GP._sidecars(cur, out)
             log(f"relocate: {ref} {row['from']} -> {row['to']} kept, opens {row['opens'][0]} -> {row['opens'][1]}")
         else:
             row["result"] = "opens not lower" if not worse else f"worse: {','.join(worse[:3])}"
-            row["opens"] = [sum(now.values()), sum(after.values())]
+            log(f"relocate: {ref} {row['from']} -> {row['to']} dropped: {row['result']}")
+        longest = max(longest, time.time() - t_part)
     try:
         if moved:
-            GP._copy(cur, out)
-            GP._sidecars(cur, out)
             BW.run_post_write(out, [r["part"] for r in rows if r.get("result") == "kept"])
     finally:
         for t in tmps:
