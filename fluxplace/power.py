@@ -21,7 +21,14 @@ import os
 
 DEFAULT_RISE_C = 10.0
 POUR_OVER_MM = 2.0
-STUB_EXEMPT_MM = 2.0            # narrow copper shorter than this per net+layer is a pad neck-down, not a power track
+# D71da (owner, 2026-11-23): a narrow run of a power net is exempt from POWER_WIDTH only if proven for the load:
+NECK_MAX_MM = 2.0               # (1) connected run length <= this (judged per run, not summed per net+layer)
+NECK_JOIN_MM = 0.02             # segment endpoints closer than this are one junction
+CU_RHO_OHM_M = 1.72e-8          # (2) copper resistivity at 20 C
+CU_K_W_MK = 390.0               #     copper thermal conductivity
+CU_UM_PER_OZ = 35.0             #     copper thickness per oz (D71da)
+# (2) heat: dT = I^2 rho L^2 / (8 k A^2) (1-D conduction, both ends held by full-width copper) <= the rail's rise_c;
+# (3) the net has a [[dcdrop]] row and channel's DC-drop metric (routed copper incl. the neck-downs) passes it.
 K_EXT, K_INT = 0.048, 0.024
 MIL = 0.0254
 
@@ -209,22 +216,108 @@ def unknown_rails(cons, net_pads):
     return out
 
 
-def check(facts, cons):
-    """Review findings (level, code, msg, refs): POWER_WIDTH, POWER_VIAS (FAIL), POWER_CURRENT_UNKNOWN (WARN)."""
+def neck_heat_c(current_a, length_mm, width_mm, oz):
+    """D71da: temperature rise (C) of the hottest point of a constriction, dT = I^2 rho L^2 / (8 k A^2)."""
+    a = (width_mm * 1e-3) * (CU_UM_PER_OZ * oz * 1e-6)
+    return current_a ** 2 * CU_RHO_OHM_M * (length_mm * 1e-3) ** 2 / (8 * CU_K_W_MK * a * a)
+
+
+def narrow_runs(segs):
+    """Group narrow segments [{layer, x1, y1, x2, y2, len, width, need}] into connected runs per layer (shared endpoints
+    within NECK_JOIN_MM; a via does not join layers: runs are per layer). A segment without endpoints is its own run.
+    -> [{layer, len, min_w, need, n}]."""
+    par = list(range(len(segs)))
+
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]
+            i = par[i]
+        return i
+    q = NECK_JOIN_MM
+    pts = {}
+    for i, g in enumerate(segs):
+        if "x1" in g:
+            for x, y in ((g["x1"], g["y1"]), (g["x2"], g["y2"])):
+                pts.setdefault((g["layer"], round(x / q), round(y / q)), []).append((x, y, i))
+    for (lyr, cx, cy), lst in pts.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for x, y, i in lst:
+                    for x2, y2, j in pts.get((lyr, cx + dx, cy + dy), ()):
+                        if i != j and abs(x - x2) <= q and abs(y - y2) <= q:
+                            par[find(i)] = find(j)
+    runs = {}
+    for i, g in enumerate(segs):
+        d = runs.setdefault(find(i), {"layer": g["layer"], "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0})
+        d["len"] += g.get("len", 0.0)
+        d["min_w"] = min(d["min_w"], g["width"])
+        d["n"] += 1
+    return sorted(runs.values(), key=lambda d: (d["layer"], -d["len"]))
+
+
+def dcdrop_status(board_path, cons):
+    """{net: {ok, mv, max, why}} from channel's [[dcdrop]] rows (the one DC-drop computation); {} when there are none or the
+    board cannot be measured (then nothing is exempt)."""
+    if not ((cons or {}).get("dcdrop") and isinstance(board_path, str) and os.path.exists(board_path)):
+        return {}
+    try:
+        from . import channel as CH, kicad_io as IO
+        board = IO.load(board_path)
+        rows, _p, _s = CH.stack_rows(cons, board.GetFileName())
+        out = {}
+        for r in CH.dcdrop_rows(board, cons, rows):
+            m = (r.get("metrics") or [None])[0]
+            ok = r["verdict"] in ("ok", "over-target-pass") and m is not None
+            st = {"ok": ok, "mv": m["value"] if m else None, "max": m["max"] if m else None,
+                  "why": "" if ok else (r.get("why") or "drop not computed")}
+            if r["name"] in out and not out[r["name"]]["ok"]:
+                continue
+            out[r["name"]] = st
+        return out
+    except Exception as e:                       # noqa: BLE001 - an unmeasurable drop exempts nothing
+        return {"__error__": {"ok": False, "mv": None, "max": None, "why": f"{type(e).__name__}: {e}"}}
+
+
+def _net_drop_fail(net, dc, has_dcdrop):
+    """D71da test 3 is per net: "" when the [[dcdrop]] budget passes, else why not."""
+    if not has_dcdrop:
+        return f"no [[dcdrop]] for {net} (add one from the load/regulator datasheets)"
+    st = dc.get(net)
+    if st and st["ok"]:
+        return ""
+    if st and st["mv"] is not None:
+        return f"drop {st['mv']:.0f} > {st['max']:g} mV"
+    return f"drop not computed ({(st or {}).get('why') or 'no result'})"
+
+
+def _neck_tests(run, r, outer):
+    """D71da tests 1-2 for one run -> list of failed-test strings (empty = passes)."""
+    fails = []
+    if run["len"] > NECK_MAX_MM + 1e-9:
+        fails.append(f"length {run['len']:.2f} mm > {NECK_MAX_MM:g}")
+    oz = r["oz_outer"] if run["layer"] in outer else r["oz_inner"]
+    rise = r.get("rise_c") or DEFAULT_RISE_C
+    dt = neck_heat_c(r["current_a"], run["len"], run["min_w"], oz)
+    if dt > rise + 1e-9:
+        fails.append(f"dT {dt:.1f} C > {rise:g}")
+    return fails
+
+
+def check(facts, cons, dc=None):
+    """Review findings (level, code, msg, refs): POWER_WIDTH, POWER_VIAS (FAIL), POWER_NECKDOWN_OK (INFO),
+    POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da)."""
     out = []
+    dc = dc or {}
+    has_dc = {d.get("net") for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict)}
     layers = facts.get("copper_layers")
     inner = set(facts.get("plane_layers") or ())
     zone_nets = set(facts.get("zone_nets") or ())
     plan_ = plan(cons, layers=layers, oz=oz_from_stackup(facts.get("stackup")))
-    copper_names = set()
-    for s in facts.get("track_geom") or []:
-        copper_names.add(s["layer"])
     outer = {"F.Cu", "B.Cu"}
     for net, r in sorted(plan_.items()):
         if r is None or r.get("track_mm") is None:
             continue
-        # tracks narrower than needed, by layer kind (outer vs inner weights differ)
-        short = {}
+        narrow = []
         for s in facts.get("track_geom") or []:
             if s["net"] != net or s.get("kind") != "track":
                 continue
@@ -232,16 +325,27 @@ def check(facts, cons):
             if need is None:
                 need = r["track_mm"]
             if s["width"] < need - 1e-6:
-                d = short.setdefault(s["layer"], {"len": 0.0, "min_w": s["width"], "need": need})
-                d["len"] += s.get("len", 0.0)
-                d["min_w"] = min(d["min_w"], s["width"])
-        bad = {l: d for l, d in short.items() if d["len"] >= STUB_EXEMPT_MM and not (net in zone_nets and r["pour"])}
-        if bad:
-            tot = sum(d["len"] for d in bad.values())
-            det = "; ".join(f"{l} {d['len']:.1f} mm at {d['min_w']:g} < {d['need']:.2f}" for l, d in sorted(bad.items()))
-            out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
-                        "msg": f"{net}: {tot:.1f} mm of track narrower than the {r['current_a']:g} A copper needs "
-                               f"({r['width_source']}, {r['oz_outer']:g}/{r['oz_inner']:g} oz): {det}"})
+                narrow.append(dict(s, need=need))
+        if narrow and not (net in zone_nets and r["pour"]):
+            bad, ok = [], []
+            dropf = _net_drop_fail(net, dc, net in has_dc)
+            for run in narrow_runs(narrow):
+                f = _neck_tests(run, r, outer)
+                (bad if f or dropf else ok).append((run, f))
+            if ok:
+                out.append({"level": "INFO", "code": "POWER_NECKDOWN_OK", "refs": [net],
+                            "value": sum(x["len"] for x, _f in ok),
+                            "msg": f"{net}: {len(ok)} neck-down run(s), {sum(x['len'] for x, _f in ok):.2f} mm total, "
+                                   f"proven for {r['current_a']:g} A (length <= {NECK_MAX_MM:g} mm, heat, [[dcdrop]]) (D71da)"})
+            if bad:
+                tot = sum(x["len"] for x, _f in bad)
+                bad.sort(key=lambda t: -t[0]["len"])
+                det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x['need']:.2f}"
+                                + (": " + ", ".join(f) if f else "") for x, f in bad[:4])
+                det += (f"; +{len(bad) - 4} more run(s)" if len(bad) > 4 else "") + (f"; net: {dropf}" if dropf else "")
+                out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
+                            "msg": f"{net}: {len(bad)} narrow run(s), {tot:.1f} mm, not proven for the {r['current_a']:g} A "
+                                   f"copper ({r['width_source']}, {r['oz_outer']:g}/{r['oz_inner']:g} oz): {det}"})
         nv = sum(1 for v in facts.get("vias") or [] if v["net"] == net)
         nvn = r.get("vias_needed")
         if nvn and 0 < nv < nvn:

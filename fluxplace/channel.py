@@ -522,6 +522,28 @@ def _routing_board(board, cache):
     return cache["B"]
 
 
+def dcdrop_rows(board, cons, rows):
+    """One row per [[dcdrop]] entry (kind "dc"): DC drop on the routed copper vs its budget. The ONE DC-drop computation
+    (evaluate and power.dcdrop_status both call it)."""
+    out = []
+    dc = [d for d in cons.get("dcdrop", []) or []]
+    if dc:
+        meas2 = measure_paths(board, sorted({d["net"] for d in dc}), rows)
+        for d in dc:
+            p = (meas2.get(d["net"]) or [{"found": False}])[0]
+            row = {"name": d["net"], "kind": "dc", "legs": [d["net"]], "family": None, "labels": {}, "metrics": []}
+            if not p.get("found"):
+                row.update(verdict="n/a", why=p.get("why", "no path"))
+            else:
+                r = dc_resistance_mohm(p, rows, float(d.get("temp_c", 20.0)), float(d.get("plating_um", DEFAULT_PLATING_UM)))
+                mv = r * float(d["current_a"])
+                m = _metric("dcdrop", "mV", mv, d.get("drop_mv_target"), d.get("drop_mv_max"), f"[[dcdrop]] {d.get('source', 'NO SOURCE')}", 1)
+                m.update(r_mohm=r, current_a=float(d["current_a"]))
+                row.update(metrics=[m], verdict=m["verdict"], paths=[p])
+            out.append(row)
+    return out
+
+
 def evaluate(board, cons, spec=None, nets=None):
     """-> rows [{name, kind pair|net|dc, legs, metrics [..], verdict, family, labels}] for every net / pair that a
     [channel.F] family covers (differential pairs only; a net outside a pair never gets channel metrics), plus every [[dcdrop]] entry. `spec` (the spec JSON) is accepted for the caller's
@@ -604,21 +626,7 @@ def evaluate(board, cons, spec=None, nets=None):
                 row["metrics"].append(m)
         row["verdict"] = max((m["verdict"] for m in row["metrics"]), key=_RANK.get, default="n/a")
         out.append(row)
-    dc = [d for d in cons.get("dcdrop", []) or []]
-    if dc:
-        meas2 = measure_paths(board, sorted({d["net"] for d in dc}), rows)
-        for d in dc:
-            p = (meas2.get(d["net"]) or [{"found": False}])[0]
-            row = {"name": d["net"], "kind": "dc", "legs": [d["net"]], "family": None, "labels": {}, "metrics": []}
-            if not p.get("found"):
-                row.update(verdict="n/a", why=p.get("why", "no path"))
-            else:
-                r = dc_resistance_mohm(p, rows, float(d.get("temp_c", 20.0)), float(d.get("plating_um", DEFAULT_PLATING_UM)))
-                mv = r * float(d["current_a"])
-                m = _metric("dcdrop", "mV", mv, d.get("drop_mv_target"), d.get("drop_mv_max"), f"[[dcdrop]] {d.get('source', 'NO SOURCE')}", 1)
-                m.update(r_mohm=r, current_a=float(d["current_a"]))
-                row.update(metrics=[m], verdict=m["verdict"], paths=[p])
-            out.append(row)
+    out += dcdrop_rows(board, cons, rows)
     return out
 
 

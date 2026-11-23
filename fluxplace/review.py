@@ -2156,7 +2156,9 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_slivers(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
-    out += [_f(x['level'], x['code'], x['msg'], refs=x['refs']) for x in __import__('fluxplace.power', fromlist=['x']).check(facts, cons)]
+    from . import power as PWR
+    out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
+            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons))]
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
@@ -2408,6 +2410,8 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "x": round(pcbnew.ToMM((s.x + e.x) / 2), 4),
             "y": round(pcbnew.ToMM((s.y + e.y) / 2), 4),
             "kind": "arc" if cls == "PCB_ARC" else "track",
+            "x1": round(pcbnew.ToMM(s.x), 4), "y1": round(pcbnew.ToMM(s.y), 4),
+            "x2": round(pcbnew.ToMM(e.x), 4), "y2": round(pcbnew.ToMM(e.y), 4),
             "len": round(pcbnew.ToMM(t.GetLength()), 4),
         })
         if cls == "PCB_TRACK":

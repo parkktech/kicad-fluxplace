@@ -140,7 +140,7 @@ def test_power_codes():
     for n in ("NONE", "+3V3"):
         assert n in codes["POWER_CURRENT_UNKNOWN"]["refs"]
     ok = _facts([_tr("MID", "F.Cu", need_out + 0.05, 10.0), _tr("MID", "F.Cu", 0.1, 1.0)], [{"net": "MID"}] * 20)
-    assert {x["code"] for x in PW.check(ok, cons)} == {"POWER_CURRENT_UNKNOWN"}          # short neck-down is exempt
+    assert "POWER_WIDTH" in {x["code"] for x in PW.check(ok, cons)}          # D71da: a neck-down with no [[dcdrop]] is not exempt
 
 
 def test_review_fab_capability_uses_profile_row_and_reports_error():

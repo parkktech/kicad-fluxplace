@@ -774,7 +774,7 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
     ]
     monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, rows))
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
-    monkeypatch.setattr(_PW, "check", lambda facts, cons: [
+    monkeypatch.setattr(_PW, "check", lambda facts, cons, dc=None: [
         {"code": "POWER_WIDTH", "refs": ["VBAT"], "msg": "VBAT narrow"},
         {"code": "POWER_CURRENT_UNKNOWN", "refs": ["X"], "msg": "warn"}])
     monkeypatch.setattr(_RD, "load", lambda board: None)
