@@ -2112,6 +2112,12 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
             out += [_f(f["level"], f["code"], f["msg"], f.get("refs", [])) for f in FC.check_board(bp, cons)]
         except Exception as e:                 # noqa: BLE001 - a check that cannot run is reported, never a pass
             out.append(_f(WARN, "FP_UNCHECKED", f"footprint geometry NOT CHECKED: {type(e).__name__}: {e}"))
+        if (cons or {}).get("channel") or (cons or {}).get("dcdrop"):      # channel budget (loss / skew / length / stub / DC drop)
+            try:
+                from . import channel as CHN
+                out += [_f(lv, code, msg, refs) for lv, code, msg, refs in CHN.check(bp, cons)]
+            except Exception as e:             # noqa: BLE001 - a check that cannot run is reported, never a pass
+                out.append(_f(WARN, "CHANNEL_UNCHECKED", f"channel budget NOT CHECKED: {type(e).__name__}: {e}"))
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
