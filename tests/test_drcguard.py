@@ -284,7 +284,7 @@ def _fake_cli(calls, report=None):
     import subprocess as _sp
 
     def run(cmd, **kw):
-        out = cmd[cmd.index("-o") + 1] if "-o" in cmd else cmd[cmd.index("--output") + 1]
+        out = cmd[cmd.index("--output") + 1]
         calls.append({"cmd": list(cmd), "dru": open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")).read()
                       if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")) else None,
                       "pro": _j.load(open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")))
