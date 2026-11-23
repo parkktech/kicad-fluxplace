@@ -653,7 +653,7 @@ def _rung_cap(cons):
 
 
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
-SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden")   # the rungs whose candidate depends on the gap list
+SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden", "relocate")   # the rungs whose candidate depends on the gap list
 SPLIT_WHY = ("R1 ", "R2 ", "R4 ", "R5 ", "R6 ", "target gap still there")
 
 
@@ -780,6 +780,13 @@ def _r_krt(base, out, gaps, ctx):
         for t in tmps:
             _clean_board(t)
     return res
+
+
+def _r_relocate(base, out, gaps, ctx):
+    """Move a small support part next to the pin it serves (route-diagnose `moves`), re-lay its nets with KRT, keep what lowers the
+    opens (relocate.py). The close loop's guard and the manifest commit judge the candidate like any rung's."""
+    from . import relocate as RL
+    return RL.relocate(base, out, gaps, ctx)
 
 
 def _r_drcfix(base, out, gaps, ctx):
@@ -1994,7 +2001,7 @@ def _r_pairgroup(base, out, gaps, ctx):
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_edgesliver, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
-         "pairgroup": _r_pairgroup, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
+         "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
          "powervias": _r_powervias, "tune": _r_tune}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
@@ -2002,7 +2009,7 @@ DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
-    "open-free": ["prune", "patch", "handrepair", "krt", "krt_region", "region", "patch_rip", "ai"],
+    "open-free": ["prune", "patch", "handrepair", "relocate", "krt", "krt_region", "region", "patch_rip", "ai"],
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
@@ -2014,7 +2021,7 @@ DISPATCH = {
     "pair-skew": ["pairgroup", "tune", "ai"],
     "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
 }
-LEVEL = {"region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
+LEVEL = {"relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
 
 def _tool():
