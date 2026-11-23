@@ -246,13 +246,22 @@ def _snap_fresh(src, dst, skip, locked_ok=False):
     return moved, refused
 
 
+def _drop_trials(tmps):
+    """The trial boards of a guarded loop and their sidecars are scratch (an 11 MB board per iteration stayed in every close folder)."""
+    for tmp in tmps:
+        for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_prl"):
+            if os.path.exists(f):
+                os.remove(f)
+
+
 def run(src, dst, iters=6, log=print, locked_ok=False):
     """-> {"moved", "excluded", "iters", "centred_left", "refused_geom"}; `dst` = the last accepted board (src when none is).
     refused_geom: joints _snap refused for clearance (PHASE3F A6) on the accepted iteration."""
     base = _keys(_report(src))
-    skip, last = set(), None
+    skip, last, tmps = set(), None, []
     for i in range(iters):
         tmp = dst + f".i{i}.kicad_pcb"
+        tmps.append(tmp)
         moved, refused_geom = _snap_fresh(src, tmp, skip, locked_ok)
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
@@ -272,6 +281,7 @@ def run(src, dst, iters=6, log=print, locked_ok=False):
         src_pro, dst_pro = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
         if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
             shutil.copy(src_pro, dst_pro)
+    _drop_trials(tmps)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "iters": i + 1,
             "centred_left": last[2] if last else None, "refused_geom": last[3] if last else 0}
 
@@ -387,10 +397,7 @@ def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, p
         src_pro, dst_pro = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
         if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
             shutil.copy(src_pro, dst_pro)
-    for tmp in tmps:                                             # the trial boards and their sidecars are scratch
-        for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_prl"):
-            if os.path.exists(f):
-                os.remove(f)
+    _drop_trials(tmps)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
 
 

@@ -21,6 +21,7 @@ def test_same_input_and_output_board(tmp_path, monkeypatch):
     monkeypatch.setattr(SI, "_snap", snap)
     rec = SI.run(str(src), str(src))
     assert rec == {"moved": 1, "excluded": 0, "iters": 1, "centred_left": 0, "refused_geom": 0}
+    assert sorted(os.listdir(tmp_path)) == ["b.kicad_pcb", "b.kicad_pro"]            # the trial board is not left behind
 
 
 def test_zone_fill_flicker_does_not_reject_accepted_snap(tmp_path, monkeypatch):
