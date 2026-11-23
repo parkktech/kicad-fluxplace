@@ -420,3 +420,19 @@ def test_breakout_without_the_gap_is_refused_by_its_own_partner():
 
 def test_breakout_gap_above_clearance_is_unchanged():
     assert _breakout_case(0.25, False)[0] is not None and _breakout_case(0.25, True)[0] is not None
+
+
+def test_a_pair_already_connected_is_never_ripped_by_a_later_pair(tmp_path):
+    """a closed pair's copper is an obstacle for the pairs still to lay, never replaced or killed to make room for them."""
+    rep, B, txt = lay(tmp_path, duo("U1", 20, 30, "D_P", "D_N") + duo("J1", 50, 30, "D_P", "D_N"))
+    assert rep["complete"] == 1
+    mine = lambda B_: sorted((s["net"], s["layer"], tuple(round(c, 3) for c in s["a"] + s["b"])) for s in B_["segs"] if s["net"] in ("D_P", "D_N"))
+    before = mine(B)
+    cross = duo("U2", 35, 20, "E_P", "E_N") + duo("J2", 35, 40, "E_P", "E_N")
+    path2 = tmp_path / "two.kicad_pcb"
+    path2.write_text(txt.rstrip().rstrip(")") + cross + ")\n")
+    out2 = str(tmp_path / "o2.kicad_pcb")
+    rep2 = PR.run(str(path2), {}, None, out2)
+    after = RD.load(out2)
+    assert mine(after) == before
+    assert clean(after, {"E_P", "E_N"}) >= CLR or not [s for s in after["segs"] if s["net"] == "E_P"]

@@ -678,6 +678,9 @@ def _section(ctx, D, O, ta, tb, rule, pr, plan_only, preset=None):
             if not r["ok"] and k == 0 and "search budget" not in r["reason"]:          # a longer uncoupled break-out: gates further out
                 r2 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, ring=max(3 * P["ring"], P["max_uncoupled"]))
                 r = r2 if r2["ok"] else r
+        if not r["ok"] and "search budget" in r["reason"] and not plan_only:        # the negotiation retries at 4x; the lay must too (bounded: x3)
+            r3 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, budget_x=3)
+            r = r3 if r3["ok"] else r
         if not r["ok"] and k == 0 and d < 3.0 and not plan_only:
             r = direct_section(ctx, a, b, rule, pr) or r
         if r["ok"]:
@@ -810,7 +813,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         return res
     clr = max(r["clr"] for r in rules.values())
     edge = max(float((RR._pro_rules(board) if board else {}).get("min_copper_edge_clearance") or 0.0), 0.3)
-    pair_nets = {n for pr in pl for n in pr}
+    # only the copper of pairs still to lay is "old" (replaceable, no obstacle): a pair already connected on the input board keeps its
+    # copper, which is then an obstacle like any foreign net's, so no later pair is laid through it and no fan-out kill removes it
+    pair_nets = {n for pr in pl if open0.get(pr[0]) or open0.get(pr[1]) for n in pr}
     old = {}
     for kind, src in (("seg", B["segs"]), ("via", B["vias"])):
         for o in src:
@@ -1105,7 +1110,9 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     # a terminal with its pads on two layers cannot give both legs one layer sequence: that copper stays (connected), reported as a mismatch
     odd = lambda e: any("@via-on-" in x for s_ in e["sections"] for x in s_.get("via_exit", [])) and \
         set(aud[tuple(e["pair"])].get("causes", [])) <= {"layers", "vias"}
-    bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch" and not odd(e)] \
+    only_skew = lambda e: aud[tuple(e["pair"])].get("causes") == ["skew"] and e["status"] == "laid"     # complete, same layers and vias: tune fixes skew
+    bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch" and not odd(e)
+           and not only_skew(e)] \
         if out and not plan_only else []
     if bad:                                                 # the audit on the written board is the judge: out-of-tolerance copper is taken back
         for e in bad:

@@ -390,8 +390,11 @@ def stub(B, items, base_n, ignore, pad, e, layer, w, net, clr, skip_old, step=0.
         if it["k"] == "via":
             F.block_via(it["c"][0], it["c"][1], it["d"], it["net"] or "")
     seeds = F.shape_mask(pad)
-    d = PK.dist(F.free(layer, w + 0.04) | seeds, seeds, step)
     j, i = F.cell(*e)
+    goal = np.zeros_like(seeds)                           # the leg end sits one pair gap from its partner leg, which the grid blocks: the cells at the end are open
+    r = int(math.ceil(0.15 / step))
+    goal[max(0, j - r):max(0, j + r + 1), max(0, i - r):max(0, i + r + 1)] = True
+    d = PK.dist(F.free(layer, w + 0.04) | seeds | goal, seeds, step)
     if not (0 <= j < F.ny and 0 <= i < F.nx) or d[j, i] >= PK.INF / 2:
         return None
     pts = [e]

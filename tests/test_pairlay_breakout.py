@@ -37,3 +37,16 @@ def test_own_net_copper_is_not_an_obstacle():
     items2 = G.Items(["F.Cu"])
     items2.seg((0.0, 0.0), (1.0, 0.0), 0.15, "F.Cu", "A")
     assert PL.check(items2, [("seg", "F.Cu", (0.5, -1.0), (0.5, 1.0), 0.15)], "A", 0.127, ())[0] >= 1e8    # own copper
+
+
+def test_stub_reaches_a_leg_end_one_pair_gap_from_the_partner_leg():
+    """PAIRS-S3: the grid blocks the partner leg's clearance, which covers the end cell of a pair gap below clearance + width."""
+    B = {"copper": ["F.Cu"], "pads": [], "segs": [], "vias": [], "zones": [], "edge": []}
+    pad = {"ref": "J", "num": "1", "net": "A", "x": 0.0, "y": 0.0, "w": 1.5, "h": 1.5, "ex": 0.75, "ey": 0.75, "angle": 0.0,
+           "layers": {"F.Cu"}, "shape": "circle"}
+    B["pads"].append(pad)
+    items = G.Items(["F.Cu"])
+    base = items.mark()
+    items.seg((3.0, 0.28), (6.0, 0.28), 0.127, "F.Cu", "B")             # the partner leg: 0.28 mm centre to centre from the end of leg A
+    pts = PL.stub(B, items, base, set(), pad, (3.0, 0.0), "F.Cu", 0.127, "A", 0.13, ())
+    assert pts and pts[0] == (0.0, 0.0) or pts and abs(pts[-1][0] - 3.0) < 1e-6
