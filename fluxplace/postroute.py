@@ -1,4 +1,6 @@
-"""Post-route clean-up, run before the close loop (and runnable alone): exact duplicate copper, off-centre track ends.
+"""Post-route clean-up, run before the close loop (and runnable alone): off-centre track ends.  (`dedupe_file` exists but clean() does not call it:
+on the W15 preview it dropped the stacked BT1/2/3_VDD vias, which are locked items in the manifest, and the commit point refused the stage
+with PROTECTED_CHANGED; the duplicates a snap itself makes are removed inside snapiter._snap.)
 
 `track_not_centered_on_via` (an error KiCad's DRC reports for every track end that touches a via off its centre; KRT leaves hundreds):
 snapiter.run moves the ends to the via centre where the DRC stays clean (new-violation guard per iteration; refused joints are
@@ -27,7 +29,7 @@ def dedupe_file(path):
 
 
 def clean(board, out, kicad_cli="kicad-cli"):
-    """-> {deduped: n, snap: {moved, excluded, iters, centred_left, refused_geom}, unconnected: [before, after], kept: bool}; `out` is always written
+    """-> {snap: {moved, excluded, iters, centred_left, refused_geom}, unconnected: [before, after], kept: bool}; `out` is always written
     (the input when the snap is not kept: unconnected must not rise)."""
     from . import snapiter as SI
     rep = {"snap": None, "unconnected": None, "kept": True}
