@@ -112,3 +112,25 @@ def test_board_without_a_stackup_reconciles_via_height_with_kicad(tmp_path):
     r = netlen.pair_skew(RD.load(str(f)), "E_P", "E_N", {}, grade_ps=True)
     assert r["status"] == "ok" and max(abs(r["recon"]["p"]), abs(r["recon"]["n"])) <= netlen.RECON_TOL_MM, r["recon"]
     assert r["skew_ps"] is None                                   # no reference planes: no delay, so a ps budget would not grade it
+
+
+def _via_in_pad_board(tmp_path):
+    """E_P: pad (F) with a via in it -> B.Cu 20 mm -> via in the far pad (F).  E_N: the same on its own pads, 2 mm apart."""
+    body = PB.fp("U1", 30, 30, [PB.pad("1", 0, 0, "E_P"), PB.pad("2", 0, 2.0, "E_N")]) + \
+        PB.fp("U2", 30, 30, [PB.pad("1", 20, 0, "E_P"), PB.pad("2", 20, 2.0, "E_N")])
+    for net, y in (("E_P", 0.0), ("E_N", 2.0)):
+        body += _via(net, 0).format(y=y + OY) + _seg(net, (0, y), (20, y), "B.Cu") + _via(net, 20).format(y=y + OY)
+    f = tmp_path / "vip.kicad_pcb"
+    f.write_text('(kicad_pcb (version 20260206) (generator "pcbnew")\n(layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n' + EDGE + body + ")\n")
+    return str(f)
+
+
+def test_via_in_end_pad_is_signal_not_a_stub(tmp_path):
+    """W15 ETH_L1 at T3: pad > via > B.Cu counted the whole barrel as a stub because the pad's layer was not served."""
+    from fluxplace import channel as CH, pairaudit as PA
+    f = _via_in_pad_board(tmp_path)
+    rows, planes = netlen._rows({}, f)
+    q = CH.measure_paths(IO.load(f), ["E_P"], rows, mode="all")["E_P"][0]
+    assert q["found"] and q["stub_max_mm"] == 0.0 and [s for s in q["stubs"] if s["kind"] == "via"] == []
+    assert q["via_mm"] == pytest.approx(2 * 1.5, abs=0.2)             # both barrels are on the signal path
+    assert PA.via_stubs(RD.load(f), ["E_P", "E_N"]) == []             # the one stub function agrees

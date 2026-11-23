@@ -374,6 +374,13 @@ def orientations(pp, pn):
     return out
 
 
+def _pad_layers(board, pad, cu):
+    """Copper layers (names in `cu`) the pad has copper on."""
+    import pcbnew
+    ids = {board.GetLayerName(i): i for i in range(pcbnew.PCB_LAYER_ID_COUNT)}
+    return [l for l in cu if ids.get(l) is not None and pad.IsOnLayer(ids[l])]
+
+
 def measure_paths(board, nets, rows, mode="trunk"):
     """{net: [path]} per signal path, pad to pad. mode "trunk": the path between the net's two farthest pads (branches
     off it are stubs); "all": every pad pair. path = {net, a, b, found, length_mm, layer_mm, layer_w, layer_sq, vias,
@@ -391,6 +398,7 @@ def measure_paths(board, nets, rows, mode="trunk"):
         if len(pad_nodes) < 2:
             out[net] = [{"net": net, "found": False, "why": f"{len(pad_nodes)} pad(s)", "copper_total_mm": total}]
             continue
+        pads_by_node = {pn: p_ for pn, _l, p_ in pad_nodes}
         dists = {pn: _dijkstra(adj, pn) for pn, _l, _p in pad_nodes}
         pairs = [(a, b) for i, (a, _l, _p) in enumerate(pad_nodes) for b, _l2, _p2 in pad_nodes[i + 1:] if b in dists[a][0]]
         if not pairs:
@@ -406,18 +414,17 @@ def measure_paths(board, nets, rows, mode="trunk"):
             stubs = _stubs(adj, nodes, edges, lab, vmap, rows, seq)
             vmm = 0.0
             cu = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
-            for (u, k), v in zip(vias, vl):      # barrel between the layers either side is signal; beyond is a stub
+            for (u, k), v in zip(vias, vl):      # barrel between the layers either side is signal; barrel stubs: pairaudit.via_stubs (one function)
                 used = [cu.index(l) for l in (seq[k - 1] if k > 0 else None, seq[k] if k < len(seq) else None) if l in cu]
+                # a via inside the path's end pad (via-in-pad: pad > via > B): the pad's own layers are served at that end
+                if k == 0:
+                    used += [cu.index(l) for l in _pad_layers(board, pads_by_node[a], cu)]
+                if k == len(seq):
+                    used += [cu.index(l) for l in _pad_layers(board, pads_by_node[b], cu)]
                 if not used or v["top"] not in cu or v["bottom"] not in cu:
                     continue
                 lo, hi = min(used), max(used)
-                vt, vb = cu.index(v["top"]), cu.index(v["bottom"])
                 vmm += via_barrel_mm(rows, cu[lo], cu[hi]) or 0.0
-                for n0, n1, ok in ((vt, lo, lo > vt), (hi, vb, hi < vb)):
-                    if ok:
-                        sm = via_barrel_mm(rows, cu[n0], cu[n1]) or 0.0
-                        if sm > 0.05:
-                            stubs.append({"kind": "via", "mm": round(sm, 4), "at": f"({v['x']:.2f},{v['y']:.2f})"})
             res.append({"net": net, "a": lab[a], "b": lab[b], "a_xy": xy[a], "b_xy": xy[b], "found": True, "length_mm": round(dist[b], 4),
                         "layer_mm": {k: round(v, 4) for k, v in lmm.items()}, "layer_w": lw, "layer_sq": lsq,
                         "vias": len(vl), "via_list": vl, "via_mm": round(vmm, 4), "stubs": stubs,
@@ -573,7 +580,9 @@ def evaluate(board, cons, spec=None, nets=None):
         if "length_mm_max" in b or "length_mm_target" in b:
             row["metrics"].append(_metric("length", "mm", max(q["length_mm"] for q in paths), b.get("length_mm_target"), b.get("length_mm_max"), lab.get("length_mm_max") or lab.get("length_mm_target"), 1))
         if "stub_mm_max" in b:
-            row["metrics"].append(_metric("stub", "mm", max(q["stub_max_mm"] for q in paths), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
+            from . import pairaudit as PA
+            vs = max([r["stub_mm"] for r in PA.via_stubs(_routing_board(board, _cache), names)] or [0.0])      # via barrel stubs: the one function
+            row["metrics"].append(_metric("stub", "mm", max(max(q["stub_max_mm"] for q in paths), vs), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
         if any(k in b for k in CN.NOISE_KEYS):
             B = _routing_board(board, _cache)
             if "cls" not in _cache:
