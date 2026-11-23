@@ -169,6 +169,43 @@ def test_fanout_and_plan_route_stages_do_not_say_pass_on_their_own_fail(tmp_path
     assert r["verdict"] == "warn" and r["line"].startswith("WARN")
 
 
+def test_silk_fail_findings_do_not_stop_the_flow_before_review(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    out = os.path.join(c.dir(9, "silk"), "board.kicad_pcb")
+
+    def fake(argv, log):
+        shutil.copy(b, out)
+        return 1, "silk: 8 FAIL, 7 WARN, 23 INFO (after fix)\n"
+    monkeypatch.setattr(PL, "_run_cli", fake)
+    r = PL.st_silk(c, 9, b)
+    assert r["verdict"] == "warn" and r["board"] == out and "review" in r["next"][0]
+
+
+def test_in_fresh_process_runs_elsewhere_and_keeps_the_traceback():
+    assert PL.in_fresh_process("os", "getpid") != os.getpid()
+    assert PL.in_fresh_process("os.path", "join", "a", "b") == os.path.join("a", "b")
+    with pytest.raises(RuntimeError) as e:
+        PL.in_fresh_process("os", "listdir", "/nonexistent-dir-xyz")
+    assert "FileNotFoundError" in str(e.value) and "Traceback" in str(e.value)
+
+
+def test_close_stage_runs_in_a_fresh_process_and_a_crash_leaves_its_traceback(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    seen = {}
+
+    def fake(module, func, *args, **kw):
+        seen["call"] = (module, func)
+        raise RuntimeError("Traceback (most recent call last):\n  ...\nAttributeError: 'SwigPyObject' object has no attribute 'GetTracks'")
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    r = PL.st_close(c, 8, b)
+    assert seen["call"] == ("fluxplace.gaps", "close") and r["verdict"] == "warn" and "GetTracks" in r["line"]
+    assert "Traceback" in open(os.path.join(c.dir(8, "close"), "crash.log")).read()
+
+
 def test_close_follows_route_in_both_flows():
     for flow in (PL.STAGES, PL.CONSTRUCTIVE):
         assert flow[flow.index("route") + 1] == "close"
@@ -319,3 +356,61 @@ def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypat
     assert r["verdict"] == "pass" and "still over" in r["line"]
     monkeypatch.setattr(PL, "_run_cli", lambda argv, log: (1, "tune: 1 pair(s) got worse"))
     assert PL.st_tune(c, 1, str(b))["verdict"] == "fail"
+
+def _commit_env(monkeypatch, tmp_path, ok=True):
+    from fluxplace import boardwrite as BW
+    prev, new = tmp_path / "prev.kicad_pcb", tmp_path / "new.kicad_pcb"
+    prev.write_text("prev"); new.write_text("new")
+    man = {"nets": {"D_P": {"fp": "x", "why": "locked"}, "D_N": {"fp": "y", "why": "locked"}}}
+    seen = {}
+    monkeypatch.setattr(BW, "load_manifest", lambda b: man)
+    monkeypatch.setattr(BW, "verify", lambda base, cand, release=(), manifest=None: seen.update(release=set(release)) or
+                        ({"ok": True} if ok else {"ok": False, "why": "PROTECTED_CHANGED D_P", "changed": ["D_P"]}))
+    monkeypatch.setattr(BW, "seed", lambda b, why_by_net=None, keep=None, locked=True: seen.update(seeded=b, keep=set((keep or {}).get("nets", {})),
+                                                                                                   why=why_by_net) or man)
+    return str(prev), str(new), seen
+
+
+def test_a3_stage_output_that_changes_protected_copper_is_refused(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path, ok=False)
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": new, "line": "routed"})
+    assert r["verdict"] == "fail" and r["board"] == prev and "commit refused: PROTECTED_CHANGED D_P" in r["line"] and "seeded" not in seen
+    assert seen["release"] == set()
+
+
+def test_a3_accepted_output_carries_the_manifest_and_adds_completed_pairs(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path)
+    r = PL._commit_point("pairs", prev, {"verdict": "pass", "board": new, "complete_pairs": [("E_P", "E_N")]})
+    assert r["verdict"] == "pass" and seen["seeded"] == new and seen["keep"] == {"D_P", "D_N"} and seen["why"] == {"E_P": "pair E_P/E_N", "E_N": "pair E_P/E_N"}
+
+
+def test_a3_tune_releases_pair_copper_it_is_allowed_to_edit(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path)
+    PL._commit_point("tune", prev, {"verdict": "pass", "board": new})
+    assert seen["release"] == {"D_P", "D_N"} and seen["keep"] == set()
+
+
+def test_a3_no_manifest_and_not_a_seeding_stage_means_nothing_to_check(tmp_path, monkeypatch):
+    from fluxplace import boardwrite as BW
+    monkeypatch.setattr(BW, "load_manifest", lambda b: {"nets": {}})
+    monkeypatch.setattr(BW, "verify", lambda *a, **k: (_ for _ in ()).throw(AssertionError("verified")))
+    prev, new = tmp_path / "p.kicad_pcb", tmp_path / "n.kicad_pcb"
+    prev.write_text("p"); new.write_text("n")
+    assert PL._commit_point("floorplan", str(prev), {"verdict": "pass", "board": str(new)})["verdict"] == "pass"
+
+
+def test_close_stage_runs_the_post_route_snap_first_and_closes_the_cleaned_board(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    calls = []
+
+    def fake(module, func, *args, **kw):
+        calls.append((module, func, args[0]))
+        if func == "clean":
+            return {"snap": {"moved": 5}, "unconnected": [3, 3], "kept": True}
+        return {"start": {"opens": 3, "errors": 9}, "end": {"opens": 2, "errors": 4}, "attempts": 1, "stop": "clean", "best": "BEST"}
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    r = PL.st_close(c, 8, b)
+    assert [x[1] for x in calls] == ["clean", "close"] and calls[1][2].endswith("postroute.kicad_pcb")
+    assert r["verdict"] == "pass" and "snapped 5" in r["line"] and r["board"] == "BEST"

@@ -126,16 +126,19 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         if pd:
             json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
         out = os.path.join(td, "drc.json")
-        try:
-            r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
-                                "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"DRC timed out after {timeout} s") from e
-        rc = getattr(r, "returncode", 0)
-        if rc not in (0, None):
-            raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
-        if not os.path.isfile(out) or not os.path.getsize(out):
-            raise RuntimeError(f"DRC produced no report: {(r.stderr or r.stdout)[-200:]}")
+        for attempt in (1, 2):                         # kicad-cli sometimes exits without a report under load (critroute: 10 of 13 tries); once more
+            try:
+                r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                                    "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(f"DRC timed out after {timeout} s") from e
+            rc = getattr(r, "returncode", 0)
+            if rc not in (0, None):
+                raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
+            if os.path.isfile(out) and os.path.getsize(out):
+                break
+        else:
+            raise RuntimeError(f"DRC produced no report (2 tries): {(r.stderr or r.stdout)[-200:]}")
         d = json.load(open(out))
         if dtext is not None and not any("rule 'fxcanary'" in str(v.get("description", "")) for v in d.get("violations", [])):
             raise RuntimeError("rule file ignored: the canary rule did not fire (a syntax error in the .kicad_dru disables every rule, "

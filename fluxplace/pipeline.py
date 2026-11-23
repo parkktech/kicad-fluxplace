@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -956,16 +957,36 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     return rec
 
 
+from .freshproc import in_fresh_process  # noqa: E402,F401 - re-exported (st_close, tests)
+
+
 def st_close(c, n, board):
-    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json."""
-    from . import gaps as GP, calllog as CL
+    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json.  Runs in a fresh process (see
+    in_fresh_process); a crash keeps its traceback in the stage log."""
+    from . import calllog as CL
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    post = None
+    try:                                                  # post-route clean-up first: off-centre track ends (postroute.py)
+        os.makedirs(c.dir(n, "close"), exist_ok=True)
+        cleaned = os.path.join(c.dir(n, "close"), "postroute.kicad_pcb")
+        post = in_fresh_process("fluxplace.postroute", "clean", board, cleaned)
+        board = cleaned
+    except (Exception, SystemExit):                       # noqa: BLE001 - never blocks the close loop
+        post = None
     try:
-        res = GP.close(board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, log=lambda m: None)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att)
     except (Exception, SystemExit) as e:
-        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e)[:80]}", "board": board}
+        try:
+            open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
+        except OSError:
+            pass
+        last = (str(e).strip().splitlines() or [""])[-1][:100]
+        return {"verdict": "warn", "line": "close: crashed " + (last if re.match(r"\w*(Error|Exception|Exit)\b", last) else f"{type(e).__name__}: {last}"),
+                "board": board}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
+    if post:
+        line += f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}"
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
 
 
@@ -1011,9 +1032,10 @@ def st_silk(c, n, board):
                 "next": ["silk failed: " + os.path.join(d, "stage.log")]}
     _sidecar(board, out)
     summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
-    return {"verdict": "pass" if rc == 0 else "fail", "line": summ, "board": out,
-            "next": [] if rc == 0 else ["FAIL-level silk findings left (footprint graphics / board texts): "
-                                        + os.path.join(d, "stage.log")]}
+    # Silk never copper-touches the board and review runs check_silk itself: what --fix could not fix stays a review finding at its own
+    # severity, so a silk FAIL is a WARN here and the flow reaches review (one flow: silk fixes, review judges).
+    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out,
+            "next": [] if rc == 0 else ["silk findings left (review reports them with their severity): " + os.path.join(d, "stage.log")]}
 
 
 def st_review(c, n, board):
