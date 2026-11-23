@@ -115,3 +115,56 @@ def test_close_adopts_a_real_candidate_only_if_locked_copper_is_untouched(tmp_pa
         assert any("PROTECTED_CHANGED L" in w for w in why)
     else:
         assert BW.verify(res["best"], res["best"])["ok"] and "L" in BW.load_manifest(res["best"])["nets"]
+
+
+def _close_stage(tmp_path, monkeypatch, prev, cleaned_content):
+    """st_close with the fresh-process calls faked: `clean` writes `cleaned_content` as postroute.kicad_pcb, `close` records its board."""
+    from types import SimpleNamespace
+    d = tmp_path / "w"
+    d.mkdir(exist_ok=True)
+    c = SimpleNamespace(dir=lambda n, name: str(d), cons_path=None, cons={}, board_in=prev)
+    seen = {}
+
+    def fake(module, func, *a, **k):
+        if func == "clean":
+            open(a[1], "w").write(cleaned_content)
+            return {"snap": {"moved": 2}}
+        seen["closed"] = a[0]
+        man = BW.load_manifest(a[0])
+        return {"start": {"opens": 1, "errors": 1}, "end": {"opens": 0, "errors": 0}, "attempts": 1, "stop": "clean", "best": a[0],
+                "manifest_nets": sorted(man["nets"])}
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    return PL.st_close(c, 8, prev), seen, str(d / "postroute.kicad_pcb")
+
+
+def test_st_close_carries_the_manifest_to_the_post_route_board(tmp_path, monkeypatch):
+    prev = board(tmp_path, "prev.kicad_pcb", BASE())
+    BW.seed(prev)
+    r, seen, cleaned = _close_stage(tmp_path, monkeypatch, prev, open(prev).read() + "")
+    assert os.path.isfile(cleaned + ".done.json") or os.path.isfile(BW.done_path(cleaned))
+    assert seen["closed"] == cleaned and set(BW.load_manifest(cleaned)["nets"]) == {"D_P", "D_N"} and not BW.is_stale(cleaned)
+    assert "snapped 2" in r["line"]
+
+
+def test_st_close_closes_the_original_board_when_the_snap_breaks_a_protected_item(tmp_path, monkeypatch):
+    prev = board(tmp_path, "prev.kicad_pcb", BASE())
+    BW.seed(prev)
+    ripped = board(tmp_path, "rip.kicad_pcb", seg("D_N", (20, 21), (30, 21), True) + seg("SIG", (20, 23), (30, 23)))
+    r, seen, cleaned = _close_stage(tmp_path, monkeypatch, prev, open(ripped).read())
+    assert seen["closed"] == prev and "post-route refused" in r["line"] and "PROTECTED_CHANGED" in r["line"]
+
+
+def test_a_pair_rung_in_close_releases_only_its_targets_on_the_carried_manifest(tmp_path, monkeypatch):
+    """What gaps.close does per rung (BW.commit(best, final, best, release=targets, manifest=man)), on the manifest st_close carried."""
+    def carried(sub):
+        d = tmp_path / sub
+        d.mkdir()
+        prev = board(d, "prev.kicad_pcb", BASE())
+        BW.seed(prev)
+        return _close_stage(d, monkeypatch, prev, open(prev).read())[2]
+    both = lambda d: board(d, "m.kicad_pcb", seg("D_N", (20, 21), (30, 24), True) + seg("D_P", (20, 20), (30, 22), True))
+    c1 = carried("a")
+    assert BW.commit(c1, both(tmp_path / "a"), c1, release={"D_P", "D_N"}, manifest=BW.load_manifest(c1), reason="pair-skew pairgroup")["written"]
+    c2 = carried("b")
+    v = BW.commit(c2, both(tmp_path / "b"), c2, release={"D_P"}, manifest=BW.load_manifest(c2), reason="pair-skew pairgroup")
+    assert not v["written"] and "PROTECTED_CHANGED D_N" in v["why"]

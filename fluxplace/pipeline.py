@@ -970,7 +970,12 @@ def st_close(c, n, board):
         os.makedirs(c.dir(n, "close"), exist_ok=True)
         cleaned = os.path.join(c.dir(n, "close"), "postroute.kicad_pcb")
         post = in_fresh_process("fluxplace.postroute", "clean", board, cleaned)
-        board = cleaned
+        from . import boardwrite as BW
+        v = BW.commit(board, cleaned, cleaned, reason="postroute snap")       # carry the manifest: close protects the same copper the flow does
+        if v["written"]:
+            board = cleaned
+        else:
+            post = dict(post or {}, refused=v["why"])                          # the snap broke a protected item: close the board as it came
     except (Exception, SystemExit):                       # noqa: BLE001 - never blocks the close loop
         post = None
     try:
@@ -986,7 +991,8 @@ def st_close(c, n, board):
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
     if post:
-        line += f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}"
+        line += (f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}" if not post.get("refused")
+                 else f"; post-route refused ({post['refused'][:60]})")
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
 
 
