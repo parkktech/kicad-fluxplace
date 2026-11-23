@@ -437,24 +437,9 @@ def direct_section(ctx, ta, tb, rule, nets):
 
 
 def pair_layers(B, cons):
-    """(signal layers, plane layers) for pairs.  `[preroute] signal_layers / plane_layers` decide when given; otherwise an
-    INNER layer is a plane when one netted zone covers the whole board (polygon area >= 90 % of the outline box).  An inner
-    layer with a partial fill is a signal layer that also carries a pour (the pour is refilled round the tracks)."""
+    """(signal layers, plane layers) for pairs: preroute.layer_split (the same split the congestion model uses)."""
     from . import preroute as PR
-    pc = (cons or {}).get("preroute", {}) or {}
-    if isinstance(pc.get("signal_layers"), list) or isinstance(pc.get("plane_layers"), list):
-        return PR.layer_split(B, cons)
-    cu = list(B["copper"])
-    x0, y0, x1, y1 = B["bbox"]
-    board = max((x1 - x0) * (y1 - y0), 1e-6)
-    plane = set()
-    for z in B["zones"]:
-        p = z["pts"]
-        if z["net"] and not z["keepout"] and len(p) >= 3:
-            a = abs(sum(p[i][0] * p[(i + 1) % len(p)][1] - p[(i + 1) % len(p)][0] * p[i][1] for i in range(len(p)))) / 2
-            if a >= 0.9 * board:
-                plane |= {l for l in z["layers"] if l in cu[1:-1]}
-    return [l for l in cu if l not in plane], [l for l in cu if l in plane]
+    return PR.layer_split(B, cons)
 
 
 def layer_geometry(rule, sig, planes, copper, stackup, floor, cons=None, tight=False, board=None):

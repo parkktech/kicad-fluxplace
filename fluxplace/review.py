@@ -1708,8 +1708,17 @@ def check_preroute(facts, spec, cons):
         found, _ = PR.run(RD.load(path), cons, spec, waivers=(), collide=True, surface=PR.surface_pins(path))
     except Exception as e:           # a gate that cannot run must say so, not crash the review
         return [_f(WARN, "PREROUTE_UNAVAILABLE", f"pre-route checks could not run: {e}")]
-    return [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))
-            for x in found]
+    out = [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))
+           for x in found]
+    try:                                                 # the coarse-route estimate predicts routing: on a routed board it is information
+        routed = PR.is_routed(RD.load(path)) if any(f["code"] == "CONGESTION" for f in out) else False
+    except Exception:                                    # noqa: BLE001
+        routed = False
+    if routed:
+        for f in out:
+            if f["code"] == "CONGESTION":
+                f["level"], f["msg"] = INFO, "(routed board: information) " + f["msg"]
+    return out
 
 
 def check_elec(spec, cons, ds_dir, mpn_map=None):
