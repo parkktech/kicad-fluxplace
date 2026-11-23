@@ -41,7 +41,9 @@ DEFAULT_FREQ_GHZ = 1.0
 DETOUR = 1.15                    # Manhattan -> routed length factor for predict()
 TOL = 0.02                       # mm, endpoint coincidence
 SAMPLE = 0.02                    # mm, step for the inside-own-pad test
-KEYS = ("loss_db_max", "loss_db_target", "freq_ghz", "skew_ps_max", "skew_ps_target", "length_mm_max",
+from . import channel_noise as CN
+
+KEYS = CN.NOISE_KEYS + ("loss_db_max", "loss_db_target", "freq_ghz", "skew_ps_max", "skew_ps_target", "length_mm_max",
         "length_mm_target", "stub_mm_max", "via_db", "connector_db")
 
 
@@ -446,6 +448,8 @@ def resolve_budget(cons, master, ps_per_mm=None):
             if k in e:
                 b[k] = float(e[k])
                 lab[k] = f"[channel.{fam}] {e.get('source', 'NO SOURCE')}"
+    if fam and cons["channel"][fam].get("noisy_classes"):
+        b["noisy_classes"] = list(cons["channel"][fam]["noisy_classes"])
     pf = _family(cons.get("pairs"), master)
     if pf and "skew_ps_max" not in b:
         pe = cons["pairs"][pf]
@@ -476,9 +480,13 @@ def verdict(value, target, mx):
 _RANK = {"n/a": 0, "ok": 1, "over-target-pass": 2, "fail": 3}
 
 
-def _metric(name, unit, value, target, mx, label, digits=1):
-    v, margin, over = verdict(value, target, mx)
-    return {"name": name, "unit": unit, "value": value, "target": target, "max": mx, "margin": margin,
+def _metric(name, unit, value, target, mx, label, digits=1, minimum=False):
+    """minimum=True: `mx` is a floor (fail below it) and `target` a floor too; margin/over count the shortfall."""
+    if minimum:
+        v, margin, over = verdict(None if value is None else -value, None if target is None else -target, None if mx is None else -mx)
+    else:
+        v, margin, over = verdict(value, target, mx)
+    return {"minimum": minimum, "name": name, "unit": unit, "value": value, "target": target, "max": mx, "margin": margin,
             "over_target": over, "verdict": v, "source": label, "digits": digits}
 
 
@@ -498,6 +506,18 @@ def _legs(pairs_map, names):
     return out
 
 
+_NKEY = {"xtalk": "xtalk_db_max", "spacing": "spacing_w_min", "broadside": "broadside_mm_max", "plane": "plane_gap_mm_max",
+         "return_via": "return_via_mm", "noisy": "noisy_mm"}
+
+
+def _routing_board(board, cache):
+    """routediag.load dict of the board file (copper, zones with fills, pads), once per evaluate."""
+    if "B" not in cache:
+        from . import routediag as RD
+        cache["B"] = RD.load(board.GetFileName())
+    return cache["B"]
+
+
 def evaluate(board, cons, spec=None, nets=None):
     """-> rows [{name, kind pair|net|dc, legs, metrics [..], verdict, family, labels}] for every net / pair that a
     [channel.F] family covers (differential pairs only; a net outside a pair never gets channel metrics), plus every [[dcdrop]] entry. `spec` (the spec JSON) is accepted for the caller's
@@ -513,6 +533,7 @@ def evaluate(board, cons, spec=None, nets=None):
     cover = [n for n in allnets if _family(cons.get("channel"), n)]
     if nets:
         cover = [n for n in cover if n in set(nets)]
+    _cache = {}
     legs = [l for l in _legs(pm, set(cover)) if l[1]]            # differential pairs only (netclass pair detection)
     meas = measure_paths(board, sorted({x for l in legs for x in l}), rows, mode="all")
     out = []
@@ -540,12 +561,15 @@ def evaluate(board, cons, spec=None, nets=None):
             ls = [m["loss_db"] for m in pmx.values()]
             row["metrics"].append(_metric("loss", "dB", None if None in ls else max(ls), b.get("loss_db_target"), b.get("loss_db_max"), lab.get("loss_db_max") or lab.get("loss_db_target"), 2))
         if "skew_ps_max" in b or "skew_ps_target" in b:
-            per = []
+            per, mms = [], []
             for pq, nq, lbl in ors:
                 dp, dn = pmx[id(pq)]["delay_ps"], (pmx[id(nq)]["delay_ps"] if nq else None)
                 per.append((lbl, abs(dp - dn) if dp is not None and dn is not None else None))
+                mms.append(abs(pq["length_mm"] - nq["length_mm"]) if nq else None)
             vals = [v for _l, v in per if v is not None]
             m = _metric("skew", "ps", max(vals) if vals else None, b.get("skew_ps_target"), b.get("skew_ps_max"), lab.get("skew_ps_max") or lab.get("skew_ps_target"), 2)
+            if vals:
+                m["mm"] = mms[[v for _l, v in per].index(max(vals))]          # the same orientation, in mm (KiCad DRC units)
             if len(per) > 1 or any(v is None for _l, v in per):
                 m["detail"] = "; ".join(f"{l} {'unmatched' if v is None else format(v, '.1f')}" for l, v in per)
             row["metrics"].append(m)
@@ -553,6 +577,16 @@ def evaluate(board, cons, spec=None, nets=None):
             row["metrics"].append(_metric("length", "mm", max(q["length_mm"] for q in paths), b.get("length_mm_target"), b.get("length_mm_max"), lab.get("length_mm_max") or lab.get("length_mm_target"), 1))
         if "stub_mm_max" in b:
             row["metrics"].append(_metric("stub", "mm", max(q["stub_max_mm"] for q in paths), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
+        if any(k in b for k in CN.NOISE_KEYS):
+            B = _routing_board(board, _cache)
+            if "cls" not in _cache:
+                from . import netclass as NC
+                _cache["cls"] = NC.classify(B, cons, spec)
+            for x in CN.analyse(B, rows, planes, names, b, cons, spec, _cache["cls"]):
+                m = _metric(x["name"], x["unit"], x["value"], x["target"], x["limit"], lab.get(_NKEY.get(x["name"])) or
+                            f"[channel.{fam}] (noise)", x["digits"], x["minimum"])
+                m["detail"] = (m.get("detail") or "") + x["detail"]
+                row["metrics"].append(m)
         row["verdict"] = max((m["verdict"] for m in row["metrics"]), key=_RANK.get, default="n/a")
         out.append(row)
     dc = [d for d in cons.get("dcdrop", []) or []]
@@ -584,13 +618,19 @@ def os_commonname(names):
 
 def _fmt(m):
     d = m["digits"]
-    v = "?" if m["value"] is None else f"{m['value']:.{d}f}"
-    mx = "" if m["max"] is None else f"/{m['max']:g}"
-    s = f"{m['name']} {v}{mx} {m['unit']}"
+    v = ("none" if str(m.get("detail", "")).startswith("no ") else "?") if m["value"] is None else f"{m['value']:.{d}f}"
+    if m.get("minimum"):
+        mx = "" if m["max"] is None else f" (min {m['max']:g})"
+        s = f"{m['name']} {v} {m['unit']}{mx}"
+    else:
+        mx = "" if m["max"] is None else f"/{m['max']:g}"
+        s = f"{m['name']} {v}{mx} {m['unit']}"
+    if m.get("mm") is not None:
+        s += f" ({m['mm']:.2f} mm)"
     if m["verdict"] == "over-target-pass":
-        s += f" (target {m['target']:g}, +{m['over_target']:.{d}f} over: pass)"
+        s += f" (target {m['target']:g}, +{m['over_target']:.{d}f} {'short' if m.get('minimum') else 'over'}: pass)"
     elif m["verdict"] == "fail":
-        s += f" (FAIL, {-m['margin']:.{d}f} over max)"
+        s += f" (FAIL, {-m['margin']:.{d}f} {'under min' if m.get('minimum') else 'over max'})"
     if m.get("detail"):
         s += f" [{m['detail']}]"
     return s
