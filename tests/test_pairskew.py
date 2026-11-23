@@ -179,3 +179,24 @@ def test_orientations_do_not_depend_on_net_order(tmp_path):
     key = lambda r: sorted((q["a"].split(".")[0], q["b"].split(".")[0], round(abs(q["d"]), 3)) for q in r["paths"])          # noqa: E731
     assert key(a) == key(b) and abs(a["skew_mm"]) == pytest.approx(abs(b["skew_mm"]), abs=1e-3)
     assert [round(x["mm"], 2) for x in a["spurs"]] == [round(x["mm"], 2) for x in b["spurs"]] or sorted(x["mm"] for x in a["spurs"]) == sorted(x["mm"] for x in b["spurs"])
+
+
+def test_review_with_a_board_file_never_falls_back_to_own_length_math(tmp_path, monkeypatch):
+    """review 5: an audit that raises is one FAIL PAIR_UNMEASURED, not the facts-length walk; PAIR_DELAY_UNKNOWN is a FAIL per pair and
+    does not hide the other pairs' FAILs."""
+    from fluxplace import review as RV, qualaudit as QA, si as SI
+    b = PB.write(tmp_path, "")
+    monkeypatch.setattr(SI, "pair_skew_findings", lambda *a, **k: (_ for _ in ()).throw(AssertionError("own math used")))
+    facts = {"board_path": b, "net_pads": {}, "net_tracks": {}}
+    def boom(*a, **k):
+        raise RuntimeError("audit died")
+    monkeypatch.setattr(QA, "pair_rows", boom)
+    out = RV.check_pairs(facts, {"pairs": {"USB_": {}}})
+    assert [(f["level"], f["code"]) for f in out] == [("FAIL", "PAIR_UNMEASURED")]
+    rows = [{"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM", "status": "unknown", "causes": [], "why": "PAIR_DELAY_UNKNOWN (no plane); pair not graded",
+             "code": "PAIR_DELAY_UNKNOWN", "skew": None, "limit": None},
+            {"pair": "USB_HUB_DP/USB_HUB_DM", "p": "USB_HUB_DP", "n": "USB_HUB_DM", "status": "unknown", "causes": [], "why": "MEASURE_DISAGREE: p +0.2 mm",
+             "code": "MEASURE_DISAGREE", "skew": None, "limit": None}]
+    monkeypatch.setattr(QA, "pair_rows", lambda *a, **k: rows)
+    got = sorted((f["level"], f["code"]) for f in RV.check_pairs(facts, {"pairs": {"USB_": {}}}))
+    assert got == [("FAIL", "MEASURE_DISAGREE"), ("FAIL", "PAIR_DELAY_UNKNOWN")]

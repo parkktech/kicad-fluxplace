@@ -257,16 +257,14 @@ def _pairs_from_audit(facts, cons):
         except Exception:
             opn = set(RC.text_open(B))
         rows = QA.pair_rows(B, cls, cons or {}, opn)
-    except Exception:
-        return None
+    except Exception as e:                                  # noqa: BLE001 - D71cx: no fallback to own length math when the file is there
+        return [_f(FAIL, "PAIR_UNMEASURED", f"pair audit failed ({type(e).__name__}: {str(e)[:100]}): no pair was measured")]
     gated = lambda m: pair_gated(cons, m)
-    if any(r["status"] == "unknown" and gated(r["p"]) and r.get("code") not in ("MEASURE_DISAGREE", "PAIR_UNMEASURED") for r in rows):
-        return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
     out = []
     from . import pairaudit as PA_
     for r in rows:
         if r["status"] == "unknown" and gated(r["p"]):      # D71cx: an unmeasured pair or a leg that misses KiCad's total cannot pass
-            out.append(_f(FAIL, r["code"], f"{r['p']}/{r['n']}: {r['why']}"))
+            out.append(_f(FAIL, r.get("code") or "PAIR_UNMEASURED", f"{r['p']}/{r['n']}: {r['why']}"))     # also PAIR_DELAY_UNKNOWN: per pair, a FAIL
             continue
         if gated(r["p"]):                                  # a via whose barrel runs past the copper that uses it is an open stub
             for vs in r.get("via_stubs") or []:
@@ -297,6 +295,9 @@ def _pairs_from_audit(facts, cons):
 
 
 def check_pairs(facts, cons):
+    """Pair findings.  With a readable board file the audit is the only judge (KiCad's lengths, D71cx: an audit that cannot measure is a
+    FAIL, never a graded-by-own-math pair).  Only facts with NO board file (a unit-level fact set, nothing to ask KiCad) use the legacy
+    net-length walk below."""
     audited = _pairs_from_audit(facts, cons)
     if audited is not None:
         return audited

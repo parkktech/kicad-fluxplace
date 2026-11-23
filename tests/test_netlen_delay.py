@@ -173,3 +173,26 @@ def test_kicad_counts_copper_inside_a_pad(tmp_path):
         return netlen.pair_lengths(str(f), [("N", "N")])[("N", "N")]["p"]
     assert length(60) == pytest.approx(30.0, abs=0.01)             # centre to centre: the 2 mm inside each pad count
     assert length(59) == pytest.approx(29.0, abs=0.01)             # ends 1 mm inside the far pad: that mm counts too
+
+
+def test_a_detour_inside_a_pad_is_clipped_by_kicad_and_kicads_number_is_the_verdict(tmp_path):
+    """review 6: KiCad clips a track inside a pad to the shortest path through it (a zigzag inside a 4 mm pad counts as the straight run; a
+    straight track ending inside counts in full), so our raw segment sum reads longer.  On a 2-terminal pair KiCad's mm and ps are the verdict
+    (delay-only tuning profile); the own sum is advice, never MEASURE_DISAGREE."""
+    def make(zig):
+        body = PB.fp("U1", OX, OY, [PB.pad("1", 0, 0, "E_P", 4.0, 4.0), PB.pad("2", 0, 8, "E_N", 4.0, 4.0)]) + \
+            PB.fp("U2", OX, OY, [PB.pad("1", 30, 0, "E_P", 4.0, 4.0), PB.pad("2", 30, 8, "E_N", 4.0, 4.0)])
+        body += _seg("E_P", (0, 0), (30, 0), "F.Cu")
+        if zig:      # N: straight to 2 mm short of the far pad centre, then a zigzag inside the pad ending at its centre
+            body += _seg("E_N", (0, 8), (28, 8), "F.Cu") + _seg("E_N", (28, 8), (28, 10), "F.Cu") + _seg("E_N", (28, 10), (30, 10), "F.Cu") + _seg("E_N", (30, 10), (30, 8), "F.Cu")
+        else:
+            body += _seg("E_N", (0, 8), (30, 8), "F.Cu")
+        f = tmp_path / f"z{zig}.kicad_pcb"
+        f.write_text(HEAD6 + EDGE + body + ")\n")
+        return str(f)
+    plain = netlen.pair_skew(RD.load(make(False)), "E_P", "E_N", STACK, grade_ps=True)
+    zig = netlen.pair_skew(RD.load(make(True)), "E_P", "E_N", STACK, grade_ps=True)
+    assert zig["status"] == "ok" and zig["basis"] == "kicad"
+    assert zig["n_mm"] == pytest.approx(plain["n_mm"], abs=0.01) and zig["n_ps"] == pytest.approx(plain["n_ps"], abs=0.05)       # KiCad clipped the zigzag
+    assert zig["skew_ps"] == pytest.approx(plain["skew_ps"], abs=0.05)
+    assert zig["recon"]["n"] == pytest.approx(4.0, abs=0.1)                                                                       # our raw sum counted it: advice only

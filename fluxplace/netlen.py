@@ -1,5 +1,5 @@
-"""KiCad is the authority for routed net length (the number its own skew DRC reports: all copper of the net, vias by stackup height,
-in-pad copper included).  `pair_lengths` writes one `(constraint skew)` rule per pair into a temp .kicad_dru next to a temp copy of the
+"""KiCad is the authority for routed net length (the number its own length / skew DRC reports: all copper of the net, vias by stackup
+height; a track inside a pad is clipped to the shortest path through the pad).  `pair_lengths` writes one `(constraint skew)` rule per pair into a temp .kicad_dru next to a temp copy of the
 board, runs `kicad-cli pcb drc` and parses `target net length X (from NET); actual Y`.  Nothing here knows a board."""
 import os
 import re
@@ -17,8 +17,9 @@ def _q(net):
 
 def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
     """{(p, n): {"p": mm | None, "n": mm | None, "skew": P - N signed mm}} for the pairs of `board` (a path), from KiCad's DRC.
-    A pair KiCad reports no skew for (equal within 0.0001 mm) has skew 0.0 and lengths None.  None when the CLI fails (the caller
-    falls back to its own measure and warns)."""
+    Lengths come from one `length` rule per net (every net with copper reports, equal or not).  None when kicad-cli fails or the rule file
+    is ignored (the canary rule did not fire): the pair is unmeasured and cannot pass, there is no fallback.  skew = P - N for the pair as
+    given (p, n)."""
     pairs = [tuple(p) for p in pairs]
     if not pairs or not board or not os.path.isfile(board):
         return {} if not pairs else None
@@ -287,8 +288,10 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
       p_mm n_mm  KiCad's net totals; skew_ps signed worst P - N delay (None: a layer without a reference plane), p_ps n_ps
       recon    {p, n: own total - KiCad total in mm}; paths [{a, b, p, n, d, skew, p_ps, n_ps, d_ps}]; stub_mm longest spur
     Delay of a leg = sum over layers of (segment length on the layer x stackup ps/mm) + via barrels.
-    The reconciliation gates the verdict where own numbers enter it: always on the path basis, on the kicad basis only when grade_ps
-    (a ps budget grades the own delay).  A 2-terminal pair graded in mm uses KiCad's number alone; `recon` is then advice."""
+    The reconciliation gates the verdict only where own numbers enter it: the path basis.  A 2-terminal pair is KiCad's number alone (mm, or
+    ps through a delay-only tuning profile); `recon` is then advice.  KiCad counts a straight run into a pad in full (a track ending 1 mm inside
+    adds that mm) but clips a detour inside a pad to the shortest path through it (OptimiseTracesInPads, tested), so our raw segment sum can
+    read longer: D71cx's "lay and tune trim the in-pad glue" is what removes the difference."""
     out = {"status": "unmeasured", "basis": None, "skew_mm": None, "skew_ps": None, "p_mm": None, "n_mm": None, "p_ps": None,
            "n_ps": None, "recon": {}, "paths": [], "stub_mm": 0.0, "why": ""}
     f = (B or {}).get("file") if isinstance(B, dict) else None
@@ -353,7 +356,11 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
         out["skew_ps"] = None if dp["delay_ps"] is None or dn["delay_ps"] is None else round(dp["delay_ps"] - dn["delay_ps"], 3)
         out["paths"] = [{"a": "", "b": "", "p": kl["p"], "n": kl["n"], "d": out["skew_mm"], "skew": abs(out["skew_mm"]),
                          "p_ps": dp["delay_ps"], "n_ps": dn["delay_ps"], "d_ps": out["skew_ps"], "stub": 0.0}]
-    bad = [k for k in ("p", "n") if abs(out["recon"][k]) > RECON_TOL_MM] if (out["basis"] == "path" or grade_ps) else []
+    # the reconciliation gates only where OUR numbers enter the verdict (the per-orientation path basis).  A 2-terminal pair is KiCad's number
+    # alone, in mm and in ps (delay-only tuning profile); the own sum is advice there (KiCad clips a detour inside a pad to the shortest
+    # path, so such a leg reads longer in our raw sum than in KiCad's number).
+    bad = [k for k in ("p", "n") if abs(out["recon"][k]) > RECON_TOL_MM] if out["basis"] == "path" else []
+    ps_bad = ps_bad if out["basis"] == "path" else []
     out["status"] = "MEASURE_DISAGREE" if bad or ps_bad else "ok"
     if bad or ps_bad:
         out["why"] = "own per-leg decomposition vs KiCad total: " + ", ".join([f"{k} {out['recon'][k]:+.3f} mm" for k in bad] +
