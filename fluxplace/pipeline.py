@@ -1659,12 +1659,15 @@ def _run(a):
     rc = 0
     if "pairs" in STAGES_[:i0] and os.path.isfile(board):          # review 3: a --from run past `pairs` protects what is already laid
         from . import boardwrite as BW_
-        _man = BW_.load_manifest(board)
-        if not _man["nets"]:
-            _man = BW_.seed_from_board(board, c.cons, log=print)
-            print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
-        elif BW_.is_stale(board, _man):
-            BW_.fresh_manifest(board, log=print)
+        try:
+            _man = BW_.load_manifest(board)
+            if not _man["nets"]:
+                _man = BW_.seed_from_board(board, c.cons, log=print)
+                print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
+            elif BW_.is_stale(board, _man):
+                BW_.fresh_manifest(board, log=print)
+        except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
+            print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
     failed_on = []

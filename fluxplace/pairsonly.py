@@ -163,7 +163,7 @@ def _commit_guard(board, out, sel, rows, log):
         man = BW.seed_from_board(board, None, log=log)
     if not man["nets"]:
         return
-    rel = {x for pr in sel for x in pr}
+    rel = {x for pr in sel for x in pr} | {x for k, r in rows.items() if r.get("status") == "rerouted" for x in k.split("/")}   # + the grouped blockers
     v = BW.commit(board, out, out, release=rel, manifest=man, reason="pair re-route")
     if not v["written"]:
         log(f"  commit refused: {v['why']}; the input board is the output")

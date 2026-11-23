@@ -8,7 +8,7 @@ from test_pipeline import _board, _args
 
 
 def test_gate_defaults_and_override():
-    assert GP.gate_kinds({}, "pairs") == ["pair-open", "pair-asym", "pair-skew", "pair-impedance"]
+    assert GP.gate_kinds({}, "pairs") == ["pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance"]
     assert GP.gate_kinds({}, "route") == ["power-width", "power-vias"]     # PHASE3I F2: rails are laid by route
     assert GP.gate_kinds({"flow": {"gates": {"pairs": []}}}, "pairs") == []
 
@@ -138,7 +138,7 @@ def test_scoped_gap_without_rung_keeps_gate_open(tmp_path, monkeypatch):
 
 def test_pair_impedance_kind_and_route_power_default():
     assert GP.DISPATCH["pair-impedance"] == ["pairgroup", "ai"]
-    assert GP.ORDER.index("pair-impedance") == GP.ORDER.index("pair-skew") + 1
+    assert GP.ORDER.index("pair-impedance") == GP.ORDER.index("pair-stub") + 1 and GP.ORDER.index("pair-stub") == GP.ORDER.index("pair-skew") + 1
     assert "pair-impedance" in GP.gate_kinds({}, "pairs")
     g = {"kind": "pair-impedance", "class": "hs-pair", "sev": 1}
     assert GP.in_scope(g, ["pair-impedance"]) and not GP.in_scope({**g, "class": "pair"}, ["pair-impedance"])
