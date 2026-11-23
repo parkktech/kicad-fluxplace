@@ -153,22 +153,24 @@ def _blocker_pairs(labels, pairs):
 
 def _commit_guard(board, out, sel, rows, log):
     """A3: the one commit point. `out` may differ from `board` only in the nets of the pairs being re-routed (`sel`); any other protected
-    net changing (boardwrite manifest of `board`), duplicate copper or an id collision puts the input back as the output."""
+    copper changing (boardwrite manifest of `board`, re-seeded loudly when stale), duplicate copper or an id collision puts the input back
+    as the output.  A board with no manifest is seeded from its locked items and complete pairs first (a hand-made `--only` run)."""
     from . import boardwrite as BW
-    man = BW.load_manifest(board)
-    if not man["nets"] or not os.path.exists(out):
+    if not os.path.exists(out):
+        return
+    man = BW.fresh_manifest(board, log)
+    if not man["nets"]:
+        man = BW.seed_from_board(board, None, log=log)
+    if not man["nets"]:
         return
     rel = {x for pr in sel for x in pr}
-    v = BW.verify(board, out, release=rel, manifest=man)
-    if not v["ok"]:
+    v = BW.commit(board, out, out, release=rel, manifest=man, reason="pair re-route")
+    if not v["written"]:
         log(f"  commit refused: {v['why']}; the input board is the output")
         shutil.copy(board, out)
         for r in rows.values():
             if r.get("status") == "rerouted":
                 r.update(status="kept_original", reason=v["why"][:160])
-        return
-    BW.release(board, sorted(rel), "pair re-route")
-    BW.seed(out, keep={"nets": {n: e for n, e in man["nets"].items() if n not in rel}})
 
 
 def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budget=None, allow_shove=False,

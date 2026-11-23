@@ -975,7 +975,17 @@ def st_tune(c, n, board):
     src = open(out, errors="surrogateescape").read()
     names = {BT.net_name(b) for _i, _j, _k, b in BT.scan(src)} - {None}
     TU.lock_tuned(out, G.diff_pairs(names))                       # tuned pair copper is locked: later stages route around it
-    return {"verdict": "pass", "board": out,                      # A5: the pairs gate decides on gated pairs; tune only reports
+    released, complete = [], []
+    try:                                                          # the pairs tune worked on (not the skipped ones) are the only ones it may change
+        for r in json.load(open(out + ".tune.json")).get("pairs", []):
+            if r.get("status") in ("ok", "over") and "/" in str(r.get("pair")):
+                pm, ps_ = r["pair"].split("/", 1)
+                released += [pm, ps_]
+                if r["status"] == "ok":
+                    complete.append((pm, ps_))
+    except (OSError, ValueError):
+        pass
+    return {"verdict": "pass", "board": out, "released": released, "complete_pairs": complete,                      # A5: the pairs gate decides on gated pairs; tune only reports
             "line": f"{len(over)} pair(s) still over skew (reported, not a stage failure)" if over else "pairs within skew",
             "next": [_clip(l.strip(), 100) for l in over[:3]]}
 
@@ -1266,8 +1276,9 @@ RELEASING_STAGES = ("tune",)
 
 
 def _commit_point(name, prev, res):
-    """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper
-    or colliding item ids; else the manifest follows the new board."""
+    """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
+    colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
+    the input path (a stage that edited its board in place): the sealed manifest is the baseline then."""
     from . import boardwrite as BW
     new = res.get("board")
     if not new or not os.path.isfile(new) or not os.path.isfile(prev):
@@ -1282,18 +1293,16 @@ def _commit_point(name, prev, res):
                 return res
         except Exception:                                               # noqa: BLE001
             return res
-    rel = set(man["nets"]) if name in RELEASING_STAGES else set()
+    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES else set())      # tune releases the pairs it tuned, not the manifest
+    complete = {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}
     try:
-        v = BW.verify(prev, new, release=rel, manifest=man) if os.path.abspath(new) != os.path.abspath(prev) else {"ok": True}
+        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
     except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
         return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
                     next=[f"{name}: output not adopted"])
     if not v["ok"]:
         return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {v['why']}"[:200],
                     next=[f"{name}: output not adopted ({v['why'][:150]}); release the pair explicitly (boardwrite.release) to re-lay it"])
-    if os.path.abspath(new) != os.path.abspath(prev):
-        keep = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}
-        BW.seed(new, {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}, keep=keep)
     return res
 
 
@@ -1639,6 +1648,14 @@ def _run(a):
         _silk_version_line(c, board)
     from . import gaps as GP_
     rc = 0
+    if "pairs" in STAGES_[:i0] and os.path.isfile(board):          # review 3: a --from run past `pairs` protects what is already laid
+        from . import boardwrite as BW_
+        _man = BW_.load_manifest(board)
+        if not _man["nets"]:
+            _man = BW_.seed_from_board(board, c.cons, log=print)
+            print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
+        elif BW_.is_stale(board, _man):
+            BW_.fresh_manifest(board, log=print)
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
     failed_on = []

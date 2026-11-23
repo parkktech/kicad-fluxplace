@@ -2153,7 +2153,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     from . import boardwrite as BW
-    man = BW.load_manifest(board)                        # A3: the input board's protected copper (empty: nothing protected yet)
+    man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing protected yet; stale: re-seeded)
     if man["nets"]:
         BW.seed(best, keep=man, locked=False)            # the work copy carries it, so a release is a logged edit of that file
     relax = relax_nets(m["gaps"])
@@ -2272,17 +2272,14 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
                     if ok and man["nets"]:                  # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
                         rel = set(_nets(targets)) if (kind or "").startswith("pair-") else set()
-                        v = BW.verify(best, final, release=rel, manifest=man)
-                        if not v["ok"]:
+                        v = BW.commit(best, final, best, release=rel, manifest=man, reason=f"{kind} {rung}")       # verify + write + re-seal
+                        if not v["written"]:
                             ok, why = False, v["why"][:120]
                         else:
-                            man = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}
-                            if rel:
-                                BW.release(best, sorted(rel), f"{kind} {rung}", attempts=attempts)
-                    if ok:
+                            man = BW.load_manifest(best)
+                    elif ok:
                         _copy(final, best)
-                        if man["nets"]:
-                            man = BW.seed(best, keep=man)           # the manifest follows the board: kept nets re-read, newly locked nets added
+                    if ok:
                         m = cm
                         protect = _protect(best, cons)
                         relax = relax_nets(m["gaps"])
