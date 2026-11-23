@@ -338,6 +338,27 @@ def test_blocked_pair_goes_first_and_the_blocker_is_laid_again(tmp_path):
     assert clean(RD.load(str(tmp_path / "b.kicad_pcb")), {"PCIE_TX_P", "PCIE_TX_N", "MIC_P", "MIC_N"}) >= CLR
 
 
+def test_blocked_pair_retry_finds_the_blocker_by_geometry_when_the_report_names_none(tmp_path, monkeypatch):
+    # same board as above, but the lay never says who blocks (as with a failure reported against a pad): the laid copper beside the
+    # failed pair's pads names the blocker, the failed pair is laid first and the result is stable run to run
+    cons = {"preroute": {"signal_layers": ["F.Cu"]}, "pairlay": {"passes": 3, "negotiate": False}}
+    wall = PB.keepout(30, 0, 30.5, 39.4) + PB.keepout(30, 40.6, 30.5, 80) + PB.keepout(30.5, 37, 36.5, 37.5) + PB.keepout(30.5, 42.5, 36.5, 43) + \
+        PB.keepout(36, 37.5, 36.5, 42.5)
+    body = duo("U1", 29.05, 20, "PCIE_TX_P", "PCIE_TX_N") + duo("U2", 29.05, 60, "PCIE_TX_P", "PCIE_TX_N") + \
+        duo("U3", 20, 40, "MIC_P", "MIC_N") + duo("U4", 33.5, 40, "MIC_P", "MIC_N") + wall
+    real = PR._lay_pair
+
+    def mute(*a, **k):
+        c = real(*a, **k)
+        c["e"].pop("blocked_by", None)
+        return c
+    monkeypatch.setattr(PR, "_lay_pair", mute)
+    runs = [PR.run(PB.write(tmp_path, body, name=f"g{i}.kicad_pcb"), cons, None, str(tmp_path / f"o{i}.kicad_pcb")) for i in (1, 2)]
+    for r in runs:
+        assert r["complete"] == 2 and r["passes"] >= 1 and r["order"][0].startswith("MIC")
+    assert runs[0]["order"] == runs[1]["order"]
+
+
 def test_skew_limit_per_family_then_kind(tmp_path):
     from fluxplace import constraints as C
     cons = {"pairs": {"ETH_": {"skew_mm": 0.5}}, "si": {"default_skew_mm": 1.0}}

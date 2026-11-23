@@ -37,7 +37,7 @@ def params(cons):
     return {"enabled": e.get("enabled", True) is not False, "step": float(e.get("step_mm", 0.1)), "clearance": e.get("clearance_mm"),
             "via_cost": float(e.get("via_cost_mm", 20.0)), "turn_cost": float(e.get("turn_cost_mm", 0.4)),
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
-            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)),
+            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)), "exit_reserve_mm": float(e.get("exit_reserve_mm", 4.0)), "near_mm": float(e.get("blocker_near_mm", 2.0)),
             "inner_cost_gated": float(e.get("inner_cost", 3.0)),        # PHASE3G G3d: gated pairs stay outer unless blocked
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
             "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
@@ -383,6 +383,13 @@ def _self_cross(runs, dl, wl, clr):
                 if kb - ka >= 3 and G.seg_seg(a, b, c, d) < need:
                     return True
     return False
+
+
+def _pt_seg(x, y, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = dx * dx + dy * dy
+    t = 0.0 if L < 1e-12 else max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / L))
+    return math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
 
 
 def _claim(items, pieces, net):
@@ -868,16 +875,33 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                        -round(sum(c["skew"] for c in st["res"].values()), 3))
         return st
 
+    def near(c, pr):
+        """smallest distance from the copper `c` laid to a terminal pad of pair `pr`"""
+        best = 1e9
+        for pcs in c["pcs"].values():
+            for q in pcs:
+                for t in info[pr][0]:
+                    for pad in (t["p"], t["n"]):
+                        if q[0] == "seg":
+                            best = min(best, _pt_seg(pad["x"], pad["y"], q[2], q[3]) - q[4] / 2)
+                        else:
+                            best = min(best, math.hypot(pad["x"] - q[1], pad["y"] - q[2]) - q[3] / 2)
+        return best
+
     def moves(st):
-        """[(failed pair, the pair whose laid copper blocks it)] with the blocker earlier in the order."""
+        """[(failed pair, the pair whose laid copper blocks it)] with the blocker earlier in the order.  The blocker is named by the
+        search's report, or else by geometry: a laid pair whose copper runs within [pairlay] blocker_near_mm of a terminal pad of the
+        failed pair (a failure reported against a pad is usually the copper beside the pad)."""
         out, pos = [], {pr: k for k, pr in enumerate(st["order"])}
         for f in st["order"]:
             c = st["res"][f]
-            txt = c["e"].get("blocked_by", "")
-            if c["full"] or not txt:
+            if c["full"] or c["e"]["status"] == "kept" or not info[f][2]:
                 continue
+            txt = c["e"].get("blocked_by", "")
             hit = [g for g in st["order"] if g != f and pos[g] < pos[f] and st["res"][g]["nok"]
-                   and any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)]
+                   and any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)] if txt else []
+            if not hit:
+                hit = [g for g in st["order"] if g != f and pos[g] < pos[f] and st["res"][g]["nok"] and near(st["res"][g], f) <= P["near_mm"]]
             if hit:
                 out.append((f, min(hit, key=lambda g: pos[g])))
         return out
@@ -903,6 +927,15 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             if r["ok"] and k[0] not in unresolved:
                 neg["preset"][k] = (r["variant"], r["states"], r["pol"])
                 neg["reserve"][k[0]] = neg["reserve"].get(k[0], []) + r["fp"]
+        # a pair the negotiation could not settle has no corridor, so an earlier pair could take its break-out cells: the first
+        # `exit_reserve_mm` of its alone path at each end stay reserved until it is laid (the lay finds the rest itself)
+        for k, r in out.items():
+            if r["ok"] and k[0] in unresolved and P["exit_reserve_mm"] > 0:
+                ends = [info[k[0]][0][k[1]]["c"], info[k[0]][0][k[2]]["c"]]
+                near_end = lambda x, y: min(math.hypot(x - c[0], y - c[1]) for c in ends) <= P["exit_reserve_mm"]
+                neg["reserve"][k[0]] = neg["reserve"].get(k[0], []) + [
+                    q for q in r["fp"] if (q[0] == "seg" and (near_end(q[2][0], q[2][1]) or near_end(q[3][0], q[3][1])))
+                    or (q[0] == "via" and near_end(q[1], q[2]))]
         gates = {pr: sum(r.get("gates", 0) for k, r in out.items() if k[0] == pr and r["ok"]) for pr in live}
         alone_fail = sorted({"/".join(k[0]) for k, r in out.items() if not r["ok"]})
         # emission order: negotiated pairs first, most constrained (fewest gates) first; then the unresolved and failed-alone ones
@@ -928,6 +961,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 o.remove(f)
                 o.insert(o.index(g), f)
                 cands.append(o)
+        failed = [f for f in best["order"] if not best["res"][f]["full"] and best["res"][f]["e"]["status"] != "kept" and info[f][2]]
+        if failed:                                            # last resort: the failed pairs first, in the order they had
+            cands.append(failed + [g for g in best["order"] if g not in failed])
         cand = next((o for o in cands if tuple(o) not in tried), None)
         if cand is None:
             break
