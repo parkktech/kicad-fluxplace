@@ -369,6 +369,8 @@ def test_close_stage_runs_the_post_route_snap_first_and_closes_the_cleaned_board
             return {"snap": {"moved": 5}, "unconnected": [3, 3], "kept": True}
         return {"start": {"opens": 3, "errors": 9}, "end": {"opens": 2, "errors": 4}, "attempts": 1, "stop": "clean", "best": "BEST"}
     monkeypatch.setattr(PL, "in_fresh_process", fake)
+    from fluxplace import boardwrite as BW
+    monkeypatch.setattr(BW, "commit", lambda *a, **k: {"written": True, "why": ""})     # the manifest carry is tested in test_commit_point_real
     r = PL.st_close(c, 8, b)
     assert [x[1] for x in calls] == ["clean", "close"] and calls[1][2].endswith("postroute.kicad_pcb")
     assert r["verdict"] == "pass" and "snapped 5" in r["line"] and r["board"] == "BEST"
