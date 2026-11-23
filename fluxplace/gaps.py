@@ -2090,6 +2090,29 @@ def _rung_job(job_path):
     return 0
 
 
+def gate_measure(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", kinds=None):
+    """A5: a gate is a MEASURE, not a repair. One refill + DRC + gap classification on a copy of `board`; no rung runs.
+    -> {"stop": "clean" | "open", "left": [gap rows in scope], "start": vitals}; writes work/gaps.json and work/stop.json
+    (stop "open" exits like an unclean gate: pipeline exit 5). The repair loop (`close`) belongs to the stage that owns the kinds."""
+    os.makedirs(work, exist_ok=True)
+    best = os.path.join(work, "best.kicad_pcb")
+    _copy(board, best)
+    _sidecars(board, best)
+    cons = cons or C.load(cons_path)
+    try:
+        m = _remeasure(best, kicad_cli)
+    except _RefillError:
+        m = dict(measure(best, kicad_cli))
+    _classify_into(m, cons, best)
+    left = [g for g in m["gaps"] if kinds is None or in_scope(g, kinds)]
+    stop = "open" if left else "clean"
+    rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at")} for g in left]
+    res = {"stop": stop, "exit": 0 if stop == "clean" else 5, "measure_only": True, "start": _vitals(m), "left": rows}
+    _write_json(os.path.join(work, "gaps.json"), {"gaps": m["gaps"], "memo": [], "round": 0})
+    _write_json(os.path.join(work, "stop.json"), res)
+    return dict(res, best=best)
+
+
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
           attempts=None, runs=None, log=print, inproc=False, kinds=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,

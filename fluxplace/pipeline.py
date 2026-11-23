@@ -1239,6 +1239,24 @@ def _gate_check(c, n, name, board, kinds, src=None):
                for p in r.get("packets") or [] if p.get("kind") == "session"]}
 
 
+def _gate_measure(c, n, name, board, kinds, src=None):
+    """A5: the gate verdict of `board` for `kinds` by measurement only (gaps.gate_measure). Same record shape as _gate_check."""
+    from . import gaps as GP
+    d = c.dir(n, "gate")
+    try:
+        r = GP.gate_measure(board, d, c.cons_path, c.cons, kinds=kinds)
+    except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
+                "gate": {"kinds": kinds, "stop": "crashed", "dir": d, "left": []}}
+    if src:
+        _stamp_gate(d, src)
+    ok = r["stop"] == "clean"
+    return {"verdict": "pass" if ok else "fail", "board": board,
+            "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope, opens {r['start']['opens']}",
+            "next": [] if ok else [f"gate {name}: {len(r['left'])} gap(s): {os.path.join(d, 'stop.json')}"],
+            "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"]}}
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
@@ -1589,10 +1607,17 @@ def _run(a):
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
         if gk_prev and gst.get("stop") != "clean" and a.board:
             # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
-            g = _gate_check(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
-            st["stages"].setdefault(k, {})["gate"] = {"stop": "clean" if g["verdict"] == "pass" else g["verdict"]}
+            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds
+            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
+            gst = {"stop": g["gate"]["stop"]}
+            st["stages"].setdefault(k, {})["gate"] = dict(gst)
             if g["verdict"] == "pass":
                 continue
+            sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
+            print(f"pipeline: gate {k} is not clean ({g['gate']['stop']}): {g['line']}; fix it in that stage: {sp} (exit 5, no stage started)")
+            for r in g["gate"].get("left", [])[:10]:
+                print(f"  gap {r['id']} {r['kind']} {r.get('nets')} at {r.get('at')}")
+            return 5
         if gk_prev and gst.get("stop") != "clean":
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")

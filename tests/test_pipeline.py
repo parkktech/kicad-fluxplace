@@ -282,6 +282,8 @@ def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_pa
     board = _board(tmp_path)
     monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
     _fake_gate(monkeypatch, "clean", tmp_path, tmp_path / "x.kicad_pcb")
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "clean", "left": [], "start": {"opens": 0}, "best": str(board)})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran on --from")))
     seen = []
     def stage(c, n, b):
         seen.append(n)
@@ -290,3 +292,17 @@ def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_pa
     a = _args(tmp_path, board, from_stage="route-ready", to_stage="route-ready")
     rc = PL.run(a)
     assert rc == 0 and seen                                   # ran the stage instead of exiting 5 for the missing gate
+
+
+def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_path, monkeypatch, capsys):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran")))
+    left = [{"id": "g1", "kind": "pair-open", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 1}, "best": str(board)})
+    seen = []
+    monkeypatch.setattr(PL, "FUNCS", {name: (lambda c, n, b: seen.append(n) or {"verdict": "pass", "board": b}) for name in PL.STAGES})
+    rc = PL.run(_args(tmp_path, board, from_stage="route-ready", to_stage="route-ready"))
+    out = capsys.readouterr().out
+    assert rc == 5 and not seen and "gap g1 pair-open" in out

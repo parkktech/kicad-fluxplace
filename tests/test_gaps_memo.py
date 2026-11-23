@@ -152,3 +152,30 @@ def test_stall_writes_the_ai_packet_and_stops_packets(tmp_path, monkeypatch):
                 attempts=str(tmp_path / "att.jsonl"), log=lambda *a: None, kinds=["pair-open"])
     assert r["stop"] == "packets" and r["exit"] == 5 and calls == ["ai"]
     assert "ai" not in json.load(open(work / "gaps.json"))["yields"].get("pair-open", {})   # R17: a packet is no try
+
+
+# ---- A5: gate = measure; a sweep with no accept stops flat; no rung for the scope = no DRC candidate
+def test_a5_gate_measure_runs_no_rung(tmp_path, monkeypatch):
+    calls = _stub(monkeypatch)
+    board = make(str(tmp_path / "in.kicad_pcb"))
+    r = G.gate_measure(board, str(tmp_path / "gate"), cons={}, kinds=["open-gap"])
+    assert r["stop"] == "open" and r["exit"] == 5 and calls == [] and r["left"][0]["id"] == "g1"
+    r2 = G.gate_measure(board, str(tmp_path / "gate2"), cons={}, kinds=["pair-open"])      # the gap is out of scope
+    assert r2["stop"] == "clean" and calls == []
+    assert os.path.exists(tmp_path / "gate" / "stop.json")
+
+
+def test_a5_one_sweep_with_zero_accepts_stops_flat_at_once(tmp_path, monkeypatch):
+    calls = _stub(monkeypatch)
+    board = make(str(tmp_path / "in.kicad_pcb"))
+    res = _close(tmp_path, board)
+    assert res["stop"] == "flat" and len(calls) == len(G.DISPATCH["open-gap"])      # each untried rung once, no second sweep
+
+
+def test_a5_no_rung_in_dispatch_for_the_scope_stops_flat_without_an_attempt(tmp_path, monkeypatch):
+    calls = _stub(monkeypatch)
+    monkeypatch.delitem(G.DISPATCH, "open-gap")
+    board = make(str(tmp_path / "in.kicad_pcb"))
+    res = G.close(board, str(tmp_path / "work"), cons={}, runs=str(tmp_path / "r.jsonl"), attempts=str(tmp_path / "a.jsonl"),
+                  log=lambda *a: None, kinds=["open-gap"])
+    assert res["stop"] == "flat" and calls == [] and not os.path.exists(tmp_path / "a.jsonl")
