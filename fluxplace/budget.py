@@ -3,11 +3,22 @@ A family is a constraints table key (`[pairs.F]`, `[channel.F]`) that is the lon
 leg of a classified pair.  A bare prefix hit also matches plain signals (X_LED, X_CLKREQ, X_CC): those are not pairs."""
 
 
+_TAILS = ("_P", "_N", "DP", "DM", "P", "N", "+", "-")
+
+
 def pair_legs(names, cons):
-    """Set of nets that are a leg of a differential pair: found by naming (graph.diff_pairs) or by a [pairs.F] family P/N tail,
-    never a net the owner declared plain (`not_pairs`)."""
-    from . import netclass
-    return set(netclass._pairs(sorted(names), cons or {}))
+    """Set of nets that are a leg of a differential pair: a partner is in `names` (graph.diff_pairs / family tails), or the net sits
+    under a [pairs.F] family and ends in a P/N tail (its partner is just not in `names`, e.g. a DRC item list). Never a net the
+    owner declared plain (`not_pairs`), never a plain signal under the family prefix (X_LED, X_CLKREQ, X_CC)."""
+    from . import netclass, constraints as C
+    cons = cons or {}
+    legs = set(netclass._pairs(sorted(names), cons))
+    nopair = C.not_pairs(cons)
+    fams = cons.get("pairs") or {}
+    for n in names:
+        if n not in nopair and n.endswith(_TAILS) and any(n.startswith(f) for f in fams):
+            legs.add(n)
+    return legs
 
 
 def family_of(table, net, legs=None):
