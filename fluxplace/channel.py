@@ -811,6 +811,8 @@ def check(board_path, cons):
     if not (cons.get("channel") or cons.get("dcdrop")):
         return out
     for r in evaluate(board_path, cons):
+        if r["kind"] == "dc" and r["verdict"] == "n/a":       # a budget that could not be measured is never silent
+            out.append(("WARN", "CHANNEL_DCDROP_UNMEASURED", f"dcdrop {r['name']}: not measured ({r.get('why') or 'no budget number'})", r["legs"]))
         for m in r["metrics"]:
             if m["verdict"] == "fail":
                 out.append(("FAIL", "CHANNEL_MAX", f"{r['name']}: {_fmt(m)} [{m['source']}]", r["legs"]))
