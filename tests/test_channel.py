@@ -265,3 +265,42 @@ def test_three_terminal_pair_matches_orientations_and_non_pairs_excluded():
     m = {x["name"]: x for x in rows[0]["metrics"]}
     assert "J1.A6" in m["skew"]["detail"] and "J1.B6" in m["skew"]["detail"]
     assert m["skew"]["value"] < 40 and m["stub"]["value"] == pytest.approx(3.5, abs=0.6)    # branch beyond the used terminal
+
+
+# ---------------------------------------------------------------- DC drop: filled zone copper (D71da, own math)
+def _filled_zone(d, net, x0, y0, x1, y1, layer=pcbnew.F_Cu):
+    z = pcbnew.ZONE(d.b)
+    z.SetLayer(layer)
+    z.SetNet(d.net(net))
+    ps = pcbnew.SHAPE_POLY_SET()
+    ps.NewOutline()
+    for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+        ps.Append(MM(x), MM(y))
+    z.SetFilledPolysList(layer, ps)
+    z.SetIsFilled(True)
+    d.b.Add(z)
+
+
+def test_dc_drop_filled_zone_conducts_and_unfilled_does_not():
+    d = Bd()
+    d.pad(1, 0, 0, "P", 0.2)
+    d.pad(2, 100, 0, "P", 0.2)
+    d.seg((0, 0), (100, 0), "P", w=0.15)
+    r0 = CH.dc_resistance_mohm(CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0], ROWS)
+    _filled_zone(d, "P", -5, -20, 105, 20)                           # 110 x 40 mm fill over both pads
+    assert CH.dc_resistance_mohm(CH.measure_paths(d.b, ["P"], ROWS)["P"][0], ROWS) == pytest.approx(r0)   # zones off: unchanged
+    p = CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0]
+    r1 = CH.dc_resistance_mohm(p, ROWS)
+    assert r1 < r0 / 50                                              # ~ d^2/A = 2.3 squares vs 667 squares of track
+    assert p["layer_sq"]["F.Cu"] == pytest.approx(100 ** 2 / (110 * 40), rel=0.2)
+
+
+def test_dc_drop_zone_that_misses_an_end_does_not_help_it():
+    d = Bd()
+    d.pad(1, 0, 0, "P", 0.2)
+    d.pad(2, 100, 0, "P", 0.2)
+    d.seg((0, 0), (100, 0), "P", w=0.15)
+    r0 = CH.dc_resistance_mohm(CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0], ROWS)
+    _filled_zone(d, "P", 40, -20, 105, 20)                           # fill stops 40 mm short of pad 1
+    r1 = CH.dc_resistance_mohm(CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0], ROWS)
+    assert r1 == pytest.approx(r0)                                   # fill not reaching a node adds nothing (track under the fill edge is not credited: conservative)

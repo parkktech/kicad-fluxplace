@@ -221,8 +221,55 @@ def _eff_len(t, pads, mm):
     return max(0.0, mm - ins), ins
 
 
-def _graph(board, net, rows):
-    """-> nodes dict: adj {node: [(node, w, info)]}, pads [(node, label)], segs list, vias list."""
+ZONE_FLOOR_SQ = 0.5       # a fill joins two nodes with at least this many squares (spreading resistance of a sheet)
+
+
+def _zone_islands(board, net, layer_names):
+    """[(layer name, island index, polygon set, outline index, area mm2)] of the net's filled zones on `layer_names`."""
+    out = []
+    for z in board.Zones():
+        if str(z.GetNetname()) != net or not z.IsFilled():
+            continue
+        for lid in z.GetLayerSet().Seq():
+            ln = board.GetLayerName(lid)
+            if ln not in layer_names:
+                continue
+            ps = z.GetFilledPolysList(lid)
+            for k in range(ps.OutlineCount()):
+                a = abs(ps.Outline(k).Area()) - sum(abs(ps.Hole(k, h).Area()) for h in range(ps.HoleCount(k)))
+                out.append((ln, ps, k, a / 1e12))
+    return out
+
+
+def _zone_links(board, net, nodes, link, res):
+    """Filled zone copper of the net as conductors. OUR OWN MATH (D71da / LESSONS-W15 rule 1: KiCad has no resistance
+    calculation): every pair of nodes (pad, via barrel, track end) that a filled island of the net on a layer contains is
+    joined by one edge of d / w_eff squares, d = centre distance, w_eff = min(A / d, island short bbox side, ...) floored
+    so that squares >= ZONE_FLOOR_SQ. A / d is the mean width of a strip of that length and area; the bbox side stops a
+    thin island borrowing area it cannot use. An ESTIMATE of a 2-D sheet, not a bound: it assumes the island's nodes are
+    reached through the fill (current crowding at narrow necks is not modelled). Nodes = [(node, x, y, layer-name set)].
+    Only nodes the fill actually contains are joined; a net with no filled zone gets no edge (nothing changes)."""
+    import pcbnew
+    layer_names = {l for _n, _x, _y, ls in nodes for l in ls}
+    for ln, ps, k, area in _zone_islands(board, net, layer_names):
+        bb = ps.Outline(k).BBox()
+        short = min(bb.GetWidth(), bb.GetHeight()) / 1e6
+        inside = [(n, x, y) for n, x, y, ls in nodes if ln in ls
+                  and ps.Contains(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), k)]
+        for i, (u, ux, uy) in enumerate(inside):
+            for v, vx, vy in inside[:i]:                  # every pair once: a direct edge beats a chain of floored hops
+                d = math.hypot(ux - vx, uy - vy)
+                if d <= TOL:
+                    link(u, v)
+                    continue
+                w = max(min(area / d, short, 1.0 / ZONE_FLOOR_SQ * d), 1e-6)     # w_eff <= d / floor
+                info = {"kind": "zone", "layer": ln, "mm": d, "raw": d, "inside": 0.0, "w": w, "id": -1}
+                link(u, v, d / w if res else d, info)
+
+
+def _graph(board, net, rows, zones=False):
+    """-> nodes dict: adj {node: [(node, w, info)]}, pads [(node, label)], segs list, vias list. `zones`: add the net's
+    filled zone copper as conductors (_zone_links) and weigh every edge in squares (resistance) instead of mm."""
     import pcbnew
     names = {board.GetLayerName(i): i for i in range(pcbnew.PCB_LAYER_ID_COUNT)}
     copper = [r["name"] for r in rows if r.get("type") == "copper" and r.get("name")]
@@ -256,7 +303,7 @@ def _graph(board, net, rows):
         lyr = board.GetLayerName(t.GetLayer())
         info = {"kind": "seg", "layer": lyr, "mm": eff, "raw": mm, "inside": ins, "w": t.GetWidth() / 1e6, "id": k}
         a, b = new(), new()
-        link(a, b, eff, info)
+        link(a, b, eff / info["w"] if zones and info["w"] else eff, info)
         s, e = t.GetStart(), t.GetEnd()
         ends += [(a, pcbnew.ToMM(s.x), pcbnew.ToMM(s.y), t.GetLayer()), (b, pcbnew.ToMM(e.x), pcbnew.ToMM(e.y), t.GetLayer())]
         seginfo.append(info)
@@ -284,6 +331,13 @@ def _graph(board, net, rows):
         for pn, _lab, p in pad_nodes:
             if any(names.get(l) is not None and p.IsOnLayer(names[l]) for l in span) and p.HitTest(pt, 0):
                 link(vn, pn, 0.0, {"kind": "via-pad"})
+    if zones:
+        pcb_names = {board.GetLayerName(i) for i in range(pcbnew.PCB_LAYER_ID_COUNT)}
+        znodes = [(n, pcbnew_mm(p.GetPosition().x), pcbnew_mm(p.GetPosition().y),
+                   {l for l in pcb_names if p.IsOnLayer(names[l])}) for n, _l, p in pad_nodes]
+        znodes += [(vn, vx, vy, set(span)) for vn, vx, vy, _r, span, _vi in vnodes]
+        znodes += [(n, x, y, {board.GetLayerName(l)}) for n, x, y, l in ends]
+        _zone_links(board, net, znodes, link, True)
     return adj, pad_nodes, seginfo, {vn: vi for vn, _x, _y, _r, _s, vi in vnodes}
 
 
@@ -335,7 +389,7 @@ def _path(adj, pad_nodes, seginfo, vmap, rows, src, dst, prev, dist, loc_pad_lab
     for p, u, info in chain:
         nodes.add(u)
         edges.add(frozenset((p, u)))
-        if info and info.get("kind") == "seg":
+        if info and info.get("kind") in ("seg", "zone"):
             l = info["layer"]
             layer_mm[l] = layer_mm.get(l, 0.0) + info["mm"]
             layer_sq[l] = layer_sq.get(l, 0.0) + info["mm"] / info["w"]
@@ -381,17 +435,18 @@ def _pad_layers(board, pad, cu):
     return [l for l in cu if ids.get(l) is not None and pad.IsOnLayer(ids[l])]
 
 
-def measure_paths(board, nets, rows, mode="trunk"):
+def measure_paths(board, nets, rows, mode="trunk", zones=False):
     """{net: [path]} per signal path, pad to pad. mode "trunk": the path between the net's two farthest pads (branches
     off it are stubs); "all": every pad pair. path = {net, a, b, found, length_mm, layer_mm, layer_w, layer_sq, vias,
     via_list, via_mm, stubs [{kind, mm, to|at}], stub_max_mm, inside_pad_mm, copper_total_mm}. Copper inside the
-    net's own pads is excluded from length (and from the loss and DC squares); zones are not measured."""
+    net's own pads is excluded from length (and from the loss and DC squares). Zones are not measured, unless `zones`
+    (DC drop only): then filled zone copper conducts (_zone_links) and the trunk is the worst pair in squares."""
     if isinstance(board, str):
         from . import kicad_io as IO
         board = IO.load(board)
     out = {}
     for net in nets:
-        adj, pad_nodes, seginfo, vmap = _graph(board, net, rows)
+        adj, pad_nodes, seginfo, vmap = _graph(board, net, rows, zones)
         lab = {n: l for n, l, _p in pad_nodes}
         xy = {n: (pcbnew_mm(p_.GetPosition().x), pcbnew_mm(p_.GetPosition().y)) for n, _l, p_ in pad_nodes}
         total = sum(s["raw"] for s in seginfo)
@@ -528,7 +583,7 @@ def dcdrop_rows(board, cons, rows):
     out = []
     dc = [d for d in cons.get("dcdrop", []) or []]
     if dc:
-        meas2 = measure_paths(board, sorted({d["net"] for d in dc}), rows)
+        meas2 = measure_paths(board, sorted({d["net"] for d in dc}), rows, zones=True)
         for d in dc:
             p = (meas2.get(d["net"]) or [{"found": False}])[0]
             row = {"name": d["net"], "kind": "dc", "legs": [d["net"]], "family": None, "labels": {}, "metrics": []}
