@@ -1,5 +1,6 @@
 import json
 import os
+import pytest
 
 from fluxplace import elec as EL, power as PW
 
@@ -149,3 +150,18 @@ def test_per_pin_supply_limits():
     assert not [x for x in EL.check_spec(sp, c, facts=fx) if x["code"] == "SUPPLY_RANGE"]
     c["power"]["+3V3"]["max_v"] = 3.7
     assert [x["refs"] for x in EL.check_spec(sp, c, facts=fx) if x["code"] == "SUPPLY_RANGE"] == [["U1"]]
+
+
+def test_support_distance_facts_store_and_read_with_source(tmp_path, monkeypatch):
+    import json
+    from fluxplace import partdocs as PD
+    (tmp_path / "X.pdf").write_bytes(b"x")
+    monkeypatch.setattr(PD, "page_text", lambda path, pages: "decoupling within 3 mm; bulk 12 mm")
+    man = {"X1": {"mpn": "X1"}}
+    (tmp_path / PD.MANIFEST).write_text(json.dumps(man))
+    EL.set_facts(str(tmp_path), "X1", {"decap_mm": 3, "bulk_mm": {"VIN": 12}, "supply_pins": ["VIN"]}, "X.pdf#p4")
+    fx = EL.load_facts(str(tmp_path))["X1"]
+    assert fx["decap_mm"] == 3 and fx["bulk_mm"] == {"VIN": 12} and fx["_src"]["decap_mm"] == "X.pdf#p4"
+    assert EL.per_pin(fx, "decap_mm") == {"VIN": 3} and EL.per_pin(fx, "bulk_mm") == {"VIN": 12} and EL.per_pin(fx, "nope") == {}
+    with pytest.raises(ValueError):
+        EL.set_facts(str(tmp_path), "X1", {"bogus_mm": 3}, "X.pdf#p4")
