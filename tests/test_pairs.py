@@ -274,7 +274,7 @@ def test_pair_leaves_through_its_fan_out_via_pair(tmp_path):
     body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 50, 40, "D_P", "D_N", layer="B.Cu") + bars + fan
     rep, B, txt = lay(tmp_path, body)
     r = rep["pairs"][0]
-    assert r["status"] == "complete" and r["via_exit"] == ["U1@via"] and r["skew"] <= 0.3
+    assert r["status"] == "complete" and r["via_exit"] == ["U1@via"] and r["skew"] <= 0.7     # KiCad length: the fan-out stub in the pad counts
     kept = {(v["x"], v["y"]) for v in B["vias"] if v["net"] in ("D_P", "D_N")}
     assert {(18.8, 20.0), (21.7, 20.0)} <= kept                    # the fan-out vias and stubs stay: the pair leaves through them
     assert sum(1 for s in B["segs"] if s["net"] == "D_P" and s["layer"] == "F.Cu" and s["a"][1] == s["b"][1] == 20.0) >= 1
@@ -457,3 +457,32 @@ def test_a_pair_already_connected_is_never_ripped_by_a_later_pair(tmp_path):
     after = RD.load(out2)
     assert mine(after) == before
     assert clean(after, {"E_P", "E_N"}) >= CLR or not [s for s in after["segs"] if s["net"] == "E_P"]
+
+
+def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
+    """in-pad copper beyond the pad entry and via height are in KiCad's net length and not in the pad-to-pad walk: a leg with a stub
+    inside its pad is longer for KiCad, and the audit grades KiCad's number (with a fallback + warning when the CLI is missing)."""
+    import shutil
+    from fluxplace import pairaudit as PA, netlen
+    if not shutil.which("kicad-cli"):
+        pytest.skip("kicad-cli not installed")
+    body = duo("U1", 20, 20, "ETH_P", "ETH_N") + duo("U2", 60, 20, "ETH_P", "ETH_N")
+    path = PB.write(tmp_path, body)
+    PR.run(path, {"preroute": {"signal_layers": ["F.Cu"]}, "pairlay": {"negotiate": False}}, None, str(tmp_path / "o.kicad_pcb"))
+    out = str(tmp_path / "o.kicad_pcb")
+    B = RD.load(out)
+    k = netlen.pair_lengths(out, [("ETH_N", "ETH_P")])
+    assert k is not None and set(k[("ETH_N", "ETH_P")]) == {"p", "n", "skew"}
+    a = PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]
+    assert a["length_src"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 2e-3
+    if k[("ETH_N", "ETH_P")]["p"] is not None:                       # KiCad's total is never shorter than the walk
+        assert a["p"]["length"] >= a["p"]["path_length"] - 1e-3
+    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is not None   # cached run above: same board
+    netlen.CACHE.clear()
+    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None, caller falls back
+    import os
+    os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"] = "1"
+    try:
+        assert PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]["length_src"] == "audit"
+    finally:
+        del os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"]

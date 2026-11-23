@@ -288,6 +288,50 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     return 1.0, "[si] default_skew_mm"
 
 
+def skew_max_source(cons, master, ps_per_mm=None):
+    """(maximum mm, where it comes from): the skew a pair FAILS past (D71cv).  `skew_max_mm` / `skew_max_ps` resolve with the same
+    precedence as `skew_mm` / `skew_ps` (skew_limit_source, which is the TARGET); without one the maximum is the target, so a board
+    that states no maximum behaves as before.  A maximum below the target is raised to it."""
+    from . import rules as RU
+    tgt, tsrc = skew_limit_source(cons, master, ps_per_mm)
+    rs = RU.load(cons)
+    cands = []
+    for key in ("skew_max_mm", "skew_max_ps"):
+        hits = rs.cascade({"net": master}, key)
+        if hits:
+            r, v = hits[0]
+            cands.append((r.rank(), key, float(v), r))
+    if not cands:
+        return tgt, tsrc
+    _rk, key, v, r = max(cands, key=lambda c: c[0])
+    mx = _to_mm(v, "mm" if key == "skew_max_mm" else "ps", f"{r.label} {key}", ps_per_mm, master)
+    return max(mx, tgt), f"{r.label} {key}"
+
+
+def skew_max_checked(cons, master, ps_per_mm=None):
+    try:
+        return skew_max_source(cons, master, ps_per_mm)
+    except ValueError as e:
+        return None, f"PAIR_DELAY_UNKNOWN ({e})"
+
+
+STUB_MAX_DEFAULT = {"usb2": 3.5, "usb3": 3.5}       # Type-C R2.0 Table 3-4: a spur on a joined connector row; other families: not checked
+
+
+def stub_max_mm(cons, master):
+    """Longest branch stub (mm) a pair with more than two terminals may have, or None (not checked): `[pairs.F] stub_max_mm` (same
+    cascade as skew_mm), else `[si] stub_max_mm_by_kind.<kind>`, else the built-in USB value."""
+    from . import rules as RU, netclass as NC
+    v, _ = RU.load(cons).resolve({"net": master}, "stub_max_mm")
+    if v is not None:
+        return float(v)
+    kind = NC.pair_kind(master)
+    by = (cons.get("si", {}) or {}).get("stub_max_mm_by_kind") or {}
+    if kind in by:
+        return float(by[kind])
+    return STUB_MAX_DEFAULT.get(kind)
+
+
 def skew_limit_checked(cons, master, ps_per_mm=None):
     """(limit mm or None, source). None = a ps limit with no known layer delay: report PAIR_DELAY_UNKNOWN and
     do not grade the pair. Never raises for that case."""

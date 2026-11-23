@@ -111,7 +111,11 @@ def shove_nets(blockers, pair, cls, protect=()):
 def _profile_row(B, pr):
     from . import pairaudit as PA
     pp, pn = PA.profile(B, pr[0]), PA.profile(B, pr[1])
-    return {"p_mm": pp["length"], "n_mm": pn["length"], "skew": round(abs(pp["length"] - pn["length"]), 3),
+    a = PA.audit(B, [tuple(pr)], {}, set()).get(tuple(pr), {})          # KiCad's lengths when the board is a file (netlen)
+    sk = round(abs(pp["length"] - pn["length"]), 3)
+    if a.get("skew") is not None and "p" in a:
+        pp, pn, sk = a["p"], a["n"], a["skew"]
+    return {"p_mm": pp["length"], "n_mm": pn["length"], "skew": sk,
             "vias": [pp["vias"], pn["vias"]], "layers": [pp["layers"], pn["layers"]]}
 
 

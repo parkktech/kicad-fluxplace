@@ -1145,7 +1145,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     aud = PA.audit(B2, [tuple(e["pair"]) for e in res["pairs"]], cons, {n for n, k in opn.items() if k})
     # a terminal with its pads on two layers cannot give both legs one layer sequence: that copper stays (connected), reported as a mismatch
     odd = lambda e: any("@via-on-" in x for s_ in e["sections"] for x in s_.get("via_exit", [])) and \
-        set(aud[tuple(e["pair"])].get("causes", [])) <= {"layers", "vias"}
+        set(aud[tuple(e["pair"])].get("causes", [])) <= {"layers", "vias", "skew"}   # the odd pad's via is a via-height skew too
     only_skew = lambda e: aud[tuple(e["pair"])].get("causes") == ["skew"] and e["status"] == "laid"     # complete, same layers and vias: tune fixes skew
     bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch" and not odd(e)
            and not only_skew(e)] \

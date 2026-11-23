@@ -197,6 +197,19 @@ def _profile(src, net, want_path=False):
     return PA.profile(B, net, want_path)
 
 
+def pair_skew(path, B, master, slave, kicad_cli="kicad-cli"):
+    """(P mm, N mm, P - N, source) of a pair on the board file `path`: KiCad's net lengths (the number the audit and the gate grade),
+    else pairaudit's pad-to-pad walk on the loaded board B (warned once per call)."""
+    from . import netlen
+    k = (netlen.pair_lengths(path, [(master, slave)], kicad_cli) or {}).get((master, slave)) if path else None
+    lm, ls = _profile(B, master)["length"], _profile(B, slave)["length"]
+    if k is None:
+        return lm, ls, lm - ls, "audit"
+    if k["p"] is None:                                       # equal within 0.0001 mm
+        return lm, ls, 0.0, "kicad"
+    return k["p"], k["n"], k["skew"], "kicad"
+
+
 def path_len(src, net):
     """PHASE3G G1b c: the pad-to-pad path length of `net` (pairaudit's number, the one the audit and review grade).
     None when the net has no path between its two farthest pads (a leg open): the caller must not tune it."""
@@ -507,11 +520,10 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                 try:
                     for rnd in range(max_rounds):
                         B = _load_routediag(work)
-                        lm, ls = _profile(B, master)["length"], _profile(B, slave)["length"]
                         if not (_profile(B, master)["path"] and _profile(B, slave)["path"]):
                             log(f"    {master}/{slave}: a leg has no pad-to-pad path: not tuned")
                             break
-                        skew = lm - ls
+                        lm, ls, skew, _src = pair_skew(work, B, master, slave, kicad_cli)
                         if abs(skew) <= lim(master):
                             break
                         longer, shorter = (master, slave) if skew > 0 else (slave, master)
@@ -563,14 +575,14 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     B_out = _load_routediag(out_path)
     out_rows = []
     for slave, master in sorted(pairs.items()):
-        lm, ls = _profile(B_out, master)["length"], _profile(B_out, slave)["length"]
+        lm, ls, sk, _src = pair_skew(out_path, B_out, master, slave, kicad_cli)
         report.append((master, slave, lm, ls))
         limit = lim(master)
-        row = {"pair": f"{master}/{slave}", "p_mm": round(lm, 3), "n_mm": round(ls, 3), "skew": round(lm - ls, 3),
+        row = {"pair": f"{master}/{slave}", "p_mm": round(lm, 3), "n_mm": round(ls, 3), "skew": round(sk, 3),
                "limit": limit if limit != float("inf") else None, "reason": ""}
         if master in need:
             row.update(status="needs_reroute", reason=need[master])
-        elif abs(lm - ls) <= limit:
+        elif abs(sk) <= limit:
             row["status"] = "ok"
         elif master not in reached and stopped in ("budget", "signal"):
             row.update(status="not_reached", reason=stopped)

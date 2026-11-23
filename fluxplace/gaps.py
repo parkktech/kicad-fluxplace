@@ -1063,6 +1063,12 @@ def _pair_block(base, cons, gap):
     except Exception as e:
         print(f"ai: pair geometry unavailable for {p}: {e}", file=sys.stderr)
     lim = gap.get("limit")                              # the audit's limit for this pair; else the family's
+    try:                                                # D71cv: tune brings the pair down to the TARGET, not just inside the maximum
+        from . import constraints as C_
+        tl = C_.skew_limit_checked(cons or {}, p)[0]
+        lim = tl if tl is not None else lim
+    except Exception:                                   # noqa: BLE001
+        pass
     if lim is None and fam:
         lim = ((cons or {}).get("pairs") or {}).get(fam, {}).get("skew_mm")
     legs = {}                                           # PHASE3H B2: each leg's routed length (None legs left out)

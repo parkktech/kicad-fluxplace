@@ -270,7 +270,7 @@ def load(path, track=None, clearance=None, project=None):
                     dclear = float(c.get("clearance", dclear))
         except (KeyError, ValueError, TypeError):
             pass
-    return {"pads": pads, "parts": parts, "zones": zones, "segs": segs,
+    return {"file": path, "pads": pads, "parts": parts, "zones": zones, "segs": segs,
             "vias": vias, "copper": copper, "bbox": bbox, "edge": edge,
             "diag": math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]),
             "track": track if track is not None else dtrack,

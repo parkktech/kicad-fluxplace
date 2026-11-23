@@ -263,9 +263,14 @@ def _pairs_from_audit(facts, cons):
     if any(r["status"] == "unknown" and gated(r["p"]) for r in rows):
         return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
     out = []
+    from . import pairaudit as PA_
     for r in rows:
+        if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
+            out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"])))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
+        if "stub" in r["causes"]:
+            out.append(_f(FAIL, "PAIR_STUB", f"{r['p']}/{r['n']}: {r['why']} (longest branch of a pair with more than two terminals)"))
         if "skew" in r["causes"]:
             note = _ps_note(facts, r["p"], r["skew"], r["limit"])
             out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit{note}"))
