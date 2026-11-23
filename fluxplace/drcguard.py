@@ -82,6 +82,10 @@ def report_slot(board_path):
     return out
 
 
+CANARY_RULE = ("(rule \"fxcanary\" (condition \"A.Type == 'Footprint' || A.Type == 'Track'\") "
+               "(constraint assertion \"A.Type == 'Nothing'\"))")
+
+
 def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True, pro_edit=None, canary=None):
     """THE kicad-cli DRC runner (all severities, zones always refilled). Runs on a temp COPY of the board (never refills or
     rewrites the original) with its .kicad_pro/.kicad_dru beside it, and a unique report path (concurrent calls never collide).
@@ -98,10 +102,12 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         b = os.path.join(td, "b.kicad_pcb")
         shutil.copy(board_path, b)
         dru = stem + ".kicad_dru"
-        if rules is not None:
-            open(os.path.join(td, "b.kicad_dru"), "w").write(rules)
-        elif os.path.isfile(dru):
-            shutil.copy(dru, os.path.join(td, "b.kicad_dru"))
+        dtext = rules if rules is not None else (open(dru, errors="replace").read() if os.path.isfile(dru) else None)
+        if dtext is not None:
+            # a syntax error anywhere in a rule file silently disables EVERY rule (exit 0, fewer violations that read as "better"):
+            # a canary rule that always fires goes into every custom-rule run and must be in the report
+            dtext = dtext.rstrip() + "\n" + CANARY_RULE + "\n"
+            open(os.path.join(td, "b.kicad_dru"), "w").write(dtext)
         pro = stem + ".kicad_pro"
         pd = {}
         if os.path.isfile(pro):
@@ -120,11 +126,22 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         if pd:
             json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
         out = os.path.join(td, "drc.json")
-        r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
-                            "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+        try:
+            r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                                "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"DRC timed out after {timeout} s") from e
+        rc = getattr(r, "returncode", 0)
+        if rc not in (0, None):
+            raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
         if not os.path.isfile(out) or not os.path.getsize(out):
             raise RuntimeError(f"DRC produced no report: {(r.stderr or r.stdout)[-200:]}")
         d = json.load(open(out))
+        if dtext is not None and not any("rule 'fxcanary'" in str(v.get("description", "")) for v in d.get("violations", [])):
+            raise RuntimeError("rule file ignored: the canary rule did not fire (a syntax error in the .kicad_dru disables every rule, "
+                               "or the board has no footprints or tracks)")
+        if dtext is not None:                                                  # our canary is a probe, never a finding
+            d["violations"] = [v for v in d.get("violations", []) if "rule 'fxcanary'" not in str(v.get("description", ""))]
         if canary and not any(f"rule '{c}'" in str(v.get("description", "")) for v in d.get("violations", []) for c in canary):
             raise RuntimeError("rule file ignored: no canary rule fired (" + ", ".join(canary[:3]) + "); a syntax error in the .kicad_dru "
                                "disables every rule, or the nets have no copper")

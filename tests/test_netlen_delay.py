@@ -196,3 +196,33 @@ def test_a_detour_inside_a_pad_is_clipped_by_kicad_and_kicads_number_is_the_verd
     assert zig["n_mm"] == pytest.approx(plain["n_mm"], abs=0.01) and zig["n_ps"] == pytest.approx(plain["n_ps"], abs=0.05)       # KiCad clipped the zigzag
     assert zig["skew_ps"] == pytest.approx(plain["skew_ps"], abs=0.05)
     assert zig["recon"]["n"] == pytest.approx(4.0, abs=0.1)                                                                       # our raw sum counted it: advice only
+
+
+def test_every_custom_rule_run_carries_a_canary_and_a_broken_file_raises(tmp_path):
+    """review 7: real kicad-cli.  The board's own .kicad_dru is covered too, and a non-zero exit is an error."""
+    from fluxplace import drcguard as DG
+    f = board(tmp_path, 4, 8)
+    open(os.path.splitext(f)[0] + ".kicad_dru", "w").write("(version 1)\n(rule \"x\" (constraint skew (max 0.001mm) within_diff_pairs))\n")        # unparenthesised
+    with pytest.raises(RuntimeError, match="rule file ignored"):
+        DG.drc_json(f, complete=False)
+    open(os.path.splitext(f)[0] + ".kicad_dru", "w").write("(version 1)\n(rule \"x\" (condition \"A.NetName == 'E_P'\") (constraint length (max 1mm)))\n")
+    d = DG.drc_json(f, complete=False)
+    assert any("rule 'x'" in v["description"] for v in d["violations"])                      # the board's rule ran
+    assert not any("fxcanary" in str(v) for v in d["violations"])                             # the probe is never a finding (counts unchanged)
+    os.unlink(os.path.splitext(f)[0] + ".kicad_dru")
+    DG.drc_json(f, complete=False)                                                              # no rule file: no canary needed
+
+
+def test_drc_json_wraps_a_timeout_and_a_bad_exit_code(tmp_path, monkeypatch):
+    import subprocess
+    from fluxplace import drcguard as DG
+    f = board(tmp_path, 4, 8)
+
+    def slow(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 1)
+    monkeypatch.setattr(DG.subprocess, "run", slow)
+    with pytest.raises(RuntimeError, match="timed out"):
+        DG.drc_json(f, timeout=1)
+    monkeypatch.setattr(DG.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 3, "", "boom"))
+    with pytest.raises(RuntimeError, match="exited 3"):
+        DG.drc_json(f)

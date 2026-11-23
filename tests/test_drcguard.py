@@ -290,7 +290,10 @@ def _fake_cli(calls, report=None):
                       "pro": _j.load(open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")))
                       if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")) else None,
                       "board": cmd[-1]})
-        _j.dump(report or {"violations": [], "unconnected_items": []}, open(out, "w"))
+        rep = dict(report or {"violations": [], "unconnected_items": []})
+        if calls[-1]["dru"] and "fxcanary" in calls[-1]["dru"]:                       # a rule file loaded: the canary fires
+            rep["violations"] = list(rep["violations"]) + [{"type": "assertion_failed", "severity": "error", "description": "Assertion failure (rule 'fxcanary')", "items": []}]
+        _j.dump(rep, open(out, "w"))
         return _sp.CompletedProcess(cmd, 0, "", "")
     return run
 
