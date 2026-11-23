@@ -10,6 +10,11 @@ optional; anything not stated keeps the heuristic default. Schema:
     impedance_diff = 85     # recorded for the stackup/report (not yet enforced)
     skew_mm = 0.1           # SI-lite intra-pair skew limit for these nets
 
+    [channel.PCIE_TX]       # budget from the parts at each end (fluxplace/channel.py): every key optional, `source` required
+    loss_db_max = 6.0       # also loss_db_target, freq_ghz, skew_ps_max/_target, length_mm_max/_target, stub_mm_max, via_db, connector_db
+    source = "CM5 datasheet p. N"
+    [[dcdrop]]              # net, current_a, drop_mv_max, drop_mv_target, source
+
     [si]
     default_skew_mm = 1.0   # SI-lite limit for pairs with no family entry
 
