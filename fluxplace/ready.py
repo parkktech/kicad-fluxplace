@@ -251,6 +251,29 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     return lines, detail
 
 
+def sync_netclasses(board, cons, log=lambda *a, **k: None):
+    """A4: the project file beside the board carries the netclasses the constraints imply (pair width/gap from the stackup, rail
+    widths), written here so the routers and the break-outs see them before any copper. Writes when they differ, then re-checks:
+    still different (unwritable file) = FAIL NETCLASS_MISMATCH. -> a checklist line."""
+    from . import constraints as C
+    pro = os.path.splitext(board)[0] + ".kicad_pro" if board else None
+    if not pro or not os.path.isfile(pro):
+        return _line("netclasses", UNCHECKED, "no project file beside the board: netclasses not synced")
+    if not ((cons or {}).get("pairs") or (cons or {}).get("power") or (cons or {}).get("rule")):
+        return _line("netclasses", PASS, "no pair, rail or rule class declared")
+    try:
+        before = C.netclass_mismatch(pro, cons, board)
+        if before:
+            C.inject_netclasses(pro, cons, log=log, board=board)
+        after = C.netclass_mismatch(pro, cons, board)
+    except (OSError, ValueError) as e:
+        return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: project file not writable or unreadable ({e})", [f"NETCLASS_MISMATCH {e}"])
+    if after:
+        return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: {len(after)} differ after write: {', '.join(after[:4])}",
+                     [f"NETCLASS_MISMATCH {x}" for x in after[:4]])
+    return _line("netclasses", PASS, f"project netclasses match the constraints" + (f" ({len(before)} written)" if before else ""))
+
+
 def _minpads(cons):
     from . import railroute as RL
     return RL.min_pads(cons)
@@ -281,6 +304,8 @@ def cmd_ready(a):
     cache = os.path.dirname(os.path.abspath(a.spec))
     pres = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess)
     lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres, allow_undocumented=getattr(a, "allow_undocumented", False))
+    if board and os.path.exists(board):
+        lines.append(sync_netclasses(board, cons))
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
     nopen = len(sess.open)

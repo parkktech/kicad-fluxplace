@@ -181,3 +181,52 @@ def test_pipeline_ready_stage_blocks_and_allow_incomplete_stamps(tmp_path):
     st = PL.load_state(a2.workdir)
     assert st["stages"]["floorplan-check"]["verdict"] == "pass" and "parts" in st["not_ready"]
     assert "NOT READY" in PL.format_status(st)
+
+
+# ---- A4: netclasses written at ready, NETCLASS_MISMATCH
+def test_sync_netclasses_writes_family_class_into_default_only_project(tmp_path):
+    import json
+    from fluxplace import ready as RY, constraints as C
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text(json.dumps({"net_settings": {"classes": [{"name": "Default", "track_width": 0.2}]}}))
+    cons = {"pairs": {"USB": {"impedance_diff": 90}}, "power": {"+5V": {"max_current_ma": 1000}}}
+    assert C.netclass_mismatch(str(pro), cons, str(b))            # Default-only: mismatch detected
+    line = RY.sync_netclasses(str(b), cons)
+    assert line["status"] == "PASS" and "written" in line["detail"]
+    ns = json.load(open(pro))["net_settings"]
+    names = {c["name"] for c in ns["classes"]}
+    assert "Default" in names and any(n.startswith("DP_USB_90R") for n in names) and any(n.startswith("PWR_") for n in names)
+    assert C.netclass_mismatch(str(pro), cons, str(b)) == []
+    assert RY.sync_netclasses(str(b), cons)["detail"] == "project netclasses match the constraints"
+
+
+def test_netclass_mismatch_sees_a_hand_edited_width(tmp_path):
+    import json
+    from fluxplace import constraints as C
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text("{}")
+    cons = {"pairs": {"USB": {"impedance_diff": 90}}}
+    C.inject_netclasses(str(pro), cons, log=lambda *a: None, board=str(b))
+    d = json.load(open(pro))
+    d["net_settings"]["classes"][0]["diff_pair_gap"] = 0.9
+    json.dump(d, open(pro, "w"))
+    assert C.netclass_mismatch(str(pro), cons, str(b)) == [d["net_settings"]["classes"][0]["name"]]
+
+
+def test_sync_netclasses_fails_when_the_project_cannot_be_written(tmp_path, monkeypatch):
+    from fluxplace import ready as RY, constraints as C
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    monkeypatch.setattr(C, "inject_netclasses", lambda *a, **k: 0)         # silently writes nothing
+    line = RY.sync_netclasses(str(b), {"pairs": {"USB": {"impedance_diff": 90}}})
+    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"]
+
+
+def test_sync_netclasses_unchecked_without_a_project(tmp_path):
+    from fluxplace import ready as RY
+    assert RY.sync_netclasses(str(tmp_path / "b.kicad_pcb"), {"pairs": {"USB": {}}})["status"] == "UNCHECKED"

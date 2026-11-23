@@ -451,6 +451,39 @@ def inject_netclasses(pro_path, cons, log=print, board=None):
     gap for their impedance target; rails get ampacity track widths."""
     import json
     d = json.load(open(pro_path))
+    classes, patterns, n_rule = _build_netclasses(d, cons, log, board)
+    ns = d.setdefault("net_settings", {})
+    ns["classes"] = classes
+    ns["netclass_patterns"] = patterns
+    json.dump(d, open(pro_path, "w"), indent=2)
+    log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
+        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes, "
+        f"{n_rule} rule classes")
+    return len(classes)
+
+
+MANAGED_CLASS_PREFIX = ("DP_", "PWR_", "RULE_")
+
+
+def netclass_mismatch(pro_path, cons, board=None):
+    """NETCLASS_MISMATCH: names of the managed (DP_/PWR_/RULE_) classes or patterns whose project-file entry differs from what
+    `inject_netclasses` would write from `cons` (missing, extra or different). Writes nothing. [] = the project carries them."""
+    import json
+    d = json.load(open(pro_path))
+    want_c, want_p, _ = _build_netclasses(json.loads(json.dumps(d)), cons, lambda *a, **k: None, board)
+    ns = d.get("net_settings", {})
+    have_c = {c.get("name"): c for c in ns.get("classes", []) if c.get("name", "").startswith(MANAGED_CLASS_PREFIX)}
+    want_c = {c["name"]: c for c in want_c if c["name"].startswith(MANAGED_CLASS_PREFIX)}
+    bad = sorted(n for n in set(have_c) | set(want_c)
+                 if n not in have_c or n not in want_c or any(have_c[n].get(k) != v for k, v in want_c[n].items()))
+    key = lambda p: (p.get("netclass"), p.get("pattern"))                  # noqa: E731
+    hp = {key(p) for p in ns.get("netclass_patterns", []) if p.get("netclass", "").startswith(MANAGED_CLASS_PREFIX)}
+    wp = {key(p) for p in want_p if p.get("netclass", "").startswith(MANAGED_CLASS_PREFIX)}
+    bad += [f"pattern {a}={b}" for a, b in sorted(hp ^ wp)]
+    return bad
+
+
+def _build_netclasses(d, cons, log, board):
     ns = d.setdefault("net_settings", {})
     classes = [c for c in ns.get("classes", [])
                if not (c.get("name", "").startswith(("DP_", "PWR_", "RULE_")))]
@@ -481,13 +514,7 @@ def inject_netclasses(pro_path, cons, log=print, board=None):
         })
         patterns.append({"netclass": name, "pattern": net})
     n_rule = _rule_netclasses(board, cons, classes, patterns, log)
-    ns["classes"] = classes
-    ns["netclass_patterns"] = patterns
-    json.dump(d, open(pro_path, "w"), indent=2)
-    log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
-        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes, "
-        f"{n_rule} rule classes")
-    return len(classes)
+    return classes, patterns, n_rule
 
 
 # ---------------------------------------------------------------------------
