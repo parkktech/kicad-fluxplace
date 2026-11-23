@@ -154,6 +154,78 @@ def _dists(g, src):
 _CH = {}
 
 
+def _span(B):
+    """span(l1, l2) -> mm copper centre to copper centre from the board's stackup, or None when the board has none."""
+    try:
+        from . import review as RV
+        st = RV.parse_stackup_text(open(B["file"], errors="replace").read()) if B.get("file") else []
+    except (OSError, ValueError):
+        st = []
+    pos = {r["name"]: k for k, r in enumerate(st) if r["type"] == "copper"}
+    if not pos:
+        return None
+
+    def span(l1, l2):
+        if l1 not in pos or l2 not in pos:
+            return None
+        a, b = sorted((pos[l1], pos[l2]))
+        return 0.0 if a == b else st[a]["thickness"] / 2 + sum(r["thickness"] for r in st[a + 1:b]) + st[b]["thickness"] / 2
+    return span
+
+
+def via_stubs(B, nets, min_mm=0.05):
+    """PAIR_VIA_STUB: vias on `nets` whose barrel runs past the copper that uses them.  The layers a via serves are those with a track
+    end at its centre or a pad of the net over it; the barrel beyond the outermost of them (towards the via's top / bottom layer) has no
+    copper on its far side and is an open stub.  -> [{net, x, y, used: [layers], stub_mm, dead}]; `dead` = the net uses ONE layer there with two
+    or more track ends (the signal enters and leaves on the same layer: the via is a leftover and can go without opening anything).
+    Empty when the board has no stackup (no barrel length)."""
+    span = _span(B)
+    if span is None:
+        return []
+    cu = B["copper"]
+    NS = set(nets)
+    out = []
+    for v in B["vias"]:
+        if v["net"] not in NS:
+            continue
+        vl = [l for l in cu if l in _range(v, cu)]
+        if len(vl) < 2:
+            continue
+        ends = {}
+        for sg in B["segs"]:
+            if sg["net"] == v["net"] and sg["layer"] in vl:
+                for e in (sg["a"], sg["b"]):
+                    if math.hypot(e[0] - v["x"], e[1] - v["y"]) <= TOL:
+                        ends[sg["layer"]] = ends.get(sg["layer"], 0) + 1
+        pad_l = set()
+        for q in B["pads"]:
+            if q["net"] == v["net"] and not q.get("np") and RC._in_pad(q, v["x"], v["y"], TOL):
+                pad_l |= {l for l in q["layers"] if l in vl}
+        used = sorted(set(ends) | pad_l, key=cu.index)
+        if not used:
+            continue
+        top, bot = span(vl[0], used[0]), span(used[-1], vl[-1])
+        if top is None or bot is None:
+            continue
+        stub = top + bot
+        if stub >= min_mm:
+            out.append({"net": v["net"], "x": v["x"], "y": v["y"], "used": used, "stub_mm": round(stub, 3),
+                        "dead": len(used) == 1 and not pad_l and ends.get(used[0], 0) >= 2})
+    return out
+
+
+def strip_dead_vias(text, B, nets):
+    """board text without the leftover vias of `nets` (via_stubs `dead`: the pair never changes layer there) -> (text, [stub rows])."""
+    from . import boardtext as BT
+    dead = [r for r in via_stubs(B, nets) if r["dead"]]
+    if not dead:
+        return text, []
+    want = {(round(r["x"], 4), round(r["y"], 4), r["net"]) for r in dead}
+    kill = [k for _i, _j, k, _b in BT.scan(text)
+            if k[0] == "v" and (k[1], k[2], k[4].strip('"')) in want]
+    return BT.remove_blocks(text, kill), dead
+
+
 def pair_list(cls):
     """[(p, n)] from the net classes' partner links (sorted, each pair once)."""
     seen, out = set(), []
@@ -274,6 +346,9 @@ def audit(B, pairs, cons, open_nets):
                 e["over_target"] = round(skew - lim, 3)
                 _note_over_target(p, n, skew, lim, mx, unit)
             e.update(causes=causes, skew=round(skew, 3), limit=mx, target=lim, limit_from=lim_src)
+            vs = via_stubs(B, (p, n)) if isinstance(B, dict) and B.get("file") else []
+            if vs:
+                e["via_stubs"] = vs
             e["status"], e["why"] = ("mismatch", "; ".join(why)) if why else ("complete", "")
         elif po != no:
             e["status"], e["why"] = "half", f"{p if no else n} routed, {p if po else n} open"

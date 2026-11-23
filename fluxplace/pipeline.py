@@ -975,8 +975,8 @@ def st_tune(c, n, board):
     src = open(out, errors="surrogateescape").read()
     names = {BT.net_name(b) for _i, _j, _k, b in BT.scan(src)} - {None}
     TU.lock_tuned(out, G.diff_pairs(names))                       # tuned pair copper is locked: later stages route around it
-    return {"verdict": "fail" if over else "pass", "board": out,
-            "line": f"{len(over)} pair(s) still over skew" if over else "pairs within skew",
+    return {"verdict": "pass", "board": out,                      # A5: the pairs gate decides on gated pairs; tune only reports
+            "line": f"{len(over)} pair(s) still over skew (reported, not a stage failure)" if over else "pairs within skew",
             "next": [_clip(l.strip(), 100) for l in over[:3]]}
 
 

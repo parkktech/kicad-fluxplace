@@ -330,3 +330,24 @@ def test_path_segs_excludes_same_net_stub_and_tune_ignores_it(tmp_path, monkeypa
     added = TU.meander_to(b, "S", 1.0, amp_mm=0.6, period_mm=0.8, candidate=0, clearance_mm=0.1, on_path=keys)
     assert added == pytest.approx(1.0, abs=0.02)
     assert [t for t in b.GetTracks() if t.GetNetname() == "S" and t.GetLength() / 1e6 > 24.0] == before_stub
+
+
+# ---- A5: tune exits 0 for open / skipped pairs, non-zero only when a pair it worked on got worse
+def test_tune_finish_open_and_over_but_not_worse_pairs_exit_zero(tmp_path):
+    import cli
+    from types import SimpleNamespace
+    res = {"stopped": None, "pairs": [
+        {"pair": "MIC_P/MIC_N", "status": "needs_reroute", "reason": "leg open", "skew": None, "before": None},
+        {"pair": "U_P/U_N", "status": "unmeasured", "reason": "kicad-cli", "skew": None, "before": None},
+        {"pair": "E_P/E_N", "status": "over", "skew": 0.6, "before": 0.9}]}
+    assert cli.tune_worse(res) == []
+    a = SimpleNamespace(report=str(tmp_path / "r.json"))
+    assert cli._tune_finish(a, str(tmp_path / "o.kicad_pcb"), res, cli.tune_worse(res), "pair") == 0
+
+
+def test_tune_finish_nonzero_when_a_tuned_pair_got_worse(tmp_path):
+    import cli
+    from types import SimpleNamespace
+    res = {"stopped": None, "pairs": [{"pair": "E_P/E_N", "status": "over", "skew": 1.2, "before": 0.9}]}
+    assert len(cli.tune_worse(res)) == 1
+    assert cli._tune_finish(SimpleNamespace(report=str(tmp_path / "r.json")), str(tmp_path / "o"), res, cli.tune_worse(res), "pair") == 1

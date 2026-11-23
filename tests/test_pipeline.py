@@ -348,3 +348,16 @@ def test_a3_no_manifest_and_not_a_seeding_stage_means_nothing_to_check(tmp_path,
     prev, new = tmp_path / "p.kicad_pcb", tmp_path / "n.kicad_pcb"
     prev.write_text("p"); new.write_text("n")
     assert PL._commit_point("floorplan", str(prev), {"verdict": "pass", "board": str(new)})["verdict"] == "pass"
+
+
+def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fluxplace import tune as TU
+    b = tmp_path / "in.kicad_pcb"; b.write_text("(kicad_pcb)\n")
+    c = SimpleNamespace(dir=lambda n, name: str(tmp_path), cons_path=None)
+    monkeypatch.setattr(PL, "_run_cli", lambda argv, log: (0, "  MIC_P/MIC_N: P 5 / N 6 mm, skew +1.0   <-- still over\ntune: 0 pair(s) got worse"))
+    monkeypatch.setattr(TU, "lock_tuned", lambda *a, **k: None)
+    r = PL.st_tune(c, 1, str(b))
+    assert r["verdict"] == "pass" and "still over" in r["line"]
+    monkeypatch.setattr(PL, "_run_cli", lambda argv, log: (1, "tune: 1 pair(s) got worse"))
+    assert PL.st_tune(c, 1, str(b))["verdict"] == "fail"

@@ -495,7 +495,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     bud = budget if isinstance(budget, Budget) else Budget(budget, stall)
     work = out_path + ".work.kicad_pcb"
     lim = limit_mm if callable(limit_mm) else (lambda m: limit_mm)
-    stalls, reached, need = set(), set(), {}
+    stalls, reached, need, first = set(), set(), {}, {}
     stopped = None
     accepted = 0
     base = None
@@ -537,6 +537,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                             log(f"    {master}/{slave}: {m['why']}: not tuned")
                             break
                         skew = m["skew"]
+                        first.setdefault(master, abs(skew))
                         if abs(skew) <= m["limit"]:
                             break
                         longer, shorter = (master, slave) if skew > 0 else (slave, master)
@@ -594,6 +595,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         limit = m.get("limit", lim(master))
         row = {"pair": f"{master}/{slave}", "p_mm": None if lm is None else round(lm, 3), "n_mm": None if ls is None else round(ls, 3),
                "skew": round(m["skew"], 3) if m["ok"] else None, "unit": m.get("unit", "mm"),
+               "before": round(first[master], 3) if master in first else None,
                "limit": limit if limit is not None and limit != float("inf") else None, "reason": ""}
         if master in need:
             row.update(status="needs_reroute", reason=need[master])

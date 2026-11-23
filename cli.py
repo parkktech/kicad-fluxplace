@@ -1925,19 +1925,30 @@ def cmd_tune(a):
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
-    return _tune_finish(a, out, res, [r for r in res.get("pairs", []) if r["status"] != "ok"], "pair")
+    return _tune_finish(a, out, res, tune_worse(res), "pair")
+
+
+def tune_worse(res):
+    """Rows tune should have helped and made worse: still over the limit and further from it than when tune started. Open, unmeasured,
+    needs_reroute and not_reached pairs are skipped rows (the pairs gate decides on gated pairs); a pair that stayed over but did not
+    get worse is not a tune failure either."""
+    return [r for r in res.get("pairs", []) if r["status"] == "over" and r.get("before") is not None and r.get("skew") is not None
+            and abs(r["skew"]) > r["before"] + 1e-6]
 
 
 def _tune_finish(a, out, res, bad, unit):
-    """tune summary line + JSON report (`--report`, default OUT.tune.json). Exit 0 all in tolerance, 1 some left over /
-    needs_reroute, 2 stopped by budget or signal (OUT is the best accepted board)."""
+    """tune summary line + JSON report (`--report`, default OUT.tune.json). Exit 0 unless a pair tune worked on got worse (`bad`);
+    open / needs_reroute / unmeasured pairs are skipped rows, never a failure (the pairs gate decides); 2 stopped by budget or
+    signal (OUT is the best accepted board)."""
     import json as _json
     nr = [r for r in res.get("pairs", []) if r["status"] == "needs_reroute"]
     path = a.report or out + ".tune.json"
     res["budget_s"] = res.get("budget_s")
     with open(path, "w") as f:
         _json.dump(res, f, indent=1)
-    msg = f"tune: {len(bad)} {unit}(s) not in tolerance"
+    skipped = [r for r in res.get("pairs", []) if r["status"] in ("needs_reroute", "unmeasured", "not_reached")]
+    over = [r for r in res.get("pairs", []) if r["status"] == "over"]
+    msg = f"tune: {len(bad)} {unit}(s) got worse, {len(over)} still over the limit, {len(skipped)} skipped"
     if nr:
         msg += f", {len(nr)} NEEDS_REROUTE (legs differ in layers/vias; length tuning cannot fix them: fluxplace pairs --only)"
     if res.get("stopped"):
