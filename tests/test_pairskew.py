@@ -110,3 +110,13 @@ def test_over_target_reaches_the_event_stream(tmp_path, monkeypatch):
     PA.audit(board(tmp_path), [("USB_DM", "USB_DP")], cons, set())
     rows = [json.loads(x) for x in ev.read_text().splitlines()]
     assert rows[-1]["kind"] == "pair_skew_over_target" and rows[-1]["verdict"] == "pass" and rows[-1]["unit"] == "mm" and 0.3 < rows[-1]["over"] < 0.4
+
+
+def test_review_fails_an_unmeasured_or_disagreeing_gated_pair(tmp_path, monkeypatch):
+    from fluxplace import review as RV, qualaudit as QA
+    b = PB.write(tmp_path, "")
+    rows = [{"pair": "USB_DP/USB_DM", "p": "USB_DP", "n": "USB_DM", "status": "unknown", "causes": [], "why": "MEASURE_DISAGREE: p +0.2 mm",
+             "code": "MEASURE_DISAGREE", "skew": None, "limit": None}]
+    monkeypatch.setattr(QA, "pair_rows", lambda *a, **k: rows)
+    out = RV._pairs_from_audit({"board_path": b}, {"pairs": {"USB_": {}}})
+    assert [(f["level"], f["code"]) for f in out if f["code"] == "MEASURE_DISAGREE"] == [("FAIL", "MEASURE_DISAGREE")]

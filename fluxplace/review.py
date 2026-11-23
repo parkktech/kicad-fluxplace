@@ -260,20 +260,24 @@ def _pairs_from_audit(facts, cons):
     except Exception:
         return None
     gated = lambda m: pair_gated(cons, m)
-    if any(r["status"] == "unknown" and gated(r["p"]) for r in rows):
+    if any(r["status"] == "unknown" and gated(r["p"]) and r.get("code") not in ("MEASURE_DISAGREE", "PAIR_UNMEASURED") for r in rows):
         return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
     out = []
     from . import pairaudit as PA_
     for r in rows:
+        if r["status"] == "unknown" and gated(r["p"]):      # D71cx: an unmeasured pair or a leg that misses KiCad's total cannot pass
+            out.append(_f(FAIL, r["code"], f"{r['p']}/{r['n']}: {r['why']}"))
+            continue
         if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
-            out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"])))
+            out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"], r.get("unit", "mm"))))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
         if "stub" in r["causes"]:
             out.append(_f(FAIL, "PAIR_STUB", f"{r['p']}/{r['n']}: {r['why']} (longest branch of a pair with more than two terminals)"))
         if "skew" in r["causes"]:
-            note = _ps_note(facts, r["p"], r["skew"], r["limit"])
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit{note}"))
+            u = r.get("unit", "mm")
+            note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
+            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:

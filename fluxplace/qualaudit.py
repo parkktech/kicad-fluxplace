@@ -31,7 +31,8 @@ def pair_rows(B, cls, cons, open_nets):
     res = PA.audit(B, PA.pair_list(cls), cons, open_nets)
     return [{"pair": f"{p}/{n}", "p": p, "n": n, "status": e["status"], "causes": e.get("causes", []), "why": e["why"],
              "skew": e.get("skew"), "limit": e.get("limit"), "target": e.get("target"), "over_target": e.get("over_target"),
-             "paths": e.get("paths"), "stubs": e.get("stubs")} for (p, n), e in res.items()]
+             "paths": e.get("paths"), "stubs": e.get("stubs"), "unit": e.get("unit", "mm"), "code": e.get("code"),
+             "basis": e.get("basis"), "skew_mm": e.get("skew_mm"), "skew_ps": e.get("skew_ps")} for (p, n), e in res.items()]
 
 
 # ---------------------------------------------------------------- RF
