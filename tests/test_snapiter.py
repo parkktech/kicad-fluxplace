@@ -169,7 +169,7 @@ def test_snap_edit_runs_in_its_own_process(monkeypatch):
     monkeypatch.setattr(FP, "in_fresh_process", spy)
     assert SI._snap is SI._SNAP_REAL
     assert SI._snap_fresh("x", "y", {"u2", "u1"}) == (3, 1)
-    assert called["fresh"] == ("fluxplace.snapiter", "_snap_json", ("x", "y", ["u1", "u2"]))
+    assert called["fresh"] == ("fluxplace.snapiter", "_snap_json", ("x", "y", ["u1", "u2"], False))
 
 
 def test_snap_that_collapses_a_track_onto_another_leaves_no_duplicate_copper(tmp_path):
@@ -193,3 +193,37 @@ def test_snap_that_collapses_a_track_onto_another_leaves_no_duplicate_copper(tmp
     dst2 = tmp_path / "o2.kicad_pcb"
     SI._snap_fresh(str(src2), str(dst2), set())
     assert len(_ends(dst2)) == 2
+
+
+def test_locked_stub_end_snaps_only_when_asked_and_stays_locked(tmp_path):
+    """D71cz: a locked fan-out stub end off a via centre is snapped by the one-off post-route step (locked_ok), and the item stays locked."""
+    import pcbnew
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, True)], [("A", (10, 10), 0.6)])
+    (tmp_path / "a.kicad_pro").write_text("{}")
+    moved, _r = SI._snap_fresh(str(src), str(tmp_path / "o0.kicad_pcb"), set())
+    assert moved == 0
+    moved, _r = SI._snap_fresh(str(src), str(tmp_path / "o1.kicad_pcb"), set(), True)
+    assert moved == 1 and _ends(tmp_path / "o1.kicad_pcb") == [((5.0, 10.0), (10.0, 10.0))]
+    t = [x for x in pcbnew.LoadBoard(str(tmp_path / "o1.kicad_pcb")).GetTracks() if x.Type() == pcbnew.PCB_TRACE_T][0]
+    assert t.IsLocked()
+
+
+def test_via_moves_to_the_track_end_when_the_end_cannot_move(tmp_path):
+    """The clearance-refused case: both ends of the F track and the B track's end at the old centre sit on one point -> the via moves to it
+    and the end at the old centre follows; a via with two different end points is skipped and reported."""
+    import pcbnew
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "B", (10, 10), (10, 15), 0.2, False)], [("A", (10, 10), 0.6)])
+    moved, skipped = SI._via_to_end(str(src), str(tmp_path / "o.kicad_pcb"), set(), None)
+    assert moved == 1 and skipped == []
+    b = pcbnew.LoadBoard(str(tmp_path / "o.kicad_pcb"))
+    via = [x for x in b.GetTracks() if x.Type() == pcbnew.PCB_VIA_T][0]
+    assert (round(pcbnew.ToMM(via.GetPosition().x), 3), round(pcbnew.ToMM(via.GetPosition().y), 3)) == (10.1, 10.05)
+    assert ((10.1, 10.05), (10.0, 15.0)) in [((round(pcbnew.ToMM(x.GetStart().x), 3), round(pcbnew.ToMM(x.GetStart().y), 3)),
+                                              (round(pcbnew.ToMM(x.GetEnd().x), 3), round(pcbnew.ToMM(x.GetEnd().y), 3)))
+                                             for x in b.GetTracks() if x.Type() == pcbnew.PCB_TRACE_T]
+    src2 = tmp_path / "c.kicad_pcb"
+    _mini_board(src2, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "F", (5, 12), (9.9, 10), 0.2, False)], [("A", (10, 10), 0.6)])
+    moved, skipped = SI._via_to_end(str(src2), str(tmp_path / "o2.kicad_pcb"), set(), None)
+    assert moved == 0 and skipped and "different end points" in skipped[0][3]

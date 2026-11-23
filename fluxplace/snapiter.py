@@ -65,7 +65,7 @@ def obstacle_gap(a, bb, hq, kind, geom):
     return _seg_rect(a, bb, geom) - hq
 
 
-def _snap(src, dst, skip):
+def _snap(src, dst, skip, locked_ok=False):
     """Snap every track end inside a same-net via to the via centre. PHASE3F A6: a snap that would bring the moved
     segment closer than the clearance to copper of ANOTHER net on its layer (tracks, vias reaching the layer, pads) is
     refused; the whole joint (every track end within JOINT_MM of the old point) stays. A joint with a locked or skipped
@@ -188,7 +188,7 @@ def _snap(src, dst, skip):
                         joint.append((u, w))
             for u, w in joint:
                 done.add((u.m_Uuid.AsString(), w))
-            if any(u.IsLocked() or u.m_Uuid.AsString() in skip for u, _w in joint):
+            if any((u.IsLocked() and not locked_ok) or u.m_Uuid.AsString() in skip for u, _w in joint):
                 continue
             new = (mm(target.x), mm(target.y))
             # each joint end's new segment: the other end of the track to the via centre
@@ -231,29 +231,29 @@ def _snap(src, dst, skip):
 _SNAP_REAL = _snap
 
 
-def _snap_json(src, dst, skip):
+def _snap_json(src, dst, skip, locked_ok=False):
     """_snap with a JSON-able signature (runs in a fresh process): -> [moved, refused]."""
-    return list(_snap(src, dst, set(skip)))
+    return list(_snap(src, dst, set(skip), locked_ok))
 
 
-def _snap_fresh(src, dst, skip):
+def _snap_fresh(src, dst, skip, locked_ok=False):
     """_snap in its own interpreter: its board.Remove() decays pcbnew's bindings for the process (freshproc), and the caller (the
     pipeline's krt-whole chain, then close) goes on loading boards."""
     if _snap is not _SNAP_REAL:                           # a test double stands in for the board edit: call it directly
-        return _snap(src, dst, skip)
+        return _snap(src, dst, skip) if not locked_ok else _snap(src, dst, skip, locked_ok)
     from .freshproc import in_fresh_process
-    moved, refused = in_fresh_process("fluxplace.snapiter", "_snap_json", src, dst, sorted(skip))
+    moved, refused = in_fresh_process("fluxplace.snapiter", "_snap_json", src, dst, sorted(skip), locked_ok)
     return moved, refused
 
 
-def run(src, dst, iters=6, log=print):
+def run(src, dst, iters=6, log=print, locked_ok=False):
     """-> {"moved", "excluded", "iters", "centred_left", "refused_geom"}; `dst` = the last accepted board (src when none is).
     refused_geom: joints _snap refused for clearance (PHASE3F A6) on the accepted iteration."""
     base = _keys(_report(src))
     skip, last = set(), None
     for i in range(iters):
         tmp = dst + f".i{i}.kicad_pcb"
-        moved, refused_geom = _snap_fresh(src, tmp, skip)
+        moved, refused_geom = _snap_fresh(src, tmp, skip, locked_ok)
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))
@@ -274,3 +274,84 @@ def run(src, dst, iters=6, log=print):
             shutil.copy(src_pro, dst_pro)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "iters": i + 1,
             "centred_left": last[2] if last else None, "refused_geom": last[3] if last else 0}
+
+
+def _via_to_end(src, dst, skip, only=None):
+    """The clearance-refused cases: where the track ends meeting a via off its centre all sit on ONE point P, the via moves to P (and the
+    ends still at the old centre, on any layer, move with it): no copper gets closer to a neighbour than the via's own annulus does at P.
+    The caller's DRC guard judges the result.  Runs in a fresh process (board.Remove / bindings, see freshproc).  -> [moved vias, skipped]
+    skipped = [[net, x, y, why]].  `only`: [[net, x, y]] the vias DRC names (the others are left alone)."""
+    import pcbnew
+    mm = pcbnew.ToMM
+    b = pcbnew.LoadBoard(src)
+    tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+    vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    moved, skipped = 0, []
+    for v in vias:
+        if v.m_Uuid.AsString() in skip:
+            continue
+        c = v.GetPosition()
+        if only is not None and not any(n == v.GetNetname() and abs(x - mm(c.x)) < 0.01 and abs(y - mm(c.y)) < 0.01 for n, x, y in only):
+            continue
+        r = mm(v.GetWidth(pcbnew.F_Cu)) / 2
+        off, at = [], []
+        for t in tracks:
+            if t.GetNetCode() != v.GetNetCode() or not v.IsOnLayer(t.GetLayer()):
+                continue
+            for w in (0, 1):
+                e = t.GetStart() if w == 0 else t.GetEnd()
+                d = math.hypot(mm(e.x - c.x), mm(e.y - c.y))
+                if d <= 0.005:
+                    at.append((t, w))
+                elif d <= r:
+                    off.append((t, w, e))
+        if not off:
+            continue
+        pts = {(round(mm(e.x), 3), round(mm(e.y), 3)) for _t, _w, e in off}
+        if len(pts) != 1:
+            skipped.append([v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3), f"{len(pts)} different end points"])
+            continue
+        target = off[0][2]
+        pads = [p for p in b.GetPads() if p.IsOnLayer(pcbnew.F_Cu) | p.IsOnLayer(pcbnew.B_Cu) and p.GetNetCode() == v.GetNetCode() and p.HitTest(c)]
+        if pads:
+            skipped.append([v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3), "via sits in a pad"])
+            continue
+        v.SetPosition(target)
+        for t, w in at:
+            (t.SetStart if w == 0 else t.SetEnd)(target)
+        moved += 1
+    pcbnew.SaveBoard(dst, b)
+    return [moved, skipped]
+
+
+def via_run(src, dst, iters=3, log=print):
+    """After `run`: the ends it refused for clearance are fixed by moving the via to the track end (see _via_to_end), DRC-guarded like `run`
+    (no new violation, no more opens; a via whose move creates one is left and reported).  -> {"moved", "excluded", "skipped", "centred_left"}."""
+    from .freshproc import in_fresh_process
+    d0 = _report(src)
+    base = _keys(d0)
+    only = [[re.search(r"\[([^\]]*)\]", it["description"]).group(1), it["pos"]["x"], it["pos"]["y"]]
+            for v in d0["violations"] if v["type"] == CENTRED for it in v["items"] if it["description"].startswith("Via")]
+    skip, last, skipped = set(), None, []
+    for i in range(iters):
+        tmp = dst + f".v{i}.kicad_pcb"
+        moved, skipped = in_fresh_process("fluxplace.snapiter", "_via_to_end", src, tmp, sorted(skip), only)
+        shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
+        d = _report(tmp)
+        new = DG.new_keys(base, _keys(d))
+        bad = [v for v in d["violations"] if v["type"] != CENTRED and DG.key_of(v) in new]
+        bad += [u for u in d.get("unconnected_items", []) if any(("Unet", n) in new for n in _unc_nets(u) or ["?"])]
+        ids = {it["uuid"] for v in bad for it in v["items"] if "uuid" in it}
+        log(f"via iter {i}: moved {moved}, new keys {sum(new.values())}")
+        if not new:
+            last = (tmp, moved, sum(v["type"] == CENTRED for v in d["violations"]))
+            break
+        if not ids - skip:
+            break
+        skip |= ids
+    if last:
+        shutil.copy(last[0], dst)
+        src_pro, dst_pro = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
+        if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
+            shutil.copy(src_pro, dst_pro)
+    return {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
