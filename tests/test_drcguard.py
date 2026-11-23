@@ -276,3 +276,78 @@ def test_tune_drc_report_keys_mask_polygon_bridges_by_net(monkeypatch):
         monkeypatch.setattr(DG, "drc_json", lambda *a, _r=run, **k: _r)
         keys, counts = TU.drc_report("x.kicad_pcb")
         assert keys == Counter({("solder_mask_bridge", ("NET_A",)): 2}) and counts == (2, 0)
+
+
+# ---- A1: the one DRC runner
+def _fake_cli(calls, report=None):
+    import json as _j
+    import subprocess as _sp
+
+    def run(cmd, **kw):
+        out = cmd[cmd.index("-o") + 1] if "-o" in cmd else cmd[cmd.index("--output") + 1]
+        calls.append({"cmd": list(cmd), "dru": open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")).read()
+                      if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")) else None,
+                      "pro": _j.load(open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")))
+                      if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")) else None,
+                      "board": cmd[-1]})
+        _j.dump(report or {"violations": [], "unconnected_items": []}, open(out, "w"))
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    return run
+
+
+def test_drc_json_always_refills_runs_on_a_copy(tmp_path, monkeypatch):
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    calls = []
+    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+    d = DG.drc_json(str(b))
+    assert d["violations"] == []
+    assert "--refill-zones" in calls[0]["cmd"] and "--severity-all" in calls[0]["cmd"]
+    assert calls[0]["board"] != str(b)
+    assert not [f for f in os.listdir(tmp_path) if f != "x.kicad_pcb"]
+
+
+def test_drc_json_rules_text_reaches_cli_and_only_rules_ignores_the_rest(tmp_path, monkeypatch):
+    import json as _j
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    (tmp_path / "x.kicad_pro").write_text(_j.dumps({"board": {"design_settings": {"rule_severities": {"clearance": "error",
+                                                                                                   "skew_out_of_range": "ignore"}}}}))
+    (tmp_path / "x.kicad_dru").write_text("(version 1)\n(rule \"old\")")
+    calls = []
+    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+    DG.drc_json(str(b), rules="(version 1)\n(rule \"new\")", only_rules=["skew_out_of_range"])
+    assert "new" in calls[0]["dru"] and "old" not in calls[0]["dru"]
+    rs = calls[0]["pro"]["board"]["design_settings"]["rule_severities"]
+    assert rs == {"clearance": "ignore", "skew_out_of_range": "error"}
+    DG.drc_json(str(b))
+    assert "old" in calls[1]["dru"]
+    assert _j.load(open(tmp_path / "x.kicad_pro"))["board"]["design_settings"]["rule_severities"]["clearance"] == "error"
+
+
+def test_drc_json_two_concurrent_calls_do_not_collide(tmp_path, monkeypatch):
+    import threading
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    calls, res, errs = [], [], []
+    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+
+    def go():
+        try:
+            res.append(DG.drc_json(str(b)))
+        except Exception as e:     # noqa
+            errs.append(e)
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs and len(res) == 2
+    assert len({c["board"] for c in calls}) == 2
+
+
+def test_drc_json_no_report_raises(tmp_path, monkeypatch):
+    import subprocess as _sp
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    monkeypatch.setattr(DG.subprocess, "run", lambda cmd, **k: _sp.CompletedProcess(cmd, 1, "", "boom"))
+    with pytest.raises(RuntimeError):
+        DG.drc_json(str(b))

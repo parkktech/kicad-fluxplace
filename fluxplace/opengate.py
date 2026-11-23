@@ -47,16 +47,9 @@ def _helper(board, fill):
 
 
 def _drc(board, refill_zones, cli="kicad-cli"):
-    """-> {unconnected, zone_clearance} from kicad-cli DRC (the board file is not written)."""
-    with tempfile.TemporaryDirectory() as td:
-        out = os.path.join(td, "drc.json")
-        cmd = [cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors"] + \
-              (["--refill-zones"] if refill_zones else []) + ["-o", out, board]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        if not os.path.exists(out):
-            raise RuntimeError("kicad-cli drc produced no report")
-        from . import drcfull as DF
-        d = DF.complete(board, json.load(open(out)), fill=refill_zones)
+    """-> {unconnected, zone_clearance} from kicad-cli DRC (the board file is not written; zones are always refilled)."""
+    from . import drcguard as DG
+    d = DG.drc_json(board, cli, 900)
     zc = 0
     for v in d.get("violations", []):
         if v.get("type") in ("clearance", "shorting_items", "starved_thermal", "isolated_copper") and \

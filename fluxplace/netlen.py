@@ -1,13 +1,10 @@
 """KiCad is the authority for routed net length (the number its own skew DRC reports: all copper of the net, vias by stackup height,
 in-pad copper included).  `pair_lengths` writes one `(constraint skew)` rule per pair into a temp .kicad_dru next to a temp copy of the
 board, runs `kicad-cli pcb drc` and parses `target net length X (from NET); actual Y`.  Nothing here knows a board."""
-import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 
 _RE = re.compile(r"rule '(sk\d+)'.*?actual (-?[\d.]+) mm; target net length ([\d.]+) mm \(from ([^)]+)\); actual ([\d.]+) mm")
 CACHE = {}
@@ -28,33 +25,18 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
     key = (os.path.abspath(board), st.st_mtime_ns, st.st_size, tuple(pairs))
     if key in CACHE:
         return CACHE[key]
-    tmp = tempfile.mkdtemp(prefix="fxlen-")
     try:
-        b = os.path.join(tmp, "b.kicad_pcb")
-        shutil.copy(board, b)
-        pro = os.path.splitext(board)[0] + ".kicad_pro"
-        d = {}
-        if os.path.isfile(pro):
-            try:
-                d = json.load(open(pro))
-            except (OSError, ValueError):
-                d = {}
-        rs = d.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})
-        for k in list(rs):                                   # only the skew rule: the run takes ~2 s
-            rs[k] = "ignore"
-        rs["skew_out_of_range"] = "error"
-        json.dump(d, open(os.path.join(tmp, "b.kicad_pro"), "w"))
-        open(os.path.join(tmp, "b.kicad_dru"), "w").write("(version 1)\n" + "".join(
+        rules = "(version 1)\n" + "".join(
             f"(rule \"sk{i}\" (condition \"A.NetName == '{_q(p)}' || A.NetName == '{_q(n)}'\") (constraint skew (max 0.0001mm)))\n"
-            for i, (p, n) in enumerate(pairs)))
-        out = os.path.join(tmp, "d.json")
-        r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error", "--output", out, b],
-                           capture_output=True, text=True, timeout=timeout)
-        if not os.path.isfile(out):
-            print(f"netlen: kicad-cli drc failed ({r.returncode}): {(r.stderr or r.stdout)[-200:]}", file=sys.stderr)
+            for i, (p, n) in enumerate(pairs))
+        from . import drcguard as DG
+        try:
+            rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["skew_out_of_range"], complete=False)
+        except RuntimeError as e:
+            print(f"netlen: kicad-cli drc failed: {e}", file=sys.stderr)
             return None
         res = {pr: {"p": None, "n": None, "skew": 0.0} for pr in pairs}
-        for v in json.load(open(out)).get("violations", []):
+        for v in rep.get("violations", []):
             m = _RE.search(v.get("description", ""))
             if not m:
                 continue
@@ -67,5 +49,4 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         print(f"netlen: kicad-cli drc unavailable: {e}", file=sys.stderr)
         return None
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+

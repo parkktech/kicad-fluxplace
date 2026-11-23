@@ -38,15 +38,7 @@ __all__ = ["drc_counts", "shortcut", "meander", "tune_pairs", "meander_to", "tun
 def drc_counts(board_path, kicad_cli="kicad-cli", timeout=600):
     """(violations, unconnected) from a kicad-cli DRC at all severities."""
     from . import drcguard as DG
-    out = DG.report_slot(board_path)
-    r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
-                        "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
-                        board_path], capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(out):
-        raise RuntimeError(f"DRC produced no report: {r.stderr[-200:]}")
-    from . import drcfull as DF
-    d = DF.complete(board_path, json.load(open(out)), fill=True)
-    os.unlink(out)
+    d = DG.drc_json(board_path, kicad_cli, timeout)
     return len(d.get("violations", [])), len(d.get("unconnected_items", []))
 
 

@@ -82,19 +82,48 @@ def report_slot(board_path):
     return out
 
 
-def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
-    """The raw kicad-cli DRC dict (all severities, zones refilled)."""
-    out = report_slot(board_path)
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
-                    "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
-                    board_path], capture_output=True, text=True, timeout=timeout)
-    if not os.path.getsize(out):
-        os.unlink(out)
-        raise RuntimeError("DRC produced no report")
-    from . import drcfull as DF
-    d = DF.complete(board_path, json.load(open(out)), fill=True)
-    os.unlink(out)
-    return d
+def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True):
+    """THE kicad-cli DRC runner (all severities, zones always refilled). Runs on a temp COPY of the board (never refills or
+    rewrites the original) with its .kicad_pro/.kicad_dru beside it, and a unique report path (concurrent calls never collide).
+    rules: .kicad_dru text that replaces the board's rule file. only_rules: list of rule-severity keys left on, every other
+    check set to ignore in the temp project (a 2 s run for one rule). complete: complete the capped unconnected list.
+    Raises RuntimeError when kicad-cli writes no report."""
+    import shutil
+    import tempfile
+    stem = os.path.splitext(os.path.abspath(board_path))[0]
+    with tempfile.TemporaryDirectory(prefix="fxdrc-") as td:
+        b = os.path.join(td, "b.kicad_pcb")
+        shutil.copy(board_path, b)
+        dru = stem + ".kicad_dru"
+        if rules is not None:
+            open(os.path.join(td, "b.kicad_dru"), "w").write(rules)
+        elif os.path.isfile(dru):
+            shutil.copy(dru, os.path.join(td, "b.kicad_dru"))
+        pro = stem + ".kicad_pro"
+        pd = {}
+        if os.path.isfile(pro):
+            try:
+                pd = json.load(open(pro))
+            except (OSError, ValueError):
+                pd = {}
+        if only_rules is not None:
+            rs = pd.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})
+            for k in list(rs):
+                rs[k] = "ignore"
+            for k in only_rules:
+                rs[k] = "error"
+        if pd:
+            json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
+        out = os.path.join(td, "drc.json")
+        r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                            "--refill-zones", "-o", out, b], capture_output=True, text=True, timeout=timeout)
+        if not os.path.isfile(out) or not os.path.getsize(out):
+            raise RuntimeError(f"DRC produced no report: {(r.stderr or r.stdout)[-200:]}")
+        d = json.load(open(out))
+        if complete:
+            from . import drcfull as DF
+            d = DF.complete(b, d, fill=True)
+        return d
 
 
 def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnected=True):
