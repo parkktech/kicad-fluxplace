@@ -1141,6 +1141,13 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
                 import shutil
                 shutil.copy(src, os.path.splitext(out)[0] + ext)
         B2 = RD.load(out)
+        pn = [n for e in res["pairs"] for n in e["pair"]]            # a via the pair passes straight through on one layer is a barrel stub: gone
+        txt2, dead = PA.strip_dead_vias(open(out, errors="replace").read(), B2, pn)
+        if dead:
+            open(out, "w").write(txt2)
+            B2 = RD.load(out)
+            rep["dead_vias_removed"] = [[r["net"], r["x"], r["y"], r["stub_mm"]] for r in dead]
+            log(f"pairs: PAIR_VIA_STUB removed {len(dead)} via(s) the pair never changes layer at: " + ", ".join(f"{r['net']}@({r['x']:.3f},{r['y']:.3f}) {r['stub_mm']:.2f} mm" for r in dead))
     opn = RC.text_open(B2)
     aud = PA.audit(B2, [tuple(e["pair"]) for e in res["pairs"]], cons, {n for n, k in opn.items() if k})
     # a terminal with its pads on two layers cannot give both legs one layer sequence: that copper stays (connected), reported as a mismatch

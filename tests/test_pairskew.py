@@ -73,3 +73,26 @@ def test_over_target_reaches_the_event_stream(tmp_path, monkeypatch):
     PA.audit(board(), [("USB_DM", "USB_DP")], cons, set())
     rows = [json.loads(x) for x in ev.read_text().splitlines()]
     assert rows[-1]["kind"] == "pair_skew_over_target" and rows[-1]["verdict"] == "pass" and rows[-1]["over_mm"] == 0.85
+
+
+def _stack_file(tmp_path, via_lines):
+    f = tmp_path / "s.kicad_pcb"
+    f.write_text('(kicad_pcb\n\t(setup\n\t\t(stackup\n\t\t\t(layer "F.Cu" (type "copper") (thickness 0.035))\n'
+                 '\t\t\t(layer "dielectric 1" (type "core") (thickness 1.5))\n\t\t\t(layer "B.Cu" (type "copper") (thickness 0.035))\n\t\t)\n\t)\n'
+                 + via_lines + ")\n")
+    return str(f)
+
+
+def test_via_stub_is_reported_and_a_straight_through_via_is_removed(tmp_path):
+    vias = ('\t(via\n\t\t(at 10 5)\n\t\t(size 0.46)\n\t\t(drill 0.2)\n\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "USB_DP")\n\t)\n'
+            '\t(via\n\t\t(at 20 5)\n\t\t(size 0.46)\n\t\t(drill 0.2)\n\t\t(layers "F.Cu" "B.Cu")\n\t\t(net "USB_DP")\n\t)\n')
+    f = _stack_file(tmp_path, vias)
+    B = {"file": f, "copper": ["F.Cu", "B.Cu"], "pads": [],
+         "vias": [{"net": "USB_DP", "x": 10, "y": 5, "d": 0.46, "layers": {"F.Cu", "B.Cu"}},
+                  {"net": "USB_DP", "x": 20, "y": 5, "d": 0.46, "layers": {"F.Cu", "B.Cu"}}],
+         "segs": [seg("USB_DP", (0, 5), (10, 5)), seg("USB_DP", (10, 5), (15, 5)),                  # F.Cu in and out of the via at x=10: straight through
+                  seg("USB_DP", (15, 5), (20, 5)), dict(seg("USB_DP", (20, 5), (30, 5)), layer="B.Cu")]}   # the via at x=20 changes layer: no stub
+    vs = PA.via_stubs(B, ["USB_DP"])
+    assert len(vs) == 1 and vs[0]["x"] == 10 and vs[0]["used"] == ["F.Cu"] and vs[0]["dead"] and abs(vs[0]["stub_mm"] - 1.535) < 1e-6
+    text, dead = PA.strip_dead_vias(open(f).read(), B, ["USB_DP"])
+    assert len(dead) == 1 and "(at 10 5)" not in text and "(at 20 5)" in text

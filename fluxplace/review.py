@@ -265,6 +265,10 @@ def _pairs_from_audit(facts, cons):
     out = []
     from . import pairaudit as PA_
     for r in rows:
+        if gated(r["p"]):                                  # a via whose barrel runs past the copper that uses it is an open stub
+            for vs in r.get("via_stubs") or []:
+                out.append(_f(WARN, "PAIR_VIA_STUB", f"{vs['net']}: via at ({vs['x']:.3f}, {vs['y']:.3f}) used on {'/'.join(vs['used'])} only: "
+                                                   f"{vs['stub_mm']:.2f} mm barrel stub" + (" (the pair never changes layer there: remove the via)" if vs["dead"] else "")))
         if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
             out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"])))
         if r["status"] != "mismatch" or not gated(r["p"]):
