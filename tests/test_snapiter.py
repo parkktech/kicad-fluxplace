@@ -227,3 +227,18 @@ def test_via_moves_to_the_track_end_when_the_end_cannot_move(tmp_path):
     _mini_board(src2, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "F", (5, 12), (9.9, 10), 0.2, False)], [("A", (10, 10), 0.6)])
     moved, skipped = SI._via_to_end(str(src2), str(tmp_path / "o2.kicad_pcb"), set(), None)
     assert moved == 0 and skipped and "different end points" in skipped[0][3]
+
+
+def test_joiner_ties_an_off_centre_end_to_the_exact_via_centre_without_moving_either(tmp_path):
+    """D71cz fallback: the via and the segment line stay; a same-net joiner (same layer, width, lock) runs from the end to the via centre."""
+    import pcbnew
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, True)], [("A", (10, 10), 0.6)])
+    added, skipped = SI._joiners(str(src), str(tmp_path / "o.kicad_pcb"), set(), None)
+    assert added == 1 and skipped == []
+    b = pcbnew.LoadBoard(str(tmp_path / "o.kicad_pcb"))
+    r = lambda p: (round(pcbnew.ToMM(p.x), 3), round(pcbnew.ToMM(p.y), 3))
+    ends = sorted((r(t.GetStart()), r(t.GetEnd()), t.IsLocked(), round(pcbnew.ToMM(t.GetWidth()), 3)) for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T)
+    assert ends == [((5.0, 10.0), (10.1, 10.05), True, 0.2), ((10.1, 10.05), (10.0, 10.0), True, 0.2)]
+    via = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T][0]
+    assert r(via.GetPosition()) == (10.0, 10.0)

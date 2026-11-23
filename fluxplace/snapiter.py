@@ -324,7 +324,7 @@ def _via_to_end(src, dst, skip, only=None):
     return [moved, skipped]
 
 
-def via_run(src, dst, iters=3, log=print):
+def via_run(src, dst, iters=3, log=print, func="_via_to_end"):
     """After `run`: the ends it refused for clearance are fixed by moving the via to the track end (see _via_to_end), DRC-guarded like `run`
     (no new violation, no more opens; a via whose move creates one is left and reported).  -> {"moved", "excluded", "skipped", "centred_left"}."""
     from .freshproc import in_fresh_process
@@ -335,7 +335,7 @@ def via_run(src, dst, iters=3, log=print):
     skip, last, skipped = set(), None, []
     for i in range(iters):
         tmp = dst + f".v{i}.kicad_pcb"
-        moved, skipped = in_fresh_process("fluxplace.snapiter", "_via_to_end", src, tmp, sorted(skip), only)
+        moved, skipped = in_fresh_process("fluxplace.snapiter", func, src, tmp, sorted(skip), only)
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))
@@ -355,3 +355,62 @@ def via_run(src, dst, iters=3, log=print):
         if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
             shutil.copy(src_pro, dst_pro)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
+
+
+def _joiners(src, dst, skip, only=None):
+    """Fallback for ends neither the snap nor a via move can fix: leave the via and the segment line alone, shorten the segment along its own
+    direction until its round end lies inside the via annulus, and add a joiner (same net, layer, width, lock) from that end to the exact via
+    centre.  The joiner lies inside via copper and shortening only removes copper, so no clearance gets worse.  `only`: [[net, x, y]] the vias
+    DRC names.  -> [joiners added, skipped [[net, x, y, why]]]."""
+    import pcbnew
+    mm = pcbnew.ToMM
+    b = pcbnew.LoadBoard(src)
+    tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+    vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+    added, skipped = 0, []
+    for v in vias:
+        if v.m_Uuid.AsString() in skip:
+            continue
+        c = v.GetPosition()
+        cx, cy = mm(c.x), mm(c.y)
+        if only is not None and not any(n == v.GetNetname() and abs(x - cx) < 0.01 and abs(y - cy) < 0.01 for n, x, y in only):
+            continue
+        r = mm(v.GetWidth(pcbnew.F_Cu)) / 2
+        for t in tracks:
+            if t.GetNetCode() != v.GetNetCode() or not v.IsOnLayer(t.GetLayer()):
+                continue
+            for w in (0, 1):
+                e, o = (t.GetStart(), t.GetEnd()) if w == 0 else (t.GetEnd(), t.GetStart())
+                ex, ey, ox, oy = mm(e.x), mm(e.y), mm(o.x), mm(o.y)
+                d = math.hypot(ex - cx, ey - cy)
+                if d <= 0.005 or d > r:
+                    continue
+                hw = mm(t.GetWidth()) / 2
+                if hw >= r:
+                    skipped.append([v.GetNetname(), round(cx, 3), round(cy, 3), "track wider than the via"])
+                    continue
+                L = math.hypot(ox - ex, oy - ey)
+                ux, uy = ((ox - ex) / L, (oy - ey) / L) if L else (0.0, 0.0)
+                tt, lim = 0.0, r - hw - 0.005
+                while math.hypot(ex + ux * tt - cx, ey + uy * tt - cy) > lim and tt < L - 0.05:
+                    tt += 0.01                                      # shorten along the segment's own line
+                if math.hypot(ex + ux * tt - cx, ey + uy * tt - cy) > lim:
+                    tt = 0.0           # the line only leaves the via: keep the end where it is; the joiner's round end is the segment's own cap
+                ne = pcbnew.VECTOR2I(pcbnew.FromMM(ex + ux * tt), pcbnew.FromMM(ey + uy * tt))
+                (t.SetStart if w == 0 else t.SetEnd)(ne)
+                j = pcbnew.PCB_TRACK(b)
+                j.SetStart(ne)
+                j.SetEnd(c)
+                j.SetWidth(t.GetWidth())
+                j.SetLayer(t.GetLayer())
+                j.SetNet(t.GetNet())
+                j.SetLocked(t.IsLocked())
+                b.Add(j)
+                added += 1
+    pcbnew.SaveBoard(dst, b)
+    return [added, skipped]
+
+
+def joiner_run(src, dst, iters=3, log=print):
+    """Last fallback for ends `run` and `via_run` left (D71cz): joiners to the exact via centre (see _joiners), DRC-guarded like `run`."""
+    return via_run(src, dst, iters, log, func="_joiners")
