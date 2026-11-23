@@ -8,7 +8,9 @@ Data (constraints TOML, all keys optional, `source` required when any number is 
       stub_mm_max                                      longest branch / via barrel stub
       via_db (loss per via), connector_db (fixed allowance)
       source = "datasheet p. N / research note"
-  [[dcdrop]]  net, current_a, drop_mv_max, drop_mv_target, source  (optional temp_c, plating_um)
+  [[dcdrop]]  net, current_a, drop_mv_max, drop_mv_target, source  (optional temp_c, plating_um, from, to: `from` = "REF" | "REF.PAD"
+              source, `to` = ["REF", "REF.PAD", ...] loads; each endpoint's pads on the net are one node; drop = current_a x the
+              WORST source->load resistance, full current to each load (conservative). Without from/to: worst pad pair + a WARN)
 
 Fallbacks (labelled in every row): no skew_ps_* -> [pairs.F] skew_max_mm (max) / skew_mm (target) converted with the
 layer delay; [pairs.F] skew_mm alone is the old single limit (max, no target); [pairs.F] skew_ps likewise.
@@ -490,6 +492,45 @@ def measure_paths(board, nets, rows, mode="trunk", zones=False):
     return out
 
 
+def _group(pad_nodes, spec):
+    """Pad nodes of `spec` ("REF" = every pad of REF on the net, "REF.PAD" = one pad)."""
+    spec = str(spec)
+    return [n for n, lab, _p in pad_nodes if lab == spec or lab.split(".")[0] == spec]
+
+
+def measure_src_load(board, net, rows, src, loads, zones=True):
+    """[dcdrop] from/to: [path] one per load (worst first): copper from the source group to each load group (each group
+    is one node: its pads are joined at zero resistance). path = measure_paths' keys layer_sq, via_list plus a, b, found,
+    contrib [{layer, w, mm, sq}] (top squares first)."""
+    adj, pad_nodes, _seg, vmap = _graph(board, net, rows, zones)
+    lab = {n: l for n, l, _p in pad_nodes}
+
+    def join(g):
+        for u in g[1:]:
+            adj[g[0]].append((u, 0.0, None))
+            adj[u].append((g[0], 0.0, None))
+        return g[0] if g else None
+    s0 = join(_group(pad_nodes, src))
+    out = []
+    for ld in loads:
+        l0 = join(_group(pad_nodes, ld))
+        if s0 is None or l0 is None:
+            out.append({"net": net, "a": str(src), "b": str(ld), "found": False,
+                        "why": f"{src if s0 is None else ld} has no pad on {net}"})
+            continue
+        dist, prev = _dijkstra(adj, s0)
+        if l0 not in dist:
+            out.append({"net": net, "a": str(src), "b": str(ld), "found": False, "why": f"{src} and {ld} not connected"})
+            continue
+        chain, lmm, lw, lsq, vias, _n, _e, _seq, _ins = _path(adj, pad_nodes, [], vmap, rows, s0, l0, prev, dist, lab)
+        contrib = sorted(({"layer": i["layer"], "w": i["w"], "mm": i["mm"], "sq": i["mm"] / i["w"]}
+                          for _p, _u, i in chain if i and i.get("kind") in ("seg", "zone") and i.get("w")),
+                         key=lambda c: -c["sq"])
+        out.append({"net": net, "a": str(src), "b": str(ld), "found": True, "layer_sq": lsq,
+                    "via_list": [dict(vmap[u]) for u, _k in vias], "contrib": contrib})
+    return out
+
+
 # ------------------------------------------------------------------ data + verdict
 def _family(table, net, legs=None):
     from . import budget
@@ -583,9 +624,16 @@ def dcdrop_rows(board, cons, rows):
     out = []
     dc = [d for d in cons.get("dcdrop", []) or []]
     if dc:
-        meas2 = measure_paths(board, sorted({d["net"] for d in dc}), rows, zones=True)
+        meas2 = measure_paths(board, sorted({d["net"] for d in dc if not d.get("from")}), rows, zones=True)
         for d in dc:
-            p = (meas2.get(d["net"]) or [{"found": False}])[0]
+            if d.get("from"):
+                ld = d.get("to") or []
+                ps = measure_src_load(board, d["net"], rows, d["from"], [ld] if isinstance(ld, str) else ld)
+                bad = [p for p in ps if not p["found"]]
+                ps = [p for p in ps if p["found"]]
+                p = max(ps, key=lambda q: dc_resistance_mohm(q, rows)) if ps and not bad else (bad[0] if bad else {"found": False, "why": "no `to` loads"})
+            else:
+                p = (meas2.get(d["net"]) or [{"found": False}])[0]
             row = {"name": d["net"], "kind": "dc", "legs": [d["net"]], "family": None, "labels": {}, "metrics": []}
             if not p.get("found"):
                 row.update(verdict="n/a", why=p.get("why", "no path"))
@@ -749,6 +797,9 @@ def check(board_path, cons):
             out.append(("WARN", "CHANNEL_SOURCE", f"[channel.{f}] sets budget numbers with no `source`", []))
         elif str(e.get("source", "")).upper().startswith("PLACEHOLDER"):
             out.append(("WARN", "CHANNEL_SOURCE", f"[channel.{f}] budget is a PLACEHOLDER, not from the parts", []))
+    for d in cons.get("dcdrop", []) or []:
+        if not (d.get("from") and d.get("to")):
+            out.append(("WARN", "CHANNEL_DCDROP_PAIR", f"dcdrop {d.get('net')}: no from/to, worst pad pair used", [d.get("net")]))
     if not (cons.get("channel") or cons.get("dcdrop")):
         return out
     for r in evaluate(board_path, cons):

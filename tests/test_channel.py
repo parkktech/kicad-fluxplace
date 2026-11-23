@@ -304,3 +304,44 @@ def test_dc_drop_zone_that_misses_an_end_does_not_help_it():
     _filled_zone(d, "P", 40, -20, 105, 20)                           # fill stops 40 mm short of pad 1
     r1 = CH.dc_resistance_mohm(CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0], ROWS)
     assert r1 == pytest.approx(r0)                                   # fill not reaching a node adds nothing (track under the fill edge is not credited: conservative)
+
+
+# ---------------------------------------------------------------- DC drop: from/to endpoints
+def _dc_board():
+    d = Bd()
+    d.pad(1, 0, 0, "P", 0.2)                       # source U1.1
+    d.pad(2, 10, 0, "P", 0.2)                      # near load U1.2
+    d.pad(3, 100, 0, "P", 0.2, ref="C1")           # decoupling cap far away on a 0.15 mm spur
+    d.pad(4, 50, 0, "P", 0.2, ref="U2")            # load, 1 mm trace
+    d.seg((0, 0), (10, 0), "P", w=1.0)
+    d.seg((10, 0), (50, 0), "P", w=1.0)
+    d.seg((50, 0), (100, 0), "P", w=0.15)
+    return d
+
+
+def _cons(**kw):
+    return {"dcdrop": [dict({"net": "P", "current_a": 2.0, "drop_mv_max": 90, "source": "t"}, **kw)]}
+
+
+def test_dcdrop_from_to_uses_the_listed_loads_not_the_far_cap():
+    d = _dc_board()
+    worst = CH.dcdrop_rows(d.b, _cons(), ROWS)[0]["metrics"][0]["value"]
+    r = CH.dcdrop_rows(d.b, _cons(**{"from": "U1.1", "to": ["U2"]}), ROWS)[0]
+    assert r["verdict"] != "n/a" and r["paths"][0]["b"] == "U2"
+    assert r["metrics"][0]["value"] == pytest.approx(2 * 1.72e-8 * 0.05 / (1e-3 * 35e-6) * 1e3, rel=0.02)
+    assert r["metrics"][0]["value"] < worst / 5                        # the 0.15 mm spur to C1 is the worst pair, not a load
+
+
+def test_dcdrop_from_to_takes_the_worst_load_and_groups_ref_pads():
+    d = _dc_board()
+    r = CH.dcdrop_rows(d.b, _cons(**{"from": "U1", "to": ["U2", "C1"]}), ROWS)[0]
+    assert r["paths"][0]["b"] == "C1"                                  # full current to each load, worst reported
+    bad = CH.dcdrop_rows(d.b, _cons(**{"from": "U1", "to": ["NOPE"]}), ROWS)[0]
+    assert bad["verdict"] == "n/a" and "NOPE" in bad["why"]
+
+
+def test_dcdrop_without_from_to_warns():
+    d = _dc_board()
+    out = CH.check(d.b, {**_cons(), "stackup": {"layers": [{"name": r_["name"], "type": r_["type"], "thickness": r_["thickness"],
+                                                              "epsilon_r": r_["epsilon_r"]} for r_ in ROWS], "planes": PLANES}})
+    assert any(c == "CHANNEL_DCDROP_PAIR" and "dcdrop P: no from/to, worst pad pair used" in m for _l, c, m, _r in out)
