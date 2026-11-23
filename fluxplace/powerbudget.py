@@ -25,6 +25,10 @@ CROWDING = 1.25                 # INF: current crowding at the pads; replaced by
 HOT_C = 85.0                    # INF: used when [env] temp_max_c is absent (the product's hot corner, D71c)
 FLOOR_MM = 0.127                # never plan below this (ready.min_feature_mm default)
 TIERS = ("target", "max")
+BULK_UF = 4.7                   # clusters.BULK_UF: above this a capacitor is bulk storage, not per-pin bypass
+BYPASS_MAX_MM = 5.0             # the pre-P3 gate limit of every support part (clusters.LIMIT_DEFAULT): FAIL stays where it was
+BULK_MM = (10.0, 15.0)          # INF, unverified: path inductance at pour width (0.3-0.5 nH/mm) below the ESL of a bulk part (2-5 nH)
+SENSE_MM = 5.0                  # feedback divider / sense resistor / any other support part (pre-P3 default)
 
 
 # ------------------------------------------------------------------ the quantities
@@ -121,7 +125,7 @@ def _ipc_width(rail, rows, layer):
     cu = _copper(rows)
     outer = layer in (cu[:1] + cu[-1:])
     w = s.get("width_outer" if outer else "width_inner")
-    return float(w if w is not None else (s.get("track_mm") or rail["floor_mm"]))
+    return max(float(w if w is not None else (s.get("track_mm") or 0.0)), rail["floor_mm"])      # never plan below the floor
 
 
 # ------------------------------------------------------------------ source and loads
@@ -264,13 +268,13 @@ def _choose(rail, ends):
     return {"kind": kind, "layers": [c["layer"]], "width_mm": c["width_ipc_mm"], "why": why}
 
 
-def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_path=None):
+def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_path=None, planes=None):
     """-> {"rails": {net: Rail}, "supports": [], "findings": [...], ...}. `rows` = stackup rows (channel.stack_rows)."""
     cons = cons or {}
     if rows is None:
         rows, _planes, _src = CH.stack_rows(cons, board_path)
     sizing = PW.plan(cons, board=board_path)
-    planes = set(((cons.get("stackup") or {}).get("planes")) or ())
+    planes = set(planes if planes is not None else ((cons.get("stackup") or {}).get("planes")) or ())
     hot, crowd, flo = hot_c(cons), crowding(cons), floor_mm(cons)
     out = {"rails": {}, "supports": [], "findings": [], "hot_c": hot, "crowding": crowd, "detour": CH.DETOUR}
     dc_by = {}
@@ -306,6 +310,8 @@ def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_pa
         rail["edges"] = _edges(rail, ends, rows) if ends and rail["choice"]["layers"] else []
         out["rails"][net] = rail
         out["findings"] += _findings(rail, B is not None)
+    if B is not None:
+        out["supports"] = supports(B, cons, spec, facts, mpn_map)
     return out
 
 
@@ -328,3 +334,108 @@ def _findings(rail, have_board):
             f.append({"code": "POWER_COPPER_IMPOSSIBLE", "level": "FAIL", "net": n,
                       "msg": f"{n}: the via barrels alone ({c['r_vias_mohm']:g} mohm) exceed the allowed {rail['r_allow_mohm']['max']:g} mohm"})
     return f
+
+
+# ------------------------------------------------------------------ the one support table
+def facts_for(cons, spec=None, anchors=()):
+    """({mpn: facts}, mpn_map) from the datasheet dir of [docs] datasheets (cited facts only); ({}, {}) when there is none."""
+    from . import elec as EL, parts as P
+    ds = P.resolve_dir((((cons or {}).get("docs") or {}).get("datasheets")), anchors)
+    try:
+        facts = EL.load_facts(ds) if ds and __import__("os").path.isdir(ds) else {}
+    except (OSError, ValueError):
+        facts = {}
+    return facts, {c["ref"]: c["mpn"] for c in (spec or {}).get("components", []) if isinstance(c, dict) and c.get("mpn")}
+
+
+def _planned(cons, net):
+    p = ((cons or {}).get("power") or {}).get(net)
+    return isinstance(p, dict) and PW.current_a(p) is not None
+
+
+def role_of(part, ref, net, info, cons):
+    """Role of a support part: loop (switch node), clock (crystal), bulk (> BULK_UF on a planned rail), bypass (capacitor), sense."""
+    from . import clusters as CL
+    if info and info["class"] == "switch_node" and info.get("budget"):
+        return "loop"
+    if info and info["class"] == "clock" and info.get("reason") == "crystal/oscillator":
+        return "clock"
+    if ref.startswith("C"):
+        uf = CL.cap_uf(part.get("value"))
+        return "bulk" if (uf or 0) > BULK_UF and _planned(cons, net) else "bypass"
+    return "sense"
+
+
+def _fact_mm(fx, key, names):
+    v = (fx or {}).get(key)
+    if isinstance(v, dict):
+        v = next((v[n] for n in names if n in v), None)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mpn_map=None):
+    """The limit of one support part: {role, target, max, unit, source, klass}. Source order: datasheet fact (decap_mm for
+    bypass, bulk_mm for bulk, REQ) -> derived (netclass budget and its basis, INF) -> default (INF). Target warns, max fails."""
+    from . import netclass as NC
+    role = role_of(B["parts"][ref], ref, net, info, cons)
+    if role in ("loop", "clock"):
+        b = float(info["budget"])
+        row = {"target": b, "max": b, "source": f"derived: netclass {info['class']} budget ({NC.BASIS.get(info['class'], 'class budget')})", "klass": "INF"}
+    elif role == "bypass":
+        row = {"target": NC.BUDGET["bypass"], "max": BYPASS_MAX_MM, "klass": "INF",
+               "source": f"target derived: netclass bypass ({NC.BASIS['bypass']}); max default {BYPASS_MAX_MM:g} mm (the pre-budget gate limit)"}
+    elif role == "bulk":
+        row = {"target": BULK_MM[0], "max": BULK_MM[1], "klass": "INF",
+               "source": f"default {BULK_MM[0]:g}/{BULK_MM[1]:g} mm, unverified: path inductance at pour width below the ESL of a bulk part (a datasheet bulk_mm replaces it)"}
+    else:
+        row = {"target": SENSE_MM, "max": SENSE_MM, "klass": "INF", "source": f"default {SENSE_MM:g} mm (sense / feedback / other support part)"}
+    key = {"bypass": "decap_mm", "bulk": "bulk_mm"}.get(role)
+    if key and ic and facts is None:
+        facts, mpn_map = facts_for(cons, spec)
+    if key and ic and facts:
+        from . import elec as EL
+        comp = next((c for c in (spec or {}).get("components", []) or [] if isinstance(c, dict) and c.get("ref") == ic), {"ref": ic})
+        mpn = EL._mpn(comp, mpn_map)
+        names = {str(pad)} | set(EL._names(comp, pad)) if pad is not None else set()
+        mm = _fact_mm((facts or {}).get(mpn), key, names)
+        if mm is not None:
+            src = ((facts.get(mpn) or {}).get("_src") or {}).get(key, "datasheet")
+            row = {"target": mm, "max": mm, "klass": "REQ", "source": f"datasheet fact {key} of {mpn} ({src})"}
+    row.update(role=role, unit="mm")
+    return row
+
+
+def supports(B, cons, spec=None, facts=None, mpn_map=None, cl=None):
+    """[Support]: one row per support part of every IC (clusters.build), graded with channel.verdict.
+    {ref, role, serves "IC.PAD", net, limit {target, max, unit, source, klass}, dist_mm, verdict, how, sure}. The single table:
+    clusters.far_parts, preroute.support_far and relocate read the same rows."""
+    from . import clusters as CL
+    if cl is None:
+        cl, _ = CL.build(B, cons, spec, facts=facts, mpn_map=mpn_map)
+    out = []
+    for c in cl:
+        for s in c["supports"]:
+            lim = {"target": s["target"], "max": s["limit"], "unit": "mm", "source": s["source"], "klass": s["klass"]}
+            v = CH.verdict(s["dist"], lim["target"], lim["max"])[0] if s["sure"] else "n/a"
+            out.append({"ref": s["ref"], "role": s["role"], "serves": f"{c['ic']}.{s['pad']}", "net": s["net"], "limit": lim,
+                        "dist_mm": round(s["dist"], 2), "verdict": v, "how": s["how"], "sure": s["sure"]})
+    return sorted(out, key=lambda r: (r["ref"]))
+
+
+# ------------------------------------------------------------------ the report (ready)
+def summary(plan):
+    """One line for the ready checklist: rails, shortest reach, edges over the max budget, supports over their limit."""
+    rails = plan["rails"]
+    reach = [e["reach_mm"]["max"] for r in rails.values() for e in r["edges"] if e["reach_mm"]["max"] is not None]
+    over = [(n, e["load"]) for n, r in rails.items() for e in r["edges"]
+            if e["est"].get("verdict") == "fail" or (e["reach_mm"]["max"] is not None and e["dist_mm"] > e["reach_mm"]["max"])]
+    sup = [x for x in plan.get("supports", []) if x["verdict"] == "fail"]
+    return (f"{len(rails)} rail(s) planned at {plan['hot_c']:g} C (crowding {plan['crowding']:g}); "
+            + (f"L_max {min(reach):g}..{max(reach):g} mm; " if reach else "")
+            + f"{len(over)} edge(s) over the max budget, {len(sup)} support(s) over their limit")
+
+
+def plan_json(plan):
+    """JSON-safe copy of the budget for power-plan.json (tuples become lists)."""
+    import json
+    return json.loads(json.dumps(plan, default=list))

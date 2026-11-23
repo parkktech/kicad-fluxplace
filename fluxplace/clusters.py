@@ -22,7 +22,6 @@ from . import geom as GM
 from . import netclass as NC
 
 SUPPORT = re.compile(r"^(C|R|L|FB|Y|X|XO)\d")
-LIMIT_DEFAULT = 5.0
 LANE_MM = {True: 1.0, False: 0.5}
 
 
@@ -112,16 +111,22 @@ def ownership(B, cls=None, cons=None, spec=None, min_pads=5):
         load[(net, ic)] += 1
         tgt = nearest_pad(ic, net, p)
         own[ref] = {"ic": ic, "net": net, "pad": tgt["num"], "via": p["num"], "how": how}
+    _explicit(B, cons, own, links)
     return own, links
 
 
-def support_limit(info):
-    """Max pad-to-pin distance (mm) for a support part on a net of this class."""
-    if info and info["class"] in ("switch_node", "bypass") and info["budget"]:
-        return info["budget"]
-    if info and info["class"] == "clock" and info["reason"] == "crystal/oscillator":
-        return info["budget"]
-    return LIMIT_DEFAULT
+def _explicit(B, cons, own, links):
+    """`[power."NET"] support = {REF = "IC.PAD"}`: the owner decided which pin the part serves; it wins over every guess."""
+    parts = B["parts"]
+    for net, pw in ((cons or {}).get("power") or {}).items():
+        for ref, tgt in ((pw or {}).get("support") or {}).items() if isinstance(pw, dict) else ():
+            ic, _, pad = str(tgt).partition(".")
+            part = parts.get(ref)
+            pin = next((q for q in parts.get(ic, {}).get("pads", ()) if str(q["num"]) == pad and q["net"] == net), None)
+            via = next((q for q in part["pads"] if q["net"] == net), None) if part else None
+            if pin and via:
+                own[ref] = {"ic": ic, "net": net, "pad": pin["num"], "via": via["num"], "how": "explicit"}
+                links.discard(ref)
 
 
 _CAPV = re.compile(r"([\d.]+)\s*([pnuµm]?)F", re.I)
@@ -160,9 +165,11 @@ def reg_rank(s, parts, pinname, cls):
     return 3
 
 
-def build(B, cons=None, spec=None):
-    """[{ic, supports: [{ref, net, pad, cls, weight, dist, limit}]}], ordered:
-    switch-node parts first, then by class weight, then by distance."""
+def build(B, cons=None, spec=None, facts=None, mpn_map=None):
+    """[{ic, supports: [{ref, net, pad, cls, weight, dist, limit, role, target, source, klass}]}], ordered:
+    switch-node parts first, then by class weight, then by distance. `limit` is the max (FAIL), `target` warns:
+    both come from powerbudget.support_row, the one support table."""
+    from . import powerbudget as PB
     cls = NC.classify(B, cons, spec)
     own, links = ownership(B, cls, cons, spec)
     parts = B["parts"]
@@ -172,22 +179,30 @@ def build(B, cons=None, spec=None):
         sp = next(p for p in part["pads"] if p["num"] == o["via"])
         pin = next(p for p in parts[o["ic"]]["pads"] if p["num"] == o["pad"])
         info = cls.get(o["net"])
-        lim = support_limit(info)
-        sure, how, ic_, pad_, dist = o["how"] != "spread", o["how"], o["ic"], o["pad"], math.hypot(
+        row = PB.support_row(B, cons, spec, ref, o["net"], info, facts=facts or {}, mpn_map=mpn_map)    # default limit (no served pin yet)
+        lim = row["max"]
+        planned_bulk = row["role"] == "bulk"
+        sole = len({q["ref"] for q in NC.net_pads(B)[o["net"]] if NC.is_ic(q["ref"], parts[q["ref"]])}) == 1
+        guess = o["how"] == "spread" and not (planned_bulk and sole)     # one IC on a planned rail: nothing to guess between
+        sure, how, ic_, pad_, dist = not guess, o["how"], o["ic"], o["pad"], math.hypot(
             sp["x"] - pin["x"], sp["y"] - pin["y"])
-        if o["how"] != "net" and o["how"] != "spread" or o["how"] == "spread":
+        if o["how"] not in ("net", "explicit"):
             # shared rail: a cap already within its limit of ANY IC pin on the rail serves that pin
             best = min(((math.hypot(q["x"] - sp["x"], q["y"] - sp["y"]), q) for q in NC.net_pads(B)[o["net"]]
                         if NC.is_ic(q["ref"], parts[q["ref"]])), key=lambda t: t[0], default=None)
             if best and best[0] <= lim:
                 ic_, pad_, dist, sure, how = best[1]["ref"], best[1]["num"], best[0], True, "near"
-            elif (cap_uf(part["value"]) or 0) > BULK_UF:
-                sure, how = False, "bulk"          # bulk storage is not per-pin bypass
+            elif (cap_uf(part["value"]) or 0) > BULK_UF and (guess or not planned_bulk):
+                sure, how = False, "bulk"          # bulk storage on an unplanned rail is not per-pin bypass
+            elif planned_bulk:
+                how = "bulk"                       # a planned rail's bulk part is graded against its owner's pin
+        row = PB.support_row(B, cons, spec, ref, o["net"], info, ic=ic_, pad=pad_, facts=facts, mpn_map=mpn_map)
         by[ic_].append({
             "ref": ref, "net": o["net"], "pad": pad_, "via": o["via"], "how": how,
             "sure": sure,
             "cls": info["class"] if info else "signal", "weight": info["weight"] if info else 1.0,
-            "dist": dist, "limit": lim})
+            "dist": dist, "limit": row["max"], "target": row["target"], "role": row["role"], "unit": "mm",
+            "source": row["source"], "klass": row["klass"]})
     out = []
     names = NC.pin_names(spec)
     for ic in sorted(by):

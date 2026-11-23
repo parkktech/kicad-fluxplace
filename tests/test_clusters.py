@@ -94,3 +94,55 @@ def test_routediag_far_support_uses_ownership(tmp_path):
     res = RD.diagnose(RD.load(p), ["VDD", "D410"])
     far = {c["part"] for n in res["nets"] for c in n["causes"] if c["cause"] == "FAR_SUPPORT_PART"}
     assert "C13" not in far and "C411" in far and "C412" in far
+
+
+# ---- P3: the one support table (powerbudget.support_row / supports)
+def _pb_board(tmp_path, c2=(30, 12), c1=(22, 20)):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    return PB, RD.load(PB.board(tmp_path, c2=c2, c1=c1))
+
+
+def _sup(B, cons, spec=None, facts=None, mpn_map=None):
+    from fluxplace import powerbudget as PBG
+    return {s["ref"]: s for s in PBG.supports(B, cons, spec, facts=facts or {}, mpn_map=mpn_map)}
+
+
+def test_rail_only_bulk_cap_is_graded_with_role_bulk_15mm(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    s = _sup(B, PB.CONS)
+    assert s["C2"]["role"] == "bulk" and s["C2"]["limit"]["max"] == 15.0 and s["C2"]["limit"]["target"] == 10.0
+    assert s["C2"]["sure"] and s["C2"]["dist_mm"] > 10                     # (30,12) is ~14 mm from U2: over target, inside max
+    assert s["C2"]["verdict"] == "over-target-pass" and s["C2"]["limit"]["klass"] == "INF"
+    PB2, B2 = _pb_board(tmp_path / "x" if (tmp_path / "x").mkdir() is None else tmp_path, c2=(30, 2))
+    assert _sup(B2, PB.CONS)["C2"]["verdict"] == "fail"
+    cl, _ = CL.build(B2, PB.CONS)
+    assert "C2" in {x["ref"] for _, x in CL.far_parts(cl)}
+
+
+def test_bypass_cap_is_3_target_5_max(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    c1 = _sup(B, PB.CONS)["C1"]
+    assert c1["role"] == "bypass" and (c1["limit"]["target"], c1["limit"]["max"]) == (3.0, 5.0) and c1["limit"]["klass"] == "INF"
+
+
+def test_decap_mm_fact_overrides_with_klass_req(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    spec = {"components": [{"ref": "U2", "mpn": "X2", "pinmap": {}}]}
+    facts = {"X2": {"decap_mm": 2.0, "_src": {"decap_mm": "X2.pdf#p9"}}}
+    c1 = _sup(B, PB.CONS, spec, facts)["C1"]
+    assert (c1["limit"]["target"], c1["limit"]["max"], c1["limit"]["klass"]) == (2.0, 2.0, "REQ") and "X2.pdf#p9" in c1["limit"]["source"]
+    cl, _ = CL.build(B, PB.CONS, spec, facts=facts)
+    assert {x["ref"] for _, x in CL.far_parts(cl)} == {"C1", "C2"} or "C1" in {x["ref"] for _, x in CL.far_parts(cl)}
+
+
+def test_explicit_power_support_wins(tmp_path):
+    import copy
+    PB, B = _pb_board(tmp_path)
+    cons = copy.deepcopy(PB.CONS)
+    cons["power"]["VOUT"]["support"] = {"C2": "U2.15"}
+    own, _ = CL.ownership(B, cons=cons)
+    assert own["C2"]["ic"] == "U2" and own["C2"]["pad"] == "15" and own["C2"]["how"] == "explicit"
+    s = _sup(B, cons)["C2"]
+    assert s["serves"] == "U2.15" and s["sure"]
