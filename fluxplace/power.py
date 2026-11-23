@@ -222,10 +222,11 @@ def neck_heat_c(current_a, length_mm, width_mm, oz):
     return current_a ** 2 * CU_RHO_OHM_M * (length_mm * 1e-3) ** 2 / (8 * CU_K_W_MK * a * a)
 
 
-def narrow_runs(segs):
-    """Group narrow segments [{layer, x1, y1, x2, y2, len, width, need}] into connected runs per layer (shared endpoints
-    within NECK_JOIN_MM; a via does not join layers: runs are per layer). A segment without endpoints is its own run.
-    -> [{layer, len, min_w, need, n}]."""
+def narrow_runs(segs, vias=()):
+    """Group narrow segments [{layer, x1, y1, x2, y2, len, width, need}] into connected runs (shared endpoints within
+    NECK_JOIN_MM on a layer; narrow ends that meet at one of the net's `vias` [{x, y, dia_mm}] are one run across the
+    layers: a via barrel is not full-width copper, so it does not end a constriction). A segment without endpoints is its
+    own run. -> [{layer ("A+B" when a via joins layers), layers, len, min_w, need, n}]."""
     par = list(range(len(segs)))
 
     def find(i):
@@ -246,12 +247,22 @@ def narrow_runs(segs):
                     for x2, y2, j in pts.get((lyr, cx + dx, cy + dy), ()):
                         if i != j and abs(x - x2) <= q and abs(y - y2) <= q:
                             par[find(i)] = find(j)
+    for v in vias or ():
+        rr = float(v.get("dia_mm") or 0.0) / 2 + q
+        at = [i for lst in pts.values() for x, y, i in lst if math.hypot(x - v["x"], y - v["y"]) <= rr]
+        for i in at[1:]:
+            par[find(i)] = find(at[0])
     runs = {}
     for i, g in enumerate(segs):
-        d = runs.setdefault(find(i), {"layer": g["layer"], "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0})
+        d = runs.setdefault(find(i), {"layers": set(), "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0})
+        d["layers"].add(g["layer"])
         d["len"] += g.get("len", 0.0)
         d["min_w"] = min(d["min_w"], g["width"])
+        d["need"] = max(d["need"], g["need"])
         d["n"] += 1
+    for d in runs.values():
+        d["layers"] = sorted(d["layers"])
+        d["layer"] = "+".join(d["layers"])
     return sorted(runs.values(), key=lambda d: (d["layer"], -d["len"]))
 
 
@@ -287,15 +298,23 @@ def _net_drop_fail(net, dc, has_dcdrop):
         return ""
     if st and st["mv"] is not None:
         return f"drop {st['mv']:.0f} > {st['max']:g} mV"
-    return f"drop not computed ({(st or {}).get('why') or 'no result'})"
+    return f"drop not computed ({(st or dc.get('__error__') or {}).get('why') or 'no result'})"
 
 
-def _neck_tests(run, r, outer):
+def _run_oz(run, r, outer, stackup):
+    """Copper weight for the heat test: the thinnest layer of the run, from the stackup row's own thickness (D71da: copper
+    weight from the stackup; the rail's oz is snapped to 0.5 oz steps and can round a thin foil up), else the rail's oz."""
+    t = {x.get("name"): float(x["thickness"]) for x in stackup or [] if x.get("type") == "copper" and x.get("thickness")}
+    return min(t[l] * 1e3 / CU_UM_PER_OZ if t.get(l) else (r["oz_outer"] if l in outer else r["oz_inner"])
+               for l in run.get("layers") or [run["layer"]])
+
+
+def _neck_tests(run, r, outer, stackup=None):
     """D71da tests 1-2 for one run -> list of failed-test strings (empty = passes)."""
     fails = []
     if run["len"] > NECK_MAX_MM + 1e-9:
         fails.append(f"length {run['len']:.2f} mm > {NECK_MAX_MM:g}")
-    oz = r["oz_outer"] if run["layer"] in outer else r["oz_inner"]
+    oz = _run_oz(run, r, outer, stackup)
     rise = r.get("rise_c") or DEFAULT_RISE_C
     dt = neck_heat_c(r["current_a"], run["len"], run["min_w"], oz)
     if dt > rise + 1e-9:
@@ -326,11 +345,11 @@ def check(facts, cons, dc=None):
                 need = r["track_mm"]
             if s["width"] < need - 1e-6:
                 narrow.append(dict(s, need=need))
-        if narrow and not (net in zone_nets and r["pour"]):
+        if narrow:                                   # D71da has no pour carve-out: a zone on the net proves no track
             bad, ok = [], []
             dropf = _net_drop_fail(net, dc, net in has_dc)
-            for run in narrow_runs(narrow):
-                f = _neck_tests(run, r, outer)
+            for run in narrow_runs(narrow, [v for v in facts.get("vias") or [] if v.get("net") == net and "x" in v]):
+                f = _neck_tests(run, r, outer, facts.get("stackup"))
                 (bad if f or dropf else ok).append((run, f))
             if ok:
                 out.append({"level": "INFO", "code": "POWER_NECKDOWN_OK", "refs": [net],

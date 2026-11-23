@@ -69,3 +69,37 @@ def test_mixed_runs_split_ok_and_fail():
     out = run([seg(0, 0, 1, 0), seg(5, 0, 8, 0)], dc=OK)
     assert [f["code"] for f in out] == ["POWER_NECKDOWN_OK", "POWER_WIDTH"]
     assert "1 neck-down run(s), 1.00 mm" in out[0]["msg"]
+
+
+def test_narrow_ends_meeting_at_a_via_are_one_run():
+    segs = [seg(0, 0, 1.5, 0), seg(1.5, 0, 3, 0, layer="B.Cu")]
+    assert [f["code"] for f in run(segs, dc=OK)] == ["POWER_NECKDOWN_OK"]            # no via there: two 1.5 mm runs
+    f = {"copper_layers": 2, "stackup": STACK, "track_geom": segs,
+         "vias": [{"net": "P", "x": 1.5, "y": 0, "dia_mm": 0.46}, {"net": "Q", "x": 0, "y": 0, "dia_mm": 0.46}]}
+    out = PW.check(f, cons(1.0), OK)
+    assert [x["code"] for x in out] == ["POWER_WIDTH"] and "B.Cu+F.Cu 3.00 mm" in out[0]["msg"] and "length 3.00 mm > 2" in out[0]["msg"]
+
+
+def test_a_pour_rail_with_a_zone_gets_no_blanket_exemption():
+    c = {"power": {"P": {"current_a": 4.0, "pour": True}}, "dcdrop": [{"net": "P", "current_a": 4.0, "drop_mv_max": 150, "source": "t"}]}
+    f = {"copper_layers": 2, "stackup": STACK, "zone_nets": ["P"], "track_geom": [seg(0, 0, 8, 0, w=0.15), seg(20, 0, 20.5, 0, w=0.15)]}
+    out = {x["code"]: x for x in PW.check(f, c, OK)}
+    assert "length 8.00 mm > 2" in out["POWER_WIDTH"]["msg"] and "1 neck-down run(s), 0.50 mm" in out["POWER_NECKDOWN_OK"]["msg"]
+
+
+def test_heat_uses_the_stackup_thickness_of_the_runs_layer():
+    stack = [{"type": "copper", "name": "F.Cu", "thickness": 0.035}, {"type": "copper", "name": "In1.Cu", "thickness": 0.0152},
+             {"type": "copper", "name": "In2.Cu", "thickness": 0.0152}, {"type": "copper", "name": "B.Cu", "thickness": 0.035}]
+    r = {"oz_outer": 1.0, "oz_inner": 0.5, "current_a": 1.49, "rise_c": 10.0}
+    inner = {"layer": "In1.Cu", "layers": ["In1.Cu"], "len": 2.0, "min_w": 0.127}
+    dt = PW.neck_heat_c(1.49, 2.0, 0.127, 15.2 / 35.0)                               # 15.2 um foil: fails ...
+    assert 13.0 < dt < 13.3 and 9.8 < PW.neck_heat_c(1.49, 2.0, 0.127, 0.5) < 10.0   # ... the snapped 0.5 oz (17.5 um) would pass
+    assert PW._neck_tests(inner, r, {"F.Cu", "B.Cu"}, stack) == [f"dT {dt:.1f} C > 10"]
+    both = dict(inner, layer="F.Cu+In1.Cu", layers=["F.Cu", "In1.Cu"])                # a via-joined run: the thinnest layer
+    assert PW._neck_tests(both, r, {"F.Cu", "B.Cu"}, stack) == [f"dT {dt:.1f} C > 10"]
+    assert PW._neck_tests(dict(inner, layer="F.Cu", layers=["F.Cu"]), r, {"F.Cu", "B.Cu"}, stack) == []
+
+
+def test_unmeasurable_drop_names_the_error():
+    out = run([seg(0, 0, 1, 0)], dc={"__error__": {"ok": False, "mv": None, "max": None, "why": "OSError: boom"}})
+    assert out[0]["code"] == "POWER_WIDTH" and "drop not computed (OSError: boom)" in out[0]["msg"]

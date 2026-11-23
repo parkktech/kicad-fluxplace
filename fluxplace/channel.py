@@ -9,8 +9,8 @@ Data (constraints TOML, all keys optional, `source` required when any number is 
       via_db (loss per via), connector_db (fixed allowance)
       source = "datasheet p. N / research note"
   [[dcdrop]]  net, current_a, drop_mv_max, drop_mv_target, source  (optional temp_c, plating_um, from, to: `from` = "REF" | "REF.PAD"
-              source, `to` = ["REF", "REF.PAD", ...] loads; each endpoint's pads on the net are one node; drop = current_a x the
-              WORST source->load resistance, full current to each load (conservative). Without from/to: worst pad pair + a WARN)
+              source (its pads on the net are one node), `to` = ["REF", "REF.PAD", ...] loads; drop = current_a x the WORST
+              source->load-pad resistance, full current to every load pad (conservative). Without from/to: worst pad pair + a WARN)
 
 Fallbacks (labelled in every row): no skew_ps_* -> [pairs.F] skew_max_mm (max) / skew_mm (target) converted with the
 layer delay; [pairs.F] skew_mm alone is the old single limit (max, no target); [pairs.F] skew_ps likewise.
@@ -223,8 +223,6 @@ def _eff_len(t, pads, mm):
     return max(0.0, mm - ins), ins
 
 
-ZONE_FLOOR_SQ = 0.5       # a fill joins two nodes with at least this many squares (spreading resistance of a sheet)
-
 
 def _zone_islands(board, net, layer_names):
     """[(layer name, island index, polygon set, outline index, area mm2)] of the net's filled zones on `layer_names`."""
@@ -243,30 +241,38 @@ def _zone_islands(board, net, layer_names):
     return out
 
 
+def zone_squares(d, area, short, a):
+    """Squares between two contacts of radius `a` (mm) a distance `d` apart in a filled island (area mm2, short bbox side
+    mm): d / w_s + ln(min(d, w_s) / a) / pi, w_s = min(area / d, short). The first term is a strip of the island's mean
+    width over that length (the bbox side stops a thin island borrowing area it cannot use); the second is the spreading
+    resistance of the two contacts (two discs on a sheet: ln(d / a) / pi), which dominates when the island is wide."""
+    w_s = max(min(area / d, short), 1e-6)
+    return d / w_s + math.log(max(min(d, w_s) / max(a, 1e-3), 1.0)) / math.pi
+
+
 def _zone_links(board, net, nodes, link, res):
     """Filled zone copper of the net as conductors. OUR OWN MATH (D71da / LESSONS-W15 rule 1: KiCad has no resistance
-    calculation): every pair of nodes (pad, via barrel, track end) that a filled island of the net on a layer contains is
-    joined by one edge of d / w_eff squares, d = centre distance, w_eff = min(A / d, island short bbox side, ...) floored
-    so that squares >= ZONE_FLOOR_SQ. A / d is the mean width of a strip of that length and area; the bbox side stops a
-    thin island borrowing area it cannot use. An ESTIMATE of a 2-D sheet, not a bound: it assumes the island's nodes are
-    reached through the fill (current crowding at narrow necks is not modelled). Nodes = [(node, x, y, layer-name set)].
-    Only nodes the fill actually contains are joined; a net with no filled zone gets no edge (nothing changes)."""
+    calculation): every pair of nodes (pad, via barrel, track end) that a filled island of the net on a layer contains
+    (KiCad's fill polygon holds the node's centre) is joined by one edge of zone_squares(). An ESTIMATE of a 2-D sheet,
+    not a bound: strip + contact spreading is right for a compact island; an island with slots, a U shape or a neck
+    between the two nodes has more resistance than this (not modelled). Nodes = [(node, x, y, layer-name set, contact
+    radius mm)]. Only nodes the fill actually contains are joined; a net with no filled zone gets no edge."""
     import pcbnew
-    layer_names = {l for _n, _x, _y, ls in nodes for l in ls}
+    layer_names = {l for _n, _x, _y, ls, _a in nodes for l in ls}
     for ln, ps, k, area in _zone_islands(board, net, layer_names):
         bb = ps.Outline(k).BBox()
         short = min(bb.GetWidth(), bb.GetHeight()) / 1e6
-        inside = [(n, x, y) for n, x, y, ls in nodes if ln in ls
+        inside = [(n, x, y, a) for n, x, y, ls, a in nodes if ln in ls
                   and ps.Contains(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), k)]
-        for i, (u, ux, uy) in enumerate(inside):
-            for v, vx, vy in inside[:i]:                  # every pair once: a direct edge beats a chain of floored hops
+        for i, (u, ux, uy, ua) in enumerate(inside):
+            for v, vx, vy, va in inside[:i]:              # every pair once
                 d = math.hypot(ux - vx, uy - vy)
                 if d <= TOL:
                     link(u, v)
                     continue
-                w = max(min(area / d, short, 1.0 / ZONE_FLOOR_SQ * d), 1e-6)     # w_eff <= d / floor
-                info = {"kind": "zone", "layer": ln, "mm": d, "raw": d, "inside": 0.0, "w": w, "id": -1}
-                link(u, v, d / w if res else d, info)
+                sq = max(zone_squares(d, area, short, min(ua, va)), 1e-9)
+                info = {"kind": "zone", "layer": ln, "mm": d, "raw": d, "inside": 0.0, "w": d / sq, "id": -1}
+                link(u, v, sq if res else d, info)
 
 
 def _graph(board, net, rows, zones=False):
@@ -336,9 +342,10 @@ def _graph(board, net, rows, zones=False):
     if zones:
         pcb_names = {board.GetLayerName(i) for i in range(pcbnew.PCB_LAYER_ID_COUNT)}
         znodes = [(n, pcbnew_mm(p.GetPosition().x), pcbnew_mm(p.GetPosition().y),
-                   {l for l in pcb_names if p.IsOnLayer(names[l])}) for n, _l, p in pad_nodes]
-        znodes += [(vn, vx, vy, set(span)) for vn, vx, vy, _r, span, _vi in vnodes]
-        znodes += [(n, x, y, {board.GetLayerName(l)}) for n, x, y, l in ends]
+                   {l for l in pcb_names if p.IsOnLayer(names[l])},
+                   min(p.GetBoundingBox().GetWidth(), p.GetBoundingBox().GetHeight()) / 2e6) for n, _l, p in pad_nodes]
+        znodes += [(vn, vx, vy, set(span), vr) for vn, vx, vy, vr, span, _vi in vnodes]
+        znodes += [(n, x, y, {board.GetLayerName(l)}, seginfo[i // 2]["w"] / 2) for i, (n, x, y, l) in enumerate(ends)]
         _zone_links(board, net, znodes, link, True)
     return adj, pad_nodes, seginfo, {vn: vi for vn, _x, _y, _r, _s, vi in vnodes}
 
@@ -499,34 +506,35 @@ def _group(pad_nodes, spec):
 
 
 def measure_src_load(board, net, rows, src, loads, zones=True):
-    """[dcdrop] from/to: [path] one per load (worst first): copper from the source group to each load group (each group
-    is one node: its pads are joined at zero resistance). path = measure_paths' keys layer_sq, via_list plus a, b, found,
-    contrib [{layer, w, mm, sq}] (top squares first)."""
+    """[dcdrop] from/to: [path] one per load: copper from the source group (its pads are one node: joined at zero
+    resistance) to the WORST pad of each load group (every supply pad of a load must hold the budget; load pads are never
+    joined, so no path shortcuts through a part). A load with a pad the source does not reach is not found.
+    path = measure_paths' keys layer_sq, via_list plus a, b (the load as given), pad, found, contrib [{layer, w, mm, sq}]
+    (top squares first)."""
     adj, pad_nodes, _seg, vmap = _graph(board, net, rows, zones)
     lab = {n: l for n, l, _p in pad_nodes}
-
-    def join(g):
-        for u in g[1:]:
-            adj[g[0]].append((u, 0.0, None))
-            adj[u].append((g[0], 0.0, None))
-        return g[0] if g else None
-    s0 = join(_group(pad_nodes, src))
+    sg = _group(pad_nodes, src)
+    for u in sg[1:]:
+        adj[sg[0]].append((u, 0.0, None))
+        adj[u].append((sg[0], 0.0, None))
+    dist, prev = _dijkstra(adj, sg[0]) if sg else ({}, {})
     out = []
     for ld in loads:
-        l0 = join(_group(pad_nodes, ld))
-        if s0 is None or l0 is None:
+        lg = _group(pad_nodes, ld)
+        if not sg or not lg:
             out.append({"net": net, "a": str(src), "b": str(ld), "found": False,
-                        "why": f"{src if s0 is None else ld} has no pad on {net}"})
+                        "why": f"{ld if sg else src} has no pad on {net}"})
             continue
-        dist, prev = _dijkstra(adj, s0)
-        if l0 not in dist:
-            out.append({"net": net, "a": str(src), "b": str(ld), "found": False, "why": f"{src} and {ld} not connected"})
+        cut = [n for n in lg if n not in dist]
+        if cut:
+            out.append({"net": net, "a": str(src), "b": str(ld), "found": False, "why": f"{src} and {lab[cut[0]]} not connected"})
             continue
-        chain, lmm, lw, lsq, vias, _n, _e, _seq, _ins = _path(adj, pad_nodes, [], vmap, rows, s0, l0, prev, dist, lab)
-        contrib = sorted(({"layer": i["layer"], "w": i["w"], "mm": i["mm"], "sq": i["mm"] / i["w"]}
+        l0 = max(lg, key=lambda n: (dist[n], lab[n]))
+        chain, lmm, lw, lsq, vias, _n, _e, _seq, _ins = _path(adj, pad_nodes, [], vmap, rows, sg[0], l0, prev, dist, lab)
+        contrib = sorted(({"layer": i["layer"], "w": i["w"], "mm": i["mm"], "sq": i["mm"] / i["w"], "kind": i["kind"]}
                           for _p, _u, i in chain if i and i.get("kind") in ("seg", "zone") and i.get("w")),
                          key=lambda c: -c["sq"])
-        out.append({"net": net, "a": str(src), "b": str(ld), "found": True, "layer_sq": lsq,
+        out.append({"net": net, "a": str(src), "b": str(ld), "pad": lab[l0], "found": True, "layer_sq": lsq,
                     "via_list": [dict(vmap[u]) for u, _k in vias], "contrib": contrib})
     return out
 

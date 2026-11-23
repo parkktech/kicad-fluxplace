@@ -292,7 +292,17 @@ def test_dc_drop_filled_zone_conducts_and_unfilled_does_not():
     p = CH.measure_paths(d.b, ["P"], ROWS, zones=True)["P"][0]
     r1 = CH.dc_resistance_mohm(p, ROWS)
     assert r1 < r0 / 50                                              # ~ d^2/A = 2.3 squares vs 667 squares of track
-    assert p["layer_sq"]["F.Cu"] == pytest.approx(100 ** 2 / (110 * 40), rel=0.2)
+    # strip 100 / min(4400 / 100, 40) = 2.5 squares + spreading of two 0.1 mm contacts ln(40 / 0.1) / pi = 1.91
+    assert p["layer_sq"]["F.Cu"] == pytest.approx(2.5 + math.log(400) / math.pi, rel=0.02)
+
+
+def test_zone_squares_strip_plus_contact_spreading():
+    # wide sheet, close contacts: two discs on a sheet, ln(d / a) / pi, never the old 0.5-square floor
+    assert CH.zone_squares(10.0, 100 * 100, 100.0, 0.15) == pytest.approx(0.1 + math.log(10 / 0.15) / math.pi)
+    assert CH.zone_squares(10.0, 100 * 100, 100.0, 0.15) > 1.3
+    # thin island: the strip term rules (50 mm of a 1 mm strip), spreading only from the contact to the strip width
+    assert CH.zone_squares(50.0, 60.0, 1.0, 0.15) == pytest.approx(50 + math.log(1 / 0.15) / math.pi)
+    assert CH.zone_squares(0.2, 100.0, 10.0, 0.5) == pytest.approx(0.02)       # overlapping contacts: no spreading term
 
 
 def test_dc_drop_zone_that_misses_an_end_does_not_help_it():
@@ -345,3 +355,28 @@ def test_dcdrop_without_from_to_warns():
     out = CH.check(d.b, {**_cons(), "stackup": {"layers": [{"name": r_["name"], "type": r_["type"], "thickness": r_["thickness"],
                                                               "epsilon_r": r_["epsilon_r"]} for r_ in ROWS], "planes": PLANES}})
     assert any(c == "CHANNEL_DCDROP_PAIR" and "dcdrop P: no from/to, worst pad pair used" in m for _l, c, m, _r in out)
+
+
+def test_dcdrop_load_is_judged_at_its_worst_pad_and_no_path_shortcuts_through_a_part():
+    d = Bd()
+    d.pad(1, 0, 0, "P", 0.2)                       # source U1.1
+    d.pad(1, 10, 0, "P", 0.2, ref="U2")            # U2: one supply pad near the source ...
+    d.pad(2, 60, 0, "P", 0.2, ref="U2")            # ... and one 50 mm on, behind a 0.15 mm trace
+    d.pad(1, 61, 0, "P", 0.2, ref="U3")            # U3 sits beside U2.2
+    d.seg((0, 0), (10, 0), "P", w=1.0)
+    d.seg((10, 0), (60, 0), "P", w=0.15)
+    d.seg((60, 0), (61, 0), "P", w=1.0)
+    ps = {p["b"]: p for p in CH.measure_src_load(d.b, "P", ROWS, "U1", ["U2", "U3", "U2.1"])}
+    assert ps["U2"]["pad"] == "U2.2" and ps["U2"]["layer_sq"]["F.Cu"] > 300          # worst pad, not the near one
+    assert ps["U2.1"]["layer_sq"]["F.Cu"] < 12                                        # a named pad is that pad
+    assert ps["U3"]["layer_sq"]["F.Cu"] > 300                                         # not U2.1 -> (inside U2) -> U2.2 -> U3
+
+
+def test_dcdrop_load_with_an_unreached_pad_is_not_found():
+    d = Bd()
+    d.pad(1, 0, 0, "P", 0.2)
+    d.pad(1, 10, 0, "P", 0.2, ref="U2")
+    d.pad(2, 60, 0, "P", 0.2, ref="U2")            # open
+    d.seg((0, 0), (10, 0), "P", w=1.0)
+    r = CH.dcdrop_rows(d.b, _cons(**{"from": "U1", "to": ["U2"]}), ROWS)[0]
+    assert r["verdict"] == "n/a" and "U2.2" in r["why"]
