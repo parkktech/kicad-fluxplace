@@ -1917,7 +1917,7 @@ def cmd_tune(a):
     budget = a.budget if a.budget is not None else TU.default_budget(len(pairs))
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
-                        amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
+                        amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
                         log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
     from fluxplace import tune as TU

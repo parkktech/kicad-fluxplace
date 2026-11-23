@@ -189,21 +189,32 @@ def _profile(src, net, want_path=False):
     return PA.profile(B, net, want_path)
 
 
-def pair_skew(path, B, master, slave, kicad_cli="kicad-cli"):
-    """(P mm, N mm, P - N, source) of a pair on the board file `path`: the D71cv definition (pairaudit.channel_paths: per signal path, pad
-    edge to pad edge, via barrel counted, worst orientation), else KiCad's net lengths, else pairaudit's pad-to-pad walk."""
+def measure_pair(path, B, master, slave, cons=None, limit_mm=None, kicad_cli="kicad-cli"):
+    """D71cx: the graded skew of a pair on the board file `path` (netlen.pair_skew: KiCad's DRC lengths for a 2-terminal pair, per-orientation
+    paths for a joined one) and the unit it is graded in.  -> dict
+      ok, why        ok False = unmeasured / MEASURE_DISAGREE: the pair is not tuned and cannot pass
+      lm, ls         KiCad's P and N net lengths (mm)
+      skew, unit     signed P - N in the budget's unit: "ps" (delay skew, when the budget is in ps) or "mm"
+      limit          the target in that unit (limit_mm(master) for mm budgets, the ps target for ps budgets); None = not graded
+      eq_mm, lim_eq  the same skew and limit as mm of the shorter side's copper, which is what a meander adds (ps / mean ps per mm)
+      src            basis: kicad | path"""
     from . import netlen, pairaudit as PA
-    lm, ls = _profile(B, master)["length"], _profile(B, slave)["length"]
-    mp = PA.channel_paths(dict(B, file=path), master, slave) if path else None
-    if mp is not None:
-        w = max(mp["paths"], key=lambda r: r["skew"])
-        return w["p"], w["n"], w["d"], "path"
-    k = (netlen.pair_lengths(path, [(master, slave)], kicad_cli) or {}).get((master, slave)) if path else None
-    if k is None:
-        return lm, ls, lm - ls, "audit"
-    if k["p"] is None:                                       # equal within 0.0001 mm
-        return lm, ls, 0.0, "kicad"
-    return k["p"], k["n"], k["skew"], "kicad"
+    B = dict(B, file=path)
+    psb = PA.ps_budget(cons, master) if cons is not None else None
+    ps = netlen.pair_skew(B, master, slave, cons, kicad_cli=kicad_cli, grade_ps=bool(psb))
+    out = {"ok": ps["status"] == "ok", "why": ps["why"], "lm": ps["p_mm"], "ls": ps["n_mm"], "src": ps["basis"], "status": ps["status"]}
+    if not out["ok"]:
+        return out
+    if psb:
+        if ps["skew_ps"] is None:
+            return dict(out, ok=False, why="PAIR_DELAY_UNKNOWN (a layer without a reference plane)")
+        k = ((ps["p_ps"] / ps["p_mm"]) + (ps["n_ps"] / ps["n_mm"])) / 2 if ps["p_mm"] and ps["n_mm"] else None
+        k = k or 6.0
+        out.update(skew=ps["skew_ps"], unit="ps", limit=psb[0], eq_mm=ps["skew_ps"] / k, lim_eq=psb[0] / k)
+    else:
+        lim = limit_mm(master) if callable(limit_mm) else limit_mm
+        out.update(skew=ps["skew_mm"], unit="mm", limit=lim, eq_mm=ps["skew_mm"], lim_eq=lim)
+    return out
 
 
 def path_len(src, net):
@@ -468,7 +479,7 @@ def _copy_sidecars(board_path, work):
 
 
 def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
-               amp_mm=0.6, max_rounds=6, log=print, budget=None, stall=STALL_TRIES, result=None):
+               amp_mm=0.6, max_rounds=6, log=print, budget=None, stall=STALL_TRIES, result=None, cons=None):
     """pairs: {slave: master}. limit_mm: float or callable(master). Works on files so every step is a fresh pcbnew session
     (SWIG decays otherwise). Returns [(master, slave, P mm, N mm)].
 
@@ -477,7 +488,9 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     out_path (the input when nothing was accepted) and every temp file and lock file is removed. `result` (a dict) is filled:
     {stopped: None|"budget"|"stall"|"signal", elapsed_s, budget_s, pairs: [{pair, p_mm, n_mm, skew, limit, status, reason}]},
     status ok | over | needs_reroute | not_reached. A pair whose legs differ in layer sequence or via count (or are open) is
-    needs_reroute: no tries are spent on it."""
+    needs_reroute: no tries are spent on it.
+    cons: the constraints. With them a pair whose budget is in ps is tuned to equal DELAY (D71cx: its skew, limit and the length a meander
+    adds are measure_pair's ps numbers); without them, or for an mm budget, the skew is KiCad's length difference."""
     import pcbnew
     bud = budget if isinstance(budget, Budget) else Budget(budget, stall)
     work = out_path + ".work.kicad_pcb"
@@ -519,12 +532,16 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                         if not (_profile(B, master)["path"] and _profile(B, slave)["path"]):
                             log(f"    {master}/{slave}: a leg has no pad-to-pad path: not tuned")
                             break
-                        lm, ls, skew, _src = pair_skew(work, B, master, slave, kicad_cli)
-                        if abs(skew) <= lim(master):
+                        m = measure_pair(work, B, master, slave, cons, lim, kicad_cli)
+                        if not m["ok"]:
+                            log(f"    {master}/{slave}: {m['why']}: not tuned")
+                            break
+                        skew = m["skew"]
+                        if abs(skew) <= m["limit"]:
                             break
                         longer, shorter = (master, slave) if skew > 0 else (slave, master)
                         on_path = path_segs(B, shorter)
-                        log(f"  {master}/{slave}: skew {skew:+.2f} mm (limit {lim(master)}) round {rnd + 1}")
+                        log(f"  {master}/{slave}: skew {skew:+.2f} {m['unit']} (limit {m['limit']:.3g}) round {rnd + 1}")
                         ok = False
                         for gap in (1.5, 3.0):                      # 1. shorten the long side
                             ok = attempt(lambda bd, g=gap: shortcut(bd, longer, max_gap_mm=g, log=log) > 0, tries)
@@ -532,7 +549,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                                 break
                         if ok:
                             continue
-                        need_mm = abs(skew) - 0.5 * lim(master)   # 2. lengthen the short side: land inside the tolerance
+                        need_mm = abs(m["eq_mm"]) - 0.5 * m["lim_eq"]   # 2. lengthen the short side: land inside the tolerance
                         for cand in range(6):
                             for amp, pitch in ((amp_mm, 0.7), (amp_mm * 0.6, 0.5), (0.35, 0.45)):
                                 ok = attempt(lambda bd, c=cand, a=amp, p=pitch: meander_to(
@@ -549,7 +566,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
                                                               log=log, on_path=on_path) > 0, tries)
                         if ok:
                             continue
-                        log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} mm")
+                        log(f"    {master}/{slave}: no DRC-clean tuning found — left at {skew:+.2f} {m['unit']}")
                         break
                 except Stalled:
                     stalls.add(master)
@@ -571,14 +588,18 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
     B_out = _load_routediag(out_path)
     out_rows = []
     for slave, master in sorted(pairs.items()):
-        lm, ls, sk, _src = pair_skew(out_path, B_out, master, slave, kicad_cli)
-        report.append((master, slave, lm, ls))
-        limit = lim(master)
-        row = {"pair": f"{master}/{slave}", "p_mm": round(lm, 3), "n_mm": round(ls, 3), "skew": round(sk, 3),
-               "limit": limit if limit != float("inf") else None, "reason": ""}
+        m = measure_pair(out_path, B_out, master, slave, cons, lim, kicad_cli)
+        lm, ls = m["lm"], m["ls"]
+        report.append((master, slave, lm if lm is not None else 0.0, ls if ls is not None else 0.0))
+        limit = m.get("limit", lim(master))
+        row = {"pair": f"{master}/{slave}", "p_mm": None if lm is None else round(lm, 3), "n_mm": None if ls is None else round(ls, 3),
+               "skew": round(m["skew"], 3) if m["ok"] else None, "unit": m.get("unit", "mm"),
+               "limit": limit if limit is not None and limit != float("inf") else None, "reason": ""}
         if master in need:
             row.update(status="needs_reroute", reason=need[master])
-        elif abs(sk) <= limit:
+        elif not m["ok"]:
+            row.update(status="unmeasured", reason=m["why"])
+        elif abs(m["skew"]) <= limit:
             row["status"] = "ok"
         elif master not in reached and stopped in ("budget", "signal"):
             row.update(status="not_reached", reason=stopped)

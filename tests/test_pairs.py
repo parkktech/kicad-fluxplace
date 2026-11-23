@@ -220,9 +220,18 @@ def gduo(ref, x, y, p, n, pitch=0.5, **kw):
     return PG.fp(ref, x, y, [PG.pad("1", 0, 0, p, 0.3, 0.8), PG.pad("2", pitch, 0, n, 0.3, 0.8)], **kw)
 
 
+def _four_layers(path):
+    """3 copper layers is not a board kicad-cli loads: add a full GND plane on In2.Cu (the signal layers stay F / In1 / B)."""
+    txt = open(path).read().replace('(31 "B.Cu" signal)', '(6 "In2.Cu" signal) (31 "B.Cu" signal)')
+    plane = '(zone (net 1) (net_name "GND") (layer "In2.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n'
+    open(path, "w").write(txt.rstrip().rstrip(")") + plane + ")\n")
+
+
 def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     cage = PB.keepout(15, 15, 25.5, 16) + PB.keepout(15, 24, 25.5, 24.5) + PB.keepout(15, 15, 15.5, 24.5) + PB.keepout(25, 15, 25.5, 24.5)
     b = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N") + cage)      # F / In1 / B; the rule areas are on F and B
+    # kicad-cli (the skew authority, D71cx) cannot load a 3-copper-layer board: add a full GND plane on In2.Cu (signal layers stay F / In1 / B)
+    _four_layers(b)
     out = str(tmp_path / "o.kicad_pcb")
     rep = PR.run(b, {}, None, out)
     r = rep["pairs"][0]
@@ -230,6 +239,7 @@ def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     assert r["status"] == "complete" and r["layers"] == ["F.Cu", "In1.Cu", "F.Cu"] and r["vias"] == 2 and r["skew"] <= 0.3
     # with nothing in the way the pair stays on the outer layer (an inner layer costs more)
     b2 = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N"), name="c.kicad_pcb")
+    _four_layers(b2)
     assert PR.run(b2, {}, None, str(tmp_path / "o2.kicad_pcb"))["pairs"][0]["layers"] == ["F.Cu"]
 
 
@@ -460,8 +470,8 @@ def test_a_pair_already_connected_is_never_ripped_by_a_later_pair(tmp_path):
 
 
 def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
-    """in-pad copper beyond the pad entry and via height are in KiCad's net length and not in the pad-to-pad walk: a leg with a stub
-    inside its pad is longer for KiCad, and the audit grades KiCad's number (with a fallback + warning when the CLI is missing)."""
+    """D71cx: a 2-terminal pair is graded on KiCad's net lengths (in-pad copper and via height included), with no own-math fallback:
+    kicad-cli failing leaves the pair `unknown` (PAIR_UNMEASURED)."""
     import shutil
     from fluxplace import pairaudit as PA, netlen
     if not shutil.which("kicad-cli"):
@@ -472,17 +482,8 @@ def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
     out = str(tmp_path / "o.kicad_pcb")
     B = RD.load(out)
     k = netlen.pair_lengths(out, [("ETH_N", "ETH_P")])
-    assert k is not None and set(k[("ETH_N", "ETH_P")]) == {"p", "n", "skew"}
+    assert k is not None and set(k[("ETH_N", "ETH_P")]) == {"p", "n", "skew"} and k[("ETH_N", "ETH_P")]["p"] is not None
     a = PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]
-    cp = PA.channel_paths(B, "ETH_N", "ETH_P")                      # D71cv: the skew is per path (channel.measure_paths), pad edge to pad edge
-    assert a["length_src"] == "path" and cp is not None and abs(a["skew"] - cp["skew"]) < 2e-3 and len(cp["paths"]) == 1
-    assert abs(cp["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) <= 0.1 + abs(cp["paths"][0]["inside"][0] - cp["paths"][0]["inside"][1])   # KiCad cross-check
-    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is not None   # cached run above: same board
+    assert a["length_src"] == "kicad" and a["basis"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 1e-3
     netlen.CACHE.clear()
-    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None, caller falls back
-    import os
-    os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"] = "1"
-    try:
-        assert PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]["length_src"] in ("audit", "path")
-    finally:
-        del os.environ["FLUXPLACE_AUDIT_OWN_LENGTHS"]
+    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None

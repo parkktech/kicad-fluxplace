@@ -7,8 +7,8 @@ sequence with the same via count, and are within the pair's skew limit (`constra
              the pair is retried as ONE two-net job, never left half
   open       neither leg closed
 
-A leg's profile (layers, vias) is measured along the copper path between its two farthest pads; its skew is KiCad's (netlen.py: all
-copper of the net, via height, in-pad copper), falling back to the walk with a warning when kicad-cli fails."""
+A leg's profile (layers, vias) is measured along the copper path between its two farthest pads; the skew is netlen.pair_skew (D71cx):
+KiCad's DRC lengths, delay skew where the budget is in ps; no fallback to own length math."""
 import heapq
 import math
 import os
@@ -154,124 +154,6 @@ def _dists(g, src):
 _CH = {}
 
 
-def channel_paths(B, p, n, cons=None):
-    """THE skew definition (D71cv): per signal path, pad edge to pad edge (copper inside the net's own pads excluded), via barrel
-    height from the stackup counted, one path per orientation.  Measured by channel.measure_paths on the board file.
-    A pair with a connector that has several pads on the net (joined rows) is judged on every orientation; any other pair on its
-    longest path (a tap or a flow-through part's second pin is a stub, not a path).
-    -> {paths: [{a, b, p, n, d (P - N, signed), skew, inside}], stubs: [{path, mm}], skew: worst, stub: longest spur, d: signed worst}
-    or None (no file, an open leg, channel/pcbnew unavailable)."""
-    f = (B or {}).get("file") if isinstance(B, dict) else None
-    if not f or not os.path.isfile(f):
-        return None
-    st = os.stat(f)
-    key = (os.path.abspath(f), st.st_mtime_ns, st.st_size, p, n)
-    if key in _CH:
-        return _CH[key]
-    out = None
-    try:
-        from . import channel as CH, kicad_io as IO
-        rows, _pl, _src = CH.stack_rows(cons or {}, f)
-        if not rows:                                       # no stackup template in the constraints: the board's own (names, thickness)
-            from . import review as RV
-            rows = [dict(r, roughness_rms_um=CH.DEFAULT_ROUGHNESS_UM) for r in RV.parse_stackup_text(open(f, errors="replace").read())]
-        meas = CH.measure_paths(IO.load(f), [p, n], rows, mode="all")
-        from . import pairs as PRS                           # P pad <-> N pad pairing: pairs.terminals (same part first, then nearest), symmetric in p/n
-        mate = {}
-        for t in PRS.terminals(B, p, n, 16.0)[0]:
-            mate[f"{t['p']['ref']}.{t['p']['num']}"], mate[f"{t['n']['ref']}.{t['n']['num']}"] = f"{t['n']['ref']}.{t['n']['num']}", f"{t['p']['ref']}.{t['p']['num']}"
-        byend = {frozenset((q["a"], q["b"])): q for q in meas[n] if q.get("found")}
-        ors = [(q, byend.get(frozenset((mate.get(q["a"]), mate.get(q["b"])))), f"{q['a']}>{q['b']}") for q in meas[p]
-               if q.get("found") and q["a"].split(".")[0] != q["b"].split(".")[0]]
-        if ors and all(b is not None for _a, b, _l in ors):
-            L = lambda q: q["length_mm"] + q["via_mm"]
-            rowsout = [{"a": a["a"], "b": a["b"], "p": round(L(a), 3), "n": round(L(b), 3), "d": round(L(a) - L(b), 3),
-                        "skew": round(abs(L(a) - L(b)), 3), "inside": [a["inside_pad_total_mm"], b["inside_pad_total_mm"]],
-                        "stub": max(a["stub_max_mm"], b["stub_max_mm"])} for a, b, _l in ors]
-            refs = {}
-            for q in B["pads"]:
-                if q["net"] in (p, n) and not q.get("np"):
-                    refs.setdefault(q["ref"], set()).add((q["net"], q["num"]))
-            joined = any(len(v) > 2 and re.match(r"(J|P|X|CN|CON)\d", r.upper()) for r, v in refs.items())
-            if not joined:
-                rowsout = [max(rowsout, key=lambda r: r["p"])]
-            w = max(rowsout, key=lambda r: r["skew"])
-            out = {"paths": rowsout, "skew": w["skew"], "d": w["d"], "stub": max(r["stub"] for r in rowsout),
-                   "stubs": [{"path": f"{r['a']}>{r['b']}", "mm": r["stub"]} for r in rowsout]}
-    except Exception as e:                                 # noqa: BLE001 - pcbnew missing / odd board: the caller falls back
-        print(f"pairaudit: channel path measure failed for {p}/{n}: {e}", file=sys.stderr)
-        out = None
-    _CH[key] = out
-    return out
-
-
-def _cross_check(p, n, cp, k):
-    """2-terminal pair: warn when KiCad's whole-net skew and the per-path skew differ by more than 0.1 mm beyond the copper inside pads."""
-    if not cp or not k or len(cp["paths"]) != 1 or k["p"] is None and abs(k["skew"]) < 1e-9 and cp["skew"] < 0.1:
-        return
-    ins = cp["paths"][0]["inside"]
-    gap = abs(abs(k["skew"]) - cp["skew"])
-    if gap > 0.1 + abs(ins[0] - ins[1]):
-        key = ("xchk", p, n, round(gap, 2))
-        if key not in _NOTED:
-            _NOTED.add(key)
-            print(f"pairaudit: WARNING {p}/{n}: per-path skew {cp['skew']:.3f} mm vs KiCad net-length skew {abs(k['skew']):.3f} mm "
-                  f"(differ {gap:.2f} mm, in-pad copper allows {abs(ins[0] - ins[1]):.2f}): branches or a via the path does not use", file=sys.stderr)
-
-
-def multi_paths(B, p, n, pad_max=16.0):
-    """Per signal path skew of a pair with more than two terminals where a part has several pads on the net (the two rows of a joined
-    connector).  Terminals = P/N pad pairs (pairs.terminals).  A path runs between two terminals of different parts, per pad pair, P
-    leg against N leg, via height included; a spur is the copper from a terminal to where it joins the rest of its part's pads
-    (3-terminal junction distance).  -> None for a normal pair (two terminals) or an open leg, else
-    {paths: [{a, b, p, n, skew}], stubs: [{at, p, n}], skew: worst path skew, stub: longest spur}."""
-    from . import pairs as PRS
-    terms, _lone = PRS.terminals(B, p, n, pad_max)
-    if len(terms) < 3:
-        return None
-    gv = _via_height(B)
-    gp, gn = _graph(B, p, gv), _graph(B, n, gv)
-    if gp is None or gn is None:
-        return None
-    ix = lambda g, pad: next((i for i, q in enumerate(g["pads"]) if q is pad), None)
-    ip = [ix(gp, t["p"]) for t in terms]
-    inn = [ix(gn, t["n"]) for t in terms]
-    if None in ip or None in inn:
-        return None
-    dp, dn = [_dists(gp, i) for i in ip], [_dists(gn, i) for i in inn]
-    ref = [t["p"]["ref"] for t in terms]
-    joined = [r for r in set(ref) if ref.count(r) > 1 and re.match(r"(J|P|X|CN|CON)\d", r.upper())]
-    if not joined:                                         # joined rows are a CONNECTOR with several pads on the net (a flow-through chip's pins
-        return None                                        # are one signal path inside the part): else KiCad's total stands
-    ref = [r if r in joined else f"{r}#{k}" for k, r in enumerate(ref)]
-    name = [f"{t['p']['ref']}.{t['p']['num']}/{t['n']['num']}" for t in terms]
-    paths = []
-    for a in range(len(terms)):
-        for b in range(a + 1, len(terms)):
-            if ref[a] == ref[b]:
-                continue
-            lp, ln = dp[a].get(ip[b]), dn[a].get(inn[b])
-            if lp is None or ln is None:
-                return None
-            paths.append({"a": name[a], "b": name[b], "p": round(lp, 3), "n": round(ln, 3), "skew": round(abs(lp - ln), 3)})
-    stubs = []
-    for a in range(len(terms)):
-        same = [j for j in range(len(terms)) if j != a and ref[j] == ref[a]]
-        out = [c for c in range(len(terms)) if ref[c] != ref[a]]
-        if not same or not out:
-            continue
-        sp = []
-        for d, ia_, ix_ in ((dp, ip, ip), (dn, inn, inn)):
-            v = [(d[a].get(ix_[j], math.inf) + d[a].get(ix_[c], math.inf) - d[j].get(ix_[c], math.inf)) / 2 for j in same for c in out]
-            sp.append(max(0.0, min(v)))
-        if all(x < math.inf for x in sp):
-            stubs.append({"at": name[a], "p": round(sp[0], 3), "n": round(sp[1], 3)})
-    if not paths:
-        return None
-    return {"paths": paths, "stubs": stubs, "skew": max(x["skew"] for x in paths),
-            "stub": max([max(x["p"], x["n"]) for x in stubs] or [0.0])}
-
-
 def pair_list(cls):
     """[(p, n)] from the net classes' partner links (sorted, each pair once)."""
     seen, out = set(), []
@@ -286,47 +168,83 @@ def pair_list(cls):
 _NOTED = set()
 
 
-def over_target_line(p, n, skew, target, mx):
-    return f"PAIR_SKEW_OVER_TARGET {p}/{n} skew {skew:.3f} mm, target {target:g} (+{skew - target:.3f} over), max {mx:g}: pass"
+def over_target_line(p, n, skew, target, mx, unit="mm"):
+    return f"PAIR_SKEW_OVER_TARGET {p}/{n} skew {skew:.3f} {unit}, target {target:g} (+{skew - target:.3f} over), max {mx:g}: pass"
 
 
-def _note_over_target(p, n, skew, target, mx):
+def _note_over_target(p, n, skew, target, mx, unit="mm"):
     """a pair between its target and its maximum passes, and the user is told once per value: stderr line + the run's event stream."""
-    key = (p, n, round(skew, 3), target, mx)
+    key = (p, n, round(skew, 3), target, mx, unit)
     if key in _NOTED:
         return
     _NOTED.add(key)
-    line = over_target_line(p, n, skew, target, mx)
+    line = over_target_line(p, n, skew, target, mx, unit)
     print(line, file=sys.stderr)
     try:
         from . import events as EV
-        EV.emit("pair_skew_over_target", pair=f"{p}/{n}", skew_mm=round(skew, 3), target_mm=target, over_mm=round(skew - target, 3),
-                max_mm=mx, verdict="pass", msg=line)
+        EV.emit("pair_skew_over_target", pair=f"{p}/{n}", skew=round(skew, 3), unit=unit, target=target, over=round(skew - target, 3),
+                max=mx, verdict="pass", msg=line)
     except Exception:                                  # noqa: BLE001 - the stream is advice
         pass
 
 
+def ps_budget(cons, master):
+    """(target_ps, max_ps, source) when the pair's budget is stated in ps (an explicit [channel.F] skew_ps_*, or the winning
+    skew entry of the constraints is *_ps), else None (the budget is in mm).  D71cx: a ps budget is graded on delay skew."""
+    from . import constraints as C, channel as CH
+    b, lab, _fam = CH.resolve_budget(cons or {}, master)
+    if "skew_ps_max" in b and str(lab.get("skew_ps_max", "")).startswith("[channel."):
+        mx = b["skew_ps_max"]
+        return b.get("skew_ps_target", mx), mx, lab["skew_ps_max"]
+    try:
+        C.skew_limit_source(cons or {}, master)
+        return None
+    except ValueError:
+        pass
+    tgt, src = C.skew_limit_source(cons or {}, master, 1.0)              # ps_per_mm = 1: the value comes back in ps
+    mx, _ = C.skew_max_source(cons or {}, master, 1.0)
+    return tgt, max(mx, tgt), src
+
+
 def audit(B, pairs, cons, open_nets):
-    """-> {(p, n): {status, why, p: profile, n: profile}}; `open_nets` = nets with open connections (any container with `in`)."""
+    """-> {(p, n): {status, why, p: profile, n: profile}}; `open_nets` = nets with open connections (any container with `in`).
+    THE skew is netlen.pair_skew (D71cx): KiCad's DRC lengths for a 2-terminal pair, per-orientation paths for a multi-terminal one,
+    delay skew (ps) where the budget is in ps.  kicad-cli failing leaves the pair `unknown` (UNMEASURED), never graded from own math;
+    a leg whose own decomposition misses KiCad's total is `unknown` (MEASURE_DISAGREE)."""
     from . import constraints as C, netlen
     res = {}
     closed = [(p, n) for p, n in pairs if p not in open_nets and n not in open_nets]
-    kl = None                                          # KiCad is the length authority (its skew DRC); the pad-to-pad walk is the fallback
-    if closed and isinstance(B, dict) and B.get("file") and not os.environ.get("FLUXPLACE_AUDIT_OWN_LENGTHS"):
+    kl = None
+    if closed and isinstance(B, dict) and B.get("file"):
         kl = netlen.pair_lengths(B["file"], closed)
-        if kl is None:
-            print("pairaudit: WARNING KiCad lengths unavailable (kicad-cli failed): skew from the pad-to-pad walk, which skips in-pad copper, "
-                  "via height and branches", file=sys.stderr)
     for p, n in pairs:
         po, no = p in open_nets, n in open_nets
         e = {"status": "open", "why": ""}
         if not po and not no:
             pp, pn = profile(B, p), profile(B, n)
             e.update(p=pp, n=pn)
-            lim, lim_src = C.skew_limit_checked(cons or {}, p)     # lim None: PAIR_DELAY_UNKNOWN, not graded
+            psb = ps_budget(cons, p)
+            lim, lim_src = (psb[0], psb[2]) if psb else C.skew_limit_checked(cons or {}, p)
+            unit = "ps" if psb else "mm"
+            ps = netlen.pair_skew(B, p, n, cons, lengths=kl if kl is not None else {}, grade_ps=bool(psb))
+            e.update(basis=ps["basis"], skew_mm=ps["skew_mm"], skew_ps=ps["skew_ps"], recon=ps["recon"], unit=unit, length_src=ps["basis"])
+            if ps["status"] != "ok":                    # unmeasured / MEASURE_DISAGREE: cannot pass, no fallback to own math
+                code = "MEASURE_DISAGREE" if ps["status"] == "MEASURE_DISAGREE" else "PAIR_UNMEASURED"
+                e.update(causes=[], skew=None, limit=None, limit_from=lim_src, status="unknown", code=code,
+                         why=f"{code}: {ps['why']}; pair not graded")
+                res[(p, n)] = e
+                continue
+            if ps["p_mm"] is not None:
+                pp, pn = dict(pp, length=round(ps["p_mm"], 4), path_length=pp["length"]), dict(pn, length=round(ps["n_mm"], 4), path_length=pn["length"])
+                e.update(p=pp, n=pn)
             if lim is None:                            # a ps limit with no layer delay: never graded as passing
                 e.update(causes=[], skew=None, limit=None, limit_from=lim_src, status="unknown",
                          why=f"{lim_src}; pair not graded")
+                res[(p, n)] = e
+                continue
+            if psb and ps["skew_ps"] is None:
+                e.update(causes=[], skew=None, limit=None, limit_from=lim_src, status="unknown", code="PAIR_DELAY_UNKNOWN",
+                         why="PAIR_DELAY_UNKNOWN (a layer of the pair has no reference plane); pair not graded")
                 res[(p, n)] = e
                 continue
             why, causes = [], []
@@ -336,38 +254,25 @@ def audit(B, pairs, cons, open_nets):
             if pp["vias"] != pn["vias"]:
                 why.append(f"vias {pp['vias']} vs {pn['vias']}")
                 causes.append("vias")
-            skew = abs(pp["length"] - pn["length"])
-            e["length_src"] = "audit"
-            k = (kl or {}).get((p, n))
-            if k:                                      # KiCad's total copper length per net; equal lengths report nothing (skew 0)
-                skew, e["length_src"] = abs(k["skew"]), "kicad"
-                if k["p"] is not None:
-                    pp, pn = dict(pp, length=round(k["p"], 4), path_length=pp["length"]), dict(pn, length=round(k["n"], 4), path_length=pn["length"])
-                    e.update(p=pp, n=pn)
-            mp = channel_paths(B, p, n, cons)         # THE skew: per path, pad edge to pad edge, via height in (channel.measure_paths)
-            if mp is not None:
-                e["length_src"] = "path"
-                skew = mp["skew"]
-                e.update(paths=mp["paths"], stubs=mp["stubs"], skew_signed=mp["d"])
-                _cross_check(p, n, mp, (kl or {}).get((p, n)))
-            else:
-                mp = multi_paths(B, p, n)              # no channel: the own walk for joined rows (KiCad total above for the rest)
-                if mp:
-                    skew, e["length_src"] = mp["skew"], "path"
-                    e.update(paths=mp["paths"], stubs=mp["stubs"])
-            if mp:
+            skew = abs(ps["skew_ps"]) if psb else abs(ps["skew_mm"])
+            e.update(paths=ps["paths"], stubs=[{"path": f"{r['a']}>{r['b']}", "mm": r["stub"]} for r in ps["paths"] if r["a"]],
+                     skew_signed=ps["skew_ps"] if psb else ps["skew_mm"])
+            if ps["basis"] == "path":
                 sm = C.stub_max_mm(cons or {}, p)
-                if sm is not None and mp["stub"] > sm:
-                    why.append(f"spur {mp['stub']:.2f} > {sm:g} mm")
+                if sm is not None and ps["stub_mm"] > sm:
+                    why.append(f"spur {ps['stub_mm']:.2f} > {sm:g} mm")
                     causes.append("stub")
-            mx, _mx_src = C.skew_max_checked(cons or {}, p)           # FAILS only past the maximum (D71cv); the limit is the target
-            mx = lim if mx is None else mx
+            if psb:
+                mx = psb[1]
+            else:
+                mx, _mx_src = C.skew_max_checked(cons or {}, p)       # FAILS only past the maximum (D71cv); the limit is the target
+                mx = lim if mx is None else mx
             if skew > mx:
-                why.append(f"skew {skew:.2f} > {mx:g} mm")
+                why.append(f"skew {skew:.2f} > {mx:g} {unit}")
                 causes.append("skew")
             elif skew > lim:
                 e["over_target"] = round(skew - lim, 3)
-                _note_over_target(p, n, skew, lim, mx)
+                _note_over_target(p, n, skew, lim, mx, unit)
             e.update(causes=causes, skew=round(skew, 3), limit=mx, target=lim, limit_from=lim_src)
             e["status"], e["why"] = ("mismatch", "; ".join(why)) if why else ("complete", "")
         elif po != no:

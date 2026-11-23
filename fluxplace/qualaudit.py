@@ -193,7 +193,7 @@ def autotune(board, cons, conn, log=lambda m: None):
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(tmp)[0] + ext)
     lim = lambda master: (lambda v: float("inf") if v is None else v)(C.skew_limit_checked(cons or {}, master)[0])
-    TU.tune_pairs(board, tmp, {r["n"]: r["p"] for r in rows}, lim, max_rounds=int(r_.get("tune_rounds", 3)), log=log)
+    TU.tune_pairs(board, tmp, {r["n"]: r["p"] for r in rows}, lim, max_rounds=int(r_.get("tune_rounds", 3)), log=log, cons=cons)
     open1 = conn(tmp)
     B1 = RD.load(tmp)
     after = {r["pair"]: r for r in pair_rows(B1, cls, cons, set(open1))}

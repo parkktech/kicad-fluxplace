@@ -1841,7 +1841,7 @@ def _r_ai_merge(base, out, gaps, ctx, regs, reg):
 def _r_tune(base, out, gaps, ctx):
     """PHASE3H B8: skew-only pairs: the shorter leg (slave) is meandered toward its partner (tune.tune_pairs, with the
     pair's skew limit). The candidate goes through close's guard; no output when nothing was tuned."""
-    from . import tune as TU
+    from . import tune as TU, pairaudit as PA_
     pairs, limits = {}, {}
     for g in gaps:
         if g["kind"] != "pair-skew" or len(g.get("nets") or []) != 2:
@@ -1849,15 +1849,17 @@ def _r_tune(base, out, gaps, ctx):
         blk = _pair_block(base, ctx["cons"], g)
         legs = blk.get("legs") or {}
         lim = blk.get("skew_limit_mm")
-        if len(legs) != 2 or lim is None:
+        if len(legs) != 2:
             continue
         slave = min(legs, key=legs.get)
         master = next(n for n in g["nets"] if n != slave)
-        pairs[slave], limits[master] = master, lim
+        if lim is None and not PA_.ps_budget(ctx["cons"], master):      # a ps budget is graded in ps inside tune_pairs (D71cx)
+            continue
+        pairs[slave], limits[master] = master, float("inf") if lim is None else lim
     if not pairs:
         return {"status": "no pair"}
     res = {}
-    TU.tune_pairs(base, out, pairs, limit_mm=lambda m: limits[m], budget=ctx["budget_s"], result=res)
+    TU.tune_pairs(base, out, pairs, limit_mm=lambda m: limits[m], budget=ctx["budget_s"], result=res, cons=ctx["cons"])
     return {"status": "ran" if os.path.exists(out) else "no change", "pairs": len(pairs), "stopped": res.get("stopped")}
 
 
