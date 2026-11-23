@@ -23,7 +23,7 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "track_not_centered_on_via": "via-offcentre"}
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
-ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-skew", "pair-impedance", "open-gap",
+ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance", "open-gap",
          "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
@@ -67,7 +67,7 @@ def _pair_audit(board, cons, opn=None):
     return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
 
 
-SEV = {"pair-open": 3, "pair-asym": 2, "pair-skew": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
+SEV = {"pair-open": 3, "pair-unmeasured": 3, "pair-asym": 2, "pair-skew": 1, "pair-stub": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
 
 
 def impedance_off_nets(board, cons):
@@ -112,10 +112,14 @@ def review_gaps(board, cons, opn=None):
             kind = "pair-open"
         elif st == "mismatch" and any(c in ("layers", "vias") for c in causes):
             kind = "pair-asym"
+        elif st == "mismatch" and "stub" in causes:
+            kind = "pair-stub"               # a spur past stub_max_mm (alone or with skew): a gap, never silently clean
         elif st == "mismatch" and causes == ["skew"]:
             kind = "pair-skew"
+        elif st == "unknown":
+            kind = "pair-unmeasured"         # D71cx: an unmeasured pair (kicad-cli failed, MEASURE_DISAGREE, PAIR_DELAY_UNKNOWN) cannot pass
         else:
-            continue                         # ok / unknown rows are not graded
+            continue                         # complete rows are not gaps
         out.append({"base": f"pair:{p}/{n}", "kind": kind, "sev": SEV[kind],
                     "class": "hs-pair" if review.pair_gated(cons, p) else "pair", "nets": [p, n], "at": None,
                     "layer": None, "evidence": str(r.get("why") or "")[:120], "refs": [p, n],
@@ -170,8 +174,8 @@ def _r5_set(kind, targets, protect, relax, fallback=()):
 
 # PHASE3I B1: stage gates. Gap kinds that must be zero before the next constructive stage runs. Pair kinds count only
 # for gated (high-speed) pairs; low-speed pairs are left to the router. [flow.gates] in constraints overrides per stage.
-PAIR_KINDS = ("pair-open", "pair-asym", "pair-skew", "pair-impedance")
-GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-skew", "pair-impedance"],
+PAIR_KINDS = ("pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance")
+GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance"],
                  "route": ["power-width", "power-vias"]}          # PHASE3I F2: no `power` stage exists; rails are laid by `route`
 
 
@@ -2093,26 +2097,31 @@ def _rung_job(job_path):
 
 
 def gate_measure(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", kinds=None):
-    """A5: a gate is a MEASURE, not a repair. One refill + DRC + gap classification on a copy of `board`; no rung runs.
-    -> {"stop": "clean" | "open", "left": [gap rows in scope], "start": vitals}; writes work/gaps.json and work/stop.json
-    (stop "open" exits like an unclean gate: pipeline exit 5). The repair loop (`close`) belongs to the stage that owns the kinds."""
+    """A5: a gate is a MEASURE, not a repair. One refill + DRC + gap classification on a TEMP copy of `board`; no rung runs and nothing
+    but work/stop.json is written (a `best.kicad_pcb`, `gaps.json` and memo of an earlier `close` in `work` are never touched, and the
+    input board is never refilled or saved).
+    -> {"stop": "clean" | "open", "left": [gap rows in scope], "start": vitals, "review_failed": [...]}.  `open` also when a review source
+    crashed (review_failed): a pair audit that raised is missing rows, never clean.  Exit 5 on `open` (pipeline)."""
+    import tempfile
     os.makedirs(work, exist_ok=True)
-    best = os.path.join(work, "best.kicad_pcb")
-    _copy(board, best)
-    _sidecars(board, best)
     cons = cons or C.load(cons_path)
-    try:
-        m = _remeasure(best, kicad_cli)
-    except _RefillError:
-        m = dict(measure(best, kicad_cli))
-    _classify_into(m, cons, best)
+    with tempfile.TemporaryDirectory(prefix="fxgate-") as td:
+        tmp = os.path.join(td, "m.kicad_pcb")
+        _copy(board, tmp)
+        _sidecars(board, tmp)
+        try:
+            m = _remeasure(tmp, kicad_cli)
+        except _RefillError:
+            m = dict(measure(tmp, kicad_cli))
+        _classify_into(m, cons, tmp)
     left = [g for g in m["gaps"] if kinds is None or in_scope(g, kinds)]
-    stop = "open" if left else "clean"
+    failed = list(m.get("review_failed") or [])
+    stop = "open" if (left or failed) else "clean"
     rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at")} for g in left]
-    res = {"stop": stop, "exit": 0 if stop == "clean" else 5, "measure_only": True, "start": _vitals(m), "left": rows}
-    _write_json(os.path.join(work, "gaps.json"), {"gaps": m["gaps"], "memo": [], "round": 0})
+    res = {"stop": stop, "exit": 0 if stop == "clean" else 5, "measure_only": True, "start": _vitals(m), "left": rows,
+           "review_failed": failed}
     _write_json(os.path.join(work, "stop.json"), res)
-    return dict(res, best=best)
+    return dict(res, best=board)
 
 
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
@@ -2376,7 +2385,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             attempt(0, kind, "ai", tg)
             save(0)
     for r in range(max_rounds):
-        if kinds is None and not any(g["kind"] in DISPATCH for g in m["gaps"]) or kinds is not None and not vis(m["gaps"]):
+        if kinds is None and not any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in m["gaps"]) or kinds is not None and not vis(m["gaps"]):
             stop = "clean"                               # a scoped gap with no rung keeps the gate open: stop "flat"
             break
         hit = False

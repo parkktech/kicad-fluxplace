@@ -782,10 +782,10 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
     cons = {"not_pairs": ["SENSE_ADC_P", "SENSE_ADC_N"]}
     rows_out, failed = GP.review_gaps("b.kicad_pcb", cons)
     got = {(g["kind"], g["class"], g["evidence"]) for g in rows_out}
-    assert got == {("pair-open", "hs-pair", "one leg open"), ("pair-skew", "pair", "skew 2 mm"),
-                   ("power-width", "power", "VBAT narrow"), ("pin-escape", "plain", "U3 blocked")}
+    assert got == {("pair-open", "hs-pair", "one leg open"), ("pair-skew", "pair", "skew 2 mm"), ("pair-unmeasured", "pair", "?"),
+                   ("power-width", "power", "VBAT narrow"), ("pin-escape", "plain", "U3 blocked")}       # an unknown row is a gap (D71cx)
     assert failed == [] and {g["base"] for g in rows_out if g["kind"].startswith("pair")} == {
-        "pair:USB_D_P/USB_D_N", "pair:Y_P/Y_N"}
+        "pair:USB_D_P/USB_D_N", "pair:Y_P/Y_N", "pair:Z_P/Z_N"}
 
 
 def test_review_gaps_isolates_failing_source(monkeypatch):

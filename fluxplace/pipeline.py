@@ -1252,7 +1252,8 @@ def _gate_measure(c, n, name, board, kinds, src=None):
         _stamp_gate(d, src)
     ok = r["stop"] == "clean"
     return {"verdict": "pass" if ok else "fail", "board": board,
-            "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope, opens {r['start']['opens']}",
+            "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope"
+                    + (f", review source(s) failed: {', '.join(r['review_failed'])}" if r.get("review_failed") else "") + f", opens {r['start']['opens']}",
             "next": [] if ok else [f"gate {name}: {len(r['left'])} gap(s): {os.path.join(d, 'stop.json')}"],
             "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"]}}
 
