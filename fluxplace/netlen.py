@@ -75,7 +75,31 @@ def _rows(cons, board_file):
         from . import review as RV
         rows = [dict(r, roughness_rms_um=CH.DEFAULT_ROUGHNESS_UM) for r in RV.parse_stackup_text(open(board_file, errors="replace").read())]
         planes = []
+    if not rows:
+        rows = _default_rows(board_file)
     return rows, planes
+
+
+def _default_rows(board_file, copper_mm=0.035):
+    """A board with no stackup: KiCad spreads the board thickness evenly between the copper layers (its via height on such a board is
+    thickness less half a copper layer, which is what leg_decomposition counts).  Copper rows carry names; no planes, so no delay."""
+    try:
+        import pcbnew
+        from . import kicad_io as IO
+        b = IO.load(board_file)
+        cu = [b.GetLayerName(i) for i in b.GetEnabledLayers().CuStack()]
+        t = b.GetDesignSettings().GetBoardThickness() / 1e6
+    except Exception:                                      # noqa: BLE001 - no pcbnew: no stackup, no via barrels
+        return []
+    if len(cu) < 2:
+        return []
+    die = max(0.0, (t - copper_mm * len(cu)) / (len(cu) - 1))
+    rows = []
+    for k, name in enumerate(cu):
+        rows.append({"type": "copper", "name": name, "thickness": copper_mm})
+        if k < len(cu) - 1:
+            rows.append({"type": "core", "thickness": die, "epsilon_r": 4.5})
+    return rows
 
 
 def leg_decomposition(board, net, rows, planes, tol=0.005):

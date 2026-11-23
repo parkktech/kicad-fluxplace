@@ -99,3 +99,16 @@ def test_tune_without_a_ps_budget_leaves_equal_lengths_alone(tmp_path):
     res = {}
     TU.tune_pairs(f, out, {"E_N": "E_P"}, 0.1, cons={"pairs": {"E_": {"skew_mm": 0.1}}}, result=res, log=lambda m: None)
     assert res["pairs"][0]["status"] == "ok" and res["pairs"][0]["unit"] == "mm" and res["accepted"] == 0
+
+
+def test_board_without_a_stackup_reconciles_via_height_with_kicad(tmp_path):
+    """no (stackup): KiCad's via height is the board thickness less half a copper layer; netlen._default_rows models it."""
+    body = PB.fp("U1", 30, 30, [PB.pad("1", 0, 0, "E_P"), PB.pad("2", 0, 2.0, "E_N")]) + \
+        PB.fp("U2", 30, 30, [PB.pad("1", 20, 0, "E_P"), PB.pad("2", 20, 2.0, "E_N")])
+    for net, y in (("E_P", 0.0), ("E_N", 2.0)):
+        body += (_seg(net, (0, y), (8, y), "F.Cu") + _via(net, 8).format(y=y + OY) + _seg(net, (8, y), (20, y), "B.Cu"))
+    f = tmp_path / "b.kicad_pcb"
+    f.write_text('(kicad_pcb (version 20260206) (generator "pcbnew")\n(layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n' + EDGE + body + ")\n")
+    r = netlen.pair_skew(RD.load(str(f)), "E_P", "E_N", {}, grade_ps=True)
+    assert r["status"] == "ok" and max(abs(r["recon"]["p"]), abs(r["recon"]["n"])) <= netlen.RECON_TOL_MM, r["recon"]
+    assert r["skew_ps"] is None                                   # no reference planes: no delay, so a ps budget would not grade it
