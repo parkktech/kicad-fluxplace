@@ -64,6 +64,16 @@ def test_pair_skew_rung_release_is_reported_and_the_commit_point_accepts_it(tmp_
     assert {"D_P", "D_N"} <= set(BW.load_manifest(res["best"])["nets"])                                         # re-sealed: protected at the new copper
 
 
+def test_only_the_target_pairs_the_candidate_re_laid_are_released(tmp_path, monkeypatch):
+    tuned = _moved(tmp_path)                                           # D_P/D_N re-laid, SIG as it was
+    inp = _setup(tmp_path, monkeypatch, tuned)
+    other = dict(SKEW, id="pair-skew:SIG/SIGB", base="pair:SIG/SIGB", nets=["SIG", "SIGB"])       # a second target pair, protected, untouched
+    monkeypatch.setattr(G, "_remeasure", lambda p, cli="kicad-cli": _m([OPEN] if "best" not in os.path.basename(p) else [SKEW, other, OPEN], 1))
+    res = G.close(inp, str(tmp_path / "W"), cons={}, attempts=str(tmp_path / "a.jsonl"), log=lambda *a: None, max_rounds=1)
+    assert set(res["released"]) == {"D_P", "D_N"}
+    assert not os.path.exists(str(tmp_path / "W" / "accepted"))        # the final board verified: no snapshot left on disk
+
+
 def test_a_pair_inside_its_maximum_is_not_a_tune_target_and_releases_nothing():
     ok = dict(SKEW, skew=0.4, limit=0.5)
     assert not G._skew_fails(ok) and G._skew_fails(SKEW)
@@ -101,5 +111,7 @@ def test_final_commit_falls_back_to_the_newest_verified_accepted_state(tmp_path,
         else real(base, cand, release, manifest)))
     res = G.close(inp, str(tmp_path / "W"), cons={}, attempts=str(tmp_path / "a.jsonl"), log=lambda *a: None, max_rounds=3)
     assert res["protection_broken_by"] and "patch" in res["protection_broken_by"]
+    assert res["stop"] == "protection" and res["exit"] != 0           # the patch state was clean; the state handed on has its gap back
+    assert os.path.isdir(str(tmp_path / "W" / "accepted"))            # kept as evidence after a fallback
     assert real(inp, res["best"], release=set(res["released"]), manifest=BW.load_manifest(inp))["ok"]
     assert set(res["released"]) == {"D_P", "D_N"}

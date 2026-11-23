@@ -2306,7 +2306,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
                     if ok and man0["nets"]:                 # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
-                        rel = _release_nets(kind, targets, man)
+                        # least release: only the target pair nets this candidate re-laid (an untouched target pair is not released)
+                        rel = _release_nets(kind, targets, man) & set(BW.changed(final, man))
                         # the same verify the final commit point runs: against the INPUT manifest with every release so far
                         v0 = BW.verify(best, final, release=set(released) | rel, manifest=man0)
                         if not v0["ok"]:
@@ -2507,7 +2508,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             for i in range(len(snaps) - 1, -1, -1):
                 label, sp, rl = snaps[i]
                 if BW.verify(board, sp, release=set(rl), manifest=man0)["ok"]:
-                    broke = snaps[i + 1][0] if i + 1 < len(snaps) else label
+                    broke = snaps[i + 1][0] if i + 1 < len(snaps) else f"an edit after {label}"
                     _copy(sp, best)
                     _sidecars(sp, best)
                     released = {n: w for n, w in released.items() if n in rl}
@@ -2520,6 +2521,11 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             log(f"close: kept {len(released)} release(s); protection broken by {broke}")
             m = _remeasure(best, kicad_cli)
             _classify_into(m, cons, best)
+            if stop == "clean" and (vis(m["gaps"]) if kinds is not None else
+                                    any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in m["gaps"])):
+                stop = "protection"                      # the board handed on is an earlier state: its gaps are back, it is not clean
+        else:
+            shutil.rmtree(os.path.join(work, "accepted"), ignore_errors=True)       # the final board verifies: the snapshots are not needed
 
     left = []
     for g in vis(m["gaps"]):
