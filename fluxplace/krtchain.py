@@ -51,8 +51,10 @@ def pair_nets(cons, names, report):
     legs = [x for p in (report or {}).get("pairs") or [] for x in (p.get("pair") or [])]
     if legs:
         return sorted(set(legs) - nopair)
-    fams = list(((cons or {}).get("pairs") or {}))
-    return sorted(x for x in names if any(x.startswith(f) for f in fams) and x not in nopair)
+    from . import budget as B
+    legs = B.pair_legs(names, cons)
+    fams = (cons or {}).get("pairs") or {}
+    return sorted(x for x in names if x in legs and B.family_of(fams, x, legs) and x not in nopair)
 
 
 def _missed_legs(row):

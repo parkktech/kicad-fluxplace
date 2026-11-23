@@ -429,12 +429,9 @@ def measure_paths(board, nets, rows, mode="trunk"):
 
 
 # ------------------------------------------------------------------ data + verdict
-def _family(table, net):
-    best = None
-    for f in table or {}:
-        if net.startswith(f) and (best is None or len(f) > len(best)):
-            best = f
-    return best
+def _family(table, net, legs=None):
+    from . import budget
+    return budget.family_of(table, net, legs)
 
 
 def resolve_budget(cons, master, ps_per_mm=None):
