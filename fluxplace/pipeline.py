@@ -993,7 +993,10 @@ def st_close(c, n, board):
     if post:
         line += (f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}" if not post.get("refused")
                  else f"; post-route refused ({post['refused'][:60]})")
-    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
+    if res.get("protection_broken_by"):
+        line += f"; protection broken by {res['protection_broken_by']}: fell back to the last verified state"
+    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
+            "released": sorted(res.get("released") or {})}
 
 
 def st_tune(c, n, board):
@@ -1330,8 +1333,11 @@ def _commit_point(name, prev, res):
                 return res
         except Exception:                                               # noqa: BLE001
             return res
-    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES else set())      # tune releases the pairs it tuned, not the manifest
+    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES or name == "close" else set())      # tune / close release the pairs they re-laid, not the manifest
     complete = {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}
+    for x in rel & set(man["nets"]):                                    # a released pair is protected again at its new copper
+        if man["nets"][x].get("why") != "locked":
+            complete.setdefault(x, man["nets"][x].get("why", "kept"))
     try:
         v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
     except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass

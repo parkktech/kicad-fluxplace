@@ -162,6 +162,25 @@ def relax_nets(gaps):
     return {n for g in gaps if g["kind"] in PAIR_KINDS for n in g["nets"]}
 
 
+def _release_nets(kind, targets, man):
+    """Protected nets an accepted pair rung may release (an explicit, logged act): the nets of its target pair gaps. A pair-skew gap
+    whose skew does not pass its maximum (D71cx: KiCad length / ps budget is the verdict) is no target and releases nothing."""
+    if not (kind or "").startswith("pair-"):
+        return set()
+    out = set()
+    for g in targets:
+        if g["kind"] == "pair-skew" and not _skew_fails(g):
+            continue
+        out |= set(g.get("nets") or [])
+    return out & set((man or {}).get("nets") or {})
+
+
+def _skew_fails(g):
+    """True when the pair-skew gap's measured skew is past its maximum (gap limit = the maximum); unknown numbers count as failing."""
+    sk, lim = g.get("skew"), g.get("limit")
+    return sk is None or lim is None or sk > lim
+
+
 def _r5_set(kind, targets, protect, relax, fallback=()):
     """R5 set handed to the guard: a pair-kind try may relax the legs of its own target pairs; other kinds keep all.
     PHASE3F A5: an open-free try may route the fallback pair legs among its targets (they are not protected then)."""
@@ -1854,8 +1873,8 @@ def _r_tune(base, out, gaps, ctx):
     from . import tune as TU, pairaudit as PA_
     pairs, limits = {}, {}
     for g in gaps:
-        if g["kind"] != "pair-skew" or len(g.get("nets") or []) != 2:
-            continue
+        if g["kind"] != "pair-skew" or len(g.get("nets") or []) != 2 or not _skew_fails(g):
+            continue                                                     # a pair inside its maximum is not tuned (D71cx)
         blk = _pair_block(base, ctx["cons"], g)
         legs = blk.get("legs") or {}
         lim = blk.get("skew_limit_mm")
@@ -2162,6 +2181,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing protected yet; stale: re-seeded)
     if man["nets"]:
         BW.seed(best, keep=man, locked=False)            # the work copy carries it, so a release is a logged edit of that file
+    man0 = json.loads(json.dumps(man))                   # the input's manifest: the baseline the pipeline's commit point judges the final board against
+    released = {}                                        # {net: reason} released by an accepted attempt (cumulative; handed to the commit point)
+    snaps = []                                           # [(label, path, frozenset(released))] after each accepted attempt, newest last
     relax = relax_nets(m["gaps"])
     start = _vitals(m)
     board_fp0 = versions.copper_fingerprint(best)
@@ -2276,16 +2298,31 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
-                    if ok and man["nets"]:                  # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
-                        rel = set(_nets(targets)) if (kind or "").startswith("pair-") else set()
-                        v = BW.commit(best, final, best, release=rel, manifest=man, reason=f"{kind} {rung}")       # verify + write + re-seal
-                        if not v["written"]:
-                            ok, why = False, v["why"][:120]
+                    if ok and man0["nets"]:                 # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
+                        rel = _release_nets(kind, targets, man)
+                        # the same verify the final commit point runs: against the INPUT manifest with every release so far
+                        v0 = BW.verify(best, final, release=set(released) | rel, manifest=man0)
+                        if not v0["ok"]:
+                            ok, why = False, ("input manifest: " + v0["why"])[:120]
                         else:
-                            man = BW.load_manifest(best)
+                            v = BW.commit(best, final, best, release=rel, manifest=man, reason=f"{kind} {rung}",
+                                          complete={n: man["nets"][n].get("why", "kept") for n in rel if n in man["nets"]
+                                                    and man["nets"][n].get("why") != "locked"})   # re-sealed: a released pair stays protected
+                            if not v["written"]:
+                                ok, why = False, v["why"][:120]
+                            else:
+                                man = BW.load_manifest(best)
+                                for n in rel:
+                                    released[n] = f"{kind} {rung} (attempt {n_att + 1})"
                     elif ok:
                         _copy(final, best)
                     if ok:
+                        if man0["nets"]:
+                            sp = os.path.join(work, "accepted", f"a{n_att + 1}.kicad_pcb")
+                            os.makedirs(os.path.dirname(sp), exist_ok=True)
+                            _copy(best, sp)
+                            _sidecars(best, sp)
+                            snaps.append((f"attempt {n_att + 1} {kind} {rung}", sp, frozenset(released)))
                         m = cm
                         protect = _protect(best, cons)
                         relax = relax_nets(m["gaps"])
@@ -2455,6 +2492,28 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     else:
         stop = "rounds"
 
+    broke = None
+    if man0["nets"]:                                     # the final board must pass the commit point's verify; else the newest accepted state that does
+        vf = BW.verify(board, best, release=set(released), manifest=man0)
+        if not vf["ok"]:
+            log(f"close: final board fails protection ({vf['why'][:100]}); falling back to the newest accepted state that verifies")
+            for i in range(len(snaps) - 1, -1, -1):
+                label, sp, rl = snaps[i]
+                if BW.verify(board, sp, release=set(rl), manifest=man0)["ok"]:
+                    broke = snaps[i + 1][0] if i + 1 < len(snaps) else label
+                    _copy(sp, best)
+                    _sidecars(sp, best)
+                    released = {n: w for n, w in released.items() if n in rl}
+                    break
+            else:
+                broke = snaps[0][0] if snaps else "input"
+                _copy(board, best)
+                _sidecars(board, best)
+                released = {}
+            log(f"close: kept {len(released)} release(s); protection broken by {broke}")
+            m = _remeasure(best, kicad_cli)
+            _classify_into(m, cons, best)
+
     left = []
     for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
@@ -2472,7 +2531,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
            "minutes": round((time.time() - t0) / 60, 1), "start": start, "end": _vitals(m),
            "attempts": n_att, "left": left,
            "packets": _packet_rows(work, vis(m["gaps"]), ai_used, _ai_budget(cons)),       # PHASE3F B6
-           "proposals": _proposal_rows(ctx_dir_ai(work)), "ignored": ignored}
+           "proposals": _proposal_rows(ctx_dir_ai(work)), "ignored": ignored,
+           "released": dict(released), "protection_broken_by": broke}
     _write_json(os.path.join(work, "stop.json"), res)
     if runs:
         ok = [t for t in tries if t["result"] in ("closed", "partial")]
