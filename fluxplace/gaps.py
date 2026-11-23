@@ -386,6 +386,12 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
     base_sev = {g["id"]: g["sev"] for g in base_m.get("gaps") or [] if "sev" in g}
     cand_sev = {g["id"]: g["sev"] for g in cand_gaps if "sev" in g}
     kept = [t for t in target_ids if not (t in base_sev and t in cand_sev and cand_sev[t] < base_sev[t])]
+    # a power target whose mag dropped (narrow mm widened, vias added) is progress too: W15 close refused a widen that took +3V3
+    # from 259 to 166 narrow mm as "target gap still there", so nothing was kept (R6 above already refuses any net whose mag rose)
+    pk = ("power-width", "power-vias")
+    base_mag = {g["id"]: g.get("mag", 0) for g in base_m.get("gaps") or [] if g["kind"] in pk}
+    cand_mag = {g["id"]: g.get("mag", 0) for g in cand_gaps if g["kind"] in pk}
+    kept = [t for t in kept if not (t in base_mag and t in cand_mag and cand_mag[t] < base_mag[t])]
     # PHASE3H A2: a target that lost sev, or whose net lost opens, is progress: no "target gap still there" refusal
     tnets = {n for g in base_m.get("gaps") or [] if g["id"] in target_ids for n in g.get("nets", [])}
     if len(kept) < len(target_ids) or any(co.get(n, 0) < bo.get(n, 0) for n in tnets):
@@ -814,7 +820,7 @@ def _r_powerwiden(base, out, gaps, ctx):
 def _r_railpour(base, out, gaps, ctx):
     """PHASE3G G4.1: rails that have a current figure but no zone get their corridor pour (power.pour_rails, guarded)."""
     from . import power as PW
-    r = PW.pour_rails(base, ctx["cons"], out, layers=len(copper_layers(base)))
+    r = PW.pour_rails(base, ctx["cons"], out, layers=len(copper_layers(base)), nets=_nets(gaps))
     return {"status": "ran" if os.path.exists(out) else "no change", "kept": len(r.get("kept") or []), "dropped": bool(r.get("dropped"))}
 
 

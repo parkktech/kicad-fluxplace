@@ -1234,3 +1234,18 @@ def test_power_mag_falling_with_equal_power_is_a_lower_score():
     cand = [dict(base[0], mag=1.0), base[1]]
     assert GP.score(m, cand) < GP.score(m, base)
     assert GP.score_terms(m, cand)["power"] == GP.score_terms(m, base)["power"]
+
+
+def test_accept_power_width_target_with_less_narrow_copper_is_progress(monkeypatch):
+    """W15 close: powerwiden took a rail from 259 to 166 narrow mm and was refused as "target gap still there", so the widen was thrown
+    away.  A power target whose mag dropped no longer has to disappear; one whose mag is unchanged still does; a rise is R6."""
+    calls = []
+    monkeypatch.setattr(GP.drcguard, "accept", lambda base, cand, mode, target, *a, **k: calls.append(list(target)) or (True, ""))
+    z = {"shorts": 0, "opens": 0, "errors": 0, "review_failed": []}
+    row = lambda mag: [{"id": "power-width:VR", "mag": mag, "nets": ["VR"], "kind": "power-width", "class": "power"}]
+    base = dict(z, gaps=row(259))
+    assert GP._accept(base, "b", dict(z), "c", ["power-width:VR"], row(166), "power-width") == (True, "")
+    assert calls[-1] == []
+    GP._accept(base, "b", dict(z), "c", ["power-width:VR"], row(259), "power-width")
+    assert calls[-1] == ["power-width:VR"]
+    assert GP._accept(base, "b", dict(z), "c", ["power-width:VR"], row(300), "power-width")[1].startswith("R6 power_mag worse VR")

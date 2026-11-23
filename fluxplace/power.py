@@ -320,11 +320,25 @@ def rail_inner_mm(board_path, rails):
     return out
 
 
-def pour_rails(board_path, cons, out, layers=None):
+def _strip_rail_zones(src, dst, nets):
+    """Fresh-process worker of pour_rails (board.Remove decays pcbnew's bindings: Zones() then yields raw SwigPyObjects, the W15 close
+    `railpour` rung died on it): save `src` as `dst` without the `fluxplace-rail:<net>` zones of `nets`.  -> zones removed."""
+    import pcbnew
+    b = pcbnew.LoadBoard(src)
+    names = {RAIL_ZONE + n for n in nets}
+    old = [z for z in b.Zones() if (z.GetZoneName() or "") in names]
+    for z in old:
+        b.Remove(z)
+    pcbnew.SaveBoard(dst, b)
+    return len(old)
+
+
+def pour_rails(board_path, cons, out, layers=None, nets=None):
     """D71cj D: a [power] rail that is routed as a spine (no zone of its net on the board) gets a corridor pour: per outer
     copper layer that carries its spine, one zone named `fluxplace-rail:<net>` whose outline is the spine grown by
     `[route] power_pour_over_mm`, pad connection solid, priority above every existing zone (GND/plane zones keep theirs).
-    Re-run: zones with the same name are removed first. Geometry is pcbnew's own (PHASE3C E): no shapely needed.
+    Re-run: zones with the same name are removed first (in a fresh process, on a scratch copy). Geometry is pcbnew's own (PHASE3C E).
+    `nets`: only these rails (the close rung passes its gap nets; None = every pour rail).
     Guard: DRC shorts, opens and errors must all be no higher after the pour, else nothing is written (`dropped`).
     -> {added: [net/layer], kept, skipped: {net: reason}, dropped, dropped_reason, before/after measures}"""
     import pcbnew
@@ -333,15 +347,30 @@ def pour_rails(board_path, cons, out, layers=None):
     rec = {"added": [], "kept": [], "skipped": {}, "dropped": False, "dropped_reason": None, "skip_all": None,
            "shorts_before": None, "shorts_after": None, "before": None, "after": None}
     pw = (cons or {}).get("power") or {}
-    rails = sorted((n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm")),
+    rails = sorted((n for n, r in plan(cons, layers=layers).items() if r and r["pour"] and r.get("track_mm")
+                    and (nets is None or n in nets)),
                    key=lambda n: -(current_a(pw.get(n)) or 0.0))
     if not rails:
         return rec
     over = float(((cons or {}).get("route") or {}).get("power_pour_over_mm", POUR_OVER_MM))
-    zoned = GP._zone_nets(board_path)
+    load = board_path
     b = pcbnew.LoadBoard(board_path)
-    for z in [z for z in b.Zones() if (z.GetZoneName() or "").startswith(RAIL_ZONE)]:
-        b.Remove(z)
+    if any((z.GetZoneName() or "")[len(RAIL_ZONE):] in rails for z in b.Zones() if (z.GetZoneName() or "").startswith(RAIL_ZONE)):
+        from .freshproc import in_fresh_process
+        import shutil
+        load = out + ".strip.kicad_pcb"
+        pro = os.path.splitext(board_path)[0] + ".kicad_pro"
+        if os.path.exists(pro):                              # the copy is loaded with the board's own project rules
+            shutil.copy(pro, os.path.splitext(load)[0] + ".kicad_pro")
+        in_fresh_process("fluxplace.power", "_strip_rail_zones", board_path, load, rails)
+        b = pcbnew.LoadBoard(load)
+    try:
+        zoned = GP._zone_nets(load)
+    finally:
+        if load != board_path:
+            for f in (load, os.path.splitext(load)[0] + ".kicad_pro", os.path.splitext(load)[0] + ".kicad_prl"):
+                if os.path.exists(f):
+                    os.remove(f)
     others = [z for z in b.Zones() if z.GetNetname() not in rails]
     prio = rail_priorities([z.GetAssignedPriority() for z in b.Zones()], [n for n in rails if n not in zoned])
     ref = others[0] if others else None

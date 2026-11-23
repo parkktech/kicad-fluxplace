@@ -367,3 +367,26 @@ def test_add_vias_places_the_missing_via_beside_the_existing_one(tmp_path, monke
     assert rec["added"] == {"VBAT": 1} and rec["refused"] == {"VBAT": 1}
     assert [p for _n, p in laid] == ["via 30.000,1.000", "via 12.000,8.000"]
     assert os.path.exists(out)
+
+
+def test_pour_rerun_on_a_board_with_rail_zones_does_not_touch_decayed_bindings_and_nets_scopes_it(monkeypatch, tmp_path):
+    """W15 close: `railpour` died with "'SwigPyObject' object has no attribute 'GetNetname'" on every board that already had rail zones
+    (board.Remove, then Zones()).  The old zones are stripped in a fresh process; the real zone-net read then sees the rail as unpoured.
+    `nets` (the rung's gap nets) limits the rails: a rail not named costs nothing and writes nothing."""
+    pcbnew = pytest.importorskip("pcbnew")
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"), zone_net="GND")
+    out = str(tmp_path / "out.kicad_pcb")
+    assert PW.pour_rails(src, CONS_POUR, out, layers=4)["added"] == ["VBAT/F.Cu"]
+    removed = []
+    real = pcbnew.BOARD.Remove
+    monkeypatch.setattr(pcbnew.BOARD, "Remove", lambda self, it: removed.append(it) or real(self, it))
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    out2 = str(tmp_path / "out2.kicad_pcb")
+    rec = PW.pour_rails(out, CONS_POUR, out2, layers=4)
+    assert rec["added"] == ["VBAT/F.Cu"] and removed == []           # nothing removed in this process
+    named = [z for z in pcbnew.LoadBoard(out2).Zones() if (z.GetZoneName() or "").startswith("fluxplace-rail:")]
+    assert len(named) == 1
+    assert not [f for f in os.listdir(tmp_path) if ".strip." in f]
+    rec = PW.pour_rails(out, CONS_POUR, str(tmp_path / "out3.kicad_pcb"), layers=4, nets=["+3V3"])
+    assert rec["added"] == [] and rec["before"] is None and not (tmp_path / "out3.kicad_pcb").exists()
