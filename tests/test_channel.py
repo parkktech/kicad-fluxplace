@@ -380,3 +380,11 @@ def test_dcdrop_load_with_an_unreached_pad_is_not_found():
     d.seg((0, 0), (10, 0), "P", w=1.0)
     r = CH.dcdrop_rows(d.b, _cons(**{"from": "U1", "to": ["U2"]}), ROWS)[0]
     assert r["verdict"] == "n/a" and "U2.2" in r["why"]
+
+
+def test_dcdrop_that_cannot_be_measured_warns():
+    d = _dc_board()
+    cons = {**_cons(**{"from": "U1", "to": ["NOPE"]}), "stackup": {"layers": [{"name": r_["name"], "type": r_["type"], "thickness": r_["thickness"],
+                                                                              "epsilon_r": r_["epsilon_r"]} for r_ in ROWS], "planes": PLANES}}
+    out = CH.check(d.b, cons)
+    assert any(lv == "WARN" and c == "CHANNEL_DCDROP_UNMEASURED" and "NOPE has no pad on P" in m for lv, c, m, _r in out)
