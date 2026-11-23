@@ -11,6 +11,7 @@ Why: a decoupling cap or pull resistor 36-68 mm from its pin leaves an open that
 The close loop then runs the usual DRC guard (gaps._accept: opens/shorts/errors, pairs, R5 protect) and boardwrite.commit (manifest) on the
 candidate this rung writes.  Board-agnostic: no reference designator, net name or board constant is read here, only the board model."""
 import heapq
+import json
 import math
 import os
 import shutil
@@ -23,6 +24,10 @@ RELOC_MAX_MM = 8.0          # largest distance (pad to target pad) searched arou
 RELOC_STEP_MM = 0.25        # grid step of the ring search (origin positions)
 RELOC_ROTS = (0, 90, 180, 270)   # footprint angle changes tried, 0 first (a tie keeps the current angle)
 RELOC_PAD_MAX = 3           # parts with more pads are never moved (a small support part: 2-pad passive, 3-pad transistor)
+RELOC_PAD_MIN = 2           # a 1-pad part (test point, mounting hole, clip) sits where it is on purpose
+RELOC_MISS_MAX = 2          # routed attempts in a row (across the calls of one close work dir) that kept nothing: the rung stops trying here
+RELOC_KEPT_RETRY = 2        # a move the rung kept but close did not adopt (the part is where it was) is routed at most this often
+RELOC_STATE = "relocate.json"    # in the close work dir: {"misses": n, "tried": {key: [result, count]}}
 RELOC_PARTS_MAX = 8         # suggestions tried per rung call
 RELOC_TRY_MAX = 8000        # legality tests per part before "no spot"
 RELOC_COURT_GAP = 0.15      # mm kept between the moved courtyard and any other courtyard on a shared side
@@ -253,14 +258,15 @@ def suggest(B, gaps, cons=None, protect=(), manifest=None):
     res = RD.diagnose(B, failed, cons=cons)
     try:
         fixed = PR.fixed_parts(B, cons or {})
-    except Exception:                                                       # noqa: BLE001 - anchors need a full spec; locked still holds
-        fixed = set()
+        own = RD._owners(B)
+    except Exception:                                                       # noqa: BLE001 - a guard that cannot be read never passes
+        return []
     mnets = {n for n, e in ((manifest or {}).get("nets") or {}).items() if e.get("why") != "locked"}
     protect = set(protect)
     out = []
     for m in res["summary"]["moves"]:
         part = B["parts"].get(m["part"])
-        if not part or part.get("locked") or m["part"] in fixed or not (1 <= len(part["pads"]) <= RELOC_PAD_MAX):
+        if not part or part.get("locked") or m["part"] in fixed or not (RELOC_PAD_MIN <= len(part["pads"]) <= RELOC_PAD_MAX):
             continue
         if any(p["net"] in protect or p["net"] in mnets for p in part["pads"]):
             continue
@@ -270,6 +276,9 @@ def suggest(B, gaps, cons=None, protect=(), manifest=None):
             tgt = next((p for p in B["pads"] if p["ref"] == r and p["num"] == num), None)
             if tgt:
                 break
+        o = own.get(m["part"])
+        if tgt and o and o.get("ic") != tgt["ref"]:
+            continue                                   # a support part with an owner (cluster model) only moves toward that owner
         if tgt and tgt["ref"] != m["part"]:
             out.append({"part": m["part"], "toward": tgt, "nets": m["nets"], "dist": m["dist"], "from": m["from"]})
     # a support part going to a bigger part (an IC pin) before one going to another passive (long-haul pairs): the stable sort keeps
@@ -296,9 +305,34 @@ def _write_moved(src, dst, ref, spot, stub):
     return True
 
 
-def _rm(p):
-    if os.path.lexists(p):
-        os.remove(p)
+def _state_load(work):
+    try:
+        with open(os.path.join(work, RELOC_STATE)) as fh:
+            d = json.load(fh)
+        return {"misses": int(d.get("misses", 0)), "tried": dict(d.get("tried") or {})}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"misses": 0, "tried": {}}
+
+
+def _state_save(work, st):
+    if not work:
+        return
+    tmp = os.path.join(work, RELOC_STATE + ".tmp")
+    with open(tmp, "w") as fh:
+        json.dump(st, fh, sort_keys=True)
+    os.replace(tmp, os.path.join(work, RELOC_STATE))
+
+
+def _key(B, c):
+    """Identity of one suggestion: the part where it sits now and the pad it would go to (a part that was moved is a new key)."""
+    x, y = B["parts"][c["part"]]["pos"]
+    return f"{c['part']}@{x:.2f},{y:.2f}>{c['toward']['ref']}.{c['toward']['num']}"
+
+
+def _spent(st, key):
+    """True when this suggestion already had its tries here: dropped once, or kept by the rung and not adopted by close."""
+    res, n = st["tried"].get(key, (None, 0))
+    return n >= (RELOC_KEPT_RETRY if res == "kept" else 1)
 
 
 def relocate(base, out, gaps, ctx, route=None, open_count=None):
@@ -311,7 +345,11 @@ def relocate(base, out, gaps, ctx, route=None, open_count=None):
     cons = ctx.get("cons") or {}
     B = RD.load(base)
     man = BW.load_manifest(base)
-    cands = suggest(B, gaps, cons, ctx.get("protect") or (), man)[:RELOC_PARTS_MAX]
+    work = ctx.get("work")
+    st = _state_load(work) if work else {"misses": 0, "tried": {}}
+    if st["misses"] >= RELOC_MISS_MAX:                  # measured here: the rung's moves do not lower the opens of this board
+        return {"status": "no yield here", "moved": 0, "tried": 0}
+    cands = [c for c in suggest(B, gaps, cons, ctx.get("protect") or (), man) if not _spent(st, _key(B, c))][:RELOC_PARTS_MAX]
     if not cands:
         return {"status": "no relocatable part", "moved": 0, "tried": 0}
     log = ctx.get("log") or (lambda *_: None)
@@ -320,6 +358,9 @@ def relocate(base, out, gaps, ctx, route=None, open_count=None):
     cur, tmps, rows, moved, longest = base, [], [], 0, 0.0
     now = open_count(cur)
     for k, c in enumerate(cands):
+        if st["misses"] >= RELOC_MISS_MAX:
+            rows.append({"part": c["part"], "result": "no yield"})
+            break
         left = budget - (time.time() - t0) - RELOC_RESERVE_S
         if left < max(RELOC_PART_MIN_S, 1.3 * longest):         # the next part may not fit: stop with what is kept
             rows.append({"part": c["part"], "result": "budget"})
@@ -366,14 +407,21 @@ def relocate(base, out, gaps, ctx, route=None, open_count=None):
         after = open_count(end)
         worse = sorted(n for n, v in after.items() if v > now.get(n, 0))
         row["opens"] = [sum(now.values()), sum(after.values())]
+        key = _key(Bc, c)
         if sum(after.values()) < sum(now.values()) and not worse:
             row["result"] = "kept"
+            st["misses"] = 0
+            st["tried"][key] = ["kept", st["tried"].get(key, ["kept", 0])[1] + 1]
+            _state_save(work, st)
             cur, now, moved = end, after, moved + 1
             GP._copy(cur, out)                                   # progress survives a kill of this worker
             GP._sidecars(cur, out)
             log(f"relocate: {ref} {row['from']} -> {row['to']} kept, opens {row['opens'][0]} -> {row['opens'][1]}")
         else:
             row["result"] = "opens not lower" if not worse else f"worse: {','.join(worse[:3])}"
+            st["misses"] += 1
+            st["tried"][key] = [row["result"], 1]
+            _state_save(work, st)
             log(f"relocate: {ref} {row['from']} -> {row['to']} dropped: {row['result']}")
         longest = max(longest, time.time() - t_part)
     try:
