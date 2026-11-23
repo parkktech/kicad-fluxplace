@@ -2143,6 +2143,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         m = dict(measure(best, kicad_cli))
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
+    from . import boardwrite as BW
+    man = BW.load_manifest(board)                        # A3: the input board's protected copper (empty: nothing protected yet)
+    if man["nets"]:
+        BW.seed(best, keep=man, locked=False)            # the work copy carries it, so a release is a logged edit of that file
     relax = relax_nets(m["gaps"])
     start = _vitals(m)
     board_fp0 = versions.copper_fingerprint(best)
@@ -2184,7 +2188,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
 
     def attempt(r, kind, rung, targets, sub=False):
         """One try. Returns True when the candidate was accepted (m is then the new base)."""
-        nonlocal m, n_att, level, n_packets, protect, relax
+        nonlocal m, n_att, level, n_packets, protect, relax, man
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         # PHASE3I B3: memo key = rung, kind, gap signature and the copper in each gap window (not the whole board)
@@ -2257,8 +2261,19 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
+                    if ok and man["nets"]:                  # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
+                        rel = set(_nets(targets)) if (kind or "").startswith("pair-") else set()
+                        v = BW.verify(best, final, release=rel, manifest=man)
+                        if not v["ok"]:
+                            ok, why = False, v["why"][:120]
+                        else:
+                            man = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}
+                            if rel:
+                                BW.release(best, sorted(rel), f"{kind} {rung}", attempts=attempts)
                     if ok:
                         _copy(final, best)
+                        if man["nets"]:
+                            man = BW.seed(best, keep=man)           # the manifest follows the board: kept nets re-read, newly locked nets added
                         m = cm
                         protect = _protect(best, cons)
                         relax = relax_nets(m["gaps"])

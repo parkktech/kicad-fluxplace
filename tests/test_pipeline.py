@@ -306,3 +306,45 @@ def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_pa
     rc = PL.run(_args(tmp_path, board, from_stage="route-ready", to_stage="route-ready"))
     out = capsys.readouterr().out
     assert rc == 5 and not seen and "gap g1 pair-open" in out
+
+
+def _commit_env(monkeypatch, tmp_path, ok=True):
+    from fluxplace import boardwrite as BW
+    prev, new = tmp_path / "prev.kicad_pcb", tmp_path / "new.kicad_pcb"
+    prev.write_text("prev"); new.write_text("new")
+    man = {"nets": {"D_P": {"fp": "x", "why": "locked"}, "D_N": {"fp": "y", "why": "locked"}}}
+    seen = {}
+    monkeypatch.setattr(BW, "load_manifest", lambda b: man)
+    monkeypatch.setattr(BW, "verify", lambda base, cand, release=(), manifest=None: seen.update(release=set(release)) or
+                        ({"ok": True} if ok else {"ok": False, "why": "PROTECTED_CHANGED D_P", "changed": ["D_P"]}))
+    monkeypatch.setattr(BW, "seed", lambda b, why_by_net=None, keep=None, locked=True: seen.update(seeded=b, keep=set((keep or {}).get("nets", {})),
+                                                                                                   why=why_by_net) or man)
+    return str(prev), str(new), seen
+
+
+def test_a3_stage_output_that_changes_protected_copper_is_refused(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path, ok=False)
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": new, "line": "routed"})
+    assert r["verdict"] == "fail" and r["board"] == prev and "commit refused: PROTECTED_CHANGED D_P" in r["line"] and "seeded" not in seen
+    assert seen["release"] == set()
+
+
+def test_a3_accepted_output_carries_the_manifest_and_adds_completed_pairs(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path)
+    r = PL._commit_point("pairs", prev, {"verdict": "pass", "board": new, "complete_pairs": [("E_P", "E_N")]})
+    assert r["verdict"] == "pass" and seen["seeded"] == new and seen["keep"] == {"D_P", "D_N"} and seen["why"] == {"E_P": "pair E_P/E_N", "E_N": "pair E_P/E_N"}
+
+
+def test_a3_tune_releases_pair_copper_it_is_allowed_to_edit(tmp_path, monkeypatch):
+    prev, new, seen = _commit_env(monkeypatch, tmp_path)
+    PL._commit_point("tune", prev, {"verdict": "pass", "board": new})
+    assert seen["release"] == {"D_P", "D_N"} and seen["keep"] == set()
+
+
+def test_a3_no_manifest_and_not_a_seeding_stage_means_nothing_to_check(tmp_path, monkeypatch):
+    from fluxplace import boardwrite as BW
+    monkeypatch.setattr(BW, "load_manifest", lambda b: {"nets": {}})
+    monkeypatch.setattr(BW, "verify", lambda *a, **k: (_ for _ in ()).throw(AssertionError("verified")))
+    prev, new = tmp_path / "p.kicad_pcb", tmp_path / "n.kicad_pcb"
+    prev.write_text("p"); new.write_text("n")
+    assert PL._commit_point("floorplan", str(prev), {"verdict": "pass", "board": str(new)})["verdict"] == "pass"

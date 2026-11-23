@@ -1234,3 +1234,35 @@ def test_power_mag_falling_with_equal_power_is_a_lower_score():
     cand = [dict(base[0], mag=1.0), base[1]]
     assert GP.score(m, cand) < GP.score(m, base)
     assert GP.score_terms(m, cand)["power"] == GP.score_terms(m, base)["power"]
+
+
+# ---- A3: close() adopts a candidate only through the boardwrite manifest
+def _fake_manifest(monkeypatch, released=None):
+    from fluxplace import boardwrite as BW
+    man = {"nets": {"D_P": {"fp": "x", "why": "locked"}}}
+    monkeypatch.setattr(BW, "load_manifest", lambda b: man)
+    monkeypatch.setattr(BW, "seed", lambda b, why_by_net=None, keep=None, locked=True: keep or man)
+    monkeypatch.setattr(BW, "release", lambda b, names, reason, attempts=None: (released or []).extend(names) or list(names))
+    monkeypatch.setattr(BW, "verify", lambda base, cand, release=(), manifest=None: (
+        {"ok": False, "why": "PROTECTED_CHANGED D_P", "changed": ["D_P"]} if "ripped" in open(cand).read() else {"ok": True, "why": "", "changed": []}))
+
+
+def test_close_refuses_a_candidate_that_changes_protected_copper(monkeypatch, loop):
+    _fake_manifest(monkeypatch)
+
+    def rip(base, out, gaps, ctx):
+        open(out, "w").write("fixed ripped")
+        return {"mode": "rip"}
+    for r in GP.DISPATCH["open-free"]:
+        monkeypatch.setitem(GP.RUNGS, r, rip)
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    lines = [json.loads(x) for x in open(loop["attempts"])]
+    assert res["stop"] == "flat" and open(res["best"]).read() == "original"
+    assert {x["result"] for x in lines} == {"refused"} and all("PROTECTED_CHANGED D_P" in x["why"] for x in lines)
+
+
+def test_close_accepts_a_candidate_that_leaves_protected_copper_alone(monkeypatch, loop):
+    _fake_manifest(monkeypatch)
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
+    res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
+    assert res["stop"] == "clean" and open(res["best"]).read() == "fixed"

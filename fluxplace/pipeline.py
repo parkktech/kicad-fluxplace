@@ -1257,6 +1257,38 @@ def _gate_measure(c, n, name, board, kinds, src=None):
             "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"]}}
 
 
+# A3: the one commit point. After `pairs` (which locks what it lays) a board carries a manifest of protected copper (boardwrite):
+# every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
+# its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
+SEED_STAGES = ("pairs", "tune")
+RELEASING_STAGES = ("tune",)
+
+
+def _commit_point(name, prev, res):
+    """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper
+    or colliding item ids; else the manifest follows the new board."""
+    from . import boardwrite as BW
+    new = res.get("board")
+    if not new or not os.path.isfile(new) or not os.path.isfile(prev):
+        return res
+    man = BW.load_manifest(prev)
+    if not man["nets"] and name not in SEED_STAGES:
+        return res                                                      # nothing protected yet
+    rel = set(man["nets"]) if name in RELEASING_STAGES else set()
+    try:
+        v = BW.verify(prev, new, release=rel, manifest=man) if os.path.abspath(new) != os.path.abspath(prev) else {"ok": True}
+    except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
+        return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
+                    next=[f"{name}: output not adopted"])
+    if not v["ok"]:
+        return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {v['why']}"[:200],
+                    next=[f"{name}: output not adopted ({v['why'][:150]}); release the pair explicitly (boardwrite.release) to re-lay it"])
+    if os.path.abspath(new) != os.path.abspath(prev):
+        keep = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}
+        BW.seed(new, {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}, keep=keep)
+    return res
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
@@ -1645,6 +1677,8 @@ def _run(a):
                 gd = c.dir(i + 1, "gate")
             res = FUNCS[name](c, i + 1, board)
         res.setdefault("verdict", "pass")
+        if res["verdict"] in ("pass", "warn"):
+            res = _commit_point(name, board, res)
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
             g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])

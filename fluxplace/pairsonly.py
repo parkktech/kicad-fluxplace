@@ -151,6 +151,26 @@ def _blocker_pairs(labels, pairs):
     return [p for p in pairs if any(leg in toks for leg in p)]
 
 
+def _commit_guard(board, out, sel, rows, log):
+    """A3: the one commit point. `out` may differ from `board` only in the nets of the pairs being re-routed (`sel`); any other protected
+    net changing (boardwrite manifest of `board`), duplicate copper or an id collision puts the input back as the output."""
+    from . import boardwrite as BW
+    man = BW.load_manifest(board)
+    if not man["nets"] or not os.path.exists(out):
+        return
+    rel = {x for pr in sel for x in pr}
+    v = BW.verify(board, out, release=rel, manifest=man)
+    if not v["ok"]:
+        log(f"  commit refused: {v['why']}; the input board is the output")
+        shutil.copy(board, out)
+        for r in rows.values():
+            if r.get("status") == "rerouted":
+                r.update(status="kept_original", reason=v["why"][:160])
+        return
+    BW.release(board, sorted(rel), "pair re-route")
+    BW.seed(out, keep={"nets": {n: e for n, e in man["nets"].items() if n not in rel}})
+
+
 def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budget=None, allow_shove=False,
             log=print, lay=None, drc=None, result=None, unlock=False, force=(), group=True):
     """-> report {out, stopped, elapsed_s, budget_s, unmatched, pairs: [row]}; row.status is rerouted | kept_original |
@@ -360,6 +380,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
             pass
     TU._finalize(work, out)
     _cleanup(work)
+    _commit_guard(board, out, sel, rows, log)
     for pr in sel:
         rows.setdefault(f"{pr[0]}/{pr[1]}", {"pair": f"{pr[0]}/{pr[1]}", "status": "not_reached", "reason": stopped or ""})
     for ext in (".kicad_pro", ".kicad_prl"):

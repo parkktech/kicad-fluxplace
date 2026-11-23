@@ -1421,7 +1421,8 @@ def stage(c, n, board):
     line = format_text(rep).splitlines()[0]
     _stage_status(spath, "done" if rep["verdict"] == "PAIRS_OK" else "warn", line, board=out,
                   complete=rep["complete"], total=rep["total"], report=os.path.join(d, "board.pairs.json"))
-    res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out}
+    res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out,
+           "complete_pairs": [tuple(r["pair"]) for r in rep.get("pairs") or [] if r.get("status") == "complete" and len(r.get("pair") or ()) == 2]}
     if rep["verdict"] != "PAIRS_OK":
         S = pad_questions(rep, out, c.cons, getattr(c, "answers", None), getattr(c, "assume", False))
         res["next"] = [f"question {q['id']}: {q['found']}" for q in S.open][:3] + \
