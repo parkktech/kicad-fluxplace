@@ -209,7 +209,8 @@ def measure_pair(path, B, master, slave, cons=None, limit_mm=None, kicad_cli="ki
         if ps["skew_ps"] is None:
             return dict(out, ok=False, why="PAIR_DELAY_UNKNOWN (a layer without a reference plane)")
         k = ((ps["p_ps"] / ps["p_mm"]) + (ps["n_ps"] / ps["n_mm"])) / 2 if ps["p_mm"] and ps["n_mm"] else None
-        k = k or 6.0
+        if not k:                                              # no delay per mm from the stackup: no built-in constant, the pair is unmeasured
+            return dict(out, ok=False, why="PAIR_DELAY_UNKNOWN (no ps per mm from the stackup)")
         out.update(skew=ps["skew_ps"], unit="ps", limit=psb[0], eq_mm=ps["skew_ps"] / k, lim_eq=psb[0] / k)
     else:
         lim = limit_mm(master) if callable(limit_mm) else limit_mm

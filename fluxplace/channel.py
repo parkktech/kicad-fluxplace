@@ -547,7 +547,7 @@ def evaluate(board, cons, spec=None, nets=None):
         row = {"name": os_commonname(names), "kind": "pair", "legs": names, "metrics": []}
         from . import netlen as NL
         try:
-            o = NL.orient(_routing_board(board, _cache), names[0], names[1], meas) if len(meas[names[0]]) + len(meas[names[1]]) > 2 else None
+            o = NL.orient(_routing_board(board, _cache), names[0], names[1], meas, cons) if len(meas[names[0]]) + len(meas[names[1]]) > 2 else None
         except (OSError, ValueError):                                     # an in-memory board with no file: the plain pairing
             o = None
         ors = o["ors"] if o else orientations(meas[names[0]], meas[names[1]])      # one end-to-end path: the plain pairing

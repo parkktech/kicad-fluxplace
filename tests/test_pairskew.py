@@ -200,3 +200,13 @@ def test_review_with_a_board_file_never_falls_back_to_own_length_math(tmp_path, 
     monkeypatch.setattr(QA, "pair_rows", lambda *a, **k: rows)
     got = sorted((f["level"], f["code"]) for f in RV.check_pairs(facts, {"pairs": {"USB_": {}}}))
     assert got == [("FAIL", "MEASURE_DISAGREE"), ("FAIL", "PAIR_DELAY_UNKNOWN")]
+
+
+def test_a_wide_connector_mates_its_pads_with_terminal_max_mm_and_tune_needs_a_stackup_delay(tmp_path):
+    """review 9: no unexplained 16 mm limit, no built-in 6 ps/mm."""
+    from fluxplace import tune as TU
+    assert netlen._pad_max({}, "X_P") == 16.0
+    assert netlen._pad_max({"pairs": {"X_": {"terminal_max_mm": 40}}}, "X_P") == 40.0
+    B = board(tmp_path)
+    m = TU.measure_pair(B["file"], B, "USB_DM", "USB_DP", {"pairs": {"USB_": {"skew_ps": 1.0}}})       # a ps budget on a board with no stackup
+    assert not m["ok"] and "PAIR_DELAY_UNKNOWN" in m["why"]

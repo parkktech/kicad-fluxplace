@@ -148,7 +148,14 @@ def leg_decomposition(board, net, rows, planes, tol=0.005):
             "delay_ps": None if unknown else round(delay, 3), "ps_per_mm": psmm, "unknown": unknown}
 
 
-def joined(B, p, n):
+def _pad_max(cons, master, default=16.0):
+    """Longest P-to-N pad distance that still mates two pads into a terminal: `[pairs.F] terminal_max_mm` (a wide connector), else 16 mm."""
+    from . import budget as BG
+    fam = BG.family_of((cons or {}).get("pairs"), master)
+    return float(((cons or {}).get("pairs", {}).get(fam) or {}).get("terminal_max_mm", default)) if fam else default
+
+
+def joined(B, p, n, cons=None):
     """True when the pair is multi-terminal by topology: some part carries more than two pads of the pair's two nets (the two rows of a
     connector) or the pair has three or more P/N terminals (a tap), so a signal path runs between end terminals and a branch hangs off the
     trunk.  No ref-prefix rule."""
@@ -160,12 +167,12 @@ def joined(B, p, n):
         return True
     try:                                                    # a tap (protection part, test point) makes a third terminal on a 2-pad-per-part pair
         from . import pairs as PRS
-        return len(PRS.terminals(B, p, n, 16.0)[0]) >= 3
+        return len(PRS.terminals(B, p, n, _pad_max(cons, p))[0]) >= 3
     except Exception:                                       # noqa: BLE001 - no terminals: not joined
         return False
 
 
-def orient(B, p, n, meas):
+def orient(B, p, n, meas, cons=None):
     """Signal paths of a multi-terminal pair, independent of net order.  `meas` = channel.measure_paths(.., mode="all") for p and n.
     Terminals are the P/N pad pairs of pairs.terminals (same part first, then nearest); a part with several terminals is one part (the two
     rows of a connector).  The END parts are the two parts farthest apart (P + N path length between their nearest terminals);
@@ -174,7 +181,7 @@ def orient(B, p, n, meas):
     the copper from it to the trunk is a stub.  No ref prefix, no part kind: topology and geometry only.
     -> {"ors": [(P path, N path, "a>b")], "taps": [{"at", "mm"}], "spurs": [{"at", "mm"}], "ends": (refX, refY)} or None."""
     from . import pairs as PRS
-    terms = PRS.terminals(B, p, n, 16.0)[0]
+    terms = PRS.terminals(B, p, n, _pad_max(cons, p))[0]
     lab = lambda pad: f"{pad['ref']}.{pad['num']}"                                    # noqa: E731
     if len(terms) < 2:
         return None
@@ -329,10 +336,10 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
         ps_bad = [k for k in ("p", "n") if abs(out["recon"][k + "_ps"]) > tol_ps]
         dp = dict(dp, delay_ps=kd[p])
         dn = dict(dn, delay_ps=kd[n])
-    if joined(B, p, n):
+    if joined(B, p, n, cons):
         meas = CH.measure_paths(board, [p, n], rows, mode="all")
         out["basis"] = "path"
-        o = orient(B, p, n, meas)
+        o = orient(B, p, n, meas, cons)
         if not o:
             out["why"] = "no end-to-end path for both legs"
             return out
