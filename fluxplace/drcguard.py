@@ -115,10 +115,13 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         if pd:
             json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
         out = os.path.join(td, "drc.json")
-        r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
-                            "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
-        if not os.path.isfile(out) or not os.path.getsize(out):
-            raise RuntimeError(f"DRC produced no report: {(r.stderr or r.stdout)[-200:]}")
+        for attempt in (1, 2):                         # kicad-cli sometimes exits without a report under load (critroute: 10 of 13 tries); once more
+            r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                                "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+            if os.path.isfile(out) and os.path.getsize(out):
+                break
+        else:
+            raise RuntimeError(f"DRC produced no report (2 tries, exit {r.returncode}): {(r.stderr or r.stdout)[-200:]}")
         d = json.load(open(out))
         if complete:
             from . import drcfull as DF

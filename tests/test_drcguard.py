@@ -351,3 +351,19 @@ def test_drc_json_no_report_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(DG.subprocess, "run", lambda cmd, **k: _sp.CompletedProcess(cmd, 1, "", "boom"))
     with pytest.raises(RuntimeError):
         DG.drc_json(str(b))
+
+
+def test_drc_json_retries_once_when_kicad_cli_writes_no_report(tmp_path):
+    """critroute lost 10 of 13 tries to `DRC produced no report`: kicad-cli sometimes exits without writing under load."""
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    flag = tmp_path / "ran"
+    cli = tmp_path / "fake-cli"
+    cli.write_text("#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = --output ] && out=$2; shift; done\n"
+                   f"if [ -f {flag} ]; then echo '{{\"violations\": [], \"unconnected_items\": []}}' > \"$out\"; else touch {flag}; fi\n")
+    cli.chmod(0o755)
+    d = DG.drc_json(str(b), str(cli), 30)
+    assert d["violations"] == [] and flag.exists()
+    cli.write_text("#!/bin/sh\nexit 3\n")
+    with pytest.raises(RuntimeError, match="2 tries, exit 3"):
+        DG.drc_json(str(b), str(cli), 30)
