@@ -133,12 +133,12 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
             except subprocess.TimeoutExpired as e:
                 raise RuntimeError(f"DRC timed out after {timeout} s") from e
             rc = getattr(r, "returncode", 0)
-            if rc not in (0, None):
-                raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
             if os.path.isfile(out) and os.path.getsize(out):
                 break
         else:
-            raise RuntimeError(f"DRC produced no report (2 tries): {(r.stderr or r.stdout)[-200:]}")
+            raise RuntimeError(f"DRC produced no report: kicad-cli exited {rc} with no report (2 tries): {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
+        if rc not in (0, None):
+            raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
         d = json.load(open(out))
         if dtext is not None and not any("rule 'fxcanary'" in str(v.get("description", "")) for v in d.get("violations", [])):
             raise RuntimeError("rule file ignored: the canary rule did not fire (a syntax error in the .kicad_dru disables every rule, "

@@ -368,5 +368,5 @@ def test_drc_json_retries_once_when_kicad_cli_writes_no_report(tmp_path):
     d = DG.drc_json(str(b), str(cli), 30)
     assert d["violations"] == [] and flag.exists()
     cli.write_text("#!/bin/sh\nexit 3\n")
-    with pytest.raises(RuntimeError, match="2 tries, exit 3"):
+    with pytest.raises(RuntimeError, match=r"exited 3 with no report \(2 tries\)"):
         DG.drc_json(str(b), str(cli), 30)
