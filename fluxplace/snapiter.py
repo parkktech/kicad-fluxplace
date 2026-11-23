@@ -163,6 +163,7 @@ def _snap(src, dst, skip):
         via_at.setdefault(cell(mm(v.GetPosition().x), mm(v.GetPosition().y)), []).append(v)
 
     done, moved, refused = set(), 0, 0
+    moved_ids = set()
     for t in tracks:
         if t.m_Uuid.AsString() in skip:
             continue
@@ -198,12 +199,31 @@ def _snap(src, dst, skip):
             for u, w in joint:
                 (u.SetStart if w == 0 else u.SetEnd)(target)
                 moved += 1
+                moved_ids.add(id(u))
                 index_end(u, w)
                 a, bb, h = trk_geom(u)
                 add(u, (min(a[0], bb[0]) - h, min(a[1], bb[1]) - h, max(a[0], bb[0]) + h, max(a[1], bb[1]) + h))
+    gone = set()
     for u in tracks:                                     # both ends in one via: a zero-length stub, the via joins it
         if u.GetStart() == u.GetEnd() and not u.IsLocked():   # (snapvias.snap_text drops it too; KiCad reports it as a
             b.Remove(u)                                  # crossing with any track near the via)
+            gone.add(id(u))
+    # a snap can collapse a track onto another (same net, layer, ends, width): the moved unlocked copy goes, one copy stays.  Only tracks
+    # this call moved are touched: duplicates already on the board are counted in the protected manifest and stay.
+    same = {}
+    for u in tracks:
+        if id(u) in gone:
+            continue
+        a, c = (u.GetStart().x, u.GetStart().y), (u.GetEnd().x, u.GetEnd().y)
+        same.setdefault((u.GetNetCode(), u.GetLayer(), min(a, c), max(a, c), u.GetWidth()), []).append(u)
+    for grp in same.values():
+        if len(grp) < 2:
+            continue
+        movers = [u for u in grp if id(u) in moved_ids and not u.IsLocked()]
+        mv = {id(u) for u in movers}
+        stay = [u for u in grp if id(u) not in mv]
+        for u in (movers if stay else movers[1:]):
+            b.Remove(u)
     pcbnew.SaveBoard(dst, b)
     return moved, refused
 

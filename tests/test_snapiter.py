@@ -170,3 +170,26 @@ def test_snap_edit_runs_in_its_own_process(monkeypatch):
     assert SI._snap is SI._SNAP_REAL
     assert SI._snap_fresh("x", "y", {"u2", "u1"}) == (3, 1)
     assert called["fresh"] == ("fluxplace.snapiter", "_snap_json", ("x", "y", ["u1", "u2"]))
+
+
+def test_snap_that_collapses_a_track_onto_another_leaves_no_duplicate_copper(tmp_path):
+    """A track end 0.1 mm off a via centre is snapped; a second track already ends at the centre, so the moved one becomes an exact copy.
+    The moved unlocked copy goes (one stays); boardwrite.verify then reports no DUPLICATE_COPPER.  A duplicate that was already on the
+    board (counted in the protected manifest) is not this call's to drop."""
+    from fluxplace import boardwrite as BW
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10), 0.2, False), ("A", "F", (5, 10), (10, 10), 0.2, False)], [("A", (10, 10), 0.6)])
+    (tmp_path / "a.kicad_pro").write_text("{}")
+    dst = tmp_path / "o.kicad_pcb"
+    BW.seed(str(src))
+    moved, refused = SI._snap_fresh(str(src), str(dst), set())
+    assert moved == 1
+    v = BW.verify(str(src), str(dst))
+    assert v["ok"] and v["duplicates"] == 0, v
+    assert _ends(dst) == [((5.0, 10.0), (10.0, 10.0))]
+    src2 = tmp_path / "c.kicad_pcb"
+    _mini_board(src2, [("A", "F", (5, 10), (10, 10), 0.2, False), ("A", "F", (5, 10), (10, 10), 0.2, False)], [("A", (10, 10), 0.6)])
+    (tmp_path / "c.kicad_pro").write_text("{}")
+    dst2 = tmp_path / "o2.kicad_pcb"
+    SI._snap_fresh(str(src2), str(dst2), set())
+    assert len(_ends(dst2)) == 2
