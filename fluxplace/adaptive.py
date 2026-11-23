@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 
 from . import escape as E
 from . import routestatus as RS
@@ -32,7 +33,7 @@ def drc_unrouted(board, kicad_cli="kicad-cli"):
     """Run kicad-cli DRC; return (report, set_of_unrouted_netnames)."""
     from . import drcguard as DG
     out = DG.report_slot(board)
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
+    _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
                     "--output", out, board], capture_output=True, text=True)
     from . import drcfull as DF
     try:                                                    # PHASE3I F8 (R16): the slot file is not left behind

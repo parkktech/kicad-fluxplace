@@ -27,6 +27,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import urllib.parse
 import urllib.request
@@ -285,7 +286,7 @@ def measure_model(model_path, rotation=(0.0, 0.0, 0.0), kicad_cli="kicad-cli",
             "print('RESULT ' + json.dumps(r)); sys.stdout.flush(); "
             "os._exit(0)" % (repo, args))
     try:
-        rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+        rc = _procs.run([sys.executable, "-c", code], capture_output=True,
                             text=True, timeout=600, env=dict(os.environ))
         for line in rc.stdout.splitlines():
             if line.startswith("RESULT "):
@@ -349,7 +350,7 @@ def _measure_inproc(model_path, rotation=(0.0, 0.0, 0.0),
 
     with tempfile.TemporaryDirectory() as td:
         def render(bp, side, out):
-            subprocess.run([kicad_cli, "pcb", "render", "--side", side,
+            _procs.run([kicad_cli, "pcb", "render", "--side", side,
                             "--width", "600", "--height", "600",
                             "--background", "opaque", "--quality", "basic",
                             "-o", out, bp], capture_output=True, timeout=180)
@@ -745,7 +746,7 @@ def easyeda_model(lcsc_code, out_dir, log=print):
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = out_dir / "easyeda"
     try:
-        rc = subprocess.run(
+        rc = _procs.run(
             [_easyeda_cli(), "--3d", "--lcsc_id", lcsc_code,
              "--output", str(stem)],
             capture_output=True, text=True, timeout=120)

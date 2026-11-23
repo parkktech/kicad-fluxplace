@@ -13,6 +13,7 @@ import json
 import math
 import os
 import subprocess
+from fluxplace import procs as _procs
 
 from . import routediag as RD
 
@@ -22,7 +23,7 @@ TOL = 0.02
 
 
 def _pcbnew(board, fill, timeout):
-    r = subprocess.run([PY, HELPER, board] + (["--fill"] if fill else []),
+    r = _procs.run([PY, HELPER, board] + (["--fill"] if fill else []),
                        capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout)[-300:])

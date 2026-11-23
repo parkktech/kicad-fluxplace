@@ -249,7 +249,8 @@ def _strip_code(board_in, board_out):
 def _run(code, timeout=900):
     """Run a pcbnew script in a fresh interpreter -> its stdout's last line; raises when it did not print OK."""
     import subprocess
-    rc = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
+    from fluxplace import procs as _procs
+    rc = _procs.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
     import re as _re                       # Fable: SWIG "memory leak" warnings share stdout with no newline ("...memorOK 1170")
     m = _re.search(r"OK(?: [^\n]*)?\s*$", rc.stdout or "")
     last = m.group(0).strip() if m else ""
@@ -386,6 +387,7 @@ def _signal_nets(copy):
 def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
     """One router process under the wall cap (routestatus.run_logged); -> (completed, secs). TimeoutExpired -> None."""
     import subprocess
+    from fluxplace import procs as _procs
     from . import routestatus as RS
     t = time.time()
     status, log = os.path.join(outdir, f"{tag}.status.json"), os.path.join(outdir, f"{tag}.log")
@@ -468,6 +470,7 @@ def _pipeline_ghost(a, board, outdir, budget_min, router="krt-whole", passes=Non
     import glob
     import shutil
     import subprocess
+    from fluxplace import procs as _procs
     from . import pipeline as PL
     os.makedirs(outdir, exist_ok=True)
     copy = os.path.join(outdir, "in.kicad_pcb")
@@ -498,7 +501,7 @@ def _pipeline_ghost(a, board, outdir, budget_min, router="krt-whole", passes=Non
     cmd += ["--route-budget", str(int(budget_min * 60)),
             "--assume-defaults", "--allow-incomplete", "--allow-undocumented", "--no-api"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 120)
+        r = _procs.run(cmd, capture_output=True, text=True, timeout=budget_min * 60 + 120)
         with open(os.path.join(outdir, "ghost.out"), "w") as fh:
             fh.write("\n".join(l for l in (r.stdout + r.stderr).splitlines() if "PROPERTY_ENUM" not in l)[-20000:])
     except subprocess.TimeoutExpired:
@@ -739,11 +742,12 @@ def _job(d, tag, kind, variant, base, rects, pair, acfg, crit, guide=None, adopt
 def _spawn(job, timeout, entry="lookahead:_worker"):
     """one job in a fresh interpreter: entry = "module:function" (default: this module's candidate worker)."""
     import subprocess
+    from fluxplace import procs as _procs
     mod, fn = entry.split(":")
     code = (f"import sys; sys.path.insert(0, {REPO!r}); "
             f"from fluxplace import {mod} as M; M.{fn}({job['jobfile']!r})")
     try:
-        subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
+        _procs.run([PY, "-c", code], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         pass
     try:

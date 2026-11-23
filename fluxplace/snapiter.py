@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 
 from . import drcguard as DG
 from . import hrgeom as HG
@@ -18,7 +19,7 @@ JOINT_MM = 0.005       # track ends this close to a snapped end move with it (th
 def _report(board, cli="kicad-cli"):
     from . import drcguard as DG
     out = DG.report_slot(board)
-    subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "--refill-zones", "-o", out, board],
+    _procs.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "--refill-zones", "-o", out, board],
                    capture_output=True, timeout=900)
     from . import drcfull as DF
     d = DF.complete(board, json.load(open(out)), fill=True)

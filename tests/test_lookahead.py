@@ -1,4 +1,5 @@
 """LOOKAHEAD stage: demand map, reservations, ghost/fitness/render helpers and the round loop (no pcbnew, no router)."""
+from fluxplace import procs as _procs_mod
 import json
 import subprocess
 import os
@@ -173,7 +174,7 @@ def test_run_raises_when_pcbnew_step_does_not_print_ok(monkeypatch):
     import subprocess
     class R:
         returncode, stdout, stderr = 1, "", "boom"
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    monkeypatch.setattr(_procs_mod, "run", lambda *a, **k: R())
     with pytest.raises(RuntimeError, match="pcbnew step failed"):
         LA._run("x")
 
@@ -191,7 +192,7 @@ def test_ghost_command_flags_and_result(monkeypatch, tmp_path):
         rd.mkdir(parents=True)
         (rd / "board.kicad_pcb").write_text("(kicad_pcb)")
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     a = SimpleNamespace(constraints="/c.toml", spec="/s.json", router_dir="/r", router_py="/rp")
     got = LA.ghost(a, str(src), str(tmp_path / "out"), 40, lean=False)
     cmd = seen["cmd"]
@@ -215,7 +216,7 @@ def test_ghost_partial_board_after_hard_cap_is_kept(monkeypatch, tmp_path):
         rd.mkdir(parents=True)
         (rd / "board.kicad_pcb").write_text("(kicad_pcb partial)")
         raise subprocess.TimeoutExpired(cmd, 1)
-    monkeypatch.setattr(subprocess, "run", cap)
+    monkeypatch.setattr(_procs_mod, "run", cap)
     got = LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(out), 1, lean=False)
     assert got and got.endswith("board.kicad_pcb")
 
@@ -228,7 +229,7 @@ def test_ghost_returns_none_on_timeout(monkeypatch, tmp_path):
 
     def boom(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(_procs_mod, "run", boom)
     assert LA.ghost(SimpleNamespace(router_dir="/r", router_py="/rp"), str(src), str(tmp_path / "o"), 1, lean=False) is None
 
 
@@ -478,7 +479,7 @@ def test_ghost_router_flags(monkeypatch, tmp_path):
     seen = {}
     src = tmp_path / "g.kicad_pcb"
     src.write_text("x")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
     a = SimpleNamespace(router_dir="/r", router_py="/rp", freerouting_jar="/fr.jar", java="/jdk/bin/java")
     LA.ghost(a, str(src), str(tmp_path / "o1"), 4, router="freerouting", lean=False)
     cmd = seen["cmd"]
@@ -533,7 +534,7 @@ def test_freerouting_ghost_gets_passes_override_when_constraints_lack_the_table(
     src = tmp_path / "g.kicad_pcb"
     src.write_text("x")
     seen = {}
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **kw: seen.setdefault("cmd", cmd) and subprocess.CompletedProcess(cmd, 0, "", ""))
     a = SimpleNamespace(router_dir="/r", router_py="/rp", constraints=str(cons), spec=None, freerouting_jar="/fr.jar", java=None)
     LA.ghost(a, str(src), str(tmp_path / "o"), 8, router="freerouting", passes=4, lean=False)
     cc = seen["cmd"][seen["cmd"].index("--constraints") + 1]

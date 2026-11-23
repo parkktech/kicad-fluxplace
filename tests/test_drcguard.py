@@ -1,5 +1,6 @@
 """Shared DRC guard (fluxplace/drcguard.py): multiset-of-keys acceptance, position-free
 identity, zone-violation exclusion, and guard_board accepting a count rise with no new key."""
+from fluxplace import procs as _procs_mod
 import os
 import sys
 from collections import Counter
@@ -302,7 +303,7 @@ def test_drc_json_always_refills_runs_on_a_copy(tmp_path, monkeypatch):
     b = tmp_path / "x.kicad_pcb"
     b.write_text("(kicad_pcb)")
     calls = []
-    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
     d = DG.drc_json(str(b))
     assert d["violations"] == []
     assert "--refill-zones" in calls[0]["cmd"] and "--severity-all" in calls[0]["cmd"]
@@ -318,7 +319,7 @@ def test_drc_json_rules_text_reaches_cli_and_only_rules_ignores_the_rest(tmp_pat
                                                                                                    "skew_out_of_range": "ignore"}}}}))
     (tmp_path / "x.kicad_dru").write_text("(version 1)\n(rule \"old\")")
     calls = []
-    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
     DG.drc_json(str(b), rules="(version 1)\n(rule \"new\")", only_rules=["skew_out_of_range"])
     assert "new" in calls[0]["dru"] and "old" not in calls[0]["dru"]
     rs = calls[0]["pro"]["board"]["design_settings"]["rule_severities"]
@@ -333,7 +334,7 @@ def test_drc_json_two_concurrent_calls_do_not_collide(tmp_path, monkeypatch):
     b = tmp_path / "x.kicad_pcb"
     b.write_text("(kicad_pcb)")
     calls, res, errs = [], [], []
-    monkeypatch.setattr(DG.subprocess, "run", _fake_cli(calls))
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
 
     def go():
         try:
@@ -351,7 +352,7 @@ def test_drc_json_no_report_raises(tmp_path, monkeypatch):
     import subprocess as _sp
     b = tmp_path / "x.kicad_pcb"
     b.write_text("(kicad_pcb)")
-    monkeypatch.setattr(DG.subprocess, "run", lambda cmd, **k: _sp.CompletedProcess(cmd, 1, "", "boom"))
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **k: _sp.CompletedProcess(cmd, 1, "", "boom"))
     with pytest.raises(RuntimeError):
         DG.drc_json(str(b))
 

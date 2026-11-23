@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 from collections import Counter, defaultdict
 
@@ -147,7 +148,7 @@ def write_project(out_dir, stem, syms):
 
 # ------------------------------------------------------------------ gate
 def _cli(args, timeout=900):
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    return _procs.run(args, capture_output=True, text=True, timeout=timeout)
 
 
 def export_netlist(sch, kicad_cli="kicad-cli"):

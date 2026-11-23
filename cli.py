@@ -4414,7 +4414,8 @@ def _guard_end(g, a, raised=False):
 
 
 def main(argv=None):
-    from fluxplace import quietlog, calllog
+    from fluxplace import quietlog, calllog, procs
+    procs.install()                              # atexit + SIGTERM/SIGHUP reap every child process group
     quietlog.install_stderr()                    # drop the repeated pcbnew assert line from fd 2 (FLUXPLACE_RAW_STDERR=1: off)
     return calllog.run(_main, argv)              # one JSON line per call in .fluxplace/calls.jsonl
 

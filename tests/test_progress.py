@@ -176,7 +176,7 @@ def test_measure_counts_shorting_items(tmp_path):
         out = cmd[cmd.index("--output") + 1]
         open(out, "w").write(J.dumps(rep))
         return type("R", (), {"returncode": 0})()
-    import subprocess as sp
+    from fluxplace import procs as sp
     old = sp.run
     sp.run = fake_cli
     try:

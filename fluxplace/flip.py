@@ -14,6 +14,7 @@ import copy
 import json
 import os
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 
 from . import boardwrite as BW
@@ -27,14 +28,14 @@ TOL_PAD = 0.005
 
 def available():
     try:
-        r = subprocess.run([PY, "-c", "import pcbnew"], capture_output=True, timeout=60)
+        r = _procs.run([PY, "-c", "import pcbnew"], capture_output=True, timeout=60)
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
 def _run(src, dst, refs):
-    r = subprocess.run([PY, HELPER, src, dst] + list(refs), capture_output=True, text=True, timeout=300)
+    r = _procs.run([PY, HELPER, src, dst] + list(refs), capture_output=True, text=True, timeout=300)
     if "@@FLIP@@" not in r.stdout:
         raise RuntimeError(f"pcbnew flip helper failed: {r.stderr[-300:] or r.stdout[-300:]}")
     return json.loads(r.stdout.split("@@FLIP@@", 1)[1])

@@ -1,6 +1,7 @@
 """fluxplace/drcfull.py: kicad-cli DRC caps `unconnected_items` at CAP (499); complete() restores per-net counts
 from pcbnew connectivity. Unit and guard tests use fake DRC/connectivity data (no kicad-cli); the integration test
 builds a real board with more opens than the cap and checks the completed total against pcbnew."""
+from fluxplace import procs as _procs_mod
 import json
 import os
 import shutil
@@ -81,7 +82,7 @@ def _fake_drc(monkeypatch, boards):
         with open(out, "w") as fh:
             json.dump(boards[cmd[-1]], fh)
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(H.subprocess, "run", run)
+    monkeypatch.setattr(_procs_mod, "run", run)
 
 
 def test_guard_sees_no_net_increase(monkeypatch):

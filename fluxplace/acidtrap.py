@@ -207,9 +207,10 @@ def _trim_overlaps_subprocess(src, dst, log=print):
     """trim_overlaps on src in a fresh interpreter, result written to dst. Returns the count
     (dst is only written when the count is non-zero)."""
     import subprocess
+    from fluxplace import procs as _procs
     import sys
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    r = subprocess.run([sys.executable, "-m", "fluxplace.acidtrap", "--trim", src, dst],
+    r = _procs.run([sys.executable, "-m", "fluxplace.acidtrap", "--trim", src, dst],
                        capture_output=True, text=True, timeout=600, cwd=root)
     # pcbnew prints its SWIG leak warnings to stdout at exit, so the count is a marked line
     marks = [ln for ln in r.stdout.splitlines() if ln.startswith(_MARK)]

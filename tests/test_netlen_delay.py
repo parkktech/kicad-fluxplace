@@ -1,6 +1,7 @@
 """A2 / D71cx (amended): where a budget is in ps the pair is graded on delay skew = sum over layers of (KiCad segment length on the
 layer x stackup ps/mm) + via barrels, reconciled with KiCad's total length per leg; tune equalises delay.  Fixture = the W15 ETH_P2
 shape: legs of equal KiCad length whose copper splits differently between outer (6.0 ps/mm) and inner (7.2 ps/mm) layers."""
+from fluxplace import procs as _procs_mod
 import os
 import shutil
 import sys
@@ -220,9 +221,9 @@ def test_drc_json_wraps_a_timeout_and_a_bad_exit_code(tmp_path, monkeypatch):
 
     def slow(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
-    monkeypatch.setattr(DG.subprocess, "run", slow)
+    monkeypatch.setattr(_procs_mod, "run", slow)
     with pytest.raises(RuntimeError, match="timed out"):
         DG.drc_json(f, timeout=1)
-    monkeypatch.setattr(DG.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 3, "", "boom"))
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 3, "", "boom"))
     with pytest.raises(RuntimeError, match="exited 3"):
         DG.drc_json(f)

@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import tempfile
 import time
@@ -62,7 +63,7 @@ def drc_raw(board, kicad_cli="kicad-cli", timeout=600):
     fd, out = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(board)), prefix=os.path.basename(board) + ".", suffix=".drc.json")
     os.close(fd)
     try:
-        subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones", "-o", out, board],
+        _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones", "-o", out, board],
                        capture_output=True, text=True, timeout=timeout)
         if os.path.getsize(out) == 0:
             raise RuntimeError("kicad-cli produced no DRC report for " + board)

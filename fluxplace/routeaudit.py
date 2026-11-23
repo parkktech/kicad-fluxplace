@@ -18,6 +18,7 @@ import math
 import os
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 from collections import Counter
 
@@ -253,7 +254,7 @@ def drc_types(path, cli="kicad-cli", timeout=900):
     d = tempfile.mkdtemp(prefix="fxdrc-")
     try:
         rep = os.path.join(d, "drc.json")
-        subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--output", rep, path],
+        _procs.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--output", rep, path],
                        capture_output=True, timeout=timeout)
         j = json.load(open(rep))
         if not isinstance(j.get("violations"), list):      # a report with no violations list is not a clean report

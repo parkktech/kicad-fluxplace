@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 from collections import Counter
 
 ZONE_MARK = "Zone"
@@ -128,7 +129,7 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         out = os.path.join(td, "drc.json")
         for attempt in (1, 2):                         # kicad-cli sometimes exits without a report under load (critroute: 10 of 13 tries); once more
             try:
-                r = subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                r = _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
                                     "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired as e:
                 raise RuntimeError(f"DRC timed out after {timeout} s") from e

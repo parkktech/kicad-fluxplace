@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import sys
 from collections import Counter
 
@@ -33,7 +34,7 @@ def _conn(board, fill):
     st = os.stat(board)
     key = (os.path.abspath(board), st.st_mtime_ns, st.st_size, bool(fill))
     if key not in _CACHE:
-        r = subprocess.run([PY, HELPER, board] + (["--fill"] if fill else []),
+        r = _procs.run([PY, HELPER, board] + (["--fill"] if fill else []),
                            capture_output=True, text=True, timeout=900)
         if r.returncode != 0:
             raise RuntimeError("conn_helper failed: " + (r.stderr or r.stdout)[-300:])

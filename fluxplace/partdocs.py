@@ -33,6 +33,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import time
 import urllib.request
 
@@ -200,7 +201,7 @@ def page_text(pdf, pages=None):
         cmd += ["-f", str(min(pages)), "-l", str(max(pages))]
     cmd += [pdf, "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = _procs.run(cmd, capture_output=True, text=True, timeout=120)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None

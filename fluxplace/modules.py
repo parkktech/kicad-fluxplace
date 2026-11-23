@@ -24,6 +24,7 @@ import math
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -232,7 +233,7 @@ def fanouts(board, cons, spec, mods, a):
     jp = os.path.join(wd, "job.json")
     json.dump(job, open(jp, "w"))
     t0 = time.time()
-    r = subprocess.run(["/usr/bin/python3", FO.HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
+    r = _procs.run(["/usr/bin/python3", FO.HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(FO.MARK)]
     if not line:
         raise SystemExit("modules: fan-out helper failed:\n" + (r.stderr or r.stdout)[-1500:])

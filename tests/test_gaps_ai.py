@@ -1,3 +1,4 @@
+from fluxplace import procs as _procs_mod
 import os
 """gaps.py phase 2b: AI packet, action file load and apply, budgets, KRT json-out, packets stop. Fakes only."""
 import hashlib, json, os, sys
@@ -163,7 +164,7 @@ def apply_env(monkeypatch, tmp_path):
     def run(cmd, **k):
         calls.append(("krt", cmd[0]))
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(GP.subprocess, "run", run)
+    monkeypatch.setattr(_procs_mod, "run", run)
 
     def open_nets(b, **k):
         conns = [] if state["laid"] else [_conn()]
@@ -263,7 +264,7 @@ def test_krt_json_out_before_nets(monkeypatch, tmp_path):
         open(js, "w").write(json.dumps({"failed_single": [{"net": "N"}], "open_single": []}))
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     opens = iter([{"N"}, set()])
     monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
     monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])

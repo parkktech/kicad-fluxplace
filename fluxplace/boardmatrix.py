@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,7 @@ def run(argv, cwd, timeout):
     """-> (rc | 'timeout', seconds, stdout+stderr)."""
     t = time.time()
     try:
-        r = subprocess.run([PY, CLI, *argv], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        r = _procs.run([PY, CLI, *argv], cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, time.time() - t, (r.stdout + r.stderr)
     except subprocess.TimeoutExpired as e:
         return "timeout", time.time() - t, ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
@@ -73,7 +74,7 @@ def questions_of(path):
             "    S = QS.Session(sys.argv[1], {}, {}, False, cmd)\n    from fluxplace import netclass as NC\n    cls = NC.classify(B, {}, None)\n"
             "    for t in topics: QS.CHECKS[t](S, B, {}, spec=None, cls=cls)\n    ids += [(cmd, q['id']) for q in S.open]\n"
             "print('@@Q' + json.dumps(ids))\n") % REPO
-    r = subprocess.run([PY, "-c", code, path], capture_output=True, text=True, timeout=300)
+    r = _procs.run([PY, "-c", code, path], capture_output=True, text=True, timeout=300)
     m = re.search(r"@@Q(.*)", r.stdout)
     return json.loads(m.group(1)) if m else [("error", (r.stderr or "")[-200:])]
 
