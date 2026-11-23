@@ -1249,3 +1249,23 @@ def test_accept_power_width_target_with_less_narrow_copper_is_progress(monkeypat
     GP._accept(base, "b", dict(z), "c", ["power-width:VR"], row(259), "power-width")
     assert calls[-1] == ["power-width:VR"]
     assert GP._accept(base, "b", dict(z), "c", ["power-width:VR"], row(300), "power-width")[1].startswith("R6 power_mag worse VR")
+
+
+def test_packets_are_written_after_every_kind_had_its_own_rungs(monkeypatch, tmp_path, guard):
+    """W15 close: 9 pair packets (no answer waiting) took 9 of the 30 minutes before the open nets had a single rung.  With no answer
+    pending the `ai` rung of a kind is deferred to the end of the round: the open-pour packet comes after the open-free rungs."""
+    pour = DRC["unconnected_items"][0]
+    monkeypatch.setattr(GP, "measure", lambda board, kicad_cli="kicad-cli": {
+        "drc": {"violations": [], "unconnected_items": [pour, FREE]}, "opens": 2, "shorts": 0, "errors": 0, "err_keys": Counter()})
+    monkeypatch.setattr(GP.versions, "copper_fingerprint", _fp)
+    board = tmp_path / "in.kicad_pcb"
+    board.write_text("original")
+    for kind in ("open-pour", "open-free"):
+        for r in GP.DISPATCH[kind]:
+            monkeypatch.setitem(GP.RUNGS, r, (lambda base, out, gaps, ctx: {"status": "packet", "n": 1}) if r == "ai" else _rung("same"))
+    attempts = str(tmp_path / "a.jsonl")
+    res = _close(str(board), str(tmp_path / "w"), attempts=attempts, log=lambda m: None)
+    seq = [(x["gap"]["kind"], x["method"]) for x in map(json.loads, open(attempts))]
+    ai = [i for i, (_k, m) in enumerate(seq) if m == "ai"]
+    assert [seq[i][0] for i in ai] == ["open-pour", "open-free"] and ai[0] > max(i for i, (_k, m) in enumerate(seq) if m != "ai")
+    assert res["stop"] == "packets"

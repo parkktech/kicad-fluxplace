@@ -2394,11 +2394,15 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         hit = False
         packets_before = n_packets
         round_vec0 = score(m, m["gaps"])                 # PHASE3E 9: the round's start, for the no-gain counter
+        deferred = []
         for kind in ORDER:
             targets = [g for g in vis(m["gaps"]) if g["kind"] == kind]
             if not targets or kind not in DISPATCH:
                 continue
             for rung in _rank(kind, DISPATCH[kind], yields):
+                if rung == "ai" and not _ai_pending(ctx_dir_ai(work), targets):
+                    deferred.append(kind)                    # a packet changes no board in this pass: it is written after every kind
+                    continue                                 # had its own rungs (W15: 9 pair packets took 9 of 30 min, opens got none)
                 if time.time() - t0 > budget_s:
                     stop = "budget"
                     break
@@ -2423,6 +2427,16 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     break
             if stop:
                 break
+        for kind in deferred:                                # the packets of this round, kinds in ORDER
+            if stop or hit:                                  # after an accept the next round re-reads the gaps first
+                break
+            if time.time() - t0 > budget_s:
+                stop = "budget"
+                break
+            tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
+            if tg:
+                attempt(r, kind, "ai", tg)
+                save(r)
         if stop:
             break
         if not hit:
