@@ -55,6 +55,13 @@ def test_tps2051c_like_4v5_part_on_3v3_rail_fails_with_ranges():
     assert len(f) == 1 and f[0]["level"] == "FAIL" and "3.2..3.4" in f[0]["msg"] and "4.5..5.5" in f[0]["msg"] and "X.pdf#p5" in f[0]["msg"]
 
 
+def test_supply_range_cites_vin_max_when_that_is_the_only_cited_limit():
+    sp = {"components": [{"ref": "U1", "mpn": "LV", "pinmap": {"IN": "5"}}], "nets": [["+5V", [["U1", "IN"]]]]}
+    fx = {"LV": {"vin_max": 3.6, "supply_pins": ["IN"], "_src": {"vin_max": "Y.pdf#p7"}}}
+    f = _codes(EL.check_spec(sp, {"power": {"+5V": {"min_v": 4.9, "max_v": 5.1}}}, facts=fx), "SUPPLY_RANGE")
+    assert len(f) == 1 and "part ?..3.6 V, Y.pdf#p7" in f[0]["msg"]
+
+
 def test_source_overload_fail_and_warn_band():
     f = _codes(EL.check_spec(_spec(), CONS, facts=FACTS), "SOURCE_OVERLOAD")
     assert [x["level"] for x in f] == ["WARN"]                       # +5V: 5 + 470 = 475 of 500 mA (within 10 %); +3V3 100 of 150 quiet

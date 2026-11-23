@@ -196,7 +196,8 @@ def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
             if hi is not None and vmax is not None and hi > vmax + 1e-9:
                 bad.append(f"rail goes up to {hi:g} V, part allows <= {vmax:g} V")
             if bad:
-                src = (facts.get(mpn) or {}).get("_src", {}).get("vin_min") or ""
+                srcs = (facts.get(mpn) or {}).get("_src", {})
+                src = srcs.get("vin_min") or srcs.get("vin_max") or ""
                 out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net} (rail {_fmt(lo)}..{_fmt(hi)} V, part {_fmt(vmin)}..{_fmt(vmax)} V"
                               + (f", {src}" if src else "") + "): " + "; ".join(bad), refs=[c["ref"]]))
     if unknown:
