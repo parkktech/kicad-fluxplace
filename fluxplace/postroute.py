@@ -37,7 +37,7 @@ def clean(board, out, kicad_cli="kicad-cli"):
             shutil.copy(s, os.path.splitext(out)[0] + ext)
     before = _unc(board, kicad_cli)
     shutil.copy(board, out)
-    rep["deduped"] = dedupe_file(out)
+    rep["deduped"] = 0   # no whole-board dedupe here: locked duplicates are counted in the manifest (Fable REVIEW-W16MERGE re-check); B1 drops snap-made copies
     try:
         rep["snap"] = SI.run(out, out, log=lambda m: None)
     except Exception as e:                           # noqa: BLE001 - a clean-up failure is reported, never fatal
