@@ -220,8 +220,22 @@ def _carve(PN, b, area, layer, net, box, grow):
         for dx, dy in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
             carve.Append(PN.FromMM(cx + dx * c - dy * s), PN.FromMM(cy + dx * s + dy * c))
 
-    def inbox(x, y):
-        return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+    def inbox(x, y, m=0.0):
+        return box[0] - m <= x <= box[2] + m and box[1] - m <= y <= box[3] + m
+
+    def crosses(x0, y0, x1, y1, m):
+        """the segment meets the box grown by m (Liang-Barsky): a track that crosses the box with both ends outside must be carved too"""
+        t0, t1 = 0.0, 1.0
+        for d, lo, hi, a in ((x1 - x0, box[0] - m, box[2] + m, x0), (y1 - y0, box[1] - m, box[3] + m, y0)):
+            if abs(d) < 1e-12:
+                if a < lo or a > hi:
+                    return False
+                continue
+            u0, u1 = (lo - a) / d, (hi - a) / d
+            t0, t1 = max(t0, min(u0, u1)), min(t1, max(u0, u1))
+            if t0 > t1:
+                return False
+        return True
 
     for t in b.GetTracks():
         if t.GetNetname() == net:
@@ -229,7 +243,7 @@ def _carve(PN, b, area, layer, net, box, grow):
         if t.Type() == PN.PCB_VIA_T:
             p = t.GetPosition()
             x, y = PN.ToMM(p.x), PN.ToMM(p.y)
-            if inbox(x, y):
+            if inbox(x, y, PN.ToMM(t.GetWidth(PN.F_Cu)) / 2 + grow):          # a via just outside the box still bites into it
                 carve.NewOutline()
                 r = PN.ToMM(t.GetWidth(PN.F_Cu)) / 2 + grow
                 for px, py in _circle(x, y, r, 24):
@@ -239,9 +253,9 @@ def _carve(PN, b, area, layer, net, box, grow):
             s, e = t.GetStart(), t.GetEnd()
             sx, sy, ex, ey = PN.ToMM(s.x), PN.ToMM(s.y), PN.ToMM(e.x), PN.ToMM(e.y)
             L = math.hypot(ex - sx, ey - sy)
-            if L == 0 or not (inbox(sx, sy) or inbox(ex, ey)):
-                continue
             h = PN.ToMM(t.GetWidth()) / 2 + grow
+            if L == 0 or not crosses(sx, sy, ex, ey, h):
+                continue
             rect((sx + ex) / 2, (sy + ey) / 2, L / 2 + h, h, math.atan2(ey - sy, ex - sx))
             n["track"] += 1
     for pd in [p for f in b.GetFootprints() for p in f.Pads()]:
