@@ -304,3 +304,34 @@ def test_find_map_prefers_the_boards_own_versioned_map(tmp_path):
     assert S.find_map(str(tmp_path / "hw" / "proj-v16.kicad_pcb")).endswith("mpn_map-v16.json")
     assert S.find_map(str(tmp_path / "hw" / "proj-v15.kicad_pcb")).endswith("mpn_map.json")
     assert S.find_map(str(tmp_path / "hw" / "proj.kicad_pcb")).endswith("mpn_map.json")
+
+
+# ---------------------------------------------------------------- D71dc(1): supply range of an IC pin vs its rail, refused before placement
+def _supply_case(tmp_path, rail_max):
+    spec = _spec()
+    spec["components"] = [c for c in spec["components"] if c["ref"] != "R2"]
+    spec["components"][1]["pinmap"]["VIN"] = "1"
+    spec["nets"] = {"RAIL": [["R1", "1"], ["U1", "VIN"]]}
+    ds = _ds(tmp_path)
+    man = {"AMP1234ID": {"file": "AMP1234ID.pdf", "facts": {k: {"value": v, "source": "AMP1234ID.pdf#p5"} for k, v in
+                                                            (("vin_min", 4.5), ("vin_max", 5.5), ("supply_pins", ["VIN"]))}}}
+    (tmp_path / "ds" / "datasheets.json").write_text(json.dumps(man))
+    sp = tmp_path / "s.json"
+    sp.write_text(json.dumps(spec))
+    cons = _cons(tmp_path, '[power."RAIL"]\nmin_v = %s\nmax_v = %s\n' % (rail_max - 0.2, rail_max))
+    return ["ready", str(sp), "--constraints", cons, "--no-api", "--datasheets", ds]
+
+
+def test_ready_refuses_a_part_whose_supply_range_excludes_its_rail(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(_supply_case(tmp_path, 3.4) + ["--allow-incomplete"])
+    out = capsys.readouterr().out
+    assert e.value.code == 1 and "SUPPLY_RANGE" in out and "U1" in out
+
+
+def test_ready_passes_the_supply_check_when_the_rail_fits(tmp_path, capsys):
+    try:
+        cli.main(_supply_case(tmp_path, 5.4))
+    except SystemExit:
+        pass
+    assert "SUPPLY_RANGE" not in capsys.readouterr().out

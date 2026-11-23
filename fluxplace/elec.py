@@ -23,7 +23,8 @@ Constraint keys read (all optional; a check without its inputs reports "not eval
   [elec]         cap_margin = 1.25  source_warn_pct = 10
   [nets.NAME]    role = "signal"    declares a net a signal, not a power rail (power.unknown_rails skips it)
 
-Codes: SUPPLY_RANGE SOURCE_OVERLOAD CONTACT_CURRENT FUSE_SIZING PIN_STRAP CAP_VOLTAGE_MARGIN (FAIL/WARN), ELEC_NOT_EVALUATED (INFO).
+SUPPLY_RANGE_UNKNOWN (WARN): an IC (U*/Y*) with a pin on a declared [power] rail and no vin_min/vin_max fact; add one with parts-fact.
+Codes: SUPPLY_RANGE SUPPLY_RANGE_UNKNOWN SOURCE_OVERLOAD CONTACT_CURRENT FUSE_SIZING PIN_STRAP CAP_VOLTAGE_MARGIN (FAIL/WARN), ELEC_NOT_EVALUATED (INFO).
 Nothing here names a board, a reference or an MPN.
 """
 import json
@@ -31,7 +32,7 @@ import math
 import os
 import re
 
-CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "ELEC_NOT_EVALUATED")
+CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "SUPPLY_RANGE_UNKNOWN", "ELEC_NOT_EVALUATED")
 FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules")
 _GND = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
 _POWER = re.compile(r"^(\+?\d+V\d*\w*|V(CC|DD|BAT|BATT|IN|BUS)\w*)$", re.I)
@@ -53,6 +54,7 @@ def load_facts(ds_dir):
             continue
         ok = {k: v["value"] for k, v in fx.items() if isinstance(v, dict) and v.get("source") and "value" in v}
         if ok:
+            ok["_src"] = {k: v["source"] for k, v in fx.items() if isinstance(v, dict) and v.get("source") and "value" in v}
             out[mpn] = ok
     return out
 
@@ -166,12 +168,17 @@ def _lim(v, pin):
 
 def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
     out = []
+    unknown = []
     for c in spec.get("components", []):
         mpn = _mpn(c, mpn_map)
         fx = facts.get(mpn) or {}
         if "vin_min" not in fx and "vin_max" not in fx:
-            if c["ref"][:1] == "U":
-                noeval.setdefault("SUPPLY_RANGE", {}).setdefault("no supply-range fact", []).append(f"{c['ref']} {mpn or c.get('value', '')}")
+            if c["ref"][:1] in ("U", "Y"):
+                on_rail = [n for n in by_ref.get(c["ref"], {}) if not _is_gnd(n) and any(v is not None for v in _vrange(_rail(cons, n)))]
+                if on_rail:
+                    unknown.append(f"{c['ref']} {mpn or c.get('value', '')} ({', '.join(sorted(on_rail)[:3])})")
+                else:
+                    noeval.setdefault("SUPPLY_RANGE", {}).setdefault("no supply-range fact", []).append(f"{c['ref']} {mpn or c.get('value', '')}")
             continue
         for sp in fx.get("supply_pins") or []:
             net = _pin_net(c, by_ref, sp)
@@ -189,8 +196,17 @@ def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
             if hi is not None and vmax is not None and hi > vmax + 1e-9:
                 bad.append(f"rail goes up to {hi:g} V, part allows <= {vmax:g} V")
             if bad:
-                out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net}: " + "; ".join(bad), refs=[c["ref"]]))
+                src = (facts.get(mpn) or {}).get("_src", {}).get("vin_min") or ""
+                out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net} (rail {_fmt(lo)}..{_fmt(hi)} V, part {_fmt(vmin)}..{_fmt(vmax)} V"
+                              + (f", {src}" if src else "") + "): " + "; ".join(bad), refs=[c["ref"]]))
+    if unknown:
+        out.append(_f("WARN", "SUPPLY_RANGE_UNKNOWN", f"{len(unknown)} IC(s) on a declared rail have no datasheet supply-range fact "
+                      f"(parts-fact MPN vin_min= vin_max= supply_pins=): {_short(unknown)}", refs=[u.split(" ")[0] for u in unknown]))
     return out
+
+
+def _fmt(v):
+    return "?" if v is None else f"{v:g}"
 
 
 def _loads(spec, facts, mpn_map, by_ref):
