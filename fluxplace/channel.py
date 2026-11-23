@@ -46,9 +46,31 @@ KEYS = ("loss_db_max", "loss_db_target", "freq_ghz", "skew_ps_max", "skew_ps_tar
 
 
 # ------------------------------------------------------------------ physics
-def stack_rows(cons):
-    """-> (rows, planes, source). zgeom.resolve_stack rows plus loss_tangent / roughness from the named template.
-    Defaults (documented above) fill what the template lacks."""
+def board_stack_rows(path):
+    """[{type, thickness, epsilon_r, loss_tangent}] (copper and dielectric rows, in order) from the board's own (stackup),
+    the numbers KiCad's tuning / DRC / calculator read. [] when the board has none."""
+    import re
+    try:
+        raw = open(path, errors="replace").read()
+    except (OSError, TypeError):
+        return []
+    m = re.search(r"\(stackup\b(.*?)\n\t\t\)\n", raw, re.S)
+    out = []
+    for blk in re.split(r'(?=\(layer\s+")', m.group(1) if m else ""):
+        t = re.search(r'\(type\s+"([^"]+)"\)', blk)
+        if not t or t.group(1) not in ("copper", "core", "prepreg"):
+            continue
+        g = lambda k: (re.search(r"\(%s\s+([\d.eE+-]+)" % k, blk) or [None, None])[1]
+        out.append({"type": t.group(1), "thickness": float(g("thickness") or 0),
+                    "epsilon_r": float(g("epsilon_r")) if g("epsilon_r") else None,
+                    "loss_tangent": float(g("loss_tangent")) if g("loss_tangent") else None})
+    return out
+
+
+def stack_rows(cons, board_path=None):
+    """-> (rows, planes, source). zgeom.resolve_stack rows (geometry: the constraints' template) plus loss_tangent and
+    roughness. With board_path, epsilon_r and loss_tangent are taken from the board's own stackup when it has the same
+    layer sequence, so loss, delay and KiCad read the same inputs (source says so; a differing sequence keeps the template)."""
     from . import zgeom as ZG
     from . import stackup as ST
     rows, planes, src = ZG.resolve_stack(cons)
@@ -56,13 +78,21 @@ def stack_rows(cons):
     tl = ST.PROFILES.get(prof, {}).get("layers") if prof else None
     rough = float(((cons or {}).get("stackup") or {}).get("roughness_rms_um")
                   or (ST.PROFILES.get(prof, {}) if prof else {}).get("roughness_rms_um") or DEFAULT_ROUGHNESS_UM)
+    br = board_stack_rows(board_path) if board_path else []
+    same = bool(br) and [r["type"] for r in br] == [r["type"] for r in rows]
     out = []
     for i, r in enumerate(rows):
         r = dict(r)
         if tl and len(tl) == len(rows):
             r.setdefault("loss_tangent", tl[i].get("loss_tangent"))
+        if same and r["type"] != "copper":
+            for k in ("epsilon_r", "loss_tangent"):
+                if br[i][k] is not None:
+                    r[k] = br[i][k]
         r["roughness_rms_um"] = rough
         out.append(r)
+    if same:
+        src += " + epsilon_r/loss_tangent from the board stackup"
     return out, planes, src
 
 
@@ -451,7 +481,7 @@ def evaluate(board, cons, spec=None, nets=None):
         board = IO.load(board)
     from . import netclass as NC
     cons = cons or {}
-    rows, planes, _src = stack_rows(cons)
+    rows, planes, _src = stack_rows(cons, board.GetFileName())
     allnets = sorted({str(n) for n in board.GetNetsByName().keys() if str(n)})
     pm = NC._pairs(set(allnets), cons)
     cover = [n for n in allnets if _family(cons.get("channel"), n)]

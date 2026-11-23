@@ -221,3 +221,13 @@ def test_predict():
     assert r["length_mm"] == pytest.approx(40 * CH.DETOUR) and r["length_margin_mm"] == pytest.approx(100 - 46)
     assert r["loss_db"] > 0 and r["max_mismatch_mm"] > 0
     assert CH.predict([(0, 0), (200, 0)], "F.Cu", b)["verdict"] == "fail"
+
+
+def test_board_stackup_supplies_er_and_df(tmp_path):
+    f = tmp_path / "b.kicad_pcb"
+    f.write_text('(kicad_pcb\n\t(setup\n\t\t(stackup\n\t\t\t(layer "F.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n'
+                 '\t\t\t(layer "dielectric 1"\n\t\t\t\t(type "core")\n\t\t\t\t(thickness 0.2)\n\t\t\t\t(epsilon_r 3.9)\n\t\t\t\t(loss_tangent 0.011)\n\t\t\t)\n'
+                 '\t\t\t(layer "B.Cu"\n\t\t\t\t(type "copper")\n\t\t\t\t(thickness 0.035)\n\t\t\t)\n\t\t)\n\t)\n)\n')
+    rows = CH.board_stack_rows(str(f))
+    assert [r["type"] for r in rows] == ["copper", "core", "copper"]
+    assert rows[1]["epsilon_r"] == 3.9 and rows[1]["loss_tangent"] == 0.011 and rows[0]["epsilon_r"] is None
