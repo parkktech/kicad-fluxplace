@@ -26,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import time
 
@@ -324,7 +325,7 @@ def import_session(workdir, idx, out_board=None):
             f"pcbnew.SaveBoard({routed!r}, b); "
             f"print('OK' if nt > 100 else 'FAIL', nt, nv, unr); "
             f"sys.stdout.flush(); os._exit(0)")
-    rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+    rc = _procs.run([sys.executable, "-c", code], capture_output=True,
                         text=True, env=dict(os.environ))
     if not (rc.stdout.strip().splitlines() or ["FAIL"])[-1].startswith("OK"):
         return None
@@ -340,7 +341,7 @@ def drc_count(board_path, kicad_cli="kicad-cli"):
     items (the router's completion number already covers those)."""
     rpt = os.path.splitext(board_path)[0] + "_drc.json"
     try:
-        subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
+        _procs.run([kicad_cli, "pcb", "drc", "--format", "json",
                         "--severity-error", "-o", rpt, board_path],
                        capture_output=True, text=True, timeout=600)
         from . import drcfull as DF
@@ -387,7 +388,7 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
                     f"from fluxplace.tournament import candidate_worker; "
                     f"candidate_worker({board_path!r}, {workdir!r}, {i}, "
                     f"{fill}, {aspect}, {pad}, {jitter}, profile={pf!r})")
-        return subprocess.Popen([sys.executable, "-c", code],
+        return _procs.popen([sys.executable, "-c", code],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 env=dict(os.environ))
 
@@ -468,7 +469,7 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
                    "--router.job_timeout=02:00:00"]
             if oit is not None:
                 cmd += ["-oit", str(oit)]
-            proc = subprocess.Popen(
+            proc = _procs.popen(
                 cmd, stdout=open(os.path.join(workdir, f"cand_{i}.frlog"), "w"),
                 stderr=subprocess.STDOUT)
             running.append((proc, r))

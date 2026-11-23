@@ -369,13 +369,14 @@ def converge(board_path, kicad_cli="kicad-cli", max_rounds=6, log=print):
     """
     import json
     import subprocess
+    from fluxplace import procs as _procs
     import tempfile
 
     history = []
     for rnd in range(1, max_rounds + 1):
         rpt = os.path.join(tempfile.gettempdir(),
                            "fluxplace-converge-%d.json" % rnd)
-        subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
+        _procs.run([kicad_cli, "pcb", "drc", "--format", "json",
                         "--severity-all", "--output", rpt, board_path],
                        capture_output=True, text=True, timeout=1800)
         if not os.path.exists(rpt):

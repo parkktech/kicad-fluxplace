@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import time
 from collections import Counter
@@ -768,7 +769,7 @@ def _r_krt(base, out, gaps, ctx):
             at = cmd.index("--nets")
             cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in rip]] if rip else [])
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
+                proc = _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
                                       cwd=ctx["work"])
             except subprocess.TimeoutExpired:
                 res["status"] = "krt timeout"
@@ -1335,7 +1336,7 @@ def _route_net(w, net, layers, ctx):
     cmd = _krt_cmd(w, dst, [net], ctx, layers)
     if cmd is not None:
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+            _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
         except subprocess.TimeoutExpired:
             pass
         if os.path.exists(dst):
@@ -1977,7 +1978,7 @@ def _r_krt_region(base, out, gaps, ctx):
                 return {"status": "krt not found"}
             _rm(out)
             try:
-                subprocess.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+                _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
             except subprocess.TimeoutExpired:
                 _rm(out)
                 return {"status": "krt timeout", "margin": margin}
@@ -2091,7 +2092,7 @@ def _call_rung(name, base, out, gaps, ctx):
         with open(job, "w") as fh:
             json.dump({"name": name, "base": base, "out": out, "gaps": gaps, "ctx": cj}, fh, default=str)
         try:
-            p = subprocess.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
+            p = _procs.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
                                text=True, timeout=ctx["budget_s"] + 120, cwd=_repo_root())
         except subprocess.TimeoutExpired:
             raise RuntimeError("rung timeout")

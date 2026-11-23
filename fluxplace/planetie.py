@@ -7,6 +7,7 @@ via per floating cluster), refills the zones and reports what is still open with
 import math
 import os
 import subprocess
+from fluxplace import procs as _procs
 
 
 
@@ -32,7 +33,7 @@ def unconnected_pads(board_path, nets, cli="/usr/bin/kicad-cli", workdir=None):
     import json, subprocess, tempfile
     wd = workdir or tempfile.mkdtemp(prefix="planetie-")
     out = os.path.join(wd, "drc.json")
-    subprocess.run([cli, "pcb", "drc", "--refill-zones", "--format", "json", "--severity-all", "--output", out, board_path],
+    _procs.run([cli, "pcb", "drc", "--refill-zones", "--format", "json", "--severity-all", "--output", out, board_path],
                    capture_output=True, text=True, timeout=900)
     try:
         from . import drcfull as DF

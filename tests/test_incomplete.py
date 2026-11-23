@@ -1,4 +1,5 @@
 """Audits say INCOMPLETE (exit 1 unless allowed), never a bare pass, when part of the design was not covered."""
+from fluxplace import procs as _procs_mod
 import json, os, sys
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -76,7 +77,7 @@ def test_drc_scope_missing_report_is_incomplete(tmp_path):
 def test_drc_types_report_without_violations_list_raises(tmp_path, monkeypatch):
     def fake(cmd, **k):
         open(cmd[cmd.index("--output") + 1], "w").write("{}")
-    monkeypatch.setattr(RA.subprocess, "run", fake)
+    monkeypatch.setattr(_procs_mod, "run", fake)
     with pytest.raises(RuntimeError):
         RA.drc_types("b.kicad_pcb")
 

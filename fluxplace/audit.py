@@ -29,6 +29,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 
 
@@ -167,7 +168,7 @@ def drc_full(board_path, kicad_cli="kicad-cli", out_path=None, log=print):
                "--output", rpt, tboard]
         log("re-running DRC with %d previously-ignored check(s) enabled" % len(flipped))
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            _procs.run(cmd, capture_output=True, text=True, timeout=1800)
         except Exception as e:
             return {"error": "kicad-cli drc failed: %s" % e}
 

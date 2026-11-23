@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import time
 import urllib.error
 import urllib.parse
@@ -66,7 +67,7 @@ def part_tokens(mpn):
 def pdf_text(path, first=None, last=None):
     cmd = ["pdftotext", "-layout"] + (["-f", str(first), "-l", str(last)] if first else []) + [path, "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        r = _procs.run(cmd, capture_output=True, text=True, timeout=180)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else ""

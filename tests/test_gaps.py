@@ -1,4 +1,5 @@
 """gaps.py: classify, guard, rung dispatch and the close loop. Fakes only: no kicad-cli, no pcbnew boards."""
+from fluxplace import procs as _procs_mod
 import hashlib, json, os, shutil, sys
 from collections import Counter
 import pytest
@@ -401,7 +402,7 @@ def test_krt_command_carries_nets_and_layers(monkeypatch, tmp_path):
         seen["cmd"], seen["kw"] = cmd, kw
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     opens = iter([{"NET[0]"}, set()])                                  # open before the call, closed after it
     monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
     monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: ["BLOCK[1]", "OTHER"])
@@ -433,7 +434,7 @@ def test_krt_keeps_previous_board_on_a_trade_and_skips_pair_legs(monkeypatch, tm
         calls.append(cmd[cmd.index("--nets") + 1:])
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     opens = iter([{"A", "P_N"}, {"P_N", "LOST"}])                      # A closes, another net opens: a trade
     monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
     monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])
@@ -511,7 +512,7 @@ def _rung_ctx(tmp_path, **kw):
 
 
 def test_call_rung_signal_crash_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr(GP.subprocess, "run", lambda *a, **k: _cp(-11))
+    monkeypatch.setattr(_procs_mod, "run", lambda *a, **k: _cp(-11))
     out = str(tmp_path / "o.kicad_pcb")
     with pytest.raises(RuntimeError, match="signal 11"):
         GP._call_rung("patch", str(tmp_path / "in.kicad_pcb"), out, [_g("a")], _rung_ctx(tmp_path))
@@ -521,14 +522,14 @@ def test_call_rung_signal_crash_raises(monkeypatch, tmp_path):
 def test_call_rung_exit_and_timeout(monkeypatch, tmp_path):
     import subprocess
     out = str(tmp_path / "o.kicad_pcb")
-    monkeypatch.setattr(GP.subprocess, "run", lambda *a, **k: _cp(3))
+    monkeypatch.setattr(_procs_mod, "run", lambda *a, **k: _cp(3))
     with pytest.raises(RuntimeError, match="rung exit 3"):
         GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
 
     def slow(*a, **k):
         assert k["timeout"] == 60 + 120
         raise subprocess.TimeoutExpired(cmd="x", timeout=k["timeout"])
-    monkeypatch.setattr(GP.subprocess, "run", slow)
+    monkeypatch.setattr(_procs_mod, "run", slow)
     with pytest.raises(RuntimeError, match="rung timeout"):
         GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
 
@@ -546,7 +547,7 @@ def test_call_rung_child_round_trip_returns_krt_last(monkeypatch, tmp_path):
         assert k["cwd"] == GP._repo_root()
         assert GP._main(["--rung-job", cmd[-1]]) == 0
         return _cp(0)
-    monkeypatch.setattr(GP.subprocess, "run", run_child)
+    monkeypatch.setattr(_procs_mod, "run", run_child)
     ctx = _rung_ctx(tmp_path)
     out = str(tmp_path / "o.kicad_pcb")
     res = GP._call_rung("fakechild", str(tmp_path / "in.kicad_pcb"), out, [_g("a"), _g("b")], ctx)
@@ -670,7 +671,7 @@ def _region_fakes(monkeypatch, tmp_path, first_margin_fixes):
     monkeypatch.setattr(GP, "_rip_window", rip)
     monkeypatch.setattr(GP, "_krt_cmd", krt_cmd)
     monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
-    monkeypatch.setattr(GP.subprocess, "run", run)
+    monkeypatch.setattr(_procs_mod, "run", run)
     ctx = {"cons": {}, "cons_path": None, "work": str(tmp_path), "budget_s": 60, "protect": {"P1"},
            "kicad_cli": "kicad-cli"}
     return base, ctx, margins, rips, krt
@@ -906,7 +907,7 @@ def test_ctx_protect_round_trips_job_json(monkeypatch, tmp_path):
         out = seen["job"]["out"]
         json.dump({}, open(out + ".job.out.json", "w"))
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(GP.subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     ctx = {"budget_s": 60, "protect": {"A_P", "A_N"}, "cons_path": None, "kicad_cli": "kicad-cli"}
     GP._call_rung("krt", str(tmp_path / "b.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), [], ctx)
     assert seen["job"]["ctx"]["protect"] == ["A_N", "A_P"]
@@ -1105,7 +1106,7 @@ def test_rail_is_never_a_krt_rip_candidate(monkeypatch, tmp_path):
     monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
     monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"])
     monkeypatch.setattr(PWR, "route_widths", lambda cons, layers=None, track_mm=0.15, exclude=(): {"VCCRAIL": 0.6})
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (open(cmd[cmd.index("--output") + 1], "w").write("x"),
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **kw: (open(cmd[cmd.index("--output") + 1], "w").write("x"),
                                                           types.SimpleNamespace(returncode=0))[1])
     skips = []
     monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: skips.append(set(skip)) or [])
@@ -1167,7 +1168,7 @@ def _fb_krt_env(monkeypatch, tmp_path, opens_seq):
         calls.append(cmd[cmd.index("--nets") + 1:])
         open(cmd[cmd.index("--output") + 1], "w").write("routed")
         return types.SimpleNamespace(returncode=0)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_procs_mod, "run", fake_run)
     opens = iter(opens_seq)
     monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(opens))
     monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])

@@ -15,6 +15,7 @@ import math
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 
 PY = os.environ.get("FLUXPLACE_KICAD_PYTHON", "/usr/bin/python3")
 HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "silk_helper.py")
@@ -221,7 +222,7 @@ class Grid:
 # ------------------------------------------------------------------ scene
 def load_scene(board, py=None):
     """Run the pcbnew helper; -> scene dict. Raises RuntimeError when pcbnew/the board is unusable."""
-    r = subprocess.run([py or PY, HELPER, "scene", board], capture_output=True, text=True, timeout=600)
+    r = _procs.run([py or PY, HELPER, "scene", board], capture_output=True, text=True, timeout=600)
     if MARK not in r.stdout:
         raise RuntimeError("silk helper failed: " + (r.stderr.strip().splitlines() or ["no output"])[-1][:200])
     return _prep(json.loads(r.stdout.split(MARK, 1)[1]))
@@ -244,7 +245,7 @@ def apply_plan(board, out, plan, py=None):
         json.dump(plan, fh)
         pf = fh.name
     try:
-        r = subprocess.run([py or PY, HELPER, "apply", board, out, pf], capture_output=True, text=True, timeout=600)
+        r = _procs.run([py or PY, HELPER, "apply", board, out, pf], capture_output=True, text=True, timeout=600)
     finally:
         os.unlink(pf)
     if MARK not in r.stdout:
@@ -708,7 +709,7 @@ def measure_text(text, sizes, mirror, cfg, py=None):
         json.dump({"text": text, "mirror": mirror, "sizes": sizes}, fh)
         pf = fh.name
     try:
-        r = subprocess.run([py or PY, HELPER, "measure", pf], capture_output=True, text=True, timeout=120)
+        r = _procs.run([py or PY, HELPER, "measure", pf], capture_output=True, text=True, timeout=120)
     finally:
         os.unlink(pf)
     if MARK not in r.stdout:

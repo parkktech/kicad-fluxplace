@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import sys
 import tempfile
 import time
@@ -118,7 +119,7 @@ def _params(a, pr):
 def drc_counts(board, workdir, timeout=900):
     out = os.path.join(workdir, os.path.basename(board) + ".drc.json")
     t0 = time.time()
-    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--all-track-errors", "--refill-zones", "-o", out, board],
+    _procs.run(["kicad-cli", "pcb", "drc", "--format", "json", "--all-track-errors", "--refill-zones", "-o", out, board],
                    capture_output=True, text=True, timeout=timeout)
     from . import drcfull as DF
     d = DF.complete(board, json.load(open(out)), fill=True)
@@ -132,7 +133,7 @@ def _drop_illegal_claims(board, job, claimed, wd, log):
     are dropped (those pins escape through the normal, fully checked fan-out); the reason is logged."""
     jp = os.path.join(wd, "claims.json")
     json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed}, open(jp, "w"))
-    r = subprocess.run(["/usr/bin/python3", HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
+    r = _procs.run(["/usr/bin/python3", HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
     if not line:
         log("fanout: reserved-escape legality check failed: " + (r.stderr or r.stdout)[-200:])
@@ -246,7 +247,7 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
     json.dump(job, open(jp, "w"))
     t0 = time.time()
     tmp_out = out or os.path.join(wd, "out.kicad_pcb")
-    r = subprocess.run(["/usr/bin/python3", HELPER, jp, board_in, tmp_out], capture_output=True, text=True)
+    r = _procs.run(["/usr/bin/python3", HELPER, jp, board_in, tmp_out], capture_output=True, text=True)
     line = [l[l.index(MARK):] for l in r.stdout.splitlines() if MARK in l]      # pcbnew may print on the same line first
     if not line:
         raise SystemExit("fanout: helper failed:\n" + (r.stderr or r.stdout)[-1500:])

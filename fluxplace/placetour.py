@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import time
 from types import SimpleNamespace
 
@@ -86,7 +87,7 @@ def _review(a, routed, rev_json):
     if not os.path.exists(tool):
         return None
     try:
-        r = subprocess.run([a.router_py, "-X", "utf8", tool, routed, "--json", rev_json, "--top", "30"],
+        r = _procs.run([a.router_py, "-X", "utf8", tool, routed, "--json", rev_json, "--top", "30"],
                            cwd=a.router_dir, capture_output=True, text=True, timeout=900)
     except (OSError, subprocess.TimeoutExpired):
         return None

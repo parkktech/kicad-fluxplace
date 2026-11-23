@@ -22,6 +22,7 @@ import math
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import time
 
 from . import clusters as CL
@@ -140,7 +141,7 @@ def run_tool(tool, aux, workdir, params, timeout=900, threads=8):
     t = time.time()
     try:
         with open(logp, "w") as fh:
-            rc = subprocess.run([tool["python"], tool["placer"], cpath], cwd=workdir, stdout=fh, stderr=subprocess.STDOUT,
+            rc = _procs.run([tool["python"], tool["placer"], cpath], cwd=workdir, stdout=fh, stderr=subprocess.STDOUT,
                                 env=env, timeout=timeout).returncode
     except subprocess.TimeoutExpired:
         raise Unavailable(f"Cypress timed out after {timeout} s ({logp})")
