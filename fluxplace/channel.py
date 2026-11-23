@@ -540,12 +540,15 @@ def evaluate(board, cons, spec=None, nets=None):
             ls = [m["loss_db"] for m in pmx.values()]
             row["metrics"].append(_metric("loss", "dB", None if None in ls else max(ls), b.get("loss_db_target"), b.get("loss_db_max"), lab.get("loss_db_max") or lab.get("loss_db_target"), 2))
         if "skew_ps_max" in b or "skew_ps_target" in b:
-            per = []
+            per, mms = [], []
             for pq, nq, lbl in ors:
                 dp, dn = pmx[id(pq)]["delay_ps"], (pmx[id(nq)]["delay_ps"] if nq else None)
                 per.append((lbl, abs(dp - dn) if dp is not None and dn is not None else None))
+                mms.append(abs(pq["length_mm"] - nq["length_mm"]) if nq else None)
             vals = [v for _l, v in per if v is not None]
             m = _metric("skew", "ps", max(vals) if vals else None, b.get("skew_ps_target"), b.get("skew_ps_max"), lab.get("skew_ps_max") or lab.get("skew_ps_target"), 2)
+            if vals:
+                m["mm"] = mms[[v for _l, v in per].index(max(vals))]          # the same orientation, in mm (KiCad DRC units)
             if len(per) > 1 or any(v is None for _l, v in per):
                 m["detail"] = "; ".join(f"{l} {'unmatched' if v is None else format(v, '.1f')}" for l, v in per)
             row["metrics"].append(m)
@@ -587,6 +590,8 @@ def _fmt(m):
     v = "?" if m["value"] is None else f"{m['value']:.{d}f}"
     mx = "" if m["max"] is None else f"/{m['max']:g}"
     s = f"{m['name']} {v}{mx} {m['unit']}"
+    if m.get("mm") is not None:
+        s += f" ({m['mm']:.2f} mm)"
     if m["verdict"] == "over-target-pass":
         s += f" (target {m['target']:g}, +{m['over_target']:.{d}f} over: pass)"
     elif m["verdict"] == "fail":
