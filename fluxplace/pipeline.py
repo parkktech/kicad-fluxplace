@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -962,7 +963,9 @@ def st_close(c, n, board):
             open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
         except OSError:
             pass
-        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e).strip().splitlines()[-1][:100] if str(e).strip() else ''}", "board": board}
+        last = (str(e).strip().splitlines() or [""])[-1][:100]
+        return {"verdict": "warn", "line": "close: crashed " + (last if re.match(r"\w*(Error|Exception|Exit)\b", last) else f"{type(e).__name__}: {last}"),
+                "board": board}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}

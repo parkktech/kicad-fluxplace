@@ -267,7 +267,7 @@ def test_rung_systemexit_is_error_and_loop_continues(monkeypatch, loop):
 def test_st_close_warns_when_close_raises(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise RuntimeError("bad")
-    monkeypatch.setattr(GP, "close", boom)
+    monkeypatch.setattr(PL, "in_fresh_process", boom)           # close runs in a fresh process (pcbnew bindings decay otherwise)
     board = tmp_path / "in.kicad_pcb"
     board.write_text("x")
     c = types.SimpleNamespace(dir=lambda n, name: str(tmp_path / "w"), cons_path=None, cons={},
