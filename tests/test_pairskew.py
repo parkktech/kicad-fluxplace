@@ -148,3 +148,34 @@ def test_via_stub_is_reported_and_a_straight_through_via_is_removed(tmp_path):
     assert len(vs) == 1 and vs[0]["x"] == 10 and vs[0]["used"] == ["F.Cu"] and vs[0]["dead"] and abs(vs[0]["stub_mm"] - 1.535) < 1e-6
     text, dead = PA.strip_dead_vias(open(f).read(), B, ["USB_DP"])
     assert len(dead) == 1 and "(at 10 5)" not in text and "(at 20 5)" in text
+
+
+def _tap_board(tmp_path, spur_p=3.0, spur_n=4.0, ox=30.0, oy=30.0):
+    """Endpoints QA1 -> ZK2 (20 mm, both legs equal); a protection-like part ZQ9 (no J/P/X/U prefix, one pad per leg) hangs off the line
+    by a spur of spur_p / spur_n mm.  No ref prefix or part kind says which part is the tap: the topology does."""
+    body = PB.fp("QA1", ox, oy, [PB.pad("1", 0, 0, "E_P"), PB.pad("2", 0, 2, "E_N")]) + PB.fp("ZK2", ox, oy, [PB.pad("1", 20, 0, "E_P"), PB.pad("2", 20, 2, "E_N")])
+    body += PB.fp("ZQ9", ox, oy, [PB.pad("1", 10, -spur_p, "E_P"), PB.pad("2", 10, 2 + spur_n, "E_N")])
+    for net, y, sp, sgn in (("E_P", 0, spur_p, -1), ("E_N", 2, spur_n, 1)):
+        body += _seg(net, (ox, oy + y), (ox + 10, oy + y)) + _seg(net, (ox + 10, oy + y), (ox + 20, oy + y)) + \
+            _seg(net, (ox + 10, oy + y), (ox + 10, oy + y + sgn * sp))
+    return RD.load(PB.write(tmp_path, body))
+
+
+@needs_cli
+def test_a_tap_is_a_stub_never_a_path_endpoint(tmp_path):
+    r = netlen.pair_skew(_tap_board(tmp_path), "E_P", "E_N", {})
+    assert r["status"] == "ok" and r["basis"] == "path" and set(r["ends"]) == {"QA1", "ZK2"}
+    assert [(p["a"][:3], p["b"][:3]) for p in r["paths"]] == [("QA1", "ZK2")] and r["skew_mm"] < 0.05       # only the end-to-end path is graded
+    assert [t["at"].split(".")[0] for t in r["taps"]] == ["ZQ9"] and 2.5 < r["taps"][0]["mm"] < 4.5       # the spur is the tap's stub
+    assert r["stub_mm"] == r["taps"][0]["mm"]
+
+
+@needs_cli
+def test_orientations_do_not_depend_on_net_order(tmp_path):
+    B = board(tmp_path)
+    a = netlen.pair_skew(B, "USB_DM", "USB_DP", {})
+    b = netlen.pair_skew(B, "USB_DP", "USB_DM", {})
+    assert a["status"] == b["status"] == "ok" and a["ends"] == b["ends"]
+    key = lambda r: sorted((q["a"].split(".")[0], q["b"].split(".")[0], round(abs(q["d"]), 3)) for q in r["paths"])          # noqa: E731
+    assert key(a) == key(b) and abs(a["skew_mm"]) == pytest.approx(abs(b["skew_mm"]), abs=1e-3)
+    assert [round(x["mm"], 2) for x in a["spurs"]] == [round(x["mm"], 2) for x in b["spurs"]] or sorted(x["mm"] for x in a["spurs"]) == sorted(x["mm"] for x in b["spurs"])

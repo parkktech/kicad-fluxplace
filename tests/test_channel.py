@@ -148,7 +148,8 @@ def test_via_and_barrel_stub():
     p = CH.measure_paths(d.b, ["N"], ROWS)["N"][0]
     assert p["found"] and p["vias"] == 2
     assert p["layer_mm"].get("In2.Cu") == pytest.approx(4.0, abs=0.01)
-    assert any(s["kind"] == "via" and s["mm"] > 0.8 for s in p["stubs"])
+    assert not any(s["kind"] == "via" for s in p["stubs"])           # barrel stubs are pairaudit.via_stubs' (tests/test_pairskew.py), the one function
+    assert p["via_mm"] > 0.8                                          # the barrels on the signal path are counted
 
 
 def test_open_net_is_not_found():

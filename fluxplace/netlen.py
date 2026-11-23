@@ -148,12 +148,88 @@ def leg_decomposition(board, net, rows, planes, tol=0.005):
 
 def joined(B, p, n):
     """True when the pair is multi-terminal by topology: some part carries more than two pads of the pair's two nets (the two rows of a
-    connector), so a signal path runs between terminals and a branch hangs off the trunk.  No ref-prefix rule."""
+    connector) or the pair has three or more P/N terminals (a tap), so a signal path runs between end terminals and a branch hangs off the
+    trunk.  No ref-prefix rule."""
     refs = {}
     for q in (B or {}).get("pads") or []:
         if q["net"] in (p, n) and not q.get("np"):
             refs.setdefault(q["ref"], set()).add((q["net"], q["num"]))
-    return any(len(v) > 2 for v in refs.values())
+    if any(len(v) > 2 for v in refs.values()):
+        return True
+    try:                                                    # a tap (protection part, test point) makes a third terminal on a 2-pad-per-part pair
+        from . import pairs as PRS
+        return len(PRS.terminals(B, p, n, 16.0)[0]) >= 3
+    except Exception:                                       # noqa: BLE001 - no terminals: not joined
+        return False
+
+
+def orient(B, p, n, meas):
+    """Signal paths of a multi-terminal pair, independent of net order.  `meas` = channel.measure_paths(.., mode="all") for p and n.
+    Terminals are the P/N pad pairs of pairs.terminals (same part first, then nearest); a part with several terminals is one part (the two
+    rows of a connector).  The END parts are the two parts farthest apart (P + N path length between their nearest terminals);
+    their terminals are the endpoints, and a path runs between an end-part terminal of one and one of the other, P leg against its
+    own N mate.  Every other part on the pair (protection, test point, a series part's tap) is a TAP: it is never an endpoint, and
+    the copper from it to the trunk is a stub.  No ref prefix, no part kind: topology and geometry only.
+    -> {"ors": [(P path, N path, "a>b")], "taps": [{"at", "mm"}], "spurs": [{"at", "mm"}], "ends": (refX, refY)} or None."""
+    from . import pairs as PRS
+    terms = PRS.terminals(B, p, n, 16.0)[0]
+    lab = lambda pad: f"{pad['ref']}.{pad['num']}"                                    # noqa: E731
+    if len(terms) < 2:
+        return None
+    L = lambda q: q["length_mm"] + q["via_mm"]                                         # noqa: E731
+    dist = {leg: {frozenset((q["a"], q["b"])): q for q in meas[leg] if q.get("found")} for leg in (p, n)}
+    byref = {}
+    for t in terms:
+        byref.setdefault(t["p"]["ref"], []).append(t)
+
+    def d2(ta, tb):                                                                    # P + N path length between two terminals
+        a, b = dist[p].get(frozenset((lab(ta["p"]), lab(tb["p"])))), dist[n].get(frozenset((lab(ta["n"]), lab(tb["n"]))))
+        return None if a is None or b is None else L(a) + L(b)
+
+    best = None
+    for x, y in ((x, y) for i, x in enumerate(sorted(byref)) for y in sorted(byref)[i + 1:]):
+        ds = [d for ta in byref[x] for tb in byref[y] for d in [d2(ta, tb)] if d is not None]
+        if ds and (best is None or min(ds) > best[0] + 1e-9):
+            best = (min(ds), x, y)
+    if best is None:
+        return None
+    _d, X, Y = best
+    ors = []
+    for ta in sorted(byref[X], key=lambda t: lab(t["p"])):
+        for tb in sorted(byref[Y], key=lambda t: lab(t["p"])):
+            qp = dist[p].get(frozenset((lab(ta["p"]), lab(tb["p"]))))
+            qn = dist[n].get(frozenset((lab(ta["n"]), lab(tb["n"]))))
+            if qp is None or qn is None:
+                return None
+            # a path is labelled with the P pad order it was measured in
+            ors.append((qp, qn, f"{qp['a']}>{qp['b']}"))
+    ends = byref[X] + byref[Y]
+    half = lambda leg, a, j, c: (dist[leg][frozenset((a, j))]["length_mm"] + dist[leg][frozenset((a, c))]["length_mm"]
+                                 - dist[leg][frozenset((j, c))]["length_mm"]) / 2          # noqa: E731
+    taps, spurs = [], []
+    for t in terms:
+        if t["p"]["ref"] in (X, Y):
+            continue
+        v = []
+        for leg, key in ((p, "p"), (n, "n")):
+            c = [half(leg, lab(t[key]), lab(a[key]), lab(b[key])) for a in byref[X] for b in byref[Y]
+                 if all(frozenset(z) in dist[leg] for z in ((lab(t[key]), lab(a[key])), (lab(t[key]), lab(b[key])), (lab(a[key]), lab(b[key]))))]
+            if c:
+                v.append(min(c))
+        taps.append({"at": f"{lab(t['p'])}/{t['n']['num']}", "mm": round(max([0.0] + v), 3)})
+    for part, grp in ((X, byref[X]), (Y, byref[Y])):
+        if len(grp) < 2:
+            continue
+        other = byref[Y if part == X else X]
+        for t in grp:
+            v = []
+            for leg, key in ((p, "p"), (n, "n")):
+                c = [half(leg, lab(t[key]), lab(j[key]), lab(o[key])) for j in grp if j is not t for o in other
+                     if all(frozenset(z) in dist[leg] for z in ((lab(t[key]), lab(j[key])), (lab(t[key]), lab(o[key])), (lab(j[key]), lab(o[key]))))]
+                if c:
+                    v.append(min(c))
+            spurs.append({"at": f"{lab(t['p'])}/{t['n']['num']}", "mm": round(max([0.0] + v), 3)})
+    return {"ors": ors, "taps": taps, "spurs": spurs, "ends": (X, Y)}
 
 
 def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=False):
@@ -195,19 +271,13 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
     if joined(B, p, n):
         meas = CH.measure_paths(board, [p, n], rows, mode="all")
         out["basis"] = "path"
-        from . import pairs as PRS
-        mate = {}
-        for t in PRS.terminals(B, p, n, 16.0)[0]:
-            a, b = f"{t['p']['ref']}.{t['p']['num']}", f"{t['n']['ref']}.{t['n']['num']}"
-            mate[a], mate[b] = b, a
-        byend = {frozenset((q["a"], q["b"])): q for q in meas[n] if q.get("found")}
-        ors = [(q, byend.get(frozenset((mate.get(q["a"]), mate.get(q["b"]))))) for q in meas[p]
-               if q.get("found") and q["a"].split(".")[0] != q["b"].split(".")[0]]
-        if not ors or any(b is None for _a, b in ors):
-            out["why"] = "an orientation has no matching N path"
+        o = orient(B, p, n, meas)
+        if not o:
+            out["why"] = "no end-to-end path for both legs"
             return out
+        ors = o["ors"]
         L = lambda q: q["length_mm"] + q["via_mm"]            # noqa: E731
-        for a, b in ors:
+        for a, b, _lbl in ors:
             ma, mb = CH.path_metrics(a, rows, planes), CH.path_metrics(b, rows, planes)
             d_ps = None if ma["delay_ps"] is None or mb["delay_ps"] is None else round(ma["delay_ps"] - mb["delay_ps"], 3)
             out["paths"].append({"a": a["a"], "b": a["b"], "p": round(L(a), 3), "n": round(L(b), 3), "d": round(L(a) - L(b), 3),
@@ -217,7 +287,8 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
         out["skew_mm"] = w["d"]
         dps = [r["d_ps"] for r in out["paths"]]
         out["skew_ps"] = None if None in dps else max(dps, key=abs)
-        out["stub_mm"] = max(r["stub"] for r in out["paths"])
+        out["taps"], out["spurs"], out["ends"] = o["taps"], o["spurs"], o["ends"]
+        out["stub_mm"] = max([x["mm"] for x in o["taps"] + o["spurs"]] + [0.0])
     else:
         out["basis"] = "kicad"
         out["skew_mm"] = round(kl["p"] - kl["n"], 4)

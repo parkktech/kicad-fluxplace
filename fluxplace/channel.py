@@ -545,7 +545,12 @@ def evaluate(board, cons, spec=None, nets=None):
         names = list(lg)
         master = names[0]
         row = {"name": os_commonname(names), "kind": "pair", "legs": names, "metrics": []}
-        ors = orientations(meas[names[0]], meas[names[1]])
+        from . import netlen as NL
+        try:
+            o = NL.orient(_routing_board(board, _cache), names[0], names[1], meas) if len(meas[names[0]]) + len(meas[names[1]]) > 2 else None
+        except (OSError, ValueError):                                     # an in-memory board with no file: the plain pairing
+            o = None
+        ors = o["ors"] if o else orientations(meas[names[0]], meas[names[1]])      # one end-to-end path: the plain pairing
         if not ors:
             why = "; ".join(f"{n}: {meas[n][0].get('why', 'no path')}" for n in names if not meas[n][0].get("found")) or "no matching pad-to-pad path"
             row.update(verdict="n/a", family=_family(cons["channel"], master), labels={}, why=why)
@@ -581,8 +586,12 @@ def evaluate(board, cons, spec=None, nets=None):
             row["metrics"].append(_metric("length", "mm", max(q["length_mm"] for q in paths), b.get("length_mm_target"), b.get("length_mm_max"), lab.get("length_mm_max") or lab.get("length_mm_target"), 1))
         if "stub_mm_max" in b:
             from . import pairaudit as PA
-            vs = max([r["stub_mm"] for r in PA.via_stubs(_routing_board(board, _cache), names)] or [0.0])      # via barrel stubs: the one function
-            row["metrics"].append(_metric("stub", "mm", max(max(q["stub_max_mm"] for q in paths), vs), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
+            try:
+                vs = max([r["stub_mm"] for r in PA.via_stubs(_routing_board(board, _cache), names)] or [0.0])      # via barrel stubs: the one function
+            except (OSError, ValueError):                                 # an in-memory board with no file
+                vs = 0.0
+            tp = max([x["mm"] for x in (o["taps"] + o["spurs"])] + [0.0]) if o else 0.0                  # taps and duplicated-row spurs (NL.orient)
+            row["metrics"].append(_metric("stub", "mm", max(max(q["stub_max_mm"] for q in paths), vs, tp), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
         if any(k in b for k in CN.NOISE_KEYS):
             B = _routing_board(board, _cache)
             if "cls" not in _cache:
