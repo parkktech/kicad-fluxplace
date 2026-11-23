@@ -385,3 +385,20 @@ def test_a3_no_manifest_and_not_a_seeding_stage_means_nothing_to_check(tmp_path,
     prev, new = tmp_path / "p.kicad_pcb", tmp_path / "n.kicad_pcb"
     prev.write_text("p"); new.write_text("n")
     assert PL._commit_point("floorplan", str(prev), {"verdict": "pass", "board": str(new)})["verdict"] == "pass"
+
+
+def test_close_stage_runs_the_post_route_snap_first_and_closes_the_cleaned_board(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    calls = []
+
+    def fake(module, func, *args, **kw):
+        calls.append((module, func, args[0]))
+        if func == "clean":
+            return {"snap": {"moved": 5}, "unconnected": [3, 3], "kept": True}
+        return {"start": {"opens": 3, "errors": 9}, "end": {"opens": 2, "errors": 4}, "attempts": 1, "stop": "clean", "best": "BEST"}
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    r = PL.st_close(c, 8, b)
+    assert [x[1] for x in calls] == ["clean", "close"] and calls[1][2].endswith("postroute.kicad_pcb")
+    assert r["verdict"] == "pass" and "snapped 5" in r["line"] and r["board"] == "BEST"

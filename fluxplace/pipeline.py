@@ -956,6 +956,14 @@ def st_close(c, n, board):
     in_fresh_process); a crash keeps its traceback in the stage log."""
     from . import calllog as CL
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    post = None
+    try:                                                  # post-route clean-up first: off-centre track ends (postroute.py)
+        os.makedirs(c.dir(n, "close"), exist_ok=True)
+        cleaned = os.path.join(c.dir(n, "close"), "postroute.kicad_pcb")
+        post = in_fresh_process("fluxplace.postroute", "clean", board, cleaned)
+        board = cleaned
+    except (Exception, SystemExit):                       # noqa: BLE001 - never blocks the close loop
+        post = None
     try:
         res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att)
     except (Exception, SystemExit) as e:
@@ -968,6 +976,8 @@ def st_close(c, n, board):
                 "board": board}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
+    if post:
+        line += f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}"
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
 
 
