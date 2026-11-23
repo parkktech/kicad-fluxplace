@@ -35,10 +35,31 @@ def test_supply_range_fails_below_min_quiet_when_inside():
     assert len(sr) == 1 and sr[0]["refs"] == ["U1"] and "3.135" in sr[0]["msg"]      # LDO 2.7-6 V on +5V stays quiet
 
 
+def test_missing_supply_fact_on_a_declared_rail_warns():
+    f = _codes(EL.check_spec(_spec(), CONS, facts=FACTS), "SUPPLY_RANGE_UNKNOWN")
+    assert len(f) == 1 and f[0]["level"] == "WARN" and f[0]["refs"] == ["U3"]
+
+
 def test_not_evaluated_is_reported_never_silent():
-    f = _codes(EL.check_spec(_spec(), CONS, facts=FACTS), "ELEC_NOT_EVALUATED")
+    cons = {"power": {}}                          # no declared rail: only an INFO
+    f = _codes(EL.check_spec(_spec(), cons, facts=FACTS), "ELEC_NOT_EVALUATED")
     assert any("no supply-range fact" in x["msg"] and "U3" in x["msg"] for x in f)
     assert all(x["level"] == "INFO" for x in f)
+    assert not _codes(EL.check_spec(_spec(), cons, facts=FACTS), "SUPPLY_RANGE_UNKNOWN")
+
+
+def test_tps2051c_like_4v5_part_on_3v3_rail_fails_with_ranges():
+    sp = {"components": [{"ref": "U1", "mpn": "SW", "pinmap": {"IN": "5"}}], "nets": [["+3V3", [["U1", "IN"]]]]}
+    fx = {"SW": {"vin_min": 4.5, "vin_max": 5.5, "supply_pins": ["IN"], "_src": {"vin_min": "X.pdf#p5"}}}
+    f = _codes(EL.check_spec(sp, {"power": {"+3V3": {"min_v": 3.2, "max_v": 3.4}}}, facts=fx), "SUPPLY_RANGE")
+    assert len(f) == 1 and f[0]["level"] == "FAIL" and "3.2..3.4" in f[0]["msg"] and "4.5..5.5" in f[0]["msg"] and "X.pdf#p5" in f[0]["msg"]
+
+
+def test_supply_range_cites_vin_max_when_that_is_the_only_cited_limit():
+    sp = {"components": [{"ref": "U1", "mpn": "LV", "pinmap": {"IN": "5"}}], "nets": [["+5V", [["U1", "IN"]]]]}
+    fx = {"LV": {"vin_max": 3.6, "supply_pins": ["IN"], "_src": {"vin_max": "Y.pdf#p7"}}}
+    f = _codes(EL.check_spec(sp, {"power": {"+5V": {"min_v": 4.9, "max_v": 5.1}}}, facts=fx), "SUPPLY_RANGE")
+    assert len(f) == 1 and "part ?..3.6 V, Y.pdf#p7" in f[0]["msg"]
 
 
 def test_source_overload_fail_and_warn_band():
