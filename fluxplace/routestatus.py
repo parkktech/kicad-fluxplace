@@ -24,7 +24,7 @@ import sys
 import time
 
 from . import routediag as RD, quietlog as Q
-from . import events as EV, snapshot as SN
+from . import events as EV, snapshot as SN, procs as PR
 
 STATUS_EVERY = 3.0          # seconds between status writes (at most)
 DEFAULT_STALL_S = 600.0
@@ -213,8 +213,7 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
 
     os.makedirs(os.path.dirname(os.path.abspath(lpath)), exist_ok=True)
     with open(lpath, "w") as lw:
-        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=lw, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+        proc = PR.popen(cmd, cwd=cwd, env=env, stdout=lw, stderr=subprocess.STDOUT)   # own session, reaped with the caller
     state["pid"] = proc.pid
     write()
     try:
@@ -239,6 +238,7 @@ def run_logged(cmd, cwd=None, timeout=None, out=None, stage="route", env=None,
             _kill(proc)
         raise
     finally:
+        PR.forget(proc)
         Q.filter_file(lpath)
     write("done" if rc == 0 else "failed", rc)
     text = open(lpath, errors="replace").read()

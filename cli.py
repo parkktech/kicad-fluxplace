@@ -605,9 +605,9 @@ def cmd_calibrate(a):
         ses = os.path.splitext(a.board)[0] + ".ses"
         print(f"running freerouting ({jar})...")
         try:
-            subprocess.run(["java", "-jar", jar, "-de", dsn, "-do", ses,
-                            "-mp", str(a.passes)], timeout=1800, check=True,
-                           capture_output=True)
+            from fluxplace import procs as _procs
+            _procs.run(["java", "-jar", jar, "-de", dsn, "-do", ses, "-mp", str(a.passes)], timeout=1800, check=True,
+                       capture_output=True)
         except Exception as e:
             print(f"freerouting failed: {e}")
             return
@@ -764,8 +764,8 @@ def cmd_auto_candidates(a):
             outdir = os.path.join(a.out, f"cand_{k}")
             os.makedirs(outdir, exist_ok=True)
             log = open(os.path.join(outdir, "log.txt"), "w")
-            live[k] = (subprocess.Popen(_cand_argv(a, k, outdir), stdout=log,
-                                        stderr=subprocess.STDOUT), log, time.time())
+            from fluxplace import procs as _procs
+            live[k] = (_procs.popen(_cand_argv(a, k, outdir), stdout=log, stderr=subprocess.STDOUT), log, time.time())
         time.sleep(5)
         for k in list(live):
             proc, log, ts = live[k]
@@ -845,9 +845,9 @@ def _export_netlist_xml(kicad_cli, sch):
     import subprocess, tempfile
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
         xml = tf.name
-    r = subprocess.run([kicad_cli, "sch", "export", "netlist",
-                        "--format", "kicadxml", "--output", xml, sch],
-                       capture_output=True, text=True)
+    from fluxplace import procs as _procs
+    r = _procs.run([kicad_cli, "sch", "export", "netlist", "--format", "kicadxml", "--output", xml, sch],
+                   capture_output=True, text=True)
     if r.returncode != 0:
         os.unlink(xml)
         return None, (r.stderr or "kicad-cli netlist export failed").strip()[:200]
@@ -1664,9 +1664,9 @@ def _bridge_guarded(path, spec, a, log, cons=None):
         shutil.move(tmp, path)
         # the new copper cut the pours: save the file with fills the fab
         # gate will judge (a stale fill read as 19 zone-clearance hits on V1.5)
-        subprocess.run([a.kicad_cli, "pcb", "drc", "--refill-zones", "--save-board",
-                        "--format", "json", "-o", tmp + ".drc.json", path],
-                       capture_output=True, text=True)
+        from fluxplace import procs as _procs
+        _procs.run([a.kicad_cli, "pcb", "drc", "--refill-zones", "--save-board", "--format", "json", "-o", tmp + ".drc.json", path],
+                   capture_output=True, text=True)
         for junk in (tmp + ".drc.json",):
             if os.path.exists(junk):
                 os.unlink(junk)

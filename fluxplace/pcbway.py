@@ -821,9 +821,9 @@ def _to_pdf(src, out_dir, log=print):
         log("    no libreoffice — cannot make the PDF upload for slot 4")
         return None
     try:
-        subprocess.run([soffice, "--headless", "--convert-to", "pdf",
-                        "--outdir", out_dir, src],
-                       capture_output=True, timeout=300)
+        from . import procs as _procs
+        _procs.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", out_dir, src],
+                   capture_output=True, timeout=300)
     except Exception as e:
         log("    pdf conversion failed: %s" % str(e)[:80])
         return None
