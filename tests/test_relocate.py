@@ -162,3 +162,67 @@ def test_a_spent_budget_tries_nothing_and_changes_nothing(tmp_path):
     res, out = run(p, tmp_path, lambda b, o, nets, c: 1 / 0, lambda b: {"VDD": 1}, budget=60)
     assert res["moved"] == 0 and res["tried"] == 0 and not os.path.exists(out) and sha(p) == before
     assert res["log"][0]["result"] == "budget"
+
+
+# ---- review (w16reloc): guards that cannot be read, owned parts, 1-pad parts, the yield gate
+
+def test_a_one_pad_part_and_a_part_with_unreadable_guards_are_never_suggested(tmp_path, monkeypatch):
+    p = ic_board(tmp_path)
+    B = RD.load(p)
+    one = build(tmp_path, PG.ic("U1", 20, 40, ["VDD", "GND", "A", "B"], court=(-3, -2, 3, 2))
+                + PG.fp("X1", 70, 40, [PG.pad("1", 0, 0, "VDD")], court=COURT), "one.kicad_pcb")
+    B1 = RD.load(one)
+    assert [m["part"] for m in RD.diagnose(B1, ["VDD"])["summary"]["moves"]] == ["X1"]      # route-diagnose names it
+    assert RL.suggest(B1, [gap(["VDD"])]) == []                                             # one pad: it stays
+    monkeypatch.setattr(RL, "RELOC_PAD_MIN", 1)
+    assert [m["part"] for m in RL.suggest(B1, [gap(["VDD"])])] == ["X1"]
+    monkeypatch.undo()
+    from fluxplace import preroute as PR
+    monkeypatch.setattr(PR, "fixed_parts", lambda B, cons: 1 / 0)     # the fixed set cannot be read: nothing may move
+    assert RL.suggest(B, [gap(["VDD"])]) == []
+
+
+def test_an_owned_support_part_only_moves_toward_its_owner(tmp_path, monkeypatch):
+    p = ic_board(tmp_path)
+    B = RD.load(p)
+    monkeypatch.setattr(RD, "_owners", lambda B: {"C1": {"ic": "U9", "pad": "1", "net": "X", "how": "net"}})
+    assert RL.suggest(B, [gap(["VDD"])]) == []                        # the suggestion goes to U1, the owner is U9
+    monkeypatch.setattr(RD, "_owners", lambda B: {"C1": {"ic": "U1", "pad": "1", "net": "VDD", "how": "net"}})
+    assert [m["part"] for m in RL.suggest(B, [gap(["VDD"])])] == ["C1"]
+
+
+def _run_w(p, tmp_path, route, count):
+    out = str(tmp_path / "out.kicad_pcb")
+    return RL.relocate(p, out, [gap(["VDD"])], {"cons": {}, "protect": set(), "budget_s": 5000, "work": str(tmp_path)}, route=route, open_count=count)
+
+
+def test_a_dropped_move_is_not_routed_again_in_the_same_work_dir(tmp_path):
+    p = ic_board(tmp_path)
+    calls = []
+    route = lambda b, o, nets, c: calls.append(nets)                  # noqa: E731
+    res = _run_w(p, tmp_path, route, lambda b: {"VDD": 1})
+    assert res["log"][0]["result"] == "opens not lower" and len(calls) == 1
+    res = _run_w(p, tmp_path, route, lambda b: {"VDD": 1})
+    assert res["status"] == "no relocatable part" and len(calls) == 1
+
+
+def test_the_rung_stops_after_misses_in_a_row_and_a_kept_move_resets_the_count(tmp_path):
+    import json
+    p = ic_board(tmp_path)
+    st = os.path.join(str(tmp_path), RL.RELOC_STATE)
+    json.dump({"misses": RL.RELOC_MISS_MAX, "tried": {}}, open(st, "w"))
+    res = _run_w(p, tmp_path, lambda b, o, nets, c: 1 / 0, lambda b: {"VDD": 1})
+    assert res["status"] == "no yield here" and res["tried"] == 0
+    json.dump({"misses": RL.RELOC_MISS_MAX - 1, "tried": {}}, open(st, "w"))
+    count = lambda b: {"VDD": 0} if ".rl" in os.path.basename(b) else {"VDD": 1}      # noqa: E731
+    keep = lambda b, o, nets, c: open(o, "w").write(open(b).read())                   # noqa: E731
+    assert _run_w(p, tmp_path, keep, count)["moved"] == 1 and json.load(open(st))["misses"] == 0
+    # close did not adopt it (the part is where it was): one more try, then the move is spent
+    assert _run_w(p, tmp_path, keep, count)["moved"] == 1
+    assert _run_w(p, tmp_path, keep, count)["status"] == "no relocatable part"
+
+
+def test_the_router_rung_runs_before_relocate():
+    from fluxplace import gaps as GP
+    r = GP.DISPATCH["open-free"]
+    assert r.index("krt") < r.index("relocate") and GP.LEVEL["relocate"] == "L1"

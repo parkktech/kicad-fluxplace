@@ -2028,7 +2028,7 @@ DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
-    "open-free": ["prune", "patch", "handrepair", "relocate", "krt", "krt_region", "region", "patch_rip", "ai"],
+    "open-free": ["prune", "patch", "handrepair", "krt", "relocate", "krt_region", "region", "patch_rip", "ai"],   # relocate (L1, moves a part) after the L0 router
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
