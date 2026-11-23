@@ -208,6 +208,24 @@ def _snap(src, dst, skip):
     return moved, refused
 
 
+_SNAP_REAL = _snap
+
+
+def _snap_json(src, dst, skip):
+    """_snap with a JSON-able signature (runs in a fresh process): -> [moved, refused]."""
+    return list(_snap(src, dst, set(skip)))
+
+
+def _snap_fresh(src, dst, skip):
+    """_snap in its own interpreter: its board.Remove() decays pcbnew's bindings for the process (freshproc), and the caller (the
+    pipeline's krt-whole chain, then close) goes on loading boards."""
+    if _snap is not _SNAP_REAL:                           # a test double stands in for the board edit: call it directly
+        return _snap(src, dst, skip)
+    from .freshproc import in_fresh_process
+    moved, refused = in_fresh_process("fluxplace.snapiter", "_snap_json", src, dst, sorted(skip))
+    return moved, refused
+
+
 def run(src, dst, iters=6, log=print):
     """-> {"moved", "excluded", "iters", "centred_left", "refused_geom"}; `dst` = the last accepted board (src when none is).
     refused_geom: joints _snap refused for clearance (PHASE3F A6) on the accepted iteration."""
@@ -215,7 +233,7 @@ def run(src, dst, iters=6, log=print):
     skip, last = set(), None
     for i in range(iters):
         tmp = dst + f".i{i}.kicad_pcb"
-        moved, refused_geom = _snap(src, tmp, skip)
+        moved, refused_geom = _snap_fresh(src, tmp, skip)
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))

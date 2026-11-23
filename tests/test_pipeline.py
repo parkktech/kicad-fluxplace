@@ -183,6 +183,29 @@ def test_silk_fail_findings_do_not_stop_the_flow_before_review(tmp_path, monkeyp
     assert r["verdict"] == "warn" and r["board"] == out and "review" in r["next"][0]
 
 
+def test_in_fresh_process_runs_elsewhere_and_keeps_the_traceback():
+    assert PL.in_fresh_process("os", "getpid") != os.getpid()
+    assert PL.in_fresh_process("os.path", "join", "a", "b") == os.path.join("a", "b")
+    with pytest.raises(RuntimeError) as e:
+        PL.in_fresh_process("os", "listdir", "/nonexistent-dir-xyz")
+    assert "FileNotFoundError" in str(e.value) and "Traceback" in str(e.value)
+
+
+def test_close_stage_runs_in_a_fresh_process_and_a_crash_leaves_its_traceback(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    seen = {}
+
+    def fake(module, func, *args, **kw):
+        seen["call"] = (module, func)
+        raise RuntimeError("Traceback (most recent call last):\n  ...\nAttributeError: 'SwigPyObject' object has no attribute 'GetTracks'")
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    r = PL.st_close(c, 8, b)
+    assert seen["call"] == ("fluxplace.gaps", "close") and r["verdict"] == "warn" and "GetTracks" in r["line"]
+    assert "Traceback" in open(os.path.join(c.dir(8, "close"), "crash.log")).read()
+
+
 def test_close_follows_route_in_both_flows():
     for flow in (PL.STAGES, PL.CONSTRUCTIVE):
         assert flow[flow.index("route") + 1] == "close"

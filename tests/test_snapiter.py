@@ -155,3 +155,18 @@ def test_snap_locked_joint_stays(tmp_path):
     assert moved == 0
     assert sorted(_ends(dst)) == sorted([((5.0, 10.0), (9.9, 10.05)), ((9.9, 10.05), (9.9, 14.0))])
 
+
+
+def test_snap_edit_runs_in_its_own_process(monkeypatch):
+    """board.Remove() decays pcbnew's bindings for a process (LoadBoard then returns a raw SwigPyObject): snapiter.run must not do it in
+    the caller's process, or the stage after it (close) crashes with `'SwigPyObject' object has no attribute 'GetTracks'`."""
+    import fluxplace.freshproc as FP
+    called = {}
+
+    def spy(module, func, *a, **k):
+        called["fresh"] = (module, func, a)
+        return [3, 1]
+    monkeypatch.setattr(FP, "in_fresh_process", spy)
+    assert SI._snap is SI._SNAP_REAL
+    assert SI._snap_fresh("x", "y", {"u2", "u1"}) == (3, 1)
+    assert called["fresh"] == ("fluxplace.snapiter", "_snap_json", ("x", "y", ["u1", "u2"]))

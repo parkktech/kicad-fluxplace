@@ -947,14 +947,22 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     return rec
 
 
+from .freshproc import in_fresh_process  # noqa: E402,F401 - re-exported (st_close, tests)
+
+
 def st_close(c, n, board):
-    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json."""
-    from . import gaps as GP, calllog as CL
+    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json.  Runs in a fresh process (see
+    in_fresh_process); a crash keeps its traceback in the stage log."""
+    from . import calllog as CL
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
     try:
-        res = GP.close(board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, log=lambda m: None)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att)
     except (Exception, SystemExit) as e:
-        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e)[:80]}", "board": board}
+        try:
+            open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
+        except OSError:
+            pass
+        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e).strip().splitlines()[-1][:100] if str(e).strip() else ''}", "board": board}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
     return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
