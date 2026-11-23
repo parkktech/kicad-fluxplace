@@ -116,6 +116,8 @@ def _stub_dg(monkeypatch, before, after):
     seq = iter([before, after])
     monkeypatch.setattr(DG, "measure", lambda p, **k: dict(next(seq)))
     monkeypatch.setattr(PL, "refill", lambda b: None)
+    from fluxplace import opengate as OG              # pour_rails refills through opengate's helper process; other test modules set
+    monkeypatch.setattr(OG, "refill", lambda b, *a, **k: None)   # routecheck.PY to a missing interpreter at import (3 order-dependent failures)
 
 
 CLEAN = {"opens": 0, "shorts": 0, "errors": 0}
