@@ -110,8 +110,9 @@ def _mini_board(path, tracks, vias, clearance_mm=0.12):
         t.SetLocked(locked)
         b.Add(t)
         out.append(t)
-    for net, c, dia in vias:
+    for net, c, dia, *lk in vias:
         v = pcbnew.PCB_VIA(b)
+        v.SetLocked(bool(lk and lk[0]))
         v.SetPosition(P(*c))
         v.SetWidth(pcbnew.F_Cu, pcbnew.FromMM(dia))
         v.SetDrill(pcbnew.FromMM(dia / 2))
@@ -215,7 +216,7 @@ def test_via_moves_to_the_track_end_when_the_end_cannot_move(tmp_path):
     import pcbnew
     src = tmp_path / "a.kicad_pcb"
     _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "B", (10, 10), (10, 15), 0.2, False)], [("A", (10, 10), 0.6)])
-    moved, skipped = SI._via_to_end(str(src), str(tmp_path / "o.kicad_pcb"), set(), None)
+    moved, skipped, touched = SI._via_to_end(str(src), str(tmp_path / "o.kicad_pcb"), set(), None)
     assert moved == 1 and skipped == []
     b = pcbnew.LoadBoard(str(tmp_path / "o.kicad_pcb"))
     via = [x for x in b.GetTracks() if x.Type() == pcbnew.PCB_VIA_T][0]
@@ -225,7 +226,7 @@ def test_via_moves_to_the_track_end_when_the_end_cannot_move(tmp_path):
                                              for x in b.GetTracks() if x.Type() == pcbnew.PCB_TRACE_T]
     src2 = tmp_path / "c.kicad_pcb"
     _mini_board(src2, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "F", (5, 12), (9.9, 10), 0.2, False)], [("A", (10, 10), 0.6)])
-    moved, skipped = SI._via_to_end(str(src2), str(tmp_path / "o2.kicad_pcb"), set(), None)
+    moved, skipped, _t = SI._via_to_end(str(src2), str(tmp_path / "o2.kicad_pcb"), set(), None)
     assert moved == 0 and skipped and "different end points" in skipped[0][3]
 
 
@@ -234,7 +235,10 @@ def test_joiner_ties_an_off_centre_end_to_the_exact_via_centre_without_moving_ei
     import pcbnew
     src = tmp_path / "a.kicad_pcb"
     _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, True)], [("A", (10, 10), 0.6)])
-    added, skipped = SI._joiners(str(src), str(tmp_path / "o.kicad_pcb"), set(), None)
+    assert SI._joiners(str(src), str(tmp_path / "o0.kicad_pcb"), set(), None)[:2] == [0, [["A", 10.0, 10.0, "locked"]]]   # locks hold by default
+    assert SI._joiners(str(src), str(tmp_path / "o0.kicad_pcb"), set(), None, True, ["A"])[0] == 0      # a protected net is never lengthened
+    added, skipped, touched = SI._joiners(str(src), str(tmp_path / "o.kicad_pcb"), set(), None, True)
+    assert len(touched) == 2 and len(set(touched.values())) == 1                                      # the joiner and the segment map to the via
     assert added == 1 and skipped == []
     b = pcbnew.LoadBoard(str(tmp_path / "o.kicad_pcb"))
     r = lambda p: (round(pcbnew.ToMM(p.x), 3), round(pcbnew.ToMM(p.y), 3))
@@ -242,3 +246,50 @@ def test_joiner_ties_an_off_centre_end_to_the_exact_via_centre_without_moving_ei
     assert ends == [((5.0, 10.0), (10.1, 10.05), True, 0.2), ((10.1, 10.05), (10.0, 10.0), True, 0.2)]
     via = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T][0]
     assert r(via.GetPosition()) == (10.0, 10.0)
+
+
+def test_via_move_leaves_locked_and_protected_items_alone(tmp_path):
+    """A locked via, a via with a locked end at its centre, and a via of a protected net (pair leg, manifest net) do not move by default."""
+    mk = lambda name, vl, tl: _mini_board(tmp_path / name, [("A", "F", (5, 10), (10.1, 10.05), 0.2, False), ("A", "B", (10, 10), (10, 15), 0.2, tl)],
+                                          [("A", (10, 10), 0.6) + ((True,) if vl else ())])
+    mk("lv.kicad_pcb", True, False)
+    got = SI._via_to_end(str(tmp_path / "lv.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), set(), None)
+    assert got[0] == 0 and got[1][0][3] == "locked"
+    mk("lt.kicad_pcb", False, True)
+    src = str(tmp_path / "lt.kicad_pcb")
+    got = SI._via_to_end(src, str(tmp_path / "o1.kicad_pcb"), set(), None)
+    assert got[0] == 0 and got[1] == [["A", 10.0, 10.0, "locked"]] and got[2] == {}
+    moved, skipped, touched = SI._via_to_end(src, str(tmp_path / "o2.kicad_pcb"), set(), None, True)
+    assert moved == 1 and len(touched) == 2
+    assert SI._via_to_end(src, str(tmp_path / "o3.kicad_pcb"), set(), None, True, ["A"])[0] == 0
+    assert SI._via_to_end(src, str(tmp_path / "o4.kicad_pcb"), set(touched), None, True)[0] == 0      # a track the guard named keeps its via
+
+
+def test_via_run_excludes_the_via_behind_a_new_violation_and_cleans_its_trials(tmp_path, monkeypatch):
+    """The guard maps the items of a new violation (a moved end, a fresh joiner) back to their via through `touched`: the next iteration
+    skips that via instead of repeating the same batch.  No via named by DRC: nothing runs.  Trial boards are removed."""
+    import shutil
+    import fluxplace.freshproc as FP
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text("board")
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    cen = {"type": SI.CENTRED, "items": [{"description": "Via [A] on F.Cu - B.Cu", "pos": {"x": 1, "y": 2}, "uuid": "v1"}]}
+    clr = {"type": "clearance", "severity": "error", "description": "x", "items": [{"description": "Track [A] on F.Cu", "uuid": "j1"},
+                                                                                 {"description": "Track [B] on F.Cu", "uuid": "o9"}]}
+    reports = iter([{"violations": [cen], "unconnected_items": []}, {"violations": [clr], "unconnected_items": []},
+                    {"violations": [cen], "unconnected_items": []}])
+    monkeypatch.setattr(SI, "_report", lambda _b: next(reports))
+    calls = []
+
+    def fresh(module, func, s, d, skip, only, locked_ok, protect):
+        calls.append((func, list(skip), only, locked_ok, protect))
+        shutil.copy(s, d)
+        return [0 if "v1" in skip else 1, [], {"j1": "v1"}]
+    monkeypatch.setattr(FP, "in_fresh_process", fresh)
+    rec = SI.joiner_run(str(src), str(tmp_path / "o.kicad_pcb"), log=lambda m: None, protect={"P"})
+    assert calls[0] == ("_joiners", [], [["A", 1, 2]], False, ["P"]) and "v1" in calls[1][1]
+    assert rec["moved"] == 0 and rec["excluded"] == 3 and rec["centred_left"] == 1
+    assert not [f for f in os.listdir(tmp_path) if ".v0." in f or ".v1." in f]
+    monkeypatch.setattr(SI, "_report", lambda _b: {"violations": [], "unconnected_items": []})
+    assert SI.via_run(str(src), str(tmp_path / "o.kicad_pcb")) == {"moved": 0, "excluded": 0, "skipped": [], "centred_left": 0}
+    assert len(calls) == 2

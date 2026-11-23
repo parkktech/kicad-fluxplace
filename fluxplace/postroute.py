@@ -29,7 +29,8 @@ def dedupe_file(path):
 
 
 def clean(board, out, kicad_cli="kicad-cli"):
-    """-> {snap: {moved, excluded, iters, centred_left, refused_geom}, unconnected: [before, after], kept: bool}; `out` is always written
+    """-> {snap: {moved, excluded, iters, centred_left, refused_geom}, via / joiner: snapiter.via_run / joiner_run records (only when ends
+    were left), unconnected: [before, after], kept: bool}; `out` is always written
     (the input when the snap is not kept: unconnected must not rise)."""
     from . import snapiter as SI
     rep = {"snap": None, "unconnected": None, "kept": True}
@@ -44,6 +45,17 @@ def clean(board, out, kicad_cli="kicad-cli"):
         rep["snap"] = SI.run(out, out, log=lambda m: None)
     except Exception as e:                           # noqa: BLE001 - a clean-up failure is reported, never fatal
         rep["snap"] = {"error": str(e)[:160]}
+    # the ends the snap left (clearance-refused): move the via to the end, then tie the end to the via centre with a joiner (snapiter).
+    # Locks hold, and the nets of the board's manifest (complete pairs, locked items: the commit point would refuse their change) are skipped.
+    if (rep["snap"] or {}).get("centred_left") != 0:
+        try:
+            from . import boardwrite as BW
+            protect = sorted((BW.load_manifest(board) or {}).get("nets") or {})
+            rep["via"] = SI.via_run(out, out, log=lambda m: None, protect=protect)
+            if rep["via"].get("centred_left") != 0:
+                rep["joiner"] = SI.joiner_run(out, out, log=lambda m: None, protect=protect)
+        except Exception as e:                       # noqa: BLE001
+            rep["via"] = dict(rep.get("via") or {}, error=str(e)[:160])
     after = _unc(out, kicad_cli)
     if after > before:
         shutil.copy(board, out)

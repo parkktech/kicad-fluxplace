@@ -205,7 +205,7 @@ def _snap(src, dst, skip, locked_ok=False):
                 add(u, (min(a[0], bb[0]) - h, min(a[1], bb[1]) - h, max(a[0], bb[0]) + h, max(a[1], bb[1]) + h))
     gone = set()
     for u in tracks:                                     # both ends in one via: a zero-length stub, the via joins it
-        if u.GetStart() == u.GetEnd() and not u.IsLocked():   # (snapvias.snap_text drops it too; KiCad reports it as a
+        if u.GetStart() == u.GetEnd() and (not u.IsLocked() or (locked_ok and id(u) in moved_ids)):   # (snapvias.snap_text drops it too; KiCad reports it as a
             b.Remove(u)                                  # crossing with any track near the via)
             gone.add(id(u))
     # a snap can collapse a track onto another (same net, layer, ends, width): the moved unlocked copy goes, one copy stays.  Only tracks
@@ -219,7 +219,7 @@ def _snap(src, dst, skip, locked_ok=False):
     for grp in same.values():
         if len(grp) < 2:
             continue
-        movers = [u for u in grp if id(u) in moved_ids and not u.IsLocked()]
+        movers = [u for u in grp if id(u) in moved_ids and (locked_ok or not u.IsLocked())]
         mv = {id(u) for u in movers}
         stay = [u for u in grp if id(u) not in mv]
         for u in (movers if stay else movers[1:]):
@@ -276,23 +276,32 @@ def run(src, dst, iters=6, log=print, locked_ok=False):
             "centred_left": last[2] if last else None, "refused_geom": last[3] if last else 0}
 
 
-def _via_to_end(src, dst, skip, only=None):
+def _only_hit(only, v, mm):
+    c = v.GetPosition()
+    return only is None or any(n == v.GetNetname() and abs(x - mm(c.x)) < 0.01 and abs(y - mm(c.y)) < 0.01 for n, x, y in only)
+
+
+def _via_to_end(src, dst, skip, only=None, locked_ok=False, protect=()):
     """The clearance-refused cases: where the track ends meeting a via off its centre all sit on ONE point P, the via moves to P (and the
     ends still at the old centre, on any layer, move with it): no copper gets closer to a neighbour than the via's own annulus does at P.
-    The caller's DRC guard judges the result.  Runs in a fresh process (board.Remove / bindings, see freshproc).  -> [moved vias, skipped]
-    skipped = [[net, x, y, why]].  `only`: [[net, x, y]] the vias DRC names (the others are left alone)."""
+    The caller's DRC guard judges the result.  Runs in a fresh process (board.Remove / bindings, see freshproc).
+    A locked via, or a via with a locked track end on it, is left alone unless `locked_ok` (D71cz: the caller then re-seeds the manifest);
+    a via of a net in `protect` (pair legs, RF, manifest nets: a move changes their length) is always left alone.
+    -> [moved vias, skipped [[net, x, y, why]], touched {item uuid: via uuid}].  `skip`: uuids (a via, or any item `touched` maps to it)
+    the guard excluded.  `only`: [[net, x, y]] the vias DRC names (the others are left alone)."""
     import pcbnew
     mm = pcbnew.ToMM
     b = pcbnew.LoadBoard(src)
     tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
     vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
-    moved, skipped = 0, []
+    protect = set(protect or ())
+    moved, skipped, touched = 0, [], {}
     for v in vias:
-        if v.m_Uuid.AsString() in skip:
+        vid = v.m_Uuid.AsString()
+        if vid in skip or v.GetNetname() in protect or not _only_hit(only, v, mm):
             continue
         c = v.GetPosition()
-        if only is not None and not any(n == v.GetNetname() and abs(x - mm(c.x)) < 0.01 and abs(y - mm(c.y)) < 0.01 for n, x, y in only):
-            continue
+        row = [v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3)]
         r = mm(v.GetWidth(pcbnew.F_Cu)) / 2
         off, at = [], []
         for t in tracks:
@@ -307,41 +316,65 @@ def _via_to_end(src, dst, skip, only=None):
                     off.append((t, w, e))
         if not off:
             continue
+        if any(t.m_Uuid.AsString() in skip for t, *_ in off + at):
+            continue
+        if not locked_ok and (v.IsLocked() or any(t.IsLocked() for t, _w in at)):
+            skipped.append(row + ["locked"])
+            continue
         pts = {(round(mm(e.x), 3), round(mm(e.y), 3)) for _t, _w, e in off}
         if len(pts) != 1:
-            skipped.append([v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3), f"{len(pts)} different end points"])
+            skipped.append(row + [f"{len(pts)} different end points"])
             continue
-        target = off[0][2]
-        pads = [p for p in b.GetPads() if p.IsOnLayer(pcbnew.F_Cu) | p.IsOnLayer(pcbnew.B_Cu) and p.GetNetCode() == v.GetNetCode() and p.HitTest(c)]
-        if pads:
-            skipped.append([v.GetNetname(), round(mm(c.x), 3), round(mm(c.y), 3), "via sits in a pad"])
+        target = pcbnew.VECTOR2I(off[0][2].x, off[0][2].y)
+        if any((p.IsOnLayer(pcbnew.F_Cu) or p.IsOnLayer(pcbnew.B_Cu)) and p.GetNetCode() == v.GetNetCode() and p.HitTest(c) for p in b.GetPads()):
+            skipped.append(row + ["via sits in a pad"])
             continue
         v.SetPosition(target)
         for t, w in at:
             (t.SetStart if w == 0 else t.SetEnd)(target)
+        for t, *_ in off + at:
+            touched[t.m_Uuid.AsString()] = vid
         moved += 1
     pcbnew.SaveBoard(dst, b)
-    return [moved, skipped]
+    return [moved, skipped, touched]
 
 
-def via_run(src, dst, iters=3, log=print, func="_via_to_end"):
+def _via_names(d0):
+    """[[net, x, y]] of the vias a DRC report names in its off-centre violations (a description without a [net] is skipped)."""
+    out = []
+    for v in d0["violations"]:
+        if v["type"] != CENTRED:
+            continue
+        for it in v["items"]:
+            m = re.search(r"\[([^\]]*)\]", it.get("description", ""))
+            if m and it["description"].startswith("Via") and "pos" in it:
+                out.append([m.group(1), it["pos"]["x"], it["pos"]["y"]])
+    return out
+
+
+def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, protect=()):
     """After `run`: the ends it refused for clearance are fixed by moving the via to the track end (see _via_to_end), DRC-guarded like `run`
-    (no new violation, no more opens; a via whose move creates one is left and reported).  -> {"moved", "excluded", "skipped", "centred_left"}."""
+    (no new violation, no more opens; a via whose move creates one is left: the items a new violation names are mapped back to their via
+    through the worker's `touched`, so one bad via does not cost the batch).  Locks and `protect` nets: see _via_to_end.
+    -> {"moved", "excluded", "skipped", "centred_left"}."""
     from .freshproc import in_fresh_process
     d0 = _report(src)
     base = _keys(d0)
-    only = [[re.search(r"\[([^\]]*)\]", it["description"]).group(1), it["pos"]["x"], it["pos"]["y"]]
-            for v in d0["violations"] if v["type"] == CENTRED for it in v["items"] if it["description"].startswith("Via")]
-    skip, last, skipped = set(), None, []
+    only = _via_names(d0)
+    if not only:
+        return {"moved": 0, "excluded": 0, "skipped": [], "centred_left": sum(v["type"] == CENTRED for v in d0["violations"])}
+    skip, last, skipped, tmps = set(), None, [], []
     for i in range(iters):
         tmp = dst + f".v{i}.kicad_pcb"
-        moved, skipped = in_fresh_process("fluxplace.snapiter", func, src, tmp, sorted(skip), only)
+        tmps.append(tmp)
+        moved, skipped, touched = in_fresh_process("fluxplace.snapiter", func, src, tmp, sorted(skip), only, locked_ok, sorted(protect or ()))
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))
         bad = [v for v in d["violations"] if v["type"] != CENTRED and DG.key_of(v) in new]
         bad += [u for u in d.get("unconnected_items", []) if any(("Unet", n) in new for n in _unc_nets(u) or ["?"])]
         ids = {it["uuid"] for v in bad for it in v["items"] if "uuid" in it}
+        ids |= {touched[u] for u in ids if u in touched}        # the via behind a moved end or a joiner
         log(f"via iter {i}: moved {moved}, new keys {sum(new.values())}")
         if not new:
             last = (tmp, moved, sum(v["type"] == CENTRED for v in d["violations"]))
@@ -349,41 +382,49 @@ def via_run(src, dst, iters=3, log=print, func="_via_to_end"):
         if not ids - skip:
             break
         skip |= ids
-    if last:
+    if last and last[1]:
         shutil.copy(last[0], dst)
         src_pro, dst_pro = os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
         if os.path.abspath(src_pro) != os.path.abspath(dst_pro):
             shutil.copy(src_pro, dst_pro)
+    for tmp in tmps:                                             # the trial boards and their sidecars are scratch
+        for f in (tmp, os.path.splitext(tmp)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_prl"):
+            if os.path.exists(f):
+                os.remove(f)
     return {"moved": last[1] if last else 0, "excluded": len(skip), "skipped": skipped, "centred_left": last[2] if last else None}
 
 
-def _joiners(src, dst, skip, only=None):
+def _joiners(src, dst, skip, only=None, locked_ok=False, protect=()):
     """Fallback for ends neither the snap nor a via move can fix: leave the via and the segment line alone, shorten the segment along its own
     direction until its round end lies inside the via annulus, and add a joiner (same net, layer, width, lock) from that end to the exact via
-    centre.  The joiner lies inside via copper and shortening only removes copper, so no clearance gets worse.  `only`: [[net, x, y]] the vias
-    DRC names.  -> [joiners added, skipped [[net, x, y, why]]]."""
+    centre.  The joiner lies inside via copper and shortening only removes copper, so no clearance gets worse; the net's track length grows
+    by up to the via radius, so nets in `protect` (length-matched legs) are left alone.  A locked segment is changed only with `locked_ok`.
+    `only`: [[net, x, y]] the vias DRC names.  -> [joiners added, skipped [[net, x, y, why]], touched {item uuid: via uuid}]."""
     import pcbnew
     mm = pcbnew.ToMM
     b = pcbnew.LoadBoard(src)
     tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
     vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
-    added, skipped = 0, []
+    protect = set(protect or ())
+    added, skipped, touched = 0, [], {}
     for v in vias:
-        if v.m_Uuid.AsString() in skip:
+        vid = v.m_Uuid.AsString()
+        if vid in skip or v.GetNetname() in protect or not _only_hit(only, v, mm):
             continue
         c = v.GetPosition()
         cx, cy = mm(c.x), mm(c.y)
-        if only is not None and not any(n == v.GetNetname() and abs(x - cx) < 0.01 and abs(y - cy) < 0.01 for n, x, y in only):
-            continue
         r = mm(v.GetWidth(pcbnew.F_Cu)) / 2
         for t in tracks:
-            if t.GetNetCode() != v.GetNetCode() or not v.IsOnLayer(t.GetLayer()):
+            if t.GetNetCode() != v.GetNetCode() or not v.IsOnLayer(t.GetLayer()) or t.m_Uuid.AsString() in skip:
                 continue
             for w in (0, 1):
                 e, o = (t.GetStart(), t.GetEnd()) if w == 0 else (t.GetEnd(), t.GetStart())
                 ex, ey, ox, oy = mm(e.x), mm(e.y), mm(o.x), mm(o.y)
                 d = math.hypot(ex - cx, ey - cy)
                 if d <= 0.005 or d > r:
+                    continue
+                if t.IsLocked() and not locked_ok:
+                    skipped.append([v.GetNetname(), round(cx, 3), round(cy, 3), "locked"])
                     continue
                 hw = mm(t.GetWidth()) / 2
                 if hw >= r:
@@ -406,11 +447,13 @@ def _joiners(src, dst, skip, only=None):
                 j.SetNet(t.GetNet())
                 j.SetLocked(t.IsLocked())
                 b.Add(j)
+                touched[j.m_Uuid.AsString()] = vid
+                touched[t.m_Uuid.AsString()] = vid
                 added += 1
     pcbnew.SaveBoard(dst, b)
-    return [added, skipped]
+    return [added, skipped, touched]
 
 
-def joiner_run(src, dst, iters=3, log=print):
+def joiner_run(src, dst, iters=3, log=print, locked_ok=False, protect=()):
     """Last fallback for ends `run` and `via_run` left (D71cz): joiners to the exact via centre (see _joiners), DRC-guarded like `run`."""
-    return via_run(src, dst, iters, log, func="_joiners")
+    return via_run(src, dst, iters, log, func="_joiners", locked_ok=locked_ok, protect=protect)
