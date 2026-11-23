@@ -220,18 +220,11 @@ def gduo(ref, x, y, p, n, pitch=0.5, **kw):
     return PG.fp(ref, x, y, [PG.pad("1", 0, 0, p, 0.3, 0.8), PG.pad("2", pitch, 0, n, 0.3, 0.8)], **kw)
 
 
-def _four_layers(path):
-    """3 copper layers is not a board kicad-cli loads: add a full GND plane on In2.Cu (the signal layers stay F / In1 / B)."""
-    txt = open(path).read().replace('(31 "B.Cu" signal)', '(6 "In2.Cu" signal) (31 "B.Cu" signal)')
-    plane = '(zone (net 1) (net_name "GND") (layer "In2.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n'
-    open(path, "w").write(txt.rstrip().rstrip(")") + plane + ")\n")
-
-
 def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     cage = PB.keepout(15, 15, 25.5, 16) + PB.keepout(15, 24, 25.5, 24.5) + PB.keepout(15, 15, 15.5, 24.5) + PB.keepout(25, 15, 25.5, 24.5)
     b = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N") + cage)      # F / In1 / B; the rule areas are on F and B
     # kicad-cli (the skew authority, D71cx) cannot load a 3-copper-layer board: add a full GND plane on In2.Cu (signal layers stay F / In1 / B)
-    _four_layers(b)
+    PG.four_layers(b)
     out = str(tmp_path / "o.kicad_pcb")
     rep = PR.run(b, {}, None, out)
     r = rep["pairs"][0]
@@ -239,7 +232,7 @@ def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     assert r["status"] == "complete" and r["layers"] == ["F.Cu", "In1.Cu", "F.Cu"] and r["vias"] == 2 and r["skew"] <= 0.3
     # with nothing in the way the pair stays on the outer layer (an inner layer costs more)
     b2 = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N"), name="c.kicad_pcb")
-    _four_layers(b2)
+    PG.four_layers(b2)
     assert PR.run(b2, {}, None, str(tmp_path / "o2.kicad_pcb"))["pairs"][0]["layers"] == ["F.Cu"]
 
 

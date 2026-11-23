@@ -46,3 +46,12 @@ def board(tmp_path, body, name="b.kicad_pcb", outline=(0, 0, 100, 80), edge=None
     p = tmp_path / name
     p.write_text(HEAD + edge + body + ")\n")
     return str(p)
+
+
+def four_layers(path):
+    """The 3-copper-layer HEAD is not a board kicad-cli loads (the skew authority, D71cx): add a full GND plane on In2.Cu. The signal
+    layers stay F / In1 / B; apply it to a fixture whose pairs are audited."""
+    txt = open(path).read().replace('(31 "B.Cu" signal)', '(6 "In2.Cu" signal) (31 "B.Cu" signal)')
+    plane = '(zone (net 1) (net_name "GND") (layer "In2.Cu") (hatch edge 0.5) (polygon (pts (xy 0 0) (xy 100 0) (xy 100 80) (xy 0 80))))\n'
+    open(path, "w").write(txt.rstrip().rstrip(")") + plane + ")\n")
+    return path
