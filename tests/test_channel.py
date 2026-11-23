@@ -29,6 +29,7 @@ class Bd:
         self.fp = pcbnew.FOOTPRINT(self.b)
         self.fp.SetReference("U1")
         self.b.Add(self.fp)
+        self.fps = {"U1": self.fp}
 
     def net(self, name):
         if name not in self.nets:
@@ -37,8 +38,15 @@ class Bd:
             self.nets[name] = ni
         return self.nets[name]
 
-    def pad(self, num, x, y, net, size=1.0):
-        p = pcbnew.PAD(self.fp)
+    def pad(self, num, x, y, net, size=1.0, ref="U1"):
+        if ref != "U1":
+            if ref not in self.fps:
+                f = pcbnew.FOOTPRINT(self.b)
+                f.SetReference(ref)
+                self.b.Add(f)
+                self.fps[ref] = f
+        fp = self.fps[ref]
+        p = pcbnew.PAD(fp)
         p.SetNumber(str(num))
         p.SetSize(pcbnew.VECTOR2I(MM(size), MM(size)))
         p.SetShape(pcbnew.PAD_SHAPE_RECT)
@@ -48,7 +56,7 @@ class Bd:
         p.SetLayerSet(ls)
         p.SetPosition(pcbnew.VECTOR2I(MM(x), MM(y)))
         p.SetNet(self.net(net))
-        self.fp.Add(p)
+        fp.Add(p)
 
     def seg(self, a, b, net, layer=pcbnew.F_Cu, w=0.15):
         t = pcbnew.PCB_TRACK(self.b)
@@ -202,7 +210,7 @@ def test_pair_row_line_format():
     d = Bd()
     for n, y in (("A_P", 0), ("A_N", 1)):
         d.pad(1 if n == "A_P" else 3, 0, y, n)
-        d.pad(2 if n == "A_P" else 4, 50 + (3 if n == "A_N" else 0), y, n)
+        d.pad(2 if n == "A_P" else 4, 50 + (3 if n == "A_N" else 0), y, n, ref="J1")
         d.seg((0, y), (50 + (3 if n == "A_N" else 0), y), n)
     cons = {"channel": {"A_": {"loss_db_max": 6.0, "loss_db_target": 1.0, "freq_ghz": 4, "skew_ps_max": 40, "skew_ps_target": 5,
                                "length_mm_max": 150, "source": "t"}},
@@ -231,3 +239,28 @@ def test_board_stackup_supplies_er_and_df(tmp_path):
     rows = CH.board_stack_rows(str(f))
     assert [r["type"] for r in rows] == ["copper", "core", "copper"]
     assert rows[1]["epsilon_r"] == 3.9 and rows[1]["loss_tangent"] == 0.011 and rows[0]["epsilon_r"] is None
+
+
+def test_three_terminal_pair_matches_orientations_and_non_pairs_excluded():
+    """U1 -> J1.A6 / J1.B6 (Type-C style): P and N legs are compared per matching orientation, never across."""
+    d = Bd()
+    d.pad(1, 0, 0, "U_P")
+    d.pad(2, 0, 1, "U_N")
+    d.pad("A6", 30, 0, "U_P", ref="J1")
+    d.pad("B6", 30, 4, "U_P", ref="J1")
+    d.pad("A7", 30, 1, "U_N", ref="J1")
+    d.pad("B7", 30, 3, "U_N", ref="J1")
+    d.seg((0, 0), (30, 0), "U_P")
+    d.seg((30, 0), (30, 4), "U_P")          # A6 -> B6 shorting stub (4 mm)
+    d.seg((0, 1), (30, 1), "U_N")
+    d.seg((30, 1), (30, 3), "U_N")          # A7 -> B7 (2 mm)
+    d.pad(1, 5, 9, "U_LED", ref="J2")
+    d.pad(2, 9, 9, "U_LED", ref="J2")
+    cons = {"channel": {"U_": {"skew_ps_max": 40, "skew_ps_target": 1, "stub_mm_max": 3, "source": "t"}},
+            "stackup": {"layers": [{"name": r["name"], "type": r["type"], "thickness": r["thickness"], "epsilon_r": r["epsilon_r"]} for r in ROWS],
+                        "planes": PLANES}}
+    rows = CH.evaluate(d.b, cons)
+    assert [r["name"] for r in rows] == ["U_P/N"]                     # U_LED is not a pair
+    m = {x["name"]: x for x in rows[0]["metrics"]}
+    assert "J1.A6" in m["skew"]["detail"] and "J1.B6" in m["skew"]["detail"]
+    assert m["skew"]["value"] < 40 and m["stub"]["value"] == pytest.approx(3.5, abs=0.6)    # branch beyond the used terminal

@@ -347,6 +347,31 @@ def _path(adj, pad_nodes, seginfo, vmap, rows, src, dst, prev, dist, loc_pad_lab
     return chain, layer_mm, layer_w, layer_sq, vias, nodes, edges, seq, inside
 
 
+def pcbnew_mm(v):
+    return v / 1e6
+
+
+def orientations(pp, pn):
+    """Pair P's pad-to-pad paths with N's by endpoints. A P pad's partner is the nearest N pad on the same footprint
+    (ref = label before the dot). -> [(P path, N path or None, "a>b" label)] for every P path joining two footprints."""
+    npads = {}
+    for q in pn:
+        if q.get("found"):
+            npads[q["a"]], npads[q["b"]] = q["a_xy"], q["b_xy"]
+
+    def partner(lbl, xy):
+        c = [(math.hypot(xy[0] - v[0], xy[1] - v[1]), k) for k, v in npads.items() if k.split(".")[0] == lbl.split(".")[0]]
+        return min(c)[1] if c else None
+    byend = {frozenset((q["a"], q["b"])): q for q in pn if q.get("found")}
+    out = []
+    for q in pp:
+        if not q.get("found") or q["a"].split(".")[0] == q["b"].split(".")[0]:
+            continue
+        na, nb = partner(q["a"], q["a_xy"]), partner(q["b"], q["b_xy"])
+        out.append((q, byend.get(frozenset((na, nb))) if na and nb else None, f"{q['a']}>{q['b']}"))
+    return out
+
+
 def measure_paths(board, nets, rows, mode="trunk"):
     """{net: [path]} per signal path, pad to pad. mode "trunk": the path between the net's two farthest pads (branches
     off it are stubs); "all": every pad pair. path = {net, a, b, found, length_mm, layer_mm, layer_w, layer_sq, vias,
@@ -359,6 +384,7 @@ def measure_paths(board, nets, rows, mode="trunk"):
     for net in nets:
         adj, pad_nodes, seginfo, vmap = _graph(board, net, rows)
         lab = {n: l for n, l, _p in pad_nodes}
+        xy = {n: (pcbnew_mm(p_.GetPosition().x), pcbnew_mm(p_.GetPosition().y)) for n, _l, p_ in pad_nodes}
         total = sum(s["raw"] for s in seginfo)
         if len(pad_nodes) < 2:
             out[net] = [{"net": net, "found": False, "why": f"{len(pad_nodes)} pad(s)", "copper_total_mm": total}]
@@ -390,7 +416,7 @@ def measure_paths(board, nets, rows, mode="trunk"):
                         sm = via_barrel_mm(rows, cu[n0], cu[n1]) or 0.0
                         if sm > 0.05:
                             stubs.append({"kind": "via", "mm": round(sm, 4), "at": f"({v['x']:.2f},{v['y']:.2f})"})
-            res.append({"net": net, "a": lab[a], "b": lab[b], "found": True, "length_mm": round(dist[b], 4),
+            res.append({"net": net, "a": lab[a], "b": lab[b], "a_xy": xy[a], "b_xy": xy[b], "found": True, "length_mm": round(dist[b], 4),
                         "layer_mm": {k: round(v, 4) for k, v in lmm.items()}, "layer_w": lw, "layer_sq": lsq,
                         "vias": len(vl), "via_list": vl, "via_mm": round(vmm, 4), "stubs": stubs,
                         "stub_max_mm": max([s["mm"] for s in stubs], default=0.0),
@@ -474,7 +500,7 @@ def _legs(pairs_map, names):
 
 def evaluate(board, cons, spec=None, nets=None):
     """-> rows [{name, kind pair|net|dc, legs, metrics [..], verdict, family, labels}] for every net / pair that a
-    [channel.F] family covers, plus every [[dcdrop]] entry. `spec` (the spec JSON) is accepted for the caller's
+    [channel.F] family covers (differential pairs only; a net outside a pair never gets channel metrics), plus every [[dcdrop]] entry. `spec` (the spec JSON) is accepted for the caller's
     convenience and not needed: pairs come from the board's net names (netclass._pairs)."""
     if isinstance(board, str):
         from . import kicad_io as IO
@@ -487,41 +513,47 @@ def evaluate(board, cons, spec=None, nets=None):
     cover = [n for n in allnets if _family(cons.get("channel"), n)]
     if nets:
         cover = [n for n in cover if n in set(nets)]
-    legs = _legs(pm, set(cover))
-    meas = measure_paths(board, sorted({x for l in legs for x in l if x}), rows)
+    legs = [l for l in _legs(pm, set(cover)) if l[1]]            # differential pairs only (netclass pair detection)
+    meas = measure_paths(board, sorted({x for l in legs for x in l}), rows, mode="all")
     out = []
     for lg in legs:
-        names = [x for x in lg if x]
+        names = list(lg)
         master = names[0]
-        paths = [p for n in names for p in meas[n][:1]]
-        row = {"name": os_commonname(names), "kind": "pair" if len(names) == 2 else "net", "legs": names, "metrics": []}
-        if not all(p.get("found") for p in paths):
-            row.update(verdict="n/a", family=_family(cons["channel"], master), labels={}, why="; ".join(p.get("why", "?") for p in paths if not p.get("found")))
+        row = {"name": os_commonname(names), "kind": "pair", "legs": names, "metrics": []}
+        ors = orientations(meas[names[0]], meas[names[1]])
+        if not ors:
+            why = "; ".join(f"{n}: {meas[n][0].get('why', 'no path')}" for n in names if not meas[n][0].get("found")) or "no matching pad-to-pad path"
+            row.update(verdict="n/a", family=_family(cons["channel"], master), labels={}, why=why)
             out.append(row)
             continue
-        mean_ps = None
+        paths = [q for pq, nq, _l in ors for q in (pq, nq) if q]
         lay = {}
-        for p in paths:
-            for l, m in p["layer_mm"].items():
+        for q in paths:
+            for l, m in q["layer_mm"].items():
                 lay[l] = lay.get(l, 0.0) + m
         mean_ps = IM.route_delay_ps_per_mm(rows, set(planes), lay)
         b, lab, fam = resolve_budget(cons, master, mean_ps)
         f = b.get("freq_ghz", DEFAULT_FREQ_GHZ)
-        pm_ = [path_metrics(p, rows, planes, f, b) for p in paths]
-        row.update(family=fam, labels=lab)
+        pmx = {id(q): path_metrics(q, rows, planes, f, b) for q in paths}
+        row.update(family=fam, labels=lab, paths=paths)
         if "loss_db_max" in b or "loss_db_target" in b:
-            ls = [m["loss_db"] for m in pm_]
+            ls = [m["loss_db"] for m in pmx.values()]
             row["metrics"].append(_metric("loss", "dB", None if None in ls else max(ls), b.get("loss_db_target"), b.get("loss_db_max"), lab.get("loss_db_max") or lab.get("loss_db_target"), 2))
         if "skew_ps_max" in b or "skew_ps_target" in b:
-            ds = [m["delay_ps"] for m in pm_]
-            sk = abs(ds[0] - ds[1]) if len(ds) == 2 and None not in ds else None
-            row["metrics"].append(_metric("skew", "ps", sk, b.get("skew_ps_target"), b.get("skew_ps_max"), lab.get("skew_ps_max") or lab.get("skew_ps_target"), 1))
+            per = []
+            for pq, nq, lbl in ors:
+                dp, dn = pmx[id(pq)]["delay_ps"], (pmx[id(nq)]["delay_ps"] if nq else None)
+                per.append((lbl, abs(dp - dn) if dp is not None and dn is not None else None))
+            vals = [v for _l, v in per if v is not None]
+            m = _metric("skew", "ps", max(vals) if vals else None, b.get("skew_ps_target"), b.get("skew_ps_max"), lab.get("skew_ps_max") or lab.get("skew_ps_target"), 2)
+            if len(per) > 1 or any(v is None for _l, v in per):
+                m["detail"] = "; ".join(f"{l} {'unmatched' if v is None else format(v, '.1f')}" for l, v in per)
+            row["metrics"].append(m)
         if "length_mm_max" in b or "length_mm_target" in b:
-            row["metrics"].append(_metric("length", "mm", max(p["length_mm"] for p in paths), b.get("length_mm_target"), b.get("length_mm_max"), lab.get("length_mm_max") or lab.get("length_mm_target"), 1))
+            row["metrics"].append(_metric("length", "mm", max(q["length_mm"] for q in paths), b.get("length_mm_target"), b.get("length_mm_max"), lab.get("length_mm_max") or lab.get("length_mm_target"), 1))
         if "stub_mm_max" in b:
-            row["metrics"].append(_metric("stub", "mm", max(p["stub_max_mm"] for p in paths), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
+            row["metrics"].append(_metric("stub", "mm", max(q["stub_max_mm"] for q in paths), None, b["stub_mm_max"], lab["stub_mm_max"], 2))
         row["verdict"] = max((m["verdict"] for m in row["metrics"]), key=_RANK.get, default="n/a")
-        row["paths"] = paths
         out.append(row)
     dc = [d for d in cons.get("dcdrop", []) or []]
     if dc:
@@ -542,10 +574,11 @@ def evaluate(board, cons, spec=None, nets=None):
 
 
 def os_commonname(names):
-    """PCIE_TX_P + PCIE_TX_N -> "PCIE_TX_P/N" (unique per pair; a single net keeps its name)."""
+    """PCIE_TX_P + PCIE_TX_N -> "PCIE_TX_P/N"; USB_DP_J + USB_DM_J -> "USB_DP_J/DM_J" (cut at a "_" boundary)."""
     if len(names) == 1:
         return names[0]
     c = len(__import__("os.path", fromlist=["x"]).commonprefix(names))
+    c = names[0].rfind("_", 0, c) + 1
     return names[0] + "/" + names[1][c:]
 
 
@@ -558,6 +591,8 @@ def _fmt(m):
         s += f" (target {m['target']:g}, +{m['over_target']:.{d}f} over: pass)"
     elif m["verdict"] == "fail":
         s += f" (FAIL, {-m['margin']:.{d}f} over max)"
+    if m.get("detail"):
+        s += f" [{m['detail']}]"
     return s
 
 
