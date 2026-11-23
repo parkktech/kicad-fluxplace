@@ -268,6 +268,15 @@ def st_ready(c, n, board):
                 "next": [l.strip()[2:] for l in text.splitlines() if l.startswith("  - ")][:5] + [os.path.join(d, "stage.log")]}
     und = next((l for l in text.splitlines() if "UNDOCUMENTED PARTS ALLOWED" in l), None)
     out = {"verdict": "pass", "line": next((l for l in text.splitlines() if l.startswith("NOT READY")), line), "board": board}
+    try:                                    # the stage's own copy of the board + project carries the managed netclasses (never the user's file)
+        from . import ready as RY_
+        cp = os.path.join(d, "board.kicad_pcb")
+        _copy(board, cp)
+        _sidecar(board, cp)
+        RY_.sync_netclasses(cp, c.cons, write=True)
+        out["board"] = cp
+    except Exception as e:                  # noqa: BLE001 - the report at ready stands; the board is the input
+        out["line"] += f" (netclass write skipped: {type(e).__name__})"
     if und:
         out["undocumented"] = und.strip()
     return out

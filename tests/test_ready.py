@@ -183,50 +183,75 @@ def test_pipeline_ready_stage_blocks_and_allow_incomplete_stamps(tmp_path):
     assert "NOT READY" in PL.format_status(st)
 
 
-# ---- A4: netclasses written at ready, NETCLASS_MISMATCH
-def test_sync_netclasses_writes_family_class_into_default_only_project(tmp_path):
+# ---- A4 / review 4: netclass sync: report at ready, managed classes only, real board and real DRC
+def _pair_project(tmp_path, project=None, family="ETH_"):
+    import json
+    import planboards as PB
+    from test_pairs import duo
+    b = PB.write(tmp_path, duo("U1", 20, 20, "ETH_P", "ETH_N") + duo("U2", 60, 25, "ETH_P", "ETH_N") + duo("U3", 20, 50, "ETH_LED", "ETH_X"))
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text(json.dumps(project if project is not None else {"net_settings": {"classes": [{"name": "Default", "track_width": 0.2, "clearance": 0.2}]}}))
+    return b, str(pro), {"pairs": {family: {"impedance_diff": 100}}, "power": {"ETH_X": {"max_current_ma": 1000}}}
+
+
+def test_ready_reports_and_never_writes_the_project(tmp_path):
+    from fluxplace import ready as RY
+    b, pro, cons = _pair_project(tmp_path)
+    before = open(pro, "rb").read()
+    line = RY.sync_netclasses(b, cons)
+    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"] and "managed" in line["detail"]
+    assert open(pro, "rb").read() == before
+
+
+def test_a_stage_copy_gets_managed_classes_that_match_the_leg_nets(tmp_path):
     import json
     from fluxplace import ready as RY, constraints as C
-    b = tmp_path / "b.kicad_pcb"
-    b.write_text("(kicad_pcb)")
-    pro = tmp_path / "b.kicad_pro"
-    pro.write_text(json.dumps({"net_settings": {"classes": [{"name": "Default", "track_width": 0.2}]}}))
-    cons = {"pairs": {"USB": {"impedance_diff": 90}}, "power": {"+5V": {"max_current_ma": 1000}}}
-    assert C.netclass_mismatch(str(pro), cons, str(b))            # Default-only: mismatch detected
-    line = RY.sync_netclasses(str(b), cons)
+    b, pro, cons = _pair_project(tmp_path)                                   # family key "ETH_" ends in "_": the old pattern was *ETH__*
+    line = RY.sync_netclasses(b, cons, write=True)
     assert line["status"] == "PASS" and "written" in line["detail"]
     ns = json.load(open(pro))["net_settings"]
-    names = {c["name"] for c in ns["classes"]}
-    assert "Default" in names and any(n.startswith("DP_USB_90R") for n in names) and any(n.startswith("PWR_") for n in names)
-    assert C.netclass_mismatch(str(pro), cons, str(b)) == []
-    assert RY.sync_netclasses(str(b), cons)["detail"] == "project netclasses match the constraints"
+    cls = {c["name"]: c for c in ns["classes"]}
+    pats = {p["pattern"]: p["netclass"] for p in ns["netclass_patterns"]}
+    assert pats["ETH_P"] == pats["ETH_N"] and pats["ETH_P"].startswith("DP_ETH_")
+    assert "ETH_LED" not in pats and "ETH_X" in pats                          # a plain signal is not a pair leg; the rail is a rail
+    for name in (pats["ETH_P"], pats["ETH_X"]):
+        c = cls[name]
+        assert c[C.MANAGED_KEY] is True and "clearance" not in c and "via_diameter" not in c and "via_drill" not in c
+    assert cls["Default"] == {"name": "Default", "track_width": 0.2, "clearance": 0.2}
+    assert C.netclass_mismatch(pro, cons, b) == []
 
 
-def test_netclass_mismatch_sees_a_hand_edited_width(tmp_path):
+def test_user_classes_are_kept_whole_even_when_named_like_ours(tmp_path):
     import json
-    from fluxplace import constraints as C
-    b = tmp_path / "b.kicad_pcb"
-    b.write_text("(kicad_pcb)")
-    pro = tmp_path / "b.kicad_pro"
-    pro.write_text("{}")
-    cons = {"pairs": {"USB": {"impedance_diff": 90}}}
-    C.inject_netclasses(str(pro), cons, log=lambda *a: None, board=str(b))
-    d = json.load(open(pro))
-    d["net_settings"]["classes"][0]["diff_pair_gap"] = 0.9
-    json.dump(d, open(pro, "w"))
-    assert C.netclass_mismatch(str(pro), cons, str(b)) == [d["net_settings"]["classes"][0]["name"]]
-
-
-def test_sync_netclasses_fails_when_the_project_cannot_be_written(tmp_path, monkeypatch):
-    from fluxplace import ready as RY, constraints as C
-    b = tmp_path / "b.kicad_pcb"
-    b.write_text("(kicad_pcb)")
-    (tmp_path / "b.kicad_pro").write_text("{}")
-    monkeypatch.setattr(C, "inject_netclasses", lambda *a, **k: 0)         # silently writes nothing
-    line = RY.sync_netclasses(str(b), {"pairs": {"USB": {"impedance_diff": 90}}})
-    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"]
-
-
-def test_sync_netclasses_unchecked_without_a_project(tmp_path):
     from fluxplace import ready as RY
-    assert RY.sync_netclasses(str(tmp_path / "b.kicad_pcb"), {"pairs": {"USB": {}}})["status"] == "UNCHECKED"
+    user = [{"name": "Default", "clearance": 0.2}, {"name": "PWR_ETH_X", "clearance": 0.33, "track_width": 0.9}, {"name": "DP_ETH__100R", "clearance": 0.4}]
+    b, pro, cons = _pair_project(tmp_path, {"net_settings": {"classes": user}})
+    RY.sync_netclasses(b, cons, write=True)
+    cls = {c["name"]: c for c in json.load(open(pro))["net_settings"]["classes"]}
+    assert cls["PWR_ETH_X"] == user[1] and cls["DP_ETH__100R"] == user[2] and cls["Default"] == user[0]      # untouched
+    assert sum(1 for c in cls.values() if c.get("fluxplace_managed")) >= 1                                   # ours were added under other names
+
+
+def test_the_class_that_applies_to_a_pair_leg_is_compared_with_the_stackup(tmp_path):
+    import json
+    from fluxplace import ready as RY, constraints as C
+    live = {"net_settings": {"classes": [{"name": "Default"}, {"name": "ETH_100R", "clearance": 0.127, "track_width": 0.15,
+                                                                "diff_pair_width": 0.15, "diff_pair_gap": 0.4}],
+                             "netclass_patterns": [{"netclass": "ETH_100R", "pattern": "ETH_*"}]}}
+    b, pro, cons = _pair_project(tmp_path, live)
+    mism = C.netclass_mismatch(pro, cons, b)
+    assert any(x.startswith("foreign ETH_P class ETH_100R") and "gap 0.4" in x for x in mism)
+    line = RY.sync_netclasses(b, cons, write=True)
+    assert line["status"] == "FAIL" and "foreign" in line["detail"]                    # a user class is reported, never rewritten
+    d = json.load(open(pro))["net_settings"]["classes"]
+    assert [c for c in d if c["name"] == "ETH_100R"][0]["diff_pair_gap"] == 0.4
+
+
+def test_writing_the_managed_classes_does_not_change_the_drc_error_count(tmp_path):
+    """review 4: 62 new clearance errors on W15 from a fixed 0.15 mm PWR clearance.  Real kicad-cli before and after the write."""
+    from fluxplace import ready as RY, drcguard as DG
+    b, pro, cons = _pair_project(tmp_path)
+    errs = lambda: sorted((v["type"], v["description"][:60]) for v in DG.drc_json(b, complete=False)["violations"] if v["severity"] == "error")   # noqa: E731
+    e0 = errs()
+    RY.sync_netclasses(b, cons, write=True)
+    assert errs() == e0

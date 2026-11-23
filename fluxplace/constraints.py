@@ -442,13 +442,85 @@ def _rule_netclasses(board, cons, classes, patterns, log):
     return len(groups)
 
 
+MANAGED_KEY = "fluxplace_managed"       # the explicit marker of a class fluxplace owns (never a name prefix: a user class named PWR_* is the user's)
+GEOM_TOL_MM = 0.005
+
+
+def _eff_class(classes, patterns, net):
+    """The class that applies to `net`: the first netclass pattern that matches it (KiCad wildcard), else None (Default)."""
+    import fnmatch
+    for p in patterns:
+        if fnmatch.fnmatchcase(net, p.get("pattern", "")):
+            return next((c for c in classes if c.get("name") == p.get("netclass")), None)
+    return None
+
+
+def pair_legs_of(cons, board):
+    """{leg net: family} for the classified pair legs of `board` (graph.diff_pairs / family tails: budget.pair_legs) under their longest
+    [pairs.F] family.  {} when the board cannot be read."""
+    from . import budget as B
+    try:
+        from . import routediag as RD
+        names = sorted({q["net"] for q in RD.load(board)["pads"] if q["net"]})
+    except Exception:                                                       # noqa: BLE001 - no board: no legs
+        return {}
+    fams = (cons or {}).get("pairs") or {}
+    legs = B.pair_legs(names, cons)
+    return {n: f for n in sorted(legs) for f in [B.family_of(fams, n, legs)] if f}
+
+
+def _expected_geometry(cons, group, board):
+    from . import zgeom as ZG
+    z = int((cons.get("pairs", {}).get(group) or {}).get("impedance_diff", 100))
+    og = ZG.outer_geometry(cons, group, board=board) if (cons.get("pairs", {}).get(group) or {}).get("impedance_diff") else None
+    w, g = og or PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])                # computed from the stackup; the constant is the fallback
+    return z, w, g
+
+
+def _build_netclasses(d, cons, log, board):
+    """(classes, patterns, n_rule): the project's classes with the fluxplace-managed ones rebuilt.  User classes are kept whole (never
+    deleted, never edited); managed classes set only width / gap (pairs, from the stackup) and width (rails), never clearance or via sizes,
+    so DRC on unchanged copper cannot move.  A pair leg or rail a user class already covers is left to that class (netclass_mismatch
+    reports it); the rest get an exact-name pattern (the old `*FAMILY_*` pattern doubled the family's trailing `_` and matched nothing)."""
+    ns = d.setdefault("net_settings", {})
+    old = ns.get("classes", [])
+    drop = {c.get("name") for c in old if c.get(MANAGED_KEY)}
+    classes = [c for c in old if not c.get(MANAGED_KEY)]
+    patterns = [p for p in ns.get("netclass_patterns", []) if p.get("netclass") not in drop]
+    taken = {c.get("name") for c in classes}
+
+    def uniq(name):
+        while name in taken:
+            name += "_fx"
+        taken.add(name)
+        return name
+    legs = pair_legs_of(cons, board) if board else {}
+    for group in sorted((cons or {}).get("pairs", {})):
+        nets = [n for n, f in legs.items() if f == group and _eff_class(classes, patterns, n) is None]
+        if not nets:
+            continue
+        z, w, g = _expected_geometry(cons, group, board)
+        name = uniq(f"DP_{group}_{z}R")
+        classes.append({"name": name, "track_width": w, "diff_pair_width": w, "diff_pair_gap": g, MANAGED_KEY: True})
+        patterns += [{"netclass": name, "pattern": n} for n in nets]
+    for net, pw in sorted((cons or {}).get("power", {}).items()):
+        ma = pw.get("max_current_ma")
+        if not ma or pw.get("pour") or _eff_class(classes, patterns, net) is not None:
+            continue
+        name = uniq(f"PWR_{net.strip('+').replace('/', '_')}")
+        classes.append({"name": name, "track_width": rail_width_mm(ma), MANAGED_KEY: True})
+        patterns.append({"netclass": name, "pattern": net})
+    n0 = len(classes)
+    n_rule = _rule_netclasses(board, cons, classes, patterns, log)
+    for c in classes[n0:]:
+        c[MANAGED_KEY] = True                                               # the owner's [[rule]] results are written by us and rebuilt by us
+    return classes, patterns, n_rule
+
+
 def inject_netclasses(pro_path, cons, log=print, board=None):
-    """Write the engineering constraints INTO the project file as KiCad net
-    classes, so any ECAD parser (Quilter's 'ECAD PARSED CONSTRAINTS', the
-    KiCad router, a human) sees the intent instead of guessing defaults
-    (measured: Quilter guessed 100R for every pair and 500mA for every rail
-    because the .kicad_pro carried no classes). Pairs get diff_pair_width/
-    gap for their impedance target; rails get ampacity track widths."""
+    """Write the engineering constraints INTO the project file as KiCad net classes, so any ECAD parser (Quilter's 'ECAD PARSED
+    CONSTRAINTS', the KiCad router, a human) sees the intent instead of guessing defaults.  Only classes carrying MANAGED_KEY are ours:
+    they are rebuilt, everything else in the file is kept as it was.  Call it on a project file the caller owns (a stage's copy)."""
     import json
     d = json.load(open(pro_path))
     classes, patterns, n_rule = _build_netclasses(d, cons, log, board)
@@ -456,65 +528,41 @@ def inject_netclasses(pro_path, cons, log=print, board=None):
     ns["classes"] = classes
     ns["netclass_patterns"] = patterns
     json.dump(d, open(pro_path, "w"), indent=2)
-    log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
-        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes, "
-        f"{n_rule} rule classes")
+    log(f"  netclasses written: {sum(1 for c in classes if c.get(MANAGED_KEY))} managed "
+        f"({sum(1 for c in classes if c.get('name', '').startswith('DP_') and c.get(MANAGED_KEY))} pair, "
+        f"{sum(1 for c in classes if c.get('name', '').startswith('PWR_') and c.get(MANAGED_KEY))} rail, {n_rule} rule classes)")
     return len(classes)
 
 
-MANAGED_CLASS_PREFIX = ("DP_", "PWR_", "RULE_")
-
-
 def netclass_mismatch(pro_path, cons, board=None):
-    """NETCLASS_MISMATCH: names of the managed (DP_/PWR_/RULE_) classes or patterns whose project-file entry differs from what
-    `inject_netclasses` would write from `cons` (missing, extra or different). Writes nothing. [] = the project carries them."""
+    """NETCLASS_MISMATCH rows, [] when the project carries the budgets.  Writes nothing.
+      managed ...   a class fluxplace owns differs from what the constraints imply (missing, extra, other width / gap)
+      foreign ...   the class that actually applies to a pair leg (first matching pattern, a user class) has another track width,
+                    diff-pair width or gap than the stackup gives for the family: the router would draw the pair off its impedance."""
     import json
     d = json.load(open(pro_path))
     want_c, want_p, _ = _build_netclasses(json.loads(json.dumps(d)), cons, lambda *a, **k: None, board)
     ns = d.get("net_settings", {})
-    have_c = {c.get("name"): c for c in ns.get("classes", []) if c.get("name", "").startswith(MANAGED_CLASS_PREFIX)}
-    want_c = {c["name"]: c for c in want_c if c["name"].startswith(MANAGED_CLASS_PREFIX)}
-    bad = sorted(n for n in set(have_c) | set(want_c)
-                 if n not in have_c or n not in want_c or any(have_c[n].get(k) != v for k, v in want_c[n].items()))
+    have_c = {c.get("name"): c for c in ns.get("classes", []) if c.get(MANAGED_KEY)}
+    want_m = {c["name"]: c for c in want_c if c.get(MANAGED_KEY)}
+    out = [f"managed {n}" for n in sorted(set(have_c) | set(want_m))
+           if n not in have_c or n not in want_m or any(have_c[n].get(k) != v for k, v in want_m[n].items())]
     key = lambda p: (p.get("netclass"), p.get("pattern"))                  # noqa: E731
-    hp = {key(p) for p in ns.get("netclass_patterns", []) if p.get("netclass", "").startswith(MANAGED_CLASS_PREFIX)}
-    wp = {key(p) for p in want_p if p.get("netclass", "").startswith(MANAGED_CLASS_PREFIX)}
-    bad += [f"pattern {a}={b}" for a, b in sorted(hp ^ wp)]
-    return bad
-
-
-def _build_netclasses(d, cons, log, board):
-    ns = d.setdefault("net_settings", {})
-    classes = [c for c in ns.get("classes", [])
-               if not (c.get("name", "").startswith(("DP_", "PWR_", "RULE_")))]
-    patterns = [p for p in ns.get("netclass_patterns", [])
-                if not p.get("netclass", "").startswith(("DP_", "PWR_", "RULE_"))]
-    for group, p in sorted((cons or {}).get("pairs", {}).items()):
-        z = int(p.get("impedance_diff", 100))
-        from . import zgeom as ZG
-        og = ZG.outer_geometry(cons, group, board=board) if p.get("impedance_diff") else None
-        w, g = og or PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])      # computed from the stackup; the constant is the fallback
-        name = f"DP_{group}_{z}R"
-        classes.append({
-            "name": name, "clearance": 0.1,
-            "track_width": w, "diff_pair_width": w, "diff_pair_gap": g,
-            "via_diameter": 0.45, "via_drill": 0.25,
-            "diff_pair_via_gap": 0.25,
-        })
-        patterns.append({"netclass": name, "pattern": f"*{group}_*"})
-    for net, pw in sorted((cons or {}).get("power", {}).items()):
-        ma = pw.get("max_current_ma")
-        if not ma or pw.get("pour"):
+    hp = {key(p) for p in ns.get("netclass_patterns", []) if p.get("netclass") in have_c}
+    wp = {key(p) for p in want_p if p.get("netclass") in want_m}
+    out += [f"managed pattern {a}={b}" for a, b in sorted(hp ^ wp)]
+    classes, patterns = ns.get("classes", []), ns.get("netclass_patterns", [])
+    for net, group in sorted(pair_legs_of(cons, board).items()) if board else []:
+        c = _eff_class(classes, patterns, net)
+        if c is None or c.get(MANAGED_KEY):
             continue
-        name = f"PWR_{net.strip('+').replace('/', '_')}"
-        classes.append({
-            "name": name, "clearance": 0.15,
-            "track_width": rail_width_mm(ma),
-            "via_diameter": 0.6, "via_drill": 0.3,
-        })
-        patterns.append({"netclass": name, "pattern": net})
-    n_rule = _rule_netclasses(board, cons, classes, patterns, log)
-    return classes, patterns, n_rule
+        z, w, g = _expected_geometry(cons, group, board)
+        got = {"diff_pair_width": c.get("diff_pair_width", c.get("track_width")), "diff_pair_gap": c.get("diff_pair_gap")}
+        bad = [f"{k} {v} != {e:g}" for k, v, e in (("width", got["diff_pair_width"], w), ("gap", got["diff_pair_gap"], g))
+               if v is not None and abs(float(v) - e) > GEOM_TOL_MM]
+        if bad:
+            out.append(f"foreign {net} class {c.get('name')}: {', '.join(bad)} (stackup, {z} ohm)")
+    return out
 
 
 # ---------------------------------------------------------------------------

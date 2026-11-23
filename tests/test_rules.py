@@ -207,7 +207,7 @@ def test_rule_width_reaches_injected_netclass(tmp_path, monkeypatch):
     d = json.loads(pro.read_text())
     cls = {c["name"]: c for c in d["net_settings"]["classes"]}
     assert cls["RULE_usb_dp"]["track_width"] == 0.15
-    assert cls["RULE_usb_dp"]["clearance"] == 0.2
+    assert cls["RULE_usb_dp"]["clearance"] == 0.2 and cls["RULE_usb_dp"]["fluxplace_managed"] is True
     pats = [p for p in d["net_settings"]["netclass_patterns"] if p["netclass"] == "RULE_usb_dp"]
     assert pats == [{"netclass": "RULE_usb_dp", "pattern": "USB_DP"}]
 
