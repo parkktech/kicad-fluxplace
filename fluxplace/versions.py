@@ -300,6 +300,8 @@ def cmd_accept(a):
 
 
 def cmd_reject(a):
+    if not a.board or not os.path.isfile(a.board):
+        sys.exit("refused: reject needs an existing board file, got %r (nothing recorded)" % a.board)
     r = load()
     v, e = active(r)
     e.setdefault("rejected", []).append({"time": now(), "board": rel(a.board), "note": a.note})

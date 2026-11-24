@@ -372,3 +372,18 @@ def test_copper_fingerprint_follows_lock_state(tmp_path):
     t.SetLocked(True)
     b.Save(locked)
     assert VS.copper_fingerprint(unlocked) != VS.copper_fingerprint(locked)
+
+
+@pytest.mark.parametrize("bad", ["", "missing"])
+def test_reject_refuses_empty_or_missing_board_and_changes_nothing(tmp_path, fake, capsys, bad):
+    root = git_repo(tmp_path)
+    init(root)
+    before = reg(root)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    arg = bad if bad == "" else str(root / "W1/nope.kicad_pcb")
+    with pytest.raises(SystemExit) as ex:
+        call(root, "reject", arg, "--note", "x")
+    assert ex.value.code not in (0, None)
+    assert reg(root) == before
+    assert subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout == head
+
