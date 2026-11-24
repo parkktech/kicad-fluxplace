@@ -1585,8 +1585,9 @@ def _ev_stage(kind, i, name, **kw):
     from . import events as EV
     EV.emit(kind, stage=name, n=i, name=name, **kw)
     if kind == "stage_start":
-        from . import eta as ETA
+        from . import eta as ETA, liveview as LV
         ETA.stage_start(name)
+        LV.narrate(name, LV.START_TEXT.get(name) or f"Running the {name} stage. Done when it reports pass or fail.", "start")
 
 
 def _ev_stage_end(i, name, res, board, secs):
@@ -1596,8 +1597,9 @@ def _ev_stage_end(i, name, res, board, secs):
         metrics = SN.active_metrics()       # the forced stage-end snapshot's board metrics
     EV.emit("stage_end", stage=name, n=i, name=name, verdict=res.get("verdict"),
             line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board, metrics=metrics)
-    from . import eta as ETA
+    from . import eta as ETA, liveview as LV
     ETA.stage_end(name, secs, res.get("verdict"))
+    LV.narrate(name, f"{name} finished: {res.get('verdict')}. {str(res.get('line', ''))[:200]}. Took {secs:.1f} s.", "end")
 
 
 def run(a):
@@ -1753,7 +1755,9 @@ def _run(a):
                 # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
                 os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
                 gd = c.dir(i + 1, "gate")
-            res = FUNCS[name](c, i + 1, board)
+            from . import liveview as LV
+            with LV.watching(name):                            # N12: a heartbeat line every few seconds while the stage works
+                res = FUNCS[name](c, i + 1, board)
             res.setdefault("verdict", "pass")
             if res["verdict"] in ("pass", "warn"):
                 res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)

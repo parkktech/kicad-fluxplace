@@ -74,6 +74,10 @@ def _placer(out, ev):
     for name, obj in (("live/place/leader-000001.json", s1), ("live/place/leader-000002.delta.json", dl)):
         with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
             json.dump(obj, fh, separators=(",", ":"))
+    ev("narration", "floorplan", 2, phase="start", text="Seating the modules on the board, then searching for a better arrangement. "
+       "Done when the search ends and the best layout is kept.", eta_s=None)
+    ev("narration", "floorplan", 3.5, phase="doing", text="Seating 14 support parts around 2 modules' anchor parts (candidate c1).", eta_s=None)
+    ev("narration", "floorplan", 4, phase="doing", text="floorplan round 2 of 8: best so far hard rows 1, sum over max 12.5", eta_s=42.0)
     base = {"generations": None, "trial": None, "trials": 8, "arm": "unguided", "seed": 1, "pair": None, "leader_key": None, "why": None,
             "rows_rev": 0, "eta_s": None, "criteria": crit}
     ev("placement_progress", "floorplan", 3, phase="anneal", generation=0, cand="c1", key=key, leader="c1", is_leader=True, verdict="kept",

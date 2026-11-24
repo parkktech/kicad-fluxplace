@@ -976,6 +976,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     B = RD.load(path_g)
     M = MD.build(B, cons, spec, arrange=True)
     from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
+    nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
+    LV0.narrate("floorplan", f"Seating {nsup} support parts around {len(M.get('modules') or [])} modules' anchor parts (candidate {tag}).", "doing")
     LV0.progress("floorplan", "construct", always=True, cand=tag, why=f"{len(M.get('rehomed') or {})} bypass part(s) re-homed",
                  criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
                             "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])},

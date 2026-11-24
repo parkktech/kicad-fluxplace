@@ -611,12 +611,12 @@ def test_watcher_and_candidate_write_lines_and_snapshots_and_are_off_without_a_s
     assert LV.candidate("floorplan", "g_0", P.B, M, [["fan-out blocked", 0]], [{"id": "fan-out", "ok": True, "value": 9, "limit": 9, "text": ""}], {},
                         generation=1, is_leader=True, leader="g_0") == "live/place/leader-000002.json"
     assert LV.candidate("floorplan", "result", path, None, None, None, {}, lane="accepted", phase="gate", full=True) == "live/place/accepted-000003.json"
-    ev = _lines(W / "events.jsonl")
+    ev = [e for e in _lines(W / "events.jsonl") if e["kind"] != "narration"]     # narration: tests/test_narrate.py
     assert [(e["kind"], e.get("phase") or e.get("lane"), e.get("cand")) for e in ev] == [
         ("placement_progress", "anneal", "g_0"), ("placement_snapshot", "trial", "g_0"), ("placement_progress", "judge", "g_0"),
         ("placement_snapshot", "leader", "g_0"), ("placement_progress", "gate", "result"), ("placement_snapshot", "accepted", "result")]
     assert ev[0]["key"] == [["cost", 12.346]] and (ev[0]["trial"], ev[0]["trials"]) == (0, 1000)
-    ops = _lines(tmp_path / "ops.jsonl")                         # the ops feed gets every line, also those with a `path` field
+    ops = [o for o in _lines(tmp_path / "ops.jsonl") if o["kind"] != "narration"]   # the ops feed gets every line (narration: test_narrate)
     assert [(o["kind"], o.get("path")) for o in ops] == [(e["kind"], e.get("path")) for e in ev] and all("text" in o for o in ops)
     assert not (W / "live/errors.jsonl").exists()
 

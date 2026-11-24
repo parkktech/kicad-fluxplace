@@ -75,6 +75,7 @@ Run-script lines: `docs/recipes/LIVE-PLACER.md`.
 | `gate_open` | id, deadline (epoch s, null = not waiting), default, machine (PASS / FAIL / null), candidates [{cand, key, criteria, snapshot, glb}], path, text | |
 | `gate_closed` | id, by (owner / timeout), action, choice, item, text | |
 | `feedback_result` | id, item_kind, action (received, refused, conflict, applied, context, honoured, not_honoured, gate_closed), row, why, effect, generation, rows_rev, file, text | one per item per action |
+| `narration` | phase (start / doing / end), text (plain words), eta_s (null = unknown) | every stage start and end (ready, modules, floorplan, placetour and every other stage via the pipeline wrapper); a `doing` line at each round or seating phase and at least every 8 s while a stage works (heartbeat); none silent over 10 s |
 
 `key` = `[[term, value], ...]`, lower is better from the left, null = not judged yet. `criteria` = `[{id, ok, value, limit, text}]`,
 `ok` true / false / null. Keys with different `rows_rev` are not comparable.
@@ -83,7 +84,7 @@ Files (all by rename; a file that exists is complete; `.tmp` files are never rea
 
 | File | Content |
 |---|---|
-| `W/live/place/<lane>-NNNNNN.json` | full placement snapshot: the board snapshot below with `tracks` and `vias` empty; per part also `mod`, `fixed` (null or the reason class; `owner` = an owner pin), `h`; plus `grid` {cols, rows, cell [w, h], origin [x, y]} (cells: column letter + row number, `A1` at the origin), `modules` [{id, name, role, bbox, side, fixed, group, n}], `regions` [{id, src, target, rect, cells, keep, exit}], `keepouts` [{id, pts, layers, src}], `key`, `criteria`, `cand`, `arm`, `generation`, `rows_rev` |
+| `W/live/place/<lane>-NNNNNN.json` | full placement snapshot: the board snapshot below with `tracks` and `vias` empty; per part also `mod`, `fixed` (null or the reason class; `owner` = an owner pin), `h`; `parked` (bool: courtyard outside the board outline), `why` {owner (the module's owner IC or null), module, fixed, rows [{id, ok, hard}] of the graded rows naming the part}; plus `grid` {cols, rows, cell [w, h], origin [x, y]} (cells: column letter + row number, `A1` at the origin), `modules` [{id, name, role, bbox, side, fixed, group, n}], `regions` [{id, src, target, rect, cells, keep, exit}], `keepouts` [{id, pts, layers, src}], `key`, `criteria`, `cand`, `arm`, `generation`, `rows_rev` |
 | `W/live/place/<lane>-NNNNNN.delta.json` | {v, seq, base, parts [changed part objects], moved [{ref, dx, dy, drot, flip}], modules [changed], regions (whole list, only when changed), key}; apply to the full snapshot `base` of the same lane; a full comes at least every 20 and at stage end |
 | `W/live/glb/<cand>.glb`, `<cand>.log`, `latest.json` | 3D export (glTF binary), the tool's output, the last `glb_ready` line |
 | `W/live/errors.jsonl` | one row per failure of the live view itself (it never fails a stage) |
