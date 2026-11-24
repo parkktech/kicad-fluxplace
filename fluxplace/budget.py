@@ -252,3 +252,52 @@ def separation_rows(B, cons):
                        str(e.get("source", "")), str(e.get("klass", "INF")), has_min and bool(e.get("hard", True)), minimum=True,
                        refs=[best[1], best[2]] if best else [], detail=str(e.get("why", ""))))
     return out
+
+
+def tracks_between(pitch, pad, width, space):
+    """Tracks that pass between two pads: n x width + (n + 1) x space <= pitch - pad."""
+    import math
+    return max(0, math.floor((pitch - pad - space) / (width + space) + 1e-9))
+
+
+def escape_rows(B, cons):
+    """One closed-form row per fine-pitch part (escapeplan.is_fine): tracks between pads at the rule floor, rows per layer,
+    layers needed, corridor depth. The lay's break-out check stays the authority (a contradiction is a drift row, step 10)."""
+    import math
+    from . import escapeplan as EP, escreserve as ER, zgeom as ZG
+    pr = EP.plan_params(cons)
+    floor = ZG.floors(cons)[0]
+    via = float(((cons or {}).get("route") or {}).get("min_via_mm", 0.46))
+    out = []
+    for ref in sorted(B["parts"]):
+        part = B["parts"][ref]
+        ps = [q for q in part["pads"] if not q.get("np")]
+        if len(ps) < 4 or EP.is_mech(ref) or not EP.is_fine(part, pr):
+            continue
+        d, a, b = min(((math.hypot(p["x"] - q["x"], p["y"] - q["y"]), i, j) for i, p in enumerate(ps) for j, q in enumerate(ps)
+                       if i < j and p["num"] != q["num"] and math.hypot(p["x"] - q["x"], p["y"] - q["y"]) > 0.05))
+        along_x = abs(ps[a]["x"] - ps[b]["x"]) >= abs(ps[a]["y"] - ps[b]["y"])
+        pitch = round(d, 4)
+        pad = round(2 * (ps[a]["ex"] if along_x else ps[a]["ey"]), 4)
+        sig = [q for q in ps if 2 * min(q["ex"], q["ey"]) <= 2 * pitch]      # without thermal and shell pads
+        x0, x1 = min(q["x"] for q in sig), max(q["x"] for q in sig)
+        y0, y1 = min(q["y"] for q in sig), max(q["y"] for q in sig)
+        # rings: pad rows counted from the nearest outward edge (a perimeter part and a two-row connector are 1 deep)
+        deep = ER._rows([min(q["x"] - x0, x1 - q["x"], q["y"] - y0, y1 - q["y"]) for q in sig], tol=pitch / 2)
+        n, nv = tracks_between(pitch, pad, floor, floor), tracks_between(pitch, via, floor, floor)
+        surface = n + 1
+        if deep <= surface:
+            need = 1
+        elif deep <= surface + nv + 1:
+            need = 2
+        else:
+            need = None if nv == 0 else 2 + math.ceil((deep - surface - nv - 1) / nv)
+        out.append(row("escape", ref, "tracks_between_pads", "count", n, None, None,
+                       f"closed form: floor((pitch {pitch:g} - pad {pad:g} - space {floor:g}) / (width {floor:g} + space {floor:g})); "
+                       f"rows per layer after Pulliam (JLab BGA escape note)", "INF", False, refs=[ref],
+                       detail=f"{len(ps)} pins, {deep} ring(s) deep; " + ("no layer count escapes it without via-in-pad" if need is None
+                                                                        else f"{need} signal layer(s) needed"),
+                       pitch_mm=pitch, pad_mm=pad, gap_mm=round(pitch - pad, 4), pins=len(ps), rows_deep=deep,
+                       rows_surface=surface, tracks_between_vias=nv, layers_needed=need,
+                       corridor_mm=round(min(deep, surface) * 2 * floor, 3)))
+    return out

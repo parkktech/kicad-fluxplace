@@ -169,3 +169,38 @@ def test_hard_separation_is_held_by_the_intent_gate(tmp_path):
     rows = [r for r in IT.check(B, cons) if r["kind"] == "away"]
     assert len(rows) == 1 and rows[0]["name"] == "sep:s" and rows[0]["met"] is False and rows[0]["hard"] is True
     assert (rows[0]["value"], rows[0]["limit"]) == (38.0, 40.0)
+
+
+def test_tracks_between_pads_closed_form():
+    assert BG.tracks_between(0.4, 0.2, 0.127, 0.127) == 0          # the strategy's acceptance case: 0.4 mm pitch at a 0.127 mm floor
+    assert BG.tracks_between(0.5, 0.25, 0.09, 0.09) == 0           # gap 0.25 < 2 x 0.09 + 0.09 = 0.27
+    assert BG.tracks_between(0.508, 0.127, 0.127, 0.127) == 1      # gap 0.381 = 2 x 0.127 + 0.127 exactly
+    assert BG.tracks_between(0.8, 0.4, 0.1, 0.1) == 1
+    assert BG.tracks_between(1.27, 0.6, 0.127, 0.127) == 2
+
+
+def _grid(ref, x, y, n, pitch=0.8, pad=0.4):
+    return PG.fp(ref, x, y, [PG.pad(f"{r}_{c}", c * pitch, r * pitch, f"{ref}g{r}_{c}", pad, pad) for r in range(n) for c in range(n)])
+
+
+def test_escape_rows_dual_row_connector_and_grids(tmp_path):
+    conn = [PG.pad(str(i + 1), i * 0.4, 0, f"n{i}", 0.2, 0.7) for i in range(10)] + \
+           [PG.pad(str(i + 11), i * 0.4, 3.0, f"m{i}", 0.2, 0.7) for i in range(10)]
+    B = RD.load(PG.board(tmp_path, PG.fp("J10", 20, 20, conn)))
+    r = BG.escape_rows(B, {"route": {"min_track_mm": 0.127, "min_clearance_mm": 0.127}})[0]
+    assert (r["kind"], r["name"], r["value"]) == ("escape", "J10", 0)
+    assert (r["pitch_mm"], r["pad_mm"], r["gap_mm"], r["pins"], r["rows_deep"]) == (0.4, 0.2, 0.2, 20, 1)
+    assert (r["rows_surface"], r["layers_needed"], r["corridor_mm"]) == (1, 1, 0.254)
+    cons = {"route": {"min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_via_mm": 0.45}}
+    B2 = RD.load(PG.board(tmp_path, _grid("U9", 20, 20, 6) + _grid("U8", 50, 20, 10), name="g.kicad_pcb"))
+    u8, u9 = BG.escape_rows(B2, cons)
+    assert (u9["value"], u9["tracks_between_vias"], u9["rows_deep"], u9["rows_surface"], u9["layers_needed"], u9["corridor_mm"]) == (1, 1, 3, 2, 2, 0.4)
+    assert (u8["name"], u8["rows_deep"], u8["layers_needed"]) == ("U8", 5, 3)             # 5 rows: 2 + 2 on two layers, 1 more layer
+    tight = {"route": {"min_track_mm": 0.2, "min_clearance_mm": 0.2, "min_via_mm": 0.45}}
+    assert BG.escape_rows(B2, tight)[0]["layers_needed"] is None                           # nothing passes between pads or vias
+    # a perimeter part with a thermal pad is one ring deep: 4 x 5 pads at 0.5 mm on a 4 mm square, centre pad 2.5 mm
+    side = [(i * 0.5 - 1.0, -2.0) for i in range(5)] + [(i * 0.5 - 1.0, 2.0) for i in range(5)] + \
+           [(-2.0, i * 0.5 - 1.0) for i in range(5)] + [(2.0, i * 0.5 - 1.0) for i in range(5)]
+    qfn = [PG.pad(str(i + 1), x, y, f"q{i}", 0.25, 0.25) for i, (x, y) in enumerate(side)] + [PG.pad("21", 0, 0, "GND", 2.5, 2.5)]
+    q = BG.escape_rows(RD.load(PG.board(tmp_path, PG.fp("U7", 30, 30, qfn), name="q.kicad_pcb")), cons)[0]
+    assert (q["pins"], q["rows_deep"], q["layers_needed"], q["pitch_mm"], q["value"]) == (21, 1, 1, 0.5, 0)
