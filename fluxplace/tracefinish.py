@@ -144,7 +144,7 @@ def practice_rows(rec, cls, rules):
     return rows, not_measured
 
 
-def _emit_criteria(phase, rec, rows):
+def _emit_criteria(phase, rec, rows, scores):
     for h in rec["hard"]:
         events.emit("criteria", STAGE, phase=phase, hard=True, id=h["id"], base=h.get("base"), limit=h.get("limit"),
                     ok=h.get("ok"), note=h.get("not_measured", ""))
@@ -152,6 +152,8 @@ def _emit_criteria(phase, rec, rows):
         events.emit("criteria", STAGE, phase=phase, hard=False, id=r["id"], ok=None, value=r["value"],
                     limit=r["limit"], cls=r["cls"], already=r["already"], applied=r["applied"],
                     not_possible=r["not_possible"], refused=r["refused"], open=r["open"])
+    for k, v in scores.items():
+        events.emit("criteria", STAGE, phase=phase, hard=False, id="SCORE", ok=None, value=v, cls=k)
 
 
 def _worse(f0_rec, f8_rec):
@@ -181,10 +183,12 @@ def stage(c, n, board):
     cls = TM.classes(B, cons, getattr(c, "spec", None))
     rec0 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli)
     rows0, nm = practice_rows(rec0, cls, rules)
-    _emit_criteria("F0", rec0, rows0)
+    sc0 = TM.class_scores(rows0, rules)
+    _emit_criteria("F0", rec0, rows0, sc0)
     rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"])   # F8 = F0 again (no pass edits copper yet)
     rows8, _ = practice_rows(rec8, cls, rules)
-    _emit_criteria("F8", rec8, rows8)
+    sc8 = TM.class_scores(rows8, rules)
+    _emit_criteria("F8", rec8, rows8, sc8)
     worse = _worse(rec0, rec8)
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copyfile(board, out)
@@ -192,6 +196,7 @@ def stage(c, n, board):
           "not_built": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"],
           "legality": rec8["hard"], "score": rows8, "not_measured_rules": nm, "facts": rec8["facts"],
           "degenerate": rec8["facts"]["degenerate"], "worse_hard": worse,
+          "class_score": {"F0": sc0, "F8": sc8},
           "sites": {k: [x for x in v if x["state"] != "already"][:200] for k, v in rec8["sites"].items()}}
     fpath = os.path.join(d, "finish.json")
     with open(fpath, "w", encoding="utf-8") as f:
@@ -199,5 +204,6 @@ def stage(c, n, board):
     events.artifact("report", fpath, "finish.json")
     verdict = "fail" if worse else "pass"
     line = (f"trace-finish: {verdict} (F0 base: opens {rec0['opens']}, DRC violations {rec0['violations']}; "
-            f"not_measured rules {len(nm)})" + (f" ILLEGAL: {','.join(worse)}" if worse else ""))
+            f"not_measured rules {len(nm)})" + (f" ILLEGAL: {','.join(worse)}" if worse else "")
+            + f" score board {sc0.get('board')} -> {sc8.get('board')}")
     return {"verdict": verdict, "line": line, "board": out}

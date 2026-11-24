@@ -300,3 +300,24 @@ def test_stage_f0_measures_every_rule_and_hard_row(tmp_path, monkeypatch):
     assert [i for i, h in hard.items() if "not_measured" in h] == ["H6"] and "gap 16" in hard["H6"]["not_measured"]
     assert all(hard[i]["base"] is not None for i in ("H3", "H7", "H8", "H9"))
     assert fj["facts"]["vias"] == 0 and res["verdict"] == "pass"
+
+
+def test_class_scores_weighted_by_rule_weight_and_zero_limit_ignored():
+    rules = [{"id": "C1", "weight": 3}, {"id": "C2", "weight": 1}, {"id": "P1", "weight": 2}]
+    rows = [{"id": "C1", "cls": "RF", "value": 0.5, "limit": 2}, {"id": "C1", "cls": "GEN", "value": 1.0, "limit": 4},
+            {"id": "C2", "cls": "RF", "value": 0.25, "limit": 4}, {"id": "C2", "cls": "GEN", "value": 0.0, "limit": 1},
+            {"id": "P1", "cls": "RF", "value": 1.0, "limit": 3}]
+    cs = TM.class_scores(rows, rules)
+    assert round(cs["RF"], 3) == 0.625 and round(cs["GEN"], 3) == 0.75 and round(cs["board"], 3) == 0.675
+    with_zero = rows + [{"id": "P1", "cls": "GEN", "value": 0.333, "limit": 0}]
+    assert TM.class_scores(with_zero, rules) == cs
+
+
+def test_stage_writes_class_score_and_board_line(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    res = TF.stage(c, 8, board)
+    fj = json.load(open(os.path.join(c.dir(8, "trace-finish"), "finish.json")))
+    assert set(fj["class_score"]) == {"F0", "F8"} and "board" in fj["class_score"]["F0"]
+    assert res["line"].endswith(f"score board {fj['class_score']['F0']['board']} -> {fj['class_score']['F8']['board']}")

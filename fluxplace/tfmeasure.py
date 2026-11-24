@@ -325,6 +325,27 @@ def score_of(states):
     return sum(COUNT[s] for s in states) / len(states), len(states)
 
 
+def class_scores(rows, rules):
+    """{cls: score, "board": score}: mean of `value` weighted by the rule's `weight` over rows with `limit > 0`;
+    board = over all rows of every class (None when nothing is eligible); a class with no eligible row has no key."""
+    w = {r["id"]: r.get("weight", 1) for r in rules}
+    acc, out = {}, {}
+    tot_v = tot_w = 0.0
+    for r in rows:
+        if not r.get("limit") or r.get("value") is None:
+            continue
+        wt = w.get(r["id"], 1)
+        a = acc.setdefault(r["cls"], [0.0, 0.0])
+        a[0] += r["value"] * wt
+        a[1] += wt
+        tot_v += r["value"] * wt
+        tot_w += wt
+    for c, (v, wt) in acc.items():
+        out[c] = round(v / wt, 3)
+    out["board"] = round(tot_v / tot_w, 3) if tot_w else None
+    return out
+
+
 def score_flags(prev, cur):
     """A score that rises while the eligible count falls is flagged, never silently accepted (T1a item 6)."""
     flags = []
