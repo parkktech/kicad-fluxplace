@@ -243,6 +243,8 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
+        lines.append(fixed_reason_line(spec, cons, B, detail))
+        lines.append(pair_class_line(cons, cls, detail))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -251,6 +253,52 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
     return lines, detail
+
+
+def fixed_reason_line(spec, cons, B, detail=None):
+    """[the "fixed reasons" line] (F1): every part a stage will not move (locked, [lock.at], [placement] fixed / anchors, mounting
+    hardware, group centres; and the detected anchors of preroute.fixed_parts) has a reason class, and a fixed support part over
+    its max distance (powerbudget.supports) is OPEN FIXED_OVER_BUDGET whatever its reason."""
+    from . import preroute as PR, powerbudget as PB, modules as MD
+    rows = {}
+    for s in PB.supports(B, cons, spec):
+        rows.setdefault(s["ref"], []).append(s)
+    from . import netclass as NC
+    explicit = PR.explicit_fixed(B, cons)
+    fixed = {r for r in explicit | MD.fixed_set(B, cons) if r in B["parts"]}
+    # the owner listed the fixed parts: whatever else a stage holds by detection is a silent hold (with no list at all the
+    # "fixed parts" question above asks instead)
+    detected = PR.fixed_parts(B, cons) - fixed if explicit else set()
+    bare = {r for r in fixed if all(not q["net"] or NC.is_ground(q["net"]) for q in B["parts"][r]["pads"])}
+    return fixed_line(fixed, cons, rows, detected, detail, bare)
+
+
+def fixed_line(fixed, cons, rows, detected=(), detail=None, unconnected=()):
+    """the "fixed reasons" line from the fixed refs and their support rows (fixedreason.findings). Every finding goes to
+    detail["fixed_reasons"] (ready.json); the line carries `open_items`, which the verdict counts like open questions."""
+    from . import fixedreason as FR
+    fs = FR.findings(fixed, cons, rows, detected, unconnected)
+    if detail is not None:
+        detail["fixed_reasons"] = fs
+    if not fs:
+        return _line("fixed reasons", PASS, f"{len(fixed)} fixed part(s), each with a reason class; none over its support max")
+    n = len({f["ref"] for f in fs})
+    return dict(_line("fixed reasons", OPEN, f"{len(fs)} finding(s) on {n} of {len(fixed)} fixed part(s)", FR.blockers(fs)),
+                open_items=len(fs))
+
+
+def pair_class_line(cons, cls, detail=None):
+    """[the "pair classes" line] (F1): a _P/_N-style name pair in no [pairs.*] / [channel.*] family is OPEN PAIR_UNCLASSIFIED."""
+    from . import fixedreason as FR
+    un = FR.unclassified_pairs(cls, cons)
+    if detail is not None:
+        detail["pairs_unclassified"] = un
+    npair = sum(1 for i in cls.values() if i["class"] == "pair") // 2
+    if not un:
+        return _line("pair classes", PASS, f"{npair} name pair(s), each in a [pairs] / [channel] family")
+    return dict(_line("pair classes", OPEN, f"{len(un)} of {npair} name pair(s) without a class",
+                      [f"PAIR_UNCLASSIFIED {len(un)} pair(s): {', '.join(un)}: add a [pairs.PREFIX] / [channel.PREFIX] family, "
+                       f"or list both nets in not_pairs (plain signals, go to the router)"]), open_items=len(un))
 
 
 def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
@@ -339,7 +387,7 @@ def cmd_ready(a):
         lines.append(sync_netclasses(board, cons))
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
-    nopen = len(sess.open)
+    nopen = len(sess.open) + sum(l.get("open_items", 0) for l in lines)      # OPEN lines with no question behind them count too
     rs = reasons(lines)
     waived = any(l["status"] == WAIVED for l in lines)
     verdict = ("ready: NOT READY (exit 1)" if nfail else "ready: OPEN QUESTIONS (exit 3)" if nopen else
@@ -353,7 +401,8 @@ def cmd_ready(a):
             fh.write(format_text(lines, full=True, verdict=verdict) + "\n")
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
-                       "questions": sess.open}, fh, indent=1)
+                       "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
+                       "pairs_unclassified": detail.get("pairs_unclassified", [])}, fh, indent=1)
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)
@@ -390,8 +439,8 @@ def cmd_ready(a):
             pass
     if nfail:
         raise SystemExit(1)
-    if q:
-        raise SystemExit(q)
+    if q or nopen:
+        raise SystemExit(q or QS.EXIT)
 
 
 def add_parser(sub):
