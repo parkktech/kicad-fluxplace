@@ -439,13 +439,14 @@ def test_pair_endpoints_too_far_apart_fail(tmp_path):
 def test_separation_and_flight_rows_do_not_change_with_rotation(tmp_path):
     seps, flights = [], []
     for a in (0, 90, 180, 270):
-        B = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "USB_D_P", "USB_D_N", court=CT, angle=a)
-                             + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=CT, angle=a), name=f"rot{a}.kicad_pcb"))
+        B = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "USB_D_P", "USB_D_N", court=(-1, -0.5, 3, 0.5), angle=a)
+                             + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=(-1, -0.5, 3, 0.5), angle=a)
+                             + zone(38, 10, 42, 30), name=f"rot{a}.kicad_pcb"))
         cons = dict(USB, separation=[{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 5.0}])
         seps.append(BG.separation_rows(B, cons)[0]["value"])
-        flights.append(len(BG.flight_rows(B, USB)))
-    # both courtyards are 2 mm squares: the gap is 60 - 20 - 2 = 38 mm at every rotation
-    assert all(abs(v - 38.0) <= 0.01 for v in seps) and len(set(flights)) == 1
+        flights.append(len(BG.flight_rows(B, USB, fixed={"U1", "J1"})))
+    # off-centre courtyards (4 x 1 mm, centre 1 mm right of the pad origin): 0 / 180 deg 36.0, 90 / 270 deg 39.0; the zone is on the line
+    assert [round(v, 2) for v in seps] == [36.0, 39.0, 36.0, 39.0] and flights == [1, 1, 1, 1]
 
 
 # ---- C6: stable row names (B4)
