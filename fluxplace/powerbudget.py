@@ -326,6 +326,8 @@ def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_pa
         out["findings"] += _findings(rail, B is not None)
     if B is not None:
         out["supports"] = supports(B, cons, spec, facts, mpn_map)
+        from . import clusters as CL
+        out["pin_demand"] = CL.pin_demand(B, cons, spec)
     return out
 
 
@@ -470,7 +472,8 @@ def summary(plan):
     return (f"{len(rails) - len(ex)} rail(s) planned at {plan['hot_c']:g} C ambient + trace rise (crowding {plan['crowding']:g}); "
             + (f"{len(ex)} exempt by design ({', '.join(ex)}); " if ex else "")
             + (f"L_max {min(reach):g}..{max(reach):g} mm; " if reach else "")
-            + f"{len(over)} edge(s) over the max budget, {len(sup)} support(s) over their limit")
+            + f"{len(over)} edge(s) over the max budget, {len(sup)} support(s) over their limit"
+            + (f", {len(plan['pin_demand'])} IC rail pin(s) without their own bypass" if plan.get("pin_demand") else ""))
 
 
 def plan_json(plan):
