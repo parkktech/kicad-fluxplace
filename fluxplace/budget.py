@@ -31,3 +31,24 @@ def family_of(table, net, legs=None):
         if net.startswith(f) and (best is None or len(f) > len(best)):
             best = f
     return best
+
+
+KINDS = ("rail", "support", "pair", "keepout", "keepout-flight", "separation", "escape", "swap")
+
+
+def row(kind, name, metric, unit, value=None, target=None, mx=None, source="", klass="INF", hard=False, minimum=False,
+        refs=(), nets=(), layers=(), detail="", **extra):
+    """One budget row, the same shape for every kind (REFACTOR-PLAN-W16 section 2): quantity, target, max, source, klass.
+    target warns, max fails (D71cv); minimum=True: target and max are floors (fail below). verdict: channel.verdict."""
+    from . import channel as CH
+    neg = (lambda v: None if v is None else -v) if minimum else (lambda v: v)
+    r = {"kind": kind, "name": name, "metric": metric, "unit": unit, "value": value, "target": target, "max": mx,
+         "source": source, "klass": klass, "hard": bool(hard), "minimum": bool(minimum), "refs": list(refs), "nets": list(nets),
+         "layers": list(layers), "verdict": CH.verdict(neg(value), neg(target), neg(mx))[0], "detail": detail}
+    r.update(extra)
+    return r
+
+
+def no_source(rows):
+    """Rows whose number has no source (BUDGET_NO_SOURCE): a limit exists and `source` is empty or says NO SOURCE."""
+    return [r for r in rows if (r["target"] is not None or r["max"] is not None) and (not r["source"] or "NO SOURCE" in r["source"])]
