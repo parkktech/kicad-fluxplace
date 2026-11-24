@@ -164,6 +164,56 @@ def _interchange(B, cons, own):
                 own[r] = dict(own[r], ic=ic, pad=near[(r, ic)][2]["num"], swapped=own[r]["ic"])
 
 
+COVER_DECADE = 10.0         # a pin's bypass is replaced only by a capacitor within this factor of its value (INF, first guess)
+
+
+def pin_demand(B, cons=None, spec=None, own=None):
+    """Per-pin demand (EVAL-PLACER-STEP1 D4): [{ic, pad, net, parts, uf, dist_mm, limit_mm, cover, verdict}], one row per IC and
+    planned rail whose own bypass is missing at the pin. Demand: the netlist gives the IC a bypass capacitor on the rail
+    (a capacitor to ground of at most powerbudget.BULK_UF whose owner is decided: block / refdes / group). Supply: every
+    capacitor to ground on the rail within powerbudget.BYPASS_MAX_MM of one of the IC's pads on the rail, whoever owns it.
+      a capacitor within COVER_DECADE of the demanded value is there  -> no row (the pin is served; `near` did its job)
+      only a larger capacitor is there (bulk parked at the pin)        -> verdict "over-target-pass" (named, not failed)
+      no capacitor of at least value / COVER_DECADE is there           -> verdict "fail" (the pin is bare)
+    dist_mm = distance of the nearest of the IC's own parts to the pad; cover = {ref, uf, dist_mm} of the nearest larger
+    capacitor or None. Ownership and the `near` rule are not changed: this is a second reading of the same table."""
+    from . import powerbudget as PB
+    if own is None:
+        own, _links = ownership(B, None, cons, spec)
+    parts, pads = B["parts"], NC.net_pads(B)
+
+    def cap_of(ref):
+        part = parts[ref]
+        if not (ref.startswith("C") and part["n_pads"] == 2 and any(NC.is_ground(q["net"] or "") for q in part["pads"])):
+            return None
+        return cap_uf(part.get("value"))
+    caps = defaultdict(list)                             # net -> [(ref, uF, pad on the net)]
+    for ref in sorted(parts):
+        uf = cap_of(ref)
+        for q in parts[ref]["pads"] if uf else ():
+            if q["net"] and not NC.is_ground(q["net"]):
+                caps[q["net"]].append((ref, uf, q))
+    want = defaultdict(list)                             # (ic, net) -> [decided bypass refs]
+    for ref in sorted(own):
+        o, uf = own[ref], cap_of(ref)
+        if uf and uf <= PB.BULK_UF and o["how"] in DECIDED and PB._planned(cons, o["net"]):
+            want[(o["ic"], o["net"])].append(ref)
+    out = []
+    for (ic, net), refs in sorted(want.items()):
+        pins = [q for q in pads[net] if q["ref"] == ic]
+        d = lambda c: min(math.hypot(c["x"] - q["x"], c["y"] - q["y"]) for q in pins)      # noqa: E731
+        uf = min(cap_of(r) for r in refs)
+        near = sorted((round(d(c), 2), r, u) for r, u, c in caps[net] if d(c) <= PB.BYPASS_MAX_MM and u >= uf / COVER_DECADE)
+        if any(u <= uf * COVER_DECADE for _d, _r, u in near):
+            continue
+        dist, ref = min((d(next(q for q in parts[r]["pads"] if q["net"] == net)), r) for r in refs)
+        pad = min(pins, key=lambda q: math.hypot(q["x"] - parts[ref]["pos"][0], q["y"] - parts[ref]["pos"][1]))["num"]
+        out.append({"ic": ic, "pad": pad, "net": net, "parts": refs, "uf": uf, "dist_mm": round(dist, 2), "limit_mm": PB.BYPASS_MAX_MM,
+                    "cover": {"ref": near[0][1], "uf": near[0][2], "dist_mm": near[0][0]} if near else None,
+                    "verdict": "over-target-pass" if near else "fail"})
+    return out
+
+
 _BLOCKS = {}
 
 

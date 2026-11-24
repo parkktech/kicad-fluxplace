@@ -224,3 +224,47 @@ def test_series_part_on_an_rf_net_is_graded_by_the_rf_budget(tmp_path):
         assert s["serves"].startswith("U2.") and s["role"] == "sense"
         assert s["limit"]["max"] == NC.BUDGET["rf"] == s["limit"]["target"] and "rf budget" in s["limit"]["source"]
         assert (s["verdict"] == "fail") is far
+
+
+# ---- placer step 3b: per-pin demand (EVAL-PLACER-STEP1 D4)
+def _demand(tmp_path, caps, name="b.kicad_pcb"):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    b = g.ic("U101", 10, 10, ["VOUT", "GND", "A1", "A2", "A3", "A4"], pitch=1.0)
+    b += g.ic("U412", 60, 10, ["VOUT", "GND", "B1", "B2", "B3", "B4"], pitch=1.0)
+    for ref, x, y, v in caps:
+        b += PB.cap(ref, x, y, "VOUT", "GND", v)
+    B = RD.load(g.board(tmp_path, b, name=name, outline=(0, 0, 80, 60)))
+    pin = {r: next(q for q in B["pads"] if q["ref"] == r and q["net"] == "VOUT") for r in ("U101", "U412")}
+    return B, pin
+
+
+def test_bypass_parked_at_another_ic_leaves_its_own_pin_bare(tmp_path):
+    B, pin = _demand(tmp_path, [])
+    x1, y1, x4, y4 = pin["U101"]["x"], pin["U101"]["y"], pin["U412"]["x"], pin["U412"]["y"]
+    B, pin = _demand(tmp_path, [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")], name="c.kicad_pcb")
+    cl, _ = CL.build(B, _PLANNED)
+    s = next(x for c in cl for x in c["supports"] if x["ref"] == "C419")
+    assert (s["ic"], s["how"]) == ("U101", "near") and not CL.far_parts(cl)                 # the part table alone sees nothing
+    rows = CL.pin_demand(B, _PLANNED)
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r["ic"], r["pad"], r["net"], r["parts"], r["uf"], r["verdict"], r["cover"]) == ("U412", "1", "VOUT", ["C419"], 0.1, "fail", None)
+    assert r["dist_mm"] == round(((x4 - (x1 - 2.5)) ** 2 + 2 ** 2) ** 0.5, 2) and r["limit_mm"] == 5.0
+    assert CL.pin_demand(B, {}) == []                                                       # not a planned rail: no demand
+
+
+def test_pin_with_an_equal_part_nearby_is_served_and_a_bulk_part_only_names_it(tmp_path):
+    B, pin = _demand(tmp_path, [])
+    x1, y1, x4, y4 = pin["U101"]["x"], pin["U101"]["y"], pin["U412"]["x"], pin["U412"]["y"]
+    park = [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")]     # a cap's VOUT pad is 0.5 mm left of its centre
+    B, _ = _demand(tmp_path, park + [("C7", x4 - 2, y4, "1uF")], name="s.kicad_pcb")       # any owner, within a decade: served
+    assert CL.pin_demand(B, _PLANNED) == []
+    B, _ = _demand(tmp_path, park + [("C7", x4 - 2, y4, "4.7uF")], name="l.kicad_pcb")     # 47 x the value: named, not failed
+    r = CL.pin_demand(B, _PLANNED)[0]
+    assert (r["ic"], r["verdict"], r["cover"]) == ("U412", "over-target-pass", {"ref": "C7", "uf": 4.7, "dist_mm": 2.5})
+    B, _ = _demand(tmp_path, park + [("C7", x4 - 2, y4, "1nF")], name="t.kicad_pcb")       # a hundredth of the value: bare
+    assert CL.pin_demand(B, _PLANNED)[0]["verdict"] == "fail"
+    B, _ = _demand(tmp_path, park + [("C7", x4 - 7, y4, "100nF")], name="f.kicad_pcb")     # equal part, 7.5 mm away: bare
+    assert CL.pin_demand(B, _PLANNED)[0]["verdict"] == "fail"
