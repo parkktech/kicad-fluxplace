@@ -35,60 +35,85 @@ def _heartbeat(stop, label):
         events.emit("progress", STAGE, phase=label, note="drc running")
 
 
-def _drc_base(board, kicad_cli):
-    """One DRC run (drcguard.drc_json, a temp copy): key multiset, violations and opens."""
-    from . import drcguard
+def _beating(label, fn):
+    """fn() with a progress event every HEARTBEAT_S while it runs (DRC and the kicad-cli pair lengths are the long steps)."""
     stop = threading.Event()
-    events.emit("progress", STAGE, phase="F0 drc", note="start")
-    t = threading.Thread(target=_heartbeat, args=(stop, "F0 drc"), daemon=True)
+    events.emit("progress", STAGE, phase=label, note="start")
+    t = threading.Thread(target=_heartbeat, args=(stop, label), daemon=True)
     t.start()
     try:
-        d = _drc(board, kicad_cli=kicad_cli)
+        return fn()
     finally:
         stop.set()
         t.join(timeout=HEARTBEAT_S + 1)
+
+
+def _drc_base(board, kicad_cli):
+    """One DRC run (drcguard.drc_json, a temp copy): key multiset, violations and opens."""
+    from . import drcguard
+    d = _beating("F0 drc", lambda: _drc(board, kicad_cli=kicad_cli))
     keys, (vio, unc) = drcguard.keys_from_report(d)
     return {"keys": {json.dumps(list(k[0:1]) + [list(k[1])]): n for k, n in keys.items()},
-            "types": collections.Counter(k[0] for k in keys.elements()), "violations": vio, "opens": unc}
+            "types": collections.Counter(k[0] for k in keys.elements()), "violations": vio, "opens": unc,
+            "report": d.get("violations", [])}
 
 
 def _count_type(types, name):
     return sum(n for t, n in types.items() if t == name)
 
 
-def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli"):
-    """Base record: HARD rows (H1-H10, measured or named as not measured) and the DRC key multiset."""
+def _hard_row(hid, m, src, limit=None):
+    """a HARD row from a measure result {base, ...} or {not_measured}."""
+    if "not_measured" in m:
+        return {"id": hid, "base": None, "limit": None, "source": None, "ok": None, "not_measured": m["not_measured"]}
+    return {"id": hid, "base": m["base"], "limit": m.get("limit", limit), "source": src, "ok": None}
+
+
+def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None):
+    """Base record: HARD rows (H1-H10) and the sites of every PRACTICE rule. `audit` (pairaudit result) is passed back in for F8
+    so the 2-minute kicad-cli length run happens once (no pass edits copper in T1b)."""
     from . import tfmeasure as TM
     base = _drc_base(board, kicad_cli)
     types = base["types"]
+    X = X or TM.context(B, cons, spec, board)
+    if audit is None:
+        audit = _beating("F0 pair lengths", lambda: TM.pair_audit(B, X, cons))
     widths = collections.defaultdict(lambda: None)
     for s in B["segs"]:
         c = cls.get(s["net"], "GEN")
         widths[c] = s["w"] if widths[c] is None else min(widths[c], s["w"])
-    hard = []
-    hard.append({"id": "H1", "base": _count_type(types, "clearance"), "limit": 0, "source": "DRC", "ok": None})
-    hard.append({"id": "H2", "base": {k: v for k, v in widths.items()}, "limit": H_MIN_WIDTH, "source": "FAB",
-                 "ok": all(v >= H_MIN_WIDTH for v in widths.values() if v is not None)})
-    hard.append({"id": "H4", "base": _count_type(types, "hole_to_hole"), "limit": 0, "source": "DRC", "ok": None})
-    hard.append({"id": "H5", "base": _count_type(types, "copper_edge_clearance"), "limit": 0, "source": "DRC", "ok": None})
-    hard.append({"id": "H10", "base": {"opens": base["opens"], "drc_keys": sum(types.values())},
-                 "limit": "base record F0", "source": "DRC", "ok": None})
-    for hid, why in (("H3", "check_fab_capability needs via / drill facts; not wired in T1a"),
-                     ("H6", "until T6 / T7a (mask web)"), ("H7", "impedance per class not wired in T1a"),
-                     ("H8", "pairaudit not wired in T1a"), ("H9", "until T7a (USB-C stub)")):
-        hard.append({"id": hid, "base": None, "limit": None, "source": None, "ok": None, "not_measured": why})
+    events.emit("progress", STAGE, phase="F0 measure", note="HARD rows")
+    hard = [{"id": "H1", "base": _count_type(types, "clearance"), "limit": 0, "source": "DRC", "ok": None},
+            {"id": "H2", "base": {k: v for k, v in widths.items()}, "limit": H_MIN_WIDTH, "source": "FAB",
+             "ok": all(v >= H_MIN_WIDTH for v in widths.values() if v is not None)},
+            _hard_row("H3", TM.h3(B, X), "FAB"),
+            {"id": "H4", "base": _count_type(types, "hole_to_hole"), "limit": 0, "source": "DRC", "ok": None},
+            {"id": "H5", "base": _count_type(types, "copper_edge_clearance"), "limit": 0, "source": "DRC", "ok": None},
+            _hard_row("H6", TM.h6(B, X, board), "FAB"),
+            _hard_row("H7", TM.h7(B, X), "DATASHEET"),
+            _hard_row("H8", TM.h8(audit), "STD"),
+            _hard_row("H9", TM.h9(audit, cons), "STD"),
+            {"id": "H10", "base": {"opens": base["opens"], "drc_keys": sum(types.values())},
+             "limit": "base record F0", "source": "DRC", "ok": None}]
     sites = {}
     sites["C1"] = TM.c1_sites(B)
     sites["C2"] = TM.c2_sites(B)
+    sites["C3"] = TM.c3_sites(B)
     sites["C4"] = TM.c4_sites(B)
     sites["C5"] = TM.c5_sites(B)
+    sites["C11"] = TM.c11_sites(X, audit)
     sites["C13"] = TM.c13_sites(B)
     sites["C14"] = TM.c14_sites(B)
     sites["C15"] = TM.c15_sites(B)
     sites["M1"] = TM.m1_sites(B, float((cons.get("fab") or {}).get("acid_trap_deg", 60.0)))
     sites["M9"] = TM.m9_sites(B)
-    return {"hard": hard, "drc": {str(k): v for k, v in base["keys"].items()}, "sites": sites,
-            "violations": base["violations"], "opens": base["opens"]}
+    sites["M2"] = TM.drc_sites(base["report"], "copper_sliver")
+    sites["M4"] = TM.drc_sites(base["report"], "isolated_copper")
+    for rid, fn in sorted(TM.SITES.items()):
+        events.emit("progress", STAGE, phase=f"F0 measure {rid}", note="rule")
+        sites[rid] = fn(B, X)
+    return {"hard": hard, "drc": {str(k): v for k, v in base["keys"].items()}, "sites": sites, "facts": TM.facts(B, X),
+            "violations": base["violations"], "opens": base["opens"], "_audit": audit, "_X": X}
 
 
 def practice_rows(rec, cls, rules):
@@ -105,12 +130,17 @@ def practice_rows(rec, cls, rules):
         for s in sites:
             by_cls[cls.get(s.get("net"), "GEN")].append(s["state"])
         from . import tfmeasure as TM
+        if not sites:
+            rows.append({"id": r["id"], "ok": None, "value": None, "limit": 0, "cls": "-", "already": 0, "applied": 0,
+                         "not_possible": 0, "refused": 0, "open": 0, "report_only": r.get("report_only", False)})
         for c, states in sorted(by_cls.items()):
             val, elig = TM.score_of(states)
             rows.append({"id": r["id"], "ok": None, "value": val, "limit": elig, "cls": c,
                          "already": states.count("already"), "applied": states.count("applied"),
                          "not_possible": states.count("not_possible"), "refused": states.count("refused"),
-                         "open": states.count("open"), "report_only": r.get("report_only", False)})
+                         "open": states.count("open"), "report_only": r.get("report_only", False),
+                         "reasons": dict(collections.Counter(s.get("reason") for s in sites if s["state"] == "not_possible"
+                                                             and cls.get(s.get("net"), "GEN") == c))})
     return rows, not_measured
 
 
@@ -129,7 +159,7 @@ def _worse(f0_rec, f8_rec):
     worse = []
     a = {h["id"]: h.get("base") for h in f0_rec["hard"]}
     b = {h["id"]: h.get("base") for h in f8_rec["hard"]}
-    for k in ("H1", "H4", "H5"):
+    for k in ("H1", "H3", "H4", "H5", "H7", "H8", "H9"):
         if isinstance(a.get(k), int) and isinstance(b.get(k), int) and b[k] > a[k]:
             worse.append(k)
     if isinstance(a.get("H10"), dict) and isinstance(b.get("H10"), dict) and b["H10"]["opens"] > a["H10"]["opens"]:
@@ -152,7 +182,7 @@ def stage(c, n, board):
     rec0 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli)
     rows0, nm = practice_rows(rec0, cls, rules)
     _emit_criteria("F0", rec0, rows0)
-    rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli)      # F8 = F0 again (no pass built in T1a)
+    rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"])   # F8 = F0 again (no pass edits copper yet)
     rows8, _ = practice_rows(rec8, cls, rules)
     _emit_criteria("F8", rec8, rows8)
     worse = _worse(rec0, rec8)
@@ -160,8 +190,9 @@ def stage(c, n, board):
     shutil.copyfile(board, out)
     fj = {"stage": STAGE, "passes": {"F0": "done", "F8": "done"},
           "not_built": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"],
-          "legality": rec8["hard"], "score": rows8, "not_measured_rules": nm,
-          "worse_hard": worse}
+          "legality": rec8["hard"], "score": rows8, "not_measured_rules": nm, "facts": rec8["facts"],
+          "degenerate": rec8["facts"]["degenerate"], "worse_hard": worse,
+          "sites": {k: [x for x in v if x["state"] != "already"][:200] for k, v in rec8["sites"].items()}}
     fpath = os.path.join(d, "finish.json")
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(fj, f, indent=1, default=str)

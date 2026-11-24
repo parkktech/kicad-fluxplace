@@ -247,8 +247,10 @@ def test_enabled_output_is_byte_copy_and_events_in_order(tmp_path, monkeypatch):
     kinds = [l["kind"] for l in lines]
     assert "progress" in kinds and "criteria" in kinds and "artifact" in kinds
     crit = [l for l in lines if l["kind"] == "criteria"]
-    hard_first = [bool(l.get("hard")) for l in crit]
-    assert hard_first == sorted(hard_first, reverse=True)
+    for ph in ("F0", "F8"):                      # HARD rows precede score rows in each report (T1b: score rows exist at F0 now)
+        hard_first = [bool(l.get("hard")) for l in crit if l.get("phase") == ph]
+        assert hard_first and hard_first == sorted(hard_first, reverse=True)
+        assert {l["id"] for l in crit if l.get("phase") == ph and l.get("hard")} == set(HARD)
     assert kinds.index("progress") < next(i for i, l in enumerate(lines) if l["kind"] == "criteria")
 
 
@@ -280,3 +282,21 @@ def test_progress_heartbeat_during_long_drc(tmp_path, monkeypatch):
     ts = [json.loads(l)["ts"] for l in open(stream) if json.loads(l)["kind"] == "progress"]
     assert len(ts) >= 4
     assert max(b - a for a, b in zip(ts, ts[1:])) < 0.3
+
+
+# ---- stage: every rule has a measure, HARD rows H3 / H6-H9 present ---------------------------------------------------------------
+
+def test_stage_f0_measures_every_rule_and_hard_row(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    res = TF.stage(c, 7, board)
+    fj = json.load(open(os.path.join(c.dir(7, "trace-finish"), "finish.json")))
+    assert fj["not_measured_rules"] == []
+    ids = {r["id"] for r in fj["score"]}
+    rules = json.load(open(os.path.join(os.path.dirname(TF.__file__), "data", "trace_finish_rules.json")))["rules"]
+    assert {r["id"] for r in rules if r["tag"] == "PRACTICE"} <= ids
+    hard = {h["id"]: h for h in fj["legality"]}
+    assert [i for i, h in hard.items() if "not_measured" in h] == ["H6"] and "gap 16" in hard["H6"]["not_measured"]
+    assert all(hard[i]["base"] is not None for i in ("H3", "H7", "H8", "H9"))
+    assert fj["facts"]["vias"] == 0 and res["verdict"] == "pass"
