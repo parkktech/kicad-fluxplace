@@ -311,15 +311,18 @@ def budget_line(spec, cons, B, rows, planes, detail):
     stack = (rows, list(planes or []), sig) if rows and sig else None
     fixed = PR.explicit_fixed(B, cons) | MD.fixed_set(B, cons)
     tab = BG.table(B, cons, spec, stack, detail.get("power_plan"), fixed)
-    detail["budgets"] = {"rows": tab, "netclasses": BG.netclasses(cons, stack=stack)}
+    rc = BG.rail_classes(cons, detail.get("power_plan"))
+    detail["budgets"] = {"rows": tab, "netclasses": BG.netclasses(cons, stack=stack), "rail_classes": rc}
+    under = [f"{n} {v['class_mm']:g} < {v['plan_mm']:g} mm" for n, v in rc.items() if v["under"]]
+    note = "".join("; " + t for t in (BG.summary(tab), f"{len(under)} rail class(es) narrower than the plan ({', '.join(under)})" if under else "") if t)
     kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
     items = BG.open_items(tab)
     if not items:
-        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}")
+        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
     by = {}
     for code, text in items:
         by.setdefault(code, []).append(text)
-    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}",
+    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}",
                       [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]), open_items=len(items))
 
 

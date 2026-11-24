@@ -6,16 +6,18 @@ leg of a classified pair.  A bare prefix hit also matches plain signals (X_LED, 
 _TAILS = ("_P", "_N", "DP", "DM", "P", "N", "+", "-")
 
 
-def pair_legs(names, cons):
+def pair_legs(names, cons, complete=False):
     """Set of nets that are a leg of a differential pair: a partner is in `names` (graph.diff_pairs / family tails), or the net sits
     under a [pairs.F] family and ends in a P/N tail (its partner is just not in `names`, e.g. a DRC item list). Never a net the
-    owner declared plain (`not_pairs`), never a plain signal under the family prefix (X_LED, X_CLKREQ, X_CC)."""
+    owner declared plain (`not_pairs`), never a plain signal under the family prefix (X_LED, X_CLKREQ, X_CC).
+    complete=True: `names` is every net of the board, so a net with no partner in it is no leg (an active-low X_RST_N, X_WAKE_N
+    under the family prefix is a plain signal): the tail rule is off."""
     from . import netclass, constraints as C
     cons = cons or {}
     legs = set(netclass._pairs(sorted(names), cons))
     nopair = C.not_pairs(cons)
     fams = cons.get("pairs") or {}
-    for n in names:
+    for n in () if complete else names:
         if n not in nopair and n.endswith(_TAILS) and any(n.startswith(f) for f in fams):
             legs.add(n)
     return legs
@@ -188,8 +190,10 @@ def keepouts(B, cons):
         k += 1
         xs, ys = [p[0] for p in z["pts"]], [p[1] for p in z["pts"]]
         lay = sorted(set(z["layers"]) & set(cu))
-        out.append({"name": z.get("name") or f"rule-area {k}", "rect": (min(xs), min(ys), max(xs), max(ys)), "layers": lay,
-                    "all_layers": set(lay) >= set(cu), "source": "board rule area (tracks not allowed)"})
+        own = z.get("owner") or ""                       # a footprint's own rule area: it moves with the part
+        out.append({"name": z.get("name") or (f"{own} rule-area {k}" if own else f"rule-area {k}"),
+                    "rect": (min(xs), min(ys), max(xs), max(ys)), "layers": lay, "all_layers": set(lay) >= set(cu), "owner": own,
+                    "source": f"footprint rule area of {own} (tracks not allowed)" if own else "board rule area (tracks not allowed)"})
     for name, kv in sorted((((cons or {}).get("placement") or {}).get("keepout") or {}).items()):
         if not isinstance(kv, dict) or not kv.get("layers"):
             continue
@@ -200,7 +204,8 @@ def keepouts(B, cons):
         if rect is None:
             continue
         lay = sorted(cu) if kv["layers"] == "all" else sorted(set(kv["layers"]) & set(cu))
-        out.append({"name": name, "rect": rect, "layers": lay, "all_layers": set(lay) >= set(cu), "source": str(kv.get("source", ""))})
+        out.append({"name": name, "rect": rect, "layers": lay, "all_layers": set(lay) >= set(cu), "source": str(kv.get("source", "")),
+                    "owner": str(kv.get("under") or "") if not kv.get("rect") else ""})
     return out
 
 
@@ -209,14 +214,15 @@ def keepout_rows(B, cons):
     for k in keepouts(B, cons):
         x0, y0, x1, y1 = k["rect"]
         out.append(row("keepout", k["name"], "area", "mm2", round((x1 - x0) * (y1 - y0), 2), None, None, k["source"], "REQ", True,
-                       layers=k["layers"], detail="all copper layers" if k["all_layers"] else f"{len(k['layers'])} layer(s)", rect=list(k["rect"])))
+                       refs=[k["owner"]] if k["owner"] else [], layers=k["layers"], detail="all copper layers" if k["all_layers"] else f"{len(k['layers'])} layer(s)", rect=list(k["rect"])))
     return out
 
 
 def flight_rows(B, cons, fixed=()):
     """A pair whose straight line between two of its parts crosses a routing keep-out: one row naming the pair and the
     keep-out. hard = the keep-out is on every copper layer AND both parts are fixed (no placement move and no layer change
-    can fix it). A keep-out that contains one of the two points is the part's own rule area: skipped."""
+    can fix it). A keep-out owned by one of the two parts, or one that contains one of the two points, is the part's own
+    rule area: skipped."""
     from . import geom as GM, netclass as NC
     cons = cons or {}
     kos = keepouts(B, cons)
@@ -230,7 +236,7 @@ def flight_rows(B, cons, fixed=()):
         ctr = _centres(B, m)
         for a, b, _d in mst_edges(ctr):
             for k in kos:
-                if inside(k["rect"], ctr[a]) or inside(k["rect"], ctr[b]) or not GM.seg_hits_rect(ctr[a], ctr[b], k["rect"]):
+                if k["owner"] in (a, b) or inside(k["rect"], ctr[a]) or inside(k["rect"], ctr[b]) or not GM.seg_hits_rect(ctr[a], ctr[b], k["rect"]):
                     continue
                 out.append(row("keepout-flight", f"{m}/{pm[m]} x {k['name']}", "crossing", "count", 1, None, 0, k["source"], "REQ",
                                k["all_layers"] and a in fixed and b in fixed, refs=sorted([a, b]), nets=[m, pm[m]], layers=k["layers"],
@@ -238,15 +244,27 @@ def flight_rows(B, cons, fixed=()):
     return out
 
 
+KO = "keepout:"            # a [[separation]] item "keepout:NAME" stands for the rect of that routing keep-out (budget.keepouts)
+
+
 def separation_rows(B, cons):
+    """One row per [[separation]]: the smallest courtyard-to-courtyard distance between group a and group b. An item
+    "keepout:NAME" is the rect of a routing keep-out (an antenna cut-out has no part of its own on a carrier board)."""
     from . import geom as GM, intent as IT
     parts, out = B["parts"], []
+    ko = {KO + k["name"]: k["rect"] for k in keepouts(B, cons)}
+
+    def group(items):
+        items = [items] if isinstance(items, str) else list(items or [])
+        rects = {x: ko[x] for x in items if x in ko}
+        rects.update({r: parts[r]["court"] for r in IT.match(parts, [x for x in items if not str(x).startswith(KO)])})
+        return rects
     for i, e in enumerate((cons or {}).get("separation") or []):
         if e.get("enabled", True) is False:
             continue
         name = str(e.get("name") or f"separation{i + 1}")
-        best = min(((GM.rect_gap(parts[x]["court"], parts[y]["court"]), x, y) for x in IT.match(parts, e.get("a"))
-                    for y in IT.match(parts, e.get("b")) if x != y), default=None)
+        ga, gb = group(e.get("a")), group(e.get("b"))
+        best = min(((GM.rect_gap(ga[x], gb[y]), x, y) for x in sorted(ga) for y in sorted(gb) if x != y), default=None)
         has_min = e.get("min_mm") is not None
         out.append(row("separation", name, "distance", "mm", round(best[0], 2) if best else None, e.get("target_mm"), e.get("min_mm"),
                        str(e.get("source", "")), str(e.get("klass", "INF")), has_min and bool(e.get("hard", True)), minimum=True,
@@ -359,3 +377,27 @@ def open_items(rows):
     out += [("SWAP_PROPOSED", f"{r['name']} ({', '.join(r['nets'])}): {r['detail']}") for r in rows
             if r["kind"] == "swap" and r["value"] == 1 and not r.get("decided")]
     return out
+
+
+def rail_classes(cons, plan):
+    """{net: {plan_mm, class_mm, under}} for every planned rail that is a track (not a pour or corridor): the width the power
+    plan needs against the width constraints._build_netclasses writes into the project class (constraints.rail_width_mm).
+    under = the written class is narrower than the plan (LESSONS-W15 rule 6: a class must come from the budget)."""
+    from . import constraints as C
+    out = {}
+    for net, rail in sorted(((plan or {}).get("rails") or {}).items()):
+        pw = ((cons or {}).get("power") or {}).get(net) or {}
+        ch = rail.get("choice") or {}
+        if ch.get("kind") != "track" or not ch.get("width_mm") or pw.get("pour") or not pw.get("max_current_ma"):
+            continue
+        cw = C.rail_width_mm(pw["max_current_ma"])
+        out[net] = {"plan_mm": ch["width_mm"], "class_mm": cw, "under": cw + C.GEOM_TOL_MM < ch["width_mm"]}
+    return out
+
+
+def summary(rows):
+    """'N fail, M over target' over the rows that carry a verdict ('' when none): the ready line shows it, nothing gates on it here."""
+    n = {v: sum(1 for r in rows if r["verdict"] == v) for v in ("fail", "over-target-pass")}
+    hard = sum(1 for r in rows if r["verdict"] == "fail" and r["hard"])
+    return "; ".join(t for t in (f"{n['fail']} fail ({hard} hard)" if n["fail"] else "",
+                                  f"{n['over-target-pass']} over target" if n["over-target-pass"] else "") if t)

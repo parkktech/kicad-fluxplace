@@ -472,7 +472,7 @@ def pair_legs_of(cons, board):
     except Exception:                                                       # noqa: BLE001 - no board: no legs
         return {}
     fams = (cons or {}).get("pairs") or {}
-    legs = B.pair_legs(names, cons)
+    legs = B.pair_legs(names, cons, complete=True)             # every net of the board: an X_RST_N with no partner is no leg
     return {n: f for n in sorted(legs) for f in [B.family_of(fams, n, legs)] if f}
 
 

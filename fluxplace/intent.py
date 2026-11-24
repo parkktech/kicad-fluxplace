@@ -141,6 +141,9 @@ def items(B, cons):
              "min": float(e["min_mm"]), "hard": bool(e.get("hard", True)), "weight": float(e.get("weight", 5.0))}
             for i, e in enumerate(sec.get("away", []) or [])]
     for i, e in enumerate((cons or {}).get("separation") or []):       # [[separation]] rows with a hard minimum are held like [[intent.away]]
+        named = [x for k in ("a", "b") for x in ([e.get(k)] if isinstance(e.get(k), str) else e.get(k) or [])]
+        if any(str(x).startswith("keepout:") for x in named):           # against a keep-out rect: graded by the budget row only
+            continue
         if e.get("enabled", True) is not False and e.get("min_mm") is not None and e.get("hard", True):
             away.append({"name": "sep:" + str(e.get("name") or f"separation{i + 1}"), "a": match(parts, e.get("a")),
                          "b": match(parts, e.get("b")), "min": float(e["min_mm"]), "hard": True, "weight": float(e.get("weight", 5.0))})

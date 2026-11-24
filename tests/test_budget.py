@@ -252,3 +252,55 @@ def test_ready_budgets_line_open_items(tmp_path):
     cons["separation"][0]["source"] = "ds p.4"
     clean = RDY.budget_line(None, cons, usb_board(tmp_path, name="c.kicad_pcb"), None, None, {})
     assert clean["status"] == RDY.PASS and "open_items" not in clean and "2 pair" in clean["detail"]
+
+
+# ---- step-3 evaluation (EVAL-PLACER-STEP3)
+def test_active_low_net_under_a_family_prefix_is_no_pair_leg_on_a_whole_board(tmp_path):
+    from fluxplace import constraints as C
+    nets = ["PCIE_TX_P", "PCIE_TX_N", "PCIE_RST_N", "PCIE_WAKE_N", "PCIE_CLKREQ_N", "GND"]
+    cons = {"pairs": {"PCIE_": {"impedance_diff": 90}}}
+    assert BG.pair_legs(nets, cons, complete=True) == {"PCIE_TX_P", "PCIE_TX_N"}
+    assert "PCIE_RST_N" in BG.pair_legs(["PCIE_RST_N"], cons)                 # a partial list (DRC items): the tail rule stays
+    body = gduo("U1", 20, 20, "PCIE_TX_P", "PCIE_TX_N") + gduo("J1", 60, 20, "PCIE_TX_P", "PCIE_TX_N") + \
+        gduo("U2", 20, 40, "PCIE_RST_N", "PCIE_WAKE_N") + gduo("J2", 60, 40, "PCIE_RST_N", "PCIE_WAKE_N")
+    board = PG.board(tmp_path, body)
+    assert C.pair_legs_of(cons, board) == {"PCIE_TX_N": "PCIE_", "PCIE_TX_P": "PCIE_"}      # the written class takes the pair only
+
+
+def test_footprint_rule_area_is_named_after_its_part_and_is_its_own_keepout(tmp_path):
+    B = usb_board(tmp_path, zone(38, 10, 42, 30))
+    B["zones"][0]["owner"] = "U1"                                              # routediag gives a footprint's rule area its owner
+    k = BG.keepout_rows(B, USB)[0]
+    assert (k["name"], k["refs"]) == ("U1 rule-area 1", ["U1"]) and k["source"].startswith("footprint rule area of U1")
+    assert BG.flight_rows(B, USB, fixed={"U1", "J1"}) == []                    # the pair's own part owns it
+    B["zones"][0]["owner"] = "Q9"
+    assert len(BG.flight_rows(B, USB, fixed={"U1", "J1"})) == 1                # another part's area is crossed
+
+
+def test_separation_against_a_keepout_rect(tmp_path):
+    from fluxplace import intent as IT
+    B = usb_board(tmp_path, zone(30, 19, 34, 21).replace('(net_name "")', '(net_name "") (name "ANT_CUT")'))
+    assert [k["name"] for k in BG.keepouts(B, USB)] == ["ANT_CUT"]
+    cons = dict(USB, separation=[{"name": "ant-metal", "a": ["keepout:ANT_CUT"], "b": ["U1", "J1"], "min_mm": 10.0, "source": "ds 4.1 p.9"}])
+    r = BG.separation_rows(B, cons)[0]                                         # U1 courtyard ends at x 21, the cut-out starts at 30
+    assert (r["value"], r["max"], r["verdict"], r["hard"], r["refs"]) == (9.0, 10.0, "fail", True, ["keepout:ANT_CUT", "U1"])
+    assert [x for x in IT.check(B, cons) if x["kind"] == "away"] == []         # no part on side a: the budget row grades it
+    assert BG.separation_rows(B, dict(USB, separation=[{"a": ["keepout:NONE"], "b": ["U1"]}]))[0]["value"] is None
+
+
+def test_rail_class_narrower_than_the_plan_is_shown_on_the_budgets_line(tmp_path):
+    from fluxplace import ready as RDY
+    plan = {"rails": {"+3V3": {"choice": {"kind": "track", "layers": ["In2.Cu"], "width_mm": 0.676}},
+                      "+1V8": {"choice": {"kind": "track", "layers": ["F.Cu"], "width_mm": 0.127}},
+                      "+5V": {"choice": {"kind": "corridor", "layers": ["F.Cu"], "width_mm": 2.2}}}}
+    cons = dict(USB, power={"+3V3": {"max_current_ma": 900}, "+1V8": {"max_current_ma": 20}, "+5V": {"max_current_ma": 4200, "pour": True}})
+    rc = BG.rail_classes(cons, plan)
+    assert rc == {"+1V8": {"plan_mm": 0.127, "class_mm": 0.3, "under": False}, "+3V3": {"plan_mm": 0.676, "class_mm": 0.5, "under": True}}
+    line = RDY.budget_line(None, cons, usb_board(tmp_path), None, None, {"power_plan": plan})
+    assert line["status"] == RDY.PASS and line["detail"].endswith("1 rail class(es) narrower than the plan (+3V3 0.5 < 0.676 mm)")
+
+
+def test_summary_counts_fail_and_over_target_rows():
+    rows = [BG.row("support", "a", "distance", "mm", 30.0, 3.0, 5.0, "s", hard=True), BG.row("pair", "b", "length", "mm", 30.0, 25.0, None, "s"),
+            BG.row("swap", "c", "crossing", "count", 1, None, 0, "s"), BG.row("pair", "d", "length", "mm", 3.0, 25.0, 40.0, "s")]
+    assert BG.summary(rows) == "2 fail (1 hard); 1 over target" and BG.summary(rows[3:]) == ""

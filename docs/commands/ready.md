@@ -74,6 +74,12 @@ else is information here (floorplan and PLACE_OK gate the rows).
 - `KEEPOUT_FLIGHT`: a pair's flight line crosses an all-layer keep-out between two fixed parts. Fix: move a fixed part or change the keep-out.
 - `SWAP_PROPOSED`: a polarity swap would remove a crossing. Fix: `[[swap]] decided = "keep"` or `decided = "swapped <id>"`.
 
+The line also shows, without gating on them here: `N fail (H hard); M over target` over all rows, and every rail whose project class
+(`constraints.rail_width_mm`) is narrower than the width the power plan needs (`rail_classes` in `budgets.json`).
+A footprint's own rule area is named `REF rule-area N` and is never a flight-line hit for a pair of that part.
+A `[[separation]]` item `"keepout:NAME"` stands for the rect of that routing keep-out (an antenna cut-out against metal parts);
+such a row is graded by the budget row only, not by the intent gate.
+
 Constraint forms:
 
 ```toml
