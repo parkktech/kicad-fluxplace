@@ -251,6 +251,7 @@ def rehome(B, cl, cons=None, spec=None, demand=None):
         row = PB.support_row(B, cons, spec, ref, p["net"], None, ic=p["ic"], pad=pin["num"])
         dist = max(0.0, d[ref] - HALO_MM) if _pitch(parts[p["ic"]]) <= 0.5 else d[ref]
         src["supports"].remove(s)
+        left = s["pad"]
         s.update(ic=p["ic"], pad=pin["num"], dist=dist, how="pin-demand", sure=True, limit=row["max"], target=row["target"], rank=9)
         dst = by_ic.get(p["ic"])
         if dst is None:
@@ -260,7 +261,7 @@ def rehome(B, cl, cons=None, spec=None, demand=None):
         dst["supports"].append(s)
         dst["supports"].sort(key=lambda x: (x["rank"], -x["weight"], x["dist"], x["ref"]))
         where[ref] = dst
-        out[ref] = {"from": src["ic"], "to": p["ic"], "pad": pin["num"], "dist": round(d[ref], 2)}
+        out[ref] = {"from": src["ic"], "to": p["ic"], "pad": pin["num"], "dist": round(d[ref], 2), "left": left}
     return out
 
 

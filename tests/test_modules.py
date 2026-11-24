@@ -138,7 +138,7 @@ def test_a_bypass_parked_at_another_ic_is_seated_at_its_own_pin_and_joins_that_m
     caps = [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")]
     B, pin = _two_ics(tmp_path, caps)
     M = MD.build(B, PLANNED, None, arrange=False)                # no seating: the part is re-homed in the table, far, alone
-    assert M["rehomed"] == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": M["rehomed"]["C419"]["dist"]}}
+    assert M["rehomed"] == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": M["rehomed"]["C419"]["dist"], "left": "1"}}
     assert M["of"]["C419"] == "C419" and [u["ref"] for u in M["unseated"]] == ["C419"] and M["of"]["C101"] == "U101"
     B, pin = _two_ics(tmp_path, caps)
     M = MD.build(B, PLANNED, None, arrange=True)
@@ -160,3 +160,14 @@ def test_a_far_support_is_seated_into_its_owner_module_and_a_fixed_one_is_left_a
     M = MD.build(B, {"placement": {"fixed": ["C2"]}}, None, arrange=True)
     assert tuple(B["parts"]["C2"]["pos"]) == (80.0, 55.0) and M["of"]["C2"] == "C2"
     assert [(u["ref"], u["ic"], u["why"]) for u in M["unseated"]] == [("C2", "U1", "fixed")]
+
+
+def test_a_pin_bared_by_a_rehome_is_named(tmp_path):
+    B, pin = _two_ics(tmp_path, [])
+    x1, y1 = pin["U101"]["x"], pin["U101"]["y"]
+    B, pin = _two_ics(tmp_path, [("C419", x1 - 2, y1 + 2, "100nF")])
+    M = MD.build(B, PLANNED, None, arrange=False)            # U101's only bypass leaves: its VOUT pin is bared
+    assert [(b["ic"], b["was"]) for b in M["bared"]] == [("U101", "C419")]
+    B, pin = _two_ics(tmp_path, [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")])
+    M = MD.build(B, PLANNED, None, arrange=False)            # a second bypass within 5 mm of the pin: nothing is bared
+    assert M["bared"] == []

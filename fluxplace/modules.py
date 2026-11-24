@@ -85,7 +85,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             if not more:
                 break
             for r, v in more.items():
-                rehomed[r] = dict(v, **{"from": rehomed[r]["from"]}) if r in rehomed else v
+                rehomed[r] = dict(v, **{"from": rehomed[r]["from"], "left": rehomed[r]["left"]}) if r in rehomed else v
+    bared = _bared(B, rehomed)                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
     pg = (cons.get("placement") or {}).get("group") or {}
@@ -195,7 +196,31 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                         q = B["parts"][s["ref"]]["court"]
                         mod.setdefault("keepouts", []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
-    return {"modules": out, "of": of, "rehomed": rehomed, "unseated": CL.unseated(cl, fixed)}
+    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "unseated": CL.unseated(cl, fixed)}
+
+
+def _bared(B, rehomed):
+    """Pins left bare by a re-home (P5 M2): the pin the part was taken from has no two-pad capacitor to ground on its net within
+    PB.BYPASS_MAX_MM (re-homed parts are not counted: they still sit where they were parked). -> [{ic, pad, net, was, nearest_mm}]."""
+    from . import powerbudget as PB, netclass as NC
+    parts = B["parts"]
+    out = []
+    for ref, v in sorted(rehomed.items()):
+        pin = next((q for q in parts[v["from"]]["pads"] if str(q["num"]) == str(v["left"])), None)
+        if pin is None:
+            continue
+        best = None
+        for r, p in parts.items():
+            if r in rehomed or not r.startswith("C") or len(p["pads"]) != 2 or not any(NC.is_ground(q["net"]) for q in p["pads"]):
+                continue
+            for q in p["pads"]:
+                if q["net"] == pin["net"]:
+                    d = math.hypot(q["x"] - pin["x"], q["y"] - pin["y"])
+                    best = d if best is None else min(best, d)
+        if best is None or best > PB.BYPASS_MAX_MM:
+            out.append({"ic": v["from"], "pad": str(v["left"]), "net": pin["net"], "was": ref,
+                        "nearest_mm": None if best is None else round(best, 2)})
+    return out
 
 
 def _remeasure(B, cl):
@@ -339,6 +364,9 @@ def cmd_modules(a):
     blocked = [(m["name"], m["fanout"]["blocked"]) for m in mods if m.get("fanout") and m["fanout"]["blocked"]]
     req = sum(m["fanout"]["req"] for m in mods if m.get("fanout"))
     ok = sum(m["fanout"]["ok"] for m in mods if m.get("fanout"))
+    if M.get("bared"):
+        print(f"modules: {len(M['bared'])} pin(s) bared by re-homing (no bypass of their own): "
+              + ", ".join(f"{b['ic']}.{b['pad']} ({b['was']} left)" for b in M["bared"]))
     if M.get("rehomed"):
         print(f"modules: {len(M['rehomed'])} bypass part(s) re-homed to their own IC's pin (per-pin demand): "
               + ", ".join(f"{r} {v['from']} -> {v['to']}.{v['pad']}" for r, v in sorted(M["rehomed"].items())))
