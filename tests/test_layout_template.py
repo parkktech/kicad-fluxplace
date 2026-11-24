@@ -264,3 +264,34 @@ def test_a_guessed_input_capacitor_is_not_the_regulators_part(tmp_path, monkeypa
     rows = {x["name"]: x for x in BU.template_rows(B, _datasheets(tmp_path, LAY), SPEC)}
     assert rows["U1 template cin_loop_mm"]["value"] is None
     assert rows["U1 template cin_side"]["value"] == 0 and rows["U1 template cin_side"]["verdict"] == "fail"
+
+
+# ---- step 5b S3: template parts are steered (sw_mm, fb_mm) and a regulator with a fact is laid out in isolation
+def _reseated(tmp_path, lay, **kw):
+    B = RD.load(_board(tmp_path))
+    c = _clusters(B, lay)
+    CL.reseat(B, [c], isolate=True, **kw)
+    return B, c
+
+
+def test_a_switch_node_part_over_sw_mm_is_reseated_and_without_the_fact_it_stays(tmp_path):
+    B, c = _reseated(tmp_path, dict(LAY, sw_mm=1.2, fb_mm=1.6))
+    m = CL.loop_metrics(B, c)
+    assert m["sw_mm"] <= 1.2 and m["fb_mm"] <= 1.6
+    (tmp_path / "n").mkdir()
+    B0 = RD.load(_board(tmp_path / "n"))
+    c0 = _clusters(B0, None)
+    assert not CL._off_template(B0, c0, next(s for s in c0["supports"] if s["rank"] == 0))     # no fact, no steering
+
+
+def test_a_neighbour_on_the_datasheet_side_does_not_hold_the_input_capacitor_off_it(tmp_path):
+    # a foreign part sits where the datasheet puts the input capacitor: placed among neighbours the seat cannot use that side
+    x = PW.cap("X9", 26.85, 29.5, "XA", "XB", "100nF")
+    B = RD.load(_board(tmp_path, x))
+    cons = _datasheets(tmp_path, LAY)
+    M = MD.build(B, cons, SPEC, arrange=True)
+    mod = next(m for m in M["modules"] if m["anchor"] == "U1")
+    assert "C1" in mod["members"]
+    assert mod["template"]["U1"]["cin_loop_mm"] <= LAY["cin_loop_mm"]
+    r = {q["name"]: q for q in BU.template_rows(B, cons, SPEC)}
+    assert r["U1 template cin_side"]["value"] == 1 and (tuple(B["parts"]["X9"]["pos"]) == (26.85, 29.5))

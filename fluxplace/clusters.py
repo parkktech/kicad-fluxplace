@@ -638,6 +638,7 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
         gnd = [p for p in icp["pads"] if NC.is_ground(p["net"])]
         pairs = (cl.get("layout") or {}).get("pairs") or []
         cin = bool(pairs) and s.get("rank") == 1 and ref.startswith("C")
+        swp = s.get("rank") == 0 and isinstance(((cl.get("layout") or {}).get("fact") or {}).get("sw_mm"), (int, float))   # sw_mm is the extent
         if cin:
             gnd = _pair_ground(icp, pairs, s["pad"]) or gnd
         other = [p for p in part["pads"] if p["num"] != s["via"]]
@@ -661,6 +662,8 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                     if is_gnd_cap:
                         op = next(p for p in pads if p["num"] != s["via"])
                         cost += 0.3 * min(math.hypot(op["x"] - g["x"], op["y"] - g["y"]) for g in gnd)
+                    if swp:
+                        cost = max(math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) for q in pads if q["net"] == s["net"])   # the hot node's extent
                     if cin and not _on_cin_side(icp, court, pairs, s["pad"], pads):
                         cost += CIN_OFF_SIDE_MM               # the datasheet's side ranks before pin distance; no such seat = the old seat
                     if cost >= best:
@@ -731,10 +734,18 @@ def _in_zone(zones, part, court):
                for z in zones)
 
 
-def _cin_off_template(B, c, s):
-    """An input capacitor the layout fact's template rejects: off the named pin pair's side, or its loop over the fact's maximum."""
+def _off_template(B, c, s):
+    """A template part the layout fact rejects (P5 S3, P5b S3): an input capacitor off the named pin pair's side or with its loop over
+    cin_loop_mm; a switch-node part over sw_mm; a two-pad feedback resistor over fb_mm. Only a confidently owned part."""
     lay = c.get("layout")
-    if not lay or not lay["pairs"] or s["rank"] != 1 or not s["ref"].startswith("C") or not s["sure"]:
+    if not lay or not s["sure"]:
+        return False
+    if s["rank"] in (0, 3) and (s["rank"] == 0 or (s["ref"].startswith("R") and B["parts"][s["ref"]]["n_pads"] == 2)):
+        key = "sw_mm" if s["rank"] == 0 else "fb_mm"
+        mx = lay["fact"].get(key)
+        got = loop_metrics(B, {"ic": c["ic"], "supports": [s], "layout": lay})[key]
+        return isinstance(mx, (int, float)) and not isinstance(mx, bool) and got is not None and got > mx
+    if not lay["pairs"] or s["rank"] != 1 or not s["ref"].startswith("C"):
         return False
     icp = B["parts"][c["ic"]]
     if not _on_cin_side(icp, B["parts"][s["ref"]]["court"], lay["pairs"], s["pad"], B["parts"][s["ref"]]["pads"]):
@@ -753,7 +764,7 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
     allm = {}
     for c in cl:
         sup = [s for s in c["supports"]
-               if (everything or s["dist"] > s["limit"] or _cin_off_template(B, c, s)) and (guess or s["sure"])
+               if (everything or s["dist"] > s["limit"] or _off_template(B, c, s)) and (guess or s["sure"])
                and (only is None or s["ref"] in only)]
         if not sup:
             continue

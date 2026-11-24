@@ -78,9 +78,16 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
+        isolated = set()
+        for c in cl:                             # P5b S3: a regulator with a datasheet layout fact is laid out in isolation, as a unit; the
+            tpl = {s["ref"] for s in c["supports"] if s["sure"] and s["rank"] < 9 and s["ref"] not in fixed}   # floorplan places it among the others
+            if c.get("layout") and tpl:
+                CL.reseat(B, [c], everything=True, only=tpl, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), isolate=True, log=log)
+                isolated |= tpl                  # a unit: the neighbours' legality is the floorplan's, a strict re-seat would trade the datasheet side for a free seat
+        _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
-                      flips=flips, refused=refused, only=set(parts) - fixed)   # a fixed part is never seated: the model must not show it where the board will not have it
+                      flips=flips, refused=refused, only=set(parts) - fixed - isolated)   # a fixed part is never seated: the model must not show it where the board will not have it
             _remeasure(B, cl)
             more = CL.rehome(B, cl, cons, spec)
             if not more:
