@@ -82,3 +82,74 @@ def pair_limits(cons, master, ps_per_mm=None):
                 if tg is not None and "skew_ps_target" not in b:
                     b["skew_ps_target"], lab["skew_ps_target"] = float(tg) * ps_per_mm, f"fallback [pairs.{pf}] skew_mm {tg} mm"
     return b, lab, fam
+
+
+PAIR_W_MM = 0.15            # trace width for the loss estimate (channel.predict's default)
+
+
+def _centres(B, net):
+    """{ref: (x, y)}: centre of the pads of `net` on each part."""
+    by = {}
+    for q in B["pads"]:
+        if q["net"] == net:
+            by.setdefault(q["ref"], []).append((q["x"], q["y"]))
+    return {r: (sum(p[0] for p in ps) / len(ps), sum(p[1] for p in ps) / len(ps)) for r, ps in by.items()}
+
+
+def mst_edges(pts):
+    """Prim MST over {key: (x, y)} -> [(key_a, key_b, mm)], deterministic (keys sorted)."""
+    import math
+    keys = sorted(pts)
+    if len(keys) < 2:
+        return []
+    done, out = [keys[0]], []
+    while len(done) < len(keys):
+        d, a, b = min((math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1]), a, b) for a in done for b in keys if b not in done)
+        out.append((a, b, d))
+        done.append(b)
+    return out
+
+
+def pair_rows(B, cons, stack=None):
+    """Rows of every classified pair in a [channel.F] or [pairs.F] family: length (predicted = endpoint distance x detour),
+    loss (needs stack), endpoint (derived max distance between the pair's parts), skew (no value before routing).
+    stack = (rows, planes, signal_layers) or None."""
+    from . import channel as CH, netclass as NC
+    cons = cons or {}
+    names = sorted({q["net"] for q in B["pads"] if q["net"]})
+    pm = NC._pairs(names, cons)
+    legs = pair_legs(names, cons)
+    out = []
+    for m in sorted({min(n, p) for n, p in pm.items()}):
+        if not (family_of(cons.get("channel"), m, legs) or family_of(cons.get("pairs"), m, legs)):
+            continue
+        srows, planes, sig = stack if stack else (None, None, None)
+        dl = CH.delay_ps_mm(srows, planes, sig[0], PAIR_W_MM) if stack else None
+        b, lab, fam = pair_limits(cons, m, dl)
+        ctr = _centres(B, m)
+        ep = sum(e[2] for e in mst_edges(ctr))
+        ln = ep * CH.DETOUR
+        name, refs, nets = f"{m}/{pm[m]}", sorted(ctr), [m, pm[m]]
+        klass = str(((cons.get("channel") or {}).get(fam) or {}).get("klass", "INF")) if fam else "INF"
+        lo = CH.loss_db_mm(srows, planes, sig[0], b.get("freq_ghz", CH.DEFAULT_FREQ_GHZ), PAIR_W_MM) if stack else None
+        per_mm = (lo[0] + lo[1]) if lo else None
+        conn = float(b.get("connector_db", 0.0))
+        if "length_mm_max" in b or "length_mm_target" in b:
+            out.append(row("pair", name, "length", "mm", round(ln, 2), b.get("length_mm_target"), b.get("length_mm_max"),
+                           lab.get("length_mm_max") or lab.get("length_mm_target", ""), klass, "length_mm_max" in b, refs=refs, nets=nets))
+        if per_mm and ("loss_db_max" in b or "loss_db_target" in b):
+            out.append(row("pair", name, "loss", "dB", round(ln * per_mm + conn, 3), b.get("loss_db_target"), b.get("loss_db_max"),
+                           lab.get("loss_db_max") or lab.get("loss_db_target", ""), klass, "loss_db_max" in b, refs=refs, nets=nets))
+        lim, src = {}, []
+        for key, lk, dk in (("max", "length_mm_max", "loss_db_max"), ("target", "length_mm_target", "loss_db_target")):
+            c = ([b[lk]] if lk in b else []) + ([(b[dk] - conn) / per_mm] if per_mm and dk in b else [])
+            lim[key] = round(min(c) / CH.DETOUR, 2) if c else None
+            src += [lab[k] for k in (lk, dk) if k in b and k in lab]
+        if lim["max"] is not None or lim["target"] is not None:
+            out.append(row("pair", name, "endpoint", "mm", round(ep, 2), lim["target"], lim["max"],
+                           f"derived: min(length, loss length) / detour {CH.DETOUR:g}; " + "; ".join(sorted(set(src))), "INF",
+                           lim["max"] is not None, refs=refs, nets=nets))
+        if "skew_ps_max" in b or "skew_ps_target" in b:
+            out.append(row("pair", name, "skew", "ps", None, b.get("skew_ps_target"), b.get("skew_ps_max"),
+                           lab.get("skew_ps_max") or lab.get("skew_ps_target", ""), klass, False, refs=refs, nets=nets))
+    return out

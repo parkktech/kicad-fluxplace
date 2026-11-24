@@ -57,3 +57,46 @@ def test_review_and_table_read_the_same_limits(monkeypatch):
     monkeypatch.setattr(BG, "pair_limits", lambda *a, **k: (seen.append(a[1]), real(*a, **k))[1])
     CH.resolve_budget(USB, "USB_D_N")
     assert seen == ["USB_D_N"]                       # channel (review) goes through budget.pair_limits
+
+
+def _by(rows, metric, kind="pair"):
+    return next(r for r in rows if r["kind"] == kind and r["metric"] == metric)
+
+
+def test_pair_length_and_derived_endpoint_distance(tmp_path):
+    B = usb_board(tmp_path)
+    rows = BG.pair_rows(B, USB)
+    assert [r["metric"] for r in rows] == ["length", "endpoint"]            # no stack: no loss row; no skew key: no skew row
+    ln, ep = _by(rows, "length"), _by(rows, "endpoint")
+    assert ln["name"] == "USB_D_N/USB_D_P" and ln["refs"] == ["J1", "U1"] and ln["nets"] == ["USB_D_N", "USB_D_P"]
+    assert (ln["value"], ln["max"], ln["verdict"], ln["hard"]) == (46.0, 203.0, "ok", True)        # 40.0 mm x 1.15
+    assert ln["source"] == "[channel.USB_] TUSB4041I 7.4.1.3 p.25"
+    assert (ep["value"], ep["max"], ep["verdict"], ep["hard"]) == (40.0, 176.52, "ok", True)       # 203 / 1.15
+    assert ep["source"].startswith("derived: ") and "TUSB4041I" in ep["source"]
+
+
+def test_pair_over_its_length_fails_before_any_copper(tmp_path):
+    cons = {"pairs": USB["pairs"], "channel": {"USB_": {"length_mm_max": 40.0, "length_mm_target": 25.0, "source": "x p.1"}}}
+    rows = BG.pair_rows(usb_board(tmp_path), cons)
+    assert (_by(rows, "length")["verdict"], _by(rows, "endpoint")["verdict"]) == ("fail", "fail")
+    assert (_by(rows, "endpoint")["max"], _by(rows, "endpoint")["target"]) == (34.78, 21.74)       # 40 / 1.15, 25 / 1.15
+
+
+def test_loss_limits_the_endpoint_distance_when_a_stack_is_given(tmp_path):
+    rows6 = [{"type": "copper", "name": "F.Cu", "thickness": 0.035, "epsilon_r": 4.4},
+             {"type": "prepreg", "name": None, "thickness": 0.1, "epsilon_r": 4.1},
+             {"type": "copper", "name": "In1.Cu", "thickness": 0.0152, "epsilon_r": 4.4},
+             {"type": "core", "name": None, "thickness": 1.2, "epsilon_r": 4.5},
+             {"type": "copper", "name": "B.Cu", "thickness": 0.035, "epsilon_r": 4.4}]
+    stack = (rows6, ["In1.Cu"], ["F.Cu", "B.Cu"])
+    cons = {"pairs": USB["pairs"], "channel": {"USB_": {"loss_db_max": 1.0, "freq_ghz": 2.5, "source": "x p.2"}}}
+    rows = BG.pair_rows(usb_board(tmp_path), cons, stack)
+    lo = CH.loss_db_mm(rows6, ["In1.Cu"], "F.Cu", 2.5, BG.PAIR_W_MM)
+    per_mm = lo[0] + lo[1]
+    assert [r["metric"] for r in rows] == ["loss", "endpoint"]
+    assert _by(rows, "loss")["value"] == round(46.0 * per_mm, 3) and _by(rows, "loss")["max"] == 1.0
+    assert _by(rows, "endpoint")["max"] == round(1.0 / per_mm / 1.15, 2)
+
+
+def test_pair_outside_every_family_has_no_rows(tmp_path):
+    assert BG.pair_rows(usb_board(tmp_path), {}) == []           # the ready "pair classes" line names it (F1)
