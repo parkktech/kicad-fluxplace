@@ -694,3 +694,9 @@ def test_m5_an_item_that_arrives_during_a_stage_is_logged_once_and_the_file_stay
     log = _lines(W / "feedback/log.jsonl")
     assert (log[-1]["id"], log[-1]["action"], log[-1]["why"]) == ("00000009", "received", "arrived during the search: not read by this stage")
     assert os.path.exists(W / "feedback/inbox/2026-late.json")
+
+
+def test_budget_row_through_criteria_carries_hard():
+    from fluxplace import liveview as LV
+    r = {"kind": "support", "name": "U1.7 own bypass", "verdict": "fail", "value": 9, "target": 5, "max": 5, "unit": "mm", "hard": False}
+    assert LV.criteria([r])[0]["hard"] is False

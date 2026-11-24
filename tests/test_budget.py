@@ -38,7 +38,7 @@ def test_row_shape_and_verdicts():
     assert BG.row("separation", "S", "distance", "mm", value=25.0, target=30.0, mx=20.0, minimum=True)["verdict"] == "over-target-pass"
     assert BG.row("separation", "S", "distance", "mm", value=35.0, target=30.0, mx=20.0, minimum=True)["verdict"] == "ok"
     assert set(r) == {"kind", "name", "metric", "unit", "value", "target", "max", "source", "klass", "hard", "minimum", "refs",
-                      "nets", "layers", "verdict", "detail"}
+                      "nets", "layers", "verdict", "detail", "derived"}
 
 
 def test_no_source_lists_only_rows_with_a_limit():
@@ -71,7 +71,7 @@ def test_pair_length_and_derived_endpoint_distance(tmp_path):
     assert ln["name"] == "USB_D_N/USB_D_P" and ln["refs"] == ["J1", "U1"] and ln["nets"] == ["USB_D_N", "USB_D_P"]
     assert (ln["value"], ln["max"], ln["verdict"], ln["hard"]) == (46.0, 203.0, "ok", True)        # 40.0 mm x 1.15
     assert ln["source"] == "[channel.USB_] TUSB4041I 7.4.1.3 p.25"
-    assert (ep["value"], ep["max"], ep["verdict"], ep["hard"]) == (40.0, 176.52, "ok", True)       # 203 / 1.15
+    assert (ep["value"], ep["max"], ep["verdict"], ep["hard"]) == (40.0, 176.52, "ok", False)      # 203 / 1.15; derived, so soft (C2)
     assert ep["source"].startswith("derived: ") and "TUSB4041I" in ep["source"]
 
 
@@ -318,5 +318,23 @@ def test_pin_demand_rows_join_the_table_and_name_the_part_and_the_ic(tmp_path):
         ("support", "U412.7 own bypass (C419)", 54.03, 5.0, None, "over-target-pass", False)
     assert a["refs"] == ["C419", "U412"] and a["detail"] == "only a larger capacitor at the pin: C1 4.7 uF at 2.12 mm"
     assert (b["name"], b["max"], b["verdict"], b["hard"], b["refs"], b["detail"]) == \
-        ("U5.32 own bypass (C54, C55)", 5.0, "fail", True, ["C54", "C55", "U5"], "no capacitor at the pin")
-    assert BG.summary(rows) == "1 fail (1 hard); 1 over target"
+        ("U5.32 own bypass (C54, C55)", 5.0, "fail", False, ["C54", "C55", "U5"], "no capacitor at the pin")
+    assert BG.summary(rows) == "1 fail (0 hard); 1 over target"
+
+
+# ---- C2: a derived limit is never hard (D71do)
+def test_derived_limit_is_never_hard():
+    r = BG.row("support", "x", "distance", "mm", 9, 5, 5, "default 5 mm", "INF", True, derived="default")
+    assert r["verdict"] == "fail" and r["hard"] is False and r["derived"] == "default"
+    assert BG.row("support", "x", "distance", "mm", 9, 5, 5, "default 5 mm", "INF", True)["hard"] is True
+
+
+def test_rail_row_without_a_page_is_soft(tmp_path):
+    import copy
+    plan = copy.deepcopy(PLAN)
+    plan["rails"]["+5V"]["drop"]["source"] = "notes.md"
+    r = [x for x in BG.table(usb_board(tmp_path), USB, plan=plan) if x["kind"] == "rail"][0]
+    assert r["hard"] is False and r["derived"] == "no page cited"
+    plan["rails"]["+5V"]["drop"]["source"] = "X.pdf#p5"
+    r = [x for x in BG.table(usb_board(tmp_path, name="p.kicad_pcb"), USB, plan=plan) if x["kind"] == "rail"][0]
+    assert r["hard"] is True and r["derived"] == ""

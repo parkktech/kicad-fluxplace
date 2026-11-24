@@ -219,7 +219,8 @@ def _drop(d):
     if not d:
         return None
     return {"target_mv": d.get("drop_mv_target"), "max_mv": d.get("drop_mv_max"), "source": d.get("source", "NO SOURCE"),
-            "klass": "REQ" if d.get("source") and "INF" not in str(d.get("source")) else "INF"}
+            "klass": "REQ" if d.get("source") and "INF" not in str(d.get("source")) else "INF",
+            "derived": str(d.get("derived") or "")}
 
 
 def _pxy(B, refnum):
@@ -420,21 +421,24 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
     role = role_of(B["parts"][ref], ref, net, info, cons)
     if role in ("loop", "clock"):
         b = float(info["budget"])
-        row = {"target": b, "max": b, "source": f"derived: netclass {info['class']} budget ({NC.BASIS.get(info['class'], 'class budget')})", "klass": "INF"}
+        row = {"target": b, "max": b, "source": f"derived: netclass {info['class']} budget ({NC.BASIS.get(info['class'], 'class budget')})", "klass": "INF",
+               "derived": "netclass budget"}
     elif role == "bypass" and info and info["class"] == "bypass" and info.get("budget"):
         b = float(info["budget"])                # a pin's own capacitor (IC pin to cap to ground): the class budget is the limit, as before P3
-        row = {"target": b, "max": b, "source": f"derived: netclass bypass budget ({NC.BASIS['bypass']})", "klass": "INF"}
+        row = {"target": b, "max": b, "source": f"derived: netclass bypass budget ({NC.BASIS['bypass']})", "klass": "INF",
+               "derived": "netclass budget"}
     elif role == "bypass":
-        row = {"target": NC.BUDGET["bypass"], "max": BYPASS_MAX_MM, "klass": "INF",
+        row = {"target": NC.BUDGET["bypass"], "max": BYPASS_MAX_MM, "klass": "INF", "derived": "default",
                "source": f"target derived: netclass bypass ({NC.BASIS['bypass']}); max default {BYPASS_MAX_MM:g} mm (the pre-budget gate limit)"}
     elif role == "bulk":
-        row = {"target": BULK_MM[0], "max": BULK_MM[1], "klass": "INF",
+        row = {"target": BULK_MM[0], "max": BULK_MM[1], "klass": "INF", "derived": "default, unverified",
                "source": f"default {BULK_MM[0]:g}/{BULK_MM[1]:g} mm, unverified: path inductance at pour width below the ESL of a bulk part (a datasheet bulk_mm replaces it)"}
     elif info and info["class"] == "rf" and info.get("budget"):
         b = float(info["budget"])                # a series part on an RF net (DC block, matching): the RF length budget, not the 5 mm default
-        row = {"target": b, "max": b, "source": f"derived: netclass rf budget ({NC.BASIS['rf']})", "klass": "INF"}
+        row = {"target": b, "max": b, "source": f"derived: netclass rf budget ({NC.BASIS['rf']})", "klass": "INF", "derived": "netclass budget"}
     else:
-        row = {"target": SENSE_MM, "max": SENSE_MM, "klass": "INF", "source": f"default {SENSE_MM:g} mm (sense / feedback / other support part)"}
+        row = {"target": SENSE_MM, "max": SENSE_MM, "klass": "INF", "derived": "default",
+               "source": f"default {SENSE_MM:g} mm (sense / feedback / other support part)"}
     key = {"bypass": "decap_mm", "bulk": "bulk_mm"}.get(role)
     if key and ic and facts is None:
         facts, mpn_map = facts_for(cons, spec)
@@ -446,7 +450,7 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
         mm = _fact_mm((facts or {}).get(mpn), key, names)
         if mm is not None:
             src = ((facts.get(mpn) or {}).get("_src") or {}).get(key, "datasheet")
-            row = {"target": mm, "max": mm, "klass": "REQ", "source": f"datasheet fact {key} of {mpn} ({src})",
+            row = {"target": mm, "max": mm, "klass": "REQ", "derived": "", "source": f"datasheet fact {key} of {mpn} ({src})",
                    "edge": True}               # a datasheet "within x mm of the pin" is pad edge to pad edge (P5b S2)
     row.update(role=role, unit="mm")
     return row
@@ -462,7 +466,8 @@ def supports(B, cons, spec=None, facts=None, mpn_map=None, cl=None):
     out = []
     for c in cl:
         for s in c["supports"]:
-            lim = {"target": s["target"], "max": s["limit"], "unit": "mm", "source": s["source"], "klass": s["klass"]}
+            lim = {"target": s["target"], "max": s["limit"], "unit": "mm", "source": s["source"], "klass": s["klass"],
+                   "derived": s.get("derived", "")}
             v = CH.verdict(s["dist"], lim["target"], lim["max"])[0] if s["sure"] else "n/a"
             out.append({"ref": s["ref"], "role": s["role"], "serves": f"{c['ic']}.{s['pad']}", "net": s["net"], "limit": lim,
                         "dist_mm": round(s["dist"], 2), "verdict": v, "how": s["how"], "sure": s["sure"]})

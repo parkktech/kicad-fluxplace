@@ -524,7 +524,8 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
             "sure": sure,
             "cls": info["class"] if info else "signal", "weight": info["weight"] if info else 1.0,
             "dist": dist, "limit": row["max"], "target": row["target"], "role": row["role"], "unit": "mm",
-            "source": row["source"], "klass": row["klass"], "edge": bool(row.get("edge"))})
+            "source": row["source"], "klass": row["klass"], "edge": bool(row.get("edge")),
+            "derived": row.get("derived", "")})
     out = []
     names = NC.pin_names(spec)
     for ic in sorted(by):

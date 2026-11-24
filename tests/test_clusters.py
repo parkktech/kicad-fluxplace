@@ -420,3 +420,12 @@ def test_the_strict_seat_and_the_remeasure_use_the_edge_distance_for_a_datasheet
     GM.place(B["parts"]["C1"], *mv["C1"])
     MD._remeasure(B, [c])
     assert s["dist"] <= 1.0 + 1e-6
+
+
+def test_datasheet_decap_is_hard_default_is_soft(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    spec = {"components": [{"ref": "U2", "mpn": "X2", "pinmap": {}}]}
+    fact = {"X2": {"decap_mm": 2.0, "_src": {"decap_mm": "X2.pdf#p9"}}}
+    c1 = _sup(B, PB.CONS, spec, fact)["C1"]
+    assert c1["limit"]["klass"] == "REQ" and c1["limit"]["derived"] == ""
+    assert _sup(B, PB.CONS)["C1"]["limit"]["derived"] == "default"

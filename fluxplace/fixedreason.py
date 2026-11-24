@@ -67,7 +67,8 @@ def findings(fixed, cons, sup_rows, detected=(), unconnected=()):
             s = max(over, key=lambda r: r["dist_mm"] - r["limit"]["max"])
             mx = s["limit"]["max"]
             out.append(_f("FIXED_OVER_BUDGET", ref, f"{ref} ({why}) {s['role']} serves {s['serves']}: {s['dist_mm']:g} mm from its "
-                                                    f"pin, max {mx:g} mm (over by {round(s['dist_mm'] - mx, 2):g} mm)"))
+                                                    f"pin, max {mx:g} mm (over by {round(s['dist_mm'] - mx, 2):g} mm)"
+                                                    + (" (derived limit)" if s["limit"].get("derived") else "")))
         elif rows and not any(s.get("sure") for s in rows):
             s = rows[0]
             out.append(_f("FIXED_OWNER_GUESSED", ref, f"{ref} ({why}) {s['role']}: its pin is a guess ({s['serves']}, "

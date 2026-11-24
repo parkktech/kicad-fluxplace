@@ -39,16 +39,24 @@ KINDS = ("rail", "support", "pair", "keepout", "keepout-flight", "separation", "
 
 
 def row(kind, name, metric, unit, value=None, target=None, mx=None, source="", klass="INF", hard=False, minimum=False,
-        refs=(), nets=(), layers=(), detail="", **extra):
+        refs=(), nets=(), layers=(), detail="", derived="", **extra):
     """One budget row, the same shape for every kind (REFACTOR-PLAN-W16 section 2): quantity, target, max, source, klass.
-    target warns, max fails (D71cv); minimum=True: target and max are floors (fail below). verdict: channel.verdict."""
+    target warns, max fails (D71cv); minimum=True: target and max are floors (fail below). verdict: channel.verdict.
+    derived: what the limit was worked out from (a netclass budget, a default, a closed form); a derived limit is never hard."""
     from . import channel as CH
     neg = (lambda v: None if v is None else -v) if minimum else (lambda v: v)
     r = {"kind": kind, "name": name, "metric": metric, "unit": unit, "value": value, "target": target, "max": mx,
-         "source": source, "klass": klass, "hard": bool(hard), "minimum": bool(minimum), "refs": list(refs), "nets": list(nets),
-         "layers": list(layers), "verdict": CH.verdict(neg(value), neg(target), neg(mx))[0], "detail": detail}
+         "source": source, "klass": klass, "hard": bool(hard) and not derived, "minimum": bool(minimum), "refs": list(refs),
+         "nets": list(nets), "layers": list(layers), "verdict": CH.verdict(neg(value), neg(target), neg(mx))[0], "detail": detail,
+         "derived": str(derived or "")}
     r.update(extra)
     return r
+
+
+def cites_page(source):
+    """True when the source text names a page (file.pdf#p7, p.7, p7)."""
+    import re
+    return bool(re.search(r"(?:#p|\bp\.?\s?)\d", str(source or "")))
 
 
 def no_source(rows):
@@ -150,7 +158,7 @@ def pair_rows(B, cons, stack=None):
         if lim["max"] is not None or lim["target"] is not None:
             out.append(row("pair", name, "endpoint", "mm", round(ep, 2), lim["target"], lim["max"],
                            f"derived: min(length, loss length) / detour {CH.DETOUR:g}; " + "; ".join(sorted(set(src))), "INF",
-                           lim["max"] is not None, refs=refs, nets=nets))
+                           lim["max"] is not None, refs=refs, nets=nets, derived=f"endpoint = length / detour {CH.DETOUR:g}"))
         if "skew_ps_max" in b or "skew_ps_target" in b:
             out.append(row("pair", name, "skew", "ps", None, b.get("skew_ps_target"), b.get("skew_ps_max"),
                            lab.get("skew_ps_max") or lab.get("skew_ps_target", ""), klass, False, refs=refs, nets=nets))
@@ -268,7 +276,8 @@ def separation_rows(B, cons):
         has_min = e.get("min_mm") is not None
         out.append(row("separation", name, "distance", "mm", round(best[0], 2) if best else None, e.get("target_mm"), e.get("min_mm"),
                        str(e.get("source", "")), str(e.get("klass", "INF")), has_min and bool(e.get("hard", True)), minimum=True,
-                       refs=[best[1], best[2]] if best else [], detail=str(e.get("why", ""))))
+                       refs=[best[1], best[2]] if best else [], detail=str(e.get("why", "")),
+                       derived=str(e.get("derived") or "")))
     return out
 
 
@@ -401,19 +410,20 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
         for e in rail.get("edges") or []:
             out.append(row("rail", f"{net} {src}->{e['load']}", "reach", "mm", e["dist_mm"], e["reach_mm"]["target"], e["reach_mm"]["max"],
                            rail["drop"]["source"], rail["drop"].get("klass", "INF"), True, refs=[src, e["load"]], nets=[net],
-                           layers=rail["choice"]["layers"]))
+                           layers=rail["choice"]["layers"],
+                           derived=rail["drop"].get("derived") or ("" if cites_page(rail["drop"]["source"]) else "no page cited")))
     for s in (plan or {}).get("supports") or []:
         lim = s["limit"]
         out.append(row("support", f"{s['ref']} -> {s['serves']}", "distance", "mm", s["dist_mm"] if s["sure"] else None, lim["target"],
                        lim["max"], lim["source"], lim["klass"], bool(s["sure"]), refs=[s["ref"], s["serves"].split(".")[0]],
-                       nets=[s["net"]], detail=f"{s['role']}, owner by {s['how']}"))
+                       nets=[s["net"]], detail=f"{s['role']}, owner by {s['how']}", derived=lim.get("derived", "")))
     for p in (plan or {}).get("pin_demand") or []:
         cv = p.get("cover")
         out.append(row("support", f"{p['ic']}.{p['pad']} own bypass ({', '.join(p['parts'])})", "pin-bypass", "mm", p["dist_mm"], p["limit_mm"],
                        None if cv else p["limit_mm"], "per-pin demand: the IC's own bypass within the support limit (clusters.pin_demand)", "INF",
                        not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
                        detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
-                               else "no capacitor at the pin")))
+                               else "no capacitor at the pin"), derived="default support limit"))
     return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
             + escape_rows(B, cons) + swap_rows(B, cons))
 

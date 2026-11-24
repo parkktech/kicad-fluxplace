@@ -76,6 +76,8 @@ def criteria(rows):
             lim = r.get("max") if r.get("max") is not None else r.get("target")
             out.append({"id": str(r.get("name")), "ok": None if r["verdict"] in (None, "n/a") else r["verdict"] != "fail", "value": r.get("value"),
                         "limit": lim, "text": f"{r.get('kind', '')} {r.get('name')}: {r.get('value')} / {lim} {r.get('unit', '')}".strip()})
+            if "hard" in r:                # a budget row: hard = datasheet limit, false = derived or default (DASHBOARD-PLACER-CONTRACT)
+                out[-1]["hard"] = r["hard"]
         else:
             out.append({"id": str(r.get("id")), "ok": r.get("ok"), "value": r.get("value"), "limit": r.get("limit"), "text": str(r.get("text", ""))})
     return out
