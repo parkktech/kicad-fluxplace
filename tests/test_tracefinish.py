@@ -365,6 +365,21 @@ def test_worse_class_min_width_h2_h6_and_drc_key_h10():
     assert TF._worse(_rec(), more) == ["H10"]
 
 
+def test_worse_ignores_unmeasured_and_missing_rows():
+    """H6 not measured (base None) on either side, a class absent or unmeasured in H2: never worse, never an exception."""
+    assert TF._worse(_rec(), _bump(_rec(), "H6", lambda b: None)) == []
+    assert TF._worse(_bump(_rec(), "H6", lambda b: None), _bump(_rec(), "H6", lambda b: 3)) == []
+    a2 = _bump(_rec(), "H2", lambda b: {"GEN": 0.2, "RF": None})
+    assert TF._worse(a2, _bump(_rec(), "H2", lambda b: {"GEN": 0.2, "RF": 0.1})) == []       # F0 had no RF width
+    assert TF._worse(a2, _bump(_rec(), "H2", lambda b: {"GEN": 0.2})) == []                  # class gone in F8
+    a3 = _bump(_rec(), "H2", lambda b: {"GEN": 0.2, "RF": 0.15})
+    assert TF._worse(a3, _bump(_rec(), "H2", lambda b: {"GEN": 0.2})) == []                  # measured at F0, gone at F8
+    assert TF._worse(a2, _bump(_rec(), "H2", lambda b: {"GEN": 0.2, "RF": None})) == []
+    assert TF._worse(_rec(), _bump(_rec(), "H2", lambda b: {"GEN": 0.3})) == []                # wider is not worse
+    assert TF._worse(_rec(), _bump(_rec(), "H1", lambda b: b - 1)) == []                      # fewer is not worse
+    assert TF._worse(_rec(), _bump(_rec(), "H10", lambda b: {"opens": 4, "drc_keys": 2})) == []
+
+
 def test_stage_second_f0_worse_on_h1_fails(tmp_path, monkeypatch):
     board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
     monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
