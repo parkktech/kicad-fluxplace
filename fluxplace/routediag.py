@@ -91,6 +91,14 @@ def _locked(n):
     return any(k == "locked" or (isinstance(k, list) and k and k[0] == "locked" and (len(k) < 2 or k[1] != "no")) for k in n[1:])
 
 
+def _teardrop_flags(n):
+    """(teardrops enabled, remove unused layers) of a pad or via node: `(teardrops ... (enabled yes))`, `(remove_unused_layers yes)`."""
+    td = BF._first(n, "teardrops")
+    en = BF._atoms(BF._first(td, "enabled")) if td else []
+    ru = BF._atoms(BF._first(n, "remove_unused_layers"))
+    return en[:1] == ["yes"], ru[:1] == ["yes"]
+
+
 def load(path, track=None, clearance=None, project=None):
     root = BF.parse(open(path, errors="replace").read())
     copper = [a[1] for a in (BF._first(root, "layers") or [])[1:]
@@ -186,6 +194,7 @@ def load(path, track=None, clearance=None, project=None):
                  "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole",
                  "drill": min(dr) if dr else 0.0,
                  "rr": (BF._nums(BF._first(pad, "roundrect_rratio") or []) or [0.25])[0]}
+            p["td"], p["rm_unused"] = _teardrop_flags(pad)
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
@@ -226,7 +235,8 @@ def load(path, track=None, clearance=None, project=None):
         if n[0] == "via":
             x, y = _f(n, "at")
             vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0], "drill": _f(n, "drill", 1)[0],
-                         "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n)})
+                         "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n),
+                         "td": _teardrop_flags(n)[0], "rm_unused": _teardrop_flags(n)[1]})
         else:
             sx, sy = _f(n, "start")
             ex, ey = _f(n, "end")
