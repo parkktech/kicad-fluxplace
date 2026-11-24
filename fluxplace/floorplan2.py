@@ -1166,6 +1166,9 @@ def cmd_floorplan(a):
     src_board = a.board
     from . import liveview as LV                 # F16: owner rows that came in before the search (no inbox folder: nothing changes)
     a.board, cons, fb = LV.stage_start(a.board, cons, spec, "floorplan", wd)
+    from . import ready as RDY, parts as PTS                 # C7b: the rows of the input, measured now; the output is set against them
+    ds_dir = PTS.resolve_dir((cons.get("docs") or {}).get("datasheets"), [a.constraints, a.board])
+    rows_in = RDY.stage_rows(spec, cons, RD.load(a.board), a.board, ds_dir)
     ex = LV.Exporter(cons, a.constraints, stage="floorplan") if LV.work() else None
     from . import pins as PN
     a.board, cons, pin_res = PN.prepare(a.board, cons, spec, wd)       # --- pins: collisions among pinned parts, resolved by precedence
@@ -1232,8 +1235,11 @@ def cmd_floorplan(a):
             Bn = RD.load(out)
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
-    LV.candidate("floorplan", "result", Bn, None, _live_key(best), _live_crit(best), cons, ex, board=out, lane="accepted", phase="gate",
-                 verdict="kept" if passes(best) and not (irc or brc) else "refused", why=best["why_not"], full=True)
+    refused = not passes(best) or bool(irc or brc)
+    hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
+    print(hon["line"])
+    LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
+                 lane="accepted", phase="gate", verdict="refused" if refused else "kept", why=best["why_not"], full=True)
     for line in fb.finish(Bn) if fb is not None else []:
         print(line)
     if ex is not None:

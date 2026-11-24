@@ -343,6 +343,34 @@ def measure_rows(spec, cons, B, board_path, facts=None, ds_dir=None, sess=None):
     return tab, FR.findings(fixed, cons, frows, detected, bare)
 
 
+def stage_rows(spec, cons, B, board_path, ds_dir=None):
+    """C7b: the rows of a stage's input board, at stage start. A failed measure never fails the stage -> rows or None."""
+    try:
+        return measure_rows(spec, cons, B, board_path, ds_dir=ds_dir)[0]
+    except Exception as e:                                  # noqa: BLE001
+        print(f"  rows: input not measured ({type(e).__name__}: {e})")
+        return None
+
+
+def stage_honoured(stage, spec, cons, rows_in, out_path, B_out, failed=False, ds_dir=None, cand="result"):
+    """C7b: measure the board a stage wrote and set it against the rows of its input. Writes <out stem>.budgets.json (rows +
+    honoured), puts the summary and the rows (criteria with `hard`) on the event stream. No verdict changes (the gate is step 14).
+    -> {line, criteria, honoured, rows}; line is None when nothing could be measured."""
+    from . import budget as BG, liveview as LV
+    try:
+        rows, _fx = measure_rows(spec, cons, B_out, out_path, ds_dir=ds_dir)
+        h = BG.honoured(rows_in or [], rows)
+        line = BG.honoured_summary(h) + (" (stage FAIL: rows not enforced)" if failed else "")
+        stem = os.path.splitext(out_path)[0]
+        if rows or rows_in:
+            with open(stem + ".budgets.json", "w") as fh:
+                json.dump({"rows": rows, "honoured": h, "summary": line}, fh, indent=1, default=list)
+        LV.progress(stage, "honoured", always=True, cand=cand, criteria=rows, why=line, verdict="refused" if failed else "kept")
+        return {"line": line, "criteria": rows, "honoured": h, "rows": rows}
+    except Exception as e:                                  # noqa: BLE001 - the report never fails the stage
+        return {"line": f"rows on the output: not measured ({type(e).__name__}: {e})", "criteria": None, "honoured": [], "rows": []}
+
+
 def budget_line(spec, cons, B, rows, planes, detail):
     """[the "budgets" line] (F2): the one budget table (budget.table) of the placement as it is, written to <board>.budgets.json.
     OPEN on a limit without a source, a hard keep-out against flight-line row, an undecided swap proposal; everything else is
