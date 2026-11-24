@@ -337,7 +337,7 @@ def _layout(B, ic, comp, facts, mpn_map, names):
 def loop_metrics(B, c, names=None):
     """The three lengths a switching regulator's datasheet layout fixes, measured on the board model for cluster `c`
     (regulator = it has a switch-node part): {"cin_loop_mm": input-capacitor loop (input pin -> capacitor -> its ground pad ->
-    nearest ground pad of the IC; the shortest over the rank-1 parts), "sw_mm": IC switch pin to the farthest switch-node pad
+    the ground pad of the named pin pair, else the nearest ground pad; the shortest over the rank-1 parts), "sw_mm": IC switch pin to the farthest switch-node pad
     (the extent of the hot node), "boot_mm": bootstrap part to its pin, "fb_mm": the farthest rank-3 two-pad resistor to its
     pin}. A value is None when the cluster has no such part. Rigid moves of the whole module leave every value unchanged."""
     parts = B["parts"]

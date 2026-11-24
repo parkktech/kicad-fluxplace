@@ -61,7 +61,7 @@ def fixed_set(B, cons):
 
 
 ATTACH_MM = 15.0                    # a support farther than this from its module's anchor is its own module
-REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); the W15 board settles in 3
+REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
 def build(B, cons=None, spec=None, arrange=True, log=None):
