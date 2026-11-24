@@ -75,15 +75,18 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     cl, links = CL.build(B, cons, spec)
     rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
     flips, refused = set(), {}
+    unit = []
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
         isolated = set()
         for c in cl:                             # P5b S3: a regulator with a datasheet layout fact is laid out in isolation, as a unit; the
             tpl = {s["ref"] for s in c["supports"] if s["sure"] and s["rank"] < 9 and s["ref"] not in fixed}   # floorplan places it among the others
-            if c.get("layout") and tpl:
+            if c.get("layout") and tpl and c["ic"] not in fixed:
                 CL.reseat(B, [c], everything=True, only=tpl, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), isolate=True, log=log)
                 isolated |= tpl                  # a unit: the neighbours' legality is the floorplan's, a strict re-seat would trade the datasheet side for a free seat
+        for r in isolated:
+            L.refresh(r)
         _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
@@ -94,6 +97,9 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                 break
             for r, v in more.items():
                 rehomed[r] = dict(v, **{"from": rehomed[r]["from"], "left": rehomed[r]["left"]}) if r in rehomed else v
+        own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
+        unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
+                for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
     bared = _bared(B, rehomed, spec, *PB.facts_for(cons, spec))                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
@@ -208,7 +214,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                         mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
     return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
-            "unseated": CL.unseated(cl, fixed, refused)}
+            "unseated": CL.unseated(cl, fixed, refused), "unit_illegal": unit}
 
 
 def _bared(B, rehomed, spec=None, facts=None, mpn_map=None):
@@ -386,6 +392,9 @@ def cmd_modules(a):
     if M.get("rehomed"):
         print(f"modules: {len(M['rehomed'])} bypass part(s) re-homed to their own IC's pin (per-pin demand): "
               + ", ".join(f"{r} {v['from']} -> {v['to']}.{v['pad']}" for r, v in sorted(M["rehomed"].items())))
+    if M.get("unit_illegal"):
+        print(f"modules: {len(M['unit_illegal'])} template part(s) not legal where their unit stands (the floorplan must move the unit): "
+              + ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in M["unit_illegal"]))
     if M.get("unseated"):
         print(f"modules: {len(M['unseated'])} support part(s) still beyond their limit: "
               + ", ".join(f"{u['ref']} {u['dist']:g} / {u['limit']:g} mm of {u['ic']}.{u['pad']} ({u['why']})" for u in M["unseated"]))

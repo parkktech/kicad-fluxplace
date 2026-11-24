@@ -980,7 +980,9 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                  criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
                             "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])},
                            {"id": "pins bared by re-homing", "ok": not M.get("bared"), "value": len(M.get("bared") or []), "limit": 0,
-                            "text": ", ".join(f"{b['ic']}.{b['pad']} ({b['was']})" for b in (M.get("bared") or [])[:12])}])
+                            "text": ", ".join(f"{b['ic']}.{b['pad']} ({b['was']})" for b in (M.get("bared") or [])[:12])},
+                           {"id": "template units legal where they stand", "ok": not M.get("unit_illegal"), "value": len(M.get("unit_illegal") or []),
+                            "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
     for u in M.get("unseated") or []:
         print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
     P = Plan(B, cons, spec, M, log=log)

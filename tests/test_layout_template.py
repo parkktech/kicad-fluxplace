@@ -295,3 +295,33 @@ def test_a_neighbour_on_the_datasheet_side_does_not_hold_the_input_capacitor_off
     assert mod["template"]["U1"]["cin_loop_mm"] <= LAY["cin_loop_mm"]
     r = {q["name"]: q for q in BU.template_rows(B, cons, SPEC)}
     assert r["U1 template cin_side"]["value"] == 1 and (tuple(B["parts"]["X9"]["pos"]) == (26.85, 29.5))
+
+
+# ---- P5 R1: a template unit must be legal where it stands (the floorplan moves the unit, not the isolated pass)
+def _hits(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def test_a_free_foreign_part_on_the_input_seat_makes_the_unit_illegal(tmp_path):
+    x = PW.cap("X9", 26.85, 29.5, "XA", "XB", "100nF")
+    B = RD.load(_board(tmp_path, x))
+    M = MD.build(B, _datasheets(tmp_path, LAY), SPEC, arrange=True)
+    hit = [u for u in M["unit_illegal"] if u["ref"] == "C1"]
+    assert hit and any(i == "overlap X9" for i in hit[0]["issues"]), M["unit_illegal"]
+
+
+def test_the_same_unit_without_the_foreign_part_is_legal(tmp_path):
+    B = RD.load(_board(tmp_path))
+    M = MD.build(B, _datasheets(tmp_path, LAY), SPEC, arrange=True)
+    assert M["unit_illegal"] == []
+
+
+def test_a_fixed_regulator_is_not_isolated_and_keeps_its_supports_off_a_foreign_part(tmp_path):
+    x = PW.cap("X9", 26.85, 29.5, "XA", "XB", "100nF")
+    B = RD.load(_board(tmp_path, x))
+    cons = _datasheets(tmp_path, LAY)
+    cons["placement"] = {"fixed": ["U1"]}
+    M = MD.build(B, cons, SPEC, arrange=True)
+    assert M["unit_illegal"] == []
+    fx = B["parts"]["X9"]["court"]
+    assert not any(_hits(B["parts"][r]["court"], fx) for r in ("C1", "C2", "L1", "R1") if r in B["parts"])
