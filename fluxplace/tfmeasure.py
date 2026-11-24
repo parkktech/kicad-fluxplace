@@ -236,10 +236,11 @@ def c14_sites(B):
     return out
 
 
-def c5_sites(B):
+def c5_sites(B, cls):
+    """C5 applies to RF, HSF and HSS bends only (spec 2 C5, O2); other classes get no site."""
     segs = B["segs"]
     return [_site(c, "already" if (segs[c["a"]].get("mid") is not None or segs[c["b"]].get("mid") is not None) else "open",
-                  theta=c["theta"]) for c in _bends(B)]
+                  theta=c["theta"]) for c in _bends(B) if cls.get(c["net"]) in ("RF", "HSF", "HSS")]
 
 
 def _chains(B):

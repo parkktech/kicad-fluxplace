@@ -100,7 +100,7 @@ def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None):
     sites["C2"] = TM.c2_sites(B)
     sites["C3"] = TM.c3_sites(B)
     sites["C4"] = TM.c4_sites(B)
-    sites["C5"] = TM.c5_sites(B)
+    sites["C5"] = TM.c5_sites(B, cls)
     sites["C11"] = TM.c11_sites(X, audit)
     sites["C13"] = TM.c13_sites(B)
     sites["C14"] = TM.c14_sites(B)

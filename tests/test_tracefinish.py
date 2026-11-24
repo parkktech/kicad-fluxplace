@@ -152,10 +152,16 @@ def test_c14_branch_under_90_open():
 
 
 def test_c5_bend_is_arc_or_open():
-    arc_bend = wedge(90)
-    arc_bend[1] = seg((0, 0), (2, 2), mid=(0.6, 1.4))
-    assert "already" in _states(TM.c5_sites(model(arc_bend)))
-    assert _states(TM.c5_sites(model(wedge(90)))) == ["open"]
+    arc_bend = wedge(90, net="R")
+    arc_bend[1] = seg((0, 0), (2, 2), net="R", mid=(0.6, 1.4))
+    assert "already" in _states(TM.c5_sites(model(arc_bend), {"R": "RF"}))
+    assert _states(TM.c5_sites(model(wedge(90, net="R")), {"R": "RF"})) == ["open"]
+
+
+def test_c5_only_rf_hsf_hss_bends():
+    assert _states(TM.c5_sites(model(wedge(135, net="G")), {"G": "GEN"})) == []
+    assert _states(TM.c5_sites(model(wedge(135, net="G")), {"G": "ANA"})) == []
+    assert _states(TM.c5_sites(model(wedge(90, net="H")), {"H": "HSS"})) == ["open"]
 
 
 def test_c15_polyline_arc_open_native_arc_already():
