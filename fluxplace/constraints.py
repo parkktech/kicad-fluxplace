@@ -57,6 +57,8 @@ optional; anything not stated keeps the heuristic default. Schema:
     min_v = 4.75            # ... down to the load's minimum ...
     load_a = 1.0            # ... at this current. Checked against bulk C.
 
+    [placement.fixed_reason."J12"]   # reason of each fixed part (fluxplace/fixedreason.py): mechanical | enclosure | module-mount | owner
+    reason = "enclosure"    # owner also needs decision = "D71dh"; note = free text; ready "fixed reasons" line (F1)
     [sourcing]              # where the board will be built
     china = true            # grade every MPN on LCSC/JLCPCB stock too (CN_* findings)
     cn_need = 100           # units the assembly house must be able to pull

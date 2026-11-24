@@ -243,6 +243,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
+        lines.append(fixed_reason_line(spec, cons, B))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -251,6 +252,26 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
     return lines, detail
+
+
+def fixed_reason_line(spec, cons, B):
+    """[the "fixed reasons" line] (F1): every fixed part (locked, [lock.at], [placement] fixed) has a reason class; a non-mechanical
+    fixed support part over its max distance (powerbudget.supports) is OPEN FIXED_OVER_BUDGET."""
+    from . import preroute as PR, powerbudget as PB, fixedreason as FR
+    rows = {}
+    for s in PB.supports(B, cons, spec):
+        rows.setdefault(s["ref"], []).append(s)
+    return fixed_line(PR.explicit_fixed(B, cons), cons, rows)
+
+
+def fixed_line(fixed, cons, rows):
+    """the "fixed reasons" line from the fixed refs and their support rows (fixedreason.findings)."""
+    from . import fixedreason as FR
+    fs = FR.findings(fixed, cons, rows)
+    if not fs:
+        return _line("fixed reasons", PASS, f"{len(fixed)} fixed part(s), each with a reason class; none over its support max")
+    return _line("fixed reasons", OPEN, f"{len(fs)} finding(s) on {len(fixed)} fixed part(s)",
+                 [f"{f['code']} {f['msg']}" for f in fs][:6])
 
 
 def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
