@@ -79,13 +79,18 @@ def test_block_cohesion_term_is_a_spread_of_each_block():
 
 
 # ---- C7b: rows measured on the output board (honoured / not honoured)
-def _fake_stage(monkeypatch, tmp_path, fanout_ok=True, extra=""):
+def _fake_stage(monkeypatch, tmp_path, fanout_ok=True, extra="", move=None):
     from fluxplace import floorplan2 as FP2, intent as IT
     sys.path.insert(0, os.path.dirname(__file__))
     from test_intent import module, cap
     board = g.board(tmp_path, module("U1", 50, 40) + cap("C1", 20, 20, "A"))
+    moved = None
+    if move:                                  # the output board has C1 at `move`: the second board the stage writes
+        (tmp_path / "moved").mkdir()
+        moved = g.board(tmp_path / "moved", module("U1", 50, 40) + cap("C1", *move, "A"))
 
     def once(b, cons, spec, grow, args, text_in, wd, tag, log=print):
+        b = moved or b
         res = {"tag": tag, "grow": list(grow), "escaped": 5, "required": 5 if fanout_ok else 6, "moved_modules": 1, "movable": 2,
                "source": {"cross": 0, "wl": 1.0}, "annealed": {"cross": 0, "wl": 1.0}, "secs": 0.0, "construct_failed": [],
                "legality_new": {}, "fanout_ok": fanout_ok, "rounds": [{"why": ["U1.3 blocked"]}], "board": b, "blocked": [],
@@ -153,3 +158,14 @@ def test_floorplan_with_no_rows_writes_no_budgets_json(monkeypatch, tmp_path, ca
     open(c, "w").write("")
     cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
     assert "rows on the output: 0 honoured" in capsys.readouterr().out
+
+
+def test_floorplan_near_row_the_moved_output_breaks_is_not_honoured_with_both_values(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path, move=(47, 40),
+                                extra='[[separation]]\nname = "near"\na = ["U1"]\nb = ["C1"]\nmin_mm = 15\nhard = true\n')
+    cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    bj = json.load(open(out[:-len(".kicad_pcb")] + ".budgets.json"))
+    near = next(r for r in bj["honoured"] if r["kind"] == "separation" and r["name"] == "near")
+    assert near["value_in"] is not None and near["value_in"] != near["value_out"]
+    assert near["status"] == "not_honoured"
