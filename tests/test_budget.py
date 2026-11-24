@@ -484,3 +484,28 @@ def test_honoured_summary_counts_hard_and_soft_apart():
          {"name": "M1", "status": "not_measured", "hard": False}, {"name": "O1", "status": "honoured", "hard": True}]
     assert BG.honoured_summary(h) == ("rows on the output: 1 honoured, 1 hard not honoured (H1), 1 soft not honoured, "
                                       "1 not measured")
+
+
+def test_default_support_row_is_soft_in_the_table(tmp_path):
+    import copy
+    plan = copy.deepcopy(PLAN)
+    plan["supports"][0]["limit"] = {"target": 5, "max": 5, "unit": "mm", "source": "default 5 mm", "klass": "INF", "derived": "default"}
+    plan["supports"][0]["sure"], plan["supports"][0]["dist_mm"] = True, 9
+    r = [x for x in BG.table(usb_board(tmp_path), USB, plan=plan) if x["kind"] == "support"][0]
+    assert (r["verdict"], r["hard"], r["derived"]) == ("fail", False, "default")
+    plan["supports"][0]["limit"]["derived"] = ""
+    r = [x for x in BG.table(usb_board(tmp_path, name="d.kicad_pcb"), USB, plan=plan) if x["kind"] == "support"][0]
+    assert r["hard"] is True
+
+
+def test_stated_derivation_makes_a_rail_or_separation_soft(tmp_path):
+    import copy
+    from fluxplace import powerbudget as PB
+    plan = copy.deepcopy(PLAN)
+    plan["rails"]["+5V"]["drop"] = {"source": "X.pdf#p5", "klass": "INF", "derived": "worst case of two rows"}
+    r = [x for x in BG.table(usb_board(tmp_path), USB, plan=plan) if x["kind"] == "rail"][0]
+    assert r["hard"] is False and r["derived"] == "worst case of two rows"
+    assert PB._drop({"drop_mv_max": 50, "source": "X.pdf#p5", "derived": "d"})["derived"] == "d"
+    sep = {"separation": [{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 50.0, "source": "x p.1", "derived": "rule of thumb"}]}
+    r = BG.separation_rows(usb_board(tmp_path, name="s.kicad_pcb"), sep)[0]
+    assert r["verdict"] == "fail" and r["hard"] is False

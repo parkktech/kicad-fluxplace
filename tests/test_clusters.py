@@ -98,11 +98,11 @@ def test_routediag_far_support_uses_ownership(tmp_path):
 
 
 # ---- P3: the one support table (powerbudget.support_row / supports)
-def _pb_board(tmp_path, c2=(30, 12), c1=(22, 20)):
+def _pb_board(tmp_path, c2=(30, 12), c1=(22, 20), extra=""):
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
     import powerboard as PB
-    return PB, RD.load(PB.board(tmp_path, c2=c2, c1=c1))
+    return PB, RD.load(PB.board(tmp_path, c2=c2, c1=c1, extra=extra))
 
 
 def _sup(B, cons, spec=None, facts=None, mpn_map=None):
@@ -447,3 +447,10 @@ def test_support_distance_does_not_change_when_the_pair_is_rotated(tmp_path):
         cl, _ = CL.build(B, _PLANNED)
         dists.append(next(x["dist"] for c in cl for x in c["supports"] if x["ref"] == "C1"))
     assert max(dists) - min(dists) <= 0.01
+
+
+def test_every_default_support_branch_is_marked_derived(tmp_path):
+    PB, B = _pb_board(tmp_path, extra=g.two("C3", 14, 14, "SW", "GND"))       # C3: a loop part (netclass budget), C2: bulk
+    lims = {s["ref"]: s["limit"] for s in _sup(B, PB.CONS).values()}
+    assert all(l["derived"] != "" and l["klass"] == "INF" for l in lims.values())
+    assert {l["derived"] for l in lims.values()} == {"default", "default, unverified", "netclass budget"}

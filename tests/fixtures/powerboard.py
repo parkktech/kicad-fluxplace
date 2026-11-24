@@ -24,7 +24,7 @@ def cap(ref, x, y, n1, n2, value):
     return s.replace(f'(property "Reference" "{ref}")', f'(property "Reference" "{ref}") (property "Value" "{value}")')
 
 
-def board(tmp_path, c2=(30, 12), c1=(22, 20)):
+def board(tmp_path, c2=(30, 12), c1=(22, 20), extra=""):
     b = g.ic("U1", 6, 8, ["VIN", "SW", "GND", "FB", "EN", "BOOT", "GND", "PG"], pitch=1.0)
     b += g.two("L1", 12, 8, "SW", "VOUT")
     b += g.fp("J1", 34, 22, [g.pad(str(i + 1), 0, i * 1.0, "VOUT" if i < 4 else ("GND" if i < 8 else "S%d" % i), 0.6, 0.6) for i in range(10)])
@@ -33,4 +33,4 @@ def board(tmp_path, c2=(30, 12), c1=(22, 20)):
     b += cap("C2", c2[0], c2[1], "VOUT", "GND", "22uF")
     for i in range(6):
         b += g.two(f"R{i + 1}", 4 + 5 * i, 28, f"S{i + 1}", "GND")
-    return g.board(tmp_path, b, outline=(0, 0, 40, 30))
+    return g.board(tmp_path, b + extra, outline=(0, 0, 40, 30))
