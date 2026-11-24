@@ -1124,6 +1124,14 @@ def st_floorplan(c, n, board):
     bad = rc != 0 or not os.path.exists(out) or line.startswith("floorplan: FAIL") or any(
         l.startswith("INTENT: FAIL") for l in text.splitlines())
     res = dict({"verdict": "fail" if bad else "pass", "line": line, "board": out if os.path.exists(out) else board}, **_wl_record(out))
+    ill = next((l for l in text.splitlines() if l.startswith("floorplan: ILLEGAL")), None)
+    if ill and os.path.exists(out):             # an illegal placement is not a stage board: kept beside, never handed on or resumed from
+        bad_out = out[:-len(".kicad_pcb")] + ".illegal.kicad_pcb"
+        os.replace(out, bad_out)
+        pro = out[:-len(".kicad_pcb")] + ".kicad_pro"
+        if os.path.exists(pro):
+            os.replace(pro, bad_out[:-len(".kicad_pcb")] + ".kicad_pro")
+        return {"verdict": "fail", "line": ill, "board": board, "illegal_board": bad_out, "next": [bad_out]}
     return _residual_fail(res, c, d)
 
 

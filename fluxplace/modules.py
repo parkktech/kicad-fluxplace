@@ -110,6 +110,7 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
             if v in flips and B["parts"][v]["side"] != orig[v][3]:
                 flips.discard(v)
             LG.revert_part(B, L, v, orig[v])
+            detach(v)                                    # back at its input pose it is no part of the rigid unit: it must not stretch the unit's box
             out.setdefault(v, []).extend(bad.get(v, ["conflict"]))
     return out
 

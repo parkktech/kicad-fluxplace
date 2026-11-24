@@ -21,7 +21,8 @@ import tempfile
 from . import geom as GM
 
 KINDS = ("overlap", "outside", "forbidden", "no_tht", "pad_short", "hole", "hardware")
-DRC_TYPES = ("shorting_items", "courtyards_overlap", "clearance", "hole_clearance", "solder_mask_bridge")
+DRC_TYPES = ("shorting_items", "courtyards_overlap", "clearance", "hole_clearance", "solder_mask_bridge", "copper_edge_clearance",
+             "hole_to_hole", "items_not_allowed", "npth_inside_courtyard", "pth_inside_courtyard")
 MOVE_EPS = 1e-3
 
 
@@ -180,11 +181,12 @@ def _refs(v):
     return sorted(out)
 
 
-def drc_new(path, orig_path, cli="kicad-cli"):
-    """DRC violations (error severity, the legality types) on `path` that `orig_path` does not have.
-    -> None when kicad-cli did not run, else {"n": {type: count}, "items": [violation], "refs": [pairs of refs]}."""
-    out, inp = _drc(path, cli=cli), _drc(orig_path, pro_from=orig_path, cli=cli)
-    if out is None:
+def drc_new(path, orig_path, cli="kicad-cli", ref=None):
+    """DRC violations (error severity, the legality types) on `path` that `orig_path` does not have (`ref`: its violations, run once).
+    -> None when kicad-cli did not run on either board (the gate fails closed), else {"n": {type: count}, "items": [violation], "pairs": [refs]}."""
+    out = _drc(path, cli=cli)
+    inp = ref if ref is not None else _drc(orig_path, pro_from=orig_path, cli=cli)
+    if out is None or inp is None:
         return None
     seen = {}
     for v in inp or []:
@@ -217,8 +219,9 @@ def gate(path, orig_path, cons, base, ref_path=None, log=print, rounds=3, cli="k
     drc_new() dict still new ("items" empty = clean), with "reverted"."""
     from . import legality as LGL, modules as MD, routediag as RD
     reverted = {}
+    ref = _drc(ref_path or orig_path, pro_from=ref_path or orig_path, cli=cli)       # the input's DRC, once
     for _ in range(rounds + 1):
-        d = drc_new(path, ref_path or orig_path, cli=cli)
+        d = drc_new(path, orig_path, cli=cli, ref=ref)
         if d is None:
             return None
         if not d["items"]:
