@@ -327,3 +327,21 @@ def test_measure_rows_returns_the_budget_rows_and_fixed_findings_and_matches_the
     detail = {}
     line = RDY.budget_line(None, cons, B, None, None, detail)           # one code path: the line's table is the same rows
     assert [r["name"] for r in detail["budgets"]["rows"]] == [r["name"] for r in rows] and BG.summary(rows) in line["detail"]
+
+
+def test_stage_honoured_big_table_is_cut_to_failing_rows_and_counts_so_the_line_fits(monkeypatch, tmp_path):
+    from fluxplace import ready as RDY, budget as BG
+    rows = [BG.row("pair", f"P{i}", "length", "mm", value=20.0, target=25.0, mx=40.0, source="s") for i in range(595)]
+    rows += [BG.row("separation", f"F{i}", "distance", "mm", value=3.0, mx=900.0, source="s", hard=True, minimum=True) for i in range(5)]
+    monkeypatch.setattr(RDY, "measure_rows", lambda spec, cons, B, path, **k: (rows, []))
+    ev = tmp_path / "ev" / "events.jsonl"
+    ev.parent.mkdir()
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    out = str(tmp_path / "o.kicad_pcb")
+    r = RDY.stage_honoured("placetour", None, {}, rows, out, None)
+    line = json.loads(open(ev).read().splitlines()[-1])
+    assert "truncated" not in line and len(open(ev).read().splitlines()[-1]) < 60000
+    assert {x["id"]: x["hard"] for x in line["criteria"] if x.get("hard")} == {f"F{i}": True for i in range(5)}
+    assert {x["id"] for x in line["criteria"] if x["id"].endswith("honoured")} == {"pair honoured"}
+    from fluxplace import liveview as LV
+    assert [c["id"] for c in LV.criteria(r["criteria"])].count("pair honoured") == 1 and len(r["criteria"]) == 6

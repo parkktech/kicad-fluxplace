@@ -355,7 +355,7 @@ def stage_rows(spec, cons, B, board_path, ds_dir=None):
 def stage_honoured(stage, spec, cons, rows_in, out_path, B_out, failed=False, ds_dir=None, cand="result"):
     """C7b: measure the board a stage wrote and set it against the rows of its input. Writes <out stem>.budgets.json (rows +
     honoured), puts the summary and the rows (criteria with `hard`) on the event stream. No verdict changes (the gate is step 14).
-    -> {line, criteria, honoured, rows}; line is None when nothing could be measured."""
+    -> {line, criteria, honoured, rows}; line is always a str (a failed measure says so in it)."""
     from . import budget as BG, liveview as LV
     try:
         rows, _fx = measure_rows(spec, cons, B_out, out_path, ds_dir=ds_dir)
@@ -365,6 +365,16 @@ def stage_honoured(stage, spec, cons, rows_in, out_path, B_out, failed=False, ds
         if rows or rows_in:
             with open(stem + ".budgets.json", "w") as fh:
                 json.dump({"rows": rows, "honoured": h, "summary": line}, fh, indent=1, default=list)
+        # the stream line stays under the events cut-off (60 kB drops every criterion): over 30 kB of criteria, only the rows
+        # not ok stay (they keep `hard`, in table order), plus one count per kind; the full table is <stem>.budgets.json
+        if len(json.dumps(LV.criteria(rows), separators=(",", ":"))) > 30000:
+            ok = [r for r, c in zip(rows, LV.criteria(rows)) if c["ok"] is True]
+            counts = {}
+            for r in ok:
+                counts[r.get("kind")] = counts.get(r.get("kind"), 0) + 1
+            rows = [r for r, c in zip(rows, LV.criteria(rows)) if c["ok"] is not True] + [
+                {"id": f"{k} honoured", "ok": True, "value": n, "limit": None,
+                 "text": f"{n} rows honoured, full table: {os.path.basename(stem)}.budgets.json"} for k, n in counts.items()]
         LV.progress(stage, "honoured", always=True, cand=cand, criteria=rows, why=line, verdict="refused" if failed else "kept")
         return {"line": line, "criteria": rows, "honoured": h, "rows": rows}
     except Exception as e:                                  # noqa: BLE001 - the report never fails the stage
