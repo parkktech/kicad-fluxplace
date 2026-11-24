@@ -130,7 +130,7 @@ def test_allow_undocumented_is_loud_recorded_and_stamps(tmp_path):
     b = _board(tmp_path)
     sp = tmp_path / "s.json"
     sp.write_text(json.dumps(_spec()))
-    cons = _cons(tmp_path)
+    cons = _cons(tmp_path, '[placement]\nsides = "front"\n')
     a = _pipe_args(tmp_path, b, sp, cons, allow_undocumented=True)
     assert PL.run(a) == 0
     st = PL.load_state(a.workdir)

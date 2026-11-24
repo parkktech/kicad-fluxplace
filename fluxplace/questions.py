@@ -356,6 +356,39 @@ def check_fixed_parts(S, B, cons, **_):
               "fixed", sorted(set(box["cons"].get("placement", {}).get("fixed", [])) | (set(cand) if ch == "lock" else set()))))
 
 
+def _ask_back_height(S):
+    S.ask("back-max-height", "placement-sides", "[placement] sides = \"both-light-back\" with no back_max_height_mm: the tallest part allowed on the back",
+          {"2.0": "parts taller than 2.0 mm stay on the front",
+           "3.0": "parts taller than 3.0 mm stay on the front",
+           "none": "no height limit; the weight rule alone decides"},
+          "none", "[placement] back_max_height_mm = <mm> in the constraints",
+          apply=lambda box, ch: None if ch == "none" else box["cons"].setdefault("placement", {}).__setitem__(
+              "back_max_height_mm", float(ch)))
+
+
+def check_placement_sides(S, B, cons, **_):
+    """which board sides free parts may be placed on, asked before any placement."""
+    pl = (cons or {}).get("placement") or {}
+    if "sides" in pl:
+        if pl.get("sides") == "both-light-back" and "back_max_height_mm" not in pl:
+            _ask_back_height(S)
+        return
+    keep = pl.get("keepout") or {}
+    names = [k for k, v in keep.items() if isinstance(v, dict) and v.get("side") in ("B", "both")]
+    names += [e.get("name") or "?" for e in ((cons or {}).get("keepout") or []) if isinstance(e, dict) and e.get("side") in ("B", "both")]
+    names = sorted(names)
+    nb = sum(1 for p in B["parts"].values() if p.get("side") == "B.Cu")
+    choice = S.ask("placement-sides", "placement-sides",
+          f"no [placement] sides decision; {nb} part(s) on the back now; back-side closed areas: {', '.join(names) or 'none declared'}",
+          {"front": "free parts go on the front only; the back takes only support parts that cannot seat on the front",
+           "both": "any free part may go on either side outside the back-side closed areas (double-sided assembly)",
+           "both-light-back": "either side, but heavy / tall parts (inductors, transformers, connectors, modules) stay on the front (they can drop in the second reflow)"},
+          "both-light-back", "[placement] sides = \"front\" | \"both\" | \"both-light-back\"; with both-light-back also back_max_height_mm = <mm>",
+          apply=lambda box, ch: box["cons"].setdefault("placement", {}).__setitem__("sides", ch))
+    if choice == "both-light-back" and "back_max_height_mm" not in pl:
+        _ask_back_height(S)
+
+
 def check_rail_pour(S, B, cons, cls=None, **_):
     """a rail (many pads, no plane) with no pour decision: pour or tree."""
     from . import railroute as RL
@@ -472,6 +505,7 @@ def check_spec_board(S, B, cons, spec=None, **_):
 
 CHECKS = {"layer-roles": check_layer_roles, "controlled": check_controlled, "rip-existing": check_rip_existing,
           "fixed-parts": check_fixed_parts, "rail-pour": check_rail_pour, "floors": check_floors, "spec-board": check_spec_board}
+CHECKS["placement-sides"] = check_placement_sides
 def check_connector_entry(S, B, cons, **_):
     """connectors whose entry direction cannot be derived (asked only when the constraints carry `[intent]`)."""
     from . import connectors as CN, intent as IT
@@ -481,8 +515,8 @@ def check_connector_entry(S, B, cons, **_):
 
 CHECKS["connector-entry"] = check_connector_entry
 TOPICS = {"fanout": ("spec-board", "layer-roles", "controlled", "floors", "rail-pour"),
-          "modules": ("spec-board", "fixed-parts", "layer-roles", "controlled"),
-          "floorplan": ("spec-board", "fixed-parts", "layer-roles", "controlled", "connector-entry"),
+          "modules": ("spec-board", "fixed-parts", "layer-roles", "controlled", "placement-sides"),
+          "floorplan": ("spec-board", "fixed-parts", "layer-roles", "controlled", "connector-entry", "placement-sides"),
           "route": ("spec-board", "rip-existing", "layer-roles", "controlled", "floors", "rail-pour")}
 
 
