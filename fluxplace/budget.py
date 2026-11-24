@@ -175,3 +175,64 @@ def netclasses(cons, board=None, stack=None):
                 w, g = lay[sig[0]]
         out[fam] = {"z": z, "track_width": w, "diff_pair_width": w, "diff_pair_gap": g, "layers": lay}
     return out
+
+
+def keepouts(B, cons):
+    """Routing keep-outs with their layers: board rule areas that forbid tracks, and [placement.keepout.N] with `layers`.
+    -> [{name, rect (x0, y0, x1, y1), layers [sorted], all_layers, source}]"""
+    cu = list(B.get("copper") or [])
+    out, k = [], 0
+    for z in B.get("zones", []):
+        if not (z.get("keepout") and z.get("no_tracks") and z.get("pts")):
+            continue
+        k += 1
+        xs, ys = [p[0] for p in z["pts"]], [p[1] for p in z["pts"]]
+        lay = sorted(set(z["layers"]) & set(cu))
+        out.append({"name": z.get("name") or f"rule-area {k}", "rect": (min(xs), min(ys), max(xs), max(ys)), "layers": lay,
+                    "all_layers": set(lay) >= set(cu), "source": "board rule area (tracks not allowed)"})
+    for name, kv in sorted((((cons or {}).get("placement") or {}).get("keepout") or {}).items()):
+        if not isinstance(kv, dict) or not kv.get("layers"):
+            continue
+        rect = tuple(float(v) for v in kv["rect"]) if kv.get("rect") else None
+        if rect is None and kv.get("under") in B["parts"]:
+            c, m = B["parts"][kv["under"]]["court"], float(kv.get("margin_mm", 0.0))
+            rect = (c[0] - m, c[1] - m, c[2] + m, c[3] + m)
+        if rect is None:
+            continue
+        lay = sorted(cu) if kv["layers"] == "all" else sorted(set(kv["layers"]) & set(cu))
+        out.append({"name": name, "rect": rect, "layers": lay, "all_layers": set(lay) >= set(cu), "source": str(kv.get("source", ""))})
+    return out
+
+
+def keepout_rows(B, cons):
+    out = []
+    for k in keepouts(B, cons):
+        x0, y0, x1, y1 = k["rect"]
+        out.append(row("keepout", k["name"], "area", "mm2", round((x1 - x0) * (y1 - y0), 2), None, None, k["source"], "REQ", True,
+                       layers=k["layers"], detail="all copper layers" if k["all_layers"] else f"{len(k['layers'])} layer(s)", rect=list(k["rect"])))
+    return out
+
+
+def flight_rows(B, cons, fixed=()):
+    """A pair whose straight line between two of its parts crosses a routing keep-out: one row naming the pair and the
+    keep-out. hard = the keep-out is on every copper layer AND both parts are fixed (no placement move and no layer change
+    can fix it). A keep-out that contains one of the two points is the part's own rule area: skipped."""
+    from . import geom as GM, netclass as NC
+    cons = cons or {}
+    kos = keepouts(B, cons)
+    names = sorted({q["net"] for q in B["pads"] if q["net"]})
+    pm, legs, out = NC._pairs(names, cons), pair_legs(names, cons), []
+    inside = lambda r, p: r[0] <= p[0] <= r[2] and r[1] <= p[1] <= r[3]                      # noqa: E731
+    ncu = len(B.get("copper") or [])
+    for m in sorted({min(n, p) for n, p in pm.items()}):
+        if not (family_of(cons.get("channel"), m, legs) or family_of(cons.get("pairs"), m, legs)):
+            continue
+        ctr = _centres(B, m)
+        for a, b, _d in mst_edges(ctr):
+            for k in kos:
+                if inside(k["rect"], ctr[a]) or inside(k["rect"], ctr[b]) or not GM.seg_hits_rect(ctr[a], ctr[b], k["rect"]):
+                    continue
+                out.append(row("keepout-flight", f"{m}/{pm[m]} x {k['name']}", "crossing", "count", 1, None, 0, k["source"], "REQ",
+                               k["all_layers"] and a in fixed and b in fixed, refs=sorted([a, b]), nets=[m, pm[m]], layers=k["layers"],
+                               detail=f"flight line {a}-{b} crosses keep-out {k['name']} on {len(k['layers'])} of {ncu} copper layers"))
+    return out

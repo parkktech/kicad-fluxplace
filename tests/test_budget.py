@@ -113,3 +113,36 @@ def test_a_90_ohm_family_yields_a_netclass_equal_to_pairs_layer_geometry():
         assert nc["layers"][l] == geo[l][:2]
     assert (nc["track_width"], nc["diff_pair_gap"]) == geo["F.Cu"][:2] and nc["diff_pair_width"] == nc["track_width"]
     assert set(BG.netclasses(TZ.CONS, stack=(TZ.ROWS, TZ.PLANES, TZ.SIG))) == {"ETH_", "USB_"}
+
+
+def test_flight_line_through_an_all_layer_keepout_is_a_hard_row_naming_both(tmp_path):
+    B = usb_board(tmp_path, zone(38, 10, 42, 30))
+    ko = BG.keepout_rows(B, USB)
+    assert len(ko) == 1 and ko[0]["layers"] == ["B.Cu", "F.Cu", "In1.Cu"] and ko[0]["value"] == 80.0 and ko[0]["rect"] == [38.0, 10.0, 42.0, 30.0]
+    f = BG.flight_rows(B, USB, fixed={"U1", "J1"})
+    assert len(f) == 1 and f[0]["kind"] == "keepout-flight" and f[0]["hard"] is True and f[0]["verdict"] == "fail"
+    assert f[0]["name"] == "USB_D_N/USB_D_P x rule-area 1" and f[0]["refs"] == ["J1", "U1"]
+    assert "3 of 3 copper layers" in f[0]["detail"]
+    assert BG.flight_rows(B, USB, fixed={"U1"})[0]["hard"] is False              # one end can still move
+
+
+def test_flight_line_cases_that_are_not_hard(tmp_path):
+    outer = usb_board(tmp_path, zone(38, 10, 42, 30, '"F.Cu" "B.Cu"'), name="o.kicad_pcb")
+    f = BG.flight_rows(outer, USB, fixed={"U1", "J1"})
+    assert len(f) == 1 and f[0]["hard"] is False and "2 of 3 copper layers" in f[0]["detail"]     # an inner layer passes
+    assert BG.flight_rows(usb_board(tmp_path, zone(38, 30, 42, 40), name="m.kicad_pcb"), USB, fixed={"U1", "J1"}) == []   # beside the line
+    assert BG.flight_rows(usb_board(tmp_path, zone(15, 15, 25, 25), name="s.kicad_pcb"), USB, fixed={"U1", "J1"}) == []   # the part's own area
+
+
+def test_declared_keepout_needs_layers_to_be_a_routing_keepout(tmp_path):
+    B = usb_board(tmp_path)
+    cons = dict(USB, placement={"keepout": {"parts_only": {"rect": [38, 10, 42, 30], "side": "both"},
+                                            "ant": {"rect": [38, 10, 42, 30], "layers": "all", "source": "module datasheet p.9"}}})
+    assert [r["name"] for r in BG.keepout_rows(B, cons)] == ["ant"]
+    f = BG.flight_rows(B, cons, fixed={"U1", "J1"})
+    assert f[0]["name"] == "USB_D_N/USB_D_P x ant" and f[0]["hard"] is True and f[0]["source"] == "module datasheet p.9"
+    under = dict(USB, placement={"keepout": {"gnss": {"under": "U1", "margin_mm": 2.0, "layers": ["F.Cu", "In1.Cu"], "source": "ds p.7"},
+                                             "gone": {"under": "U99", "layers": "all", "source": "ds p.7"}}})
+    k = BG.keepout_rows(B, under)
+    assert [r["name"] for r in k] == ["gnss"] and k[0]["rect"] == [17.0, 17.0, 23.0, 23.0] and k[0]["layers"] == ["F.Cu", "In1.Cu"]
+    assert BG.flight_rows(B, under, fixed={"U1", "J1"}) == []                 # the pair starts inside the area: the part's own keep-out
