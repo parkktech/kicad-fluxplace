@@ -527,3 +527,14 @@ def test_table_exempts_a_keepout_of_its_own_module(tmp_path):
     cons = dict(USB, placement={"keepout": {"ind": {"under": "L1", "layers": "all"}}})
     rows = BG.table(_own_board(tmp_path, "t.kicad_pcb"), cons, fixed=("U1", "J1"))
     assert [r for r in rows if r["kind"] == "keepout-flight"] == []
+
+
+def test_unnamed_separations_keep_their_names_when_an_earlier_one_is_dropped(tmp_path):
+    from fluxplace import intent as IT
+    B = usb_board(tmp_path)
+    first = {"a": ["U*"], "b": ["J1"], "min_mm": 10.0, "source": "ds p.2"}               # met (38 mm), still an away row
+    second = {"a": ["U1"], "b": ["J1"], "min_mm": 40.0, "source": "ds p.4"}              # fails
+    away = lambda sep: [r["name"] for r in IT.check(B, {"separation": sep}) if r["kind"] == "away"]
+    name1, name2 = "sep:" + BG.sep_name(first, 0), "sep:" + BG.sep_name(second, 1)
+    assert name1 != name2
+    assert away([first, second]) == [name1, name2] and away([second]) == [name2]
