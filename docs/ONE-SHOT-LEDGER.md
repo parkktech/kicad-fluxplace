@@ -101,3 +101,5 @@ Call-log bug: a global flag before the subcommand (`--no-sourcing review`) is lo
 | 2026-11-24 | W15 CURRENT hygiene | router/repair output | BUG | 87 zero-length + 4 duplicate segments, 130 dangling vias, 54 dangling tracks, stacked vias | measured as M9 hygiene (T1b); cleaned in T2 | open (T2) |
 | 2026-11-24 | step 3c suite | test_lookahead thread race | FLAKY | failed 4/50 under load | F8 (4b14886) | 0/50 |
 | 2026-11-24 | trace-finish T1b | pipeline clean gate on W15 | BYPASS | measure-only run refused on W15; run-finish.sh seeds state.json + --force (W15 harness only, M8 conditions) | open: a measure-only stage entry that needs no clean gate (T8) | - |
+| 2026-11-24 | trace-finish T1 baseline | `fills()` zone-fill net lookup | BUG (KiCad 10) | read `net_name`, which KiCad 10 does not write: 526 vias falsely dangling | fixed in w18tf1 (TF T1 fixes) | 142 dangling on W15 |
+| 2026-11-24 | trace-finish T1 baseline | H10 opens gate | BUG (nondeterministic) | compared kicad-cli unconnected item pairs, which change run to run: the same board failed ILLEGAL: H10 twice | count opens per net | identical board passes |
