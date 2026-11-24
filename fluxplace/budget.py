@@ -426,7 +426,8 @@ def template_rows(B, cons, spec=None, cl=None):
                    else f"derived layout.{key} of {lay['mpn']} from courtyard geometry, recommended ({lay['src']} states the rule, not the number)")
             out.append(row("support", f"{c['ic']} template {key}", "template", "mm", got.get(key), mx, mx, src,
                            "REQ" if hard else "INF", hard, refs=[c["ic"]] + [s["ref"] for s in c["supports"] if s["rank"] < 9],
-                           detail="" if got.get(key) is not None else "no such part in the module"))
+                           detail="" if got.get(key) is not None else "no such part in the module",
+                           derived="" if hard else "courtyard geometry (D71do)"))
         pairs = lay["pairs"]
         if pairs:                       # cin_side is the datasheet's REQ the seater steers by: it gets a row, never a silent fallback (A1)
             caps = [s for s in c["supports"] if s["rank"] == 1 and s["ref"].startswith("C")]

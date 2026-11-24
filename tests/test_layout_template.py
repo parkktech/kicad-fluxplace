@@ -217,6 +217,9 @@ def test_template_rows_are_hard_only_for_numbers_the_page_states(tmp_path):
     assert not any(r["hard"] for r in rows2.values()) and {r["klass"] for r in rows2.values()} == {"INF"}
     assert rows2["U1 template cin_loop_mm"]["verdict"] == "fail" and "derived" in rows2["U1 template cin_loop_mm"]["source"]
     assert BU.template_rows(B, {}, SPEC) == []                                                     # no fact, no row
+    assert {k: v["derived"] for k, v in rows2.items()} == {"U1 template cin_loop_mm": "courtyard geometry (D71do)",
+                                                           "U1 template sw_mm": "courtyard geometry (D71do)", "U1 template fb_mm": "courtyard geometry (D71do)"}
+    assert {r["derived"] for r in rows.values()} == {""} and rows["U1 template cin_side"]["hard"]   # datasheet rows: hard, no derivation
 
 
 def test_rows_pass_once_the_module_is_seated(tmp_path):
