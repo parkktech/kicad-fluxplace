@@ -470,6 +470,7 @@ def test_honoured_ok_to_fail_is_not_honoured_and_fail_to_ok_is_honoured():
     h2 = BG.honoured(a, b)
     assert h2[0]["status"] == "honoured" and h2[0]["value_in"] == 46.0 and h2[0]["value_out"] == 20.0
     assert BG.honoured(b, [BG.row("pair", "X", "length", "mm", value=30.0, target=25.0, mx=40.0, source="s")])[0]["status"] == "honoured"
+    assert BG.honoured(b, [BG.row("pair", "X", "length", "mm", value=30.0, target=25.0, mx=40.0, source="s")])[0]["limit"] == 40.0
 
 
 def test_honoured_row_missing_in_after_is_not_measured_and_row_only_in_after_has_no_value_in():
