@@ -605,9 +605,9 @@ def cmd_calibrate(a):
         ses = os.path.splitext(a.board)[0] + ".ses"
         print(f"running freerouting ({jar})...")
         try:
-            subprocess.run(["java", "-jar", jar, "-de", dsn, "-do", ses,
-                            "-mp", str(a.passes)], timeout=1800, check=True,
-                           capture_output=True)
+            from fluxplace import procs as _procs
+            _procs.run(["java", "-jar", jar, "-de", dsn, "-do", ses, "-mp", str(a.passes)], timeout=1800, check=True,
+                       capture_output=True)
         except Exception as e:
             print(f"freerouting failed: {e}")
             return
@@ -764,8 +764,8 @@ def cmd_auto_candidates(a):
             outdir = os.path.join(a.out, f"cand_{k}")
             os.makedirs(outdir, exist_ok=True)
             log = open(os.path.join(outdir, "log.txt"), "w")
-            live[k] = (subprocess.Popen(_cand_argv(a, k, outdir), stdout=log,
-                                        stderr=subprocess.STDOUT), log, time.time())
+            from fluxplace import procs as _procs
+            live[k] = (_procs.popen(_cand_argv(a, k, outdir), stdout=log, stderr=subprocess.STDOUT), log, time.time())
         time.sleep(5)
         for k in list(live):
             proc, log, ts = live[k]
@@ -845,9 +845,9 @@ def _export_netlist_xml(kicad_cli, sch):
     import subprocess, tempfile
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tf:
         xml = tf.name
-    r = subprocess.run([kicad_cli, "sch", "export", "netlist",
-                        "--format", "kicadxml", "--output", xml, sch],
-                       capture_output=True, text=True)
+    from fluxplace import procs as _procs
+    r = _procs.run([kicad_cli, "sch", "export", "netlist", "--format", "kicadxml", "--output", xml, sch],
+                   capture_output=True, text=True)
     if r.returncode != 0:
         os.unlink(xml)
         return None, (r.stderr or "kicad-cli netlist export failed").strip()[:200]
@@ -1664,9 +1664,9 @@ def _bridge_guarded(path, spec, a, log, cons=None):
         shutil.move(tmp, path)
         # the new copper cut the pours: save the file with fills the fab
         # gate will judge (a stale fill read as 19 zone-clearance hits on V1.5)
-        subprocess.run([a.kicad_cli, "pcb", "drc", "--refill-zones", "--save-board",
-                        "--format", "json", "-o", tmp + ".drc.json", path],
-                       capture_output=True, text=True)
+        from fluxplace import procs as _procs
+        _procs.run([a.kicad_cli, "pcb", "drc", "--refill-zones", "--save-board", "--format", "json", "-o", tmp + ".drc.json", path],
+                   capture_output=True, text=True)
         for junk in (tmp + ".drc.json",):
             if os.path.exists(junk):
                 os.unlink(junk)
@@ -1917,25 +1917,38 @@ def cmd_tune(a):
     budget = a.budget if a.budget is not None else TU.default_budget(len(pairs))
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
-                        amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res,
+                        amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
                         log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
+    from fluxplace import tune as TU
+    TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
     for master, slave, lm, ls in rep:
         flag = "" if abs(lm - ls) <= lim(master) else "   <-- still over"
         print(f"  {master}/{slave}: P {lm:.1f} / N {ls:.1f} mm, skew {lm - ls:+.2f}{flag}")
-    return _tune_finish(a, out, res, [r for r in res.get("pairs", []) if r["status"] != "ok"], "pair")
+    return _tune_finish(a, out, res, tune_worse(res), "pair")
+
+
+def tune_worse(res):
+    """Rows tune should have helped and made worse: still over the limit and further from it than when tune started. Open, unmeasured,
+    needs_reroute and not_reached pairs are skipped rows (the pairs gate decides on gated pairs); a pair that stayed over but did not
+    get worse is not a tune failure either."""
+    return [r for r in res.get("pairs", []) if r["status"] == "over" and r.get("before") is not None and r.get("skew") is not None
+            and abs(r["skew"]) > r["before"] + 1e-6]
 
 
 def _tune_finish(a, out, res, bad, unit):
-    """tune summary line + JSON report (`--report`, default OUT.tune.json). Exit 0 all in tolerance, 1 some left over /
-    needs_reroute, 2 stopped by budget or signal (OUT is the best accepted board)."""
+    """tune summary line + JSON report (`--report`, default OUT.tune.json). Exit 0 unless a pair tune worked on got worse (`bad`);
+    open / needs_reroute / unmeasured pairs are skipped rows, never a failure (the pairs gate decides); 2 stopped by budget or
+    signal (OUT is the best accepted board)."""
     import json as _json
     nr = [r for r in res.get("pairs", []) if r["status"] == "needs_reroute"]
     path = a.report or out + ".tune.json"
     res["budget_s"] = res.get("budget_s")
     with open(path, "w") as f:
         _json.dump(res, f, indent=1)
-    msg = f"tune: {len(bad)} {unit}(s) not in tolerance"
+    skipped = [r for r in res.get("pairs", []) if r["status"] in ("needs_reroute", "unmeasured", "not_reached")]
+    over = [r for r in res.get("pairs", []) if r["status"] == "over"]
+    msg = f"tune: {len(bad)} {unit}(s) got worse, {len(over)} still over the limit, {len(skipped)} skipped"
     if nr:
         msg += f", {len(nr)} NEEDS_REROUTE (legs differ in layers/vias; length tuning cannot fix them: fluxplace pairs --only)"
     if res.get("stopped"):
@@ -4401,7 +4414,8 @@ def _guard_end(g, a, raised=False):
 
 
 def main(argv=None):
-    from fluxplace import quietlog, calllog
+    from fluxplace import quietlog, calllog, procs
+    procs.install()                              # atexit + SIGTERM/SIGHUP reap every child process group
     quietlog.install_stderr()                    # drop the repeated pcbnew assert line from fd 2 (FLUXPLACE_RAW_STDERR=1: off)
     return calllog.run(_main, argv)              # one JSON line per call in .fluxplace/calls.jsonl
 

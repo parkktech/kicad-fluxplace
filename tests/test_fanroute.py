@@ -46,7 +46,8 @@ def test_order_controlled_first_with_fanout(monkeypatch):
 
 def test_constructive_flow_stage_names():
     assert PL.FLOWS["constructive"][0] == "ready"
-    assert PL.FLOWS["constructive"][1:8] == ["modules", "floorplan", "fanout", "pour-tie", "pairs", "critroute", "plan-route"]
-    assert PL.FLOWS["constructive"][8] == "route"
+    assert PL.FLOWS["constructive"][1:11] == ["modules", "floorplan", "fanout", "pour-tie", "placetour", "lookahead", "pairs", "tune",
+                                              "critroute", "plan-route"]
+    assert PL.FLOWS["constructive"][11] == "route"
     for n in PL.FLOWS["constructive"]:
         assert n in PL.FUNCS

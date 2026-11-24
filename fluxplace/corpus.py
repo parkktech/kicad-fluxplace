@@ -11,6 +11,7 @@ The manifest is user data (`~/.config/fluxplace/corpus.toml` by default); nothin
 module names a board, ref, net or path.
 """
 import hashlib, json, os, shutil, subprocess, sys, time
+from fluxplace import procs as _procs
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -82,7 +83,7 @@ def _run(argv, cwd, log, timeout):
     t0 = time.time()
     nice = ["nice", "-n", "10"] if shutil.which("nice") else []
     try:
-        p = subprocess.run(nice + argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        p = _procs.run(nice + argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         code, text = p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         code, text = None, f"TIMEOUT after {timeout}s\n"
@@ -497,7 +498,7 @@ def _baseline_ref(a, ref, out, work):
                "--jobs", str(a.jobs)]
         for n in a.board or []:
             cmd += ["--board", n]
-        p = subprocess.run(cmd, capture_output=True, text=True, cwd=tree)
+        p = _procs.run(cmd, capture_output=True, text=True, cwd=tree)
         if p.returncode not in (0, 1):
             raise RuntimeError(f"baseline run at {ref} failed ({p.returncode}):\n{p.stdout[-800:]}{p.stderr[-800:]}")
         return _load_sc(os.path.join(out, "baseline-ref", a.tier, "scorecard.json"))

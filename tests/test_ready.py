@@ -7,6 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pcbgen as G
 import cli
@@ -181,3 +182,184 @@ def test_pipeline_ready_stage_blocks_and_allow_incomplete_stamps(tmp_path):
     st = PL.load_state(a2.workdir)
     assert st["stages"]["floorplan-check"]["verdict"] == "pass" and "parts" in st["not_ready"]
     assert "NOT READY" in PL.format_status(st)
+
+
+# ---- A4 / review 4: netclass sync: report at ready, managed classes only, real board and real DRC
+def _pair_project(tmp_path, project=None, family="ETH_"):
+    import json
+    import planboards as PB
+    from test_pairs import duo
+    b = PB.write(tmp_path, duo("U1", 20, 20, "ETH_P", "ETH_N") + duo("U2", 60, 25, "ETH_P", "ETH_N") + duo("U3", 20, 50, "ETH_LED", "ETH_X"))
+    pro = tmp_path / "b.kicad_pro"
+    pro.write_text(json.dumps(project if project is not None else {"net_settings": {"classes": [{"name": "Default", "track_width": 0.2, "clearance": 0.2}]}}))
+    return b, str(pro), {"pairs": {family: {"impedance_diff": 100}}, "power": {"ETH_X": {"max_current_ma": 1000}}}
+
+
+def test_ready_reports_and_never_writes_the_project(tmp_path):
+    from fluxplace import ready as RY
+    b, pro, cons = _pair_project(tmp_path)
+    before = open(pro, "rb").read()
+    line = RY.sync_netclasses(b, cons)
+    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"] and "managed" in line["detail"]
+    assert open(pro, "rb").read() == before
+
+
+def test_a_stage_copy_gets_managed_classes_that_match_the_leg_nets(tmp_path):
+    import json
+    from fluxplace import ready as RY, constraints as C
+    b, pro, cons = _pair_project(tmp_path)                                   # family key "ETH_" ends in "_": the old pattern was *ETH__*
+    line = RY.sync_netclasses(b, cons, write=True)
+    assert line["status"] == "PASS" and "written" in line["detail"]
+    ns = json.load(open(pro))["net_settings"]
+    cls = {c["name"]: c for c in ns["classes"]}
+    pats = {p["pattern"]: p["netclass"] for p in ns["netclass_patterns"]}
+    assert pats["ETH_P"] == pats["ETH_N"] and pats["ETH_P"].startswith("DP_ETH_")
+    assert "ETH_LED" not in pats and "ETH_X" in pats                          # a plain signal is not a pair leg; the rail is a rail
+    for name in (pats["ETH_P"], pats["ETH_X"]):
+        c = cls[name]
+        assert c[C.MANAGED_KEY] is True and "clearance" not in c and "via_diameter" not in c and "via_drill" not in c
+    assert cls["Default"] == {"name": "Default", "track_width": 0.2, "clearance": 0.2}
+    assert C.netclass_mismatch(pro, cons, b) == []
+
+
+def test_user_classes_are_kept_whole_even_when_named_like_ours(tmp_path):
+    import json
+    from fluxplace import ready as RY
+    user = [{"name": "Default", "clearance": 0.2}, {"name": "PWR_ETH_X", "clearance": 0.33, "track_width": 0.9}, {"name": "DP_ETH_100R", "clearance": 0.4}]
+    b, pro, cons = _pair_project(tmp_path, {"net_settings": {"classes": user}})
+    RY.sync_netclasses(b, cons, write=True)
+    cls = {c["name"]: c for c in json.load(open(pro))["net_settings"]["classes"]}
+    assert cls["PWR_ETH_X"] == user[1] and cls["DP_ETH_100R"] == user[2] and cls["Default"] == user[0]      # untouched
+    assert sum(1 for c in cls.values() if c.get("fluxplace_managed")) >= 1                                   # ours were added under other names
+
+
+def test_the_class_that_applies_to_a_pair_leg_is_compared_with_the_stackup(tmp_path):
+    import json
+    from fluxplace import ready as RY, constraints as C
+    live = {"net_settings": {"classes": [{"name": "Default"}, {"name": "ETH_100R", "clearance": 0.127, "track_width": 0.15,
+                                                                "diff_pair_width": 0.15, "diff_pair_gap": 0.4}],
+                             "netclass_patterns": [{"netclass": "ETH_100R", "pattern": "ETH_*"}]}}
+    b, pro, cons = _pair_project(tmp_path, live)
+    mism = C.netclass_mismatch(pro, cons, b)
+    assert any(x.startswith("foreign ETH_P class ETH_100R") and "gap 0.4" in x for x in mism)
+    line = RY.sync_netclasses(b, cons, write=True)
+    assert line["status"] == "FAIL" and "foreign" in line["detail"]                    # a user class is reported, never rewritten
+    d = json.load(open(pro))["net_settings"]["classes"]
+    assert [c for c in d if c["name"] == "ETH_100R"][0]["diff_pair_gap"] == 0.4
+
+
+def test_writing_the_managed_classes_does_not_change_the_drc_error_count(tmp_path):
+    """review 4: 62 new clearance errors on W15 from a fixed 0.15 mm PWR clearance.  Real kicad-cli before and after the write."""
+    from fluxplace import ready as RY, drcguard as DG
+    b, pro, cons = _pair_project(tmp_path)
+    errs = lambda: sorted((v["type"], v["description"][:60]) for v in DG.drc_json(b, complete=False)["violations"] if v["severity"] == "error")   # noqa: E731
+    e0 = errs()
+    RY.sync_netclasses(b, cons, write=True)
+    assert errs() == e0
+
+
+# ---- P4: the "power plan" line (powerbudget, D71dc / D71dd)
+def _plan_line(tmp_path, cons, spread=False):
+    import powerboard as PB
+    from fluxplace import routediag as RD
+    kw = {"c2": (12, 28)} if spread else {}
+    path = PB.board(tmp_path, **kw)
+    B = RD.load(path)
+    sess = QS.Session(path, cons, {}, False, "ready")
+    detail = {}
+    rows = PB.rows()
+    lines = RDY.power_plan_lines({"components": []}, cons, {}, B, None, sess, rows, ["In1.Cu", "In4.Cu"], path, detail)
+    return lines, sess, detail
+
+
+def test_power_plan_passes_on_the_fixture_and_the_json_holds_reach_and_width_rows(tmp_path):
+    import powerboard as PB
+    lines, sess, detail = _plan_line(tmp_path, PB.CONS)
+    assert [(l["name"], l["status"]) for l in lines] == [("power plan", "PASS")] and not sess.open
+    r = detail["power_plan"]["rails"]["VOUT"]
+    e = r["edges"][0]
+    assert e["reach_mm"]["max"] > 0 and e["width_req_mm"]["max"] >= 0.127 and r["copper"][0]["reach_mm"]["max"] > 0
+    assert "L_max" in lines[0]["detail"]
+    json.dumps(detail["power_plan"])
+
+
+def test_power_plan_fails_a_rail_with_a_current_and_no_dcdrop_row(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"] = []
+    lines, _s, _d = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "FAIL" and "POWER_PLAN_NO_BUDGET" in " ".join(lines[0]["blockers"])
+
+
+def test_power_plan_unknown_source_is_an_open_question(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["power"]["VOUT"].pop("source")
+    c["dcdrop"][0].pop("from")
+    c["dcdrop"][0]["to"] = ["NOPE"]
+    lines, sess, _d = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "OPEN" and any(q["id"] == "power-source:VOUT" for q in sess.open)
+
+
+def test_power_plan_exempt_rail_passes_and_is_named_in_the_line(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"] = []
+    c["power"]["VOUT"].pop("source")
+    c["power"]["VOUT"]["dcdrop_exempt"] = "bias inductor DCR by design"
+    lines, sess, detail = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "PASS" and "exempt by design (VOUT)" in lines[0]["detail"] and not sess.open
+    assert [f["code"] for f in detail["power_plan"]["findings"]] == ["POWER_PLAN_EXEMPT"]
+
+
+# ---- C7b: measure_rows = the rows and fixed findings the ready lines print, returned without printing
+def test_measure_rows_returns_the_budget_rows_and_fixed_findings_and_matches_the_ready_lines(tmp_path):
+    import pcbgen as PG
+    from fluxplace import budget as BG, routediag as RD
+    B = RD.load(PG.board(tmp_path, PG.two("R1", 20, 20, "A", "B", court=(-1, -0.5, 1, 0.5)) + PG.two("R2", 22, 20, "A", "C", court=(-1, -0.5, 1, 0.5))))
+    cons = {"separation": [{"name": "close", "a": ["R1"], "b": ["R2"], "min_mm": 50.0}]}
+    rows, fixed = RDY.measure_rows(None, cons, B, None)
+    sep = [r for r in rows if r["kind"] == "separation"]
+    assert [(r["name"], r["verdict"], r["hard"]) for r in sep] == [("close", "fail", True)] and isinstance(fixed, list)
+    detail = {}
+    line = RDY.budget_line(None, cons, B, None, None, detail)           # one code path: the line's table is the same rows
+    assert [r["name"] for r in detail["budgets"]["rows"]] == [r["name"] for r in rows] and BG.summary(rows) in line["detail"]
+
+
+def test_stage_honoured_big_table_is_cut_to_failing_rows_and_counts_so_the_line_fits(monkeypatch, tmp_path):
+    from fluxplace import ready as RDY, budget as BG
+    rows = [BG.row("pair", f"P{i}", "length", "mm", value=20.0, target=25.0, mx=40.0, source="s") for i in range(595)]
+    rows += [BG.row("separation", f"F{i}", "distance", "mm", value=3.0, mx=900.0, source="s", hard=True, minimum=True) for i in range(5)]
+    monkeypatch.setattr(RDY, "measure_rows", lambda spec, cons, B, path, **k: (rows, []))
+    ev = tmp_path / "ev" / "events.jsonl"
+    ev.parent.mkdir()
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    out = str(tmp_path / "o.kicad_pcb")
+    r = RDY.stage_honoured("placetour", None, {}, rows, out, None)
+    line = json.loads(open(ev).read().splitlines()[-1])
+    assert "truncated" not in line and len(open(ev).read().splitlines()[-1]) < 60000
+    assert {x["id"]: x["hard"] for x in line["criteria"] if x.get("hard")} == {f"F{i}": True for i in range(5)}
+    assert {x["id"] for x in line["criteria"] if x["id"].endswith("honoured")} == {"pair honoured"}
+    from fluxplace import liveview as LV
+    assert [c["id"] for c in LV.criteria(r["criteria"])].count("pair honoured") == 1 and len(r["criteria"]) == 6
+
+
+def test_stage_honoured_says_datasheets_not_loaded_when_the_folder_is_missing(monkeypatch, tmp_path):
+    from fluxplace import ready as RDY, budget as BG
+    rows = [BG.row("separation", "F0", "distance", "mm", value=3.0, mx=900.0, source="s", hard=True, minimum=True)]
+    monkeypatch.setattr(RDY, "measure_rows", lambda spec, cons, B, path, **k: (rows, []))
+    ev = tmp_path / "ev" / "events.jsonl"
+    ev.parent.mkdir()
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    out = str(tmp_path / "o.kicad_pcb")
+    cons = {"docs": {"datasheets": "nope"}}
+    r = RDY.stage_honoured("placetour", None, cons, rows, out, None, ds_dir="nope")
+    assert "DATASHEETS NOT LOADED" in r["line"] and "'nope' not found" in r["line"]
+    line = json.loads(open(ev).read().splitlines()[-1])
+    assert "DATASHEETS NOT LOADED" in line["why"]
+    assert "DATASHEETS NOT LOADED" in json.load(open(str(tmp_path / "o.budgets.json")))["summary"]
+    r2 = RDY.stage_honoured("placetour", None, cons, rows, out, None, ds_dir=str(tmp_path))
+    assert "DATASHEETS NOT LOADED" not in r2["line"]

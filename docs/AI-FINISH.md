@@ -102,3 +102,45 @@ locking any escape. Route coupled and long nets before ordinary copper.
 - `probe` gives the size of a clearance miss but not the direction or the smallest shift that clears it.
 - No command copies one net's copper from another board (used to restore removed nets); hand scripts bypass the guards.
 - No command re-routes a named pair whole; `tune` cannot fix a pair whose legs differ in layers or via count.
+
+## Packet loop (close exit 5)
+
+`close` stops with exit 5 when packets wait for an answer. `best.kicad_pcb` is valid and never worse than its input.
+Everything lives in `<work>/ai/`, one set of files per gap key (`kind:first-net`, sanitised, 80 chars).
+
+Files:
+- `<sid>.packet.json` (v2, <= 4096 bytes): `gap {id, kind, class, net}`, `board` (the board to read), `conn` (first open
+  connection: ends, straight length, rules), `window` (tracks, vias, via sites near the connection), `corridors`
+  (`direct` layers, `max_track_mm` per layer), `png` (paths: `<sid>.conn.png` = connection view, `<sid>.pocket.png` = 4 mm
+  pad pocket with less free room), `sealed_by`, `krt` (KRT failures on the net), `tried` (earlier attempts on the gap),
+  `feedback` (the last action's result, see below), `pair` (pair gaps only: legs, family, per-layer `width`/`gap`, skew limit), `actions` (the kinds).
+- `<sid>.action.json`: written by the agent: `{"actions": [...], "why": "...", "tokens": n}`, at most 8 actions.
+- `<sid>.feedback.json` (<= 1200 bytes): `actions` = `[{do, ok, why, probe?}]` per applied action (`probe` = first 3
+  violations of a refused `path`: kind, net, margin, at), `commit`, `commit_why`, and `refused` (close's reason when the
+  candidate was not accepted). The next packet for the gap carries it.
+- `<sid>.swap.json`: a `swap_pins` proposal. Never applied: a pin swap changes the netlist (needs the spec and schematic).
+- `stop.json`: `packets` = `[{gap_id, packet, png, action, budget_left}]` for every open gap with a packet on disk;
+  `proposals` = the swap files.
+
+Action kinds: `rip {net, ids}`, `rip_locked {net, ids}`, `nudge {ref, dx, dy, rot}`, `route {nets, layers}`,
+`path {net, path, lock}` (AI-FINISH path syntax, <= 800 chars, hs-pair legs only as a stub join <= 2 mm), `pair_path {pair, layer, waypoints}`
+(2-40 points; waypoints `[x, y]` or `[x, y, "Layer"]`. A named layer other than the current one is a LAYER CHANGE at that point
+(a via pair is placed there); at most 4 changes, never on the last point; each run 45/90 and >= 1.0 mm; the start pad must be on
+the first layer (else refused: "pad REF.NUM is not on LAYER: start the centre line on the pad's layer"); a change where the
+reference plane changes gets one return via of the reference net within `[review] return_via_mm`, or the result lists
+`return_via_missing` (the review WARNs). A refusal reports `at` [x, y] and `blocker` {label, net, layer}; the feedback row keeps
+them with `stripped` {items, locked}), `swap_pins {ref, pads, why}` (proposal only),
+`give_up {why}`. Budget: `[ai] budget` (default 4 applied action files per gap key per work dir).
+Pair gaps: an hs-pair gap (`class` hs-pair) applies `pair_path`, `rip`, `give_up` and `path` only (a `path` on an hs leg is a stub join <= 2 mm); a low-speed `pair` gap applies every validated kind. The AI rung's memo key names the pending action files, so each answer file gets its try.
+
+Order inside one transaction: nudges, rips, `path`s, `pair_path`s, `route`s, then `session_commit`; close's guard
+(R0-R6) then judges the candidate like any rung.
+
+Who does what:
+- close (this code): writes packets, applies each action file once (`<sid>.action.used.json` after), keeps `ai_used` in `gaps.json`.
+- the caller (run script or top-level model, not this code): one agent per packet. The agent may run read-only `hrcli`
+  `window` / `probe` / `suggest` on the packet's `board`, looks at the `png` files, then writes `<sid>.action.json` and
+  nothing else.
+- Loop: run the SAME close command again on `best.kicad_pcb` with the same `--work`. It applies each pending action file as
+  one guarded transaction and resumes. Repeat until the exit is not 5 or no packet has budget left. A packet whose action
+  file is pending is not rewritten (the pending action is applied first).

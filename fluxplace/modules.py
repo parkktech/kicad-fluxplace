@@ -24,6 +24,7 @@ import math
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -60,21 +61,46 @@ def fixed_set(B, cons):
 
 
 ATTACH_MM = 15.0                    # a support farther than this from its module's anchor is its own module
+REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
 def build(B, cons=None, spec=None, arrange=True, log=None):
     """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
-    from . import clusters as CL, legality as LGL, netclass as NC, routable as RB
+    from . import clusters as CL, powerbudget as PB, legality as LGL, netclass as NC, routable as RB
     from . import blocks as BK
     cons = cons or {}
     parts = B["parts"]
     fixed = fixed_set(B, cons)
     cls = NC.classify(B, cons, spec)
     cl, links = CL.build(B, cons, spec)
+    rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
+    flips, refused = set(), {}
+    unit = []
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
-        CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log)
+        isolated = set()
+        for c in cl:                             # P5b S3: a regulator with a datasheet layout fact is laid out in isolation, as a unit; the
+            tpl = {s["ref"] for s in c["supports"] if s["sure"] and s["rank"] < 9 and s["ref"] not in fixed}   # floorplan places it among the others
+            if c.get("layout") and tpl and c["ic"] not in fixed:
+                CL.reseat(B, [c], everything=True, only=tpl, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), isolate=True, log=log)
+                isolated |= tpl                  # a unit: the neighbours' legality is the floorplan's, a strict re-seat would trade the datasheet side for a free seat
+        for r in isolated:
+            L.refresh(r)
+        _remeasure(B, cl)
+        for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
+            CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
+                      flips=flips, refused=refused, only=set(parts) - fixed - isolated)   # a fixed part is never seated: the model must not show it where the board will not have it
+            _remeasure(B, cl)
+            more = CL.rehome(B, cl, cons, spec)
+            if not more:
+                break
+            for r, v in more.items():
+                rehomed[r] = dict(v, **{"from": rehomed[r]["from"], "left": rehomed[r]["left"]}) if r in rehomed else v
+        own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
+        unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
+                for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
+    bared = _bared(B, rehomed, spec, *PB.facts_for(cons, spec))                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
     pg = (cons.get("placement") or {}).get("group") or {}
@@ -133,7 +159,9 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             best = min(cand, key=lambda k: math.hypot(mod_c[k][0] - cx, mod_c[k][1] - cy))
         of[r] = best
         mods[best]["refs"].append(r)
-    # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone
+    # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone. A support
+    # within its limit of the pin it serves is never far (P5): the budget row, not the distance to the anchor's centre, decides.
+    seated = {s["ref"] for c in cl for s in c["supports"] if s["sure"] and s["dist"] <= s["limit"] and owner.get(s["ref"]) == c["ic"]}
     for key in sorted(mods):
         m = mods[key]
         ax, ay = _centre(parts[m["anchor"]])
@@ -141,7 +169,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             if r == m["anchor"] or (m["group"] and r in groups):
                 continue
             cx, cy = _centre(parts[r])
-            if math.hypot(cx - ax, cy - ay) > ATTACH_MM or (r in fixed and m["anchor"] not in fixed):
+            if (math.hypot(cx - ax, cy - ay) > ATTACH_MM and r not in seated) or (r in fixed and m["anchor"] not in fixed):
                 m["refs"].remove(r)
                 of.pop(r)
     # mechanical hardware: fixed single-part modules
@@ -166,7 +194,67 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         _geometry(B, mod)
         out.append(mod)
     ports(B, out, of, cls)
-    return {"modules": out, "of": of}
+    names = NC.pin_names(spec)
+    for c in cl:                                 # P5: a regulator module is a rigid template; its loop lengths travel with it
+        if c.get("regulator") and c["ic"] in of:
+            mod = next(m for m in out if m["name"] == of[c["ic"]])
+            inside = {"ic": c["ic"], "supports": [s for s in c["supports"] if of.get(s["ref"]) == mod["name"]]}
+            if c.get("layout"):
+                inside["layout"] = c["layout"]
+            mod.setdefault("template", {})[c["ic"]] = CL.loop_metrics(B, inside, names.get(c["ic"], {}))
+            km = ((c.get("layout") or {}).get("fact") or {}).get("inductor_keepout_mm")
+            if isinstance(km, (int, float)) and not isinstance(km, bool) and km > 0:
+                ax, ay = mod["pos"]                  # the inductor's courtyard grown by the margin, every layer, relative to the anchor
+                der = (c.get("layout") or {}).get("fact", {}).get("derived")   # P5 M4: a derived value is soft (D71do)
+                der = set((c.get("layout") or {}).get("fact") or {}) if der is True else {str(k) for k in der} if isinstance(der, (list, tuple)) else set()
+                key = "keepouts_soft" if "inductor_keepout_mm" in der else "keepouts"
+                for s in inside["supports"]:
+                    if s["rank"] == 0 and s["ref"].startswith("L"):
+                        q = B["parts"][s["ref"]]["court"]
+                        mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
+                                                               round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
+    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
+            "unseated": CL.unseated(cl, fixed, refused), "unit_illegal": unit}
+
+
+def _bared(B, rehomed, spec=None, facts=None, mpn_map=None):
+    """Pins left bare by a re-home (P5 M2): the pin the part was taken from is a supply pin (the part's `supply_pins` fact; a tie-off
+    such as EN on the rail wants no bypass; no fact = every pad counts) and has no two-pad capacitor to ground on its net within
+    PB.BYPASS_MAX_MM (re-homed parts are not counted: they still sit where they were parked). -> [{ic, pad, net, was, nearest_mm}]."""
+    from . import clusters as CL, powerbudget as PB, netclass as NC
+    parts = B["parts"]
+    out = []
+    for ref, v in sorted(rehomed.items()):
+        pin = next((q for q in parts[v["from"]]["pads"] if str(q["num"]) == str(v["left"])), None)
+        if pin is None:
+            continue
+        sup, kind = CL._supply_pads(v["from"], [q for q in parts[v["from"]]["pads"] if q["net"] == pin["net"]], spec, facts, mpn_map)
+        if kind == "supply" and not any(q is pin for q in sup):
+            continue
+        best = None
+        for r, p in parts.items():
+            if r in rehomed or not r.startswith("C") or len(p["pads"]) != 2 or not any(NC.is_ground(q["net"]) for q in p["pads"]):
+                continue
+            for q in p["pads"]:
+                if q["net"] == pin["net"]:
+                    d = math.hypot(q["x"] - pin["x"], q["y"] - pin["y"])
+                    best = d if best is None else min(best, d)
+        if best is None or best > PB.BYPASS_MAX_MM:
+            out.append({"ic": v["from"], "pad": str(v["left"]), "net": pin["net"], "was": ref,
+                        "nearest_mm": None if best is None else round(best, 2)})
+    return out
+
+
+def _remeasure(B, cl):
+    """Distances of the cluster table after a seating pass (the table was measured before it), same rule as clusters.build."""
+    from . import clusters as CL
+    parts = B["parts"]
+    for c in cl:
+        halo = CL.HALO_MM if CL._pitch(parts[c["ic"]]) <= 0.5 else 0.0
+        for s in c["supports"]:
+            sp = next(q for q in parts[s["ref"]]["pads"] if q["num"] == s["via"])
+            pin = next(q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"])
+            s["dist"] = CL.support_dist(s, sp, pin, halo)
 
 
 def pose(mod, X, Y, th):
@@ -232,7 +320,7 @@ def fanouts(board, cons, spec, mods, a):
     jp = os.path.join(wd, "job.json")
     json.dump(job, open(jp, "w"))
     t0 = time.time()
-    r = subprocess.run(["/usr/bin/python3", FO.HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
+    r = _procs.run(["/usr/bin/python3", FO.HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(FO.MARK)]
     if not line:
         raise SystemExit("modules: fan-out helper failed:\n" + (r.stderr or r.stdout)[-1500:])
@@ -298,6 +386,18 @@ def cmd_modules(a):
     blocked = [(m["name"], m["fanout"]["blocked"]) for m in mods if m.get("fanout") and m["fanout"]["blocked"]]
     req = sum(m["fanout"]["req"] for m in mods if m.get("fanout"))
     ok = sum(m["fanout"]["ok"] for m in mods if m.get("fanout"))
+    if M.get("bared"):
+        print(f"modules: {len(M['bared'])} pin(s) bared by re-homing (no bypass of their own): "
+              + ", ".join(f"{b['ic']}.{b['pad']} ({b['was']} left)" for b in M["bared"]))
+    if M.get("rehomed"):
+        print(f"modules: {len(M['rehomed'])} bypass part(s) re-homed to their own IC's pin (per-pin demand): "
+              + ", ".join(f"{r} {v['from']} -> {v['to']}.{v['pad']}" for r, v in sorted(M["rehomed"].items())))
+    if M.get("unit_illegal"):
+        print(f"modules: {len(M['unit_illegal'])} template part(s) not legal where their unit stands (the floorplan must move the unit): "
+              + ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in M["unit_illegal"]))
+    if M.get("unseated"):
+        print(f"modules: {len(M['unseated'])} support part(s) still beyond their limit: "
+              + ", ".join(f"{u['ref']} {u['dist']:g} / {u['limit']:g} mm of {u['ic']}.{u['pad']} ({u['why']})" for u in M["unseated"]))
     print(f"modules: {nm} modules ({nfix} fixed, {len(multi)} with support parts, {sum(len(m['members']) for m in mods)} parts), "
           f"fan-out in isolation {ok}/{req} pins, {len(blocked)} modules with blocked pins; ports N{tot['N']} E{tot['E']} S{tot['S']} W{tot['W']}; "
           f"{time.time() - t0:.1f} s; wrote section 'modules' into {path}")

@@ -109,3 +109,21 @@ def test_datasheet_temp_reads_the_sheet_not_the_distributor():
     assert rng == (-40.0, 70.0) and "operating" in line.lower()
     _pdf(pdf, ["Coil resistance 237 ohm", "Rated voltage 5 VDC"])
     assert PD.datasheet_temp(pdf) is None
+
+
+def test_datasheet_named_for_mpn_without_manifest_entry_passes(tmp_path):
+    # PHASE3G G5b: no manifest entry, but docs/datasheets/<MPN>.pdf exists -> no DATASHEET_MISSING;
+    # match is case-insensitive with characters outside [A-Za-z0-9._-] read as "_"; another MPN does not match.
+    d = str(tmp_path)
+    open(os.path.join(d, "TLV7031DBVR.pdf"), "wb").write(b"%PDF-1.4\n")
+    open(os.path.join(d, "ab_cd_1.PDF"), "wb").write(b"%PDF-1.4\n")
+    assert PD.ds_file_for_mpn(d, "TLV7031DBVR") == "TLV7031DBVR.pdf"
+    assert PD.ds_file_for_mpn(d, "tlv7031dbvr") == "TLV7031DBVR.pdf"
+    assert PD.ds_file_for_mpn(d, "ab/cd 1") == "ab_cd_1.PDF"
+    assert PD.ds_file_for_mpn(d, "TLV7031DBVS") is None
+    spec = {"components": [{"ref": "U9", "value": "TLV7031", "fp": "SOT-23-5"},
+                           {"ref": "U7", "value": "TLV7031", "fp": "SOT-23-5"}],
+            "nets": {}}
+    finds = PD.spec_check(spec, d, mpn_map={"U9": "TLV7031DBVR", "U7": "TLV7031DBVS"})
+    missing = {ref for lvl, code, ref, _ in finds if code == "DATASHEET_MISSING"}
+    assert missing == {"U7"}, finds

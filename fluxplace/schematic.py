@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 
 MM = 1.0                      # kicad_sch works in mm
 PIN_PITCH = 2.54
@@ -237,7 +238,7 @@ def verify(sch_path, spec_path, kicad_cli="kicad-cli"):
     import tempfile
     out = os.path.join(tempfile.mkdtemp(), "net.net")
     try:
-        r = subprocess.run([kicad_cli, "sch", "export", "netlist",
+        r = _procs.run([kicad_cli, "sch", "export", "netlist",
                             "--format", "kicadsexpr", "--output", out, sch_path],
                            capture_output=True, text=True, timeout=600)
     except Exception as e:

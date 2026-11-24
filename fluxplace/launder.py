@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 
 
 _DELETABLE = {
@@ -50,7 +51,7 @@ _PHASES = (
 
 def _drc(board_path, kicad_cli):
     out = board_path + ".launder_drc.json"
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
+    _procs.run([kicad_cli, "pcb", "drc", "--format", "json",
                     "--output", out, board_path],
                    capture_output=True, timeout=600)
     from . import drcfull as DF
@@ -103,7 +104,7 @@ def mutate(src_path, dst_path, picks):
     pk = dst_path + ".picks.json"
     with open(pk, "w") as f:
         json.dump(picks, f)
-    r = subprocess.run([sys.executable, "-u", "-m", "fluxplace.launder",
+    r = _procs.run([sys.executable, "-u", "-m", "fluxplace.launder",
                         src_path, dst_path, pk],
                        capture_output=True, text=True, timeout=900,
                        env=wenv, cwd=repo)

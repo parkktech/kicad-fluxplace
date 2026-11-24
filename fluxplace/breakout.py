@@ -20,6 +20,7 @@ copper (lanes + vias).  Pure text model (routediag.load), no pcbnew.  Determinis
 
     [breakout]   enabled = true   lane_start_mm = 0.15   max_extra_rows = 3   waive = ["REF.PIN", ...]
 """
+import hashlib
 import math
 import os
 import statistics
@@ -509,9 +510,11 @@ def lay_text(text, pins, drill, via):
     blks, ns, nv = [], 0, 0
     cnt = [0]
 
+    seed = hashlib.sha1(text.encode("utf-8", "surrogateescape")).hexdigest()[:12]   # per input: a re-lay never repeats ids
+
     def u():                                            # deterministic ids, marked so the generic fan-out knows these pads are escaped
         cnt[0] += 1
-        return MARK + str(uuid.uuid5(uuid.NAMESPACE_URL, f"breakout/{cnt[0]}"))[len(MARK):]
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"breakout/{seed}/{cnt[0]}"))[:-8] + MARK     # PHASE3I F9: marker at the tail
     for key in sorted(pins, key=lambda k: (k[0], pins[k]["side"], pins[k]["row"], k[1])):
         r = pins[key]
         for a, b in zip(r["pts"], r["pts"][1:]):

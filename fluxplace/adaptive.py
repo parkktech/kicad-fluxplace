@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 
 from . import escape as E
 from . import routestatus as RS
@@ -30,11 +31,17 @@ from . import routestatus as RS
 
 def drc_unrouted(board, kicad_cli="kicad-cli"):
     """Run kicad-cli DRC; return (report, set_of_unrouted_netnames)."""
-    out = board + ".drc.json"
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
+    from . import drcguard as DG
+    out = DG.report_slot(board)
+    _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-error",
                     "--output", out, board], capture_output=True, text=True)
     from . import drcfull as DF
-    d = DF.complete(board, json.load(open(out)))
+    try:                                                    # PHASE3I F8 (R16): the slot file is not left behind
+        with open(out) as fh:
+            d = DF.complete(board, json.load(fh))
+    finally:
+        if os.path.exists(out):
+            os.unlink(out)
     nets = set()
     for u in d.get("unconnected_items", []):
         for it in u.get("items", []):

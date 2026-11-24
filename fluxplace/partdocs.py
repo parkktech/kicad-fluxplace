@@ -33,6 +33,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import time
 import urllib.request
 
@@ -70,6 +71,18 @@ def _sha(path):
 
 def _safe_name(mpn):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", mpn).strip("_") or "part"
+
+
+def ds_file_for_mpn(ds_dir, mpn):
+    """PHASE3G G5b: a `.pdf` in ds_dir named for the MPN when the manifest has no entry: the stem equals the MPN
+    case-insensitively after replacing each character outside [A-Za-z0-9._-] with `_`. -> filename or None."""
+    if not ds_dir or not mpn or not os.path.isdir(ds_dir):
+        return None
+    want = re.sub(r"[^A-Za-z0-9._-]", "_", mpn).lower()
+    for name in sorted(os.listdir(ds_dir)):
+        if name.lower().endswith(".pdf") and name[:-4].lower() == want:
+            return name
+    return None
 
 
 def _get(url, timeout=60):
@@ -188,7 +201,7 @@ def page_text(pdf, pages=None):
         cmd += ["-f", str(min(pages)), "-l", str(max(pages))]
     cmd += [pdf, "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = _procs.run(cmd, capture_output=True, text=True, timeout=120)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -394,6 +407,9 @@ def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
                             f"{ref} ({c.get('value', '')}): no manufacturer part number"))
             continue
         ent = man.get(mpn)
+        if not ent:
+            fn = ds_file_for_mpn(ds_dir, mpn)
+            ent = {"file": fn} if fn else None
         f = os.path.join(ds_dir, ent["file"]) if (ent and ds_dir) else None
         if not ent or not f or not os.path.exists(f):
             # a 2-terminal passive with an MPN is identified; its datasheet is

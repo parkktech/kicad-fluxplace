@@ -169,7 +169,7 @@ def test_pipeline_stage_sits_between_fanout_and_plan_route_and_route_skips_laid_
     from fluxplace import pipeline as PP
     from fluxplace import routeconn as RC
     i = PP.CONSTRUCTIVE.index("pairs")
-    assert PP.CONSTRUCTIVE[i - 1] == "pour-tie" and PP.CONSTRUCTIVE[i - 2] == "fanout" and PP.CONSTRUCTIVE[i + 1] == "critroute" and PP.CONSTRUCTIVE[i + 2] == "plan-route" \
+    assert PP.CONSTRUCTIVE[i - 1] == "lookahead" and PP.CONSTRUCTIVE[i - 2] == "placetour" and PP.CONSTRUCTIVE[i - 3] == "pour-tie" and PP.CONSTRUCTIVE[i - 4] == "fanout" and PP.CONSTRUCTIVE[i + 1] == "tune" and PP.CONSTRUCTIVE[i + 2] == "critroute" and PP.CONSTRUCTIVE[i + 3] == "plan-route" \
         and "pairs" not in PP.STAGES
     body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 20, 40, "D_P", "D_N") + \
         PB.fp("R1", 60, 20, [PB.pad("1", 0, 0, "SIG")]) + PB.fp("R2", 60, 30, [PB.pad("1", 0, 0, "SIG")])
@@ -223,6 +223,8 @@ def gduo(ref, x, y, p, n, pitch=0.5, **kw):
 def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     cage = PB.keepout(15, 15, 25.5, 16) + PB.keepout(15, 24, 25.5, 24.5) + PB.keepout(15, 15, 15.5, 24.5) + PB.keepout(25, 15, 25.5, 24.5)
     b = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N") + cage)      # F / In1 / B; the rule areas are on F and B
+    # kicad-cli (the skew authority, D71cx) cannot load a 3-copper-layer board: add a full GND plane on In2.Cu (signal layers stay F / In1 / B)
+    PG.four_layers(b)
     out = str(tmp_path / "o.kicad_pcb")
     rep = PR.run(b, {}, None, out)
     r = rep["pairs"][0]
@@ -230,6 +232,7 @@ def test_inner_signal_layer_is_used_when_the_outer_layers_are_blocked(tmp_path):
     assert r["status"] == "complete" and r["layers"] == ["F.Cu", "In1.Cu", "F.Cu"] and r["vias"] == 2 and r["skew"] <= 0.3
     # with nothing in the way the pair stays on the outer layer (an inner layer costs more)
     b2 = PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 50, 40, "D_P", "D_N"), name="c.kicad_pcb")
+    PG.four_layers(b2)
     assert PR.run(b2, {}, None, str(tmp_path / "o2.kicad_pcb"))["pairs"][0]["layers"] == ["F.Cu"]
 
 
@@ -274,7 +277,7 @@ def test_pair_leaves_through_its_fan_out_via_pair(tmp_path):
     body = duo("U1", 20, 20, "D_P", "D_N") + duo("J1", 50, 40, "D_P", "D_N", layer="B.Cu") + bars + fan
     rep, B, txt = lay(tmp_path, body)
     r = rep["pairs"][0]
-    assert r["status"] == "complete" and r["via_exit"] == ["U1@via"] and r["skew"] <= 0.3
+    assert r["status"] == "complete" and r["via_exit"] == ["U1@via"] and r["skew"] <= 0.7     # KiCad length: the fan-out stub in the pad counts
     kept = {(v["x"], v["y"]) for v in B["vias"] if v["net"] in ("D_P", "D_N")}
     assert {(18.8, 20.0), (21.7, 20.0)} <= kept                    # the fan-out vias and stubs stay: the pair leaves through them
     assert sum(1 for s in B["segs"] if s["net"] == "D_P" and s["layer"] == "F.Cu" and s["a"][1] == s["b"][1] == 20.0) >= 1
@@ -338,6 +341,27 @@ def test_blocked_pair_goes_first_and_the_blocker_is_laid_again(tmp_path):
     assert clean(RD.load(str(tmp_path / "b.kicad_pcb")), {"PCIE_TX_P", "PCIE_TX_N", "MIC_P", "MIC_N"}) >= CLR
 
 
+def test_blocked_pair_retry_finds_the_blocker_by_geometry_when_the_report_names_none(tmp_path, monkeypatch):
+    # same board as above, but the lay never says who blocks (as with a failure reported against a pad): the laid copper beside the
+    # failed pair's pads names the blocker, the failed pair is laid first and the result is stable run to run
+    cons = {"preroute": {"signal_layers": ["F.Cu"]}, "pairlay": {"passes": 3, "negotiate": False}}
+    wall = PB.keepout(30, 0, 30.5, 39.4) + PB.keepout(30, 40.6, 30.5, 80) + PB.keepout(30.5, 37, 36.5, 37.5) + PB.keepout(30.5, 42.5, 36.5, 43) + \
+        PB.keepout(36, 37.5, 36.5, 42.5)
+    body = duo("U1", 29.05, 20, "PCIE_TX_P", "PCIE_TX_N") + duo("U2", 29.05, 60, "PCIE_TX_P", "PCIE_TX_N") + \
+        duo("U3", 20, 40, "MIC_P", "MIC_N") + duo("U4", 33.5, 40, "MIC_P", "MIC_N") + wall
+    real = PR._lay_pair
+
+    def mute(*a, **k):
+        c = real(*a, **k)
+        c["e"].pop("blocked_by", None)
+        return c
+    monkeypatch.setattr(PR, "_lay_pair", mute)
+    runs = [PR.run(PB.write(tmp_path, body, name=f"g{i}.kicad_pcb"), cons, None, str(tmp_path / f"o{i}.kicad_pcb")) for i in (1, 2)]
+    for r in runs:
+        assert r["complete"] == 2 and r["passes"] >= 1 and r["order"][0].startswith("MIC")
+    assert runs[0]["order"] == runs[1]["order"]
+
+
 def test_skew_limit_per_family_then_kind(tmp_path):
     from fluxplace import constraints as C
     cons = {"pairs": {"ETH_": {"skew_mm": 0.5}}, "si": {"default_skew_mm": 1.0}}
@@ -390,3 +414,69 @@ def test_fanout_alternative_routes_a_blocked_pin_to_a_via_site(tmp_path):
     assert clean(B, {"SIG"}) >= 0.15 - 1e-6
     off = {"pins": [{"ref": "U1", "pin": "1", "net": "SIG", "ok": False}], "params": res["params"]}
     assert FA.rescue(b, off, {"escape": {"alternatives": False}}, None)["left"] == 1
+
+
+# ---- break-out of a pair whose gap is below the routing clearance (W14: the three USB pairs, gap 0.127 against 0.130) ----
+
+def _breakout_case(gap, pass_gap):
+    from fluxplace import pairgeo as G, pairlay as PL
+    w, clr = 0.153, 0.130
+    items = G.Items(["F.Cu", "B.Cu"])
+    pads = tuple({"ref": "J1", "num": n, "x": x, "y": 0.0, "w": 0.2, "h": 0.7, "angle": 0.0, "net": net, "layers": ["F.Cu"]}
+                 for n, x, net in (("1", -0.2, "D_P"), ("2", 0.2, "D_N")))
+    half = (w + gap) / 2
+    ends = ((-half, 1.5), (half, 1.5))                       # the coupled legs start 1.5 mm above the pads
+    for (x, _y), net in zip(ends, ("D_P", "D_N")):           # ... and are already claimed, as lay_section does
+        items.seg((x, 1.5), (x, 6.0), w, "F.Cu", net)
+    return PL.breakout(items, pads, ends, (0.0, 1.0), "F.Cu", w, ("D_P", "D_N"), clr, (), gap=gap if pass_gap else None)
+
+
+def test_breakout_reaches_legs_closer_than_the_clearance():
+    got = _breakout_case(0.127, True)
+    assert got[0] is not None, got                           # both legs broken out
+    assert abs(got[2]) < 0.01                                # symmetric pads: no skew
+
+
+def test_breakout_without_the_gap_is_refused_by_its_own_partner():
+    got = _breakout_case(0.127, False)                       # the old behaviour, kept when no gap is given
+    assert got[0] is None and "break-out" in got[1]
+
+
+def test_breakout_gap_above_clearance_is_unchanged():
+    assert _breakout_case(0.25, False)[0] is not None and _breakout_case(0.25, True)[0] is not None
+
+
+def test_a_pair_already_connected_is_never_ripped_by_a_later_pair(tmp_path):
+    """a closed pair's copper is an obstacle for the pairs still to lay, never replaced or killed to make room for them."""
+    rep, B, txt = lay(tmp_path, duo("U1", 20, 30, "D_P", "D_N") + duo("J1", 50, 30, "D_P", "D_N"))
+    assert rep["complete"] == 1
+    mine = lambda B_: sorted((s["net"], s["layer"], tuple(round(c, 3) for c in s["a"] + s["b"])) for s in B_["segs"] if s["net"] in ("D_P", "D_N"))
+    before = mine(B)
+    cross = duo("U2", 35, 20, "E_P", "E_N") + duo("J2", 35, 40, "E_P", "E_N")
+    path2 = tmp_path / "two.kicad_pcb"
+    path2.write_text(txt.rstrip().rstrip(")") + cross + ")\n")
+    out2 = str(tmp_path / "o2.kicad_pcb")
+    rep2 = PR.run(str(path2), {}, None, out2)
+    after = RD.load(out2)
+    assert mine(after) == before
+    assert clean(after, {"E_P", "E_N"}) >= CLR or not [s for s in after["segs"] if s["net"] == "E_P"]
+
+
+def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
+    """D71cx: a 2-terminal pair is graded on KiCad's net lengths (in-pad copper and via height included), with no own-math fallback:
+    kicad-cli failing leaves the pair `unknown` (PAIR_UNMEASURED)."""
+    import shutil
+    from fluxplace import pairaudit as PA, netlen
+    if not shutil.which("kicad-cli"):
+        pytest.skip("kicad-cli not installed")
+    body = duo("U1", 20, 20, "ETH_P", "ETH_N") + duo("U2", 60, 20, "ETH_P", "ETH_N")
+    path = PB.write(tmp_path, body)
+    PR.run(path, {"preroute": {"signal_layers": ["F.Cu"]}, "pairlay": {"negotiate": False}}, None, str(tmp_path / "o.kicad_pcb"))
+    out = str(tmp_path / "o.kicad_pcb")
+    B = RD.load(out)
+    k = netlen.pair_lengths(out, [("ETH_N", "ETH_P")])
+    assert k is not None and set(k[("ETH_N", "ETH_P")]) == {"p", "n", "skew"} and k[("ETH_N", "ETH_P")]["p"] is not None
+    a = PA.audit(B, [("ETH_N", "ETH_P")], {}, set())[("ETH_N", "ETH_P")]
+    assert a["length_src"] == "kicad" and a["basis"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 1e-3
+    netlen.CACHE.clear()
+    assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None

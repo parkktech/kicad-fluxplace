@@ -72,6 +72,14 @@ def is_locked(blk):
     return bool(re.search(r"\(locked(?: yes)?\)", blk))
 
 
+def lock_nets(text, nets):
+    """text with every unlocked (segment|via|arc) on `nets` marked (locked yes) -> (text, count). Other blocks untouched."""
+    hits = [(i, j, blk) for i, j, _k, blk in scan(text) if net_name(blk) in nets and not is_locked(blk)]
+    for i, j, blk in reversed(hits):
+        text = text[:i] + re.sub(r"^\((segment|via|arc)", lambda m: m.group(0) + "\n\t\t(locked yes)", blk, count=1) + text[j + 1:]
+    return text, len(hits)
+
+
 def remove_blocks(text, keys):
     """text without the forms whose key is in `keys` (the whole line is dropped)."""
     keys = set(keys)
@@ -157,3 +165,31 @@ def unnet_copper(text, net, keep_segs, keep_vias):
         last = j + 1
     out.append(text[last:])
     return "".join(out)
+
+
+def reuuid_collisions(board):
+    """PHASE3I F9 (R19): every item uuid whose first 8 hex repeat an earlier one's gets a new uuid4-headed uuid (the breakout
+    MARK tail kept when the old one carried the mark), and every reference to it is rewritten in the file. Call on a work
+    copy only. -> {"collisions": colliding groups, "changed": uuids renewed}."""
+    import collections
+    import re
+    import uuid as UU
+    from . import breakout as BO
+    text = open(board, errors="surrogateescape").read()
+    found = list(dict.fromkeys(re.findall(r'"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"', text)))
+    groups = collections.defaultdict(list)
+    for u in found:
+        groups[u[:8].lower()].append(u)
+    changed = {}
+    for us in groups.values():
+        for old in us[1:]:
+            new = str(UU.uuid4())
+            if old[:8].lower() == BO.MARK or old[-8:].lower() == BO.MARK:
+                new = new[:-8] + BO.MARK
+            changed[old] = new
+    if changed:
+        pat = re.compile("|".join(re.escape(k) for k in changed))     # L3: one pass, dict lookup
+        text = pat.sub(lambda m: changed[m.group(0)], text)
+        with open(board, "w", errors="surrogateescape") as fh:
+            fh.write(text)
+    return {"collisions": sum(1 for us in groups.values() if len(us) > 1), "changed": len(changed)}

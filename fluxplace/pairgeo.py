@@ -11,6 +11,30 @@ from . import pocket as PK
 from . import routeaudit as RA
 
 
+def blocker_at(it, pieces):
+    """PHASE3G G1b b: the point of blocking item `it` (an Items record) nearest to the offending `pieces` (centre-line pieces:
+    ("seg", layer, a, b, w) | ("via", x, y, d)). A via or pad returns its centre; a track returns its end or the foot of a
+    piece end on it; a rule area returns its nearest vertex. The result is on the item's copper (within its half width)."""
+    k = it["k"]
+    if k == "via":
+        return it["c"]
+    if k == "pad":
+        return (it["p"]["x"], it["p"]["y"])
+    segs = [(p[2], p[3]) for p in pieces if p[0] == "seg"] + [((p[1], p[2]), (p[1], p[2])) for p in pieces if p[0] == "via"]
+    if not segs:
+        return it["a"] if k == "seg" else (it["pts"][0] if it.get("pts") else (0.0, 0.0))
+    if k == "seg":
+        (ax, ay), (bx, by) = it["a"], it["b"]
+        L2 = (bx - ax) ** 2 + (by - ay) ** 2
+        cand = [(ax, ay), (bx, by)]
+        for e in [q for s in segs for q in s]:
+            t = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, ((e[0] - ax) * (bx - ax) + (e[1] - ay) * (by - ay)) / L2))
+            cand.append((ax + t * (bx - ax), ay + t * (by - ay)))
+    else:
+        cand = list(it.get("pts") or [])
+    return min(cand, key=lambda q: min(pt_seg(q, a, b) for a, b in segs))
+
+
 def pt_seg(p, a, b):
     dx, dy = b[0] - a[0], b[1] - a[1]
     L2 = dx * dx + dy * dy
@@ -207,14 +231,18 @@ class Items:
             return -1.0
         return min(seg_seg(a, b, pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts)))
 
-    def gap_seg(self, a, b, w, layer, net, need, skip_old=()):
-        """(smallest gap, item) of a new track to foreign copper on its layer; only gaps under `need` are searched."""
+    def gap_seg(self, a, b, w, layer, net, need, skip_old=(), mate=None):
+        """(smallest gap, item) of a new track to foreign copper on its layer; only gaps under `need` are searched.
+        `mate` = (partner net, slack): the partner leg's NEW copper is judged against the pair gap, which may sit below
+        the routing clearance (gap 0.127 against clearance 0.130), so `slack` (clearance - gap) is added to its gap."""
         r = w / 2 + need + 0.6
         best, who = 1e9, None
         for it in self._near(min(a[0], b[0]) - r, min(a[1], b[1]) - r, max(a[0], b[0]) + r, max(a[1], b[1]) + r):
             if layer not in it["layers"] or (it["net"] and it["net"] == net) or (it["old"] and (it["net"] in skip_old or it.get("dead"))):
                 continue
             g = self._dist(it, a, b) - w / 2
+            if mate and it["net"] == mate[0] and not it["old"] and it["k"] != "pad":
+                g += mate[1]
             if g < best:
                 best, who = g, it
         return best, who

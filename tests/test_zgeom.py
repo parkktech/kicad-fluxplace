@@ -110,3 +110,28 @@ def test_review_codes():
     bad = dict(CONS, route={"min_track_mm": 0.3, "min_clearance_mm": 0.3})
     u = R.check_pair_geometry(facts, dict(bad, pairs={"ETH_": {"impedance_diff": 100, "layers": ["F.Cu"]}}))
     assert u[0]["code"] == "PAIR_IMPEDANCE_UNREACHABLE" and u[0]["level"] == "FAIL" and "best achievable" in u[0]["msg"]
+
+
+def test_single_ended_net_with_family_prefix_is_not_graded():
+    # PHASE3G G3a: ETH_CLKREQ_N shares the ETH_ prefix but has no partner leg: not a pair, never PAIR_IMPEDANCE_OFF
+    facts = {"stackup": ROWS, "plane_layers": PLANES, "copper_layers": 6, "net_tracks": {
+        "ETH_CLKREQ_N": {"segments": [("In2.Cu", 0.2, 30.0)]},
+        "ETH_TX_P": {"segments": [("In2.Cu", 0.2, 30.0)]}, "ETH_TX_N": {"segments": [("F.Cu", 0.127, 30.0)]}}}
+    off = [x["msg"] for x in R.check_pair_geometry(facts, CONS) if x["code"] == "PAIR_IMPEDANCE_OFF"]
+    assert any("ETH_TX_P" in m for m in off) and not any("CLKREQ" in m for m in off)
+    # a declared plain net (not_pairs) takes its partner out of the pair list too
+    off2 = [x["msg"] for x in R.check_pair_geometry(facts, dict(CONS, not_pairs=["ETH_TX_N"]))
+            if x["code"] == "PAIR_IMPEDANCE_OFF"]
+    assert not any("ETH_TX_P" in m for m in off2)
+
+
+def test_gated_pair_pays_more_for_inner_layers():
+    # PHASE3G G3d: a gated pair's A* layer cost on inner layers is inner_cost_gated (3.0 unless [pairlay] inner_cost is set)
+    P = PA.params({})
+    assert P["inner_cost"] == 1.15 and P["inner_cost_gated"] == 3.0
+    copper = ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]
+    plain = PA.layer_cost(copper, SIG, P, gated=False)
+    gated = PA.layer_cost(copper, SIG, P, gated=True)
+    assert gated[0] == plain[0] == gated[3] == 1.0
+    assert gated[1] > plain[1] and gated[2] > plain[2]
+    assert PA.layer_cost(copper, SIG, PA.params({"pairlay": {"inner_cost": 1.5}}), gated=True)[1] == 1.5

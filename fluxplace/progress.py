@@ -78,29 +78,15 @@ def parse_metrics(items):
 def measure(board, timeout=900, cli=None):
     """{unconnected, errors} from a DRC of a temp COPY of the board (the original is never refilled)."""
     cli = cli or os.environ.get("FLUXPLACE_KICAD_CLI") or shutil.which("kicad-cli") or "kicad-cli"
-    with tempfile.TemporaryDirectory(prefix="fxprog-") as d:
-        base = os.path.splitext(os.path.basename(board))[0]
-        tb = os.path.join(d, base + ".kicad_pcb")
-        shutil.copy2(board, tb)
-        for ext in (".kicad_pro", ".kicad_dru"):
-            side = os.path.splitext(board)[0] + ext
-            if os.path.exists(side):
-                shutil.copy2(side, os.path.join(d, base + ext))
-        rep = os.path.join(d, "drc.json")
-        subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "--refill-zones", "--output", rep, tb],
-                       capture_output=True, timeout=timeout)
-        with open(rep) as fh:
-            j = json.load(fh)
-        from . import drcfull as DF
-        j = DF.complete(tb, j, fill=True)
-        if not isinstance(j.get("violations"), list):
-            raise RuntimeError("DRC report has no violations list")
-        shorts = sum(1 for v in j["violations"] if v.get("type") == "shorting_items")
-        from . import drcguard as DG
-        split = DG.open_split(j)
-        return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"]), "shorts": shorts,
-                "track_opens": split["track_opens"], "zone_islands": sum(split["islands"].values()),
-                "islands": [[net, layer, n] for (net, layer), n in sorted(split["islands"].items())]}
+    from . import drcguard as DG
+    j = DG.drc_json(board, cli, timeout)
+    if not isinstance(j.get("violations"), list):
+        raise RuntimeError("DRC report has no violations list")
+    shorts = sum(1 for v in j["violations"] if v.get("type") == "shorting_items")
+    split = DG.open_split(j)
+    return {"unconnected": len(j.get("unconnected_items") or []), "errors": len(j["violations"]), "shorts": shorts,
+            "track_opens": split["track_opens"], "zone_islands": sum(split["islands"].values()),
+            "islands": [[net, layer, n] for (net, layer), n in sorted(split["islands"].items())]}
 
 
 def checkpoint(board, workdir=None, note="", metrics=None, do_measure=False, measure_fn=None, allow_new_shorts=False):

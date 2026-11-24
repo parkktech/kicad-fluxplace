@@ -95,6 +95,7 @@ import os
 import re
 
 from . import bomopt as BO
+from . import modelpaths as MP
 from . import constraints as C
 from . import graph as G
 from . import si as SI
@@ -224,6 +225,24 @@ def _ps_note(facts, master, skew_mm, limit_mm):
     return f" [{skew_mm * pp:.1f} ps / limit {limit_mm * pp:.1f} ps]"
 
 
+def pin_escape_blocked(board, cons=None):
+    """PHASE3I F6: the "REF.pad" set of every fine-pitch pad whose escape lane is blocked on `board` (preroute's
+    PIN_ESCAPE_BLOCKED check). The lock writers compare it before and after a lock."""
+    from . import preroute, routediag
+    out = set()
+    for f in preroute.pin_escape_blocked(routediag.load(board)):
+        if f.get("code") == "PIN_ESCAPE_BLOCKED":
+            out |= set(f.get("pins") or [])
+    return out
+
+
+def pair_gated(cons, master):
+    """A pair is gated (stop-ship on skew/asymmetry) when its master is in a [pairs.*] family or a high-speed family."""
+    fams = tuple((cons or {}).get("pairs", {}))
+    fam = re.sub(r"\d+$", "", master.upper().split("_")[0])      # USB3_..., PCIE2_... gate as USB, PCIE
+    return master.startswith(fams) or fam in _HS_FAMILIES
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -238,19 +257,29 @@ def _pairs_from_audit(facts, cons):
         except Exception:
             opn = set(RC.text_open(B))
         rows = QA.pair_rows(B, cls, cons or {}, opn)
-    except Exception:
-        return None
-    fams = tuple((cons or {}).get("pairs", {}))
-    gated = lambda m: m.startswith(fams) or m.upper().split("_")[0] in _HS_FAMILIES
-    if any(r["status"] == "unknown" and gated(r["p"]) for r in rows):
-        return None          # a ps limit with no layer delay: check_pairs converts what it can and warns
+    except Exception as e:                                  # noqa: BLE001 - D71cx: no fallback to own length math when the file is there
+        return [_f(FAIL, "PAIR_UNMEASURED", f"pair audit failed ({type(e).__name__}: {str(e)[:100]}): no pair was measured")]
+    gated = lambda m: pair_gated(cons, m)
     out = []
+    from . import pairaudit as PA_
     for r in rows:
+        if r["status"] == "unknown" and gated(r["p"]):      # D71cx: an unmeasured pair or a leg that misses KiCad's total cannot pass
+            out.append(_f(FAIL, r.get("code") or "PAIR_UNMEASURED", f"{r['p']}/{r['n']}: {r['why']}"))     # also PAIR_DELAY_UNKNOWN: per pair, a FAIL
+            continue
+        if gated(r["p"]):                                  # a via whose barrel runs past the copper that uses it is an open stub
+            for vs in r.get("via_stubs") or []:
+                out.append(_f(WARN, "PAIR_VIA_STUB", f"{vs['net']}: via at ({vs['x']:.3f}, {vs['y']:.3f}) used on {'/'.join(vs['used'])} only: "
+                                                   f"{vs['stub_mm']:.2f} mm barrel stub" + (" (the pair never changes layer there: remove the via)" if vs["dead"] else "")))
+        if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
+            out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"], r.get("unit", "mm"))))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
+        if "stub" in r["causes"]:
+            out.append(_f(FAIL, "PAIR_STUB", f"{r['p']}/{r['n']}: {r['why']} (longest branch of a pair with more than two terminals)"))
         if "skew" in r["causes"]:
-            note = _ps_note(facts, r["p"], r["skew"], r["limit"])
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} mm > {r['limit']:g} mm limit{note}"))
+            u = r.get("unit", "mm")
+            note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
+            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
@@ -266,11 +295,14 @@ def _pairs_from_audit(facts, cons):
 
 
 def check_pairs(facts, cons):
+    """Pair findings.  With a readable board file the audit is the only judge (KiCad's lengths, D71cx: an audit that cannot measure is a
+    FAIL, never a graded-by-own-math pair).  Only facts with NO board file (a unit-level fact set, nothing to ask KiCad) use the legacy
+    net-length walk below."""
     audited = _pairs_from_audit(facts, cons)
     if audited is not None:
         return audited
     tracks = facts.get("net_tracks", {})
-    pairs = G.diff_pairs(list(facts["net_pads"]))
+    pairs = G.diff_pairs(list(facts["net_pads"]), exclude=C.not_pairs(cons))
     if not pairs:
         return []
     lengths = {n: t["length"] for n, t in tracks.items()}
@@ -285,11 +317,10 @@ def check_pairs(facts, cons):
             return float("inf")
     finds, _ = SI.pair_skew_findings(lengths, pairs, warn_mm=lim)
     out = []
-    fams = tuple((cons or {}).get("pairs", {}))
+    # skew is a stop-ship for high-speed pairs and for any family the
+    # engineer wrote a [pairs.*] rule for; on an audio pair it is advice
     def gated(master):
-        # skew is a stop-ship for high-speed pairs and for any family the
-        # engineer wrote a [pairs.*] rule for; on an audio pair it is advice
-        return master.startswith(fams) or master.upper().split("_")[0] in _HS_FAMILIES
+        return pair_gated(cons, master)
     for level, code, msg in finds:
         master = msg.split("/")[0]
         hard = code == "PAIR_SKEW" and gated(master)
@@ -472,6 +503,23 @@ def z0_on_layer(w, geom):
     return 2 * z1 * z2 / (z1 + z2), "stripline"
 
 
+def _pair_legs(facts, cons, names):
+    """PHASE3G G3a: the nets that are a leg of a differential pair: pairaudit.pair_list over netclass.classify when the
+    board is readable, else the name rule (_pairs) over `names`. constraints.not_pairs always removes its nets."""
+    from . import constraints as C, netclass as NC, pairaudit as PA, routediag as RD
+    legs = None
+    path = facts.get("board_path") or facts.get("board")
+    if isinstance(path, str) and os.path.isfile(path):
+        try:
+            cls = NC.classify(RD.load(path), cons or {})
+            legs = {n for pr in PA.pair_list(cls) for n in pr}
+        except Exception:                                     # noqa: BLE001 - unreadable board: the name rule
+            legs = None
+    if legs is None:
+        legs = set(NC._pairs(set(names), cons))
+    return legs - C.not_pairs(cons)
+
+
 def check_pair_geometry(facts, cons):
     """Controlled-impedance pair families graded against zgeom.pair_geometry (the geometry the pairs stage lays):
     PAIR_GEOMETRY (info: width/gap/impedance per layer), PAIR_IMPEDANCE_UNREACHABLE (FAIL: no allowed layer meets the target),
@@ -502,9 +550,11 @@ def check_pair_geometry(facts, cons):
         out.append(_f(INFO, "PAIR_GEOMETRY", f"{fam} {v['impedance_diff']} ohm: {line}"))
         if v.get("width_mm") and v.get("gap_mm"):
             continue                                              # explicit geometry is kept; the table above reports its impedance
-        for net, tr in sorted((facts.get("net_tracks") or {}).items()):
-            if not net.startswith(fam) or ZG.family_of(cons, net) != fam:
-                continue
+        nt = facts.get("net_tracks") or {}
+        legs = _pair_legs(facts, cons, nt)
+        for net, tr in sorted(nt.items()):
+            if not net.startswith(fam) or ZG.family_of(cons, net) != fam or net not in legs:
+                continue                                      # PHASE3G G3a: a single-ended net with a family prefix is not graded
             bad = None
             for layer, w, mm in tr.get("segments", []):
                 g = tab.get(layer)
@@ -1094,6 +1144,8 @@ def check_models(facts, board_path=None):
     entry in `refs`) with `re.search`, and "^ANT1 " needs that space to
     land right after the ref, not swallowed by a colon."""
     out = []
+    via = {}                                          # model path -> ancestor folder it resolves from (G5a)
+    bp = board_path or facts.get("board_path", "")
     for ref, p in sorted(facts["parts"].items()):
         if p.get("mech") or "models" not in p:   # hand-built facts carry no model list
             continue
@@ -1111,7 +1163,14 @@ def check_models(facts, board_path=None):
                               f"the rule is a real vendor/EasyEDA body (fluxplace models --fetch)",
                               refs=[ref]))
                 continue
-            full = resolve_model(m, board_path or facts.get("board_path", ""))
+            full = resolve_model(m, bp)
+            if not os.path.exists(full) and bp:
+                # PHASE3G G5a: a run-folder copy one level below the folder its lib/ paths were written for
+                hit = MP.ancestor_hit(m, os.path.dirname(os.path.abspath(bp)),
+                                      resolve=lambda q, d: resolve_model(q, os.path.join(d, "_")))
+                if hit:
+                    via[m] = hit[1]
+                    full = hit[0]
             if not os.path.exists(full):
                 base, ext = os.path.splitext(full)
                 alt = [e for e in (".step", ".stp", ".wrl") if os.path.exists(base + e)]
@@ -1134,6 +1193,10 @@ def check_models(facts, board_path=None):
                               f"parse into geometry (STEP with <50 points, or a WRL with "
                               f"no Shape/IndexedFaceSet) — renders as a missing body",
                               refs=[ref]))
+    if via:
+        dirs = sorted(set(via.values()))
+        out.append(_f(INFO, "MODEL_PATH_VIA_ANCESTOR",
+                      f"{len(via)} model paths resolve from {', '.join(dirs)}; a board opened here shows no bodies"))
     return out
 
 
@@ -1650,8 +1713,17 @@ def check_preroute(facts, spec, cons):
         found, _ = PR.run(RD.load(path), cons, spec, waivers=(), collide=True, surface=PR.surface_pins(path))
     except Exception as e:           # a gate that cannot run must say so, not crash the review
         return [_f(WARN, "PREROUTE_UNAVAILABLE", f"pre-route checks could not run: {e}")]
-    return [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))
-            for x in found]
+    out = [dict(_f(x["level"], x["code"], x["msg"], refs=x["refs"]), **({"relevance": x["relevance"]} if x.get("relevance") else {}))
+           for x in found]
+    try:                                                 # the coarse-route estimate predicts routing: on a routed board it is information
+        routed = PR.is_routed(RD.load(path)) if any(f["code"] == "CONGESTION" for f in out) else False
+    except Exception:                                    # noqa: BLE001
+        routed = False
+    if routed:
+        for f in out:
+            if f["code"] == "CONGESTION":
+                f["level"], f["msg"] = INFO, "(routed board: information) " + f["msg"]
+    return out
 
 
 def check_elec(spec, cons, ds_dir, mpn_map=None):
@@ -2058,6 +2130,12 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
             out += [_f(f["level"], f["code"], f["msg"], f.get("refs", [])) for f in FC.check_board(bp, cons)]
         except Exception as e:                 # noqa: BLE001 - a check that cannot run is reported, never a pass
             out.append(_f(WARN, "FP_UNCHECKED", f"footprint geometry NOT CHECKED: {type(e).__name__}: {e}"))
+        if (cons or {}).get("channel") or (cons or {}).get("dcdrop"):      # channel budget (loss / skew / length / stub / DC drop)
+            try:
+                from . import channel as CHN
+                out += [_f(lv, code, msg, refs) for lv, code, msg, refs in CHN.check(bp, cons)]
+            except Exception as e:             # noqa: BLE001 - a check that cannot run is reported, never a pass
+                out.append(_f(WARN, "CHANNEL_UNCHECKED", f"channel budget NOT CHECKED: {type(e).__name__}: {e}"))
     out += check_net_rules(facts, cons)
     out += check_rule_selectors(facts, cons)
     out += check_pairs(facts, cons)
@@ -2078,7 +2156,9 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_slivers(facts, cons)
     out += check_models(facts)
     out += check_power(facts, cons)
-    out += [_f(x['level'], x['code'], x['msg'], refs=x['refs']) for x in __import__('fluxplace.power', fromlist=['x']).check(facts, cons)]
+    from . import power as PWR
+    out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
+            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons))]
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
@@ -2330,6 +2410,8 @@ def _facts_swig(board_path, mpn_map=None, plane_track_max_mm=200.0):
             "x": round(pcbnew.ToMM((s.x + e.x) / 2), 4),
             "y": round(pcbnew.ToMM((s.y + e.y) / 2), 4),
             "kind": "arc" if cls == "PCB_ARC" else "track",
+            "x1": round(pcbnew.ToMM(s.x), 4), "y1": round(pcbnew.ToMM(s.y), 4),
+            "x2": round(pcbnew.ToMM(e.x), 4), "y2": round(pcbnew.ToMM(e.y), 4),
             "len": round(pcbnew.ToMM(t.GetLength()), 4),
         })
         if cls == "PCB_TRACK":

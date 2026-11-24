@@ -76,3 +76,96 @@ def test_block_cohesion_term_is_a_spread_of_each_block():
     # a block of fixed modules only is not pulled
     assert F2.block_spread(X, Y, np.array([True, True, False, False]), groups) == 54.0
     assert F2.block_spread(X, Y, fixed, {}) == 0.0
+
+
+# ---- C7b: rows measured on the output board (honoured / not honoured)
+def _fake_stage(monkeypatch, tmp_path, fanout_ok=True, extra="", move=None):
+    from fluxplace import floorplan2 as FP2, intent as IT
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_intent import module, cap
+    board = g.board(tmp_path, module("U1", 50, 40) + cap("C1", 20, 20, "A"))
+    moved = None
+    if move:                                  # the output board has C1 at `move`: the second board the stage writes
+        (tmp_path / "moved").mkdir()
+        moved = g.board(tmp_path / "moved", module("U1", 50, 40) + cap("C1", *move, "A"))
+
+    def once(b, cons, spec, grow, args, text_in, wd, tag, log=print):
+        b = moved or b
+        res = {"tag": tag, "grow": list(grow), "escaped": 5, "required": 5 if fanout_ok else 6, "moved_modules": 1, "movable": 2,
+               "source": {"cross": 0, "wl": 1.0}, "annealed": {"cross": 0, "wl": 1.0}, "secs": 0.0, "construct_failed": [],
+               "legality_new": {}, "fanout_ok": fanout_ok, "rounds": [{"why": ["U1.3 blocked"]}], "board": b, "blocked": [],
+               "metrics": {"RF_EXT": None, "pair_spans": []}}
+        return res, None, RD.load(b)
+    monkeypatch.setattr(FP2, "floorplan_once", once)
+    monkeypatch.setattr(FP2, "edge_order", lambda B, cons: ["L", "R", "T", "B"])
+    monkeypatch.setattr(FP2, "span_summary", lambda s: "-")
+    monkeypatch.setattr(FP2, "plan_summary", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skipped")))
+    monkeypatch.setattr(IT, "prepare", lambda b, cons, spec, wd, **k: (b, cons, None))
+    monkeypatch.setattr(IT, "gate", lambda *a, **k: 0)
+    c = tmp_path / "c.toml"
+    c.write_text('[[separation]]\nname = "met"\na = ["U1"]\nb = ["C1"]\nmin_mm = 5\nhard = true\n'
+                 '[[separation]]\nname = "violated"\na = ["U1"]\nb = ["C1"]\nmin_mm = 500\nhard = true\n' + extra)
+    return board, str(c), str(tmp_path / "o.kicad_pcb")
+
+
+def test_floorplan_reports_the_violated_hard_row_as_not_honoured_and_writes_budgets_json(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path)
+    cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    o = capsys.readouterr().out
+    line = next(l for l in o.splitlines() if l.startswith("rows on the output:"))
+    assert "1 hard not honoured (violated)" in line and "met" not in line.split("(")[1] and "stage FAIL" not in line
+    bj = json.load(open(out[:-len(".kicad_pcb")] + ".budgets.json"))
+    assert {r["name"]: r["status"] for r in bj["honoured"] if r["kind"] == "separation"} == {"met": "honoured", "violated": "not_honoured"}
+
+
+def test_floorplan_measures_a_keepout_separation_and_the_line_ends_stage_fail_on_a_fail(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path, fanout_ok=False,
+                                extra='[placement.keepout.ant]\nrect = [30, 30, 40, 50]\nlayers = "all"\nsource = "ds p.3"\n'
+                                      '[[separation]]\nname = "ko"\na = ["keepout:ant"]\nb = ["C1"]\nmin_mm = 100\nhard = true\n')
+    try:
+        cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    except SystemExit:
+        pass
+    o = capsys.readouterr().out
+    line = next(l for l in o.splitlines() if l.startswith("rows on the output:"))
+    assert line.endswith("(stage FAIL: rows not enforced)") and "ko" in line
+    p = out[:-len(".kicad_pcb")] + ".budgets.json"
+    ko = next(r for r in json.load(open(p))["honoured"] if r["name"] == "ko")
+    assert ko["value_out"] is not None and ko["status"] == "not_honoured"
+
+
+def test_floorplan_honoured_rows_go_on_the_event_stream_as_criteria_with_hard(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path)
+    ev = tmp_path / "ev" / "events.jsonl"
+    ev.parent.mkdir()
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    lines = [json.loads(l) for l in open(ev)]
+    res = [l for l in lines if l.get("kind") == "placement_progress" and l.get("cand") == "result"]
+    crit = {x["id"]: x for x in res[-1]["criteria"]}
+    assert crit["violated"]["ok"] is False and crit["violated"]["hard"] is True and crit["met"]["ok"] is True
+    hon = [l for l in lines if l.get("kind") == "placement_progress" and l.get("phase") == "honoured"]
+    assert hon and hon[-1]["why"].startswith("rows on the output: 1 honoured, 1 hard not honoured (violated)")
+    assert {x["id"]: x["hard"] for x in hon[-1]["criteria"]}["violated"] is True
+
+
+def test_floorplan_with_no_rows_writes_no_budgets_json(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path)
+    open(c, "w").write("")
+    cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    assert "rows on the output: 0 honoured" in capsys.readouterr().out
+
+
+def test_floorplan_near_row_the_moved_output_breaks_is_not_honoured_with_both_values(monkeypatch, tmp_path, capsys):
+    import cli
+    board, c, out = _fake_stage(monkeypatch, tmp_path, move=(47, 40),
+                                extra='[[separation]]\nname = "near"\na = ["U1"]\nb = ["C1"]\nmin_mm = 15\nhard = true\n')
+    cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
+    bj = json.load(open(out[:-len(".kicad_pcb")] + ".budgets.json"))
+    near = next(r for r in bj["honoured"] if r["kind"] == "separation" and r["name"] == "near")
+    assert near["value_in"] is not None and near["value_in"] != near["value_out"]
+    assert near["status"] == "not_honoured"

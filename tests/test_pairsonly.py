@@ -1,5 +1,6 @@
 """pairs --only: re-route named pairs whole on a routed board; keep the original unless the new pair is connected, matched,
 DRC-clean and opens nothing; refuse locked copper; --allow-shove; budget stop. Synthetic text boards, DRC injected."""
+import math
 import os
 import signal
 import sys
@@ -309,3 +310,179 @@ def test_zero_limit_allows_no_break_out_retry(tmp_path):
     r = rep["pairs"][0]
     assert len(calls) == 1 and r["status"] == "kept_original" and r["breakout_limit"] == 0.0
     assert "closest approach" in r["reason"] and "breakout_retry" not in r
+
+
+def test_rerouted_pair_on_discarded_group_board_counts_failed(tmp_path, monkeypatch):
+    """PHASE3E 4b: a group board that does not gain is discarded, so its "rerouted" pairs are failed, not laid."""
+    from fluxplace import netclass as NC, constraints as C, zgeom as ZG
+    board = tmp_path / "in.kicad_pcb"
+    board.write_text("x")
+    pa, pb = ("A_P", "A_N"), ("B_P", "B_N")
+    monkeypatch.setattr(RD, "load", lambda p: None)
+    monkeypatch.setattr(NC, "classify", lambda *a, **k: None)
+    monkeypatch.setattr(PO, "groups", lambda B, cls, pairs: {"U1": [pa, pb]})
+    monkeypatch.setattr(PO, "_complete", lambda board_, members, cons: 5)     # the group board never gains (5 complete before)
+    monkeypatch.setattr(C, "fab_profile", lambda cons: {"min_clearance_mm": 0.127})
+    monkeypatch.setattr(ZG, "family_of", lambda cons, p: None)
+
+    def fake_reroute(cur, tmp, names, cons, spec, budget=None, **k):
+        return {"pairs": [{"pair": n, "status": "rerouted"} for n in names]}
+    monkeypatch.setattr(PO, "reroute", fake_reroute)
+    rep = PO.regroup(str(board), str(tmp_path / "out.kicad_pcb"), {}, None, [pa, pb], log=lambda m: None)
+    assert rep["groups"]["U1"]["laid"] == [] and sorted(rep["failed"]) == sorted([pa, pb])
+
+
+# ---- PHASE3G G1: lay_centreline (agent pair_path) -------------------------------------------------------------------
+def _cl_board(tmp_path, extra=""):
+    body = duo("U1", 10, 20, "P", "N") + duo("J1", 10, 40, "P", "N") + extra
+    return PB.write(tmp_path, body)
+
+
+@pytest.fixture
+def cl_geo(monkeypatch):
+    """the family table the pairs stage would read: w 0.2 / gap 0.2 on F.Cu and B.Cu (stackup stubbed)."""
+    from fluxplace import zgeom as ZG
+    tab = {"F.Cu": {"w": 0.2, "gap": 0.2}, "B.Cu": {"w": 0.2, "gap": 0.2}}
+    monkeypatch.setattr(ZG, "resolve_stack", lambda cons, board=None, **k: ([{"name": "F.Cu", "type": "copper"}], [], "stub"))
+    monkeypatch.setattr(ZG, "family_table", lambda cons, rows, planes, sig, fam, **k: {l: tab[l] for l in sig if l in tab})
+    monkeypatch.setattr(ZG, "family_of", lambda cons, net: "P_")
+    return tab
+
+
+WPS = [(10.25, 23), (10.25, 30), (10.25, 37)]          # straight, 3 mm off each pad pair (break-outs join the pads)
+
+
+def test_centreline_lays_two_legs_at_width_plus_gap(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    out = str(tmp_path / "cl.kicad_pcb")
+    r = PO.lay_centreline(src, out, ("P", "N"), "F.Cu", WPS, {})
+    assert r["laid"], r
+    B = RD.load(out)
+    segs = [s for s in B["segs"] if s["net"] in ("P", "N") and s["a"][0] == s["b"][0] and abs(s["b"][1] - s["a"][1]) > 5]
+    xp = [s["a"][0] for s in segs if s["net"] == "P"]
+    xn = [s["a"][0] for s in segs if s["net"] == "N"]
+    assert xp and xn
+    assert abs(abs(xp[0] - xn[0]) - 0.4) < 0.01                       # offset between the legs = width + gap
+    assert all(abs(s["w"] - 0.2) < 1e-6 for s in B["segs"] if s["net"] in ("P", "N"))
+    assert all(s["locked"] for s in B["segs"] if s["net"] in ("P", "N"))  # new copper locked like reroute
+    assert r["p_mm"] and r["n_mm"]
+
+
+def test_centreline_refuses_non_45_waypoint_and_writes_nothing(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    out = tmp_path / "cl.kicad_pcb"
+    r = PO.lay_centreline(src, str(out), ("P", "N"), "F.Cu", [(10.25, 23), (12, 30), (10.25, 37)], {})
+    assert not r["laid"] and "segment 0 is not 45/90" in r["why"]
+    assert not out.exists()
+
+
+def test_centreline_refuses_foreign_track_on_the_line(tmp_path, cl_geo):
+    foreign = seg((5, 28), (15, 28), "X")
+    src = _cl_board(tmp_path, foreign)
+    before = open(src).read()
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert not r["laid"] and "exact check" in r["why"]
+    assert open(src).read() == before                                # in-place edit: nothing written when refused
+
+
+def test_centreline_missing_layer_geometry_is_refused(tmp_path, cl_geo):
+    src = _cl_board(tmp_path)
+    r = PO.lay_centreline(src, str(tmp_path / "x.kicad_pcb"), ("P", "N"), "In5.Cu", WPS, {})
+    assert not r["laid"] and r["why"] == "no pair geometry for In5.Cu"
+
+
+def test_centreline_in_place_edit_replaces_pair_copper(tmp_path, cl_geo):
+    src = _cl_board(tmp_path, seg((1, 1), (2, 1), "P", locked=True))  # an old locked stub of the pair
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert r["laid"], r
+    B = RD.load(src)
+    assert not [s for s in B["segs"] if s["a"] == (1.0, 1.0)]         # the replaced copper is gone
+
+
+# ---- PHASE3G G1b b/a: refusal detail, layer changes, pad-layer rule, return vias --------------------------------------
+@pytest.fixture
+def cl_geo2(monkeypatch):
+    """F.Cu and B.Cu signal layers, both with the same pair geometry (w 0.2 / gap 0.2): the layer-change centre line."""
+    from fluxplace import zgeom as ZG
+    tab = {"F.Cu": {"w": 0.2, "gap": 0.2}, "B.Cu": {"w": 0.2, "gap": 0.2}}
+    monkeypatch.setattr(ZG, "resolve_stack", lambda cons, board=None, **k: ([{"name": "F.Cu", "type": "copper"},
+                                                                          {"name": "B.Cu", "type": "copper"}], [], "stub"))
+    monkeypatch.setattr(ZG, "family_table", lambda cons, rows, planes, sig, fam, **k: {l: tab[l] for l in sig if l in tab})
+    monkeypatch.setattr(ZG, "family_of", lambda cons, net: "P_")
+    return tab
+
+
+class _FakePlanes:
+    """RP.Planes stand-in: F.Cu is referenced by In1.Cu (net GND), B.Cu by In2.Cu (net VCC); no fills are read."""
+    REF = {"F.Cu": ["In1.Cu"], "B.Cu": ["In2.Cu"]}
+    NETS = {"In1.Cu": {"GND"}, "In2.Cu": {"VCC"}}
+
+    def __init__(self, path, copper):
+        self.nets_on = self.NETS
+
+    def ref_layers(self, layer):
+        return self.REF.get(layer, [])
+
+
+WPS_LAYERS = [(10.25, 23, "F.Cu"), (10.25, 30, "B.Cu"), (10.25, 33, "F.Cu"), (10.25, 37)]   # F -> B -> F, the end on F
+
+
+def _vias(path, net=None):
+    return [(v["x"], v["y"], v["net"]) for v in RD.load(path)["vias"] if net is None or v["net"] == net]
+
+
+def test_centreline_two_layer_changes_lay_both_legs_with_via_pairs(tmp_path, cl_geo2, monkeypatch):
+    from fluxplace import returnpath as RP
+    monkeypatch.setattr(RP, "Planes", lambda path, copper: type("E", (), {"nets_on": {}, "ref_layers": lambda s, l: []})())
+    src = _cl_board(tmp_path)
+    out = str(tmp_path / "cl.kicad_pcb")
+    r = PO.lay_centreline(src, out, ("P", "N"), "F.Cu", WPS_LAYERS, {})
+    assert r["laid"], r
+    assert r["layers"] == ["F.Cu", "B.Cu", "F.Cu"] and r["vias"] == 2
+    B = RD.load(out)
+    for lay in ("F.Cu", "B.Cu"):
+        assert {s["net"] for s in B["segs"] if s["layer"] == lay and s["net"] in ("P", "N")} == {"P", "N"}
+    for y in (30.0, 33.0):                                             # one via pair per change, centred on the change point
+        pv = [v for v in _vias(out, "P") if abs(v[1] - y) < 0.6]
+        nv = [v for v in _vias(out, "N") if abs(v[1] - y) < 0.6]
+        assert len(pv) == 1 and len(nv) == 1
+        mx, my = (pv[0][0] + nv[0][0]) / 2, (pv[0][1] + nv[0][1]) / 2
+        assert abs(mx - 10.25) < 1e-3 and abs(my - y) < 1e-3
+        assert math.hypot(pv[0][0] - nv[0][0], pv[0][1] - nv[0][1]) >= 0.4 - 1e-3   # 2 x (width + gap) / 2 at least
+    assert r["return_via_missing"] == []
+
+
+def test_centreline_refusal_names_foreign_via_within_03mm(tmp_path, cl_geo2):
+    src = _cl_board(tmp_path, via(10.25, 30, "X"))
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert not r["laid"] and "exact check" in r["why"]
+    assert r["at"] is not None and math.hypot(r["at"][0] - 10.25, r["at"][1] - 30) <= 0.3
+    assert r["blocker"]["net"] == "X" and r["blocker"]["layer"] in ("F.Cu", "B.Cu")
+    assert [x["sign"] for x in r["refusals"]] == [1, -1]
+
+
+def test_centreline_start_pad_on_other_layer_is_refused(tmp_path, cl_geo2):
+    src = _cl_board(tmp_path)
+    r = PO.lay_centreline(src, None, ("P", "N"), "B.Cu", [(10.25, 23), (10.25, 30), (10.25, 37)], {})
+    assert not r["laid"]
+    assert r["why"].startswith("pad U1.1 is not on B.Cu: start the centre line on the pad's layer")
+
+
+def test_centreline_reference_change_gets_return_via_or_reports_missing(tmp_path, cl_geo2, monkeypatch):
+    from fluxplace import returnpath as RP
+    monkeypatch.setattr(RP, "Planes", _FakePlanes)
+    src = _cl_board(tmp_path)
+    out = str(tmp_path / "cl.kicad_pcb")
+    r = PO.lay_centreline(src, out, ("P", "N"), "F.Cu", WPS_LAYERS, {})
+    assert r["laid"] and r["return_via_missing"] == []
+    gnd = [v for v in _vias(out, "GND")]
+    assert len(gnd) == 2 and all(math.hypot(v[0] - 10.25, v[1] - y) <= 2.0 for v, y in zip(sorted(gnd, key=lambda v: v[1]), (30, 33)))
+    out2 = str(tmp_path / "cl2.kicad_pcb")
+    r2 = PO.lay_centreline(src, out2, ("P", "N"), "F.Cu", WPS_LAYERS, {"review": {"return_via_mm": 0.0}})
+    assert r2["laid"] and len(r2["return_via_missing"]) == 2 and _vias(out2, "GND") == []
+
+
+def test_centreline_stripped_counts_old_locked_pair_copper(tmp_path, cl_geo):
+    src = _cl_board(tmp_path, seg((1, 1), (2, 1), "P", locked=True))
+    r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
+    assert r["laid"] and r["stripped"]["locked"] >= 1 and r["stripped"]["items"] >= r["stripped"]["locked"]

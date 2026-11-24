@@ -129,12 +129,18 @@ def budget_overrides(B, cls):
 
 
 def support_far(B, cons, spec):
+    """FAIL over the support limit (max), INFO over the target (powerbudget.support_row: role, limit and its source in the message)."""
     cl, _ = CL.build(B, cons, spec)
-    return [_f(FAIL, "SUPPORT_PART_FAR",
-               f"{s['ref']} is {s['dist']:.1f} mm from {ic} pin {s['pad']} "
-               f"({s['net']}, {s['cls']}; limit {s['limit']:g} mm)",
-               refs=[s["ref"], ic], value=round(s["dist"], 2), limit=s["limit"])
-            for ic, s in sorted(CL.far_parts(cl), key=lambda x: -x[1]["dist"])]
+    far = [_f(FAIL, "SUPPORT_PART_FAR",
+              f"{s['ref']} is {s['dist']:.1f} mm from {ic} pin {s['pad']} "
+              f"({s['net']}, {s['cls']}, {s['role']}; limit {s['limit']:g} mm: {s['source']})",
+              refs=[s["ref"], ic], value=round(s["dist"], 2), limit=s["limit"])
+           for ic, s in sorted(CL.far_parts(cl), key=lambda x: -x[1]["dist"])]
+    soft = [_f(INFO, "SUPPORT_PART_FAR",
+               f"{s['ref']} is {s['dist']:.1f} mm from {c['ic']} pin {s['pad']} ({s['net']}, {s['role']}; over target {s['target']:g} mm, "
+               f"within max {s['limit']:g} mm: {s['source']})", refs=[s["ref"], c["ic"]], value=round(s["dist"], 2), limit=s["target"])
+            for c in cl for s in c["supports"] if s["sure"] and s["target"] < s["dist"] <= s["limit"]]
+    return far + soft
 
 
 def keepout_trapped(B):
@@ -173,10 +179,13 @@ def _lane(p, part, L, w):
     return (p["x"] - w / 2, p["y"] - p["ey"] - L, p["x"] + w / 2, p["y"] - p["ey"])
 
 
-def pin_escape_blocked(B):
+def pin_escape_blocked(B, only_nets=None, partners=None):
     """A fine-pitch (<= 0.5 mm) IC pad whose outward lane (track wide, track +
     clearance long) contains another net's pad, another part's courtyard, a
-    track-forbidding rule area or existing copper of another net."""
+    track-forbidding rule area or existing copper of another net.
+    only_nets: grade only pads of these nets (routed boards: the open nets). partners: {net: partner net}; copper of
+    a pad's partner is not a blocker (a pair's own legs)."""
+    partners = partners or {}
     L, w = B["track"] + B["clearance"], B["track"]
     pads = GM.Hash(2.0)
     for i, q in enumerate(B["pads"]):
@@ -199,19 +208,21 @@ def pin_escape_blocked(B):
         for p in part["pads"]:
             if not p["net"] or p["w"] * p["h"] > 1.5:
                 continue
+            if only_nets is not None and p["net"] not in only_nets:
+                continue
             lane = _lane(p, part, L, w)
             why = None
             for k in pads.hits(lane, "x"):
                 q = B["pads"][k]
                 if q["ref"] == ref and q["num"] == p["num"]:
                     continue
-                if q["net"] != p["net"] and q["layers"] & p["layers"]:
+                if q["net"] != p["net"] and q["net"] != partners.get(p["net"]) and q["layers"] & p["layers"]:
                     why = f"pad {q['ref']}.{q['num']}"
                     break
             if not why:
                 for k in segs.hits(lane, "x"):
                     s = B["segs"][k]
-                    if s["net"] != p["net"] and s["layer"] in p["layers"] and _seg_in(lane, s):
+                    if s["net"] not in (p["net"], partners.get(p["net"])) and s["layer"] in p["layers"] and _seg_in(lane, s):
                         why = f"copper of {s['net']}"
                         break
             if not why:
@@ -227,11 +238,13 @@ def pin_escape_blocked(B):
         if hits:
             n = sum(len(v) for v in hits.values())
             top = sorted(hits.items(), key=lambda kv: -len(kv[1]))[:3]
-            out.append(_f(FAIL, "PIN_ESCAPE_BLOCKED",
-                          f"{ref}: {n} fine-pitch pin(s) blocked within {L:.2f} mm "
-                          f"(track {B['track']:g} + clearance {B['clearance']:g}): "
-                          + "; ".join(f"{k} (pin {','.join(v[:4])})" for k, v in top),
-                          refs=[ref], value=n, limit=0))
+            f = _f(FAIL, "PIN_ESCAPE_BLOCKED",
+                   f"{ref}: {n} fine-pitch pin(s) blocked within {L:.2f} mm "
+                   f"(track {B['track']:g} + clearance {B['clearance']:g}): "
+                   + "; ".join(f"{k} (pin {','.join(v[:4])})" for k, v in top),
+                   refs=[ref], value=n, limit=0)
+            f["pins"] = sorted(f"{ref}.{x}" for v in hits.values() for x in v)     # PHASE3I F6: "REF.pad" of the blocked pins
+            out.append(f)
     return out
 
 
@@ -307,10 +320,10 @@ def ratsnest_crossings(edges):
 
 # ------------------------------------------------------------------ congestion
 def layer_split(B, cons=None):
-    """(signal layers, plane layers) as counted by the congestion model. Override with
-    `[preroute] signal_layers = ["F.Cu", ...]` (names) or `plane_layers = [...]`.
-    Default: an INNER layer is a plane when a pour zone with a net covers >= 60 % of
-    the outline there (a pour on an outer layer is routable copper, not a plane)."""
+    """(signal layers, plane layers) as counted by the congestion model and by the pairs lay.  Decided by, in order:
+    `[preroute] signal_layers = ["F.Cu", ...]` / `plane_layers = [...]` (names); the stackup's planes (`[stackup] planes` or the profile's:
+    a layer the designer made a plane, whatever copper it also carries); else the pour test: an INNER layer is a plane when one netted
+    zone's polygon covers >= 90 % of the outline box (a partial pour, or one on an outer layer, is routable copper)."""
     pc = (cons or {}).get("preroute", {})
     cu = list(B["copper"])
     if isinstance(pc.get("signal_layers"), list):
@@ -318,15 +331,38 @@ def layer_split(B, cons=None):
         return sig, [l for l in cu if l not in sig]
     if isinstance(pc.get("plane_layers"), list):
         return [l for l in cu if l not in pc["plane_layers"]], [l for l in cu if l in pc["plane_layers"]]
+    try:
+        from . import zgeom as ZG
+        planes = [l for l in (ZG.resolve_stack(cons)[1] or []) if l in cu[1:-1]]
+    except Exception:                                    # noqa: BLE001 - no stackup in the constraints: the pour test decides
+        planes = []
+    if planes:
+        return [l for l in cu if l not in planes], [l for l in cu if l in planes]
     x0, y0, x1, y1 = B["bbox"]
     board = max((x1 - x0) * (y1 - y0), 1e-6)
     plane = set()
     for z in B["zones"]:
-        if z["net"] and not z["keepout"] and z["pts"]:
-            xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
-            if (max(xs) - min(xs)) * (max(ys) - min(ys)) >= 0.6 * board:
+        p = z["pts"]
+        if z["net"] and not z["keepout"] and len(p) >= 3:
+            a = abs(sum(p[i][0] * p[(i + 1) % len(p)][1] - p[(i + 1) % len(p)][0] * p[i][1] for i in range(len(p)))) / 2
+            if a >= 0.9 * board:
                 plane |= {l for l in z["layers"] if l in cu[1:-1]}
     return [l for l in cu if l not in plane], [l for l in cu if l in plane]
+
+
+def is_routed(B):
+    """A board whose routing is done or nearly: at most a quarter of its multi-pad nets still have an open connection.  The coarse-route
+    congestion estimate predicts the routing; on a routed board it is information, not a verdict."""
+    from . import routeconn as RC
+    nets = {}
+    for p in B["pads"]:
+        if p["net"] and not p.get("np"):
+            nets[p["net"]] = nets.get(p["net"], 0) + 1
+    multi = [n for n, k in nets.items() if k >= 2]
+    if not multi:
+        return False
+    opn = RC.text_open(B)
+    return sum(1 for n in multi if opn.get(n)) <= len(multi) / 4
 
 
 def signal_layer_count(B, cons=None):

@@ -1,5 +1,6 @@
 """Shared DRC guard (fluxplace/drcguard.py): multiset-of-keys acceptance, position-free
 identity, zone-violation exclusion, and guard_board accepting a count rise with no new key."""
+from fluxplace import procs as _procs_mod
 import os
 import sys
 from collections import Counter
@@ -243,3 +244,130 @@ def test_protected_nets_naming_pairs_and_rf_names():
     from fluxplace import drcguard as DG
     got = DG.protected_nets({}, ["USB_DP", "USB_DM", "BT1_RF", "GPIO3"])
     assert {"USB_DP", "USB_DM", "BT1_RF"} <= got and "GPIO3" not in got
+
+
+def test_keys_per_net_same_open_named_two_ways_is_equal():
+    # PHASE3G G2a: KiCad names a different item pair for the same open net from run to run; the key is the net
+    def unc(desc_a, desc_b):
+        return {"unconnected_items": [{"type": "unconnected_items", "items": [
+            {"description": desc_a}, {"description": desc_b}]}], "violations": []}
+    a = unc("Track [NET_A] on B.Cu, length 10.0000 mm", "Pad 1 of U1 [NET_A]")
+    b = unc("Via [NET_A] on B.Cu", "Pad 2 of J1 [NET_A]")
+    assert DG.keys_per_net(a) == DG.keys_per_net(b) == {("Unet", "NET_A"): 1}
+    new_open = unc("Track [NET_B] on F.Cu", "Pad 3 of R1 [NET_B]")
+    assert set(DG.keys_per_net(new_open)) - set(DG.keys_per_net(a)) == {("Unet", "NET_B")}
+    # a zone clearance item is still counted; keep() restricts the violations
+    d = {"violations": [{"type": "clearance", "items": [{"description": "Zone [GND] on F.Cu"},
+                                                        {"description": "Track [SIG] on F.Cu"}]},
+                        {"type": "track_not_centered_on_via", "items": [{"description": "Via [SIG]"}]}],
+         "unconnected_items": []}
+    assert sum(DG.keys_per_net(d).values()) == 1 + 1
+    assert sum(DG.keys_per_net(d, keep=lambda v: v.get("type") != "track_not_centered_on_via").values()) == 1
+
+
+def test_tune_drc_report_keys_mask_polygon_bridges_by_net(monkeypatch):
+    # PHASE3G G2a: one mask polygon named by different item pairs on each run -> keyed (type, net of other item)
+    from collections import Counter
+    def bridge(other_desc):
+        return {"type": "solder_mask_bridge", "items": [
+            {"description": "Polygon on F.Mask, length 1.0 mm"}, {"description": other_desc}]}
+    run1 = {"violations": [bridge("Pad 1 of U1 [NET_A]"), bridge("Pad 2 of U1 [NET_A]")], "unconnected_items": []}
+    run2 = {"violations": [bridge("Pad 7 of R3 [NET_A]"), bridge("Pad 9 of R4 [NET_A]")], "unconnected_items": []}
+    for run in (run1, run2):
+        monkeypatch.setattr(DG, "drc_json", lambda *a, _r=run, **k: _r)
+        keys, counts = TU.drc_report("x.kicad_pcb")
+        assert keys == Counter({("solder_mask_bridge", ("NET_A",)): 2}) and counts == (2, 0)
+
+
+# ---- A1: the one DRC runner
+def _fake_cli(calls, report=None):
+    import json as _j
+    import subprocess as _sp
+
+    def run(cmd, **kw):
+        out = cmd[cmd.index("--output") + 1]
+        calls.append({"cmd": list(cmd), "dru": open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")).read()
+                      if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_dru")) else None,
+                      "pro": _j.load(open(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")))
+                      if os.path.isfile(os.path.join(os.path.dirname(cmd[-1]), "b.kicad_pro")) else None,
+                      "board": cmd[-1]})
+        rep = dict(report or {"violations": [], "unconnected_items": []})
+        if calls[-1]["dru"] and "fxcanary" in calls[-1]["dru"]:                       # a rule file loaded: the canary fires
+            rep["violations"] = list(rep["violations"]) + [{"type": "assertion_failed", "severity": "error", "description": "Assertion failure (rule 'fxcanary')", "items": []}]
+        _j.dump(rep, open(out, "w"))
+        return _sp.CompletedProcess(cmd, 0, "", "")
+    return run
+
+
+def test_drc_json_always_refills_runs_on_a_copy(tmp_path, monkeypatch):
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    calls = []
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
+    d = DG.drc_json(str(b))
+    assert d["violations"] == []
+    assert "--refill-zones" in calls[0]["cmd"] and "--severity-all" in calls[0]["cmd"]
+    assert calls[0]["board"] != str(b)
+    assert not [f for f in os.listdir(tmp_path) if f != "x.kicad_pcb"]
+
+
+def test_drc_json_rules_text_reaches_cli_and_only_rules_ignores_the_rest(tmp_path, monkeypatch):
+    import json as _j
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    (tmp_path / "x.kicad_pro").write_text(_j.dumps({"board": {"design_settings": {"rule_severities": {"clearance": "error",
+                                                                                                   "skew_out_of_range": "ignore"}}}}))
+    (tmp_path / "x.kicad_dru").write_text("(version 1)\n(rule \"old\")")
+    calls = []
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
+    DG.drc_json(str(b), rules="(version 1)\n(rule \"new\")", only_rules=["skew_out_of_range"])
+    assert "new" in calls[0]["dru"] and "old" not in calls[0]["dru"]
+    rs = calls[0]["pro"]["board"]["design_settings"]["rule_severities"]
+    assert rs == {"clearance": "ignore", "skew_out_of_range": "error"}
+    DG.drc_json(str(b))
+    assert "old" in calls[1]["dru"]
+    assert _j.load(open(tmp_path / "x.kicad_pro"))["board"]["design_settings"]["rule_severities"]["clearance"] == "error"
+
+
+def test_drc_json_two_concurrent_calls_do_not_collide(tmp_path, monkeypatch):
+    import threading
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    calls, res, errs = [], [], []
+    monkeypatch.setattr(_procs_mod, "run", _fake_cli(calls))
+
+    def go():
+        try:
+            res.append(DG.drc_json(str(b)))
+        except Exception as e:     # noqa
+            errs.append(e)
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs and len(res) == 2
+    assert len({c["board"] for c in calls}) == 2
+
+
+def test_drc_json_no_report_raises(tmp_path, monkeypatch):
+    import subprocess as _sp
+    b = tmp_path / "x.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    monkeypatch.setattr(_procs_mod, "run", lambda cmd, **k: _sp.CompletedProcess(cmd, 1, "", "boom"))
+    with pytest.raises(RuntimeError):
+        DG.drc_json(str(b))
+
+
+def test_drc_json_retries_once_when_kicad_cli_writes_no_report(tmp_path):
+    """critroute lost 10 of 13 tries to `DRC produced no report`: kicad-cli sometimes exits without writing under load."""
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("(kicad_pcb)")
+    flag = tmp_path / "ran"
+    cli = tmp_path / "fake-cli"
+    cli.write_text("#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = --output ] && out=$2; shift; done\n"
+                   f"if [ -f {flag} ]; then echo '{{\"violations\": [], \"unconnected_items\": []}}' > \"$out\"; else touch {flag}; fi\n")
+    cli.chmod(0o755)
+    d = DG.drc_json(str(b), str(cli), 30)
+    assert d["violations"] == [] and flag.exists()
+    cli.write_text("#!/bin/sh\nexit 3\n")
+    with pytest.raises(RuntimeError, match=r"exited 3 with no report \(2 tries\)"):
+        DG.drc_json(str(b), str(cli), 30)

@@ -1,0 +1,64 @@
+"""Post-route clean-up, run before the close loop (and runnable alone): off-centre track ends.  (`dedupe_file` exists but clean() does not call it:
+on the W15 preview it dropped the stacked BT1/2/3_VDD vias, which are locked items in the manifest, and the commit point refused the stage
+with PROTECTED_CHANGED; the duplicates a snap itself makes are removed inside snapiter._snap.)
+
+`track_not_centered_on_via` (an error KiCad's DRC reports for every track end that touches a via off its centre; KRT leaves hundreds):
+snapiter.run moves the ends to the via centre where the DRC stays clean (new-violation guard per iteration; refused joints are
+reported).  Dangling vias / stubs are NOT pruned here: on the W15 KRT preview the 130 `via_dangling` are locked fan-out vias, and removing
+them (alone or with their stubs) raised the unconnected count 65 -> 78 and moved the warning to the stubs (`track_dangling` 57 -> 148);
+a safe removal needs a per-candidate connectivity check (open item)."""
+import os
+import shutil
+
+
+def _unc(board, cli):
+    from . import tune as TU
+    return TU.drc_counts(board, cli)[1]
+
+
+def dedupe_file(path):
+    """Drop exact duplicate copper (same geometry, width, layer, net; a locked copy wins) from the board file `path` in place -> n dropped.
+    Stacked duplicate vias are what the review's HOLE_TO_HOLE reports as -0.2 mm edge-to-edge."""
+    from . import dedupe as DD
+    text = open(path, errors="surrogateescape").read()
+    new, n = DD.dedupe_text(text)
+    if n:
+        with open(path, "w", errors="surrogateescape") as fh:
+            fh.write(new)
+    return n
+
+
+def clean(board, out, kicad_cli="kicad-cli"):
+    """-> {snap: {moved, excluded, iters, centred_left, refused_geom}, via / joiner: snapiter.via_run / joiner_run records (only when ends
+    were left), unconnected: [before, after], kept: bool}; `out` is always written
+    (the input when the snap is not kept: unconnected must not rise)."""
+    from . import snapiter as SI
+    rep = {"snap": None, "unconnected": None, "kept": True}
+    for ext in (".kicad_pro", ".kicad_dru"):
+        s = os.path.splitext(board)[0] + ext
+        if os.path.exists(s) and os.path.abspath(s) != os.path.abspath(os.path.splitext(out)[0] + ext):
+            shutil.copy(s, os.path.splitext(out)[0] + ext)
+    before = _unc(board, kicad_cli)
+    shutil.copy(board, out)
+    rep["deduped"] = 0   # no whole-board dedupe here: locked duplicates are counted in the manifest (Fable REVIEW-W16MERGE re-check); B1 drops snap-made copies
+    try:
+        rep["snap"] = SI.run(out, out, log=lambda m: None)
+    except Exception as e:                           # noqa: BLE001 - a clean-up failure is reported, never fatal
+        rep["snap"] = {"error": str(e)[:160]}
+    # the ends the snap left (clearance-refused): move the via to the end, then tie the end to the via centre with a joiner (snapiter).
+    # Locks hold, and the nets of the board's manifest (complete pairs, locked items: the commit point would refuse their change) are skipped.
+    if (rep["snap"] or {}).get("centred_left") != 0:
+        try:
+            from . import boardwrite as BW
+            protect = sorted((BW.load_manifest(board) or {}).get("nets") or {})
+            rep["via"] = SI.via_run(out, out, log=lambda m: None, protect=protect)
+            if rep["via"].get("centred_left") != 0:
+                rep["joiner"] = SI.joiner_run(out, out, log=lambda m: None, protect=protect)
+        except Exception as e:                       # noqa: BLE001
+            rep["via"] = dict(rep.get("via") or {}, error=str(e)[:160])
+    after = _unc(out, kicad_cli)
+    if after > before:
+        shutil.copy(board, out)
+        rep["kept"], after = False, before
+    rep["unconnected"] = [before, after]
+    return rep

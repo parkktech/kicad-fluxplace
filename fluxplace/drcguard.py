@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 from collections import Counter
 
 ZONE_MARK = "Zone"
@@ -48,18 +49,110 @@ def keys_from_report(d, keep=None, unconnected=True):
     return Counter(keys), (len(vio), len(unc))
 
 
-def drc_json(board_path, kicad_cli="kicad-cli", timeout=600):
-    """The raw kicad-cli DRC dict (all severities, zones refilled)."""
-    out = board_path + ".drc.json"
-    subprocess.run([kicad_cli, "pcb", "drc", "--format", "json",
-                    "--severity-all", "--all-track-errors", "--refill-zones", "-o", out,
-                    board_path], capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(out):
-        raise RuntimeError("DRC produced no report")
-    from . import drcfull as DF
-    d = DF.complete(board_path, json.load(open(out)), fill=True)
-    os.unlink(out)
-    return d
+_NET = re.compile(r"\[([^\]]+)\]")
+
+
+def unc_nets(u):
+    """Net names of an unconnected item (from its item descriptions, e.g. 'Track [NET] on B.Cu, ...')."""
+    return sorted({m.group(1) for it in u.get("items") or [] for m in [_NET.search(str(it.get("description", "")))] if m})
+
+
+def keys_per_net(d, keep=None):
+    """Counter of keys for a kicad-cli JSON dict with OPENS counted per NET (key ("Unet", net)), not by item
+    description: moving a track end changes which items an existing open names, and that read as a new open
+    every run (W9/W13). Clearance items on a zone are counted (keys_from_report leaves zone items out).
+    keep(v) -> bool restricts the violations; unconnected items are always counted per net. (PHASE3G G2a: the
+    body of snapiter._keys minus its CENTRED filter.)"""
+    keys = keys_from_report(d, keep=keep, unconnected=False)[0]
+    for v in d.get("violations", []):
+        if v.get("type") == "clearance" and _zone_item(v):
+            keys[key_of(v)] += 1
+    for u in d.get("unconnected_items", []):
+        for n in unc_nets(u) or ["?"]:
+            keys[("Unet", n)] += 1
+    return keys
+
+
+def report_slot(board_path):
+    """A unique kicad-cli DRC report path beside the board (mkstemp): two runs on one board never unlink each
+    other's report (the pour-island missing-file crash)."""
+    import tempfile
+    fd, out = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(board_path)),
+                               prefix=os.path.basename(board_path) + ".", suffix=".drc.json")
+    os.close(fd)
+    return out
+
+
+CANARY_RULE = ("(rule \"fxcanary\" (condition \"A.Type == 'Footprint' || A.Type == 'Track'\") "
+               "(constraint assertion \"A.Type == 'Nothing'\"))")
+
+
+def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True, pro_edit=None, canary=None):
+    """THE kicad-cli DRC runner (all severities, zones always refilled). Runs on a temp COPY of the board (never refills or
+    rewrites the original) with its .kicad_pro/.kicad_dru beside it, and a unique report path (concurrent calls never collide).
+    rules: .kicad_dru text that replaces the board's rule file. only_rules: list of rule-severity keys left on, every other
+    check set to ignore in the temp project (a 2 s run for one rule). complete: complete the capped unconnected list.
+    pro_edit(dict): edits the temp project (e.g. a tuning profile). canary: names of rules in `rules` at least one of which must fire:
+    a syntax error anywhere in a .kicad_dru silently disables EVERY rule (kicad-cli still exits 0), so a report in which none of
+    the canary rules appears raises RuntimeError("rule file ignored").
+    Raises RuntimeError when kicad-cli writes no report.  Never saves a board (BOARD.Save() would rewrite a neighbouring .kicad_pro)."""
+    import shutil
+    import tempfile
+    stem = os.path.splitext(os.path.abspath(board_path))[0]
+    with tempfile.TemporaryDirectory(prefix="fxdrc-") as td:
+        b = os.path.join(td, "b.kicad_pcb")
+        shutil.copy(board_path, b)
+        dru = stem + ".kicad_dru"
+        dtext = rules if rules is not None else (open(dru, errors="replace").read() if os.path.isfile(dru) else None)
+        if dtext is not None:
+            # a syntax error anywhere in a rule file silently disables EVERY rule (exit 0, fewer violations that read as "better"):
+            # a canary rule that always fires goes into every custom-rule run and must be in the report
+            dtext = dtext.rstrip() + "\n" + CANARY_RULE + "\n"
+            open(os.path.join(td, "b.kicad_dru"), "w").write(dtext)
+        pro = stem + ".kicad_pro"
+        pd = {}
+        if os.path.isfile(pro):
+            try:
+                pd = json.load(open(pro))
+            except (OSError, ValueError):
+                pd = {}
+        if only_rules is not None:
+            rs = pd.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})
+            for k in list(rs):
+                rs[k] = "ignore"
+            for k in only_rules:
+                rs[k] = "error"
+        if pro_edit:
+            pro_edit(pd)
+        if pd:
+            json.dump(pd, open(os.path.join(td, "b.kicad_pro"), "w"))
+        out = os.path.join(td, "drc.json")
+        for attempt in (1, 2):                         # kicad-cli sometimes exits without a report under load (critroute: 10 of 13 tries); once more
+            try:
+                r = _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
+                                    "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(f"DRC timed out after {timeout} s") from e
+            rc = getattr(r, "returncode", 0)
+            if os.path.isfile(out) and os.path.getsize(out):
+                break
+        else:
+            raise RuntimeError(f"DRC produced no report: kicad-cli exited {rc} with no report (2 tries): {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
+        if rc not in (0, None):
+            raise RuntimeError(f"kicad-cli exited {rc}: {(getattr(r, 'stderr', '') or getattr(r, 'stdout', '') or '')[-200:]}")
+        d = json.load(open(out))
+        if dtext is not None and not any("rule 'fxcanary'" in str(v.get("description", "")) for v in d.get("violations", [])):
+            raise RuntimeError("rule file ignored: the canary rule did not fire (a syntax error in the .kicad_dru disables every rule, "
+                               "or the board has no footprints or tracks)")
+        if dtext is not None:                                                  # our canary is a probe, never a finding
+            d["violations"] = [v for v in d.get("violations", []) if "rule 'fxcanary'" not in str(v.get("description", ""))]
+        if canary and not any(f"rule '{c}'" in str(v.get("description", "")) for v in d.get("violations", []) for c in canary):
+            raise RuntimeError("rule file ignored: no canary rule fired (" + ", ".join(canary[:3]) + "); a syntax error in the .kicad_dru "
+                               "disables every rule, or the nets have no copper")
+        if complete:
+            from . import drcfull as DF
+            d = DF.complete(b, d, fill=True)
+        return d
 
 
 def drc_keys(board_path, kicad_cli="kicad-cli", timeout=600, keep=None, unconnected=True):
@@ -137,19 +230,20 @@ def new_keys(base_keys, keys):
 def protected_nets(cons, names):
     """Nets no trade may open (R5) and whose copper stays locked: the [rf] nets, nets named as RF (review.is_rf),
     every pair leg from the constraints (krtchain.pair_nets) and every leg found by naming (graph.diff_pairs)."""
-    from . import krtchain, graph, review
+    from . import krtchain, graph, review, constraints as C
     names = sorted(names)
+    nopair = C.not_pairs(cons)
     rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
     try:
         pairs = set(krtchain.pair_nets(cons, names, None))
     except Exception:
         pairs = set()
     try:
-        dp = graph.diff_pairs(names)
+        dp = graph.diff_pairs(names, exclude=nopair)
         pairs |= set(dp) | set(dp.values())
     except Exception:
         pass
-    return rf | pairs
+    return rf | (pairs - nopair)
 
 
 def snap_nets(snap):

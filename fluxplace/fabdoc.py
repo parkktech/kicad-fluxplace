@@ -17,6 +17,7 @@ Used by `fluxplace deliver` and `fluxplace/pcbway.py`; also runnable directly:
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import sys
 
 # plain tuples, not RGBColor: this module must import without python-docx so
@@ -186,7 +187,7 @@ def render(md_path, out_path, title, subtitle):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for py in ("python3", "/usr/bin/python3"):
         try:
-            r = subprocess.run([py, "-m", "fluxplace.fabdoc", md_path,
+            r = _procs.run([py, "-m", "fluxplace.fabdoc", md_path,
                                 out_path, title, subtitle], cwd=here,
                                capture_output=True, timeout=120)
             if r.returncode == 0 and os.path.exists(out_path):

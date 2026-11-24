@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 import tempfile
 import time
 import zipfile
@@ -348,7 +349,7 @@ def run_jvm(cmd, log_path, timeout_s, grace_s, ses, cwd=None, tick=None, poll=2.
     res = {"rc": None, "killed": False, "hung_after_save": False, "pid": None}
     with open(log_path, "wb") as lf:
         try:
-            p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=cwd, env=env)
+            p = _procs.popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=cwd, env=env)
         except OSError as e:
             raise RuntimeError(f"cannot start Java ({cmd[0]}): {e}") from e
         res["pid"] = p.pid
@@ -393,7 +394,7 @@ def _helper(cmd, args, workdir, timeout=1800):
     aj = os.path.join(workdir, f"fr-{cmd}.args.json")
     with open(aj, "w") as fh:
         json.dump(args, fh)
-    r = subprocess.run([RC.PY, HELPER, cmd, aj], capture_output=True, text=True, timeout=timeout)
+    r = _procs.run([RC.PY, HELPER, cmd, aj], capture_output=True, text=True, timeout=timeout)
     lines = [l for l in r.stdout.splitlines() if l.startswith("{")]
     if r.returncode != 0 or not lines:
         raise RuntimeError(f"freerouting {cmd} step failed: " + (r.stderr or r.stdout)[-300:].strip())
@@ -516,7 +517,7 @@ def subfloor_copper(board, workdir, classes, floor, drc_cli="kicad-cli"):
     gate_pro(os.path.splitext(board)[0] + ".kicad_pro", os.path.splitext(cp)[0] + ".kicad_pro", classes)
     with tempfile.TemporaryDirectory() as td:
         o = os.path.join(td, "drc.json")
-        subprocess.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones",
+        _procs.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "--refill-zones",
                         "-o", o, cp], capture_output=True, text=True, timeout=900)
         d = json.load(open(o)) if os.path.exists(o) else {"violations": []}
     out = []
@@ -545,7 +546,7 @@ def load_violations(board, workdir, loc, S, planes=(), floor_track=0.0, floor_cl
     os.makedirs(os.path.join(seg, "jvmtmp"), exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
     with open(flog, "wb") as lf:
-        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=seg, env=env)
+        p = _procs.popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=seg, env=env)
     t0 = time.time()
     try:
         while time.time() - t0 < tmo_s:
@@ -585,7 +586,7 @@ def preroute_gate(board, workdir, *, loc, S, classes, out, planes=(), floor_trac
     def drc(path):
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "drc.json")
-            subprocess.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "-o", o, path],
+            _procs.run([drc_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors", "-o", o, path],
                            capture_output=True, text=True, timeout=900)
             return json.load(open(o)) if os.path.exists(o) else {"violations": []}
     rec = {"classes": len(classes.get("classes") or ()), "ok": True}

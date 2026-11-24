@@ -37,7 +37,8 @@ def params(cons):
     return {"enabled": e.get("enabled", True) is not False, "step": float(e.get("step_mm", 0.1)), "clearance": e.get("clearance_mm"),
             "via_cost": float(e.get("via_cost_mm", 20.0)), "turn_cost": float(e.get("turn_cost_mm", 0.4)),
             "nodes": int(e.get("max_nodes", 400000)), "pad_max": float(e.get("pad_max_mm", 16.0)), "ring": float(e.get("ring_mm", 1.0)),
-            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)),
+            "margin": float(e.get("margin_mm", 0.03)), "inner_cost": float(e.get("inner_cost", 1.15)), "passes": int(e.get("passes", 0)), "exit_reserve_mm": float(e.get("exit_reserve_mm", 4.0)), "near_mm": float(e.get("blocker_near_mm", 2.0)),
+            "inner_cost_gated": float(e.get("inner_cost", 3.0)),        # PHASE3G G3d: gated pairs stay outer unless blocked
             "nodes_per_mm": int(e.get("nodes_per_mm", 25000)), "via_exit": e.get("via_exit", True) is not False,
             "dogbone": e.get("dogbone", True) is not False, "reserve_exits": e.get("reserve_exits", False) is True,
             "reserve_mm": float(e.get("reserve_mm", 3.0)), "negotiate": e.get("negotiate", True) is not False,
@@ -163,6 +164,38 @@ def _gates(grid, allowed, li_list, term, R, outward, lats):
     return out
 
 
+def layer_cost(copper, sig, P, gated):
+    """A* length factor per signal layer: outer layers 1.0; inner layers P["inner_cost"], or P["inner_cost_gated"] for a
+    gated pair (review.pair_gated: a route stays on the outer layers unless blocked; a cost, not a ban)."""
+    inner = P["inner_cost_gated"] if gated else P["inner_cost"]
+    return [1.0 if l in (copper[0], copper[-1]) else inner for l in sig]
+
+
+def via_half_pitch(via, via_gap, dist, step):
+    """PHASE3G G1b a: the via-pair grid -> (kv_s, kv_d, hv): kv in grid steps (straight / diagonal) and hv = half the via-pair
+    pitch per direction index. The one definition the pairs stage (lay_section) and the centre line (pairsonly.lay_centreline)
+    both use. dist = the pair's half pitch on the layer."""
+    hvmin = max((via + via_gap) / 2, dist)
+    kv_s, kv_d = math.ceil(hvmin / step - 1e-9), math.ceil(hvmin / (step * math.sqrt(2)) - 1e-9)
+    return kv_s, kv_d, [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
+
+
+def _guide_cost(ctx, grid, sig, nets, cost):
+    """pairs guide (lookahead, L7): per-layer extra cost of entering each cell, max-merged with the negotiation cost and
+    capped at 255. No guide in ctx -> `cost` returned unchanged (the search is byte-identical to before)."""
+    g = ctx.get("guide")
+    if not g:
+        return cost
+    arrs = g(tuple(nets), grid, sig)
+    if not arrs:
+        return cost
+    if not cost:
+        return arrs
+    import numpy as np
+    return [np.maximum(np.frombuffer(bytes(x), dtype=np.uint8), np.frombuffer(bytes(y), dtype=np.uint8)).tobytes()
+            for x, y in zip(arrs, cost)]
+
+
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
@@ -177,9 +210,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
     for t, ls in zip((ta, tb), lays):
         if not ls:
             return {"ok": False, "reason": f"{t['name']}: the two pads share no signal layer", "blockers": []}
-    hvmin = max((rule["via"] + rule["via_gap"]) / 2, dist)
-    kv_s, kv_d = math.ceil(hvmin / step - 1e-9), math.ceil(hvmin / (step * math.sqrt(2)) - 1e-9)
-    hv = [(kv_s if (di == 0 or dj == 0) else kv_d) * step * math.hypot(di, dj) for di, dj in (PL.DIRS[(d + 2) % 8] for d in range(8))]
+    kv_s, kv_d, hv = via_half_pitch(rule["via"], rule["via_gap"], dist, step)
     K = max(2, math.ceil(max(2 * dist * PL.T22, max(hv) - dist + dist * PL.T22) / step + 0.3))
     viaok = None
     banned = set()
@@ -220,8 +251,8 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         else:
             states, info = PL.astar(grid.nx, grid.ny, sig, allowed, vm if nl > 1 else None, seeds, goals, H, 4, K, step,
                                     P["turn_cost"], P["via_cost"], int(budget_x * (P["nodes"] + P["nodes_per_mm"] * span)),
-                                    [1.0 if l in (grid.B["copper"][0], grid.B["copper"][-1]) else P["inner_cost"] for l in sig],
-                                    ccost=cost) if seeds else (None, {"reason": "no gate with a matching polarity"})
+                                    layer_cost(grid.B["copper"], sig, P, ctx["gated"](nets)),
+                                    ccost=_guide_cost(ctx, grid, sig, nets, cost)) if seeds else (None, {"reason": "no gate with a matching polarity"})
         if not states:
             reason = f"{info['reason']} for the coupled centre line ({env:.2f} mm envelope + {clr:.3f} clearance)"
             near = info.get("near")
@@ -249,6 +280,23 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             return {"ok": True, "states": states, "pol": pol, "fp": fp, "gates": len(ga) + len(gb), "vias": len(vias),
                     "layers": [r["layer"] for r in runs], "cost": info.get("cost", 0.0)}
         if plan_only:
+            cp, p0, p1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], pol)          # the break-outs the lay will make must exist
+            cn, n0, n1 = PL.legs(runs, vias, dl, hv, wl, rule["via"], -pol)
+            mark = items.mark()
+            _claim(items, cp, nets[0])
+            _claim(items, cn, nets[1])
+            fb = lambda pad, e, layer, net: PL.stub(grid.B, items, ctx["base_n"], ctx["ign"], pad, e, layer, wl[layer], net, clr, ctx["skip"])
+            ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), runs[0]["t0"], runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], fallback=fb, gap=geo[runs[0]["layer"]][1])
+            if ba[0] is not None:
+                _claim(items, ba[0], nets[0])
+                _claim(items, ba[1], nets[1])
+                bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-runs[-1]["t1"][0], -runs[-1]["t1"][1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], fallback=fb, gap=geo[runs[-1]["layer"]][1])
+            items.rollback(mark)
+            if ba[0] is None or bb[0] is None:
+                bad, side = (ba, states[0]) if ba[0] is None else (bb, states[-1])
+                reason, blockers = bad[1], [bad[2]["label"]] if bad[2] else []
+                banned |= _ban(side, grid, 0.3)
+                continue
             keepfree = []                                   # what the fan-out must leave free: both ends of the corridor and the via pairs near them
             for r, t, rev in ((runs[0], ta, False), (runs[-1], tb, True)):
                 pts = r["pts"][::-1] if rev else list(r["pts"])
@@ -282,7 +330,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
         t0, t1 = runs[0]["t0"], runs[-1]["t1"]
         skew = PL.piece_len(cp) - PL.piece_len(cn) + ta.get("bias", 0.0) + tb.get("bias", 0.0)
         fb = lambda pad, e, layer, net: PL.stub(grid.B, items, ctx["base_n"], ctx["ign"], pad, e, layer, wl[layer], net, clr, ctx["skip"])
-        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], bias=skew, fallback=fb)
+        ba = PL.breakout(items, (ta["p"], ta["n"]), (p0, n0), t0, runs[0]["layer"], wl[runs[0]["layer"]], nets, clr, ctx["skip"], bias=skew, fallback=fb, gap=geo[runs[0]["layer"]][1])
         if ba[0] is None:
             items.rollback(mark)
             reason, blockers = ba[1], [ba[2]["label"]] if ba[2] else []
@@ -290,7 +338,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             continue
         _claim(items, ba[0], nets[0])
         _claim(items, ba[1], nets[1])
-        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], bias=skew + ba[2], fallback=fb)
+        bb = PL.breakout(items, (tb["p"], tb["n"]), (p1, n1), (-t1[0], -t1[1]), runs[-1]["layer"], wl[runs[-1]["layer"]], nets, clr, ctx["skip"], bias=skew + ba[2], fallback=fb, gap=geo[runs[-1]["layer"]][1])
         if bb[0] is None:
             items.rollback(mark)
             reason, blockers = bb[1], [bb[2]["label"]] if bb[2] else []
@@ -335,6 +383,13 @@ def _self_cross(runs, dl, wl, clr):
                 if kb - ka >= 3 and G.seg_seg(a, b, c, d) < need:
                     return True
     return False
+
+
+def _pt_seg(x, y, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = dx * dx + dy * dy
+    t = 0.0 if L < 1e-12 else max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / L))
+    return math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
 
 
 def _claim(items, pieces, net):
@@ -382,24 +437,9 @@ def direct_section(ctx, ta, tb, rule, nets):
 
 
 def pair_layers(B, cons):
-    """(signal layers, plane layers) for pairs.  `[preroute] signal_layers / plane_layers` decide when given; otherwise an
-    INNER layer is a plane when one netted zone covers the whole board (polygon area >= 90 % of the outline box).  An inner
-    layer with a partial fill is a signal layer that also carries a pour (the pour is refilled round the tracks)."""
+    """(signal layers, plane layers) for pairs: preroute.layer_split (the same split the congestion model uses)."""
     from . import preroute as PR
-    pc = (cons or {}).get("preroute", {}) or {}
-    if isinstance(pc.get("signal_layers"), list) or isinstance(pc.get("plane_layers"), list):
-        return PR.layer_split(B, cons)
-    cu = list(B["copper"])
-    x0, y0, x1, y1 = B["bbox"]
-    board = max((x1 - x0) * (y1 - y0), 1e-6)
-    plane = set()
-    for z in B["zones"]:
-        p = z["pts"]
-        if z["net"] and not z["keepout"] and len(p) >= 3:
-            a = abs(sum(p[i][0] * p[(i + 1) % len(p)][1] - p[(i + 1) % len(p)][0] * p[i][1] for i in range(len(p)))) / 2
-            if a >= 0.9 * board:
-                plane |= {l for l in z["layers"] if l in cu[1:-1]}
-    return [l for l in cu if l not in plane], [l for l in cu if l in plane]
+    return PR.layer_split(B, cons)
 
 
 def layer_geometry(rule, sig, planes, copper, stackup, floor, cons=None, tight=False, board=None):
@@ -630,6 +670,9 @@ def _section(ctx, D, O, ta, tb, rule, pr, plan_only, preset=None):
             if not r["ok"] and k == 0 and "search budget" not in r["reason"]:          # a longer uncoupled break-out: gates further out
                 r2 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, ring=max(3 * P["ring"], P["max_uncoupled"]))
                 r = r2 if r2["ok"] else r
+        if not r["ok"] and "search budget" in r["reason"] and not plan_only:        # the negotiation retries at 4x; the lay must too (bounded: x3)
+            r3 = lay_section(ctx, D2, O2, a, b, rule, pr, plan_only, budget_x=3)
+            r = r3 if r3["ok"] else r
         if not r["ok"] and k == 0 and d < 3.0 and not plan_only:
             r = direct_section(ctx, a, b, rule, pr) or r
         if r["ok"]:
@@ -724,7 +767,7 @@ def _apply(ctx, pr, c, plan_only):
         items.retire(nets=set(pr))
 
 
-def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=lambda m: None):
+def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=lambda m: None, guide=None):
     """-> {pairs: [...], laid: {net: pieces}, strip: [nets whose old copper goes], keep, kill, B, secs, order}.
     Negotiated order: a pair that fails on copper laid by this stage is moved ahead of the pair that laid it and the
     order is laid again (`[pairlay] passes`); the best result (pairs complete, then total skew) is kept."""
@@ -762,7 +805,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         return res
     clr = max(r["clr"] for r in rules.values())
     edge = max(float((RR._pro_rules(board) if board else {}).get("min_copper_edge_clearance") or 0.0), 0.3)
-    pair_nets = {n for pr in pl for n in pr}
+    # only the copper of pairs still to lay is "old" (replaceable, no obstacle): a pair already connected on the input board keeps its
+    # copper, which is then an obstacle like any foreign net's, so no later pair is laid through it and no fan-out kill removes it
+    pair_nets = {n for pr in pl if open0.get(pr[0]) or open0.get(pr[1]) for n in pr}
     old = {}
     for kind, src in (("seg", B["segs"]), ("via", B["vias"])):
         for o in src:
@@ -788,12 +833,14 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     def mk_ctx():
         grid = PL.Grid(B, sig, clr, edge, P["step"], pair_nets)
         items = G.Items.of_board(B, old_nets=pair_nets, edge_extra=max(0.0, edge - clr))
+        from . import review as RV                       # PHASE3G G3d
         return {"grid": grid, "items": items, "P": P, "base_n": items.mark(), "skip": pair_nets, "min_clearance": R.get("min_clearance", 0.0),
+                "gated": lambda pr: RV.pair_gated(cons, pr[0]),
                 "closed": lambda pr: not open0.get(pr[0]) and not open0.get(pr[1]), "info": info, "rules": rules,
                 "ign": {("seg", k) for k, s in enumerate(B["segs"]) if s["net"] in pair_nets} | {("via", k) for k, v in enumerate(B["vias"]) if v["net"] in pair_nets},
                 "limit": lambda net: guard_limit(cons, net),
                 "tol": lambda net: min(0.25 * guard_limit(cons, net), 0.25),
-                "reserve": neg["reserve"], "preset": neg["preset"], "done": set()}
+                "reserve": neg["reserve"], "preset": neg["preset"], "done": set(), "guide": guide}
 
     def one_pass(order):
         ctx = mk_ctx()
@@ -813,16 +860,33 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                        -round(sum(c["skew"] for c in st["res"].values()), 3))
         return st
 
+    def near(c, pr):
+        """smallest distance from the copper `c` laid to a terminal pad of pair `pr`"""
+        best = 1e9
+        for pcs in c["pcs"].values():
+            for q in pcs:
+                for t in info[pr][0]:
+                    for pad in (t["p"], t["n"]):
+                        if q[0] == "seg":
+                            best = min(best, _pt_seg(pad["x"], pad["y"], q[2], q[3]) - q[4] / 2)
+                        else:
+                            best = min(best, math.hypot(pad["x"] - q[1], pad["y"] - q[2]) - q[3] / 2)
+        return best
+
     def moves(st):
-        """[(failed pair, the pair whose laid copper blocks it)] with the blocker earlier in the order."""
+        """[(failed pair, the pair whose laid copper blocks it)] with the blocker earlier in the order.  The blocker is named by the
+        search's report, or else by geometry: a laid pair whose copper runs within [pairlay] blocker_near_mm of a terminal pad of the
+        failed pair (a failure reported against a pad is usually the copper beside the pad)."""
         out, pos = [], {pr: k for k, pr in enumerate(st["order"])}
         for f in st["order"]:
             c = st["res"][f]
-            txt = c["e"].get("blocked_by", "")
-            if c["full"] or not txt:
+            if c["full"] or c["e"]["status"] == "kept" or not info[f][2]:
                 continue
+            txt = c["e"].get("blocked_by", "")
             hit = [g for g in st["order"] if g != f and pos[g] < pos[f] and st["res"][g]["nok"]
-                   and any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)]
+                   and any(re.search(r"(^|[ \[(])" + re.escape(n) + r"($|[ \])])", txt) for n in g)] if txt else []
+            if not hit:
+                hit = [g for g in st["order"] if g != f and pos[g] < pos[f] and st["res"][g]["nok"] and near(st["res"][g], f) <= P["near_mm"]]
             if hit:
                 out.append((f, min(hit, key=lambda g: pos[g])))
         return out
@@ -848,6 +912,15 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
             if r["ok"] and k[0] not in unresolved:
                 neg["preset"][k] = (r["variant"], r["states"], r["pol"])
                 neg["reserve"][k[0]] = neg["reserve"].get(k[0], []) + r["fp"]
+        # a pair the negotiation could not settle has no corridor, so an earlier pair could take its break-out cells: the first
+        # `exit_reserve_mm` of its alone path at each end stay reserved until it is laid (the lay finds the rest itself)
+        for k, r in out.items():
+            if r["ok"] and k[0] in unresolved and P["exit_reserve_mm"] > 0:
+                ends = [info[k[0]][0][k[1]]["c"], info[k[0]][0][k[2]]["c"]]
+                near_end = lambda x, y: min(math.hypot(x - c[0], y - c[1]) for c in ends) <= P["exit_reserve_mm"]
+                neg["reserve"][k[0]] = neg["reserve"].get(k[0], []) + [
+                    q for q in r["fp"] if (q[0] == "seg" and (near_end(q[2][0], q[2][1]) or near_end(q[3][0], q[3][1])))
+                    or (q[0] == "via" and near_end(q[1], q[2]))]
         gates = {pr: sum(r.get("gates", 0) for k, r in out.items() if k[0] == pr and r["ok"]) for pr in live}
         alone_fail = sorted({"/".join(k[0]) for k, r in out.items() if not r["ok"]})
         # emission order: negotiated pairs first, most constrained (fewest gates) first; then the unresolved and failed-alone ones
@@ -873,6 +946,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 o.remove(f)
                 o.insert(o.index(g), f)
                 cands.append(o)
+        failed = [f for f in best["order"] if not best["res"][f]["full"] and best["res"][f]["e"]["status"] != "kept" and info[f][2]]
+        if failed:                                            # last resort: the failed pairs first, in the order they had
+            cands.append(failed + [g for g in best["order"] if g not in failed])
         cand = next((o for o in cands if tuple(o) not in tried), None)
         if cand is None:
             break
@@ -1028,12 +1104,12 @@ def write(board, out, res, drill_of):
     return len(blks), len(keys)
 
 
-def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None, fallback=True, cs_args=None):
+def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=lambda m: None, fallback=True, cs_args=None, guide=None):
     """plan (and with `out`, write) -> report dict: complete / total, per pair length, skew, vias, layers, reasons."""
     from . import routediag as RD, pairaudit as PA, routeconn as RC, constraints as C, routerules as RR
     cons = cons or {}
-    res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log) if (plan_only or not out) else \
-        plan(board, cons, spec, only=only, log=log)
+    res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
+        plan(board, cons, spec, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
            "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"),
            "plane_layers": res["plane_layers"], "pairs": []}
@@ -1050,12 +1126,21 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
                 import shutil
                 shutil.copy(src, os.path.splitext(out)[0] + ext)
         B2 = RD.load(out)
+        pn = [n for e in res["pairs"] for n in e["pair"]]            # a via the pair passes straight through on one layer is a barrel stub: gone
+        txt2, dead = PA.strip_dead_vias(open(out, errors="replace").read(), B2, pn)
+        if dead:
+            open(out, "w").write(txt2)
+            B2 = RD.load(out)
+            rep["dead_vias_removed"] = [[r["net"], r["x"], r["y"], r["stub_mm"]] for r in dead]
+            log(f"pairs: PAIR_VIA_STUB removed {len(dead)} via(s) the pair never changes layer at: " + ", ".join(f"{r['net']}@({r['x']:.3f},{r['y']:.3f}) {r['stub_mm']:.2f} mm" for r in dead))
     opn = RC.text_open(B2)
     aud = PA.audit(B2, [tuple(e["pair"]) for e in res["pairs"]], cons, {n for n, k in opn.items() if k})
     # a terminal with its pads on two layers cannot give both legs one layer sequence: that copper stays (connected), reported as a mismatch
     odd = lambda e: any("@via-on-" in x for s_ in e["sections"] for x in s_.get("via_exit", [])) and \
-        set(aud[tuple(e["pair"])].get("causes", [])) <= {"layers", "vias"}
-    bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch" and not odd(e)] \
+        set(aud[tuple(e["pair"])].get("causes", [])) <= {"layers", "vias", "skew"}   # the odd pad's via is a via-height skew too
+    only_skew = lambda e: aud[tuple(e["pair"])].get("causes") == ["skew"] and e["status"] == "laid"     # complete, same layers and vias: tune fixes skew
+    bad = [e for e in res["pairs"] if e["status"] in ("laid", "partial") and aud[tuple(e["pair"])]["status"] == "mismatch" and not odd(e)
+           and not only_skew(e)] \
         if out and not plan_only else []
     if bad:                                                 # the audit on the written board is the judge: out-of-tolerance copper is taken back
         for e in bad:
@@ -1305,7 +1390,9 @@ def stage(c, n, board):
     except AttributeError:                                  # a bare context (tests): no fan-out re-escape, no rip of stubs
         cs_args = None
     try:
-        rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out))
+        rep = run(board, c.cons, c.spec, out, cs_args=cs_args, log=lambda m: _stage_status(spath, "running", m, board=out),
+                  guide=getattr(c, "guide", None),
+                  only=getattr(c, "only", None) or None)
     except Exception as e:                                  # noqa: BLE001 - an unmeasured board must not advance as if the stage ran
         msg = f"pairs failed ({type(e).__name__}: {str(e)[:160]})"
         with open(os.path.join(d, "stage.log"), "a") as fh:
@@ -1326,7 +1413,8 @@ def stage(c, n, board):
     line = format_text(rep).splitlines()[0]
     _stage_status(spath, "done" if rep["verdict"] == "PAIRS_OK" else "warn", line, board=out,
                   complete=rep["complete"], total=rep["total"], report=os.path.join(d, "board.pairs.json"))
-    res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out}
+    res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out,
+           "complete_pairs": [tuple(r["pair"]) for r in rep.get("pairs") or [] if r.get("status") == "complete" and len(r.get("pair") or ()) == 2]}
     if rep["verdict"] != "PAIRS_OK":
         S = pad_questions(rep, out, c.cons, getattr(c, "answers", None), getattr(c, "assume", False))
         res["next"] = [f"question {q['id']}: {q['found']}" for q in S.open][:3] + \

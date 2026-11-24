@@ -28,6 +28,7 @@ import re
 from collections import defaultdict
 
 from . import boardfile as BF
+from . import constraints as C
 from . import graph as G
 from . import routediag as RD
 
@@ -236,7 +237,7 @@ def controlled_nets(facts, cons):
     from . import review as R
     cons = cons or {}
     nets = set(facts.get("net_pads") or {})
-    pairs = G.diff_pairs(sorted(nets))
+    pairs = G.diff_pairs(sorted(nets), exclude=C.not_pairs(cons))
     out = set(pairs) | set(pairs.values()) | {n for n in nets if R.is_rf(n)}
     for rx in (cons.get("review") or {}).get("return_path_nets", []) or []:
         out |= {n for n in nets if re.search(rx, n)}
@@ -318,6 +319,34 @@ def check_return_path(facts, cons):
     return out
 
 
+def return_via_limit(cons):
+    """`[review] return_via_mm` (default 2.0): the reach of a return via from a layer-change via."""
+    return float((((cons or {}).get("review") or {})).get("return_via_mm", 2.0))
+
+
+def ref_need(P, touched):
+    """PHASE3G G1b a: the reference layers a signal that runs on the `touched` layers needs a return via for, or [] when the
+    reference does not change between them (the same test RETURN_VIA_MISSING uses). A layer the via touches is the plane itself."""
+    touched = set(touched)
+    if len({frozenset(P.ref_layers(l)) for l in touched}) < 2:
+        return []
+    return sorted({r for l in touched for r in P.ref_layers(l)} - touched)
+
+
+def return_missing(P, vias, x, y, net, need, via_lim):
+    """(missing, nets_all) for a layer-change via of `net` at (x, y) and the reference layers `need`: a reference layer with no
+    via on its net within via_lim (a via of another net than `net`) is missing. missing: [(layer, rnets, nearest mm | None)]."""
+    missing, nets_all = [], set()
+    for r in need:
+        rnets = P.nets_on.get(r, set())
+        nets_all |= rnets
+        near = [math.hypot(w["x"] - x, w["y"] - y) for w in vias if w["net"] in rnets and w["net"] != net]
+        if any(d <= via_lim for d in near):
+            continue
+        missing.append((r, rnets, min(near) if near else None))
+    return missing, nets_all
+
+
 def _return_vias(B, P, ctrl, via_lim):
     out = []
     segs_of = defaultdict(list)
@@ -334,21 +363,13 @@ def _return_vias(B, P, ctrl, via_lim):
                     touched.add(s["layer"])
         if len(touched) < 2:
             continue
-        ref_sets = {frozenset(P.ref_layers(l)) for l in touched}
-        if len(ref_sets) < 2:
-            continue
         # a reference layer the via itself touches is not a missing return path (it IS the plane)
-        need = sorted({r for l in touched for r in P.ref_layers(l)} - touched)
-        missing, nets_all = [], set()
-        for r in need:
-            rnets = P.nets_on.get(r, set())
-            nets_all |= rnets
-            near = [math.hypot(w["x"] - v["x"], w["y"] - v["y"]) for w in B["vias"]
-                    if w is not v and w["net"] in rnets and w["net"] != v["net"]]
-            if any(d <= via_lim for d in near):
-                continue
-            nearest = f"nearest {min(near):.2f} mm" if near else "none on that net"
-            missing.append(f"{r} ({'/'.join(sorted(rnets)) or '-'}; {nearest})")
+        need = ref_need(P, touched)
+        if not need:
+            continue
+        missing, nets_all = return_missing(P, B["vias"], v["x"], v["y"], v["net"], need, via_lim)
+        missing = [f"{r} ({'/'.join(sorted(rn)) or '-'}; {f'nearest {d:.2f} mm' if d is not None else 'none on that net'})"
+                   for r, rn, d in missing]
         if not missing:
             continue
         diff = (" — the reference planes are different nets" if len(nets_all) > 1 else "")

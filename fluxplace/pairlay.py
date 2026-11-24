@@ -322,27 +322,53 @@ def piece_len(pieces):
     return sum(math.hypot(p[3][0] - p[2][0], p[3][1] - p[2][1]) for p in pieces if p[0] == "seg")
 
 
-def check(items, pieces, net, clr, skip_old):
-    """worst exact gap of the pieces to foreign copper -> (gap, item)."""
+def check(items, pieces, net, clr, skip_old, mate=None):
+    """worst exact gap of the pieces to foreign copper -> (gap, item). `mate`: see Items.gap_seg."""
     worst, who = 1e9, None
     for p in pieces:
-        g, it = items.gap_seg(p[2], p[3], p[4], p[1], net, clr, skip_old) if p[0] == "seg" else items.gap_via(p[1], p[2], p[3], net, clr, skip_old)
+        g, it = items.gap_seg(p[2], p[3], p[4], p[1], net, clr, skip_old, mate) if p[0] == "seg" else items.gap_via(p[1], p[2], p[3], net, clr, skip_old)
         if g < worst:
             worst, who = g, it
     return worst, who
 
 
-def doglegs(q, e, t, exts=(0.0, 0.15, 0.3, 0.5, 0.8, 1.2)):
-    """candidate polylines pad anchor q -> leg end e; t = the leg's direction AWAY from the terminal at e."""
+def pad_axis(pad, toward):
+    """unit vector along the pad's long axis, signed towards the point `toward` (None for a round / square pad)."""
+    w, h = pad.get("w", 0.0), pad.get("h", 0.0)
+    if abs(w - h) < 1e-6:
+        return None
+    a = math.radians(pad.get("angle") or 0.0)
+    u = (math.cos(a), math.sin(a)) if w > h else (-math.sin(a), math.cos(a))
+    d = (toward[0] - pad["x"]) * u[0] + (toward[1] - pad["y"]) * u[1]
+    return u if d >= 0 else (-u[0], -u[1])
+
+
+def _octi(d):
+    """vector d as a diagonal part then a straight part (both 45/90 aligned)."""
+    k = min(abs(d[0]), abs(d[1]))
+    dg = (math.copysign(k, d[0]), math.copysign(k, d[1]))
+    return dg, (d[0] - dg[0], d[1] - dg[1])
+
+
+def doglegs(q, e, t, exts=(0.0, 0.15, 0.3, 0.5, 0.8, 1.2), axis=None):
+    """candidate polylines pad anchor q -> leg end e; t = the leg's direction AWAY from the terminal at e.
+    `axis` (pad_axis): also candidates that leave the pad straight along its long axis first (fine pitch: a first move
+    along the pad row would run into the neighbouring pad), then go 45/90 to the leg end."""
     out = []
     for ext in exts:
         e2 = (e[0] - t[0] * ext, e[1] - t[1] * ext)
         dx, dy = e2[0] - q[0], e2[1] - q[1]
-        k = min(abs(dx), abs(dy))
-        dg = (math.copysign(k, dx), math.copysign(k, dy))
-        st = (dx - dg[0], dy - dg[1])
-        for first in (dg, st):
-            pts = G.clean([q, (q[0] + first[0], q[1] + first[1]), e2, e], 1e-4)
+        dg, st = _octi((dx, dy))
+        firsts = [[dg], [st]]
+        if axis is not None:
+            proj = dx * axis[0] + dy * axis[1]
+            lat = abs(dx * axis[1] - dy * axis[0])
+            for L in sorted({round(x, 3) for x in [proj - lat] + [0.05 * i for i in range(6, 26)] if 0.05 < x <= proj + 1e-9}):
+                p1 = (axis[0] * L, axis[1] * L)
+                for part in _octi((dx - p1[0], dy - p1[1])):
+                    firsts.append([p1, (p1[0] + part[0], p1[1] + part[1])])
+        for first in firsts:
+            pts = G.clean([q] + [(q[0] + f[0], q[1] + f[1]) for f in first] + [e2, e], 1e-4)
             if len(pts) < 2:
                 continue
             dirs = [G.unit(a, b) for a, b in zip(pts, pts[1:])] + [t]
@@ -364,8 +390,11 @@ def stub(B, items, base_n, ignore, pad, e, layer, w, net, clr, skip_old, step=0.
         if it["k"] == "via":
             F.block_via(it["c"][0], it["c"][1], it["d"], it["net"] or "")
     seeds = F.shape_mask(pad)
-    d = PK.dist(F.free(layer, w + 0.04) | seeds, seeds, step)
     j, i = F.cell(*e)
+    goal = np.zeros_like(seeds)                           # the leg end sits one pair gap from its partner leg, which the grid blocks: the cells at the end are open
+    r = int(math.ceil(0.15 / step))
+    goal[max(0, j - r):max(0, j + r + 1), max(0, i - r):max(0, i + r + 1)] = True
+    d = PK.dist(F.free(layer, w + 0.04) | seeds | goal, seeds, step)
     if not (0 <= j < F.ny and 0 <= i < F.nx) or d[j, i] >= PK.INF / 2:
         return None
     pts = [e]
@@ -401,15 +430,19 @@ def _eff(pts, pad):
     return G.length(pts[max(inside, default=0):])
 
 
-def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fallback=None):
+def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fallback=None, gap=None):
     """break-outs of both legs at one terminal -> ([pieces P], [pieces N], length P - length N) | (None, reason, item).
     pads = (pad P, pad N), ends = (leg end P, leg end N).  Dog-legs first (the pair of candidates with the least
-    |skew + bias| wins); `fallback(pad, e, net)` grid-routes a leg the dog-legs cannot reach."""
+    |skew + bias| wins); `fallback(pad, e, net)` grid-routes a leg the dog-legs cannot reach.
+    `gap`: the pair's own gap on this layer. A break-out ends on its leg, which runs one gap from the partner leg; when
+    the gap is below `clr` every candidate would be refused by its own partner, so the two legs are held to the gap."""
+    slack = max(0.0, clr - gap) if gap is not None else 0.0
+
     def dog(k):
         ok, worst = [], (None, None)
-        for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t):
+        for pts in doglegs((pads[k]["x"], pads[k]["y"]), ends[k], t, axis=pad_axis(pads[k], ends[k])):
             pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
-            g, it = check(items, pcs, nets[k], clr, skip_old)
+            g, it = check(items, pcs, nets[k], clr, skip_old, (nets[1 - k], slack) if slack else None)
             if g >= clr - 1e-6:
                 ok.append((pts, pcs, _eff(pts, pads[k])))
             elif worst[0] is None or g > worst[0]:
@@ -422,7 +455,7 @@ def breakout(items, pads, ends, t, layer, w, nets, clr, skip_old, bias=0.0, fall
     best = None
     for a in cands[0]:
         for b in cands[1]:
-            if min(G.seg_seg(p[2], p[3], q[2], q[3]) for p in a[1] for q in b[1]) < w + clr - 1e-6:
+            if min(G.seg_seg(p[2], p[3], q[2], q[3]) for p in a[1] for q in b[1]) < w + clr - slack - 1e-6:
                 continue
             key = (round(abs(a[2] - b[2] + bias), 3), a[2] + b[2])
             if best is None or key < best[0]:

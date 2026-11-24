@@ -7,6 +7,7 @@ skipped (with the reason).  Also called by the route stage after every round (`r
 import json
 import os
 import subprocess
+from fluxplace import procs as _procs
 import uuid
 
 from . import boardtext as BT
@@ -22,7 +23,7 @@ def _f(v):
 
 def plan(board, gap=GAP, extra=0.0, timeout=900, nets=None):
     """-> {add, skipped, gap, candidates} (board not touched)."""
-    r = subprocess.run([RC.PY, HELPER, board, "--gap", str(gap), "--extra-clearance", str(extra)] +
+    r = _procs.run([RC.PY, HELPER, board, "--gap", str(gap), "--extra-clearance", str(extra)] +
                        (["--nets", ",".join(nets)] if nets else []),
                        capture_output=True, text=True, timeout=timeout)
     lines = [l for l in r.stdout.splitlines() if l.startswith("{")]

@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+from fluxplace import procs as _procs
 
 from . import fabxcheck
 
@@ -47,7 +48,7 @@ from . import gerbercheck as GC
 
 def _run(args, log):
     log("  $ " + " ".join(args))
-    r = subprocess.run(args, capture_output=True, text=True)
+    r = _procs.run(args, capture_output=True, text=True)
     if r.returncode != 0:
         log("    ! " + (r.stderr or r.stdout or "failed").strip()[:300])
     return r.returncode == 0

@@ -22,9 +22,11 @@ import math
 import os
 import re
 import subprocess
+from fluxplace import procs as _procs
 import time
 
 from . import clusters as CL
+from . import events as EV
 from . import cypress_io as IO
 from . import geom as GM
 from . import intent as IT
@@ -139,7 +141,7 @@ def run_tool(tool, aux, workdir, params, timeout=900, threads=8):
     t = time.time()
     try:
         with open(logp, "w") as fh:
-            rc = subprocess.run([tool["python"], tool["placer"], cpath], cwd=workdir, stdout=fh, stderr=subprocess.STDOUT,
+            rc = _procs.run([tool["python"], tool["placer"], cpath], cwd=workdir, stdout=fh, stderr=subprocess.STDOUT,
                                 env=env, timeout=timeout).returncode
     except subprocess.TimeoutExpired:
         raise Unavailable(f"Cypress timed out after {timeout} s ({logp})")
@@ -656,6 +658,7 @@ def place(B, cons=None, spec=None, workdir=".", home=None, python=None, log=prin
             mac = (k % 2 == 0) if best is None or k < 2 else bool(best[2].get("macro_mode"))
         elif aware:
             mac = bool(S["macros"])
+        EV.iteration("place", k + 1, n_trials, {"trial": k, "macros": bool(mac)})
         Bv, cl, macros, rigid = variant(mac)
         model = IO.build_model(Bv, fixed, cls, clusters=cl, keepouts=_keepouts(M) + zb + fb_blocks, allowance=allowance,
                                unit=float(S["unit_mm"]), gap=float(S["gap_mm"]), cluster_weight=float(S["cluster_weight"]),

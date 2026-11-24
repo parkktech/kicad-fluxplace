@@ -63,7 +63,7 @@ open(out, "w").write(txt[:-1] + add + ")\n")
 
 def setup(tmp_path, body, **cfg):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    board = G.board(tmp_path, body, outline=(0, 0, 100, 100))
+    board = G.four_layers(G.board(tmp_path, body, outline=(0, 0, 100, 100)))
     (tmp_path / "rfake.py").write_text(FAKE)
     cfg["log"] = str(tmp_path / "calls.jsonl")
     (tmp_path / "cfg.json").write_text(json.dumps(cfg))

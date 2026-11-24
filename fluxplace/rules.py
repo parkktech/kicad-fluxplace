@@ -40,6 +40,9 @@ SET_KEYS = {
     "clearance_mm": "[pairs.F] clearance_mm",
     "skew_mm": "[pairs.F] skew_mm",
     "skew_ps": "[pairs.F] skew_ps (converted to mm with the layer delay of the pair)",
+    "skew_max_mm": "[pairs.F] skew_max_mm (the failing maximum; skew_mm is the target)",
+    "skew_max_ps": "[pairs.F] skew_max_ps (converted to mm with the layer delay of the pair)",
+    "stub_max_mm": "[pairs.F] stub_max_mm (longest branch stub of a pair with more than two terminals)",
     "impedance_diff": "[pairs.F] impedance_diff",
     "straight_copper": "[nets.X] straight_copper",
     "max_vias": "[nets.X] max_vias, [rf] nets max_vias",
@@ -47,7 +50,7 @@ SET_KEYS = {
     "min_track_mm": "[route] min_track_mm (a floor; routerules takes the max with [fab])",
     "min_clearance_mm": "[route] min_clearance_mm (a floor; routerules takes the max with [fab])",
 }
-_NUMERIC = {"width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "impedance_diff", "max_vias",
+_NUMERIC = {"width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "skew_max_mm", "skew_max_ps", "stub_max_mm", "impedance_diff", "max_vias",
             "min_track_mm", "min_clearance_mm"}
 
 LEVEL = {"exact": 100, "pattern": 90, "prop": 70, "pair": 60, "netclass": 50, "type_layer": 40, "default": 0}
@@ -215,7 +218,7 @@ def _legacy(cons, out):
     for fam, p in (cons.get("pairs") or {}).items():
         if not isinstance(p, dict):
             continue
-        vals = {k: p[k] for k in ("width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "impedance_diff")
+        vals = {k: p[k] for k in ("width_mm", "gap_mm", "clearance_mm", "skew_mm", "skew_ps", "skew_max_mm", "skew_max_ps", "stub_max_mm", "impedance_diff")
                 if isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool)}
         add(f"[pairs.{fam}]", {"pair": fam}, {k: float(v) if k != "impedance_diff" else v for k, v in vals.items()})
 

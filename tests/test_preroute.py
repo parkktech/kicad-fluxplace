@@ -78,6 +78,17 @@ def test_pin_escape_blocked_by_neighbour_courtyard_and_copper(tmp_path):
     assert "PIN_ESCAPE_BLOCKED" in codes(f3)
 
 
+def test_pin_escape_only_nets_and_partners(tmp_path):
+    ic = g.ic("U1", 20, 20, ["A", "B", "C", "D", "E", "F"], pitch=0.4)
+    near = g.two("R1", 17.2, 19.2, "X", "Y", court=(-1.0, -0.5, 1.0, 0.5))
+    seg = "(segment (start 17.5 18.5) (end 17.5 22) (width 0.15) (layer \"F.Cu\") (net \"ZZ\"))\n"
+    B = RD.load(g.board(tmp_path, ic + near))
+    assert PR.pin_escape_blocked(B) and PR.pin_escape_blocked(B, only_nets=set()) == []
+    far = g.two("R1", 12, 12, "X", "Y", court=(-1.0, -0.5, 1.0, 0.5))
+    B2 = RD.load(g.board(tmp_path, ic + far + seg, name="e.kicad_pcb"))
+    assert PR.pin_escape_blocked(B2, partners={n: "ZZ" for n in "ABCDEF"}) == []
+
+
 def test_ratsnest_crossings_and_congestion(tmp_path):
     b = (g.two("R1", 10, 10, "A", "A2") + g.two("R2", 50, 50, "A", "A3")
          + g.two("R3", 50, 10, "B", "B2") + g.two("R4", 10, 50, "B", "B3"))
@@ -164,3 +175,22 @@ def test_congestion_clamps_parts_outside_the_outline(tmp_path):
     assert card["congestion"]["outside_refs"] == ["R2", "R3"]
     hit = [x for x in f if x["code"] == "PLACE_OUTSIDE_OUTLINE"]
     assert hit and "R2" in hit[0]["msg"] and "R3" in hit[0]["msg"]
+
+
+def test_layer_split_uses_the_stackup_planes_and_polygon_area_not_the_bounding_box(tmp_path):
+    # an L-shaped pour: bounding box = the board, polygon area 55 %: a partial pour is signal copper
+    ell = ('(zone (net 2) (net_name "P") (layers "In1.Cu") (polygon (pts (xy 0 0) (xy 100 0) (xy 100 20) (xy 20 20) (xy 20 80) (xy 0 80))))\n')
+    B = RD.load(g.board(tmp_path, ell + g.two("R1", 10, 10, "A", "B")))
+    assert PR.layer_split(B)[0] == ["F.Cu", "In1.Cu", "B.Cu"]
+    # the stackup's plane list decides when the constraints carry one, whatever the pour covers
+    assert PR.layer_split(B, {"stackup": {"planes": ["In1.Cu"]}}) == (["F.Cu", "B.Cu"], ["In1.Cu"])
+    assert PR.signal_layer_count(B, {"stackup": {"planes": ["In1.Cu"]}}) == 2
+
+
+def test_congestion_on_a_routed_board_is_information(tmp_path):
+    from fluxplace import review as RV
+    seg = '(segment (start 9.5 10) (end 10.5 10) (width 0.2) (layer "F.Cu") (net "A"))\n'
+    open_b = RD.load(g.board(tmp_path, g.two("R1", 10, 10, "A", "A")))
+    done_b = RD.load(g.board(tmp_path, g.two("R1", 10, 10, "A", "A") + seg, name="r.kicad_pcb"))
+    assert PR.is_routed(open_b) is False and PR.is_routed(done_b) is True
+    assert RV.INFO == "INFO"

@@ -17,15 +17,16 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import time
 
 from . import routeconn as RC
 
-STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "silk", "review"]
+STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "trace-finish", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "pairs", "critroute", "plan-route", "route", "close", "tune", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "placetour", "lookahead", "pairs", "tune", "critroute", "plan-route", "route", "close", "trace-finish", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -268,6 +269,15 @@ def st_ready(c, n, board):
                 "next": [l.strip()[2:] for l in text.splitlines() if l.startswith("  - ")][:5] + [os.path.join(d, "stage.log")]}
     und = next((l for l in text.splitlines() if "UNDOCUMENTED PARTS ALLOWED" in l), None)
     out = {"verdict": "pass", "line": next((l for l in text.splitlines() if l.startswith("NOT READY")), line), "board": board}
+    try:                                    # the stage's own copy of the board + project carries the managed netclasses (never the user's file)
+        from . import ready as RY_
+        cp = os.path.join(d, "board.kicad_pcb")
+        _copy(board, cp)
+        _sidecar(board, cp)
+        RY_.sync_netclasses(cp, c.cons, write=True)
+        out["board"] = cp
+    except Exception as e:                  # noqa: BLE001 - the report at ready stands; the board is the input
+        out["line"] += f" (netclass write skipped: {type(e).__name__})"
     if und:
         out["undocumented"] = und.strip()
     return out
@@ -389,6 +399,11 @@ def _route_cmd(a, src, dst, only, power_nets=None, limited=False, max_ripup=3, R
     from . import batchroute as BR
     if BR.has_fanout(src):
         cmd += ["--no-stub-layer-swap"]              # the router may not re-layer the locked fan-out stubs
+    if power_nets and not pair:                      # D71cj: [power] rails route at their width (power.route_widths)
+        from . import krtchain as KC
+        pn = [n for n in only if n in power_nets]
+        if pn:
+            cmd += ["--power-nets", *[KC.glob_escape(n) for n in pn], "--power-nets-widths", *[f"{power_nets[n]:g}" for n in pn]]
     return cmd + ["--nets", *only]
 
 
@@ -499,7 +514,9 @@ def _st_route(c, n, board):
         raise
     c.cons, c.spec = c_cons, c_spec
     if getattr(a, "route_mode", None) == "krt-whole":        # the four-call KiCadRoutingTools chain (krtchain.py)
-        from . import krtchain as KC
+        from . import krtchain as KC, routetour as RT
+        if RT.params(c.cons)["enabled"]:                     # D71ct: final-routing tournament of KRT variants
+            return RT.run(c, n, board)
         return KC.run(c, n, board)
     best = os.path.join(d, "board.kicad_pcb")
     _copy(board, best)
@@ -516,7 +533,7 @@ def _st_route(c, n, board):
 
     def build(s, o, only, lim, pair=False):
         pair = pair and len(only) == 2 and diff_named(*only)       # other pair naming (DP/DM...): route_diff.py cannot see the pair
-        return _route_cmd(a, s, o, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+        return _route_cmd(a, s, o, only, power_nets=PW, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
                           gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
     run = BR.make_runner(build, a.router_dir, extra, spath, S)
 
@@ -570,6 +587,12 @@ def _st_route(c, n, board):
     B = RD.load(board)
     todo = sorted(conn(board))
     cls = NC.classify(B, c.cons, c.spec)
+    from . import power as PWR
+    from . import gaps as GP
+    try:                                                 # D71cj: rail widths; a net with a zone on the board is not a rail
+        PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=GP._zone_nets(board))
+    except Exception:                                    # noqa: BLE001 - no widths is a worse route, not a failed stage
+        PW = {}
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None
@@ -604,7 +627,7 @@ def _st_route(c, n, board):
     else:
         res = BR.route_batches(start_board, d, rtodo, run, cons=c.cons, spec=c.spec, B=B, cls=cls, first=first,
                                total_budget=left_rounds(), status_path=spath, extra=extra, log=lambda m: None,
-                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()))
+                               rules=R, conn=conn, hybrid=hybrid, retry_last=(resume or {}).get("tried_failed", ()), widths=PW)
     for k in ("timeouts", "halvings"):
         state[k] += res[k]
     state["ckpts"] += len(res["checkpoints"])
@@ -619,7 +642,7 @@ def _st_route(c, n, board):
             k[0] += 1
             r = BR.route_batches(b_in, os.path.join(d, f"stall-batches-{k[0]}"), only, run, cons=c.cons,
                                  spec=c.spec, total_budget=min(timeout, left_rounds()), status_path=spath,
-                                 extra=extra, log=lambda m: None, rules=R, conn=conn)
+                                 extra=extra, log=lambda m: None, rules=R, conn=conn, widths=PW)
             shutil.copy(r["board"], b_out)
             _sidecar(b_in, b_out)
             state["timeouts"] += r["timeouts"]
@@ -645,7 +668,7 @@ def _st_route(c, n, board):
 
             def build2(s_, o_, only, lim, pair=False):
                 pair = pair and len(only) == 2 and diff_named(*only)
-                return _route_cmd(a2, s_, o_, only, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
+                return _route_cmd(a2, s_, o_, only, power_nets=PW, limited=lim, max_ripup=S["max_ripup"], R=R, rflags=rflags, pair=pair,
                                   gap=pair_gap(c.cons, only[0], getattr(a, 'board', None)) if pair else None, dflags=dflags)
             return BR.make_runner(build2, a.router_dir, extra, spath, S)
         lad = RLD.Ladder(best, os.path.join(d, "ladder"), run, run_for, conn, keep, lleft, B, c.cons, c.spec, cls, a.layers,
@@ -676,6 +699,15 @@ def _st_route(c, n, board):
         _sidecar(board, best)
     with open(os.path.join(d, "planetie.txt"), "w") as fh:
         fh.write("\n".join(PT.lines(ptr)) + "\n")
+    # D71cj D: rail corridor pours before the final measurement, so opens / verdict / owners describe the poured board
+    pour = {"added": [], "dropped": False, "skipped": {}}
+    try:
+        pour = PWR.pour_rails(best, c.cons, os.path.join(d, "poured.kicad_pcb"), layers=len(B["copper"]))
+        if pour["added"]:
+            shutil.copy(os.path.join(d, "poured.kicad_pcb"), best)
+            _sidecar(board, best)
+    except Exception as e:                               # noqa: BLE001 - the routed board stands without the pour
+        pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     final_open = _unc_nets(best, conn)               # per net, kicad-cli after refill: the one open-connection definition
     final = sorted(final_open)
     diag = None
@@ -756,6 +788,13 @@ def _st_route(c, n, board):
     except Exception as e:                              # noqa: BLE001 - numbers are advice
         line += f", pairs_uncoupled not measured ({type(e).__name__})"
     out = {"verdict": "pass" if not final else "fail", "line": line, "board": best, "times": times}
+    if pour["added"]:
+        line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
+        out["line"] = line
+    elif pour["dropped"]:
+        line += f"; rail pour dropped ({pour['dropped_reason']})"
+        out["line"] = line
+    out["pour_rails"] = pour
     if fin:
         out["finish"] = fin
     with open(os.path.join(d, "result.json"), "w") as fh:
@@ -871,8 +910,9 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     planes = [l for l in B["copper"] if l not in a.layers]
     ctl = RIP.controlled_nets(cls, c.cons, names=todo)
     from . import pairfb as PFB
-    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage could not lay: ordinary nets for the router, not skipped
-    skip = PFB.router_skip(todo, ctl, hand, FS["pairs"])
+    hand = PFB.handoff_nets(getattr(c, "state", None), getattr(c, "work", ""))             # pairs the pairs stage handed over (state c): still never plain nets for the router (PHASE3C)
+    hs_hand = PFB.gated_open_legs(c.cons, todo, set(conn(board)), hand)   # PHASE3I F1/B1: a gated pair leg still open is never a plain net
+    skip = sorted(set(PFB.router_skip(todo, ctl, hand, FS["pairs"])) | (set(todo) & hs_hand))
     from . import routeowners as RO
     bad = RO.unclaimed_skips(skip, conn(board), claimer_runs)
     if bad:
@@ -917,17 +957,46 @@ def _freerouting(c, d, board, B, cls, todo, R, conn, post_round, extra, spath, c
     return rec
 
 
+from .freshproc import in_fresh_process  # noqa: E402,F401 - re-exported (st_close, tests)
+
+
 def st_close(c, n, board):
-    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json."""
-    from . import gaps as GP, calllog as CL
+    """Gap loop (gaps.py): classify, dispatch, guard; W/best.kicad_pcb, W/gaps.json, W/stop.json.  Runs in a fresh process (see
+    in_fresh_process); a crash keeps its traceback in the stage log."""
+    from . import calllog as CL
     att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    post = None
+    try:                                                  # post-route clean-up first: off-centre track ends (postroute.py)
+        os.makedirs(c.dir(n, "close"), exist_ok=True)
+        cleaned = os.path.join(c.dir(n, "close"), "postroute.kicad_pcb")
+        post = in_fresh_process("fluxplace.postroute", "clean", board, cleaned)
+        from . import boardwrite as BW
+        v = BW.commit(board, cleaned, cleaned, reason="postroute snap")       # carry the manifest: close protects the same copper the flow does
+        if v["written"]:
+            board = cleaned
+        else:
+            post = dict(post or {}, refused=v["why"])                          # the snap broke a protected item: close the board as it came
+    except (Exception, SystemExit):                       # noqa: BLE001 - never blocks the close loop
+        post = None
     try:
-        res = GP.close(board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, log=lambda m: None)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att)
     except (Exception, SystemExit) as e:
-        return {"verdict": "warn", "line": f"close: crashed {type(e).__name__}: {str(e)[:80]}", "board": board}
+        try:
+            open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
+        except OSError:
+            pass
+        last = (str(e).strip().splitlines() or [""])[-1][:100]
+        return {"verdict": "warn", "line": "close: crashed " + (last if re.match(r"\w*(Error|Exception|Exit)\b", last) else f"{type(e).__name__}: {last}"),
+                "board": board}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
-    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"]}
+    if post:
+        line += (f"; post-route: snapped {(post.get('snap') or {}).get('moved', 0)}" if not post.get("refused")
+                 else f"; post-route refused ({post['refused'][:60]})")
+    if res.get("protection_broken_by"):
+        line += f"; protection broken by {res['protection_broken_by']}: fell back to the last verified state"
+    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
+            "released": sorted(res.get("released") or {})}
 
 
 def st_tune(c, n, board):
@@ -941,9 +1010,29 @@ def st_tune(c, n, board):
     if rc != 0:
         return {"verdict": "fail", "line": _last_line(text) or f"exit {rc}", "board": board,
                 "next": ["tune failed: " + os.path.join(d, "stage.log")]}
-    return {"verdict": "fail" if over else "pass", "board": out,
-            "line": f"{len(over)} pair(s) still over skew" if over else "pairs within skew",
+    from . import boardtext as BT, graph as G, tune as TU
+    src = open(out, errors="surrogateescape").read()
+    names = {BT.net_name(b) for _i, _j, _k, b in BT.scan(src)} - {None}
+    TU.lock_tuned(out, G.diff_pairs(names))                       # tuned pair copper is locked: later stages route around it
+    released, complete = [], []
+    try:                                                          # the pairs tune worked on (not the skipped ones) are the only ones it may change
+        for r in json.load(open(out + ".tune.json")).get("pairs", []):
+            if r.get("status") in ("ok", "over") and "/" in str(r.get("pair")):
+                pm, ps_ = r["pair"].split("/", 1)
+                released += [pm, ps_]
+                if r["status"] == "ok":
+                    complete.append((pm, ps_))
+    except (OSError, ValueError):
+        pass
+    return {"verdict": "pass", "board": out, "released": released, "complete_pairs": complete,                      # A5: the pairs gate decides on gated pairs; tune only reports
+            "line": f"{len(over)} pair(s) still over skew (reported, not a stage failure)" if over else "pairs within skew",
             "next": [_clip(l.strip(), 100) for l in over[:3]]}
+
+
+def st_trace_finish(c, n, board):
+    """Trace finishing (TRACE-FINISH-SPEC): one flow, switched by [finish] enabled; absent = board handed on unchanged."""
+    from . import tracefinish as TF
+    return TF.stage(c, n, board)
 
 
 def st_silk(c, n, board):
@@ -958,9 +1047,10 @@ def st_silk(c, n, board):
                 "next": ["silk failed: " + os.path.join(d, "stage.log")]}
     _sidecar(board, out)
     summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
-    return {"verdict": "pass" if rc == 0 else "fail", "line": summ, "board": out,
-            "next": [] if rc == 0 else ["FAIL-level silk findings left (footprint graphics / board texts): "
-                                        + os.path.join(d, "stage.log")]}
+    # Silk never copper-touches the board and review runs check_silk itself: what --fix could not fix stays a review finding at its own
+    # severity, so a silk FAIL is a WARN here and the flow reaches review (one flow: silk fixes, review judges).
+    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out,
+            "next": [] if rc == 0 else ["silk findings left (review reports them with their severity): " + os.path.join(d, "stage.log")]}
 
 
 def st_review(c, n, board):
@@ -1139,15 +1229,153 @@ def st_critroute(c, n, board):
     return CR.stage(c, n, board)
 
 
+def _file_sha1(path):
+    """PHASE3M-review H1: content fingerprint of a board (the stage input a gate verdict belongs to)."""
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for blk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def _gate_reusable(gate_dir, stage_input):
+    """H1: a packets gate's best board is reused only when its stop.json was written for this stage input."""
+    try:
+        with open(os.path.join(gate_dir, "stop.json")) as fh:
+            s = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return (s.get("stop") == "packets" and os.path.exists(os.path.join(gate_dir, "best.kicad_pcb"))
+            and s.get("input_sha1") == _file_sha1(stage_input))
+
+
+def _stamp_gate(gate_dir, stage_input):
+    """H1: record the stage input's fingerprint in the gate's stop.json."""
+    p = os.path.join(gate_dir, "stop.json")
+    try:
+        with open(p) as fh:
+            s = json.load(fh)
+        s["input_sha1"] = _file_sha1(stage_input)
+        with open(p, "w") as fh:
+            json.dump(s, fh, indent=1)
+    except (OSError, ValueError):
+        pass
+
+
+def _gate_stop(gate_dir):
+    """stop reason of a gate's stop.json, None when there is none (PHASE3I F2)."""
+    try:
+        with open(os.path.join(gate_dir, "stop.json")) as fh:
+            return json.load(fh).get("stop")
+    except (OSError, ValueError):
+        return None
+
+
+def _gate_check(c, n, name, board, kinds, src=None):
+    """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
+    -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
+    from . import gaps as GP, calllog as CL
+    d = c.dir(n, "gate")
+    att = CL.attempts_path(c.board_in) if CL.enabled() else None
+    try:
+        r = GP.close(board, d, c.cons_path, c.cons, attempts=att, log=lambda m: None, kinds=kinds,
+                     budget_min=float((c.cons.get("flow") or {}).get("gate_budget_min", 20)))   # PHASE3I F2
+    except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
+                "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
+    stop = r["stop"]
+    if src:
+        _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
+    verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
+    line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
+    return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
+            "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
+            + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
+               for p in r.get("packets") or [] if p.get("kind") == "session"]}
+
+
+def _gate_measure(c, n, name, board, kinds, src=None):
+    """A5: the gate verdict of `board` for `kinds` by measurement only (gaps.gate_measure). Same record shape as _gate_check."""
+    from . import gaps as GP
+    d = c.dir(n, "gate")
+    try:
+        r = GP.gate_measure(board, d, c.cons_path, c.cons, kinds=kinds)
+    except (Exception, SystemExit) as e:                    # noqa: BLE001 - an unmeasured gate must not pass
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
+                "gate": {"kinds": kinds, "stop": "crashed", "dir": d, "left": []}}
+    if src:
+        _stamp_gate(d, src)
+    ok = r["stop"] == "clean"
+    return {"verdict": "pass" if ok else "fail", "board": board,
+            "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope"
+                    + (f", review source(s) failed: {', '.join(r['review_failed'])}" if r.get("review_failed") else "") + f", opens {r['start']['opens']}",
+            "next": [] if ok else [f"gate {name}: {len(r['left'])} gap(s): {os.path.join(d, 'stop.json')}"],
+            "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"]}}
+
+
+# A3: the one commit point. After `pairs` (which locks what it lays) a board carries a manifest of protected copper (boardwrite):
+# every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
+# its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
+SEED_STAGES = ("pairs", "tune")
+RELEASING_STAGES = ("tune",)
+
+
+def _commit_point(name, prev, res):
+    """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
+    colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
+    the input path (a stage that edited its board in place): the sealed manifest is the baseline then."""
+    from . import boardwrite as BW
+    new = res.get("board")
+    if not new or not os.path.isfile(new) or not os.path.isfile(prev):
+        return res
+    man = BW.load_manifest(prev)
+    if not man["nets"] and name not in SEED_STAGES:
+        return res                                                      # nothing protected yet
+    if not man["nets"]:
+        try:                                                            # first seeding point: a board pcbnew cannot read has nothing to protect
+            import pcbnew
+            if pcbnew.LoadBoard(new) is None:
+                return res
+        except Exception:                                               # noqa: BLE001
+            return res
+    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES or name == "close" else set())      # tune / close release the pairs they re-laid, not the manifest
+    complete = {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}
+    for x in rel & set(man["nets"]):                                    # a released pair is protected again at its new copper
+        if man["nets"][x].get("why") != "locked":
+            complete.setdefault(x, man["nets"][x].get("why", "kept"))
+    try:
+        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
+    except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
+        return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
+                    next=[f"{name}: output not adopted"])
+    if not v["ok"]:
+        return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {v['why']}"[:200],
+                    next=[f"{name}: output not adopted ({v['why'][:150]}); release the pair explicitly (boardwrite.release) to re-lay it"])
+    return res
+
+
 def st_pairs(c, n, board):
     """differential pairs laid by construction and locked (pairs.py); never blocks: an unlaid pair stays with the router."""
     from . import pairs as PR
     return PR.stage(c, n, board)
 
 
-FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
+def st_placetour(c, n, board):
+    """placement tournament judged by KRT (placetour.py); skipped unless [placetour] enabled = true."""
+    from . import placetour as PT
+    return PT.stage(c, n, board)
+
+
+def st_lookahead(c, n, board):
+    """ghost-route demand, reserved channels and the lock tournament (lookahead.py); skipped unless [lookahead] enabled."""
+    from . import lookahead as LA
+    return LA.stage(c, n, board)
+
+
+FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "lookahead": st_lookahead, "placetour": st_placetour, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
-         "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "silk": st_silk, "review": st_review}
+         "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "trace-finish": st_trace_finish, "silk": st_silk, "review": st_review}
 
 
 # ------------------------------------------------------------------ connectivity invariant + ledger
@@ -1278,8 +1506,122 @@ def _apply_lock_at(a, work, board):
     return out
 
 
+_EV_ENV = ("FLUXPLACE_EVENTS", "FLUXPLACE_RUN", "FLUXPLACE_STAGE", "FLUXPLACE_NESTED")
+
+
+def _ev_call(fn, *args, **kw):
+    """Event-stream hook: never raises (docs/EVENTS-CONTRACT.md)."""
+    try:
+        return fn(*args, **kw)
+    except Exception:
+        return None
+
+
+def _ev_begin(a, work):
+    from . import events as EV, snapshot as SN
+    parent = os.environ.get(EV.ENV_FILE)
+    nested = bool(parent)            # a pipeline started by a parent run (lookahead ghosts / candidates)
+    if nested:
+        os.environ["FLUXPLACE_NESTED"] = "1"
+        EV.emit_to(parent, "log", level="info", text=f"nested run {work}", src="nested")
+    EV.init(work)
+    SN.set_active(SN.Snapper(work))
+    try:
+        st = load_state(work) or {}
+        board = os.path.abspath(a.board) if getattr(a, "board", None) else st.get("board0") or st.get("board")
+        flow = getattr(a, "flow", None) or st.get("flow") or "classic"
+        feats = {}
+        if board and os.path.exists(board):
+            from . import routediag as RD
+            B = RD.load(board)
+            area = max(1e-9, (B["bbox"][2] - B["bbox"][0]) * (B["bbox"][3] - B["bbox"][1]))
+            feats = {"components": len(B["parts"]), "nets": len({p["net"] for p in B["pads"] if p["net"]}),
+                     "pads": len(B["pads"]), "layers": len(B["copper"]), "area_mm2": round(area, 1),
+                     "density": round(len(B["pads"]) / area, 4)}
+        stages = list(FLOWS.get(flow, STAGES))
+        fr, to = getattr(a, "from_stage", None), getattr(a, "to_stage", None)     # EV1: which stages this run skips
+        i0 = stages.index(fr) if fr in stages else 0
+        i1 = stages.index(to) if to in stages else len(stages) - 1
+        skipped = stages[:i0] + stages[i1 + 1:]
+        EV.emit("run_start", board=board, flow=flow, stages=stages, features=feats, nested=nested,
+                from_stage=stages[i0] if stages else None, to_stage=stages[i1] if stages else None, skipped=skipped)
+        from . import eta as ETA
+        ETA.set_run(feats, stages)
+        board_in = st.get("board0") or board             # the input board: may live outside W
+        if getattr(a, "board", None):
+            board_in = os.path.abspath(a.board)
+        _ev_write_run(work, {"run": os.environ.get("FLUXPLACE_RUN"), "board": board, "board_in": board_in,
+                             "flow": flow,
+                             "stages": stages, "from_stage": stages[i0] if stages else None,
+                             "to_stage": stages[i1] if stages else None, "skipped": skipped,
+                             "features": feats, "nested": nested, "started": time.time(),
+                             "ended": None, "verdict": None})
+    except Exception:
+        pass
+
+
+def _ev_write_run(work, obj):
+    tmp = os.path.join(work, "run.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, os.path.join(work, "run.json"))
+
+
+def _ev_end(work, rc, t0, board):
+    from . import events as EV, snapshot as SN
+    verdict = {0: "pass", 1: "fail", 3: "questions", 5: "packets"}.get(rc, "error" if rc else "pass")
+    EV.emit("run_end", verdict=verdict, secs=round(time.time() - t0, 1), board=board)
+    try:
+        with open(os.path.join(work, "run.json"), encoding="utf-8") as fh:
+            obj = json.load(fh)
+        obj.update(ended=time.time(), verdict=verdict)
+        _ev_write_run(work, obj)
+    except Exception:
+        pass
+    SN.set_active(None)
+
+
+def _ev_stage(kind, i, name, **kw):
+    from . import events as EV
+    EV.emit(kind, stage=name, n=i, name=name, **kw)
+    if kind == "stage_start":
+        from . import eta as ETA
+        ETA.stage_start(name)
+
+
+def _ev_stage_end(i, name, res, board, secs):
+    from . import events as EV, snapshot as SN
+    metrics = None
+    if board and os.path.exists(board) and SN.active_take(board, "stage_end", force=True):
+        metrics = SN.active_metrics()       # the forced stage-end snapshot's board metrics
+    EV.emit("stage_end", stage=name, n=i, name=name, verdict=res.get("verdict"),
+            line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board, metrics=metrics)
+    from . import eta as ETA
+    ETA.stage_end(name, secs, res.get("verdict"))
+
+
 def run(a):
-    """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked)."""
+    """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked). Emits the event stream."""
+    work = os.path.abspath(a.workdir)
+    os.makedirs(work, exist_ok=True)
+    saved = {k: os.environ.get(k) for k in _EV_ENV}
+    t0 = time.time()
+    _ev_call(_ev_begin, a, work)
+    rc = 1
+    try:
+        rc = _run(a)
+        return rc
+    finally:
+        _ev_call(_ev_end, work, rc, t0, os.path.abspath(a.board) if getattr(a, "board", None) else None)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _run(a):
+    """Execute the stage range (body of run())."""
     work = os.path.abspath(a.workdir)
     os.makedirs(work, exist_ok=True)
     st = load_state(work)
@@ -1353,18 +1695,75 @@ def run(a):
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
+    from . import gaps as GP_
     rc = 0
+    if "pairs" in STAGES_[:i0] and os.path.isfile(board):          # review 3: a --from run past `pairs` protects what is already laid
+        from . import boardwrite as BW_
+        try:
+            _man = BW_.load_manifest(board)
+            if not _man["nets"]:
+                from . import tracefinish as TF_
+                _man = TF_._beating("manifest seed", lambda: BW_.seed_from_board(board, c.cons, log=print), stage="pipeline")
+                print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
+            elif BW_.is_stale(board, _man):
+                BW_.fresh_manifest(board, log=print)
+        except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
+            print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
     led = _Ledger(work, STAGES_, i0)
     done = i0 - 1
     failed_on = []
+    for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
+        gk_prev = GP_.gate_kinds(c.cons, k)
+        gst = ((st["stages"].get(k) or {}).get("gate") or {})
+        if gk_prev and gst.get("stop") != "clean" and a.board:
+            # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
+            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds
+            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
+            gst = {"stop": g["gate"]["stop"]}
+            st["stages"].setdefault(k, {})["gate"] = dict(gst)
+            if g["verdict"] == "pass":
+                continue
+            sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
+            print(f"pipeline: gate {k} is not clean ({g['gate']['stop']}): {g['line']}; fix it in that stage: {sp} (exit 5, no stage started)")
+            for r in g["gate"].get("left", [])[:10]:
+                print(f"  gap {r['id']} {r['kind']} {r.get('nets')} at {r.get('at')}")
+            return 5
+        if gk_prev and gst.get("stop") != "clean":
+            sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
+            print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
+            return 5
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
         t = time.time()
+        os.environ["FLUXPLACE_STAGE"] = name
+        _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
         led.before(prev)
-        res = FUNCS[name](c, i + 1, board)
+        gd = c.dir(i + 1, "gate")
+        gk = GP_.gate_kinds(c.cons, name)
+        best_g = os.path.join(gd, "best.kicad_pcb")
+        if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
+            rp = os.path.join(gd, "resume.kicad_pcb")
+            for ext in ("", ".kicad_pro", ".kicad_dru"):
+                if os.path.exists(best_g + ext):
+                    shutil.copy2(best_g + ext, rp + ext)
+            res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
+        else:
+            if gk and os.path.isdir(gd) and os.listdir(gd):
+                # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
+                os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
+                gd = c.dir(i + 1, "gate")
+            res = FUNCS[name](c, i + 1, board)
+            res.setdefault("verdict", "pass")
+            if res["verdict"] in ("pass", "warn"):
+                res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
         res.setdefault("verdict", "pass")
-        led.after(name, i + 1, res)
+        if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
+            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
+            res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
+            if g["verdict"] == "packets":
+                res["gate_packets"] = True
+        led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
         if res.get("board") and res["board"] != prev:
@@ -1376,6 +1775,8 @@ def run(a):
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
+        if res.get("gate"):
+            st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         if name == "route":
@@ -1385,6 +1786,7 @@ def run(a):
         if res.get("engine"):
             st["stages"][name]["engine"] = res["engine"]
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board
+        _ev_call(_ev_stage_end, i + 1, name, res, board, time.time() - t)
         st["next"] = res.get("next", [])
         if res.get("scorecard"):
             st["scorecard"] = res["scorecard"]
@@ -1407,7 +1809,10 @@ def run(a):
             rc = 5
             for l in res.get("next", [])[:40]:
                 print(l)
-            print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
+            if res.get("gate_packets"):
+                print(f"pipeline: gate {name} is open; the flow stops here (exit 5), later stages not started")
+            else:
+                print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
             break
         if res["verdict"] == "questions":
             rc = 3
@@ -1436,7 +1841,10 @@ def run(a):
         with open(led.path, "a") as fh:
             fh.write(note + "\n")
     if inc:
-        st["incomplete"] = _clip(inc, 160)
+        # loud notes first: a clip may drop remaining-stage names, never a warning
+        parts = inc.split(" | ")
+        loud = [x for x in parts[1:] if x]
+        st["incomplete"] = _clip(" | ".join(loud + parts[:1]), 160) if loud else _clip(inc, 160)
     else:
         st.pop("incomplete", None)
     save_state(work, st)

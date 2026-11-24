@@ -10,6 +10,12 @@ optional; anything not stated keeps the heuristic default. Schema:
     impedance_diff = 85     # recorded for the stackup/report (not yet enforced)
     skew_mm = 0.1           # SI-lite intra-pair skew limit for these nets
 
+    [channel.PCIE_TX]       # budget from the parts at each end (fluxplace/channel.py): every key optional, `source` required
+    loss_db_max = 6.0       # also loss_db_target, freq_ghz, skew_ps_max/_target, length_mm_max/_target, stub_mm_max, via_db, connector_db
+    source = "CM5 datasheet p. N"
+    [[dcdrop]]              # net, current_a, drop_mv_max, drop_mv_target, source; from/to (source and load groups "REF" or "REF.PAD"),
+                            # temp_c, to_a = {REF = amps} (per-load currents with a datasheet source; else every load carries current_a)
+
     [si]
     default_skew_mm = 1.0   # SI-lite limit for pairs with no family entry
 
@@ -35,18 +41,24 @@ optional; anything not stated keeps the heuristic default. Schema:
     [review]                # waive = ["UNROUTED:^\\+3V3$"] waives one open net; open_gate = false switches UNROUTED/STALE_FILL off
     [closure]               # window_mm radius_mm step_mm nudge_max_mm max_trials track_mm clearance_mm via_mm (docs/commands/closure.md)
     [escape]                # near_mm 2.0, lane_mm 1.5, window_mm 4.0, radius_mm 2.5, enabled, power_pins (escape reservation, escres.py)
-    [route]                 # track_mm / clearance_mm = PREFERRED routing sizes (CLI > these > 0.2; lifted to min_track_mm / min_clearance_mm); same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
+    [route]                 # power_corridor_max_mm (longest planned power corridor), power_crowding (current crowding factor, default 1.25), track_mm / clearance_mm = PREFERRED routing sizes (CLI > these > 0.2; lifted to min_track_mm / min_clearance_mm); same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
 
+    [floorplan]             # w_power = 1.0 (weight of the power source-to-load reach term; planned, floorplan2); block_weight breakout_weight stay waive_fail
     [[rule]]                # selector rules over the same keys (fluxplace/rules.py, docs/commands/rules.md)
     select = { net = "^USB_.*" }   # ref | net | netclass | type | layer | prop | pair (AND)
     set = { width_mm = 0.15 }      # width_mm gap_mm clearance_mm skew_mm impedance_diff straight_copper max_vias pour
 
     [power."+5V"]           # (in addition to the ampacity fields above)
+    support = {C117 = "J200.70"}   # which pin a rail-only support part serves (powerbudget.supports; decided, never guessed)
+    dcdrop_exempt = "R11 10 ohm sense resistor in series: the drop is the design"   # a rail with a current and NO [[dcdrop]] row by design
+                                   # (ready lists it as INFO POWER_PLAN_EXEMPT; without the reason, or the row, ready FAILs: D71dd)
     holdup_ms = 20          # ride-through the spec promises ...
     nominal_v = 5.0         # ... from this rail voltage ...
     min_v = 4.75            # ... down to the load's minimum ...
     load_a = 1.0            # ... at this current. Checked against bulk C.
 
+    [placement.fixed_reason."J12"]   # reason of each fixed part (fluxplace/fixedreason.py): mechanical | enclosure | module-mount | owner
+    reason = "enclosure"    # owner also needs decision = "D71dh"; note = free text; ready "fixed reasons" line (F1)
     [sourcing]              # where the board will be built
     china = true            # grade every MPN on LCSC/JLCPCB stock too (CN_* findings)
     cn_need = 100           # units the assembly house must be able to pull
@@ -114,7 +126,12 @@ def load(path):
         return {}
     from . import placerules as PR
     with open(path, "rb") as f:
-        return PR.expand(tomllib.load(f))          # [placement.module.*] with an explicit outline -> keep-out / no_tht
+        d = PR.expand(tomllib.load(f))             # [placement.module.*] with an explicit outline -> keep-out / no_tht
+    rel = (d.get("docs") or {}).get("datasheets")
+    if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
+        from . import parts as P
+        d["docs"]["datasheets"] = P.resolve_dir(rel, [path])
+    return d
 
 
 def power_width_mm(cons, net, default_mm):
@@ -210,6 +227,11 @@ def clamp_drill_mm(drill_mm, cons, log=None, what=""):
     return _clamp_floor(drill_mm, cons, "min_drill_mm", log, what)
 
 
+def not_pairs(cons):
+    """Nets the owner declared plain signals although their names look like a pair (top-level `not_pairs = [...]`)."""
+    return set((cons or {}).get("not_pairs") or [])
+
+
 def pour_nets(cons):
     """Power nets the engineer says ride a plane/pour — the router should not
     also draw them as fat traces."""
@@ -281,6 +303,50 @@ def skew_limit_source(cons, master, ps_per_mm=None):
     if e:
         return _to_mm(e[0], e[1], f"[si] {e[2]}", ps_per_mm, master), f"[si] {e[2]}"
     return 1.0, "[si] default_skew_mm"
+
+
+def skew_max_source(cons, master, ps_per_mm=None):
+    """(maximum mm, where it comes from): the skew a pair FAILS past (D71cv).  `skew_max_mm` / `skew_max_ps` resolve with the same
+    precedence as `skew_mm` / `skew_ps` (skew_limit_source, which is the TARGET); without one the maximum is the target, so a board
+    that states no maximum behaves as before.  A maximum below the target is raised to it."""
+    from . import rules as RU
+    tgt, tsrc = skew_limit_source(cons, master, ps_per_mm)
+    rs = RU.load(cons)
+    cands = []
+    for key in ("skew_max_mm", "skew_max_ps"):
+        hits = rs.cascade({"net": master}, key)
+        if hits:
+            r, v = hits[0]
+            cands.append((r.rank(), key, float(v), r))
+    if not cands:
+        return tgt, tsrc
+    _rk, key, v, r = max(cands, key=lambda c: c[0])
+    mx = _to_mm(v, "mm" if key == "skew_max_mm" else "ps", f"{r.label} {key}", ps_per_mm, master)
+    return max(mx, tgt), f"{r.label} {key}"
+
+
+def skew_max_checked(cons, master, ps_per_mm=None):
+    try:
+        return skew_max_source(cons, master, ps_per_mm)
+    except ValueError as e:
+        return None, f"PAIR_DELAY_UNKNOWN ({e})"
+
+
+STUB_MAX_DEFAULT = {"usb2": 3.5, "usb3": 3.5}       # Type-C R2.0 Table 3-4: a spur on a joined connector row; other families: not checked
+
+
+def stub_max_mm(cons, master):
+    """Longest branch stub (mm) a pair with more than two terminals may have, or None (not checked): `[pairs.F] stub_max_mm` (same
+    cascade as skew_mm), else `[si] stub_max_mm_by_kind.<kind>`, else the built-in USB value."""
+    from . import rules as RU, netclass as NC
+    v, _ = RU.load(cons).resolve({"net": master}, "stub_max_mm")
+    if v is not None:
+        return float(v)
+    kind = NC.pair_kind(master)
+    by = (cons.get("si", {}) or {}).get("stub_max_mm_by_kind") or {}
+    if kind in by:
+        return float(by[kind])
+    return STUB_MAX_DEFAULT.get(kind)
 
 
 def skew_limit_checked(cons, master, ps_per_mm=None):
@@ -388,52 +454,127 @@ def _rule_netclasses(board, cons, classes, patterns, log):
     return len(groups)
 
 
-def inject_netclasses(pro_path, cons, log=print, board=None):
-    """Write the engineering constraints INTO the project file as KiCad net
-    classes, so any ECAD parser (Quilter's 'ECAD PARSED CONSTRAINTS', the
-    KiCad router, a human) sees the intent instead of guessing defaults
-    (measured: Quilter guessed 100R for every pair and 500mA for every rail
-    because the .kicad_pro carried no classes). Pairs get diff_pair_width/
-    gap for their impedance target; rails get ampacity track widths."""
-    import json
-    d = json.load(open(pro_path))
+MANAGED_KEY = "fluxplace_managed"       # the explicit marker of a class fluxplace owns (never a name prefix: a user class named PWR_* is the user's)
+GEOM_TOL_MM = 0.005
+
+
+def _eff_class(classes, patterns, net):
+    """The class that applies to `net`: the first netclass pattern that matches it (KiCad wildcard), else None (Default)."""
+    import fnmatch
+    for p in patterns:
+        if fnmatch.fnmatchcase(net, p.get("pattern", "")):
+            return next((c for c in classes if c.get("name") == p.get("netclass")), None)
+    return None
+
+
+def pair_legs_of(cons, board):
+    """{leg net: family} for the classified pair legs of `board` (graph.diff_pairs / family tails: budget.pair_legs) under their longest
+    [pairs.F] family.  {} when the board cannot be read."""
+    from . import budget as B
+    try:
+        from . import routediag as RD
+        names = sorted({q["net"] for q in RD.load(board)["pads"] if q["net"]})
+    except Exception:                                                       # noqa: BLE001 - no board: no legs
+        return {}
+    fams = (cons or {}).get("pairs") or {}
+    legs = B.pair_legs(names, cons, complete=True)             # every net of the board: an X_RST_N with no partner is no leg
+    return {n: f for n in sorted(legs) for f in [B.family_of(fams, n, legs)] if f}
+
+
+def _expected_geometry(cons, group, board):
+    from . import zgeom as ZG
+    z = int((cons.get("pairs", {}).get(group) or {}).get("impedance_diff", 100))
+    og = ZG.outer_geometry(cons, group, board=board) if (cons.get("pairs", {}).get(group) or {}).get("impedance_diff") else None
+    w, g = og or PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])                # computed from the stackup; the constant is the fallback
+    return z, w, g
+
+
+def _build_netclasses(d, cons, log, board):
+    """(classes, patterns, n_rule): the project's classes with the fluxplace-managed ones rebuilt.  User classes are kept whole (never
+    deleted, never edited); managed classes set only width / gap (pairs, from the stackup) and width (rails), never clearance or via sizes,
+    so DRC on unchanged copper cannot move.  A pair leg or rail a user class already covers is left to that class (netclass_mismatch
+    reports it); the rest get an exact-name pattern (the old `*FAMILY_*` pattern doubled the family's trailing `_` and matched nothing)."""
     ns = d.setdefault("net_settings", {})
-    classes = [c for c in ns.get("classes", [])
-               if not (c.get("name", "").startswith(("DP_", "PWR_", "RULE_")))]
-    patterns = [p for p in ns.get("netclass_patterns", [])
-                if not p.get("netclass", "").startswith(("DP_", "PWR_", "RULE_"))]
-    for group, p in sorted((cons or {}).get("pairs", {}).items()):
-        z = int(p.get("impedance_diff", 100))
-        from . import zgeom as ZG
-        og = ZG.outer_geometry(cons, group, board=board) if p.get("impedance_diff") else None
-        w, g = og or PAIR_GEOM_BY_Z.get(z, PAIR_GEOM_BY_Z[100])      # computed from the stackup; the constant is the fallback
-        name = f"DP_{group}_{z}R"
-        classes.append({
-            "name": name, "clearance": 0.1,
-            "track_width": w, "diff_pair_width": w, "diff_pair_gap": g,
-            "via_diameter": 0.45, "via_drill": 0.25,
-            "diff_pair_via_gap": 0.25,
-        })
-        patterns.append({"netclass": name, "pattern": f"*{group}_*"})
+    old = ns.get("classes", [])
+    drop = {c.get("name") for c in old if c.get(MANAGED_KEY)}
+    classes = [c for c in old if not c.get(MANAGED_KEY)]
+    patterns = [p for p in ns.get("netclass_patterns", []) if p.get("netclass") not in drop]
+    taken = {c.get("name") for c in classes}
+
+    def uniq(name):
+        while name in taken:
+            name += "_fx"
+        taken.add(name)
+        return name
+    legs = pair_legs_of(cons, board) if board else {}
+    for group in sorted((cons or {}).get("pairs", {})):
+        nets = [n for n, f in legs.items() if f == group and _eff_class(classes, patterns, n) is None]
+        if not nets:
+            continue
+        z, w, g = _expected_geometry(cons, group, board)
+        name = uniq(f"DP_{group.rstrip('_')}_{z}R")
+        classes.append({"name": name, "track_width": w, "diff_pair_width": w, "diff_pair_gap": g, MANAGED_KEY: True})
+        patterns += [{"netclass": name, "pattern": n} for n in nets]
     for net, pw in sorted((cons or {}).get("power", {}).items()):
         ma = pw.get("max_current_ma")
-        if not ma or pw.get("pour"):
+        if not ma or pw.get("pour") or _eff_class(classes, patterns, net) is not None:
             continue
-        name = f"PWR_{net.strip('+').replace('/', '_')}"
-        classes.append({
-            "name": name, "clearance": 0.15,
-            "track_width": rail_width_mm(ma),
-            "via_diameter": 0.6, "via_drill": 0.3,
-        })
+        name = uniq(f"PWR_{net.strip('+').replace('/', '_')}")
+        classes.append({"name": name, "track_width": rail_width_mm(ma), MANAGED_KEY: True})
         patterns.append({"netclass": name, "pattern": net})
+    n0 = len(classes)
     n_rule = _rule_netclasses(board, cons, classes, patterns, log)
+    for c in classes[n0:]:
+        c[MANAGED_KEY] = True                                               # the owner's [[rule]] results are written by us and rebuilt by us
+    return classes, patterns, n_rule
+
+
+def inject_netclasses(pro_path, cons, log=print, board=None):
+    """Write the engineering constraints INTO the project file as KiCad net classes, so any ECAD parser (Quilter's 'ECAD PARSED
+    CONSTRAINTS', the KiCad router, a human) sees the intent instead of guessing defaults.  Only classes carrying MANAGED_KEY are ours:
+    they are rebuilt, everything else in the file is kept as it was.  Call it on a project file the caller owns (a stage's copy)."""
+    import json
+    d = json.load(open(pro_path))
+    classes, patterns, n_rule = _build_netclasses(d, cons, log, board)
+    ns = d.setdefault("net_settings", {})
     ns["classes"] = classes
     ns["netclass_patterns"] = patterns
     json.dump(d, open(pro_path, "w"), indent=2)
-    log(f"  netclasses injected: {sum(1 for c in classes if c['name'].startswith('DP_'))} "
-        f"pair classes, {sum(1 for c in classes if c['name'].startswith('PWR_'))} rail classes, "
-        f"{n_rule} rule classes")
+    log(f"  netclasses written: {sum(1 for c in classes if c.get(MANAGED_KEY))} managed "
+        f"({sum(1 for c in classes if c.get('name', '').startswith('DP_') and c.get(MANAGED_KEY))} pair, "
+        f"{sum(1 for c in classes if c.get('name', '').startswith('PWR_') and c.get(MANAGED_KEY))} rail, {n_rule} rule classes)")
     return len(classes)
+
+
+def netclass_mismatch(pro_path, cons, board=None):
+    """NETCLASS_MISMATCH rows, [] when the project carries the budgets.  Writes nothing.
+      managed ...   a class fluxplace owns differs from what the constraints imply (missing, extra, other width / gap)
+      foreign ...   the class that actually applies to a pair leg (first matching pattern, a user class) has another track width,
+                    diff-pair width or gap than the stackup gives for the family: the router would draw the pair off its impedance."""
+    import json
+    d = json.load(open(pro_path))
+    want_c, want_p, _ = _build_netclasses(json.loads(json.dumps(d)), cons, lambda *a, **k: None, board)
+    ns = d.get("net_settings", {})
+    have_c = {c.get("name"): c for c in ns.get("classes", []) if c.get(MANAGED_KEY)}
+    want_m = {c["name"]: c for c in want_c if c.get(MANAGED_KEY)}
+    out = [f"managed {n}" for n in sorted(set(have_c) | set(want_m))
+           if n not in have_c or n not in want_m or any(have_c[n].get(k) != v for k, v in want_m[n].items())]
+    key = lambda p: (p.get("netclass"), p.get("pattern"))                  # noqa: E731
+    hp = {key(p) for p in ns.get("netclass_patterns", []) if p.get("netclass") in have_c}
+    wp = {key(p) for p in want_p if p.get("netclass") in want_m}
+    out += [f"managed pattern {a}={b}" for a, b in sorted(hp ^ wp)]
+    classes, patterns = ns.get("classes", []), ns.get("netclass_patterns", [])
+    for net, group in sorted(pair_legs_of(cons, board).items()) if board else []:
+        c = _eff_class(classes, patterns, net)
+        if c is None or c.get(MANAGED_KEY):
+            continue
+        z, w, g = _expected_geometry(cons, group, board)
+        got = {"diff_pair_width": c.get("diff_pair_width", c.get("track_width")), "diff_pair_gap": c.get("diff_pair_gap")}
+        bad = [f"{k} {v} != {e:g}" for k, v, e in (("width", got["diff_pair_width"], w), ("gap", got["diff_pair_gap"], g))
+               if v is not None and abs(float(v) - e) > GEOM_TOL_MM]
+        if bad:
+            out.append(f"foreign {net} class {c.get('name')}: {', '.join(bad)} (stackup, {z} ohm)")
+    return out
 
 
 # ---------------------------------------------------------------------------

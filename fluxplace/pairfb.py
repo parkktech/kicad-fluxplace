@@ -367,7 +367,35 @@ def handoff_nets(state, work):
         return set()
 
 
+def gated_open_legs(cons, pair_legs, open_names, extra=()):
+    """PHASE3I F1: both legs of every gated pair (review.pair_gated) that has a leg open (or in `extra`, the handed-over
+    nets). Pairs come from naming over `pair_legs`; `not_pairs` nets are never a pair."""
+    from . import graph, review, constraints as C
+    pairs = graph.diff_pairs(pair_legs, exclude=C.not_pairs(cons))
+    hit = set(open_names) | set(extra)
+    out = set()
+    for slave, master in pairs.items():
+        if review.pair_gated(cons, master) and (slave in hit or master in hit):
+            out.update((slave, master))
+    return out
+
+
+def handoff_hs_nets(state, work, cons=None):
+    """PHASE3I B1: the legs of handed-over pairs that are gated (high-speed). They never reach the plain router."""
+    from . import review as RV
+    import json
+    try:
+        d = ((state or {}).get("stages") or {}).get("pairs", {}).get("dir")
+        if not d:
+            return set()
+        rep = json.load(open(os.path.join(work, d, "board.pairs.json")))
+        return {n for r in rep.get("pairs", []) if r.get("handoff") and RV.pair_gated(cons, r["pair"][0]) for n in r["pair"]}
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+        return set()
+
+
 def router_skip(todo, controlled, handoff, mode):
-    """nets the whole-board router is told to leave alone: the controlled nets (pairs, RF, clocks) except the pairs handed over
-    by the pairs stage (state c), which it routes as ordinary nets of their class."""
-    return [n for n in todo if n in controlled and n not in handoff] if mode == "exclude" else []
+    """nets the whole-board router is told to leave alone: the controlled nets (pairs, RF, clocks). PHASE3C D71cj (c): a pair
+    leg is never routed as a plain net, handed-over pairs (`handoff`, state c) included; the pairgroups step re-lays them
+    per connector group first. `handoff` stays in the signature for the call sites."""
+    return [n for n in todo if n in controlled] if mode == "exclude" else []

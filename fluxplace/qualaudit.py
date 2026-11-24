@@ -30,7 +30,9 @@ def pair_rows(B, cls, cons, open_nets):
     """[{pair, p, n, status, causes, why, skew, limit}] for every pair of the board (pairaudit.audit)."""
     res = PA.audit(B, PA.pair_list(cls), cons, open_nets)
     return [{"pair": f"{p}/{n}", "p": p, "n": n, "status": e["status"], "causes": e.get("causes", []), "why": e["why"],
-             "skew": e.get("skew"), "limit": e.get("limit")} for (p, n), e in res.items()]
+             "skew": e.get("skew"), "limit": e.get("limit"), "target": e.get("target"), "over_target": e.get("over_target"),
+             "paths": e.get("paths"), "stubs": e.get("stubs"), "unit": e.get("unit", "mm"), "code": e.get("code"),
+             "via_stubs": e.get("via_stubs"), "basis": e.get("basis"), "skew_mm": e.get("skew_mm"), "skew_ps": e.get("skew_ps")} for (p, n), e in res.items()]
 
 
 # ---------------------------------------------------------------- RF
@@ -192,7 +194,7 @@ def autotune(board, cons, conn, log=lambda m: None):
         if os.path.exists(side):
             shutil.copy(side, os.path.splitext(tmp)[0] + ext)
     lim = lambda master: (lambda v: float("inf") if v is None else v)(C.skew_limit_checked(cons or {}, master)[0])
-    TU.tune_pairs(board, tmp, {r["n"]: r["p"] for r in rows}, lim, max_rounds=int(r_.get("tune_rounds", 3)), log=log)
+    TU.tune_pairs(board, tmp, {r["n"]: r["p"] for r in rows}, lim, max_rounds=int(r_.get("tune_rounds", 3)), log=log, cons=cons)
     open1 = conn(tmp)
     B1 = RD.load(tmp)
     after = {r["pair"]: r for r in pair_rows(B1, cls, cons, set(open1))}

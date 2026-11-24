@@ -11,7 +11,6 @@ from collections import defaultdict
 from . import boardfile as BF
 
 FINE_GAP = 0.3          # mm, neighbour-pad gap below which a part is fine-pitch
-FAR_MM, FAR_TIGHT_MM = 5.0, 2.5
 HAUL_MM, HAUL_FRAC = 30.0, 0.35
 MIN_NECK = 0.127
 TIGHT_NAMES = ("DECAP", "VREF", "BYP")
@@ -90,6 +89,14 @@ def _edge_segments(g):
 def _locked(n):
     """a track/via node carrying `(locked yes)` (the fan-out copper is locked)."""
     return any(k == "locked" or (isinstance(k, list) and k and k[0] == "locked" and (len(k) < 2 or k[1] != "no")) for k in n[1:])
+
+
+def _teardrop_flags(n):
+    """(teardrops enabled, remove unused layers) of a pad or via node: `(teardrops ... (enabled yes))`, `(remove_unused_layers yes)`."""
+    td = BF._first(n, "teardrops")
+    en = BF._atoms(BF._first(td, "enabled")) if td else []
+    ru = BF._atoms(BF._first(n, "remove_unused_layers"))
+    return en[:1] == ["yes"], ru[:1] == ["yes"]
 
 
 def load(path, track=None, clearance=None, project=None):
@@ -187,6 +194,7 @@ def load(path, track=None, clearance=None, project=None):
                  "tht": ptype in ("thru_hole", "np_thru_hole"), "np": ptype == "np_thru_hole",
                  "drill": min(dr) if dr else 0.0,
                  "rr": (BF._nums(BF._first(pad, "roundrect_rratio") or []) or [0.25])[0]}
+            p["td"], p["rm_unused"] = _teardrop_flags(pad)
             pads.append(p)
             mine.append(p)
         for z in BF._kids(fp, "zone"):
@@ -227,7 +235,8 @@ def load(path, track=None, clearance=None, project=None):
         if n[0] == "via":
             x, y = _f(n, "at")
             vias.append({"net": net, "x": x, "y": y, "d": _f(n, "size", 1)[0], "drill": _f(n, "drill", 1)[0],
-                         "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n)})
+                         "layers": set(BF._atoms(BF._first(n, "layers"))), "locked": _locked(n),
+                         "td": _teardrop_flags(n)[0], "rm_unused": _teardrop_flags(n)[1]})
         else:
             sx, sy = _f(n, "start")
             ex, ey = _f(n, "end")
@@ -270,7 +279,7 @@ def load(path, track=None, clearance=None, project=None):
                     dclear = float(c.get("clearance", dclear))
         except (KeyError, ValueError, TypeError):
             pass
-    return {"pads": pads, "parts": parts, "zones": zones, "segs": segs,
+    return {"file": path, "pads": pads, "parts": parts, "zones": zones, "segs": segs,
             "vias": vias, "copper": copper, "bbox": bbox, "edge": edge,
             "diag": math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]),
             "track": track if track is not None else dtrack,
@@ -387,6 +396,7 @@ def _far(B, net, ps):
     the cluster model's (unique-IC net, else reference-designator block); a rail
     cap whose owner is only a guess is not reported, and a cap is never measured
     against an arbitrary nearest IC."""
+    from . import netclass as NC, powerbudget as PB
     own, out = _owners(B), []
     for p in ps:
         part = B["parts"].get(p["ref"])
@@ -396,13 +406,16 @@ def _far(B, net, ps):
         other = [q for q in part["pads"] if q["num"] != p["num"]]
         gnd = p["ref"].startswith("C") and other and GROUND.match(other[0]["net"] or "")
         tight = gnd or any(k in net.upper() for k in TIGHT_NAMES)
-        lim = FAR_TIGHT_MM if tight else FAR_MM
+        if "_cls" not in B:
+            B["_cls"] = NC.classify(B, B.get("_cons"), B.get("_spec"))
+        row = PB.support_row(B, B.get("_cons"), B.get("_spec"), p["ref"], net, B["_cls"].get(net), ic=o["ic"], pad=o["pad"])
+        lim = row["target"] if tight else row["max"]                     # the one support table: tight parts are held to the target
         ic = next(q for q in B["parts"][o["ic"]]["pads"] if q["num"] == o["pad"])
         d = math.hypot(ic["x"] - p["x"], ic["y"] - p["y"])
         if d > lim:
             out.append({"cause": "FAR_SUPPORT_PART", "part": p["ref"], "toward": _pad_name(ic),
                         "dist": round(d, 1), "limit": lim,
-                        "evidence": f"{p['ref']} is {d:.1f} mm from {_pad_name(ic)} (limit {lim:g} mm)",
+                        "evidence": f"{p['ref']} is {d:.1f} mm from {_pad_name(ic)} (limit {lim:g} mm, {row['role']}: {row['source']})",
                         "suggestion": f"move {p['ref']} to within {lim:g} mm of {_pad_name(ic)} "
                                       f"(now {d:.1f} mm)"})
     return out

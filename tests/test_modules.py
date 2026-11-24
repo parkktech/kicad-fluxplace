@@ -114,3 +114,71 @@ def test_annealing_does_not_worsen_cost(tmp_path):
     c0 = P.total(P.cost_parts())
     FP.anneal(P, iters=600, seed=1)
     assert P.total(P.cost_parts()) <= c0 + 1e-6
+
+
+# ---- placer step 5 (P5): supports join their owner's module
+def _two_ics(tmp, caps, cons=None):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PW
+    import pcbgen as g
+    b = g.ic("U101", 10, 10, ["VOUT", "GND", "A1", "A2", "A3", "A4"], pitch=1.0)
+    b += g.ic("U412", 60, 10, ["VOUT", "GND", "B1", "B2", "B3", "B4"], pitch=1.0)
+    for ref, x, y, v in caps:
+        b += PW.cap(ref, x, y, "VOUT", "GND", v)
+    B = RD.load(g.board(tmp, b, outline=(0, 0, 80, 60)))
+    return B, {r: next(q for q in B["pads"] if q["ref"] == r and q["net"] == "VOUT") for r in ("U101", "U412")}
+
+
+PLANNED = {"power": {"VOUT": {"max_current_ma": 3000}}}
+
+
+def test_a_bypass_parked_at_another_ic_is_seated_at_its_own_pin_and_joins_that_module(tmp_path):
+    B, pin = _two_ics(tmp_path, [])
+    x1, y1 = pin["U101"]["x"], pin["U101"]["y"]
+    caps = [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")]
+    B, pin = _two_ics(tmp_path, caps)
+    M = MD.build(B, PLANNED, None, arrange=False)                # no seating: the part is re-homed in the table, far, alone
+    assert M["rehomed"] == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": M["rehomed"]["C419"]["dist"], "left": "1"}}
+    assert M["of"]["C419"] == "C419" and [u["ref"] for u in M["unseated"]] == ["C419"] and M["of"]["C101"] == "U101"
+    B, pin = _two_ics(tmp_path, caps)
+    M = MD.build(B, PLANNED, None, arrange=True)
+    via = next(q for q in B["parts"]["C419"]["pads"] if q["net"] == "VOUT")
+    d = math.hypot(via["x"] - pin["U412"]["x"], via["y"] - pin["U412"]["y"])
+    assert M["of"]["C419"] == "U412" and d <= 5.0 and M["unseated"] == [] and M["of"]["C101"] == "U101"
+    assert "C419" in next(m for m in M["modules"] if m["name"] == "U412")["members"]
+    B, pin = _two_ics(tmp_path, caps)
+    M = MD.build(B, {}, None, arrange=True)                      # no planned rail: no per-pin demand, the `near` owner keeps it
+    assert M["rehomed"] == {} and M["of"]["C419"] == "U101"
+
+
+def test_a_far_support_is_seated_into_its_owner_module_and_a_fixed_one_is_left_and_reported(tmp_path):
+    B = RD.load(board(tmp_path, far_cap=True))
+    M = MD.build(B, {}, None, arrange=True)
+    c2, u1 = B["parts"]["C2"], B["parts"]["U1"]
+    assert M["of"]["C2"] == "U1" and math.hypot(c2["pos"][0] - u1["pos"][0], c2["pos"][1] - u1["pos"][1]) <= 15.0 and M["unseated"] == []
+    B = RD.load(board(tmp_path, far_cap=True))
+    M = MD.build(B, {"placement": {"fixed": ["C2"]}}, None, arrange=True)
+    assert tuple(B["parts"]["C2"]["pos"]) == (80.0, 55.0) and M["of"]["C2"] == "C2"
+    assert [(u["ref"], u["ic"], u["why"]) for u in M["unseated"]] == [("C2", "U1", "fixed")]
+
+
+def test_a_pin_bared_by_a_rehome_is_named(tmp_path):
+    B, pin = _two_ics(tmp_path, [])
+    x1, y1 = pin["U101"]["x"], pin["U101"]["y"]
+    B, pin = _two_ics(tmp_path, [("C419", x1 - 2, y1 + 2, "100nF")])
+    M = MD.build(B, PLANNED, None, arrange=False)            # U101's only bypass leaves: its VOUT pin is bared
+    assert [(b["ic"], b["was"]) for b in M["bared"]] == [("U101", "C419")]
+    B, pin = _two_ics(tmp_path, [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")])
+    M = MD.build(B, PLANNED, None, arrange=False)            # a second bypass within 5 mm of the pin: nothing is bared
+    assert M["bared"] == []
+
+
+def test_a_tie_off_pin_on_the_rail_is_not_a_bared_supply_pin(tmp_path):
+    import pcbgen as g
+    B = RD.load(g.board(tmp_path, g.ic("U1", 10, 10, ["VOUT", "GND", "VOUT", "A1"], pitch=1.0), outline=(0, 0, 40, 40)))
+    spec = {"components": [{"ref": "U1", "mpn": "X1", "pinmap": {"VIN": "1", "EN": "3"}}]}
+    facts, mp = {"X1": {"supply_pins": ["VIN"]}}, {"U1": "X1"}
+    left = lambda pad: {"C9": {"from": "U1", "left": pad}}          # noqa: E731
+    assert [b["pad"] for b in MD._bared(B, left("1"), spec, facts, mp)] == ["1"]     # the supply pin: bare
+    assert MD._bared(B, left("3"), spec, facts, mp) == []                            # EN tied to the rail: no bypass wanted
+    assert [b["pad"] for b in MD._bared(B, left("3"), spec, {}, {})] == ["3"]        # no supply_pins fact: every pad counts

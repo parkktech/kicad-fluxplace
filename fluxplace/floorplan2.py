@@ -88,6 +88,7 @@ class Plan:
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
         self.claims_rel = {}
         self.chash = GM.Hash(3.0)
+        self.ko_rel, self.khash = {}, GM.Hash(3.0)             # --- module keep-outs (datasheet layout template): rects rel. to the anchor, all layers
         self.bo_rel, self.bhash = {}, GM.Hash(3.0)             # --- breakout (breakout.py): lane regions per module, hashed in world coordinates
         self.bo_reg = []
         self.bo_w = float((cons.get("floorplan") or {}).get("breakout_weight", 6.0))
@@ -331,6 +332,23 @@ class Plan:
         for i in range(self.n):
             self._claims(i)
 
+    def set_keepouts(self, rel):
+        """rel: {module index: [rect rel to the anchor]}. A module's keep-out is its own claim: its OWN parts are exempt, every other
+        module's courtyard is refused inside it (both sides), and its members' courtyards are refused inside the others'."""
+        self.ko_rel = {i: [tuple(r) for r in v] for i, v in rel.items() if v}
+        self.khash = GM.Hash(3.0)
+        for i in range(self.n):
+            self._claims(i)
+
+    def keepouts_world(self, i):
+        X, Y, th = self.cur[i]
+        out = []
+        for x0, y0, x1, y1 in self.ko_rel.get(i, ()):
+            ax, ay = GM.rot(x0, y0, th)
+            bx, by = GM.rot(x1, y1, th)
+            out.append((X + min(ax, bx), Y + min(ay, by), X + max(ax, bx), Y + max(ay, by)))
+        return out
+
     def set_breakouts(self, regs):
         """regs: [(module index, rect rel to the anchor, outward unit vector rel, sides)] = the lane regions of the dense parts' templates."""
         self.bo_reg = list(regs)
@@ -398,6 +416,10 @@ class Plan:
         for k, (rect, sides) in enumerate(self.claims_world(i)):
             for sd in sides:
                 self.chash.add((i, k, sd), rect, sd)
+        for k in range(len(self.ko_rel.get(i, ())) + 8):
+            self.khash.remove((i, k))
+        for k, rect in enumerate(self.keepouts_world(i)):
+            self.khash.add((i, k), rect, "x")
         for k in range(len(self.bo_rel.get(i, ())) + 8):
             for sd in ("F", "B"):
                 self.bhash.remove((i, k, sd))
@@ -446,6 +468,8 @@ class Plan:
                 for sd in sides:
                     if next(self.chash.hits(rect, sd, 0.0, ignore=mine), None) is not None:
                         return False
+        if self.ko_rel and not self.keepouts_ok(i):
+            return False
         mineb = {(i, k, sd) for k in range(len(self.bo_rel.get(i, ())) + 8) for sd in ("F", "B")}
         for k, (rect, sides) in enumerate(self.bo_rel.get(i, ())):      # two dense parts' breakouts may not overlap
             for sd in sides:
@@ -458,6 +482,22 @@ class Plan:
                 q = P[o]["pads"][j]
                 ps = {("F" if l == "F.Cu" else "B") for l in q["layers"] if l in ("F.Cu", "B.Cu")}
                 if ps & set(sides):
+                    return False
+        return True
+
+    def keepouts_ok(self, i):
+        """module i's keep-outs hold no courtyard of another module, and none of its courtyards lies in another module's keep-out.
+        A pair of fixed modules is a baseline fact, not the search's to fix."""
+        mem = set(self.mods[i]["members"])
+        P = self.B["parts"]
+        for rect in self.keepouts_world(i):
+            for o in self.L.hash.hits(rect, "x", 0.0, ignore=mem):
+                j = self.idx.get(self.of.get(o))
+                if j is None or j == i or not (self.fixed[i] and self.fixed[j]):
+                    return False
+        for r in mem:
+            for (j, _k) in self.khash.hits(P[r]["court"], "x", 0.0, ignore=()):
+                if j != i and not (self.fixed[i] and self.fixed[j]):
                     return False
         return True
 
@@ -482,6 +522,8 @@ class Plan:
         for k in range(len(self.claims_rel.get(i, ())) + 8):
             for sd in ("F", "B"):
                 self.chash.remove((i, k, sd))
+        for k in range(len(self.ko_rel.get(i, ())) + 8):
+            self.khash.remove((i, k))
         return old
 
 
@@ -686,7 +728,10 @@ def _grid(P, i, tx, ty, R, step, placed, x0, y0, x1, y1, occ):
     return out
 
 
-def anneal(P, iters=4000, seed=1, t0=None, log=print):
+WATCH_EVERY = 250                   # anneal moves between two calls of the live view
+
+
+def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
     rng = random.Random(seed)
     mov = [i for i in range(P.n) if not P.fixed[i]]
     if not mov:
@@ -698,6 +743,8 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print):
     acc = 0
     x0, y0, x1, y1 = P.B["bbox"]
     for it in range(iters):
+        if watch is not None and it % WATCH_EVERY == 0:      # F16 (liveview): no random draw, nothing of the search is touched
+            watch(it, iters, cs)
         frac = it / max(1, iters)
         T = T0 * (0.02 ** frac)
         sig = max(0.5, 8.0 * (1 - frac))
@@ -928,6 +975,16 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         _pro(board, path_g)
     B = RD.load(path_g)
     M = MD.build(B, cons, spec, arrange=True)
+    from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
+    LV0.progress("floorplan", "construct", always=True, cand=tag, why=f"{len(M.get('rehomed') or {})} bypass part(s) re-homed",
+                 criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
+                            "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])},
+                           {"id": "pins bared by re-homing", "ok": not M.get("bared"), "value": len(M.get("bared") or []), "limit": 0,
+                            "text": ", ".join(f"{b['ic']}.{b['pad']} ({b['was']})" for b in (M.get("bared") or [])[:12])},
+                           {"id": "template units legal where they stand", "ok": not M.get("unit_illegal"), "value": len(M.get("unit_illegal") or []),
+                            "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
+    for u in M.get("unseated") or []:
+        print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
     P = Plan(B, cons, spec, M, log=log)
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)
@@ -956,6 +1013,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     for i, extra in bcl.items():
         cl[i] = list(cl.get(i, [])) + extra
     P.set_claims(cl)
+    P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
     P.set_breakouts(bregs)
     P.freeze_baseline()
     src = P.cost_parts()
@@ -966,14 +1024,23 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         rep = repair_claims(P, step=args.step)
         print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
     init = P.cost_parts()
-    acc, best = anneal(P, iters=args.iters, seed=args.seed)
+    from . import liveview as LV                 # F16: the constructed placement and the running anneal, when a stream is on
+    LV.candidate("floorplan", f"{tag}-construct", P.B, {"modules": P.mods, "of": P.of}, [["cost", round(float(P.total(init)), 3)]], None, cons,
+                 lane="trial", phase="construct", verdict="running", full=True)
+    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
     cur = P.cost_parts()
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
            "source": src, "constructed": init, "annealed": cur, "accepted": acc, "rounds": []}
     out_path = os.path.join(workdir, f"{tag}.kicad_pcb")
+    base = path_g
+    if M.get("flipped"):                         # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
+        from . import flip as FL
+        base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
+        FL.flip_file(path_g, base, M["flipped"])
+        _pro(board, base)
     for rd in range(args.rounds + 1):
         moves = dict(all_moves(P))
-        BW.move_file(path_g, out_path, moves, post=False)
+        BW.move_file(base, out_path, moves, post=False)
         _pro(board, out_path)
         a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                nodes=200000, repairs=12, check_only=True)
@@ -1075,6 +1142,15 @@ def edge_order(B, cons):
     return sorted(ln, key=lambda k: (ln[k] / max(heat[k], 0.05), k))
 
 
+def _live_key(res):
+    """The floorplan result as a judge key for the live view (liveview.progress): lower is better, left first."""
+    return [["fan-out blocked", res["required"] - res["escaped"]], ["crossings", res["annealed"]["cross"]], ["wire length", round(res["annealed"]["wl"], 1)]]
+
+
+def _live_crit(res):
+    return [{"id": "fan-out", "ok": passes(res), "value": res["escaped"], "limit": res["required"], "text": str(res.get("why_not") or "")}]
+
+
 def cmd_floorplan(a):
     from . import constraints as C, routediag as RD
     spec = json.load(open(a.spec)) if a.spec else None
@@ -1088,6 +1164,12 @@ def cmd_floorplan(a):
     os.makedirs(wd, exist_ok=True)
     from . import intent as IT
     src_board = a.board
+    from . import liveview as LV                 # F16: owner rows that came in before the search (no inbox folder: nothing changes)
+    a.board, cons, fb = LV.stage_start(a.board, cons, spec, "floorplan", wd)
+    from . import ready as RDY, parts as PTS                 # C7b: the rows of the input, measured now; the output is set against them
+    ds_dir = PTS.resolve_dir((cons.get("docs") or {}).get("datasheets"), [a.constraints, a.board])
+    rows_in = RDY.stage_rows(spec, cons, RD.load(a.board), a.board, ds_dir)
+    ex = LV.Exporter(cons, a.constraints, stage="floorplan") if LV.work() else None
     from . import pins as PN
     a.board, cons, pin_res = PN.prepare(a.board, cons, spec, wd)       # --- pins: collisions among pinned parts, resolved by precedence
     if pin_res is not None and pin_res.unresolved:
@@ -1113,6 +1195,8 @@ def cmd_floorplan(a):
               f"fan-out {res['escaped']}/{res['required']}, {res['moved_modules']}/{res['movable']} modules moved, "
               f"cross {res['source']['cross']} -> {res['annealed']['cross']}, wl {res['source']['wl']:.0f} -> {res['annealed']['wl']:.0f}, "
               f"{res['secs']} s; {res['why_not']}")
+        LV.candidate("floorplan", tag, Bn, {"modules": P.mods, "of": P.of} if P is not None else None, _live_key(res), _live_crit(res), cons, ex, board=res["board"],
+                     generation=len(history), verdict="kept" if passes(res) else "dropped", why=res["why_not"], is_leader=True, leader=tag)
         if passes(res) or not a.size or steps >= a.max_grow * 4:
             break
         e = order[steps % 4]
@@ -1151,6 +1235,15 @@ def cmd_floorplan(a):
             Bn = RD.load(out)
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
+    refused = not passes(best) or bool(irc or brc)
+    hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
+    print(hon["line"])
+    LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
+                 lane="accepted", phase="gate", verdict="refused" if refused else "kept", why=best["why_not"], full=True)
+    for line in fb.finish(Bn) if fb is not None else []:
+        print(line)
+    if ex is not None:
+        ex.close()
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")

@@ -42,3 +42,90 @@ netclass's Z and the dominant routed widths' Z per layer (a width that is right 
 `not_ready` in `state.json`, the status table and every `*.status.json`; the sidecar follows each stage's output board
 (`questions.inherit`); `fab` and `deliver` refuse such a board (`NOT READY: <reasons>`). `pipeline` without `--spec` reports the
 stage `na` (nothing to check); the stage's distributor/stock lookups are live by default (`--no-api` for offline, which blocks the parts gate: stock cannot be checked). Work list: [parts-todo](parts-todo.md), [parts-apply](parts-apply.md).
+
+## The `fixed reasons` and `pair classes` lines (fixedreason.py, F1)
+
+Every part a stage will not move needs a reason class: `[placement.fixed_reason."REF"] reason = "mechanical" | "enclosure" |
+"module-mount" | "owner"` (`owner` also needs `decision = "<id>"`). A fixed part with no pad on a signal or power net (hole,
+standoff, fiducial) is mechanical without a declaration. No class exempts a support part from its distance budget. Both lines
+are OPEN without a question behind them: their findings count as open items (exit 3) and are listed in full in `<board>.ready.json`
+(`fixed_reasons`, `pairs_unclassified`).
+
+| Finding | Level | Fix |
+|---|---|---|
+| `FIXED_OVER_BUDGET` | OPEN | a fixed support part over its max (the support table of the power plan): free it, or move it and its pin together |
+| `FIXED_REASON_MISMATCH` | OPEN | `mechanical` on a part with a support row: give the real reason or free the part |
+| `FIXED_OWNER_GUESSED` | OPEN | a fixed support part whose pin is a guess: `[power."NET"] support = {REF = "IC.PAD"}` |
+| `FIXED_OWNER_NO_DECISION` | OPEN | add `decision = "<id>"` |
+| `FIXED_UNDECLARED` | OPEN | a fixed list exists and this part is held by anchor detection only (relocate, closure, refiners hold it; the floorplan does not): add it to `[placement] fixed` with a reason, or to `[floorplan] movable` |
+| `FIXED_NO_REASON` | OPEN | add the `[placement.fixed_reason."REF"]` row, or remove the part from the fixed list / unlock it |
+| `PAIR_UNCLASSIFIED` | OPEN | a `_P/_N`-style name pair in no family: add `[pairs.PREFIX]` / `[channel.PREFIX]`, or list both nets in top-level `not_pairs` |
+
+A two-pad part in line with an RF net that reaches no IC (bias inductor, DC block at the antenna) is not a support part of the IC
+on its DC side; a series part on an RF net that reaches an IC is graded by the RF length budget.
+
+## The budgets line (budget.py, F2)
+
+The `budgets` line is the one budget table (`budget.table`) of the placement as it is, written to `<board>.budgets.json`.
+It is OPEN on a limit without a source, a hard keep-out against flight-line row, or an undecided swap proposal; everything
+else is information here (floorplan and PLACE_OK gate the rows).
+
+- `BUDGET_NO_SOURCE`: a limit has no `source`. Fix: set `source = "datasheet p.N"` on the row.
+- `KEEPOUT_FLIGHT`: a pair's flight line crosses an all-layer keep-out between two fixed parts. Fix: move a fixed part or change the keep-out.
+- `SWAP_PROPOSED`: a polarity swap would remove a crossing. Fix: `[[swap]] decided = "keep"` or `decided = "swapped <id>"`.
+
+The line also shows, without gating on them here: `N fail (H hard); M over target` over all rows, and every rail whose project class
+(`constraints.rail_width_mm`) is narrower than the width the power plan needs (`rail_classes` in `budgets.json`).
+A footprint's own rule area is named `REF rule-area N` and is never a flight-line hit for a pair of that part.
+A `[[separation]]` item `"keepout:NAME"` stands for the rect of that routing keep-out (an antenna cut-out against metal parts);
+such a row is graded by the budget row only, not by the intent gate.
+
+Constraint forms:
+
+```toml
+[placement.keepout.NAME]
+rect = [x0, y0, x1, y1]       # or under = "REF" + margin_mm = 0.0
+layers = "all"                # or ["F.Cu", "In1.Cu"]; absent = parts only
+source = "datasheet p.N"      # required with layers
+
+[[separation]]
+name = "gnss-rf"
+a = ["U3"]
+b = ["U30*", "ANT300"]
+min_mm = 5.0                  # hard floor, courtyard to courtyard; needs source
+target_mm = 20.0              # warning floor
+source = "datasheet p.N"
+why = "free text"
+
+[[swap]]
+name = "pcie-tx"
+kind = "polarity"             # polarity | pins | gates
+nets = ["PCIE_TX_P", "PCIE_TX_N"]
+source = "module datasheet 2.3 p.N"
+decided = "keep"
+```
+
+Per-pin demand (`clusters.pin_demand`, rows of kind `support` with metric `pin-bypass`): an IC that owns a bypass capacitor on a
+planned rail and has no capacitor within a decade of that value inside the 5 mm support limit of its pads. `fail` (hard) when
+nothing of at least a tenth of the value is there; `over-target-pass` when only a larger capacitor is. The part table and the
+`near` rule are unchanged; the rows are information at `ready`.
+
+## The `power plan` line (powerbudget.py, D71dc / D71dd)
+
+One row per `[power."NET"]` rail with a current, written to `<board>.power-plan.json`: allowed resistance, candidate copper per layer
+(IPC width, sheet resistance, vias per layer change, reach `L_max` at target / max), the chosen layer, and per source-to-load edge the
+Manhattan distance, the width it needs and the estimated drop. Copper is taken at `[env] temp_max_c` + the trace rise the IPC width was
+sized for (a `[[dcdrop]] temp_c` wins); the path is Manhattan x 1.15 (detour) x `[route] power_crowding` (default 1.25).
+
+| Finding | Level | Fix |
+|---|---|---|
+| `POWER_PLAN_NO_BUDGET` | FAIL | add a cited `[[dcdrop]]` row, or state why the rail has none: `[power."NET"] dcdrop_exempt = "reason"` |
+| `POWER_PLAN_EXEMPT` | INFO | a rail with `dcdrop_exempt` (series drop by design, return net): no budget, no reach, named in the line |
+| `POWER_SOURCE_UNKNOWN` | OPEN | `[[dcdrop]] from` / `to` or `[power."NET"] source` |
+| `POWER_COPPER_IMPOSSIBLE` | FAIL | the via barrels alone exceed the allowed resistance |
+| question `power-owner:REF` | OPEN | a rail support part whose pin is still a guess; the answer is written as `[power."NET"] support = {REF = "IC.PAD"}` |
+
+Support owner, in order: `[power] support` (explicit); the net (one IC on the net); the one source or load group of the rail in the part's
+functional block (`group`); the reference block (`block` / `refdes`); a spread guess (asked). Any pin of the rail within the limit takes
+a bypass part (`near`). A bulk part (> 4.7 uF to ground) of a planned rail with a decided owner is graded against that owner wherever it
+sits; identical bulk parts (same net, value, footprint) are interchangeable between their owners.

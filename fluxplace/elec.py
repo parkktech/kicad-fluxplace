@@ -10,6 +10,8 @@ Fact keys
   supply_pins        []  which pins the range / `i_max_ma` apply to
   i_max_ma           mA  maximum supply current (a number for the first supply pin, or {pin: mA})
   i_out_max_a        A   rated output current of a regulator / switch (the source limit)
+  decap_mm bulk_mm   mm  datasheet limit, pad of the bypass / bulk capacitor to the supply pin it serves (number, or {pin: mm} as i_max_ma;
+                         powerbudget.supports: a datasheet figure replaces the derived and default limits; REQ, never printed as a default)
   contact_a          A   per-contact current rating of a connector or socket
   v_rated            V   voltage rating of a capacitor / device where the value text has none
   pin_rules          []  [{"pin": "ILIM", "rule": "needs_resistor"|"must_float", "allow_net_of": "IN", "level": "WARN",
@@ -23,7 +25,8 @@ Constraint keys read (all optional; a check without its inputs reports "not eval
   [elec]         cap_margin = 1.25  source_warn_pct = 10
   [nets.NAME]    role = "signal"    declares a net a signal, not a power rail (power.unknown_rails skips it)
 
-Codes: SUPPLY_RANGE SOURCE_OVERLOAD CONTACT_CURRENT FUSE_SIZING PIN_STRAP CAP_VOLTAGE_MARGIN (FAIL/WARN), ELEC_NOT_EVALUATED (INFO).
+SUPPLY_RANGE_UNKNOWN (WARN): an IC (U*/Y*) with a pin on a declared [power] rail and no vin_min/vin_max fact; add one with parts-fact.
+Codes: SUPPLY_RANGE SUPPLY_RANGE_UNKNOWN SOURCE_OVERLOAD CONTACT_CURRENT FUSE_SIZING PIN_STRAP CAP_VOLTAGE_MARGIN (FAIL/WARN), ELEC_NOT_EVALUATED (INFO).
 Nothing here names a board, a reference or an MPN.
 """
 import json
@@ -31,8 +34,8 @@ import math
 import os
 import re
 
-CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "ELEC_NOT_EVALUATED")
-FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules")
+CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "SUPPLY_RANGE_UNKNOWN", "ELEC_NOT_EVALUATED")
+FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm", "layout")
 _GND = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
 _POWER = re.compile(r"^(\+?\d+V\d*\w*|V(CC|DD|BAT|BATT|IN|BUS)\w*)$", re.I)
 _VRATE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*V(?![\w])", re.I)
@@ -53,6 +56,7 @@ def load_facts(ds_dir):
             continue
         ok = {k: v["value"] for k, v in fx.items() if isinstance(v, dict) and v.get("source") and "value" in v}
         if ok:
+            ok["_src"] = {k: v["source"] for k, v in fx.items() if isinstance(v, dict) and v.get("source") and "value" in v}
             out[mpn] = ok
     return out
 
@@ -62,6 +66,27 @@ def _coerce(s):
         return json.loads(s)
     except ValueError:
         return s
+
+
+_NOT_DIGITS = ("page", "derived", "derivation")      # keys of a dict fact that are bookkeeping, not datasheet figures
+
+
+def _numbers(key, v):
+    """[(name, number)] a fact claims the cited page states: a scalar, or the numbers of a dict fact (nested too). A dict fact's
+    `derived` (list of its keys, or true for all) marks values the page does not state (D71do): they are not digit-checked."""
+    if isinstance(v, bool):
+        return []
+    if isinstance(v, (int, float)):
+        return [(key, v)]
+    if not isinstance(v, dict):
+        return []
+    d = v.get("derived")
+    skip = set(_NOT_DIGITS) | (set(v) if d is True else {str(x) for x in d} if isinstance(d, (list, tuple)) else set())
+    out = []
+    for k2, v2 in v.items():
+        if k2 not in skip:
+            out += _numbers(f"{key}.{k2}", v2)
+    return out
 
 
 def set_facts(ds_dir, mpn, kv, source, check_page=True, force=False):
@@ -82,13 +107,13 @@ def set_facts(ds_dir, mpn, kv, source, check_page=True, force=False):
     for k, v in kv.items():
         if k not in FACT_KEYS:
             raise ValueError(f"unknown fact '{k}' (known: {', '.join(FACT_KEYS)})")
-        if text is not None and isinstance(v, (int, float)) and not isinstance(v, bool):
-            pat = re.escape(f"{v:g}")
-            if not re.search(r"(?<![\d.])" + pat + r"(?![\d])", text):
-                msg = f"{mpn} {k}={v:g}: that number is not on {f} page(s) {pages}"
-                if not force:
-                    raise ValueError(msg + " (use --force if the page states it another way)")
-                warn.append(msg)
+        if text is not None:
+            for name, n in _numbers(k, v):
+                if not re.search(r"(?<![\d.])" + re.escape(f"{n:g}") + r"(?![\d])", text):
+                    msg = f"{mpn} {name}={n:g}: that number is not on {f} page(s) {pages}"
+                    if not force:
+                        raise ValueError(msg + " (use --force if the page states it another way; a value the page does not state is `derived`)")
+                    warn.append(msg)
         man[mpn].setdefault("facts", {})[k] = {"value": v, "source": source}
     tmp = PD.manifest_path(ds_dir) + ".tmp"
     with open(tmp, "w") as fh:
@@ -166,12 +191,17 @@ def _lim(v, pin):
 
 def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
     out = []
+    unknown = []
     for c in spec.get("components", []):
         mpn = _mpn(c, mpn_map)
         fx = facts.get(mpn) or {}
         if "vin_min" not in fx and "vin_max" not in fx:
-            if c["ref"][:1] == "U":
-                noeval.setdefault("SUPPLY_RANGE", {}).setdefault("no supply-range fact", []).append(f"{c['ref']} {mpn or c.get('value', '')}")
+            if c["ref"][:1] in ("U", "Y"):
+                on_rail = [n for n in by_ref.get(c["ref"], {}) if not _is_gnd(n) and any(v is not None for v in _vrange(_rail(cons, n)))]
+                if on_rail:
+                    unknown.append(f"{c['ref']} {mpn or c.get('value', '')} ({', '.join(sorted(on_rail)[:3])})")
+                else:
+                    noeval.setdefault("SUPPLY_RANGE", {}).setdefault("no supply-range fact", []).append(f"{c['ref']} {mpn or c.get('value', '')}")
             continue
         for sp in fx.get("supply_pins") or []:
             net = _pin_net(c, by_ref, sp)
@@ -189,8 +219,27 @@ def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
             if hi is not None and vmax is not None and hi > vmax + 1e-9:
                 bad.append(f"rail goes up to {hi:g} V, part allows <= {vmax:g} V")
             if bad:
-                out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net}: " + "; ".join(bad), refs=[c["ref"]]))
+                srcs = (facts.get(mpn) or {}).get("_src", {})
+                src = srcs.get("vin_min") or srcs.get("vin_max") or ""
+                out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net} (rail {_fmt(lo)}..{_fmt(hi)} V, part {_fmt(vmin)}..{_fmt(vmax)} V"
+                              + (f", {src}" if src else "") + "): " + "; ".join(bad), refs=[c["ref"]]))
+    if unknown:
+        out.append(_f("WARN", "SUPPLY_RANGE_UNKNOWN", f"{len(unknown)} IC(s) on a declared rail have no datasheet supply-range fact "
+                      f"(parts-fact MPN vin_min= vin_max= supply_pins=): {_short(unknown)}", refs=[u.split(" ")[0] for u in unknown]))
     return out
+
+
+def _fmt(v):
+    return "?" if v is None else f"{v:g}"
+
+
+def per_pin(fx, key):
+    """{pin: value} of a per-pin fact: a number applies to the first supply pin, a dict is already per pin ({} when absent)."""
+    v = fx.get(key)
+    if v is None:
+        return {}
+    sps = fx.get("supply_pins") or []
+    return dict(v) if isinstance(v, dict) else ({sps[0]: v} if sps else {})
 
 
 def _loads(spec, facts, mpn_map, by_ref):
@@ -198,12 +247,7 @@ def _loads(spec, facts, mpn_map, by_ref):
     out = {}
     for c in spec.get("components", []):
         fx = facts.get(_mpn(c, mpn_map)) or {}
-        im = fx.get("i_max_ma")
-        if im is None:
-            continue
-        sps = fx.get("supply_pins") or []
-        per = im if isinstance(im, dict) else ({sps[0]: im} if sps else {})
-        for pin, ma in per.items():
+        for pin, ma in per_pin(fx, "i_max_ma").items():
             net = _pin_net(c, by_ref, pin)
             if net:
                 out.setdefault(net, []).append((c["ref"], float(ma)))

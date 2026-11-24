@@ -242,13 +242,217 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                {"rails": f"every rail of >= {_minpads(cons)} pads has a plane/pour or an answer",
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
+        lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
+        lines.append(fixed_reason_line(spec, cons, B, detail))
+        lines.append(pair_class_line(cons, cls, detail))
+        lines.append(budget_line(spec, cons, B, rows, planes, detail))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
                            [] if has_outline else ["board has no outline"]))
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
+        lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
+    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED) for x in lines) else "refused",
+                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED), "value": x["status"],
+                           "limit": PASS, "text": x["detail"]} for x in lines])
     return lines, detail
+
+
+def _fixed_inputs(spec, cons, B):
+    """-> (fixed refs, support rows by ref, detected-only refs, bare refs): what fixed_line and the stage rows both judge."""
+    from . import preroute as PR, powerbudget as PB, modules as MD
+    rows = {}
+    for s in PB.supports(B, cons, spec):
+        rows.setdefault(s["ref"], []).append(s)
+    from . import netclass as NC
+    explicit = PR.explicit_fixed(B, cons)
+    fixed = {r for r in explicit | MD.fixed_set(B, cons) if r in B["parts"]}
+    # the owner listed the fixed parts: whatever else a stage holds by detection is a silent hold (with no list at all the
+    # "fixed parts" question above asks instead)
+    detected = PR.fixed_parts(B, cons) - fixed if explicit else set()
+    bare = {r for r in fixed if all(not q["net"] or NC.is_ground(q["net"]) for q in B["parts"][r]["pads"])}
+    return fixed, rows, detected, bare
+
+
+def fixed_reason_line(spec, cons, B, detail=None):
+    """[the "fixed reasons" line] (F1): every part a stage will not move (locked, [lock.at], [placement] fixed / anchors, mounting
+    hardware, group centres; and the detected anchors of preroute.fixed_parts) has a reason class, and a fixed support part over
+    its max distance (powerbudget.supports) is OPEN FIXED_OVER_BUDGET whatever its reason."""
+    fixed, rows, detected, bare = _fixed_inputs(spec, cons, B)
+    return fixed_line(fixed, cons, rows, detected, detail, bare)
+
+
+def fixed_line(fixed, cons, rows, detected=(), detail=None, unconnected=()):
+    """the "fixed reasons" line from the fixed refs and their support rows (fixedreason.findings). Every finding goes to
+    detail["fixed_reasons"] (ready.json); the line carries `open_items`, which the verdict counts like open questions."""
+    from . import fixedreason as FR
+    fs = FR.findings(fixed, cons, rows, detected, unconnected)
+    if detail is not None:
+        detail["fixed_reasons"] = fs
+    if not fs:
+        return _line("fixed reasons", PASS, f"{len(fixed)} fixed part(s), each with a reason class; none over its support max")
+    n = len({f["ref"] for f in fs})
+    return dict(_line("fixed reasons", OPEN, f"{len(fs)} finding(s) on {n} of {len(fixed)} fixed part(s)", FR.blockers(fs)),
+                open_items=len(fs))
+
+
+def pair_class_line(cons, cls, detail=None):
+    """[the "pair classes" line] (F1): a _P/_N-style name pair in no [pairs.*] / [channel.*] family is OPEN PAIR_UNCLASSIFIED."""
+    from . import fixedreason as FR
+    un = FR.unclassified_pairs(cls, cons)
+    if detail is not None:
+        detail["pairs_unclassified"] = un
+    npair = sum(1 for i in cls.values() if i["class"] == "pair") // 2
+    if not un:
+        return _line("pair classes", PASS, f"{npair} name pair(s), each in a [pairs] / [channel] family")
+    return dict(_line("pair classes", OPEN, f"{len(un)} of {npair} name pair(s) without a class",
+                      [f"PAIR_UNCLASSIFIED {len(un)} pair(s): {', '.join(un)}: add a [pairs.PREFIX] / [channel.PREFIX] family, "
+                       f"or list both nets in not_pairs (plain signals, go to the router)"]), open_items=len(un))
+
+
+def _budget_table(spec, cons, B, rows, planes, detail):
+    """the one budget table (budget.table) of the placement as it is; also detail["budgets"]. -> (table, rail classes)."""
+    from . import budget as BG, preroute as PR, modules as MD, pairs as PA
+    sig = [l for l in PA.pair_layers(B, cons)[0]] if rows else []
+    stack = (rows, list(planes or []), sig) if rows and sig else None
+    fixed = PR.explicit_fixed(B, cons) | MD.fixed_set(B, cons)
+    tab = BG.table(B, cons, spec, stack, detail.get("power_plan"), fixed)
+    rc = BG.rail_classes(cons, detail.get("power_plan"))
+    detail["budgets"] = {"rows": tab, "netclasses": BG.netclasses(cons, stack=stack), "rail_classes": rc}
+    return tab, rc
+
+
+def measure_rows(spec, cons, B, board_path, facts=None, ds_dir=None, sess=None):
+    """C7b: the budget rows and fixed-reason findings of a placement, computed as `ready` computes them and returned without
+    printing -> (rows, fixed findings). Stage-end use: nothing is asked, nothing is written. A stackup the constraints do not
+    declare is taken from the board file when it can be read."""
+    from . import questions as QS_, review as R, fixedreason as FR
+    if facts is None and board_path and os.path.exists(board_path):
+        try:
+            facts = R.facts_from_board(board_path, backend="file")
+        except Exception:                                   # noqa: BLE001 - a board facts cannot read still has rows
+            facts = None
+    sess = sess or QS_.Session(board_path or "rows.kicad_pcb", cons, {}, True, "rows")
+    rows, planes, _src = resolve_stackup(cons, facts, sess)
+    detail = {}
+    power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board_path, detail)
+    tab, _rc = _budget_table(spec, cons, B, rows, planes, detail)
+    fixed, frows, detected, bare = _fixed_inputs(spec, cons, B)
+    return tab, FR.findings(fixed, cons, frows, detected, bare)
+
+
+def stage_rows(spec, cons, B, board_path, ds_dir=None):
+    """C7b: the rows of a stage's input board, at stage start. A failed measure never fails the stage -> rows or None."""
+    try:
+        return measure_rows(spec, cons, B, board_path, ds_dir=ds_dir)[0]
+    except Exception as e:                                  # noqa: BLE001
+        print(f"  rows: input not measured ({type(e).__name__}: {e})")
+        return None
+
+
+def stage_honoured(stage, spec, cons, rows_in, out_path, B_out, failed=False, ds_dir=None, cand="result"):
+    """C7b: measure the board a stage wrote and set it against the rows of its input. Writes <out stem>.budgets.json (rows +
+    honoured), puts the summary and the rows (criteria with `hard`) on the event stream. No verdict changes (the gate is step 14).
+    -> {line, criteria, honoured, rows}; line is always a str (a failed measure says so in it)."""
+    from . import budget as BG, liveview as LV
+    try:
+        rows, _fx = measure_rows(spec, cons, B_out, out_path, ds_dir=ds_dir)
+        h = BG.honoured(rows_in or [], rows)
+        line = BG.honoured_summary(h) + (" (stage FAIL: rows not enforced)" if failed else "")
+        want = ((cons or {}).get("docs") or {}).get("datasheets")
+        if want and not os.path.isdir(ds_dir or ""):          # M5: blind limits, the hard count is not valid
+            line += f"; DATASHEETS NOT LOADED ('{want}' not found): hard limits fell to defaults, the hard count is not valid"
+        stem = os.path.splitext(out_path)[0]
+        if rows or rows_in:
+            with open(stem + ".budgets.json", "w") as fh:
+                json.dump({"rows": rows, "honoured": h, "summary": line}, fh, indent=1, default=list)
+        # the stream line stays under the events cut-off (60 kB drops every criterion): over 30 kB of criteria, only the rows
+        # not ok stay (they keep `hard`, in table order), plus one count per kind; the full table is <stem>.budgets.json
+        if len(json.dumps(LV.criteria(rows), separators=(",", ":"))) > 30000:
+            ok = [r for r, c in zip(rows, LV.criteria(rows)) if c["ok"] is True]
+            counts = {}
+            for r in ok:
+                counts[r.get("kind")] = counts.get(r.get("kind"), 0) + 1
+            rows = [r for r, c in zip(rows, LV.criteria(rows)) if c["ok"] is not True] + [
+                {"id": f"{k} honoured", "ok": True, "value": n, "limit": None,
+                 "text": f"{n} rows honoured, full table: {os.path.basename(stem)}.budgets.json"} for k, n in counts.items()]
+        LV.progress(stage, "honoured", always=True, cand=cand, criteria=rows, why=line, verdict="refused" if failed else "kept")
+        return {"line": line, "criteria": rows, "honoured": h, "rows": rows}
+    except Exception as e:                                  # noqa: BLE001 - the report never fails the stage
+        return {"line": f"rows on the output: not measured ({type(e).__name__}: {e})", "criteria": None, "honoured": [], "rows": []}
+
+
+def budget_line(spec, cons, B, rows, planes, detail):
+    """[the "budgets" line] (F2): the one budget table (budget.table) of the placement as it is, written to <board>.budgets.json.
+    OPEN on a limit without a source, a hard keep-out against flight-line row, an undecided swap proposal; everything else is
+    information here (floorplan and PLACE_OK gate the rows)."""
+    from . import budget as BG
+    tab, rc = _budget_table(spec, cons, B, rows, planes, detail)
+    under = [f"{n} {v['class_mm']:g} < {v['plan_mm']:g} mm" for n, v in rc.items() if v["under"]]
+    note = "".join("; " + t for t in (BG.summary(tab), f"{len(under)} rail class(es) narrower than the plan ({', '.join(under)})" if under else "") if t)
+    kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
+    items = BG.open_items(tab)
+    if not items:
+        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
+    by = {}
+    for code, text in items:
+        by.setdefault(code, []).append(text)
+    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}",
+                      [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]), open_items=len(items))
+
+
+def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
+    """[the "power plan" line]: powerbudget.build on the placement as it is (D71dc/D71dd). FAIL: a rail with a [power] current and no
+    [[dcdrop]] row, or copper that cannot carry the budget; OPEN: an unresolved source or a guessed support owner. The table goes to
+    detail["power_plan"] (written as power-plan.json). Reach and support limits are information here (floorplan / preroute gate them)."""
+    from . import powerbudget as PB, elec as EL, power as PW
+    if not any(isinstance(p, dict) and PW.current_a(p) for p in ((cons or {}).get("power") or {}).values()):
+        return []
+    if rows is None:
+        return [_line("power plan", UNCHECKED, "no stackup resolved: copper reach not planned")]
+    mm = (facts or {}).get("mpn_map") or {}
+    mm = {**{c["ref"]: c["mpn"] for c in (spec or {}).get("components", []) if isinstance(c, dict) and c.get("mpn")}, **mm}
+    df = EL.load_facts(ds_dir) if ds_dir and os.path.isdir(ds_dir) else {}
+    plan = PB.build(cons, B, spec, rows, df, mm, board_path=board, planes=planes)
+    n0 = len(sess.open)
+    QS.check_power_plan(sess, B, cons, plan=plan)
+    new = sess.open[n0:]
+    detail["power_plan"] = PB.plan_json(plan)
+    bad = [f for f in plan["findings"] if f["level"] == "FAIL"]
+    if bad:
+        names = ", ".join(sorted({f["net"] for f in bad}))
+        return [_line("power plan", FAIL, f"{len(bad)} rail(s) cannot be planned ({names}); {PB.summary(plan)}",
+                      [f"{f['code']} {f['msg']}" for f in bad][:6])]
+    ids = ", ".join(q["id"] for q in new[:4]) + (f" (+{len(new) - 4})" if len(new) > 4 else "")
+    return [_line("power plan", OPEN if new else PASS, (f"{len(new)} undecided: {ids}; " if new else "") + PB.summary(plan))]
+
+
+def sync_netclasses(board, cons, log=lambda *a, **k: None, write=False):
+    """A4 / review 4: do the project's netclasses carry the budgets?  REPORT-ONLY unless `write`: the project file beside the user's board may
+    be open in a GUI, so `ready` never writes it; a stage that owns a COPY of the project (the ready stage's board) calls this with
+    write=True.  The check compares the class that actually applies to each pair leg (a user class too), not only our own classes.
+    Written classes are fluxplace-managed (explicit marker) and set width / gap only: user classes are kept whole, clearance and via
+    sizes are never touched.  -> a checklist line (FAIL NETCLASS_MISMATCH lists what differs)."""
+    from . import constraints as C
+    pro = os.path.splitext(board)[0] + ".kicad_pro" if board else None
+    if not pro or not os.path.isfile(pro):
+        return _line("netclasses", UNCHECKED, "no project file beside the board: netclasses not checked")
+    if not ((cons or {}).get("pairs") or (cons or {}).get("power") or (cons or {}).get("rule")):
+        return _line("netclasses", PASS, "no pair, rail or rule class declared")
+    try:
+        before = C.netclass_mismatch(pro, cons, board)
+        managed = [x for x in before if x.startswith("managed")]
+        if write and managed:
+            C.inject_netclasses(pro, cons, log=log, board=board)
+        after = C.netclass_mismatch(pro, cons, board) if (write and managed) else before
+    except (OSError, ValueError) as e:
+        return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: project file not readable or writable ({e})", [f"NETCLASS_MISMATCH {e}"])
+    if after:
+        return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: {len(after)} differ: {'; '.join(after[:3])}",
+                     [f"NETCLASS_MISMATCH {x}" for x in after[:6]])
+    return _line("netclasses", PASS, "project netclasses match the constraints" + (f" ({len(managed)} written)" if write and managed else ""))
 
 
 def _minpads(cons):
@@ -281,9 +485,11 @@ def cmd_ready(a):
     cache = os.path.dirname(os.path.abspath(a.spec))
     pres = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess)
     lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres, allow_undocumented=getattr(a, "allow_undocumented", False))
+    if board and os.path.exists(board):
+        lines.append(sync_netclasses(board, cons))
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
-    nopen = len(sess.open)
+    nopen = len(sess.open) + sum(l.get("open_items", 0) for l in lines)      # OPEN lines with no question behind them count too
     rs = reasons(lines)
     waived = any(l["status"] == WAIVED for l in lines)
     verdict = ("ready: NOT READY (exit 1)" if nfail else "ready: OPEN QUESTIONS (exit 3)" if nopen else
@@ -297,7 +503,14 @@ def cmd_ready(a):
             fh.write(format_text(lines, full=True, verdict=verdict) + "\n")
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
-                       "questions": sess.open}, fh, indent=1)
+                       "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
+                       "pairs_unclassified": detail.get("pairs_unclassified", [])}, fh, indent=1)
+        if detail.get("power_plan"):
+            with open(stem + ".power-plan.json", "w") as fh:
+                json.dump(detail["power_plan"], fh, indent=1)
+        if detail.get("budgets"):
+            with open(stem + ".budgets.json", "w") as fh:
+                json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
     if getattr(a, "json", False):
@@ -331,8 +544,8 @@ def cmd_ready(a):
             pass
     if nfail:
         raise SystemExit(1)
-    if q:
-        raise SystemExit(q)
+    if q or nopen:
+        raise SystemExit(q or QS.EXIT)
 
 
 def add_parser(sub):

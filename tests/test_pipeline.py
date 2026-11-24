@@ -169,14 +169,62 @@ def test_fanout_and_plan_route_stages_do_not_say_pass_on_their_own_fail(tmp_path
     assert r["verdict"] == "warn" and r["line"].startswith("WARN")
 
 
+def test_silk_fail_findings_do_not_stop_the_flow_before_review(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    out = os.path.join(c.dir(9, "silk"), "board.kicad_pcb")
+
+    def fake(argv, log):
+        shutil.copy(b, out)
+        return 1, "silk: 8 FAIL, 7 WARN, 23 INFO (after fix)\n"
+    monkeypatch.setattr(PL, "_run_cli", fake)
+    r = PL.st_silk(c, 9, b)
+    assert r["verdict"] == "warn" and r["board"] == out and "review" in r["next"][0]
+
+
+def test_in_fresh_process_runs_elsewhere_and_keeps_the_traceback():
+    assert PL.in_fresh_process("os", "getpid") != os.getpid()
+    assert PL.in_fresh_process("os.path", "join", "a", "b") == os.path.join("a", "b")
+    with pytest.raises(RuntimeError) as e:
+        PL.in_fresh_process("os", "listdir", "/nonexistent-dir-xyz")
+    assert "FileNotFoundError" in str(e.value) and "Traceback" in str(e.value)
+
+
+def test_close_stage_runs_in_a_fresh_process_and_a_crash_leaves_its_traceback(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    seen = {}
+
+    def fake(module, func, *args, **kw):
+        seen["call"] = (module, func)
+        raise RuntimeError("Traceback (most recent call last):\n  ...\nAttributeError: 'SwigPyObject' object has no attribute 'GetTracks'")
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    r = PL.st_close(c, 8, b)
+    assert seen["call"] == ("fluxplace.gaps", "close") and r["verdict"] == "warn" and "GetTracks" in r["line"]
+    assert "Traceback" in open(os.path.join(c.dir(8, "close"), "crash.log")).read()
+
+
 def test_close_follows_route_in_both_flows():
     for flow in (PL.STAGES, PL.CONSTRUCTIVE):
         assert flow[flow.index("route") + 1] == "close"
     assert PL.FUNCS["close"] is PL.st_close
 
 
+def test_tune_locks_pair_copper_only(monkeypatch):
+    from fluxplace import boardtext as BT
+    seg = lambda net, y: f'\t(segment\n\t\t(start 1 {y})\n\t\t(end 2 {y})\n\t\t(width 0.2)\n\t\t(layer "F.Cu")\n\t\t(net "{net}")\n\t\t(uuid "u{y}")\n\t)\n'
+    text = "(kicad_pcb\n" + seg("D_P", 1) + seg("SIG", 2) + '\t(via\n\t\t(at 3 3)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n\t\t(net "D_N")\n\t)\n)\n'
+    out, n = BT.lock_nets(text, {"D_P", "D_N"})
+    assert n == 2 and out.count("(locked yes)") == 2
+    assert [BT.is_locked(b) for _i, _j, _k, b in BT.scan(out)] == [True, False, True]
+    assert BT.lock_nets(out, {"D_P", "D_N"})[1] == 0           # idempotent
+
 def test_critroute_order_and_packets_exit_5(tmp_path, monkeypatch):
-    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("pairs") + 1] == "critroute"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("pairs") + 1] == "tune"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("tune") + 1] == "critroute"
+    assert PL.CONSTRUCTIVE.count("tune") == 1 and "tune" not in PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("route"):]
     assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("critroute") + 1] == "plan-route"
     assert PL.STAGES[PL.STAGES.index("critroute") + 1] == "route"
     assert "packets" in PL.VERDICTS
@@ -228,3 +276,110 @@ def test_mask_warning_line_and_helper(tmp_path, monkeypatch):
     assert res["next"] == ["kept", PL.MASK_WARN] and res["verdict"] == "pass"
     monkeypatch.setattr(PL, "mask_openings", lambda b: 0)
     assert PL.st_route(None, 7, "board.kicad_pcb")["next"] == ["kept"]
+
+
+# ---- PHASE3M review fixes: gate verdicts tied to their input (H1), crashed gate record (M2), --from without state (M3) ----
+def _fake_gate(monkeypatch, stop, gd, best):
+    from fluxplace import gaps as GP
+    def fake_close(board, d, *a, **k):
+        (gd / "stop.json").write_text(json.dumps({"stop": stop}))
+        return {"stop": stop, "best": str(best), "start": {"opens": 1}, "end": {"opens": 1}, "packets": []}
+    monkeypatch.setattr(GP, "close", fake_close)
+
+
+def test_h1_packets_gate_is_reused_only_for_the_input_it_was_written_for(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    a, b = tmp_path / "a.kicad_pcb", tmp_path / "b.kicad_pcb"
+    a.write_text("A"); b.write_text("B")
+    gd = tmp_path / "gate"; gd.mkdir()
+    best = gd / "best.kicad_pcb"; best.write_text("best")
+    _fake_gate(monkeypatch, "packets", gd, best)
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    g = PL._gate_check(c, 1, "pairs", str(best), ["pair-open"], src=str(a))
+    assert g["verdict"] == "packets"
+    assert PL._gate_reusable(str(gd), str(a))                 # the stop.json carries the input's fingerprint
+    assert not PL._gate_reusable(str(gd), str(b))             # another input: not reused
+
+
+def test_m2_crashed_gate_still_returns_a_gate_record(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fluxplace import gaps as GP
+    a = tmp_path / "a.kicad_pcb"; a.write_text("A")
+    gd = tmp_path / "gate"; gd.mkdir()
+    def boom(*a_, **k):
+        raise RuntimeError("probe died")
+    monkeypatch.setattr(GP, "close", boom)
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    g = PL._gate_check(c, 1, "pairs", str(a), ["pair-open"])
+    assert g["verdict"] == "fail" and g["gate"]["stop"] == "crashed" and g["gate"]["kinds"] == ["pair-open"]
+
+
+def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_path, monkeypatch):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    _fake_gate(monkeypatch, "clean", tmp_path, tmp_path / "x.kicad_pcb")
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "clean", "left": [], "start": {"opens": 0}, "best": str(board)})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran on --from")))
+    seen = []
+    def stage(c, n, b):
+        seen.append(n)
+        return {"verdict": "pass", "board": b, "line": "stub"}
+    monkeypatch.setattr(PL, "FUNCS", {name: stage for name in PL.STAGES})
+    a = _args(tmp_path, board, from_stage="route-ready", to_stage="route-ready")
+    rc = PL.run(a)
+    assert rc == 0 and seen                                   # ran the stage instead of exiting 5 for the missing gate
+
+
+def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_path, monkeypatch, capsys):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran")))
+    left = [{"id": "g1", "kind": "pair-open", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 1}, "best": str(board)})
+    seen = []
+    monkeypatch.setattr(PL, "FUNCS", {name: (lambda c, n, b: seen.append(n) or {"verdict": "pass", "board": b}) for name in PL.STAGES})
+    rc = PL.run(_args(tmp_path, board, from_stage="route-ready", to_stage="route-ready"))
+    out = capsys.readouterr().out
+    assert rc == 5 and not seen and "gap g1 pair-open" in out
+
+
+def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fluxplace import tune as TU
+    b = tmp_path / "in.kicad_pcb"; b.write_text("(kicad_pcb)\n")
+    c = SimpleNamespace(dir=lambda n, name: str(tmp_path), cons_path=None)
+    monkeypatch.setattr(PL, "_run_cli", lambda argv, log: (0, "  MIC_P/MIC_N: P 5 / N 6 mm, skew +1.0   <-- still over\ntune: 0 pair(s) got worse"))
+    monkeypatch.setattr(TU, "lock_tuned", lambda *a, **k: None)
+    r = PL.st_tune(c, 1, str(b))
+    assert r["verdict"] == "pass" and "still over" in r["line"]
+    monkeypatch.setattr(PL, "_run_cli", lambda argv, log: (1, "tune: 1 pair(s) got worse"))
+    assert PL.st_tune(c, 1, str(b))["verdict"] == "fail"
+
+def test_close_stage_runs_the_post_route_snap_first_and_closes_the_cleaned_board(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    calls = []
+
+    def fake(module, func, *args, **kw):
+        calls.append((module, func, args[0]))
+        if func == "clean":
+            return {"snap": {"moved": 5}, "unconnected": [3, 3], "kept": True}
+        return {"start": {"opens": 3, "errors": 9}, "end": {"opens": 2, "errors": 4}, "attempts": 1, "stop": "clean", "best": "BEST"}
+    monkeypatch.setattr(PL, "in_fresh_process", fake)
+    from fluxplace import boardwrite as BW
+    monkeypatch.setattr(BW, "commit", lambda *a, **k: {"written": True, "why": ""})     # the manifest carry is tested in test_commit_point_real
+    r = PL.st_close(c, 8, b)
+    assert [x[1] for x in calls] == ["clean", "close"] and calls[1][2].endswith("postroute.kicad_pcb")
+    assert r["verdict"] == "pass" and "snapped 5" in r["line"] and r["board"] == "BEST"
+
+def test_trace_finish_sits_directly_before_silk():
+    # TF T1a item 1: classic flow after tune, constructive flow after close; one flow, no flag.
+    assert PL.STAGES[PL.STAGES.index("silk") - 1] == "trace-finish"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("silk") - 1] == "trace-finish"
+    assert PL.STAGES[PL.STAGES.index("trace-finish") - 1] == "tune"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("trace-finish") - 1] == "close"
+    assert PL.ALL_STAGES.count("trace-finish") == 1
+    assert "trace-finish" in PL.FUNCS
