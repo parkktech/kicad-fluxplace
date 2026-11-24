@@ -301,3 +301,32 @@ def escape_rows(B, cons):
                        rows_surface=surface, tracks_between_vias=nv, layers_needed=need,
                        corridor_mm=round(min(deep, surface) * 2 * floor, 3)))
     return out
+
+
+def swap_rows(B, cons):
+    """Declared swap groups. polarity with both legs on the same two parts: value 1 when the two flight lines cross (a swap at
+    one end removes the crossing; proposal only, the schematic owns the change). Other kinds are listed with no value."""
+    from . import geom as GM
+    out = []
+    for i, e in enumerate((cons or {}).get("swap") or []):
+        name, nets = str(e.get("name") or f"swap{i + 1}"), list(e.get("nets") or [])
+        val, refs, det = None, [], "listed; evaluated with the crossings term (step 6)"
+        if e.get("kind") == "polarity" and len(nets) == 2:
+            p, n = _pads_by_ref(B, nets[0]), _pads_by_ref(B, nets[1])
+            refs = sorted(set(p) & set(n))
+            if len(refs) == 2 and len(p) == 2 and len(n) == 2:
+                a, b = refs
+                val = 1 if GM._segs_cross(p[a], p[b], n[a], n[b]) else 0
+                det = "proposal: swap P/N at one end (schematic change, DECISIONS row)" if val else "no crossing"
+        out.append(row("swap", name, "crossing", "count", val, None, 0 if val is not None else None, str(e.get("source", "")), "REQ",
+                       False, refs=refs, nets=nets, detail=det, decided=str(e.get("decided", ""))))
+    return out
+
+
+def _pads_by_ref(B, net):
+    """{ref: (x, y)} of the first pad of `net` on each part."""
+    out = {}
+    for q in B["pads"]:
+        if q["net"] == net and q["ref"] not in out:
+            out[q["ref"]] = (q["x"], q["y"])
+    return out

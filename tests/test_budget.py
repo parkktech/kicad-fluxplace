@@ -204,3 +204,15 @@ def test_escape_rows_dual_row_connector_and_grids(tmp_path):
     qfn = [PG.pad(str(i + 1), x, y, f"q{i}", 0.25, 0.25) for i, (x, y) in enumerate(side)] + [PG.pad("21", 0, 0, "GND", 2.5, 2.5)]
     q = BG.escape_rows(RD.load(PG.board(tmp_path, PG.fp("U7", 30, 30, qfn), name="q.kicad_pcb")), cons)[0]
     assert (q["pins"], q["rows_deep"], q["layers_needed"], q["pitch_mm"], q["value"]) == (21, 1, 1, 0.5, 0)
+
+
+def test_polarity_swap_is_proposed_only_when_the_legs_cross(tmp_path):
+    cons = {"swap": [{"name": "d", "kind": "polarity", "nets": ["D_P", "D_N"], "source": "ds 2.3 p.12"}]}
+    crossed = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 20, 40, "D_N", "D_P")))
+    r = BG.swap_rows(crossed, cons)[0]
+    assert (r["kind"], r["value"], r["max"], r["verdict"], r["hard"], r["refs"]) == ("swap", 1, 0, "fail", False, ["J1", "U1"])
+    assert r["detail"].startswith("proposal: swap P/N")
+    straight = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "D_P", "D_N") + gduo("J1", 20, 40, "D_P", "D_N"), name="s.kicad_pcb"))
+    assert (BG.swap_rows(straight, cons)[0]["value"], BG.swap_rows(straight, cons)[0]["verdict"]) == (0, "ok")
+    listed = BG.swap_rows(straight, {"swap": [{"name": "g", "kind": "gates", "source": "ds p.3"}]})[0]
+    assert (listed["value"], listed["verdict"]) == (None, "n/a")
