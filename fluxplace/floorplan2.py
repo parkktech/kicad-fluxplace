@@ -1148,7 +1148,9 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         _pro(board, out_path)
         rep_ = LG.repair_file(out_path, path_g, cons, base_in, log=lambda t: print(f"  [{tag}] {t}", flush=True))     # nothing illegal is written: a part that adds an issue goes back
         reverted.update(rep_["reverted"])
-        for r in rep_["reverted"]:                # the model learns it: the module of a reverted part stands at the input poses from here on
+        for r, why in rep_["reverted"].items():   # the model learns it: the module of a part that went back to its input pose stands at the input poses from here on
+            if not any(w.startswith("input") for w in why):
+                continue
             i = P.idx[P.of[r]]
             if not P.fixed[i] and i not in P.parked:
                 P.park(i, orig)

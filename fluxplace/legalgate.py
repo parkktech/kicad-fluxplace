@@ -94,59 +94,98 @@ def revert_part(B, L, ref, o):
     L.refresh(ref)
 
 
+NUDGE_MM, NUDGE_STEP = 4.0, 0.25
+
+
+def nudge(B, L, ref, is_known):
+    """the nearest pose of `ref` within NUDGE_MM of where it stands (its angle first, then turned) that adds no issue the input lacked."""
+    part = B["parts"][ref]
+    x0, y0 = part["pos"]
+    a0 = part["angle"]
+    n = int(NUDGE_MM / NUDGE_STEP)
+    cands = sorted((math.hypot(i, j) * NUDGE_STEP + (0 if k == 0 else 0.5 * k), i, j, da)
+                   for i in range(-n, n + 1) for j in range(-n, n + 1) for k, da in enumerate((0, 90, 180, 270)) if math.hypot(i, j) * NUDGE_STEP <= NUDGE_MM)
+    for _d, i, j, da in cands:
+        x, y, a = x0 + i * NUDGE_STEP, y0 + j * NUDGE_STEP, (a0 + da) % 360
+        pads, court = GM.moved(part, x, y, a)
+        if not part_new(L, ref, is_known, court=court, pads=pads):
+            return x, y, a
+    return None
+
+
+def fix_part(B, L, ref, orig, is_known):
+    """put `ref` right: the nearest legal pose near where it stands, else its input pose when that is free where the others stand now.
+    -> "moved" | "input" | None (nothing legal: the part is left as it was)."""
+    part = B["parts"][ref]
+    here = (part["pos"][0], part["pos"][1], part["angle"], part["side"])
+    hit = nudge(B, L, ref, is_known)
+    if hit:
+        GM.place(part, *hit)
+        L.refresh(ref)
+        return "moved"
+    revert_part(B, L, ref, orig[ref])
+    if not part_new(L, ref, is_known):
+        return "input"
+    revert_part(B, L, ref, here)
+    return None
+
+
 def revert_illegal(B, L, is_known, orig, fixed=(), refs=None, limit=None):
-    """Every part with an issue the input does not have, and that moved, goes back to its input pose, the one that moved farther
-    first, until no new issue is left. -> ({ref: [why]} reverted, [(ref, kind, detail)] left: nothing movable explains them)."""
-    reverted = {}
-    movable = lambda r: r in B["parts"] and r in orig and r not in fixed and not B["parts"][r].get("locked")
+    """Every part with an issue the input does not have, and that moved, is put right (`fix_part`: the nearest legal pose, else its input
+    pose when that is free), the one that moved farther first, until no new issue is left. A part with no legal pose is left and reported.
+    -> ({ref: [why]} changed, [(ref, kind, detail)] left)."""
+    changed, stuck = {}, set()
+    movable = lambda r: r in B["parts"] and r in orig and r not in fixed and not B["parts"][r].get("locked") and r not in stuck
     for _ in range(limit or 4 * len(B["parts"]) + 8):
         bad = [(r, k, d) for r in sorted(refs or B["parts"]) for k, d in part_new(L, r, is_known)]
         if not bad:
-            return reverted, []
+            return changed, []
         progressed = False
         for r, k, d in bad:
-            cands = [x for x in (r, _other(r, k, d)) if x and movable(x) and displaced(B["parts"][x], orig[x]) > MOVE_EPS and x not in reverted]
+            cands = [x for x in (r, _other(r, k, d)) if x and movable(x) and displaced(B["parts"][x], orig[x]) > MOVE_EPS]
             if not cands:
                 continue
             v = max(cands, key=lambda x: (displaced(B["parts"][x], orig[x]), x))
-            revert_part(B, L, v, orig[v])
-            reverted.setdefault(v, []).append(f"{k} {r if _other(r, k, d) == v else d}".strip() if k in ("overlap", "hole") else f"{k} {d}".strip())
+            how = fix_part(B, L, v, orig, is_known)
+            if how is None:
+                stuck.add(v)
+            else:
+                changed.setdefault(v, []).append(f"{how}: {k} {r if _other(r, k, d) == v else d}".strip())
             progressed = True
             break
         if not progressed:
-            return reverted, bad
-    return reverted, [(r, k, d) for r in sorted(refs or B["parts"]) for k, d in part_new(L, r, is_known)]
+            return changed, bad
+    return changed, [(r, k, d) for r in sorted(refs or B["parts"]) for k, d in part_new(L, r, is_known)]
 
 
-def write_reverted(path, orig_path, reverted, orig):
-    """write the reverted parts back at their input pose in the board file `path` (in place)."""
-    from . import boardwrite as BW, flip as FL, routediag as RD
-    if not reverted:
+def write_poses(path, B, refs, was):
+    """write the poses the model B now has for `refs` into the board file `path` (in place); `was` = {ref: side} the file has."""
+    from . import boardwrite as BW, flip as FL
+    if not refs:
         return
-    B = RD.load(path)
-    side = [r for r in reverted if r in B["parts"] and B["parts"][r]["side"] != orig[r][3]]
+    side = [r for r in refs if B["parts"][r]["side"] != was[r]]
     if side:
         tmp = path + ".flip"
         FL.flip_file(path, tmp, side)
         os.replace(tmp, path)
     tmp = path + ".tmp"
-    BW.move_file(path, tmp, {r: (orig[r][0], orig[r][1], orig[r][2]) for r in reverted}, post=False)
+    BW.move_file(path, tmp, {r: (B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]) for r in refs}, post=False)
     os.replace(tmp, path)
 
 
-def repair_file(path, orig_path, cons, base, log=print):
-    """the written board `path`: every part that adds a legality issue (against `base`, the input's) goes back to its pose on
-    `orig_path`. -> {"reverted": {ref: [why]}, "left": [(ref, kind, detail)]}."""
+def repair_file(path, orig_path, cons, base, log=print, refs=None):
+    """the written board `path`: every part that adds a legality issue (against `base`, the input's) is put right (nearest legal pose, else
+    its pose on `orig_path` when free; `refs` limits the check). -> {"reverted": {ref: [why]}, "left": [(ref, kind, detail)]}."""
     from . import legality as LGL, modules as MD, routediag as RD
     B, Bo = RD.load(path), RD.load(orig_path)
     fixed = MD.fixed_set(B, cons)
     L = LGL.Legal(B, cons, fixed)
-    orig = poses(Bo)
-    rev, left = revert_illegal(B, L, known(base), orig, fixed)
-    write_reverted(path, orig_path, rev, orig)
+    orig, was = poses(Bo), {r: p["side"] for r, p in B["parts"].items()}
+    rev, left = revert_illegal(B, L, known(base), orig, fixed, refs=refs)
+    write_poses(path, B, sorted(rev), was)
     if rev:
-        log(f"floorplan: {len(rev)} part(s) back at their input pose (adding an issue the input lacked): "
-            + ", ".join(f"{r} ({rev[r][0]})" for r in sorted(rev)[:8]) + (" ..." if len(rev) > 8 else ""))
+        log(f"floorplan: {len(rev)} part(s) put right after the search (nearest legal pose, else the input pose): "
+            + ", ".join(f"{r} ({rev[r][0]})" for r in sorted(rev)[:6]) + (" ..." if len(rev) > 6 else ""))
     return {"reverted": rev, "left": left}
 
 
@@ -228,19 +267,13 @@ def gate(path, orig_path, cons, base, ref_path=None, log=print, rounds=3, cli="k
             return {"n": {}, "items": [], "pairs": [], "reverted": reverted}
         if _ == rounds:
             break
-        B, Bo = RD.load(path), RD.load(orig_path)
-        fixed = MD.fixed_set(B, cons)
-        orig = poses(Bo)
-        victims = set()
-        for pair in d["pairs"]:
-            c = [x for x in pair if x in orig and x in B["parts"] and x not in fixed and displaced(B["parts"][x], orig[x]) > MOVE_EPS]
-            if c:
-                victims.add(max(c, key=lambda x: (displaced(B["parts"][x], orig[x]), x)))
+        victims = {x for pair in d["pairs"] for x in pair}
         if not victims:
             break
-        write_reverted(path, orig_path, sorted(victims), orig)
-        for v in sorted(victims):
-            reverted.setdefault(v, []).append("kicad drc")
-            log(f"floorplan: {v} back at its input pose (KiCad DRC)")
+        rp = repair_file(path, orig_path, cons, base, log=log, refs=sorted(victims))
+        for v, w in rp["reverted"].items():
+            reverted.setdefault(v, []).extend(w)
+        if not rp["reverted"]:
+            break
     d["reverted"] = reverted
     return d
