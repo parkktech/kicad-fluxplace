@@ -327,3 +327,91 @@ def test_stage_writes_class_score_and_board_line(tmp_path, monkeypatch):
     fj = json.load(open(os.path.join(c.dir(8, "trace-finish"), "finish.json")))
     assert set(fj["class_score"]) == {"F0", "F8"} and "board" in fj["class_score"]["F0"]
     assert res["line"].endswith(f"score board {fj['class_score']['F0']['board']} -> {fj['class_score']['F8']['board']}")
+
+
+# ---- M5: tests that bite (each kills one survivor) ------------------------------------------------------------------
+
+def _rec(**k):
+    hard = [{"id": "H1", "base": 2}, {"id": "H2", "base": {"GEN": 0.2}}, {"id": "H3", "base": 1}, {"id": "H4", "base": 0},
+            {"id": "H5", "base": 0}, {"id": "H6", "base": 0}, {"id": "H7", "base": 0}, {"id": "H8", "base": 0},
+            {"id": "H9", "base": 0}, {"id": "H10", "base": {"opens": 5, "drc_keys": 2}}]
+    rec = {"hard": hard, "drc": {"clearance": 2}}
+    rec.update(k)
+    return rec
+
+
+def _bump(rec, hid, fn):
+    out = json.loads(json.dumps(rec))
+    for h in out["hard"]:
+        if h["id"] == hid:
+            h["base"] = fn(h["base"])
+    return out
+
+
+@pytest.mark.parametrize("hid", ["H1", "H3", "H4", "H5", "H7", "H8", "H9"])
+def test_worse_plus_one_on_each_count_row(hid):
+    assert TF._worse(_rec(), _bump(_rec(), hid, lambda b: b + 1)) == [hid]
+
+
+def test_worse_opens_plus_one_is_h10_and_equal_is_empty():
+    assert TF._worse(_rec(), _bump(_rec(), "H10", lambda b: {"opens": 6, "drc_keys": 2})) == ["H10"]
+    assert TF._worse(_rec(), _rec()) == []
+
+
+def test_worse_class_min_width_h2_h6_and_drc_key_h10():
+    assert TF._worse(_rec(), _bump(_rec(), "H2", lambda b: {"GEN": 0.19})) == ["H2"]
+    assert TF._worse(_rec(), _bump(_rec(), "H6", lambda b: 1)) == ["H6"]
+    more = _rec(drc={"clearance": 2, "hole_to_hole": 1})
+    assert TF._worse(_rec(), more) == ["H10"]
+
+
+def test_stage_second_f0_worse_on_h1_fails(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    real, calls = TF.f0, []
+
+    def fake(*a, **k):
+        r = real(*a, **k)
+        calls.append(1)
+        if len(calls) == 2:
+            for h in r["hard"]:
+                if h["id"] == "H1":
+                    h["base"] += 1
+        return r
+    monkeypatch.setattr(TF, "f0", fake)
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    res = TF.stage(c, 9, board)
+    fj = json.load(open(os.path.join(c.dir(9, "trace-finish"), "finish.json")))
+    assert res["verdict"] == "fail" and "ILLEGAL: H1" in res["line"] and fj["worse_hard"] == ["H1"]
+
+
+def test_drc_fake_report_counts_h1_h4_h5(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    vio = [{"type": "clearance", "items": []}, {"type": "clearance", "items": []}, {"type": "hole_to_hole", "items": []}] + \
+          [{"type": "copper_edge_clearance", "items": []} for _ in range(3)]
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": vio, "unconnected_items": []})
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    TF.stage(c, 10, board)
+    fj = json.load(open(os.path.join(c.dir(10, "trace-finish"), "finish.json")))
+    h = {r["id"]: r["base"] for r in fj["legality"]}
+    assert (h["H1"], h["H4"], h["H5"]) == (2, 1, 3)
+
+
+def test_h2_narrow_track_not_ok(tmp_path, monkeypatch):
+    seg = '(segment (start 20 20) (end 30 20) (width 0.09) (layer "F.Cu") (net "A"))\n'
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B") + seg)
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    TF.stage(c, 11, board)
+    fj = json.load(open(os.path.join(c.dir(11, "trace-finish"), "finish.json")))
+    assert next(r for r in fj["legality"] if r["id"] == "H2")["ok"] is False
+
+
+
+
+def test_c14_branch_75_open_90_already():
+    def segs(deg):
+        t = math.radians(deg)
+        return [seg((0, 0), (5, 0)), seg((5, 0), (10, 0)), seg((5, 0), (5 + 3 * math.cos(t), 3 * math.sin(t)))]
+    assert _states(TM.c14_sites(model(segs(75)))) == ["open"]
+    assert _states(TM.c14_sites(model(segs(90)))) == ["already"]

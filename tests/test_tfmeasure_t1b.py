@@ -515,3 +515,31 @@ def test_pad_exit_vs_buried_segment(k, mirror):
     assert len(TM.p1_sites(m, XC(cls={"N": "GEN"}))) == 1
     buried = [s for s in TM.m9_sites(m) if s.get("kind") == "buried"]
     assert len(buried) == 1 and buried[0]["state"] == "open"
+
+
+def test_h3_ring_boundary():
+    X = XC(fab={"min_annular_mm": 0.13, "hard": {"pth_annular_min": 0.15}})
+    assert TM.h3(mdl(vias=[via("N", 0, 0, d=0.45, drill=0.2)]), X)["base"] == 1     # ring 0.125
+    assert TM.h3(mdl(vias=[via("N", 0, 0, d=0.46, drill=0.2)]), X)["base"] == 0     # ring 0.13
+
+def test_h7_half_ohm_inside_and_outside_window():
+    from fluxplace import impedance as IM
+    g = {"hu": None, "eu": None, "hd": 0.1195, "ed": 4.45, "t": 0.035, "model": "microstrip", "layer": "F.Cu"}
+    z = IM.z_diff(0.15, 0.25, g)
+    B = mdl(poly([(0, 0), (5, 0)], net="A", w=0.15) + poly([(0, 0.4), (5, 0.4)], net="B", w=0.15))
+    assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=z), geom={"F.Cu": g}))["base"] == 0
+    assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=(z - 0.5) / 1.1), geom={"F.Cu": g}))["base"] == 1   # measured 0.5 ohm above hi
+    assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=(z + 0.5) / 0.9), geom={"F.Cu": g}))["base"] == 1   # measured 0.5 ohm below lo
+
+def test_s4_pair_ground_via_limit_and_rf_two_within_1mm():
+    X = XC(**pairx())
+    ends = [seg((-3, 0), (0, 0), net="A", layer="F.Cu"), seg((0, 0), (3, 0), net="A", layer="B.Cu")]
+    assert st(TM.s4_sites(mdl(ends, vias=[via("A", 0, 0), via("GND", 1.2, 0)], zones=[_gnd_zone()]), X)) == ["already"]
+    assert st(TM.s4_sites(mdl(ends, vias=[via("A", 0, 0), via("GND", 1.4, 0)], zones=[_gnd_zone()]), X)) == ["not_possible"]
+    XR = XC(**pairx())
+    XR["cls"] = {"A": "RF"}
+    rf_one = mdl(ends, vias=[via("A", 0, 0), via("GND", 0.9, 0)], zones=[_gnd_zone()])
+    assert st(TM.s4_sites(rf_one, XR)) == ["not_possible"]
+    rf_two = mdl(ends, vias=[via("A", 0, 0), via("GND", 0.9, 0), via("GND", 0.0, 0.9)], zones=[_gnd_zone()])
+    assert st(TM.s4_sites(rf_two, XR)) == ["already"]
+

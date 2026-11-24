@@ -161,10 +161,15 @@ def _worse(f0_rec, f8_rec):
     worse = []
     a = {h["id"]: h.get("base") for h in f0_rec["hard"]}
     b = {h["id"]: h.get("base") for h in f8_rec["hard"]}
-    for k in ("H1", "H3", "H4", "H5", "H7", "H8", "H9"):
+    for k in ("H1", "H3", "H4", "H5", "H6", "H7", "H8", "H9"):
         if isinstance(a.get(k), int) and isinstance(b.get(k), int) and b[k] > a[k]:
             worse.append(k)
-    if isinstance(a.get("H10"), dict) and isinstance(b.get("H10"), dict) and b["H10"]["opens"] > a["H10"]["opens"]:
+    if isinstance(a.get("H2"), dict) and isinstance(b.get("H2"), dict) and \
+            any(v is not None and b["H2"].get(c) is not None and b["H2"][c] < v for c, v in a["H2"].items()):
+        worse.append("H2")
+    if isinstance(a.get("H10"), dict) and isinstance(b.get("H10"), dict) and (
+            b["H10"]["opens"] > a["H10"]["opens"] or
+            any(n > f0_rec["drc"].get(k, 0) for k, n in f8_rec["drc"].items())):
         worse.append("H10")
     return worse
 
