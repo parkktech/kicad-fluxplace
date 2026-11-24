@@ -167,7 +167,17 @@ def _interchange(B, cons, own):
 COVER_DECADE = 10.0         # a pin's bypass is replaced only by a capacitor within this factor of its value (INF, first guess)
 
 
-def pin_demand(B, cons=None, spec=None, own=None):
+def _supply_pads(ic, pins, spec, facts, mpn_map):
+    """(pads, kind): the IC's pads on a rail that its `supply_pins` fact names -> kind "supply". No fact, or none of
+    these pads is named (an unlisted supply pin stays graded) -> every pad, kind "unlisted"."""
+    from . import elec as EL
+    comp = next((c for c in (spec or {}).get("components", []) or [] if isinstance(c, dict) and c.get("ref") == ic), None)
+    sp = set(((facts or {}).get(EL._mpn(comp, mpn_map)) or {}).get("supply_pins") or []) if comp else set()
+    keep = [q for q in pins if sp & set(EL._names(comp, q["num"]))] if sp else []
+    return (keep, "supply") if keep else (pins, "unlisted")
+
+
+def pin_demand(B, cons=None, spec=None, own=None, facts=None, mpn_map=None):
     """Per-pin demand (EVAL-PLACER-STEP1 D4): [{ic, pad, net, parts, uf, dist_mm, limit_mm, cover, verdict}], one row per IC and
     planned rail whose own bypass is missing at the pin. Demand: the netlist gives the IC a bypass capacitor on the rail
     (a capacitor to ground of at most powerbudget.BULK_UF whose owner is decided: block / refdes / group). Supply: every
@@ -180,6 +190,8 @@ def pin_demand(B, cons=None, spec=None, own=None):
     from . import powerbudget as PB
     if own is None:
         own, _links = ownership(B, None, cons, spec)
+    if facts is None:
+        facts, mpn_map = PB.facts_for(cons, spec)
     parts, pads = B["parts"], NC.net_pads(B)
 
     def cap_of(ref):
@@ -200,7 +212,7 @@ def pin_demand(B, cons=None, spec=None, own=None):
             want[(o["ic"], o["net"])].append(ref)
     out = []
     for (ic, net), refs in sorted(want.items()):
-        pins = [q for q in pads[net] if q["ref"] == ic]
+        pins, kind = _supply_pads(ic, [q for q in pads[net] if q["ref"] == ic], spec, facts, mpn_map)
         d = lambda c: min(math.hypot(c["x"] - q["x"], c["y"] - q["y"]) for q in pins)      # noqa: E731
         uf = min(cap_of(r) for r in refs)
         near = sorted((round(d(c), 2), r, u) for r, u, c in caps[net] if d(c) <= PB.BYPASS_MAX_MM and u >= uf / COVER_DECADE)
@@ -209,7 +221,7 @@ def pin_demand(B, cons=None, spec=None, own=None):
         dist, ref = min((d(next(q for q in parts[r]["pads"] if q["net"] == net)), r) for r in refs)
         pad = min(pins, key=lambda q: math.hypot(q["x"] - parts[ref]["pos"][0], q["y"] - parts[ref]["pos"][1]))["num"]
         out.append({"ic": ic, "pad": pad, "net": net, "parts": refs, "uf": uf, "dist_mm": round(dist, 2), "limit_mm": PB.BYPASS_MAX_MM,
-                    "cover": {"ref": near[0][1], "uf": near[0][2], "dist_mm": near[0][0]} if near else None,
+                    "cover": {"ref": near[0][1], "uf": near[0][2], "dist_mm": near[0][0]} if near else None, "pin_kind": kind,
                     "verdict": "over-target-pass" if near else "fail"})
     return out
 

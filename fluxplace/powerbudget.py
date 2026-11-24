@@ -327,7 +327,7 @@ def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_pa
     if B is not None:
         out["supports"] = supports(B, cons, spec, facts, mpn_map)
         from . import clusters as CL
-        out["pin_demand"] = CL.pin_demand(B, cons, spec)
+        out["pin_demand"] = CL.pin_demand(B, cons, spec, facts=facts, mpn_map=mpn_map)
     return out
 
 

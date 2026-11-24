@@ -268,3 +268,44 @@ def test_pin_with_an_equal_part_nearby_is_served_and_a_bulk_part_only_names_it(t
     assert CL.pin_demand(B, _PLANNED)[0]["verdict"] == "fail"
     B, _ = _demand(tmp_path, park + [("C7", x4 - 7, y4, "100nF")], name="f.kicad_pcb")     # equal part, 7.5 mm away: bare
     assert CL.pin_demand(B, _PLANNED)[0]["verdict"] == "fail"
+
+
+
+# ---- placer step 3c C1: pin_demand grades supply pins, not every pad on the rail (D71dp)
+def _supply_board(tmp_path, caps, name="sp.kicad_pcb"):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    b = g.ic("U101", 10, 10, ["VOUT", "GND", "A1", "VOUT", "A2", "GND"], pitch=1.0)     # pad 1 = VCC, pad 4 = EN, both on VOUT
+    b += g.ic("U412", 60, 10, ["VOUT", "GND", "B1", "B2", "B3", "B4"], pitch=1.0)      # second IC on the rail: ownership is by reference
+    for ref, x, y, v in caps:
+        b += PB.cap(ref, x, y, "VOUT", "GND", v)
+    return RD.load(g.board(tmp_path, b, name=name, outline=(0, 0, 80, 60)))
+
+
+_SUP_SPEC = {"components": [{"ref": "U101", "mpn": "X1", "pinmap": {"VCC": "1", "EN": "4"}}]}
+
+
+def test_pin_demand_names_the_supply_pin_not_a_tied_input(tmp_path):
+    B = _supply_board(tmp_path, [("C101", 14, 11, "100nF")])                  # own bypass 2 mm from EN, 6.3 mm from VCC
+    rows = CL.pin_demand(B, _PLANNED, _SUP_SPEC, facts={"X1": {"supply_pins": ["VCC"]}})
+    assert len(rows) == 1
+    assert (rows[0]["pad"], rows[0]["pin_kind"], rows[0]["verdict"]) == ("1", "supply", "fail")
+
+
+def test_capacitor_at_a_tied_input_does_not_serve_the_supply_pin(tmp_path):
+    B = _supply_board(tmp_path, [("C101", 13.5, 11.5, "100nF")])              # own bypass 1.5 mm from EN, 6 mm from VCC
+    rows = CL.pin_demand(B, _PLANNED, _SUP_SPEC, facts={"X1": {"supply_pins": ["VCC"]}})
+    assert len(rows) == 1 and rows[0]["verdict"] == "fail"
+
+
+def test_no_supply_fact_keeps_every_pad(tmp_path):
+    B = _supply_board(tmp_path, [("C101", 30, 30, "100nF")])                  # own bypass far from both pads
+    rows = CL.pin_demand(B, _PLANNED, _SUP_SPEC, facts={})
+    assert len(rows) == 1 and (rows[0]["pad"], rows[0]["pin_kind"]) == ("4", "unlisted")
+
+
+def test_fact_that_names_no_pad_on_this_rail_keeps_every_pad(tmp_path):
+    B = _supply_board(tmp_path, [("C101", 30, 30, "100nF")])
+    rows = CL.pin_demand(B, _PLANNED, _SUP_SPEC, facts={"X1": {"supply_pins": ["VBAT"]}})
+    assert len(rows) == 1 and (rows[0]["pad"], rows[0]["pin_kind"]) == ("4", "unlisted")
