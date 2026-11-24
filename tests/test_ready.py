@@ -345,3 +345,21 @@ def test_stage_honoured_big_table_is_cut_to_failing_rows_and_counts_so_the_line_
     assert {x["id"] for x in line["criteria"] if x["id"].endswith("honoured")} == {"pair honoured"}
     from fluxplace import liveview as LV
     assert [c["id"] for c in LV.criteria(r["criteria"])].count("pair honoured") == 1 and len(r["criteria"]) == 6
+
+
+def test_stage_honoured_says_datasheets_not_loaded_when_the_folder_is_missing(monkeypatch, tmp_path):
+    from fluxplace import ready as RDY, budget as BG
+    rows = [BG.row("separation", "F0", "distance", "mm", value=3.0, mx=900.0, source="s", hard=True, minimum=True)]
+    monkeypatch.setattr(RDY, "measure_rows", lambda spec, cons, B, path, **k: (rows, []))
+    ev = tmp_path / "ev" / "events.jsonl"
+    ev.parent.mkdir()
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    out = str(tmp_path / "o.kicad_pcb")
+    cons = {"docs": {"datasheets": "nope"}}
+    r = RDY.stage_honoured("placetour", None, cons, rows, out, None, ds_dir="nope")
+    assert "DATASHEETS NOT LOADED" in r["line"] and "'nope' not found" in r["line"]
+    line = json.loads(open(ev).read().splitlines()[-1])
+    assert "DATASHEETS NOT LOADED" in line["why"]
+    assert "DATASHEETS NOT LOADED" in json.load(open(str(tmp_path / "o.budgets.json")))["summary"]
+    r2 = RDY.stage_honoured("placetour", None, cons, rows, out, None, ds_dir=str(tmp_path))
+    assert "DATASHEETS NOT LOADED" not in r2["line"]

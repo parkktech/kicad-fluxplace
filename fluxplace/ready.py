@@ -361,6 +361,9 @@ def stage_honoured(stage, spec, cons, rows_in, out_path, B_out, failed=False, ds
         rows, _fx = measure_rows(spec, cons, B_out, out_path, ds_dir=ds_dir)
         h = BG.honoured(rows_in or [], rows)
         line = BG.honoured_summary(h) + (" (stage FAIL: rows not enforced)" if failed else "")
+        want = ((cons or {}).get("docs") or {}).get("datasheets")
+        if want and not os.path.isdir(ds_dir or ""):          # M5: blind limits, the hard count is not valid
+            line += f"; DATASHEETS NOT LOADED ('{want}' not found): hard limits fell to defaults, the hard count is not valid"
         stem = os.path.splitext(out_path)[0]
         if rows or rows_in:
             with open(stem + ".budgets.json", "w") as fh:
