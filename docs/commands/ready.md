@@ -64,6 +64,41 @@ are OPEN without a question behind them: their findings count as open items (exi
 A two-pad part in line with an RF net that reaches no IC (bias inductor, DC block at the antenna) is not a support part of the IC
 on its DC side; a series part on an RF net that reaches an IC is graded by the RF length budget.
 
+## The budgets line (budget.py, F2)
+
+The `budgets` line is the one budget table (`budget.table`) of the placement as it is, written to `<board>.budgets.json`.
+It is OPEN on a limit without a source, a hard keep-out against flight-line row, or an undecided swap proposal; everything
+else is information here (floorplan and PLACE_OK gate the rows).
+
+- `BUDGET_NO_SOURCE`: a limit has no `source`. Fix: set `source = "datasheet p.N"` on the row.
+- `KEEPOUT_FLIGHT`: a pair's flight line crosses an all-layer keep-out between two fixed parts. Fix: move a fixed part or change the keep-out.
+- `SWAP_PROPOSED`: a polarity swap would remove a crossing. Fix: `[[swap]] decided = "keep"` or `decided = "swapped <id>"`.
+
+Constraint forms:
+
+```toml
+[placement.keepout.NAME]
+rect = [x0, y0, x1, y1]       # or under = "REF" + margin_mm = 0.0
+layers = "all"                # or ["F.Cu", "In1.Cu"]; absent = parts only
+source = "datasheet p.N"      # required with layers
+
+[[separation]]
+name = "gnss-rf"
+a = ["U3"]
+b = ["U30*", "ANT300"]
+min_mm = 5.0                  # hard floor, courtyard to courtyard; needs source
+target_mm = 20.0              # warning floor
+source = "datasheet p.N"
+why = "free text"
+
+[[swap]]
+name = "pcie-tx"
+kind = "polarity"             # polarity | pins | gates
+nets = ["PCIE_TX_P", "PCIE_TX_N"]
+source = "module datasheet 2.3 p.N"
+decided = "keep"
+```
+
 ## The `power plan` line (powerbudget.py, D71dc / D71dd)
 
 One row per `[power."NET"]` rail with a current, written to `<board>.power-plan.json`: allowed resistance, candidate copper per layer

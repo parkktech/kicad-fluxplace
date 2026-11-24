@@ -330,3 +330,32 @@ def _pads_by_ref(B, net):
         if q["net"] == net and q["ref"] not in out:
             out[q["ref"]] = (q["x"], q["y"])
     return out
+
+
+def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
+    """Every budget row of the board, one shape (row): rails and supports from the power plan (powerbudget.build output, or
+    None), pairs, keep-outs, keep-out against flight line, separation, escape, swap."""
+    out = []
+    for net, rail in sorted(((plan or {}).get("rails") or {}).items()):
+        src = (rail.get("source") or {}).get("spec") or "?"
+        for e in rail.get("edges") or []:
+            out.append(row("rail", f"{net} {src}->{e['load']}", "reach", "mm", e["dist_mm"], e["reach_mm"]["target"], e["reach_mm"]["max"],
+                           rail["drop"]["source"], rail["drop"].get("klass", "INF"), True, refs=[src, e["load"]], nets=[net],
+                           layers=rail["choice"]["layers"]))
+    for s in (plan or {}).get("supports") or []:
+        lim = s["limit"]
+        out.append(row("support", f"{s['ref']} -> {s['serves']}", "distance", "mm", s["dist_mm"] if s["sure"] else None, lim["target"],
+                       lim["max"], lim["source"], lim["klass"], bool(s["sure"]), refs=[s["ref"], s["serves"].split(".")[0]],
+                       nets=[s["net"]], detail=f"{s['role']}, owner by {s['how']}"))
+    return (out + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
+            + escape_rows(B, cons) + swap_rows(B, cons))
+
+
+def open_items(rows):
+    """What `ready` leaves OPEN: [(code, text)]. BUDGET_NO_SOURCE (a limit without a source), KEEPOUT_FLIGHT (a hard
+    keep-out against flight-line row), SWAP_PROPOSED (an undecided polarity swap that removes a crossing)."""
+    out = [("BUDGET_NO_SOURCE", f"{r['kind']} {r['name']} {r['metric']}") for r in no_source(rows)]
+    out += [("KEEPOUT_FLIGHT", f"{r['name']}: {r['detail']}") for r in rows if r["kind"] == "keepout-flight" and r["hard"]]
+    out += [("SWAP_PROPOSED", f"{r['name']} ({', '.join(r['nets'])}): {r['detail']}") for r in rows
+            if r["kind"] == "swap" and r["value"] == 1 and not r.get("decided")]
+    return out

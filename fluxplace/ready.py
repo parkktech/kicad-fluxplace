@@ -245,6 +245,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))
+        lines.append(budget_line(spec, cons, B, rows, planes, detail))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -299,6 +300,27 @@ def pair_class_line(cons, cls, detail=None):
     return dict(_line("pair classes", OPEN, f"{len(un)} of {npair} name pair(s) without a class",
                       [f"PAIR_UNCLASSIFIED {len(un)} pair(s): {', '.join(un)}: add a [pairs.PREFIX] / [channel.PREFIX] family, "
                        f"or list both nets in not_pairs (plain signals, go to the router)"]), open_items=len(un))
+
+
+def budget_line(spec, cons, B, rows, planes, detail):
+    """[the "budgets" line] (F2): the one budget table (budget.table) of the placement as it is, written to <board>.budgets.json.
+    OPEN on a limit without a source, a hard keep-out against flight-line row, an undecided swap proposal; everything else is
+    information here (floorplan and PLACE_OK gate the rows)."""
+    from . import budget as BG, preroute as PR, modules as MD, pairs as PA
+    sig = [l for l in PA.pair_layers(B, cons)[0]] if rows else []
+    stack = (rows, list(planes or []), sig) if rows and sig else None
+    fixed = PR.explicit_fixed(B, cons) | MD.fixed_set(B, cons)
+    tab = BG.table(B, cons, spec, stack, detail.get("power_plan"), fixed)
+    detail["budgets"] = {"rows": tab, "netclasses": BG.netclasses(cons, stack=stack)}
+    kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
+    items = BG.open_items(tab)
+    if not items:
+        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}")
+    by = {}
+    for code, text in items:
+        by.setdefault(code, []).append(text)
+    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}",
+                      [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]), open_items=len(items))
 
 
 def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
@@ -406,6 +428,9 @@ def cmd_ready(a):
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)
+        if detail.get("budgets"):
+            with open(stem + ".budgets.json", "w") as fh:
+                json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
     if getattr(a, "json", False):

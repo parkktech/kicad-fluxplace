@@ -216,3 +216,39 @@ def test_polarity_swap_is_proposed_only_when_the_legs_cross(tmp_path):
     assert (BG.swap_rows(straight, cons)[0]["value"], BG.swap_rows(straight, cons)[0]["verdict"]) == (0, "ok")
     listed = BG.swap_rows(straight, {"swap": [{"name": "g", "kind": "gates", "source": "ds p.3"}]})[0]
     assert (listed["value"], listed["verdict"]) == (None, "n/a")
+
+
+PLAN = {"rails": {"+5V": {"source": {"spec": "U100"}, "drop": {"source": "module datasheet 3.1 p.16", "klass": "INF"},
+                          "choice": {"layers": ["F.Cu"]},
+                          "edges": [{"load": "J10", "dist_mm": 61.45, "reach_mm": {"target": 42.44, "max": 84.89}}]}},
+        "supports": [{"ref": "C9", "role": "bypass", "serves": "U1.7", "net": "+5V", "dist_mm": 30.0, "sure": True, "how": "net",
+                      "limit": {"target": 3.0, "max": 5.0, "source": "default", "klass": "INF"}},
+                     {"ref": "C8", "role": "bypass", "serves": "U1.7", "net": "+5V", "dist_mm": 30.0, "sure": False, "how": "spread",
+                      "limit": {"target": 3.0, "max": 5.0, "source": "default", "klass": "INF"}}]}
+
+
+def test_table_joins_rail_support_and_pair_rows_in_one_shape(tmp_path):
+    rows = BG.table(usb_board(tmp_path), USB, plan=PLAN)
+    assert [(r["kind"], r["metric"], r["verdict"]) for r in rows] == [
+        ("rail", "reach", "over-target-pass"), ("support", "distance", "fail"), ("support", "distance", "n/a"),
+        ("pair", "length", "ok"), ("pair", "endpoint", "ok")]
+    assert rows[0]["name"] == "+5V U100->J10" and rows[0]["hard"] and rows[2]["hard"] is False and rows[2]["value"] is None
+    keys = set(BG.row("pair", "x", "m", "mm"))
+    assert all(keys <= set(r) for r in rows)
+
+
+def test_ready_budgets_line_open_items(tmp_path):
+    from fluxplace import ready as RDY
+    B = usb_board(tmp_path, zone(38, 10, 42, 30))
+    cons = dict(USB, placement={"fixed": ["U1", "J1"]},
+                swap=[{"name": "d", "kind": "polarity", "nets": ["USB_D_P", "USB_D_N"], "source": "ds p.1"}],
+                separation=[{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 5.0}])
+    detail = {}
+    line = RDY.budget_line(None, cons, B, None, None, detail)
+    assert line["name"] == "budgets" and line["status"] == RDY.OPEN and line["open_items"] == 2
+    assert line["blockers"][0].startswith("BUDGET_NO_SOURCE 1: separation s distance")
+    assert line["blockers"][1].startswith("KEEPOUT_FLIGHT 1: USB_D_N/USB_D_P x rule-area 1")
+    assert {r["kind"] for r in detail["budgets"]["rows"]} == {"pair", "keepout", "keepout-flight", "separation", "swap"}
+    cons["separation"][0]["source"] = "ds p.4"
+    clean = RDY.budget_line(None, cons, usb_board(tmp_path, name="c.kicad_pcb"), None, None, {})
+    assert clean["status"] == RDY.PASS and "open_items" not in clean and "2 pair" in clean["detail"]
