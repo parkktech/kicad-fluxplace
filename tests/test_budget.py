@@ -47,3 +47,13 @@ def test_no_source_lists_only_rows_with_a_limit():
     c = BG.row("pair", "C", "length", "mm", mx=10.0, source="datasheet p.3")
     d = BG.row("swap", "D", "crossing", "count")
     assert [r["name"] for r in BG.no_source([a, b, c, d])] == ["A", "B"]
+
+
+
+def test_review_and_table_read_the_same_limits(monkeypatch):
+    assert CH.resolve_budget(USB, "USB_D_N") == ({"length_mm_max": 203.0}, {"length_mm_max": "[channel.USB_] TUSB4041I 7.4.1.3 p.25"}, "USB_")
+    seen = []
+    real = BG.pair_limits
+    monkeypatch.setattr(BG, "pair_limits", lambda *a, **k: (seen.append(a[1]), real(*a, **k))[1])
+    CH.resolve_budget(USB, "USB_D_N")
+    assert seen == ["USB_D_N"]                       # channel (review) goes through budget.pair_limits

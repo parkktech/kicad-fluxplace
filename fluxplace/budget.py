@@ -52,3 +52,33 @@ def row(kind, name, metric, unit, value=None, target=None, mx=None, source="", k
 def no_source(rows):
     """Rows whose number has no source (BUDGET_NO_SOURCE): a limit exists and `source` is empty or says NO SOURCE."""
     return [r for r in rows if (r["target"] is not None or r["max"] is not None) and (not r["source"] or "NO SOURCE" in r["source"])]
+
+
+def pair_limits(cons, master, ps_per_mm=None):
+    """-> (budget dict of the KEYS above, labels {key: where it came from}, family or None)."""
+    from . import channel as CH
+    cons = cons or {}
+    fam = family_of(cons.get("channel"), master)
+    b, lab = {}, {}
+    if fam:
+        e = cons["channel"][fam]
+        for k in CH.KEYS:
+            if k in e:
+                b[k] = float(e[k])
+                lab[k] = f"[channel.{fam}] {e.get('source', 'NO SOURCE')}"
+    if fam and cons["channel"][fam].get("noisy_classes"):
+        b["noisy_classes"] = list(cons["channel"][fam]["noisy_classes"])
+    pf = family_of(cons.get("pairs"), master)
+    if pf and "skew_ps_max" not in b:
+        pe = cons["pairs"][pf]
+        mx, tg = pe.get("skew_max_mm"), pe.get("skew_mm")
+        if mx is None and "skew_ps" in pe:
+            b["skew_ps_max"], lab["skew_ps_max"] = float(pe["skew_ps"]), f"fallback [pairs.{pf}] skew_ps (single limit)"
+        elif ps_per_mm and (mx is not None or tg is not None):
+            if mx is None:
+                b["skew_ps_max"], lab["skew_ps_max"] = float(tg) * ps_per_mm, f"fallback [pairs.{pf}] skew_mm {tg} mm (single limit, as max)"
+            else:
+                b["skew_ps_max"], lab["skew_ps_max"] = float(mx) * ps_per_mm, f"fallback [pairs.{pf}] skew_max_mm {mx} mm"
+                if tg is not None and "skew_ps_target" not in b:
+                    b["skew_ps_target"], lab["skew_ps_target"] = float(tg) * ps_per_mm, f"fallback [pairs.{pf}] skew_mm {tg} mm"
+    return b, lab, fam
