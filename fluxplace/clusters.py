@@ -226,6 +226,88 @@ def pin_demand(B, cons=None, spec=None, own=None, facts=None, mpn_map=None):
     return out
 
 
+def rehome(B, cl, cons=None, spec=None, demand=None):
+    """Per-pin demand applied to the cluster table (P5): for every pin_demand row the IC's own bypass part nearest to the pin
+    leaves the cluster that holds it (the `near` rule parked it at another IC's pin, or it is far) and joins its own IC's
+    cluster: served pad = the row's pad, how = "pin-demand", sure, limit from the one support table. Mutates `cl`.
+    -> {ref: {from, to, pad, dist}}. A part already in its own IC's cluster is not listed (nothing to do)."""
+    from . import powerbudget as PB
+    parts = B["parts"]
+    rows = pin_demand(B, cons, spec) if demand is None else demand
+    where = {s["ref"]: c for c in cl for s in c["supports"]}
+    by_ic = {c["ic"]: c for c in cl}
+    out = {}
+    for p in rows:
+        pin = next(q for q in parts[p["ic"]]["pads"] if str(q["num"]) == str(p["pad"]) and q["net"] == p["net"])
+        d = {}
+        for r in p["parts"]:
+            via = next(q for q in parts[r]["pads"] if q["net"] == p["net"])
+            d[r] = math.hypot(via["x"] - pin["x"], via["y"] - pin["y"])
+        ref = min(sorted(d), key=lambda r: d[r])
+        src = where.get(ref)
+        if src is None or src["ic"] == p["ic"]:
+            continue
+        s = next(x for x in src["supports"] if x["ref"] == ref)
+        row = PB.support_row(B, cons, spec, ref, p["net"], None, ic=p["ic"], pad=pin["num"])
+        dist = max(0.0, d[ref] - HALO_MM) if _pitch(parts[p["ic"]]) <= 0.5 else d[ref]
+        src["supports"].remove(s)
+        s.update(ic=p["ic"], pad=pin["num"], dist=dist, how="pin-demand", sure=True, limit=row["max"], target=row["target"], rank=9)
+        dst = by_ic.get(p["ic"])
+        if dst is None:
+            dst = by_ic[p["ic"]] = {"ic": p["ic"], "supports": [], "regulator": False}
+            cl.append(dst)
+            cl.sort(key=lambda c: c["ic"])
+        dst["supports"].append(s)
+        dst["supports"].sort(key=lambda x: (x["rank"], -x["weight"], x["dist"], x["ref"]))
+        where[ref] = dst
+        out[ref] = {"from": src["ic"], "to": p["ic"], "pad": pin["num"], "dist": round(d[ref], 2)}
+    return out
+
+
+def unseated(cl, fixed=()):
+    """Confidently-owned support parts beyond their limit after a seating pass: [{ref, ic, pad, dist, limit, why}], why =
+    "fixed" (the part may not move) or "no legal seat" (the seater found none). Sorted by ref."""
+    return sorted(({"ref": s["ref"], "ic": c["ic"], "pad": s["pad"], "dist": round(s["dist"], 2), "limit": s["limit"],
+                    "why": "fixed" if s["ref"] in fixed else "no legal seat"} for c in cl for s in c["supports"] if s["sure"] and s["dist"] > s["limit"]),
+                  key=lambda x: x["ref"])
+
+
+def loop_metrics(B, c, names=None):
+    """The three lengths a switching regulator's datasheet layout fixes, measured on the board model for cluster `c`
+    (regulator = it has a switch-node part): {"cin_loop_mm": input-capacitor loop (input pin -> capacitor -> its ground pad ->
+    nearest ground pad of the IC; the shortest over the rank-1 parts), "sw_mm": IC switch pin to the farthest switch-node pad
+    (the extent of the hot node), "boot_mm": bootstrap part to its pin, "fb_mm": the farthest rank-3 two-pad resistor to its
+    pin}. A value is None when the cluster has no such part. Rigid moves of the whole module leave every value unchanged."""
+    parts = B["parts"]
+    ic = parts[c["ic"]]
+    gnd = [q for q in ic["pads"] if NC.is_ground(q["net"] or "")]
+    out = {"cin_loop_mm": None, "sw_mm": None, "boot_mm": None, "fb_mm": None}
+
+    def dist(a, b):
+        return math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+    for s in c["supports"]:
+        part = parts[s["ref"]]
+        via = next((q for q in part["pads"] if q["num"] == s["via"]), None)
+        pin = next((q for q in ic["pads"] if q["num"] == s["pad"]), None)
+        if via is None or pin is None:
+            continue
+        if s["rank"] == 1 and s["ref"].startswith("C") and gnd:
+            g = next((q for q in part["pads"] if NC.is_ground(q["net"] or "")), None)
+            if g is not None:
+                v = dist(pin, via) + dist(via, g) + min(dist(g, q) for q in gnd)
+                out["cin_loop_mm"] = v if out["cin_loop_mm"] is None else min(out["cin_loop_mm"], v)
+        elif s["rank"] == 0:
+            v = max(dist(pin, q) for q in part["pads"] if q["net"] == s["net"])
+            out["sw_mm"] = v if out["sw_mm"] is None else max(out["sw_mm"], v)
+        elif s["rank"] == 2:
+            v = dist(pin, via)
+            out["boot_mm"] = v if out["boot_mm"] is None else max(out["boot_mm"], v)
+        elif s["rank"] == 3 and s["ref"].startswith("R") and part["n_pads"] == 2:
+            v = dist(pin, via)
+            out["fb_mm"] = v if out["fb_mm"] is None else max(out["fb_mm"], v)
+    return {k: (round(v, 3) if v is not None else None) for k, v in out.items()}
+
+
 _BLOCKS = {}
 
 

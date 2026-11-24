@@ -933,6 +933,12 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         _pro(board, path_g)
     B = RD.load(path_g)
     M = MD.build(B, cons, spec, arrange=True)
+    from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
+    LV0.progress("floorplan", "construct", always=True, cand=tag, why=f"{len(M.get('rehomed') or {})} bypass part(s) re-homed",
+                 criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
+                            "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])}])
+    for u in M.get("unseated") or []:
+        print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
     P = Plan(B, cons, spec, M, log=log)
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)

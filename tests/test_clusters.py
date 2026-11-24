@@ -309,3 +309,51 @@ def test_fact_that_names_no_pad_on_this_rail_keeps_every_pad(tmp_path):
     B = _supply_board(tmp_path, [("C101", 30, 30, "100nF")])
     rows = CL.pin_demand(B, _PLANNED, _SUP_SPEC, facts={"X1": {"supply_pins": ["VBAT"]}})
     assert len(rows) == 1 and (rows[0]["pad"], rows[0]["pin_kind"]) == ("4", "unlisted")
+
+
+# ---- placer step 5 (P5): per-pin demand applied to the cluster table; what stayed far; regulator loop lengths
+def test_rehome_puts_the_parked_bypass_into_its_own_ic_cluster(tmp_path):
+    B, pin = _demand(tmp_path, [])
+    x1, y1 = pin["U101"]["x"], pin["U101"]["y"]
+    B, pin = _demand(tmp_path, [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")], name="c.kicad_pcb")
+    cl, _ = CL.build(B, _PLANNED)
+    moved = CL.rehome(B, cl, _PLANNED)
+    d = CL.pin_demand(B, _PLANNED)[0]["dist_mm"]
+    assert moved == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": d}}
+    where = {s["ref"]: (c["ic"], s["how"], s["pad"], s["sure"], round(s["dist"], 2), s["limit"]) for c in cl for s in c["supports"]}
+    assert where["C419"] == ("U412", "pin-demand", "1", True, d, 5.0) and where["C101"][:2] == ("U101", "near")
+    assert CL.unseated(cl) == [{"ref": "C419", "ic": "U412", "pad": "1", "dist": d, "limit": 5.0, "why": "no legal seat"}]
+    assert CL.unseated(cl, fixed={"C419"})[0]["why"] == "fixed"
+    assert CL.rehome(B, cl, _PLANNED) == {}                                                  # already home: nothing to do
+    cl2, _ = CL.build(B, {})
+    assert CL.rehome(B, cl2, {}) == {}                                                       # not a planned rail: no demand, no move
+
+
+def test_regulator_loop_lengths_do_not_change_when_the_module_turns(tmp_path):
+    from fluxplace import geom as GM
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    b = g.ic("U1", 30, 30, ["VIN", "GND", "SW", "BOOT", "FB", "EN"], pitch=1.0)
+    b += PB.cap("C1", 26, 30, "VIN", "GND", "10uF") + PB.cap("C2", 27, 34, "BOOT", "SW", "100nF")
+    b += PB.cap("L1", 36, 31, "SW", "VOUT", "") + PB.cap("R1", 27, 38, "FB", "VOUT", "")
+    B = RD.load(g.board(tmp_path, b, outline=(0, 0, 80, 60)))
+    pad = {n: next(q["num"] for q in B["parts"]["U1"]["pads"] if q["net"] == n) for n in ("VIN", "SW", "BOOT", "FB")}
+    via = lambda r, n: next(q["num"] for q in B["parts"][r]["pads"] if q["net"] == n)        # noqa: E731
+    c = {"ic": "U1", "supports": [{"ref": "C1", "rank": 1, "net": "VIN", "pad": pad["VIN"], "via": via("C1", "VIN")},
+                                  {"ref": "L1", "rank": 0, "net": "SW", "pad": pad["SW"], "via": via("L1", "SW")},
+                                  {"ref": "C2", "rank": 2, "net": "BOOT", "pad": pad["BOOT"], "via": via("C2", "BOOT")},
+                                  {"ref": "R1", "rank": 3, "net": "FB", "pad": pad["FB"], "via": via("R1", "FB")}]}
+    m0 = CL.loop_metrics(B, c)
+    assert m0 == {"cin_loop_mm": 5.193, "sw_mm": 7.5, "boot_mm": 6.265, "fb_mm": 9.708}
+    for th in (90.0, 180.0, 270.0):                                                          # the whole module about the IC, a quarter turn each
+        for r in ("U1", "C1", "C2", "L1", "R1"):
+            p = B["parts"][r]
+            rx, ry = GM.rot(p["pos"][0] - 30.0, p["pos"][1] - 30.0, 90.0)
+            GM.place(p, 30.0 + rx, 30.0 + ry, p["angle"] + 90.0)
+        assert CL.loop_metrics(B, c) == m0, th
+    p = B["parts"]["C1"]
+    GM.place(p, p["pos"][0] - 2.0, p["pos"][1], p["angle"])                                 # the input capacitor alone, 2 mm further
+    m1 = CL.loop_metrics(B, c)
+    assert m1["cin_loop_mm"] == 7.405 and m1["sw_mm"] == m0["sw_mm"]
+    assert CL.loop_metrics(B, {"ic": "U1", "supports": []}) == {"cin_loop_mm": None, "sw_mm": None, "boot_mm": None, "fb_mm": None}

@@ -61,6 +61,7 @@ def fixed_set(B, cons):
 
 
 ATTACH_MM = 15.0                    # a support farther than this from its module's anchor is its own module
+REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); the W15 board settles in 3
 
 
 def build(B, cons=None, spec=None, arrange=True, log=None):
@@ -72,10 +73,19 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     fixed = fixed_set(B, cons)
     cls = NC.classify(B, cons, spec)
     cl, links = CL.build(B, cons, spec)
+    rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
-        CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log)
+        for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
+            CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
+                      only=set(parts) - fixed)   # a fixed part is never seated: the model must not show it where the board will not have it
+            _remeasure(B, cl)
+            more = CL.rehome(B, cl, cons, spec)
+            if not more:
+                break
+            for r, v in more.items():
+                rehomed[r] = dict(v, **{"from": rehomed[r]["from"]}) if r in rehomed else v
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
     pg = (cons.get("placement") or {}).get("group") or {}
@@ -134,7 +144,9 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             best = min(cand, key=lambda k: math.hypot(mod_c[k][0] - cx, mod_c[k][1] - cy))
         of[r] = best
         mods[best]["refs"].append(r)
-    # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone
+    # far members (a rail cap owned by an IC across the board) would make the block huge: they stand alone. A support
+    # within its limit of the pin it serves is never far (P5): the budget row, not the distance to the anchor's centre, decides.
+    seated = {s["ref"] for c in cl for s in c["supports"] if s["sure"] and s["dist"] <= s["limit"] and owner.get(s["ref"]) == c["ic"]}
     for key in sorted(mods):
         m = mods[key]
         ax, ay = _centre(parts[m["anchor"]])
@@ -142,7 +154,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             if r == m["anchor"] or (m["group"] and r in groups):
                 continue
             cx, cy = _centre(parts[r])
-            if math.hypot(cx - ax, cy - ay) > ATTACH_MM or (r in fixed and m["anchor"] not in fixed):
+            if (math.hypot(cx - ax, cy - ay) > ATTACH_MM and r not in seated) or (r in fixed and m["anchor"] not in fixed):
                 m["refs"].remove(r)
                 of.pop(r)
     # mechanical hardware: fixed single-part modules
@@ -167,7 +179,25 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         _geometry(B, mod)
         out.append(mod)
     ports(B, out, of, cls)
-    return {"modules": out, "of": of}
+    names = NC.pin_names(spec)
+    for c in cl:                                 # P5: a regulator module is a rigid template; its loop lengths travel with it
+        if c.get("regulator") and c["ic"] in of:
+            mod = next(m for m in out if m["name"] == of[c["ic"]])
+            inside = {"ic": c["ic"], "supports": [s for s in c["supports"] if of.get(s["ref"]) == mod["name"]]}
+            mod.setdefault("template", {})[c["ic"]] = CL.loop_metrics(B, inside, names.get(c["ic"], {}))
+    return {"modules": out, "of": of, "rehomed": rehomed, "unseated": CL.unseated(cl, fixed)}
+
+
+def _remeasure(B, cl):
+    """Distances of the cluster table after a seating pass (the table was measured before it), same rule as clusters.build."""
+    from . import clusters as CL
+    parts = B["parts"]
+    for c in cl:
+        halo = CL.HALO_MM if CL._pitch(parts[c["ic"]]) <= 0.5 else 0.0
+        for s in c["supports"]:
+            sp = next(q for q in parts[s["ref"]]["pads"] if q["num"] == s["via"])
+            pin = next(q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"])
+            s["dist"] = max(0.0, math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) - halo)
 
 
 def pose(mod, X, Y, th):
@@ -299,6 +329,12 @@ def cmd_modules(a):
     blocked = [(m["name"], m["fanout"]["blocked"]) for m in mods if m.get("fanout") and m["fanout"]["blocked"]]
     req = sum(m["fanout"]["req"] for m in mods if m.get("fanout"))
     ok = sum(m["fanout"]["ok"] for m in mods if m.get("fanout"))
+    if M.get("rehomed"):
+        print(f"modules: {len(M['rehomed'])} bypass part(s) re-homed to their own IC's pin (per-pin demand): "
+              + ", ".join(f"{r} {v['from']} -> {v['to']}.{v['pad']}" for r, v in sorted(M["rehomed"].items())))
+    if M.get("unseated"):
+        print(f"modules: {len(M['unseated'])} support part(s) still beyond their limit: "
+              + ", ".join(f"{u['ref']} {u['dist']:g} / {u['limit']:g} mm of {u['ic']}.{u['pad']} ({u['why']})" for u in M["unseated"]))
     print(f"modules: {nm} modules ({nfix} fixed, {len(multi)} with support parts, {sum(len(m['members']) for m in mods)} parts), "
           f"fan-out in isolation {ok}/{req} pins, {len(blocked)} modules with blocked pins; ports N{tot['N']} E{tot['E']} S{tot['S']} W{tot['W']}; "
           f"{time.time() - t0:.1f} s; wrote section 'modules' into {path}")
