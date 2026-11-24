@@ -370,14 +370,35 @@ def test_carried_track_near_foreign_pad_and_same_net_ignored():
 
 
 def test_stage_reports_honoured_rows_on_the_written_board(monkeypatch, tmp_path):
+    import json
     from fluxplace import placetour as PTm
     keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
     board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
     c = _stage_ctx(tmp_path)
     from fluxplace import ready as RDY, budget as BG
     far = BG.row("separation", "far", "distance", "mm", 3.0, None, 900.0, "ds p.1", hard=True, minimum=True)
-    monkeypatch.setattr(RDY, "measure_rows", lambda *a, **k: ([far], []))          # the synthetic board has no copper model: wiring only
+    far_ok = BG.row("separation", "far", "distance", "mm", 950.0, None, 900.0, "ds p.1", hard=True, minimum=True)
+    # the synthetic board has no copper model: wiring only. Stub by path: the input board measures 950, the written one 3.
+    monkeypatch.setattr(RDY, "measure_rows", lambda spec, cons, B, path, **k: ([far_ok] if path == board else [far], []))
+    ev = tmp_path / "ev" / "events.jsonl"                 # the live-view work folder: the PLACE_OK gate is opened, not waited on
+    monkeypatch.setenv("FLUXPLACE_EVENTS", str(ev))
+    c.cons["live"] = {"gate": {"PLACE_OK": {"wait_min": 0}}}
+    from fluxplace import liveview as LV
+
+    class _NoOwner:                          # the synthetic board has no copper model, so no Feedback: an owner with no rows
+        dir = str(ev.parent / "feedback")
+        open_gates, answers, stage = {}, {}, "placetour"
+        def on(self): return True
+        def boundary(self, **k): pass
+        def finish(self, B): return []
+    monkeypatch.setattr(LV, "stage_start", lambda board, cons, spec, stage, wd, apply=True: (board, cons, _NoOwner()))
     r = PTm.stage(c, 3, board)
     assert any(l.startswith("rows on the output: 0 honoured, 1 hard not honoured (far)") for l in r["next"])
     d = c.dir(3, "placetour")
-    assert os.path.exists(os.path.join(d, "board.budgets.json"))
+    bj = json.load(open(os.path.join(d, "board.budgets.json")))
+    assert bj["honoured"][0]["value_in"] == 950.0 and bj["honoured"][0]["value_out"] == 3.0
+    lines = [json.loads(l) for l in open(ev)]
+    pg = [l for l in lines if l["kind"] == "placement_progress" and l.get("phase") == "gate" and l.get("cand") == "result"]
+    assert [(x["id"], x["hard"], x["ok"]) for x in pg[0]["criteria"] if x["id"] == "far"] == [("far", True, False)]
+    gate = next(l for l in lines if l["kind"] == "gate_open")
+    assert [(x["id"], x["hard"], x["ok"]) for x in gate["candidates"][0]["criteria"] if x["id"] == "far"] == [("far", True, False)]
