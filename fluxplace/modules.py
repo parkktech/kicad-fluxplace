@@ -66,7 +66,7 @@ REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settl
 
 def build(B, cons=None, spec=None, arrange=True, log=None):
     """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
-    from . import clusters as CL, legality as LGL, netclass as NC, routable as RB
+    from . import clusters as CL, powerbudget as PB, legality as LGL, netclass as NC, routable as RB
     from . import blocks as BK
     cons = cons or {}
     parts = B["parts"]
@@ -86,7 +86,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                 break
             for r, v in more.items():
                 rehomed[r] = dict(v, **{"from": rehomed[r]["from"], "left": rehomed[r]["left"]}) if r in rehomed else v
-    bared = _bared(B, rehomed)                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
+    bared = _bared(B, rehomed, spec, *PB.facts_for(cons, spec))                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
     pg = (cons.get("placement") or {}).get("group") or {}
@@ -202,15 +202,19 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "unseated": CL.unseated(cl, fixed)}
 
 
-def _bared(B, rehomed):
-    """Pins left bare by a re-home (P5 M2): the pin the part was taken from has no two-pad capacitor to ground on its net within
+def _bared(B, rehomed, spec=None, facts=None, mpn_map=None):
+    """Pins left bare by a re-home (P5 M2): the pin the part was taken from is a supply pin (the part's `supply_pins` fact; a tie-off
+    such as EN on the rail wants no bypass; no fact = every pad counts) and has no two-pad capacitor to ground on its net within
     PB.BYPASS_MAX_MM (re-homed parts are not counted: they still sit where they were parked). -> [{ic, pad, net, was, nearest_mm}]."""
-    from . import powerbudget as PB, netclass as NC
+    from . import clusters as CL, powerbudget as PB, netclass as NC
     parts = B["parts"]
     out = []
     for ref, v in sorted(rehomed.items()):
         pin = next((q for q in parts[v["from"]]["pads"] if str(q["num"]) == str(v["left"])), None)
         if pin is None:
+            continue
+        sup, kind = CL._supply_pads(v["from"], [q for q in parts[v["from"]]["pads"] if q["net"] == pin["net"]], spec, facts, mpn_map)
+        if kind == "supply" and not any(q is pin for q in sup):
             continue
         best = None
         for r, p in parts.items():

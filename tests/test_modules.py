@@ -171,3 +171,14 @@ def test_a_pin_bared_by_a_rehome_is_named(tmp_path):
     B, pin = _two_ics(tmp_path, [("C101", x1 - 2, y1, "100nF"), ("C419", x1 - 2, y1 + 2, "100nF")])
     M = MD.build(B, PLANNED, None, arrange=False)            # a second bypass within 5 mm of the pin: nothing is bared
     assert M["bared"] == []
+
+
+def test_a_tie_off_pin_on_the_rail_is_not_a_bared_supply_pin(tmp_path):
+    import pcbgen as g
+    B = RD.load(g.board(tmp_path, g.ic("U1", 10, 10, ["VOUT", "GND", "VOUT", "A1"], pitch=1.0), outline=(0, 0, 40, 40)))
+    spec = {"components": [{"ref": "U1", "mpn": "X1", "pinmap": {"VIN": "1", "EN": "3"}}]}
+    facts, mp = {"X1": {"supply_pins": ["VIN"]}}, {"U1": "X1"}
+    left = lambda pad: {"C9": {"from": "U1", "left": pad}}          # noqa: E731
+    assert [b["pad"] for b in MD._bared(B, left("1"), spec, facts, mp)] == ["1"]     # the supply pin: bare
+    assert MD._bared(B, left("3"), spec, facts, mp) == []                            # EN tied to the rail: no bypass wanted
+    assert [b["pad"] for b in MD._bared(B, left("3"), spec, {}, {})] == ["3"]        # no supply_pins fact: every pad counts
