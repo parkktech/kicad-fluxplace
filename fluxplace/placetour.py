@@ -724,7 +724,7 @@ def stage(c, n, board):
     nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
     LV.candidate("placetour", "result", out, None, _lv(best["key"]), None, cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
     if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
-        _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d)
+        _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d, apply=False)
         g = LV.gate("PLACE_OK", None, [{"cand": "result", "key": _lv(best["key"]), "board": out}], fb, cons, ex)
         if g["by"]:
             nxt.append(f"gate PLACE_OK closed by {g['by']}: {g['action']}" + (f" - {g['text']}" if g["text"] else ""))

@@ -229,6 +229,11 @@ def place_snapshot(B, lane="leader", meta=None, M=None, cons=None, regions=None,
         W = work()
         if not W or lane not in LANES:
             return None
+        if _snap.get("W") != W:                  # another process wrote this W: continue its numbers, every lane starts full
+            d = os.path.join(W, "live", "place")
+            names = os.listdir(d) if os.path.isdir(d) else []
+            _snap.update(W=W, lanes={}, seq=max((int(n.split("-")[-1].split(".")[0]) for n in names
+                                                 if "-" in n and n.split("-")[-1].split(".")[0].isdigit()), default=0))
         st = _snap["lanes"].setdefault(lane, {"prev": None, "since": 0, "last": -1e9})
         now = time.monotonic()
         if lane == "trial" and not full and now - st["last"] < TRIAL_S:
@@ -499,6 +504,8 @@ def check_item(a, ctx):
         if "target" not in a or "group" in a["target"]:
             return "pin needs target.part or target.module"
         pin = a.get("pin") or {}
+        if "at" in pin and "module" in a["target"]:
+            return "pin.at needs target.part (a module is pinned where it stands)"
         if "at" in pin:
             at = pin["at"]
             if not (isinstance(at, list) and len(at) == 2 and all(_num(v) for v in at)):
@@ -570,9 +577,10 @@ class Feedback:
     Rows live for the run in W/feedback/rows.json; the constraints file is never edited (merged() returns a copy to run with).
     No W/feedback/inbox folder: on() is False and nothing is read or written."""
 
-    def __init__(self, B, M=None, cons=None, stage="", clock=time.time):
+    def __init__(self, B, M=None, cons=None, stage="", clock=time.time, apply=True):
         from . import fixedreason as FR, modules as MD
         self.W, self.stage, self.clock, self.B, self.cons0 = work(), stage, clock, B, cons or {}
+        self.apply = apply                       # False: the rows are read and shown, the search of this stage is not steered by them
         self.dir = os.path.join(self.W, "feedback") if self.W else ""
         self.rows, self.rev, self.notes, self.items, self.open_gates, self.answers = [], 0, [], {}, {}, {}
         mods = {m["name"]: sorted(m["members"]) for m in (M or {}).get("modules") or []}
@@ -619,8 +627,10 @@ class Feedback:
         base = {"id": a["id"], "kind": k, "src": "owner", "text": a.get("text", ""), "scope": a.get("scope", "run")}
         if k == "pin":
             pin = a.get("pin") or {}
-            return dict(base, kind="fixed", hard=True, refs=self._refs(a["target"]), at=pin.get("at"), rot=pin.get("rot"), side=pin.get("side"),
-                        cand=a.get("cand"), snapshot=a.get("snapshot"))
+            refs = self._refs(a["target"])
+            held = {r: list(self.B["parts"][r]["pos"]) for r in refs if r in self.B["parts"]}
+            return dict(base, kind="fixed", hard=True, refs=refs, at=pin.get("at"), rot=pin.get("rot"), side=pin.get("side"),
+                        cand=a.get("cand"), snapshot=a.get("snapshot"), held=held)
         if k == "region":
             reg = a["region"]
             rect = list(reg["rect"]) if "rect" in reg else list(cell_rect(self.ctx["grid"], reg["cells"]))
@@ -699,6 +709,10 @@ class Feedback:
                     self.notes.append(row or {"id": a["id"], "kind": "note", "text": a["text"], "target": a.get("target"), "cand": a.get("cand")})
                     self._log(a, "context", generation, row=row, file=name)
                     continue
+                if not self.apply:
+                    self.notes.append(row)
+                    self._log(a, "context", generation, row=row, why=f"read after the search of {self.stage}: not applied in this run", file=name)
+                    continue
                 self.rows.append(row)
                 self.rev += 1
                 new.append(row)
@@ -750,8 +764,10 @@ class Feedback:
         parts = B["parts"]
         cs = [parts[r]["court"] for r in row.get("refs", row.get("a", [])) if r in parts]
         if row["kind"] == "fixed":
-            if not row["at"]:
-                return True, None
+            if not row["at"]:                    # a pin without coordinates holds the part where it stood at the boundary
+                held = row.get("held") or {}
+                d = max((math.hypot(parts[r]["pos"][0] - held[r][0], parts[r]["pos"][1] - held[r][1]) for r in held if r in parts), default=0.0)
+                return d <= 0.011, round(d, 3)
             p = parts[row["refs"][0]]
             d = math.hypot(p["pos"][0] - row["at"][0], p["pos"][1] - row["at"][1])
             return d <= 0.011, round(d, 3)
@@ -782,6 +798,13 @@ class Feedback:
         try:
             if not self.on():
                 return []
+            for name in sorted(os.listdir(os.path.join(self.dir, "inbox"))):   # arrived during the search: the file stays for the next stage start
+                if name.endswith(".json"):
+                    try:
+                        iid = json.load(open(os.path.join(self.dir, "inbox", name), encoding="utf-8")).get("id") or name
+                    except (OSError, ValueError, AttributeError):
+                        iid = name
+                    self._log({"id": iid, "kind": None}, "received", why="arrived during the search: not read by this stage", file=name)
             for r in self.rows:
                 ok, v = self.measure(r, B)
                 self._log({"id": r["id"], "kind": r["kind"]}, "honoured" if ok else "not_honoured", row=r, effect=f"measured {v}")
@@ -873,7 +896,7 @@ def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sle
 
 
 # ---------------------------------------------------------------- L7: what the stages call
-def stage_start(board, cons, spec, stage, workdir):
+def stage_start(board, cons, spec, stage, workdir, apply=True):
     """The first boundary of a stage -> (board path, constraints to run with, Feedback or None). Stream off or no
     W/feedback/inbox folder: the arguments come back untouched and nothing is loaded. With rows: the constraints are a merged
     copy, and pin rows with coordinates are moved on a copy of the board in `workdir` (the input board is never written)."""
@@ -883,8 +906,10 @@ def stage_start(board, cons, spec, stage, workdir):
             return board, cons, None
         from . import boardwrite as BW, modules as MD, routediag as RD
         B = RD.load(board)
-        fb = Feedback(B, MD.build(B, cons, spec, arrange=False), cons, stage)
+        fb = Feedback(B, MD.build(B, cons, spec, arrange=False), cons, stage, apply=apply)
         fb.boundary(generation=0)
+        if not apply:                            # read and shown only: the board and the constraints stay as they came
+            return board, cons, fb
         moves = {r: v for r, v in fb.pin_moves().items()
                  if math.hypot(v[0] - B["parts"][r]["pos"][0], v[1] - B["parts"][r]["pos"][1]) > 1e-4 or abs(v[2] - B["parts"][r]["angle"]) > 1e-4}
         if moves:

@@ -87,7 +87,7 @@ Files (all by rename; a file that exists is complete; `.tmp` files are never rea
 | `W/live/place/<lane>-NNNNNN.delta.json` | {v, seq, base, parts [changed part objects], moved [{ref, dx, dy, drot, flip}], modules [changed], regions (whole list, only when changed), key}; apply to the full snapshot `base` of the same lane; a full comes at least every 20 and at stage end |
 | `W/live/glb/<cand>.glb`, `<cand>.log`, `latest.json` | 3D export (glTF binary), the tool's output, the last `glb_ready` line |
 | `W/live/errors.jsonl` | one row per failure of the live view itself (it never fails a stage) |
-| `W/feedback/inbox/*.json` | written by the dashboard, one owner item per file (schema v1: `liveview.check_item`) |
+| `W/feedback/inbox/*.json` | written by the dashboard, one owner item per file (schema v1: `liveview.check_item`); read at the stage start of `floorplan`, at the result of `placetour` and every 2 s while a gate waits; an item sent while a stage runs is read by the next stage start in that workdir |
 | `W/feedback/applied/`, `refused/` (+ `<name>.reason.txt`), `rows.json`, `log.jsonl`, `gates/<id>.json` | written by fluxplace: what happened to each item, the rows in force with `rows_rev`, open and closed gates |
 
 ## Examples (one line each)

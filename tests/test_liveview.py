@@ -639,3 +639,58 @@ def test_stage_start_is_a_no_op_without_an_inbox_and_moves_owner_pins_on_a_copy(
     assert (round(p["pos"][0], 3), round(p["pos"][1], 3), p["angle"]) == (70.0, 50.0, 90.0)
     assert c["lock"]["at"]["U2"] == [70.0, 50.0, "F.Cu"] and c["placement"]["fixed"] == ["J1", "U2"] and cons == {"placement": {"fixed": ["J1"]}}
     assert fb.measure(fb.rows[0], RD.load(b)) == (True, 0.0)
+
+
+# ---------------------------------------------------------------- EVAL-PLACER-STEP4a section 6 (M1-M5)
+def test_m1_a_module_pin_with_at_is_refused_and_a_module_pin_with_a_snapshot_loads(tmp_path):
+    for a, want in [(_item(kind="pin", target={"module": "U1"}, pin={"at": [5, 5]}), "pin.at needs target.part (a module is pinned where it stands)"),
+                    (_item(kind="pin", target={"module": "U1"}, cand="c1", snapshot=3), None)]:
+        p = tmp_path / f"{a['kind']}-{want is None}.json"
+        p.write_text(json.dumps(a))
+        assert LV.load_feedback(str(p), _ctx())[1] == want
+
+
+def test_m2_a_pin_without_at_holds_its_part_and_reads_the_distance(tmp_path, monkeypatch):
+    import copy
+    W, path, B, M, fb = _fb(tmp_path, monkeypatch, [_item(id="00000001", kind="pin", target={"part": "U2"}, cand="c1", snapshot=3)])
+    assert len(fb.boundary(generation=0)) == 1
+    assert fb.measure(fb.rows[0], B) == (True, 0.0)
+    moved = copy.deepcopy(B)
+    moved["parts"]["U2"]["pos"] = [moved["parts"]["U2"]["pos"][0] + 0.5, moved["parts"]["U2"]["pos"][1]]
+    assert fb.measure(fb.rows[0], moved) == (False, 0.5)
+
+
+def test_m3_a_stage_that_does_not_apply_shows_the_row_and_moves_nothing(tmp_path, monkeypatch):
+    W = _on(tmp_path, monkeypatch)
+    path, B, M = _board(tmp_path)
+    os.makedirs(W / "feedback/inbox")
+    (W / "feedback/inbox/2026-a.json").write_text(json.dumps(_item(id="00000001", kind="pin", target={"part": "U2"}, pin={"at": [70.0, 50.0]})))
+    cons = {"placement": {"fixed": ["J1"]}}
+    b, c, fb = LV.stage_start(path, cons, None, "placetour", str(tmp_path / "wd"), apply=False)
+    assert b == path and c is cons and fb.rows == [] and fb.rev == 0 and len(fb.notes) == 1
+    assert not (tmp_path / "wd" / "owner-pins.kicad_pcb").exists()
+    fb.finish(B)
+    log = _lines(W / "feedback/log.jsonl")
+    assert [(x["id"], x["action"]) for x in log] == [("00000001", "received"), ("00000001", "context")]
+    assert log[1]["why"] == "read after the search of placetour: not applied in this run"
+    assert not [x for x in _lines(W / "feedback/log.jsonl") if x["action"] == "honoured"]
+
+
+def test_m4_a_second_process_in_the_same_w_continues_the_numbers_and_starts_full(tmp_path, monkeypatch):
+    W = _on(tmp_path, monkeypatch)
+    path, B, M = _board(tmp_path)
+    assert LV.place_snapshot(B, "leader", None, M) == "live/place/leader-000001.json"
+    first = (W / "live/place/leader-000001.json").read_text()
+    LV._snap.clear()                             # a second process: its own counters, same W
+    LV._snap.update(seq=0, lanes={})
+    assert LV.place_snapshot(B, "leader", None, M) == "live/place/leader-000002.json"
+    assert (W / "live/place/leader-000001.json").read_text() == first
+
+
+def test_m5_an_item_that_arrives_during_a_stage_is_logged_once_and_the_file_stays(tmp_path, monkeypatch):
+    W, path, B, M, fb = _fb(tmp_path, monkeypatch)
+    (W / "feedback/inbox/2026-late.json").write_text(json.dumps(_item(id="00000009", kind="note", text="late")))
+    fb.finish(B)
+    log = _lines(W / "feedback/log.jsonl")
+    assert (log[-1]["id"], log[-1]["action"], log[-1]["why"]) == ("00000009", "received", "arrived during the search: not read by this stage")
+    assert os.path.exists(W / "feedback/inbox/2026-late.json")
