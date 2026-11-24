@@ -6,6 +6,7 @@ var FLUXPLACE_EVENTS is set, so subprocesses inherit the stream through the envi
 """
 import json
 import os
+import threading
 import time
 
 ENV_FILE = "FLUXPLACE_EVENTS"
@@ -16,6 +17,7 @@ MAX_STR = 400          # longest string kept in any field (log text contract)
 MAX_LINE = 60_000      # keep each line well under the 64 KiB contract limit
 
 _seq = 0
+_seq_lock = threading.Lock()
 _buckets = {}          # key -> [tokens, last_ts]
 
 
@@ -42,9 +44,11 @@ def _trim(v):
 
 def _line(kind, stage, fields):
     global _seq
-    _seq += 1
+    with _seq_lock:
+        _seq += 1
+        seq = _seq
     obj = {"v": VERSION, "ts": round(time.time(), 3), "run": os.environ.get(ENV_RUN, ""),
-           "seq": _seq, "pid": os.getpid(),
+           "seq": seq, "pid": os.getpid(),
            "stage": stage if stage is not None else (os.environ.get(ENV_STAGE) or None),
            "kind": kind}
     obj.update(_trim(fields))

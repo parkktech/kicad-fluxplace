@@ -372,3 +372,32 @@ def test_copper_fingerprint_follows_lock_state(tmp_path):
     t.SetLocked(True)
     b.Save(locked)
     assert VS.copper_fingerprint(unlocked) != VS.copper_fingerprint(locked)
+
+
+@pytest.mark.parametrize("bad", ["", "missing"])
+def test_reject_refuses_empty_or_missing_board_and_changes_nothing(tmp_path, fake, capsys, bad):
+    root = git_repo(tmp_path)
+    init(root)
+    before = reg(root)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    arg = bad if bad == "" else str(root / "W1/nope.kicad_pcb")
+    with pytest.raises(SystemExit) as ex:
+        call(root, "reject", arg, "--note", "x")
+    assert ex.value.code not in (0, None)
+    assert reg(root) == before
+    assert subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout == head
+
+
+
+def test_scratch_config_skips_matching_folder_warning(tmp_path, fake, capsys):
+    root = git_repo(tmp_path)
+    init(root)
+    t = os.path.getmtime(root / "W1/start.kicad_pcb") + 120
+    for rel_p in ("W1/stage4/set/a.kicad_pcb", "W1/stage9/b.kicad_pcb"):
+        os.utime(board(root, rel_p), (t, t))
+    set_config(root, scratch=["stage4/set/*"])
+    capsys.readouterr()
+    call(root, "status")
+    out = capsys.readouterr().out
+    assert "stage9/b.kicad_pcb" in out
+    assert "stage4/set/a.kicad_pcb" not in out

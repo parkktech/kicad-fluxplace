@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import datetime
+import fnmatch
 
 from fluxplace import progress as PG
 
@@ -229,6 +230,8 @@ def warnings(r):
                  and "/undo" not in dp and os.path.getmtime(os.path.join(dp, f)) > mt + 60]
         tried = {h["board"] for h in e.get("rejected", [])} | {h["board"] for h in e.get("history", [])}
         newer = [n for n in newer if n not in tried and not re.search(r"\.(i\d+|guard|try)\.kicad_pcb$|\.kicad_pcb\.", n)]
+        # config "scratch": glob patterns relative to the version folder, e.g. ["stage4/set/*"]; never warned about
+        newer = [n for n in newer if not any(fnmatch.fnmatch(n[len(v) + 1:], g) for g in cfg.get("scratch", []))]
         if newer:
             w.append("%d board file(s) newer than CURRENT, neither accepted nor rejected (scratch?): %s"
                      % (len(newer), ", ".join(sorted(newer)[:4])))
@@ -300,6 +303,8 @@ def cmd_accept(a):
 
 
 def cmd_reject(a):
+    if not a.board or not os.path.isfile(a.board):
+        sys.exit("refused: reject needs an existing board file, got %r (nothing recorded)" % a.board)
     r = load()
     v, e = active(r)
     e.setdefault("rejected", []).append({"time": now(), "board": rel(a.board), "note": a.note})
