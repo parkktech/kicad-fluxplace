@@ -126,7 +126,12 @@ def load(path):
         return {}
     from . import placerules as PR
     with open(path, "rb") as f:
-        return PR.expand(tomllib.load(f))          # [placement.module.*] with an explicit outline -> keep-out / no_tht
+        d = PR.expand(tomllib.load(f))             # [placement.module.*] with an explicit outline -> keep-out / no_tht
+    rel = (d.get("docs") or {}).get("datasheets")
+    if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
+        from . import parts as P
+        d["docs"]["datasheets"] = P.resolve_dir(rel, [path])
+    return d
 
 
 def power_width_mm(cons, net, default_mm):

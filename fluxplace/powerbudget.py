@@ -20,6 +20,7 @@ A rail whose series drop is the design (a sense resistor, a bias inductor, a ret
 Nothing here names a board, a reference or an MPN.
 """
 import math
+import sys
 
 from . import channel as CH
 from . import power as PW
@@ -359,12 +360,19 @@ def _findings(rail, have_board):
 _FACTS = {}
 
 
+_WARNED = set()
+
+
 def facts_for(cons, spec=None, anchors=()):
     """({mpn: facts}, mpn_map) from the datasheet dir of [docs] datasheets (cited facts only); ({}, {}) when there is none."""
     import os
     from . import elec as EL, parts as P, partdocs as PD
     ds = P.resolve_dir((((cons or {}).get("docs") or {}).get("datasheets")), anchors)
     facts = {}
+    if ds and not os.path.isdir(ds) and ds not in _WARNED:
+        _WARNED.add(ds)
+        print(f"datasheets: '{ds}' ([docs] datasheets) not found from {os.getcwd()}: no datasheet facts loaded, limits are derived / default",
+              file=sys.stderr)
     try:
         if ds and os.path.isdir(ds):
             mp = PD.manifest_path(ds)

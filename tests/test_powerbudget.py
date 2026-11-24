@@ -166,3 +166,32 @@ def test_role_needs_a_ground_side_and_a_pin_capacitor_keeps_the_class_budget(tmp
     row = PBG.support_row(B, PB.CONS, None, "C1", "VOUT", info)
     assert (row["target"], row["max"]) == (3.0, 3.0)                                                 # the pre-P3 gate (3 mm) does not move
     assert (PBG.support_row(B, PB.CONS, None, "C1", "VOUT", None)["max"]) == 5.0
+
+
+def _proj(tmp_path, with_ds=True):
+    proj = tmp_path / "proj"
+    (proj / "W" / "copy").mkdir(parents=True)
+    if with_ds:
+        ds = proj / "docs" / "datasheets"
+        ds.mkdir(parents=True)
+        (ds / "datasheets.json").write_text('{"PART-1": {"facts": {"i_max_ma": {"value": 5, "source": "p1"}}}}')
+    c = proj / "W" / "copy" / "constraints.toml"
+    c.write_text('[docs]\ndatasheets = "docs/datasheets"\n')
+    other = tmp_path / "other"
+    other.mkdir()
+    return c, other
+
+
+def test_datasheet_dir_resolves_from_the_constraints_file_not_the_cwd(tmp_path, monkeypatch):
+    from fluxplace import constraints as C
+    c, other = _proj(tmp_path)
+    monkeypatch.chdir(other)
+    assert "PART-1" in PBG.facts_for(C.load(str(c)))[0]
+
+
+def test_missing_datasheet_dir_says_so_on_stderr(tmp_path, monkeypatch, capsys):
+    from fluxplace import constraints as C
+    c, other = _proj(tmp_path, with_ds=False)
+    monkeypatch.chdir(other)
+    assert PBG.facts_for(C.load(str(c)))[0] == {}
+    assert "no datasheet facts loaded" in capsys.readouterr().err
