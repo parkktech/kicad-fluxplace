@@ -1599,7 +1599,8 @@ def _ev_stage_end(i, name, res, board, secs):
             line=str(res.get("line", ""))[:400], secs=round(secs, 1), board=board, metrics=metrics)
     from . import eta as ETA, liveview as LV
     ETA.stage_end(name, secs, res.get("verdict"))
-    LV.narrate(name, f"{name} finished: {res.get('verdict')}. {str(res.get('line', ''))[:200]}. Took {secs:.1f} s.", "end")
+    line_part = f" {str(res.get('line', ''))[:200]}." if res.get("line") else ""
+    LV.narrate(name, f"{name} finished: {res.get('verdict')}.{line_part} Took {secs:.1f} s.", "end")
 
 
 def run(a):

@@ -28,6 +28,7 @@ PROGRESS_KEYS = ("phase", "generation", "generations", "trial", "trials", "arm",
 _last = {}
 NARR_S = 8.0                       # a "doing" narration line at least this often while a stage works (no silence over 10 s)
 _narr = {}                         # stage -> the latest "doing" text, repeated by the heartbeat
+_narr_gen = {}                     # stage -> the last generation narrated (one round line per generation)
 _watch = {"stage": None}           # the stage whose heartbeat runs in this process (nested watches do nothing)
 START_TEXT = {
     "ready": "Checking the parts list, the stackup and the board outline before any part is moved. Done when every check is kept or waived.",
@@ -121,6 +122,8 @@ def watching(stage):
         return
     stop, t0 = threading.Event(), time.monotonic()
     _watch["stage"] = stage
+    _narr.pop(stage, None)
+    _narr_gen.pop(stage, None)
 
     def beat():
         while not stop.wait(NARR_S):
@@ -188,10 +191,12 @@ def progress(stage, phase, always=False, **fields):
                  criteria=criteria(fields.get("criteria")), verdict=fields.get("verdict") or "running")
         f["text"] = _text(stage, f)
         _emit("placement_progress", stage=stage, **f)
-        if always and f["generation"] is not None:
+        if always and f["generation"] is not None and _narr_gen.get(stage) != f["generation"]:
+            _narr_gen[stage] = f["generation"]
             g, big = f["generation"], f["generations"]
-            best = ", ".join(f"{k} {v}" for k, v in (f["key"] or [])[:2]) or "not judged yet"
-            narrate(stage, f"{stage} round {g}{f' of {big}' if big is not None else ''}: best so far {best}", "doing")
+            best = ", ".join(f"{k} {v}" for k, v in (f["leader_key"] or f["key"] or [])[:2]) or "not judged yet"
+            narrate(stage, f"{stage} round {g}{f' of {big}' if big is not None else ''}: best so far {best}", "doing",
+                    eta_s=f["eta_s"])
         return f
     except Exception as e:                       # noqa: BLE001 - the view never fails a stage
         _err("progress", e)
@@ -248,10 +253,11 @@ def _why_parts(B, parts, M, meta):
     x0, y0, x1, y1 = B["bbox"]
     anchor = {m["name"]: m.get("anchor") for m in (M or {}).get("modules") or []}
     rows = criteria((meta or {}).get("criteria"))
+    toks = [(r, set(re.split(r"[^A-Za-z0-9_]+", r["id"]))) for r in rows]
     for p in parts:
         c = (B["parts"].get(p["ref"]) or {}).get("court")
         p["parked"] = bool(c) and (c[2] < x0 or c[0] > x1 or c[3] < y0 or c[1] > y1)       # courtyard wholly outside the outline
-        mine = [{"id": r["id"], "ok": r["ok"], "hard": r.get("hard")} for r in rows if p["ref"] in re.split(r"[^A-Za-z0-9_]+", r["id"])]
+        mine = [{"id": r["id"], "ok": r["ok"], "hard": r.get("hard")} for r, t in toks if p["ref"] in t]
         p["why"] = {"owner": anchor.get(p["mod"]), "module": p["mod"], "fixed": p["fixed"], "rows": mine}
 
 

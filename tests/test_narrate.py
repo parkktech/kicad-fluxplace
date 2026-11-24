@@ -138,3 +138,13 @@ def test_direct_command_under_pipeline_emits_no_own_start_or_end(tmp_path, monke
     monkeypatch.setenv(events.ENV_STAGE, "ready")
     LV.run_command("ready", lambda a: 0, None)
     assert [r["phase"] for r in _narr(W)] == []
+
+
+def test_one_round_line_per_generation_uses_leader_key(tmp_path, monkeypatch):
+    W = _on(tmp_path, monkeypatch)
+    LV.progress("floorplan", "anneal", always=True, generation=3, generations=8, key=[["hard rows", 2]],
+                leader_key=[["hard rows", 0]], verdict="kept")
+    LV.progress("floorplan", "anneal", always=True, generation=3, generations=8, key=[["hard rows", 2]],
+                leader_key=[["hard rows", 0]], verdict="kept")
+    (row,) = _narr(W)
+    assert "round 3 of 8" in row["text"] and "hard rows 0" in row["text"] and "hard rows 2" not in row["text"]
