@@ -7,7 +7,8 @@ import math
 from collections import defaultdict
 
 TOL = 0.5          # deg (spec symbols)
-EPS = 1e-3         # mm: joints are matched on coordinates rounded to this
+EPS = 1e-4         # mm: joints are matched on coordinates rounded to this grid (W15: 1e-3 split / merged joints, 1e-5 and 1e-4 give the
+                   # same counts; KiCad coordinates are nm, so a joint is exact and 0.1 um is already generous)
 MIN_POLY_SEG = 0.2 # mm: a polyline-arc segment is shorter than this (spec 3.2 C15)
 MIN_POLY_N = 4     # same-turn segments that make a polyline arc
 
@@ -60,12 +61,40 @@ def leave(s, e):
     return (-tx, -ty) if ccw else (tx, ty)
 
 
+def _ckey(s):
+    """identity of a piece of copper: net, layer, unordered end points (and mid for an arc) on the EPS grid."""
+    q = lambda p: (round(p[0] / EPS), round(p[1] / EPS))
+    return (s["net"], s["layer"], tuple(sorted([q(s["a"]), q(s["b"])])), q(s["mid"]) if s.get("mid") is not None else None)
+
+
+def live(B):
+    """indices of segments that count as copper for corners and junctions: not zero length, first of any exact duplicate.
+    Degenerate ones (T2 deletes them, M9) would otherwise make backtrack 'acute' corners and phantom legs; they are
+    reported by degenerate() and m9_sites()."""
+    seen, out = set(), []
+    for i, s in enumerate(B["segs"]):
+        if _len(s) < 1e-6:
+            continue
+        k = _ckey(s)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(i)
+    return out
+
+
+def degenerate(B):
+    """{'zero': n, 'duplicate': n}: the hygiene counts behind M9."""
+    keep = set(live(B))
+    zero = sum(1 for s in B["segs"] if _len(s) < 1e-6)
+    return {"zero": zero, "duplicate": len(B["segs"]) - zero - len(keep)}
+
+
 def _ends(B):
     ends = defaultdict(list)
     segs = B["segs"]
-    for i, s in enumerate(segs):
-        if _len(s) < 1e-6:
-            continue
+    for i in live(B):
+        s = segs[i]
         ends[_k(s["net"], s["layer"], s["a"])].append((i, "a"))
         ends[_k(s["net"], s["layer"], s["b"])].append((i, "b"))
     return ends
@@ -132,7 +161,7 @@ def _pair_family(net, pairs):
 
 def classes(B, cons, spec):
     """{net: RF | HSF | HSS | PWR | ANA | GEN}. RF: [rf] nets, else review.is_rf. Pairs: [pairs.<fam>] by name prefix;
-    HSF when the family's `maximum_mm` <= 0.2 (spec 0), else HSS. PWR: netclass rail / switch_node, never ground.
+    HSF when the family's `skew_max_mm` (D71cv maximum; `maximum_mm` accepted) <= 0.2 (spec 0), else HSS. PWR: netclass rail / switch_node, never ground.
     ANA: netclass audio pair or slow role. Everything else GEN."""
     from . import netclass as NC, review as RV
     cons = cons or {}
@@ -147,7 +176,8 @@ def classes(B, cons, spec):
         if n in rf_nets or (not rf_nets and RV.is_rf(n)):
             out[n] = "RF"
         elif fam is not None and (c.get("partner") or c.get("class") == "pair"):      # a differential partner, not just a name
-            mx = pairs[fam].get("maximum_mm")
+            pf = pairs[fam]
+            mx = pf.get("skew_max_mm", pf.get("maximum_mm"))          # D71cv maximum: the key the constraints carry
             out[n] = "HSF" if (mx is not None and float(mx) <= 0.2) else "HSS"
         elif NC.is_ground(n):
             out[n] = "GEN"
@@ -273,13 +303,10 @@ def m1_sites(B, min_deg):
 def m9_sites(B):
     out, seen = [], set()
     for s in B["segs"]:
-        key = (s["net"], s["layer"], tuple(sorted([(round(s["a"][0], 3), round(s["a"][1], 3)),
-                                                   (round(s["b"][0], 3), round(s["b"][1], 3))])))
-        zero = _len(s) < 1e-6
-        dup = key in seen
-        seen.add(key)
-        out.append({"net": s["net"], "layer": s["layer"], "x": s["a"][0], "y": s["a"][1],
-                    "state": "open" if (zero or dup) else "already"})
+        k = _ckey(s)
+        bad = _len(s) < 1e-6 or k in seen
+        seen.add(k)
+        out.append({"net": s["net"], "layer": s["layer"], "x": s["a"][0], "y": s["a"][1], "state": "open" if bad else "already"})
     return out
 
 

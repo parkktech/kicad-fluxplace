@@ -59,10 +59,10 @@ def test_rule_table_is_10_hard_50_practice_with_sources():
 
 # ---- 2. classes on two fixture boards (4-layer and 6-layer, different net names) ---------------------------------
 
-FOUR = dict(rf={"nets": ["RF_GNSS"]}, pairs={"USB2_": {"impedance_diff": 90, "skew_mm": 0.15, "maximum_mm": 1.27},
-                                   "ETH_": {"impedance_diff": 100, "skew_mm": 0.15, "maximum_mm": 0.5}})
-SIX = dict(rf={"nets": ["ANT_LTE"]}, pairs={"PCIE_": {"impedance_diff": 90, "skew_mm": 0.1, "maximum_mm": 0.127},
-                                            "USB3_": {"impedance_diff": 90, "skew_mm": 0.1, "maximum_mm": 0.127}})
+FOUR = dict(rf={"nets": ["RF_GNSS"]}, pairs={"USB2_": {"impedance_diff": 90, "skew_mm": 0.15, "skew_max_mm": 1.27},
+                                   "ETH_": {"impedance_diff": 100, "skew_mm": 0.15, "skew_max_mm": 0.5}})
+SIX = dict(rf={"nets": ["ANT_LTE"]}, pairs={"PCIE_": {"impedance_diff": 90, "skew_mm": 0.1, "skew_max_mm": 0.127},
+                                            "USB3_": {"impedance_diff": 90, "skew_mm": 0.1, "skew_max_mm": 0.127}})
 
 
 def _two_nets(tmp_path, nets):
