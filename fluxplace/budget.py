@@ -153,3 +153,25 @@ def pair_rows(B, cons, stack=None):
             out.append(row("pair", name, "skew", "ps", None, b.get("skew_ps_target"), b.get("skew_ps_max"),
                            lab.get("skew_ps_max") or lab.get("skew_ps_target", ""), klass, False, refs=refs, nets=nets))
     return out
+
+
+def netclasses(cons, board=None, stack=None):
+    """{family: {z, track_width, diff_pair_width, diff_pair_gap, layers {layer: (w, gap)}}} for every [pairs.F] with
+    impedance_diff: what the project net class must carry (IMPROVEMENTS-W15 item 3). stack = (rows, planes, signal_layers):
+    per-layer geometry from zgeom.family_table, the function pairs.layer_geometry uses; the class width / gap is the first
+    signal layer's. Without a stack: constraints._expected_geometry (what inject_netclasses writes)."""
+    from . import constraints as C, zgeom as ZG
+    out = {}
+    for fam, fv in sorted(((cons or {}).get("pairs") or {}).items()):
+        if not isinstance(fv, dict) or not fv.get("impedance_diff"):
+            continue
+        z, w, g = C._expected_geometry(cons, fam, board)
+        lay = {}
+        if stack:
+            rows, planes, sig = stack
+            tab = ZG.family_table(cons, rows, planes, sig, fam, board=board)
+            lay = {l: (t["w"], t["gap"]) for l, t in tab.items() if t["w"] and t["status"] in ("ok", "off", "unreachable")}
+            if sig and sig[0] in lay:
+                w, g = lay[sig[0]]
+        out[fam] = {"z": z, "track_width": w, "diff_pair_width": w, "diff_pair_gap": g, "layers": lay}
+    return out

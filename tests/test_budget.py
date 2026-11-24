@@ -100,3 +100,16 @@ def test_loss_limits_the_endpoint_distance_when_a_stack_is_given(tmp_path):
 
 def test_pair_outside_every_family_has_no_rows(tmp_path):
     assert BG.pair_rows(usb_board(tmp_path), {}) == []           # the ready "pair classes" line names it (F1)
+
+
+def test_a_90_ohm_family_yields_a_netclass_equal_to_pairs_layer_geometry():
+    import test_zgeom as TZ
+    from fluxplace import pairs as PA
+    nc = BG.netclasses(TZ.CONS, stack=(TZ.ROWS, TZ.PLANES, TZ.SIG))["USB_"]
+    rule = {"w": 0.2, "gap": 0.25, "target": 90, "family": "USB_"}
+    geo = PA.layer_geometry(rule, TZ.SIG, TZ.PLANES, ["F.Cu"] + TZ.SIG[1:], TZ.ROWS, 0.127, cons=TZ.CONS)
+    assert nc["z"] == 90 and set(nc["layers"]) == set(TZ.SIG)
+    for l in TZ.SIG:
+        assert nc["layers"][l] == geo[l][:2]
+    assert (nc["track_width"], nc["diff_pair_gap"]) == geo["F.Cu"][:2] and nc["diff_pair_width"] == nc["track_width"]
+    assert set(BG.netclasses(TZ.CONS, stack=(TZ.ROWS, TZ.PLANES, TZ.SIG))) == {"ETH_", "USB_"}
