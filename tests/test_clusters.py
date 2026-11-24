@@ -1,4 +1,5 @@
 import os, sys, subprocess
+import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fluxplace import clusters as CL, routediag as RD, boardwrite as BW, geom as GM
 import pcbgen as g
@@ -378,3 +379,44 @@ def test_a_strict_seat_searches_as_far_as_the_limit_not_just_8_mm(tmp_path):
     pin = next(p for p in B["parts"]["U1"]["pads"] if p["num"] == s["pad"])
     d = math.hypot(mv["C1"][0] - pin["x"], mv["C1"][1] - pin["y"])
     assert "C1" in mv and 9.5 < d <= s["limit"] and left == []
+
+
+# ---- placer step 5b S2: a datasheet decap_mm / bulk_mm is an edge distance (pad to pad), a derived / default limit is a centre distance
+def _edge_board(tmp_path, cap_x):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    b = g.fp("U1", 30, 30, [g.pad("1", 0, 0, "VOUT", w=2.05, h=0.6), g.pad("2", 0, 3, "GND", w=2.05, h=0.6), g.pad("3", 0, 6, "A1"), g.pad("4", 0, 7, "A2"), g.pad("5", 0, 8, "A3")], court=(-2, -1, 2, 9))
+    b += g.fp("C1", cap_x, 30, [g.pad("1", -0.5, 0, "VOUT"), g.pad("2", 0.5, 0, "GND")], court=(-1, -0.6, 1, 0.6))
+    return RD.load(g.board(tmp_path, b, outline=(0, 0, 80, 60)))
+
+
+_EDGE_FACTS = {"X1": {"decap_mm": 1, "_src": {"decap_mm": "X.pdf#p3"}}}
+
+
+def _edge_support(B, facts):
+    cl, _ = CL.build(B, {}, {"components": [{"ref": "U1", "mpn": "X1"}]}, facts=facts, mpn_map={"U1": "X1"})
+    return cl[0], next(s for s in cl[0]["supports"] if s["ref"] == "C1")
+
+
+def test_a_datasheet_decap_limit_is_measured_pad_edge_to_pad_edge(tmp_path):
+    B = _edge_board(tmp_path, 32.4)                    # VOUT pad of C1 at x 31.9: centre 1.9 mm from the 2.05 mm long pad, edges 0.625 mm
+    _c, s = _edge_support(B, _EDGE_FACTS)
+    assert (s["limit"], s["klass"]) == (1.0, "REQ") and s["dist"] == pytest.approx(0.625) and s["dist"] <= s["limit"]
+    _c, s = _edge_support(B, {})                       # no fact: the default limit keeps the centre measure
+    assert s["dist"] == pytest.approx(1.9) and s["klass"] == "INF"
+    B = _edge_board(tmp_path, 34.4)
+    _c, s = _edge_support(B, _EDGE_FACTS)
+    assert s["dist"] == pytest.approx(2.625) and s["dist"] > s["limit"]
+
+
+def test_the_strict_seat_and_the_remeasure_use_the_edge_distance_for_a_datasheet_limit(tmp_path):
+    from fluxplace import modules as MD
+    B = _edge_board(tmp_path, 45.0)
+    c, s = _edge_support(B, _EDGE_FACTS)
+    left = []
+    mv = CL.seat(B, c, strict=True, left=left)         # the centre of any seat is at least 1.275 mm from the pin centre: only an edge measure can seat it
+    assert "C1" in mv and left == []
+    GM.place(B["parts"]["C1"], *mv["C1"])
+    MD._remeasure(B, [c])
+    assert s["dist"] <= 1.0 + 1e-6

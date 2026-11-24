@@ -40,6 +40,19 @@ def _is_support(ref, part):
     return bool(SUPPORT.match(ref)) and part["n_pads"] == 2
 
 
+def pad_gap(a, b):
+    """Distance between the edges of two pads (their extents, rectangles); 0 when they touch or overlap."""
+    return math.hypot(max(0.0, abs(a["x"] - b["x"]) - a["ex"] - b["ex"]), max(0.0, abs(a["y"] - b["y"]) - a["ey"] - b["ey"]))
+
+
+def support_dist(s, sp, pin, halo=0.0):
+    """Distance of a support's pad `sp` to the pin it serves, as its limit is stated: a datasheet limit (`s["edge"]`) pad edge to
+    pad edge, every other limit centre to centre less the fine-pitch halo (P5b S2)."""
+    if s.get("edge"):
+        return pad_gap(sp, pin)
+    return max(0.0, math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) - halo)
+
+
 def ownership(B, cls=None, cons=None, spec=None, min_pads=5):
     """({support_ref: {ic, net, pad (IC pad number), how}}, {link refs})."""
     cls = cls or NC.classify(B, cons, spec)
@@ -511,7 +524,7 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
             "sure": sure,
             "cls": info["class"] if info else "signal", "weight": info["weight"] if info else 1.0,
             "dist": dist, "limit": row["max"], "target": row["target"], "role": row["role"], "unit": "mm",
-            "source": row["source"], "klass": row["klass"]})
+            "source": row["source"], "klass": row["klass"], "edge": bool(row.get("edge"))})
     out = []
     names = NC.pin_names(spec)
     for ic in sorted(by):
@@ -520,8 +533,9 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
             s["ic"] = ic
             s["nets"] = [q["net"] for q in parts[s["ref"]]["pads"]]
             s["rank"] = reg_rank(s, parts, names.get(ic, {}), cls) if reg else 9
-            if _pitch(parts[ic]) <= 0.5:
-                s["dist"] = max(0.0, s["dist"] - HALO_MM)   # measured from the edge of the keep-clear halo
+            sp = next(p for p in parts[s["ref"]]["pads"] if p["num"] == s["via"])
+            pin = next(p for p in parts[ic]["pads"] if p["num"] == s["pad"])
+            s["dist"] = support_dist(s, sp, pin, HALO_MM if _pitch(parts[ic]) <= 0.5 else 0.0)   # a halo is the edge of the keep-clear zone
         sup = sorted(by[ic], key=lambda s: (s["rank"], -s["weight"], s["dist"], s["ref"]))
         row = {"ic": ic, "supports": sup, "regulator": reg}
         if reg and facts:
@@ -664,8 +678,7 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                     if zones and _in_zone(zones, part, court):
                         no["side closed: keep-out zone"] += 1
                         continue
-                    if strict and math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) > s["limit"] + (
-                            HALO_MM if halo else 0.0):
+                    if strict and support_dist(s, sp, pin, HALO_MM if halo else 0.0) > s["limit"] + 1e-6:
                         continue
                     if legal is not None:
                         bad = legal.part_issues(ref, court, pads)

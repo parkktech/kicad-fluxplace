@@ -414,7 +414,7 @@ def _fact_mm(fx, key, names):
 
 
 def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mpn_map=None):
-    """The limit of one support part: {role, target, max, unit, source, klass}. Source order: datasheet fact (decap_mm for
+    """The limit of one support part: {role, target, max, unit, source, klass[, edge]}; edge = the limit is a datasheet distance, measured pad edge to pad edge. Source order: datasheet fact (decap_mm for
     bypass, bulk_mm for bulk, REQ) -> derived (netclass budget and its basis, INF) -> default (INF). Target warns, max fails."""
     from . import netclass as NC
     role = role_of(B["parts"][ref], ref, net, info, cons)
@@ -446,7 +446,8 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
         mm = _fact_mm((facts or {}).get(mpn), key, names)
         if mm is not None:
             src = ((facts.get(mpn) or {}).get("_src") or {}).get(key, "datasheet")
-            row = {"target": mm, "max": mm, "klass": "REQ", "source": f"datasheet fact {key} of {mpn} ({src})"}
+            row = {"target": mm, "max": mm, "klass": "REQ", "source": f"datasheet fact {key} of {mpn} ({src})",
+                   "edge": True}               # a datasheet "within x mm of the pin" is pad edge to pad edge (P5b S2)
     row.update(role=role, unit="mm")
     return row
 

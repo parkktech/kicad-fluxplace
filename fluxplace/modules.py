@@ -241,7 +241,7 @@ def _remeasure(B, cl):
         for s in c["supports"]:
             sp = next(q for q in parts[s["ref"]]["pads"] if q["num"] == s["via"])
             pin = next(q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"])
-            s["dist"] = max(0.0, math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) - halo)
+            s["dist"] = CL.support_dist(s, sp, pin, halo)
 
 
 def pose(mod, X, Y, th):
