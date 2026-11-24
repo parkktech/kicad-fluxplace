@@ -661,3 +661,10 @@ def test_dangling_via_one_segment_is_site_and_fill_on_second_layer_saves_it():
     assert [x for x in TM.s2_sites(B, X) if x.get("kind") == "via"]            # another net's fill does not connect it
     B2 = mdl([seg((0, 0), (5, 0), net="N", layer="F.Cu"), seg((5, 0), (9, 0), net="N", layer="B.Cu")], vias=[via("N", 5, 0)])
     assert not [x for x in TM.s2_sites(B2, X) if x.get("kind") == "via"]       # used on two layers
+
+
+def test_fills_carry_the_zone_net_of_kicad_10_and_9(tmp_path):
+    for tag in ('(net "GND")', '(net 3 "GND") (net_name "GND")'):
+        f = tmp_path / "z.kicad_pcb"
+        f.write_text('(kicad_pcb (zone %s (layer "In1.Cu") (filled_polygon (layer "In1.Cu") (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))))' % tag)
+        assert [n for n, _bb, _P in TM.fills({"file": str(f)})["In1.Cu"]] == ["GND"]

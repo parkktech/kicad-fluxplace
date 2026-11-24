@@ -1650,7 +1650,7 @@ def fills(B):
     root = BF.parse(open(B["file"], errors="replace").read())
     out = defaultdict(list)
     for z in BF._kids(root, "zone"):
-        net = BF._atoms(BF._first(z, "net_name"))
+        net = [BF._net(z)] if BF._net(z) else BF._atoms(BF._first(z, "net_name"))      # KiCad 10: (net "GND"); 9: (net_name "GND")
         for fp_ in BF._kids(z, "filled_polygon"):
             lay = (BF._atoms(BF._first(fp_, "layer")) or [""])[0]
             pts = np.array([BF._nums(xy)[:2] for xy in BF._kids(BF._first(fp_, "pts") or [], "xy")], dtype=float)
