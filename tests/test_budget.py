@@ -338,3 +338,43 @@ def test_rail_row_without_a_page_is_soft(tmp_path):
     plan["rails"]["+5V"]["drop"]["source"] = "X.pdf#p5"
     r = [x for x in BG.table(usb_board(tmp_path, name="p.kicad_pcb"), USB, plan=plan) if x["kind"] == "rail"][0]
     assert r["hard"] is True and r["derived"] == ""
+
+
+# ---- C3: a keep-out or separation never flags a part against its own module (L4, A4)
+CT = (-1, -1, 1, 1)
+
+
+def _ind_board(tmp_path, name="ind.kicad_pcb"):
+    """U1 (20,20) with L1 (23,20) as its support part (keep-out under L1, all layers), U2 and J1 far away."""
+    return usb_board(tmp_path, gduo("L1", 23, 20, "LA", "LB", court=CT) + gduo("U2", 60, 20, "UA", "UB", court=CT), name=name)
+
+
+def test_keepout_is_not_measured_against_its_own_part_or_module(tmp_path):
+    B = _ind_board(tmp_path)
+    cons = dict(USB, placement={"keepout": {"ind": {"under": "L1", "layers": "all"}}},
+                separation=[{"name": "s", "a": ["keepout:ind"], "b": ["U*", "L*"], "min_mm": 5.0}])
+    r = BG.separation_rows(B, cons, home={"L1": "U1"})[0]
+    assert r["value"] == 35.0 and "U2" in r["refs"] and "L1" not in r["refs"] and "U1" not in r["refs"]
+
+
+def test_part_in_both_groups_is_not_measured_against_its_mates(tmp_path):
+    B = _ind_board(tmp_path, name="both.kicad_pcb")
+    cons = dict(USB, separation=[{"name": "s", "a": ["U1", "L1"], "b": ["U*"], "min_mm": 5.0}])
+    r = BG.separation_rows(B, cons)[0]
+    # U1 is in both groups: it is not measured against L1 (1.0 mm); the nearest mate left is U2 from L1 (35.0 mm)
+    assert r["value"] == 35.0 and r["refs"] == ["L1", "U2"]
+
+
+def test_two_parts_of_one_module_in_opposite_groups_are_still_measured(tmp_path):
+    B = _ind_board(tmp_path, name="opp.kicad_pcb")
+    cons = dict(USB, separation=[{"name": "s", "a": ["U1"], "b": ["L1"], "min_mm": 5.0}])
+    r = BG.separation_rows(B, cons, home={"L1": "U1"})[0]
+    assert r["verdict"] == "fail" and r["value"] == 1.0 and r["hard"] is True
+
+
+def test_flight_line_is_not_blocked_by_a_keepout_of_its_own_module(tmp_path):
+    B = _ind_board(tmp_path, name="fl.kicad_pcb")
+    cons = dict(USB, placement={"keepout": {"ind": {"under": "L1", "layers": "all"}}})
+    assert BG.flight_rows(B, cons, fixed=("U1", "J1"), home={"L1": "U1"}) == []
+    f = BG.flight_rows(B, cons, fixed=("U1", "J1"))
+    assert len(f) == 1 and f[0]["hard"] is True

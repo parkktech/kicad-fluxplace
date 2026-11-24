@@ -226,7 +226,14 @@ def keepout_rows(B, cons):
     return out
 
 
-def flight_rows(B, cons, fixed=()):
+def homes(B, cons, spec=None):
+    """{ref: the IC that owns it} for support parts whose owner is decided (clusters.DECIDED); an IC is its own home."""
+    from . import clusters as CL
+    own, _links = CL.ownership(B, None, cons, spec)
+    return {r: o["ic"] for r, o in own.items() if o.get("how") in CL.DECIDED}
+
+
+def flight_rows(B, cons, fixed=(), home=None):
     """A pair whose straight line between two of its parts crosses a routing keep-out: one row naming the pair and the
     keep-out. hard = the keep-out is on every copper layer AND both parts are fixed (no placement move and no layer change
     can fix it). A keep-out owned by one of the two parts, or one that contains one of the two points, is the part's own
@@ -237,6 +244,7 @@ def flight_rows(B, cons, fixed=()):
     names = sorted({q["net"] for q in B["pads"] if q["net"]})
     pm, legs, out = NC._pairs(names, cons), pair_legs(names, cons), []
     inside = lambda r, p: r[0] <= p[0] <= r[2] and r[1] <= p[1] <= r[3]                      # noqa: E731
+    h = lambda r: (home or {}).get(r, r)                                                     # noqa: E731
     ncu = len(B.get("copper") or [])
     for m in sorted({min(n, p) for n, p in pm.items()}):
         if not (family_of(cons.get("channel"), m, legs) or family_of(cons.get("pairs"), m, legs)):
@@ -244,7 +252,7 @@ def flight_rows(B, cons, fixed=()):
         ctr = _centres(B, m)
         for a, b, _d in mst_edges(ctr):
             for k in kos:
-                if k["owner"] in (a, b) or inside(k["rect"], ctr[a]) or inside(k["rect"], ctr[b]) or not GM.seg_hits_rect(ctr[a], ctr[b], k["rect"]):
+                if (k["owner"] and h(k["owner"]) in (h(a), h(b))) or inside(k["rect"], ctr[a]) or inside(k["rect"], ctr[b]) or not GM.seg_hits_rect(ctr[a], ctr[b], k["rect"]):
                     continue
                 out.append(row("keepout-flight", f"{m}/{pm[m]} x {k['name']}", "crossing", "count", 1, None, 0, k["source"], "REQ",
                                k["all_layers"] and a in fixed and b in fixed, refs=sorted([a, b]), nets=[m, pm[m]], layers=k["layers"],
@@ -255,12 +263,14 @@ def flight_rows(B, cons, fixed=()):
 KO = "keepout:"            # a [[separation]] item "keepout:NAME" stands for the rect of that routing keep-out (budget.keepouts)
 
 
-def separation_rows(B, cons):
+def separation_rows(B, cons, home=None):
     """One row per [[separation]]: the smallest courtyard-to-courtyard distance between group a and group b. An item
     "keepout:NAME" is the rect of a routing keep-out (an antenna cut-out has no part of its own on a carrier board)."""
     from . import geom as GM, intent as IT
     parts, out = B["parts"], []
     ko = {KO + k["name"]: k["rect"] for k in keepouts(B, cons)}
+    owner = {KO + k["name"]: k["owner"] for k in keepouts(B, cons)}
+    h = lambda r: (home or {}).get(r, r)                                                    # noqa: E731
 
     def group(items):
         items = [items] if isinstance(items, str) else list(items or [])
@@ -272,7 +282,11 @@ def separation_rows(B, cons):
             continue
         name = str(e.get("name") or f"separation{i + 1}")
         ga, gb = group(e.get("a")), group(e.get("b"))
-        best = min(((GM.rect_gap(ga[x], gb[y]), x, y) for x in sorted(ga) for y in sorted(gb) if x != y), default=None)
+        gb = {k: v for k, v in gb.items() if k not in ga}     # a ref both groups match belongs to group a: never measured against its mates
+
+        def own_ko(x, y):                                     # a keep-out against its owner part or that part's module
+            return any(owner.get(p) and h(owner[p]) == h(q) for p, q in ((x, y), (y, x)))
+        best = min(((GM.rect_gap(ga[x], gb[y]), x, y) for x in sorted(ga) for y in sorted(gb) if x != y and not own_ko(x, y)), default=None)
         has_min = e.get("min_mm") is not None
         out.append(row("separation", name, "distance", "mm", round(best[0], 2) if best else None, e.get("target_mm"), e.get("min_mm"),
                        str(e.get("source", "")), str(e.get("klass", "INF")), has_min and bool(e.get("hard", True)), minimum=True,
@@ -424,7 +438,9 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
                        not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
                        detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
                                else "no capacitor at the pin"), derived="default support limit"))
-    return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
+    home = homes(B, cons, spec)
+    return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed, home)
+            + separation_rows(B, cons, home)
             + escape_rows(B, cons) + swap_rows(B, cons))
 
 
