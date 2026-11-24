@@ -444,3 +444,23 @@ def test_beating_heartbeat_over_a_long_seed(tmp_path, monkeypatch):
     TF._beating("manifest seed", lambda: _t.sleep(0.6), stage="pipeline")   # stands in for the 12 s seed
     ts = [json.loads(l)["ts"] for l in open(stream) if json.loads(l)["kind"] == "progress"]
     assert len(ts) >= 4 and max(b - a for a, b in zip(ts, ts[1:])) < 0.3
+
+
+def test_pipeline_resume_past_pairs_seeds_manifest_inside_a_heartbeat(tmp_path, monkeypatch):
+    """M7 wiring: pipeline._run past `pairs` on a board with no manifest runs BW.seed_from_board inside TF._beating."""
+    import argparse, time as _t
+    from fluxplace import pipeline as PL, boardwrite as BW
+    stream = tmp_path / "events.jsonl"
+    monkeypatch.setenv(events.ENV_FILE, str(stream))
+    monkeypatch.setattr(TF, "HEARTBEAT_S", 0.05)
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(BW, "load_manifest", lambda b: {"nets": []})
+    monkeypatch.setattr(BW, "seed_from_board", lambda b, cons, log=print: (_t.sleep(0.6), {"nets": ["A"]})[1])   # stands in for the 12 s seed
+    monkeypatch.setitem(PL.FUNCS, "tune", lambda c, n, b: {"verdict": "pass", "board": b})
+    monkeypatch.setattr(PL, "_commit_point", lambda name, b, res: res)
+    a = argparse.Namespace(board=board, workdir=str(tmp_path / "W"), constraints=None, spec=None, from_stage="tune", to_stage="tune",
+                           status=False, flow="constructive", waive=[], force=True, api=False, answer=[])
+    PL._run(a)
+    ts = [json.loads(l) for l in open(stream)]
+    ts = [e["ts"] for e in ts if e["kind"] == "progress" and e.get("phase") == "manifest seed"]
+    assert len(ts) >= 4 and max(b - a_ for a_, b in zip(ts, ts[1:])) < 0.3
