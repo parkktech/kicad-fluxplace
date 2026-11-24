@@ -479,3 +479,17 @@ def test_pipeline_resume_past_pairs_seeds_manifest_inside_a_heartbeat(tmp_path, 
     ts = [json.loads(l) for l in open(stream)]
     ts = [e["ts"] for e in ts if e["kind"] == "progress" and e.get("phase") == "manifest seed"]
     assert len(ts) >= 4 and max(b - a_ for a_, b in zip(ts, ts[1:])) < 0.3
+
+
+def test_drc_base_open_pairing_does_not_make_h10_worse(monkeypatch):
+    """kicad-cli names a different item pair for the same open on each run (W15, 28 keys moved, 50 opens both): per-net count."""
+    def rep(a, b):
+        return {"violations": [], "unconnected_items": [
+            {"type": "unconnected_items", "items": [{"description": f"Pad {a} [N1] of T2 on F.Cu"}, {"description": f"Pad {b} [N1] of J2 on F.Cu"}]},
+            {"type": "unconnected_items", "items": [{"description": "Track [N2] on B.Cu, length 1 mm"}, {"description": "Pad 1 [N2] of C1 on B.Cu"}]}]}
+    outs = []
+    for r in (rep(3, 4), rep(5, 6)):
+        monkeypatch.setattr(TF, "_drc", lambda path, _r=r, **k: _r)
+        b = TF._drc_base("x.kicad_pcb", "kicad-cli")
+        outs.append({"hard": [{"id": "H10", "base": {"opens": b["opens"], "drc_keys": sum(b["types"].values())}}], "drc": b["keys"]})
+    assert outs[0]["hard"][0]["base"]["opens"] == 2 and TF._worse(outs[0], outs[1]) == []

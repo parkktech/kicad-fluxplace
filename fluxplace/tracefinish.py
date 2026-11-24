@@ -52,7 +52,10 @@ def _drc_base(board, kicad_cli):
     """One DRC run (drcguard.drc_json, a temp copy): key multiset, violations and opens."""
     from . import drcguard
     d = _beating("F0 drc", lambda: _drc(board, kicad_cli=kicad_cli))
-    keys, (vio, unc) = drcguard.keys_from_report(d)
+    keys, (vio, unc) = drcguard.keys_from_report(d, unconnected=False)
+    for u in d.get("unconnected_items", []):                     # opens per NET: kicad-cli names another item pair for the same open each run
+        for n in drcguard.unc_nets(u) or ["?"]:
+            keys[("Unet", (n,))] += 1
     return {"keys": {json.dumps(list(k[0:1]) + [list(k[1])]): n for k, n in keys.items()},
             "types": collections.Counter(k[0] for k in keys.elements()), "violations": vio, "opens": unc,
             "report": d.get("violations", [])}
