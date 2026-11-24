@@ -223,3 +223,15 @@ def test_rows_pass_once_the_module_is_seated(tmp_path):
     cons = _datasheets(tmp_path, dict(LAY, sw_mm=1.5, fb_mm=1.5))
     rows = {r["name"]: r for r in BU.template_rows(B, cons, SPEC)}
     assert all(r["verdict"] == "ok" for r in rows.values()), {k: (v["value"], v["verdict"]) for k, v in rows.items()}
+
+
+@pytest.mark.parametrize("side", ("F", "B"))
+def test_a_derived_keepout_is_soft_and_does_not_make_the_plan_illegal(tmp_path, side):
+    lay = dict(LAY, derived=["inductor_keepout_mm"])
+    P, iu, ix = _plan(tmp_path, lay, side, (29.0, 32.0))
+    assert P.legal(iu) and P.legal(ix)
+    mod = P.mods[iu]
+    ax, ay = mod["pos"]
+    assert [ax + mod["keepouts_soft"][0][0], ay + mod["keepouts_soft"][0][1], ax + mod["keepouts_soft"][0][2],
+            ay + mod["keepouts_soft"][0][3]] == pytest.approx((26.1, 31.0, 29.1, 33.0))
+    assert "keepouts" not in mod

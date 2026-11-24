@@ -191,10 +191,13 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             km = ((c.get("layout") or {}).get("fact") or {}).get("inductor_keepout_mm")
             if isinstance(km, (int, float)) and not isinstance(km, bool) and km > 0:
                 ax, ay = mod["pos"]                  # the inductor's courtyard grown by the margin, every layer, relative to the anchor
+                der = (c.get("layout") or {}).get("fact", {}).get("derived")   # P5 M4: a derived value is soft (D71do)
+                der = set((c.get("layout") or {}).get("fact") or {}) if der is True else {str(k) for k in der} if isinstance(der, (list, tuple)) else set()
+                key = "keepouts_soft" if "inductor_keepout_mm" in der else "keepouts"
                 for s in inside["supports"]:
                     if s["rank"] == 0 and s["ref"].startswith("L"):
                         q = B["parts"][s["ref"]]["court"]
-                        mod.setdefault("keepouts", []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
+                        mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
     return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "unseated": CL.unseated(cl, fixed)}
 
