@@ -105,6 +105,11 @@ source = "module datasheet 2.3 p.N"
 decided = "keep"
 ```
 
+Per-pin demand (`clusters.pin_demand`, rows of kind `support` with metric `pin-bypass`): an IC that owns a bypass capacitor on a
+planned rail and has no capacitor within a decade of that value inside the 5 mm support limit of its pads. `fail` (hard) when
+nothing of at least a tenth of the value is there; `over-target-pass` when only a larger capacitor is. The part table and the
+`near` rule are unchanged; the rows are information at `ready`.
+
 ## The `power plan` line (powerbudget.py, D71dc / D71dd)
 
 One row per `[power."NET"]` rail with a current, written to `<board>.power-plan.json`: allowed resistance, candidate copper per layer

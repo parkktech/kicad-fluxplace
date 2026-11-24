@@ -304,3 +304,19 @@ def test_summary_counts_fail_and_over_target_rows():
     rows = [BG.row("support", "a", "distance", "mm", 30.0, 3.0, 5.0, "s", hard=True), BG.row("pair", "b", "length", "mm", 30.0, 25.0, None, "s"),
             BG.row("swap", "c", "crossing", "count", 1, None, 0, "s"), BG.row("pair", "d", "length", "mm", 3.0, 25.0, 40.0, "s")]
     assert BG.summary(rows) == "2 fail (1 hard); 1 over target" and BG.summary(rows[3:]) == ""
+
+
+# ---- placer step 3b: per-pin demand rows
+def test_pin_demand_rows_join_the_table_and_name_the_part_and_the_ic(tmp_path):
+    plan = {"pin_demand": [
+        {"ic": "U412", "pad": "7", "net": "VBATT", "parts": ["C419"], "uf": 0.1, "dist_mm": 54.03, "limit_mm": 5.0,
+         "cover": {"ref": "C1", "uf": 4.7, "dist_mm": 2.12}, "verdict": "over-target-pass"},
+        {"ic": "U5", "pad": "32", "net": "+1V8", "parts": ["C54", "C55"], "uf": 1.0, "dist_mm": 36.44, "limit_mm": 5.0, "cover": None, "verdict": "fail"}]}
+    rows = [r for r in BG.table(usb_board(tmp_path), USB, plan=plan) if r["metric"] == "pin-bypass"]
+    a, b = rows
+    assert (a["kind"], a["name"], a["value"], a["target"], a["max"], a["verdict"], a["hard"]) == \
+        ("support", "U412.7 own bypass (C419)", 54.03, 5.0, None, "over-target-pass", False)
+    assert a["refs"] == ["C419", "U412"] and a["detail"] == "only a larger capacitor at the pin: C1 4.7 uF at 2.12 mm"
+    assert (b["name"], b["max"], b["verdict"], b["hard"], b["refs"], b["detail"]) == \
+        ("U5.32 own bypass (C54, C55)", 5.0, "fail", True, ["C54", "C55", "U5"], "no capacitor at the pin")
+    assert BG.summary(rows) == "1 fail (1 hard); 1 over target"

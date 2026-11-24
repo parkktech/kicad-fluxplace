@@ -365,6 +365,13 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
         out.append(row("support", f"{s['ref']} -> {s['serves']}", "distance", "mm", s["dist_mm"] if s["sure"] else None, lim["target"],
                        lim["max"], lim["source"], lim["klass"], bool(s["sure"]), refs=[s["ref"], s["serves"].split(".")[0]],
                        nets=[s["net"]], detail=f"{s['role']}, owner by {s['how']}"))
+    for p in (plan or {}).get("pin_demand") or []:
+        cv = p.get("cover")
+        out.append(row("support", f"{p['ic']}.{p['pad']} own bypass ({', '.join(p['parts'])})", "pin-bypass", "mm", p["dist_mm"], p["limit_mm"],
+                       None if cv else p["limit_mm"], "per-pin demand: the IC's own bypass within the support limit (clusters.pin_demand)", "INF",
+                       not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
+                       detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
+                               else "no capacitor at the pin")))
     return (out + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
             + escape_rows(B, cons) + swap_rows(B, cons))
 
