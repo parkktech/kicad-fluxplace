@@ -29,17 +29,17 @@ def _drc(path, **kw):
     return drcguard.drc_json(path, **kw)
 
 
-def _heartbeat(stop, label):
+def _heartbeat(stop, label, stage=STAGE):
     """progress every HEARTBEAT_S while the DRC child runs (the only long step)."""
     while not stop.wait(HEARTBEAT_S):
-        events.emit("progress", STAGE, phase=label, note="drc running")
+        events.emit("progress", stage, phase=label, note="drc running")
 
 
-def _beating(label, fn):
-    """fn() with a progress event every HEARTBEAT_S while it runs (DRC and the kicad-cli pair lengths are the long steps)."""
+def _beating(label, fn, stage=STAGE):
+    """fn() with a progress event every HEARTBEAT_S while it runs (DRC, pair lengths and the manifest seed are the long steps)."""
     stop = threading.Event()
-    events.emit("progress", STAGE, phase=label, note="start")
-    t = threading.Thread(target=_heartbeat, args=(stop, label), daemon=True)
+    events.emit("progress", stage, phase=label, note="start")
+    t = threading.Thread(target=_heartbeat, args=(stop, label, stage), daemon=True)
     t.start()
     try:
         return fn()
@@ -69,7 +69,7 @@ def _hard_row(hid, m, src, limit=None):
     return {"id": hid, "base": m["base"], "limit": m.get("limit", limit), "source": src, "ok": None}
 
 
-def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None):
+def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None, phase="F0"):
     """Base record: HARD rows (H1-H10) and the sites of every PRACTICE rule. `audit` (pairaudit result) is passed back in for F8
     so the 2-minute kicad-cli length run happens once (no pass edits copper in T1b)."""
     from . import tfmeasure as TM
@@ -82,7 +82,7 @@ def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None):
     for s in B["segs"]:
         c = cls.get(s["net"], "GEN")
         widths[c] = s["w"] if widths[c] is None else min(widths[c], s["w"])
-    events.emit("progress", STAGE, phase="F0 measure", note="HARD rows")
+    events.emit("progress", STAGE, phase=f"{phase} measure", note="HARD rows")
     hard = [{"id": "H1", "base": _count_type(types, "clearance"), "limit": 0, "source": "DRC", "ok": None},
             {"id": "H2", "base": {k: v for k, v in widths.items()}, "limit": H_MIN_WIDTH, "source": "FAB",
              "ok": all(v >= H_MIN_WIDTH for v in widths.values() if v is not None)},
@@ -109,8 +109,8 @@ def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None):
     sites["M9"] = TM.m9_sites(B)
     sites["M2"] = TM.drc_sites(base["report"], "copper_sliver")
     sites["M4"] = TM.drc_sites(base["report"], "isolated_copper")
-    for rid, fn in sorted(TM.SITES.items()):
-        events.emit("progress", STAGE, phase=f"F0 measure {rid}", note="rule")
+    for i, (rid, fn) in enumerate(sorted(TM.SITES.items())):
+        events.emit("progress", STAGE, phase=f"{phase} measure {rid}", note="rule", pct=round(100.0 * i / len(TM.SITES), 1))
         sites[rid] = fn(B, X)
     return {"hard": hard, "drc": {str(k): v for k, v in base["keys"].items()}, "sites": sites, "facts": TM.facts(B, X),
             "violations": base["violations"], "opens": base["opens"], "_audit": audit, "_X": X}
@@ -144,10 +144,12 @@ def practice_rows(rec, cls, rules):
     return rows, not_measured
 
 
-def _emit_criteria(phase, rec, rows, scores):
+def _emit_criteria(phase, rec, rows, scores, worse=()):
     for h in rec["hard"]:
-        events.emit("criteria", STAGE, phase=phase, hard=True, id=h["id"], base=h.get("base"), limit=h.get("limit"),
-                    ok=h.get("ok"), note=h.get("not_measured", ""))
+        ok = (h["id"] not in worse) if phase == "F8" else h.get("ok")
+        text = h.get("not_measured") or f"{h['id']} base {h.get('base')} limit {h.get('limit')}"
+        events.emit("criteria", STAGE, phase=phase, hard=True, id=h["id"], value=h.get("base"), text=text, base=h.get("base"),
+                    limit=h.get("limit"), ok=ok, note=h.get("not_measured", ""))
     for r in rows:
         events.emit("criteria", STAGE, phase=phase, hard=False, id=r["id"], ok=None, value=r["value"],
                     limit=r["limit"], cls=r["cls"], already=r["already"], applied=r["applied"],
@@ -190,18 +192,18 @@ def stage(c, n, board):
     rows0, nm = practice_rows(rec0, cls, rules)
     sc0 = TM.class_scores(rows0, rules)
     _emit_criteria("F0", rec0, rows0, sc0)
-    rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"])   # F8 = F0 again (no pass edits copper yet)
+    rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"], phase="F8")   # F8 = F0 again (no pass edits copper yet)
     rows8, _ = practice_rows(rec8, cls, rules)
     sc8 = TM.class_scores(rows8, rules)
-    _emit_criteria("F8", rec8, rows8, sc8)
     worse = _worse(rec0, rec8)
+    _emit_criteria("F8", rec8, rows8, sc8, worse)
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copyfile(board, out)
     fj = {"stage": STAGE, "passes": {"F0": "done", "F8": "done"},
           "not_built": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"],
           "legality": rec8["hard"], "score": rows8, "not_measured_rules": nm, "facts": rec8["facts"],
           "degenerate": rec8["facts"]["degenerate"], "worse_hard": worse,
-          "class_score": {"F0": sc0, "F8": sc8},
+          "class_score": {"F0": sc0, "F8": sc8}, "sites_total": {k: len(v) for k, v in rec8["sites"].items()},
           "sites": {k: [x for x in v if x["state"] != "already"][:200] for k, v in rec8["sites"].items()}}
     fpath = os.path.join(d, "finish.json")
     with open(fpath, "w", encoding="utf-8") as f:

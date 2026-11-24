@@ -415,3 +415,32 @@ def test_c14_branch_75_open_90_already():
         return [seg((0, 0), (5, 0)), seg((5, 0), (10, 0)), seg((5, 0), (5 + 3 * math.cos(t), 3 * math.sin(t)))]
     assert _states(TM.c14_sites(model(segs(75)))) == ["open"]
     assert _states(TM.c14_sites(model(segs(90)))) == ["already"]
+
+
+def test_stream_f8_labels_pct_hard_ok_and_sites_total(tmp_path, monkeypatch):
+    stream = tmp_path / "events.jsonl"
+    monkeypatch.setenv(events.ENV_FILE, str(stream))
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    c = _Ctx(tmp_path / "w", {"finish": {"enabled": True}})
+    TF.stage(c, 12, board)
+    evs = [json.loads(l) for l in open(stream)]
+    prog = [e for e in evs if e["kind"] == "progress"]
+    assert any(str(e.get("phase", "")).startswith("F8 measure") for e in prog)
+    pcts = [e["pct"] for e in prog if "pct" in e and str(e.get("phase", "")).startswith("F8")]
+    assert pcts and pcts == sorted(pcts) and 0 <= pcts[0] and pcts[-1] <= 100
+    crit = [e for e in evs if e["kind"] == "criteria" and e.get("phase") == "F8" and e.get("hard")]
+    assert crit and all("value" in e and "text" in e for e in crit)
+    fj = json.load(open(os.path.join(c.dir(12, "trace-finish"), "finish.json")))
+    assert all(e["ok"] == (e["id"] not in fj["worse_hard"]) for e in crit)
+    assert set(fj["sites_total"]) == set(fj["sites"])
+
+
+def test_beating_heartbeat_over_a_long_seed(tmp_path, monkeypatch):
+    import time as _t
+    stream = tmp_path / "events.jsonl"
+    monkeypatch.setenv(events.ENV_FILE, str(stream))
+    monkeypatch.setattr(TF, "HEARTBEAT_S", 0.05)
+    TF._beating("manifest seed", lambda: _t.sleep(0.6), stage="pipeline")   # stands in for the 12 s seed
+    ts = [json.loads(l)["ts"] for l in open(stream) if json.loads(l)["kind"] == "progress"]
+    assert len(ts) >= 4 and max(b - a for a, b in zip(ts, ts[1:])) < 0.3

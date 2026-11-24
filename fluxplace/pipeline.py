@@ -1702,7 +1702,8 @@ def _run(a):
         try:
             _man = BW_.load_manifest(board)
             if not _man["nets"]:
-                _man = BW_.seed_from_board(board, c.cons, log=print)
+                from . import tracefinish as TF_
+                _man = TF_._beating("manifest seed", lambda: BW_.seed_from_board(board, c.cons, log=print), stage="pipeline")
                 print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
             elif BW_.is_stale(board, _man):
                 BW_.fresh_manifest(board, log=print)
