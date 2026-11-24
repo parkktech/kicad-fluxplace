@@ -137,3 +137,10 @@ def test_name_pair_without_a_family_is_open_and_named():
     cls["BT1_DM"]["override"] = True                                # a per-net budget is a class too
     line = RDY.pair_class_line(cons, cls)
     assert line["status"] == RDY.PASS and "3 name pair(s)" in line["detail"] and "open_items" not in line
+
+
+def test_fixed_over_budget_names_a_derived_limit():
+    row = _row("C9", 30.0)
+    row["limit"]["derived"] = "default"
+    f = FR.findings({"C9"}, _cons(C9={"reason": "owner", "decision": "D71dh"}), {"C9": [row]})
+    assert f[0]["code"] == "FIXED_OVER_BUDGET" and f[0]["msg"].endswith("(derived limit)")

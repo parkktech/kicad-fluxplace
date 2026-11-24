@@ -429,3 +429,21 @@ def test_datasheet_decap_is_hard_default_is_soft(tmp_path):
     c1 = _sup(B, PB.CONS, spec, fact)["C1"]
     assert c1["limit"]["klass"] == "REQ" and c1["limit"]["derived"] == ""
     assert _sup(B, PB.CONS)["C1"]["limit"]["derived"] == "default"
+
+
+def test_support_distance_does_not_change_when_the_pair_is_rotated(tmp_path):
+    import math
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    dists = []
+    for a in (0, 90, 180, 270):
+        t = math.radians(a)
+        rot = lambda x, y: (x * math.cos(t) + y * math.sin(t), -x * math.sin(t) + y * math.cos(t))          # KiCad footprint rotation
+        cx, cy = 10 + rot(-4.0, -1.0)[0], 10 + rot(-4.0, -1.0)[1]                                              # cap moves with the IC
+        b = g.ic("U101", 10, 10, ["VOUT", "GND", "A1", "A2", "A3", "A4"], pitch=1.0, angle=a)
+        b += g.two("C1", cx, cy, "VOUT", "GND", angle=a).replace('(property "Reference" "C1")', '(property "Reference" "C1") (property "Value" "100nF")')
+        B = RD.load(g.board(tmp_path, b, name=f"rot{a}.kicad_pcb", outline=(0, 0, 80, 60)))
+        cl, _ = CL.build(B, _PLANNED)
+        dists.append(next(x["dist"] for c in cl for x in c["supports"] if x["ref"] == "C1"))
+    assert max(dists) - min(dists) <= 0.01

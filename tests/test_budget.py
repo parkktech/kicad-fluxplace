@@ -405,3 +405,44 @@ def test_escape_rows_do_not_change_with_rotation(tmp_path):
         seen.append(sorted((r["name"], r["value"], r["pitch_mm"], r["pad_mm"], r["gap_mm"], r["rows_deep"], r["layers_needed"],
                             r["corridor_mm"]) for r in BG.escape_rows(B, cons)))
     assert all(s == seen[0] for s in seen) and len(seen[0]) == 2
+
+
+# ---- C5: fixtures that must FAIL each row kind (L6, B2, A6)
+def test_rail_edge_over_its_reach_fails_in_the_table(tmp_path):
+    import copy
+    plan = copy.deepcopy(PLAN)
+    plan["rails"]["+5V"]["edges"][0]["dist_mm"] = 90.0                     # reach max 84.89
+    r = [x for x in BG.table(usb_board(tmp_path), USB, plan=plan) if x["kind"] == "rail"][0]
+    assert r["verdict"] == "fail" and r["hard"] is True and r["value"] == 90.0
+
+
+_LOSS_ROWS = [{"type": "copper", "name": "F.Cu", "thickness": 0.035, "epsilon_r": 4.4},
+              {"type": "prepreg", "name": None, "thickness": 0.1, "epsilon_r": 4.1},
+              {"type": "copper", "name": "In1.Cu", "thickness": 0.0152, "epsilon_r": 4.4},
+              {"type": "core", "name": None, "thickness": 1.2, "epsilon_r": 4.5},
+              {"type": "copper", "name": "B.Cu", "thickness": 0.035, "epsilon_r": 4.4}]
+
+
+def test_pair_over_its_loss_fails(tmp_path):
+    stack = (_LOSS_ROWS, ["In1.Cu"], ["F.Cu", "B.Cu"])
+    cons = {"pairs": USB["pairs"], "channel": {"USB_": {"loss_db_max": 0.01, "freq_ghz": 2.5, "source": "x p.2"}}}
+    lo = _by(BG.pair_rows(usb_board(tmp_path), cons, stack), "loss")
+    assert lo["verdict"] == "fail" and lo["hard"] is True and lo["max"] == 0.01
+
+
+def test_pair_endpoints_too_far_apart_fail(tmp_path):
+    cons = {"pairs": USB["pairs"], "channel": {"USB_": {"length_mm_max": 30.0, "source": "x p.2"}}}
+    ep = _by(BG.pair_rows(usb_board(tmp_path), cons), "endpoint")
+    assert ep["verdict"] == "fail" and ep["hard"] is False and ep["derived"] == f"endpoint = length / detour {CH.DETOUR:g}"
+
+
+def test_separation_and_flight_rows_do_not_change_with_rotation(tmp_path):
+    seps, flights = [], []
+    for a in (0, 90, 180, 270):
+        B = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "USB_D_P", "USB_D_N", court=CT, angle=a)
+                             + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=CT, angle=a), name=f"rot{a}.kicad_pcb"))
+        cons = dict(USB, separation=[{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 5.0}])
+        seps.append(BG.separation_rows(B, cons)[0]["value"])
+        flights.append(len(BG.flight_rows(B, USB)))
+    # both courtyards are 2 mm squares: the gap is 60 - 20 - 2 = 38 mm at every rotation
+    assert all(abs(v - 38.0) <= 0.01 for v in seps) and len(set(flights)) == 1
