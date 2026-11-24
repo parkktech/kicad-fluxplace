@@ -10,10 +10,13 @@ source / loads {spec, pads, how}, copper [{layer, kind, width_ipc_mm, mohm_sq, v
 choice {kind, layers, width_mm, why}, edges [{load, dist_mm, len_mm, width_req_mm, est}] (edges need a board; [] without).
 
 Reach (L_max) is the drop equation solved for length: L_max = (R_allow - R_vias) x W / (Rsq(T_hot, t_layer) x DETOUR x CROWDING).
-Rsq comes from the stackup copper of THAT layer at the hot temperature ([env] temp_max_c, default 85), so the same edge on
-0.5 oz copper has half the reach of 1 oz. DETOUR (channel, 1.15) is Manhattan -> routed; CROWDING (1.25, INF until a routed
+Rsq comes from the stackup copper of THAT layer at the hot COPPER temperature: ambient ([env] temp_max_c, default 85) plus the
+trace rise the rail's IPC width was sized for (power.rail rise_c), so the same edge on 0.5 oz copper has half the reach of 1 oz.
+A [[dcdrop]] temp_c states the copper temperature itself and wins. DETOUR (channel, 1.15) is Manhattan -> routed; CROWDING (1.25, INF until a routed
 board measures it; [route] power_crowding overrides) is current crowding at the pads. Vias: a layer change at each end
 costs `vias_needed` parallel barrels (current / rated amps per via, power.rail).
+A rail whose series drop is the design (a sense resistor, a bias inductor, a return net) carries
+`[power."NET"] dcdrop_exempt = "reason"`: no budget, no reach, listed as INFO POWER_PLAN_EXEMPT (the reason is required).
 Nothing here names a board, a reference or an MPN.
 """
 import math
@@ -38,6 +41,13 @@ def hot_c(cons):
 
 def crowding(cons):
     return float((((cons or {}).get("route") or {}).get("power_crowding")) or CROWDING)
+
+
+def exempt_reason(cons, net):
+    """The stated reason a rail has no [[dcdrop]] budget by design (`[power."NET"] dcdrop_exempt = "reason"`), else None."""
+    p = ((cons or {}).get("power") or {}).get(net)
+    v = p.get("dcdrop_exempt") if isinstance(p, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
 
 
 def floor_mm(cons):
@@ -260,7 +270,9 @@ def _choose(rail, ends):
     reach = lambda c: c["reach_mm"]["max"] or 0.0
     ok = [c for c in cs if d and reach(c) >= far]
     if ok:
-        c, why = sorted(ok, key=lambda c: c["kind"] != "outer")[0], "first outer layer holding the longest edge" if far else "outer copper at its IPC width"
+        c = sorted(ok, key=lambda c: c["kind"] != "outer")[0]
+        why = "outer copper at its IPC width" if not far else ("first outer layer holding the longest edge" if c["kind"] == "outer" else
+                                                               "no outer layer holds the longest edge at its IPC width: first inner layer that does")
     elif d:
         c, why = max(cs, key=reach), "no layer holds the longest edge: longest reach at the max budget"
     else:
@@ -285,7 +297,9 @@ def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_pa
         if not s or not s.get("current_a"):
             continue
         d = dc_by.get(net)
-        rail = {"net": net, "current_a": s["current_a"], "sizing": s, "d": d, "drop": _drop(d), "temp_c": float((d or {}).get("temp_c", hot)),
+        rise = float(s.get("rise_c") or 0.0)
+        rail = {"net": net, "current_a": s["current_a"], "sizing": s, "d": d, "drop": _drop(d), "rise_c": rise,
+                "temp_c": float((d or {}).get("temp_c", hot + rise)), "exempt": None if d else exempt_reason(cons, net),
                 "detour": CH.DETOUR, "crowding": crowd, "floor_mm": flo, "via_drill_mm": s.get("via_drill_mm"), "vias_needed": s.get("vias_needed")}
         amps = float(s["current_a"])
         rail["r_allow_mohm"] = {t: (float(d["drop_mv_" + t]) / amps if d and d.get("drop_mv_" + t) is not None else None) for t in TIERS}
@@ -317,9 +331,12 @@ def build(cons, B=None, spec=None, rows=None, facts=None, mpn_map=None, board_pa
 
 def _findings(rail, have_board):
     n, f = rail["net"], []
+    if rail["drop"] is None and rail.get("exempt"):
+        return [{"code": "POWER_PLAN_EXEMPT", "level": "INFO", "net": n,
+                 "msg": f"{n}: {rail['current_a']:g} A, no drop budget by design ([power] dcdrop_exempt: {rail['exempt']})"}]
     if rail["drop"] is None:
         f.append({"code": "POWER_PLAN_NO_BUDGET", "level": "FAIL", "net": n,
-                  "msg": f"{n}: {rail['current_a']:g} A in [power] and no [[dcdrop]] row (D71dd); add one with drop_mv_max/target, from, to and a cited source"})
+                  "msg": f"{n}: {rail['current_a']:g} A in [power] and no [[dcdrop]] row (D71dd); add one with drop_mv_max/target, from, to and a cited source, or state why the rail has none: [power.\"{n}\"] dcdrop_exempt = \"reason\""})
     if have_board and (rail["source"] is None or not rail["source"]["pads"]):
         f.append({"code": "POWER_SOURCE_UNKNOWN", "level": "OPEN", "net": n,
                   "msg": f"{n}: no source resolved (set [[dcdrop]] from or [power.\"{n}\"] source)" if rail["source"] is None else
@@ -337,12 +354,23 @@ def _findings(rail, have_board):
 
 
 # ------------------------------------------------------------------ the one support table
+_FACTS = {}
+
+
 def facts_for(cons, spec=None, anchors=()):
     """({mpn: facts}, mpn_map) from the datasheet dir of [docs] datasheets (cited facts only); ({}, {}) when there is none."""
-    from . import elec as EL, parts as P
+    import os
+    from . import elec as EL, parts as P, partdocs as PD
     ds = P.resolve_dir((((cons or {}).get("docs") or {}).get("datasheets")), anchors)
+    facts = {}
     try:
-        facts = EL.load_facts(ds) if ds and __import__("os").path.isdir(ds) else {}
+        if ds and os.path.isdir(ds):
+            mp = PD.manifest_path(ds)
+            key = (os.path.abspath(mp), os.stat(mp).st_mtime_ns if os.path.exists(mp) else None)
+            if key not in _FACTS:                # one read per manifest version: clusters.build runs inside placer loops
+                _FACTS.clear()
+                _FACTS[key] = EL.load_facts(ds)
+            facts = _FACTS[key]
     except (OSError, ValueError):
         facts = {}
     return facts, {c["ref"]: c["mpn"] for c in (spec or {}).get("components", []) if isinstance(c, dict) and c.get("mpn")}
@@ -354,13 +382,15 @@ def _planned(cons, net):
 
 
 def role_of(part, ref, net, info, cons):
-    """Role of a support part: loop (switch node), clock (crystal), bulk (> BULK_UF on a planned rail), bypass (capacitor), sense."""
+    """Role of a support part: loop (switch node), clock (crystal), bulk (> BULK_UF to ground on a planned rail), bypass (capacitor
+    to ground), sense (everything else: divider, sense resistor, series capacitor)."""
     from . import clusters as CL
     if info and info["class"] == "switch_node" and info.get("budget"):
         return "loop"
     if info and info["class"] == "clock" and info.get("reason") == "crystal/oscillator":
         return "clock"
-    if ref.startswith("C"):
+    from . import netclass as NC
+    if ref.startswith("C") and any(q["net"] != net and NC.is_ground(q["net"] or "") for q in part["pads"]):     # rail / pin to ground
         uf = CL.cap_uf(part.get("value"))
         return "bulk" if (uf or 0) > BULK_UF and _planned(cons, net) else "bypass"
     return "sense"
@@ -381,6 +411,9 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
     if role in ("loop", "clock"):
         b = float(info["budget"])
         row = {"target": b, "max": b, "source": f"derived: netclass {info['class']} budget ({NC.BASIS.get(info['class'], 'class budget')})", "klass": "INF"}
+    elif role == "bypass" and info and info["class"] == "bypass" and info.get("budget"):
+        b = float(info["budget"])                # a pin's own capacitor (IC pin to cap to ground): the class budget is the limit, as before P3
+        row = {"target": b, "max": b, "source": f"derived: netclass bypass budget ({NC.BASIS['bypass']})", "klass": "INF"}
     elif role == "bypass":
         row = {"target": NC.BUDGET["bypass"], "max": BYPASS_MAX_MM, "klass": "INF",
                "source": f"target derived: netclass bypass ({NC.BASIS['bypass']}); max default {BYPASS_MAX_MM:g} mm (the pre-budget gate limit)"}
@@ -430,7 +463,9 @@ def summary(plan):
     over = [(n, e["load"]) for n, r in rails.items() for e in r["edges"]
             if e["est"].get("verdict") == "fail" or (e["reach_mm"]["max"] is not None and e["dist_mm"] > e["reach_mm"]["max"])]
     sup = [x for x in plan.get("supports", []) if x["verdict"] == "fail"]
-    return (f"{len(rails)} rail(s) planned at {plan['hot_c']:g} C (crowding {plan['crowding']:g}); "
+    ex = sorted(n for n, r in rails.items() if r.get("exempt"))
+    return (f"{len(rails) - len(ex)} rail(s) planned at {plan['hot_c']:g} C ambient + trace rise (crowding {plan['crowding']:g}); "
+            + (f"{len(ex)} exempt by design ({', '.join(ex)}); " if ex else "")
             + (f"L_max {min(reach):g}..{max(reach):g} mm; " if reach else "")
             + f"{len(over)} edge(s) over the max budget, {len(sup)} support(s) over their limit")
 

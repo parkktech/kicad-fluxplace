@@ -118,3 +118,51 @@ def test_identity_routed_fixture_contrib_rows_replayed_as_synth_paths():
             sq[k] = sq.get(k, 0.0) + v
     replay = CH.dcdrop_row(cons["dcdrop"][0], {"found": True, "layer_sq": sq, "via_list": path["via_list"]}, TC.ROWS)
     assert abs(replay["metrics"][0]["value"] - row["metrics"][0]["value"]) < 0.1                # mV, same code
+
+
+# ---- step-1 evaluation (D71di): exemption, copper temperature, layer choice text
+def test_exempt_rail_is_info_not_fail_and_blank_reason_still_fails(tmp_path):
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"] = []
+    c["power"]["VOUT"].pop("source")
+    c["power"]["VOUT"]["dcdrop_exempt"] = "series sense resistor: the drop is the design"
+    out = PBG.build(c, RD.load(PB.board(tmp_path)), rows=PB.rows())
+    assert [(f["code"], f["level"]) for f in out["findings"]] == [("POWER_PLAN_EXEMPT", "INFO")]          # and no source question
+    assert "series sense resistor" in out["findings"][0]["msg"] and out["rails"]["VOUT"]["exempt"]
+    assert "1 exempt by design (VOUT)" in PBG.summary(out)
+    c["power"]["VOUT"]["dcdrop_exempt"] = "  "                                                       # the reason is required
+    out = PBG.build(c, None, rows=PB.rows())
+    assert [(f["code"], f["level"]) for f in out["findings"]] == [("POWER_PLAN_NO_BUDGET", "FAIL")] and "dcdrop_exempt" in out["findings"][0]["msg"]
+    c = copy.deepcopy(PB.CONS)                                                                       # a row wins over the exemption
+    c["power"]["VOUT"]["dcdrop_exempt"] = "x"
+    assert PBG.build(c, None, rows=PB.rows())["rails"]["VOUT"]["exempt"] is None
+
+
+def test_copper_is_planned_at_ambient_plus_the_trace_rise_and_a_row_temp_wins():
+    r = PBG.build(PB.CONS, None, rows=PB.rows())["rails"]["VOUT"]
+    assert r["rise_c"] == r["sizing"]["rise_c"] > 0 and r["temp_c"] == 85.0 + r["rise_c"]
+    f = next(c for c in r["copper"] if c["layer"] == "F.Cu")
+    assert abs(f["mohm_sq"] - PBG.sheet_mohm_sq(PB.rows(), "F.Cu", r["temp_c"])) < 1e-3
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"][0]["temp_c"] = 60.0
+    assert PBG.build(c, None, rows=PB.rows())["rails"]["VOUT"]["temp_c"] == 60.0
+
+
+def test_choice_says_inner_when_no_outer_layer_holds_the_edge():
+    cu = [{"layer": "F.Cu", "kind": "outer", "width_ipc_mm": 0.3, "reach_mm": {"max": 10.0}},
+          {"layer": "In2.Cu", "kind": "inner", "width_ipc_mm": 0.7, "reach_mm": {"max": 40.0}}]
+    rail = {"copper": cu, "drop": {"max_mv": 100}, "sizing": {}}
+    ch = PBG._choose(rail, [(None, None, None, 30.0)])
+    assert ch["layers"] == ["In2.Cu"] and "inner" in ch["why"]
+    assert "outer layer holding" in PBG._choose(rail, [(None, None, None, 5.0)])["why"]
+
+
+def test_role_needs_a_ground_side_and_a_pin_capacitor_keeps_the_class_budget(tmp_path):
+    B = RD.load(PB.board(tmp_path))
+    series = {"value": "100nF", "pads": [{"net": "A"}, {"net": "B"}]}
+    assert PBG.role_of(series, "C9", "A", None, PB.CONS) == "sense"                                  # a series capacitor is not a bypass
+    assert PBG.role_of(B["parts"]["C1"], "C1", "VOUT", None, PB.CONS) == "bypass"
+    info = {"class": "bypass", "budget": 3.0, "reason": "IC pin to cap to ground", "weight": 8.0}
+    row = PBG.support_row(B, PB.CONS, None, "C1", "VOUT", info)
+    assert (row["target"], row["max"]) == (3.0, 3.0)                                                 # the pre-P3 gate (3 mm) does not move
+    assert (PBG.support_row(B, PB.CONS, None, "C1", "VOUT", None)["max"]) == 5.0

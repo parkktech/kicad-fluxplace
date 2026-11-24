@@ -23,6 +23,7 @@ from . import netclass as NC
 
 SUPPORT = re.compile(r"^(C|R|L|FB|Y|X|XO)\d")
 LANE_MM = {True: 1.0, False: 0.5}
+DECIDED = ("block", "refdes", "group")      # owner fixed by the netlist's blocks / references / the rail's source-load groups (not a guess)
 
 
 def block(ref):
@@ -111,8 +112,99 @@ def ownership(B, cls=None, cons=None, spec=None, min_pads=5):
         load[(net, ic)] += 1
         tgt = nearest_pad(ic, net, p)
         own[ref] = {"ic": ic, "net": net, "pad": tgt["num"], "via": p["num"], "how": how}
+    _by_group(B, cons, spec, own)
+    _interchange(B, cons, own)
     _explicit(B, cons, own, links)
     return own, links
+
+
+def _interchange(B, cons, own):
+    """Identical parts are interchangeable: bulk capacitors (> powerbudget.BULK_UF) of a planned rail with the same net, value and
+    footprint and a decided owner (block / refdes / group) are re-dealt among their owners' pins so the summed squared distance
+    is least (each owner keeps its count of each value). Two equal parts that swapped places are two served pins; a part parked
+    at a pin that owns no such part stays far. Deterministic: nearest pair first, then pairwise exchange until no gain.
+    (Bypass parts need none of this: build's `near` rule already lets any pin of the rail take them.)"""
+    from . import powerbudget as PB
+    parts, pads = B["parts"], NC.net_pads(B)
+    groups = defaultdict(list)
+    for ref, o in own.items():
+        if o["how"] in DECIDED and ref.startswith("C") and (cap_uf(parts[ref].get("value")) or 0) > PB.BULK_UF and PB._planned(cons, o["net"]):
+            groups[(o["net"], str(parts[ref].get("value")), str(parts[ref].get("fp")))].append(ref)
+    for (net, _v, _f), refs in sorted(groups.items()):
+        refs.sort()
+        slots = [own[r]["ic"] for r in refs]
+        if len(set(slots)) < 2:
+            continue
+        via = {r: next(q for q in parts[r]["pads"] if q["num"] == own[r]["via"]) for r in refs}
+        near = {}
+        for r in refs:
+            for ic in set(slots):
+                near[(r, ic)] = min(((q["x"] - via[r]["x"]) ** 2 + (q["y"] - via[r]["y"]) ** 2, str(q["num"]), q) for q in pads[net] if q["ref"] == ic)
+        cost = lambda r, ic: near[(r, ic)][0]
+        free, got = list(range(len(slots))), {}
+        for _c, r, i in sorted((cost(r, slots[i]), r, i) for r in refs for i in range(len(slots))):
+            if r not in got and i in free:
+                got[r] = i
+                free.remove(i)
+        better = True
+        while better:
+            better = False
+            for a in refs:
+                for b in refs:
+                    if a < b and cost(a, slots[got[b]]) + cost(b, slots[got[a]]) < cost(a, slots[got[a]]) + cost(b, slots[got[b]]) - 1e-9:
+                        got[a], got[b] = got[b], got[a]
+                        better = True
+        for r in refs:
+            ic = slots[got[r]]
+            if ic != own[r]["ic"]:
+                own[r] = dict(own[r], ic=ic, pad=near[(r, ic)][2]["num"], swapped=own[r]["ic"])
+
+
+_BLOCKS = {}
+
+
+def _block_of(B, cons, spec):
+    """{ref: functional block} (blocks.of_board), kept per netlist: the grouping does not depend on the placement."""
+    from . import blocks as BK
+    key = (hash(tuple(sorted((q["ref"], str(q["num"]), q["net"] or "") for q in B["pads"]))),
+           repr(sorted(((cons or {}).get("blocks") or {}).items())), repr(sorted((((cons or {}).get("schematic") or {}).get("blocks") or {}).items())),
+           spec if isinstance(spec, str) else None)
+    if key not in _BLOCKS:
+        _BLOCKS.clear()
+        try:
+            _BLOCKS[key] = BK.of_board(B, cons, spec)["of"]
+        except Exception:               # noqa: BLE001  (a block clash is ready's finding, not ours: no block rule then)
+            _BLOCKS[key] = {}
+    return _BLOCKS[key]
+
+
+def _by_group(B, cons, spec, own):
+    """A guessed (`spread`) support part of a planned rail that sits in the same functional block as exactly ONE source or load
+    group of that rail (powerbudget.resolve_ends) serves that group: its nearest pad of the group on the net. how = "group".
+    Two groups in the block, none, or a group that is itself a two-pad part: the guess stays and `ready` asks."""
+    from . import powerbudget as PB
+    guess = sorted(r for r, o in own.items() if o["how"] == "spread" and PB._planned(cons, o["net"]))
+    if not guess:
+        return
+    parts, of, ends = B["parts"], _block_of(B, cons, spec), {}
+    facts, mpn_map = PB.facts_for(cons, spec)
+    for ref in guess:
+        o = own[ref]
+        net = o["net"]
+        if net not in ends:
+            src, loads = PB.resolve_ends(B, cons, net, spec, facts, mpn_map)
+            g = defaultdict(set)
+            for e in ([src] if src else []) + loads:
+                for r, num in e["pads"]:
+                    g[r].add(str(num))
+            ends[net] = g
+        same = [r for r in sorted(ends[net]) if of.get(r) is not None and of.get(r) == of.get(ref) and not _is_support(r, parts[r])]
+        if len(same) != 1:
+            continue
+        via = next(q for q in parts[ref]["pads"] if q["num"] == o["via"])
+        pin = min((q for q in parts[same[0]]["pads"] if q["net"] == net and str(q["num"]) in ends[net][same[0]]),
+                  key=lambda q: math.hypot(q["x"] - via["x"], q["y"] - via["y"]))
+        own[ref] = {"ic": same[0], "net": net, "pad": pin["num"], "via": o["via"], "how": "group"}
 
 
 def _explicit(B, cons, own, links):
@@ -173,21 +265,25 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
     cls = NC.classify(B, cons, spec)
     own, links = ownership(B, cls, cons, spec)
     parts = B["parts"]
+    if facts is None:
+        facts, mpn_map = PB.facts_for(cons, spec)          # once per build (cached per manifest), never per part
     by = defaultdict(list)
     for ref, o in own.items():
         part = parts[ref]
         sp = next(p for p in part["pads"] if p["num"] == o["via"])
         pin = next(p for p in parts[o["ic"]]["pads"] if p["num"] == o["pad"])
         info = cls.get(o["net"])
-        row = PB.support_row(B, cons, spec, ref, o["net"], info, facts=facts or {}, mpn_map=mpn_map)    # default limit (no served pin yet)
+        row = PB.support_row(B, cons, spec, ref, o["net"], info, facts=facts, mpn_map=mpn_map)    # default limit (no served pin yet)
         lim = row["max"]
         planned_bulk = row["role"] == "bulk"
         sole = len({q["ref"] for q in NC.net_pads(B)[o["net"]] if NC.is_ic(q["ref"], parts[q["ref"]])}) == 1
         guess = o["how"] == "spread" and not (planned_bulk and sole)     # one IC on a planned rail: nothing to guess between
         sure, how, ic_, pad_, dist = not guess, o["how"], o["ic"], o["pad"], math.hypot(
             sp["x"] - pin["x"], sp["y"] - pin["y"])
-        if o["how"] not in ("net", "explicit"):
-            # shared rail: a cap already within its limit of ANY IC pin on the rail serves that pin
+        if o["how"] not in ("net", "explicit") and not (planned_bulk and o["how"] in DECIDED):
+            # shared rail: a cap already within its limit of ANY IC pin on the rail serves that pin. Not a planned rail's bulk
+            # part with a decided owner: storage belongs to the regulator or load it was sized for, wherever it sits (a bulk part
+            # parked at another IC's pin is a far part, not a served pin; identical bulk parts are re-dealt in _interchange).
             best = min(((math.hypot(q["x"] - sp["x"], q["y"] - sp["y"]), q) for q in NC.net_pads(B)[o["net"]]
                         if NC.is_ic(q["ref"], parts[q["ref"]])), key=lambda t: t[0], default=None)
             if best and best[0] <= lim:

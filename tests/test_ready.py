@@ -301,3 +301,15 @@ def test_power_plan_unknown_source_is_an_open_question(tmp_path):
     c["dcdrop"][0]["to"] = ["NOPE"]
     lines, sess, _d = _plan_line(tmp_path, c)
     assert lines[0]["status"] == "OPEN" and any(q["id"] == "power-source:VOUT" for q in sess.open)
+
+
+def test_power_plan_exempt_rail_passes_and_is_named_in_the_line(tmp_path):
+    import copy
+    import powerboard as PB
+    c = copy.deepcopy(PB.CONS)
+    c["dcdrop"] = []
+    c["power"]["VOUT"].pop("source")
+    c["power"]["VOUT"]["dcdrop_exempt"] = "bias inductor DCR by design"
+    lines, sess, detail = _plan_line(tmp_path, c)
+    assert lines[0]["status"] == "PASS" and "exempt by design (VOUT)" in lines[0]["detail"] and not sess.open
+    assert [f["code"] for f in detail["power_plan"]["findings"]] == ["POWER_PLAN_EXEMPT"]
