@@ -121,7 +121,7 @@ def test_flight_line_through_an_all_layer_keepout_is_a_hard_row_naming_both(tmp_
     assert len(ko) == 1 and ko[0]["layers"] == ["B.Cu", "F.Cu", "In1.Cu"] and ko[0]["value"] == 80.0 and ko[0]["rect"] == [38.0, 10.0, 42.0, 30.0]
     f = BG.flight_rows(B, USB, fixed={"U1", "J1"})
     assert len(f) == 1 and f[0]["kind"] == "keepout-flight" and f[0]["hard"] is True and f[0]["verdict"] == "fail"
-    assert f[0]["name"] == "USB_D_N/USB_D_P x rule-area 1" and f[0]["refs"] == ["J1", "U1"]
+    assert f[0]["name"] == "USB_D_N/USB_D_P x rule-area 38,10" and f[0]["refs"] == ["J1", "U1"]
     assert "3 of 3 copper layers" in f[0]["detail"]
     assert BG.flight_rows(B, USB, fixed={"U1"})[0]["hard"] is False              # one end can still move
 
@@ -247,7 +247,7 @@ def test_ready_budgets_line_open_items(tmp_path):
     line = RDY.budget_line(None, cons, B, None, None, detail)
     assert line["name"] == "budgets" and line["status"] == RDY.OPEN and line["open_items"] == 2
     assert line["blockers"][0].startswith("BUDGET_NO_SOURCE 1: separation s distance")
-    assert line["blockers"][1].startswith("KEEPOUT_FLIGHT 1: USB_D_N/USB_D_P x rule-area 1")
+    assert line["blockers"][1].startswith("KEEPOUT_FLIGHT 1: USB_D_N/USB_D_P x rule-area 38,10")
     assert {r["kind"] for r in detail["budgets"]["rows"]} == {"pair", "keepout", "keepout-flight", "separation", "swap"}
     cons["separation"][0]["source"] = "ds p.4"
     clean = RDY.budget_line(None, cons, usb_board(tmp_path, name="c.kicad_pcb"), None, None, {})
@@ -446,3 +446,15 @@ def test_separation_and_flight_rows_do_not_change_with_rotation(tmp_path):
         flights.append(len(BG.flight_rows(B, USB)))
     # both courtyards are 2 mm squares: the gap is 60 - 20 - 2 = 38 mm at every rotation
     assert all(abs(v - 38.0) <= 0.01 for v in seps) and len(set(flights)) == 1
+
+
+# ---- C6: stable row names (B4)
+def test_unnamed_separation_keeps_its_name_when_a_row_is_removed_above_it(tmp_path):
+    B = usb_board(tmp_path)
+    first = {"a": ["U1"], "b": ["J1"], "min_mm": 5.0}
+    second = {"a": ["J1"], "b": ["U2"], "min_mm": 5.0}
+    both = BG.separation_rows(B, dict(USB, separation=[first, second]))
+    alone = BG.separation_rows(B, dict(USB, separation=[second]))
+    assert both[1]["name"] == alone[0]["name"] == "sep J1 / U2"
+    disabled = BG.separation_rows(B, dict(USB, separation=[dict(first, enabled=False), second]))
+    assert disabled[0]["name"] == "sep J1 / U2"

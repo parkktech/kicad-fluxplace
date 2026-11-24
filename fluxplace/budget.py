@@ -199,7 +199,7 @@ def keepouts(B, cons):
         xs, ys = [p[0] for p in z["pts"]], [p[1] for p in z["pts"]]
         lay = sorted(set(z["layers"]) & set(cu))
         own = z.get("owner") or ""                       # a footprint's own rule area: it moves with the part
-        out.append({"name": z.get("name") or (f"{own} rule-area {k}" if own else f"rule-area {k}"),
+        out.append({"name": z.get("name") or (f"{own} rule-area {k}" if own else f"rule-area {min(xs):g},{min(ys):g}"),
                     "rect": (min(xs), min(ys), max(xs), max(ys)), "layers": lay, "all_layers": set(lay) >= set(cu), "owner": own,
                     "source": f"footprint rule area of {own} (tracks not allowed)" if own else "board rule area (tracks not allowed)"})
     for name, kv in sorted((((cons or {}).get("placement") or {}).get("keepout") or {}).items()):
@@ -263,6 +263,16 @@ def flight_rows(B, cons, fixed=(), home=None):
 KO = "keepout:"            # a [[separation]] item "keepout:NAME" stands for the rect of that routing keep-out (budget.keepouts)
 
 
+def sep_name(e, i):
+    """Name of a [[separation]] row: its name, else "sep " + the sorted items of both groups (a row added or removed above it
+    does not rename it, unlike the list index). Used by budget rows and intent.away alike."""
+    if e.get("name"):
+        return str(e["name"])
+    items = lambda v: [v] if isinstance(v, str) else list(v or [])                        # noqa: E731
+    a, b = sorted(str(x) for x in items(e.get("a"))), sorted(str(x) for x in items(e.get("b")))
+    return "sep " + "|".join(a) + " / " + "|".join(b) if a or b else f"separation{i + 1}"
+
+
 def separation_rows(B, cons, home=None):
     """One row per [[separation]]: the smallest courtyard-to-courtyard distance between group a and group b. An item
     "keepout:NAME" is the rect of a routing keep-out (an antenna cut-out has no part of its own on a carrier board)."""
@@ -280,7 +290,7 @@ def separation_rows(B, cons, home=None):
     for i, e in enumerate((cons or {}).get("separation") or []):
         if e.get("enabled", True) is False:
             continue
-        name = str(e.get("name") or f"separation{i + 1}")
+        name = sep_name(e, i)
         ga, gb = group(e.get("a")), group(e.get("b"))
         gb = {k: v for k, v in gb.items() if k not in ga}     # a ref both groups match belongs to group a: never measured against its mates
 
