@@ -606,3 +606,58 @@ def test_hard_row_keeps_detail():
     assert r9["graded"] == 2 and r9["over"] == []
     r3 = TF._hard_row("H3", {"base": 1, "limit": {"via": 0.13}, "sites": [{"x": 1}]}, "FAB")
     assert r3["sites"] == [{"x": 1}]
+
+
+# ---- M6: D71dz via measures ---------------------------------------------------------------------------------------
+
+HFAB = {"hard": {"hole_to_hole_via": 0.279, "hole_to_hole_pth": 0.406}}
+
+
+def test_via_hygiene_same_net_colocated_is_m9_duplicate_via():
+    B = mdl(vias=[via("N", 3, 4), via("N", 3, 4)])
+    d = [x for x in TM.m9_sites(B) if x.get("kind") == "duplicate_via"]
+    assert len(d) == 1 and d[0]["state"] == "open" and (d[0]["x"], d[0]["y"]) == (3, 4)
+    assert TM.h4(B, XC(fab=HFAB), 0)["base"] == 0
+    assert [x for x in TM.m9_sites(mdl(vias=[via("N", 3, 4), via("N", 5, 4)])) if x.get("kind") == "duplicate_via"] == []
+
+
+def test_via_hygiene_different_net_colocated_is_h4_site():
+    r = TM.h4(mdl(vias=[via("A", 3, 4), via("B", 3, 4)]), XC(fab=HFAB), 0)
+    assert r["base"] == 1 and not [x for x in TM.m9_sites(mdl(vias=[via("A", 3, 4), via("B", 3, 4)])) if x.get("kind") == "duplicate_via"]
+
+
+@pytest.mark.parametrize("dx,base", [(0.45, 1), (0.50, 0)])
+def test_h4_hole_to_hole_via_edge_distance_against_fab_limit(dx, base):
+    B = mdl(vias=[via("A", 0, 0, d=0.45, drill=0.2), via("B", dx, 0, d=0.45, drill=0.2)])      # edge distance dx - 0.2
+    r = TM.h4(B, XC(fab=HFAB), 7)
+    assert r["base"] == (1 if dx - 0.2 < 0.279 else 0) == base and r["limit"] == {"via": 0.279, "pth": 0.406} and r["drc"] == 7
+
+
+def test_h4_pad_hole_uses_pth_limit_and_npth_holes_count():
+    B = mdl(pads=[pad("J", "1", 0, 0, "A", w=1.0, h=1.0, tht=True, drill=0.6, layers=("F.Cu", "B.Cu"))], vias=[via("B", 0.8, 0, drill=0.2)])
+    assert TM.h4(B, XC(fab=HFAB), 0)["base"] == 1          # edge 0.8 - 0.3 - 0.1 = 0.4 < 0.406 (pth limit), >= 0.279
+    B2 = mdl(vias=[via("B", 0.8, 0, drill=0.2)])
+    B2["parts"] = {"M": {"pads": [], "n_pads": 0, "holes": [{"x": 0, "y": 0, "drill": 0.6, "np": True}]}}
+    assert TM.h4(B2, XC(fab=HFAB), 0)["base"] == 1
+    B3 = mdl(pads=[pad("J", "1", 0, 0, "A", w=1.0, h=1.0, tht=True, drill=0.6, layers=("F.Cu", "B.Cu"))], vias=[via("B", 0.9, 0, drill=0.2)])
+    assert TM.h4(B3, XC(fab=HFAB), 0)["base"] == 0
+
+
+def test_h4_without_fab_limit_falls_back_to_drc_count():
+    r = TM.h4(mdl(vias=[via("A", 0, 0), via("B", 0.1, 0)]), XC(), 3)
+    assert r["base"] == 3 and r["drc"] == 3
+
+
+def test_dangling_via_one_segment_is_site_and_fill_on_second_layer_saves_it():
+    B = mdl([seg((0, 0), (5, 0), net="N", layer="F.Cu")], vias=[via("N", 5, 0)])
+    X = XC(cls={"N": "GEN"})
+    assert [(x["net"], x["kind"]) for x in TM.s2_sites(B, X) if x.get("kind") == "via"] == [("N", "via")]
+    assert not [x for x in TM.s1_sites(B, X) if x.get("kind") == "via"]
+    XR = XC(cls={"N": "RF"})
+    assert [x for x in TM.s1_sites(B, XR) if x.get("kind") == "via"] and not [x for x in TM.s2_sites(B, XR) if x.get("kind") == "via"]
+    B["_fills"] = {"B.Cu": [("N", (0, -5, 10, 5), __import__("numpy").array([[0, -5], [10, -5], [10, 5], [0, 5]], dtype=float))]}
+    assert not [x for x in TM.s2_sites(B, X) if x.get("kind") == "via"]
+    B["_fills"] = {"B.Cu": [("OTHER", (0, -5, 10, 5), __import__("numpy").array([[0, -5], [10, -5], [10, 5], [0, 5]], dtype=float))]}
+    assert [x for x in TM.s2_sites(B, X) if x.get("kind") == "via"]            # another net's fill does not connect it
+    B2 = mdl([seg((0, 0), (5, 0), net="N", layer="F.Cu"), seg((5, 0), (9, 0), net="N", layer="B.Cu")], vias=[via("N", 5, 0)])
+    assert not [x for x in TM.s2_sites(B2, X) if x.get("kind") == "via"]       # used on two layers

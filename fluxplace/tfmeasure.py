@@ -304,6 +304,17 @@ def m1_sites(B, min_deg):
             for j in AT.acute_junctions(segs, min_deg=min_deg)]
 
 
+def _colocated(B):
+    """vias whose centres agree on the EPS grid: ([later same-net vias to delete], [(via, other via) of different nets])."""
+    seen, dup, diff = {}, [], []
+    for v in B["vias"]:
+        k = (round(v["x"] / EPS), round(v["y"] / EPS))
+        for o in seen.get(k, ()):
+            (dup if o["net"] == v["net"] else diff).append(v if o["net"] == v["net"] else (o, v))
+        seen.setdefault(k, []).append(v)
+    return dup, diff
+
+
 def m9_sites(B):
     out, seen, buried = [], set(), _buried(B)
     for i, s in enumerate(B["segs"]):
@@ -314,6 +325,7 @@ def m9_sites(B):
         if i in buried:
             d.update(kind="buried", state="open")
         out.append(d)
+    out += [_s(v["net"], "", v["x"], v["y"], "open", kind="duplicate_via") for v in _colocated(B)[0]]
     return out
 
 
@@ -1352,9 +1364,57 @@ def dangling(B):
     return out
 
 
+def _holes(B):
+    """[(x, y, drill, kind, net)] of every drilled hole: vias, pad holes (PTH, NPTH) and unnumbered NPTH of the parts."""
+    out = [(v["x"], v["y"], v["drill"], "via", v["net"]) for v in B["vias"] if v["drill"] > 0]
+    out += [(p["x"], p["y"], p["drill"], "pth", p["net"]) for p in B["pads"] if p.get("drill", 0) > 0]
+    for part in B["parts"].values():
+        out += [(h["x"], h["y"], h["drill"], "pth", "") for h in part.get("holes", ()) if h.get("drill", 0) > 0]
+    return out
+
+
+def hole_limits(X):
+    """the fab profile's hole-to-hole limits {via, pth}, or None when the profile gives none."""
+    hard = (X.get("fab") or {}).get("hard") or {}
+    if hard.get("hole_to_hole_via") is None or hard.get("hole_to_hole_pth") is None:
+        return None
+    return {"via": float(hard["hole_to_hole_via"]), "pth": float(hard["hole_to_hole_pth"])}
+
+
+def via_hygiene(B, X):
+    """D71dz: {limit, h2h: [site per hole pair under the fab limit], dangling: [site per via with < 2 connected layers]}.
+    Same-net co-located vias are M9 `duplicate_via` (m9_sites), not hole pairs. A via is connected on a layer by a same-net
+    segment end or pad on it (`via_used`) or by a same-net zone fill containing it (`fills`)."""
+    lim, h2h = hole_limits(X), []
+    if lim:
+        holes = _holes(B)
+        gc = _grid_pts(holes, lambda h: (h[0], h[1]), 3.0)
+        idx = {id(h): i for i, h in enumerate(holes)}
+        for h in holes:
+            for o in _near_pts(gc, h[0], h[1], 3.0):
+                if idx[id(o)] <= idx[id(h)]:
+                    continue
+                if h[3] == "via" and o[3] == "via" and h[4] == o[4] and (round(h[0] / EPS), round(h[1] / EPS)) == (round(o[0] / EPS), round(o[1] / EPS)):
+                    continue
+                edge = _dist(h[:2], o[:2]) - (h[2] + o[2]) / 2
+                need = lim["via"] if h[3] == o[3] == "via" else lim["pth"]
+                if edge < need - 1e-9:
+                    h2h.append(_s(h[4] or o[4], "", (h[0] + o[0]) / 2, (h[1] + o[1]) / 2, "open", kind="hole_to_hole", edge=edge, limit=need))
+    used, dangling = via_used(B), []
+    fl = fills(B) if ("_fills" in B or B.get("file")) else {}
+    for v in B["vias"]:
+        conn = set(used[id(v)])
+        for l in _via_layers(v, B["copper"]):
+            if l not in conn and any(n == v["net"] and _inside([(n, bb, P)], v["x"], v["y"]) for n, bb, P in fl.get(l, ())):
+                conn.add(l)
+        if len(conn) < 2:
+            dangling.append(_s(v["net"], "", v["x"], v["y"], "open", kind="via", layers=sorted(conn)))
+    return {"limit": lim, "h2h": h2h, "dangling": dangling}
+
+
 def s1_sites(B, X):
-    """RF and pair copper: a dangling end is deleted (open); a T on them is listed (open)."""
-    segs, out = B["segs"], []
+    """RF and pair copper: a dangling end is deleted (open); a T on them is listed (open); a dangling via is listed (open)."""
+    segs, out = B["segs"], [x for x in via_hygiene(B, X)["dangling"] if X["cls"].get(x["net"]) in ("RF",) + PAIR_CLS]
     for i, e, tail, tee in dangling(B):
         s = segs[i]
         if X["cls"].get(s["net"]) in ("RF",) + PAIR_CLS:
@@ -1368,8 +1428,9 @@ def s1_sites(B, X):
 def s2_sites(B, X):
     """other nets: a dangling end (stub) is deleted."""
     segs = B["segs"]
-    return [_s(segs[i]["net"], segs[i]["layer"], segs[i][e][0], segs[i][e][1], "open", tail=tail)
-            for i, e, tail, tee in dangling(B) if X["cls"].get(segs[i]["net"]) not in ("RF",) + PAIR_CLS and not tee]
+    return ([_s(segs[i]["net"], segs[i]["layer"], segs[i][e][0], segs[i][e][1], "open", tail=tail)
+             for i, e, tail, tee in dangling(B) if X["cls"].get(segs[i]["net"]) not in ("RF",) + PAIR_CLS and not tee]
+            + [x for x in via_hygiene(B, X)["dangling"] if X["cls"].get(x["net"]) not in ("RF",) + PAIR_CLS])
 
 
 def via_used(B):
@@ -1714,6 +1775,15 @@ def h7(B, X):
                              "len_mm": ln, "ok": z is not None and tz * (1 - tol) <= z <= tz * (1 + tol),
                              **({"exempt": "neck"} if ln <= float(rf.get("neck_max_mm", 0.0)) else {})})
     return {"base": sum(1 for r in rows if not r["ok"] and not r.get("exempt")), "rows": rows}
+
+
+def h4(B, X, drc):
+    """hole to hole: hole pairs under the fab limit (via to via, any pad hole involved) + different-net co-located vias (distance 0
+    is a pair too); `drc` is the DRC `hole_to_hole` count, kept as a field. Without a fab limit the DRC count is the base."""
+    vh = via_hygiene(B, X)
+    if vh["limit"] is None:
+        return {"base": drc, "limit": 0, "drc": drc, "sites": []}
+    return {"base": len(vh["h2h"]), "limit": vh["limit"], "drc": drc, "sites": vh["h2h"]}
 
 
 def pair_audit(B, X, cons):

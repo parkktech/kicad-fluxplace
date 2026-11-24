@@ -91,7 +91,7 @@ def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None, pha
             {"id": "H2", "base": {k: v for k, v in widths.items()}, "limit": H_MIN_WIDTH, "source": "FAB",
              "ok": all(v >= H_MIN_WIDTH for v in widths.values() if v is not None)},
             _hard_row("H3", TM.h3(B, X), "FAB"),
-            {"id": "H4", "base": _count_type(types, "hole_to_hole"), "limit": 0, "source": "DRC", "ok": None},
+            _hard_row("H4", TM.h4(B, X, _count_type(types, "hole_to_hole")), "FAB"),
             {"id": "H5", "base": _count_type(types, "copper_edge_clearance"), "limit": 0, "source": "DRC", "ok": None},
             _hard_row("H6", TM.h6(B, X, board), "FAB"),
             _hard_row("H7", TM.h7(B, X), "DATASHEET"),
