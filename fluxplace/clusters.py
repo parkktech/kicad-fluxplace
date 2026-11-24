@@ -711,8 +711,9 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
             cx, cy, ang, court, cost = pick
             moves[ref] = (round(cx, 4), round(cy, 4), ang)
             occ.add(ref, court, part["side"])
-            if legal is not None:
-                legal.hash.add(ref, court, "x")
+            if legal is not None:                               # the seat stands on the model now: the next part of this call sees its pads and courtyard
+                GM.place(part, cx, cy, ang)
+                legal.refresh(ref)
             if log:
                 log(f"  {ref} -> ({cx:.2f}, {cy:.2f}) {ang:g} deg  "
                     f"{s['dist']:.1f} -> {cost:.1f} mm (pin {ic}.{s['pad']})")

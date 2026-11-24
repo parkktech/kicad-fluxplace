@@ -51,7 +51,7 @@ def block_spread(X, Y, fixed, groups):
 
 
 class Plan:
-    def __init__(self, B, cons, spec, M, log=print, halo=None):
+    def __init__(self, B, cons, spec, M, log=print, halo=None, base=None):
         from . import legality as LGL, netclass as NC, escapeplan as EP
         self.B, self.cons, self.spec, self.log = B, cons, spec, log
         self.mods = M["modules"]
@@ -82,7 +82,7 @@ class Plan:
         pr = EP.plan_params(cons)
         self.plane = set(EP.plane_nets(B, cons, self.cls, pr))
         self._nets(NC)
-        self.base_issues = self.L.issues()
+        self.base_issues = base if base is not None else self.L.issues()      # `base`: the issues of the INPUT board; without it the board as handed in (already seated)
         self._ints = {}
         self.init_raster()
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
@@ -560,6 +560,18 @@ def breakout_claims(B, cons, spec, M, P):
     return dict(claims), regs
 
 
+def legalise_units(P, step=1.0):
+    """every movable module with a member that adds an issue the input board did not have (pad short, courtyard overlap, hole, outline,
+    keep-out), wherever it stands, is re-seated at the nearest legal pose. -> (names re-seated, names left where they stand)."""
+    from . import legalgate as LG
+    kn = LG.known(P.base_issues)
+    bad = [i for i in range(P.n) if not P.fixed[i] and any(LG.part_new(P.L, r, kn) for r in P.mods[i]["members"])]
+    moved, left = [], []
+    for i in bad:
+        (moved if reseat_module(P, i, step=step) else left).append(P.mods[i]["name"])
+    return moved, left
+
+
 def reseat_module(P, i, step=1.0):
     """move module i to the nearest legal pose (by the same cost as the constructive pass) outside the halos."""
     x0, y0, x1, y1 = P.B["bbox"]
@@ -974,6 +986,10 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         open(path_g, "w", errors="surrogateescape").write(text2)
         _pro(board, path_g)
     B = RD.load(path_g)
+    from . import legalgate as LG
+    base_in = getattr(args, "legal_base", None)
+    if base_in is None:                          # what the input board already violates, taken before any seating
+        base_in = LG.baseline(RD.load(board) if any(grow) else B, cons)
     M = MD.build(B, cons, spec, arrange=True)
     from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
     nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
@@ -987,7 +1003,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                             "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
     for u in M.get("unseated") or []:
         print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
-    P = Plan(B, cons, spec, M, log=log)
+    P = Plan(B, cons, spec, M, log=log, base=base_in)
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)
     # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
@@ -1018,6 +1034,10 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
     P.set_breakouts(bregs)
     P.freeze_baseline()
+    if start != "construct":                     # the construct start places every module afresh; the source start keeps the seated poses
+        moved_u, left_u = legalise_units(P, step=args.step)
+        if moved_u or left_u:
+            print(f"  [{tag}] units illegal where they stand: {len(moved_u)} re-seated ({', '.join(moved_u[:8])}), {len(left_u)} left ({', '.join(left_u[:8])})", flush=True)
     src = P.cost_parts()
     if start == "construct":
         failed = construct(P, seed=args.seed, step=args.step)
@@ -1031,6 +1051,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                  lane="trial", phase="construct", verdict="running", full=True)
     acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
     cur = P.cost_parts()
+    reverted = {}
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
            "source": src, "constructed": init, "annealed": cur, "accepted": acc, "rounds": []}
     out_path = os.path.join(workdir, f"{tag}.kicad_pcb")
@@ -1044,6 +1065,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         moves = dict(all_moves(P))
         BW.move_file(base, out_path, moves, post=False)
         _pro(board, out_path)
+        rep_ = LG.repair_file(out_path, path_g, cons, base_in, log=lambda t: print(f"  [{tag}] {t}", flush=True))     # nothing illegal is written: a part that adds an issue goes back
+        reverted.update(rep_["reverted"])
         a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                nodes=200000, repairs=12, check_only=True)
         Bn, fres = FO.run(out_path, cons, spec, None, a, None)
@@ -1088,7 +1111,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     res["board"] = out_path
     iss = LGL.Legal(Bn, cons, MD.fixed_set(Bn, cons)).issues()
     res["legality"] = {k: len(v) for k, v in iss.items()}
-    res["legality_new"] = {k: sorted(set(v) - set(P.base_issues.get(k, []))) for k, v in iss.items()}
+    res["legality_new"] = LG.new_issues(iss, base_in)
+    res["reverted"] = {r: w for r, w in sorted(reverted.items())}
     res["moved_modules"] = int(sum(1 for i in range(P.n) if not P.fixed[i] and (abs(P.X[i] - P.src[0][i]) > 0.05 or abs(P.Y[i] - P.src[1][i]) > 0.05 or P.T[i])))
     res["moved_parts"] = len(all_moves(P))
     res["secs"] = round(time.time() - t0, 1)
@@ -1180,6 +1204,8 @@ def cmd_floorplan(a):
     a.board, cons, seated = IT.prepare(a.board, cons, spec, wd)        # --- intent: hard items seated and held before the search
     text_in = open(a.board, errors="surrogateescape").read()
     B0 = RD.load(a.board)
+    from . import legalgate as LG
+    a.legal_base = LG.baseline(RD.load(src_board), cons)       # what the input board as it came in already violates: the stage may add nothing to it
     grow = tuple(float(v) for v in a.grow.split(",")) if a.grow else (0, 0, 0, 0)
     if len(grow) != 4:
         raise SystemExit("floorplan: --grow L,R,T,B (four numbers)")
@@ -1231,13 +1257,23 @@ def cmd_floorplan(a):
     print(f"  legality new: {best['legality_new']}")
     from . import breakout as BO                     # --- breakout gate: every pin of every dense part has an escape on the WHOLE placed board
     if BO.conf(cons)["enabled"]:
-        fix = BO.repair(out, cons, spec)                  # parts that wall a dense part in are moved out of its breakout first
+        fix = BO.repair(out, cons, spec, baseline=a.legal_base)                  # parts that wall a dense part in are moved out of its breakout first
         if fix["moved"]:
             print(f"breakout: {len(fix['moved'])} part(s) moved out of breakout regions; pins without an escape {fix['before']} -> {fix['after']}")
             Bn = RD.load(out)
+    rp2 = LG.repair_file(out, a.board, cons, a.legal_base, log=lambda t: print(t, flush=True))      # a move after the search (breakout, wire length) adds nothing illegal
+    if rp2["reverted"]:
+        Bn = RD.load(out)
+    drc = LG.gate(out, a.board, cons, a.legal_base, ref_path=src_board, log=lambda t: print(t, flush=True))     # KiCad DRC of the written board against the input's
+    ill = bool(drc and drc["items"])
+    if ill:
+        print(LG.drc_line(drc))
+        best["why_not"] = LG.drc_line(drc).replace("floorplan: ", "")
+    elif drc is None:
+        print("floorplan: legality gate not run (kicad-cli did not answer)")
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
-    refused = not passes(best) or bool(irc or brc)
+    refused = not passes(best) or bool(irc or brc) or ill
     hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
     print(hon["line"])
     LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
@@ -1249,7 +1285,7 @@ def cmd_floorplan(a):
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
-    if (not passes(best) and not waive) or irc or brc:
+    if ill or (not passes(best) and not waive) or irc or brc:
         raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
     return 0
 

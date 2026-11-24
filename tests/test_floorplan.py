@@ -162,7 +162,7 @@ def test_floorplan_with_no_rows_writes_no_budgets_json(monkeypatch, tmp_path, ca
 
 def test_floorplan_near_row_the_moved_output_breaks_is_not_honoured_with_both_values(monkeypatch, tmp_path, capsys):
     import cli
-    board, c, out = _fake_stage(monkeypatch, tmp_path, move=(47, 40),
+    board, c, out = _fake_stage(monkeypatch, tmp_path, move=(60, 40),
                                 extra='[[separation]]\nname = "near"\na = ["U1"]\nb = ["C1"]\nmin_mm = 15\nhard = true\n')
     cli.main(["floorplan", board, "--out", out, "--constraints", c, "--assume-defaults"])
     bj = json.load(open(out[:-len(".kicad_pcb")] + ".budgets.json"))
