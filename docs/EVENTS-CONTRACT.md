@@ -60,6 +60,36 @@ when the file lies outside W (or no stream is set, in which case TOURNAMENT.md p
 | `eta` | secs_left, done_frac, model, basis |
 | `run_end` | verdict, secs, board |
 
+## Placer (F16, `fluxplace/liveview.py`)
+
+Written by `ready`, `floorplan` and `placetour` when the stream is on; with env `FLUXPLACE_OPS` set the same lines also go
+to that file (the run-level ops feed), each with a `text`. Values are JSON numbers, strings, lists and null.
+Run-script lines: `docs/recipes/LIVE-PLACER.md`.
+
+| kind | fields | rate |
+|---|---|---|
+| `placement_progress` | phase, generation, generations, trial, trials, arm, cand, seed, pair, key, leader, leader_key, is_leader, criteria, verdict, why, rows_rev, elapsed_s, eta_s, text | at most 1 per 2 s per stage, plus one per generation end, leader change, kept / dropped candidate, stage end |
+| `placement_snapshot` | lane (leader / trial / accepted), seq, path, full, delta, base, cand, arm, generation, moved (count), parts (count), key, text | leaders, kept candidates, the running trial at most every 5 s |
+| `glb_ready` | path, cand, why (leader / accepted / gate), snapshot, secs, bytes, models, missing, text | leaders at most one per max(`[live] glb_min_s`, 5 x the last export time); accepted and gate candidates when they occur |
+| `glb_failed` | cand, why, text | |
+| `gate_open` | id, deadline (epoch s, null = not waiting), default, machine (PASS / FAIL / null), candidates [{cand, key, criteria, snapshot, glb}], path, text | |
+| `gate_closed` | id, by (owner / timeout), action, choice, item, text | |
+| `feedback_result` | id, item_kind, action (received, refused, conflict, applied, context, honoured, not_honoured, gate_closed), row, why, effect, generation, rows_rev, file, text | one per item per action |
+
+`key` = `[[term, value], ...]`, lower is better from the left, null = not judged yet. `criteria` = `[{id, ok, value, limit, text}]`,
+`ok` true / false / null. Keys with different `rows_rev` are not comparable.
+
+Files (all by rename; a file that exists is complete; `.tmp` files are never read):
+
+| File | Content |
+|---|---|
+| `W/live/place/<lane>-NNNNNN.json` | full placement snapshot: the board snapshot below with `tracks` and `vias` empty; per part also `mod`, `fixed` (null or the reason class; `owner` = an owner pin), `h`; plus `grid` {cols, rows, cell [w, h], origin [x, y]} (cells: column letter + row number, `A1` at the origin), `modules` [{id, name, role, bbox, side, fixed, group, n}], `regions` [{id, src, target, rect, cells, keep, exit}], `keepouts` [{id, pts, layers, src}], `key`, `criteria`, `cand`, `arm`, `generation`, `rows_rev` |
+| `W/live/place/<lane>-NNNNNN.delta.json` | {v, seq, base, parts [changed part objects], moved [{ref, dx, dy, drot, flip}], modules [changed], regions (whole list, only when changed), key}; apply to the full snapshot `base` of the same lane; a full comes at least every 20 and at stage end |
+| `W/live/glb/<cand>.glb`, `<cand>.log`, `latest.json` | 3D export (glTF binary), the tool's output, the last `glb_ready` line |
+| `W/live/errors.jsonl` | one row per failure of the live view itself (it never fails a stage) |
+| `W/feedback/inbox/*.json` | written by the dashboard, one owner item per file (schema v1: `liveview.check_item`) |
+| `W/feedback/applied/`, `refused/` (+ `<name>.reason.txt`), `rows.json`, `log.jsonl`, `gates/<id>.json` | written by fluxplace: what happened to each item, the rows in force with `rows_rev`, open and closed gates |
+
 ## Examples (one line each)
 
 ```

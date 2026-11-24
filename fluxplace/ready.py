@@ -253,6 +253,10 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
+    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED) for x in lines) else "refused",
+                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED), "value": x["status"],
+                           "limit": PASS, "text": x["detail"]} for x in lines])
     return lines, detail
 
 

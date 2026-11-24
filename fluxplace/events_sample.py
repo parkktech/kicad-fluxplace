@@ -54,6 +54,59 @@ def _parts(dx):
             {"ref": "C3", "x": 11.2, "y": 9.0, "rot": 90, "side": "bottom", "crt": [10.5, 8.2, 11.9, 9.8], "value": "100n"}]
 
 
+def _placer(out, ev):
+    """The placer kinds of liveview.py (F16): two leader snapshots (full, delta with one moved part), one 3D model line, one
+    refused and one applied feedback item, a gate that closed by timeout. Files under live/ and feedback/."""
+    from . import liveview as LV
+    for d in ("live/place", "live/glb", "feedback/gates"):
+        os.makedirs(os.path.join(out, d), exist_ok=True)
+    key = [["hard rows", 1], ["sum over max", 12.5], ["ghost opens", None]]
+    crit = [{"id": "C3 -> U1.1", "ok": False, "value": 6.2, "limit": 5.0, "text": "support C3 -> U1.1: 6.2 / 5.0 mm"}]
+
+    def snap(seq, dx, k):
+        parts = [dict(p, mod="U1", fixed=None, h=None) for p in _parts(dx)]
+        return dict(_full(seq, [], parts, 3), vias=[], grid=LV.grid_of((0, 0, 100, 80)), keepouts=[], key=k, criteria=crit, cand=f"c{seq}",
+                    arm="unguided", generation=seq - 1, rows_rev=0,
+                    modules=[{"id": "U1", "name": "U1", "role": None, "side": "top", "fixed": False, "bbox": [8 + dx, 8, 12 + dx, 12], "group": False, "n": 2}],
+                    regions=[{"id": "owner-00000002", "src": "owner", "target": ["U1"], "rect": [0.0, 0.0, 25.0, 20.0], "cells": "A1:B2", "keep": "in", "exit": None}])
+    s1, s2 = snap(1, 0.0, key), snap(2, 3.0, [["hard rows", 0], ["sum over max", 0.0], ["ghost opens", None]])
+    dl = LV.snapshot_delta(s1, s2)
+    for name, obj in (("live/place/leader-000001.json", s1), ("live/place/leader-000002.delta.json", dl)):
+        with open(os.path.join(out, name), "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, separators=(",", ":"))
+    base = {"generations": None, "trial": None, "trials": 8, "arm": "unguided", "seed": 1, "pair": None, "leader_key": None, "why": None,
+            "rows_rev": 0, "eta_s": None, "criteria": crit}
+    ev("placement_progress", "floorplan", 3, phase="anneal", generation=0, cand="c1", key=key, leader="c1", is_leader=True, verdict="kept",
+       elapsed_s=1.0, text="floorplan anneal gen 0 unguided c1 hard rows 1 sum over max 12.5 kept", **base)
+    ev("placement_snapshot", "floorplan", 3, lane="leader", seq=1, path="live/place/leader-000001.json", full=True, delta=False, base=None, cand="c1",
+       arm="unguided", generation=0, moved=0, parts=2, key=key, text="leader snapshot 1: 2 parts")
+    ev("feedback_result", "floorplan", 4, id="00000001", item_kind="pin", action="refused", generation=0, rows_rev=0, row=None,
+       why="unknown part U99", effect=None, file="2026-00000001.json", text="feedback 00000001 (pin): refused - unknown part U99")
+    ev("feedback_result", "floorplan", 4, id="00000002", item_kind="region", action="applied", generation=0, rows_rev=1, why=None, effect=None,
+       row={"id": "00000002", "kind": "region", "src": "owner", "hard": True, "rect": [0.0, 0.0, 25.0, 20.0], "keep": "in", "refs": ["U1"]},
+       file="2026-00000002.json", text="feedback 00000002 (region): applied")
+    ev("placement_progress", "floorplan", 5, phase="anneal", generation=1, cand="c2", key=s2["key"], leader="c2", is_leader=True, verdict="kept",
+       elapsed_s=3.0, text="floorplan anneal gen 1 unguided c2 hard rows 0 sum over max 0.0 kept", **dict(base, rows_rev=1))
+    ev("placement_snapshot", "floorplan", 5, lane="leader", seq=2, path="live/place/leader-000002.delta.json", full=False, delta=True, base=1, cand="c2",
+       arm="unguided", generation=1, moved=len(dl["moved"]), parts=2, key=s2["key"], text="leader snapshot 2: 2 parts, 1 moved")
+    with open(os.path.join(out, "live/glb/c2.glb"), "wb") as fh:
+        fh.write(b"glTF\x02\x00\x00\x00\x0c\x00\x00\x00")              # header only: a stand-in, not a model
+    glb = {"path": "live/glb/c2.glb", "cand": "c2", "why": "leader", "snapshot": 2, "secs": 15.7, "bytes": 12, "models": 2, "missing": 0,
+           "text": "3D model of c2 (leader): 0.0 MB in 15.7 s, 0 model(s) missing"}
+    with open(os.path.join(out, "live/glb/latest.json"), "w", encoding="utf-8") as fh:
+        json.dump(dict(glb, kind="glb_ready", ts=T0 + 6), fh)
+    ev("glb_ready", "floorplan", 6, **glb)
+    ev("glb_failed", "floorplan", 6, cand="c3", why="timeout after 60 s", text="3D export of c3 failed: timeout after 60 s")
+    cands = [{"cand": "c2", "key": s2["key"], "criteria": crit, "snapshot": 2, "glb": "live/glb/c2.glb"}]
+    gate = {"id": "PLACE_OK", "stage": "placetour", "opened": T0 + 7, "deadline": T0 + 7.5, "default": "proceed", "machine": "PASS", "candidates": cands}
+    ev("gate_open", "placetour", 7, id="PLACE_OK", deadline=T0 + 7.5, default="proceed", machine="PASS", candidates=cands,
+       path="feedback/gates/PLACE_OK.json", text="gate PLACE_OK open: machine PASS, waits 0.00833333 min, default proceed")
+    ev("gate_closed", "placetour", 7.5, id="PLACE_OK", by="timeout", action="proceed", choice="c2", item=None,
+       text="gate PLACE_OK closed by timeout: proceed (no answer in 0.00833333 min: default proceed)")
+    with open(os.path.join(out, "feedback/gates/PLACE_OK.json"), "w", encoding="utf-8") as fh:
+        json.dump(dict(gate, closed=T0 + 7.5, by="timeout", action="proceed", choice="c2", item=None, gate_wait_s=0.5), fh)
+
+
 def sample(out):
     """Write a synthetic W to `out`: events.jsonl with every kind, 2 full + 3 delta snapshots, eta.json, run.json,
     TOURNAMENT.md and one PNG."""
@@ -93,6 +146,7 @@ def sample(out):
        features={"components": 2, "nets": 4, "pads": 1, "layers": 2, "area_mm2": 8000.0, "density": 0.0001})
     ev("stage_start", "ready", 1, n=1, name="ready")
     ev("stage_end", "ready", 2, n=1, name="ready", verdict="pass", line="ready ok", secs=1.0, board="sample.kicad_pcb")
+    _placer(out, ev)
     ev("eta", "ready", 2, secs_left=4300.0, done_frac=0.02, model="table", basis="place:table; route:table")
     ev("stage_start", "place", 3, n=2, name="place")
     ev("parts", "place", 4, frame=[["U1", 10.0, 10.0, 0, "top"], ["C3", 11.2, 9.0, 90, "bottom"]])

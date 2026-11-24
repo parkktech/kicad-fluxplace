@@ -6,6 +6,8 @@ Rules that hold for every function here:
   - Nothing blocks or raises into a stage: a failure is one row in W/live/errors.jsonl.
   - No reference, net or part number in code; criteria and key terms are whatever the stage hands in.
 W = the stage workdir = the folder of the event stream (env FLUXPLACE_EVENTS). Stream off: every function is a no-op.
+A nested run (env FLUXPLACE_NESTED: the ghost and candidate pipelines a stage starts) is never shown: thousands of trials
+are not a view. The 3D export is on only when the constraints have a `[live]` table (it costs a process and 1 GB for 16 s).
 """
 import json
 import math
@@ -24,8 +26,8 @@ _last = {}
 
 
 def work():
-    """The stage workdir W, or "" when the stream is off."""
-    return events._workdir()
+    """The stage workdir W, or "" when the stream is off or this is a nested run."""
+    return "" if os.environ.get("FLUXPLACE_NESTED") else events._workdir()
 
 
 def _err(where, e):
@@ -42,8 +44,11 @@ def _err(where, e):
 def _emit(kind, stage=None, **f):
     """One line on the stage stream and, with FLUXPLACE_OPS set, the same line on the ops feed. Never raises."""
     events.emit(kind, stage=stage, **f)
-    if os.environ.get(ENV_OPS):
-        events.emit_to(os.environ[ENV_OPS], kind, stage=stage, **f)
+    if os.environ.get(ENV_OPS):                  # not events.emit_to: several placer lines carry a field named `path`
+        try:
+            events._append(os.environ[ENV_OPS], events._line(kind, stage, f))
+        except Exception:                        # noqa: BLE001
+            pass
 
 
 def _write(path, obj):
@@ -90,7 +95,7 @@ def progress(stage, phase, always=False, **fields):
     """One placement_progress line (fields: PROGRESS_KEYS; anything else is dropped). `always` = a generation end, a leader
     change, a kept or dropped candidate, the stage end: it bypasses the 2 s limit. -> the fields written, or None."""
     try:
-        if not (events.enabled() or os.environ.get(ENV_OPS)):
+        if os.environ.get("FLUXPLACE_NESTED") or not (events.enabled() or os.environ.get(ENV_OPS)):
             return None
         now = time.monotonic()
         if not always and now - _last.get(stage, -1e9) < PROGRESS_S:
@@ -265,7 +270,7 @@ class Exporter:
 
     def __init__(self, cons=None, cons_path=None, cli=None, clock=time.monotonic, timeout=None, stage=None):
         lv = (cons or {}).get("live") or {}
-        self.W, self.stage, self.clock = work(), stage, clock
+        self.W, self.stage, self.clock = (work() if isinstance((cons or {}).get("live"), dict) else ""), stage, clock
         self.cli = cli or lv.get("kicad_cli") or "kicad-cli"
         self.min_s, self.keep, self._timeout = float(lv.get("glb_min_s", GLB_MIN_S)), int(lv.get("glb_keep", GLB_KEEP)), timeout
         mb = lv.get("model_base")
@@ -865,6 +870,77 @@ def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sle
     except Exception as e:                       # noqa: BLE001
         _err("gate", e)
     return out
+
+
+# ---------------------------------------------------------------- L7: what the stages call
+def stage_start(board, cons, spec, stage, workdir):
+    """The first boundary of a stage -> (board path, constraints to run with, Feedback or None). Stream off or no
+    W/feedback/inbox folder: the arguments come back untouched and nothing is loaded. With rows: the constraints are a merged
+    copy, and pin rows with coordinates are moved on a copy of the board in `workdir` (the input board is never written)."""
+    try:
+        W = work()
+        if not W or not os.path.isdir(os.path.join(W, "feedback", "inbox")):
+            return board, cons, None
+        from . import boardwrite as BW, modules as MD, routediag as RD
+        B = RD.load(board)
+        fb = Feedback(B, MD.build(B, cons, spec, arrange=False), cons, stage)
+        fb.boundary(generation=0)
+        moves = {r: v for r, v in fb.pin_moves().items()
+                 if math.hypot(v[0] - B["parts"][r]["pos"][0], v[1] - B["parts"][r]["pos"][1]) > 1e-4 or abs(v[2] - B["parts"][r]["angle"]) > 1e-4}
+        if moves:
+            os.makedirs(workdir, exist_ok=True)
+            out = os.path.join(workdir, "owner-pins.kicad_pcb")
+            BW.move_file(board, out, moves, post=False)
+            pro = os.path.splitext(board)[0] + ".kicad_pro"
+            if os.path.exists(pro):
+                shutil.copyfile(pro, os.path.splitext(out)[0] + ".kicad_pro")
+            board = out
+        return board, fb.merged(cons), fb
+    except Exception as e:                       # noqa: BLE001
+        _err("stage_start", e)
+        return board, cons, None
+
+
+def candidate(stage, cand, B=None, M=None, key=None, crit=None, cons=None, ex=None, board=None, lane="leader", phase="judge",
+              verdict="kept", full=False, **fields):
+    """One candidate, shown: an always-on progress line, a snapshot in `lane` (B = a board model or a board path; None =
+    no snapshot) and, with an exporter and a board path, a GLB request (leader lane: why leader; accepted lane: accepted).
+    Stream off: returns at once. Never raises."""
+    try:
+        if not work():
+            return None
+        meta = {"cand": cand, "arm": fields.get("arm"), "generation": fields.get("generation"), "key": key, "criteria": crit,
+                "rows_rev": fields.get("rows_rev")}
+        progress(stage, phase, always=True, cand=cand, key=key, criteria=crit, verdict=verdict, **fields)
+        rel = None
+        if B is not None:
+            if isinstance(B, (str, os.PathLike)):
+                from . import routediag as RD
+                B = RD.load(os.fspath(B))
+            rel = place_snapshot(B, lane, meta, M, cons, full=full, stage=stage)
+        if ex is not None and board and lane in ("leader", "accepted"):
+            ex.request(cand, lane, board, snapshot=_snap["seq"] if rel else None)
+        return rel
+    except Exception as e:                       # noqa: BLE001
+        _err("candidate", e)
+        return None
+
+
+def watcher(stage, cand, P, cons=None, names=("cost",)):
+    """A callback (i, n, *values) for a search loop over a floorplan2.Plan: a limited progress line and the throttled
+    `trial` snapshot of the plan's own board model. None when the stream is off, so the loop pays one `is not None`."""
+    if not work():
+        return None
+    M = {"modules": P.mods, "of": P.of}
+
+    def watch(i, n, *values):
+        try:
+            key = [[k, (round(float(v), 3) if v is not None else None)] for k, v in zip(names, values)]
+            if progress(stage, "anneal", cand=cand, trial=i, trials=n, key=key) is not None:
+                place_snapshot(P.B, "trial", {"cand": cand, "key": key}, M, cons, stage=stage)
+        except Exception as e:                   # noqa: BLE001
+            _err("watch", e)
+    return watch
 
 
 if __name__ == "__main__":                       # python3 -m fluxplace.liveview --glb-job JOB   (the exporter's child, not a command)

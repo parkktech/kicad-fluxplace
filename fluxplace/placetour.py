@@ -23,6 +23,7 @@ from . import events as EV
 from . import intent as IT
 from . import legalise as LG
 from . import legality as LGL
+from . import liveview as LV
 from . import lookahead as LA
 from . import placechecks as PC
 from . import planplace as PP
@@ -118,6 +119,13 @@ def judge(a, board, outdir, P, cons=None, spec=None, log=print):
         log(f"placetour judge: blame from the predictor ({'no routed copy' if not routed else 'route_review unavailable'})")
         blame = _predictor_blame(routed or board, cons or {}, spec)
     return {"routed": routed, "blame": blame, "source": blame["source"], "secs": round(time.time() - t0, 1)}
+
+
+KEY_NAMES = ("ghost opens", "hot areas", "hot occupancy", "vias", "detour")       # judge_key, in order (live view)
+
+
+def _lv(key):
+    return [[n, (None if v >= WORST else v)] for n, v in zip(KEY_NAMES, key)] if key is not None else None
 
 
 def judge_key(routed_board, blame, cons=None):
@@ -616,6 +624,9 @@ def stage(c, n, board):
     EV.artifact("png", png0, "input")
     EV.iteration("place", 0, n=P["max_rounds"], metrics={"opens": key0[0], "hot": key0[1], "vias": key0[3]}, note="input")
     LA._table(table, rows)
+    ex = LV.Exporter(cons, getattr(a, "constraints", None), stage="placetour") if LV.work() else None          # F16: the live view
+    LV.candidate("placetour", "input", board, None, _lv(key0), None, cons, ex, board=board, generation=0, generations=P["max_rounds"],
+                 arm="move", is_leader=True, leader="input", full=True)
     stale, rounds, stop = 0, 0, "no round ran"
     for r in range(1, P["max_rounds"] + 1):
         if budget and time.time() - t_stage > budget * 60:
@@ -628,6 +639,8 @@ def stage(c, n, board):
         rdir = os.path.join(d, f"r{r}")
         surv, _dropped = tier1(best["board"], cands, cons, spec, P, rdir, gate_state(Bb, cons, spec))
         top = surv[:P["judge_top"]]
+        LV.progress("placetour", "tier1", always=True, generation=r, generations=P["max_rounds"], trial=len(surv), trials=len(cands), arm="move",
+                    leader_key=_lv(best["key"]), why=f"{len(cands)} candidates, {len(surv)} pass tier 1, {len(top)} to judge")
         _progress(spath, "running", f"round {r}: {len(cands)} candidates, {len(surv)} tier-1, judging {len(top)}",
                   timing=timing, rounds=r - 1)
         jobs = []
@@ -653,6 +666,9 @@ def stage(c, n, board):
             if jk is not None and (winner is None or jk < winner[0]):
                 winner = (jk, cnd, p, rem, res)
             rows.append(_row(r, job["tag"], cnd["kind"], _moved(cnd["moves"]), key1, jk, res.get("png"), verdict))
+            LV.progress("placetour", "judge", always=True, generation=r, generations=P["max_rounds"], arm="move", cand=job["tag"], key=_lv(jk),
+                        leader_key=_lv(best["key"]), verdict="kept" if jk is not None and jk < tuple(best["key"]) else "dropped",
+                        why=verdict if jk is None else cnd["kind"])
         improved = winner is not None and tuple(winner[0]) < tuple(best["key"])
         if improved:
             jk, cnd, p, rem, res = winner
@@ -680,6 +696,11 @@ def stage(c, n, board):
                                                              "opens": best_key[0], "hot": best_key[1], "vias": best_key[3],
                                                              "stale": stale}, note=winner_id)
         timing[f"round{r}_s"] = round(time.time() - t_stage, 1)
+        LV.candidate("placetour", f"r{r}-{winner_id}" if improved else f"r{r}-no-gain", best["board"] if improved else None, None, _lv(best_key), None, cons,
+                     ex if improved else None, board=best["board"], generation=r, generations=P["max_rounds"], arm="move", is_leader=improved,
+                     verdict="kept" if improved else "dropped", why="improved" if improved else "no gain")
+        if ex is not None:
+            ex.poll()
         LA._table(table, rows)
         _progress(spath, "running", f"round {r} done: best key {tuple(best_key)}", rounds=r, timing=timing)
         if best_key[0] == 0 and best_key[1] == 0:
@@ -701,6 +722,16 @@ def stage(c, n, board):
             f"{stop}, {timing['stage_s']} s")
     _progress(spath, "done", line, board=out, rounds=rounds, timing=timing, reason=stop)
     nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
+    LV.candidate("placetour", "result", out, None, _lv(best["key"]), None, cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
+    if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
+        _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d)
+        g = LV.gate("PLACE_OK", None, [{"cand": "result", "key": _lv(best["key"]), "board": out}], fb, cons, ex)
+        if g["by"]:
+            nxt.append(f"gate PLACE_OK closed by {g['by']}: {g['action']}" + (f" - {g['text']}" if g["text"] else ""))
+        for row in fb.finish(RD.load(out)) if fb is not None else []:
+            nxt.append(row)
+    if ex is not None:
+        ex.close()
     if removed_refs:
         nxt.append("re-escape moved parts: fanout --parts " + ",".join(sorted(removed_refs)))
     return {"verdict": "pass" if best["routed"] else "warn", "line": line, "board": out, "next": nxt}

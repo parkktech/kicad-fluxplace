@@ -264,7 +264,7 @@ def test_a_failed_export_and_an_absent_tool_are_one_row_each(tmp_path, monkeypat
     ex = LV.Exporter({"live": {"glb_min_s": 0}}, cli=_fake_cli(tmp_path, "exit 1"))
     ex.request("bad", "leader", path)
     _wait(ex)
-    ex2 = LV.Exporter({}, cli=str(tmp_path / "no-such-tool"))
+    ex2 = LV.Exporter({"live": {}}, cli=str(tmp_path / "no-such-tool"))
     assert ex2.request("x", "leader", path) is False and ex2.request("y", "leader", path) is False
     ev = _glb_events(W)
     assert [(e["kind"], e["cand"]) for e in ev] == [("glb_failed", "bad"), ("glb_failed", "x")]
@@ -288,12 +288,18 @@ def test_close_drops_leaders_waits_for_an_accepted_export_and_old_leader_files_a
     assert [(e["kind"], e["cand"], e["why"]) for e in ev] == [("glb_failed", "lead", "stage ended"), ("glb_ready", "final", "accepted")]
 
 
-def test_stream_off_the_exporter_does_nothing(tmp_path):
-    ex = LV.Exporter({}, cli="/bin/true")
+def test_stream_off_no_live_table_or_a_nested_run_the_view_does_nothing(tmp_path, monkeypatch):
+    ex = LV.Exporter({"live": {}}, cli="/bin/true")
     assert ex.request("a", "leader", "/nonexistent.kicad_pcb") is False
     ex.poll()
     ex.close()
     assert list(tmp_path.iterdir()) == []
+    W = _on(tmp_path, monkeypatch)
+    assert LV.Exporter({}, cli="/bin/true").request("a", "leader", "/nonexistent.kicad_pcb") is False      # no [live] table: no 3D export
+    monkeypatch.setenv("FLUXPLACE_NESTED", "1")
+    assert LV.work() == "" and LV.progress("floorplan", "anneal", always=True) is None
+    assert LV.Exporter({"live": {}}, cli="/bin/true").request("a", "leader", "/nonexistent.kicad_pcb") is False
+    assert not (W / "events.jsonl").exists()
 
 
 # ---------------------------------------------------------------- L4
@@ -569,3 +575,67 @@ def test_a_gate_with_wait_zero_is_shown_but_does_not_wait(tmp_path, monkeypatch)
     assert (r["passed"], r["by"], ck.sleeps) == (True, None, 0)
     g = json.load(open(W / "feedback/gates/PLACE_OK.json"))
     assert g["deadline"] is None and "closed" not in g
+
+
+# ---------------------------------------------------------------- L7
+def _plan(tmp):
+    from fluxplace import floorplan2 as F2
+    path, B, M = _board(tmp)
+    P = F2.Plan(B, {}, None, M, log=lambda *a, **k: None)
+    P.set_claims({})
+    P.freeze_baseline()
+    return path, P, F2
+
+
+def test_anneal_is_the_same_with_and_without_the_watcher_and_calls_it_once_per_250_moves(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _p, P1, F2 = _plan(tmp_path / "a")
+    _p, P2, F2 = _plan(tmp_path / "b")
+    calls = []
+    r1 = F2.anneal(P1, iters=1000, seed=3)
+    r2 = F2.anneal(P2, iters=1000, seed=3, watch=lambda i, n, cs: calls.append((i, n)))
+    assert r1 == r2 and (P1.X == P2.X).all() and (P1.Y == P2.Y).all() and (P1.T == P2.T).all()
+    assert calls == [(0, 1000), (250, 1000), (500, 1000), (750, 1000)] and F2.WATCH_EVERY == 250
+    assert {r: (p["pos"], p["angle"]) for r, p in P1.B["parts"].items()} == {r: (p["pos"], p["angle"]) for r, p in P2.B["parts"].items()}
+
+
+def test_watcher_and_candidate_write_lines_and_snapshots_and_are_off_without_a_stream(tmp_path, monkeypatch):
+    path, P, F2 = _plan(tmp_path)
+    assert LV.watcher("floorplan", "t", P) is None and LV.candidate("floorplan", "t", P.B) is None
+    W = _on(tmp_path, monkeypatch, ops=True)
+    watch = LV.watcher("floorplan", "g_0", P, {}, names=("cost",))
+    watch(0, 1000, 12.3456)
+    watch(250, 1000, 11.0)                                     # inside 2 s: no line, no snapshot
+    M = {"modules": P.mods, "of": P.of}
+    assert LV.candidate("floorplan", "g_0", P.B, M, [["fan-out blocked", 0]], [{"id": "fan-out", "ok": True, "value": 9, "limit": 9, "text": ""}], {},
+                        generation=1, is_leader=True, leader="g_0") == "live/place/leader-000002.json"
+    assert LV.candidate("floorplan", "result", path, None, None, None, {}, lane="accepted", phase="gate", full=True) == "live/place/accepted-000003.json"
+    ev = _lines(W / "events.jsonl")
+    assert [(e["kind"], e.get("phase") or e.get("lane"), e.get("cand")) for e in ev] == [
+        ("placement_progress", "anneal", "g_0"), ("placement_snapshot", "trial", "g_0"), ("placement_progress", "judge", "g_0"),
+        ("placement_snapshot", "leader", "g_0"), ("placement_progress", "gate", "result"), ("placement_snapshot", "accepted", "result")]
+    assert ev[0]["key"] == [["cost", 12.346]] and (ev[0]["trial"], ev[0]["trials"]) == (0, 1000)
+    ops = _lines(tmp_path / "ops.jsonl")                         # the ops feed gets every line, also those with a `path` field
+    assert [(o["kind"], o.get("path")) for o in ops] == [(e["kind"], e.get("path")) for e in ev] and all("text" in o for o in ops)
+    assert not (W / "live/errors.jsonl").exists()
+
+
+def test_stage_start_is_a_no_op_without_an_inbox_and_moves_owner_pins_on_a_copy(tmp_path, monkeypatch):
+    path, B, M = _board(tmp_path)
+    cons = {"placement": {"fixed": ["J1"]}}
+    assert LV.stage_start(path, cons, None, "floorplan", str(tmp_path / "wd")) == (path, cons, None)       # stream off
+    W = _on(tmp_path, monkeypatch)
+    b, c, fb = LV.stage_start(path, cons, None, "floorplan", str(tmp_path / "wd"))
+    assert b == path and c is cons and fb is None and not (tmp_path / "wd").exists()                     # no inbox folder
+    os.makedirs(W / "feedback/inbox")
+    b, c, fb = LV.stage_start(path, cons, None, "floorplan", str(tmp_path / "wd"))
+    assert b == path and c is cons and fb is not None and fb.rows == []                                  # empty inbox: nothing changes
+    before = open(path, "rb").read()
+    (W / "feedback/inbox/2026-a.json").write_text(json.dumps(_item(id="00000001", kind="pin", target={"part": "U2"}, pin={"at": [70.0, 50.0], "rot": 90})))
+    b, c, fb = LV.stage_start(path, cons, None, "floorplan", str(tmp_path / "wd"))
+    assert b == str(tmp_path / "wd" / "owner-pins.kicad_pcb") and open(path, "rb").read() == before
+    p = RD.load(b)["parts"]["U2"]
+    assert (round(p["pos"][0], 3), round(p["pos"][1], 3), p["angle"]) == (70.0, 50.0, 90.0)
+    assert c["lock"]["at"]["U2"] == [70.0, 50.0, "F.Cu"] and c["placement"]["fixed"] == ["J1", "U2"] and cons == {"placement": {"fixed": ["J1"]}}
+    assert fb.measure(fb.rows[0], RD.load(b)) == (True, 0.0)

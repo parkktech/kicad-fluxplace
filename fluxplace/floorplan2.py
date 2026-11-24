@@ -686,7 +686,10 @@ def _grid(P, i, tx, ty, R, step, placed, x0, y0, x1, y1, occ):
     return out
 
 
-def anneal(P, iters=4000, seed=1, t0=None, log=print):
+WATCH_EVERY = 250                   # anneal moves between two calls of the live view
+
+
+def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
     rng = random.Random(seed)
     mov = [i for i in range(P.n) if not P.fixed[i]]
     if not mov:
@@ -698,6 +701,8 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print):
     acc = 0
     x0, y0, x1, y1 = P.B["bbox"]
     for it in range(iters):
+        if watch is not None and it % WATCH_EVERY == 0:      # F16 (liveview): no random draw, nothing of the search is touched
+            watch(it, iters, cs)
         frac = it / max(1, iters)
         T = T0 * (0.02 ** frac)
         sig = max(0.5, 8.0 * (1 - frac))
@@ -966,7 +971,10 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         rep = repair_claims(P, step=args.step)
         print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
     init = P.cost_parts()
-    acc, best = anneal(P, iters=args.iters, seed=args.seed)
+    from . import liveview as LV                 # F16: the constructed placement and the running anneal, when a stream is on
+    LV.candidate("floorplan", f"{tag}-construct", P.B, {"modules": P.mods, "of": P.of}, [["cost", round(float(P.total(init)), 3)]], None, cons,
+                 lane="trial", phase="construct", verdict="running", full=True)
+    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
     cur = P.cost_parts()
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
            "source": src, "constructed": init, "annealed": cur, "accepted": acc, "rounds": []}
@@ -1075,6 +1083,15 @@ def edge_order(B, cons):
     return sorted(ln, key=lambda k: (ln[k] / max(heat[k], 0.05), k))
 
 
+def _live_key(res):
+    """The floorplan result as a judge key for the live view (liveview.progress): lower is better, left first."""
+    return [["fan-out blocked", res["required"] - res["escaped"]], ["crossings", res["annealed"]["cross"]], ["wire length", round(res["annealed"]["wl"], 1)]]
+
+
+def _live_crit(res):
+    return [{"id": "fan-out", "ok": passes(res), "value": res["escaped"], "limit": res["required"], "text": str(res.get("why_not") or "")}]
+
+
 def cmd_floorplan(a):
     from . import constraints as C, routediag as RD
     spec = json.load(open(a.spec)) if a.spec else None
@@ -1088,6 +1105,9 @@ def cmd_floorplan(a):
     os.makedirs(wd, exist_ok=True)
     from . import intent as IT
     src_board = a.board
+    from . import liveview as LV                 # F16: owner rows that came in before the search (no inbox folder: nothing changes)
+    a.board, cons, fb = LV.stage_start(a.board, cons, spec, "floorplan", wd)
+    ex = LV.Exporter(cons, a.constraints, stage="floorplan") if LV.work() else None
     from . import pins as PN
     a.board, cons, pin_res = PN.prepare(a.board, cons, spec, wd)       # --- pins: collisions among pinned parts, resolved by precedence
     if pin_res is not None and pin_res.unresolved:
@@ -1113,6 +1133,8 @@ def cmd_floorplan(a):
               f"fan-out {res['escaped']}/{res['required']}, {res['moved_modules']}/{res['movable']} modules moved, "
               f"cross {res['source']['cross']} -> {res['annealed']['cross']}, wl {res['source']['wl']:.0f} -> {res['annealed']['wl']:.0f}, "
               f"{res['secs']} s; {res['why_not']}")
+        LV.candidate("floorplan", tag, Bn, {"modules": P.mods, "of": P.of} if P is not None else None, _live_key(res), _live_crit(res), cons, ex, board=res["board"],
+                     generation=len(history), verdict="kept" if passes(res) else "dropped", why=res["why_not"], is_leader=True, leader=tag)
         if passes(res) or not a.size or steps >= a.max_grow * 4:
             break
         e = order[steps % 4]
@@ -1151,6 +1173,12 @@ def cmd_floorplan(a):
             Bn = RD.load(out)
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
+    LV.candidate("floorplan", "result", Bn, None, _live_key(best), _live_crit(best), cons, ex, board=out, lane="accepted", phase="gate",
+                 verdict="kept" if passes(best) and not (irc or brc) else "refused", why=best["why_not"], full=True)
+    for line in fb.finish(Bn) if fb is not None else []:
+        print(line)
+    if ex is not None:
+        ex.close()
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
