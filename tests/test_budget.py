@@ -440,13 +440,14 @@ def test_separation_and_flight_rows_do_not_change_with_rotation(tmp_path):
     seps, flights = [], []
     for a in (0, 90, 180, 270):
         B = RD.load(PG.board(tmp_path, gduo("U1", 20, 20, "USB_D_P", "USB_D_N", court=(-1, -0.5, 3, 0.5), angle=a)
-                             + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=(-1, -0.5, 3, 0.5), angle=a)
+                             + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=(-1, -0.5, 3, 0.5))
                              + zone(38, 10, 42, 30), name=f"rot{a}.kicad_pcb"))
         cons = dict(USB, separation=[{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 5.0}])
         seps.append(BG.separation_rows(B, cons)[0]["value"])
         flights.append(len(BG.flight_rows(B, USB, fixed={"U1", "J1"})))
-    # off-centre courtyards (4 x 1 mm, centre 1 mm right of the pad origin): 0 / 180 deg 36.0, 90 / 270 deg 39.0; the zone is on the line
-    assert [round(v, 2) for v in seps] == [36.0, 39.0, 36.0, 39.0] and flights == [1, 1, 1, 1]
+    # off-centre courtyards (4 x 1 mm, centre 1 mm right of the pad origin): U1 turns, J1 does not: an offset that does not turn
+    # with the part shows at 180 degrees; the zone is on the line
+    assert [round(v, 2) for v in seps] == [36.0, 38.5, 38.0, 38.5] and flights == [1, 1, 1, 1]
 
 
 # ---- C6: stable row names (B4)
@@ -530,6 +531,22 @@ def test_table_exempts_a_keepout_of_its_own_module(tmp_path):
     assert [r for r in rows if r["kind"] == "keepout-flight"] == []
 
 
+def test_homes_leaves_out_a_guessed_owner(tmp_path):
+    body = PG.ic("U1", 20, 20, ["LX", "VDD", "GND", "A4", "A5", "A6"], pitch=0.5)
+    body += PG.ic("U2", 60, 20, ["B1", "VDD", "GND", "B4", "B5", "B6"], pitch=0.5)
+    body += gduo("L1", 23, 20, "LX", "LB", court=CT) + gduo("C9", 40, 40, "VDD", "GND", court=CT)    # C9: shared rail, far from both (spread, not sure)
+    assert BG.homes(RD.load(PG.board(tmp_path, body, name="g.kicad_pcb")), {}) == {"L1": "U1"}
+
+
+def test_table_exempts_a_separation_against_the_keepout_of_its_own_module(tmp_path):
+    B = _own_board(tmp_path, "s.kicad_pcb")
+    cons = dict(USB, placement={"keepout": {"ind": {"under": "L1", "layers": "all"}}},
+                separation=[{"name": "s", "a": ["keepout:ind"], "b": ["U1"], "min_mm": 5.0, "source": "x p.1"}])
+    r = [x for x in BG.table(B, cons) if x["kind"] == "separation"][0]
+    assert r["value"] is None and r["refs"] == []              # U1 owns L1: nothing left to measure
+    assert BG.separation_rows(B, cons)[0]["value"] == 0.0      # without the home it is measured against its own IC
+
+
 def test_unnamed_separations_keep_their_names_when_an_earlier_one_is_dropped(tmp_path):
     from fluxplace import intent as IT
     B = usb_board(tmp_path)
@@ -544,8 +561,10 @@ def test_unnamed_separations_keep_their_names_when_an_earlier_one_is_dropped(tmp
 def test_row_that_exists_only_while_violated_is_honoured_when_gone():
     fl = BG.row("keepout-flight", "P x ko", "crossing", "count", value=1, mx=0, source="s", hard=True)
     pb = BG.row("support", "U1.7 own bypass (C1)", "pin-bypass", "mm", value=9.0, target=5.0, source="s")
-    pair = BG.row("pair", "X", "length", "mm", value=20.0, mx=40.0, source="s")
+    pair = BG.row("pair", "X", "length", "mm", value=20.0, target=25.0, mx=40.0, source="s")
     h = {r["kind"]: r for r in BG.honoured([fl, pb, pair], [])}
     assert h["keepout-flight"]["status"] == "honoured" and h["keepout-flight"]["value_out"] is None
     assert h["support"]["status"] == "honoured" and h["support"]["value_out"] is None
-    assert h["pair"]["status"] == "not_measured"
+    assert h["pair"]["status"] == "not_measured" and h["pair"]["limit"] == 40.0
+    gone = BG.honoured([BG.row("support", "U9 -> X", "distance", "mm", value=9.0, target=5.0, source="s")], [])
+    assert gone[0]["status"] == "not_measured"
