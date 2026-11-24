@@ -367,6 +367,7 @@ def template_rows(B, cons, spec=None):
         lay = c.get("layout")
         if not lay:
             continue
+        c = dict(c, supports=[s for s in c["supports"] if s["sure"]])         # a guessed owner is not this regulator's part (M5)
         got = CL.loop_metrics(B, c, names.get(c["ic"], {}))
         der = lay["fact"].get("derived")
         der = set(lay["fact"]) if der is True else {str(k) for k in der} if isinstance(der, (list, tuple)) else set()
@@ -380,6 +381,14 @@ def template_rows(B, cons, spec=None):
             out.append(row("support", f"{c['ic']} template {key}", "template", "mm", got.get(key), mx, mx, src,
                            "REQ" if hard else "INF", hard, refs=[c["ic"]] + [s["ref"] for s in c["supports"] if s["rank"] < 9],
                            detail="" if got.get(key) is not None else "no such part in the module"))
+        pairs = lay["pairs"]
+        if pairs:                       # cin_side is the datasheet's REQ the seater steers by: it gets a row, never a silent fallback (A1)
+            caps = [s for s in c["supports"] if s["rank"] == 1 and s["ref"].startswith("C")]
+            served = sum(1 for pr in pairs if any(CL._on_cin_side(B["parts"][c["ic"]], B["parts"][s["ref"]]["court"], [pr], pr[0],
+                                                                  B["parts"][s["ref"]]["pads"]) for s in caps))
+            out.append(row("support", f"{c['ic']} template cin_side", "template", "pairs", served, len(pairs), len(pairs),
+                           f"datasheet fact layout.cin_side of {lay['mpn']} ({lay['src']})", "REQ", True, minimum=True,
+                           refs=[c["ic"]] + [s["ref"] for s in caps], detail="input capacitor on the side of each named pin pair"))
     return out
 
 

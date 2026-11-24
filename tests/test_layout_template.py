@@ -207,12 +207,13 @@ def test_template_rows_are_hard_only_for_numbers_the_page_states(tmp_path):
     B = RD.load(_board(tmp_path))
     cons = _datasheets(tmp_path, LAY)
     rows = {r["name"]: r for r in BU.template_rows(B, cons, SPEC)}
-    assert set(rows) == {"U1 template cin_loop_mm", "U1 template sw_mm", "U1 template fb_mm"}
+    assert set(rows) == {"U1 template cin_loop_mm", "U1 template sw_mm", "U1 template fb_mm", "U1 template cin_side"}
     r = rows["U1 template cin_loop_mm"]
     assert (r["value"], r["target"], r["max"], r["hard"], r["klass"], r["verdict"]) == (5.193, 4.0, 4.0, True, "REQ", "fail")
     (tmp_path / "d2").mkdir()
     cons2 = _datasheets(tmp_path / "d2", dict(LAY, derived=["cin_loop_mm", "sw_mm", "fb_mm"]))
     rows2 = {r["name"]: r for r in BU.template_rows(B, cons2, SPEC)}
+    rows2 = {k: v for k, v in rows2.items() if not k.endswith("cin_side")}               # cin_side is a named datasheet REQ, never derived
     assert not any(r["hard"] for r in rows2.values()) and {r["klass"] for r in rows2.values()} == {"INF"}
     assert rows2["U1 template cin_loop_mm"]["verdict"] == "fail" and "derived" in rows2["U1 template cin_loop_mm"]["source"]
     assert BU.template_rows(B, {}, SPEC) == []                                                     # no fact, no row
@@ -235,3 +236,31 @@ def test_a_derived_keepout_is_soft_and_does_not_make_the_plan_illegal(tmp_path, 
     assert [ax + mod["keepouts_soft"][0][0], ay + mod["keepouts_soft"][0][1], ax + mod["keepouts_soft"][0][2],
             ay + mod["keepouts_soft"][0][3]] == pytest.approx((26.1, 31.0, 29.1, 33.0))
     assert "keepouts" not in mod
+
+
+def test_cin_side_has_a_hard_row_that_fails_off_side_and_passes_on_side(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    Bn, _, _ = _seated(tmp_path / "a", lay=None)                       # seated without the fact: C1 above the IC, off the VIN/GND side
+    r = {x["name"]: x for x in BU.template_rows(Bn, _datasheets(tmp_path / "a", LAY), SPEC)}["U1 template cin_side"]
+    assert (r["value"], r["target"], r["hard"], r["klass"], r["verdict"], r["refs"]) == (0, 1, True, "REQ", "fail", ["U1", "C1"])
+    Bs, _, _ = _seated(tmp_path / "b")
+    r2 = {x["name"]: x for x in BU.template_rows(Bs, _datasheets(tmp_path / "b", LAY), SPEC)}["U1 template cin_side"]
+    assert (r2["value"], r2["verdict"], r2["hard"]) == (1, "ok", True)
+
+
+def test_a_guessed_input_capacitor_is_not_the_regulators_part(tmp_path, monkeypatch):
+    B = RD.load(_board(tmp_path))
+    real = CL.build
+
+    def guess(*a, **k):
+        cl, rest = real(*a, **k)
+        for c in cl:
+            for s in c["supports"]:
+                if s["ref"] == "C1":
+                    s["sure"] = False
+        return cl, rest
+    monkeypatch.setattr(CL, "build", guess)
+    rows = {x["name"]: x for x in BU.template_rows(B, _datasheets(tmp_path, LAY), SPEC)}
+    assert rows["U1 template cin_loop_mm"]["value"] is None
+    assert rows["U1 template cin_side"]["value"] == 0 and rows["U1 template cin_side"]["verdict"] == "fail"
