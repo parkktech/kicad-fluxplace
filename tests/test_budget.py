@@ -509,3 +509,20 @@ def test_stated_derivation_makes_a_rail_or_separation_soft(tmp_path):
     sep = {"separation": [{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 50.0, "source": "x p.1", "derived": "rule of thumb"}]}
     r = BG.separation_rows(usb_board(tmp_path, name="s.kicad_pcb"), sep)[0]
     assert r["verdict"] == "fail" and r["hard"] is False
+
+
+def _own_board(tmp_path, name):
+    """U1 (an IC, 6 pads) with L1 on a net only U1 has (L1 is owned by net); the USB pair J1 at x = 60 crosses L1's keep-out."""
+    body = PG.ic("U1", 20, 20, ["LX", "USB_D_P", "USB_D_N", "A4", "A5", "A6"], pitch=0.5)
+    body += gduo("L1", 23, 20, "LX", "LB", court=CT) + gduo("J1", 60, 20, "USB_D_P", "USB_D_N", court=CT)
+    return RD.load(PG.board(tmp_path, body, name=name))
+
+
+def test_homes_owns_a_part_whose_only_ic_is_on_its_net(tmp_path):
+    assert BG.homes(_own_board(tmp_path, "h.kicad_pcb"), USB)["L1"] == "U1"
+
+
+def test_table_exempts_a_keepout_of_its_own_module(tmp_path):
+    cons = dict(USB, placement={"keepout": {"ind": {"under": "L1", "layers": "all"}}})
+    rows = BG.table(_own_board(tmp_path, "t.kicad_pcb"), cons, fixed=("U1", "J1"))
+    assert [r for r in rows if r["kind"] == "keepout-flight"] == []
