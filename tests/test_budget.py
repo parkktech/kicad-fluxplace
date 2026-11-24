@@ -538,3 +538,13 @@ def test_unnamed_separations_keep_their_names_when_an_earlier_one_is_dropped(tmp
     name1, name2 = "sep:" + BG.sep_name(first, 0), "sep:" + BG.sep_name(second, 1)
     assert name1 != name2
     assert away([first, second]) == [name1, name2] and away([second]) == [name2]
+
+
+def test_row_that_exists_only_while_violated_is_honoured_when_gone():
+    fl = BG.row("keepout-flight", "P x ko", "crossing", "count", value=1, mx=0, source="s", hard=True)
+    pb = BG.row("support", "U1.7 own bypass (C1)", "pin-bypass", "mm", value=9.0, target=5.0, source="s")
+    pair = BG.row("pair", "X", "length", "mm", value=20.0, mx=40.0, source="s")
+    h = {r["kind"]: r for r in BG.honoured([fl, pb, pair], [])}
+    assert h["keepout-flight"]["status"] == "honoured" and h["keepout-flight"]["value_out"] is None
+    assert h["support"]["status"] == "honoured" and h["support"]["value_out"] is None
+    assert h["pair"]["status"] == "not_measured"

@@ -505,7 +505,8 @@ def summary(rows):
 def honoured(before, after):
     """Rows of the output board against the same rows of the input: [{name, kind, metric, hard, derived, value_in, value_out, limit,
     status}]. status: "honoured" (verdict ok / over-target-pass), "not_honoured" (fail), "not_measured" (n/a or the row is gone).
-    Keyed by (kind, name, metric); a row only in `after` has value_in None."""
+    Keyed by (kind, name, metric); a row only in `after` has value_in None. A row that exists only while violated (flight
+    crossing, bare pin) and is gone is honoured; any other row gone from `after` is not_measured."""
     key = lambda r: (r["kind"], r["name"], r["metric"])
     old = {key(r): r for r in before}
     out = []
@@ -516,9 +517,10 @@ def honoured(before, after):
                     "value_in": b["value"] if b else None, "value_out": r["value"],
                     "limit": r["max"] if r["max"] is not None else r["target"], "status": st})
     for b in old.values():
+        gone_ok = b["kind"] == "keepout-flight" or b["metric"] == "pin-bypass"
         out.append({"name": b["name"], "kind": b["kind"], "metric": b["metric"], "hard": b["hard"], "derived": b["derived"],
                     "value_in": b["value"], "value_out": None,
-                    "limit": b["max"] if b["max"] is not None else b["target"], "status": "not_measured"})
+                    "limit": b["max"] if b["max"] is not None else b["target"], "status": "honoured" if gone_ok else "not_measured"})
     return out
 
 
