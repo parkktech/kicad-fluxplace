@@ -624,6 +624,9 @@ def stage(c, n, board):
     EV.artifact("png", png0, "input")
     EV.iteration("place", 0, n=P["max_rounds"], metrics={"opens": key0[0], "hot": key0[1], "vias": key0[3]}, note="input")
     LA._table(table, rows)
+    from . import ready as RDY, parts as PTS                  # C7b: the rows of the input, measured now; the output is set against them
+    ds_dir = PTS.resolve_dir(((cons or {}).get("docs") or {}).get("datasheets"), [getattr(a, "constraints", None), board])
+    rows_in = RDY.stage_rows(spec, cons, RD.load(board), board, ds_dir)
     ex = LV.Exporter(cons, getattr(a, "constraints", None), stage="placetour") if LV.work() else None          # F16: the live view
     LV.candidate("placetour", "input", board, None, _lv(key0), None, cons, ex, board=board, generation=0, generations=P["max_rounds"],
                  arm="move", is_leader=True, leader="input", full=True)
@@ -722,10 +725,12 @@ def stage(c, n, board):
             f"{stop}, {timing['stage_s']} s")
     _progress(spath, "done", line, board=out, rounds=rounds, timing=timing, reason=stop)
     nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
-    LV.candidate("placetour", "result", out, None, _lv(best["key"]), None, cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
+    hon = RDY.stage_honoured("placetour", spec, cons, rows_in, out, RD.load(out), ds_dir=ds_dir)
+    nxt.append(hon["line"])
+    LV.candidate("placetour", "result", out, None, _lv(best["key"]), hon["criteria"], cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
     if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
         _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d, apply=False)
-        g = LV.gate("PLACE_OK", None, [{"cand": "result", "key": _lv(best["key"]), "board": out}], fb, cons, ex)
+        g = LV.gate("PLACE_OK", None, [{"cand": "result", "key": _lv(best["key"]), "criteria": hon["criteria"], "board": out}], fb, cons, ex)
         if g["by"]:
             nxt.append(f"gate PLACE_OK closed by {g['by']}: {g['action']}" + (f" - {g['text']}" if g["text"] else ""))
         for row in fb.finish(RD.load(out)) if fb is not None else []:

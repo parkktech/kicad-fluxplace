@@ -367,3 +367,17 @@ def test_carried_track_near_foreign_pad_and_same_net_ignored():
     pad2 = dict(pad, net="N1")                                 # same net as the carried track: no clearance check
     B["pads"] = [pad2]
     assert PTm.carried_clearance(B, {"segs": {1: "R1"}, "vias": {}}) is None
+
+
+def test_stage_reports_honoured_rows_on_the_written_board(monkeypatch, tmp_path):
+    from fluxplace import placetour as PTm
+    keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
+    c = _stage_ctx(tmp_path)
+    from fluxplace import ready as RDY, budget as BG
+    far = BG.row("separation", "far", "distance", "mm", 3.0, None, 900.0, "ds p.1", hard=True, minimum=True)
+    monkeypatch.setattr(RDY, "measure_rows", lambda *a, **k: ([far], []))          # the synthetic board has no copper model: wiring only
+    r = PTm.stage(c, 3, board)
+    assert any(l.startswith("rows on the output: 0 honoured, 1 hard not honoured (far)") for l in r["next"])
+    d = c.dir(3, "placetour")
+    assert os.path.exists(os.path.join(d, "board.budgets.json"))
