@@ -1,4 +1,5 @@
-import os, sys
+import math, os, sys
+import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fluxplace import clusters as CL, routediag as RD, legality as LGL, geom as GM
 import pcbgen as g
@@ -93,3 +94,65 @@ def test_gate_fails_placement_illegal_and_allow_overlap_clears_it(tmp_path):
     assert bad and bad[0]["level"] == "FAIL" and card["counts"]["PLACEMENT_ILLEGAL"] == 1 and card["fail"] >= 1
     f2, card2 = PR.run(B, {"placement": {"allow_overlap": [["C1", "C2"]]}})
     assert card2["counts"]["PLACEMENT_ILLEGAL"] == 0 and card2["score"] < card["score"]
+
+
+# ---- placer step 5b S1: a side-aware seat
+KO = {"placement": {"keepout": {"mod": {"rect": [30, 30, 50, 50], "side": "B"}}}}
+
+
+def _reseat(path, cons, **kw):
+    B = RD.load(path)
+    cl, _ = CL.build(B, cons)
+    left, refused = [], {}
+    mv = CL.reseat(B, cl, bounds=(0, 0, 100, 80), legal=LGL.Legal(B, cons), strict=True, left=left, refused=refused, **kw)
+    return B, mv, left, refused
+
+
+def test_a_part_with_no_seat_on_its_side_is_seated_on_the_other_side_within_its_limit(tmp_path):
+    path = _board_with_keepout(tmp_path)
+    B, mv, left, refused = _reseat(path, KO)                          # no flips asked: left, and the refusing check is named
+    assert not mv and refused["C411"].startswith("side closed: mod")
+    flips = set()
+    B, mv, left, refused = _reseat(path, KO, flips=flips)
+    assert set(mv) == {"C411", "C412"} and flips == {"C411", "C412"} and left == []
+    assert {B["parts"][r]["side"] for r in mv} == {"F.Cu"} and LGL.count(LGL.Legal(B, KO).issues()) == 0
+    for r in mv:
+        pin = next(p for p in B["parts"]["U410"]["pads"] if p["net"] == "D410")
+        via = next(p for p in B["parts"][r]["pads"] if p["net"] == "D410")
+        assert math.hypot(via["x"] - pin["x"], via["y"] - pin["y"]) <= 5.0
+
+
+def test_a_through_hole_part_is_never_flipped_and_no_keepout_is_todays_result(tmp_path):
+    b = g.ic("U410", 40, 40, ["VDD", "A1", "D410", "GND", "A2", "A3"], pitch=0.5)
+    b += g.fp("C411", 70, 70, [g.pad("1", -1, 0, "D410", typ="thru_hole", w=1.0, h=1.0), g.pad("2", 1, 0, "GND", typ="thru_hole", w=1.0, h=1.0)],
+              side="B", court=(-1.5, -0.8, 1.5, 0.8))
+    path = g.board(tmp_path, b)
+    flips = set()
+    B, mv, left, _ = _reseat(path, KO, flips=flips)
+    assert B["parts"]["C411"]["tht"] and not mv and flips == set() and [r for r, _ in left] == ["C411"]
+    p2 = _board_with_keepout(tmp_path)
+    B0, mv0, _l, _r = _reseat(p2, {})
+    f2 = set()
+    B1, mv1, _l, _r = _reseat(p2, {}, flips=f2)
+    assert mv0 == mv1 and f2 == set()                                   # a part that seats on its own side is not flipped
+
+
+def test_a_flipped_seat_is_written_to_the_board_as_the_model_has_it(tmp_path):
+    from fluxplace import boardwrite as BW, flip as FL, modules as MD
+    if not FL.available():
+        pytest.skip("pcbnew not available")
+    from test_flip import KICAD_HEAD                      # pcbnew wants the real layer table
+    path = _board_with_keepout(tmp_path)
+    txt = open(path).read().replace(g.HEAD, KICAD_HEAD)
+    open(path, "w").write(txt)
+    B = RD.load(path)
+    M = MD.build(B, KO, None, arrange=True)
+    assert M["flipped"] == ["C411", "C412"] and {B["parts"][r]["side"] for r in M["flipped"]} == {"F.Cu"}
+    dst, dst2 = str(tmp_path / "f.kicad_pcb"), str(tmp_path / "w.kicad_pcb")
+    FL.flip_file(path, dst, M["flipped"])
+    BW.move_file(dst, dst2, {r: (*B["parts"][r]["pos"], B["parts"][r]["angle"]) for r in M["flipped"]}, post=False)
+    W = RD.load(dst2)
+    for r in M["flipped"]:
+        assert W["parts"][r]["side"] == "F.Cu"
+        for q, w in zip(B["parts"][r]["pads"], W["parts"][r]["pads"]):
+            assert (q["x"], q["y"]) == pytest.approx((w["x"], w["y"]), abs=1e-3)

@@ -16,7 +16,7 @@ The spec JSON adds nothing here beyond pin names; it carries no grouping.
 """
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from . import geom as GM
 from . import netclass as NC
@@ -265,11 +265,13 @@ def rehome(B, cl, cons=None, spec=None, demand=None):
     return out
 
 
-def unseated(cl, fixed=()):
+def unseated(cl, fixed=(), refused=None):
     """Confidently-owned support parts beyond their limit after a seating pass: [{ref, ic, pad, dist, limit, why}], why =
-    "fixed" (the part may not move) or "no legal seat" (the seater found none). Sorted by ref."""
+    "fixed" (the part may not move) or "no legal seat" (the seater found none; with `refused` {ref: check} from seat: "no legal seat: <check>"). Sorted by ref."""
+    refused = refused or {}
     return sorted(({"ref": s["ref"], "ic": c["ic"], "pad": s["pad"], "dist": round(s["dist"], 2), "limit": s["limit"],
-                    "why": "fixed" if s["ref"] in fixed else "no legal seat"} for c in cl for s in c["supports"] if s["sure"] and s["dist"] > s["limit"]),
+                    "why": "fixed" if s["ref"] in fixed else f"no legal seat: {refused[s['ref']]}" if s["ref"] in refused else "no legal seat"}
+                   for c in cl for s in c["supports"] if s["sure"] and s["dist"] > s["limit"]),
                   key=lambda x: x["ref"])
 
 
@@ -585,7 +587,7 @@ def _outward(part, pin):
 
 
 def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isolate=False, legal=None,
-         strict=False, left=None):
+         strict=False, left=None, flips=None, refused=None):
     """Re-seat the movable support parts of cluster `cl` around its (fixed) IC.
     Returns {ref: (x, y, angle)}. Rigid: each part keeps its footprint; only its
     origin and rotation change. Candidate positions are tried in order of
@@ -597,7 +599,10 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
     also add no violation there (same-side courtyards of through-hole parts, the real outline with its
     rounded corners, named keep-outs and side regions, no-through-hole regions). With `strict` a seat
     farther than the part's limit from its pin is refused: the part stays and is appended to `left`
-    as (ref, reason)."""
+    as (ref, reason). With `flips` (a set) a surface-mount part with no legal seat on its side is tried on the other side (P5b S1,
+    GM.flip on the model, in place: the part stays flipped when it seats there and its ref is added to `flips`; the caller must write
+    the flip, flip.flip_file); without it a part never changes side. `refused` (a dict) gets {ref: the check that refused most
+    candidates}: "side closed: <keep-out>", "own escape lane", "occupied by <refs>", "board edge"."""
     parts = B["parts"]
     ic = cl["ic"]
     icp = parts[ic]
@@ -627,37 +632,64 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
         base = (pin["x"] + ox * pin["ex"], pin["y"] + oy * pin["ey"])
         grid = sorted(((math.hypot(ia * step, it * step), ia * step, it * step)
                        for ia in range(0, n_d + 1) for it in range(-n_d, n_d + 1)))
-        pick, best = None, math.inf
-        for approx, d, t in grid:
-            if approx > best + 2.5:
-                break
-            cx = base[0] + ox * d + (-oy) * t
-            cy = base[1] + oy * d + ox * t
-            for ang in (0.0, 90.0, 180.0, 270.0):
-                pads, court = GM.moved(part, cx, cy, ang)
-                sp = next(p for p in pads if p["num"] == s["via"])
-                cost = math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"])
-                if is_gnd_cap:
-                    op = next(p for p in pads if p["num"] != s["via"])
-                    cost += 0.3 * min(math.hypot(op["x"] - g["x"], op["y"] - g["y"]) for g in gnd)
-                if cin and not _on_cin_side(icp, court, pairs, s["pad"], pads):
-                    cost += CIN_OFF_SIDE_MM               # the datasheet's side ranks before pin distance; no such seat = the old seat
-                if cost >= best:
-                    continue
-                if bounds and not GM.inside(court, bounds):
-                    continue
-                if any(GM.overlap(court, ln) for ln in lanes):
-                    continue
-                if any(True for _ in occ.hits(court, part["side"], 0.0, ignore=(ref,))):
-                    continue
-                if zones and _in_zone(zones, part, court):
-                    continue
-                if strict and math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) > s["limit"] + (
-                        HALO_MM if halo else 0.0):
-                    continue
-                if legal is not None and legal.part_issues(ref, court, pads):
-                    continue
-                pick, best = (cx, cy, ang, court, cost), cost
+        def search():
+            pick, best = None, math.inf
+            no = Counter()                                       # which check refused how many candidates
+            for approx, d, t in grid:
+                if approx > best + 2.5:
+                    break
+                cx = base[0] + ox * d + (-oy) * t
+                cy = base[1] + oy * d + ox * t
+                for ang in (0.0, 90.0, 180.0, 270.0):
+                    pads, court = GM.moved(part, cx, cy, ang)
+                    sp = next(p for p in pads if p["num"] == s["via"])
+                    cost = math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"])
+                    if is_gnd_cap:
+                        op = next(p for p in pads if p["num"] != s["via"])
+                        cost += 0.3 * min(math.hypot(op["x"] - g["x"], op["y"] - g["y"]) for g in gnd)
+                    if cin and not _on_cin_side(icp, court, pairs, s["pad"], pads):
+                        cost += CIN_OFF_SIDE_MM               # the datasheet's side ranks before pin distance; no such seat = the old seat
+                    if cost >= best:
+                        continue
+                    if bounds and not GM.inside(court, bounds):
+                        no["board edge"] += 1
+                        continue
+                    if any(GM.overlap(court, ln) for ln in lanes):
+                        no["own escape lane"] += 1
+                        continue
+                    hit = next(iter(occ.hits(court, part["side"], 0.0, ignore=(ref,))), None)
+                    if hit is not None:
+                        no["occupied by " + str(hit)] += 1
+                        continue
+                    if zones and _in_zone(zones, part, court):
+                        no["side closed: keep-out zone"] += 1
+                        continue
+                    if strict and math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"]) > s["limit"] + (
+                            HALO_MM if halo else 0.0):
+                        continue
+                    if legal is not None:
+                        bad = legal.part_issues(ref, court, pads)
+                        if bad:
+                            k, dd = bad[0]
+                            no["side closed: " + str(dd) if k == "forbidden" else "board edge" if k == "outside" else
+                               "occupied by " + str(dd) if k == "overlap" and dd else f"{k} {dd}".strip()] += 1
+                            continue
+                    pick, best = (cx, cy, ang, court, cost), cost
+            return pick, (no.most_common(1)[0][0] if no else "no candidate within the limit")
+        pick, why_not = search()
+        if pick is None and flips is not None and not part["tht"]:
+            GM.flip(part)                                        # the other side, same origin; undone when no seat is there either
+            if legal is not None:
+                legal.refresh(ref)
+            pick2, why2 = search()
+            if pick2:
+                pick = pick2
+                flips.symmetric_difference_update({ref})         # flipped back to its input side = no flip to write
+            else:
+                GM.flip(part)
+                if legal is not None:
+                    legal.refresh(ref)
+                why_not = f"{why_not}; other side: {why2}"
         if pick:
             cx, cy, ang, court, cost = pick
             moves[ref] = (round(cx, 4), round(cy, 4), ang)
@@ -668,6 +700,8 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                 log(f"  {ref} -> ({cx:.2f}, {cy:.2f}) {ang:g} deg  "
                     f"{s['dist']:.1f} -> {cost:.1f} mm (pin {ic}.{s['pad']})")
         else:
+            if refused is not None:
+                refused[ref] = why_not
             why = (f"no legal seat within its {s['limit']:g} mm limit of {ic}.{s['pad']}" if strict
                    else f"no free seat within {reach:g} mm of {ic}.{s['pad']}")
             if left is not None:
@@ -698,7 +732,7 @@ def _cin_off_template(B, c, s):
 
 
 def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None,
-           legal=None, strict=False, left=None):
+           legal=None, strict=False, left=None, flips=None, refused=None):
     """Seat the far support parts of every cluster around their ICs (ICs never
     move). Mutates the board model B as it goes so later clusters see earlier
     moves. Parts already within their limit stay put unless `everything`;
@@ -713,7 +747,7 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
         if log:
             log(f"{c['ic']}: re-seating {len(sup)} part(s)")
         m = seat(B, dict({"ic": c["ic"], "supports": sup}, **({"layout": c["layout"]} if c.get("layout") else {})), bounds=bounds, log=log, isolate=isolate,
-                 legal=legal, strict=strict, left=left)
+                 legal=legal, strict=strict, left=left, flips=flips, refused=refused)
         for ref, (x, y, a) in m.items():
             GM.place(B["parts"][ref], x, y, a)
             if legal is not None:

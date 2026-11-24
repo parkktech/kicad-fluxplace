@@ -1030,9 +1030,15 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
            "source": src, "constructed": init, "annealed": cur, "accepted": acc, "rounds": []}
     out_path = os.path.join(workdir, f"{tag}.kicad_pcb")
+    base = path_g
+    if M.get("flipped"):                         # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
+        from . import flip as FL
+        base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
+        FL.flip_file(path_g, base, M["flipped"])
+        _pro(board, base)
     for rd in range(args.rounds + 1):
         moves = dict(all_moves(P))
-        BW.move_file(path_g, out_path, moves, post=False)
+        BW.move_file(base, out_path, moves, post=False)
         _pro(board, out_path)
         a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                nodes=200000, repairs=12, check_only=True)

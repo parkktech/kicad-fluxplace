@@ -74,12 +74,13 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     cls = NC.classify(B, cons, spec)
     cl, links = CL.build(B, cons, spec)
     rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
+    flips, refused = set(), {}
     if arrange:
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
-                      only=set(parts) - fixed)   # a fixed part is never seated: the model must not show it where the board will not have it
+                      flips=flips, refused=refused, only=set(parts) - fixed)   # a fixed part is never seated: the model must not show it where the board will not have it
             _remeasure(B, cl)
             more = CL.rehome(B, cl, cons, spec)
             if not more:
@@ -199,7 +200,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                         q = B["parts"][s["ref"]]["court"]
                         mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
-    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "unseated": CL.unseated(cl, fixed)}
+    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
+            "unseated": CL.unseated(cl, fixed, refused)}
 
 
 def _bared(B, rehomed, spec=None, facts=None, mpn_map=None):
