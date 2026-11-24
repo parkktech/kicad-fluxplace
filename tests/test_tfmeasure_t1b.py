@@ -505,3 +505,13 @@ def test_facts_report_the_numbers_the_acceptance_names():
     assert f["vias"] == 1 and f["vias_ground"] == 1 and f["pads_pth"] == 1 and f["teardrops"] == 0
     assert f["short_leg_45_under_3w"]["RF"] == [1, 1] and f["degenerate"] == {"zero": 1, "duplicate": 0}
 
+
+
+@pytest.mark.parametrize("k,mirror", [(k, m) for k in range(4) for m in (False, True)])
+def test_pad_exit_vs_buried_segment(k, mirror):
+    segs = rot([seg((0.0, 0.0), (0.1, 0.0), net="N", w=0.2), seg((0.0, 0.0), (3.0, 0.0), net="N", w=0.2)], k, mirror)
+    m = mdl(segs=segs, pads=[pad("U1", "1", 0, 0, "N", 0.5, 0.5)])
+    assert len(TM.pad_exits(m)) == 1
+    assert len(TM.p1_sites(m, XC(cls={"N": "GEN"}))) == 1
+    buried = [s for s in TM.m9_sites(m) if s.get("kind") == "buried"]
+    assert len(buried) == 1 and buried[0]["state"] == "open"

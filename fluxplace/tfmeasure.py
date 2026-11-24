@@ -304,12 +304,15 @@ def m1_sites(B, min_deg):
 
 
 def m9_sites(B):
-    out, seen = [], set()
-    for s in B["segs"]:
+    out, seen, buried = [], set(), _buried(B)
+    for i, s in enumerate(B["segs"]):
         k = _ckey(s)
         bad = _len(s) < 1e-6 or k in seen
         seen.add(k)
-        out.append({"net": s["net"], "layer": s["layer"], "x": s["a"][0], "y": s["a"][1], "state": "open" if bad else "already"})
+        d = {"net": s["net"], "layer": s["layer"], "x": s["a"][0], "y": s["a"][1], "state": "open" if bad else "already"}
+        if i in buried:
+            d.update(kind="buried", state="open")
+        out.append(d)
     return out
 
 
@@ -861,6 +864,26 @@ def pad_ends(B):
     return out
 
 
+def pad_exits(B):
+    """pad_ends with the segment's other end outside that pad: the exits P1, P3, P4, P5, P7, P14 measure."""
+    from . import routeconn as RC
+    segs = B["segs"]
+    return [(p, i, e) for p, i, e in pad_ends(B) if not RC._in_pad(p, *segs[i]["b" if e == "a" else "a"], 0.005)]
+
+
+def _buried(B):
+    """segment indices with both ends inside one same-net pad on their layer (M9 `buried`)."""
+    from . import routeconn as RC
+    gc, out, segs = _pad_idx(B), set(), B["segs"]
+    for i in live(B):
+        s = segs[i]
+        for p in _near_pts(gc, s["a"][0], s["a"][1], 2.5):
+            if p["net"] == s["net"] and s["layer"] in p["layers"] and RC._in_pad(p, *s["a"], 0.005) and RC._in_pad(p, *s["b"], 0.005):
+                out.add(i)
+                break
+    return out
+
+
 def via_ends(B):
     """[(via, seg index, end)] for every live segment end on a same-net via barrel's copper on the segment's layer."""
     gc, out, segs = _grid_pts(B["vias"], lambda v: (v["x"], v["y"]), 3.0), [], B["segs"]
@@ -911,7 +934,7 @@ def p1_sites(B, X):
     """pad exit on a pad axis: the last segment runs along a pad axis (+-TOL) with its centre line through the pad centre
     (0.02 mm), and the first straight is >= 1 w (pairs 1.5 w)."""
     rs, out = runs(B, oriented=False), []
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         s = B["segs"][i]
         d = leave(s, e)
         ang = math.degrees(math.atan2(d[1], d[0])) - (p.get("angle") or 0.0)
@@ -954,7 +977,7 @@ def p3_sites(B, X):
     """concave pocket under 90 deg between the trace edge and the pad edge: the trace enters a rectangular pad off its axis
     or at a pad corner (a trace edge flush with or beyond the pad side)."""
     out = []
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         if p.get("shape") in ("circle", "oval"):
             continue
         s = B["segs"][i]
@@ -985,7 +1008,7 @@ def p4_sites(B, X):
     """pair members enter pads of one part symmetrically: first-corner distances within 0.05 mm (a member without a bend
     against one with a bend is unequal)."""
     rs, byref = runs(B, oriented=False), defaultdict(dict)
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         pk = X["pair_of"].get(p["net"])
         if pk:
             byref[(pk, p["ref"])].setdefault(p["net"], (p, i, e))
@@ -1011,7 +1034,7 @@ def p5_sites(B, X):
     (pitch <= 0.65 mm) with width >= 0.127 (RF: and length <= [rf] neck_max_mm); anywhere else open."""
     rs, out = runs(B, oriented=False), []
     neck_max = float((X["rf"] or {}).get("neck_max_mm", 99.0))
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         r, k = _run_at(B, rs, i, e)
         if r is None or len(r["sl"]) < 2:
             continue
@@ -1067,7 +1090,7 @@ def p6_sites(B, X):
 def p7_sites(B, X):
     """RF trace entering a pad: pad cross width within 10 % of the trace width, else listed (taper or pad = trace)."""
     out = []
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         s = B["segs"][i]
         if X["cls"].get(s["net"]) != "RF":
             continue
@@ -1194,7 +1217,7 @@ def p13_sites(B, X, term_of=None):
 def p14_sites(B, X):
     """two-pin 0603-or-smaller parts: each entry trace narrower than its pad, both pads' entries equal width. Reported."""
     out, ends = [], defaultdict(list)
-    for p, i, e in pad_ends(B):
+    for p, i, e in pad_exits(B):
         ends[p["ref"]].append((p, B["segs"][i]["w"], B["segs"][i]["layer"]))
     for ref_, es in sorted(ends.items()):
         part = B["parts"].get(ref_)
