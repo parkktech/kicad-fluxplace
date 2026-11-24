@@ -498,3 +498,32 @@ def summary(rows):
     hard = sum(1 for r in rows if r["verdict"] == "fail" and r["hard"])
     return "; ".join(t for t in (f"{n['fail']} fail ({hard} hard)" if n["fail"] else "",
                                   f"{n['over-target-pass']} over target" if n["over-target-pass"] else "") if t)
+
+
+def honoured(before, after):
+    """Rows of the output board against the same rows of the input: [{name, kind, metric, hard, derived, value_in, value_out, limit,
+    status}]. status: "honoured" (verdict ok / over-target-pass), "not_honoured" (fail), "not_measured" (n/a or the row is gone).
+    Keyed by (kind, name, metric); a row only in `after` has value_in None."""
+    key = lambda r: (r["kind"], r["name"], r["metric"])
+    old = {key(r): r for r in before}
+    out = []
+    for r in after:
+        b = old.pop(key(r), None)
+        st = {"ok": "honoured", "over-target-pass": "honoured", "fail": "not_honoured"}.get(r["verdict"], "not_measured")
+        out.append({"name": r["name"], "kind": r["kind"], "metric": r["metric"], "hard": r["hard"], "derived": r["derived"],
+                    "value_in": b["value"] if b else None, "value_out": r["value"],
+                    "limit": r["max"] if r["max"] is not None else r["target"], "status": st})
+    for b in old.values():
+        out.append({"name": b["name"], "kind": b["kind"], "metric": b["metric"], "hard": b["hard"], "derived": b["derived"],
+                    "value_in": b["value"], "value_out": None,
+                    "limit": b["max"] if b["max"] is not None else b["target"], "status": "not_measured"})
+    return out
+
+
+def honoured_summary(h):
+    """'rows on the output: N honoured, H hard not honoured (names), S soft not honoured, M not measured'."""
+    names = lambda hard: ", ".join(r["name"] for r in h if r["status"] == "not_honoured" and r["hard"] is hard) or "none"
+    cnt = lambda st: sum(1 for r in h if r["status"] == st)
+    soft = sum(1 for r in h if r["status"] == "not_honoured" and not r["hard"])
+    return (f"rows on the output: {cnt('honoured')} honoured, {sum(1 for r in h if r['status'] == 'not_honoured' and r['hard'])} "
+            f"hard not honoured ({names(True)}), {soft} soft not honoured, {cnt('not_measured')} not measured")

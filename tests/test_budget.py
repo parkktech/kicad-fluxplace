@@ -458,3 +458,29 @@ def test_unnamed_separation_keeps_its_name_when_a_row_is_removed_above_it(tmp_pa
     assert both[1]["name"] == alone[0]["name"] == "sep J1 / U2"
     disabled = BG.separation_rows(B, dict(USB, separation=[dict(first, enabled=False), second]))
     assert disabled[0]["name"] == "sep J1 / U2"
+
+
+def test_honoured_ok_to_fail_is_not_honoured_and_fail_to_ok_is_honoured():
+    b = [BG.row("pair", "X", "length", "mm", value=20.0, mx=40.0, source="s", hard=True)]
+    a = [BG.row("pair", "X", "length", "mm", value=46.0, mx=40.0, source="s", hard=True)]
+    h = BG.honoured(b, a)
+    assert len(h) == 1 and h[0]["status"] == "not_honoured" and h[0]["hard"] is True
+    assert h[0]["value_in"] == 20.0 and h[0]["value_out"] == 46.0 and h[0]["limit"] == 40.0
+    h2 = BG.honoured(a, b)
+    assert h2[0]["status"] == "honoured" and h2[0]["value_in"] == 46.0 and h2[0]["value_out"] == 20.0
+    assert BG.honoured(b, [BG.row("pair", "X", "length", "mm", value=30.0, target=25.0, mx=40.0, source="s")])[0]["status"] == "honoured"
+
+
+def test_honoured_row_missing_in_after_is_not_measured_and_row_only_in_after_has_no_value_in():
+    gone = BG.row("pair", "A", "length", "mm", value=20.0, mx=40.0, source="s")
+    new = BG.row("pair", "B", "length", "mm", value=20.0, mx=40.0, source="s")
+    h = {(r["name"]): r for r in BG.honoured([gone], [new])}
+    assert h["A"]["status"] == "not_measured" and h["A"]["value_out"] is None and h["A"]["value_in"] == 20.0
+    assert h["B"]["status"] == "honoured" and h["B"]["value_in"] is None and h["B"]["value_out"] == 20.0
+
+
+def test_honoured_summary_counts_hard_and_soft_apart():
+    h = [{"name": "H1", "status": "not_honoured", "hard": True}, {"name": "S1", "status": "not_honoured", "hard": False},
+         {"name": "M1", "status": "not_measured", "hard": False}, {"name": "O1", "status": "honoured", "hard": True}]
+    assert BG.honoured_summary(h) == ("rows on the output: 1 honoured, 1 hard not honoured (H1), 1 soft not honoured, "
+                                      "1 not measured")
