@@ -1840,7 +1840,10 @@ def _run(a):
         with open(led.path, "a") as fh:
             fh.write(note + "\n")
     if inc:
-        st["incomplete"] = _clip(inc, 160)
+        # loud notes first: a clip may drop remaining-stage names, never a warning
+        parts = inc.split(" | ")
+        loud = [x for x in parts[1:] if x]
+        st["incomplete"] = _clip(" | ".join(loud + parts[:1]), 160) if loud else _clip(inc, 160)
     else:
         st.pop("incomplete", None)
     save_state(work, st)
