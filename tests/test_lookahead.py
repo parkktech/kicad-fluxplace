@@ -280,7 +280,7 @@ def test_render_writes_png_fixture(load, tmp_path):
 
 # ---- L5 tournament: every external call monkeypatched (ghost, fitness, render, demand, reservations, workers) ----
 
-def _tour_setup(monkeypatch, tmp_path, plan):
+def _tour_setup(monkeypatch, tmp_path, plan, sync=False):
     """plan(round, job) -> fit dict (key, opens, pairs_complete, pairs_total, blockers) for each candidate result."""
     from types import SimpleNamespace
     fixture = tmp_path / "ghost0.kicad_pcb"
@@ -317,6 +317,16 @@ def _tour_setup(monkeypatch, tmp_path, plan):
                         "png": str(tmp_path / f"{job['tag']}.png"), "fit": fit})
         return res
     monkeypatch.setattr(LA, "_run_jobs", fake_run_jobs)
+
+    def sync_ghosts(a, board, d, P, routers):               # every ghost has landed before round 0 polls: no thread race
+        import concurrent.futures as cf
+        futs = {}
+        for r in routers:
+            futs[r] = cf.Future()
+            futs[r].set_result(LA._one_ghost(a, board, d, P, r))
+        return cf.ThreadPoolExecutor(max_workers=1), futs
+    if sync:
+        monkeypatch.setattr(LA, "_launch_ghosts", sync_ghosts)
     d = tmp_path / "stage"
     c = SimpleNamespace(cons={"lookahead": {"enabled": True, "max_rounds": 4, "no_gain_rounds": 2}}, spec=None,
                         a=SimpleNamespace(constraints=None, spec=None, router_dir="/r", router_py="/rp"),
@@ -370,7 +380,7 @@ def test_blockers_drive_repair_candidates_in_round_two(monkeypatch, tmp_path):
                     "blockers": {"A|B": {"count": 3, "nets": ["X"]}, "C|D": {"count": 1, "nets": ["Y"]},
                                  "E|F": {"count": 9, "nets": ["Z"]}}}
         return {"key": (0, 0, 9, 0, 0, 0.0), "opens": 9, "pairs_complete": 0, "pairs_total": 2, "blockers": {}}
-    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan)
+    c, jobs, rounds = _tour_setup(monkeypatch, tmp_path, plan, sync=True)
     LA.stage(c, 7, "in.kicad_pcb")
     r2 = [j for j in jobs if j["tag"].startswith("r2-")]
     repairs = [j for j in r2 if j["kind"] == "repair"]
