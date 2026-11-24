@@ -10,6 +10,8 @@ Fact keys
   supply_pins        []  which pins the range / `i_max_ma` apply to
   i_max_ma           mA  maximum supply current (a number for the first supply pin, or {pin: mA})
   i_out_max_a        A   rated output current of a regulator / switch (the source limit)
+  decap_mm bulk_mm   mm  datasheet limit, pad of the bypass / bulk capacitor to the supply pin it serves (number, or {pin: mm} as i_max_ma;
+                         powerbudget.supports: a datasheet figure replaces the derived and default limits; REQ, never printed as a default)
   contact_a          A   per-contact current rating of a connector or socket
   v_rated            V   voltage rating of a capacitor / device where the value text has none
   pin_rules          []  [{"pin": "ILIM", "rule": "needs_resistor"|"must_float", "allow_net_of": "IN", "level": "WARN",
@@ -33,7 +35,7 @@ import os
 import re
 
 CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "SUPPLY_RANGE_UNKNOWN", "ELEC_NOT_EVALUATED")
-FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules")
+FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm")
 _GND = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
 _POWER = re.compile(r"^(\+?\d+V\d*\w*|V(CC|DD|BAT|BATT|IN|BUS)\w*)$", re.I)
 _VRATE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*V(?![\w])", re.I)
@@ -210,17 +212,21 @@ def _fmt(v):
     return "?" if v is None else f"{v:g}"
 
 
+def per_pin(fx, key):
+    """{pin: value} of a per-pin fact: a number applies to the first supply pin, a dict is already per pin ({} when absent)."""
+    v = fx.get(key)
+    if v is None:
+        return {}
+    sps = fx.get("supply_pins") or []
+    return dict(v) if isinstance(v, dict) else ({sps[0]: v} if sps else {})
+
+
 def _loads(spec, facts, mpn_map, by_ref):
     """{net: [(ref, mA)]} from i_max_ma facts."""
     out = {}
     for c in spec.get("components", []):
         fx = facts.get(_mpn(c, mpn_map)) or {}
-        im = fx.get("i_max_ma")
-        if im is None:
-            continue
-        sps = fx.get("supply_pins") or []
-        per = im if isinstance(im, dict) else ({sps[0]: im} if sps else {})
-        for pin, ma in per.items():
+        for pin, ma in per_pin(fx, "i_max_ma").items():
             net = _pin_net(c, by_ref, pin)
             if net:
                 out.setdefault(net, []).append((c["ref"], float(ma)))

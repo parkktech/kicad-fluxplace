@@ -65,8 +65,8 @@ def test_far_support_part_and_tight_decap(tmp_path):
     res = diag(p, ["N"])
     far = {c["part"]: c for c in res["nets"][0]["causes"] if c["cause"] == "FAR_SUPPORT_PART"}
     assert set(far) == {"C1", "R1"} or set(far) == {"C1"}
-    assert far["C1"]["limit"] == 2.5 and far["C1"]["toward"] == "U1.1"      # cap to GND: tight
-    assert "move C1 to within 2.5 mm of U1.1" in far["C1"]["suggestion"]
+    assert far["C1"]["limit"] == 3.0 and far["C1"]["toward"] == "U1.1"      # cap to GND: tight = the support table target (was FAR_TIGHT_MM 2.5)
+    assert "move C1 to within 3 mm of U1.1" in far["C1"]["suggestion"]
     assert "R1" not in far or far["R1"]["limit"] == 5.0
     assert res["summary"]["moves"][0]["part"] in ("C1", "R1")
 

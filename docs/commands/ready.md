@@ -42,3 +42,23 @@ netclass's Z and the dominant routed widths' Z per layer (a width that is right 
 `not_ready` in `state.json`, the status table and every `*.status.json`; the sidecar follows each stage's output board
 (`questions.inherit`); `fab` and `deliver` refuse such a board (`NOT READY: <reasons>`). `pipeline` without `--spec` reports the
 stage `na` (nothing to check); the stage's distributor/stock lookups are live by default (`--no-api` for offline, which blocks the parts gate: stock cannot be checked). Work list: [parts-todo](parts-todo.md), [parts-apply](parts-apply.md).
+
+## The `power plan` line (powerbudget.py, D71dc / D71dd)
+
+One row per `[power."NET"]` rail with a current, written to `<board>.power-plan.json`: allowed resistance, candidate copper per layer
+(IPC width, sheet resistance, vias per layer change, reach `L_max` at target / max), the chosen layer, and per source-to-load edge the
+Manhattan distance, the width it needs and the estimated drop. Copper is taken at `[env] temp_max_c` + the trace rise the IPC width was
+sized for (a `[[dcdrop]] temp_c` wins); the path is Manhattan x 1.15 (detour) x `[route] power_crowding` (default 1.25).
+
+| Finding | Level | Fix |
+|---|---|---|
+| `POWER_PLAN_NO_BUDGET` | FAIL | add a cited `[[dcdrop]]` row, or state why the rail has none: `[power."NET"] dcdrop_exempt = "reason"` |
+| `POWER_PLAN_EXEMPT` | INFO | a rail with `dcdrop_exempt` (series drop by design, return net): no budget, no reach, named in the line |
+| `POWER_SOURCE_UNKNOWN` | OPEN | `[[dcdrop]] from` / `to` or `[power."NET"] source` |
+| `POWER_COPPER_IMPOSSIBLE` | FAIL | the via barrels alone exceed the allowed resistance |
+| question `power-owner:REF` | OPEN | a rail support part whose pin is still a guess; the answer is written as `[power."NET"] support = {REF = "IC.PAD"}` |
+
+Support owner, in order: `[power] support` (explicit); the net (one IC on the net); the one source or load group of the rail in the part's
+functional block (`group`); the reference block (`block` / `refdes`); a spread guess (asked). Any pin of the rail within the limit takes
+a bypass part (`near`). A bulk part (> 4.7 uF to ground) of a planned rail with a decided owner is graded against that owner wherever it
+sits; identical bulk parts (same net, value, footprint) are interchangeable between their owners.

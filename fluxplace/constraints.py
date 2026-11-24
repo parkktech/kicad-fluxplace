@@ -13,7 +13,8 @@ optional; anything not stated keeps the heuristic default. Schema:
     [channel.PCIE_TX]       # budget from the parts at each end (fluxplace/channel.py): every key optional, `source` required
     loss_db_max = 6.0       # also loss_db_target, freq_ghz, skew_ps_max/_target, length_mm_max/_target, stub_mm_max, via_db, connector_db
     source = "CM5 datasheet p. N"
-    [[dcdrop]]              # net, current_a, drop_mv_max, drop_mv_target, source
+    [[dcdrop]]              # net, current_a, drop_mv_max, drop_mv_target, source; from/to (source and load groups "REF" or "REF.PAD"),
+                            # temp_c, to_a = {REF = amps} (per-load currents with a datasheet source; else every load carries current_a)
 
     [si]
     default_skew_mm = 1.0   # SI-lite limit for pairs with no family entry
@@ -40,13 +41,17 @@ optional; anything not stated keeps the heuristic default. Schema:
     [review]                # waive = ["UNROUTED:^\\+3V3$"] waives one open net; open_gate = false switches UNROUTED/STALE_FILL off
     [closure]               # window_mm radius_mm step_mm nudge_max_mm max_trials track_mm clearance_mm via_mm (docs/commands/closure.md)
     [escape]                # near_mm 2.0, lane_mm 1.5, window_mm 4.0, radius_mm 2.5, enabled, power_pins (escape reservation, escres.py)
-    [route]                 # track_mm / clearance_mm = PREFERRED routing sizes (CLI > these > 0.2; lifted to min_track_mm / min_clearance_mm); same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
+    [route]                 # power_corridor_max_mm (longest planned power corridor), power_crowding (current crowding factor, default 1.25), track_mm / clearance_mm = PREFERRED routing sizes (CLI > these > 0.2; lifted to min_track_mm / min_clearance_mm); same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
 
+    [floorplan]             # w_power = 1.0 (weight of the power source-to-load reach term; planned, floorplan2); block_weight breakout_weight stay waive_fail
     [[rule]]                # selector rules over the same keys (fluxplace/rules.py, docs/commands/rules.md)
     select = { net = "^USB_.*" }   # ref | net | netclass | type | layer | prop | pair (AND)
     set = { width_mm = 0.15 }      # width_mm gap_mm clearance_mm skew_mm impedance_diff straight_copper max_vias pour
 
     [power."+5V"]           # (in addition to the ampacity fields above)
+    support = {C117 = "J200.70"}   # which pin a rail-only support part serves (powerbudget.supports; decided, never guessed)
+    dcdrop_exempt = "R11 10 ohm sense resistor in series: the drop is the design"   # a rail with a current and NO [[dcdrop]] row by design
+                                   # (ready lists it as INFO POWER_PLAN_EXEMPT; without the reason, or the row, ready FAILs: D71dd)
     holdup_ms = 20          # ride-through the spec promises ...
     nominal_v = 5.0         # ... from this rail voltage ...
     min_v = 4.75            # ... down to the load's minimum ...

@@ -94,3 +94,103 @@ def test_routediag_far_support_uses_ownership(tmp_path):
     res = RD.diagnose(RD.load(p), ["VDD", "D410"])
     far = {c["part"] for n in res["nets"] for c in n["causes"] if c["cause"] == "FAR_SUPPORT_PART"}
     assert "C13" not in far and "C411" in far and "C412" in far
+
+
+# ---- P3: the one support table (powerbudget.support_row / supports)
+def _pb_board(tmp_path, c2=(30, 12), c1=(22, 20)):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    return PB, RD.load(PB.board(tmp_path, c2=c2, c1=c1))
+
+
+def _sup(B, cons, spec=None, facts=None, mpn_map=None):
+    from fluxplace import powerbudget as PBG
+    return {s["ref"]: s for s in PBG.supports(B, cons, spec, facts=facts or {}, mpn_map=mpn_map)}
+
+
+def test_rail_only_bulk_cap_is_graded_with_role_bulk_15mm(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    s = _sup(B, PB.CONS)
+    assert s["C2"]["role"] == "bulk" and s["C2"]["limit"]["max"] == 15.0 and s["C2"]["limit"]["target"] == 10.0
+    assert s["C2"]["sure"] and s["C2"]["dist_mm"] > 10                     # (30,12) is ~14 mm from U2: over target, inside max
+    assert s["C2"]["verdict"] == "over-target-pass" and s["C2"]["limit"]["klass"] == "INF"
+    PB2, B2 = _pb_board(tmp_path / "x" if (tmp_path / "x").mkdir() is None else tmp_path, c2=(30, 2))
+    assert _sup(B2, PB.CONS)["C2"]["verdict"] == "fail"
+    cl, _ = CL.build(B2, PB.CONS)
+    assert "C2" in {x["ref"] for _, x in CL.far_parts(cl)}
+
+
+def test_bypass_cap_is_3_target_5_max(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    c1 = _sup(B, PB.CONS)["C1"]
+    assert c1["role"] == "bypass" and (c1["limit"]["target"], c1["limit"]["max"]) == (3.0, 5.0) and c1["limit"]["klass"] == "INF"
+
+
+def test_decap_mm_fact_overrides_with_klass_req(tmp_path):
+    PB, B = _pb_board(tmp_path)
+    spec = {"components": [{"ref": "U2", "mpn": "X2", "pinmap": {}}]}
+    facts = {"X2": {"decap_mm": 2.0, "_src": {"decap_mm": "X2.pdf#p9"}}}
+    c1 = _sup(B, PB.CONS, spec, facts)["C1"]
+    assert (c1["limit"]["target"], c1["limit"]["max"], c1["limit"]["klass"]) == (2.0, 2.0, "REQ") and "X2.pdf#p9" in c1["limit"]["source"]
+    cl, _ = CL.build(B, PB.CONS, spec, facts=facts)
+    assert {x["ref"] for _, x in CL.far_parts(cl)} == {"C1", "C2"} or "C1" in {x["ref"] for _, x in CL.far_parts(cl)}
+
+
+def test_explicit_power_support_wins(tmp_path):
+    import copy
+    PB, B = _pb_board(tmp_path)
+    cons = copy.deepcopy(PB.CONS)
+    cons["power"]["VOUT"]["support"] = {"C2": "U2.15"}
+    own, _ = CL.ownership(B, cons=cons)
+    assert own["C2"]["ic"] == "U2" and own["C2"]["pad"] == "15" and own["C2"]["how"] == "explicit"
+    s = _sup(B, cons)["C2"]
+    assert s["serves"] == "U2.15" and s["sure"]
+
+
+# ---- step-1 evaluation (D71di): owner by source/load group, bulk parts keep their owner, identical bulk parts interchange
+def _rail_board(tmp_path, u, caps):
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PB
+    import pcbgen as g
+    b = g.ic(u[0], 10, 10, ["VOUT", "GND", "A1", "A2", "A3", "A4"], pitch=1.0)
+    b += g.ic(u[1], 60, 10, ["VOUT", "GND", "B1", "B2", "B3", "B4"], pitch=1.0)
+    for ref, x, y, v in caps:
+        b += PB.cap(ref, x, y, "VOUT", "GND", v)
+    return RD.load(g.board(tmp_path, b, outline=(0, 0, 80, 60)))
+
+
+_PLANNED = {"power": {"VOUT": {"max_current_ma": 3000}}}
+
+
+def test_guessed_rail_part_takes_the_one_load_group_of_its_block(tmp_path):
+    B = _rail_board(tmp_path, ("U1", "U2"), [("C9", 30, 40, "100nF")])
+    base = dict(_PLANNED, dcdrop=[{"net": "VOUT", "current_a": 3.0, "drop_mv_max": 100.0, "to": ["U1", "U2"], "source": "t"}])
+    for owner, blocks in (("U1", {"left": ["U1", "C9"], "right": ["U2"]}), ("U2", {"left": ["U1"], "right": ["U2", "C9"]})):
+        own, _ = CL.ownership(B, cons=dict(base, blocks=blocks))
+        assert (own["C9"]["ic"], own["C9"]["how"]) == (owner, "group")
+        cl, _ = CL.build(B, dict(base, blocks=blocks))
+        s = next(x for c in cl for x in c["supports"] if x["ref"] == "C9")
+        assert s["sure"] and s["ic"] == owner and "C9" in {x["ref"] for _, x in CL.far_parts(cl)}     # decided, so graded
+    own, _ = CL.ownership(B, cons=dict(base, blocks={"both": ["U1", "U2", "C9"]}))                    # two groups in the block: still a guess
+    assert own["C9"]["how"] == "spread"
+    own, _ = CL.ownership(B, cons={"blocks": {"left": ["U1", "C9"], "right": ["U2"]}})                # not a planned rail: rule off
+    assert own["C9"]["how"] == "spread"
+
+
+def test_identical_bulk_parts_that_swapped_places_are_two_served_pins(tmp_path):
+    B = _rail_board(tmp_path, ("U101", "U201"), [("C102", 60, 14, "10uF"), ("C202", 10, 14, "10uF")])
+    own, _ = CL.ownership(B, cons=_PLANNED)
+    assert (own["C102"]["ic"], own["C102"]["swapped"], own["C202"]["ic"]) == ("U201", "U101", "U101")
+    cl, _ = CL.build(B, _PLANNED)
+    assert not CL.far_parts(cl)
+
+
+def test_bulk_part_parked_at_another_ic_is_far_from_its_owner_on_a_planned_rail(tmp_path):
+    B = _rail_board(tmp_path, ("U101", "U201"), [("C102", 10, 14, "10uF"), ("C103", 60, 14, "22uF")])
+    cl, _ = CL.build(B, _PLANNED)
+    far = {x["ref"]: (ic, x) for ic, x in CL.far_parts(cl)}
+    assert set(far) == {"C103"} and far["C103"][0] == "U101" and far["C103"][1]["role"] == "bulk" and far["C103"][1]["dist"] > 40
+    cl, _ = CL.build(B, {})                                                                           # unplanned rail: as before
+    assert not CL.far_parts(cl)

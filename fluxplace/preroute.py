@@ -129,12 +129,18 @@ def budget_overrides(B, cls):
 
 
 def support_far(B, cons, spec):
+    """FAIL over the support limit (max), INFO over the target (powerbudget.support_row: role, limit and its source in the message)."""
     cl, _ = CL.build(B, cons, spec)
-    return [_f(FAIL, "SUPPORT_PART_FAR",
-               f"{s['ref']} is {s['dist']:.1f} mm from {ic} pin {s['pad']} "
-               f"({s['net']}, {s['cls']}; limit {s['limit']:g} mm)",
-               refs=[s["ref"], ic], value=round(s["dist"], 2), limit=s["limit"])
-            for ic, s in sorted(CL.far_parts(cl), key=lambda x: -x[1]["dist"])]
+    far = [_f(FAIL, "SUPPORT_PART_FAR",
+              f"{s['ref']} is {s['dist']:.1f} mm from {ic} pin {s['pad']} "
+              f"({s['net']}, {s['cls']}, {s['role']}; limit {s['limit']:g} mm: {s['source']})",
+              refs=[s["ref"], ic], value=round(s["dist"], 2), limit=s["limit"])
+           for ic, s in sorted(CL.far_parts(cl), key=lambda x: -x[1]["dist"])]
+    soft = [_f(INFO, "SUPPORT_PART_FAR",
+               f"{s['ref']} is {s['dist']:.1f} mm from {c['ic']} pin {s['pad']} ({s['net']}, {s['role']}; over target {s['target']:g} mm, "
+               f"within max {s['limit']:g} mm: {s['source']})", refs=[s["ref"], c["ic"]], value=round(s["dist"], 2), limit=s["target"])
+            for c in cl for s in c["supports"] if s["sure"] and s["target"] < s["dist"] <= s["limit"]]
+    return far + soft
 
 
 def keepout_trapped(B):

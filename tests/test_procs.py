@@ -174,10 +174,13 @@ def test_no_new_child_after_sigterm():
 
 
 def test_sigint_reaps_children_of_worker_threads():
-    """children are out of the terminal's foreground group: Ctrl-C reaches them only through the handler"""
+    """children are out of the terminal's foreground group: Ctrl-C reaches them only through the handler.
+    The child restores the default SIGINT disposition first: a suite started as a background job (`&`, nohup) inherits SIGINT
+    ignored, and install() rightly leaves an ignored signal alone, so the test failed there every time (w17p1 flake)."""
     p = _child("""
-        import threading, time
+        import signal, threading, time
         from fluxplace import procs
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         procs.install()
         def work():
             try:
@@ -192,9 +195,29 @@ def test_sigint_reaps_children_of_worker_threads():
             print("interrupted", t.is_alive(), flush=True)
     """ % GC, stdout=subprocess.PIPE, text=True)
     gpid = int(p.stdout.readline())
+    pgid = os.getpgid(gpid)
     p.send_signal(signal.SIGINT)
-    assert p.communicate(timeout=30)[0].split() == ["interrupted", "False"]
-    assert _gone(gpid)
+    try:
+        assert p.communicate(timeout=30)[0].split() == ["interrupted", "False"]
+        assert _gone(gpid)
+    finally:                                # a failure must not leave the 300 s sleepers (and the pipe they hold) behind
+        for kill, target in ((os.killpg, pgid), (os.kill, p.pid)):
+            try:
+                kill(target, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def test_install_leaves_an_ignored_sigint_alone():
+    """a background job runs with SIGINT ignored: install() must not start handling it (only default dispositions are replaced)"""
+    p = _child("""
+        import signal
+        from fluxplace import procs
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        procs.install()
+        print(signal.getsignal(signal.SIGINT) is signal.SIG_IGN, signal.getsignal(signal.SIGTERM) is procs._on_signal)
+    """, stdout=subprocess.PIPE, text=True)
+    assert p.communicate(timeout=30)[0].split() == ["True", "True"]
 
 
 def test_forked_worker_does_not_own_the_parents_children():
