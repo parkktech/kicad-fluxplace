@@ -12,6 +12,7 @@ TOL = 0.5          # deg (spec symbols)
 EPS = 1e-4         # mm: joints are matched on coordinates rounded to this grid (W15: 1e-3 split / merged joints, 1e-5 and 1e-4 give the
                    # same counts; KiCad coordinates are nm, so a joint is exact and 0.1 um is already generous)
 MIN_POLY_SEG = 0.2 # mm: a polyline-arc segment is shorter than this (spec 3.2 C15)
+P13_MM = 6.35      # mm: pair break-out length per end (rule P13, DP-03); H7 exempts pair sections no longer than this
 MIN_POLY_N = 4     # same-turn segments that make a polyline arc
 
 
@@ -648,12 +649,14 @@ def _gap_of(B, X, pair, layer=None):
         m = ((s["a"][0] + s["b"][0]) / 2, (s["a"][1] + s["b"][1]) / 2)
         d = min((_pt_seg(m, segs[j]["a"], segs[j]["b"]) for j in g.near(m[0], m[1], 1.0) if segs[j]["layer"] == s["layer"]), default=None)
         if d is not None and d < 0.6:
-            vals.append(round(d, 2))
+            vals.append((round(d, 2), _len(s)))
     if not vals:
         cache[key] = float(pe.get("gap") or 0.15)
         return cache[key]
-    from collections import Counter
-    cache[key] = max(0.0, Counter(vals).most_common(1)[0][0] - pe["w"])          # centre distance mode - w = edge gap
+    by_len = defaultdict(float)
+    for d, ln in vals:
+        by_len[d] += ln
+    cache[key] = max(0.0, max(by_len.items(), key=lambda kv: (kv[1], -kv[0]))[0] - pe["w"])   # centre distance mode by length - w = edge gap
     return cache[key]
 
 
@@ -1209,7 +1212,7 @@ def p13_sites(B, X, term_of=None):
         for term, v in rows.items():
             mm = max(v["P"], v["N"])
             tc = next(t["c"] for t in T if t["name"] == term)
-            out.append(_s(pk[0], "", tc[0], tc[1], "already", mm=mm) if mm <= 6.35 else
+            out.append(_s(pk[0], "", tc[0], tc[1], "already", mm=mm) if mm <= P13_MM else
                        _np(pk[0], "", tc[0], tc[1], f"couple the pair within 6.35 mm of {term}", mm=mm))
     return out
 
@@ -1675,7 +1678,8 @@ def h3(B, X):
 def h7(B, X):
     """impedance inside the window: pairs (impedance_diff +-10 %, optional [pairs.F] impedance_window [lo, hi] intersected), RF
     ([rf] target_z, tolerance_pct). One row per pair / net and layer from the median width and the measured gap (same
-    model before and after the stage). -> {base: rows out of window, rows}."""
+    model before and after the stage). A pair row whose length on that layer is <= P13_MM (a break-out section) and an RF row whose
+    length is <= [rf] neck_max_mm (a neck) are listed `exempt` and not in base. -> {base: rows out of window, rows}."""
     from . import impedance as IM
     rows = []
     for pk, pe in sorted(X["pairs"].items()):
@@ -1691,7 +1695,9 @@ def h7(B, X):
             lo, hi = pe["imp"] * 0.9, pe["imp"] * 1.1
             if pe.get("window"):
                 lo, hi = max(lo, float(pe["window"][0])), min(hi, float(pe["window"][1]))
-            rows.append({"net": pk[0], "layer": layer, "z": z, "lo": lo, "hi": hi, "ok": z is not None and lo <= z <= hi})
+            ln = max(sum(_len(s) for s in B["segs"] if s["net"] == n and s["layer"] == layer) for n in pk)
+            rows.append({"net": pk[0], "layer": layer, "z": z, "lo": lo, "hi": hi, "w": w, "gap": gap, "len_mm": ln,
+                         "ok": z is not None and lo <= z <= hi, **({"exempt": "breakout"} if ln <= P13_MM else {})})
     rf = X["rf"] or {}
     tz = rf.get("target_z")
     if tz:
@@ -1703,9 +1709,11 @@ def h7(B, X):
                     continue
                 w = statistics.median(s["w"] for s in B["segs"] if s["net"] == net and s["layer"] == layer)
                 z = IM.z_single(w, g)
-                rows.append({"net": net, "layer": layer, "z": z, "lo": tz * (1 - tol), "hi": tz * (1 + tol),
-                             "ok": z is not None and tz * (1 - tol) <= z <= tz * (1 + tol)})
-    return {"base": sum(1 for r in rows if not r["ok"]), "rows": rows}
+                ln = sum(_len(s) for s in B["segs"] if s["net"] == net and s["layer"] == layer)
+                rows.append({"net": net, "layer": layer, "z": z, "lo": tz * (1 - tol), "hi": tz * (1 + tol), "w": w, "gap": None,
+                             "len_mm": ln, "ok": z is not None and tz * (1 - tol) <= z <= tz * (1 + tol),
+                             **({"exempt": "neck"} if ln <= float(rf.get("neck_max_mm", 0.0)) else {})})
+    return {"base": sum(1 for r in rows if not r["ok"] and not r.get("exempt")), "rows": rows}
 
 
 def pair_audit(B, X, cons):

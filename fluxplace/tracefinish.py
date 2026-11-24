@@ -62,11 +62,15 @@ def _count_type(types, name):
     return sum(n for t, n in types.items() if t == name)
 
 
+HARD_DETAIL = ("rows", "pairs", "unmeasured", "over", "graded", "sites", "drc")   # measure detail kept in finish.json legality
+
+
 def _hard_row(hid, m, src, limit=None):
     """a HARD row from a measure result {base, ...} or {not_measured}."""
     if "not_measured" in m:
         return {"id": hid, "base": None, "limit": None, "source": None, "ok": None, "not_measured": m["not_measured"]}
-    return {"id": hid, "base": m["base"], "limit": m.get("limit", limit), "source": src, "ok": None}
+    return {"id": hid, "base": m["base"], "limit": m.get("limit", limit), "source": src, "ok": None,
+            **{k: m[k] for k in HARD_DETAIL if k in m}}
 
 
 def f0(board, B, cons, spec, cls, kicad_cli="kicad-cli", X=None, audit=None, phase="F0"):

@@ -478,7 +478,7 @@ def test_h7_impedance_window_rows():
     from fluxplace import impedance as IM
     g = {"hu": None, "eu": None, "hd": 0.1195, "ed": 4.45, "t": 0.035, "model": "microstrip", "layer": "F.Cu"}
     z = IM.z_diff(0.15, 0.25, g)
-    B = mdl(poly([(0, 0), (5, 0)], net="A", w=0.15) + poly([(0, 0.4), (5, 0.4)], net="B", w=0.15))
+    B = mdl(poly([(0, 0), (10, 0)], net="A", w=0.15) + poly([(0, 0.4), (10, 0.4)], net="B", w=0.15))
     ok = XC(**pairx(w=0.15, gap=0.25, imp=z), geom={"F.Cu": g})
     r = TM.h7(B, ok)
     assert r["base"] == 0 and r["rows"][0]["z"] == pytest.approx(z)
@@ -526,7 +526,7 @@ def test_h7_half_ohm_inside_and_outside_window():
     from fluxplace import impedance as IM
     g = {"hu": None, "eu": None, "hd": 0.1195, "ed": 4.45, "t": 0.035, "model": "microstrip", "layer": "F.Cu"}
     z = IM.z_diff(0.15, 0.25, g)
-    B = mdl(poly([(0, 0), (5, 0)], net="A", w=0.15) + poly([(0, 0.4), (5, 0.4)], net="B", w=0.15))
+    B = mdl(poly([(0, 0), (10, 0)], net="A", w=0.15) + poly([(0, 0.4), (10, 0.4)], net="B", w=0.15))
     assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=z), geom={"F.Cu": g}))["base"] == 0
     assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=(z - 0.5) / 1.1), geom={"F.Cu": g}))["base"] == 1   # measured 0.5 ohm above hi
     assert TM.h7(B, XC(**pairx(w=0.15, gap=0.25, imp=(z + 0.5) / 0.9), geom={"F.Cu": g}))["base"] == 1   # measured 0.5 ohm below lo
@@ -543,3 +543,66 @@ def test_s4_pair_ground_via_limit_and_rf_two_within_1mm():
     rf_two = mdl(ends, vias=[via("A", 0, 0), via("GND", 0.9, 0), via("GND", 0.0, 0.9)], zones=[_gnd_zone()])
     assert st(TM.s4_sites(rf_two, XR)) == ["already"]
 
+
+
+# ---- M4: H7 rows detail, gap by length, break-out / neck exemption --------------------------------------------------
+
+def _h7_pair_board(len_b, gap_b):
+    """30 mm in-window pair run on F.Cu (gap 0.25) and a len_b mm section on B.Cu at centre distance gap_b + 0.15."""
+    pts = [(0, 0), (30, 0)]
+    f = poly(pts, net="A", w=0.15) + poly([(0, 0.4), (30, 0.4)], net="B", w=0.15)
+    b = (poly([(0, 5), (len_b, 5)], net="A", layer="B.Cu", w=0.15) +
+         poly([(0, 5 + gap_b + 0.15), (len_b, 5 + gap_b + 0.15)], net="B", layer="B.Cu", w=0.15))
+    return mdl(f + b)
+
+
+def _h7_x(**kw):
+    from fluxplace import impedance as IM
+    g = {"hu": None, "eu": None, "hd": 0.1195, "ed": 4.45, "t": 0.035, "model": "microstrip", "layer": "F.Cu"}
+    gb = dict(g, layer="B.Cu")
+    z = IM.z_diff(0.15, 0.25, g)
+    X = XC(**pairx(w=0.15, gap=None, imp=z, window=[z * 0.95, z * 1.02]), geom={"F.Cu": g, "B.Cu": gb}, **kw)
+    X["cu"] = ["F.Cu", "B.Cu"]
+    X["cons"] = {}
+    return X
+
+
+@pytest.mark.parametrize("mm,base,exempt", [(2.0, 0, 1), (10.0, 1, 0)])
+def test_h7_pair_breakout_section_exempt_when_short(mm, base, exempt):
+    r = TM.h7(_h7_pair_board(mm, 0.4), _h7_x())
+    assert r["base"] == base and sum(1 for x in r["rows"] if x.get("exempt") == "breakout") == exempt
+    row = next(x for x in r["rows"] if x["layer"] == "B.Cu")
+    assert {"net", "layer", "z", "lo", "hi", "w", "gap", "len_mm", "ok"} <= set(row) and abs(row["len_mm"] - mm) < 1e-6
+
+
+@pytest.mark.parametrize("mm,base,exempt", [(1.4, 0, 1), (3.0, 1, 0)])
+def test_h7_rf_neck_exempt_when_short(mm, base, exempt):
+    from fluxplace import impedance as IM
+    g = {"hu": None, "eu": None, "hd": 0.1195, "ed": 4.45, "t": 0.035, "model": "microstrip", "layer": "F.Cu"}
+    z = IM.z_single(0.15, g)                                   # target z; the thin neck is off
+    X = XC(geom={"F.Cu": g}, rf={"target_z": z, "tolerance_pct": 10, "neck_max_mm": 1.5}, cls={"R": "RF"})
+    r = TM.h7(mdl(poly([(0, 0), (mm, 0)], net="R", w=0.05)), X)
+    assert r["base"] == base and sum(1 for x in r["rows"] if x.get("exempt") == "neck") == exempt
+
+
+def test_gap_of_most_frequent_gap_by_length_not_count():
+    # 1 long run at centre distance 0.4 (gap 0.25), 5 short pieces at 0.5 (gap 0.35): by count 0.5 wins, by length 0.4
+    long_ = poly([(0, 0), (20, 0)], net="A", w=0.15) + poly([(0, 0.4), (20, 0.4)], net="B", w=0.15)
+    short = []
+    for i in range(5):
+        x0 = 30 + i * 3
+        short += poly([(x0, 0), (x0 + 0.8, 0)], net="A", w=0.15) + poly([(x0, 0.5), (x0 + 0.8, 0.5)], net="B", w=0.15)
+    X = XC(**pairx(w=0.15, gap=None))
+    assert TM._gap_of(mdl(long_ + short), X, ("A", "B"), "F.Cu") == pytest.approx(0.25, abs=0.011)
+
+
+def test_hard_row_keeps_detail():
+    from fluxplace import tracefinish as TF
+    r = TF._hard_row("H7", {"base": 0, "rows": [{"net": "A"}], "extra": 1}, "DATASHEET")
+    assert r["rows"] == [{"net": "A"}] and "extra" not in r
+    r8 = TF._hard_row("H8", {"base": 1, "pairs": [["A", "B"]], "unmeasured": []}, "STD")
+    assert r8["pairs"] == [["A", "B"]] and r8["unmeasured"] == []
+    r9 = TF._hard_row("H9", {"base": 0, "graded": 2, "over": []}, "STD")
+    assert r9["graded"] == 2 and r9["over"] == []
+    r3 = TF._hard_row("H3", {"base": 1, "limit": {"via": 0.13}, "sites": [{"x": 1}]}, "FAB")
+    assert r3["sites"] == [{"x": 1}]
