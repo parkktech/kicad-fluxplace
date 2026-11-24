@@ -1,0 +1,282 @@
+"""Trace finishing stage, T1a: frame, rule table, corner measures, score, events (TRACE-FINISH-SPEC, RECIPE-TRACE-FINISH)."""
+import hashlib, json, math, os, sys
+import pytest
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import pcbgen as G
+from fluxplace import routediag, events, tracefinish as TF, tfmeasure as TM
+
+RULES = os.path.join(os.path.dirname(TF.__file__), "data", "trace_finish_rules.json")
+HARD = [f"H{i}" for i in range(1, 11)]
+PRACTICE = ("C1 C2 C3 C4 C5 C6 C7 C8 C9 C11 C12 C13 C14 C15 C16 C17 C18 C19 C20 "
+            "P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P12 P13 P14 P15 "
+            "M1 M2 M4 M9 M11 "
+            "S1 S2 S3 S4 S5 S6 S8 S9 S10 S11 S12 S13").split()
+
+
+def seg(a, b, mid=None, net="N", layer="F.Cu", w=0.2, locked=False):
+    return {"net": net, "a": a, "b": b, "w": w, "mid": mid, "layer": layer, "locked": locked}
+
+
+def model(segs):
+    return {"segs": segs, "pads": [], "parts": {}, "zones": [], "vias": [], "copper": ["F.Cu", "B.Cu"], "edge": None}
+
+
+def wedge(interior_deg, net="N", layer="F.Cu", L=2.0):
+    """Two straight legs of length L meeting at (0,0) with the given interior angle."""
+    t = math.radians(interior_deg)
+    return [seg((L, 0.0), (0.0, 0.0), net=net, layer=layer), seg((0.0, 0.0), (L * math.cos(t), L * math.sin(t)), net=net, layer=layer)]
+
+
+def rot(segs, k, mirror=False):
+    def p(xy):
+        x, y = (-xy[0], xy[1]) if mirror else xy
+        for _ in range(k):
+            x, y = -y, x
+        return (x, y)
+    out = []
+    for s in segs:
+        d = dict(s, a=p(s["a"]), b=p(s["b"]))
+        if s["mid"] is not None:
+            d["mid"] = p(s["mid"])
+        out.append(d)
+    return out
+
+
+# ---- 1. rule table -----------------------------------------------------------------------------------------------
+
+def test_rule_table_is_10_hard_50_practice_with_sources():
+    rows = json.load(open(RULES))["rules"]
+    ids = [r["id"] for r in rows]
+    assert len(ids) == 60 and len(set(ids)) == 60
+    assert sorted(r["id"] for r in rows if r["tag"] == "HARD") == sorted(HARD)
+    assert sorted(r["id"] for r in rows if r["tag"] == "PRACTICE") == sorted(PRACTICE)
+    assert len(PRACTICE) == 50 and not {"C10", "P11", "S7", "M3", "M5", "M6", "M7", "M8", "M10"} & set(ids)
+    assert all(r.get("src") for r in rows)
+    assert {r["conf"] for r in rows} <= {"H", "M", "L", "J"}
+    assert all(r["weight"] == {"H": 3, "M": 2, "L": 1, "J": 1}[r["conf"]] for r in rows)
+
+
+# ---- 2. classes on two fixture boards (4-layer and 6-layer, different net names) ---------------------------------
+
+FOUR = dict(rf={"nets": ["RF_GNSS"]}, pairs={"USB2_": {"impedance_diff": 90, "skew_mm": 0.15, "maximum_mm": 1.27},
+                                   "ETH_": {"impedance_diff": 100, "skew_mm": 0.15, "maximum_mm": 0.5}})
+SIX = dict(rf={"nets": ["ANT_LTE"]}, pairs={"PCIE_": {"impedance_diff": 90, "skew_mm": 0.1, "maximum_mm": 0.127},
+                                            "USB3_": {"impedance_diff": 90, "skew_mm": 0.1, "maximum_mm": 0.127}})
+
+
+def _two_nets(tmp_path, nets):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    # two parts per pair of nets, so every net has >= 2 pads (netclass classifies nets with >= 2 pads)
+    body = "".join(G.two(f"{k}{i}", 10 + 5 * i, 30 + 10 * k_i, a, b) for i, (a, b) in enumerate(nets) for k, k_i in (("R", 0), ("Q", 1)))
+    return routediag.load(G.board(tmp_path, body))
+
+
+def test_classes_on_two_fixture_boards(tmp_path):
+    B4 = _two_nets(tmp_path / "a", [("RF_GNSS", "GND"), ("USB2_DP", "USB2_DN"), ("ETH_TXP", "ETH_TXN"), ("VBAT_5V", "GND"), ("AUD_IN", "GND")])
+    got4 = TM.classes(B4, FOUR, None)
+    assert got4["RF_GNSS"] == "RF" and got4["USB2_DP"] == "HSS" and got4["ETH_TXP"] == "HSS"
+    assert got4["AUD_IN"] == "ANA" and got4["GND"] == "GEN"
+    B6 = _two_nets(tmp_path / "b", [("ANT_LTE", "GND"), ("PCIE_TX0P", "PCIE_TX0N"), ("USB3_RX_P", "USB3_RX_N"), ("VBAT", "GND")])
+    got6 = TM.classes(B6, SIX, None)
+    assert got6["ANT_LTE"] == "RF" and got6["PCIE_TX0P"] == "HSF" and got6["USB3_RX_P"] == "HSF"
+
+
+# ---- 3. corners, junctions, arcs, rotation and mirror ------------------------------------------------------------
+
+@pytest.mark.parametrize("interior,kind", [(30, "acute"), (60, "acute"), (89, "acute"), (90.4, "right"), (135, "45")])
+def test_wedge_kinds(interior, kind):
+    cs = TM.corners(model(wedge(interior)))
+    assert len(cs) == 1 and cs[0]["kind"] == kind
+
+
+def test_arc_to_tangent_joint_is_straight_not_corner():
+    # straight leg into a 90 degree arc, tangent at the joint: no corner counted as a bend
+    R = 2.0
+    cx, cy = 10.0, R
+    end = (cx + R * math.sin(math.pi / 2), cy - R * math.cos(math.pi / 2))
+    mid = (cx + R * math.sin(math.pi / 4), cy - R * math.cos(math.pi / 4))
+    a = seg((0.0, 0.0), (10.0, 0.0))
+    b = seg((10.0, 0.0), end, mid=mid)
+    cs = TM.corners(model([a, b]))
+    assert len(cs) == 1 and cs[0]["kind"] == "straight"
+
+
+def test_t_is_junction_not_corner():
+    segs = [seg((0, 0), (5, 0)), seg((5, 0), (10, 0)), seg((5, 0), (5, 5))]
+    assert TM.corners(model(segs)) == []
+    js = TM.junctions(model(segs))
+    assert len(js) == 1 and js[0]["n"] == 3
+
+
+@pytest.mark.parametrize("k,mirror", [(0, False), (1, False), (2, False), (3, False), (0, True), (1, True)])
+def test_corner_counts_invariant_under_rotation_and_mirror(k, mirror):
+    segs = wedge(30) + wedge(89, layer="B.Cu") + wedge(90.4, net="M")
+    base = sorted(c["kind"] for c in TM.corners(model(segs)))
+    moved = sorted(c["kind"] for c in TM.corners(model(rot(segs, k, mirror))))
+    assert base == moved == ["acute", "acute", "right"]
+
+
+# ---- 4. one fixture per rule measure -----------------------------------------------------------------------------
+
+def _states(sites):
+    return sorted(s["state"] for s in sites)
+
+
+def test_c1_acute_row_not_ok():
+    assert _states(TM.c1_sites(model(wedge(30)))) == ["open"]
+
+
+def test_c2_right_row_not_ok_and_45_ok():
+    right = wedge(90.4)
+    ok45 = wedge(135)
+    assert _states(TM.c2_sites(model(right))) == ["open"]
+    assert _states(TM.c2_sites(model(ok45))) == []
+
+
+def test_c4_short_segment_between_bends():
+    # two 45-degree bends with a 0.2 mm middle run (w = 0.2, needs >= 0.4 mm)
+    # 45 bend at (5,0), run of 0.1414 mm, 45 bend at (5.1,0.1); w = 0.2 so the run needs >= 0.4 mm
+    segs = [seg((0, 0), (5, 0)), seg((5, 0), (5.1, 0.1)), seg((5.1, 0.1), (9, 0.1))]
+    assert _states(TM.c4_sites(model(segs))) == ["open"]
+
+
+def test_c13_odd_angle_counted_not_failed():
+    sites = TM.c13_sites(model(wedge(180 - 30)))            # deflection 30 deg
+    assert _states(sites) == ["already"]
+
+
+def test_c14_branch_under_90_open():
+    segs = [seg((0, 0), (5, 0)), seg((5, 0), (10, 0)), seg((5, 0), (5 + 3 * math.cos(math.radians(30)), 3 * math.sin(math.radians(30))))]
+    assert _states(TM.c14_sites(model(segs))) == ["open"]
+
+
+def test_c5_bend_is_arc_or_open():
+    arc_bend = wedge(90)
+    arc_bend[1] = seg((0, 0), (2, 2), mid=(0.6, 1.4))
+    assert "already" in _states(TM.c5_sites(model(arc_bend)))
+    assert _states(TM.c5_sites(model(wedge(90)))) == ["open"]
+
+
+def test_c15_polyline_arc_open_native_arc_already():
+    pts = [(10 + 2 * math.cos(math.radians(a)), 10 + 2 * math.sin(math.radians(a))) for a in range(0, 50, 5)]
+    poly = [seg(pts[i], pts[i + 1], w=0.2) for i in range(len(pts) - 1)]   # 5 deg steps: chord 0.17 mm < 0.2
+    assert _states(TM.c15_sites(model(poly))) == ["open"]
+    native = [seg((0, 0), (2, 2), mid=(0.6, 1.4))]
+    assert _states(TM.c15_sites(model(native))) == ["already"]
+
+
+def test_m1_acid_trap_open():
+    segs = wedge(30)
+    segs = [dict(s, mid=None) for s in segs]
+    assert _states(TM.m1_sites(model(segs), 60.0)) == ["open"]
+
+
+def test_m9_zero_length_and_duplicate_open():
+    segs = [seg((0, 0), (0, 0)), seg((1, 0), (2, 0)), seg((2, 0), (1, 0))]
+    assert _states(TM.m9_sites(model(segs))).count("open") == 2
+
+
+# ---- 5. records and score: hand table, flagged rise ---------------------------------------------------------------
+
+def test_score_hand_table_and_flag():
+    # rule x class: already, applied, not_possible counts -> (sum, eligible)
+    table = {("C1", "GEN"): ["already", "already", "not_possible"], ("C1", "RF"): ["already"],
+             ("C2", "GEN"): ["applied", "applied", "already", "already"]}
+    sc = {k: TM.score_of(v) for k, v in table.items()}
+    assert round(sc[("C1", "GEN")][0], 3) == round(2 / 3, 3) and sc[("C1", "GEN")][1] == 3
+    assert sc[("C1", "RF")] == (1.0, 1)
+    assert sc[("C2", "GEN")] == (1.0, 4)
+    assert TM.score_flags({"eligible": 10, "score": 0.5}, {"eligible": 7, "score": 0.7}) == ["RISE_ON_FALLING_ELIGIBLE"]
+    assert TM.score_flags({"eligible": 10, "score": 0.5}, {"eligible": 10, "score": 0.7}) == []
+
+
+# ---- 6. F0 record (DRC faked, one clearance violation: base, verdict not FAIL) ---------------------------------
+
+class _Ctx:
+    """Minimal stand-in for pipeline.Ctx: cons, spec, dir(n, name) -> <work>/<n>-<name>/."""
+    def __init__(self, work, cons):
+        self.work, self.cons, self.cons_path, self.spec, self.spec_path = str(work), cons, None, None, None
+
+    def dir(self, n, name):
+        d = os.path.join(self.work, f"{n}-{name}")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+def _enabled_ctx(tmp_path, board, cons):
+    return _Ctx(tmp_path / "w", cons)
+
+
+def test_f0_clearance_violation_is_base_not_fail(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    fake = {"violations": [{"type": "clearance", "description": "Clearance violation", "items": [{"description": "x"}]}],
+            "unconnected_items": []}
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: fake)
+    c = _enabled_ctx(tmp_path, board, {"finish": {"enabled": True}})
+    res = TF.stage(c, 7, board)
+    assert res["verdict"] != "fail" and res["verdict"] != "FAIL"
+    fj = json.load(open(os.path.join(c.dir(7, "trace-finish"), "finish.json")))
+    assert any(r["id"] == "H1" and r["base"] >= 1 for r in fj["legality"])
+
+
+# ---- 7. stage: skipped and enabled byte identity, events --------------------------------------------------------
+
+def _sha(p):
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()
+
+
+def test_skipped_when_finish_absent_and_nothing_written(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    c = _enabled_ctx(tmp_path, board, {})
+    res = TF.stage(c, 7, board)
+    assert res["verdict"] == "pass" and res["line"] == "trace-finish: skipped ([finish] enabled is not set)"
+    assert res["board"] == board
+    assert not os.path.exists(os.path.join(c.dir(7, "trace-finish"), "finish.json"))
+
+
+def test_enabled_output_is_byte_copy_and_events_in_order(tmp_path, monkeypatch):
+    board = G.board(tmp_path, G.two("R1", 10, 10, "A", "B"))
+    monkeypatch.setattr(TF, "_drc", lambda path, **k: {"violations": [], "unconnected_items": []})
+    stream = tmp_path / "events.jsonl"
+    monkeypatch.setenv(events.ENV_FILE, str(stream))
+    c = _enabled_ctx(tmp_path, board, {"finish": {"enabled": True}})
+    res = TF.stage(c, 7, board)
+    assert _sha(res["board"]) == _sha(board)
+    lines = [json.loads(l) for l in open(stream)]
+    kinds = [l["kind"] for l in lines]
+    assert "progress" in kinds and "criteria" in kinds and "artifact" in kinds
+    crit = [l for l in lines if l["kind"] == "criteria"]
+    hard_first = [bool(l.get("hard")) for l in crit]
+    assert hard_first == sorted(hard_first, reverse=True)
+    assert kinds.index("progress") < next(i for i, l in enumerate(lines) if l["kind"] == "criteria")
+
+
+@pytest.mark.parametrize("k,mirror", [(0, False), (1, False), (2, False), (3, False), (0, True), (1, True)])
+def test_rule_measure_counts_invariant_under_rotation_and_mirror(k, mirror):
+    # one combined fixture: wedges, a 0.1 mm run between two bends, a 3-leg junction, zero-length and duplicate segments
+    segs = wedge(30) + wedge(90.4, net="M") + [seg((0, 0), (0, 0)), seg((20, 0), (21, 0)), seg((21, 0), (20, 0))]
+    segs += [seg((5, 0), (5.1, 0.1)), seg((5, 0), (5, 3)), seg((5.1, 0.1), (9, 0.1))]
+    ref, moved = model(segs), model(rot(segs, k, mirror))
+    fns = {"c1": lambda B: TM.c1_sites(B), "c2": lambda B: TM.c2_sites(B), "c4": lambda B: TM.c4_sites(B),
+           "c13": lambda B: TM.c13_sites(B), "c14": lambda B: TM.c14_sites(B), "m1": lambda B: TM.m1_sites(B, 60.0),
+           "m9": lambda B: TM.m9_sites(B)}
+    for name, f in fns.items():
+        a = sorted(s["state"] for s in f(ref))
+        b = sorted(s["state"] for s in f(moved))
+        assert a == b, name
+
+
+def test_progress_heartbeat_during_long_drc(tmp_path, monkeypatch):
+    import time as _t
+    stream = tmp_path / "events.jsonl"
+    monkeypatch.setenv(events.ENV_FILE, str(stream))
+    monkeypatch.setattr(TF, "HEARTBEAT_S", 0.05)
+    def slow_drc(path, **k):
+        _t.sleep(0.4)                                  # stands in for the 22 s W15 DRC
+        return {"violations": [], "unconnected_items": []}
+    monkeypatch.setattr(TF, "_drc", slow_drc)
+    TF._drc_base(str(tmp_path / "b.kicad_pcb"), "kicad-cli")
+    ts = [json.loads(l)["ts"] for l in open(stream) if json.loads(l)["kind"] == "progress"]
+    assert len(ts) >= 4
+    assert max(b - a for a, b in zip(ts, ts[1:])) < 0.3

@@ -374,3 +374,12 @@ def test_close_stage_runs_the_post_route_snap_first_and_closes_the_cleaned_board
     r = PL.st_close(c, 8, b)
     assert [x[1] for x in calls] == ["clean", "close"] and calls[1][2].endswith("postroute.kicad_pcb")
     assert r["verdict"] == "pass" and "snapped 5" in r["line"] and r["board"] == "BEST"
+
+def test_trace_finish_sits_directly_before_silk():
+    # TF T1a item 1: classic flow after tune, constructive flow after close; one flow, no flag.
+    assert PL.STAGES[PL.STAGES.index("silk") - 1] == "trace-finish"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("silk") - 1] == "trace-finish"
+    assert PL.STAGES[PL.STAGES.index("trace-finish") - 1] == "tune"
+    assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("trace-finish") - 1] == "close"
+    assert PL.ALL_STAGES.count("trace-finish") == 1
+    assert "trace-finish" in PL.FUNCS

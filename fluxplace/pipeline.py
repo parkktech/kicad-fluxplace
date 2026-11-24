@@ -24,9 +24,9 @@ import time
 
 from . import routeconn as RC
 
-STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "silk", "review"]
+STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "trace-finish", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
-CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "placetour", "lookahead", "pairs", "tune", "critroute", "plan-route", "route", "close", "silk", "review"]
+CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "placetour", "lookahead", "pairs", "tune", "critroute", "plan-route", "route", "close", "trace-finish", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
 STATE_MAX = 2400   # router + engine records joined the stage entries
@@ -1029,6 +1029,12 @@ def st_tune(c, n, board):
             "next": [_clip(l.strip(), 100) for l in over[:3]]}
 
 
+def st_trace_finish(c, n, board):
+    """Trace finishing (TRACE-FINISH-SPEC): one flow, switched by [finish] enabled; absent = board handed on unchanged."""
+    from . import tracefinish as TF
+    return TF.stage(c, n, board)
+
+
 def st_silk(c, n, board):
     """Silkscreen check + reference-text fit after routing (copper is never touched), before review/fab."""
     d = c.dir(n, "silk")
@@ -1369,7 +1375,7 @@ def st_lookahead(c, n, board):
 
 FUNCS = {"pour-tie": st_pour_tie, "pairs": st_pairs, "lookahead": st_lookahead, "placetour": st_placetour, "critroute": st_critroute, "ready": st_ready, "modules": st_modules, "floorplan": st_floorplan, "fanout": st_fanout, "plan-route": st_plan_route, "relieve": st_relieve,
          "floorplan-check": st_floorplan_check, "anchor-check": st_anchor_check, "place": st_place,
-         "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "silk": st_silk, "review": st_review}
+         "route-ready": st_route_ready, "route": st_route, "close": st_close, "tune": st_tune, "trace-finish": st_trace_finish, "silk": st_silk, "review": st_review}
 
 
 # ------------------------------------------------------------------ connectivity invariant + ledger
