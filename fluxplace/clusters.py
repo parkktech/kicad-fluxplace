@@ -623,7 +623,7 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
             gnd = _pair_ground(icp, pairs, s["pad"]) or gnd
         other = [p for p in part["pads"] if p["num"] != s["via"]]
         is_gnd_cap = bool(other and NC.is_ground(other[0]["net"]) and gnd)
-        n_d = int(reach / step)
+        n_d = int((max(reach, s["limit"]) if strict else reach) / step)
         base = (pin["x"] + ox * pin["ex"], pin["y"] + oy * pin["ey"])
         grid = sorted(((math.hypot(ia * step, it * step), ia * step, it * step)
                        for ia in range(0, n_d + 1) for it in range(-n_d, n_d + 1)))

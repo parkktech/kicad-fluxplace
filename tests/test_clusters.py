@@ -319,7 +319,7 @@ def test_rehome_puts_the_parked_bypass_into_its_own_ic_cluster(tmp_path):
     cl, _ = CL.build(B, _PLANNED)
     moved = CL.rehome(B, cl, _PLANNED)
     d = CL.pin_demand(B, _PLANNED)[0]["dist_mm"]
-    assert moved == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": d}}
+    assert moved == {"C419": {"from": "U101", "to": "U412", "pad": "1", "dist": d, "left": "1"}}
     where = {s["ref"]: (c["ic"], s["how"], s["pad"], s["sure"], round(s["dist"], 2), s["limit"]) for c in cl for s in c["supports"]}
     assert where["C419"] == ("U412", "pin-demand", "1", True, d, 5.0) and where["C101"][:2] == ("U101", "near")
     assert CL.unseated(cl) == [{"ref": "C419", "ic": "U412", "pad": "1", "dist": d, "limit": 5.0, "why": "no legal seat"}]
@@ -357,3 +357,24 @@ def test_regulator_loop_lengths_do_not_change_when_the_module_turns(tmp_path):
     m1 = CL.loop_metrics(B, c)
     assert m1["cin_loop_mm"] == 7.405 and m1["sw_mm"] == m0["sw_mm"]
     assert CL.loop_metrics(B, {"ic": "U1", "supports": []}) == {"cin_loop_mm": None, "sw_mm": None, "boot_mm": None, "fb_mm": None}
+
+
+def test_a_strict_seat_searches_as_far_as_the_limit_not_just_8_mm(tmp_path):
+    import math
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fixtures"))
+    import powerboard as PW
+    import pcbgen as g
+    b = g.ic("U1", 30, 30, ["VOUT", "GND", "A1", "A2", "A3", "A4"], pitch=1.0)
+    b += PW.cap("C1", 26, 29, "VOUT", "GND", "10uF")
+    b += g.fp("X1", 23.15, 29.0, [], court=(-4.65, -9.5, 4.65, 9.5))   # blockers: nothing legal within 9.5 mm outward of pin 1
+    B = RD.load(g.board(tmp_path, b, outline=(0, 0, 80, 60)))
+    cl, _ = CL.build(B, {"power": {"VOUT": {"max_current_ma": 3000}}})          # a planned rail: the 10 uF is bulk, limit 15 mm
+    c = cl[0]
+    s = next(x for x in c["supports"] if x["ref"] == "C1")
+    assert s["limit"] == 15.0
+    left = []
+    mv = CL.seat(B, c, strict=True, left=left)
+    pin = next(p for p in B["parts"]["U1"]["pads"] if p["num"] == s["pad"])
+    d = math.hypot(mv["C1"][0] - pin["x"], mv["C1"][1] - pin["y"])
+    assert "C1" in mv and 9.5 < d <= s["limit"] and left == []
