@@ -226,11 +226,11 @@ def keepout_rows(B, cons):
     return out
 
 
-def homes(B, cons, spec=None):
-    """{ref: the IC that owns it} for support parts whose owner is decided (clusters.DECIDED); an IC is its own home."""
+def homes(B, cons, spec=None, cl=None):
+    """{ref: the IC that owns it}: the sure supports of the cluster table (the same rule as modules.build); an IC is its own home."""
     from . import clusters as CL
-    own, _links = CL.ownership(B, None, cons, spec)
-    return {r: o["ic"] for r, o in own.items() if o.get("how") in CL.DECIDED}
+    cl = cl if cl is not None else CL.build(B, cons, spec)[0]
+    return {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
 
 
 def flight_rows(B, cons, fixed=(), home=None):
@@ -399,7 +399,7 @@ def _pads_by_ref(B, net):
 TEMPLATE_KEYS = ("cin_loop_mm", "sw_mm", "fb_mm")
 
 
-def template_rows(B, cons, spec=None):
+def template_rows(B, cons, spec=None, cl=None):
     """support rows of a regulator against the maxima of its part's `layout` fact: the measured loop lengths (clusters.loop_metrics) vs
     cin_loop_mm / sw_mm / fb_mm. Hard only when the number is the datasheet's: a key the fact lists in `derived` was worked out from
     courtyard geometry (D71do) and grades as recommended (not hard, klass INF). No fact, no row."""
@@ -409,7 +409,7 @@ def template_rows(B, cons, spec=None):
         return []
     names = NC.pin_names(spec)
     out = []
-    for c in CL.build(B, cons, spec, facts=facts, mpn_map=mpn_map)[0]:
+    for c in (cl if cl is not None else CL.build(B, cons, spec, facts=facts, mpn_map=mpn_map)[0]):
         lay = c.get("layout")
         if not lay:
             continue
@@ -461,8 +461,10 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
                        not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
                        detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
                                else "no capacitor at the pin"), derived="default support limit"))
-    home, esc = homes(B, cons, spec), escape_rows(B, cons)
-    return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed, home)
+    from . import clusters as CL
+    cl = CL.build(B, cons, spec)[0]
+    home, esc = homes(B, cons, spec, cl=cl), escape_rows(B, cons)
+    return (out + template_rows(B, cons, spec, cl=cl) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed, home)
             + separation_rows(B, cons, home) + esc + escape_layer_rows(B, cons, esc) + swap_rows(B, cons))
 
 
