@@ -194,3 +194,33 @@ def test_bulk_part_parked_at_another_ic_is_far_from_its_owner_on_a_planned_rail(
     assert set(far) == {"C103"} and far["C103"][0] == "U101" and far["C103"][1]["role"] == "bulk" and far["C103"][1]["dist"] > 40
     cl, _ = CL.build(B, {})                                                                           # unplanned rail: as before
     assert not CL.far_parts(cl)
+
+
+# ---- step-2 evaluation (D71di): a part in line with an RF net belongs to the RF line, not to the IC on its DC side
+def _rf_board(tmp_path, c1x=30.0):
+    b = g.ic("U1", 10, 10, ["ANT_BIAS", "a", "b", "GND", "c", "d"])                 # bias supply / detector, far from the antenna
+    b += g.ic("U2", 80, 10, ["RF_IN", "e", "f", "GND", "h", "i"])                   # receiver
+    b += g.fp("J1", 95, 10, [g.pad("1", 0, 0, "RF_EXT"), g.pad("2", 1, 0, "GND")])  # antenna jack
+    b += g.two("L1", 93, 12, "ANT_BIAS", "RF_EXT")                                  # bias inductor at the jack, 83 mm from U1
+    b += g.two("C1", c1x, 10, "RF_EXT", "RF_IN")                                    # DC block in the RF line
+    return RD.load(g.board(tmp_path, b))
+
+
+def test_bias_inductor_on_an_rf_line_is_not_a_support_of_the_dc_side_ic(tmp_path):
+    B = _rf_board(tmp_path)
+    own, links = CL.ownership(B)
+    assert "L1" not in own and "L1" not in links
+    cl, _ = CL.build(B)
+    assert "L1" not in {s["ref"] for c in cl for s in c["supports"]}
+    assert "L1" not in {c["part"] for n in RD.diagnose(B, ["ANT_BIAS", "RF_EXT"])["nets"] for c in n["causes"]
+                        if c["cause"] == "FAR_SUPPORT_PART"}
+
+
+def test_series_part_on_an_rf_net_is_graded_by_the_rf_budget(tmp_path):
+    from fluxplace import netclass as NC
+    for c1x, far in ((70.0, False), (30.0, True)):                    # about 9 mm and 49 mm from U2's RF pin; the budget is 17.7 mm
+        d = tmp_path / str(int(c1x)); d.mkdir()
+        s = _sup(_rf_board(d, c1x), {})["C1"]
+        assert s["serves"].startswith("U2.") and s["role"] == "sense"
+        assert s["limit"]["max"] == NC.BUDGET["rf"] == s["limit"]["target"] and "rf budget" in s["limit"]["source"]
+        assert (s["verdict"] == "fail") is far

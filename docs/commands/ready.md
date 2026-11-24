@@ -43,6 +43,27 @@ netclass's Z and the dominant routed widths' Z per layer (a width that is right 
 (`questions.inherit`); `fab` and `deliver` refuse such a board (`NOT READY: <reasons>`). `pipeline` without `--spec` reports the
 stage `na` (nothing to check); the stage's distributor/stock lookups are live by default (`--no-api` for offline, which blocks the parts gate: stock cannot be checked). Work list: [parts-todo](parts-todo.md), [parts-apply](parts-apply.md).
 
+## The `fixed reasons` and `pair classes` lines (fixedreason.py, F1)
+
+Every part a stage will not move needs a reason class: `[placement.fixed_reason."REF"] reason = "mechanical" | "enclosure" |
+"module-mount" | "owner"` (`owner` also needs `decision = "<id>"`). A fixed part with no pad on a signal or power net (hole,
+standoff, fiducial) is mechanical without a declaration. No class exempts a support part from its distance budget. Both lines
+are OPEN without a question behind them: their findings count as open items (exit 3) and are listed in full in `<board>.ready.json`
+(`fixed_reasons`, `pairs_unclassified`).
+
+| Finding | Level | Fix |
+|---|---|---|
+| `FIXED_OVER_BUDGET` | OPEN | a fixed support part over its max (the support table of the power plan): free it, or move it and its pin together |
+| `FIXED_REASON_MISMATCH` | OPEN | `mechanical` on a part with a support row: give the real reason or free the part |
+| `FIXED_OWNER_GUESSED` | OPEN | a fixed support part whose pin is a guess: `[power."NET"] support = {REF = "IC.PAD"}` |
+| `FIXED_OWNER_NO_DECISION` | OPEN | add `decision = "<id>"` |
+| `FIXED_UNDECLARED` | OPEN | a fixed list exists and this part is held by anchor detection only (relocate, closure, refiners hold it; the floorplan does not): add it to `[placement] fixed` with a reason, or to `[floorplan] movable` |
+| `FIXED_NO_REASON` | OPEN | add the `[placement.fixed_reason."REF"]` row, or remove the part from the fixed list / unlock it |
+| `PAIR_UNCLASSIFIED` | OPEN | a `_P/_N`-style name pair in no family: add `[pairs.PREFIX]` / `[channel.PREFIX]`, or list both nets in top-level `not_pairs` |
+
+A two-pad part in line with an RF net that reaches no IC (bias inductor, DC block at the antenna) is not a support part of the IC
+on its DC side; a series part on an RF net that reaches an IC is graded by the RF length budget.
+
 ## The `power plan` line (powerbudget.py, D71dc / D71dd)
 
 One row per `[power."NET"]` rail with a current, written to `<board>.power-plan.json`: allowed resistance, candidate copper per layer

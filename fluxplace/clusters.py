@@ -73,6 +73,10 @@ def ownership(B, cls=None, cons=None, spec=None, min_pads=5):
                 sides.append((p, None, "rail"))
             else:
                 sides.append((p, None, "none"))
+        rf = [s for s in sides if (cls.get(s[0]["net"]) or {}).get("class") == "rf"]
+        if rf and not any(s[1] for s in rf):
+            continue        # in line with an RF net that reaches no IC (bias inductor, DC block, matching part at the antenna):
+            #                 the part belongs to the RF line and its net budget, not to the IC on its DC side
         owners = {s[1] for s in sides if s[1]}
         if len(owners) > 1:
             links.add(ref)

@@ -420,6 +420,9 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
     elif role == "bulk":
         row = {"target": BULK_MM[0], "max": BULK_MM[1], "klass": "INF",
                "source": f"default {BULK_MM[0]:g}/{BULK_MM[1]:g} mm, unverified: path inductance at pour width below the ESL of a bulk part (a datasheet bulk_mm replaces it)"}
+    elif info and info["class"] == "rf" and info.get("budget"):
+        b = float(info["budget"])                # a series part on an RF net (DC block, matching): the RF length budget, not the 5 mm default
+        row = {"target": b, "max": b, "source": f"derived: netclass rf budget ({NC.BASIS['rf']})", "klass": "INF"}
     else:
         row = {"target": SENSE_MM, "max": SENSE_MM, "klass": "INF", "source": f"default {SENSE_MM:g} mm (sense / feedback / other support part)"}
     key = {"bypass": "decap_mm", "bulk": "bulk_mm"}.get(role)
