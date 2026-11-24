@@ -378,3 +378,30 @@ def test_flight_line_is_not_blocked_by_a_keepout_of_its_own_module(tmp_path):
     assert BG.flight_rows(B, cons, fixed=("U1", "J1"), home={"L1": "U1"}) == []
     f = BG.flight_rows(B, cons, fixed=("U1", "J1"))
     assert len(f) == 1 and f[0]["hard"] is True
+
+
+# ---- C4: escape rows can fail (X1, B2)
+def test_escape_layers_fail_when_the_stackup_is_short(tmp_path):
+    cons = {"route": {"min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_via_mm": 0.45}, "stackup": {"planes": ["In1.Cu"]}}
+    B2 = RD.load(PG.board(tmp_path, _grid("U9", 20, 20, 6) + _grid("U8", 50, 20, 10), name="g.kicad_pcb"))
+    rows = {r["name"]: r for r in BG.table(B2, cons) if r["kind"] == "escape" and r["metric"] == "layers_needed"}
+    assert (rows["U9"]["value"], rows["U9"]["verdict"]) == (2, "ok")
+    assert (rows["U8"]["value"], rows["U8"]["verdict"], rows["U8"]["hard"]) == (3, "fail", False)
+    tight = dict(cons, route={"min_track_mm": 0.2, "min_clearance_mm": 0.2, "min_via_mm": 0.45})
+    t = {r["name"]: r for r in BG.escape_layer_rows(B2, tight)}
+    assert (t["U8"]["value"], t["U8"]["max"], t["U8"]["verdict"]) == (3, 2, "fail")
+
+
+def test_escape_rows_do_not_change_with_rotation(tmp_path):
+    side = [(i * 0.5 - 1.0, -2.0) for i in range(5)] + [(i * 0.5 - 1.0, 2.0) for i in range(5)] + \
+           [(-2.0, i * 0.5 - 1.0) for i in range(5)] + [(2.0, i * 0.5 - 1.0) for i in range(5)]
+    cons = {"route": {"min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_via_mm": 0.45}}
+    conn = [PG.pad(str(i + 1), i * 0.4, 0, f"n{i}", 0.2, 0.7) for i in range(10)] + \
+           [PG.pad(str(i + 11), i * 0.4, 3.0, f"m{i}", 0.2, 0.7) for i in range(10)]
+    seen = []
+    for a in (0, 90, 180, 270):
+        qfn = [PG.pad(str(i + 1), x, y, f"q{i}", 0.25, 0.8) for i, (x, y) in enumerate(side)]
+        B = RD.load(PG.board(tmp_path, PG.fp("J10", 20, 20, conn, angle=a) + PG.fp("U7", 50, 30, qfn, angle=a), name=f"r{a}.kicad_pcb"))
+        seen.append(sorted((r["name"], r["value"], r["pitch_mm"], r["pad_mm"], r["gap_mm"], r["rows_deep"], r["layers_needed"],
+                            r["corridor_mm"]) for r in BG.escape_rows(B, cons)))
+    assert all(s == seen[0] for s in seen) and len(seen[0]) == 2

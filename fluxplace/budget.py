@@ -344,6 +344,19 @@ def escape_rows(B, cons):
     return out
 
 
+def escape_layer_rows(B, cons, rows=None):
+    """One row per escape row: signal layers needed against the signal layers the stackup has (copper minus [stackup] planes).
+    Closed form, so derived (soft). No-escape (layers_needed None) reports have + 1."""
+    cu = list(B.get("copper") or [])
+    have = len([l for l in cu if l not in set(((cons or {}).get("stackup") or {}).get("planes") or ())])
+    out = []
+    for e in rows if rows is not None else escape_rows(B, cons):
+        need = e["layers_needed"]
+        out.append(row("escape", e["name"], "layers_needed", "count", have + 1 if need is None else need, None, have,
+                       e["source"], "INF", True, refs=e["refs"], detail=e["detail"], derived="closed form"))
+    return out
+
+
 def swap_rows(B, cons):
     """Declared swap groups. polarity with both legs on the same two parts: value 1 when the two flight lines cross (a swap at
     one end removes the crossing; proposal only, the schematic owns the change). Other kinds are listed with no value."""
@@ -438,10 +451,9 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
                        not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
                        detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
                                else "no capacitor at the pin"), derived="default support limit"))
-    home = homes(B, cons, spec)
+    home, esc = homes(B, cons, spec), escape_rows(B, cons)
     return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed, home)
-            + separation_rows(B, cons, home)
-            + escape_rows(B, cons) + swap_rows(B, cons))
+            + separation_rows(B, cons, home) + esc + escape_layer_rows(B, cons, esc) + swap_rows(B, cons))
 
 
 def open_items(rows):
