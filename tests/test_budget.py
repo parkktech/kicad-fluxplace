@@ -568,3 +568,18 @@ def test_row_that_exists_only_while_violated_is_honoured_when_gone():
     assert h["pair"]["status"] == "not_measured" and h["pair"]["limit"] == 40.0
     gone = BG.honoured([BG.row("support", "U9 -> X", "distance", "mm", value=9.0, target=5.0, source="s")], [])
     assert gone[0]["status"] == "not_measured"
+
+
+def test_hard_row_with_limit_gone_from_after_is_not_honoured_and_named():
+    hard_gone = BG.row("support", "C26 -> U404.9", "distance", "mm", value=4.35, mx=1.0, source="s", hard=True)
+    h = BG.honoured([hard_gone], [])
+    assert h[0]["status"] == "not_honoured" and h[0]["gone"] is True and h[0]["value_in"] == 4.35
+    assert "C26 -> U404.9" in BG.honoured_summary(h)
+
+
+def test_hard_keepout_without_limit_gone_is_not_measured_and_soft_gone_is_not_measured():
+    ko = BG.row("keepout", "U1 area", "area", "mm2", value=3.0, source="s", hard=True)
+    soft = BG.row("support", "C9 -> X", "distance", "mm", value=9.0, target=5.0, source="s")
+    h = {r["name"]: r for r in BG.honoured([ko, soft], [])}
+    assert h["U1 area"]["status"] == "not_measured" and h["U1 area"]["gone"] is True
+    assert h["C9 -> X"]["status"] == "not_measured" and h["C9 -> X"]["gone"] is True
