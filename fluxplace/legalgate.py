@@ -109,7 +109,7 @@ def revert_illegal(B, L, is_known, orig, fixed=(), refs=None, limit=None):
                 continue
             v = max(cands, key=lambda x: (displaced(B["parts"][x], orig[x]), x))
             revert_part(B, L, v, orig[v])
-            reverted.setdefault(v, []).append(f"{k} {d}".strip())
+            reverted.setdefault(v, []).append(f"{k} {r if _other(r, k, d) == v else d}".strip() if k in ("overlap", "hole") else f"{k} {d}".strip())
             progressed = True
             break
         if not progressed:
@@ -143,8 +143,9 @@ def repair_file(path, orig_path, cons, base, log=print):
     orig = poses(Bo)
     rev, left = revert_illegal(B, L, known(base), orig, fixed)
     write_reverted(path, orig_path, rev, orig)
-    for r in sorted(rev):
-        log(f"floorplan: {r} back at its input pose ({'; '.join(rev[r][:2])})")
+    if rev:
+        log(f"floorplan: {len(rev)} part(s) back at their input pose (adding an issue the input lacked): "
+            + ", ".join(f"{r} ({rev[r][0]})" for r in sorted(rev)[:8]) + (" ..." if len(rev) > 8 else ""))
     return {"reverted": rev, "left": left}
 
 
