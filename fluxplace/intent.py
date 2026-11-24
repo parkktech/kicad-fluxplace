@@ -140,6 +140,10 @@ def items(B, cons):
     away = [{"name": e.get("name") or f"away{i + 1}", "a": match(parts, e.get("a")), "b": match(parts, e.get("b")),
              "min": float(e["min_mm"]), "hard": bool(e.get("hard", True)), "weight": float(e.get("weight", 5.0))}
             for i, e in enumerate(sec.get("away", []) or [])]
+    for i, e in enumerate((cons or {}).get("separation") or []):       # [[separation]] rows with a hard minimum are held like [[intent.away]]
+        if e.get("enabled", True) is not False and e.get("min_mm") is not None and e.get("hard", True):
+            away.append({"name": "sep:" + str(e.get("name") or f"separation{i + 1}"), "a": match(parts, e.get("a")),
+                         "b": match(parts, e.get("b")), "min": float(e["min_mm"]), "hard": True, "weight": float(e.get("weight", 5.0))})
     region = []
     for i, e in enumerate(sec.get("region", []) or []):
         side = str(e.get("side", "both")).upper()

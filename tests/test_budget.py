@@ -146,3 +146,26 @@ def test_declared_keepout_needs_layers_to_be_a_routing_keepout(tmp_path):
     k = BG.keepout_rows(B, under)
     assert [r["name"] for r in k] == ["gnss"] and k[0]["rect"] == [17.0, 17.0, 23.0, 23.0] and k[0]["layers"] == ["F.Cu", "In1.Cu"]
     assert BG.flight_rows(B, under, fixed={"U1", "J1"}) == []                 # the pair starts inside the area: the part's own keep-out
+
+
+def test_separation_rows_hard_minimum_target_and_scored(tmp_path):
+    B = usb_board(tmp_path)                                   # courtyard gap U1 - J1 = 38.0 mm
+    sep = lambda **k: {"separation": [dict({"name": "s", "a": ["U*"], "b": ["J1"]}, **k)]}       # noqa: E731
+    r = BG.separation_rows(B, sep(min_mm=40.0, source="ds p.4"))[0]
+    assert (r["value"], r["max"], r["verdict"], r["hard"], r["minimum"], r["refs"]) == (38.0, 40.0, "fail", True, True, ["U1", "J1"])
+    assert BG.separation_rows(B, sep(min_mm=20.0, source="ds p.4"))[0]["verdict"] == "ok"
+    assert BG.separation_rows(B, sep(min_mm=20.0, target_mm=50.0, source="ds p.4"))[0]["verdict"] == "over-target-pass"
+    s = BG.separation_rows(B, sep(why="clock harmonic"))[0]                                      # scored: no limit, never fails
+    assert (s["value"], s["verdict"], s["hard"], s["detail"]) == (38.0, "n/a", False, "clock harmonic")
+    assert BG.separation_rows(B, sep(min_mm=40.0, enabled=False)) == []
+    assert BG.separation_rows(B, sep(a=["Q*"]))[0]["value"] is None
+
+
+def test_hard_separation_is_held_by_the_intent_gate(tmp_path):
+    from fluxplace import intent as IT
+    B = usb_board(tmp_path)
+    cons = {"separation": [{"name": "s", "a": ["U1"], "b": ["J1"], "min_mm": 40.0, "source": "ds p.4"},
+                           {"name": "scored", "a": ["U1"], "b": ["J1"]}]}
+    rows = [r for r in IT.check(B, cons) if r["kind"] == "away"]
+    assert len(rows) == 1 and rows[0]["name"] == "sep:s" and rows[0]["met"] is False and rows[0]["hard"] is True
+    assert (rows[0]["value"], rows[0]["limit"]) == (38.0, 40.0)

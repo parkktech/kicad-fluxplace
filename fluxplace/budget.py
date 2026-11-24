@@ -236,3 +236,19 @@ def flight_rows(B, cons, fixed=()):
                                k["all_layers"] and a in fixed and b in fixed, refs=sorted([a, b]), nets=[m, pm[m]], layers=k["layers"],
                                detail=f"flight line {a}-{b} crosses keep-out {k['name']} on {len(k['layers'])} of {ncu} copper layers"))
     return out
+
+
+def separation_rows(B, cons):
+    from . import geom as GM, intent as IT
+    parts, out = B["parts"], []
+    for i, e in enumerate((cons or {}).get("separation") or []):
+        if e.get("enabled", True) is False:
+            continue
+        name = str(e.get("name") or f"separation{i + 1}")
+        best = min(((GM.rect_gap(parts[x]["court"], parts[y]["court"]), x, y) for x in IT.match(parts, e.get("a"))
+                    for y in IT.match(parts, e.get("b")) if x != y), default=None)
+        has_min = e.get("min_mm") is not None
+        out.append(row("separation", name, "distance", "mm", round(best[0], 2) if best else None, e.get("target_mm"), e.get("min_mm"),
+                       str(e.get("source", "")), str(e.get("klass", "INF")), has_min and bool(e.get("hard", True)), minimum=True,
+                       refs=[best[1], best[2]] if best else [], detail=str(e.get("why", ""))))
+    return out
