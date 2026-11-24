@@ -35,7 +35,7 @@ import os
 import re
 
 CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "SUPPLY_RANGE_UNKNOWN", "ELEC_NOT_EVALUATED")
-FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm")
+FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm", "layout")
 _GND = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
 _POWER = re.compile(r"^(\+?\d+V\d*\w*|V(CC|DD|BAT|BATT|IN|BUS)\w*)$", re.I)
 _VRATE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*V(?![\w])", re.I)
@@ -68,6 +68,27 @@ def _coerce(s):
         return s
 
 
+_NOT_DIGITS = ("page", "derived", "derivation")      # keys of a dict fact that are bookkeeping, not datasheet figures
+
+
+def _numbers(key, v):
+    """[(name, number)] a fact claims the cited page states: a scalar, or the numbers of a dict fact (nested too). A dict fact's
+    `derived` (list of its keys, or true for all) marks values the page does not state (D71do): they are not digit-checked."""
+    if isinstance(v, bool):
+        return []
+    if isinstance(v, (int, float)):
+        return [(key, v)]
+    if not isinstance(v, dict):
+        return []
+    d = v.get("derived")
+    skip = set(_NOT_DIGITS) | (set(v) if d is True else {str(x) for x in d} if isinstance(d, (list, tuple)) else set())
+    out = []
+    for k2, v2 in v.items():
+        if k2 not in skip:
+            out += _numbers(f"{key}.{k2}", v2)
+    return out
+
+
 def set_facts(ds_dir, mpn, kv, source, check_page=True, force=False):
     """Write facts (key -> value) for `mpn` with a `file.pdf#pN` citation. -> (written, warnings). Raises ValueError on a bad cite.
     A numeric value whose digits are not on the cited page is refused unless force (the page is the evidence)."""
@@ -86,13 +107,13 @@ def set_facts(ds_dir, mpn, kv, source, check_page=True, force=False):
     for k, v in kv.items():
         if k not in FACT_KEYS:
             raise ValueError(f"unknown fact '{k}' (known: {', '.join(FACT_KEYS)})")
-        if text is not None and isinstance(v, (int, float)) and not isinstance(v, bool):
-            pat = re.escape(f"{v:g}")
-            if not re.search(r"(?<![\d.])" + pat + r"(?![\d])", text):
-                msg = f"{mpn} {k}={v:g}: that number is not on {f} page(s) {pages}"
-                if not force:
-                    raise ValueError(msg + " (use --force if the page states it another way)")
-                warn.append(msg)
+        if text is not None:
+            for name, n in _numbers(k, v):
+                if not re.search(r"(?<![\d.])" + re.escape(f"{n:g}") + r"(?![\d])", text):
+                    msg = f"{mpn} {name}={n:g}: that number is not on {f} page(s) {pages}"
+                    if not force:
+                        raise ValueError(msg + " (use --force if the page states it another way; a value the page does not state is `derived`)")
+                    warn.append(msg)
         man[mpn].setdefault("facts", {})[k] = {"value": v, "source": source}
     tmp = PD.manifest_path(ds_dir) + ".tmp"
     with open(tmp, "w") as fh:

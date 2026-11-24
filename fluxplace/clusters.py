@@ -272,6 +272,67 @@ def unseated(cl, fixed=()):
                   key=lambda x: x["ref"])
 
 
+def _pair_ground(ic, pairs, pad):
+    """The ground pads the datasheet names for the input pin `pad` (layout fact cin_side: [input, ground] pad pairs), else the ground of
+    every pair; [] when no pair is known. A strapped ground pin (mode, frequency select) is not the power ground."""
+    mine = [p for p in pairs if p[0] == pad] or list(pairs)
+    return [q for q in ic["pads"] if any(q["num"] == p[1] for p in mine)]
+
+
+CIN_OFF_SIDE_MM = 100.0
+CIN_TOL_MM = 1.0        # the input capacitor's courtyard stays within this much of the named pin pair's span along the package side
+
+
+def _on_cin_side(ic, court, pairs, pad, pads=None):
+    """Does `court` lie beyond the package courtyard on the side that carries the named pin pair(s) of input pin `pad`, with the
+    capacitor's pads (their centres; its courtyard when `pads` is None) within CIN_TOL_MM of the pair along that side?"""
+    ic_c = ic["court"]
+    mine = [p for p in pairs if p[0] == pad] or list(pairs)
+    for a, g in mine:
+        pa = next((q for q in ic["pads"] if q["num"] == a), None)
+        pg = next((q for q in ic["pads"] if q["num"] == g), None)
+        if pa is None or pg is None:
+            continue
+        ox, oy = _outward(ic, pa)
+        if ox:
+            beyond = court[0] >= ic_c[2] - 1e-6 if ox > 0 else court[2] <= ic_c[0] + 1e-6
+            lo, hi = min(pa["y"], pg["y"]) - CIN_TOL_MM, max(pa["y"], pg["y"]) + CIN_TOL_MM
+            along = all(lo - 1e-6 <= q["y"] <= hi + 1e-6 for q in pads) if pads else court[1] >= lo - 1e-6 and court[3] <= hi + 1e-6
+        else:
+            beyond = court[1] >= ic_c[3] - 1e-6 if oy > 0 else court[3] <= ic_c[1] + 1e-6
+            lo, hi = min(pa["x"], pg["x"]) - CIN_TOL_MM, max(pa["x"], pg["x"]) + CIN_TOL_MM
+            along = all(lo - 1e-6 <= q["x"] <= hi + 1e-6 for q in pads) if pads else court[0] >= lo - 1e-6 and court[2] <= hi + 1e-6
+        if beyond and along:
+            return True
+    return False
+
+
+def _layout(B, ic, comp, facts, mpn_map, names):
+    """The `layout` fact of the IC's part, with its input/ground pin pairs resolved to pad numbers (by pad number, spec pin name, then
+    net name): {"fact", "pairs": [[in pad, ground pad]], "mpn", "src"}; None when the part has none."""
+    from . import elec as EL
+    mpn = EL._mpn(comp, mpn_map)
+    f = (facts or {}).get(mpn) or {}
+    lay = f.get("layout")
+    if not isinstance(lay, dict):
+        return None
+    pads = B["parts"][ic]["pads"]
+
+    def pad_of(name):
+        for pick in (lambda q: q["num"] == str(name), lambda q: names.get(q["num"]) == name, lambda q: q["net"] == name):
+            hit = [q["num"] for q in pads if pick(q)]
+            if hit:
+                return hit[0]
+        return None
+    pairs = []
+    for pr in lay.get("cin_side") or []:
+        if isinstance(pr, (list, tuple)) and len(pr) == 2:
+            a, g = pad_of(pr[0]), pad_of(pr[1])
+            if a is not None and g is not None:
+                pairs.append([a, g])
+    return {"fact": lay, "pairs": pairs, "mpn": mpn, "src": (f.get("_src") or {}).get("layout", "datasheet")}
+
+
 def loop_metrics(B, c, names=None):
     """The three lengths a switching regulator's datasheet layout fixes, measured on the board model for cluster `c`
     (regulator = it has a switch-node part): {"cin_loop_mm": input-capacitor loop (input pin -> capacitor -> its ground pad ->
@@ -281,6 +342,7 @@ def loop_metrics(B, c, names=None):
     parts = B["parts"]
     ic = parts[c["ic"]]
     gnd = [q for q in ic["pads"] if NC.is_ground(q["net"] or "")]
+    pairs = (c.get("layout") or {}).get("pairs") or []
     out = {"cin_loop_mm": None, "sw_mm": None, "boot_mm": None, "fb_mm": None}
 
     def dist(a, b):
@@ -294,7 +356,7 @@ def loop_metrics(B, c, names=None):
         if s["rank"] == 1 and s["ref"].startswith("C") and gnd:
             g = next((q for q in part["pads"] if NC.is_ground(q["net"] or "")), None)
             if g is not None:
-                v = dist(pin, via) + dist(via, g) + min(dist(g, q) for q in gnd)
+                v = dist(pin, via) + dist(via, g) + min(dist(g, q) for q in (_pair_ground(ic, pairs, s["pad"]) or gnd))
                 out["cin_loop_mm"] = v if out["cin_loop_mm"] is None else min(out["cin_loop_mm"], v)
         elif s["rank"] == 0:
             v = max(dist(pin, q) for q in part["pads"] if q["net"] == s["net"])
@@ -458,7 +520,13 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
             if _pitch(parts[ic]) <= 0.5:
                 s["dist"] = max(0.0, s["dist"] - HALO_MM)   # measured from the edge of the keep-clear halo
         sup = sorted(by[ic], key=lambda s: (s["rank"], -s["weight"], s["dist"], s["ref"]))
-        out.append({"ic": ic, "supports": sup, "regulator": reg})
+        row = {"ic": ic, "supports": sup, "regulator": reg}
+        if reg and facts:
+            comp = next((x for x in (spec or {}).get("components", []) or [] if isinstance(x, dict) and x.get("ref") == ic), {"ref": ic})
+            lay = _layout(B, ic, comp, facts, mpn_map, names.get(ic, {}))
+            if lay:
+                row["layout"] = lay
+        out.append(row)
     return out, links
 
 
@@ -548,6 +616,10 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
         pin = next(p for p in icp["pads"] if p["num"] == s["pad"])
         ox, oy = _outward(icp, pin)
         gnd = [p for p in icp["pads"] if NC.is_ground(p["net"])]
+        pairs = (cl.get("layout") or {}).get("pairs") or []
+        cin = bool(pairs) and s.get("rank") == 1 and ref.startswith("C")
+        if cin:
+            gnd = _pair_ground(icp, pairs, s["pad"]) or gnd
         other = [p for p in part["pads"] if p["num"] != s["via"]]
         is_gnd_cap = bool(other and NC.is_ground(other[0]["net"]) and gnd)
         n_d = int(reach / step)
@@ -567,6 +639,8 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                 if is_gnd_cap:
                     op = next(p for p in pads if p["num"] != s["via"])
                     cost += 0.3 * min(math.hypot(op["x"] - g["x"], op["y"] - g["y"]) for g in gnd)
+                if cin and not _on_cin_side(icp, court, pairs, s["pad"], pads):
+                    cost += CIN_OFF_SIDE_MM               # the datasheet's side ranks before pin distance; no such seat = the old seat
                 if cost >= best:
                     continue
                 if bounds and not GM.inside(court, bounds):
@@ -609,6 +683,19 @@ def _in_zone(zones, part, court):
                for z in zones)
 
 
+def _cin_off_template(B, c, s):
+    """An input capacitor the layout fact's template rejects: off the named pin pair's side, or its loop over the fact's maximum."""
+    lay = c.get("layout")
+    if not lay or not lay["pairs"] or s["rank"] != 1 or not s["ref"].startswith("C") or not s["sure"]:
+        return False
+    icp = B["parts"][c["ic"]]
+    if not _on_cin_side(icp, B["parts"][s["ref"]]["court"], lay["pairs"], s["pad"], B["parts"][s["ref"]]["pads"]):
+        return True
+    mx = lay["fact"].get("cin_loop_mm")
+    got = loop_metrics(B, {"ic": c["ic"], "supports": [s], "layout": lay})["cin_loop_mm"]
+    return isinstance(mx, (int, float)) and got is not None and got > mx
+
+
 def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=False, only=None,
            legal=None, strict=False, left=None):
     """Seat the far support parts of every cluster around their ICs (ICs never
@@ -618,13 +705,13 @@ def reseat(B, cl, everything=False, guess=False, bounds=None, log=None, isolate=
     allm = {}
     for c in cl:
         sup = [s for s in c["supports"]
-               if (everything or s["dist"] > s["limit"]) and (guess or s["sure"])
+               if (everything or s["dist"] > s["limit"] or _cin_off_template(B, c, s)) and (guess or s["sure"])
                and (only is None or s["ref"] in only)]
         if not sup:
             continue
         if log:
             log(f"{c['ic']}: re-seating {len(sup)} part(s)")
-        m = seat(B, {"ic": c["ic"], "supports": sup}, bounds=bounds, log=log, isolate=isolate,
+        m = seat(B, dict({"ic": c["ic"], "supports": sup}, **({"layout": c["layout"]} if c.get("layout") else {})), bounds=bounds, log=log, isolate=isolate,
                  legal=legal, strict=strict, left=left)
         for ref, (x, y, a) in m.items():
             GM.place(B["parts"][ref], x, y, a)

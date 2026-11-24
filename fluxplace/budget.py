@@ -350,6 +350,39 @@ def _pads_by_ref(B, net):
     return out
 
 
+TEMPLATE_KEYS = ("cin_loop_mm", "sw_mm", "fb_mm")
+
+
+def template_rows(B, cons, spec=None):
+    """support rows of a regulator against the maxima of its part's `layout` fact: the measured loop lengths (clusters.loop_metrics) vs
+    cin_loop_mm / sw_mm / fb_mm. Hard only when the number is the datasheet's: a key the fact lists in `derived` was worked out from
+    courtyard geometry (D71do) and grades as recommended (not hard, klass INF). No fact, no row."""
+    from . import clusters as CL, netclass as NC, powerbudget as PB
+    facts, mpn_map = PB.facts_for(cons, spec)
+    if not any(isinstance(f.get("layout"), dict) for f in facts.values()):
+        return []
+    names = NC.pin_names(spec)
+    out = []
+    for c in CL.build(B, cons, spec, facts=facts, mpn_map=mpn_map)[0]:
+        lay = c.get("layout")
+        if not lay:
+            continue
+        got = CL.loop_metrics(B, c, names.get(c["ic"], {}))
+        der = lay["fact"].get("derived")
+        der = set(lay["fact"]) if der is True else {str(k) for k in der} if isinstance(der, (list, tuple)) else set()
+        for key in TEMPLATE_KEYS:
+            mx = lay["fact"].get(key)
+            if not isinstance(mx, (int, float)) or isinstance(mx, bool):
+                continue
+            hard = key not in der
+            src = (f"datasheet fact layout.{key} of {lay['mpn']} ({lay['src']})" if hard
+                   else f"derived layout.{key} of {lay['mpn']} from courtyard geometry, recommended ({lay['src']} states the rule, not the number)")
+            out.append(row("support", f"{c['ic']} template {key}", "template", "mm", got.get(key), mx, mx, src,
+                           "REQ" if hard else "INF", hard, refs=[c["ic"]] + [s["ref"] for s in c["supports"] if s["rank"] < 9],
+                           detail="" if got.get(key) is not None else "no such part in the module"))
+    return out
+
+
 def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
     """Every budget row of the board, one shape (row): rails and supports from the power plan (powerbudget.build output, or
     None), pairs, keep-outs, keep-out against flight line, separation, escape, swap."""
@@ -372,7 +405,7 @@ def table(B, cons, spec=None, stack=None, plan=None, fixed=()):
                        not cv, refs=list(p["parts"]) + [p["ic"]], nets=[p["net"]],
                        detail=(f"only a larger capacitor at the pin: {cv['ref']} {cv['uf']:g} uF at {cv['dist_mm']:g} mm" if cv
                                else "no capacitor at the pin")))
-    return (out + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
+    return (out + template_rows(B, cons, spec) + pair_rows(B, cons, stack) + keepout_rows(B, cons) + flight_rows(B, cons, fixed) + separation_rows(B, cons)
             + escape_rows(B, cons) + swap_rows(B, cons))
 
 

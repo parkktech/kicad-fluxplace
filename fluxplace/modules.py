@@ -184,7 +184,17 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         if c.get("regulator") and c["ic"] in of:
             mod = next(m for m in out if m["name"] == of[c["ic"]])
             inside = {"ic": c["ic"], "supports": [s for s in c["supports"] if of.get(s["ref"]) == mod["name"]]}
+            if c.get("layout"):
+                inside["layout"] = c["layout"]
             mod.setdefault("template", {})[c["ic"]] = CL.loop_metrics(B, inside, names.get(c["ic"], {}))
+            km = ((c.get("layout") or {}).get("fact") or {}).get("inductor_keepout_mm")
+            if isinstance(km, (int, float)) and not isinstance(km, bool) and km > 0:
+                ax, ay = mod["pos"]                  # the inductor's courtyard grown by the margin, every layer, relative to the anchor
+                for s in inside["supports"]:
+                    if s["rank"] == 0 and s["ref"].startswith("L"):
+                        q = B["parts"][s["ref"]]["court"]
+                        mod.setdefault("keepouts", []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
+                                                               round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
     return {"modules": out, "of": of, "rehomed": rehomed, "unseated": CL.unseated(cl, fixed)}
 
 

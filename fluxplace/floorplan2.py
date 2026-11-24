@@ -88,6 +88,7 @@ class Plan:
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
         self.claims_rel = {}
         self.chash = GM.Hash(3.0)
+        self.ko_rel, self.khash = {}, GM.Hash(3.0)             # --- module keep-outs (datasheet layout template): rects rel. to the anchor, all layers
         self.bo_rel, self.bhash = {}, GM.Hash(3.0)             # --- breakout (breakout.py): lane regions per module, hashed in world coordinates
         self.bo_reg = []
         self.bo_w = float((cons.get("floorplan") or {}).get("breakout_weight", 6.0))
@@ -331,6 +332,23 @@ class Plan:
         for i in range(self.n):
             self._claims(i)
 
+    def set_keepouts(self, rel):
+        """rel: {module index: [rect rel to the anchor]}. A module's keep-out is its own claim: its OWN parts are exempt, every other
+        module's courtyard is refused inside it (both sides), and its members' courtyards are refused inside the others'."""
+        self.ko_rel = {i: [tuple(r) for r in v] for i, v in rel.items() if v}
+        self.khash = GM.Hash(3.0)
+        for i in range(self.n):
+            self._claims(i)
+
+    def keepouts_world(self, i):
+        X, Y, th = self.cur[i]
+        out = []
+        for x0, y0, x1, y1 in self.ko_rel.get(i, ()):
+            ax, ay = GM.rot(x0, y0, th)
+            bx, by = GM.rot(x1, y1, th)
+            out.append((X + min(ax, bx), Y + min(ay, by), X + max(ax, bx), Y + max(ay, by)))
+        return out
+
     def set_breakouts(self, regs):
         """regs: [(module index, rect rel to the anchor, outward unit vector rel, sides)] = the lane regions of the dense parts' templates."""
         self.bo_reg = list(regs)
@@ -398,6 +416,10 @@ class Plan:
         for k, (rect, sides) in enumerate(self.claims_world(i)):
             for sd in sides:
                 self.chash.add((i, k, sd), rect, sd)
+        for k in range(len(self.ko_rel.get(i, ())) + 8):
+            self.khash.remove((i, k))
+        for k, rect in enumerate(self.keepouts_world(i)):
+            self.khash.add((i, k), rect, "x")
         for k in range(len(self.bo_rel.get(i, ())) + 8):
             for sd in ("F", "B"):
                 self.bhash.remove((i, k, sd))
@@ -446,6 +468,8 @@ class Plan:
                 for sd in sides:
                     if next(self.chash.hits(rect, sd, 0.0, ignore=mine), None) is not None:
                         return False
+        if self.ko_rel and not self.keepouts_ok(i):
+            return False
         mineb = {(i, k, sd) for k in range(len(self.bo_rel.get(i, ())) + 8) for sd in ("F", "B")}
         for k, (rect, sides) in enumerate(self.bo_rel.get(i, ())):      # two dense parts' breakouts may not overlap
             for sd in sides:
@@ -458,6 +482,22 @@ class Plan:
                 q = P[o]["pads"][j]
                 ps = {("F" if l == "F.Cu" else "B") for l in q["layers"] if l in ("F.Cu", "B.Cu")}
                 if ps & set(sides):
+                    return False
+        return True
+
+    def keepouts_ok(self, i):
+        """module i's keep-outs hold no courtyard of another module, and none of its courtyards lies in another module's keep-out.
+        A pair of fixed modules is a baseline fact, not the search's to fix."""
+        mem = set(self.mods[i]["members"])
+        P = self.B["parts"]
+        for rect in self.keepouts_world(i):
+            for o in self.L.hash.hits(rect, "x", 0.0, ignore=mem):
+                j = self.idx.get(self.of.get(o))
+                if j is None or j == i or not (self.fixed[i] and self.fixed[j]):
+                    return False
+        for r in mem:
+            for (j, _k) in self.khash.hits(P[r]["court"], "x", 0.0, ignore=()):
+                if j != i and not (self.fixed[i] and self.fixed[j]):
                     return False
         return True
 
@@ -482,6 +522,8 @@ class Plan:
         for k in range(len(self.claims_rel.get(i, ())) + 8):
             for sd in ("F", "B"):
                 self.chash.remove((i, k, sd))
+        for k in range(len(self.ko_rel.get(i, ())) + 8):
+            self.khash.remove((i, k))
         return old
 
 
@@ -967,6 +1009,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     for i, extra in bcl.items():
         cl[i] = list(cl.get(i, [])) + extra
     P.set_claims(cl)
+    P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
     P.set_breakouts(bregs)
     P.freeze_baseline()
     src = P.cost_parts()
