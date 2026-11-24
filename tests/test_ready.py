@@ -313,3 +313,17 @@ def test_power_plan_exempt_rail_passes_and_is_named_in_the_line(tmp_path):
     lines, sess, detail = _plan_line(tmp_path, c)
     assert lines[0]["status"] == "PASS" and "exempt by design (VOUT)" in lines[0]["detail"] and not sess.open
     assert [f["code"] for f in detail["power_plan"]["findings"]] == ["POWER_PLAN_EXEMPT"]
+
+
+# ---- C7b: measure_rows = the rows and fixed findings the ready lines print, returned without printing
+def test_measure_rows_returns_the_budget_rows_and_fixed_findings_and_matches_the_ready_lines(tmp_path):
+    import pcbgen as PG
+    from fluxplace import budget as BG, routediag as RD
+    B = RD.load(PG.board(tmp_path, PG.two("R1", 20, 20, "A", "B", court=(-1, -0.5, 1, 0.5)) + PG.two("R2", 22, 20, "A", "C", court=(-1, -0.5, 1, 0.5))))
+    cons = {"separation": [{"name": "close", "a": ["R1"], "b": ["R2"], "min_mm": 50.0}]}
+    rows, fixed = RDY.measure_rows(None, cons, B, None)
+    sep = [r for r in rows if r["kind"] == "separation"]
+    assert [(r["name"], r["verdict"], r["hard"]) for r in sep] == [("close", "fail", True)] and isinstance(fixed, list)
+    detail = {}
+    line = RDY.budget_line(None, cons, B, None, None, detail)           # one code path: the line's table is the same rows
+    assert [r["name"] for r in detail["budgets"]["rows"]] == [r["name"] for r in rows] and BG.summary(rows) in line["detail"]

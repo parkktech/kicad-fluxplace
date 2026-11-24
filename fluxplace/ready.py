@@ -260,10 +260,8 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     return lines, detail
 
 
-def fixed_reason_line(spec, cons, B, detail=None):
-    """[the "fixed reasons" line] (F1): every part a stage will not move (locked, [lock.at], [placement] fixed / anchors, mounting
-    hardware, group centres; and the detected anchors of preroute.fixed_parts) has a reason class, and a fixed support part over
-    its max distance (powerbudget.supports) is OPEN FIXED_OVER_BUDGET whatever its reason."""
+def _fixed_inputs(spec, cons, B):
+    """-> (fixed refs, support rows by ref, detected-only refs, bare refs): what fixed_line and the stage rows both judge."""
     from . import preroute as PR, powerbudget as PB, modules as MD
     rows = {}
     for s in PB.supports(B, cons, spec):
@@ -275,6 +273,14 @@ def fixed_reason_line(spec, cons, B, detail=None):
     # "fixed parts" question above asks instead)
     detected = PR.fixed_parts(B, cons) - fixed if explicit else set()
     bare = {r for r in fixed if all(not q["net"] or NC.is_ground(q["net"]) for q in B["parts"][r]["pads"])}
+    return fixed, rows, detected, bare
+
+
+def fixed_reason_line(spec, cons, B, detail=None):
+    """[the "fixed reasons" line] (F1): every part a stage will not move (locked, [lock.at], [placement] fixed / anchors, mounting
+    hardware, group centres; and the detected anchors of preroute.fixed_parts) has a reason class, and a fixed support part over
+    its max distance (powerbudget.supports) is OPEN FIXED_OVER_BUDGET whatever its reason."""
+    fixed, rows, detected, bare = _fixed_inputs(spec, cons, B)
     return fixed_line(fixed, cons, rows, detected, detail, bare)
 
 
@@ -306,10 +312,8 @@ def pair_class_line(cons, cls, detail=None):
                        f"or list both nets in not_pairs (plain signals, go to the router)"]), open_items=len(un))
 
 
-def budget_line(spec, cons, B, rows, planes, detail):
-    """[the "budgets" line] (F2): the one budget table (budget.table) of the placement as it is, written to <board>.budgets.json.
-    OPEN on a limit without a source, a hard keep-out against flight-line row, an undecided swap proposal; everything else is
-    information here (floorplan and PLACE_OK gate the rows)."""
+def _budget_table(spec, cons, B, rows, planes, detail):
+    """the one budget table (budget.table) of the placement as it is; also detail["budgets"]. -> (table, rail classes)."""
     from . import budget as BG, preroute as PR, modules as MD, pairs as PA
     sig = [l for l in PA.pair_layers(B, cons)[0]] if rows else []
     stack = (rows, list(planes or []), sig) if rows and sig else None
@@ -317,6 +321,34 @@ def budget_line(spec, cons, B, rows, planes, detail):
     tab = BG.table(B, cons, spec, stack, detail.get("power_plan"), fixed)
     rc = BG.rail_classes(cons, detail.get("power_plan"))
     detail["budgets"] = {"rows": tab, "netclasses": BG.netclasses(cons, stack=stack), "rail_classes": rc}
+    return tab, rc
+
+
+def measure_rows(spec, cons, B, board_path, facts=None, ds_dir=None, sess=None):
+    """C7b: the budget rows and fixed-reason findings of a placement, computed as `ready` computes them and returned without
+    printing -> (rows, fixed findings). Stage-end use: nothing is asked, nothing is written. A stackup the constraints do not
+    declare is taken from the board file when it can be read."""
+    from . import questions as QS_, review as R, fixedreason as FR
+    if facts is None and board_path and os.path.exists(board_path):
+        try:
+            facts = R.facts_from_board(board_path, backend="file")
+        except Exception:                                   # noqa: BLE001 - a board facts cannot read still has rows
+            facts = None
+    sess = sess or QS_.Session(board_path or "rows.kicad_pcb", cons, {}, True, "rows")
+    rows, planes, _src = resolve_stackup(cons, facts, sess)
+    detail = {}
+    power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board_path, detail)
+    tab, _rc = _budget_table(spec, cons, B, rows, planes, detail)
+    fixed, frows, detected, bare = _fixed_inputs(spec, cons, B)
+    return tab, FR.findings(fixed, cons, frows, detected, bare)
+
+
+def budget_line(spec, cons, B, rows, planes, detail):
+    """[the "budgets" line] (F2): the one budget table (budget.table) of the placement as it is, written to <board>.budgets.json.
+    OPEN on a limit without a source, a hard keep-out against flight-line row, an undecided swap proposal; everything else is
+    information here (floorplan and PLACE_OK gate the rows)."""
+    from . import budget as BG
+    tab, rc = _budget_table(spec, cons, B, rows, planes, detail)
     under = [f"{n} {v['class_mm']:g} < {v['plan_mm']:g} mm" for n, v in rc.items() if v["under"]]
     note = "".join("; " + t for t in (BG.summary(tab), f"{len(under)} rail class(es) narrower than the plan ({', '.join(under)})" if under else "") if t)
     kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
