@@ -199,3 +199,11 @@ def test_a_fill_answer_sets_back_fill_max(tmp_path):
     S = QS.Session("x", BOTH, {"crowding": "a-fill"}, False, "floorplan")
     QS.apply_crowding_answer(S)
     assert S.apply(BOTH, None)[0]["placement"]["back_fill"] == "max" and "back_fill" not in BOTH["placement"]
+
+
+def test_report_options_always_carry_an_explicit_keep_first(tmp_path):
+    B = _crowded(tmp_path)
+    rep, ops, default = QS.crowding_options(B, dict(BOTH), None)
+    out = DN.report_options(rep, ops)
+    assert out[0]["key"] == "keep" and {o["key"] for o in out} == {"keep"} | {o["key"] for o in ops}
+    assert len(out) == len(ops) + (0 if any(o["key"] == "keep" for o in ops) else 1)

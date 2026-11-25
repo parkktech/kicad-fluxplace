@@ -584,6 +584,16 @@ def _area(p):
     return max((c[2] - c[0]) * (c[3] - c[1]), 0.0)
 
 
+def report_options(rep, ops):
+    """the crowding options as the floorplan report writes them: an explicit `keep` first (its predicted verdicts are the measured ones),
+    then the ranked options. Every choice the owner can answer is a key here (an inbox `answer` is validated against these keys)."""
+    u = rep["usage"]
+    keep = {"key": "keep", "tag": "keep", "label": "keep as is", "text": "routing and the supports beyond their limit stay as measured",
+            "cost": 0, "relief": 0.0, "parts": [], "apply": None, "fixes": {},
+            "predicted": {s: {"util": round(u["sides"][s]["util"], 3), "verdict": rep["verdicts"][s]["verdict"]} for s in SIDES}}
+    return [keep] + [o for o in ops if o["key"] != "keep"]
+
+
 def options(B, cons, spec, rep):
     """ranked options (list of dicts) for a crowded board: key, tag, label, text, cost, relief, predicted {side: {util, verdict}},
     fixes {measure: yes|helps|no|n/a}, parts [refs], apply.  Predictions are area arithmetic on this board's courtyards: a part moved

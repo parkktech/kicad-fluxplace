@@ -549,10 +549,10 @@ def _glb_child(jobfile):
 
 # ---------------------------------------------------------------- L4: owner feedback items (schema v1)
 ITEM_MAX_BYTES, TEXT_MAX = 16_000, 400
-KINDS = ("note", "pin", "region", "near", "away", "gate")
-ITEM_KEYS = {"v", "id", "ts", "author", "kind", "text", "target", "pin", "region", "other", "dist_mm", "gate", "cand", "snapshot", "scope"}
+KINDS = ("note", "pin", "region", "near", "away", "gate", "answer")
+ITEM_KEYS = {"v", "id", "ts", "author", "kind", "text", "target", "pin", "region", "other", "dist_mm", "gate", "cand", "snapshot", "scope", "answer"}
 SUB_KEYS = {"target": {"part", "module", "group"}, "pin": {"at", "rot", "side"}, "region": {"cells", "rect", "keep"},
-            "other": {"part", "module", "cell", "edge"}, "gate": {"id", "action", "choice"}}
+            "other": {"part", "module", "cell", "edge"}, "gate": {"id", "action", "choice"}, "answer": {"id", "choice"}}
 EDGES = ("N", "E", "S", "W")
 
 
@@ -604,6 +604,12 @@ def check_item(a, ctx):
         if why:
             return why
     x0, y0, x1, y1 = ctx["bbox"]
+    if kind == "answer":
+        an = a.get("answer")
+        if not isinstance(an, dict) or set(an) - {"id", "choice"} or not all(isinstance(an.get(k), str) and 0 < len(an[k]) <= 80 for k in ("id", "choice")):
+            return "answer.id and answer.choice are non-empty strings of at most 80 characters"
+        asked = (ctx.get("asked") or {}).get(an["id"])
+        return None if asked and an["choice"] in asked[1] else "unknown question or choice"
     if kind == "note":
         return None if a.get("text") else "missing key text"
     if kind == "pin":
@@ -655,6 +661,29 @@ def check_item(a, ctx):
     return "a reject needs text" if g["action"] == "reject" and not a.get("text") else None
 
 
+def asked_questions(W):
+    """{question id: (board path, {choice keys})} as last asked in this workdir: the stage questions files (`*.questions.json`) and the
+    crowding options of the floorplan report (`*.floorplan.json`, history[-1].crowding.options plus keep)."""
+    import glob
+    out = {}
+    for p in sorted(glob.glob(os.path.join(W, "*.questions.json"))):
+        board = p[:-len(".questions.json")] + ".kicad_pcb"
+        try:
+            qs = json.load(open(p, encoding="utf-8")).get("questions") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        for q in qs:
+            out.setdefault(q["id"], (board, {o["choice"] for o in q.get("options") or []}))
+    for p in sorted(glob.glob(os.path.join(W, "*.floorplan.json"))):
+        try:
+            cr = json.load(open(p, encoding="utf-8"))["history"][-1].get("crowding") or {}
+        except (OSError, ValueError, KeyError, IndexError, AttributeError, TypeError):
+            continue
+        if cr.get("options"):
+            out["crowding"] = (p[:-len(".floorplan.json")] + ".kicad_pcb", {o["key"] for o in cr["options"]} | {"keep"})
+    return out
+
+
 def load_feedback(path, ctx):
     """(item, None) or (None, reason) for one inbox file. Never raises. A `.tmp` file is (None, None): not read."""
     try:
@@ -695,7 +724,7 @@ class Feedback:
         self.members = {"part": {r: [r] for r in B["parts"]}, "module": mods, "group": groups}
         self.hard_fixed = {r for r in MD.fixed_set(B, self.cons0) if MD.MECH.match(r) or (why.get(r) or {}).get("reason") in HARD_PIN_REASONS}
         self.ctx = {"parts": set(B["parts"]), "modules": set(mods), "groups": set(groups), "grid": grid_of(B["bbox"]), "bbox": B["bbox"],
-                    "gates": {}, "seen": set()}
+                    "gates": {}, "seen": set(), "asked": {}}
         self.replay = {}                         # item file name -> (stage, generation) it took effect at in the stored log
         if self.on():
             for line in self._log_lines():
@@ -772,6 +801,17 @@ class Feedback:
                         return f"near {near['dist_mm']:g} mm is under away {away['dist_mm']:g} mm of row {o['id']}"
         return None
 
+    def _answer(self, a, path, name, stored, generation):
+        """an owner answer to an open question: recorded in the board's map now, so the NEXT stage start asks nothing and applies it.
+        Nothing of the running stage changes."""
+        qid, choice = a["answer"]["id"], a["answer"]["choice"]
+        if not stored:
+            os.replace(path, os.path.join(self.dir, "applied", name))
+        from . import questions as QS
+        QS.record_answer(self.ctx["asked"][qid][0], qid, choice)
+        self._log(a, "applied", generation, effect=f"answer {qid} = {choice} recorded in the map", file=name)
+        print(f"Owner answered {qid} = {choice} (applies from the next stage start)", flush=True)
+
     def boundary(self, generation=None):
         """Read the inbox: refuse, log, turn into rows. On a re-run the items of applied/ take effect at their recorded
         boundary. -> the rows that came into force at this call (rows_rev rose when the list is not empty)."""
@@ -782,6 +822,7 @@ class Feedback:
             for sub in ("applied", "refused", "gates"):
                 os.makedirs(os.path.join(self.dir, sub), exist_ok=True)
             self.ctx["gates"] = {g: list(c) for g, c in self.open_gates.items()}
+            self.ctx["asked"] = asked_questions(self.W)
             todo = [(os.path.join(self.dir, "applied", n), n, True) for n in sorted(os.listdir(os.path.join(self.dir, "applied")))
                     if self.replay.get(n) == (self.stage, generation)]
             todo += [(os.path.join(self.dir, "inbox", n), n, False) for n in sorted(os.listdir(os.path.join(self.dir, "inbox"))) if n.endswith(".json")]
@@ -797,6 +838,9 @@ class Feedback:
                 self.ctx["seen"].add(a["id"])
                 if not stored:
                     self._log(a, "received", generation, file=name)
+                if a["kind"] == "answer":
+                    self._answer(a, path, name, stored, generation)
+                    continue
                 row = self.row_of(a)
                 why = self.conflict(row) if row else None
                 if why:
