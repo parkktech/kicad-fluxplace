@@ -156,6 +156,7 @@ def row_kind(r, intent=False):
     return {"separation": "row-away", "keepout-flight": "row-flight", "rail": "row-rail"}.get(k, "row-other")
 
 
+SOFT_BUDGET_MIN = 10.0                 # [placegaps] soft_budget_min: soft rows are only worked while the loop has run less than this
 RAIL_TOLERANCE = 0.10                  # a rail reach overage within the model's error is a soft row
 
 
@@ -189,6 +190,8 @@ def detect_rows(ctx):
                            row=None if soft else f"{r['kind']}:{r['name']}",
                            detail=f"{r.get('metric')} {r.get('value')} limit {r.get('max') if r.get('max') is not None else r.get('target')}"
                                   + (" (soft: within the rail model error)" if soft else "")))
+            if soft:
+                out[-1]["soft"] = True
             if r.get("kind") == "separation":
                 sep_b[str(r["name"])] = out[-1]
     for r in ctx.intent_rows() or []:
@@ -502,6 +505,7 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
     budget_s = float(flow.get("budget_min") or 0) * 60
     own_s = float(budget_min) * 60 if budget_min else 0.0                 # this loop's own wall budget (placetour: [placetour] ladder_budget_min)
     max_rounds = int((cons.get("placegaps") or {}).get("max_rounds", MAX_ROUNDS))
+    soft_s = float((cons.get("placegaps") or {}).get("soft_budget_min", SOFT_BUDGET_MIN)) * 60      # soft rows are only worked while elapsed < this
     cap_s = G._rung_cap(cons)
     t0 = last = clock()
     allow = (cons.get("placegaps") or {}).get("kinds")
@@ -529,6 +533,9 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
                 for g in [x for x in base["gaps"] if x["kind"] == kind]:
                     if g["id"] not in {x["id"] for x in base["gaps"]}:
                         continue                        # an earlier accept of this rung closed it
+                    if g.get("soft") and soft_s and clock() - t0 > soft_s:
+                        out["soft_skips"] = out.get("soft_skips", 0) + 1       # a soft row (inside the model error) never spends hard-row time
+                        continue
                     if own_s and clock() - t0 > own_s:
                         out["stop"] = "ladder budget (time stop)"
                     elif budget_s and clock() - t0 > budget_s:

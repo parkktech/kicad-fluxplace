@@ -309,3 +309,22 @@ def test_stock_unchecked_is_not_a_zero():
          "unchecked": ["distributor data and stock NOT CHECKED (offline / no credentials)"]}
     r = PG.detect(ctx(parts_gate=g), ["part-datasheet", "part-stock"])
     assert r["counts"] == {"part-datasheet": 1, "part-stock": None} and "part-stock" in r["errors"]
+
+
+def test_close_soft_rows_stop_after_soft_budget(monkeypatch):
+    class SoftEv(FakeEv):
+        def detect(self, kinds):
+            return [dict(PG.gap("support-far", r, "decap", 5.0, refs=[r]), soft=(r == "C2")) for r in sorted(self.far)]
+    monkeypatch.setitem(PG.DISPATCH, "support-far", ["home"])
+    monkeypatch.setitem(PG.RUNGS, "home", rung_home)
+    ticks = {"t": 0.0}
+
+    def clock():
+        ticks["t"] += 100.0
+        return ticks["t"]
+    ev = SoftEv({"C1", "C2", "C3"}, bad={"C1", "C2", "C3"})
+    out = PG.close({"cons": {"placegaps": {"soft_budget_min": 5}}}, ["support-far"], ev, clock=clock)
+    assert out.get("soft_skips", 0) >= 1 and all(r["gap"] != "support-far:C2" for r in out["refused"][-1:]) or out.get("soft_skips")
+    ev = SoftEv({"C2"}, bad={"C2"})
+    out = PG.close({"cons": {"placegaps": {"soft_budget_min": 1000}}}, ["support-far"], ev, clock=clock)
+    assert not out.get("soft_skips") and any(r["gap"] == "support-far:C2" for r in out["refused"])       # inside the budget it is worked
