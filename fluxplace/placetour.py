@@ -727,6 +727,8 @@ def stage(c, n, board):
     nxt = [f"TOURNAMENT.md: {table}", f"report: {rep}"]
     hon = RDY.stage_honoured("placetour", spec, cons, rows_in, out, RD.load(out), ds_dir=ds_dir)
     nxt.append(hon["line"])
+    from . import placegaps as PG                                  # detect-only (PLAN-PLACE-GAPS phase 0): gap table of the result, no board change
+    nxt.append(PG.detect_stage("placetour", out, cons, spec, d, ds_dir=ds_dir, blame=best["blame"])["line"])
     LV.candidate("placetour", "result", out, None, _lv(best["key"]), hon["criteria"], cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
     if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
         _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d, apply=False)

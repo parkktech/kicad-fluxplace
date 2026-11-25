@@ -515,6 +515,9 @@ def cmd_ready(a):
                 json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
+    from . import placegaps as PG                  # detect-only (PLAN-PLACE-GAPS phase 0): the parts gaps; changes no result, no board
+    PG.detect_stage("ready", board or a.spec, cons, spec, os.path.dirname(stem) or ".", base=os.path.basename(stem) + ".placegaps", ds_dir=ds,
+                    parts_gate=detail.get("gate"), printer=None if getattr(a, "json", False) or getattr(a, "quiet", False) else print)
     if getattr(a, "json", False):
         print(json.dumps({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", [])}, indent=1))
     elif getattr(a, "quiet", False):
