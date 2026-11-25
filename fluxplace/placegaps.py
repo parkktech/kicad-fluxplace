@@ -537,6 +537,9 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
                     memo.add(key)
                     tried += 1
                     cands = sorted(RUNGS[rung](g, ctx) or [], key=lambda c: c["id"])[:CANDS_PER_RUNG]
+                    if not cands and kind.startswith("row-"):           # a leftover row is never silent: the rung says why it had nothing to try
+                        out["refused"].append({"gap": g["id"], "rung": rung, "check": "no-candidate",
+                                               "why": (ctx.get("why_none") or {}).get((rung, g["id"])) or "the rung proposed no move"})
                     winner = None
                     for cand, tr in zip(cands, ev.trials(cands) if cands else []):
                         ok, check, why = _accept(base, tr, g["id"])
@@ -577,6 +580,10 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
             break
     out["stop"] = out["stop"] or "max_rounds"
     out.update(gaps_out=list(base["gaps"]), score_out=score(base["gaps"], base["state"]))
+    try:
+        cin_questions(ctx, out)
+    except Exception as e:                              # noqa: BLE001 - a question that cannot be asked never fails the loop
+        ctx.setdefault("errors", {})["cin_questions"] = f"{type(e).__name__}: {e}"
     _narr(stage, f"{stage}: placement gaps {len(out['gaps_in'])} -> {len(out['gaps_out'])}, {len(out['accepted'])} repaired ({out['stop']})", "end")
     return out
 
@@ -1245,12 +1252,12 @@ def _on_copy(B, tg):
     return B2
 
 
-def _reseat_on(ctx, B2, c, only=None, everything=False):
+def _reseat_on(ctx, B2, c, only=None, everything=False, refused=None):
     """The seater (clusters.reseat, strict: a seat beyond the part's limit is refused) on the model copy, for the parts of cluster `c`
     named in `only` that are far or off the template (all of them with `everything`); mutates B2."""
     from . import clusters as CL, legality as LGL
     x0, y0, x1, y1 = B2["bbox"]
-    CL.reseat(B2, [c], everything=everything, only=only, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=LGL.Legal(B2, ctx["cons"]), strict=True)
+    CL.reseat(B2, [c], everything=everything, only=only, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=LGL.Legal(B2, ctx["cons"]), strict=True, refused=refused)
 
 
 def _moves_between(B0, B2):
@@ -1349,7 +1356,7 @@ def _r_unit_turn(g, ctx):
     return out
 
 
-def _strips(B, c, g, row):
+def _strips(B, c, g, row, pairs=None):
     """Where the parts served by the row must stand: [(rect, depth)] beyond the regulator's courtyard, in front of the pin pair's span
     +- CIN_TOL_MM (cin_side, cin_loop_mm) or of the served pin (sw_mm, fb_mm); depth = the serving parts' courtyard + CLEAR_MM."""
     from . import clusters as CL
@@ -1357,7 +1364,7 @@ def _strips(B, c, g, row):
     ic_c = icp["court"]
     key = str(row.get("name", "")).rsplit(" ", 1)[-1]
     if g["kind"] == "row-cin-side" or key == "cin_loop_mm":
-        rank, spans = 1, [(a, gnd) for a, gnd in ((c.get("layout") or {}).get("pairs") or [])]
+        rank, spans = 1, [(a, gnd) for a, gnd in (pairs if pairs is not None else ((c.get("layout") or {}).get("pairs") or []))]
     else:
         rank = 0 if key == "sw_mm" else 3
         spans = [(s["pad"], s["pad"]) for s in c["supports"] if s["sure"] and s["rank"] == rank]
@@ -1380,22 +1387,12 @@ def _strips(B, c, g, row):
     return out
 
 
-def _r_clear_side(g, ctx):
-    """A movable part standing in the strip the row's parts need (pin-pair span +- CIN_TOL_MM, depth = their courtyard + clearance) steps out
-    by the minimum translation (clear_shift along either way of the package side, or outward); its supports follow; then the parts of the
-    row are re-seated at their pins. Candidates: each of the first 2 blockers alone, and the first 3 together."""
-    from . import placetour as PT
-    u = _unit_gap(g, ctx)
-    if u is None:
-        return []
-    B, ic, c, mov, sup, caps = u
-    row = _row_of(ctx, g)
-    serve = set(caps if g["kind"] == "row-cin-side" else sup)
-    if not serve:
-        return []
+def _clear_picks(B, c, g, row, mov, serve, ic, pairs=None, together=3):
+    """[(tag, [(blocker ref, (dx, dy))])]: each of the first 2 movable blockers standing in the row's strip alone (2 smallest ways out), and
+    the first `together` (3) together. `serve` = the parts that belong in the strip (never moved out of it)."""
     ics = B["parts"][ic]
     plan = {}                                                     # blocker -> [(shift mm, (dx, dy))] smallest first
-    for rect, (ox, oy) in _strips(B, c, g, row):
+    for rect, (ox, oy) in _strips(B, c, g, row, pairs):
         for ref in sorted(mov - serve - {ic}):
             p = B["parts"][ref]
             if (p["side"] != ics["side"] and not p.get("tht")) or not _hit(rect, p["court"]):
@@ -1414,7 +1411,24 @@ def _r_clear_side(g, ctx):
     for r in order[:2]:
         picks.extend([(f"{r}-{i}", [(r, v)]) for i, (_d, v) in enumerate(plan[r])])
     if len(order) > 1:
-        picks.append(("all", [(r, plan[r][0][1]) for r in order[:3]]))
+        picks.append(("all", [(r, plan[r][0][1]) for r in order[:together]]))
+    return picks
+
+
+def _r_clear_side(g, ctx):
+    """A movable part standing in the strip the row's parts need (pin-pair span +- CIN_TOL_MM, depth = their courtyard + clearance) steps out
+    by the minimum translation (clear_shift along either way of the package side, or outward); its supports follow; then the parts of the
+    row are re-seated at their pins. Candidates: each of the first 2 blockers alone, and the first 3 together."""
+    from . import placetour as PT
+    u = _unit_gap(g, ctx)
+    if u is None:
+        return []
+    B, ic, c, mov, sup, caps = u
+    row = _row_of(ctx, g)
+    serve = set(caps if g["kind"] == "row-cin-side" else sup)
+    if not serve:
+        return []
+    picks = _clear_picks(B, c, g, row, mov, serve, ic)
     out, seen = [], set()
     for tag, mvs in picks:
         tg = {r: (B["parts"][r]["pos"][0] + v[0], B["parts"][r]["pos"][1] + v[1], B["parts"][r]["angle"]) for r, v in mvs}
@@ -1478,10 +1492,143 @@ def _r_re_deal(g, ctx):
     return out
 
 
-DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side"]
+def _cap_net_uf(part, net):
+    from . import clusters as CL, netclass as NC
+    if not (part["n_pads"] == 2 and any(q["net"] == net for q in part["pads"]) and any(NC.is_ground(q["net"] or "") for q in part["pads"])):
+        return None
+    return CL.cap_uf(part.get("value"))
+
+
+def _r_cin_re_deal(g, ctx):
+    """Named input pin pairs outnumber the input caps the cluster owns: another capacitor of the pair's net, with a value >= the template's
+    input cap, is served to the unserved pair and seated on its side (clusters.reseat only=, strict). An unowned one first (nearest to the
+    pin), then one owned by another cluster, only when that regulator keeps at least the caps of its own rows (pairs, at least 1) on the net.
+    Every candidate cap and why it was not usable goes to ctx["cin_need"][gap id] (the owner question after the loop)."""
+    from . import clusters as CL, powerbudget as PB
+    u = _unit_gap(g, ctx, ("row-cin-side",))
+    if u is None:
+        return []
+    B, ic, c, mov, _sup, _caps = u
+    pairs = (c.get("layout") or {}).get("pairs") or []
+    icp, parts = B["parts"][ic], B["parts"]
+    owned = sorted(s["ref"] for s in c["supports"] if s["sure"] and s["rank"] == 1 and s["ref"].startswith("C"))
+    if len(pairs) <= len(owned):
+        return []
+    bare = [pr for pr in pairs if not any(CL._on_cin_side(icp, parts[r]["court"], [pr], pr[0], parts[r]["pads"]) for r in owned)]
+    if not bare:
+        return []
+    pin = next((q for q in icp["pads"] if q["num"] == bare[0][0]), None)
+    if pin is None or not pin["net"]:
+        return []
+    net = pin["net"]
+    need_uf = min([CL.cap_uf(parts[r].get("value")) or 0.0 for r in owned] or [0.0])
+    owner = {s["ref"]: cc for cc in ctx.clusters() or [] for s in cc["supports"]}
+    rec = {"ic": ic, "net": net, "pairs": len(pairs), "owned": owned, "need_uf": need_uf, "caps": []}
+    ctx.setdefault("cin_need", {})[g["id"]] = rec
+    pool = []
+    for ref in sorted(r for r, p in parts.items() if r.startswith("C") and r != ic):
+        uf = _cap_net_uf(parts[ref], net)
+        if uf is None or ref in owned:
+            continue
+        d = min(math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) for q in parts[ref]["pads"] if q["net"] == net)
+        why = None
+        if uf < need_uf - 1e-9:
+            why = f"{uf:g} uF is below the input cap value {need_uf:g} uF"
+        elif ref not in mov or parts[ref].get("locked"):
+            why = "fixed (may not move)"
+        else:
+            oc = owner.get(ref)
+            if oc is not None and oc["ic"] != ic:
+                left = sum(1 for s in oc["supports"] if s["ref"] != ref and s["sure"] and s["net"] == net and s["ref"].startswith("C"))
+                need = max(1, len((oc.get("layout") or {}).get("pairs") or []))
+                if left < need:
+                    why = f"owned by {oc['ic']}, which would keep {left} of the {need} cap(s) its rows need"
+        rec["caps"].append({"ref": ref, "uf": uf, "dist_mm": round(d, 1), "why": why})
+        if why is None:
+            pool.append((owner.get(ref) is not None, round(d, 3), ref))
+    rec["caps"].sort(key=lambda x: (x["why"] is not None, x["dist_mm"], x["ref"]))
+    out, seen = [], set()
+    for _o, _d, ref in sorted(pool)[:3]:
+        cap = parts[ref]
+        via = next(q for q in cap["pads"] if q["net"] == net)
+        s0 = next((s for cc in ctx.clusters() or [] for s in cc["supports"] if s["ref"] == ref), None)
+        for pr in bare[:2]:
+            pad = next(q for q in icp["pads"] if q["num"] == pr[0])
+            s = dict(s0 or {"cls": "power", "weight": 1.0, "role": "bypass", "nets": [q["net"] for q in cap["pads"]]}, ref=ref, ic=ic, pad=pad["num"], via=via["num"],
+                     net=net, how="pin-demand", sure=True, rank=1, dist=math.hypot(via["x"] - pad["x"], via["y"] - pad["y"]))
+            try:
+                lim = PB.support_row(B, ctx["cons"], ctx["spec"], ref, net, None, ic=ic, pad=pad["num"])
+                s.update(limit=lim["max"], target=lim["target"])
+            except Exception:                                   # noqa: BLE001 - the limit of the cluster's own input cap
+                s.update(limit=next((x["limit"] for x in c["supports"] if x["ref"] in owned), 5.0), target=s.get("target", 5.0))
+            row = _row_of(ctx, g)
+            variants = [("", None)] + [(f"-{tag}", mvs) for tag, mvs in _clear_picks(B, c, g, row, mov, set(owned) | {ref}, ic, [pr], together=8)[::-1][:3]]
+            whys = []
+            for vtag, mvs in variants:
+                pre = {}
+                if mvs:                                           # the blockers in the pair's strip step out first
+                    tg = {r: (B["parts"][r]["pos"][0] + v[0], B["parts"][r]["pos"][1] + v[1], B["parts"][r]["angle"]) for r, v in mvs}
+                    pre = _with_supports(B, ctx, mov, tg)
+                    if not pre:
+                        whys.append(f"{', '.join(r for r, _v in mvs)} cannot step out legally")
+                        continue
+                B2, refused = _on_copy(B, pre), {}
+                _reseat_on(ctx, B2, {"ic": ic, "supports": [s], "layout": c["layout"]}, only={ref}, everything=True, refused=refused)
+                moves = _moves_between(B, B2)
+                if ref not in moves:
+                    whys.append(f"no legal seat on the {pr[0]}/{pr[1]} side: {refused.get(ref, 'none')}" + (f" after {', '.join(r for r, _v in mvs)} step out" if mvs else ""))
+                    continue
+                if not CL._on_cin_side(B2["parts"][ic], B2["parts"][ref]["court"], [pr], pr[0], B2["parts"][ref]["pads"]):
+                    whys.append(f"seat not on the {pr[0]}/{pr[1]} side" + (f" after {', '.join(r for r, _v in mvs)} step out" if mvs else ""))
+                    continue
+                key = _pt_key(moves)
+                if key not in seen:
+                    seen.add(key)
+                    d0 = min(math.hypot(q["x"] - pad["x"], q["y"] - pad["y"]) for q in cap["pads"] if q["net"] == net)
+                    out.append({"id": f"cin-re-deal-{ref}-{pr[0]}{vtag}", "rung": "cin-re-deal", "moves": moves, "claims": [],
+                                "notes": f"{ref} {d0:.1f} mm from {ic}.{pr[0]}, served to the {pr[0]}/{pr[1]} pair" + (f"; {', '.join(r for r, _v in mvs)} step out of the strip" if mvs else "")})
+                    whys = []
+                    break
+            if whys:
+                next(q for q in rec["caps"] if q["ref"] == ref)["why"] = "; ".join(dict.fromkeys(whys))[:240]
+    if not out:
+        ctx.setdefault("why_none", {})[("cin-re-deal", g["id"])] = "; ".join(f"{x['ref']}: {x['why']}" for x in rec["caps"][:6]) or f"no capacitor of {net} is a candidate"
+    return out
+
+
+def _pt_key(moves):
+    from . import placetour as PT
+    return PT._key(moves)
+
+
+def cin_questions(ctx, res):
+    """After `close`: a cin_side row still not honoured gets one owner question `row:<name>` with the numbers (pairs, caps owned, each candidate
+    cap and why it was refused). Nothing is applied here. -> [record]."""
+    S = ctx.get("session")
+    out = []
+    for g in res.get("gaps_out") or []:
+        rec = (ctx.get("cin_need") or {}).get(g["id"])
+        if g["kind"] != "row-cin-side" or not rec:
+            continue
+        out.append(rec)
+        if S is None:
+            continue
+        name = (g["row"] or g["id"]).split(":", 1)[-1]
+        caps = "; ".join(f"{x['ref']} {x['uf']:g} uF {x['dist_mm']:g} mm: {x['why'] or 'seat refused'}" for x in rec["caps"][:6]) or "none on the net"
+        S.ask(f"row:{name}", "input capacitor side",
+              f"{rec['ic']} names {rec['pairs']} input pin pair(s) on separate sides, the cluster owns {len(rec['owned'])} input cap(s) ({', '.join(rec['owned']) or '-'}); "
+              f"candidates on {rec['net']} (>= {rec['need_uf']:g} uF): {caps}",
+              {"assign": f"name the cap yourself: [power.\"{rec['net']}\"] support = {{REF = \"{rec['ic']}.PAD\"}} (and unfix it if it is fixed)",
+               "add": "add an input capacitor of at least that value on the unserved pair's side to the netlist",
+               "waive": "accept one pair served, with the reason on record"},
+              "assign", "the next floorplan run")
+    return out
+
+
+DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side", "cin-re-deal"]
 DISPATCH["row-template"] = ["template-turn", "clear-side"]
 DISPATCH["row-pin-bypass"] = ["re-deal"]
-RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal})
+RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal, "cin-re-deal": _r_cin_re_deal})
 
 
 class JudgeEval(Evaluator):

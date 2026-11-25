@@ -223,3 +223,112 @@ def test_a_cin_side_repair_that_does_not_serve_a_pair_is_refused_even_if_the_sco
     assert not ok and check == "score:row-cin-side" and "not closer" in why
     assert PG._accept(base, {"gaps": [dict(cin, mag=0.2)], "state": {}, "refusal": None}, cin["id"])[0]
     assert PG._accept(base, {"gaps": [], "state": {}, "refusal": None}, cin["id"])[0]
+
+
+# ---- cin-re-deal: more named pin pairs than input caps
+LAY2 = dict(T.LAY, cin_side=[["VIN", "GND"], ["VIN2", "GND2"]])
+SPEC2 = {"components": [{"ref": "U1", "mpn": "REG1", "pinmap": {"VIN": "1", "GND": "2", "SW": "3", "BOOT": "4", "FB": "5", "EN": "6", "VIN2": "7", "GND2": "8"}}]}
+
+
+def two_pairs(tmp_path, c3_value="10uF"):
+    """U1 with a pair on pads 1/2 (C1 serves it) and a second pair on pads 7/8; C3 is a free capacitor of the same net far away."""
+    b = g.ic("U1", 30, 30, ["VIN", "GND", "SW", "BOOT", "FB", "EN", "VIN", "GND"], pitch=1.0)
+    b += PW.cap("C1", 26, 30, "VIN", "GND", "10uF") + PW.cap("C3", 60, 50, "VIN", "GND", c3_value)
+    b += PW.cap("C2", 27, 34, "BOOT", "SW", "100nF") + PW.cap("L1", 36, 36, "SW", "VOUT", "") + PW.cap("R1", 27, 38, "FB", "VOUT", "")
+    board = g.board(tmp_path, b, outline=(0, 0, 80, 60))
+    return board, T._datasheets(tmp_path, LAY2)
+
+
+def mk2(board, cons, owners=None, extra=()):
+    from fluxplace import clusters as CL
+    B = RD.load(board)
+    rows = BU.template_rows(B, cons, SPEC2)
+    c = PG.Ctx(stage="floorplan", board=board, cons=cons, spec=SPEC2, ds_dir=None, B=B, rows=rows)
+    cl, _ = CL.build(B, cons, SPEC2)
+    for k in cl:
+        k["supports"] = [s for s in k["supports"] if s["ref"] != "C3"]                 # C3 is nobody's (no cluster owns it)
+    c["_cl"] = cl + list(extra)
+    return c
+
+
+def test_cin_re_deal_serves_the_second_pair_with_a_free_cap_of_the_same_net(tmp_path):
+    board, cons = two_pairs(tmp_path)
+    c = mk2(board, cons)
+    row = next(r for r in c["rows"] if r["name"].endswith("cin_side"))
+    assert (row["value"], row["max"]) == (1, 2)
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+    cands = PG.RUNGS["cin-re-deal"](g_, c)
+    assert cands and all(list(x["moves"]) == ["C3"] for x in cands)
+    B2 = applied(c.B(), cands[0]["moves"])
+    assert next(r for r in BU.template_rows(B2, cons, SPEC2) if r["name"].endswith("cin_side"))["value"] == 2
+    assert c["cin_need"][g_["id"]]["owned"] == ["C1"] and c["cin_need"][g_["id"]]["caps"][0]["ref"] == "C3"
+
+
+def test_cin_re_deal_takes_a_cap_from_another_cluster_only_when_it_keeps_enough(tmp_path):
+    board, cons = two_pairs(tmp_path)
+    sole = {"ic": "U2", "supports": [{"ref": "C3", "net": "VIN", "sure": True, "rank": 9}]}
+    c = mk2(board, cons, extra=[sole])
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+    assert PG.RUNGS["cin-re-deal"](g_, c) == []
+    assert "owned by U2, which would keep 0 of the 1 cap(s)" in c["cin_need"][g_["id"]]["caps"][0]["why"]
+    two = {"ic": "U2", "supports": [{"ref": "C3", "net": "VIN", "sure": True, "rank": 9}, {"ref": "C1", "net": "VIN", "sure": True, "rank": 9}]}
+    c2 = mk2(board, cons, extra=[two])
+    g2 = next(x for x in PG.detect(c2, ["row-cin-side"])["gaps"])
+    assert PG.RUNGS["cin-re-deal"](g2, c2)
+
+
+def test_no_usable_cap_is_a_refused_entry_and_one_owner_question_with_the_numbers(tmp_path):
+    board, cons = two_pairs(tmp_path, c3_value="100nF")
+    c = mk2(board, cons)
+
+    class S:
+        asked = []
+
+        def ask(self, qid, topic, found, options, default, settle, apply=None):
+            self.asked.append((qid, found, sorted(options), default))
+            return default
+    s = S()
+    c["session"] = s
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+
+    class Same(PG.Evaluator):
+        def detect(self, kinds):
+            return [g_]
+
+        def board(self):
+            return c.B()
+
+        def trial(self, cand):
+            return {"gaps": [g_], "state": {}, "refusal": None}
+
+        def commit(self, tr):
+            pass
+    res = PG.close(c, ["row-cin-side"], Same(), stage="t")
+    none = [r for r in res["refused"] if r["rung"] == "cin-re-deal"]
+    assert none and none[0]["check"] == "no-candidate" and "C3: 0.1 uF is below the input cap value 10 uF" in none[0]["why"]
+    assert len(s.asked) == 1 and s.asked[0][0] == "row:U1 template cin_side"
+    assert "2 input pin pair(s)" in s.asked[0][1] and "owns 1 input cap(s) (C1)" in s.asked[0][1] and "C3" in s.asked[0][1]
+
+
+def test_a_leftover_row_gets_a_refused_entry_even_when_a_rung_proposes_nothing():
+    cin = PG.gap("row-cin-side", "U1 template cin_side|template", "plain", 0.5, refs=["U1"], row="support:U1 template cin_side")
+
+    class E(PG.Evaluator):
+        def detect(self, kinds):
+            return [cin]
+
+        def board(self):
+            return {"parts": {}}
+
+        def trial(self, cand):
+            raise AssertionError
+
+        def commit(self, tr):
+            pass
+    old = PG.RUNGS.get("template-turn")
+    PG.RUNGS["template-turn"] = lambda g_, c_: []
+    try:
+        res = PG.close(PG.Ctx(stage="floorplan", board="/x", cons={}, spec={}, ds_dir=None), ["row-cin-side"], E(), stage="t")
+    finally:
+        PG.RUNGS["template-turn"] = old
+    assert any(r["rung"] == "template-turn" and r["check"] == "no-candidate" for r in res["refused"])
