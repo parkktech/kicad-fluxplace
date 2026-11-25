@@ -150,7 +150,7 @@ def _add_tie(board, net, pad, pours, made, rules=None):
 def _undo(board, made):
     for o in made:
         if o is not None:
-            board.Remove(o)
+            board.Delete(o)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
 
 
 def _tie_pads(board, net, pads, pours, rules=None):

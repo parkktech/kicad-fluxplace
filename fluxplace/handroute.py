@@ -878,7 +878,7 @@ def _drop_vias(b, M, att):
         pos = pcbnew.VECTOR2I(int(round(x * 1e6)), int(round(y * 1e6)))
         for t in [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetPosition() == pos and pnet is not None
                   and t.GetNetCode() == pnet.GetNetCode()]:
-            b.Remove(t)
+            b.Delete(t)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
 
 
 def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, require_close=True, kicad_cli="kicad-cli", extra_check=None, refill=True,
@@ -1184,7 +1184,7 @@ def copy_net(src, dst, net, out=None, constraints=None, kicad_cli="kicad-cli", l
         if any(t.IsLocked() for t in old):
             raise ValueError(f"destination has locked copper of net {net!r}: {sum(1 for t in old if t.IsLocked())} item(s); unlock or leave it")
         for t in old:
-            b.Remove(t)
+            b.Delete(t)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
         for t in items:
             cls = t.GetClass()
             if cls == "PCB_VIA":

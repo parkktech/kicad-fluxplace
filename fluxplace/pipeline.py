@@ -1342,6 +1342,26 @@ SEED_STAGES = ("pairs", "tune")
 RELEASING_STAGES = ("tune",)
 
 
+def _pcbnew_state_guard(name, res):
+    """After a stage that returned a board: one LoadBoard must still give a BOARD.  A board.Remove() of a discarded item leaves every later
+    LoadBoard in the process a raw SwigPyObject (use Delete, or run the code in freshproc); without pcbnew nothing is checked."""
+    p = res.get("board")
+    if not p or not os.path.isfile(p) or res.get("verdict") not in ("pass", "warn"):
+        return res
+    try:
+        import pcbnew
+    except ImportError:
+        return res
+    try:
+        kind = type(pcbnew.LoadBoard(p)).__name__
+    except Exception as e:
+        kind = f"{type(e).__name__}: {e}"
+    if kind == "BOARD":
+        return res
+    return dict(res, verdict="fail", line=f"pcbnew in-process state broken after {name}: LoadBoard gave {kind}, not BOARD "
+                f"(a Remove() of a discarded item? use Delete or fresh process); stage line was: {res.get('line', '')}")
+
+
 def _commit_point(name, prev, res):
     """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
     colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
@@ -1784,6 +1804,7 @@ def _run(a):
             if res["verdict"] in ("pass", "warn"):
                 res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
         res.setdefault("verdict", "pass")
+        res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
             g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
