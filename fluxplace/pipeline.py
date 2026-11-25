@@ -1293,7 +1293,36 @@ def _gate_stop(gate_dir):
         return None
 
 
-def _gate_check(c, n, name, board, kinds, src=None):
+def _defer_gate(res, d, later):
+    """A gate that ends with only findings a later stage owns (gaps.GATE_DEFER) does not stop the flow: verdict warn, stop
+    "deferred", the rows kept in state and in stop.json. `res`: gate record with res["left"] rows. -> deferred rows or None."""
+    from . import gaps as GP
+    if res.get("review_failed") or res.get("stop") == "clean":
+        return None
+    rows = GP.deferred_left(res.get("left"), later)
+    if rows:
+        _stamp_stop(d, {"deferred": rows})
+    return rows
+
+
+def _stamp_stop(d, extra):
+    p = os.path.join(d, "stop.json")
+    try:
+        with open(p) as fh:
+            s = json.load(fh)
+        s.update(extra)
+        with open(p, "w") as fh:
+            json.dump(s, fh, indent=1)
+    except (OSError, ValueError):
+        pass
+
+
+def _deferred_line(rows):
+    from collections import Counter
+    return ", ".join(f"{k} {v}" for k, v in sorted(Counter(g["kind"] for g in rows).items()))
+
+
+def _gate_check(c, n, name, board, kinds, src=None, later=()):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
     from . import gaps as GP, calllog as CL
@@ -1310,13 +1339,17 @@ def _gate_check(c, n, name, board, kinds, src=None):
         _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
+    rows = _defer_gate(r, d, later)
+    if rows:                                                # only findings a later stage owns: the flow goes on
+        return {"verdict": "warn", "board": r["best"], "line": line.replace(f": {stop},", ": deferred,", 1) + f"; carried to {', '.join(sorted({o for g in rows for o in GP.GATE_DEFER[g['kind']] if o in later}))}: {_deferred_line(rows)}",
+                "next": [], "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "deferred": rows}}
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
             "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
             + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
                for p in r.get("packets") or [] if p.get("kind") == "session"]}
 
 
-def _gate_measure(c, n, name, board, kinds, src=None):
+def _gate_measure(c, n, name, board, kinds, src=None, later=()):
     """A5: the gate verdict of `board` for `kinds` by measurement only (gaps.gate_measure). Same record shape as _gate_check."""
     from . import gaps as GP
     d = c.dir(n, "gate")
@@ -1328,6 +1361,10 @@ def _gate_measure(c, n, name, board, kinds, src=None):
     if src:
         _stamp_gate(d, src)
     ok = r["stop"] == "clean"
+    rows = _defer_gate(r, d, later)
+    if rows:
+        return {"verdict": "warn", "board": board, "line": f"gate {name} ({', '.join(kinds)}): deferred, {_deferred_line(rows)}", "next": [],
+                "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "left": [], "deferred": rows}}
     return {"verdict": "pass" if ok else "fail", "board": board,
             "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope"
                     + (f", review source(s) failed: {', '.join(r['review_failed'])}" if r.get("review_failed") else "") + f", opens {r['start']['opens']}",
@@ -1760,20 +1797,24 @@ def _run(a):
     for k in STAGES_[:i0]:                                     # PHASE3I F2: a resume past an unclean gate does not start
         gk_prev = GP_.gate_kinds(c.cons, k)
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
-        if gk_prev and gst.get("stop") != "clean" and a.board:
+        if gk_prev and gst.get("stop") not in ("clean", "deferred") and a.board:
             # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
             # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds
-            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board)
+            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board, later=STAGES_[i0:])
             gst = {"stop": g["gate"]["stop"]}
+            if g["gate"].get("deferred"):
+                gst["deferred"] = g["gate"]["deferred"]
             st["stages"].setdefault(k, {})["gate"] = dict(gst)
-            if g["verdict"] == "pass":
+            if g["verdict"] in ("pass", "warn"):
+                if g["verdict"] == "warn":
+                    print(f"pipeline: {g['line']}", flush=True)
                 continue
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({g['gate']['stop']}): {g['line']}; fix it in that stage: {sp} (exit 5, no stage started)")
             for r in g["gate"].get("left", [])[:10]:
                 print(f"  gap {r['id']} {r['kind']} {r.get('nets')} at {r.get('at')}")
             return 5
-        if gk_prev and gst.get("stop") != "clean":
+        if gk_prev and gst.get("stop") not in ("clean", "deferred"):
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
             return 5
@@ -1807,7 +1848,7 @@ def _run(a):
         res.setdefault("verdict", "pass")
         res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
-            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board)
+            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board, later=STAGES_[i + 1:])
             res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
             if g["verdict"] == "packets":
                 res["gate_packets"] = True
@@ -1825,6 +1866,8 @@ def _run(a):
                               "dir": f"{i + 1}-{name}", "board": board}
         if res.get("gate"):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
+            if res["gate"].get("deferred"):
+                st["stages"][name]["gate"]["deferred"] = res["gate"]["deferred"]      # review reads these: findings a later stage owns
         if name == "route" and router:
             st["stages"][name]["router"] = {k: router[k] for k in ("dir", "source", "version", "commit")}
         if name == "route":

@@ -199,6 +199,22 @@ GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-unmeasured", "pair-sk
                  "route": ["power-width", "power-vias"]}          # PHASE3I F2: no `power` stage exists; rails are laid by `route`
 
 
+# Gap kinds a LATER stage of the flow owns: a gate that ends with only these left does not stop the flow (verdict warn, stop
+# "deferred", the rows kept in state and stop.json); review stays the final hard gate. A kind is deferred only when one of its
+# owner stages is still to run in this flow, so there is never an exit 5 without a driver.
+GATE_DEFER = {"pair-skew": ("tune",), "pair-unmeasured": ("tune",), "pair-stub": ("tune",), "pair-impedance": ("tune",),
+              "pair-open": ("critroute", "route", "close"), "pair-asym": ("route", "close")}
+
+
+def deferred_left(left, later_stages):
+    """The rows of `left` (gap rows) when every one is owned by a stage in `later_stages`, else None (nothing is deferred:
+    shorts, powers and any kind without an owner keep the gate closed)."""
+    later = set(later_stages or ())
+    if left and all(any(o in later for o in GATE_DEFER.get(g["kind"], ())) for g in left):
+        return list(left)
+    return None
+
+
 def gate_kinds(cons, stage):
     """Kinds gating `stage` ([] = no gate). cons [flow.gates] = {stage: [kind, ...]} overrides the defaults."""
     over = ((cons or {}).get("flow") or {}).get("gates") or {}
