@@ -284,7 +284,23 @@ def classify(B, cons=None, spec=None):
                     "partner": pair_of.get(net), "pads": len(ps), "drops": len(set(refs)),
                     "kind": kind, "override": net in per_net_budget or "budget" in o,
                     "override_reason": reason or str(o.get("reason", ""))}
+    _mark_coupled_preferred(B, cons, out)
     return out
+
+
+def _mark_coupled_preferred(B, cons, out):
+    """Pairs that pairlay cannot lay as a pair (pairs.coupled_preferred) get info["coupled_pref"] = reason on both legs;
+    pairaudit.pair_list then leaves them out: not laid by pairlay, not audited or gated as a pair, routed as two single nets."""
+    from . import pairs as PR
+    seen = set()
+    for n, i in out.items():
+        q = i.get("partner")
+        if i.get("class") != "pair" or not q or q not in out or n in seen:
+            continue
+        seen.update((n, q))
+        why = PR.coupled_preferred(B, cons, *sorted((n, q)))
+        if why:
+            i["coupled_pref"] = out[q]["coupled_pref"] = why
 
 
 def _active(part):

@@ -73,14 +73,14 @@ def _write(path, obj):
 
 
 # ---------------------------------------------------------------- N12: narration (plain words, one line per phase)
-def narrate(stage, text, phase="doing", eta_s=None):
+def narrate(stage, text, phase="doing", eta_s=None, remember=True):
     """One narration line: phase start | doing | end, plain words for the owner. Never raises; off without a stream."""
     try:
         if os.environ.get("FLUXPLACE_NESTED") or not events.enabled():
             return None
         phase = phase if phase in ("start", "doing", "end") else "doing"
         text = " ".join(str(text).split())[:300]
-        if phase == "doing":
+        if phase == "doing" and remember:       # the heartbeat's own fallback line is never remembered (it would freeze its elapsed time)
             _narr[str(stage)] = text
         _emit("narration", stage=stage, phase=phase, text=text, eta_s=eta_s)
         return {"stage": stage, "phase": phase, "text": text, "eta_s": eta_s}
@@ -127,8 +127,8 @@ def watching(stage):
 
     def beat():
         while not stop.wait(NARR_S):
-            text = _narr.get(stage) or f"Still working on the {stage} stage, {int(time.monotonic() - t0)} s so far."
-            narrate(stage, text, "doing")
+            text = _narr.get(stage)
+            narrate(stage, text or f"Still working on the {stage} stage, {int(time.monotonic() - t0)} s so far.", "doing", remember=False)
 
     th = threading.Thread(target=beat, name="narration-heartbeat", daemon=True)
     th.start()

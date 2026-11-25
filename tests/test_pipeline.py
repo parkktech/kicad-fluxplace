@@ -334,15 +334,15 @@ def test_m3_from_stage_without_state_checks_the_missing_gate_on_the_input(tmp_pa
 def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_path, monkeypatch, capsys):
     from fluxplace import gaps as GP
     board = _board(tmp_path)
-    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["pair-open"]})
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"place": ["short"]})
     monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran")))
-    left = [{"id": "g1", "kind": "pair-open", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
+    left = [{"id": "g1", "kind": "short", "class": "hs-pair", "nets": ["A_P"], "at": [1.0, 2.0]}]
     monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 1}, "best": str(board)})
     seen = []
     monkeypatch.setattr(PL, "FUNCS", {name: (lambda c, n, b: seen.append(n) or {"verdict": "pass", "board": b}) for name in PL.STAGES})
     rc = PL.run(_args(tmp_path, board, from_stage="route-ready", to_stage="route-ready"))
     out = capsys.readouterr().out
-    assert rc == 5 and not seen and "gap g1 pair-open" in out
+    assert rc == 5 and not seen and "gap g1 short" in out
 
 
 def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypatch):

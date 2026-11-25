@@ -227,11 +227,12 @@ def strip_dead_vias(text, B, nets):
 
 
 def pair_list(cls):
-    """[(p, n)] from the net classes' partner links (sorted, each pair once)."""
+    """[(p, n)] from the net classes' partner links (sorted, each pair once). Coupled-preferred pairs (netclass `coupled_pref`:
+    analog pairs through passives or a transformer, no two terminals) are not pairs here: the router lays their legs."""
     seen, out = set(), []
     for n, info in sorted((cls or {}).items()):
         q = info.get("partner")
-        if info.get("class") == "pair" and q and q in cls and tuple(sorted((n, q))) not in seen:
+        if info.get("class") == "pair" and q and q in cls and not info.get("coupled_pref") and tuple(sorted((n, q))) not in seen:
             seen.add(tuple(sorted((n, q))))
             out.append(tuple(sorted((n, q))))
     return out

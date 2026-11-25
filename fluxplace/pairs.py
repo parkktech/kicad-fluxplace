@@ -118,6 +118,25 @@ def terminals(B, p, n, pad_max):
     return out, [q for i, q in enumerate(Pp) if i not in ui] + [q for j, q in enumerate(Np) if j not in uj]
 
 
+def coupled_preferred(B, cons, p, n, pad_max=None):
+    """Why the pair p/n is "coupled-preferred" (None = a real pair for pairlay): its P and N pads do not form two or more
+    terminals within pad_max_mm, or pads of either leg stay unpaired (the pair runs through a passive, a divider or a transformer
+    winding). pairlay cannot lay it, the gate does not count it as an open pair; the router lays the two legs as single nets,
+    side by side where it can (it has no coupling hint). A pair of a controlled-impedance or high-speed family is never one."""
+    from . import review as RV
+    fam = max((f for f in ((cons or {}).get("pairs") or {}) if p.startswith(f)), key=len, default=None)
+    if fam and "impedance_diff" in (((cons or {}).get("pairs") or {}).get(fam) or {}):
+        return None
+    if re.sub(r"\d+$", "", p.upper().split("_")[0]) in RV._HS_FAMILIES:
+        return None
+    terms, lone = terminals(B, p, n, pad_max if pad_max is not None else params(cons)["pad_max"])
+    if len(terms) < 2:
+        return "no two terminals (P and N pads further apart than [pairlay] pad_max_mm)"
+    if lone:
+        return "unpaired pad(s) " + ", ".join(f"{q['ref']}.{q['num']}" for q in lone[:4])
+    return None
+
+
 def tree(terms):
     """minimum spanning tree over the terminal centres -> [(ia, ib)] shortest first."""
     if len(terms) < 2:

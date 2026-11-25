@@ -27,7 +27,7 @@ def test_flow_stops_at_pairs_gate_with_exit_5(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setitem(PL.FUNCS, "pairs", lambda c, n, board: {"verdict": "pass", "line": "pairs ok", "board": board})
     monkeypatch.setitem(PL.FUNCS, "tune", lambda c, n, board: seen.append("tune") or {"verdict": "pass", "board": board})
-    monkeypatch.setattr(PL, "_gate_check", lambda c, n, name, board, kinds, src=None: {
+    monkeypatch.setattr(PL, "_gate_check", lambda c, n, name, board, kinds, src=None, later=(): {
         "verdict": "packets", "board": board, "line": f"gate {name}: packets", "next": ["gap pair:A/B"],
         "gate": {"kinds": kinds, "stop": "packets", "dir": ""}})
     a = _args(tmp_path, b, flow="constructive", from_stage="pairs", to_stage="tune")
@@ -175,7 +175,7 @@ def test_ledger_gets_the_gated_verdict(tmp_path, monkeypatch):
     orig_after = PL2._Ledger.after
     monkeypatch.setattr(PL2._Ledger, "after", lambda self, name, n, res: seen.append((name, res["verdict"])) or orig_after(self, name, n, res))
     monkeypatch.setitem(PL2.FUNCS, "pairs", lambda c, n, board: {"verdict": "pass", "line": "pairs ok", "board": board})
-    monkeypatch.setattr(PL2, "_gate_check", lambda c, n, name, board, kinds, src=None: {
+    monkeypatch.setattr(PL2, "_gate_check", lambda c, n, name, board, kinds, src=None, later=(): {
         "verdict": "packets", "board": board, "line": "gate", "next": [], "gate": {"kinds": kinds, "stop": "packets", "dir": ""}})
     b = _board(tmp_path)
     assert PL2.run(_args(tmp_path, b, flow="constructive", from_stage="pairs", to_stage="pairs")) == 5
@@ -195,7 +195,7 @@ def test_packets_answered_gate_is_rechecked_without_stage_rerun(tmp_path, monkey
     ran, checked = [], []
     monkeypatch.setitem(PL2.FUNCS, "pairs", lambda c, n_, board: ran.append("pairs") or {"verdict": "pass", "board": board})
 
-    def gate(c, n_, name, board, kinds, src=None):
+    def gate(c, n_, name, board, kinds, src=None, later=()):
         checked.append(os.path.basename(board))
         return {"verdict": "pass", "board": board, "line": "ok", "next": [], "gate": {"kinds": kinds, "stop": "clean", "dir": gd}}
     monkeypatch.setattr(PL2, "_gate_check", gate)
