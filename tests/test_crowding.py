@@ -102,8 +102,9 @@ def test_options_ranked_by_relief_per_cost_and_computed_from_the_board(tmp_path)
     ops, default = DN.options(B, BOTH, None, rep)
     keys = [o["key"] for o in ops]
     assert "a-fill" in keys and any(k.startswith("grow-") for k in keys)
-    score = [o["relief"] / o["cost"] for o in ops]
-    assert score == sorted(score, reverse=True)
+    nl = [o for o in ops if o["tag"] != "e"]
+    score = [o["relief"] / o["cost"] for o in nl]
+    assert score == sorted(score, reverse=True) and (ops[-1]["tag"] == "e" or not any(o["tag"] == "e" for o in ops))
     fill = next(o for o in ops if o["key"] == "a-fill")
     assert fill["text"].startswith("120 part(s) / 1080 mm2")                         # this board's eligible parts, not generic text
     assert fill["predicted"]["F"]["util"] == pytest.approx((5 * 1000 - 0 + 0) / 8000 + 0 - 0.0, abs=0.2)
@@ -163,3 +164,38 @@ def test_check_crowding_in_ready_opens_the_question(tmp_path):
     S = QS.Session(str(tmp_path / "b.kicad_pcb"), BOTH, {}, False, "ready")
     QS.check_crowding(S, B, BOTH, spec=None)
     assert [q["id"] for q in S.open] == ["crowding"]
+
+
+def test_a_big_part_cell_is_not_crowding(tmp_path):
+    B = _B(tmp_path, _big(1))                                          # one 1000 mm2 courtyard covers whole cells
+    u = DN.usage(B, {})
+    assert u["sides"]["F"]["hot"] == [] and len(u["sides"]["F"]["big"]) >= 3
+    rep = DN.crowding_report(B, {})
+    assert rep["verdicts"]["F"]["verdict"] == "ok" and "big-part cells, not counted" in rep["line"] and "0 hot cells" in rep["line"]
+    # many small courtyards in the same cells ARE crowding
+    tiles = "".join(g.two(f"R{i}", x, y, f"N{i}", f"M{i}", name="X", court=(-2.5, -2.5, 2.5, 2.5)) for i, (x, y) in enumerate([(2.5, 2.5), (7.5, 2.5), (2.5, 7.5), (7.5, 7.5)]))
+    assert DN.usage(_B(tmp_path, tiles, name="s.kicad_pcb"), {})["sides"]["F"]["hot"]
+
+
+def test_ready_asks_crowding_on_utilisation_or_hot_cells_never_on_far_supports_alone(tmp_path):
+    body = (g.ic("U1", 30, 30, ["VCC", "GND", "SIG", "SIG2", "VCC", "GND", "SIG3", "SIG4"], pitch=0.8, court=(-3, -3, 3, 3))
+            + g.two("C1", 70, 60, "VCC", "GND", name="C_0603_1608Metric", court=(-1, -.6, 1, .6)))
+    B = _B(tmp_path, body)
+    rep = DN.crowding_report(B, {})
+    assert rep["shortfall"]["far"]["F"] == 1 and rep["usage"]["sides"]["F"]["util"] < 0.5
+    S = QS.Session(str(tmp_path / "b.kicad_pcb"), {}, {}, False, "ready")
+    QS.check_crowding(S, B, {}, spec=None)
+    assert S.open == []                                                 # a far support alone: the floorplan's to seat
+    S2 = QS.Session(str(tmp_path / "b.kicad_pcb"), {}, {}, False, "floorplan")
+    QS.ask_crowding(S2, B, {}, None, out=lambda *a: None)
+    assert [q["id"] for q in S2.open] == ["crowding"]                   # the floorplan (after the fill) does ask
+    Bc = _crowded(tmp_path)
+    S3 = QS.Session(str(tmp_path / "c.kicad_pcb"), BOTH, {}, False, "ready")
+    QS.check_crowding(S3, Bc, BOTH, spec=None)
+    assert [q["id"] for q in S3.open] == ["crowding"]
+
+
+def test_a_fill_answer_sets_back_fill_max(tmp_path):
+    S = QS.Session("x", BOTH, {"crowding": "a-fill"}, False, "floorplan")
+    QS.apply_crowding_answer(S)
+    assert S.apply(BOTH, None)[0]["placement"]["back_fill"] == "max" and "back_fill" not in BOTH["placement"]

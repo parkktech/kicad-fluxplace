@@ -699,8 +699,25 @@ def seat(B, cl, bounds=None, step=0.25, reach=8.0, log=None, keepouts=True, isol
                             continue
                     pick, best = (cx, cy, ang, court, cost), cost
             return pick, (no.most_common(1)[0][0] if no else "no candidate within the limit")
-        pick, why_not = search()
-        want = pick is None or (back is not None and getattr(back, "prefer", True) and not swp and part["side"] == "F.Cu" and pick[4] > BACK_PREFER_FRAC * s["limit"])
+        dense = (back is not None and getattr(back, "dense", False) and flips is not None and not part["tht"] and part["side"] == "F.Cu" and not swp
+                 and back(ref))
+        pick = None
+        if dense:                                              # density-driven fill: the back first, any seat within the limit (directly under the owner's pin when it is free)
+            GM.flip(part)
+            if legal is not None:
+                legal.refresh(ref)
+            pick, why_not = search()
+            if pick:
+                flips.symmetric_difference_update({ref})
+            else:
+                GM.flip(part)
+                if legal is not None:
+                    legal.refresh(ref)
+                if getattr(back, "only_back", False):          # the back-only pass leaves a part with no back seat exactly where it is
+                    continue
+        if not pick:
+            pick, why_not = search()
+        want = (not dense) and (pick is None or (back is not None and getattr(back, "prefer", True) and not swp and part["side"] == "F.Cu" and pick[4] > BACK_PREFER_FRAC * s["limit"]))
         if want and flips is not None and not part["tht"] and (back is None or back(ref)):
             GM.flip(part)                                        # the other side, same origin; undone when no better seat is there either
             if legal is not None:

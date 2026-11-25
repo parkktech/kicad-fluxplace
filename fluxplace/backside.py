@@ -30,13 +30,13 @@ ALWAYS_FRONT = re.compile(r"^(J|P|CN|SW|BT|BAT|AE|ANT|MH|MK|H|FID|TP|F)\d")   # 
 HEAVY_AREA_MM2 = 100.0           # a courtyard this large is a module or a power part: front in both-light-back
 SMALL_MM2 = 12.0                 # a free "small part": the ones that fill the gaps around an owner's pins
 # package-class default heights (mm, nominal max from the JEDEC / vendor outline), the last source before "unknown"
-PKG_H = [(re.compile(p, re.I), h) for p, h in (
-    (r"SOT-?23|SOT-?323|SC-?70|SOT-?363|SOT-?353|SOT-?563|SOD-?(123|323|523|923)|SOT-?143", 1.2),
-    (r"SOT-?89|SOT-?223|SMA\b|DO-?214AC", 2.3), (r"SMB\b|SMC\b", 2.6),
-    (r"SOIC|SO-?8|SOP|SSOP|TSOP", 1.8), (r"TSSOP|MSOP|VSSOP|TSOT|SOT-?23-?[5-8]", 1.2),
-    (r"VQFN|WQFN|UQFN|QFN|DFN|WSON|SON|LGA|MLP", 1.0), (r"BGA|CSP|WLCSP", 1.4), (r"LQFP|TQFP|PQFP|QFP", 1.6),
-    (r"LED", 0.8), (r"Crystal|XTAL", 1.0), (r"Fuse", 1.0), (r"Diode_SMD|D_", 1.2),
-    (r"Inductor|L_", 2.0), (r"Buzzer", 3.0))]
+PKG_H = [(re.compile(p), h) for p, h in (            # anchored on the footprint name: a vendor name that merely contains "L_" or "SON" is not a package
+    (r"^(SOT-?23(?![-_]?[5-8])|SOT-?323|SC-?70|SOT-?363|SOT-?353|SOT-?563|SOD-?(123|323|523|923)|SOT-?143)", 1.2),
+    (r"^(SOT-?89|SOT-?223|D_SMA|DO-?214AC)", 2.3), (r"^(D_SMB|D_SMC)", 2.6),
+    (r"^(SOIC|SO-?8|SOP|SSOP|TSOP)", 1.8), (r"^(TSSOP|MSOP|VSSOP|TSOT|SOT-?23-?[5-8])", 1.2),
+    (r"^(VQFN|WQFN|UQFN|QFN|DFN|WSON|LGA|MLP)", 1.0), (r"^(BGA|WLCSP)", 1.4), (r"^(LQFP|TQFP|PQFP|QFP)", 1.6),
+    (r"^LED_", 0.8), (r"^(Crystal_|XTAL)", 1.0), (r"^Fuse_", 1.0), (r"^(Diode_SMD|D_)", 1.2),
+    (r"^(Inductor_|L_)", 2.0), (r"^Buzzer", 3.0))]
 
 _PTS = {}                        # resolved model file -> numpy (n, 3) points, or None
 _SCAN = {}                       # board file -> (mtime, text, {ref: (start, end)})
@@ -178,10 +178,21 @@ def model_top(B, ref):
     return best
 
 
+def _node_key(B, ref):
+    """what makes a footprint's height differ from its siblings: its Height property and its model block (path, offset, scale, rotate)"""
+    text, idx = _scan(B)
+    if ref not in idx:
+        return None
+    node = text[idx[ref][0]:idx[ref][1]]
+    h = re.search(r'\(property\s+"(?:Height|height)"\s+"([^"]*)"', node)
+    m = re.search(r'\(model\s+"([^"]+)"', node)
+    return (h.group(1) if h else None, re.sub(r"\s+", " ", node[m.start():m.start() + 400].split("\n\t\t)")[0]) if m else None)
+
+
 def height(B, cons, ref, cache=None):
     """(mm | None, source) of part `ref`; see the module docstring for the order"""
     from . import intent as IT
-    key = (B["parts"][ref].get("fp", ""), ref if "${" in str(ref) else None)
+    key = (B["parts"][ref].get("fp", ""), _node_key(B, ref))
     fp = str(B["parts"][ref].get("fp", "")).split(":")[-1]
     for g in (_pl(cons).get("heights") or {}):
         if fnmatch.fnmatch(ref, g) or fnmatch.fnmatch(fp, g):
@@ -249,6 +260,8 @@ def stays_front(ctx, ref):
         return "through-hole part"
     if ALWAYS_FRONT.match(ref):
         return "connector / switch / battery / antenna / hardware class"
+    if re.search(r"(^|[:_])LED(_|$)", str(p.get("fp", ""))):
+        return "LED (light pipe / bezel alignment)"
     if any(fnmatch.fnmatch(ref, g) for g in ctx.front_only):
         return "[placement] front_only"
     if ref in ctx.template:
@@ -269,6 +282,9 @@ def back_ok(B, cons, ref, spec=None, ctx=None, at_pose=True):
     if w:
         return False, w
     p = B["parts"][ref]
+    h0, _src0 = ctx.height(ref)
+    if h0 is None:
+        return False, "height unknown"
     if ctx.sides == "both-light-back":
         c = p["court"]
         if (HEAVY_PREFIX.match(ref) or (c[2] - c[0]) * (c[3] - c[1]) > HEAVY_AREA_MM2) and not any(fnmatch.fnmatch(ref, g) for g in ctx.allow):
@@ -291,7 +307,11 @@ def guard(B, cons, spec=None, template=()):
     if not active(cons):
         return None
     ctx = Ctx(B, cons, spec, template)
-    return lambda ref: back_ok(B, cons, ref, ctx=ctx, at_pose=False)[0]
+
+    def fn(ref):
+        return back_ok(B, cons, ref, ctx=ctx, at_pose=False)[0]
+    fn.ctx = ctx
+    return fn
 
 
 def side_illegal(B, cons, spec=None, ctx=None):
@@ -336,7 +356,8 @@ def assembly_note(B, cons, spec=None):
     if not back:
         return "assembly: all SMD parts on the front: single-sided reflow"
     hs = {r: ctx.height(r) for r in back}
-    tall = max(hs, key=lambda r: (hs[r][0] or 0, r))
+    free = [r for r in back if r not in ctx.fixed] or back                    # a fixed module (the CM5) is not the free parts' tallest
+    tall = max(free, key=lambda r: (hs[r][0] or 0, r))
     unk = [r for r in back if hs[r][0] is None]
     mpns = {str(B["parts"][r].get("value", "")) for r in back}
     return (f"assembly: {len(back)} SMD part(s) on the back ({len(mpns)} distinct values), tallest {tall} "

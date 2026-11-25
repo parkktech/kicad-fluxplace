@@ -1182,6 +1182,20 @@ def floorplan_once(board, cons, spec, grow, args, text_in, workdir, tag, log=pri
     return best[1]
 
 
+def write_flips(src, dst, flipped, tag=""):
+    """flip `flipped` in file `src` through pcbnew, write `dst`, and check every part against the model and the re-parsed file
+    (flip.verify). A disagreement raises: a flipped part the model and KiCad disagree about must never be written on."""
+    from . import flip as FL, routediag as RD
+    facts = FL.flip_file(src, dst, flipped)
+    bad = FL.verify(RD.load(src), dst, flipped, facts)
+    n_bad = len({b.split(":")[0].split(".")[0] for b in bad})
+    print(f"  [{tag}] back side: {len(flipped)} part(s) flipped, verified by pcbnew / model / file: {len(flipped) - n_bad}/{len(flipped)}"
+          + (f" ({bad[0]})" if bad else ""), flush=True)
+    if bad:
+        raise RuntimeError(f"back side: {n_bad} flipped part(s) disagree between the model, pcbnew and the file: " + "; ".join(bad[:3]))
+    return facts
+
+
 def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print):
     from . import routediag as RD, boardwrite as BW, fanout as FO, legality as LGL
     t0 = time.time()
@@ -1232,6 +1246,10 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                                 "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
         for u in M.get("unseated") or []:
             print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
+        if M.get("backfill"):
+            bf = M["backfill"]
+            print(f"  [{tag}] back fill: {len(bf['singles'])} single part(s) flipped, {len(bf['modules'])} module(s) mirrored ({', '.join(bf['modules'][:8])}), {bf['mm2']:.0f} mm2"
+                  + (f"; skipped {bf['skipped']}" if bf["skipped"] else ""), flush=True)
         P = Plan(B, cons, spec, M, log=log, base=base_in)
         fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                 nodes=200000, repairs=12, check_only=True)
@@ -1246,10 +1264,13 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                 m = M["modules"][P.idx[M["of"][pin["ref"]]]]
                 ox, oy = m["pos"]
                 e = {"ok": True, "w": pin.get("w", 0.15), "layer": pin.get("layer")}
+                mx = -1.0 if m.get("mirror") else 1.0            # a module mirrored to the back (backfill.py): the input's escape copper is its mirror image, on the other layer
+                if mx < 0 and e["layer"] in ("F.Cu", "B.Cu"):
+                    e["layer"] = "B.Cu" if e["layer"] == "F.Cu" else "F.Cu"
                 if pin.get("stub"):
-                    e["stub"] = [[q[0] - ox, q[1] - oy] for q in pin["stub"]]
+                    e["stub"] = [[mx * (q[0] - ox), q[1] - oy] for q in pin["stub"]]
                 if pin.get("via"):
-                    e["via"] = [pin["via"][0] - ox, pin["via"][1] - oy]
+                    e["via"] = [mx * (pin["via"][0] - ox), pin["via"][1] - oy]
                 whole[m["name"]].append(e)
         for m in M["modules"]:
             m["fanout"] = {"pins": whole.get(m["name"], [])}
@@ -1317,12 +1338,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     flipped = sorted({r for r in M.get("flipped") or []} | {r for r, p_ in P.B["parts"].items() if r in orig and p_["side"] != orig[r][3]})
     flipped = [r for r in flipped if r in P.of and not P.unplaced(P.idx[P.of[r]]) and P.idx[P.of[r]] not in P.parked and P.B["parts"][r]["side"] != orig[r][3]]
     if flipped:                                  # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
-        from . import flip as FL
         base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
-        facts = FL.flip_file(path_g, base, flipped)
-        bad = FL.verify(RD.load(path_g), base, flipped, facts)
-        print(f"  [{tag}] back side: {len(flipped)} part(s) flipped, verified by pcbnew / model / file: {len(flipped) - len({b.split(':')[0].split('.')[0] for b in bad})}/{len(flipped)}"
-              + (f" ({bad[0]})" if bad else ""), flush=True)
+        write_flips(path_g, base, flipped, tag)
         _pro(board, base)
     for rd in range(args.rounds + 1):
         if rd:

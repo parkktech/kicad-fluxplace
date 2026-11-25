@@ -285,6 +285,7 @@ def usage(B, cons, spec=None, grid=CELL):
     free_m = {s: np.zeros_like(inside) for s in SIDES}
     load = {s: 0.0 for s in SIDES}
     nparts = {s: 0 for s in SIDES}
+    single = {s: {} for s in SIDES}                               # (cell column, cell row) -> the largest courtyard area of ONE part in that cell
     for ref, p in B["parts"].items():
         if EP.is_mech(ref) or p["pos"][0] > 9e4:
             continue
@@ -292,6 +293,12 @@ def usage(B, cons, spec=None, grid=CELL):
         area = max((c[2] - c[0]) * (c[3] - c[1]), 0.0)
         tht = any(q.get("tht") and not q.get("np") for q in p["pads"])
         for s in (SIDES if tht else (p["side"][0],)):
+            for cj in range(max(0, int((c[1] - y0) // grid)), int((c[3] - y0) // grid) + 1):
+                for ci in range(max(0, int((c[0] - x0) // grid)), int((c[2] - x0) // grid) + 1):
+                    w = min(c[2], x0 + (ci + 1) * grid) - max(c[0], x0 + ci * grid)
+                    h = min(c[3], y0 + (cj + 1) * grid) - max(c[1], y0 + cj * grid)
+                    if w > 0 and h > 0 and w * h > single[s].get((ci, cj), 0.0):
+                        single[s][(ci, cj)] = w * h
             _fill(occ[s], x0, y0, c)
             if ref in fixed or p.get("locked"):
                 _fill(fixm[s], x0, y0, c)
@@ -310,15 +317,17 @@ def usage(B, cons, spec=None, grid=CELL):
         for j in range(0, ny, k):
             for i in range(0, nx, k):
                 a = avail[j:j + k, i:i + k]
-                if a.sum() * cell < 0.25 * grid * grid:
+                if a.sum() * cell < 0.5 * grid * grid:             # an edge sliver is not a region
                     continue
                 cover = float((occ[s][j:j + k, i:i + k] & a).sum()) / float(a.sum())
-                cells.append({"x": round(x0 + i * RAST, 2), "y": round(y0 + j * RAST, 2), "cover": cover,
+                big = single[s].get((i // k, j // k), 0.0) >= 0.5 * float(a.sum()) * cell      # one courtyard covers half the cell: a big part's cell, not crowding
+                cells.append({"x": round(x0 + i * RAST, 2), "y": round(y0 + j * RAST, 2), "cover": cover, "big": big,
                               "free": bool((free_m[s][j:j + k, i:i + k] & a).any())})
         res["sides"][s] = {"usable_mm2": u, "fixed_mm2": float((fixm[s] & inside & ~closed[s]).sum()) * cell,
                            "closed_mm2": float((inside & closed[s]).sum()) * cell, "load_mm2": load[s], "parts": nparts[s],
                            "util": load[s] / u if u > 0 else (math.inf if load[s] else 0.0), "cells": cells,
-                           "hot": [c for c in cells if c["free"] and c["cover"] >= lim["cell_fail"]]}
+                           "hot": [c for c in cells if c["free"] and not c["big"] and c["cover"] >= lim["cell_fail"]],
+                           "big": [c for c in cells if c["big"] and c["cover"] >= lim["cell_fail"]]}
     # parts that could move F -> B: small, free, on the front, eligible under the sides policy
     elig, ea = [], 0.0
     if BS.active(cons):
@@ -359,15 +368,20 @@ def shortfall(B, cons, spec, u, overflow=None):
     except Exception:                                       # noqa: BLE001 - a clusters failure must not hide the density figure
         far, far_refs = {s: {} for s in SIDES}, set()
     esc = {s: 0.0 for s in SIDES}
+    dense = {s: 0.0 for s in SIDES}                                 # free dense parts' courtyards (their routing share is already in load / target)
+    from . import modules as MD0
+    fx = MD0.fixed_set(B, cons)
     for ref, p in B["parts"].items():
         if EP.is_mech(ref) or not EP.is_fine(p, pr):
             continue
+        if ref not in fx and not p["tht"]:
+            dense[p["side"][0]] += _area(p)
         n = len([q for q in p["pads"] if not q.get("np")])
         pitch = EP.part_pitch(p)
         if not p["tht"]:
             esc[p["side"][0]] += n * min(pitch, 1.0) * lim["escape_reach_mm"]
     return {"far_refs": sorted(far_refs), "far_by_cell": far, "far": {s: sum(v.values()) for s, v in far.items()},
-            "overflow": overflow, "escape_mm2": esc}
+            "overflow": overflow, "escape_mm2": esc, "dense_court_mm2": dense}
 
 
 def verdicts(u, sf):
@@ -419,7 +433,9 @@ def line(u, sf=None, vd=None):
     e = u["eligible"]
     elig = (f"movable small parts F->B eligible: {e['n']} ({e['mm2']:.0f} mm2)" if e["policy"] in ("both", "both-light-back")
             else "movable small parts F->B eligible: none (sides policy " + (e["policy"] or "not set") + ")")
-    s = f"density: {side('F')}, {side('B')}; {len(hot)} hot cells (>= {lim['cell_fail'] * 100:.0f} %)" + (f": {show}" if show else "") + "; " + elig
+    nbig = sum(len(sd[x]["big"]) for x in SIDES)
+    s = (f"density: {side('F')}, {side('B')}; {len(hot)} hot cells (>= {lim['cell_fail'] * 100:.0f} %)" + (f": {show}" if show else "")
+         + (f" (+{nbig} big-part cells, not counted)" if nbig else "") + "; " + elig)
     if sf is not None:
         s += f"; far supports F {sf['far']['F']} B {sf['far']['B']}, escape F {sf['escape_mm2']['F']:.0f} mm2"
     if vd is not None:
@@ -456,14 +472,20 @@ def suggest(B, cons, spec, u, sf, order=None):
     lim = u["limits"]
     A0 = u["outline_mm2"]
     req = {}
+    moved = u["eligible"]["mm2"] if u["eligible"]["n"] else 0.0                  # the back takes the eligible small parts first
+    loads = {"F": u["sides"]["F"]["load_mm2"] - moved, "B": u["sides"]["B"]["load_mm2"] + moved}
     for s in SIDES:
         d = u["sides"][s]
-        req[s] = d["load_mm2"] / lim["target"] + d["fixed_mm2"] + d["closed_mm2"] + lim["escape_k"] * sf["escape_mm2"][s]
+        # the free courtyards / target already contain the routing share (1/target - 1) of every ordinary part; a dense part needs escape
+        # lanes on top of that share, so only the excess of its lanes over the share it already got is added (routing counted once)
+        allow = max(0.0, lim["escape_k"] * sf["escape_mm2"][s] - (1.0 / lim["target"] - 1.0) * sf.get("dense_court_mm2", {}).get(s, 0.0))
+        req[s] = loads[s] / lim["target"] + d["fixed_mm2"] + d["closed_mm2"] + allow
     need = max(req.values())
     x0, y0, x1, y1 = u["bbox"]
     W, H = x1 - x0, y1 - y0
     out = {"required_mm2": {s: round(v, 1) for s, v in req.items()}, "needed_outline_mm2": round(need, 1), "outline_mm2": round(A0, 1),
-           "formula": f"per side: free courtyards / {lim['target']:g} + fixed courtyards + closed areas + {lim['escape_k']:g} x sum(dense pins x pitch x {lim['escape_reach_mm']:g} mm); outline = larger side",
+           "formula": (f"per side: (free courtyards, eligible small parts counted on the back) / {lim['target']:g} + fixed courtyards + closed areas + "
+                    f"max(0, {lim['escape_k']:g} x sum(dense pins x pitch x {lim['escape_reach_mm']:g} mm) - ({1 / lim['target'] - 1:g}) x dense free courtyards); outline = larger side"),
            "size_mm": [round(W, 2), round(H, 2)]}
     lim_wh, lim_src = enclosure_limit(B, cons, spec)
     out["limit"] = {"max_mm": lim_wh, "source": lim_src}
@@ -613,13 +635,14 @@ def options(B, cons, spec, rep):
         in_hot = sum(_area(parts[r]) for r in mv if sd(r) == "F" and key(r) in hotk["F"])
         in_far = sum(_area(parts[r]) for r in mv if key(r) in farc[sd(r)])
         fx = {"util": ("yes" if all(pu[s] < lim["warn"] for s in SIDES) else "helps" if any(pu[s] < base_u[s] - 1e-9 for s in SIDES) else "no") if meas["util"] else "n/a",
-              "hot": ("yes" if (in_hot >= excess_hot or (grow_added and all(pu[s] < lim["warn"] for s in SIDES))) else "helps" if (in_hot > 0 or grow_added) else "no") if meas["hot"] else "n/a",
-              "far": ("yes" if (in_far >= far_need or (grow_added and all(pu[s] < lim["warn"] for s in SIDES))) else "helps" if (in_far > 0 or grow_added) else "no") if meas["far"] else "n/a",
+              "hot": ("yes" if in_hot >= excess_hot else "helps" if (in_hot > 0 or grow_added) else "no") if meas["hot"] else "n/a",
+              "far": ("yes" if in_far >= far_need else "helps" if (in_far > 0 or grow_added) else "no") if meas["far"] else "n/a",
               "overflow": ("yes" if (layers or (grow_added and all(pu[s] < lim["warn"] for s in SIDES))) else "helps" if (mv or grow_added) else "no") if meas["overflow"] else "n/a"}
         pv = sv(pu, fx)
         relief = sum(max(0.0, base_u[s] - lim["warn"]) - max(0.0, pu[s] - lim["warn"]) for s in SIDES) + 0.1 * sum(1 for v in fx.values() if v == "yes")
         return {"key": okey, "tag": tag, "label": label, "text": text, "cost": COST[tag], "relief": round(relief, 4), "predicted": pv, "fixes": fx,
-                "parts": sorted(parts_ or mv), "all_ok": all(v["verdict"] == "ok" for v in pv.values())}
+                "parts": sorted(parts_ or mv), "all_ok": all(v["verdict"] == "ok" for v in pv.values()),
+                "reaches_ok": all(v["util"] < lim["warn"] for v in pv.values()) and all(x != "no" for x in fx.values())}
 
     out = []
     # (a) back fill with relaxed limits
@@ -707,6 +730,7 @@ def options(B, cons, spec, rep):
         o["predicted"] = sv(pu, o["fixes"])
         o["relief"] = round(sum(max(0.0, base_u[s] - lim["warn"]) - max(0.0, pu[s] - lim["warn"]) for s in SIDES) + 0.1 * sum(v == "yes" for v in o["fixes"].values()), 4)
         o["all_ok"] = all(v["verdict"] == "ok" for v in o["predicted"].values()) and all(v in ("yes", "n/a") for v in o["fixes"].values())
+        o["reaches_ok"] = all(v["util"] < lim["warn"] for v in o["predicted"].values()) and all(x != "no" for x in o["fixes"].values())
         out.append(o)
     # (c) fewer parts: resistor arrays for runs of one value on one IC, decaps above one per supply pin
     try:
@@ -764,9 +788,9 @@ def options(B, cons, spec, rep):
     if meas["overflow"] or meas["hot"] or meas["far"]:
         out.append(build("e", "e-layers", f"more layers ({nl} -> {nl + 2})",
                          "routing relief only, no area relief; the owner prefers growing the board before adding layers", layers=True))
-    ok = [o for o in out if o["all_ok"] and o.get("within_limit", True)]
+    ok = [o for o in out if o["reaches_ok"] and o.get("within_limit", True)]       # a growth that fixes the utilisation and no measure it leaves untouched
     for o in out:
-        o["rank_key"] = (-(o["relief"] / o["cost"]), o["cost"], o["key"])
+        o["rank_key"] = (o["tag"] == "e", -(o["relief"] / o["cost"]), o["cost"], o["key"])       # more layers is always last (the owner grows the board first)
     out.sort(key=lambda o: o["rank_key"])
     for o in out:
         o.pop("rank_key")

@@ -138,6 +138,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         from . import density as DN
         u0 = DN.usage(B, cons, spec)["sides"]["F"]
         bk.prefer = u0["util"] >= DN.limits(cons)["warn"] or bool(u0["hot"])
+        bk.dense = (cons.get("placement") or {}).get("back_fill") == "max" or bk.prefer       # the density-driven fill (clusters.seat dense mode, backfill.run)
     unit = []
     base0 = orig = None
     if arrange:
@@ -153,6 +154,13 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         for r in isolated:
             L.refresh(r)
         _remeasure(B, cl)
+        if bk is not None and getattr(bk, "dense", False):      # (b) every back-eligible support, not only the far ones, tries the back directly under its owner's pin
+            sup_ok = {s["ref"] for c in cl if not c.get("layout") for s in c["supports"] if s["sure"] and s["ref"] not in fixed | isolated | set(unseat) and bk(s["ref"])}
+            bk.only_back = True
+            CL.reseat(B, cl, everything=True, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
+                      flips=flips, refused={}, back=bk, only=sup_ok)
+            bk.only_back = False
+            _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
                       flips=flips, refused=refused, back=bk, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
@@ -252,6 +260,11 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
             return True
         legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict, back=bk)
         L = LGL.Legal(B, cons, fixed)
+        backfilled = None
+        if bk is not None and getattr(bk, "dense", False):      # (c) free single parts and (d) whole modules, hottest cells first
+            from . import backfill as BF
+            backfilled = BF.run(B, cons, spec, mods, of, fixed, bk, L, flips, LG.known(base0), log=log)
+            _remeasure(B, cl)
         own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
         unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
                 for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
@@ -267,6 +280,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         mod = {"name": key, "anchor": m["anchor"], "members": mem, "fixed": bool(m["anchor"] in fixed or MECH.match(m["anchor"])),
                "pos": [round(ax, 4), round(ay, 4)], "angle": round(a["angle"], 4), "side": a["side"],
                "fixed_members": sorted(r for r in m["refs"] if r in fixed and r != m["anchor"])}
+        if m.get("mirror"):
+            mod["mirror"] = True                                  # mirrored to the back as a unit (backfill.py): the input's escape copper is its mirror image
         if bl is not None:
             mod["block"] = bl.get(m["anchor"])
         _geometry(B, mod)
@@ -291,7 +306,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
                         q = B["parts"][s["ref"]]["court"]
                         mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
-    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
+    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips), "backfill": backfilled if arrange else None,
             "unseated": CL.unseated(cl, fixed, refused) + [{"ref": r, "dist": 0.0, "ic": "", "pad": "", "limit": 0.0, "why": "input pose kept: " + "; ".join(w[:2])}
                                                           for r, w in sorted(legalised.items()) if r not in refused], "unit_illegal": unit, "legalised": legalised}
 

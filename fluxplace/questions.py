@@ -520,7 +520,7 @@ def crowding_options(B, cons, spec, rep=None, **kw):
     return rep, ops, default
 
 
-def ask_crowding(S, B, cons, spec, rep=None, out=print, **kw):
+def ask_crowding(S, B, cons, spec, rep=None, out=print, only_util_hot=False, **kw):
     """`crowding`: one owner question when a side stays warn / fail (after the back fill in the floorplan, as measured in ready). Options are
     ranked by predicted relief per cost and each carries this board's numbers; default = the cheapest option whose predicted verdict is ok on
     every side and measure, else keep. Nothing is applied here: (a) is applied by an ANSWER on the next run (`apply_crowding_answer`), (d) is
@@ -529,6 +529,9 @@ def ask_crowding(S, B, cons, spec, rep=None, out=print, **kw):
     vd = rep["verdicts"]
     if all(v["verdict"] == "ok" for v in vd.values()):
         return None, rep, ops
+    lim = rep["usage"]["limits"]
+    if only_util_hot and not any(rep["usage"]["sides"][s]["util"] >= lim["warn"] or rep["usage"]["sides"][s]["hot"] for s in vd):
+        return None, rep, ops                              # ready: far supports alone are the floorplan's to seat, not an owner question
     ans = S.cli.get("crowding", S.cons_ans.get("crowding", S.map_ans.get("crowding")))
     if ans is not None and (ans == "keep" or any(o["key"] == ans for o in ops) or ans.startswith(("a-", "grow-"))):
         S.used["crowding"] = ans
@@ -565,6 +568,9 @@ def apply_crowding_answer(S):
     if m:
         S.used["crowding"] = a
         S.appliers.append((lambda box, ch: box["cons"].setdefault("placement", {}).__setitem__("back_max_height_mm", float(m.group(1))), a))
+    elif str(a or "") == "a-fill":
+        S.used["crowding"] = a
+        S.appliers.append((lambda box, ch: box["cons"].setdefault("placement", {}).__setitem__("back_fill", "max"), a))
     elif str(a or "").startswith("a-heavy:"):
         names = [x for x in str(a).split(":", 1)[1].split("+") if x]
         S.used["crowding"] = a
@@ -574,7 +580,7 @@ def apply_crowding_answer(S):
 
 def check_crowding(S, B, cons, spec=None, **_):
     """ready: the crowding of the board as it is (the back fill has not run yet); asks when a side is warn / fail"""
-    ask_crowding(S, B, cons, spec, out=lambda *a, **k: None)
+    ask_crowding(S, B, cons, spec, out=lambda *a, **k: None, only_util_hot=True)
 
 
 CHECKS = {"layer-roles": check_layer_roles, "controlled": check_controlled, "rip-existing": check_rip_existing,
