@@ -33,6 +33,8 @@ from .redact import urlopen as _redact_urlopen, redact as _redact
 from .models import credentials
 
 CACHE_NAME = ".sourcing_cache.json"
+LOOKUP_BUDGET_S = 120                       # wall budget of one check() (env FLUXPLACE_LOOKUP_BUDGET_S); the rest is UNCHECKED
+NEG_TTL = 3600                              # a failed lookup is remembered this long (s): an outage costs one try per hour, not one per part per run
 PARTDATA_CACHE = ".partdata_cache.json"   # written by partdata.py (same dir)
 CACHE_TTL = 24 * 3600          # stock moves daily, not minutely
 BAD = ("obsolete", "discontinued", "end of life", "eol", "nrnd",
@@ -337,15 +339,28 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             cache = {}
     tok, report, counts = None, {}, {}
     skipped = set()
+    t_start, budget, done = time.time(), float(os.environ.get("FLUXPLACE_LOOKUP_BUDGET_S", LOOKUP_BUDGET_S)), 0
     for mpn in sorted(by_mpn):
         hit = cache.get(mpn)
         errs = []
         req = len(by_mpn[mpn]) * qty if qty else need
         if qty:
             both = True
-        if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
+        if hit and hit.get("_neg") and time.time() - hit.get("_t", 0) < NEG_TTL:
+            dk = mo = None                  # a lookup that failed a moment ago is not repeated (negative cache): UNCHECKED, not a pass
+            errs = list(hit.get("errs") or ["cached failure"])
+        elif hit and not hit.get("_neg") and time.time() - hit.get("_t", 0) < CACHE_TTL:
             dk, mo = hit.get("dk"), hit.get("mo")
+        elif budget and time.time() - t_start > budget:
+            dk = mo = None                  # budget spent: this part is not asked (and not cached): UNCHECKED, the next run resumes here
+            errs = ["lookup budget spent"]
         else:
+            done += 1
+            if done % 10 == 0:
+                try:
+                    json.dump(cache, open(cache_path, "w"))
+                except Exception:
+                    pass
             dk = mo = None
             try:
                 if "DIGIKEY_CLIENT_ID" in creds:
@@ -374,6 +389,8 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             # freeze a transient outage into the report for 24 h
             if not errs:
                 cache[mpn] = {"_t": time.time(), "dk": dk, "mo": mo}
+            else:
+                cache[mpn] = {"_t": time.time(), "_neg": True, "errs": errs}     # short-lived: see NEG_TTL
         verdict, stock = grade(dk, mo, req, errors=errs)
         counts[verdict] = counts.get(verdict, 0) + 1
         report[mpn] = {"refs": by_mpn[mpn], "verdict": verdict,
@@ -492,7 +509,7 @@ def alternates(report, cache, cache_dir, limit=3):
             if cand == mpn or cand in report or not same_spec(target, cdata):
                 continue
             hit = cache.get(cand)
-            if not hit:
+            if not hit or hit.get("_neg"):
                 continue
             if time.time() - hit.get("_t", 0) >= CACHE_TTL:   # same TTL rule as the main lookup
                 stale += 1

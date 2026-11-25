@@ -22,7 +22,8 @@ _RF_TOKENS = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
 
 
 def is_rf(net):
-    return bool(set(re.split(r"[_\-.]", net.upper())) & _RF_TOKENS)
+    from .review import is_rf as _is_rf                  # one rule (review.is_rf), not two
+    return _is_rf(net)
 
 
 # ---------------------------------------------------------------- pairs

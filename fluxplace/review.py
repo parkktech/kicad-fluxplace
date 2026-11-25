@@ -578,12 +578,23 @@ def check_pair_geometry(facts, cons):
 _RF_TOKENS = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
 
 
-def is_rf(net):
+_RF_PIN = re.compile(r"^RF(?:C|\d{1,2})$")        # RFC, RF1 .. RF99: the ports of an RF switch / splitter (RFU, RFID are not)
+
+
+def _rf_token(tok):
+    return tok in _RF_TOKENS or bool(_RF_PIN.match(tok))
+
+
+def is_rf(net, pins=()):
     """A net is RF when a whole underscore-token says so: RF_GNSS, RF_INT_SW,
-    ANT1_RF. ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely
-    contain the letters (stackup.looks_rf matched those — measured on V1.4)."""
+    ANT1_RF, and the RF-port tokens RFC / RF1 / RF2 (BT_SW_RFC). ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely
+    contain the letters (stackup.looks_rf matched those — measured on V1.4). Context (optional): `pins` = the pin names on the
+    net; a pin whose whole name is an RF token (RF, RFC, RF_IN, RFIN, RF1) makes the net RF whatever its name."""
     toks = set(re.split(r"[_\-.]", net.upper()))
-    return bool(toks & _RF_TOKENS)
+    if any(_rf_token(t) for t in toks):
+        return True
+    return any(re.split(r"[_\-.]", str(p).upper())[0] in ("RF", "RFIN", "RFOUT") or str(p).upper() in ("RFC", "RF1", "RF2")
+               for p in pins or ())
 
 
 def check_rf(facts, cons):

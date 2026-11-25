@@ -400,9 +400,9 @@ def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
         return False, round(time.time() - t, 1)
 
 
-def lean_krt(a, board, outdir, budget_min, extra=()):
-    """KRT lean ghost: ONE route.py call over every non-plane net with >= 2 pads on the signal layers; no planes, rails,
-    pairgroups or diff steps. At the cap, the checkpoint the status json names (if it exists), else None."""
+def lean_krt(a, board, outdir, budget_min, extra=(), only=None):
+    """KRT lean ghost: ONE route.py call over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets);
+    no planes, rails, pairgroups or diff steps. At the cap, the checkpoint the status json names (if it exists), else None."""
     import json as _json
     from types import SimpleNamespace
     from . import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routestatus as RS
@@ -415,7 +415,7 @@ def lean_krt(a, board, outdir, budget_min, extra=()):
     for p in RD.load(copy)["pads"]:
         if p["net"]:
             cnt[p["net"]] = cnt.get(p["net"], 0) + 1
-    nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets)
+    nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets and (only is None or n in only))   # only: route just these nets
     out = os.path.join(outdir, "krt-lean.kicad_pcb")
     # --quick 2: route to judge (main pass only; no rescue, escalation, plane finalize, cleanup, late sweeps) - about half
     # the time of level 1, and it writes its output. The wall cap is only a safety (SIGINT does not stop it softly).

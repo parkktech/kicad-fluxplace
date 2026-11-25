@@ -99,9 +99,12 @@ def _net_class(ctx):
         mates[slave], mates[master] = master, slave
     masters = set(graph.diff_pairs(names, exclude=C.not_pairs(cons)).values())
 
+    nets_pins = (ctx.get("spec") or {}).get("nets") or {}
+    pins = lambda n: [p[1] for p in nets_pins.get(n, ()) if isinstance(p, (list, tuple)) and len(p) > 1]
+
     def of(net):
         mate = mates.get(net)
-        if net in rf or mate in rf or RV.is_rf(net):
+        if net in rf or mate in rf or RV.is_rf(net, pins(net)) or (mate and RV.is_rf(mate, pins(mate))):
             return "rf", mate
         if mate:
             master = net if net in masters else mate
@@ -566,7 +569,7 @@ def write_reports(res, outdir, stage, base="placegaps"):
         os.replace(pj + ".tmp", pj)
         md = os.path.join(outdir, base + ".md")
         with open(md, "w") as fh:
-            fh.write("```\n" + table(res, stage) + "\n```\n\n| gap | class | mag | detail |\n|---|---|---|---|\n")
+            fh.write("```\n" + table(res, stage) + "\n" + diagnosis_table(res["gaps"]) + "\n```\n\n| gap | class | mag | detail |\n|---|---|---|---|\n")
             fh.write("\n".join(f"| {g['id']} | {g['class']} | {g['mag']:g} | {g['detail']} |" for g in res["gaps"]) + "\n")
         with open(os.path.join(outdir, "ledger-rows.md" if base == "placegaps" else base + ".ledger-rows.md"), "w") as fh:
             fh.write(_ledger(res, stage))
@@ -576,18 +579,131 @@ def write_reports(res, outdir, stage, base="placegaps"):
         return None
 
 
-def detect_stage(stage, board, cons, spec, outdir, base="placegaps", ds_dir=None, blame=None, parts_gate=None, kinds=None, printer=print):
+def detect_stage(stage, board, cons, spec, outdir, base="placegaps", ds_dir=None, blame=None, parts_gate=None, kinds=None, printer=print,
+                 confirm=None):
     """The one call the stages make. Detect-only: reads the board and stage data, writes report files into `outdir`, prints the
     table. Never writes a board, never raises. -> detect result (+ "line", "report")."""
     try:
         ctx = Ctx(stage=stage, board=board, cons=cons or {}, spec=spec, ds_dir=ds_dir, blame=blame, parts_gate=parts_gate)
         _narr(stage, f"{stage}: measuring placement gaps", "start")
         res = detect(ctx, kinds or SCOPE.get(stage))
+        if blame is not None:
+            diagnose(ctx, res["gaps"], confirm)             # reads the board, may run `confirm` (a router on a scratch copy); writes no board
+            res["errors"].update({k: v for k, v in (ctx.get("errors") or {}).items() if k in ("confirm", "routediag")})
         res["line"] = stage_line(res)
         res["report"] = write_reports(res, outdir, stage, base)
         _narr(stage, narration(res, stage), "end")
         if printer:
-            printer(table(res, stage))
+            printer(table(res, stage) + ("\n" + diagnosis_table(res["gaps"]) if blame is not None else ""))
         return res
     except Exception as e:                              # noqa: BLE001 - detect-only must never fail a stage
         return {"gaps": [], "counts": {}, "classes": {}, "errors": {"*": f"{type(e).__name__}: {e}"}, "line": "gaps not measured", "report": None}
+
+
+# ------------------------------------------------------------------ phase 1: class terms of a judge, diagnosis of a ghost-open gap
+def open_terms(board, blame, cons, spec):
+    """(hs_open, rf_open, power_open) of a judge blame on `board`: the same gaps `detect_ghost` makes (a pair is one gap)."""
+    ctx = Ctx(stage="placetour", board=board, cons=cons or {}, spec=spec, blame=blame)
+    t = score_terms(detect_ghost(ctx) or [])
+    return t["hs_open"], t["rf_open"], t["power_open"]
+
+
+def critical(gaps):
+    """The ghost-open gaps that fail a placement stage: an hs pair or an rf net unrouted."""
+    return [g for g in gaps if g["kind"] == "ghost-open" and g["class"] in ("hs-pair", "rf")]
+
+
+def _rules(ctx, g):
+    """-> (track mm, clearance mm, width mm of the corridor): 2w + gap + 2 clr for a pair (family numbers from [pairs.*]), else w + 2 clr."""
+    from . import budget as BG, routerules as RR
+    R = RR.rules(ctx["cons"], None, B=ctx.B())
+    w, clr = float(R["track"]), float(R["clearance"])
+    if g["class"] in ("hs-pair", "pair"):
+        fams = ctx["cons"].get("pairs") or {}
+        fam = BG.family_of(fams, g["nets"][0]) if g["nets"] else None
+        f = fams.get(fam) or {}
+        w, gap_mm = float(f.get("width_mm", w)), float(f.get("gap_mm", clr))
+        return w, clr, 2 * w + gap_mm + 2 * clr
+    return w, clr, w + 2 * clr
+
+
+def corridor(ctx, g):
+    """Flight lines (MST over the pads of the gap's nets, only the edges that reach a disconnected part) as rects of the derived
+    width -> {"rects": [...], "len_mm": float, "width_mm": float}."""
+    from . import budget as BG, escreserve as ES
+    B = ctx.B()
+    _w, _c, width = _rules(ctx, g)
+    rects, total = [], 0.0
+    for net in g["nets"]:
+        pts = {(p["ref"], p["num"]): (p["x"], p["y"]) for p in B["pads"] if p["net"] == net}
+        for a, b, d in BG.mst_edges(pts):
+            if g["refs"] and a[0] not in g["refs"] and b[0] not in g["refs"]:
+                continue
+            total += d
+            rects += ES.seg_rects(pts[a], pts[b], width)
+    return {"rects": rects, "len_mm": round(total, 2), "width_mm": round(width, 3)}
+
+
+def blockers(ctx, g, corr):
+    """Parts whose courtyard cuts a corridor rect on a side an endpoint pad is on (or through-hole), endpoints excluded, smallest
+    courtyard first -> [{"ref", "movable", "area"}]."""
+    from . import geom as GM, placetour as PT
+    B = ctx.B()
+    ends = {p["ref"] for p in B["pads"] if p["net"] in g["nets"]}
+    sides = {B["parts"][r]["side"] for r in ends if r in B["parts"]}
+    mov = set(PT._movable(B, ctx["cons"], PT.params(ctx["cons"])))
+    out = {}
+    for ref, p in B["parts"].items():
+        if ref in ends or not (p["side"] in sides or p.get("tht")):
+            continue
+        if any(GM.overlap(r, p["court"], -0.02) for r in corr["rects"]):
+            c = p["court"]
+            out[ref] = {"ref": ref, "movable": ref in mov, "area": round((c[2] - c[0]) * (c[3] - c[1]), 2)}
+    return sorted(out.values(), key=lambda x: (x["area"], x["ref"]))
+
+
+def diagnose(ctx, gaps, confirm=None):
+    """Fills cause / blockers / routediag causes / corridor on every ghost-open gap; no board change.
+    confirm(nets) -> set of those nets still open when routed ALONE on the placed board (None: not run).
+      routed alone but open in the judge  -> cause "order" (room exists; the competition for it lost; ladder starts at `reserve`)
+      open alone too                       -> cause "blocked" (the placement leaves no way; ladder starts at `unblock`)"""
+    from . import routediag as RDG
+    todo = [g for g in gaps if g["kind"] == "ghost-open"]
+    crit = [g for g in todo if g["class"] in ("hs-pair", "rf", "power")]
+    still = None
+    if confirm is not None and crit:
+        try:
+            still = confirm(sorted({n for g in crit for n in g["nets"]}))
+        except Exception as e:                              # noqa: BLE001
+            ctx.setdefault("errors", {})["confirm"] = f"{type(e).__name__}: {e}"
+    B = ctx.B()
+    try:
+        rd = {n["net"]: n["causes"] for n in RDG.diagnose(B, sorted({n for g in todo for n in g["nets"]}), ctx["cons"], ctx["spec"])["nets"]}
+    except Exception as e:                                  # noqa: BLE001
+        rd = {}
+        ctx.setdefault("errors", {})["routediag"] = f"{type(e).__name__}: {e}"
+    for g in todo:
+        c = corridor(ctx, g)
+        bl = blockers(ctx, g, c)
+        g["corridor_mm"], g["width_mm"] = c["len_mm"], c["width_mm"]
+        g["blockers"] = [b["ref"] for b in bl]
+        g["blockers_movable"] = [b["ref"] for b in bl if b["movable"]]
+        g["causes"] = sorted({x["cause"] for n in g["nets"] for x in rd.get(n, [])})
+        if g in crit and still is not None:
+            g["cause"] = "blocked" if set(g["nets"]) & set(still) else "order"
+        elif g in crit:
+            g["cause"] = "unconfirmed"
+        else:
+            g["cause"] = "not-confirmed"                     # plain nets: corridor and blockers reported, no router run for them
+    return todo
+
+
+def diagnosis_table(gaps):
+    rows = [g for g in gaps if g["kind"] == "ghost-open" and "cause" in g]
+    if not rows:
+        return ""
+    out = ["  ghost-open diagnosis (net: class, cause, blocking parts, routediag causes):"]
+    for g in rows:
+        out.append(f"    {'/'.join(g['nets'])}: {g['class']}, {g['cause']}, blockers [{', '.join(g['blockers'][:8]) or '-'}]"
+                   f" (movable {len(g['blockers_movable'])}), corridor {g['corridor_mm']:g} mm x {g['width_mm']:g}, causes [{', '.join(g['causes']) or '-'}]")
+    return "\n".join(out)

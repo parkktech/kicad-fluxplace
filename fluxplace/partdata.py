@@ -36,6 +36,8 @@ from . import sourcing as S
 
 CACHE_NAME = ".partdata_cache.json"
 CACHE_TTL = 7 * 24 * 3600
+BUDGET_S = 120                              # wall budget of one fetch (env FLUXPLACE_LOOKUP_BUDGET_S): the rest is UNCHECKED, a rerun resumes from the cache
+NEG_TTL = 3600                              # a part nobody could describe is not asked again for this long (s)
 
 __all__ = ["fetch", "parse_temp_range", "parse_pins", "parse_clamp_v", "normalize"]
 
@@ -239,11 +241,22 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
         except Exception:
             cache = {}
     tok = None
+    t_start, budget, left, done = time.time(), float(os.environ.get("FLUXPLACE_LOOKUP_BUDGET_S", BUDGET_S)), 0, 0
     for mpn in sorted(set(mpns)):
         hit = cache.get(mpn)
-        if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
+        if hit and time.time() - hit.get("_t", 0) < (NEG_TTL if hit.get("_neg") else CACHE_TTL):
             out[mpn] = hit.get("data")
             continue
+        if budget and time.time() - t_start > budget:      # not asked, not cached: unchecked, and the next run starts here
+            out[mpn] = None
+            left += 1
+            continue
+        done += 1
+        if done % 10 == 0:                                  # progress survives a killed run
+            try:
+                json.dump(cache, open(cache_path, "w"), indent=1)
+            except Exception:
+                pass
         dk = mo = None
         if have_dk:
             try:
@@ -286,8 +299,12 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             if mo and dk:
                 data["source"] = "digikey+mouser"
         out[mpn] = data
-        if data is not None:                        # never cache an outage
+        if data is not None:
             cache[mpn] = {"_t": time.time(), "data": data}
+        else:                                       # an outage is remembered briefly (NEG_TTL), never for the 7 days of a real answer
+            cache[mpn] = {"_t": time.time(), "_neg": True, "data": None}
+    if left:
+        log(f"    partdata: lookup budget {budget:g} s spent, {left} part(s) UNCHECKED (rerun continues from the cache)")
     try:
         json.dump(cache, open(cache_path, "w"), indent=1)
     except Exception:

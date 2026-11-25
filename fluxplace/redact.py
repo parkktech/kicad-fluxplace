@@ -39,19 +39,47 @@ def redact(text):
     return out
 
 
+_DOWN = {}            # host -> [consecutive network failures, down-until epoch]: the per-process negative cache of a dead host
+
+
+def _limits():
+    import os
+    f = lambda k, d: float(os.environ.get(k, d))
+    return f("FLUXPLACE_HTTP_TIMEOUT", 15), int(f("FLUXPLACE_HTTP_DOWN_AFTER", 2)), f("FLUXPLACE_HTTP_DOWN_S", 300)
+
+
+def _host(req):
+    import urllib.parse
+    return urllib.parse.urlsplit(getattr(req, "full_url", None) or str(req)).hostname or ""
+
+
 def urlopen(req, timeout=30):
     """urllib.request.urlopen whose failures carry no credentials. HTTPError keeps its type (callers branch on
     .code); other exceptions are re-raised with the same type when constructible, else as RuntimeError. The
     replacement is raised with no __cause__ and no __context__, so the original (unredacted) exception and its
-    URL are not reachable from the traceback."""
+    URL are not reachable from the traceback.
+    Bounded: one request waits at most FLUXPLACE_HTTP_TIMEOUT s (default 15); a host that fails FLUXPLACE_HTTP_DOWN_AFTER (2)
+    times in a row at the network level (timeout, DNS, refused; an HTTP status is an answer) is skipped for
+    FLUXPLACE_HTTP_DOWN_S (300) s, so a dead distributor costs two timeouts, not one per part."""
+    import time
+    cap, after, down_s = _limits()
+    host = _host(req)
+    st = _DOWN.get(host)
+    if st and st[1] > time.time():
+        raise urllib.error.URLError(f"{host} skipped: {st[0]} network failures in a row (negative cache, {int(st[1] - time.time())} s left)")
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        r = urllib.request.urlopen(req, timeout=min(timeout, cap))
+        _DOWN.pop(host, None)
+        return r
     except urllib.error.HTTPError as e:
+        _DOWN.pop(host, None)
         if e.url:
             e.url = redact(e.url)
         e.msg = redact(e.msg)
         raise
     except Exception as e:
+        n = (_DOWN.get(host) or [0, 0])[0] + 1
+        _DOWN[host] = [n, time.time() + down_s if n >= after else 0]
         text = redact(f"{type(e).__name__}: {e}")
         try:
             new = type(e)(redact(str(e)))
