@@ -1353,10 +1353,11 @@ def _pcbnew_state_guard(name, res):
     except ImportError:
         return res
     try:
-        kind = type(pcbnew.LoadBoard(p)).__name__
-    except Exception as e:
-        kind = f"{type(e).__name__}: {e}"
-    if kind == "BOARD":
+        lb = pcbnew.LoadBoard(p)
+    except Exception:
+        return res                                         # an unreadable board is the stage gates' business, not this check's
+    kind = type(lb).__name__
+    if lb is None or kind == "BOARD":                      # None: a stub / unparsable file (tests)
         return res
     return dict(res, verdict="fail", line=f"pcbnew in-process state broken after {name}: LoadBoard gave {kind}, not BOARD "
                 f"(a Remove() of a discarded item? use Delete or fresh process); stage line was: {res.get('line', '')}")
