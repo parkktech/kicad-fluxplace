@@ -30,6 +30,8 @@ def load(a, need_board=False):
     from . import constraints as C, review as R, parts as P, sourcing as S
     spec = json.load(open(a.spec))
     cons = C.load(getattr(a, "constraints", None))
+    from . import redact as _RD
+    _RD.configure(cons)                        # [parts] http_* / lookup_budget_s: the limits of the distributor lookups
     board = getattr(a, "board", None)
     if need_board and not board:
         raise SystemExit(f"{a.cmd}: --board is required")

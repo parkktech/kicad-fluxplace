@@ -149,8 +149,8 @@ def class_key(routed_board, blame, cons=None, spec=None):
         from . import placegaps as PG
         return tuple(PG.open_terms(routed_board, blame, cons, spec)) + base
     except Exception as e:                                # noqa: BLE001 - classes unknown: say so, rank as plain
-        print(f"placetour: open nets not classed ({type(e).__name__}: {e}); ranked as plain")
-        return (0, 0, 0) + base
+        print(f"placetour: open nets not classed ({type(e).__name__}: {e}); the key ranks WORST")
+        return (WORST, WORST, WORST) + base
 
 
 # ------------------------------------------------------------------ P2 move generator
@@ -598,7 +598,7 @@ def _row(r, cid, kind, moved, t1key, jkey, png, verdict):
 
 def _report(path, P, start, end, accepted, removed_refs, groups, rounds_log):
     L = ["# PLACETOUR report", "", "| | input | output |", "|---|---|---|"]
-    names = ("judge opens (signal)", "hot areas", "hot occupancy", "vias", "detour sum")
+    names = ("hs-pair opens", "rf opens", "power opens", "judge opens (signal)", "hot areas", "hot occupancy", "vias", "detour sum")    # = class_key, in order
     for i, nm in enumerate(names):
         L.append(f"| {nm} | {start[i]} | {end[i]} |")
     L += ["", "## rounds", "| round | candidates | tier-1 survivors | judged | winner | judge key | verdict |", "|---|---|---|---|---|---|---|"]
@@ -745,10 +745,12 @@ def stage(c, n, board):
     from . import placegaps as PG                                  # detect-only (PLAN-PLACE-GAPS phase 0): gap table of the result, no board change
     pg = PG.detect_stage("placetour", out, cons, spec, d, ds_dir=ds_dir, blame=best["blame"], confirm=_confirm(a, out, d, P))
     nxt.append(pg["line"])
-    crit = PG.critical(pg["gaps"])
-    if crit:                                                                  # hs / rf unrouted after the tournament: the stage fails
-        nxt.append("FAIL: " + "; ".join(f"{g['class']} {'/'.join(g['nets'])} ghost-unrouted ({g.get('cause', '?')}, blockers "
-                                         f"{','.join(g.get('blockers', [])[:6]) or '-'})" for g in crit))
+    crit_gaps = PG.critical(pg["gaps"])
+    fatal = [x for x in crit_gaps if x.get("cause") == "blocked"]           # fail only where the router alone could not route it either
+    if crit_gaps:
+        nxt.append(("FAIL: " if fatal else "WARN: ") + "; ".join(
+            f"{x['class']} {'/'.join(x['nets'])} ghost-unrouted ({x.get('cause', '?')}, blockers {','.join(x.get('blockers', [])[:6]) or '-'})"
+            for x in crit_gaps))
     LV.candidate("placetour", "result", out, None, _lv(best["key"]), hon["criteria"], cons, ex, board=out, lane="accepted", phase="gate", arm="move", full=True)
     if LV.work():                                # F16: the owner's view of the result; until the hard gate exists (F7) it is recorded, not enforced
         _b, _c, fb = LV.stage_start(out, cons, spec, "placetour", d, apply=False)
@@ -761,9 +763,9 @@ def stage(c, n, board):
         ex.close()
     if removed_refs:
         nxt.append("re-escape moved parts: fanout --parts " + ",".join(sorted(removed_refs)))
-    verdict = "fail" if crit else "pass" if best["routed"] else "warn"
-    if crit:
-        line += "; FAIL: " + ", ".join("/".join(g["nets"]) for g in crit) + " ghost-unrouted"
+    verdict = "fail" if fatal else "warn" if crit_gaps or not best["routed"] else "pass"
+    if crit_gaps:
+        line += f"; {'FAIL' if fatal else 'WARN'}: " + ", ".join("/".join(x["nets"]) for x in crit_gaps) + " ghost-unrouted"
     return {"verdict": verdict, "line": line, "board": out, "next": nxt}
 
 
@@ -772,9 +774,10 @@ def _confirm(a, board, outdir, P):
     def run(nets):
         from . import gaps as G
         d = LA._mk(os.path.join(outdir, "confirm"))
-        routed = LA.lean_krt(a, board, d, P["judge_min"], only=set(nets))
-        if routed is None:
-            raise RuntimeError("router gave no board")
+        info = {}
+        routed = LA.lean_krt(a, board, d, P["judge_min"], only=set(nets), info=info)
+        if routed is None or not info.get("complete"):
+            raise RuntimeError("router gave no board" if routed is None else "router hit its cap: not a finished answer")   # -> cause "unconfirmed"
         return set(nets) & G._krt_open(routed, getattr(a, "constraints", None))
     return run
 

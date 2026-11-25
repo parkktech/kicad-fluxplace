@@ -578,23 +578,36 @@ def check_pair_geometry(facts, cons):
 _RF_TOKENS = {"RF", "RFIN", "RFOUT", "COAX", "UFL", "LNA", "ANTENNA"}
 
 
-_RF_PIN = re.compile(r"^RF(?:C|\d{1,2})$")        # RFC, RF1 .. RF99: the ports of an RF switch / splitter (RFU, RFID are not)
+_RF_PORT = re.compile(r"^RF(?:C|\d{1,2})$")           # RFC, RF1 .. RF99: the ports of an RF switch / splitter (RFU, RFID are not)
+_RF_PIN_TOKENS = _RF_TOKENS | {"RFIO", "ANT", "ANT1", "ANT2"}
+# a token that makes a name a control, strap or supply line whatever else it says: RF_EN, RFC_CTRL, SW_RF1_SEL, RF_3V3, VCC_RF, RF_GND
+_NOT_RF = {"EN", "ENA", "ENABLE", "SEL", "SELECT", "CTRL", "CTL", "DET", "DETECT", "GND", "AGND", "DGND", "VCC", "VDD", "VSS", "VBAT", "VIN",
+           "VOUT", "PWR", "POWER", "SUPPLY", "BIAS"}
+_VOLT = re.compile(r"^\d+V\d*$|^V\d+(?:V\d+)?$")
 
 
-def _rf_token(tok):
-    return tok in _RF_TOKENS or bool(_RF_PIN.match(tok))
+def _tokens(name):
+    return [t for t in re.split(r"[_\-./\s]+", str(name).upper()) if t]
+
+
+def _is_control(toks):
+    return any(t in _NOT_RF or _VOLT.match(t) for t in toks)
 
 
 def is_rf(net, pins=()):
-    """A net is RF when a whole underscore-token says so: RF_GNSS, RF_INT_SW,
-    ANT1_RF, and the RF-port tokens RFC / RF1 / RF2 (BT_SW_RFC). ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely
-    contain the letters (stackup.looks_rf matched those — measured on V1.4). Context (optional): `pins` = the pin names on the
-    net; a pin whose whole name is an RF token (RF, RFC, RF_IN, RFIN, RF1) makes the net RF whatever its name."""
-    toks = set(re.split(r"[_\-.]", net.upper()))
-    if any(_rf_token(t) for t in toks):
+    """A net is RF when a whole token of its name says so: RF_GNSS, RF_INT_SW, ANT1_RF, BT_SW_RFC (RF-port tokens RFC / RF1..RF99),
+    a /RF/ sheet path. ANT_SEL / ANT_DET / PWRFAIL are DC lines whose NAMES merely contain the letters (stackup.looks_rf matched
+    those, measured on V1.4), and a control, strap or supply token (EN SEL CTRL DET GND, a rail voltage, VCC, VDD ...) makes the
+    net not RF: RF_EN, RFC_CTRL, SW_RF1_SEL, RF_3V3, VCC_RF, RF_GND. Context (optional): `pins` = the pin names on the net; the
+    same token rule applied to a pin name (RF, RFC, RFIO, RF_IN, GNSS_ANT) makes the net RF whatever its own name."""
+    toks = _tokens(net)
+    if not _is_control(toks) and any(t in _RF_TOKENS or _RF_PORT.match(t) for t in toks):
         return True
-    return any(re.split(r"[_\-.]", str(p).upper())[0] in ("RF", "RFIN", "RFOUT") or str(p).upper() in ("RFC", "RF1", "RF2")
-               for p in pins or ())
+    for p in pins or ():
+        pt = _tokens(p)
+        if pt and not _is_control(pt) and any(t in _RF_PIN_TOKENS or _RF_PORT.match(t) for t in pt):
+            return True
+    return False
 
 
 def check_rf(facts, cons):

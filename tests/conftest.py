@@ -16,8 +16,10 @@ def _http_breaker_reset():
     """redact.urlopen remembers a dead host per process; a test that fails a host must not poison the next one."""
     from fluxplace import redact
     redact._DOWN.clear()
+    redact._CFG.clear()
     yield
     redact._DOWN.clear()
+    redact._CFG.clear()
 
 
 @pytest.fixture(autouse=True)

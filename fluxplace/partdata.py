@@ -29,14 +29,13 @@ import time
 import urllib.error
 import urllib.request
 
-from .redact import urlopen as _redact_urlopen, redact as _redact
+from .redact import urlopen as _redact_urlopen, redact as _redact, setting as _redact_setting
 
 from .models import credentials
 from . import sourcing as S
 
 CACHE_NAME = ".partdata_cache.json"
 CACHE_TTL = 7 * 24 * 3600
-BUDGET_S = 120                              # wall budget of one fetch (env FLUXPLACE_LOOKUP_BUDGET_S): the rest is UNCHECKED, a rerun resumes from the cache
 NEG_TTL = 3600                              # a part nobody could describe is not asked again for this long (s)
 
 __all__ = ["fetch", "parse_temp_range", "parse_pins", "parse_clamp_v", "normalize"]
@@ -233,7 +232,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
     if not have_dk and not have_mo:
         log("    partdata: no DigiKey/Mouser credentials — part data unchecked")
         return {m: None for m in mpns}
-    cache_path = os.path.join(cache_dir or ".", CACHE_NAME)
+    cache_path = os.path.join(S.cache_home(cache_dir), CACHE_NAME)
     cache = {}
     if not refresh and os.path.exists(cache_path):
         try:
@@ -241,7 +240,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
         except Exception:
             cache = {}
     tok = None
-    t_start, budget, left, done = time.time(), float(os.environ.get("FLUXPLACE_LOOKUP_BUDGET_S", BUDGET_S)), 0, 0
+    t_start, budget, left, done = time.time(), float(_redact_setting("lookup_budget_s")), 0, 0
     for mpn in sorted(set(mpns)):
         hit = cache.get(mpn)
         if hit and time.time() - hit.get("_t", 0) < (NEG_TTL if hit.get("_neg") else CACHE_TTL):
@@ -253,11 +252,9 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             continue
         done += 1
         if done % 10 == 0:                                  # progress survives a killed run
-            try:
-                json.dump(cache, open(cache_path, "w"), indent=1)
-            except Exception:
-                pass
+            S.write_json(cache_path, cache, indent=1)
         dk = mo = None
+        tr = False
         if have_dk:
             try:
                 if tok is None:
@@ -268,6 +265,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
                     tok = t
                 dk = _dk_details(mpn, creds, tok, on_token=_keep)
             except Exception as e:
+                tr = tr or S.transient(e)
                 log(f"    ! DigiKey data {mpn}: {e}")
         need_mo = (dk is None or dk.get("package") is None
                    or dk.get("temp_min") is None)
@@ -275,6 +273,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             try:
                 mo = _mouser_details(mpn, creds)
             except Exception as e:
+                tr = tr or S.transient(e)
                 log(f"    ! Mouser data {mpn}: {e}")
         nx = None
         if dk is None and mo is None:      # metered: last resort only
@@ -283,6 +282,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
                 if NX.available(creds):
                     nx = NX.part_data(mpn, creds)
             except Exception as e:
+                tr = tr or S.transient(e)
                 log(f"    ! Nexar data {mpn}: {e}")
         if nx and not (dk or mo):
             mo = nx
@@ -301,12 +301,9 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
         out[mpn] = data
         if data is not None:
             cache[mpn] = {"_t": time.time(), "data": data}
-        else:                                       # an outage is remembered briefly (NEG_TTL), never for the 7 days of a real answer
+        elif not tr:                                # an outage is remembered briefly (NEG_TTL); a skipped host / a 429 is not remembered at all
             cache[mpn] = {"_t": time.time(), "_neg": True, "data": None}
     if left:
         log(f"    partdata: lookup budget {budget:g} s spent, {left} part(s) UNCHECKED (rerun continues from the cache)")
-    try:
-        json.dump(cache, open(cache_path, "w"), indent=1)
-    except Exception:
-        pass
+    S.write_json(cache_path, cache, indent=1)
     return out

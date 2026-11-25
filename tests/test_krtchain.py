@@ -395,3 +395,14 @@ def test_diff_step_carries_family_width_on_outer_layers_only(tmp_path, monkeypat
     plain = K.cmd_diff("py", "/r", "s", "o", ["FOO_1"], SIG, base, None)
     assert plain.count("--track-width") == 1 and plain[plain.index("--track-width") + 1] == "0.15"
     assert "--diff-pair-gap" not in plain
+
+
+def test_rf_nets_route_before_the_rest(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "BT_SW_RFC", "RF_EN"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]    # RF_EN is a control line, not RF
+    rf = calls[1]
+    assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["BT_SW_RFC"]

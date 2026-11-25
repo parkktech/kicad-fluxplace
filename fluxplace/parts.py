@@ -468,6 +468,8 @@ def evaluate(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, api=True, c
              extra_mpns=(), qty=None):
     """Look up (unless offline), then run().  `data`/`stock` inject results (tests)."""
     st = settings(cons)
+    from . import redact as _RD
+    _RD.configure(cons)
     mm = mpn_map or (facts or {}).get("mpn_map") or {}
     mpns = {c.get("mpn") or mm.get(c.get("ref")) for c in spec.get("components", []) if not c.get("dnp")}
     mpns |= {mpn_in_value(c.get("value", "")) for c in spec.get("components", [])

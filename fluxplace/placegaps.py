@@ -582,22 +582,35 @@ def write_reports(res, outdir, stage, base="placegaps"):
 def detect_stage(stage, board, cons, spec, outdir, base="placegaps", ds_dir=None, blame=None, parts_gate=None, kinds=None, printer=print,
                  confirm=None):
     """The one call the stages make. Detect-only: reads the board and stage data, writes report files into `outdir`, prints the
-    table. Never writes a board, never raises. -> detect result (+ "line", "report")."""
+    table. Never writes a board, never raises. A later step that fails (diagnosis, reports, printing) is recorded in `errors`
+    and keeps the gaps already found. -> detect result (+ "line", "report")."""
     try:
         ctx = Ctx(stage=stage, board=board, cons=cons or {}, spec=spec, ds_dir=ds_dir, blame=blame, parts_gate=parts_gate)
         _narr(stage, f"{stage}: measuring placement gaps", "start")
         res = detect(ctx, kinds or SCOPE.get(stage))
-        if blame is not None:
-            diagnose(ctx, res["gaps"], confirm)             # reads the board, may run `confirm` (a router on a scratch copy); writes no board
-            res["errors"].update({k: v for k, v in (ctx.get("errors") or {}).items() if k in ("confirm", "routediag")})
-        res["line"] = stage_line(res)
-        res["report"] = write_reports(res, outdir, stage, base)
-        _narr(stage, narration(res, stage), "end")
-        if printer:
-            printer(table(res, stage) + ("\n" + diagnosis_table(res["gaps"]) if blame is not None else ""))
-        return res
     except Exception as e:                              # noqa: BLE001 - detect-only must never fail a stage
         return {"gaps": [], "counts": {}, "classes": {}, "errors": {"*": f"{type(e).__name__}: {e}"}, "line": "gaps not measured", "report": None}
+    if blame is not None:
+        try:
+            diagnose(ctx, res["gaps"], confirm)         # reads the board, may run `confirm` (a router on a scratch copy); writes no board
+        except Exception as e:                          # noqa: BLE001 - the gaps stay; an undiagnosed critical gap reads "unconfirmed"
+            res["errors"]["diagnose"] = f"{type(e).__name__}: {e}"
+            for g in res["gaps"]:
+                if g["kind"] == "ghost-open":
+                    g.setdefault("cause", "unconfirmed")
+                    g.setdefault("blockers", [])
+        res["errors"].update({k: v for k, v in (ctx.get("errors") or {}).items() if k in ("confirm", "routediag", "corridor")})
+    for step in (lambda: res.update(line=stage_line(res)),
+                 lambda: res.update(report=write_reports(res, outdir, stage, base)),
+                 lambda: _narr(stage, narration(res, stage), "end"),
+                 lambda: printer and printer(table(res, stage) + ("\n" + diagnosis_table(res["gaps"]) if blame is not None else ""))):
+        try:
+            step()
+        except Exception as e:                          # noqa: BLE001
+            res["errors"]["report"] = f"{type(e).__name__}: {e}"
+    res.setdefault("line", "gaps ?")
+    res.setdefault("report", None)
+    return res
 
 
 # ------------------------------------------------------------------ phase 1: class terms of a judge, diagnosis of a ghost-open gap
@@ -676,18 +689,23 @@ def diagnose(ctx, gaps, confirm=None):
             still = confirm(sorted({n for g in crit for n in g["nets"]}))
         except Exception as e:                              # noqa: BLE001
             ctx.setdefault("errors", {})["confirm"] = f"{type(e).__name__}: {e}"
-    B = ctx.B()
     try:
+        B = ctx.B()
         rd = {n["net"]: n["causes"] for n in RDG.diagnose(B, sorted({n for g in todo for n in g["nets"]}), ctx["cons"], ctx["spec"])["nets"]}
     except Exception as e:                                  # noqa: BLE001
         rd = {}
         ctx.setdefault("errors", {})["routediag"] = f"{type(e).__name__}: {e}"
     for g in todo:
-        c = corridor(ctx, g)
-        bl = blockers(ctx, g, c)
-        g["corridor_mm"], g["width_mm"] = c["len_mm"], c["width_mm"]
-        g["blockers"] = [b["ref"] for b in bl]
-        g["blockers_movable"] = [b["ref"] for b in bl if b["movable"]]
+        try:
+            c = corridor(ctx, g)
+            bl = blockers(ctx, g, c)
+            g["corridor_mm"], g["width_mm"] = c["len_mm"], c["width_mm"]
+            g["blockers"] = [b["ref"] for b in bl]
+            g["blockers_movable"] = [b["ref"] for b in bl if b["movable"]]
+        except Exception as e:                              # noqa: BLE001 - this gap keeps its class; its corridor is reported missing
+            ctx.setdefault("errors", {})["corridor"] = f"{type(e).__name__}: {e}"
+            g.update(corridor_mm=None, width_mm=None, blockers=[], blockers_movable=[], causes=[], cause="unconfirmed")
+            continue
         g["causes"] = sorted({x["cause"] for n in g["nets"] for x in rd.get(n, [])})
         if g in crit and still is not None:
             g["cause"] = "blocked" if set(g["nets"]) & set(still) else "order"
@@ -705,5 +723,5 @@ def diagnosis_table(gaps):
     out = ["  ghost-open diagnosis (net: class, cause, blocking parts, routediag causes):"]
     for g in rows:
         out.append(f"    {'/'.join(g['nets'])}: {g['class']}, {g['cause']}, blockers [{', '.join(g['blockers'][:8]) or '-'}]"
-                   f" (movable {len(g['blockers_movable'])}), corridor {g['corridor_mm']:g} mm x {g['width_mm']:g}, causes [{', '.join(g['causes']) or '-'}]")
+                   f" (movable {len(g['blockers_movable'])}), corridor {g['corridor_mm'] if g['corridor_mm'] is not None else '?'} mm x {g['width_mm'] if g['width_mm'] is not None else '?'}, causes [{', '.join(g.get('causes') or []) or '-'}]")
     return "\n".join(out)

@@ -23,30 +23,70 @@ def test_class_key_ranks_hs_above_any_plain_opens(monkeypatch):
     assert PT.class_key(None, {"open": [], "hs": 0})[0] == PT.WORST
 
 
-def test_class_key_unclassable_ranks_as_plain(monkeypatch, capsys):
+def test_class_key_unclassable_ranks_worst(monkeypatch, capsys):
     monkeypatch.setattr(PT, "judge_key", lambda routed, blame, cons=None: (2, 0, 0.0, 0, 0.0))
     monkeypatch.setattr(PG, "open_terms", lambda *a: 1 / 0)
-    assert PT.class_key("r", {"open": []})[:3] == (0, 0, 0) and "not classed" in capsys.readouterr().out
+    assert PT.class_key("r", {"open": []})[:3] == (PT.WORST,) * 3 and "not classed" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("hs,want", [(True, "fail"), (False, "pass")])
-def test_stage_fails_on_hs_open_and_passes_without(monkeypatch, tmp_path, hs, want):
+@pytest.mark.parametrize("cause,want", [("blocked", "fail"), ("order", "warn"), ("unconfirmed", "warn"), (None, "warn")])
+def test_stage_fails_only_on_a_blocked_hs_open(monkeypatch, tmp_path, cause, want):
     from test_placetour import _script_stage, _stage_ctx
     keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
     board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
-    g = PG.gap("ghost-open", "P/N" if hs else "S", "hs-pair" if hs else "plain", 1, nets=["P", "N"] if hs else ["S"])
-    g.update(cause="blocked", blockers=["R1"])
+    g = PG.gap("ghost-open", "P/N", "hs-pair", 1, nets=["P", "N"])
+    g.update(blockers=["R1"], **({"cause": cause} if cause else {}))
     monkeypatch.setattr(PG, "detect_stage", lambda *a, **k: {"gaps": [g], "line": "gaps"})
     r = PT.stage(_stage_ctx(tmp_path), 3, board)
-    assert r["verdict"] == want
-    if hs:
-        assert "N/P ghost-unrouted" in r["line"] and any(x.startswith("FAIL: hs-pair N/P") for x in r["next"])
+    assert r["verdict"] == want and "N/P ghost-unrouted" in r["line"]
+    assert any(x.startswith("FAIL: hs-pair N/P" if want == "fail" else "WARN: hs-pair N/P") for x in r["next"])
 
 
-@pytest.mark.parametrize("net,pins,rf", [("BT_SW_RFC", (), True), ("BT_SW_RF2", (), True), ("RF_GNSS", (), True), ("RFU_PIN", (), False),
-                                         ("RFID", (), False), ("ANT_SEL", (), False), ("PWRFAIL", (), False),
-                                         ("X_1", ("RFC",), True), ("X_1", ("GND",), False), ("X_1", ("RF_IN",), True)])
-def test_is_rf_port_tokens_and_pin_context(net, pins, rf):
+def test_stage_without_critical_gap_passes(monkeypatch, tmp_path):
+    from test_placetour import _script_stage, _stage_ctx
+    board = _script_stage(monkeypatch, tmp_path, [["A"], []], {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)})
+    monkeypatch.setattr(PG, "detect_stage", lambda *a, **k: {"gaps": [PG.gap("ghost-open", "S", "plain", 1)], "line": "gaps"})
+    assert PT.stage(_stage_ctx(tmp_path), 3, board)["verdict"] == "pass"
+
+
+def test_report_labels_match_the_class_key(tmp_path):
+    key0, key1 = (1, 1, 0, 9, 7, 3.9, 810, 92.6), (0, 1, 0, 5, 7, 3.9, 800, 90.0)
+    PT._report(str(tmp_path / "r.md"), PT.params({}), key0, key1, [], set(), [], [])
+    md = open(tmp_path / "r.md").read()
+    assert "| hs-pair opens | 1 | 0 |" in md and "| judge opens (signal) | 9 | 5 |" in md and "| detour sum | 92.6 | 90.0 |" in md
+
+
+def test_diagnosis_crash_keeps_the_gaps(monkeypatch, tmp_path):
+    bl = {"open": [{"net": "S1", "refs": ["U1"]}, {"net": "RFX", "refs": ["C1"]}], "costly": [], "hot": [], "turned": []}
+    monkeypatch.setattr(PG, "_net_class", lambda c: lambda n: ("rf", None) if n == "RFX" else ("plain", None))
+    monkeypatch.setattr(PG, "diagnose", lambda *a, **k: 1 / 0)
+    r = PG.detect_stage("placetour", "/nonexistent.kicad_pcb", {}, {}, str(tmp_path), blame=bl, printer=None, kinds=["ghost-open"])
+    assert r["counts"]["ghost-open"] == 2 and "diagnose" in r["errors"]
+    rf = PG.critical(r["gaps"])
+    assert [g["class"] for g in rf] == ["rf"] and rf[0]["cause"] == "unconfirmed"          # warn, never a silent pass or a crash
+
+
+def test_corridor_failure_of_one_gap_is_unconfirmed(monkeypatch):
+    from fluxplace import routediag as RDG
+    monkeypatch.setattr(RDG, "diagnose", lambda B, nets, cons, spec: {"nets": []})
+    monkeypatch.setattr(PG, "corridor", lambda c, g: 1 / 0)
+    g = PG.gap("ghost-open", "N1", "hs-pair", 1, nets=["N1"])
+    c = gctx(board_with_cut())
+    PG.diagnose(c, [g], confirm=lambda n: set())
+    assert g["cause"] == "unconfirmed" and g["blockers"] == [] and "corridor" in c["errors"]
+    assert "corridor ? mm" in PG.diagnosis_table([g])
+
+
+@pytest.mark.parametrize("net,pins,rf", [
+    ("BT_SW_RFC", (), True), ("BT_SW_RF2", (), True), ("RF_GNSS", (), True), ("RF_INT_SW", (), True), ("BT1_RF", (), True),
+    ("/RF/ANT_OUT", (), True), ("RF_EXT", (), True),
+    ("RFU_PIN", (), False), ("RFID", (), False), ("ANT_SEL", (), False), ("ANT_DET", (), False), ("PWRFAIL", (), False),
+    ("RF_EN", (), False), ("RFC_CTRL", (), False), ("SW_RF1_SEL", (), False), ("RF_3V3", (), False), ("VCC_RF", (), False),
+    ("RF_GND", (), False), ("RF_1V8", (), False),
+    ("X_1", ("RFC",), True), ("X_1", ("RFIO",), True), ("X_1", ("GNSS_ANT",), True), ("X_1", ("RF_IN",), True), ("X_1", ("RF",), True),
+    ("X_1", ("GND",), False), ("X_1", ("RF_EN",), False), ("X_1", ("ANT_SEL",), False), ("X_1", ("RFC_CTRL",), False),
+    ("X_1", ("VCC_RF",), False), ("X_1", ("RFU",), False)])
+def test_is_rf_port_tokens_pin_context_and_control_exclusions(net, pins, rf):
     assert RV.is_rf(net, pins) is rf
 
 
@@ -101,13 +141,18 @@ def test_diagnose_cause_from_confirm(monkeypatch):
 def test_confirm_runs_router_on_the_gap_nets_only(monkeypatch, tmp_path):
     from fluxplace import gaps as G
     seen = {}
-    monkeypatch.setattr(PT.LA, "lean_krt", lambda a, b, d, m, extra=(), only=None: seen.update(only=only) or str(tmp_path / "r.kicad_pcb"))
+    done = {"complete": True}
+    monkeypatch.setattr(PT.LA, "lean_krt", lambda a, b, d, m, extra=(), only=None, info=None: (seen.update(only=only), info.update(done), str(tmp_path / "r.kicad_pcb"))[2])
     monkeypatch.setattr(G, "_krt_open", lambda board, cp: {"A", "OTHER"})
     from types import SimpleNamespace
     run = PT._confirm(SimpleNamespace(constraints=None), "b", str(tmp_path), PT.params({}))
     assert run(["A", "B"]) == {"A"} and seen["only"] == {"A", "B"}
     monkeypatch.setattr(PT.LA, "lean_krt", lambda *a, **k: None)
     with pytest.raises(RuntimeError):
+        run(["A"])
+    done["complete"] = False                                                     # the router hit its cap: a checkpoint is not an answer
+    monkeypatch.setattr(PT.LA, "lean_krt", lambda a, b, d, m, extra=(), only=None, info=None: info.update(done) or "ckpt.kicad_pcb")
+    with pytest.raises(RuntimeError, match="cap"):
         run(["A"])
 
 
@@ -209,3 +254,100 @@ def test_sourcing_budget_is_unchecked_not_a_pass(monkeypatch, tmp_path):
     assert rep["B1"]["verdict"] not in ("OK", "LOW")
     import json
     assert "B1" not in json.load(open(tmp_path / S.CACHE_NAME))                   # not asked: not remembered as a failure
+
+
+def test_negative_entry_keeps_the_good_half_and_skips_transient_errors(monkeypatch, tmp_path):
+    from fluxplace import sourcing as S
+    import json
+    monkeypatch.setattr(S, "credentials", lambda: {"MOUSER_API_KEY": "k", "DIGIKEY_CLIENT_ID": "i", "DIGIKEY_CLIENT_SECRET": "s"})
+    monkeypatch.setattr(S, "_dk_token", lambda c: "t")
+    monkeypatch.setattr(S, "_dk", lambda mpn, creds, tok, on_token=None: (500, "in stock", [], ""))
+    err = {"e": RuntimeError("down")}
+    def mouser(mpn, creds):
+        raise err["e"]
+    monkeypatch.setattr(S, "_mouser", mouser)
+    kw = dict(cache_dir=str(tmp_path), log=lambda *a: None, qty=1)
+    S.check({"P1": ["U1"]}, **kw)
+    ent = json.load(open(tmp_path / S.CACHE_NAME))["P1"]
+    assert ent["_neg"] and ent["errs"] == ["Mouser"] and ent["dk"][0] == 500          # the DigiKey half survives
+    for e, name in ((R.HostSkipped("api.mouser.com skipped: negative cache"), "P2"),
+                    (urllib.error.HTTPError("https://x", 429, "slow", {}, None), "P3")):
+        err["e"] = e
+        S.check({name: ["U1"]}, **kw)
+        assert name not in json.load(open(tmp_path / S.CACHE_NAME))                  # a skipped host / a 429 is never cached
+
+
+def test_partdata_does_not_cache_a_skipped_host(monkeypatch, tmp_path):
+    from fluxplace import partdata as PD
+    import json
+    monkeypatch.setattr(PD, "_mouser_details", lambda mpn, creds: (_ for _ in ()).throw(R.HostSkipped("skipped")))
+    PD.fetch(["P1"], cache_dir=str(tmp_path), log=lambda *a: None, creds={"MOUSER_API_KEY": "k"})
+    assert "P1" not in json.load(open(tmp_path / PD.CACHE_NAME))
+
+
+def test_lookup_limits_come_from_parts_table_env_overrides_bad_values_fall_back(monkeypatch):
+    assert R.setting("http_timeout_s") == 15.0 and R.setting("http_down_after") == 2 and R.setting("lookup_budget_s") == 120.0
+    R.configure({"parts": {"http_timeout_s": 7, "http_down_after": 3, "lookup_budget_s": "90", "other": 1}})
+    assert R.setting("http_timeout_s") == 7.0 and R.setting("http_down_after") == 3 and R.setting("lookup_budget_s") == 90.0
+    monkeypatch.setenv("FLUXPLACE_HTTP_TIMEOUT", "4")
+    assert R.setting("http_timeout_s") == 4.0                                        # env is the override
+    monkeypatch.setenv("FLUXPLACE_HTTP_TIMEOUT", "fast")
+    assert R.setting("http_timeout_s") == 7.0                                        # bad env: the [parts] value
+    R.configure({"parts": {"http_timeout_s": "slow"}})
+    assert R.setting("http_timeout_s") == 15.0                                       # bad everywhere: the default, no raise
+    monkeypatch.setenv("FLUXPLACE_HTTP_DOWN_AFTER", "-3")
+    assert R.setting("http_down_after") == 2
+
+
+def test_checkpoint_is_atomic_and_cache_never_falls_back_to_cwd(monkeypatch, tmp_path):
+    from fluxplace import sourcing as S
+    import json
+    path = tmp_path / "c.json"
+    S.write_json(str(path), {"a": 1})
+    S.write_json(str(path), {"a": 2})
+    assert json.load(open(path)) == {"a": 2} and sorted(os.listdir(tmp_path)) == ["c.json"]      # no .tmp left behind
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    d = S.cache_home(None)
+    assert d == str(tmp_path / "home" / ".cache" / "fluxplace") and os.path.isdir(d)
+    assert S.cache_home(str(tmp_path)) == str(tmp_path)
+
+
+def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from fluxplace import lookahead as LA, krtchain as KC, routediag as RDG
+    board = tmp_path / "in.kicad_pcb"
+    board.write_text("x")
+    cmds = []
+    monkeypatch.setattr(LA, "_ghost_copy", lambda b, d: (os.makedirs(d, exist_ok=True), str(tmp_path / "copy.kicad_pcb"), open(tmp_path / "copy.kicad_pcb", "w").write("c"))[1])
+    monkeypatch.setattr(LA, "_signal_nets", lambda c: (["F.Cu", "B.Cu"], {"GND"}))
+    monkeypatch.setattr(LA, "_ghost_stats", lambda *a, **k: None)
+    monkeypatch.setattr(LA, "critical_first", lambda copy, cons, spec, nets: ["RFX", "P"])
+    monkeypatch.setattr(KC, "base_flags", lambda R, d: [])
+    monkeypatch.setattr(LA.RR if hasattr(LA, "RR") else __import__("fluxplace.routerules", fromlist=["x"]), "rules_for", lambda *a, **k: {})
+    monkeypatch.setattr(RDG, "load", lambda p: {"pads": [{"net": n} for n in ("RFX", "RFX", "P", "P", "S", "S", "GND", "GND")]})
+    def fake_run(cmd, cwd, outdir, tag, out, cap):
+        cmds.append((tag, cmd))
+        open(out, "w").write(tag)
+        return True, 1.0
+    monkeypatch.setattr(LA, "_run_capped", fake_run)
+    a = SimpleNamespace(constraints=None, spec=None, router_py="py", router_dir="/r", track=None, clearance=None)
+    info = {}
+    out = LA.lean_krt(a, str(board), str(tmp_path / "o"), 1.0, info=info)
+    assert [t for t, _c in cmds] == ["krt-first", "krt"] and out.endswith("krt-lean.kicad_pcb")
+    nets = lambda c: c[c.index("--nets") + 1:c.index("--layers")]
+    assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[1][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
+    assert cmds[0][1][2].endswith("copy.kicad_pcb") and cmds[1][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
+    assert "--keep-input-copper" in cmds[1][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
+    cmds.clear()
+    LA.lean_krt(a, str(board), str(tmp_path / "o2"), 1.0, only={"P"}, info=info)           # a diagnosis run stays one pass
+    assert [t for t, _c in cmds] == ["krt"] and nets(cmds[0][1]) == ["P"] and info["passes"] == 1
+
+
+def test_critical_first_orders_hs_then_rf_then_power(monkeypatch):
+    from fluxplace import lookahead as LA
+    cls = {"A_P": "hs-pair", "RFX": "rf", "VBAT": "power", "S": "plain", "Q": "pair"}
+    monkeypatch.setattr(PG, "_net_class", lambda c: lambda n: (cls[n], None))
+    assert LA.critical_first("b", {}, {}, ["S", "VBAT", "RFX", "Q", "A_P"]) == ["A_P", "RFX", "VBAT"]
+    monkeypatch.setattr(PG, "_net_class", lambda c: 1 / 0)
+    assert LA.critical_first("b", {}, {}, ["S"]) == []                                      # unclassable: one pass as before

@@ -400,15 +400,37 @@ def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
         return False, round(time.time() - t, 1)
 
 
-def lean_krt(a, board, outdir, budget_min, extra=(), only=None):
-    """KRT lean ghost: ONE route.py call over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets);
-    no planes, rails, pairgroups or diff steps. At the cap, the checkpoint the status json names (if it exists), else None."""
+def critical_first(copy, cons, spec, nets):
+    """The nets of `nets` that must be routed before the rest, class-ranked: hs-pair legs, then rf, then power ([power] rails).
+    -> ordered list (placegaps' net classes, one rule). Never raises: unclassable -> [] (one pass, as before)."""
+    try:
+        from . import placegaps as PG
+        of = PG._net_class(PG.Ctx(stage="judge", board=copy, cons=cons or {}, spec=spec))
+        rank = {"hs-pair": 0, "rf": 1, "power": 2}
+        got = sorted(((rank[c], n) for n in nets for c in [of(n)[0]] if c in rank))
+        return [n for _r, n in got]
+    except Exception as e:                                  # noqa: BLE001
+        print(f"lean_krt: critical nets not classed ({type(e).__name__}: {e}); one pass")
+        return []
+
+
+def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
+    """KRT lean ghost over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets); no planes, rails,
+    pairgroups or diff steps. Two passes (PLAN-PLACE-GAPS phase 2): the critical nets first (hs-pair legs, rf, power; class-ranked),
+    then every other net on top of that copper (--keep-input-copper), so a plain net can never take the room of a critical one.
+    `only` (a diagnosis run) is one pass. At the cap, the checkpoint the status json names (if it exists), else None.
+    `info` (a dict) receives {"complete": bool (no pass hit its cap), "secs", "passes", "first": [nets routed first]}."""
     import json as _json
     from types import SimpleNamespace
     from . import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routestatus as RS
     copy = _ghost_copy(board, outdir)
     sig, plane_nets = _signal_nets(copy)
     cons = C.load(a.constraints) if getattr(a, "constraints", None) else {}
+    spec = None
+    try:
+        spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
+    except (OSError, ValueError):
+        spec = None
     R = RR.rules_for(cons, copy, SimpleNamespace(track=getattr(a, "track", None), clearance=getattr(a, "clearance", None)))
     base = KC.base_flags(R, outdir)
     cnt = {}
@@ -416,20 +438,38 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None):
         if p["net"]:
             cnt[p["net"]] = cnt.get(p["net"], 0) + 1
     nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets and (only is None or n in only))   # only: route just these nets
+    first = [] if only is not None else critical_first(copy, cons, spec, nets)
     out = os.path.join(outdir, "krt-lean.kicad_pcb")
     # --quick 2: route to judge (main pass only; no rescue, escalation, plane finalize, cleanup, late sweeps) - about half
     # the time of level 1, and it writes its output. The wall cap is only a safety (SIGINT does not stop it softly).
-    cmd = KC.cmd_route(a.router_py, a.router_dir, copy, out, sig, base, {}, nets=nets) + ["--quick", "2"] + list(extra)
-    ok, secs = _run_capped(cmd, a.router_dir, outdir, "krt", out, budget_min * 60 + 300)
+    cap = budget_min * 60 + 300
+    t0, complete, src, left = time.time(), True, copy, nets
+    passes = []
+    if first:
+        mid = os.path.join(outdir, "krt-first.kicad_pcb")
+        cmd = KC.cmd_route(a.router_py, a.router_dir, copy, mid, sig, base, {}, nets=first) + ["--quick", "2"] + list(extra)
+        ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt-first", mid, cap)
+        if ok and os.path.exists(mid):
+            src, left = mid, [n for n in nets if n not in set(first)]
+            passes.append("first")
+        else:
+            complete = False
+            first = []                                          # the critical pass failed: the one-pass judge below, as before
+    cmd = KC.cmd_route(a.router_py, a.router_dir, src, out, sig, base, {}, nets=left or nets) + ["--quick", "2"] + list(extra)
+    ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt", out, max(60.0, cap - (time.time() - t0)) if first else cap)
+    secs = round(time.time() - t0, 1)
     res = None
     if ok and os.path.exists(out):
         res = out
     else:
+        complete = False
         try:
             ckpt = (_json.load(open(os.path.join(outdir, "krt.status.json"))) or {}).get("checkpoint")
         except (OSError, ValueError):
             ckpt = None
         res = ckpt if ckpt and os.path.exists(ckpt) else None
+    if info is not None:
+        info.update(complete=complete and res is not None, secs=secs, passes=len(passes) + 1, first=list(first))
     _ghost_stats(copy, res, outdir, secs)
     return res
 
