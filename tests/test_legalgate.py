@@ -324,3 +324,30 @@ def test_pad_inside_copper_edge_clearance_is_outside():
     B = {"parts": {}, "bbox": (0, 0, 10, 10)}
     assert L.copper_edge_mm(B, {"placement": {"copper_edge_clearance_mm": 0.5}}) == 0.5
     assert L.copper_edge_mm({"parts": {}}, {}) == 0.0
+
+
+def test_home_supports_names_the_check_that_refuses_a_support(tmp_path):
+    from fluxplace import floorplan2 as F2
+    body = (G.ic("U1", 30, 30, ["VCC", "GND", "SIG", "SIG2", "VCC", "GND", "SIG3", "SIG4"], pitch=0.8, court=(-3, -3, 3, 3))
+            + G.two("C1", 70, 60, "VCC", "GND", **CAP))
+    B = RD.load(G.board(tmp_path, body, outline=(0, 0, 100, 80)))
+    cons = {"placement": {"fixed": ["C1"]}}                                # a fixed part is never moved: left, with the reason
+    M = MD.build(B, cons, None, arrange=False)
+    P = F2.Plan(B, cons, None, M, log=lambda *a, **k: None)
+    P.freeze_baseline()
+    done, left = F2.home_supports(P, cons, None)
+    assert not done and [(t[0], t[4]) for t in left] == [("C1", "fixed part")] and left[0][1] > left[0][3]
+
+
+def test_support_pull_is_a_cost_term_beyond_the_limit(tmp_path):
+    from fluxplace import floorplan2 as F2
+    body = (G.ic("U1", 30, 30, ["VCC", "GND", "SIG", "SIG2", "VCC", "GND", "SIG3", "SIG4"], pitch=0.8, court=(-3, -3, 3, 3))
+            + G.two("C1", 70, 60, "VCC", "GND", **CAP))
+    B = RD.load(G.board(tmp_path, body, outline=(0, 0, 100, 80)))
+    cons = {"placement": {"fixed": []}, "floorplan": {"support_weight": 2.0}}
+    P = F2.Plan(B, cons, None, MD.build(B, cons, None, arrange=False), log=lambda *a, **k: None)
+    far = P.support_pen()
+    assert far > 40 and P.sup_w == 2.0 and P.total({"wl": 0, "over": 0, "cross": 0, "compact": 0, "support": 7.0}) == 7.0
+    P.freeze_baseline()
+    F2.home_supports(P, cons, None)
+    assert P.support_pen() < 1e-6

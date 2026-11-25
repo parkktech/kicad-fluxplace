@@ -43,7 +43,7 @@ optional; anything not stated keeps the heuristic default. Schema:
     [escape]                # near_mm 2.0, lane_mm 1.5, window_mm 4.0, radius_mm 2.5, enabled, power_pins (escape reservation, escres.py)
     [route]                 # power_corridor_max_mm (longest planned power corridor), power_crowding (current crowding factor, default 1.25), track_mm / clearance_mm = PREFERRED routing sizes (CLI > these > 0.2; lifted to min_track_mm / min_clearance_mm); same_net_via_spacing = "freerouting"|"hole" (see docs/commands/route.md); tune_rounds = 3, tune_pairs = 8: auto-tune of pairs failing only on skew at the end of the route stage
 
-    [floorplan]             # w_power = 1.0 (weight of the power source-to-load reach term; planned, floorplan2); block_weight breakout_weight stay waive_fail
+    [floorplan]             # w_power = 1.0 (weight of the power source-to-load reach term; planned, floorplan2); block_weight breakout_weight support_weight stay waive_fail
     [[rule]]                # selector rules over the same keys (fluxplace/rules.py, docs/commands/rules.md)
     select = { net = "^USB_.*" }   # ref | net | netclass | type | layer | prop | pair (AND)
     set = { width_mm = 0.15 }      # width_mm gap_mm clearance_mm skew_mm impedance_diff straight_copper max_vias pour

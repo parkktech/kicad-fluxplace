@@ -22,6 +22,7 @@ zones grow with the board. Reports the minimal passing size and the first failin
 """
 import argparse
 import json
+import collections
 import math
 import os
 import random
@@ -36,6 +37,7 @@ from . import geom as GM
 from . import modules as MD
 
 THETA = (0, 90, 180, 270)
+SUPPORT_WEIGHT = 0.5                # `[floorplan] support_weight`: cost per mm a graded support stands beyond its limit from its owner pin
 CS = {0: (1.0, 0.0), 90: (0.0, 1.0), 180: (-1.0, 0.0), 270: (0.0, -1.0)}      # (cos, sin) of KiCad rotation
 
 
@@ -96,6 +98,8 @@ class Plan:
         self.bo_apron = float((cons.get("floorplan") or {}).get("breakout_apron_mm", 2.0))
         from . import intent as IT
         self.intent = IT.PlanTerms(self)                      # --- intent: away penalty / legality
+        self.sup_w = float((cons.get("floorplan") or {}).get("support_weight", SUPPORT_WEIGHT))
+        self._support_terms()
 
     # -- nets
     def _nets(self, NC):
@@ -145,6 +149,43 @@ class Plan:
         self.tn, self.tm, self.tx, self.ty = (np.array(v) for v in (pt_n, pt_m, pt_x, pt_y))
         self.tstarts = np.searchsorted(self.tn, np.arange(len(self.net_name)))
 
+    def _support_terms(self):
+        """the supports the intent rows grade (the same filter: owned for sure or spread, not waived, not placed by a `near` item) as
+        `self.graded` = [(cluster ic ref, support dict, fine-pitch halo)], and for the anneal the arrays of their pull: support pad and
+        owner pin relative to their modules, the limit (`[floorplan] support_weight` x distance beyond it is a cost term)."""
+        from . import clusters as CL, intent as IT
+        parts = self.B["parts"]
+        self.graded, rows = [], []
+        try:
+            cl, _ = CL.build(self.B, self.cons, self.spec)
+            it = IT.items(self.B, self.cons)
+            near = {r for n in it["near"] for r in (n.get("chain") or n.get("refs") or ())}
+        except Exception:                                    # noqa: BLE001 - a board the clusters cannot read has no supports to pull
+            cl, it, near = [], None, set()
+        for c in cl:
+            halo = CL.HALO_MM if CL._pitch(parts[c["ic"]]) <= 0.5 else 0.0
+            for s in sorted(c["supports"], key=lambda s: s["ref"]):
+                r = s["ref"]
+                if r in it["support"]["waive"] or r in near or not (s["sure"] or s.get("how") == "spread") or r not in self.of or c["ic"] not in self.of:
+                    continue
+                pin = next((q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"]), None)
+                sp = next((q for q in parts[r]["pads"] if q["num"] == s["via"]), None)
+                if pin is None or sp is None:
+                    continue
+                self.graded.append((c["ic"], s, halo))
+                a, b = self.idx[self.of[r]], self.idx[self.of[c["ic"]]]
+                pa, pb = self.mods[a]["pos"], self.mods[b]["pos"]
+                rows.append((a, sp["x"] - pa[0], sp["y"] - pa[1], b, pin["x"] - pb[0], pin["y"] - pb[1], float(s["limit"]) + halo))
+        self.sup = [np.array([r[k] for r in rows], int if k in (0, 3) else float) for k in range(7)] if rows else None
+
+    def support_pen(self):
+        """sum of the distance beyond the limit of every graded support to its owner pin (mm), centre to centre."""
+        if self.sup is None:
+            return 0.0
+        a, ax, ay, b, bx, by, lim = self.sup
+        wa, wb = self.world(a, ax, ay), self.world(b, bx, by)
+        return float(np.maximum(0.0, np.hypot(wa[0] - wb[0], wa[1] - wb[1]) - lim).sum())
+
     def world(self, m, x, y):
         """world coords of rel points (arrays) of module indices m."""
         th = self.T[m]
@@ -170,6 +211,8 @@ class Plan:
         blk = block_spread(self.X, self.Y, self.fixed, self.blk)
         out = {"wl": wl, "over": over, "cross": cr, "compact": bx, "block": self.blk_w * blk,
                "intent": self.intent.penalty() if self.intent.items else 0.0}
+        if self.sup_w and self.sup is not None:
+            out["support"] = self.sup_w * self.support_pen()
         if self.bo_reg and self.bo_w:
             out["breakout"] = self.bo_w * self.breakout_pen()
         if self.stay.any():
@@ -177,7 +220,7 @@ class Plan:
         return out
 
     def total(self, p, w_cross=4.0):
-        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0) + p.get("stay", 0.0) + p.get("breakout", 0.0)
+        return p["wl"] + 4.0 * p["over"] + w_cross * p["cross"] + 0.2 * p["compact"] + p.get("block", 0.0) + p.get("intent", 0.0) + p.get("support", 0.0) + p.get("stay", 0.0) + p.get("breakout", 0.0)
 
     def crossings(self):
         """port-to-port crossing count: ports of one net chained by x, edges of different nets that intersect."""
@@ -228,7 +271,13 @@ class Plan:
                 self._fill(self.base[sd], rect)
                 self._fill(self.base_edge[sd], rect)
 
+    _shrink = 0.0                                # > 0: courtyards fill the raster that much smaller (an optimistic prefilter; Legal decides)
+
     def _fill(self, arr, r):
+        if self._shrink:
+            r = (r[0] + self._shrink, r[1] + self._shrink, r[2] - self._shrink, r[3] - self._shrink)
+            if r[2] <= r[0] or r[3] <= r[1]:
+                return
         i0 = max(0, int((r[0] - self.r0[0]) / self.RES))
         i1 = min(self.nx, int(math.ceil((r[2] - self.r0[0]) / self.RES)))
         j0 = max(0, int((r[1] - self.r0[1]) / self.RES))
@@ -908,6 +957,10 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None, cap=None):
     return acc, best[0]
 
 HOME_TRY = 24
+NUDGE_MAGS = (0.5, 1.0, 2.0, 3.0, 4.0)
+NUDGE_MAX = 4.0
+NEIGH = 8
+MODULE_MAX = 12                       # a module of more parts than this is not carried to a support's owner
 NUDGE_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
 
 
@@ -924,96 +977,180 @@ def _window(cons):
     return float((cons.get("floorplan") or {}).get("block_window_mm", 3.0))
 
 
-def _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1):
-    """module i (one support, unplaced here) at the legal pose nearest the pin it serves whose distance is within its limit, the one with the
-    lowest crossings then wire among HOME_TRY; -> True when seated (the model, P.X/Y/T and the claim hash follow)."""
+def _refusal(P, i):
+    """the first check module i's members fail where they stand now (the legality P.legal applies), as a short phrase."""
+    P_ = P.B["parts"]
+    for r in P.mods[i]["members"]:
+        for kind, d in P.L.part_issues(r, court=P_[r]["court"], pads=P_[r]["pads"]):
+            if kind in ("overlap", "hole") and (frozenset((r, d)) in P.known or frozenset((r, d)) in P.known_hole):
+                continue
+            if kind == "pad_short" and d in P.known_short:
+                continue
+            if kind == "outside" and r in P.known_out:
+                continue
+            return {"overlap": f"courtyard of {d}", "hole": f"hole of {d}", "pad_short": f"pad short to {d}", "outside": "board edge",
+                    "forbidden": "side closed", "no_tht": "no through-hole there", "hardware": f"hardware {d}"}.get(kind, kind)
+    if not P.claims_ok(i):
+        return "fan-out claim"
+    if not P.intent.ok(i):
+        return "intent hold"
+    return None
+
+
+def _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1, reach=0.0, accept=None):
+    """module i (unplaced here) at the legal pose nearest the pin it serves whose distance is within its limit, the one with the lowest
+    crossings then wire among HOME_TRY (`accept()`, when given, must hold at the pose); -> (True, "") when seated (the model, P.X/Y/T and the
+    claim hash follow), else (False, the check that refused the most poses)."""
+    ok, why = _seat_pass(P, i, pin, s, halo, dist, step, x0, y0, x1, y1, reach, accept, 0.0)
+    if not ok and why in ("no free cell within the limit", "no pose within the limit keeps its module's other supports"):
+        ok, why2 = _seat_pass(P, i, pin, s, halo, dist, step / 2.0, x0, y0, x1, y1, reach, accept, 0.12)     # courtyards that touch a raster cell: the legality decides
+        why = why2 if ok or why2 != "no free cell within the limit" else why
+    return ok, why
+
+
+def _seat_pass(P, i, pin, s, halo, dist, step, x0, y0, x1, y1, reach, accept, shrink):
     placed = set(j for j in range(P.n) if j != i and P.cur[j][0] < 9e4)
-    occ = P.raster(skip=P.mods[i]["members"], edge=any(m in P.L.edge for m in P.mods[i]["members"]), skip_mod=i)
+    P._shrink = shrink
+    try:
+        occ = P.raster(skip=P.mods[i]["members"], edge=any(m in P.L.edge for m in P.mods[i]["members"]), skip_mod=i)
+    finally:
+        P._shrink = 0.0
     P._ints = {}
-    R = float(s["limit"]) + halo + 2.0
+    R = float(s["limit"]) + halo + 2.0 + reach
     cand = sorted(_grid(P, i, pin["x"], pin["y"], R, step, placed, x0, y0, x1, y1, occ),
                   key=lambda t: (round(math.hypot(t[1] - pin["x"], t[2] - pin["y"]), 6), t[3], t[1], t[2]))
-    pick, seen = None, 0
+    pick, seen, why, far = None, 0, collections.Counter(), 0
     for _c, X, Y, th in cand:
         if seen >= HOME_TRY:
             break
         good, old = P.try_pose(i, X, Y, th)
         if not good:
+            if sum(why.values()) < 60:
+                o2 = P.apply(i, X, Y, th)
+                why[_refusal(P, i) or "legality"] += 1
+                P.restore(i, o2)
             continue
-        if dist() <= s["limit"]:
+        if dist() <= s["limit"] and (accept is None or accept()):
             seen += 1
             P.X[i], P.Y[i], P.T[i] = X, Y, th
             k = P.cost_parts()
             k = (round(k["cross"] + k["wl"] / 4.0, 6), seen)
             if pick is None or k < pick[0]:
                 pick = (k, X, Y, th)
+        else:
+            far += 1
         P.restore(i, old)
     if pick is None:
-        return False
+        return False, (why.most_common(1)[0][0] if why else "no free cell within the limit" if not far else "no pose within the limit keeps its module's other supports")
     _, X, Y, th = pick
     P.apply(i, X, Y, th)
     P.X[i], P.Y[i], P.T[i] = X, Y, th
-    return True
+    return True, ""
+
+
+def _neighbours(P, i, pin, win, graded, dist_of):
+    """[(module, slack mm)] movable modules with a courtyard within `win` of the pin, nearest first (at most NEIGH): a module that carries no
+    graded support may step NUDGE_MAX mm; one that carries graded supports only as far as the smallest slack (limit - distance) of them."""
+    parts = P.B["parts"]
+    out = []
+    for j in range(P.n):
+        if j == i or P.fixed[j] or j in P.parked or P.unplaced(j):
+            continue
+        d = min((math.hypot(max(0.0, parts[m]["court"][0] - pin["x"], pin["x"] - parts[m]["court"][2]),
+                            max(0.0, parts[m]["court"][1] - pin["y"], pin["y"] - parts[m]["court"][3])) for m in P.mods[j]["members"]), default=1e9)
+        if d > win:
+            continue
+        slack = [graded[m][1]["limit"] - dist_of(*graded[m]) for m in P.mods[j]["members"] if m in graded]
+        cap = NUDGE_MAX if not slack else min(NUDGE_MAX, min(slack))
+        if cap >= NUDGE_MAGS[0]:
+            out.append((d, j, cap))
+    return [(j, c) for _d, j, c in sorted(out)[:NEIGH]]
+
+
+def _far(P, dist_of):
+    """{ref: distance beyond its limit} of every graded support now."""
+    return {s["ref"]: d for ic, s, h in P.graded for d in [dist_of(ic, s, h) - s["limit"]] if d > 1e-6}
 
 
 def home_supports(P, cons, spec, step=0.5):
-    """after the search: a support the budget rows grade (confidently owned or spread; the clusters' own limits) that is its own single-part
-    module and stands beyond its limit is put at the legal pose (courtyards, claims, keep-outs, intent: as the search checks them)
-    nearest the pin it serves, within its limit. With no legal seat within the limit, one movable neighbour near the pin is nudged aside
-    (<= 1 mm, legal, via try_pose) and the seat tried again; kept only when crossings and the weighted cost do not rise.
-    -> (refs seated, refs left)."""
+    """after the search: every graded support (the parts the intent rows grade: owned for sure or spread) beyond its limit from the pin it
+    serves, biggest excess first, goes to the legal pose (courtyards, claims, keep-outs, intent hold: P.try_pose) nearest that pin within
+    its limit, the one of lowest crossings + wire/4. A support in a module of several parts takes the module along when no other graded
+    support of it ends further. With no legal seat, ONE movable neighbour that is no graded support is nudged aside (<= 2 mm, legal) and
+    the seat tried again; kept only when crossings and the weighted cost do not rise and no graded support ends further. The other side
+    is not tried here (the arrangement tried it with the part's side rule; no 3D height is in the model, so a back seat for a part of
+    unknown height is skipped). -> (refs seated, [(ref, distance, ic.pin, limit, refusing check)] left)."""
     from . import clusters as CL
-    cl, _ = CL.build(P.B, cons, spec)
     parts = P.B["parts"]
     x0, y0, x1, y1 = P.B["bbox"]
     done, left = [], []
-    for c in cl:
-        halo = CL.HALO_MM if CL._pitch(parts[c["ic"]]) <= 0.5 else 0.0
-        for s in sorted(c["supports"], key=lambda s: s["ref"]):
-            r = s["ref"]
-            if not (s["sure"] or s.get("how") == "spread") or r not in P.of:
-                continue
-            i = P.idx[P.of[r]]
-            if P.fixed[i] or i in P.parked or P.unplaced(i) or len(P.mods[i]["members"]) != 1:
-                continue
-            pin = next(q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"])
-            dist = lambda: CL.support_dist(s, next(q for q in parts[r]["pads"] if q["num"] == s["via"]), pin, halo)
-            if dist() <= s["limit"]:
-                continue
-            sx, sy, st = float(P.X[i]), float(P.Y[i]), int(P.T[i])
-            c0 = P.cost_parts()
+    graded = {s["ref"]: (ic, s, h) for ic, s, h in P.graded}
+    refs = set(graded)
+
+    def dist_of(ic, s, h):
+        pin = next(q for q in parts[ic]["pads"] if q["num"] == s["pad"])
+        return CL.support_dist(s, next(q for q in parts[s["ref"]]["pads"] if q["num"] == s["via"]), pin, h)
+
+    far0 = _far(P, dist_of)
+    for r in sorted(far0, key=lambda r: (-far0[r], r)):
+        ic, s, halo = graded[r]
+        pin = next(q for q in parts[ic]["pads"] if q["num"] == s["pad"])
+        dist = lambda: dist_of(ic, s, halo)
+        if dist() <= s["limit"] + 1e-6:
+            continue                                         # an earlier seat brought it home
+        i = P.idx[P.of[r]]
+        why = None
+        if P.fixed[i]:
+            why = "fixed part"
+        elif P.unplaced(i):
+            why = "module unplaced"
+        elif len(P.mods[i]["members"]) > MODULE_MAX:
+            why = f"module of {len(P.mods[i]['members'])} parts"
+        if why:
+            left.append((r, dist(), f"{ic}.{s['pad']}", s["limit"], why))
+            continue
+        mem = [m for m in P.mods[i]["members"] if m in refs and m != r]
+        near_mem = {m: max(0.0, dist_of(*graded[m]) - graded[m][1]["limit"]) for m in mem}
+        ok_mem = lambda: all(max(0.0, dist_of(*graded[m]) - graded[m][1]["limit"]) <= near_mem[m] + 1e-6 for m in mem)
+        px = parts[r]["pos"]
+        reach = max([math.hypot(parts[m]["pos"][0] - px[0], parts[m]["pos"][1] - px[1]) for m in P.mods[i]["members"]] or [0.0])
+        sx, sy, st = float(P.X[i]), float(P.Y[i]), int(P.T[i])
+        was_parked = i in P.parked
+        c0 = P.cost_parts()
+        n0 = len(_far(P, dist_of))
+        P.apply(i, sx, sy, st)
+        P.unplace(i)
+        ok, why = _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1, reach=reach, accept=ok_mem if mem else None)
+        if not ok:                                           # no legal seat within the limit: one neighbour steps aside
+            win = s["limit"] + halo + 2.0
+            for j, cap in _neighbours(P, i, pin, win, graded, dist_of):
+                jx, jy, jt = float(P.X[j]), float(P.Y[j]), int(P.T[j])
+                for mag in (m for m in NUDGE_MAGS if m <= cap + 1e-9):
+                    for dx, dy in NUDGE_DIRS:
+                        g, oldj = P.try_pose(j, jx + dx * mag, jy + dy * mag, jt)
+                        if not g:
+                            continue
+                        P.X[j], P.Y[j] = jx + dx * mag, jy + dy * mag
+                        if _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1, reach=reach, accept=ok_mem if mem else None)[0]:
+                            c1 = P.cost_parts()
+                            if c1["cross"] <= c0["cross"] and P.total(c1) <= P.total(c0) + 1e-6 and len(_far(P, dist_of)) < n0:
+                                ok = True
+                                break
+                            P.unplace(i)
+                        P.restore(j, oldj)
+                        P.X[j], P.Y[j] = jx, jy
+                    if ok:
+                        break
+                if ok:
+                    break
+        if not ok:
+            P.X[i], P.Y[i], P.T[i] = sx, sy, st
             P.apply(i, sx, sy, st)
-            P.unplace(i)
-            ok = _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1)
-            if not ok:                                   # no legal seat within the limit: one neighbour steps aside
-                win = s["limit"] + halo + 2.0
-                for j in range(P.n):
-                    if ok or j == i or P.fixed[j] or j in P.parked or P.unplaced(j):
-                        continue
-                    if not any(parts[m]["court"][0] - win < pin["x"] < parts[m]["court"][2] + win
-                               and parts[m]["court"][1] - win < pin["y"] < parts[m]["court"][3] + win for m in P.mods[j]["members"]):
-                        continue
-                    jx, jy, jt = float(P.X[j]), float(P.Y[j]), int(P.T[j])
-                    for mag in (0.5, 1.0):
-                        for dx, dy in NUDGE_DIRS:
-                            g, oldj = P.try_pose(j, jx + dx * mag, jy + dy * mag, jt)
-                            if not g:
-                                continue
-                            P.X[j], P.Y[j] = jx + dx * mag, jy + dy * mag
-                            if _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1):
-                                c1 = P.cost_parts()
-                                if c1["cross"] <= c0["cross"] and P.total(c1) <= P.total(c0) + 1e-6:
-                                    ok = True
-                                    break
-                                P.unplace(i)
-                            P.restore(j, oldj)
-                            P.X[j], P.Y[j] = jx, jy
-                        if ok:
-                            break
-            if not ok:
-                P.X[i], P.Y[i], P.T[i] = sx, sy, st
-                P.apply(i, sx, sy, st)
-            (done if ok else left).append(r)
+            if was_parked:
+                P.parked.add(i)
+            left.append((r, dist(), f"{ic}.{s['pad']}", s["limit"], why))
+        else:
+            done.append(r)
     return done, left
 
 
@@ -1277,11 +1414,13 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                  lane="trial", phase="construct", verdict="running", full=True)
     cap = None if start == "construct" else {"wl": init["wl"], "cross": init["cross"]}      # the source start never keeps a state worse than the one it starts the search from
     acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons), cap=cap)
-    if start != "construct":                     # the search leaves supports where the input had them: those beyond their limit go home
-        c0 = P.cost_parts()
-        hd, hl = home_supports(P, cons, spec)
-        c1 = P.cost_parts()
-        print(f"  [{tag}] supports seated near their pin after the search: {len(hd)} ({', '.join(hd[:12])}), left {len(hl)}; model wl {c0['wl']:.0f} -> {c1['wl']:.0f}, crossings {c0['cross']} -> {c1['cross']}", flush=True)
+    c0 = P.cost_parts()                          # the search leaves supports where it found them: those beyond their limit go home, on whichever start won
+    hd, hl = home_supports(P, cons, spec)
+    c1 = P.cost_parts()
+    for r_, d_, pin_, lim_, why_ in hl:
+        print(f"  [{tag}] support {r_} left {d_:.1f} mm from {pin_} (limit {lim_:g}): {why_}", flush=True)
+    refuse = collections.Counter(w for *_x, w in hl)
+    print(f"  [{tag}] floorplan: supports homed {len(hd)}, left {len(hl)} (refusing checks: {', '.join(f'{w} x{n}' for w, n in refuse.most_common(6)) or 'none'}); model wl {c0['wl']:.0f} -> {c1['wl']:.0f}, crossings {c0['cross']} -> {c1['cross']}", flush=True)
     cur = P.cost_parts()
     reverted = {}
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
