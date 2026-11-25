@@ -26,6 +26,7 @@ SCOPE = {"ready": ("part-datasheet", "part-stock"),
 TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows", "hard_mag", "decap_far", "support_far", "far_mm",
          "open", "hot", "hot_occ", "vias", "detour")
 R6_TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows")        # never worse, whatever the target gap gained
+DIAG_RUNGS = {"feasible"}                     # diagnosis-only rungs: no candidate by design, no "no-candidate" entry
 TARGET_MUST_GAIN = ("row-cin-side:", "row-template:", "row-pin-bypass:")
 MAX_ROUNDS = 6
 CANDS_PER_RUNG = 8
@@ -177,7 +178,7 @@ def _excess(r):
 @detector(*(k for k in ORDER if k.startswith("row-")))
 def detect_rows(ctx):
     """A gap per hard row not met: budget rows (verdict fail) and intent rows (met False). Other-kind rows keep their own kind."""
-    out = []
+    out, sep_b, sep_i = [], {}, {}                         # separation rows by name: budget table / intent check (one gap per named row)
     far = {f["ref"] for f in ctx.need("_far", lambda: far_supports(ctx)) or []}
     for r in ctx.rows() or []:
         if r.get("hard") and r.get("verdict") == "fail":
@@ -188,11 +189,20 @@ def detect_rows(ctx):
                            row=None if soft else f"{r['kind']}:{r['name']}",
                            detail=f"{r.get('metric')} {r.get('value')} limit {r.get('max') if r.get('max') is not None else r.get('target')}"
                                   + (" (soft: within the rail model error)" if soft else "")))
+            if r.get("kind") == "separation":
+                sep_b[str(r["name"])] = out[-1]
     for r in ctx.intent_rows() or []:
         if r.get("hard") and r.get("met") is False and r.get("kind") != "support":      # support rows: the support-far gaps carry them
             out.append(gap(row_kind(r, True), r["name"], "plain", _excess(r), r.get("refs") or (), (), row=f"intent:{r['kind']}:{r['name']}",
                            detail=f"{r['kind']} {r.get('value')} limit {r.get('limit')}; {r.get('detail', '')}"))
-    return out
+            if r.get("kind") == "away" and str(r["name"]).startswith("sep:"):
+                sep_i[str(r["name"])[4:]] = out[-1]
+    drop = set()
+    for n, gi in sep_i.items():                      # the same [[separation]] seen twice: keep the copy that names the offender (ties: the budget row)
+        gb = sep_b.get(n)
+        if gb is not None:
+            drop.add(id(gi) if gb["refs"] or not gi["refs"] else id(gb))
+    return [g for g in out if id(g) not in drop]
 
 
 def far_supports(ctx):
@@ -537,7 +547,7 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
                     memo.add(key)
                     tried += 1
                     cands = sorted(RUNGS[rung](g, ctx) or [], key=lambda c: c["id"])[:CANDS_PER_RUNG]
-                    if not cands and kind.startswith("row-"):           # a leftover row is never silent: the rung says why it had nothing to try
+                    if not cands and kind.startswith("row-") and rung not in DIAG_RUNGS:           # a leftover row is never silent: the rung says why it had nothing to try
                         out["refused"].append({"gap": g["id"], "rung": rung, "check": "no-candidate",
                                                "why": (ctx.get("why_none") or {}).get((rung, g["id"])) or "the rung proposed no move"})
                     winner = None
@@ -1132,6 +1142,285 @@ def _r_pour_need(g, ctx):
 
 DISPATCH["row-rail"] = ["pull-load", "pour-need"]
 RUNGS.update({"pull-load": _r_pull_load, "pour-need": _r_pour_need})
+
+
+# ------------------------------------------------------------------ phase 6: row-away (feasible, push-out, re-seat), row-flight (push-out)
+AWAY_STEP_MM = 1.0                      # grid pitch of the feasibility / re-seat scan (the module's bounding box is the footprint: conservative)
+AWAY_DIRS = 8
+
+
+def _sep_entry(cons, name):
+    from . import budget as BG
+    n = name[4:] if name.startswith("sep:") else name
+    return next((e for i, e in enumerate((cons or {}).get("separation") or []) if BG.sep_name(e, i) == n), None)
+
+
+def _away_info(ctx, g):
+    """The row behind a row-away gap: {name, limit, value, refs, a {ref|keepout: rect}, b {...}} or None (a region row, a row not found)."""
+    from . import budget as BG, intent as IT
+    B, cons = ctx.B(), ctx["cons"]
+    row = next((r for r in ctx.rows() or [] if r.get("kind") == "separation" and g["id"] == f"row-away:{r['name']}|{r.get('metric')}"), None)
+    irow = None if row else next((r for r in ctx.intent_rows() or [] if r.get("kind") == "away" and g["id"] == f"row-away:{r['name']}"), None)
+    if row is None and irow is None:
+        return None
+    r = row or irow
+    name = str(r["name"])
+    e = _sep_entry(cons, name) if row or name.startswith("sep:") else None
+    if e is not None:
+        ko = {BG.KO + k["name"]: k["rect"] for k in BG.keepouts(B, cons)}
+
+        def group(items):
+            items = [items] if isinstance(items, str) else list(items or [])
+            rects = {x: ko[x] for x in items if x in ko}
+            rects.update({x: B["parts"][x]["court"] for x in IT.match(B["parts"], [x for x in items if not str(x).startswith(BG.KO)])})
+            return rects
+        ga, gb = group(e.get("a")), group(e.get("b"))
+        gb = {k: v for k, v in gb.items() if k not in ga}
+        limit = e.get("min_mm")
+    else:
+        a = next((x for x in IT.items(B, cons)["away"] if x["name"] == name), None)
+        if a is None:
+            return None
+        ga, gb = {x: B["parts"][x]["court"] for x in a["a"]}, {x: B["parts"][x]["court"] for x in a["b"] if x not in a["a"]}
+        limit = a["min"]
+    if limit is None:
+        return None
+    return {"name": name[4:] if name.startswith("sep:") else name, "limit": float(limit), "value": r.get("value"),
+            "refs": list(r.get("refs") or []), "a": ga, "b": gb}
+
+
+def _module(ctx, ref, mov):
+    """The offender's unit: the IC and its supports that may move (the same unit `_with_supports` carries)."""
+    sup = [s["ref"] for c in ctx.clusters() or [] if c["ic"] == ref for s in c["supports"]]
+    return [ref] + sorted(s for s in set(sup) if s in mov and s != ref and s in ctx.B()["parts"])
+
+
+def _away_scan(ctx, g, info):
+    """Feasibility of the offender's module at the row's limit: scans module-bbox positions on the grid (board minus fixed parts and
+    keep-outs, at least `limit` from the other group). -> dict {off, module, bbox, other, free: [(disp, cx, cy)], best, wanted, refusing, ...};
+    the verdict `impossible` is recorded in ctx["away_impossible"][gap id] with limit, best reachable value and the refusing part."""
+    from . import budget as BG, geom as GM, placetour as PT
+    B, cons = ctx.B(), ctx["cons"]
+    mov = set(PT._movable(B, cons, _P(ctx)))
+    imp = ctx.setdefault("away_impossible", {})
+    imp.pop(g["id"], None)
+    side = lambda x: "a" if x in info["a"] else "b" if x in info["b"] else None             # noqa: E731
+    off = next((r for r in info["refs"] if r in B["parts"] and r in mov and side(r)), None)
+    if off is None:                                          # both sides fixed (or the row names no part): nothing may move
+        val = info["value"]
+        imp[g["id"]] = {"name": info["name"], "limit": info["limit"], "best": val, "value": val, "refusing": ", ".join(info["refs"]) or "?",
+                        "why": "both ends are fixed"}
+        return {"off": None}
+    other = info["b" if side(off) == "a" else "a"]
+    module = _module(ctx, off, mov)
+    cs = [B["parts"][m]["court"] for m in module]
+    bb = (min(c[0] for c in cs), min(c[1] for c in cs), max(c[2] for c in cs), max(c[3] for c in cs))
+    w, h = bb[2] - bb[0], bb[3] - bb[1]
+    c0 = ((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+    key = (g["id"], tuple((m, *B["parts"][m]["pos"], B["parts"][m]["angle"]) for m in module), tuple(sorted(tuple(r) for r in other.values())))
+    cache = ctx.setdefault("_away_cache", {})
+    if key in cache:
+        sc = cache[key]
+        if sc["verdict"]:
+            imp[g["id"]] = sc["verdict"]
+        return sc
+    board = B.get("bbox") or (min(p["court"][0] for p in B["parts"].values()), min(p["court"][1] for p in B["parts"].values()),
+                              max(p["court"][2] for p in B["parts"].values()), max(p["court"][3] for p in B["parts"].values()))
+    obst = [(r, B["parts"][r]["court"]) for r in sorted(B["parts"]) if r not in mov and r not in module and r not in other and r not in info["a"]
+            and r not in info["b"]]
+    obst += [(r, B["parts"][r]["court"]) for r in sorted(B["parts"]) if r not in mov and r not in module and (r in info["a"] or r in info["b"])
+             and r not in other]
+    for k in BG.keepouts(B, cons):                           # a keep-out the module already stands in, or owns, is not an obstacle
+        if k["owner"] in module or k["owner"] in other or (BG.KO + k["name"]) in other or (BG.KO + k["name"]) in info["a"] \
+                or (BG.KO + k["name"]) in info["b"] or GM.overlap(bb, k["rect"]):
+            continue
+        obst.append(("keep-out " + k["name"], tuple(k["rect"])))
+    orects = list(other.values())
+    pos, x = [], board[0] + w / 2
+    while x <= board[2] - w / 2 + 1e-9:
+        y = board[1] + h / 2
+        while y <= board[3] - h / 2 + 1e-9:
+            r = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+            pos.append((min((GM.rect_gap(r, o) for o in orects), default=1e9), x, y, r))
+            y += AWAY_STEP_MM
+        x += AWAY_STEP_MM
+    blocker = lambda r: next((n for n, o in obst if GM.overlap(r, o)), None)                # noqa: E731
+    pos.sort(key=lambda t: (-t[0], t[1], t[2]))
+    best = next(((v, x, y) for v, x, y, r in pos if blocker(r) is None), None)
+    wanted = [t for t in pos if t[0] >= info["limit"] + CLEAR_MM - 1e-9]
+    free = sorted(((math.hypot(x - c0[0], y - c0[1]), x, y) for v, x, y, r in wanted[:4000] if blocker(r) is None))
+    sc = {"off": off, "module": module, "bbox": bb, "other": other, "free": free, "best": best[0] if best else None, "c0": c0, "verdict": None,
+          "obst": obst, "wanted": len(wanted)}
+    if not free:
+        tally = {}
+        for v, x, y, r in wanted[:400]:
+            n = blocker(r) or "?"
+            tally[n] = tally.get(n, 0) + 1
+        sc["verdict"] = {"name": info["name"], "limit": info["limit"], "value": info["value"],
+                         "best": round(min(best[0], 1e6), 2) if best else None,
+                         "refusing": max(sorted(tally), key=lambda n: tally[n]) if tally else "the board outline (it cannot hold the unit that far away)",
+                         "why": f"{off} (unit of {len(module)} part(s), {w:.1f} x {h:.1f} mm) has no place on the board at {info['limit']:g} mm"}
+        imp[g["id"]] = sc["verdict"]
+    cache[key] = sc
+    return sc
+
+
+def _r_feasible(g, ctx):
+    """Diagnosis only: no candidate. Records the `impossible` verdict (limit, best reachable value, refusing part) for `away_questions`."""
+    if g["kind"] == "row-away":
+        info = _away_info(ctx, g)
+        if info:
+            _away_scan(ctx, g, info)
+        else:                                               # a region row (or a row not found): no rung moves it yet; say so, never silently
+            ctx.setdefault("row_reports", {})[g["id"]] = {"name": g["id"].split(":", 1)[1].split("|")[0], "why": "region row: no placement rung repairs it yet (listed, not relaxed)"}
+    return []
+
+
+def _r_push_out(g, ctx):
+    """row-away: the offender's unit steps along the separating direction (and 7 more at 45 deg) by limit - value + clearance.
+    row-flight: the movable end steps (8 directions) by the least distance at which its flight line clears the keep-out + clearance."""
+    from . import placetour as PT
+    if g["kind"] == "row-flight":
+        return _flight_push(g, ctx)
+    if g["kind"] != "row-away":
+        return []
+    info = _away_info(ctx, g)
+    if not info or info["value"] is None:
+        return []
+    sc = _away_scan(ctx, g, info)
+    if not sc["off"] or sc["verdict"]:
+        return []
+    B = ctx.B()
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    from . import geom as GM
+    near = min(sc["other"].values(), key=lambda o: (GM.rect_gap(sc["bbox"], o), o))
+    ux, uy = sc["c0"][0] - (near[0] + near[2]) / 2, sc["c0"][1] - (near[1] + near[3]) / 2
+    base = math.atan2(uy, ux) if (ux or uy) else 0.0
+    d = info["limit"] - float(info["value"]) + CLEAR_MM
+    p = B["parts"][sc["off"]]
+    out, seen = [], set()
+    for k in range(AWAY_DIRS):
+        a = base + k * 2 * math.pi / AWAY_DIRS
+        tg = {sc["off"]: (p["pos"][0] + d * math.cos(a), p["pos"][1] + d * math.sin(a), p["angle"])}
+        mv = _with_supports(B, ctx, mov, tg)
+        key = PT._key(mv) if mv else None
+        if mv and key not in seen:
+            seen.add(key)
+            out.append({"id": f"push-{k}", "rung": "push-out", "moves": mv, "claims": [], "notes": f"{sc['off']} {d:.1f} mm away from the other group ({k * 45} deg)"})
+    return out
+
+
+def _r_re_seat(g, ctx):
+    """row-away: grid seats of the unit (nearest first, >= 2 mm apart, at least limit + clearance from the other group, clear of fixed parts and keep-outs)."""
+    from . import placetour as PT
+    if g["kind"] != "row-away":
+        return []
+    info = _away_info(ctx, g)
+    if not info:
+        return []
+    sc = _away_scan(ctx, g, info)
+    if not sc["off"] or sc["verdict"]:
+        return []
+    B = ctx.B()
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    p = B["parts"][sc["off"]]
+    picks = []
+    for _d, x, y in sc["free"]:
+        if all(math.hypot(x - a, y - b) >= 2.0 for a, b in picks):
+            picks.append((x, y))
+        if len(picks) >= CANDS_PER_RUNG:
+            break
+    out, seen = [], set()
+    for k, (x, y) in enumerate(picks):
+        tg = {sc["off"]: (p["pos"][0] + x - sc["c0"][0], p["pos"][1] + y - sc["c0"][1], p["angle"])}
+        mv = _with_supports(B, ctx, mov, tg)
+        key = PT._key(mv) if mv else None
+        if mv and key not in seen:
+            seen.add(key)
+            out.append({"id": f"seat-{k}", "rung": "re-seat", "moves": mv, "claims": [], "notes": f"{sc['off']} seated {math.hypot(x - sc['c0'][0], y - sc['c0'][1]):.1f} mm away"})
+    return out
+
+
+def _flight_push(g, ctx):
+    from . import budget as BG, geom as GM, placetour as PT
+    B, cons = ctx.B(), ctx["cons"]
+    row = next((r for r in ctx.rows() or [] if r.get("kind") == "keepout-flight" and g["id"] == f"row-flight:{r['name']}|{r.get('metric')}"), None)
+    if not row or len(row.get("refs") or []) < 2 or not row.get("nets"):
+        return []
+    ko = next((k for k in BG.keepouts(B, cons) if str(row["name"]).endswith(" x " + k["name"])), None)
+    if ko is None:
+        return []
+    mov = set(PT._movable(B, cons, _P(ctx)))
+    a, b = row["refs"][:2]
+    ctr = BG._centres(B, row["nets"][0])
+    if a not in ctr or b not in ctr:
+        return []
+    ends = [r for r in (a, b) if r in mov]
+    rep = ctx.setdefault("row_reports", {})
+    rep.pop(g["id"], None)
+    if not ends:
+        rep[g["id"]] = {"name": row["name"], "why": f"both ends {a}, {b} are fixed: a layer change is the route stage's job"}
+        return []
+    r0 = (ko["rect"][0] - CLEAR_MM, ko["rect"][1] - CLEAR_MM, ko["rect"][2] + CLEAR_MM, ko["rect"][3] + CLEAR_MM)
+    out, seen = [], set()
+    for k in range(AWAY_DIRS):
+        ang = k * 2 * math.pi / AWAY_DIRS
+        ux, uy = math.cos(ang), math.sin(ang)
+        best = None
+        for e in ends:
+            o = b if e == a else a
+            d = 0.25
+            while d <= 40.0:
+                c = (ctr[e][0] + ux * d, ctr[e][1] + uy * d)
+                if not GM.seg_hits_rect(c, ctr[o], r0):
+                    break
+                d += 0.25
+            else:
+                continue
+            if best is None or (d, e) < best:
+                best = (d, e)
+        if best is None:
+            continue
+        d, e = best
+        p = B["parts"][e]
+        mv = _with_supports(B, ctx, mov, {e: (p["pos"][0] + ux * d, p["pos"][1] + uy * d, p["angle"])})
+        key = PT._key(mv) if mv else None
+        if mv and key not in seen:
+            seen.add(key)
+            out.append({"id": f"flight-{k}", "rung": "push-out", "moves": mv, "claims": [], "notes": f"{e} {d:.1f} mm ({k * 45} deg): the flight line clears {ko['name']}"})
+    return out
+
+
+def away_questions(ctx, res):
+    """After `close`: a row-away gap still open and impossible (both ends fixed, or no place at the limit) is one owner question
+    `row:<name>` (ctx["session"]) with limit, best reachable value, refusing part and the four ways out. Returns the records asked; a row
+    a later round closed is dropped. row-flight rows with both ends fixed come back in ctx["row_reports"] (the route stage's job)."""
+    left = {g["id"] for g in res.get("gaps_out") or []}
+    imp = ctx.setdefault("away_impossible", {})
+    for gid in [k for k in imp if k not in left]:
+        del imp[gid]
+    rep = ctx.setdefault("row_reports", {})
+    for gid in [k for k in rep if k not in left]:
+        del rep[gid]
+    S, out = ctx.get("session"), []
+    for gid, rec in sorted(imp.items()):
+        out.append(dict(rec, gap=gid))
+        if S is None:
+            continue
+        best = "none (nothing can be reached)" if rec["best"] is None else f"{rec['best']:g} mm"
+        S.ask(f"row:{rec['name']}", "separation", f"row {rec['name']}: {rec['value'] if rec['value'] is None else format(float(rec['value']), 'g')} mm now, limit {rec['limit']:g} mm; best reachable {best}; "
+              f"refused by {rec['refusing']} ({rec['why']})",
+              {"waive": "accept the separation as it is, with the reason on record",
+               "lower": f"lower min_mm of the row to the best reachable value ({best})",
+               "unfix": f"unfix the part that stops the move ({rec['refusing']}) so it can be placed",
+               "grow": "grow the board so the unit fits at the limit"},
+              "waive", "the next floorplan run")
+    return out
+
+
+DISPATCH["row-away"] = ["feasible", "push-out", "re-seat"]
+DISPATCH["row-flight"] = ["push-out"]
+RUNGS.update({"feasible": _r_feasible, "push-out": _r_push_out, "re-seat": _r_re_seat})
 
 
 class FileEval(Evaluator):
