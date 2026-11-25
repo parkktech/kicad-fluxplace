@@ -740,7 +740,7 @@ def stage(c, n, board):
             for i in rem["vias"]:
                 removed_refs |= {ref for ref, _n in A["vias"][i] if ref in cnd["moves"]}
             best = {"board": p, "blame": res["blame"], "key": jk, "routed": res["routed"]}
-            stale = stale + 1 if minor else 0                                    # a decimal-only gain advances the board but is not progress
+            stale = stale + 1 if minor and not any(jk[:K_OPEN]) else 0          # a decimal-only gain is not progress (while an hs/rf/power net is open it still is: keep looking)
             judged_on = set()
             SN.active_take(p, f"placetour r{r} winner", force=True, opens=jk[K_OPEN])
             EV.emit("parts", stage="placetour", i=r, refs=sorted(cnd["moves"]), why=cnd["kind"])
