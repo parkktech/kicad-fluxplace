@@ -98,6 +98,50 @@ def test_the_output_gate_flags_an_injected_short_and_repairs_it(tmp_path):
     assert LG.drc_new(out2, src)["items"] == []
 
 
+def test_strict_arrange_does_not_leave_a_seat_on_a_neighbour_at_its_input_pose(tmp_path):
+    """A: the source start keeps the others at their input poses, so a seat that lands on another module's part goes back."""
+    B = RD.load(_two_caps(tmp_path))
+    base, orig = LG.baseline(B, {}), LG.poses(B)
+    GM.place(B["parts"]["C2"], 20.3, 20, 0.0)
+    of = {"C1": "C1", "C2": "C2"}
+    out = MD._legalise_arranged(B, {}, set(), [], of, base, orig, set(), {}, set(), lambda o: False, strict=True)
+    assert "C2" in out and tuple(B["parts"]["C2"]["pos"]) == orig["C2"][:2]
+    assert LG.count_new(LG.new_issues(LGL.Legal(B, {}, ()).issues(), base)) == 0
+
+
+def test_anneal_cap_never_keeps_a_best_state_above_the_start(tmp_path):
+    """C: with a cap below every reachable state the anneal returns to its starting state."""
+    ic = lambda ref, x, y: G.fp(ref, x, y, [G.pad(str(k + 1), -1 + (k % 2) * 2, (k // 2) * 1.0, f"N{k}", 0.6, 0.6) for k in range(8)], court=(-3, -3, 3, 3))
+    body = ic("U1", 8, 8) + ic("U2", 30, 20) + ic("U3", 15, 25)
+    F2, B, P = _plan(tmp_path, body, {"placement": {"fixed": []}})
+    start = P.cost_parts()
+    pos0 = [(P.X[i], P.Y[i]) for i in range(P.n)]
+    F2.anneal(P, iters=300, seed=3, cap={"wl": start["wl"] - 1e9, "cross": -1})
+    assert [(P.X[i], P.Y[i]) for i in range(P.n)] == pos0
+    F2.anneal(P, iters=300, seed=3)                                                   # uncapped it does move
+    assert [(P.X[i], P.Y[i]) for i in range(P.n)] != pos0
+    assert F2._within({"wl": 5.0, "cross": 2}, {"wl": 5.0, "cross": 2}) and not F2._within({"wl": 5.1, "cross": 2}, {"wl": 5.0, "cross": 2})
+
+
+def test_selection_prefers_fewer_crossings_then_wire_among_passing_starts(monkeypatch, tmp_path):
+    """D: both starts pass: the written board with fewer crossings wins, wire length breaks the tie."""
+    import argparse
+    from fluxplace import floorplan2 as F2
+
+    class Pl:
+        def total(self, c):
+            return 0.0
+    mk = lambda cr, wl: {"fanout_ok": True, "construct_failed": [], "legality_new": {}, "blocked": [], "escaped": 1, "required": 1, "annealed": {"cross": cr, "wl": wl}}
+    outs = {"construct": mk(3, 10.0), "source": mk(2, 99.0)}
+    monkeypatch.setattr(F2, "_one", lambda *a, **k: ((outs[a[8]]), Pl(), None))
+    r = F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")
+    assert r[0]["start"] == "source"
+    outs["source"] = mk(3, 12.0)
+    assert F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")[0]["start"] == "construct"
+    outs["construct"] = dict(mk(0, 1.0), fanout_ok=False, blocked=["x"])               # a failing start never beats a passing one
+    assert F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")[0]["start"] == "source"
+
+
 # ---- construct, settle, gate fails closed, pipeline
 def _plan(tmp_path, body, cons=None, arrange=False):
     from fluxplace import floorplan2 as F2
@@ -208,3 +252,68 @@ def test_an_illegal_floorplan_is_not_the_stage_board(monkeypatch, tmp_path):
     res = PL.st_floorplan(C(), 3, str(board))
     assert res["verdict"] == "fail" and res["board"] == str(board) and res["line"].startswith("floorplan: ILLEGAL")
     assert not out.exists() and (out_dir / "board.illegal.kicad_pcb").exists() and res["illegal_board"].endswith(".illegal.kicad_pcb")
+
+
+# ---- review round: unseat decision, ref spellings, homing, breakout nudge
+def test_ref_spellings_and_window_come_from_the_board(tmp_path):
+    from fluxplace import floorplan2 as F2
+    refs = {"U1A", "J_USB1", "C1"}
+    assert F2._ref_in("escape of U1A.3", refs) == "U1A"
+    assert F2._ref_in("J_USB1.2", refs) == "J_USB1"
+    assert F2._ref_in("via of NET", refs) is None and F2._ref_in("C9.1", refs) is None
+    assert F2._window({}) == 3.0 and F2._window({"floorplan": {"block_window_mm": 5}}) == 5.0
+
+
+def test_unseat_names_only_the_offending_support_and_sees_flipped_parts(monkeypatch, tmp_path):
+    from fluxplace import boardwrite as BW, fanout as FO, flip as FL, floorplan2 as F2
+    body = G.two("C1", 20, 20, "A", "B", **CAP) + G.two("C2", 25, 20, "C", "D", **CAP) + G.two("C3", 20, 22, "E", "F", **CAP)
+    path = G.four_layers(G.board(tmp_path, body))
+    B = RD.load(path)
+    orig = LG.poses(B)
+    GM.place(B["parts"]["C2"], 25, 20, 0.0)
+    GM.flip(B["parts"]["C2"])                                          # flipped: it stands at its input XY on the other side
+    GM.place(B["parts"]["C3"], 20.5, 22, 0.0)                         # moved, within the window of C1.1, but not the blocker
+    M = {"of": {r: "U" for r in B["parts"]}, "modules": [{"name": "U", "anchor": "C1", "fixed": False, "members": {"C1": {}, "C2": {}, "C3": {}}}]}
+    seen = {}
+    monkeypatch.setattr(FL, "flip_file", lambda src, dst, refs: seen.setdefault("flipped", list(refs)) and open(dst, "w").write(open(src).read()))
+    monkeypatch.setattr(BW, "move_file", lambda src, dst, moves, post=True: seen.update(moves=dict(moves)) or open(dst, "w").write(open(src).read()))
+    blocked = [{"ref": "C1", "pin": "1", "net": "A", "blocker": "C2.1"}]
+    monkeypatch.setattr(FO, "run", lambda *a, **k: (RD.load(path), {}))
+    monkeypatch.setattr(FO, "summarise", lambda *a, **k: {"C1": {"blocked": blocked}})
+    out = F2._seats_that_block(B, M, path, orig, {}, None, str(tmp_path), "t", None)
+    assert out == {"C2"} and "C2" in seen["moves"] and seen["flipped"] == ["C2"]
+    blocked[:] = [{"ref": "C1", "pin": "1", "net": "A", "blocker": "via of X"}]          # no part named: the supports within the window
+    out = F2._seats_that_block(B, M, path, orig, {}, None, str(tmp_path), "t", None)
+    assert "C3" in out
+
+
+def test_home_supports_seats_a_far_support_within_its_limit(tmp_path):
+    from fluxplace import clusters as CL, floorplan2 as F2
+    body = (G.ic("U1", 30, 30, ["VCC", "GND", "SIG", "SIG2", "VCC", "GND", "SIG3", "SIG4"], pitch=0.8, court=(-3, -3, 3, 3))
+            + G.two("C1", 70, 60, "VCC", "GND", **CAP))
+    B = RD.load(G.board(tmp_path, body, outline=(0, 0, 100, 80)))
+    cons = {"placement": {"fixed": []}}
+    M = MD.build(B, cons, None, arrange=False)
+    P = F2.Plan(B, cons, None, M, log=lambda *a, **k: None)
+    P.freeze_baseline()
+    done, left = F2.home_supports(P, cons, None)
+    assert done == ["C1"] and not left
+    assert all(s["dist"] <= s["limit"] for c in CL.build(B, cons, None)[0] for s in c["supports"] if s["ref"] == "C1")
+    assert not any(LG.part_new(P.L, r, LG.known(P.base_issues)) for r in B["parts"])
+
+
+def test_breakout_steps_the_dense_part_aside_for_a_via_blocker(monkeypatch, tmp_path):
+    from fluxplace import breakout as BO
+    body = G.ic("U1", 30, 30, ["A", "B", "C", "D"], pitch=0.8, court=(-3, -3, 3, 3)) + G.two("C1", 60, 30, "E", "F", **CAP)
+    path = G.board(tmp_path, body)
+    real = BO.solve
+
+    def fake(B, cons=None, spec=None, **k):
+        r = real(B, cons, spec, **k)
+        bad = B["parts"]["U1"]["pos"][0] < 30.2
+        r["failed"] = [{"ref": "U1", "pin": "1", "net": "A", "side": 0, "gap": -0.2, "blocker": "via of B", "msg": "x"}] if bad else []
+        return r
+    monkeypatch.setattr(BO, "solve", fake)
+    out = BO.repair(path, {}, None, log=lambda t: None)
+    assert (out["before"], out["after"]) == (1, 0) and 0.2 < out["moved"]["U1"][3] <= 1.0
+    assert RD.load(path)["parts"]["U1"]["pos"][0] > 30.2

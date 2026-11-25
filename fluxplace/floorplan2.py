@@ -814,7 +814,12 @@ def _grid(P, i, tx, ty, R, step, placed, x0, y0, x1, y1, occ):
 WATCH_EVERY = 250                   # anneal moves between two calls of the live view
 
 
-def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
+def _within(cost, cap):
+    return cap is None or (cost["wl"] <= cap["wl"] + 1e-6 and cost["cross"] <= cap["cross"])
+
+
+def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None, cap=None):
+    """cap = {"wl":, "cross":}: a state above either is never kept as the best (the source start must not end worse than it began)."""
     rng = random.Random(seed)
     mov = [i for i in range(P.n) if not P.fixed[i] and i not in P.parked]
     if not mov:
@@ -870,7 +875,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
                 if ns <= cs or rng.random() < math.exp(-(ns - cs) / T):
                     cs, cur = ns, nc
                     acc += 1
-                    if cs < best[0]:
+                    if cs < best[0] and _within(nc, cap):
                         best = (cs, P.X.copy(), P.Y.copy(), P.T.copy())
                     continue
                 P.X[i], P.Y[i], P.X[j], P.Y[j] = Xi, Yi, Xj, Yj
@@ -892,7 +897,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
             continue
         cs, cur = ns, nc
         acc += 1
-        if cs < best[0]:
+        if cs < best[0] and _within(nc, cap):
             best = (cs, P.X.copy(), P.Y.copy(), P.T.copy())
     # back to the best state
     _, bx, by, bt = best
@@ -901,6 +906,115 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
             P.X[i], P.Y[i], P.T[i] = bx[i], by[i], bt[i]
             P.apply(i, bx[i], by[i], int(bt[i]))
     return acc, best[0]
+
+HOME_TRY = 24
+NUDGE_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1))
+
+
+def _ref_in(text, refs):
+    """the first ref of `refs` that `text` names as REF.pad (any ref spelling: U1A, J_USB1)."""
+    for t in re.split(r"[\s,;()]+", str(text or "")):
+        for m in re.finditer(r"\.", t):
+            if t[:m.start()] in refs:
+                return t[:m.start()]
+    return None
+
+
+def _window(cons):
+    return float((cons.get("floorplan") or {}).get("block_window_mm", 3.0))
+
+
+def _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1):
+    """module i (one support, unplaced here) at the legal pose nearest the pin it serves whose distance is within its limit, the one with the
+    lowest crossings then wire among HOME_TRY; -> True when seated (the model, P.X/Y/T and the claim hash follow)."""
+    placed = set(j for j in range(P.n) if j != i and P.cur[j][0] < 9e4)
+    occ = P.raster(skip=P.mods[i]["members"], edge=any(m in P.L.edge for m in P.mods[i]["members"]), skip_mod=i)
+    P._ints = {}
+    R = float(s["limit"]) + halo + 2.0
+    cand = sorted(_grid(P, i, pin["x"], pin["y"], R, step, placed, x0, y0, x1, y1, occ),
+                  key=lambda t: (round(math.hypot(t[1] - pin["x"], t[2] - pin["y"]), 6), t[3], t[1], t[2]))
+    pick, seen = None, 0
+    for _c, X, Y, th in cand:
+        if seen >= HOME_TRY:
+            break
+        good, old = P.try_pose(i, X, Y, th)
+        if not good:
+            continue
+        if dist() <= s["limit"]:
+            seen += 1
+            P.X[i], P.Y[i], P.T[i] = X, Y, th
+            k = P.cost_parts()
+            k = (round(k["cross"] + k["wl"] / 4.0, 6), seen)
+            if pick is None or k < pick[0]:
+                pick = (k, X, Y, th)
+        P.restore(i, old)
+    if pick is None:
+        return False
+    _, X, Y, th = pick
+    P.apply(i, X, Y, th)
+    P.X[i], P.Y[i], P.T[i] = X, Y, th
+    return True
+
+
+def home_supports(P, cons, spec, step=0.5):
+    """after the search: a support the budget rows grade (confidently owned or spread; the clusters' own limits) that is its own single-part
+    module and stands beyond its limit is put at the legal pose (courtyards, claims, keep-outs, intent: as the search checks them)
+    nearest the pin it serves, within its limit. With no legal seat within the limit, one movable neighbour near the pin is nudged aside
+    (<= 1 mm, legal, via try_pose) and the seat tried again; kept only when crossings and the weighted cost do not rise.
+    -> (refs seated, refs left)."""
+    from . import clusters as CL
+    cl, _ = CL.build(P.B, cons, spec)
+    parts = P.B["parts"]
+    x0, y0, x1, y1 = P.B["bbox"]
+    done, left = [], []
+    for c in cl:
+        halo = CL.HALO_MM if CL._pitch(parts[c["ic"]]) <= 0.5 else 0.0
+        for s in sorted(c["supports"], key=lambda s: s["ref"]):
+            r = s["ref"]
+            if not (s["sure"] or s.get("how") == "spread") or r not in P.of:
+                continue
+            i = P.idx[P.of[r]]
+            if P.fixed[i] or i in P.parked or P.unplaced(i) or len(P.mods[i]["members"]) != 1:
+                continue
+            pin = next(q for q in parts[c["ic"]]["pads"] if q["num"] == s["pad"])
+            dist = lambda: CL.support_dist(s, next(q for q in parts[r]["pads"] if q["num"] == s["via"]), pin, halo)
+            if dist() <= s["limit"]:
+                continue
+            sx, sy, st = float(P.X[i]), float(P.Y[i]), int(P.T[i])
+            c0 = P.cost_parts()
+            P.apply(i, sx, sy, st)
+            P.unplace(i)
+            ok = _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1)
+            if not ok:                                   # no legal seat within the limit: one neighbour steps aside
+                win = s["limit"] + halo + 2.0
+                for j in range(P.n):
+                    if ok or j == i or P.fixed[j] or j in P.parked or P.unplaced(j):
+                        continue
+                    if not any(parts[m]["court"][0] - win < pin["x"] < parts[m]["court"][2] + win
+                               and parts[m]["court"][1] - win < pin["y"] < parts[m]["court"][3] + win for m in P.mods[j]["members"]):
+                        continue
+                    jx, jy, jt = float(P.X[j]), float(P.Y[j]), int(P.T[j])
+                    for mag in (0.5, 1.0):
+                        for dx, dy in NUDGE_DIRS:
+                            g, oldj = P.try_pose(j, jx + dx * mag, jy + dy * mag, jt)
+                            if not g:
+                                continue
+                            P.X[j], P.Y[j] = jx + dx * mag, jy + dy * mag
+                            if _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1):
+                                c1 = P.cost_parts()
+                                if c1["cross"] <= c0["cross"] and P.total(c1) <= P.total(c0) + 1e-6:
+                                    ok = True
+                                    break
+                                P.unplace(i)
+                            P.restore(j, oldj)
+                            P.X[j], P.Y[j] = jx, jy
+                        if ok:
+                            break
+            if not ok:
+                P.X[i], P.Y[i], P.T[i] = sx, sy, st
+                P.apply(i, sx, sy, st)
+            (done if ok else left).append(r)
+    return done, left
 
 
 def all_moves(P):
@@ -1032,8 +1146,10 @@ def floorplan_once(board, cons, spec, grow, args, text_in, workdir, tag, log=pri
     best = None
     for start in (["construct", "source"] if args.start == "both" else [args.start]):
         r = _one(board, cons, spec, grow, args, text_in, workdir, f"{tag}_{start}", start, log)
-        key = (0 if passes(r[0]) else 1, len(r[0]["blocked"]), r[1].total(r[0]["annealed"]))
+        a = r[0]["annealed"]                    # measured on the written board: the passing start with fewer crossings, then less wire, wins
+        key = (0, a["cross"], a["wl"]) if passes(r[0]) else (1, len(r[0]["blocked"]), r[1].total(a))
         r[0]["start"] = start
+        log(f"  [{tag}] start {start}: {'pass' if passes(r[0]) else 'FAIL'}, fan-out {r[0]['escaped']}/{r[0]['required']}, crossings {a['cross']}, wire length {a['wl']:.0f}")
         if best is None or key < best[0]:
             best = (key, r)
     res = best[1][0]
@@ -1062,50 +1178,73 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     if base_in is None:                          # what the input board already violates, taken before any seating
         base_in = LG.baseline(RD.load(board) if any(grow) else B, cons)
     orig = LG.poses(RD.load(path_g))             # every part's pose on the input: where a part that cannot be seated legally stands
-    M = MD.build(B, cons, spec, arrange=True)
-    from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
-    nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
-    LV0.narrate("floorplan", f"Seating {nsup} support parts around {len(M.get('modules') or [])} modules' anchor parts (candidate {tag}).", "doing")
-    LV0.progress("floorplan", "construct", always=True, cand=tag, why=f"{len(M.get('rehomed') or {})} bypass part(s) re-homed",
-                 criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
-                            "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])},
-                           {"id": "pins bared by re-homing", "ok": not M.get("bared"), "value": len(M.get("bared") or []), "limit": 0,
-                            "text": ", ".join(f"{b['ic']}.{b['pad']} ({b['was']})" for b in (M.get("bared") or [])[:12])},
-                           {"id": "template units legal where they stand", "ok": not M.get("unit_illegal"), "value": len(M.get("unit_illegal") or []),
-                            "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
-    for u in M.get("unseated") or []:
-        print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
-    P = Plan(B, cons, spec, M, log=log, base=base_in)
+    from . import fanout as FO0
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)
-    # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
-    # neighbours), as geometry relative to each module. (Using the isolated solution for the pins it could not escape was
-    # tried and made the result worse: RN400.7/.8 and U302.2 came back.)
-    from . import fanout as FO0
     _B0, fres0 = FO0.run(path_g, cons, spec, None, fa, None)
-    whole = defaultdict(list)
-    okpins = set()
-    for pin in fres0["pins"]:
-        if pin.get("ok") and pin["ref"] in M["of"]:
-            okpins.add((pin["ref"], pin["pin"]))
-            m = M["modules"][P.idx[M["of"][pin["ref"]]]]
-            ox, oy = m["pos"]
-            e = {"ok": True, "w": pin.get("w", 0.15), "layer": pin.get("layer")}
-            if pin.get("stub"):
-                e["stub"] = [[q[0] - ox, q[1] - oy] for q in pin["stub"]]
-            if pin.get("via"):
-                e["via"] = [pin["via"][0] - ox, pin["via"][1] - oy]
-            whole[m["name"]].append(e)
-    for m in M["modules"]:
-        m["fanout"] = {"pins": whole.get(m["name"], [])}
-    cl = claims_from(M["modules"])
-    bcl, bregs = breakout_claims(B, cons, spec, M, P)
-    for i, extra in bcl.items():
-        cl[i] = list(cl.get(i, [])) + extra
-    P.set_claims(cl)
-    P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
-    P.set_breakouts(bregs)
-    P.freeze_baseline()
+    in_blocked = any(v["blocked"] for v in FO0.summarise(_B0, fres0).values())
+    unseat = set()
+    for outer in range(2):
+        for attempt in range(3):
+            M = MD.build(B, cons, spec, arrange=True, strict=(start != "construct"), unseat=unseat)   # the source start keeps the others at their input poses: a seat is kept only when legal against them
+            if start == "construct" or in_blocked or attempt == 2:
+                break
+            more = _seats_that_block(B, M, path_g, orig, cons, spec, workdir, f"{tag}.arr{attempt}", fa)
+            if not more:
+                break
+            print(f"  [{tag}] seats that blocked a pin's escape on the input's own fan-out and stay at their input pose: {', '.join(sorted(more)[:12])}{' ...' if len(more) > 12 else ''}", flush=True)
+            unseat |= more
+            B = RD.load(path_g)                      # build mutates the model: again from the input
+        from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
+        nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
+        LV0.narrate("floorplan", f"Seating {nsup} support parts around {len(M.get('modules') or [])} modules' anchor parts (candidate {tag}).", "doing")
+        LV0.progress("floorplan", "construct", always=True, cand=tag, why=f"{len(M.get('rehomed') or {})} bypass part(s) re-homed",
+                     criteria=[{"id": "supports seated", "ok": not M.get("unseated"), "value": len(M.get("unseated") or []), "limit": 0,
+                                "text": ", ".join(f"{u['ref']} ({u['why']})" for u in (M.get("unseated") or [])[:12])},
+                               {"id": "pins bared by re-homing", "ok": not M.get("bared"), "value": len(M.get("bared") or []), "limit": 0,
+                                "text": ", ".join(f"{b['ic']}.{b['pad']} ({b['was']})" for b in (M.get("bared") or [])[:12])},
+                               {"id": "template units legal where they stand", "ok": not M.get("unit_illegal"), "value": len(M.get("unit_illegal") or []),
+                                "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
+        for u in M.get("unseated") or []:
+            print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
+        P = Plan(B, cons, spec, M, log=log, base=base_in)
+        fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
+                                nodes=200000, repairs=12, check_only=True)
+        # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
+        # neighbours), as geometry relative to each module. (Using the isolated solution for the pins it could not escape was
+        # tried and made the result worse: RN400.7/.8 and U302.2 came back.)
+        whole = defaultdict(list)
+        okpins = set()
+        for pin in fres0["pins"]:
+            if pin.get("ok") and pin["ref"] in M["of"]:
+                okpins.add((pin["ref"], pin["pin"]))
+                m = M["modules"][P.idx[M["of"][pin["ref"]]]]
+                ox, oy = m["pos"]
+                e = {"ok": True, "w": pin.get("w", 0.15), "layer": pin.get("layer")}
+                if pin.get("stub"):
+                    e["stub"] = [[q[0] - ox, q[1] - oy] for q in pin["stub"]]
+                if pin.get("via"):
+                    e["via"] = [pin["via"][0] - ox, pin["via"][1] - oy]
+                whole[m["name"]].append(e)
+        for m in M["modules"]:
+            m["fanout"] = {"pins": whole.get(m["name"], [])}
+        cl = claims_from(M["modules"])
+        bcl, bregs = breakout_claims(B, cons, spec, M, P)
+        for i, extra in bcl.items():
+            cl[i] = list(cl.get(i, [])) + extra
+        P.set_claims(cl)
+        P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
+        P.set_breakouts(bregs)
+        P.freeze_baseline()
+
+        clash = [] if start == "construct" else [i for i in range(P.n) if not P.fixed[i] and not P.claims_ok(i)]
+        more = {r for i in clash for r in P.mods[i]["members"] if r in orig and r != P.mods[i]["anchor"] and r not in unseat
+                and LG.displaced(P.B["parts"][r], orig[r]) > LG.MOVE_EPS}      # a seat on another module's claim / keep-out / breakout region stays at its input pose
+        if not more or outer == 1:
+            break
+        print(f"  [{tag}] seats on a claim, keep-out or breakout region that stay at their input pose: {', '.join(sorted(more)[:12])}{' ...' if len(more) > 12 else ''}", flush=True)
+        unseat |= more
+        B = RD.load(path_g)
     if start != "construct":                     # the construct start places every module afresh; the source start keeps the seated poses
         moved_u, left_u = legalise_units(P, step=args.step)
         if moved_u or left_u:
@@ -1116,8 +1255,18 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         P.noseat |= set(failed)
     else:
         failed = []
-        rep = repair_claims(P, step=args.step)
-        print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
+        from . import breakout as BO0
+        bo_in = BO0.solve(RD.load(path_g), cons, spec)["failed"] if BO0.conf(cons)["enabled"] else []
+        bo_mods = sorted({P.idx[P.of[f["ref"]]] for f in bo_in if f["ref"] in P.of and not P.fixed[P.idx[P.of[f["ref"]]]]})
+        rep = []
+        if in_blocked:                           # the input's own fan-out has blocked pins: modules on another's escape copper are re-seated (a claim a seat made was unseated above; the input's own are its baseline)
+            rep = repair_claims(P, step=args.step)
+            print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
+        owners = [P.mods[i]["name"] for i in bo_mods if P.mods[i]["name"] not in rep and reseat_module(P, i, step=args.step)]
+        if owners:
+            print(f"  [{tag}] re-seated the module(s) of input breakout pins that fail: {', '.join(owners[:12])}", flush=True)
+        if not (in_blocked or bo_mods):
+            print(f"  [{tag}] input fan-out, breakout and claims are clean: no claim repair", flush=True)
     st0 = settle(P, orig, args.step)
     if any(st0.values()):
         print(f"  [{tag}] settled before the search: re-seated {len(st0['reseated'])}, at input poses {len(st0['parked'])}, unplaced {len(st0['unplaced'])}"
@@ -1126,7 +1275,13 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     from . import liveview as LV                 # F16: the constructed placement and the running anneal, when a stream is on
     LV.candidate("floorplan", f"{tag}-construct", P.B, {"modules": P.mods, "of": P.of}, [["cost", round(float(P.total(init)), 3)]], None, cons,
                  lane="trial", phase="construct", verdict="running", full=True)
-    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
+    cap = None if start == "construct" else {"wl": init["wl"], "cross": init["cross"]}      # the source start never keeps a state worse than the one it starts the search from
+    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons), cap=cap)
+    if start != "construct":                     # the search leaves supports where the input had them: those beyond their limit go home
+        c0 = P.cost_parts()
+        hd, hl = home_supports(P, cons, spec)
+        c1 = P.cost_parts()
+        print(f"  [{tag}] supports seated near their pin after the search: {len(hd)} ({', '.join(hd[:12])}), left {len(hl)}; model wl {c0['wl']:.0f} -> {c1['wl']:.0f}, crossings {c0['cross']} -> {c1['cross']}", flush=True)
     cur = P.cost_parts()
     reverted = {}
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
@@ -1169,11 +1324,12 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         # halo the modules that own a blocked pin, the module whose pad or escape blocks it, and the movable modules within
         # 3 mm of the pin; each of those that can move is re-seated at the nearest legal pose outside the halo
         bad = set()
+        win = _window(cons)
         for p in blocked:
             bad.add(P.idx[P.of[p["ref"]]])
-            m = re.match(r"(?:escape of )?([A-Z]+\d+)\.", str(p.get("blocker", "")))
-            if m and m.group(1) in P.of:
-                bad.add(P.idx[P.of[m.group(1)]])
+            br = _ref_in(p.get("blocker"), P.of)
+            if br:
+                bad.add(P.idx[P.of[br]])
             q = Bn["parts"].get(p["ref"])
             if q:
                 for pad in q["pads"]:
@@ -1183,7 +1339,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                                 continue
                             for r in P.mods[j]["members"]:
                                 c = P.B["parts"][r]["court"]
-                                if c[0] - 3 < pad["x"] < c[2] + 3 and c[1] - 3 < pad["y"] < c[3] + 3:
+                                if c[0] - win < pad["x"] < c[2] + win and c[1] - win < pad["y"] < c[3] + win:
                                     bad.add(j)
         for i in sorted(bad):
             P.halo[i] += 0.4
@@ -1211,6 +1367,41 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     res["secs"] = round(time.time() - t0, 1)
     res["metrics"] = metrics(Bn, cons, spec, P.cls)
     return res, P, Bn
+
+
+def _seats_that_block(B, M, path_g, orig, cons, spec, workdir, tag, fa):
+    """the supports whose seat blocks a pin the whole-board fan-out cannot escape on the arranged board (the input's own fan-out escapes
+    every pin, so the seating did it): the pin's own part or the part named as its blocker when that is a moved support; else the moved
+    supports whose courtyard is within `[floorplan] block_window_mm` of the pad. -> set of refs."""
+    from . import boardwrite as BW, fanout as FO, flip as FL, legalgate as LG
+    moves = {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), round(p["angle"], 4)) for r, p in B["parts"].items()
+             if LG.displaced(p, orig[r]) > LG.MOVE_EPS}              # a flipped part too: it was flipped, and stands where the arrangement put it
+    flipped = [r for r, p in B["parts"].items() if p["side"] != orig[r][3]]
+    base = path_g
+    if flipped:
+        base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
+        FL.flip_file(path_g, base, flipped)
+        _pro(path_g, base)
+    f = os.path.join(workdir, f"{tag}.kicad_pcb")
+    BW.move_file(base, f, moves, post=False)
+    _pro(path_g, f)
+    Bn, fres = FO.run(f, cons, spec, None, fa, None)
+    blocked = [p for v in FO.summarise(Bn, fres).values() for p in v["blocked"]]
+    mods = {m["name"]: m for m in M["modules"]}
+    sup = {r for m in M["modules"] if not m["fixed"] for r in m["members"]
+           if r != m["anchor"] and r in orig and LG.displaced(B["parts"][r], orig[r]) > LG.MOVE_EPS}     # a moved support
+    win = _window(cons)
+    out = set()
+    for p in blocked:
+        named = {r for r in (p["ref"], _ref_in(p.get("blocker"), B["parts"])) if r in sup}
+        if not named:
+            q = Bn["parts"].get(p["ref"])
+            for pad in (q["pads"] if q else ()):
+                if str(pad["num"]) == str(p["pin"]):
+                    named |= {r for r in sup if Bn["parts"][r]["court"][0] - win < pad["x"] < Bn["parts"][r]["court"][2] + win
+                              and Bn["parts"][r]["court"][1] - win < pad["y"] < Bn["parts"][r]["court"][3] + win}
+        out |= named
+    return out
 
 
 def measured(path, cons, spec):
