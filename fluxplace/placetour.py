@@ -35,7 +35,7 @@ from . import routestatus as RS
 from . import snapshot as SN
 
 DEFAULTS = {"enabled": False, "max_rounds": 10, "no_gain_rounds": 2, "jobs": 4, "judge_top": 4, "judge_min": 4.0,
-            "cands": 12, "hot": 0.5, "nudge_mm": [0.5, 1.0, 2.0], "move_routed": True}
+            "cands": 12, "ladder_budget_min": 15.0, "hot": 0.5, "nudge_mm": [0.5, 1.0, 2.0], "move_routed": True}
 _INT = ("max_rounds", "no_gain_rounds", "jobs", "judge_top", "cands")
 WORST = 10 ** 6
 KINDS = ("turn", "relieve", "nudge", "rot", "pull")
@@ -51,6 +51,7 @@ def params(cons):
     for k in _INT:
         P[k] = int(P[k])
     P["judge_min"] = float(P["judge_min"])
+    P["ladder_budget_min"] = float(P["ladder_budget_min"])
     P["hot"] = float(P["hot"])
     P["nudge_mm"] = [float(x) for x in P["nudge_mm"]]
     return P
@@ -730,8 +731,16 @@ def stage(c, n, board):
         stop = "max_rounds"
     ladder = None
     if tuple(best["key"][:3]) != (0, 0, 0) and best["routed"]:                  # hs / rf / power nets still open: the ghost-open ladder
-        best, ladder = _close_ghost(a, cons, spec, best, d, P, acfg, board, spath)
-        stop += f"; ghost ladder: {len(ladder['accepted'])} repair(s), {ladder['stop']}" if ladder else ""
+        input_best = best["board"]
+        best, ladder = _close_ghost(a, cons, spec, best, d, P, acfg, board, spath, ds_dir)
+        if ladder:
+            stop += f"; ghost ladder: {len(ladder['accepted'])} repair(s), {ladder['stop']}"
+            pos = {r: (round(p["pos"][0], 3), round(p["pos"][1], 3), p["angle"]) for r, p in RD.load(input_best)["parts"].items()}
+            for step in ladder["accepted"]:
+                for ref, v in sorted(step["moves"].items()):
+                    accepted.append({"round": "ladder", "why": step["rung"], "ref": ref, "rot": v[2], "from": pos.get(ref), "to": tuple(v)})
+                    pos[ref] = tuple(v)
+                removed_refs |= set(step.get("removed_refs") or [])
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copy(best["board"], out)
     LA._copy_sidecar(best["board"], out)
@@ -751,7 +760,7 @@ def stage(c, n, board):
                          attempts=ladder)
     nxt.append(pg["line"])
     crit_gaps = PG.critical(pg["gaps"])
-    fatal = [x for x in crit_gaps if x.get("cause") == "blocked"]           # fail only where the router alone could not route it either
+    fatal = [x for x in crit_gaps if x.get("cause", "unconfirmed") != "order"]    # an hs / rf net stays a FAIL unless the router alone routed it ("order")
     if crit_gaps:
         nxt.append(("FAIL: " if fatal else "WARN: ") + "; ".join(
             f"{x['class']} {'/'.join(x['nets'])} ghost-unrouted ({x.get('cause', '?')}, blockers {','.join(x.get('blockers', [])[:6]) or '-'})"
@@ -774,18 +783,17 @@ def stage(c, n, board):
     return {"verdict": verdict, "line": line, "board": out, "next": nxt}
 
 
-def _close_ghost(a, cons, spec, best, d, P, acfg, input_board, spath):
+def _close_ghost(a, cons, spec, best, d, P, acfg, input_board, spath, ds_dir=None):
     """PLAN-PLACE-GAPS phase 2: close(JudgeEval) on the ghost-open gaps (rungs unblock / seal / endpoint). Never raises; the board of
     `best` changes only when a candidate passed tier-1, the class-first judge, the never-worse terms and the KiCad DRC.
     -> (best, result | None)."""
     from . import placegaps as PG
     try:
         _progress(spath, "running", "ghost-open ladder")
-        ds = None
-        ctx = PG.Ctx(stage="placetour", board=best["board"], cons=cons, spec=spec, ds_dir=ds, blame=best["blame"])
+        ctx = PG.Ctx(stage="placetour", board=best["board"], cons=cons, spec=spec, ds_dir=ds_dir, blame=best["blame"])
         ev = PG.JudgeEval(ctx, acfg, best["board"], best["blame"], best["key"], os.path.join(d, "close"), P, input_board=input_board,
                           confirm=_confirm(a, best["board"], d, P))
-        res = PG.close(ctx, ["ghost-open"], ev, stage="placetour")
+        res = PG.close(ctx, ["ghost-open"], ev, stage="placetour", budget_min=P["ladder_budget_min"])
         if res["accepted"]:
             best = {"board": ev.board_path, "blame": ev.blame, "key": tuple(ev.key), "routed": getattr(ev, "routed", None) or best["routed"]}
             EV.emit("parts", stage="placetour", i=99, refs=sorted({r for x in res["accepted"] for r in x["refs"]}), why="ghost ladder")

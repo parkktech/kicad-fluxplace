@@ -29,8 +29,8 @@ def test_class_key_unclassable_ranks_worst(monkeypatch, capsys):
     assert PT.class_key("r", {"open": []})[:3] == (PT.WORST,) * 3 and "not classed" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("cause,want", [("blocked", "fail"), ("order", "warn"), ("unconfirmed", "warn"), (None, "warn")])
-def test_stage_fails_only_on_a_blocked_hs_open(monkeypatch, tmp_path, cause, want):
+@pytest.mark.parametrize("cause,want", [("blocked", "fail"), ("order", "warn"), ("unconfirmed", "fail"), (None, "fail")])
+def test_stage_fails_on_an_hs_open_unless_the_router_alone_routed_it(monkeypatch, tmp_path, cause, want):
     from test_placetour import _script_stage, _stage_ctx
     keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
     board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
@@ -326,7 +326,9 @@ def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkey
     monkeypatch.setattr(KC, "base_flags", lambda R, d: [])
     monkeypatch.setattr(LA.RR if hasattr(LA, "RR") else __import__("fluxplace.routerules", fromlist=["x"]), "rules_for", lambda *a, **k: {})
     monkeypatch.setattr(RDG, "load", lambda p: {"pads": [{"net": n} for n in ("RFX", "RFX", "P", "P", "S", "S", "GND", "GND")]})
-    def fake_run(cmd, cwd, outdir, tag, out, cap):
+    envs = {}
+    def fake_run(cmd, cwd, outdir, tag, out, cap, env=None):
+        envs[tag] = env
         cmds.append((tag, cmd))
         open(out, "w").write(tag)
         return True, 1.0
@@ -338,10 +340,11 @@ def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkey
     nets = lambda c: c[c.index("--nets") + 1:c.index("--layers")]
     assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[1][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
     assert cmds[0][1][2].endswith("copy.kicad_pcb") and cmds[1][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
+    assert envs["krt-first"] is None and envs["krt"]["KICAD_RIP_PREEXISTING"] == "0"                 # pass 2 may not rip pass 1
     assert "--keep-input-copper" in cmds[1][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
     cmds.clear()
     LA.lean_krt(a, str(board), str(tmp_path / "o2"), 1.0, only={"P"}, info=info)           # a diagnosis run stays one pass
-    assert [t for t, _c in cmds] == ["krt"] and nets(cmds[0][1]) == ["P"] and info["passes"] == 1
+    assert [t for t, _c in cmds] == ["krt"] and nets(cmds[0][1]) == ["P"] and info["passes"] == 1 and envs["krt"] is None
 
 
 def test_critical_first_orders_hs_then_rf_then_power(monkeypatch):
@@ -351,3 +354,77 @@ def test_critical_first_orders_hs_then_rf_then_power(monkeypatch):
     assert LA.critical_first("b", {}, {}, ["S", "VBAT", "RFX", "Q", "A_P"]) == ["A_P", "RFX", "VBAT"]
     monkeypatch.setattr(PG, "_net_class", lambda c: 1 / 0)
     assert LA.critical_first("b", {}, {}, ["S"]) == []                                      # unclassable: one pass as before
+
+
+def test_target_must_be_gone_for_a_ghost_open_accept():
+    hs = PG.gap("ghost-open", "P/N", "hs-pair", 1)
+    other = PG.gap("ghost-open", "S1", "plain", 1)
+    base = {"gaps": [hs, other], "state": {"illegal": 0, "open": 5}, "refusal": None}
+    better_but_open = {"gaps": [hs], "state": {"illegal": 0, "open": 4}, "refusal": None}               # lower score, target still open
+    ok, check, why = PG._accept(base, better_but_open, "ghost-open:P/N")
+    assert (ok, check) == (False, "judge:target open") and "still open" in why
+    routed = {"gaps": [other], "state": {"illegal": 0, "open": 4}, "refusal": None}
+    assert PG._accept(base, routed, "ghost-open:P/N")[0] is True
+    assert PG._accept(base, better_but_open, "support-far:C1")[0] is True                              # other kinds keep the score rule
+
+
+def test_commit_keeps_every_carried_cause(monkeypatch, tmp_path):
+    from test_placegaps_rungs import judge_world
+    c, ev = judge_world(monkeypatch, tmp_path, {})
+    ev.detect(["ghost-open"])
+    for g in ev.gaps:
+        g["cause"] = "order" if g["id"].endswith("HS_N") else "not-confirmed"
+    tr = {"gaps": [PG.gap("ghost-open", "HS_N", "hs-pair", 1, nets=["HS_N"]), PG.gap("ghost-open", "S1", "plain", 1, nets=["S1"]),
+                   PG.gap("ghost-open", "NEW", "plain", 1, nets=["NEW"])],
+          "res": {"blame": {"open": []}, "key": [0] * 8}, "board": str(tmp_path / "base.kicad_pcb")}
+    monkeypatch.setattr(PG, "diagnose", lambda ctx, gaps, conf: [g.update(cause="unconfirmed") for g in gaps])   # what a router-less diagnose says
+    ev.commit(tr)
+    by = {g["id"]: g["cause"] for g in ev.gaps}
+    assert by == {"ghost-open:HS_N": "order", "ghost-open:S1": "not-confirmed", "ghost-open:NEW": "unconfirmed"}   # `order` is not turned into a rung target
+
+
+def test_ladder_budget_stops_inside_the_rung_loop(monkeypatch):
+    monkeypatch.setitem(PG.DISPATCH, "support-far", ["home", "home2"])
+    calls = []
+    def rung(g, c):
+        calls.append(g["id"])
+        return []
+    monkeypatch.setitem(PG.RUNGS, "home", rung)
+    monkeypatch.setitem(PG.RUNGS, "home2", rung)
+    from test_placegaps_core import FakeEv
+    t = iter(range(0, 10 ** 6, 100))
+    out = PG.close({"cons": {}}, ["support-far"], FakeEv({"C1", "C2", "C3"}), clock=lambda: next(t), budget_min=1)
+    assert out["stop"] == "ladder budget (time stop)" and len(calls) < 6
+
+
+def test_ladder_budget_is_a_placetour_key(monkeypatch):
+    assert PT.params({"placetour": {"enabled": True}})["ladder_budget_min"] == 15.0
+    assert PT.params({"placetour": {"ladder_budget_min": 6}})["ladder_budget_min"] == 6.0
+
+
+def test_close_ghost_gets_the_datasheet_dir_and_the_ladder_budget(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    seen = {}
+    monkeypatch.setattr(PG, "JudgeEval", lambda ctx, *a, **k: seen.update(ds=ctx["ds_dir"]) or SimpleNamespace(board_path="x", blame={}, key=(0,) * 8))
+    monkeypatch.setattr(PG, "close", lambda ctx, kinds, ev, stage="x", budget_min=None, **k: seen.update(b=budget_min) or {"accepted": [], "stop": "x"})
+    PT._close_ghost(SimpleNamespace(), {}, {}, {"board": "b", "blame": {}, "key": (1,) * 8, "routed": "r"}, str(tmp_path),
+                    PT.params({"placetour": {"ladder_budget_min": 7}}), {}, "b", str(tmp_path / "p.json"), "/ds")
+    assert seen == {"ds": "/ds", "b": 7.0}
+
+
+def test_ladder_moves_reach_the_report_and_removed_refs(monkeypatch, tmp_path):
+    from test_placetour import _script_stage, _stage_ctx
+    keys = {"input": (5, 1, 0.5, 0, 1.0), "A": (3, 0, 0.0, 0, 0.5)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], []], keys)
+    monkeypatch.setattr(PT, "class_key", lambda routed, blame, cons=None, spec=None: (1, 0, 0) + tuple(blame["k"]))
+    orig_jobs = PT.LA._run_jobs
+    monkeypatch.setattr(PT.LA, "_run_jobs", lambda *a, **k: [dict(r, key=[1, 0, 0] + r["key"][3:]) for r in orig_jobs(*a, **k)])   # an hs net stays open
+    step = {"gap": "ghost-open:N1", "rung": "unblock", "candidate": "unblock-n1", "refs": ["R5"], "moves": {"R5": [2.0, 3.0, 90.0]}, "removed_refs": ["R5"]}
+    best_after = {"board": str(tmp_path / "moved.kicad_pcb"), "blame": {"open": []}, "key": (0, 0, 0, 1, 0, 0.0, 0, 0.5), "routed": "/r"}
+    open(best_after["board"], "w").write("ladder")
+    monkeypatch.setattr(PT, "_close_ghost", lambda *a, **k: (best_after, {"accepted": [step], "refused": [], "stop": "done"}))
+    monkeypatch.setattr(PG, "detect_stage", lambda *a, **k: {"gaps": [], "line": "gaps"})
+    r = PT.stage(_stage_ctx(tmp_path), 3, board)
+    md = open(os.path.join(tmp_path, "w", "3-placetour", "placetour.md")).read()
+    assert "| ladder | unblock | R5 |" in md and "(2.0, 3.0, 90.0)" in md and "R5" in md.split("fan-out again)")[1]
+    assert open(r["board"]).read() == "ladder"

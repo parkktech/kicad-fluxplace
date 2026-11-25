@@ -383,6 +383,8 @@ def _accept(base, cand, target=None):
                 new = sorted({g["row"] for g in cand["gaps"] if g["row"]} - {g["row"] for g in base["gaps"] if g["row"]})
                 check = "row:" + (new[0] if new else "?") if new else check
             return False, check, f"{t} worse {tb[t]:g}->{tc[t]:g}"
+    if target and str(target).startswith("ghost-open:") and target in {g["id"] for g in cand["gaps"]}:
+        return False, "judge:target open", f"{target} is still open in the judge (a ghost-open repair counts only when its target routes)"
     sb, sc = score(base["gaps"], base.get("state")), score(cand["gaps"], cand.get("state"))
     if sc < sb:
         return True, None, "score lower"
@@ -450,7 +452,7 @@ class Evaluator:
         raise NotImplementedError
 
 
-def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
+def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
     """rounds x kinds (ORDER) x rungs (yield order) x gaps (worst first). -> {stop, accepted, refused, gaps_in, gaps_out, score_in,
     score_out, rounds}. Stops: no gap in scope, no rung, no gain N rounds, stalled, budget, rung cap, max rounds (a time stop is
     named; it is the one non-deterministic outcome)."""
@@ -460,6 +462,7 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
     no_gain = int(flow.get("no_gain_rounds", G.NO_GAIN_ROUNDS))
     stall_s = float(flow.get("stall_min", G.STALL_MIN)) * 60
     budget_s = float(flow.get("budget_min") or 0) * 60
+    own_s = float(budget_min) * 60 if budget_min else 0.0                 # this loop's own wall budget (placetour: [placetour] ladder_budget_min)
     max_rounds = int((cons.get("placegaps") or {}).get("max_rounds", MAX_ROUNDS))
     cap_s = G._rung_cap(cons)
     t0 = last = clock()
@@ -481,11 +484,16 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
         for kind in kinds:
             rungs = [x for x in DISPATCH.get(kind, []) if x in RUNGS]
             for rung in G._rank(kind, rungs, yields):
+                if own_s and clock() - t0 > own_s:
+                    out["stop"] = "ladder budget (time stop)"
+                    break
                 t_rung = clock()
                 for g in [x for x in base["gaps"] if x["kind"] == kind]:
                     if g["id"] not in {x["id"] for x in base["gaps"]}:
                         continue                        # an earlier accept of this rung closed it
-                    if budget_s and clock() - t0 > budget_s:
+                    if own_s and clock() - t0 > own_s:
+                        out["stop"] = "ladder budget (time stop)"
+                    elif budget_s and clock() - t0 > budget_s:
                         out["stop"] = "flow budget_min (time stop)"
                     elif clock() - last > stall_s:
                         out["stop"] = "stalled (time stop)"
@@ -518,7 +526,9 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
                         ev.commit(tr)
                         base = {"gaps": _sort(tr["gaps"]), "state": tr.get("state") or {}, "refusal": None}
                         out["accepted"].append({"gap": g["id"], "rung": rung, "candidate": cand["id"], "why": why,
-                                                "refs": sorted(cand.get("moves") or {}), "gaps_before": n_before, "gaps_after": len(base["gaps"])})
+                                                "refs": sorted(cand.get("moves") or {}), "gaps_before": n_before, "gaps_after": len(base["gaps"]),
+                                                "moves": {r: [round(float(x), 3) for x in v[:3]] for r, v in (cand.get("moves") or {}).items()},
+                                                "removed_refs": sorted(tr.get("removed_refs") or [])})
                         EV.emit("parts", stage=stage, i=r, refs=sorted(cand.get("moves") or {}), why=f"{kind}/{rung}")
                         _narr(stage, f"{stage}: {kind} {g['id'].split(':', 1)[1]} repaired by {rung}")
                         gain, last = True, clock()
@@ -785,6 +795,24 @@ def _P(ctx):
     return PT.params(ctx["cons"])
 
 
+def _with_supports(B, ctx, mov, tg):
+    """Targets -> legal moves, and the support parts of every IC among them follow it (intent.move_with_support: near ones rigidly, far ones
+    re-seated at their pin), then everything is legalised against the non-movable parts (placetour._legal). None when nothing is legal."""
+    from . import intent as IT, placetour as PT
+    full = dict(tg)
+    try:
+        ics = {c["ic"] for c in ctx.clusters() or []}
+        for ref, (x, y, a) in list(tg.items()):
+            if ref in ics:
+                for r, v in (IT.move_with_support(B, ctx["cons"], ctx["spec"], ref, x, y, a) or {}).items():
+                    if r in mov:
+                        full[r] = tuple(v) if r != ref else (x, y, a)
+    except Exception as e:                                  # noqa: BLE001 - the IC alone, as before
+        ctx.setdefault("errors", {})["supports"] = f"{type(e).__name__}: {e}"
+        full = dict(tg)
+    return PT._legal(B, ctx["cons"], full, mov)
+
+
 def _r_unblock(g, ctx):
     """Per blocker (movable, <= 16 pads, smallest first): the minimum-translation nudge out of the corridor along either normal of the
     nearest flight line; candidates move the first 1, 2, 3 blockers together (the 1-blocker one also on the other normal); legalised
@@ -811,7 +839,7 @@ def _r_unblock(g, ctx):
         for ref, sh in picks:
             x, y, a = B["parts"][ref]["pos"][0], B["parts"][ref]["pos"][1], B["parts"][ref]["angle"]
             tg[ref] = (x + sh[0], y + sh[1], a)
-        mv = PT._legal(B, ctx["cons"], tg, mov) if tg else None
+        mv = _with_supports(B, ctx, mov, tg) if tg else None
         k = PT._key(mv) if mv else None
         if mv and k not in seen:
             seen.add(k)
@@ -852,10 +880,23 @@ def _r_seal(g, ctx):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def endpoint_budget(g):
-    """Length budget (mm) of the gap's class from the net-class table (rf, hs pair), else None (the span is the reference)."""
+def endpoint_budget(g, ctx=None):
+    """Length budget (mm) of the gap's own net class: a pair's own kind (usb2, eth, pcie ... from netclass.classify, owner overrides in
+    [placement.budget] included), the rf budget (owner's [placement.rf] / [placement.budget] rf included); None -> the span is the reference."""
     from . import netclass as NC
-    return {"rf": NC.BUDGET.get("rf"), "hs-pair": NC.BUDGET.get("pair:usb2")}.get(g["class"])
+    try:
+        cons = ctx["cons"]
+        pl = cons.get("placement") or {}
+        if g["class"] == "rf":
+            user = (pl.get("budget") or {}).get("rf")
+            rfc = pl.get("rf") or {}
+            if user is not None and not isinstance(user, dict):
+                return float(user)
+            return NC.rf_budget_mm(float(rfc.get("freq_ghz", 2.4)), float(rfc.get("loss_db", 0.5))) if rfc else NC.BUDGET.get("rf")
+        info = NC.classify(ctx.B(), cons, ctx["spec"]).get(g["nets"][0]) or {}
+        return info.get("budget") if info.get("class") == "pair" else None
+    except Exception:                                       # noqa: BLE001 - no table, no budget: the span
+        return None
 
 
 def _r_endpoint(g, ctx):
@@ -882,13 +923,13 @@ def _r_endpoint(g, ctx):
     span = math.hypot(ox - mx, oy - my)
     if span < 1e-6:
         return []
-    bud = endpoint_budget(g)
+    bud = endpoint_budget(g, ctx)
     excess = span - bud if bud and span > bud else span
     out, p = [], B["parts"][me]
     for frac in (0.25, 0.5, 1.0):
         d = min(span, excess * frac)
         tg = {me: (p["pos"][0] + (ox - mx) / span * d, p["pos"][1] + (oy - my) / span * d, p["angle"])}
-        mv = PT._legal(B, ctx["cons"], tg, mov)
+        mv = _with_supports(B, ctx, mov, tg)
         if mv:
             out.append({"id": f"endpoint-{me}-{int(frac * 100)}", "rung": "endpoint", "moves": mv, "claims": [],
                         "notes": f"{me} {d:.1f} mm toward the other end (span {span:.1f}, budget {bud if bud else '-'})"})
@@ -976,7 +1017,12 @@ class JudgeEval(Evaluator):
         run = self.jobs_fn or (lambda js: LA._run_jobs(js, self.P, self.P["judge_min"] * 60 + 600, entry="placetour:_worker"))
         results = run(jobs) if jobs else []
         by = {}
-        for (_k, cnd, path, _rem), res in zip(surv, results):
+        from . import relieve as RL
+        try:
+            A = RL.attached_copper(B0) if surv else {"segs": {}, "vias": {}}
+        except Exception:                                   # noqa: BLE001 - no attached-copper map: no removed-copper refs
+            A = {"segs": {}, "vias": {}}
+        for (_k, cnd, path, rem), res in zip(surv, results):
             if not res.get("key"):
                 by[cnd["id"]] = {"gaps": [], "state": {}, "refusal": "judge:no routed copy " + str(res.get("error") or "")[:60]}
                 continue
@@ -984,7 +1030,9 @@ class JudgeEval(Evaluator):
             diag = [g for g in gaps if g["kind"] == "ghost-open"]
             tr = {"gaps": gaps, "state": {"illegal": 0, "open": res["key"][3], "hot": res["key"][4], "hot_occ": res["key"][5],
                                           "vias": res["key"][6], "detour": res["key"][7]},
-                  "refusal": None, "board": path, "res": res, "diag": diag}
+                  "refusal": None, "board": path, "res": res, "diag": diag,
+                  "removed_refs": sorted({ref for i in rem["segs"] for _k2, ref, _n in A["segs"].get(i, []) if ref in cnd["moves"]}
+                                         | {ref for j in rem["vias"] for ref, _n in A["vias"].get(j, []) if ref in cnd["moves"]})}
             by[cnd["id"]] = tr
         out = []
         for cnd in cands:
@@ -1030,9 +1078,9 @@ class JudgeEval(Evaluator):
                 g["cause"] = prev[g["id"]].get("cause", "unconfirmed")
         try:
             diagnose(c, carry, None)
-            for g in carry:
-                if g["id"] in prev and prev[g["id"]].get("cause") in RUNGABLE:
-                    g["cause"] = prev[g["id"]]["cause"]
         except Exception:                                   # noqa: BLE001
             pass
+        for g in carry:                                     # diagnose without a router can only say "unconfirmed": a carried id keeps its own cause
+            if g["id"] in prev and prev[g["id"]].get("cause"):
+                g["cause"] = prev[g["id"]]["cause"]
         self.ctx["diagnosed"] = self.gaps

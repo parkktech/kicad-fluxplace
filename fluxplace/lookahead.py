@@ -384,7 +384,7 @@ def _signal_nets(copy):
     return sig, {n for n, _l in planes}
 
 
-def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
+def _run_capped(cmd, cwd, outdir, tag, out, cap_s, env=None):
     """One router process under the wall cap (routestatus.run_logged); -> (completed, secs). TimeoutExpired -> None."""
     import subprocess
     from fluxplace import procs as _procs
@@ -392,7 +392,7 @@ def _run_capped(cmd, cwd, outdir, tag, out, cap_s):
     t = time.time()
     status, log = os.path.join(outdir, f"{tag}.status.json"), os.path.join(outdir, f"{tag}.log")
     try:
-        r = RS.run_logged(cmd, cwd=cwd, timeout=cap_s, out=out, log_path=log, status_path=status)
+        r = RS.run_logged(cmd, cwd=cwd, timeout=cap_s, out=out, log_path=log, status_path=status, env=env)
         _ghost_out(outdir, f"[{tag}] rc {r.returncode}\n" + (r.stdout or "")[-4000:])
         return True, round(time.time() - t, 1)
     except subprocess.TimeoutExpired:
@@ -456,7 +456,10 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
             complete = False
             first = []                                          # the critical pass failed: the one-pass judge below, as before
     cmd = KC.cmd_route(a.router_py, a.router_dir, src, out, sig, base, {}, nets=left or nets) + ["--quick", "2"] + list(extra)
-    ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt", out, max(60.0, cap - (time.time() - t0)) if first else cap)
+    # pass 2 must not rip pass 1: KRT registers unlocked pre-existing nets (<= 30 segments, <= 6 vias) as rip candidates and
+    # --keep-input-copper only guards the cleanup; KICAD_RIP_PREEXISTING=0 is the engine's kill switch
+    ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt", out, max(60.0, cap - (time.time() - t0)) if first else cap,
+                         env=KC.no_rip_env() if first else None)
     secs = round(time.time() - t0, 1)
     res = None
     if ok and os.path.exists(out):

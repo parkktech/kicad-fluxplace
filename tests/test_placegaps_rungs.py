@@ -68,14 +68,14 @@ def test_unblock_only_for_blocked_or_unconfirmed(env):
 
 
 def test_endpoint_smaller_end_steps_toward_the_other_by_fractions_of_the_excess(env, monkeypatch):
-    monkeypatch.setattr(PG, "endpoint_budget", lambda g: 20.0)
+    monkeypatch.setattr(PG, "endpoint_budget", lambda g, ctx=None: 20.0)
     B = line_board()
     c = ctx(B=B, cons={}, spec={})
     cands = PG._r_endpoint(gap(), c)
     assert [x["id"] for x in cands] == ["endpoint-U1-25", "endpoint-U1-50", "endpoint-U1-100"]       # U1 (16 mm2) is smaller than J1 (64 mm2)
     xs = [x["moves"]["U1"][0] for x in cands]
     assert xs == pytest.approx([10 + 0.25 * 30, 10 + 0.5 * 30, 10 + 30])                              # span 50 - budget 20 = 30 mm excess
-    monkeypatch.setattr(PG, "endpoint_budget", lambda g: None)                                       # no budget: fractions of the span
+    monkeypatch.setattr(PG, "endpoint_budget", lambda g, ctx=None: None)                              # no budget: fractions of the span
     assert [x["moves"]["U1"][0] for x in PG._r_endpoint(gap(), c)] == pytest.approx([10 + 12.5, 10 + 25, 10 + 50])
     assert PG._r_endpoint(gap(cause="order"), c) == []
 
@@ -171,7 +171,8 @@ def test_close_with_judge_eval_accepts_the_class_gain_and_refuses_the_rest(monke
     out = PG.close(c, ["ghost-open"], ev)
     assert [a["candidate"] for a in out["accepted"]] == ["good"]                                # the best acceptable candidate, not the first
     refused = {r["candidate"]: r["check"] for r in out["refused"] if r.get("candidate")}
-    assert refused["newhs"] == "judge:hs-pair open" and refused["bad-gate"].startswith("legal") and refused["noop"] == "score:no-gain" and "trade" not in refused
+    assert refused["newhs"] == "judge:hs-pair open" and refused["bad-gate"].startswith("legal") and refused["noop"] == "judge:target open"
+    assert refused["trade"] == "judge:target open"                                              # a lower score with the target still open is not a repair
     assert ev.board_path.endswith("good.kicad_pcb") and ev.key == (0, 0, 0, 2, 0, 0.0, 11, 5.0)  # the base moved only for the winner
     assert [g["id"] for g in out["gaps_out"]] == ["ghost-open:S1", "ghost-open:S2"] and out["score_out"] < out["score_in"]
     assert c["board"] == ev.board_path
@@ -235,3 +236,29 @@ def test_close_stops_when_every_rung_already_ran_on_these_poses(monkeypatch, tmp
     c["cons"]["flow"] = {"no_gain_rounds": 9}
     out = PG.close(c, ["ghost-open"], ev)
     assert out["stop"].startswith("nothing new") and out["rounds"] == 2 and out["memo_skips"] >= 1
+
+
+def test_supports_follow_an_ic_endpoint_or_blocker(env, monkeypatch):
+    from fluxplace import intent as IT
+    B = line_board()
+    B["parts"]["C9"] = part(11, 14)
+    c = ctx(B=B, cons={}, spec={}, _cl=[{"ic": "U1", "supports": []}])
+    calls = []
+    monkeypatch.setattr(IT, "move_with_support", lambda B_, cons, spec, ref, x, y, a: calls.append(ref) or {ref: (x, y, a), "C9": (x + 1, y + 4, a)})
+    mv = PG._with_supports(B, c, set(B["parts"]), {"U1": (20.0, 10.0, 0.0), "X1": (30.0, 12.0, 0.0)})
+    assert calls == ["U1"] and mv["C9"] == (21.0, 14.0, 0.0) and mv["U1"] == (20.0, 10.0, 0.0) and mv["X1"] == (30.0, 12.0, 0.0)
+    monkeypatch.setattr(IT, "move_with_support", lambda *a, **k: 1 / 0)                              # a failure leaves the IC alone, recorded
+    mv = PG._with_supports(B, c, set(B["parts"]), {"U1": (20.0, 10.0, 0.0)})
+    assert list(mv) == ["U1"] and "supports" in c["errors"]
+
+
+def test_endpoint_budget_is_the_nets_own_class(monkeypatch):
+    from fluxplace import netclass as NC
+    B = line_board()
+    c = ctx(B=B, cons={"placement": {"rf": {"freq_ghz": 5.0, "loss_db": 0.5}}}, spec={})
+    assert PG.endpoint_budget({"class": "rf", "nets": ["N1"]}, c) == NC.rf_budget_mm(5.0, 0.5)         # the owner's rf frequency, not the 2.4 GHz default
+    monkeypatch.setattr(NC, "classify", lambda B_, cons, spec: {"E_P": {"class": "pair", "budget": 100.0}, "U_P": {"class": "pair", "budget": 80.0}})
+    assert PG.endpoint_budget({"class": "hs-pair", "nets": ["U_P"]}, c) == 80.0 and PG.endpoint_budget({"class": "hs-pair", "nets": ["E_P"]}, c) == 100.0
+    assert PG.endpoint_budget({"class": "hs-pair", "nets": ["ZZ"]}, c) is None
+    monkeypatch.setattr(NC, "classify", lambda *a: 1 / 0)
+    assert PG.endpoint_budget({"class": "hs-pair", "nets": ["U_P"]}, c) is None
