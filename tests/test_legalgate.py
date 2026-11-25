@@ -252,3 +252,68 @@ def test_an_illegal_floorplan_is_not_the_stage_board(monkeypatch, tmp_path):
     res = PL.st_floorplan(C(), 3, str(board))
     assert res["verdict"] == "fail" and res["board"] == str(board) and res["line"].startswith("floorplan: ILLEGAL")
     assert not out.exists() and (out_dir / "board.illegal.kicad_pcb").exists() and res["illegal_board"].endswith(".illegal.kicad_pcb")
+
+
+# ---- review round: unseat decision, ref spellings, homing, breakout nudge
+def test_ref_spellings_and_window_come_from_the_board(tmp_path):
+    from fluxplace import floorplan2 as F2
+    refs = {"U1A", "J_USB1", "C1"}
+    assert F2._ref_in("escape of U1A.3", refs) == "U1A"
+    assert F2._ref_in("J_USB1.2", refs) == "J_USB1"
+    assert F2._ref_in("via of NET", refs) is None and F2._ref_in("C9.1", refs) is None
+    assert F2._window({}) == 3.0 and F2._window({"floorplan": {"block_window_mm": 5}}) == 5.0
+
+
+def test_unseat_names_only_the_offending_support_and_sees_flipped_parts(monkeypatch, tmp_path):
+    from fluxplace import boardwrite as BW, fanout as FO, flip as FL, floorplan2 as F2
+    body = G.two("C1", 20, 20, "A", "B", **CAP) + G.two("C2", 25, 20, "C", "D", **CAP) + G.two("C3", 20, 22, "E", "F", **CAP)
+    path = G.four_layers(G.board(tmp_path, body))
+    B = RD.load(path)
+    orig = LG.poses(B)
+    GM.place(B["parts"]["C2"], 25, 20, 0.0)
+    GM.flip(B["parts"]["C2"])                                          # flipped: it stands at its input XY on the other side
+    GM.place(B["parts"]["C3"], 20.5, 22, 0.0)                         # moved, within the window of C1.1, but not the blocker
+    M = {"of": {r: "U" for r in B["parts"]}, "modules": [{"name": "U", "anchor": "C1", "fixed": False, "members": {"C1": {}, "C2": {}, "C3": {}}}]}
+    seen = {}
+    monkeypatch.setattr(FL, "flip_file", lambda src, dst, refs: seen.setdefault("flipped", list(refs)) and open(dst, "w").write(open(src).read()))
+    monkeypatch.setattr(BW, "move_file", lambda src, dst, moves, post=True: seen.update(moves=dict(moves)) or open(dst, "w").write(open(src).read()))
+    blocked = [{"ref": "C1", "pin": "1", "net": "A", "blocker": "C2.1"}]
+    monkeypatch.setattr(FO, "run", lambda *a, **k: (RD.load(path), {}))
+    monkeypatch.setattr(FO, "summarise", lambda *a, **k: {"C1": {"blocked": blocked}})
+    out = F2._seats_that_block(B, M, path, orig, {}, None, str(tmp_path), "t", None)
+    assert out == {"C2"} and "C2" in seen["moves"] and seen["flipped"] == ["C2"]
+    blocked[:] = [{"ref": "C1", "pin": "1", "net": "A", "blocker": "via of X"}]          # no part named: the supports within the window
+    out = F2._seats_that_block(B, M, path, orig, {}, None, str(tmp_path), "t", None)
+    assert "C3" in out
+
+
+def test_home_supports_seats_a_far_support_within_its_limit(tmp_path):
+    from fluxplace import clusters as CL, floorplan2 as F2
+    body = (G.ic("U1", 30, 30, ["VCC", "GND", "SIG", "SIG2", "VCC", "GND", "SIG3", "SIG4"], pitch=0.8, court=(-3, -3, 3, 3))
+            + G.two("C1", 70, 60, "VCC", "GND", **CAP))
+    B = RD.load(G.board(tmp_path, body, outline=(0, 0, 100, 80)))
+    cons = {"placement": {"fixed": []}}
+    M = MD.build(B, cons, None, arrange=False)
+    P = F2.Plan(B, cons, None, M, log=lambda *a, **k: None)
+    P.freeze_baseline()
+    done, left = F2.home_supports(P, cons, None)
+    assert done == ["C1"] and not left
+    assert all(s["dist"] <= s["limit"] for c in CL.build(B, cons, None)[0] for s in c["supports"] if s["ref"] == "C1")
+    assert not any(LG.part_new(P.L, r, LG.known(P.base_issues)) for r in B["parts"])
+
+
+def test_breakout_steps_the_dense_part_aside_for_a_via_blocker(monkeypatch, tmp_path):
+    from fluxplace import breakout as BO
+    body = G.ic("U1", 30, 30, ["A", "B", "C", "D"], pitch=0.8, court=(-3, -3, 3, 3)) + G.two("C1", 60, 30, "E", "F", **CAP)
+    path = G.board(tmp_path, body)
+    real = BO.solve
+
+    def fake(B, cons=None, spec=None, **k):
+        r = real(B, cons, spec, **k)
+        bad = B["parts"]["U1"]["pos"][0] < 30.2
+        r["failed"] = [{"ref": "U1", "pin": "1", "net": "A", "side": 0, "gap": -0.2, "blocker": "via of B", "msg": "x"}] if bad else []
+        return r
+    monkeypatch.setattr(BO, "solve", fake)
+    out = BO.repair(path, {}, None, log=lambda t: None)
+    assert (out["before"], out["after"]) == (1, 0) and 0.2 < out["moved"]["U1"][3] <= 1.0
+    assert RD.load(path)["parts"]["U1"]["pos"][0] > 30.2

@@ -103,7 +103,9 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
         if not victims:
             break
         for v in victims:
-            if v in sup and v not in isolated and v not in out:      # a supporting part: the nearest legal seat first
+            if v not in out and not any(mine(v, k, d) for k, d in LG.part_new(L, v, known)):
+                continue                                             # an earlier revert already cleared it: it stays where it is
+            if v in sup and (v not in isolated or strict) and v not in out:      # a supporting part: the nearest legal seat first (a template part too, when strict)
                 c, s = sup[v]
                 x0, y0, x1, y1 = B["bbox"]
                 CL.reseat(B, [{"ic": c["ic"], "supports": [s], **({"layout": c["layout"]} if c.get("layout") else {})}], everything=True,

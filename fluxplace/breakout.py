@@ -537,6 +537,43 @@ def _sides_of(q):
     return {"F" if l == "F.Cu" else "B" for l in q["layers"] if l in ("F.Cu", "B.Cu")} or {"F", "B"}
 
 
+NUDGE_REACH, NUDGE_STEP, NUDGE_TRY = 1.0, 0.25, 16
+
+
+def _nudge_dense(B, cons, spec, pr, res, fixed, L, known, moved):
+    """the dense part of a pin whose escape is blocked by another net's via or lane (no part to evict) steps aside, with the support parts
+    that serve it, by the smallest shift (<= NUDGE_REACH) that lowers the failed-pin count and adds no issue the input lacked.
+    -> (res, progressed)."""
+    from . import clusters as CL, legalgate as LG
+    refs = sorted({f["ref"] for f in res["failed"] if str(f["blocker"]).startswith(("via", "lane"))})
+    refs = [r for r in refs if r in B["parts"] and r not in fixed]
+    if not refs:
+        return res, False
+    cl = CL.build(B, cons, spec)[0]
+    n0 = len(res["failed"])
+    R = int(NUDGE_REACH / NUDGE_STEP)
+    cands = sorted((round(math.hypot(i, j) * NUDGE_STEP, 4), i, j) for i in range(-R, R + 1) for j in range(-R, R + 1)
+                   if 0 < math.hypot(i, j) * NUDGE_STEP <= NUDGE_REACH)
+    for ref in refs:
+        group = [ref] + sorted({q["ref"] for c in cl if c["ic"] == ref for q in c["supports"] if q["sure"] and q["dist"] <= q["limit"] and q["ref"] in B["parts"]
+                                and q["ref"] not in fixed and q["ref"] != ref})
+        home = {r: (B["parts"][r]["pos"][0], B["parts"][r]["pos"][1], B["parts"][r]["angle"]) for r in group}
+        for _d, i, j, grp in [(d, i, j, g) for d, i, j in cands[:NUDGE_TRY] for g in (group, group[:1])]:
+            for r in grp:
+                GM.place(B["parts"][r], home[r][0] + i * NUDGE_STEP, home[r][1] + j * NUDGE_STEP, home[r][2])
+                L.refresh(r)
+            ok = not any(LG.part_new(L, r, known) for r in grp)
+            r2 = solve(B, cons, spec, pr=pr) if ok else None
+            if ok and len(r2["failed"]) < n0:
+                for r in grp:
+                    moved[r] = (home[r][0] + i * NUDGE_STEP, home[r][1] + j * NUDGE_STEP, home[r][2])
+                return r2, True
+            for r in group:
+                GM.place(B["parts"][r], *home[r])
+                L.refresh(r)
+    return res, False
+
+
 def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print, baseline=None):
     """Evict what walls a dense part in: every movable, non-dense part whose pad blocks a pin's template (the gate's blocker) is moved
     to the nearest legal pose (same angle first, then turned) whose pads stay out of every dense part's breakout region, then the
@@ -562,11 +599,11 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print, baseline
         dense = set(res["dense"])
         blockers = sorted({f["blocker"].split(".")[0] for f in res["failed"] if "." in f["blocker"] and not f["blocker"].startswith(("via", "lane", "keep", "board", "hole"))})
         blockers = [r for r in blockers if r in B["parts"] and r not in fixed and r not in dense]
-        if not blockers:
-            break
-        iso = solve(B, cons, spec, pr=pr0, others=False)
-        regs = [(r, s) for ref in sorted(iso["templates"]) for r, s in rects(B, ref, iso, pr0)]
         progressed = False
+        regs = []
+        if blockers:
+            iso = solve(B, cons, spec, pr=pr0, others=False)
+            regs = [(r, s) for ref in sorted(iso["templates"]) for r, s in rects(B, ref, iso, pr0)]
         for ref in blockers:
             part = B["parts"][ref]
             x0, y0, a0 = part["pos"][0], part["pos"][1], part["angle"]
@@ -595,6 +632,8 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print, baseline
                 L.refresh(ref)
                 moved[ref] = hit
                 progressed = True
+        if not progressed:                           # a `via of` / `lane of` blocker is no part to evict: the failing dense part itself steps aside
+            res, progressed = _nudge_dense(B, cons, spec, pr0, res, fixed, L, known, moved)
         if not progressed:
             break
         res = solve(B, cons, spec, pr=pr0)
