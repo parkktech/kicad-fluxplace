@@ -1257,6 +1257,8 @@ def _r_feasible(g, ctx):
         info = _away_info(ctx, g)
         if info:
             _away_scan(ctx, g, info)
+        else:                                               # a region row (or a row not found): no rung moves it yet; say so, never silently
+            ctx.setdefault("row_reports", {})[g["id"]] = {"name": g["id"].split(":", 1)[1].split("|")[0], "why": "region row: no placement rung repairs it yet (listed, not relaxed)"}
     return []
 
 

@@ -197,3 +197,12 @@ def test_flight_with_both_ends_fixed_is_reported_not_moved(mov):
     assert PG.RUNGS["push-out"](g, c) == [] and "route stage" in c["row_reports"][g["id"]]["why"]
     PG.away_questions(c, {"gaps_out": [g]})
     assert g["id"] in c["row_reports"]
+
+
+def test_region_row_without_a_rung_is_reported_not_silent():
+    c = PG.Ctx(stage="floorplan", cons={}, spec={}, rows=[])
+    c["B"] = {"parts": {}}
+    c["_intent"] = []
+    g = PG.gap("row-away", "keep-in-x", "plain", 0.5, ("U1",), row="intent:region:keep-in-x")
+    assert PG.RUNGS["feasible"](g, c) == []
+    assert "region row" in c["row_reports"][g["id"]]["why"]
