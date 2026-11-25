@@ -232,7 +232,8 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         B = RD.load(board)
         cls = NC.classify(B, cons, spec)
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
-                               ("floors", "design-rule floors", QS.check_floors)):
+                               ("floors", "design-rule floors", QS.check_floors),
+                               ("sides", "placement sides", QS.check_placement_sides)):
             n0 = len(sess.open)
             fn(sess, B, cons, cls=cls)
             new = sess.open[n0:]
@@ -241,7 +242,8 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                f"{len(new)} undecided: {ids}" if new else
                                {"rails": f"every rail of >= {_minpads(cons)} pads has a plane/pour or an answer",
                                 "fixed": "anchors and mounting hardware are locked or declared",
-                                "floors": "floors declared ([fab]/[route] or the project's rules)"}[key]))
+                                "floors": "floors declared ([fab]/[route] or the project's rules)",
+                                "sides": "[placement] sides decided"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))

@@ -73,7 +73,7 @@ def test_assume_defaults_marks_outputs_and_fab_refuses(tmp_path, capsys):
 
 def test_full_records_raise_none(tmp_path, capsys):
     b = bare_board(tmp_path)
-    cons = dict(FLOORS, route={"allow_rip": "never"}, placement={"fixed": []}, lock={"at": {}},
+    cons = dict(FLOORS, route={"allow_rip": "never"}, placement={"fixed": [], "sides": "front"}, lock={"at": {}},
                 pairs={"X": {"skew_mm": 0.1}}, preroute={"signal_layers": ["F.Cu", "B.Cu", "In1.Cu"]})
     for cmd in ("fanout", "modules", "floorplan", "route"):
         S, c2, _ = QS.guard(args(), cmd, b, cons, None)
