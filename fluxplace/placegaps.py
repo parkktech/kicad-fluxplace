@@ -26,6 +26,7 @@ SCOPE = {"ready": ("part-datasheet", "part-stock"),
 TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows", "hard_mag", "decap_far", "support_far", "far_mm",
          "open", "hot", "hot_occ", "vias", "detour")
 R6_TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows")        # never worse, whatever the target gap gained
+TARGET_MUST_GAIN = ("row-cin-side:", "row-template:", "row-pin-bypass:")
 MAX_ROUNDS = 6
 CANDS_PER_RUNG = 8
 WINDOW_MM = 3.0
@@ -399,6 +400,11 @@ def _accept(base, cand, target=None):
             return False, check, f"{t} worse {tb[t]:g}->{tc[t]:g}"
     if target and str(target).startswith("ghost-open:") and target in {g["id"] for g in cand["gaps"]}:
         return False, "judge:target open", f"{target} is still open in the judge (a ghost-open repair counts only when its target routes)"
+    if target and str(target).startswith(TARGET_MUST_GAIN):       # a template / bypass repair counts only when its own row got closer (served pairs, loop, bare pin)
+        m0 = next((g["mag"] for g in base["gaps"] if g["id"] == target), None)
+        m1 = next((g["mag"] for g in cand["gaps"] if g["id"] == target), None)
+        if m0 is not None and m1 is not None and m1 >= m0 - 1e-9:
+            return False, f"score:{target.split(':', 1)[0]}", f"{target} not closer: mag {m0:g}->{m1:g}"
     mb0 = {g["id"]: g["mag"] for g in base["gaps"] if g["row"]}
     worse = sorted(g["id"] for g in cand["gaps"] if g["row"] and g["id"] != target and g["id"] in mb0 and g["mag"] > mb0[g["id"]] + 1e-9)
     if worse:                                        # a row that already fails must not fail harder because another was repaired
@@ -1215,6 +1221,267 @@ class FileEval(Evaluator):
     def commit(self, tr):
         self.board_path, self.gaps, self.m = tr["board"], tr["gaps"], tr.get("m") or self.m
         self._sync()
+
+
+# ------------------------------------------------------------------ phase 7: row-cin-side, row-template, row-pin-bypass
+def _row_of(ctx, g):
+    for r in ctx.rows() or []:
+        if r.get("kind") == "support" and r.get("metric") in ("template", "pin-bypass") and g.get("id") == f"{g['kind']}:{r.get('name')}|{r.get('metric')}":
+            return r
+    return None
+
+
+def _unit(ctx, B, ic):
+    """The cluster of regulator `ic` measured on the model `B` (fresh distances: rungs move parts on copies)."""
+    from . import clusters as CL
+    return next((c for c in CL.build(B, ctx["cons"], ctx["spec"])[0] if c["ic"] == ic), None)
+
+
+def _on_copy(B, tg):
+    from . import geom as GM
+    B2 = copy.deepcopy(B)
+    for r, (x, y, a) in tg.items():
+        GM.place(B2["parts"][r], x, y, a)
+    return B2
+
+
+def _reseat_on(ctx, B2, c, only=None, everything=False):
+    """The seater (clusters.reseat, strict: a seat beyond the part's limit is refused) on the model copy, for the parts of cluster `c`
+    named in `only` that are far or off the template (all of them with `everything`); mutates B2."""
+    from . import clusters as CL, legality as LGL
+    x0, y0, x1, y1 = B2["bbox"]
+    CL.reseat(B2, [c], everything=everything, only=only, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=LGL.Legal(B2, ctx["cons"]), strict=True)
+
+
+def _moves_between(B0, B2):
+    out = {}
+    for r, p in B2["parts"].items():
+        q = B0["parts"].get(r)
+        if q is not None and (abs(p["pos"][0] - q["pos"][0]) > 1e-3 or abs(p["pos"][1] - q["pos"][1]) > 1e-3 or abs(p["angle"] - q["angle"]) > 1e-3):
+            out[r] = (round(p["pos"][0], 4), round(p["pos"][1], 4), p["angle"])
+    return out
+
+
+def _unit_gap(g, ctx, kinds=("row-cin-side", "row-template")):
+    """-> (board, regulator ref, its cluster, movable set, the unit's movable confidently-owned supports, input caps) or None."""
+    from . import placetour as PT
+    row = _row_of(ctx, g)
+    if g["kind"] not in kinds or not row or not row.get("refs"):
+        return None
+    B, ic = ctx.B(), row["refs"][0]
+    c = next((x for x in ctx.clusters() or [] if x["ic"] == ic), None)
+    if c is None or ic not in B["parts"]:
+        return None
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    sup = sorted(s["ref"] for s in c["supports"] if s["sure"] and s["ref"] in mov and not B["parts"][s["ref"]].get("locked"))
+    caps = sorted(s["ref"] for s in c["supports"] if s["sure"] and s["rank"] == 1 and s["ref"].startswith("C") and s["ref"] in sup)
+    return B, ic, c, mov, sup, caps
+
+
+def _r_template_turn(g, ctx):
+    """The regulator stays; its movable supports are laid around it in the 8 poses of the template (4 quarter turns x mirrored or not,
+    about the regulator's origin), legalised against every non-movable part, then the parts that are far or off the template are re-seated
+    at their pins (an input capacitor on the named pin pair's side first). The identity pose is the plain re-seat."""
+    from . import geom as GM, placetour as PT
+    u = _unit_gap(g, ctx)
+    if u is None:
+        return []
+    B, ic, c, mov, sup, caps = u
+    only = set(caps if g["kind"] == "row-cin-side" else sup)
+    if not only:
+        return []
+    cx, cy = B["parts"][ic]["pos"]
+    out, seen = [], set()
+    for mirror in (False, True):
+        for k in range(4):
+            tg = {}
+            if k or mirror:
+                for r in sup:
+                    p = B["parts"][r]
+                    dx, dy = p["pos"][0] - cx, p["pos"][1] - cy
+                    rx, ry = GM.rot(-dx if mirror else dx, dy, 90.0 * k)
+                    tg[r] = (cx + rx, cy + ry, ((180.0 - p["angle"]) if mirror else p["angle"]) + 90.0 * k)
+                tg = {r: (x, y, a % 360.0) for r, (x, y, a) in tg.items()}
+                mv = PT._legal(B, ctx["cons"], tg, mov)
+                if not mv:
+                    continue
+            else:
+                mv = {}
+            B2 = _on_copy(B, mv)
+            c2 = _unit(ctx, B2, ic)
+            if c2 is None:
+                continue
+            _reseat_on(ctx, B2, c2, only=only)
+            moves = _moves_between(B, B2)
+            key = PT._key(moves) if moves else None
+            if moves and key not in seen:
+                seen.add(key)
+                out.append({"id": f"template-turn-{'m' if mirror else 'r'}{90 * k}", "rung": "template-turn", "moves": moves, "claims": [],
+                            "notes": f"{ic} unit laid {'mirrored, ' if mirror else ''}turned {90 * k} deg, then re-seated"})
+    return out
+
+
+def _r_unit_turn(g, ctx):
+    """The whole module (regulator + its supports, intent.move_with_support) turned 90 / 180 / 270 deg about the regulator's origin so the
+    named side faces other board; the parts far or off the template are re-seated at their pins in the new pose."""
+    from . import placetour as PT
+    u = _unit_gap(g, ctx, ("row-cin-side",))
+    if u is None:
+        return []
+    B, ic, c, mov, sup, caps = u
+    if ic not in mov:
+        return []
+    p = B["parts"][ic]
+    out, seen = [], set()
+    for k in (1, 2, 3):
+        mv = _with_supports(B, ctx, mov, {ic: (p["pos"][0], p["pos"][1], (p["angle"] + 90.0 * k) % 360.0)})
+        if not mv:
+            continue
+        B2 = _on_copy(B, mv)
+        c2 = _unit(ctx, B2, ic)
+        if c2 is not None:
+            _reseat_on(ctx, B2, c2, only=set(sup))
+        moves = _moves_between(B, B2)
+        key = PT._key(moves) if moves else None
+        if moves and key not in seen:
+            seen.add(key)
+            out.append({"id": f"unit-turn-{90 * k}", "rung": "unit-turn", "moves": moves, "claims": [], "notes": f"module of {ic} turned {90 * k} deg"})
+    return out
+
+
+def _strips(B, c, g, row):
+    """Where the parts served by the row must stand: [(rect, depth)] beyond the regulator's courtyard, in front of the pin pair's span
+    +- CIN_TOL_MM (cin_side, cin_loop_mm) or of the served pin (sw_mm, fb_mm); depth = the serving parts' courtyard + CLEAR_MM."""
+    from . import clusters as CL
+    icp = B["parts"][c["ic"]]
+    ic_c = icp["court"]
+    key = str(row.get("name", "")).rsplit(" ", 1)[-1]
+    if g["kind"] == "row-cin-side" or key == "cin_loop_mm":
+        rank, spans = 1, [(a, gnd) for a, gnd in ((c.get("layout") or {}).get("pairs") or [])]
+    else:
+        rank = 0 if key == "sw_mm" else 3
+        spans = [(s["pad"], s["pad"]) for s in c["supports"] if s["sure"] and s["rank"] == rank]
+    out = []
+    for a, gnd in spans:
+        pa = next((q for q in icp["pads"] if q["num"] == a), None)
+        pg = next((q for q in icp["pads"] if q["num"] == gnd), None)
+        if pa is None or pg is None:
+            continue
+        ox, oy = CL._outward(icp, pa)
+        ext = [B["parts"][s["ref"]]["court"] for s in c["supports"] if s["sure"] and s["rank"] == rank]
+        depth = max(((e[2] - e[0]) if ox else (e[3] - e[1])) for e in ext) + CLEAR_MM if ext else 1.0
+        if ox:
+            lo, hi = min(pa["y"], pg["y"]) - CL.CIN_TOL_MM, max(pa["y"], pg["y"]) + CL.CIN_TOL_MM
+            rect = (ic_c[2], lo, ic_c[2] + depth, hi) if ox > 0 else (ic_c[0] - depth, lo, ic_c[0], hi)
+        else:
+            lo, hi = min(pa["x"], pg["x"]) - CL.CIN_TOL_MM, max(pa["x"], pg["x"]) + CL.CIN_TOL_MM
+            rect = (lo, ic_c[3], hi, ic_c[3] + depth) if oy > 0 else (lo, ic_c[1] - depth, hi, ic_c[1])
+        out.append((tuple(rect), (ox, oy)))
+    return out
+
+
+def _r_clear_side(g, ctx):
+    """A movable part standing in the strip the row's parts need (pin-pair span +- CIN_TOL_MM, depth = their courtyard + clearance) steps out
+    by the minimum translation (clear_shift along either way of the package side, or outward); its supports follow; then the parts of the
+    row are re-seated at their pins. Candidates: each of the first 2 blockers alone, and the first 3 together."""
+    from . import placetour as PT
+    u = _unit_gap(g, ctx)
+    if u is None:
+        return []
+    B, ic, c, mov, sup, caps = u
+    row = _row_of(ctx, g)
+    serve = set(caps if g["kind"] == "row-cin-side" else sup)
+    if not serve:
+        return []
+    ics = B["parts"][ic]
+    plan = {}                                                     # blocker -> [(shift mm, (dx, dy))] smallest first
+    for rect, (ox, oy) in _strips(B, c, g, row):
+        for ref in sorted(mov - serve - {ic}):
+            p = B["parts"][ref]
+            if (p["side"] != ics["side"] and not p.get("tht")) or not _hit(rect, p["court"]):
+                continue
+            for vec in ((0.0, 1.0), (0.0, -1.0)) if ox else ((1.0, 0.0), (-1.0, 0.0)):
+                d = clear_shift(p["court"], [rect], vec)
+                if d is not None:
+                    plan.setdefault(ref, []).append((d, (vec[0] * d, vec[1] * d)))
+            d = clear_shift(p["court"], [rect], (ox, oy))
+            if d is not None:
+                plan.setdefault(ref, []).append((d, (ox * d, oy * d)))
+    order = sorted(plan, key=lambda r: (min(d for d, _ in plan[r]), r))
+    for r in order:
+        plan[r] = sorted(plan[r], key=lambda t: (t[0], t[1]))[:2]
+    picks = []
+    for r in order[:2]:
+        picks.extend([(f"{r}-{i}", [(r, v)]) for i, (_d, v) in enumerate(plan[r])])
+    if len(order) > 1:
+        picks.append(("all", [(r, plan[r][0][1]) for r in order[:3]]))
+    out, seen = [], set()
+    for tag, mvs in picks:
+        tg = {r: (B["parts"][r]["pos"][0] + v[0], B["parts"][r]["pos"][1] + v[1], B["parts"][r]["angle"]) for r, v in mvs}
+        mv = _with_supports(B, ctx, mov, tg)
+        if not mv:
+            continue
+        B2 = _on_copy(B, mv)
+        c2 = _unit(ctx, B2, ic)
+        if c2 is not None:
+            _reseat_on(ctx, B2, c2, only=serve)
+        moves = _moves_between(B, B2)
+        key = PT._key(moves) if moves else None
+        if moves and key not in seen:
+            seen.add(key)
+            out.append({"id": f"clear-side-{tag}", "rung": "clear-side", "moves": moves, "claims": [],
+                        "notes": f"{', '.join(r for r, _v in mvs)} step out of the strip in front of {ic}"})
+    return out
+
+
+def _hit(a, b):
+    from . import geom as GM
+    return GM.overlap(a, b, -0.02)
+
+
+def _r_re_deal(g, ctx):
+    """Minimal `re-deal` (plan section 4 rung 5; the section's machinery is not in yet): for the bare pin, each of the regulator's own
+    bypass parts of the net (nearest to the pin first, 2 at most) is served to that pin (clusters.pin_demand's row: ic, pad, net, parts)
+    and re-seated by the seater (strict: within the support limit of the pin). A part owned by another cluster is dealt away from it."""
+    from . import clusters as CL, powerbudget as PB
+    row = _row_of(ctx, g)
+    if g["kind"] != "row-pin-bypass" or not row or len(row.get("refs") or []) < 2 or not row.get("nets"):
+        return []
+    from . import placetour as PT
+    B, cons, spec = ctx.B(), ctx["cons"], ctx["spec"]
+    ic, net, parts = row["refs"][-1], row["nets"][0], set(row["refs"][:-1])
+    dem = next((d for d in CL.pin_demand(B, cons, spec) if d["ic"] == ic and d["net"] == net and set(d["parts"]) == parts), None)
+    if dem is None or ic not in B["parts"]:
+        return []
+    mov = set(PT._movable(B, cons, _P(ctx)))
+    pin = next((q for q in B["parts"][ic]["pads"] if str(q["num"]) == str(dem["pad"]) and q["net"] == net), None)
+    if pin is None:
+        return []
+    own = {s["ref"]: s for c in ctx.clusters() or [] for s in c["supports"]}
+    dist = lambda r: min(math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) for q in B["parts"][r]["pads"] if q["net"] == net)
+    out, seen = [], set()
+    for ref in sorted([r for r in parts if r in mov and r in own], key=lambda r: (dist(r), r))[:2]:
+        s = dict(own[ref], ic=ic, pad=pin["num"], how="pin-demand", sure=True, rank=9, dist=dist(ref))
+        try:
+            lim = PB.support_row(B, cons, spec, ref, net, None, ic=ic, pad=pin["num"])
+            s.update(limit=lim["max"], target=lim["target"])
+        except Exception:                                   # noqa: BLE001 - the part keeps the limit it had
+            pass
+        B2 = copy.deepcopy(B)
+        _reseat_on(ctx, B2, {"ic": ic, "supports": [s]}, only={ref}, everything=True)
+        moves = _moves_between(B, B2)
+        key = PT._key(moves) if moves else None
+        if moves and key not in seen:
+            seen.add(key)
+            out.append({"id": f"re-deal-{ref}-{pin['num']}", "rung": "re-deal", "moves": moves, "claims": [],
+                        "notes": f"{ref} served to {ic}.{pin['num']} ({net}) and seated at the pin"})
+    return out
+
+
+DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side"]
+DISPATCH["row-template"] = ["template-turn", "clear-side"]
+DISPATCH["row-pin-bypass"] = ["re-deal"]
+RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal})
 
 
 class JudgeEval(Evaluator):
