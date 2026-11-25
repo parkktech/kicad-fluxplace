@@ -28,11 +28,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .redact import urlopen as _redact_urlopen, redact as _redact
+from .redact import urlopen as _redact_urlopen, redact as _redact, setting as _redact_setting, HostSkipped
 
 from .models import credentials
 
 CACHE_NAME = ".sourcing_cache.json"
+NEG_TTL = 3600                              # a failed lookup is remembered this long (s): an outage costs one try per hour, not one per part per run
 PARTDATA_CACHE = ".partdata_cache.json"   # written by partdata.py (same dir)
 CACHE_TTL = 24 * 3600          # stock moves daily, not minutely
 BAD = ("obsolete", "discontinued", "end of life", "eol", "nrnd",
@@ -314,6 +315,32 @@ def load_map(path):
 
 
 # ------------------------------------------------------------------- check
+def cache_home(cache_dir=None):
+    """The directory of the lookup caches: the one given, else ~/.cache/fluxplace (never the current directory)."""
+    d = cache_dir or os.path.join(os.path.expanduser("~"), ".cache", "fluxplace")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def write_json(path, obj, indent=None):
+    """Atomic: a temp file in the same directory, then os.replace; a failure is silent (a cache is never worth a crash)."""
+    try:
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh, indent=indent)
+        os.replace(tmp, path)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def transient(e):
+    """An error that says nothing about the part: this process skipped the host, or the distributor throttled (429)."""
+    return isinstance(e, HostSkipped) or (isinstance(e, urllib.error.HTTPError) and e.code == 429)
+
+
 def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
           both=False, qty=None):
     """-> (report, counts). Never raises on a per-part API error: an outage
@@ -328,7 +355,8 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
     if "DIGIKEY_CLIENT_ID" not in creds and "MOUSER_API_KEY" not in creds:
         log("    sourcing: no DigiKey/Mouser credentials — skipped")
         return {}, {}
-    cache_path = os.path.join(cache_dir or ".", CACHE_NAME)
+    cache_dir = cache_home(cache_dir)
+    cache_path = os.path.join(cache_dir, CACHE_NAME)
     cache = {}
     if not refresh and os.path.exists(cache_path):
         try:
@@ -337,15 +365,29 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             cache = {}
     tok, report, counts = None, {}, {}
     skipped = set()
+    t_start, budget, done = time.time(), float(_redact_setting("lookup_budget_s")), 0
     for mpn in sorted(by_mpn):
         hit = cache.get(mpn)
         errs = []
         req = len(by_mpn[mpn]) * qty if qty else need
         if qty:
             both = True
-        if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
+        if hit and hit.get("_neg") and time.time() - hit.get("_t", 0) < NEG_TTL:
+            dk, mo = hit.get("dk"), hit.get("mo")      # a lookup that failed a moment ago is not repeated; its good half is kept
+            errs = list(hit.get("errs") or ["cached failure"])
+        elif hit and not hit.get("_neg") and time.time() - hit.get("_t", 0) < CACHE_TTL:
             dk, mo = hit.get("dk"), hit.get("mo")
+        elif budget and time.time() - t_start > budget:
+            dk = mo = None                  # budget spent: this part is not asked (and not cached): UNCHECKED, the next run resumes here
+            errs = ["lookup budget spent"]
         else:
+            done += 1
+            tr = False
+            if done % 10 == 0:
+                try:
+                    write_json(cache_path, cache)
+                except Exception:
+                    pass
             dk = mo = None
             try:
                 if "DIGIKEY_CLIENT_ID" in creds:
@@ -358,6 +400,7 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
                     dk = _dk(mpn, creds, tok, on_token=_keep)
             except Exception as e:
                 errs.append("DigiKey")
+                tr = tr or transient(e)
                 log(f"    ! DigiKey {mpn}: {e}")
             settled = (dk and dk[0] >= req
                        and not any(b in str(dk[1]).lower() for b in BAD))
@@ -369,11 +412,14 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
                         mo = _mouser(mpn, creds)
                 except Exception as e:
                     errs.append("Mouser")
+                    tr = tr or transient(e)
                     log(f"    ! Mouser {mpn}: {e}")
             # only cache a COMPLETE answer — caching a failed lookup would
             # freeze a transient outage into the report for 24 h
             if not errs:
                 cache[mpn] = {"_t": time.time(), "dk": dk, "mo": mo}
+            elif not tr:           # a skipped host / a 429 says nothing about the part: not cached; any other failure is, with the good half
+                cache[mpn] = {"_t": time.time(), "_neg": True, "errs": errs, "dk": dk, "mo": mo}     # short-lived: see NEG_TTL
         verdict, stock = grade(dk, mo, req, errors=errs)
         counts[verdict] = counts.get(verdict, 0) + 1
         report[mpn] = {"refs": by_mpn[mpn], "verdict": verdict,
@@ -382,12 +428,12 @@ def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
                        "required": req, "per_board": len(by_mpn[mpn]),
                        "quantity": qty}
     try:
-        json.dump(cache, open(cache_path, "w"))
+        write_json(cache_path, cache)
     except Exception:
         pass
     if qty:
         price_lines(report, qty)
-        alternates(report, cache, cache_dir or ".")
+        alternates(report, cache, cache_dir)
     return report, counts
 
 
@@ -492,7 +538,7 @@ def alternates(report, cache, cache_dir, limit=3):
             if cand == mpn or cand in report or not same_spec(target, cdata):
                 continue
             hit = cache.get(cand)
-            if not hit:
+            if not hit or hit.get("_neg"):
                 continue
             if time.time() - hit.get("_t", 0) >= CACHE_TTL:   # same TTL rule as the main lookup
                 stale += 1

@@ -12,6 +12,17 @@ def _events_isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _http_breaker_reset():
+    """redact.urlopen remembers a dead host per process; a test that fails a host must not poison the next one."""
+    from fluxplace import redact
+    redact._DOWN.clear()
+    redact._CFG.clear()
+    yield
+    redact._DOWN.clear()
+    redact._CFG.clear()
+
+
+@pytest.fixture(autouse=True)
 def _drc_gate_off_for_synthetic_boards(monkeypatch, request):
     """The floorplan's KiCad DRC gate fails closed; the synthetic fixtures are not boards kicad-cli loads. Only test_legalgate runs it for real."""
     if request.module.__name__.endswith("test_legalgate"):

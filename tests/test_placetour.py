@@ -206,13 +206,13 @@ def _script_stage(monkeypatch, tmp_path, rounds, keys):
         out = []
         for j in jobs:
             cid = j["tag"].split("-", 1)[1]
-            out.append({"tag": j["tag"], "routed": f"/routed/{cid}", "blame": {"k": keys[cid]}, "key": list(keys[cid]),
+            out.append({"tag": j["tag"], "routed": f"/routed/{cid}", "blame": {"k": keys[cid]}, "key": [0, 0, 0] + list(keys[cid]),
                         "png": None})
         return out
 
     monkeypatch.setattr(PTm, "judge", lambda a, b, outdir, P, cons=None, spec=None, log=None:
                         {"routed": "/routed/input", "blame": {"k": keys["input"]}, "source": "route_review", "secs": 0})
-    monkeypatch.setattr(PTm, "judge_key", lambda routed, blame, cons=None: tuple(blame["k"]))
+    monkeypatch.setattr(PTm, "class_key", lambda routed, blame, cons=None, spec=None: (0, 0, 0) + tuple(blame["k"]))
     monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None: [{"id": "x", "kind": "nudge", "moves": {}}])
     monkeypatch.setattr(PTm, "tier1", fake_tier1)
     monkeypatch.setattr(PTm, "gate_state", lambda B, cons, spec: {"collision": 0})

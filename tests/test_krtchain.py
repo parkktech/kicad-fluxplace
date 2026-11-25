@@ -395,3 +395,53 @@ def test_diff_step_carries_family_width_on_outer_layers_only(tmp_path, monkeypat
     plain = K.cmd_diff("py", "/r", "s", "o", ["FOO_1"], SIG, base, None)
     assert plain.count("--track-width") == 1 and plain[plain.index("--track-width") + 1] == "0.15"
     assert "--diff-pair-gap" not in plain
+
+
+def test_rf_nets_route_before_the_rest(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "BT_SW_RFC", "RF_EN"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]    # RF_EN is a control line, not RF
+    rf = calls[1]
+    assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["BT_SW_RFC"]
+
+
+def test_route_and_rf_steps_may_not_rip_earlier_copper(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    c, calls, base_runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    envs = {}
+    def runner(cmd, log, **kw):
+        envs[len(calls)] = kw.get("env")
+        return base_runner(cmd, log, **kw)
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "BT_SW_RFC"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    steps = [s["step"] for s in r["steps"]]
+    assert steps == ["plane-GND", "pairgroups", "rf", "route"]
+    by = {n: envs.get(i) for i, n in enumerate(["plane-GND", "rf", "route"])}
+    assert by["plane-GND"] is None                                                                    # the plane step keeps the default
+    assert by["rf"]["KICAD_RIP_PREEXISTING"] == "0" and by["route"]["KICAD_RIP_PREEXISTING"] == "0"   # KRT would register earlier copper as rip candidates
+
+
+def test_run_step_hands_the_env_to_the_router(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(K.subprocess, "TimeoutExpired", K.subprocess.TimeoutExpired)
+    from fluxplace import routestatus as RS
+    monkeypatch.setattr(RS, "run_logged", lambda cmd, **kw: seen.update(kw) or types.SimpleNamespace(returncode=0))
+    K.run_step(["py", "/r/py_router/route.py", "a", "b"], str(tmp_path / "l"), env=K.no_rip_env())
+    assert seen["env"]["KICAD_RIP_PREEXISTING"] == "0" and "PATH" in seen["env"]
+
+
+def test_rf_step_uses_the_pin_aware_class(tmp_path, monkeypatch):
+    import fluxplace.gaps as GP
+    from fluxplace import placegaps as PG
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "SW_OUT"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    monkeypatch.setattr(PG, "_net_class", lambda ctx: lambda n: ("rf", None) if n == "SW_OUT" else ("plain", None))   # SW_OUT sits on an RFC pin
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]
+    rf = calls[1]
+    assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["SW_OUT"]

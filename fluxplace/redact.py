@@ -39,19 +39,79 @@ def redact(text):
     return out
 
 
+_DOWN = {}            # host -> [consecutive network failures, down-until epoch]: the per-process negative cache of a dead host
+
+
+class HostSkipped(urllib.error.URLError):
+    """Raised without touching the network: the host failed `http_down_after` times in a row and is skipped for `http_down_s`.
+    A transient state of this process, never a fact about the part: callers must not cache it."""
+
+
+# [parts] keys (constraints) with their defaults; env FLUXPLACE_<NAME> overrides; a bad value falls back to the next level
+DEFAULTS = {"http_timeout_s": 15.0, "http_down_after": 2, "http_down_s": 300.0, "lookup_budget_s": 120.0}
+_ENV = {"http_timeout_s": "FLUXPLACE_HTTP_TIMEOUT", "http_down_after": "FLUXPLACE_HTTP_DOWN_AFTER", "http_down_s": "FLUXPLACE_HTTP_DOWN_S",
+        "lookup_budget_s": "FLUXPLACE_LOOKUP_BUDGET_S"}
+_CFG = {}
+
+
+def configure(cons):
+    """Take the lookup limits from the constraints' [parts] table (called where a stage loads them). Never raises."""
+    _CFG.clear()
+    try:
+        _CFG.update({k: v for k, v in ((cons or {}).get("parts") or {}).items() if k in DEFAULTS})
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def setting(key):
+    """env override > [parts] key > default; a value that is not a number (or is negative) is skipped, never raised."""
+    import os
+    for raw in (os.environ.get(_ENV[key]), _CFG.get(key)):
+        try:
+            v = float(raw)
+            if raw is not None and v >= 0:
+                return int(v) if isinstance(DEFAULTS[key], int) else v
+        except (TypeError, ValueError):
+            continue
+    return DEFAULTS[key]
+
+
+def _limits():
+    return setting("http_timeout_s"), setting("http_down_after"), setting("http_down_s")
+
+
+def _host(req):
+    import urllib.parse
+    return urllib.parse.urlsplit(getattr(req, "full_url", None) or str(req)).hostname or ""
+
+
 def urlopen(req, timeout=30):
     """urllib.request.urlopen whose failures carry no credentials. HTTPError keeps its type (callers branch on
     .code); other exceptions are re-raised with the same type when constructible, else as RuntimeError. The
     replacement is raised with no __cause__ and no __context__, so the original (unredacted) exception and its
-    URL are not reachable from the traceback."""
+    URL are not reachable from the traceback.
+    Bounded: one request waits at most `http_timeout_s` (default 15); a host that fails `http_down_after` (2)
+    times in a row at the network level (timeout, DNS, refused; an HTTP status is an answer) is skipped for
+    `http_down_s` (300) s, so a dead distributor costs two timeouts, not one per part."""
+    import time
+    cap, after, down_s = _limits()
+    host = _host(req)
+    st = _DOWN.get(host)
+    if st and st[1] > time.time():
+        raise HostSkipped(f"{host} skipped: {st[0]} network failures in a row (negative cache, {int(st[1] - time.time())} s left)")
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        r = urllib.request.urlopen(req, timeout=min(timeout, cap))
+        _DOWN.pop(host, None)
+        return r
     except urllib.error.HTTPError as e:
+        _DOWN.pop(host, None)
         if e.url:
             e.url = redact(e.url)
         e.msg = redact(e.msg)
         raise
     except Exception as e:
+        n = (_DOWN.get(host) or [0, 0])[0] + 1
+        _DOWN[host] = [n, time.time() + down_s if n >= after else 0]
         text = redact(f"{type(e).__name__}: {e}")
         try:
             new = type(e)(redact(str(e)))

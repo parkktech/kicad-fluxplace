@@ -4,6 +4,8 @@
   r    [power] rails    spine routes of the [power] rails at their width (PHASE3B)
   p    pairgroups       Python step (PHASE3C): failed pairs re-laid per connector group; skipped when none is incomplete
   3    route_diff.py    the pair nets that are still open
+  rf   route.py         the RF nets (the [rf] nets and the nets named as RF) before the rest: a plain net never takes their room
+                        (PLAN-PLACE-GAPS phase 2: pairs and rails were already ahead of plain nets, RF nets were not)
   4    route.py         every net but the legs of pairs p could not lay, plane nets as --power-nets, --keep-input-copper
 
 Each call reads the previous call's board and writes the next (the .kicad_pro travels along).  Exit 0 and 3 (some
@@ -168,12 +170,21 @@ def base_flags(R, d):
     return [*RR.size_args(R), "--escalation", "off", "--strict-sizes", *(["--fab-overrides", fo] if fo else [])]
 
 
-def run_step(cmd, log, cap_s=CAP_S, status_path=None, step=None):
+NO_RIP_STEPS = ("rf", "route")      # steps that route over the copper of earlier steps: they must not rip it
+
+
+def no_rip_env():
+    """The router's environment with its pre-existing-net rip-up off: KRT registers unlocked pre-existing nets (<= 30 segments, <= 6 vias)
+    as rip candidates, and --keep-input-copper only guards its cleanup, so a later step could rip an earlier step's rf / pair / rail copper."""
+    return dict(os.environ, KICAD_RIP_PREEXISTING="0")
+
+
+def run_step(cmd, log, cap_s=CAP_S, status_path=None, step=None, env=None):
     """-> (rc, seconds); rc 124 on the cap, -N when killed by a signal.  Never retried."""
     from . import routestatus as RS
     t = time.time()
     try:
-        r = RS.run_logged(cmd, cwd=os.path.dirname(os.path.dirname(cmd[1])), timeout=cap_s, out=cmd[3], log_path=log,
+        r = RS.run_logged(cmd, cwd=os.path.dirname(os.path.dirname(cmd[1])), timeout=cap_s, out=cmd[3], log_path=log, env=env,
                           status_path=status_path, extra={"router": "krt-whole", "current_step": step}, keep_open=True)
         rc = r.returncode
     except subprocess.TimeoutExpired:
@@ -340,6 +351,17 @@ def run(c, n, board, runner=run_step):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
                           lambda s, o, gnets=gnets, glay=glay, gw=gw, ggap=ggap: cmd_diff(
                               a.router_py, a.router_dir, s, o, gnets, glay, base, o[:-10] + ".json", width=gw, gap=ggap)))
+    from . import review as RV
+    rfc = set(((c.cons or {}).get("rf") or {}).get("nets") or [])
+    try:                                                     # the same class rule as the placement gaps (name, pin names, mate)
+        from . import placegaps as PG
+        of = PG._net_class(PG.Ctx(stage="route", board=board, cons=c.cons or {}, spec=getattr(c, "spec", None)))
+        is_rf_net = lambda n: n in rfc or of(n)[0] == "rf"
+    except Exception:                                        # noqa: BLE001 - no board facts: the name rule
+        is_rf_net = lambda n: n in rfc or RV.is_rf(n)
+    rf_nets = sorted(n for n in allnets if is_rf_net(n) and n not in pn and n not in rail_nets and n not in {x for x, _l in planes})
+    if rf_nets:                                              # RF before plain: one router call on the RF nets, the route step takes the rest
+        steps.append(("rf", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, {}, o[:-10] + ".json", nets=rf_nets, extra=xtra)))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
@@ -364,9 +386,9 @@ def run(c, n, board, runner=run_step):
                 t1 = time.time()
                 rc, secs = cmd(cur, dst), round(time.time() - t1, 1)
             else:
-                rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name)
+                rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name, **({"env": no_rip_env()} if name in NO_RIP_STEPS else {}))
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups") or name.startswith("diff") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups", "rf") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
