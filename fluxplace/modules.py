@@ -64,7 +64,7 @@ ATTACH_MM = 15.0                    # a support farther than this from its modul
 REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
-def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=False):
+def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=False, back=None):
     """A part the seating put where it adds a pad short, courtyard overlap or other issue the input board did not have is not left
     there when the floorplan cannot move it out: a part that conflicts with another part of its OWN module, or with a held part
     (fixed or mechanical), is seated again (the nearest legal seat within its limit), else returned to its input pose. A conflict
@@ -109,7 +109,7 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
                 c, s = sup[v]
                 x0, y0, x1, y1 = B["bbox"]
                 CL.reseat(B, [{"ic": c["ic"], "supports": [s], **({"layout": c["layout"]} if c.get("layout") else {})}], everything=True,
-                          bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, flips=flips, refused=refused, only={v})
+                          bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, flips=flips, refused=refused, only={v}, back=back)
                 if not any(mine(v, k, d) for k, d in LG.part_new(L, v, known)):
                     continue
             if v in flips and B["parts"][v]["side"] != orig[v][3]:
@@ -132,6 +132,12 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
     cl, links = CL.build(B, cons, spec)
     rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
     flips, refused = set(), {}
+    from . import backside as BS                  # [placement] sides = both / both-light-back: the back is a seat (guarded); else legacy
+    bk = BS.guard(B, cons, spec, template={s["ref"] for c in cl if c.get("layout") for s in c["supports"]})
+    if bk is not None:                            # fill the back first when the front is crowded: seats under the owner's pins, before any growth
+        from . import density as DN
+        u0 = DN.usage(B, cons, spec)["sides"]["F"]
+        bk.prefer = u0["util"] >= DN.limits(cons)["warn"] or bool(u0["hot"])
     unit = []
     base0 = orig = None
     if arrange:
@@ -149,7 +155,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
-                      flips=flips, refused=refused, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
+                      flips=flips, refused=refused, back=bk, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
             _remeasure(B, cl)
             more = CL.rehome(B, cl, cons, spec)
             if not more:
@@ -244,7 +250,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
             mods[o] = {"name": o, "anchor": o, "refs": [o], "group": False}
             of[o] = o
             return True
-        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict)
+        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict, back=bk)
         L = LGL.Legal(B, cons, fixed)
         own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
         unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}

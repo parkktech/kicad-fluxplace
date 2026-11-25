@@ -503,9 +503,84 @@ def check_spec_board(S, B, cons, spec=None, **_):
           "update the spec or the board so they agree (spec-check)", apply=f)
 
 
+def board_grow_answer(S):
+    """the owner's answer to `crowding` (command line, constraints [answers], map) when it is a growth option, else the old `board-grow` answer"""
+    from . import density as DN
+    for qid in ("crowding", "board-grow"):
+        a = S.cli.get(qid, S.cons_ans.get(qid, S.map_ans.get(qid)))
+        if a is not None and DN.parse_grow(a):
+            return a
+    return None
+
+
+def crowding_options(B, cons, spec, rep=None, **kw):
+    from . import density as DN
+    rep = rep or DN.crowding_report(B, cons, spec, **kw)
+    ops, default = DN.options(B, cons, spec, rep)
+    return rep, ops, default
+
+
+def ask_crowding(S, B, cons, spec, rep=None, out=print, **kw):
+    """`crowding`: one owner question when a side stays warn / fail (after the back fill in the floorplan, as measured in ready). Options are
+    ranked by predicted relief per cost and each carries this board's numbers; default = the cheapest option whose predicted verdict is ok on
+    every side and measure, else keep. Nothing is applied here: (a) is applied by an ANSWER on the next run (`apply_crowding_answer`), (d) is
+    read by the floorplan as its growth, (b) (c) (e) are the owner's. -> (choice, rep, options)."""
+    rep, ops, default = crowding_options(B, cons, spec, rep, **kw)
+    vd = rep["verdicts"]
+    if all(v["verdict"] == "ok" for v in vd.values()):
+        return None, rep, ops
+    ans = S.cli.get("crowding", S.cons_ans.get("crowding", S.map_ans.get("crowding")))
+    if ans is not None and (ans == "keep" or any(o["key"] == ans for o in ops) or ans.startswith(("a-", "grow-"))):
+        S.used["crowding"] = ans
+        return ans, rep, ops
+    from . import density as DN
+    why = "; ".join(f"{s} {v['verdict']}: {'; '.join(v['reasons'])}" for s, v in vd.items() if v["verdict"] != "ok")
+    keep = (f"keep as is: {why}; routing and the seats of the supports left beyond their limit stay as measured")
+    opts = {"keep": keep}
+    for o in ops:
+        pv = o["predicted"]
+        opts[o["key"]] = (f"{o['label']}: {o['text']}; predicted F {pv['F']['util'] * 100:.0f} % {pv['F']['verdict']}, B {pv['B']['util'] * 100:.0f} % "
+                          f"{pv['B']['verdict']}; fixes " + (", ".join(f"{k} {v}" for k, v in o["fixes"].items() if v != "n/a") or "nothing measured"))
+    choice = S.ask("crowding", "crowding", why, opts, default,
+                   "[answers] crowding = \"<option>\" in the constraints (a-* sets the back limits, grow-* grows the outline on the next floorplan run)")
+    q = next((q for q in S.open if q["id"] == "crowding"), None)
+    out(f"crowding: {why}; options ranked by predicted relief per cost (default {default}):")
+    out(f"  0. keep: {keep}")
+    for i, o in enumerate(ops, 1):
+        out(DN.option_line(i, o))
+    if q:                                   # open: told, not blocking (the board is written at its current size)
+        out(f"  ? crowding [crowding] answer with --answer crowding=<option>; default if forced: {default}")
+        try:
+            with open(questions_path(S.board), "w") as fh:
+                json.dump({"board": S.board, "command": S.cmd, "questions": S.open}, fh, indent=1)
+        except OSError:
+            pass
+    return choice, rep, ops
+
+
+def apply_crowding_answer(S):
+    """an explicit answer `a-height-<mm>` / `a-heavy:<refs>` takes effect in the constraints of this run (never an assumed default)"""
+    a = S.cli.get("crowding", S.cons_ans.get("crowding", S.map_ans.get("crowding")))
+    m = re.fullmatch(r"a-height-([\d.]+)", str(a or ""))
+    if m:
+        S.used["crowding"] = a
+        S.appliers.append((lambda box, ch: box["cons"].setdefault("placement", {}).__setitem__("back_max_height_mm", float(m.group(1))), a))
+    elif str(a or "").startswith("a-heavy:"):
+        names = [x for x in str(a).split(":", 1)[1].split("+") if x]
+        S.used["crowding"] = a
+        S.appliers.append((lambda box, ch: box["cons"].setdefault("placement", {}).__setitem__(
+            "back_allow", sorted(set(box["cons"].get("placement", {}).get("back_allow", [])) | set(names))), a))
+
+
+def check_crowding(S, B, cons, spec=None, **_):
+    """ready: the crowding of the board as it is (the back fill has not run yet); asks when a side is warn / fail"""
+    ask_crowding(S, B, cons, spec, out=lambda *a, **k: None)
+
+
 CHECKS = {"layer-roles": check_layer_roles, "controlled": check_controlled, "rip-existing": check_rip_existing,
           "fixed-parts": check_fixed_parts, "rail-pour": check_rail_pour, "floors": check_floors, "spec-board": check_spec_board}
 CHECKS["placement-sides"] = check_placement_sides
+CHECKS["crowding"] = check_crowding
 def check_connector_entry(S, B, cons, **_):
     """connectors whose entry direction cannot be derived (asked only when the constraints carry `[intent]`)."""
     from . import connectors as CN, intent as IT
@@ -530,6 +605,7 @@ def guard(a, cmd, board, cons, spec, topics=None, B=None):
     S = Session(board, cons, parse_answers(getattr(a, "answer", None)), bool(getattr(a, "assume_defaults", False)), cmd)
     if used:
         S.inferred(f"{', '.join(used)} taken from {os.path.basename(FA.FM.default_path(board))}", "the constraints declare none and the map recorded them")
+    apply_crowding_answer(S)
     B = B or RD.load(board)
     cls = NC.classify(B, cons, spec)
     for t in topics or TOPICS.get(cmd, ()):
