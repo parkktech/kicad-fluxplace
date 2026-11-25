@@ -226,6 +226,50 @@ def hole_ok(board, x, y, via_drill=0.3, extra=(), hgap_mm=0.25):
     return True
 
 
+MASK_MARGIN = 0.05         # mm: = geom.MASK_MARGIN (this module needs no other fluxplace import)
+
+
+def forbidden_regions(board):
+    """[(poly SHAPE_POLY_SET, margin nm, owner net or None)] a via may not touch: rule areas that forbid vias (every layer they cover) and
+    solder-mask openings (board-level filled shapes on F.Mask / B.Mask; owner = net of the copper zone that covers them on that side).
+    Same model as routediag.mask_openings / fanout_helper._mask_openings / escapeplan.Obstacles.keepout_hit."""
+    out, zs = [], list(board.Zones())
+    cu = list(board.GetEnabledLayers().CuStack())
+    for z in zs:
+        if z.GetIsRuleArea() and z.GetDoNotAllowVias():
+            out.append((z.Outline(), 0, None))
+    for s in board.Drawings():
+        ml = board.GetLayerName(s.GetLayer())
+        if ml not in ("F.Mask", "B.Mask") or not cu or not s.IsAnyFill():
+            continue
+        ps = pcbnew.SHAPE_POLY_SET()
+        if s.GetShape() == pcbnew.SHAPE_T_POLY:
+            ps = s.GetPolyShape()
+        elif s.GetShape() == pcbnew.SHAPE_T_RECT:
+            ps.NewOutline()
+            for x, y in ((s.GetStart().x, s.GetStart().y), (s.GetEnd().x, s.GetStart().y), (s.GetEnd().x, s.GetEnd().y), (s.GetStart().x, s.GetEnd().y)):
+                ps.Append(x, y)
+        elif s.GetShape() == pcbnew.SHAPE_T_CIRCLE:
+            c, rr = s.GetCenter(), s.GetRadius()
+            ps.NewOutline()
+            for k in range(24):
+                ps.Append(int(c.x + rr * math.cos(k * math.pi / 12)), int(c.y + rr * math.sin(k * math.pi / 12)))
+        if ps.OutlineCount() == 0:
+            continue
+        lay = cu[0] if ml == "F.Mask" else cu[-1]
+        pts = [ps.CVertex(i) for i in range(ps.FullPointCount())]
+        cover = collections.Counter()
+        for z in zs:
+            if z.GetIsRuleArea() or not z.GetNetname() or not z.IsOnLayer(lay):
+                continue
+            k = sum(1 for p in pts if z.Outline().Contains(p))
+            if k * 2 >= len(pts):
+                cover[z.GetNetname()] = max(cover[z.GetNetname()], k)
+        owner = max(sorted(cover), key=lambda n: cover[n]) if cover else ""
+        out.append((ps, _mm(MASK_MARGIN), owner or ""))
+    return out
+
+
 def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
                   keep=0.2):
     """Drop a through-via at each (x, y) mm point on `netname`, skipping
@@ -258,8 +302,12 @@ def via_at_points(board, netname, points_mm, via_d=0.6, via_drill=0.3,
     holes += [(t.GetPosition().x, t.GetPosition().y, t.GetDrill() // 2) for t in board.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
     hgap = _mm(0.25) + _mm(via_drill) // 2
     placed = 0
+    regions = forbidden_regions(board)
     for (xm, ym) in points_mm:
         x, y = _mm(xm), _mm(ym)
+        if any((owner is None or owner != netname) and poly.Collide(pcbnew.SHAPE_CIRCLE(pcbnew.VECTOR2I(int(x), int(y)), _mm(via_d) // 2), mg)
+               for poly, mg, owner in regions):
+            continue
         if any((x - ox) ** 2 + (y - oy) ** 2 < (r + hgap) ** 2 for ox, oy, r in holes):
             continue
         if any((x - ox) ** 2 + (y - oy) ** 2 < r * r for ox, oy, r in obst):

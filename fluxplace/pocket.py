@@ -16,6 +16,7 @@ import math
 import numpy as np
 
 from . import routeaudit as RA
+from .geom import MASK_MARGIN
 
 CAP = 3.0                      # distances are clipped here (mm)
 INF = np.float32(1e9)
@@ -143,6 +144,19 @@ class Field:
                 i = self._add("keepout", z.get("name") or z.get("owner") or "keep-out", "", "keep-out")
                 inside = poly_mask(z["pts"], self.X[sl], self.Y[sl])
                 self._put(z["layers"] or self.copper, sl, np.where(inside, -1.0, CAP).astype(np.float32), i)
+        self.maskd = np.full((self.ny, self.nx), CAP, np.float32)       # signed distance to the solder-mask openings whose copper may not be ours
+        for z in B.get("mask_open", []):
+            if (z["owner"] and z["owner"] in self.own) or len(z["pts"]) < 3:
+                continue
+            xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
+            sl = self._sl(min(xs), min(ys), max(xs), max(ys), 1.0)
+            if sl:
+                X, Y = self.X[sl], self.Y[sl]
+                sd = np.min([seg_sdf(z["pts"][k - 1], z["pts"][k], 0.0, X, Y) for k in range(len(z["pts"]))], axis=0)
+                sd = np.where(poly_mask(z["pts"], X, Y), -1.0, sd).astype(np.float32)
+                self.maskd[sl] = np.minimum(self.maskd[sl], sd)
+                i = self._add("keepout", z["name"], "", "mask opening")
+                self._put(z["layers"], sl, sd - MASK_MARGIN, i)
         for (a, b) in B.get("edge", []):
             sl = self._sl(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
             if sl:
@@ -178,7 +192,7 @@ class Field:
         m = np.ones((self.ny, self.nx), bool)
         for l in (layers or self.copper):
             m &= self.dist[l] >= self.clr + d / 2
-        return m
+        return m & (self.maskd >= d / 2 + MASK_MARGIN)             # a via exposes copper on the opening's side whatever its layers
 
     def shape_mask(self, p, grow=0.0):
         """cells inside pad p (grown by `grow`) as a full-window bool array."""

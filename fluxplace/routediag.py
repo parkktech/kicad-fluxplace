@@ -9,6 +9,7 @@ import re
 from collections import defaultdict
 
 from . import boardfile as BF
+from . import geom as GM
 
 FINE_GAP = 0.3          # mm, neighbour-pad gap below which a part is fine-pitch
 HAUL_MM, HAUL_FRAC = 30.0, 0.35
@@ -97,6 +98,45 @@ def _teardrop_flags(n):
     en = BF._atoms(BF._first(td, "enabled")) if td else []
     ru = BF._atoms(BF._first(n, "remove_unused_layers"))
     return en[:1] == ["yes"], ru[:1] == ["yes"]
+
+
+def mask_openings(root, zones, copper, nm=lambda n: n):
+    """Board-level filled graphics (gr_poly / gr_rect / gr_circle) on F.Mask / B.Mask: a deliberate solder-mask opening exposes the copper of
+    that side.  -> [{name, layers {outer Cu of that side}, pts, owner}] where owner is the net of the copper zone of that layer that covers
+    the opening (its copper may be exposed), "" when none does.  Pads carry their own apertures (footprint level) and are not listed."""
+    out = []
+    for g in root:
+        if not isinstance(g, list) or not g or g[0] not in ("gr_poly", "gr_rect", "gr_circle"):
+            continue
+        ml = (BF._atoms(BF._first(g, "layer")) or [""])[0]
+        if ml not in ("F.Mask", "B.Mask") or not copper:
+            continue
+        fill = (BF._atoms(BF._first(g, "fill")) or ["yes" if g[0] == "gr_poly" else "no"])[0]
+        if fill in ("no", "none"):
+            continue
+        if g[0] == "gr_poly":
+            pts = [tuple(BF._nums(xy)[:2]) for xy in BF._kids(BF._first(g, "pts") or [], "xy")]
+        elif g[0] == "gr_rect":
+            (x0, y0), (x1, y1) = _f(g, "start"), _f(g, "end")
+            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        else:
+            (cx, cy), (ex, ey) = _f(g, "center"), _f(g, "end")
+            rr = math.hypot(ex - cx, ey - cy)
+            pts = [(cx + rr * math.cos(a * math.pi / 12), cy + rr * math.sin(a * math.pi / 12)) for a in range(24)]
+        if len(pts) < 3:
+            continue
+        lay = copper[0] if ml == "F.Mask" else copper[-1]
+        cover = {}
+        for z in zones:
+            if z["keepout"] or not z["net"] or lay not in z["layers"] or len(z["pts"]) < 3:
+                continue
+            k = sum(1 for p in pts if GM.poly_has(z["pts"], p[0], p[1]))
+            if k * 2 >= len(pts):
+                cover[z["net"]] = max(cover.get(z["net"], 0), k)
+        owner = max(sorted(cover), key=lambda n: cover[n]) if cover else ""
+        out.append({"name": f"mask opening {min(p[0] for p in pts):g},{min(p[1] for p in pts):g}", "layers": {lay}, "pts": pts, "owner": owner,
+                    "mask": ml})
+    return out
 
 
 def load(path, track=None, clearance=None, project=None):
@@ -227,6 +267,8 @@ def load(path, track=None, clearance=None, project=None):
     for z in BF._kids(root, "zone"):
         zones.append(zone_of(z))
 
+    mask_open = mask_openings(root, zones, copper, nm)
+
     segs, vias = [], []
     for n in root:
         if not isinstance(n, list) or not n or n[0] not in ("segment", "arc", "via"):
@@ -279,7 +321,7 @@ def load(path, track=None, clearance=None, project=None):
                     dclear = float(c.get("clearance", dclear))
         except (KeyError, ValueError, TypeError):
             pass
-    return {"file": path, "pads": pads, "parts": parts, "zones": zones, "segs": segs,
+    return {"file": path, "pads": pads, "parts": parts, "zones": zones, "mask_open": mask_open, "segs": segs,
             "vias": vias, "copper": copper, "bbox": bbox, "edge": edge,
             "diag": math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]),
             "track": track if track is not None else dtrack,

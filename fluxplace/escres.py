@@ -107,6 +107,9 @@ def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0, snv="hole"):
         if snv == "freerouting":                        # Freerouting keeps its via clearance between same-net vias too
             hpitch = max(hpitch, vd + R["clearance"])
         hole_block = np.zeros((F.ny, F.nx), bool)
+        for v in B["vias"]:                             # a via of the net already on the board (a breakout via): same hole pitch, and no site inside its copper
+            if v["net"] == net and abs(v["x"] - pad["x"]) < ep["window"] + 1 and abs(v["y"] - pad["y"]) < ep["window"] + 1:
+                hole_block |= np.hypot(F.X - v["x"], F.Y - v["y"]) < max(hpitch, v["d"] / 2 + 0.01) - 1e-6
         for r in res:
             if r["net"] == net and hpitch > 0 and abs(r["site"][0] - pad["x"]) < ep["window"] + 1 and abs(r["site"][1] - pad["y"]) < ep["window"] + 1:
                 hole_block |= np.hypot(F.X - r["site"][0], F.Y - r["site"][1]) < hpitch - 1e-6
