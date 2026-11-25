@@ -1499,6 +1499,179 @@ def _cap_net_uf(part, net):
     return CL.cap_uf(part.get("value"))
 
 
+def _cin_pool(ctx, B, ic, c, mov, owned, pin, net, rec):
+    """The capacitors of `net` that can serve another input pair: [(owned by a cluster, dist to the pin, ref)] sorted; every capacitor of the net
+    (and why it is not usable) is appended to rec["caps"], sorted usable first, nearest first."""
+    from . import clusters as CL
+    parts = B["parts"]
+    need_uf = rec["need_uf"]
+    owner = {s["ref"]: cc for cc in ctx.clusters() or [] for s in cc["supports"]}
+    pool = []
+    for ref in sorted(r for r, p in parts.items() if r.startswith("C") and r != ic):
+        uf = _cap_net_uf(parts[ref], net)
+        if uf is None or ref in owned:
+            continue
+        d = min(math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) for q in parts[ref]["pads"] if q["net"] == net)
+        why = None
+        if uf < need_uf - 1e-9:
+            why = f"{uf:g} uF is below the input cap value {need_uf:g} uF"
+        elif ref not in mov or parts[ref].get("locked"):
+            why = "fixed (may not move)"
+        else:
+            oc = owner.get(ref)
+            if oc is not None and oc["ic"] != ic:
+                left = sum(1 for s in oc["supports"] if s["ref"] != ref and s["sure"] and s["net"] == net and s["ref"].startswith("C"))
+                need = max(1, len((oc.get("layout") or {}).get("pairs") or []))
+                if left < need:
+                    why = f"owned by {oc['ic']}, which would keep {left} of the {need} cap(s) its rows need"
+        rec["caps"].append({"ref": ref, "uf": uf, "dist_mm": round(d, 1), "why": why})
+        if why is None:
+            pool.append((owner.get(ref) is not None, round(d, 3), ref))
+    rec["caps"].sort(key=lambda x: (x["why"] is not None, x["dist_mm"], x["ref"]))
+    return sorted(pool)
+
+
+def _cin_support(ctx, B, c, owned, ref, net, pad):
+    """The support entry of capacitor `ref` served to input pad `pad` of the cluster `c` (limit from the one support table)."""
+    from . import powerbudget as PB
+    ic, cap = c["ic"], B["parts"][ref]
+    via = next(q for q in cap["pads"] if q["net"] == net)
+    s0 = next((x for cc in ctx.clusters() or [] for x in cc["supports"] if x["ref"] == ref), None)
+    s = dict(s0 or {"cls": "power", "weight": 1.0, "role": "bypass", "nets": [q["net"] for q in cap["pads"]]}, ref=ref, ic=ic, pad=pad["num"], via=via["num"],
+             net=net, how="pin-demand", sure=True, rank=1, dist=math.hypot(via["x"] - pad["x"], via["y"] - pad["y"]))
+    try:
+        lim = PB.support_row(B, ctx["cons"], ctx["spec"], ref, net, None, ic=ic, pad=pad["num"])
+        s.update(limit=lim["max"], target=lim["target"])
+    except Exception:                                   # noqa: BLE001 - the limit of the cluster's own input cap
+        s.update(limit=next((x["limit"] for x in c["supports"] if x["ref"] in owned), 5.0), target=s.get("target", 5.0))
+    return s
+
+
+def _fixed_walls(B, ic, mov, side):
+    """Courtyard rects that cannot move: fixed parts on the regulator's side (or through-hole) and the bounding boxes of the track-forbidding
+    keep-out zones that close that side."""
+    out = [p["court"] for r, p in B["parts"].items() if r != ic and r not in mov and (p["side"] == side or p.get("tht"))]
+    for z in B.get("zones") or []:
+        if z.get("keepout") and z.get("no_tracks") and z.get("pts") and side in (z.get("layers") or ()):
+            xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
+            out.append((min(xs), min(ys), max(xs), max(ys)))
+    return out
+
+
+def _depth_deficit(B, ic, rect, normal, depth, walls):
+    """How much shorter than `depth` the free run in front of the regulator's package edge is along `normal` (a strip `rect` wide), because a wall
+    stands in it: depth - free, 0 when nothing in the strip's width is nearer than depth. Walls behind the package edge do not count."""
+    ox, oy = normal
+    ic_c = B["parts"][ic]["court"]
+    free = depth
+    for w in walls:
+        if ox:
+            if not (w[1] < rect[3] and w[3] > rect[1]):
+                continue
+            edge = (w[0] - ic_c[2]) if ox > 0 else (ic_c[0] - w[2])
+            near = (w[2] > ic_c[2]) if ox > 0 else (w[0] < ic_c[0])
+        else:
+            if not (w[0] < rect[2] and w[2] > rect[0]):
+                continue
+            edge = (w[1] - ic_c[3]) if oy > 0 else (ic_c[1] - w[3])
+            near = (w[3] > ic_c[3]) if oy > 0 else (w[1] < ic_c[1])
+        if near:
+            free = min(free, max(0.0, edge))
+    return round(depth - free, 3)
+
+
+def _r_unit_shift(g, ctx):
+    """A fixed part (or keep-out) stands in the strip an unserved input pin pair needs, closer than the capacitor's courtyard depth + clearance:
+    the whole module (regulator + supports, `_with_supports`) moves away from the blocker, against the pair side's outward normal, by the depth
+    deficit + 0 / 0.5 / 1.0 mm, and by (deficit + 0.5) mm of normal travel at either 45 deg; then the input cap of that side is seated there
+    (an owned cap that serves no pair, else the cin-re-deal pick: a free cap of the net with a value >= the template's input cap)."""
+    from . import clusters as CL
+    u = _unit_gap(g, ctx, ("row-cin-side",))
+    if u is None:
+        return []
+    B, ic, c, mov, sup, _caps = u
+    if ic not in mov:
+        return []
+    icp, parts = B["parts"][ic], B["parts"]
+    pairs = (c.get("layout") or {}).get("pairs") or []
+    owned = sorted(s["ref"] for s in c["supports"] if s["sure"] and s["rank"] == 1 and s["ref"].startswith("C"))
+    bare = [pr for pr in pairs if not any(CL._on_cin_side(icp, parts[r]["court"], [pr], pr[0], parts[r]["pads"]) for r in owned)]
+    if not bare:
+        return []
+    free_owned = [r for r in owned if r in sup and not any(CL._on_cin_side(icp, parts[r]["court"], [pr], pr[0], parts[r]["pads"]) for pr in pairs)]
+    walls = _fixed_walls(B, ic, mov, icp["side"])
+    row = _row_of(ctx, g)
+    out, seen, why = [], set(), []
+    for pr in bare[:2]:
+        pin = next((q for q in icp["pads"] if q["num"] == pr[0]), None)
+        strips = _strips(B, c, g, row, [pr])
+        if pin is None or not pin["net"] or not strips:
+            continue
+        rect, (ox, oy) = strips[0]
+        depth = (rect[2] - rect[0]) if ox else (rect[3] - rect[1])
+        net = pin["net"]
+        need_uf = min([CL.cap_uf(parts[r].get("value")) or 0.0 for r in owned] or [0.0])
+        rec = {"need_uf": need_uf, "caps": []}
+        pool = [r for _o, _d, r in _cin_pool(ctx, B, ic, c, mov, owned, pin, net, rec)]
+        cap_order = (free_owned[:1] + pool[:2])
+        if cap_order:                                          # the capacitor that will stand there sets the depth
+            cc = parts[cap_order[0]]["court"]
+            depth = max(depth, ((cc[2] - cc[0]) if ox else (cc[3] - cc[1])) + CLEAR_MM)
+        deficit = _depth_deficit(B, ic, rect, (ox, oy), depth, walls)
+        if deficit <= 0:
+            why.append(f"{pr[0]}/{pr[1]}: no fixed part or keep-out shortens the strip")
+            continue
+        c45 = math.sqrt(0.5)
+        moves_to = [(f"{e:g}", (-ox * (deficit + e), -oy * (deficit + e))) for e in (0.0, 0.5, 1.0)]
+        for sg in (1.0, -1.0):                                 # the two 45 deg variants: normal travel deficit + 0.5 mm
+            t = (deficit + 0.5) / c45
+            vx, vy = (-ox * c45 - sg * oy * c45, -oy * c45 + sg * ox * c45)
+            moves_to.append((f"d{'p' if sg > 0 else 'n'}", (vx * t, vy * t)))
+        for tag, (vx, vy) in moves_to:
+            mv = _with_supports(B, ctx, mov, {ic: (icp["pos"][0] + vx, icp["pos"][1] + vy, icp["angle"])})
+            if not mv:
+                why.append(f"{pr[0]}/{pr[1]}: the module cannot move {math.hypot(vx, vy):.1f} mm away from the blocker legally")
+                continue
+            for ref in cap_order:
+                B2 = _on_copy(B, mv)
+                ic2 = B2["parts"][ic]
+                pad2 = next(q for q in ic2["pads"] if q["num"] == pr[0])
+                c2 = _unit(ctx, B2, ic)
+                if c2 is None:
+                    continue
+                refused = {}
+
+                def seat_cap(B2, c2, pad2):
+                    if ref in free_owned:
+                        _reseat_on(ctx, B2, c2, only={ref}, everything=True, refused=refused)
+                    else:
+                        s_ = _cin_support(ctx, B2, c2, owned, ref, net, pad2)
+                        _reseat_on(ctx, B2, {"ic": ic, "supports": [s_], "layout": c["layout"]}, only={ref}, everything=True, refused=refused)
+                    return CL._on_cin_side(B2["parts"][ic], B2["parts"][ref]["court"], [pr], pr[0], B2["parts"][ref]["pads"])
+                ok = seat_cap(B2, c2, pad2)
+                if not ok:                                         # the module's own parts that came along stand in the strip: they step out, then the cap seats
+                    pk = _clear_picks(B2, c2, g, row, mov, set(owned) | {ref}, ic, [pr], together=8)
+                    pre = _with_supports(B2, ctx, mov, {r: (B2["parts"][r]["pos"][0] + v[0], B2["parts"][r]["pos"][1] + v[1], B2["parts"][r]["angle"]) for r, v in pk[-1][1]}) if pk else None
+                    if pre:
+                        B3 = _on_copy(B2, pre)
+                        c3 = _unit(ctx, B3, ic)
+                        if c3 is not None and seat_cap(B3, c3, next(q for q in B3["parts"][ic]["pads"] if q["num"] == pr[0])):
+                            B2, ok = B3, True
+                if not ok:
+                    why.append(f"{pr[0]}/{pr[1]}: shifted {math.hypot(vx, vy):.1f} mm, {ref} still has no seat on the side ({refused.get(ref, 'off the side')})")
+                    continue
+                moves = _moves_between(B, B2)
+                key = _pt_key(moves)
+                if key not in seen:
+                    seen.add(key)
+                    out.append({"id": f"unit-shift-{pr[0]}-{tag}-{ref}", "rung": "unit-shift", "moves": moves, "claims": [],
+                                "notes": f"module of {ic} {math.hypot(vx, vy):.1f} mm away from the blocker (deficit {deficit:g} mm), {ref} seated on the {pr[0]}/{pr[1]} side"})
+                break
+    if not out:
+        ctx.setdefault("why_none", {})[("unit-shift", g["id"])] = "; ".join(dict.fromkeys(why))[:300] or "no unserved pair"
+    return out
+
+
 def _r_cin_re_deal(g, ctx):
     """Named input pin pairs outnumber the input caps the cluster owns: another capacitor of the pair's net, with a value >= the template's
     input cap, is served to the unserved pair and seated on its side (clusters.reseat only=, strict). An unowned one first (nearest to the
@@ -1522,45 +1695,15 @@ def _r_cin_re_deal(g, ctx):
         return []
     net = pin["net"]
     need_uf = min([CL.cap_uf(parts[r].get("value")) or 0.0 for r in owned] or [0.0])
-    owner = {s["ref"]: cc for cc in ctx.clusters() or [] for s in cc["supports"]}
     rec = {"ic": ic, "net": net, "pairs": len(pairs), "owned": owned, "need_uf": need_uf, "caps": []}
     ctx.setdefault("cin_need", {})[g["id"]] = rec
-    pool = []
-    for ref in sorted(r for r, p in parts.items() if r.startswith("C") and r != ic):
-        uf = _cap_net_uf(parts[ref], net)
-        if uf is None or ref in owned:
-            continue
-        d = min(math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) for q in parts[ref]["pads"] if q["net"] == net)
-        why = None
-        if uf < need_uf - 1e-9:
-            why = f"{uf:g} uF is below the input cap value {need_uf:g} uF"
-        elif ref not in mov or parts[ref].get("locked"):
-            why = "fixed (may not move)"
-        else:
-            oc = owner.get(ref)
-            if oc is not None and oc["ic"] != ic:
-                left = sum(1 for s in oc["supports"] if s["ref"] != ref and s["sure"] and s["net"] == net and s["ref"].startswith("C"))
-                need = max(1, len((oc.get("layout") or {}).get("pairs") or []))
-                if left < need:
-                    why = f"owned by {oc['ic']}, which would keep {left} of the {need} cap(s) its rows need"
-        rec["caps"].append({"ref": ref, "uf": uf, "dist_mm": round(d, 1), "why": why})
-        if why is None:
-            pool.append((owner.get(ref) is not None, round(d, 3), ref))
-    rec["caps"].sort(key=lambda x: (x["why"] is not None, x["dist_mm"], x["ref"]))
+    pool = _cin_pool(ctx, B, ic, c, mov, owned, pin, net, rec)
     out, seen = [], set()
     for _o, _d, ref in sorted(pool)[:3]:
         cap = parts[ref]
-        via = next(q for q in cap["pads"] if q["net"] == net)
-        s0 = next((s for cc in ctx.clusters() or [] for s in cc["supports"] if s["ref"] == ref), None)
         for pr in bare[:2]:
             pad = next(q for q in icp["pads"] if q["num"] == pr[0])
-            s = dict(s0 or {"cls": "power", "weight": 1.0, "role": "bypass", "nets": [q["net"] for q in cap["pads"]]}, ref=ref, ic=ic, pad=pad["num"], via=via["num"],
-                     net=net, how="pin-demand", sure=True, rank=1, dist=math.hypot(via["x"] - pad["x"], via["y"] - pad["y"]))
-            try:
-                lim = PB.support_row(B, ctx["cons"], ctx["spec"], ref, net, None, ic=ic, pad=pad["num"])
-                s.update(limit=lim["max"], target=lim["target"])
-            except Exception:                                   # noqa: BLE001 - the limit of the cluster's own input cap
-                s.update(limit=next((x["limit"] for x in c["supports"] if x["ref"] in owned), 5.0), target=s.get("target", 5.0))
+            s = _cin_support(ctx, B, c, owned, ref, net, pad)
             row = _row_of(ctx, g)
             variants = [("", None)] + [(f"-{tag}", mvs) for tag, mvs in _clear_picks(B, c, g, row, mov, set(owned) | {ref}, ic, [pr], together=8)[::-1][:3]]
             whys = []
@@ -1625,10 +1768,10 @@ def cin_questions(ctx, res):
     return out
 
 
-DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side", "cin-re-deal"]
+DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side", "unit-shift", "cin-re-deal"]
 DISPATCH["row-template"] = ["template-turn", "clear-side"]
 DISPATCH["row-pin-bypass"] = ["re-deal"]
-RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal, "cin-re-deal": _r_cin_re_deal})
+RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal, "cin-re-deal": _r_cin_re_deal, "unit-shift": _r_unit_shift})
 
 
 class JudgeEval(Evaluator):

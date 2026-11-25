@@ -332,3 +332,84 @@ def test_a_leftover_row_gets_a_refused_entry_even_when_a_rung_proposes_nothing()
     finally:
         PG.RUNGS["template-turn"] = old
     assert any(r["rung"] == "template-turn" and r["check"] == "no-candidate" for r in res["refused"])
+
+
+# ---- unit-shift: a fixed part shortens the strip of an unserved pair
+def capc(ref, x, y, n1, n2, value, court):
+    s = g.fp(ref, x, y, [g.pad("1", -0.5, 0, n1, 0.5, 0.5), g.pad("2", 0.5, 0, n2, 0.5, 0.5)], court=court)
+    return s.replace(f'(property "Reference" "{ref}")', f'(property "Reference" "{ref}") (property "Value" "{value}")')
+
+
+def walled_pair(tmp_path, free):
+    """U1's second pair (pads 7/8) faces east; a fixed connector J9 stands `free` mm beyond the package edge. C3 (3.0 mm courtyard) is free."""
+    b = g.ic("U1", 30, 30, ["VIN", "GND", "SW", "BOOT", "FB", "EN", "VIN", "GND"], pitch=1.0)
+    b += PW.cap("C1", 26, 30, "VIN", "GND", "10uF") + capc("C3", 60, 50, "VIN", "GND", "10uF", (-1.5, -1.5, 1.5, 1.5))
+    b += PW.cap("C2", 27, 34, "BOOT", "SW", "100nF") + PW.cap("L1", 36, 38, "SW", "VOUT", "") + PW.cap("R1", 27, 38, "FB", "VOUT", "")
+    B0 = RD.load(g.board(tmp_path / "pre", b, outline=(0, 0, 80, 60))) if (tmp_path / "pre").mkdir() is None else None
+    edge = B0["parts"]["U1"]["court"][2]
+    wall = g.fp("J9", edge + free + 1.0, 30, [g.pad("1", 0, 0, "XN", 0.6, 0.6)], court=(-1.0, -9.0, 1.0, 9.0))
+    board = g.board(tmp_path, b + wall, outline=(0, 0, 80, 60))
+    FIXED.add("J9")
+    return board, T._datasheets(tmp_path, LAY2), edge
+
+
+def test_unit_shift_moves_the_module_off_the_fixed_part_and_serves_the_second_pair(tmp_path, monkeypatch):
+    board, cons, edge = walled_pair(tmp_path, free=2.6)                 # cap depth 3.0 + clearance 0.2: deficit 0.6 mm
+    c = mk2(board, cons)
+    B = c.B()
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+    assert PG.RUNGS["cin-re-deal"](g_, c) == []                           # the strip is too short for the cap as the unit stands
+    cands = PG.RUNGS["unit-shift"](g_, c)
+    assert cands and all("U1" in x["moves"] and "J9" not in x["moves"] and "C3" in x["moves"] for x in cands)
+    shifts = sorted(round(B["parts"]["U1"]["pos"][0] - x["moves"]["U1"][0], 2) for x in cands if abs(x["moves"]["U1"][1] - 30) < 1e-6)
+    assert shifts and shifts[0] >= 0.6 - 1e-6                              # away from the blocker (west) by at least the deficit
+    win = [x for x in cands if next(r for r in BU.template_rows(applied(B, x["moves"]), cons, SPEC2) if r["name"].endswith("cin_side"))["value"] == 2]
+    assert win
+    monkeypatch.setitem(PG.DISPATCH, "row-cin-side", ["unit-shift"])          # the earlier rungs (a quarter turn) may close this small board too
+    res = PG.close(c, ["row-cin-side"], ModelEval2(c), stage="t")
+    assert any(a["rung"] == "unit-shift" for a in res["accepted"]) and not [x for x in res["gaps_out"] if x["kind"] == "row-cin-side"]
+
+
+class ModelEval2(ModelEval):
+    def _gaps(self, B):
+        c = PG.Ctx(stage="floorplan", board=self.ctx["board"], cons=self.ctx["cons"], spec=SPEC2, ds_dir=None, B=B, rows=BU.template_rows(B, self.ctx["cons"], SPEC2))
+        return PG.detect(c, PG.SCOPE["floorplan"])["gaps"]
+
+    def commit(self, tr):
+        self.B = tr["B"]
+        self.ctx.pop("_cl", None)
+        self.ctx["B"], self.ctx["rows"] = self.B, BU.template_rows(self.B, self.ctx["cons"], SPEC2)
+
+
+def test_depth_deficit_counts_only_walls_in_the_strip_in_front_of_the_package(tmp_path):
+    board, cons, edge = walled_pair(tmp_path, free=2.6)
+    B = RD.load(board)
+    rect = (edge, 27.5, edge + 3.2, 30.5)
+    walls = PG._fixed_walls(B, "U1", set(B["parts"]) - {"J9"}, "F.Cu")
+    assert PG._depth_deficit(B, "U1", rect, (1, 0), 3.2, walls) == pytest.approx(0.6, abs=1e-6)
+    assert PG._depth_deficit(B, "U1", rect, (-1, 0), 3.2, walls) == 0.0         # the west side has no wall in front
+    assert PG._depth_deficit(B, "U1", (edge, 5.0, edge + 3.2, 7.0), (1, 0), 3.2, walls) == 0.0   # a wall outside the strip's width
+
+
+def test_a_unit_shift_that_breaks_another_hard_row_is_refused(tmp_path):
+    board, cons, edge = walled_pair(tmp_path, free=2.6)
+    c = mk2(board, cons)
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+    cands = PG.RUNGS["unit-shift"](g_, c)
+    other = PG.gap("row-template", "U1 template sw_mm|template", "plain", 0.3, refs=["U1"], row="support:U1 template sw_mm")
+
+    class Fk(PG.Evaluator):
+        def detect(self, kinds):
+            return [g_]
+
+        def board(self):
+            return c.B()
+
+        def trial(self, cand):
+            return {"gaps": [other], "state": {}, "refusal": None}        # the second pair served, but the sw_mm row now fails
+
+        def commit(self, tr):
+            raise AssertionError("must not commit")
+    res = PG.close(c, ["row-cin-side"], Fk(), stage="t")
+    assert not [a for a in res["accepted"] if a["rung"] == "unit-shift"]
+    assert any(r["rung"] == "unit-shift" and r["check"] == "row:support:U1 template sw_mm" for r in res["refused"]) and cands
