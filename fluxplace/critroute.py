@@ -207,8 +207,14 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             if r.get("found"):
                 tmp = HR._tmp_beside(cur, f"critroute{n_try}")
                 try:
-                    HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
-                    m = gaps.measure(tmp)
+                    try:
+                        HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
+                        m = gaps.measure(tmp)
+                    except RuntimeError as e:               # kicad-cli exits without a report under load (W30: 10 of 20 tries); one more go
+                        if "no report" not in str(e):
+                            raise
+                        HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
+                        m = gaps.measure(tmp)
                     ok = m["opens"] < base["opens"] and m["shorts"] <= base["shorts"]
                     result = "kept" if ok else "dropped"
                     why = f"opens {base['opens']}->{m['opens']}, shorts {base['shorts']}->{m['shorts']}"
@@ -240,7 +246,9 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
 
 def stage(c, n, board):
     """Pipeline stage `critroute`. No actions file and `[ai] mode` = "packet" (default): writes the packets and returns
-    verdict "packets" (the pipeline stops with exit 5). Otherwise lays the suggested paths (defaults when no file)."""
+    verdict "packets" (the pipeline stops with exit 5) only when `[ai] answer` = "required". Otherwise (default "optional") an
+    unanswered packet set does not stop the flow: each net gets its own try with the default order and layers, and the
+    result carries `ai_unanswered` (count, packet files); the packets stay on disk for an optional agent pass."""
     from . import gaps
     d = c.dir(n, "critroute")
     ai = os.path.join(d, "ai")
@@ -260,14 +268,20 @@ def stage(c, n, board):
     apath = os.path.join(ai, "actions.json")
     mode = str(((c.cons or {}).get("ai") or {}).get("mode", "packet"))
     acts = load_actions(apath, names, gaps.copper_layers(board)) if os.path.exists(apath) else None
+    unanswered = None
     if acts is None and mode == "packet":
-        return {"verdict": "packets", "board": board, "next": [f"write {apath} (order, nets: layers, avoid circles) and re-run"],
-                "line": f"critroute: {len(names)} packet(s) in {ai}; write {apath} and re-run"}
+        if gaps.ai_answer_required(c.cons):
+            return {"verdict": "packets", "board": board, "next": [f"write {apath} (order, nets: layers, avoid circles) and re-run"],
+                    "line": f"critroute: {len(names)} packet(s) in {ai}; write {apath} and re-run"}
+        unanswered = {"n": len(names), "packets": [os.path.join(ai, _safe(x) + ".packet.json") for x in names]}
     res = apply(board, os.path.join(d, "board.kicad_pcb"), acts, c.cons_path, c.cons, calllog.attempts_path(board), crit=crit)
     still = [x for x in names if x in res["open_nets"]]
     with open(os.path.join(d, "stage.log"), "a") as fh:
         fh.write("\n".join(res["lines"]) + "\n")
     line = (f"critroute: {len(res['kept'])} path(s) kept, {len(names) - len(still)}/{len(names)} critical net(s) closed"
             + (f"; open: {', '.join(still)}" if still else ""))
-    return {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
-            "next": [f"critroute open: {x}" for x in still]}
+    out = {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
+           "next": [f"critroute open: {x}" for x in still]}
+    if unanswered:
+        out["ai_unanswered"] = unanswered
+    return out

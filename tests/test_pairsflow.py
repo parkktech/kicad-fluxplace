@@ -45,6 +45,7 @@ def test_owner_stage_beyond_the_run_range_still_defers(tmp_path, monkeypatch):
 
 
 def test_unowned_kind_keeps_the_gate_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(GP, "ai_answer_required", lambda cons: True)        # [ai] answer = required keeps exit 5
     rc, st, seen = _flow(tmp_path, monkeypatch, [_row("pair-skew"), _row("short")])
     assert rc == 5 and seen == [] and st["stages"]["pairs"]["verdict"] == "packets"
 

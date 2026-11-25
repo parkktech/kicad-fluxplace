@@ -908,6 +908,12 @@ _PACKET_ACTIONS = (
 AI_PACKETS = 24                                 # PHASE3H A1: packets written per _r_ai call ([ai] packets overrides)
 
 
+def ai_answer_required(cons):
+    """[ai] answer = "optional" (default): a stage whose AI packets have no answer goes on with its defaults and records the count;
+    "required": the stage stops with exit 5 until the packets are answered."""
+    return str(((cons or {}).get("ai") or {}).get("answer", "optional")).lower() == "required"
+
+
 def _ai_packets(cons):
     """PHASE3H A1: [ai] packets overrides AI_PACKETS (packets written per _r_ai call)."""
     return int(((cons or {}).get("ai") or {}).get("packets", AI_PACKETS))
