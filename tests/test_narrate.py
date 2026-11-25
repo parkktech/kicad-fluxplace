@@ -148,3 +148,12 @@ def test_one_round_line_per_generation_uses_leader_key(tmp_path, monkeypatch):
                 leader_key=[["hard rows", 0]], verdict="kept")
     (row,) = _narr(W)
     assert "round 3 of 8" in row["text"] and "hard rows 0" in row["text"] and "hard rows 2" not in row["text"]
+
+
+def test_snapshot_write_takes_numpy_scalars(tmp_path):
+    import json
+    import numpy as np
+    from fluxplace import snapshot as SN
+    p = str(tmp_path / "s.json")
+    SN._write(p, {"parked": np.bool_(True), "n": np.int64(3), "x": np.float64(1.5), "rows": [{"ok": np.bool_(False)}]})
+    assert json.load(open(p)) == {"parked": True, "n": 3, "x": 1.5, "rows": [{"ok": False}]}
