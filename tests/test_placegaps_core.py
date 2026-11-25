@@ -27,8 +27,9 @@ def ctx(**kw):
 
 def test_every_kind_has_a_detector_and_only_ghost_open_and_row_rail_have_rungs_so_far():
     assert set(PG.ORDER) == set(PG.DETECT) == set(PG.DISPATCH)
-    assert {k: v for k, v in PG.DISPATCH.items() if v} == {"ghost-open": ["unblock", "seal", "endpoint"], "row-rail": ["pull-load", "pour-need"]}
-    assert set(PG.RUNGS) == {"unblock", "seal", "endpoint", "pull-load", "pour-need"}
+    assert {k: v for k, v in PG.DISPATCH.items() if v} == {"ghost-open": ["unblock", "seal", "endpoint"], "row-rail": ["pull-load", "pour-need"],
+                                                              "row-away": ["feasible", "push-out", "re-seat"], "row-flight": ["push-out"]}
+    assert set(PG.RUNGS) == {"unblock", "seal", "endpoint", "pull-load", "pour-need", "feasible", "push-out", "re-seat"}
     assert len(set(PG.ORDER)) == len(PG.ORDER)
     assert PG.ORDER.index("ghost-open") < PG.ORDER.index("row-cin-side") < PG.ORDER.index("support-far") < PG.ORDER.index("part-stock")
 
