@@ -7,6 +7,7 @@ writes a board and never judges itself); an evaluator applies and judges a candi
 report files and narration; DISPATCH is empty, so `detect_stage` (the only thing the stages call) is detect-only: it writes
 report files and prints a table, never a board, never raises. Board-agnostic: no reference, net or distance of a board here.
 """
+import copy
 import json
 import math
 import os
@@ -153,6 +154,16 @@ def row_kind(r, intent=False):
     return {"separation": "row-away", "keepout-flight": "row-flight", "rail": "row-rail"}.get(k, "row-other")
 
 
+RAIL_TOLERANCE = 0.10                  # a rail reach overage within the model's error is a soft row
+
+
+def rail_tolerance(cons):
+    try:
+        return float(((cons or {}).get("placegaps") or {}).get("rail_tolerance", RAIL_TOLERANCE))
+    except (TypeError, ValueError):
+        return RAIL_TOLERANCE
+
+
 def _excess(r):
     v, lim = r.get("value"), r.get("limit") if "limit" in r else (r.get("max") if r.get("max") is not None else r.get("target"))
     try:
@@ -171,8 +182,11 @@ def detect_rows(ctx):
         if r.get("hard") and r.get("verdict") == "fail":
             if r.get("kind") == "support" and r.get("metric") == "distance" and (r.get("refs") or [None])[0] in far:
                 continue                                        # graded as a support-far gap (which carries this row)
+            soft = r.get("kind") == "rail" and _excess(r) <= rail_tolerance(ctx.get("cons"))      # inside the model's error: soft, never outranks a hard row
             out.append(gap(row_kind(r), f"{r['name']}|{r.get('metric')}", "plain", _excess(r), r.get("refs") or (), r.get("nets") or (),
-                           row=f"{r['kind']}:{r['name']}", detail=f"{r.get('metric')} {r.get('value')} limit {r.get('max') if r.get('max') is not None else r.get('target')}"))
+                           row=None if soft else f"{r['kind']}:{r['name']}",
+                           detail=f"{r.get('metric')} {r.get('value')} limit {r.get('max') if r.get('max') is not None else r.get('target')}"
+                                  + (" (soft: within the rail model error)" if soft else "")))
     for r in ctx.intent_rows() or []:
         if r.get("hard") and r.get("met") is False and r.get("kind") != "support":      # support rows: the support-far gaps carry them
             out.append(gap(row_kind(r, True), r["name"], "plain", _excess(r), r.get("refs") or (), (), row=f"intent:{r['kind']}:{r['name']}",
@@ -385,6 +399,14 @@ def _accept(base, cand, target=None):
             return False, check, f"{t} worse {tb[t]:g}->{tc[t]:g}"
     if target and str(target).startswith("ghost-open:") and target in {g["id"] for g in cand["gaps"]}:
         return False, "judge:target open", f"{target} is still open in the judge (a ghost-open repair counts only when its target routes)"
+    mb0 = {g["id"]: g["mag"] for g in base["gaps"] if g["row"]}
+    worse = sorted(g["id"] for g in cand["gaps"] if g["row"] and g["id"] != target and g["id"] in mb0 and g["mag"] > mb0[g["id"]] + 1e-9)
+    if worse:                                        # a row that already fails must not fail harder because another was repaired
+        r = next(g for g in cand["gaps"] if g["id"] == worse[0])
+        return False, f"row:{r['row']}", f"{r['row']} worse: mag {mb0[worse[0]]:g}->{r['mag']:g}"
+    newrow = sorted({g["row"] for g in cand["gaps"] if g["row"]} - {g["row"] for g in base["gaps"] if g["row"]})
+    if newrow:                                       # a repair that breaks another hard row is refused whatever it gained
+        return False, f"row:{newrow[0]}", f"hard row {newrow[0]} newly not honoured"
     sb, sc = score(base["gaps"], base.get("state")), score(cand["gaps"], cand.get("state"))
     if sc < sb:
         return True, None, "score lower"
@@ -804,7 +826,8 @@ def _with_supports(B, ctx, mov, tg):
         ics = {c["ic"] for c in ctx.clusters() or []}
         for ref, (x, y, a) in list(tg.items()):
             if ref in ics:
-                for r, v in (IT.move_with_support(B, ctx["cons"], ctx["spec"], ref, x, y, a) or {}).items():
+                work = copy.deepcopy(B)                         # move_with_support relocates parts on the model it is given: never the shared one
+                for r, v in (IT.move_with_support(work, ctx["cons"], ctx["spec"], ref, x, y, a) or {}).items():
                     if r in mov:
                         full[r] = tuple(v) if r != ref else (x, y, a)
     except Exception as e:                                  # noqa: BLE001 - the IC alone, as before
@@ -938,6 +961,260 @@ def _r_endpoint(g, ctx):
 
 DISPATCH["ghost-open"] = ["unblock", "seal", "endpoint"]
 RUNGS.update({"unblock": _r_unblock, "seal": _r_seal, "endpoint": _r_endpoint})
+
+
+# ------------------------------------------------------------------ phase 8: row-rail (pull-load, pour-need)
+def _ref(s):
+    return str(s).split(".")[0]
+
+
+def _rail_row(ctx, g):
+    for r in ctx.rows() or []:
+        if r.get("kind") == "rail" and g.get("id") == f"row-rail:{r.get('name')}|{r.get('metric')}":
+            return r
+    return None
+
+
+def _rail_xy(B, ref, net):
+    p = B["parts"].get(ref)
+    return [(q["x"], q["y"]) for q in (p["pads"] if p else []) if q.get("net") == net]
+
+
+def rail_reach(B, src, load, net, shift=(0.0, 0.0)):
+    """(Manhattan mm, source pad, worst load pad): the load pad farthest from its nearest source pad (powerbudget._ends), with the
+    source pads translated by `shift`. The plane is on an inner layer: the side of a part does not enter (pad x, y are absolute)."""
+    s = [(x + shift[0], y + shift[1]) for x, y in _rail_xy(B, src, net)]
+    ld = _rail_xy(B, load, net)
+    if not s or not ld:
+        return None
+    d = lambda a, b: abs(a[0] - b[0]) + abs(a[1] - b[1])
+    w = max(ld, key=lambda b: (min(d(a, b) for a in s), b))
+    a = min(s, key=lambda a: (d(a, w), a))
+    return d(a, w), a, w
+
+
+def _rail_siblings(ctx, row):
+    """Every rail row of the same net and source: [(load ref, limit mm, value mm)]."""
+    src = _ref(row["refs"][0])
+    return [(_ref(r["refs"][1]), r.get("max"), r.get("value")) for r in ctx.rows() or []
+            if r.get("kind") == "rail" and r.get("nets") == row.get("nets") and _ref(r["refs"][0]) == src and len(r.get("refs") or []) > 1]
+
+
+def _r_pull_load(g, ctx):
+    """The load steps toward the source, or the source (with its regulator's supports) toward the load, by the Manhattan excess x 1.1 + 0.2 mm
+    (+ 0, 1, 2.5 mm), along the line and along each axis; legalised against every non-movable part (placetour._legal), supports carried
+    (intent.move_with_support). A source move is proposed only when no other load of the rail gets newly beyond its limit by it."""
+    from . import placetour as PT
+    row = _rail_row(ctx, g)
+    if g["kind"] != "row-rail" or not row or row.get("max") is None or len(row.get("refs") or []) < 2:
+        return []
+    B, net = ctx.B(), (row.get("nets") or [None])[0]
+    src, load = _ref(row["refs"][0]), _ref(row["refs"][1])
+    got = rail_reach(B, src, load, net)
+    if got is None:
+        return []
+    dist, a, w = got
+    need = dist - float(row["max"])
+    if need <= 0:
+        return []
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    dx, dy = w[0] - a[0], w[1] - a[1]                       # source pad -> load pad
+    ax, ay = abs(dx), abs(dy)
+    sib = [(r, mx, v) for r, mx, v in _rail_siblings(ctx, row) if r != load and mx is not None]
+    ic = next((c["ic"] for c in ctx.clusters() or [] if c["ic"] == src or any(s["ref"] == src for s in c["supports"])), src)
+    out, seen = [], set()
+    for k, extra in enumerate((0.0, 1.0, 2.5)):
+        s = need * 1.1 + 0.2 + extra
+        vecs = {"line": (dx / dist * s, dy / dist * s)}
+        if ax >= s:
+            vecs["x"] = (math.copysign(s, dx), 0.0)
+        if ay >= s:
+            vecs["y"] = (0.0, math.copysign(s, dy))
+        for tag, (vx, vy) in sorted(vecs.items()):
+            for who, ref, sg in (("load", load, -1.0), ("src", ic, 1.0)):
+                if ref not in mov:
+                    continue
+                if who == "src":                            # the source steps toward the load: no sibling load may get newly over its limit
+                    bad = False
+                    for r, mx, v in sib:
+                        n = rail_reach(B, src, r, net, (vx, vy))
+                        if n is not None and n[0] > max(float(mx), float(v if v is not None else 0.0)) + 1e-6:
+                            bad = True
+                            break
+                    if bad:
+                        continue
+                p = B["parts"][ref]
+                tg = {ref: (p["pos"][0] + sg * vx, p["pos"][1] + sg * vy, p["angle"])} if who == "src" else \
+                     {ref: (p["pos"][0] - vx, p["pos"][1] - vy, p["angle"])}
+                mv = _with_supports(B, ctx, mov, tg)
+                key = PT._key(mv) if mv else None
+                if mv and key not in seen:
+                    seen.add(key)
+                    out.append({"id": f"pull-{k}-{tag}-{who}", "rung": "pull-load", "moves": mv, "claims": [],
+                                "notes": f"{ref} {s:.1f} mm toward {'the load' if who == 'src' else 'the source'} ({tag})"})
+    return out
+
+
+def pour_need(ctx, g):
+    """What a rail row that no placement move closes needs: the rail copper wider by value / limit (reach is linear in the copper width at
+    a fixed drop budget) and the load spread."""
+    row = _rail_row(ctx, g)
+    if not row or row.get("max") is None:
+        return None
+    B, net = ctx.B(), (row.get("nets") or [None])[0]
+    src = _ref(row["refs"][0])
+    sib = _rail_siblings(ctx, row)
+    over = sorted(r for r, mx, v in sib if mx is not None and v is not None and v > mx)
+    xy = [q for r, _m, _v in sib for q in _rail_xy(B, r, net)]
+    spread = (round(max(x for x, _ in xy) - min(x for x, _ in xy), 1), round(max(y for _, y in xy) - min(y for _, y in xy), 1)) if xy else None
+    rec = _pour_rec(row, sib, spread, over, src, net)
+    ctx.setdefault("pour_need", {}).setdefault(net, rec)           # the first record of a net stands; pour_questions refreshes it from the final state
+    return ctx["pour_need"][net]
+
+
+def _pour_rec(row, sib, spread, over, src, net):
+    vals = [v for _r, _m, v in sib if v is not None] or [row["value"]]
+    worst = max(vals)
+    return {"net": net, "source": src, "limit_mm": row["max"], "worst_mm": worst, "loads": len(sib), "loads_over": over, "spread_mm": spread,
+            "copper_factor": round(float(worst) / float(row["max"]), 3), "layers": row.get("layers")}
+
+
+def pour_questions(ctx, res):
+    """After `close`: the rails whose row is still not honoured (gaps_out) and for which no move was found get the owner question
+    `rail-pour:<net>` (ctx["session"], a questions.Session); a rail a later round closed is dropped from the record. -> [record]."""
+    left = {g["nets"][0] for g in res.get("gaps_out") or [] if g["kind"] == "row-rail" and g["nets"]}
+    need = ctx.setdefault("pour_need", {})
+    for net in [n for n in need if n not in left]:
+        del need[net]
+    for net, rec in sorted(need.items()):                           # the final state: loads over, worst reach and copper factor of the rail now
+        row = next((r for r in ctx.rows() or [] if r.get("kind") == "rail" and (r.get("nets") or [None])[0] == net and r.get("refs")), None)
+        if row and row.get("max") is not None:
+            sib = _rail_siblings(ctx, row)
+            over = sorted(r for r, mx, v in sib if mx is not None and v is not None and v > mx)
+            need[net] = dict(_pour_rec(row, sib, rec["spread_mm"], over, rec["source"], net))
+    S = ctx.get("session")
+    for net, rec in sorted(need.items()):
+        if S is None:
+            continue
+        over, f, row_max = rec["loads_over"], rec["copper_factor"], rec["limit_mm"]
+        sp = rec["spread_mm"]
+        found = (f"rail {net} from {rec['source']}: {len(over)} of {rec['loads']} loads beyond the reach limit {row_max:g} mm ({', '.join(over)}); worst "
+                 f"{rec['worst_mm']:g} mm; loads spread {sp[0]:g} x {sp[1]:g} mm; no legal move of a load or of the source closes it" if sp else
+                 f"rail {net}: loads beyond the reach limit and no legal move closes it")
+        S.ask(f"rail-pour:{net}", "rail copper", found,
+              {"pour": f"plan the rail as a pour / plane copper on {', '.join(rec.get('layers') or ['an inner layer'])}, x{f:g} the copper of the budget "
+                       f"(the row then reads 'by pour')",
+               "waive": "accept the reach as it is, with the reason on record",
+               "move": "unfix or move the source / loads yourself, then run again"},
+              "pour", "the route stage (rail copper) and the next floorplan run")
+    return [need[n] for n in sorted(need)]
+
+
+def _r_pour_need(g, ctx):
+    """No candidate: the rail needs copper, not a move. Records the need (ctx["pour_need"]); `pour_questions` asks after the loop."""
+    if g["kind"] == "row-rail":
+        pour_need(ctx, g)
+    return []
+
+
+DISPATCH["row-rail"] = ["pull-load", "pour-need"]
+RUNGS.update({"pull-load": _r_pull_load, "pour-need": _r_pour_need})
+
+
+class FileEval(Evaluator):
+    """Floorplan's evaluator after the search: a candidate is applied to a copy of the written board (placetour._apply, connectivity guard),
+    every gap kind of the stage is measured again on it, and it is refused for: a new legality issue against the input (model), a
+    support beyond its limit that was not, wire length or crossings more than +2 % (floorplan2.measured), a `guards` value that rose
+    (breakout / fan-out), and, when it would improve the score, a new KiCad DRC item against the input (`drc_new`). The base moves only on commit."""
+    TOL = 0.02
+
+    def __init__(self, ctx, board, input_board, workdir, legal_base=None, measure=None, guards=None, drc_ref_board=None):
+        self.ctx, self.input_board, self.work = ctx, input_board, workdir
+        self.drc_board = drc_ref_board or input_board
+        self.legal_base, self.measure, self.guards = legal_base, measure, dict(guards or {})
+        os.makedirs(workdir, exist_ok=True)
+        self.board_path = os.path.join(workdir, "base.kicad_pcb")
+        shutil.copyfile(board, self.board_path)
+        pro = os.path.splitext(input_board)[0] + ".kicad_pro"
+        self.pro = pro if os.path.exists(pro) else None
+        if self.pro:
+            shutil.copyfile(self.pro, os.path.splitext(self.board_path)[0] + ".kicad_pro")
+        self.n, self.drc_ref, self.gaps = 0, None, None
+        self.m = self._cost(self.board_path)
+        self.g0 = {k: f(self.board_path) for k, f in self.guards.items()}
+        self._sync()
+
+    def _cost(self, path):
+        return self.measure(path) if self.measure else {}
+
+    def _sync(self):
+        self.ctx["board"] = self.board_path
+        for k in ("B", "_rows", "_intent", "_cl", "_far", "errors", "rows"):
+            self.ctx.pop(k, None)
+
+    def _gaps(self, path):
+        c = Ctx(stage="floorplan", board=path, cons=self.ctx["cons"], spec=self.ctx["spec"], ds_dir=self.ctx.get("ds_dir"))
+        return detect(c, SCOPE["floorplan"])["gaps"]
+
+    def detect(self, kinds):
+        if self.gaps is None:
+            self.gaps = self._gaps(self.board_path)
+        return list(self.gaps)
+
+    def state(self):
+        return {"illegal": 0}
+
+    def board(self):
+        return self.ctx.B()
+
+    def trial(self, cand):
+        from . import legalgate as LG, placetour as PT, routediag as RD
+        self.n += 1
+        p = os.path.join(self.work, f"t{self.n}-{cand['id']}.kicad_pcb")
+        ok, probs, _rem = PT._apply(self.board_path, cand["moves"], p, False)
+        if not ok:
+            return {"gaps": [], "state": {}, "refusal": "legal:guard " + "; ".join(probs[:2])}
+        if self.pro:
+            shutil.copyfile(self.pro, os.path.splitext(p)[0] + ".kicad_pro")
+        B1 = RD.load(p)
+        ill = LG.count_new(LG.new_issues(LG.baseline(B1, self.ctx["cons"]), self.legal_base)) if self.legal_base is not None else 0
+        gaps = self._gaps(p)
+        tr = {"gaps": gaps, "state": {"illegal": ill}, "refusal": None, "board": p}
+        if ill:
+            tr["refusal"] = f"legal:model {ill} new issue(s) against the input"
+            return tr
+        before, after = score_terms(self.gaps or [], self.state()), score_terms(gaps, tr["state"])
+        for t in ("decap_far", "support_far", "far_mm"):
+            if after[t] > before[t] + 1e-9:
+                tr["refusal"] = f"score:{t} {before[t]}->{after[t]}"
+                return tr
+        m = self._cost(p)
+        for k in ("wl", "cross"):
+            if self.m.get(k) and m.get(k, 0) > self.m[k] * (1 + self.TOL):
+                tr["refusal"] = f"score:{k} {self.m[k]:.0f}->{m[k]:.0f} (+{100 * (m[k] / self.m[k] - 1):.1f} % > 2 %)"
+                return tr
+        tr["m"] = m
+        for k, f in sorted(self.guards.items()):
+            v = f(p)
+            if v > self.g0[k]:
+                tr["refusal"] = f"score:{k} {self.g0[k]}->{v}"
+                return tr
+        if score(gaps, tr["state"]) <= score(self.gaps or [], self.state()):
+            try:
+                if self.drc_ref is None:
+                    self.drc_ref = LG._drc(self.drc_board, pro_from=self.drc_board) or []
+                d = LG.drc_new(p, self.drc_board, ref=self.drc_ref)
+            except Exception:                                   # noqa: BLE001
+                d = None
+            if d is None:
+                tr["refusal"] = "drc:not-run (kicad-cli gave no answer: fails closed)"
+            elif d["items"]:
+                tr["refusal"] = "drc:" + ",".join(f"{t} {n}" for t, n in sorted(d["n"].items())) + " " + ";".join("/".join(q) for q in d["pairs"][:3])
+        return tr
+
+    def commit(self, tr):
+        self.board_path, self.gaps, self.m = tr["board"], tr["gaps"], tr.get("m") or self.m
+        self._sync()
 
 
 class JudgeEval(Evaluator):

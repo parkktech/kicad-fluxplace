@@ -189,9 +189,21 @@ def test_datasheet_dir_resolves_from_the_constraints_file_not_the_cwd(tmp_path, 
     assert "PART-1" in PBG.facts_for(C.load(str(c)))[0]
 
 
-def test_missing_datasheet_dir_says_so_on_stderr(tmp_path, monkeypatch, capsys):
+def test_missing_datasheet_dir_fails_when_the_constraints_set_it(tmp_path, monkeypatch):
+    import pytest
     from fluxplace import constraints as C
     c, other = _proj(tmp_path, with_ds=False)
     monkeypatch.chdir(other)
-    assert PBG.facts_for(C.load(str(c)))[0] == {}
-    assert "no datasheet facts loaded" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="datasheets"):
+        C.load(str(c))
+
+
+def test_datasheet_dir_is_the_same_from_two_cwds_and_a_cwd_lookalike_does_not_win(tmp_path, monkeypatch):
+    from fluxplace import constraints as C
+    c, other = _proj(tmp_path)
+    (other / "docs" / "datasheets").mkdir(parents=True)                       # a lookalike beside the cwd: the project's own wins
+    got = []
+    for cwd in (other, tmp_path / "proj" / "W"):
+        monkeypatch.chdir(cwd)
+        got.append(C.load(str(c))["docs"]["datasheets"])
+    assert got[0] == got[1] == str(tmp_path / "proj" / "docs" / "datasheets")

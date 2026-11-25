@@ -1650,6 +1650,41 @@ def cmd_floorplan(a):
         print(f"floorplan: fan-out re-checked after the repairs: {nb} pin(s) blocked")
         if nb and best["fanout_ok"]:
             best["fanout_ok"], best["why_not"] = False, f"fan-out: {nb} pin(s) blocked after the legality repairs"
+    pgres = None
+    if drc is not None and not drc["items"] and not rp2["left"]:     # --- placement gaps (row-rail): pull a load / the source, or say the rail needs copper
+        from . import placegaps as PG
+        try:
+            import shutil
+            wd_pg = os.path.join(os.path.dirname(os.path.abspath(out)), os.path.splitext(os.path.basename(out))[0] + ".placegaps.work")
+            ctx_pg = PG.Ctx(stage="floorplan", board=out, cons=cons, spec=spec, ds_dir=ds_dir, session=S)
+            ev_pg = PG.FileEval(ctx_pg, out, src_board, wd_pg, legal_base=a.legal_base, measure=lambda p_: measured(p_, cons, spec),
+                                guards={"fanout": lambda p_: fanout_blocked(p_, cons, spec)}, drc_ref_board=src_board)
+            pgres = PG.close(ctx_pg, ["row-rail"], ev_pg, stage="floorplan")
+            if pgres["accepted"]:
+                shutil.copyfile(ev_pg.board_path, out)
+                Bn = RD.load(out)
+                try:                                            # the report of the search is refreshed to the board that stands now
+                    from . import netclass as NC_
+                    d_ = json.load(open(rp))
+                    d_["rail_repair"] = {"accepted": [{k: x[k] for k in ("gap", "rung", "candidate", "refs", "moves")} for x in pgres["accepted"]],
+                                         "measured": {k: round(float(v), 3) for k, v in measured(out, cons, spec).items()},
+                                         "metrics": metrics(Bn, cons, spec, NC_.classify(Bn, cons, spec))}
+                    json.dump(d_, open(rp, "w"), indent=1, default=str)
+                except Exception as e:                          # noqa: BLE001
+                    print(f"floorplan: rail rows repaired, report not refreshed ({type(e).__name__}: {str(e)[:120]})", flush=True)
+                print(f"floorplan: rail rows: {len(pgres['accepted'])} repair(s) kept ({', '.join(x['candidate'] for x in pgres['accepted'])}); "
+                      f"hard rows not honoured {pgres['score_in'][PG.TERMS.index('hard_rows')]} -> {pgres['score_out'][PG.TERMS.index('hard_rows')]}", flush=True)
+            for rf in pgres["refused"][:6]:
+                print(f"floorplan: rail repair {rf.get('candidate', rf['rung'])} for {rf['gap'].split(':', 1)[1].split('|')[0]} refused by {rf['check']}", flush=True)
+            for rec in PG.pour_questions(ctx_pg, pgres):
+                net = rec["net"]
+                print(f"floorplan: rail {net} needs copper x{rec['copper_factor']:g} ({len(rec['loads_over'])} of {rec['loads']} loads beyond {rec['limit_mm']:g} mm: "
+                      f"{', '.join(rec['loads_over'])}); question rail-pour:{net}", flush=True)
+        except (Exception, SystemExit) as e:                    # noqa: BLE001 - a repair (or a guard) that cannot run leaves the board as it was
+            done = bool(pgres and pgres.get("accepted"))        # the copy may already have happened: say which of the two it is
+            print(f"floorplan: rail rows {'repaired, report not refreshed' if done else 'not repaired'}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+            if done:
+                Bn = RD.load(out)
     ill = drc is None or bool(drc["items"]) or bool(rp2["left"])      # fails closed: a gate that did not run, or a part nothing could put right, is a failure
     if drc is not None and drc["items"]:
         print(LG.drc_line(drc))
@@ -1669,7 +1704,7 @@ def cmd_floorplan(a):
     refused = not passes(best) or bool(irc or brc) or ill
     hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
     print(hon["line"])
-    from . import placegaps as PG; PG.detect_stage("floorplan", out, cons, spec, os.path.dirname(os.path.abspath(out)), base=os.path.splitext(os.path.basename(out))[0] + ".placegaps", ds_dir=ds_dir)    # detect-only
+    from . import placegaps as PG; PG.detect_stage("floorplan", out, cons, spec, os.path.dirname(os.path.abspath(out)), base=os.path.splitext(os.path.basename(out))[0] + ".placegaps", ds_dir=ds_dir, attempts=pgres)
     LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
                  lane="accepted", phase="gate", verdict="refused" if refused else "kept", why=best["why_not"], full=True)
     for line in fb.finish(Bn) if fb is not None else []:
