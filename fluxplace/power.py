@@ -552,7 +552,7 @@ def pour_rails(board_path, cons, out, layers=None, nets=None):
         return _guard_measure(DG.measure(out), DG)
 
     def drop(z):                                         # back to the accepted set (kept zones only)
-        b.Remove(z)
+        b.Delete(z)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
         b.Save(out)
         OG.refill(out)
 

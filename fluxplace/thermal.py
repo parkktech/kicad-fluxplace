@@ -372,7 +372,7 @@ def strip_covered(board, cons, out):
             bb = d.GetBoundingBox()
             res["log"].append(f"thermal {sp['name']}: mask opening at ({PN.ToMM(bb.GetLeft()):.1f}, {PN.ToMM(bb.GetTop()):.1f}) taken off "
                               f"the working board before routing; recut re-makes it after the copper")
-            b.Remove(d)
+            b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
             res["stripped"] += 1
     if res["stripped"]:
         PN.SaveBoard(out, b)
@@ -403,7 +403,7 @@ def recut(board, cons, out):
         for d in list(polys):
             if not _covered(PN, d, sp):
                 continue
-            b.Remove(d)
+            b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
             polys.remove(d)
         _post(PN, b, sp, res["log"], keep)
         res["blocks"] += 1
@@ -420,8 +420,9 @@ def recut(board, cons, out):
                PN.ToMM(bb.GetBottom()) + 0.5)
         area = PN.SHAPE_POLY_SET(poly)
         n = _carve(PN, b, area, layer, net, box, GROW_MM)
-        b.Remove(d)
-        _mask_shape(PN, b, area, d.GetLayer(), SLIVER_MM, keep)
+        dlayer = d.GetLayer()                     # read before Delete: the item is gone after
+        b.Delete(d)  # Delete, not Remove: a Remove() of a discarded item breaks pcbnew.LoadBoard for the process
+        _mask_shape(PN, b, area, dlayer, SLIVER_MM, keep)
         res["inferred"] += 1
         res["log"].append(f"polygon at {at} on {'B' if layer == PN.B_Cu else 'F'}: net {net}; carved around "
                           f"{n['via']} via(s), {n['pad']} pad(s), {n['track']} track(s), {n['zone']} zone fill(s)")
