@@ -174,7 +174,7 @@ class Solver:
         for i in range(max(1, int(L / 0.1)) + 1):
             s = i / max(1, int(L / 0.1))
             x, y = a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s
-            z = self.ob.keepout_hit(x, y, frozenset({layer}))
+            z = self.ob.keepout_hit(x, y, frozenset({layer}), net=net, r=hw)
             if z:
                 out.append((-hw, f"keep-out {z}"))
                 break
@@ -207,7 +207,7 @@ class Solver:
             hx, hy, hr = self.hl[key]
             g = math.hypot(hx - p[0], hy - p[1])
             out.append((min(g - hr - r - pr["hclr"], g - hr - pr["drill"] / 2 - pr["h2h"]), f"hole of {key[0]}"))
-        if not self.isolated and self.ob.keepout_hit(p[0], p[1], self.all_layers, vias=True):
+        if not self.isolated and self.ob.keepout_hit(p[0], p[1], self.all_layers, vias=True, net=net, r=r):
             out.append((-r, "keep-out"))
         if not self.isolated and not GM.in_outline(self.B, (p[0] - r, p[1] - r, p[0] + r, p[1] + r), pr["edge"]):
             out.append((-r, "board edge"))
