@@ -99,3 +99,60 @@ def test_plane_via_drop_honours_mask_openings(tmp_path):
     assert PL.via_at_points(b, "VX", [(30, 30)]) == 0          # another net's via inside the opening
     assert PL.via_at_points(b, "VX", [(45, 45)]) == 1
     assert PL.via_at_points(b, "GND", [(30, 30)]) == 1         # the owner net's via is fine
+
+
+# ---- the settled order: the thermal mask is cut after routing (thermal.recut), so covered openings leave the board first -----------
+def _thermal(rect, side="B"):
+    return {"thermal": {"t1": {"rect": rect, "side": side, "net": "GND", "mask_open": True}}}
+
+
+def _mask_polys(path):
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    return [d for d in b.GetDrawings() if d.GetShape() == pcbnew.SHAPE_T_POLY and b.GetLayerName(d.GetLayer()) in ("F.Mask", "B.Mask")]
+
+
+POLY = ('(gr_poly (pts (xy 20 20) (xy 40 20) (xy 40 40) (xy 20 40)) (stroke (width 0) (type default)) (fill yes) (layer "B.Mask") '
+        '(uuid "00000000-0000-0000-0000-0000000000b1"))\n')
+
+
+@pytest.mark.skipif(not HAVE, reason="pcbnew not available")
+def test_covered_opening_is_stripped_before_copper_and_recut_remakes_it(tmp_path):
+    from fluxplace import fanout as FO, thermal as TH
+    src = PB.write(tmp_path, POLY + GND_ZONE + PB.fp("C0", 30, 30, [PB.pad("1", -0.5, 0, "+3V3", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)]))
+    cons = _thermal([19, 19, 41, 41])
+    lines = []
+    work = FO.strip_thermal_openings(src, cons, lines.append)
+    assert work != src and not _mask_polys(work) and len(_mask_polys(src)) == 1       # the input file is never touched
+    assert any("taken off the working board" in l and "t1" in l for l in lines)
+    routed = str(tmp_path / "routed.kicad_pcb")
+    import shutil
+    shutil.copy(work, routed)
+    res = TH.recut(routed, cons, str(tmp_path / "cut.kicad_pcb"))                      # the finish stage makes the opening again
+    assert res["blocks"] == 1 and len(_mask_polys(str(tmp_path / "cut.kicad_pcb"))) >= 1
+
+
+@pytest.mark.skipif(not HAVE, reason="pcbnew not available")
+def test_uncovered_opening_stays_and_is_still_forbidden(tmp_path):
+    from fluxplace import fanout as FO
+    src = PB.write(tmp_path, POLY + GND_ZONE.replace('"GND"', '"+5V"'))
+    far = _thermal([80, 80, 90, 90])                                                   # a block elsewhere: does not cover the opening
+    assert FO.strip_thermal_openings(src, far, lambda m: None) == src                 # nothing stripped
+    assert FO.strip_thermal_openings(src, {}, lambda m: None) == src                   # no thermal config at all
+    B = load(tmp_path, POLY + GND_ZONE.replace('"GND"', '"+5V"'))
+    ob = EP.Obstacles(B, EP.plan_params({}), True)
+    assert ob.keepout_hit(30, 30, frozenset(B["copper"]), vias=True, net="GND", r=0.225)   # still forbidden for a non-owner net
+
+
+@pytest.mark.skipif(not HAVE, reason="pcbnew not available")
+def test_fanout_with_a_covered_opening_may_put_the_via_under_the_window(tmp_path):
+    from fluxplace import fanout as FO
+    import test_fanout as TF
+    caps = PB.fp("C0", 30, 30, [PB.pad("1", -0.5, 0, "+3V3", 0.5, 0.5), PB.pad("2", 0.5, 0, "GND", 0.5, 0.5)])
+    caps += PB.fp("J1", 60, 60, [PB.pad("1", 0, 0, "+3V3", 1, 1), PB.pad("2", 3, 0, "GND", 1, 1)])
+    path = PB.write(tmp_path, POLY + GND_ZONE.replace('"GND"', '"+5V"') + caps)       # owner +5V: GND vias would be forbidden if the opening stayed
+    out = str(tmp_path / "out.kicad_pcb")
+    B, res = FO.run(path, _thermal([19, 19, 41, 41]), None, out, TF.args(), None)
+    pin = [p for p in res["pins"] if p["ref"] == "C0" and p["net"] == "GND"][0]
+    assert pin["ok"] and pin["via"] and 19.7 < pin["via"][0] < 40.3                    # under the window, as the thermal flow intends
+    assert not _mask_polys(out)                                                         # the stage output carries no opening until recut

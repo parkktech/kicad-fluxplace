@@ -358,7 +358,19 @@ def _engine_floorplan(c, d, board, out):
     return {"verdict": "pass", "line": line, "board": out, "engine": _engine_record(out)}
 
 
+def _unmask(c, n, board):
+    """the first copper stage of a run (fanout runs its own copy of this in fanout.run): the mask openings a [thermal.*] block re-cuts after
+    routing leave the working board (thermal.strip_covered), so no router lays copper round a window that is made later; stages after the
+    first find nothing to strip. -> the board to use."""
+    from . import fanout as FO
+    if c is None or not (c.cons or {}).get("thermal"):
+        return board
+    out = FO.strip_thermal_openings(board, c.cons, lambda m: print("pipeline: " + m.replace("fanout: ", "", 1), flush=True), wd=lambda: c.dir(n, "unmask"))
+    return out
+
+
 def st_route_ready(c, n, board):
+    board = _unmask(c, n, board)
     d = c.dir(n, "route-ready")
     waive = []
     for w in c.a.waive or []:
@@ -473,7 +485,8 @@ def mask_warning(n_masks):
 
 def st_route(c, n, board):
     """Routing stage (see _st_route): a board-level mask opening present before routing adds a WARN line; never blocks."""
-    warn = mask_warning(mask_openings(board))            # read before any routing
+    board = _unmask(c, n, board)
+    warn = mask_warning(mask_openings(board))            # read before any routing (an opening a [thermal.*] block re-cuts is already off the board)
     res = _st_route(c, n, board)
     if warn and isinstance(res, dict):
         res["next"] = list(res.get("next") or []) + warn
@@ -1234,7 +1247,7 @@ def st_relieve(c, n, board):
 def st_critroute(c, n, board):
     """AI pre-route of critical nets (critroute.py): verdict "packets" stops the pipeline with exit 5 until actions exist."""
     from . import critroute as CR
-    return CR.stage(c, n, board)
+    return CR.stage(c, n, _unmask(c, n, board))
 
 
 def _file_sha1(path):

@@ -184,9 +184,31 @@ def lay_breakout(board, cons, spec, wd, log=print):
     return dst, res
 
 
+def strip_thermal_openings(board, cons, log=print, wd=None):
+    """-> the board to work on: `board` itself, or a copy without the mask openings the [thermal.*] mask_open blocks re-make after routing
+    (thermal.strip_covered; the first copper stage of every flow calls this: fanout, route-ready, critroute, route)."""
+    from . import thermal as TH
+    if not any(sp["mask"] for sp in TH.blocks(cons, pre=False)):
+        return board
+    wd = wd() if callable(wd) else wd or tempfile.mkdtemp(prefix="unmask-")
+    dst = os.path.join(wd, "unmasked.kicad_pcb")
+    r = TH.strip_covered(board, cons, dst)
+    for line in r["log"]:
+        log("fanout: " + line)
+    if not r["stripped"]:
+        return board
+    for ext in (".kicad_pro", ".kicad_dru", ".fluxmap.json", ".pins.json"):
+        side = os.path.splitext(board)[0] + ext
+        if os.path.exists(side):
+            shutil.copy(side, os.path.splitext(dst)[0] + ext)
+    return dst
+
+
 def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _depth=0):
     from . import routediag as RD
     bo_res = None
+    if not a.check_only and not refs and not _depth:         # first copper stage: a mask opening a [thermal.*] block re-cuts after routing is not on the board yet
+        board = strip_thermal_openings(board, cons, log)
     if not a.check_only and not refs and not _depth and not getattr(a, "no_breakout", False):
         wd0 = tempfile.mkdtemp(prefix="breakout-")
         board, bo_res = lay_breakout(board, cons, spec, wd0, log)
