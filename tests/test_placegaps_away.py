@@ -206,3 +206,30 @@ def test_region_row_without_a_rung_is_reported_not_silent():
     g = PG.gap("row-away", "keep-in-x", "plain", 0.5, ("U1",), row="intent:region:keep-in-x")
     assert PG.RUNGS["feasible"](g, c) == []
     assert "region row" in c["row_reports"][g["id"]]["why"]
+
+
+def test_push_out_carries_the_small_parts_that_hold_the_unit_back(mov, monkeypatch):
+    """The legaliser keeps every non-target part where it is: a unit pushed onto a small movable part is put back. The push then carries the
+    part out of the way (a target of the same move), so the unit reaches the separation."""
+    mov["m"] = {"U2", "P3"}
+
+    def legal(B, cons, tg, mv):
+        out = {}
+        for r, v in tg.items():
+            c = B["parts"][r]["court"]
+            n = (c[0] + v[0] - B["parts"][r]["pos"][0], c[1] + v[1] - B["parts"][r]["pos"][1], c[2] + v[0] - B["parts"][r]["pos"][0], c[3] + v[1] - B["parts"][r]["pos"][1])
+            if any(q != r and q not in tg and n[0] < p["court"][2] and p["court"][0] < n[2] and n[1] < p["court"][3] and p["court"][1] < n[3] for q, p in B["parts"].items()):
+                continue                                           # a target on a non-target part: not placed
+            out[r] = tuple(v)
+        return out or None
+    monkeypatch.setattr(PT, "_legal", legal)
+    B, cons = board(U1=(20, 50), U2=(28, 50), P3=(35, 50)), {"separation": [sep("gs", "U1", "U2", 10.0)]}
+    B["parts"]["P3"]["court"] = (34.0, 49.0, 36.0, 51.0)
+    c = mk(B, cons, None)
+    g = PG.detect(c, ["row-away"])["gaps"][0]
+    cands = PG.RUNGS["push-out"](g, c)
+    east = next(x for x in cands if x["id"] == "push-0")
+    assert east["moves"]["U2"][0] == pytest.approx(28 + 6.2) and "P3" in east["moves"]               # the unit reached its target, with the blocker moved
+    u2 = (east["moves"]["U2"][0] - 2, east["moves"]["U2"][1] - 2, east["moves"]["U2"][0] + 2, east["moves"]["U2"][1] + 2)
+    p = east["moves"]["P3"]
+    assert not (u2[0] < p[0] + 1 and p[0] - 1 < u2[2] and u2[1] < p[1] + 1 and p[1] - 1 < u2[3])        # P3 no longer stands on the pushed unit

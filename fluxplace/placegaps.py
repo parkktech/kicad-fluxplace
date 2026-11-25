@@ -1276,6 +1276,49 @@ def _r_feasible(g, ctx):
     return []
 
 
+def _reached(mv, ref, tg, tol=0.05):
+    """True when the legalised move `mv` puts `ref` on its target pose `tg[ref]` (within `tol` mm): the push was not undone by the legaliser."""
+    if not mv:
+        return False
+    x, y, _a = tg[ref]
+    got = mv.get(ref)
+    return bool(got) and math.hypot(got[0] - x, got[1] - y) <= tol
+
+
+def _carry_blockers(B, ctx, mov, sc, tg, info):
+    """The legaliser treats every part that is not a target as fixed, so a unit pushed into a gap that small movable parts fill is put back
+    where it was (or short of it). Those parts (movable, same side, not part of the unit nor of either group of the row) whose courtyard
+    meets the unit's pushed courtyards step out by the least translation (8 ways, `clear_shift`) as targets of the same move; every move is
+    then legalised together. -> moves, or None when nothing blocks / the pushed unit is still held back."""
+    from . import geom as GM
+    off = sc["off"]
+    dx, dy = tg[off][0] - B["parts"][off]["pos"][0], tg[off][1] - B["parts"][off]["pos"][1]
+    unit = set(sc["module"])
+    new = [(m, tuple(v + s_ for v, s_ in zip(B["parts"][m]["court"], (dx, dy, dx, dy)))) for m in sc["module"]]
+    rects = [c for _m, c in new]
+    skip = unit | set(info["a"]) | set(info["b"])
+    side = B["parts"][off]["side"]
+    blk = sorted((r for r in mov if r not in skip and (B["parts"][r]["side"] == side or B["parts"][r].get("tht"))
+                  and any(GM.overlap(c, B["parts"][r]["court"], -0.02) for c in rects)),
+                 key=lambda r: (GM.rect_gap(B["parts"][r]["court"], B["parts"][off]["court"]), r))[:6]
+    if not blk:
+        return None
+    c45 = math.sqrt(0.5)
+    full = dict(tg)
+    for r in blk:
+        q = B["parts"][r]
+        best = None
+        for vec in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (c45, c45), (-c45, c45), (c45, -c45), (-c45, -c45)):
+            t = clear_shift(q["court"], rects, vec)
+            if t is not None and (best is None or t < best[0]):
+                best = (t, vec)
+        if best is None:
+            return None
+        full[r] = (q["pos"][0] + best[1][0] * best[0], q["pos"][1] + best[1][1] * best[0], q["angle"])
+    mv = _with_supports(B, ctx, mov, full)
+    return mv if _reached(mv, off, tg) else None
+
+
 def _r_push_out(g, ctx):
     """row-away: the offender's unit steps along the separating direction (and 7 more at 45 deg) by limit - value + clearance.
     row-flight: the movable end steps (8 directions) by the least distance at which its flight line clears the keep-out + clearance."""
@@ -1303,6 +1346,8 @@ def _r_push_out(g, ctx):
         a = base + k * 2 * math.pi / AWAY_DIRS
         tg = {sc["off"]: (p["pos"][0] + d * math.cos(a), p["pos"][1] + d * math.sin(a), p["angle"])}
         mv = _with_supports(B, ctx, mov, tg)
+        if not _reached(mv, sc["off"], tg):                    # the legaliser held the unit back: small parts stand in its way, they travel with it
+            mv = _carry_blockers(B, ctx, mov, sc, tg, info) or mv
         key = PT._key(mv) if mv else None
         if mv and key not in seen:
             seen.add(key)
@@ -1869,11 +1914,47 @@ def _depth_deficit(B, ic, rect, normal, depth, walls):
     return round(depth - free, 3)
 
 
+SHIFT_LADDER_MM = (0.0, 0.5, 1.0, 1.5, 2.5)     # unit-shift: travel beyond the depth deficit (a flat cap needs the strip's depth, the supports in it need room)
+
+
+def _strip_block(ctx, B2, g, row, ic, pr, ref, sup, owned, seat_cap, refused):
+    """The module's own supports (`sup`, movable and confidently owned) whose courtyards stand in the strip of pin pair `pr` leave it as one
+    block: they are lifted off the board model, `seat_cap` seats the input cap `ref` in the emptied strip, then the lifted parts re-seat at
+    their pins (clusters.reseat, strict) wherever a legal seat is free: the strip is taken now, so that is another side of the IC.
+    -> the model copy, or None (no strip part, the cap does not seat, or a lifted part has no seat within its limit)."""
+    from . import geom as GM
+    c2 = _unit(ctx, B2, ic)
+    strips = _strips(B2, c2, g, row, [pr]) if c2 is not None else []
+    if not strips:
+        return None
+    rect = strips[0][0]
+    blk = [r for r in sup if r != ref and r not in owned and r in B2["parts"] and _hit(rect, B2["parts"][r]["court"])]
+    if not blk:
+        return None
+    B3 = copy.deepcopy(B2)
+    x0, y0 = B3["bbox"][0], B3["bbox"][1]
+    for i, r in enumerate(blk):                                # parked clear of the board and of one another
+        GM.place(B3["parts"][r], x0 - 30.0 - 10.0 * i, y0 - 30.0, B3["parts"][r]["angle"])
+    c3 = _unit(ctx, B3, ic)
+    if c3 is None or not seat_cap(B3, c3, next(q for q in B3["parts"][ic]["pads"] if q["num"] == pr[0])):
+        return None
+    c4, left = _unit(ctx, B3, ic), {}
+    if c4 is None:
+        return None
+    _reseat_on(ctx, B3, c4, only=set(blk), everything=True, refused=left)
+    if any(B3["parts"][r]["pos"][0] < x0 - 5.0 for r in blk):   # one that found no seat is still parked: the block does not fit
+        refused.update({r: f"no free seat after the strip emptied ({left.get(r, '?')})" for r in blk if B3["parts"][r]["pos"][0] < x0 - 5.0})
+        return None
+    return B3
+
+
 def _r_unit_shift(g, ctx):
     """A fixed part (or keep-out) stands in the strip an unserved input pin pair needs, closer than the capacitor's courtyard depth + clearance:
     the whole module (regulator + supports, `_with_supports`) moves away from the blocker, against the pair side's outward normal, by the depth
-    deficit + 0 / 0.5 / 1.0 mm, and by (deficit + 0.5) mm of normal travel at either 45 deg; then the input cap of that side is seated there
-    (an owned cap that serves no pair, else the cin-re-deal pick: a free cap of the net with a value >= the template's input cap)."""
+    deficit + SHIFT_LADDER_MM (0 / 0.5 / 1.0 / 1.5 / 2.5), and by (deficit + 0.5) mm of normal travel at either 45 deg; then the input cap of that
+    side is seated there (an owned cap that serves no pair, else the cin-re-deal pick: a free cap of the net with a value >= the template's input cap).
+    The module's own supports that stand in that strip travel as a block (`_strip_block`): they are lifted out, the cap takes the strip, and they
+    re-seat at their pins on whatever side is free; only when that fails do they step out by the least translation (into the neighbours)."""
     from . import clusters as CL
     u = _unit_gap(g, ctx, ("row-cin-side",))
     if u is None:
@@ -1911,7 +1992,7 @@ def _r_unit_shift(g, ctx):
             why.append(f"{pr[0]}/{pr[1]}: no fixed part or keep-out shortens the strip")
             continue
         c45 = math.sqrt(0.5)
-        moves_to = [(f"{e:g}", (-ox * (deficit + e), -oy * (deficit + e))) for e in (0.0, 0.5, 1.0)]
+        moves_to = [(f"{e:g}", (-ox * (deficit + e), -oy * (deficit + e))) for e in SHIFT_LADDER_MM]
         for sg in (1.0, -1.0):                                 # the two 45 deg variants: normal travel deficit + 0.5 mm
             t = (deficit + 0.5) / c45
             vx, vy = (-ox * c45 - sg * oy * c45, -oy * c45 + sg * ox * c45)
@@ -1938,6 +2019,10 @@ def _r_unit_shift(g, ctx):
                         _reseat_on(ctx, B2, {"ic": ic, "supports": [s_], "layout": c["layout"]}, only={ref}, everything=True, refused=refused)
                     return CL._on_cin_side(B2["parts"][ic], B2["parts"][ref]["court"], [pr], pr[0], B2["parts"][ref]["pads"])
                 ok = seat_cap(B2, c2, pad2)
+                if not ok:                                         # the strip's own supports travel as a block: lifted, the cap seats, they re-seat on a free side
+                    B3 = _strip_block(ctx, B2, g, row, ic, pr, ref, sup, owned, seat_cap, refused)
+                    if B3 is not None:
+                        B2, ok = B3, True
                 if not ok:                                         # the module's own parts that came along stand in the strip: they step out, then the cap seats
                     pk = _clear_picks(B2, c2, g, row, mov, set(owned) | {ref}, ic, [pr], together=8)
                     pre = _with_supports(B2, ctx, mov, {r: (B2["parts"][r]["pos"][0] + v[0], B2["parts"][r]["pos"][1] + v[1], B2["parts"][r]["angle"]) for r, v in pk[-1][1]}) if pk else None

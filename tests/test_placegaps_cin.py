@@ -413,3 +413,28 @@ def test_a_unit_shift_that_breaks_another_hard_row_is_refused(tmp_path):
     res = PG.close(c, ["row-cin-side"], Fk(), stage="t")
     assert not [a for a in res["accepted"] if a["rung"] == "unit-shift"]
     assert any(r["rung"] == "unit-shift" and r["check"] == "row:support:U1 template sw_mm" for r in res["refused"]) and cands
+
+
+def test_unit_shift_carries_the_supports_in_the_strip_as_a_block(tmp_path, monkeypatch):
+    """An own support of the regulator (R5, EN net) stands in the strip of the second pair: the shift alone leaves it in the strip, so the cap has
+    no seat. With the block, R5 is lifted out, the cap seats, and R5 re-seats at its pin on another side."""
+    board, cons, edge = walled_pair(tmp_path, free=2.6)
+    b = open(board).read()
+    r5 = capc("R5", edge + 1.6, 29.5, "EN", "VOUT", "", (-1.5, -2.0, 1.5, 2.0))
+    open(board, "w").write(b.rstrip().rstrip(")") + r5 + ")\n")
+    c = mk2(board, cons)
+    B = c.B()
+    assert "R5" in B["parts"] and any(s["ref"] == "R5" for k in c["_cl"] for s in k["supports"])
+    g_ = next(x for x in PG.detect(c, ["row-cin-side"])["gaps"])
+    monkeypatch.setattr(PG, "_clear_picks", lambda *a, **k: [])             # the old way out (step into the neighbours) is closed: only the block can serve
+    with monkeypatch.context() as m:
+        m.setattr(PG, "_strip_block", lambda *a, **k: None)
+        assert PG.RUNGS["unit-shift"](g_, c) == []                         # without the block R5 stays in the strip and the cap has no seat
+    cands = PG.RUNGS["unit-shift"](g_, c)
+    assert cands
+    win = [x for x in cands if next(r for r in BU.template_rows(applied(B, x["moves"]), cons, SPEC2) if r["name"].endswith("cin_side"))["value"] == 2]
+    assert win and all("R5" in x["moves"] and "U1" in x["moves"] for x in win)
+    B2 = applied(B, win[0]["moves"])
+    cap_c = B2["parts"]["C3"]["court"]
+    r5c = B2["parts"]["R5"]["court"]
+    assert not (r5c[0] < cap_c[2] and cap_c[0] < r5c[2] and r5c[1] < cap_c[3] and cap_c[1] < r5c[3])      # R5 and the cap do not overlap
