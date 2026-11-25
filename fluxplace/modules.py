@@ -64,9 +64,60 @@ ATTACH_MM = 15.0                    # a support farther than this from its modul
 REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
+def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach):
+    """A part the seating put where it adds a pad short, courtyard overlap or other issue the input board did not have is not left
+    there when the floorplan cannot move it out: a part that conflicts with another part of its OWN module, or with a held part
+    (fixed or mechanical), is seated again (the nearest legal seat within its limit), else returned to its input pose. A conflict
+    between two movable modules is the floorplan's: it moves the unit (the template units stand in isolation on purpose).
+    -> {ref: [what it was refused for]} of the parts returned to their input pose (their flip is undone in `flips`)."""
+    from . import clusters as CL, legality as LGL, legalgate as LG
+    L = LGL.Legal(B, cons, fixed)
+    known = LG.known(base0)
+    held = lambda r: r in fixed or MECH.match(r)
+
+    moved = lambda r: r in orig and r not in fixed and LG.displaced(B["parts"][r], orig[r]) > LG.MOVE_EPS
+    sup = {s["ref"]: (c, s) for c in cl for s in c["supports"] if s["sure"]}
+
+    def mine(r, k, d):                                   # an issue the floorplan cannot move away
+        o = LG._other(r, k, d)
+        if o is None or held(o):
+            return True
+        if of.get(o) == of.get(r):                       # one rigid unit: a part that stands where it was and belongs to no IC only came along by distance, it is its own unit
+            for x in (o, r):
+                if not moved(x) and x not in sup and detach(x):
+                    return False
+            return True
+        return False
+    out = {}
+    for _ in range(3):
+        bad, victims = {}, set()
+        for r in sorted(B["parts"]):
+            for k, d in LG.part_new(L, r, known):
+                if mine(r, k, d):
+                    bad.setdefault(r, []).append(f"{k} {d}".strip())
+                    victims |= {x for x in (r, LG._other(r, k, d)) if x and x in B["parts"] and moved(x)}
+        victims = sorted(victims)
+        if not victims:
+            break
+        for v in victims:
+            if v in sup and v not in isolated and v not in out:      # a supporting part: the nearest legal seat first
+                c, s = sup[v]
+                x0, y0, x1, y1 = B["bbox"]
+                CL.reseat(B, [{"ic": c["ic"], "supports": [s], **({"layout": c["layout"]} if c.get("layout") else {})}], everything=True,
+                          bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, flips=flips, refused=refused, only={v})
+                if not any(mine(v, k, d) for k, d in LG.part_new(L, v, known)):
+                    continue
+            if v in flips and B["parts"][v]["side"] != orig[v][3]:
+                flips.discard(v)
+            LG.revert_part(B, L, v, orig[v])
+            detach(v)                                    # back at its input pose it is no part of the rigid unit: it must not stretch the unit's box
+            out.setdefault(v, []).extend(bad.get(v, ["conflict"]))
+    return out
+
+
 def build(B, cons=None, spec=None, arrange=True, log=None):
     """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
-    from . import clusters as CL, powerbudget as PB, legality as LGL, netclass as NC, routable as RB
+    from . import clusters as CL, powerbudget as PB, legality as LGL, netclass as NC, routable as RB, legalgate as LG
     from . import blocks as BK
     cons = cons or {}
     parts = B["parts"]
@@ -76,7 +127,9 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
     rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
     flips, refused = set(), {}
     unit = []
+    base0 = orig = None
     if arrange:
+        base0, orig = LG.baseline(B, cons), LG.poses(B)          # the issues of the board as it comes in: what the seating adds is its own
         x0, y0, x1, y1 = B["bbox"]
         L = LGL.Legal(B, cons, fixed)
         isolated = set()
@@ -98,8 +151,6 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             for r, v in more.items():
                 rehomed[r] = dict(v, **{"from": rehomed[r]["from"], "left": rehomed[r]["left"]}) if r in rehomed else v
         own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
-        unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
-                for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
     bared = _bared(B, rehomed, spec, *PB.facts_for(cons, spec))                   # P5 M2: a pin a re-home left without a bypass of its own is named, not silent
     owner = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
     groups = {}
@@ -177,6 +228,21 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         if r not in of:
             mods[r] = {"name": r, "anchor": r, "refs": [r], "group": False}
             of[r] = r
+    legalised = {}
+    if arrange:
+        def detach(o):
+            m = mods[of[o]]
+            if o == m["anchor"] or o in fixed or (m["group"] and o in groups):
+                return False
+            m["refs"].remove(o)
+            mods[o] = {"name": o, "anchor": o, "refs": [o], "group": False}
+            of[o] = o
+            return True
+        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach)
+        L = LGL.Legal(B, cons, fixed)
+        own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
+        unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
+                for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
     out = []
     for key in sorted(mods):
         m = mods[key]
@@ -214,7 +280,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
                         mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
     return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
-            "unseated": CL.unseated(cl, fixed, refused), "unit_illegal": unit}
+            "unseated": CL.unseated(cl, fixed, refused) + [{"ref": r, "dist": 0.0, "ic": "", "pad": "", "limit": 0.0, "why": "input pose kept: " + "; ".join(w[:2])}
+                                                          for r, w in sorted(legalised.items()) if r not in refused], "unit_illegal": unit, "legalised": legalised}
 
 
 def _bared(B, rehomed, spec=None, facts=None, mpn_map=None):

@@ -51,7 +51,7 @@ def block_spread(X, Y, fixed, groups):
 
 
 class Plan:
-    def __init__(self, B, cons, spec, M, log=print, halo=None):
+    def __init__(self, B, cons, spec, M, log=print, halo=None, base=None):
         from . import legality as LGL, netclass as NC, escapeplan as EP
         self.B, self.cons, self.spec, self.log = B, cons, spec, log
         self.mods = M["modules"]
@@ -82,10 +82,11 @@ class Plan:
         pr = EP.plan_params(cons)
         self.plane = set(EP.plane_nets(B, cons, self.cls, pr))
         self._nets(NC)
-        self.base_issues = self.L.issues()
+        self.base_issues = base if base is not None else self.L.issues()      # `base`: the issues of the INPUT board; without it the board as handed in (already seated)
         self._ints = {}
         self.init_raster()
         self.cur = [(float(m['pos'][0]), float(m['pos'][1]), 0) for m in self.mods]
+        self.parked, self.noseat = set(), set()        # modules whose parts stand at their input poses / that found no legal pose
         self.claims_rel = {}
         self.chash = GM.Hash(3.0)
         self.ko_rel, self.khash = {}, GM.Hash(3.0)             # --- module keep-outs (datasheet layout template): rects rel. to the anchor, all layers
@@ -293,6 +294,7 @@ class Plan:
     def apply(self, i, X, Y, th):
         """put module i at (X, Y, th) in the board model, the courtyard hash and the claim hash; -> state to restore."""
         P = self.B["parts"]
+        self.parked.discard(i)
         old = ({r: (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"]) for r in self.mods[i]["members"]}, self.cur[i])
         for r, (x, y, a) in self.poses(i, X, Y, th).items():
             GM.place(P[r], x, y, a)
@@ -517,6 +519,34 @@ class Plan:
             self.restore(i, old)
         return ok, old
 
+    def park(self, i, orig):
+        """module i gives up its rigid pose: every member goes back to its pose on the input board, when that is legal where the others
+        stand now (else the module stays unplaced). -> True when parked. The module is reported in `noseat` either way."""
+        from . import legalgate as LG
+        P = self.B["parts"]
+        was = self.cur[i]
+        mem = {r: (P[r]["pos"][0], P[r]["pos"][1], P[r]["angle"], P[r]["side"]) for r in self.mods[i]["members"]}
+        for r in self.mods[i]["members"]:
+            LG.revert_part(self.B, self.L, r, orig[r])
+        kn = LG.known(self.base_issues)
+        if any(LG.part_new(self.L, r, kn) for r in self.mods[i]["members"]):
+            for r in self.mods[i]["members"]:
+                LG.revert_part(self.B, self.L, r, mem[r])
+            self.cur[i] = was
+            if was[0] < 9e4:
+                self.unplace(i)
+            self.noseat.add(self.mods[i]["name"])
+            return False
+        self.cur[i] = (float(self.src[0][i]), float(self.src[1][i]), 0)
+        self.X[i], self.Y[i], self.T[i] = self.src[0][i], self.src[1][i], 0
+        self._claims(i)
+        self.parked.add(i)
+        self.noseat.add(self.mods[i]["name"])
+        return True
+
+    def unplaced(self, i):
+        return self.cur[i][0] > 9e4
+
     def unplace(self, i):
         old = self.apply(i, 1e5 + 50.0 * i, 1e5, 0)
         for k in range(len(self.claims_rel.get(i, ())) + 8):
@@ -560,21 +590,56 @@ def breakout_claims(B, cons, spec, M, P):
     return dict(claims), regs
 
 
+def legalise_units(P, step=1.0):
+    """every movable module with a member that adds an issue the input board did not have (pad short, courtyard overlap, hole, outline,
+    keep-out), wherever it stands, is re-seated at the nearest legal pose. -> (names re-seated, names left where they stand)."""
+    from . import legalgate as LG
+    kn = LG.known(P.base_issues)
+    bad = [i for i in range(P.n) if not P.fixed[i] and any(LG.part_new(P.L, r, kn) for r in P.mods[i]["members"])]
+    moved, left = [], []
+    for i in bad:
+        (moved if reseat_module(P, i, step=step) else left).append(P.mods[i]["name"])
+    return moved, left
+
+
+def settle(P, orig, step=1.0):
+    """nothing illegal stands in the model before it is written: a movable module with a member that adds an issue the input lacked is
+    re-seated (wide search), else its parts go back to their input poses (parked), else it stays unplaced; a module still unplaced is
+    parked when its input poses are free. -> {"reseated": [...], "parked": [...], "unplaced": [...]} (module names)."""
+    from . import legalgate as LG
+    kn = LG.known(P.base_issues)
+    out = {"reseated": [], "parked": [], "unplaced": []}
+    for i in range(P.n):
+        if P.fixed[i] or i in P.parked:
+            continue
+        name = P.mods[i]["name"]
+        if P.unplaced(i):
+            out["parked" if P.park(i, orig) else "unplaced"].append(name)
+        elif any(LG.part_new(P.L, r, kn) for r in P.mods[i]["members"]):
+            if reseat_module(P, i, step=step):
+                out["reseated"].append(name)
+            else:
+                out["parked" if P.park(i, orig) else "unplaced"].append(name)
+    return out
+
+
 def reseat_module(P, i, step=1.0):
     """move module i to the nearest legal pose (by the same cost as the constructive pass) outside the halos."""
     x0, y0, x1, y1 = P.B["bbox"]
-    old = P.apply(i, P.X[i], P.Y[i], int(P.T[i]))
+    was_out = P.unplaced(i)
+    old = None if was_out else P.apply(i, P.X[i], P.Y[i], int(P.T[i]))
     P.unplace(i)
     placed = set(j for j in range(P.n) if j != i and P.cur[j][0] < 9e4)
     occ = P.raster(skip=P.mods[i]["members"], edge=any(r in P.L.edge for r in P.mods[i]["members"]), skip_mod=i)
     P._ints = {}
-    for R in (4.0, 8.0, 16.0, 40.0):
-        for c, X, Y, th in _grid(P, i, float(P.X[i]), float(P.Y[i]), R, step, placed, x0, y0, x1, y1, occ)[:80]:
+    for R in (4.0, 8.0, 16.0, 40.0, 120.0):
+        for c, X, Y, th in _grid(P, i, float(P.X[i]), float(P.Y[i]), R, step, placed, x0, y0, x1, y1, occ):
             ok, _ = P.try_pose(i, X, Y, th)
             if ok:
                 P.X[i], P.Y[i], P.T[i] = X, Y, th
                 return True
-    P.apply(i, P.X[i], P.Y[i], int(P.T[i]))
+    if not was_out:
+        P.apply(i, P.X[i], P.Y[i], int(P.T[i]))
     return False
 
 
@@ -623,14 +688,16 @@ def claims_from(mods, clr=0.10, lane=0.0):
     return out
 
 
+CONSTRUCT_TRIES = 3                 # passes of the constructive placement: the modules that found no pose go to the front of the next order
+
+
 def construct(P, seed=1, log=print, step=1.0):
-    """place the movable modules one by one; returns the number placed."""
-    rng = random.Random(seed)
+    """place the movable modules, the largest first, each at the legal pose nearest the modules it connects to. A module that finds no
+    pose in a pass goes to the front of the next order (CONSTRUCT_TRIES passes, deterministic; the pass with the fewest failures
+    stands). A module with no legal pose is left UNPLACED (P.unplaced(i)): the source pose is taken only when it is itself legal there.
+    -> names of the modules left unplaced."""
     mov = [i for i in range(P.n) if not P.fixed[i]]
-    for i in mov:
-        P.unplace(i)
-    placed = set(i for i in range(P.n) if P.fixed[i])
-    x0, y0, x1, y1 = P.B["bbox"]
+    order = sorted(mov, key=lambda i: (-P.mods[i]["area"], P.mods[i]["name"]))
     conn = np.zeros((P.n, P.n))
     for ni in range(len(P.net_name)):
         ms = sorted(set(P.tm[P.tstarts[ni]:(P.tstarts[ni + 1] if ni + 1 < len(P.net_name) else len(P.tm))]))
@@ -638,14 +705,31 @@ def construct(P, seed=1, log=print, step=1.0):
             for b in ms:
                 if a != b:
                     conn[a, b] += P.net_w[ni] / max(1, len(ms) - 1)
-    todo = set(mov)
+    best, last = None, None
+    for _try in range(CONSTRUCT_TRIES):
+        failed = _construct_pass(P, order, conn, step)
+        last = list(order)
+        if best is None or len(failed) < len(best[0]):
+            best = (list(failed), list(order))
+        if not failed:
+            break
+        order = sorted(failed, key=lambda i: (-P.mods[i]["area"], P.mods[i]["name"])) + [i for i in order if i not in failed]
+    if best[1] != last:                    # the last pass was not the best one: place it again, same order
+        failed = _construct_pass(P, best[1], conn, step)
+    for i in failed:                                             # the arranged source pose, only when it is legal where it stands
+        ok, _ = P.try_pose(i, float(P.src[0][i]), float(P.src[1][i]), 0)
+        if ok:
+            P.X[i], P.Y[i], P.T[i] = P.src[0][i], P.src[1][i], 0
+    return [P.mods[i]["name"] for i in failed if P.unplaced(i)]
+
+
+def _construct_pass(P, order, conn, step):
+    for i in order:
+        P.unplace(i)
+    placed = set(i for i in range(P.n) if P.fixed[i])
+    x0, y0, x1, y1 = P.B["bbox"]
     failed = []
-    order_log = []
-    while todo:
-        nxt = max(sorted(todo), key=lambda i: (conn[i, list(placed)].sum() if placed else 0.0, P.mods[i]["area"], P.mods[i]["name"]))
-        todo.discard(nxt)
-        i = nxt
-        # target: weighted centroid of the already placed modules it connects to
+    for i in order:
         w = conn[i]
         pl = [j for j in placed if w[j] > 0]
         if pl:
@@ -671,11 +755,10 @@ def construct(P, seed=1, log=print, step=1.0):
                     break
             if ok:
                 break
-        if not ok:
-            failed.append(P.mods[i]["name"])
-            P.X[i], P.Y[i], P.T[i] = P.src[0][i], P.src[1][i], 0
-            P.apply(i, P.X[i], P.Y[i], 0)
-        placed.add(i)
+        if ok:
+            placed.add(i)
+        else:
+            failed.append(i)
     return failed
 
 
@@ -689,7 +772,7 @@ def _grid(P, i, tx, ty, R, step, placed, x0, y0, x1, y1, occ):
         return []
     GX, GY = np.meshgrid(xs, ys)
     gx, gy = GX.ravel(), GY.ravel()
-    placed_l = np.array(sorted(placed))
+    placed_l = np.array(sorted(placed), dtype=int)
     isp = np.zeros(P.n, bool)
     isp[placed_l] = True
     out = []
@@ -733,7 +816,7 @@ WATCH_EVERY = 250                   # anneal moves between two calls of the live
 
 def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
     rng = random.Random(seed)
-    mov = [i for i in range(P.n) if not P.fixed[i]]
+    mov = [i for i in range(P.n) if not P.fixed[i] and i not in P.parked]
     if not mov:
         return 0, 0
     cur = P.cost_parts()
@@ -774,7 +857,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
             X, Y, th = P.X[i] + 0.5 * (tx - P.X[i]) + rng.gauss(0, 1.0), P.Y[i] + 0.5 * (ty - P.Y[i]) + rng.gauss(0, 1.0), int(P.T[i])
         else:
             j = mov[rng.randrange(len(mov))]
-            if j == i:
+            if j == i or P.unplaced(i) or P.unplaced(j):
                 continue
             old_i = P.apply(i, P.X[j], P.Y[j], int(P.T[i]))
             old_j = P.apply(j, P.X[i], P.Y[i], int(P.T[j]))
@@ -823,7 +906,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
 def all_moves(P):
     out = {}
     for i, m in enumerate(P.mods):
-        if m["fixed"]:
+        if m["fixed"] or P.unplaced(i) or i in P.parked:                  # an unplaced module keeps its parts where the input has them
             continue
         out.update(P.poses(i, float(P.X[i]), float(P.Y[i]), int(P.T[i])))
     return {r: (round(x, 4), round(y, 4), round(a, 4)) for r, (x, y, a) in out.items()}
@@ -974,6 +1057,11 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         open(path_g, "w", errors="surrogateescape").write(text2)
         _pro(board, path_g)
     B = RD.load(path_g)
+    from . import legalgate as LG
+    base_in = getattr(args, "legal_base", None)
+    if base_in is None:                          # what the input board already violates, taken before any seating
+        base_in = LG.baseline(RD.load(board) if any(grow) else B, cons)
+    orig = LG.poses(RD.load(path_g))             # every part's pose on the input: where a part that cannot be seated legally stands
     M = MD.build(B, cons, spec, arrange=True)
     from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
     nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
@@ -987,7 +1075,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                             "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
     for u in M.get("unseated") or []:
         print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
-    P = Plan(B, cons, spec, M, log=log)
+    P = Plan(B, cons, spec, M, log=log, base=base_in)
     fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                             nodes=200000, repairs=12, check_only=True)
     # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
@@ -1018,32 +1106,54 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     P.set_keepouts({i: m["keepouts"] for i, m in enumerate(M["modules"]) if m.get("keepouts")})
     P.set_breakouts(bregs)
     P.freeze_baseline()
+    if start != "construct":                     # the construct start places every module afresh; the source start keeps the seated poses
+        moved_u, left_u = legalise_units(P, step=args.step)
+        if moved_u or left_u:
+            print(f"  [{tag}] units illegal where they stand: {len(moved_u)} re-seated ({', '.join(moved_u[:8])}), {len(left_u)} left ({', '.join(left_u[:8])})", flush=True)
     src = P.cost_parts()
     if start == "construct":
         failed = construct(P, seed=args.seed, step=args.step)
+        P.noseat |= set(failed)
     else:
         failed = []
         rep = repair_claims(P, step=args.step)
         print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
+    st0 = settle(P, orig, args.step)
+    if any(st0.values()):
+        print(f"  [{tag}] settled before the search: re-seated {len(st0['reseated'])}, at input poses {len(st0['parked'])}, unplaced {len(st0['unplaced'])}"
+              + (f" ({', '.join(st0['unplaced'][:6])})" if st0["unplaced"] else ""), flush=True)
     init = P.cost_parts()
     from . import liveview as LV                 # F16: the constructed placement and the running anneal, when a stream is on
     LV.candidate("floorplan", f"{tag}-construct", P.B, {"modules": P.mods, "of": P.of}, [["cost", round(float(P.total(init)), 3)]], None, cons,
                  lane="trial", phase="construct", verdict="running", full=True)
     acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
     cur = P.cost_parts()
+    reverted = {}
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
            "source": src, "constructed": init, "annealed": cur, "accepted": acc, "rounds": []}
     out_path = os.path.join(workdir, f"{tag}.kicad_pcb")
     base = path_g
-    if M.get("flipped"):                         # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
+    st1 = settle(P, orig, args.step)
+    flipped = [r for r in M.get("flipped") or [] if not P.unplaced(P.idx[P.of[r]]) and P.idx[P.of[r]] not in P.parked]
+    if flipped:                                  # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
         from . import flip as FL
         base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
-        FL.flip_file(path_g, base, M["flipped"])
+        FL.flip_file(path_g, base, flipped)
         _pro(board, base)
     for rd in range(args.rounds + 1):
+        if rd:
+            settle(P, orig, args.step)
         moves = dict(all_moves(P))
         BW.move_file(base, out_path, moves, post=False)
         _pro(board, out_path)
+        rep_ = LG.repair_file(out_path, path_g, cons, base_in, log=lambda t: print(f"  [{tag}] {t}", flush=True))     # nothing illegal is written: a part that adds an issue goes back
+        reverted.update(rep_["reverted"])
+        for r, why in rep_["reverted"].items():   # the model learns it: the module of a part that went back to its input pose stands at the input poses from here on
+            if not any(w.startswith("input") for w in why):
+                continue
+            i = P.idx[P.of[r]]
+            if not P.fixed[i] and i not in P.parked:
+                P.park(i, orig)
         a = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                nodes=200000, repairs=12, check_only=True)
         Bn, fres = FO.run(out_path, cons, spec, None, a, None)
@@ -1079,7 +1189,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
             P.halo[i] += 0.4
         P.rehalo()
         for i in sorted(bad):
-            if not P.fixed[i]:
+            if not P.fixed[i] and i not in P.parked:
                 reseat_module(P, i, step=args.step)
         anneal(P, iters=max(500, args.iters // 3), seed=args.seed + rd + 1, t0=1.0)
     res["escaped"], res["required"] = ok, req
@@ -1088,12 +1198,26 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     res["board"] = out_path
     iss = LGL.Legal(Bn, cons, MD.fixed_set(Bn, cons)).issues()
     res["legality"] = {k: len(v) for k, v in iss.items()}
-    res["legality_new"] = {k: sorted(set(v) - set(P.base_issues.get(k, []))) for k, v in iss.items()}
+    res["legality_new"] = LG.new_issues(iss, base_in)
+    res["construct_failed"] = sorted(P.noseat)
+    try:                                         # crossings and wire length of the board that is written (and of the input), not of the search's model
+        res["source"] = measured(path_g, cons, spec)
+        res["annealed"] = measured(out_path, cons, spec)
+    except Exception as e:                       # noqa: BLE001 - the report must never fail the floorplan
+        print(f"  [{tag}] written-board metrics unavailable: {type(e).__name__}: {e}", flush=True)
+    res["reverted"] = {r: w for r, w in sorted(reverted.items())}
     res["moved_modules"] = int(sum(1 for i in range(P.n) if not P.fixed[i] and (abs(P.X[i] - P.src[0][i]) > 0.05 or abs(P.Y[i] - P.src[1][i]) > 0.05 or P.T[i])))
     res["moved_parts"] = len(all_moves(P))
     res["secs"] = round(time.time() - t0, 1)
     res["metrics"] = metrics(Bn, cons, spec, P.cls)
     return res, P, Bn
+
+
+def measured(path, cons, spec):
+    """the cost terms (wl, crossings, ...) of the placement as written in `path`."""
+    from . import routediag as RD0
+    B = RD0.load(path)
+    return Plan(B, cons, spec, MD.build(B, cons, spec, arrange=False), log=lambda *a, **k: None).cost_parts()
 
 
 def fanout_blocked(path, cons, spec):
@@ -1116,7 +1240,8 @@ def plan_summary(path, cons, spec):
 
 def first_failure(res):
     if res["construct_failed"]:
-        return f"no legal pose for {', '.join(res['construct_failed'][:4])}"
+        cf = res["construct_failed"]
+        return f"no legal pose for {len(cf)} module(s): {', '.join(cf[:6])}" + (" ..." if len(cf) > 6 else "")
     if res["legality_new"] and any(v for v in res["legality_new"].values()):
         return "legality: " + "; ".join(f"{k} {', '.join(v[:3])}" for k, v in res["legality_new"].items() if v)
     if not res["fanout_ok"]:
@@ -1180,6 +1305,8 @@ def cmd_floorplan(a):
     a.board, cons, seated = IT.prepare(a.board, cons, spec, wd)        # --- intent: hard items seated and held before the search
     text_in = open(a.board, errors="surrogateescape").read()
     B0 = RD.load(a.board)
+    from . import legalgate as LG
+    a.legal_base = LG.baseline(RD.load(src_board), cons)       # what the input board as it came in already violates: the stage may add nothing to it
     grow = tuple(float(v) for v in a.grow.split(",")) if a.grow else (0, 0, 0, 0)
     if len(grow) != 4:
         raise SystemExit("floorplan: --grow L,R,T,B (four numbers)")
@@ -1231,13 +1358,38 @@ def cmd_floorplan(a):
     print(f"  legality new: {best['legality_new']}")
     from . import breakout as BO                     # --- breakout gate: every pin of every dense part has an escape on the WHOLE placed board
     if BO.conf(cons)["enabled"]:
-        fix = BO.repair(out, cons, spec)                  # parts that wall a dense part in are moved out of its breakout first
+        fix = BO.repair(out, cons, spec, baseline=a.legal_base)                  # parts that wall a dense part in are moved out of its breakout first
         if fix["moved"]:
             print(f"breakout: {len(fix['moved'])} part(s) moved out of breakout regions; pins without an escape {fix['before']} -> {fix['after']}")
             Bn = RD.load(out)
+    rp2 = LG.repair_file(out, a.board, cons, a.legal_base, log=lambda t: print(t, flush=True))      # a move after the search (breakout, wire length) adds nothing illegal
+    if rp2["reverted"]:
+        Bn = RD.load(out)
+    drc = LG.gate(out, a.board, cons, a.legal_base, ref_path=src_board, log=lambda t: print(t, flush=True))     # KiCad DRC of the written board against the input's
+    moved_after = bool(rp2["reverted"] or (drc and drc.get("reverted")) or (fix["moved"] if BO.conf(cons)["enabled"] else False))
+    if moved_after:                                 # a repair after the search moved parts: the fan-out is measured again on the board that stands
+        Bn = RD.load(out)
+        nb = fanout_blocked(out, cons, spec)
+        print(f"floorplan: fan-out re-checked after the repairs: {nb} pin(s) blocked")
+        if nb and best["fanout_ok"]:
+            best["fanout_ok"], best["why_not"] = False, f"fan-out: {nb} pin(s) blocked after the legality repairs"
+    ill = drc is None or bool(drc["items"]) or bool(rp2["left"])      # fails closed: a gate that did not run, or a part nothing could put right, is a failure
+    if drc is not None and drc["items"]:
+        print(LG.drc_line(drc))
+        best["why_not"] = LG.drc_line(drc).replace("floorplan: ", "")
+    elif ill:
+        why = "legality gate did not run (kicad-cli gave no answer)" if drc is None else \
+            f"{len(rp2['left'])} issue(s) no part could be moved out of: " + "; ".join(f"{r} {k} {d}".strip() for r, k, d in rp2["left"][:3])
+        print(f"floorplan: ILLEGAL - {why}")
+        best["why_not"] = why
+    try:
+        w = measured(out, cons, spec)
+        print(f"  written board: crossings {w['cross']}, weighted wire length {w['wl']:.0f} (input {best['source']['cross']}, {best['source']['wl']:.0f})")
+    except Exception as e:                          # noqa: BLE001
+        print(f"  written-board metrics unavailable: {type(e).__name__}: {e}")
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
-    refused = not passes(best) or bool(irc or brc)
+    refused = not passes(best) or bool(irc or brc) or ill
     hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
     print(hon["line"])
     LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
@@ -1249,7 +1401,7 @@ def cmd_floorplan(a):
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
-    if (not passes(best) and not waive) or irc or brc:
+    if ill or (not passes(best) and not waive) or irc or brc:
         raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
     return 0
 

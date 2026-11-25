@@ -497,7 +497,7 @@ def ledger(step, before, after, diff, extra=None):
            "moved": mv, "moved_count": len(mv), "max_move_mm": round(far, 3),
            "nets_touched": diff["nets_touched"], "checks": chk}
     rec.update(extra or {})
-    head = "OK" if diff["ok"] else f"FAIL connectivity ({len(diff['violations'])}: {'; '.join(diff['violations'][:3])})"
+    head = ("OK" if (extra or {}).get("verdict") not in ("fail", "blocked") else "connectivity OK, stage FAILED") if diff["ok"] else f"FAIL connectivity ({len(diff['violations'])}: {'; '.join(diff['violations'][:3])})"
     line = (f"{step}: {head}  moved {len(mv)}" + (f" (max {far:.2f} mm)" if mv else "") +
             f"  nets touched {len(diff['nets_touched'])}" +
             (f"  declared {len(diff['expected'])}" if diff["expected"] else "") +

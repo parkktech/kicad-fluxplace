@@ -537,12 +537,13 @@ def _sides_of(q):
     return {"F" if l == "F.Cu" else "B" for l in q["layers"] if l in ("F.Cu", "B.Cu")} or {"F", "B"}
 
 
-def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
+def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print, baseline=None):
     """Evict what walls a dense part in: every movable, non-dense part whose pad blocks a pin's template (the gate's blocker) is moved
     to the nearest legal pose (same angle first, then turned) whose pads stay out of every dense part's breakout region, then the
-    whole board is solved again; up to `rounds`.  Parts the placement holds (fixed, locked, pinned) never move.  Writes `path` in place.
+    whole board is solved again; up to `rounds`.  A pose that adds a legality issue the INPUT board (`baseline`, an issues() dict; default the board
+    as it stands) did not have is never taken: the next candidate is tried, else the part stays.  Parts the placement holds (fixed, locked, pinned) never move.  Writes `path` in place.
     -> {"moved": {ref: (x, y, angle, mm)}, "before": failed pins, "after": failed pins}."""
-    from . import boardwrite as BW, legality as LGL, modules as MD, routediag as RD
+    from . import boardwrite as BW, legality as LGL, legalgate as LG, modules as MD, routediag as RD
     pr0 = None
     B = RD.load(path)
     if not conf(cons)["enabled"]:
@@ -550,6 +551,7 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
     pr0 = params(cons, B)
     fixed = MD.fixed_set(B, cons) | {r for r, p in B["parts"].items() if p.get("locked")}
     L = LGL.Legal(B, cons, fixed)
+    known = LG.known(baseline if baseline is not None else L.issues())
     origin = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in B["parts"].items()}
     res = solve(B, cons, spec, pr=pr0)
     n0 = len(res["failed"])
@@ -568,7 +570,6 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
         for ref in blockers:
             part = B["parts"][ref]
             x0, y0, a0 = part["pos"][0], part["pos"][1], part["angle"]
-            base = set(LGL.Legal.part_issues(L, ref))
             cands = []
             R = int(reach / step)
             for i in range(-R, R + 1):
@@ -585,7 +586,7 @@ def repair(path, cons, spec, rounds=4, step=0.25, reach=5.0, log=print):
                 m = pr0["clr"] + 0.05
                 if any(GM.overlap(_pad_rect(q, m), rc, 0.0) and (_sides_of(q) & sd) for q in pads if not q.get("np") for rc, sd in regs):
                     continue
-                if set(L.part_issues(ref, court=court, pads=pads)) - base:
+                if LG.part_new(L, ref, known, court=court, pads=pads):
                     continue
                 hit = (x, y, a)
                 break
