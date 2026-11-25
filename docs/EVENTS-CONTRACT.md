@@ -89,6 +89,7 @@ Files (all by rename; a file that exists is complete; `.tmp` files are never rea
 | `W/live/glb/<cand>.glb`, `<cand>.log`, `latest.json` | 3D export (glTF binary), the tool's output, the last `glb_ready` line |
 | `W/live/errors.jsonl` | one row per failure of the live view itself (it never fails a stage) |
 | `W/feedback/inbox/*.json` | written by the dashboard, one owner item per file (schema v1: `liveview.check_item`); read at the stage start of `floorplan`, at the result of `placetour` and every 2 s while a gate waits; an item sent while a stage runs is read by the next stage start in that workdir |
+| inbox item `kind: "answer"` | `{"v":1,"id":"<item id>","ts":<unix>,"author":"<name>","kind":"answer","answer":{"id":"<question id>","choice":"<option key>"}}`; id and choice are non-empty strings of at most 80 characters; the choice must be an option of that question as last asked (its `*.questions.json`, or for `crowding` the floorplan report's `history[-1].crowding.options` keys plus `keep`), else refused with reason `unknown question or choice`; accepted: written into the board map `<stem>.fluxmap.json` key `answers`, stdout `Owner answered <id> = <choice> (applies from the next stage start)`, moved to `applied/`; the running stage is not changed |
 | `W/feedback/applied/`, `refused/` (+ `<name>.reason.txt`), `rows.json`, `log.jsonl`, `gates/<id>.json` | written by fluxplace: what happened to each item, the rows in force with `rows_rev`, open and closed gates |
 
 ## Examples (one line each)

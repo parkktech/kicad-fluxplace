@@ -62,6 +62,20 @@ def refuse_assumed(board, what="fab/deliver"):
                          "Answer them (--answer id=choice or [answers] in the constraints) and re-run the stages.")
 
 
+def record_answer(board, qid, choice):
+    """an owner answer (inbox item kind `answer`) merged into the board's map, key `answers`: tmp file + os.replace, so the map is never half-written."""
+    path = _stem(board) + ".fluxmap.json"
+    try:
+        m = json.load(open(path))
+    except (OSError, ValueError):
+        m = {"fluxmap": 1}
+    m.setdefault("answers", {})[str(qid)] = str(choice)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(json.dumps(m, separators=(",", ":"), ensure_ascii=True))
+    os.replace(tmp, path)
+
+
 def add_args(p, json_flag=True):
     p.add_argument("--answer", action="append", default=[], metavar="ID=CHOICE",
                    help="answer an open question (repeatable); recorded in the map")

@@ -1607,7 +1607,7 @@ def cmd_floorplan(a):
             for ln in DN.size_lines(crowd["suggestion"]):
                 print("floorplan: " + ln if ln.startswith("size") else ln, flush=True)
             ch, _r, ops = QS.ask_crowding(S, Bc, cons, spec, rep=crowd, out=lambda t: print("floorplan: " + t if t.startswith("crowding") else t, flush=True))
-            crowd["options"] = [{k: v for k, v in o.items()} for o in ops]
+            crowd["options"] = DN.report_options(crowd, ops)
             crowd["question"] = {"id": "crowding", "choice": ch, "open": any(q["id"] == "crowding" for q in S.open)}
         import fluxplace.backside as BS0
         print("floorplan: " + BS0.assembly_note(Bc, cons, spec), flush=True)
