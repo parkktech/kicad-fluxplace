@@ -84,12 +84,26 @@ def edge_mounted(B, cons=None):
     return out
 
 
+def copper_edge_mm(B, cons):
+    """Copper-to-board-edge clearance a placed pad must keep: `[placement] copper_edge_clearance_mm`, else the project's
+    min_copper_edge_clearance (the rule KiCad DRC checks as copper_edge_clearance), else 0 (not checked)."""
+    v = ((cons or {}).get("placement") or {}).get("copper_edge_clearance_mm")
+    if v is None and B.get("file"):
+        try:
+            from . import routerules as RR
+            v = RR._pro_rules(B["file"]).get("min_copper_edge_clearance")
+        except Exception:                        # noqa: BLE001 - no project file: not checked
+            v = None
+    return float(v or 0.0)
+
+
 class Legal:
     def __init__(self, B, cons=None, fixed=()):
         self.B, self.cons = B, cons or {}
         self.M = LG._Model(B, self.cons, fixed, B["bbox"])
         self.allow = _pairs(self.cons)
         self.edge = edge_mounted(B, self.cons)
+        self.cem = copper_edge_mm(B, self.cons)
         self.tht_regions = no_tht_regions(self.cons, B)
         self.hw = PR.hardware(B, self.cons)
         self.hw_allow = ((PR.hardware_cfg(self.cons) or {}).get("allow")) or []
@@ -247,6 +261,9 @@ class Legal:
         elif ref in self.edge and not all(GM.in_outline(B, (q["x"] - q["ex"], q["y"] - q["ey"],
                                                            q["x"] + q["ex"], q["y"] + q["ey"]), 0.0) for q in pads):
             out.append(("outside", "pads"))
+        elif ref not in self.edge and self.cem > 0 and not all(GM.in_outline(B, (q["x"] - q["ex"], q["y"] - q["ey"],
+                                                                   q["x"] + q["ex"], q["y"] + q["ey"]), self.cem) for q in pads):
+            out.append(("outside", "pads within the copper edge clearance"))   # KiCad copper_edge_clearance
         for d in self.pad_shorts(ref, pads):
             out.append(("pad_short", d))
         for o in sorted({o for o, _k, _e in self.hole_issues(ref, court, pads)}):

@@ -317,3 +317,10 @@ def test_breakout_steps_the_dense_part_aside_for_a_via_blocker(monkeypatch, tmp_
     out = BO.repair(path, {}, None, log=lambda t: None)
     assert (out["before"], out["after"]) == (1, 0) and 0.2 < out["moved"]["U1"][3] <= 1.0
     assert RD.load(path)["parts"]["U1"]["pos"][0] > 30.2
+
+
+def test_pad_inside_copper_edge_clearance_is_outside():
+    from fluxplace import legality as L
+    B = {"parts": {}, "bbox": (0, 0, 10, 10)}
+    assert L.copper_edge_mm(B, {"placement": {"copper_edge_clearance_mm": 0.5}}) == 0.5
+    assert L.copper_edge_mm({"parts": {}}, {}) == 0.0
