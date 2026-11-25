@@ -728,6 +728,10 @@ def stage(c, n, board):
             stop = f"no gain for {stale} round(s)"
             break
         stop = "max_rounds"
+    ladder = None
+    if tuple(best["key"][:3]) != (0, 0, 0) and best["routed"]:                  # hs / rf / power nets still open: the ghost-open ladder
+        best, ladder = _close_ghost(a, cons, spec, best, d, P, acfg, board, spath)
+        stop += f"; ghost ladder: {len(ladder['accepted'])} repair(s), {ladder['stop']}" if ladder else ""
     out = os.path.join(d, "board.kicad_pcb")
     shutil.copy(best["board"], out)
     LA._copy_sidecar(best["board"], out)
@@ -743,7 +747,8 @@ def stage(c, n, board):
     hon = RDY.stage_honoured("placetour", spec, cons, rows_in, out, RD.load(out), ds_dir=ds_dir)
     nxt.append(hon["line"])
     from . import placegaps as PG                                  # detect-only (PLAN-PLACE-GAPS phase 0): gap table of the result, no board change
-    pg = PG.detect_stage("placetour", out, cons, spec, d, ds_dir=ds_dir, blame=best["blame"], confirm=_confirm(a, out, d, P))
+    pg = PG.detect_stage("placetour", out, cons, spec, d, ds_dir=ds_dir, blame=best["blame"], confirm=_confirm(a, out, d, P),
+                         attempts=ladder)
     nxt.append(pg["line"])
     crit_gaps = PG.critical(pg["gaps"])
     fatal = [x for x in crit_gaps if x.get("cause") == "blocked"]           # fail only where the router alone could not route it either
@@ -767,6 +772,27 @@ def stage(c, n, board):
     if crit_gaps:
         line += f"; {'FAIL' if fatal else 'WARN'}: " + ", ".join("/".join(x["nets"]) for x in crit_gaps) + " ghost-unrouted"
     return {"verdict": verdict, "line": line, "board": out, "next": nxt}
+
+
+def _close_ghost(a, cons, spec, best, d, P, acfg, input_board, spath):
+    """PLAN-PLACE-GAPS phase 2: close(JudgeEval) on the ghost-open gaps (rungs unblock / seal / endpoint). Never raises; the board of
+    `best` changes only when a candidate passed tier-1, the class-first judge, the never-worse terms and the KiCad DRC.
+    -> (best, result | None)."""
+    from . import placegaps as PG
+    try:
+        _progress(spath, "running", "ghost-open ladder")
+        ds = None
+        ctx = PG.Ctx(stage="placetour", board=best["board"], cons=cons, spec=spec, ds_dir=ds, blame=best["blame"])
+        ev = PG.JudgeEval(ctx, acfg, best["board"], best["blame"], best["key"], os.path.join(d, "close"), P, input_board=input_board,
+                          confirm=_confirm(a, best["board"], d, P))
+        res = PG.close(ctx, ["ghost-open"], ev, stage="placetour")
+        if res["accepted"]:
+            best = {"board": ev.board_path, "blame": ev.blame, "key": tuple(ev.key), "routed": getattr(ev, "routed", None) or best["routed"]}
+            EV.emit("parts", stage="placetour", i=99, refs=sorted({r for x in res["accepted"] for r in x["refs"]}), why="ghost ladder")
+        return best, res
+    except Exception as e:                                                      # noqa: BLE001 - the ladder never fails the stage
+        print(f"placetour: ghost ladder not run ({type(e).__name__}: {e})")
+        return best, None
 
 
 def _confirm(a, board, outdir, P):

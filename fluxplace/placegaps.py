@@ -10,6 +10,7 @@ report files and prints a table, never a board, never raises. Board-agnostic: no
 import json
 import math
 import os
+import shutil
 import time
 import zlib
 
@@ -439,6 +440,9 @@ class Evaluator:
     def commit(self, trial):                            # make the trial the base
         raise NotImplementedError
 
+    def trials(self, cands):                            # a batch of candidates (JudgeEval judges them in parallel) -> [trial] in order
+        return [self.trial(c) for c in cands]
+
     def pose_key(self, g):                              # -> hashable of the poses around the gap (memo)
         return pose_hash(self.board(), g)
 
@@ -473,12 +477,14 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
             out["stop"] = "no rung for the gaps in scope"
             break
         out["rounds"] = r
-        gain = False
+        gain, tried = False, 0
         for kind in kinds:
             rungs = [x for x in DISPATCH.get(kind, []) if x in RUNGS]
             for rung in G._rank(kind, rungs, yields):
                 t_rung = clock()
                 for g in [x for x in base["gaps"] if x["kind"] == kind]:
+                    if g["id"] not in {x["id"] for x in base["gaps"]}:
+                        continue                        # an earlier accept of this rung closed it
                     if budget_s and clock() - t0 > budget_s:
                         out["stop"] = "flow budget_min (time stop)"
                     elif clock() - last > stall_s:
@@ -490,26 +496,32 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
                         break
                     key = (rung, kind, g["id"], ev.pose_key(g))
                     if key in memo:
-                        out["refused"].append({"gap": g["id"], "rung": rung, "check": "memo", "why": "same poses tried"})
+                        out["memo_skips"] = out.get("memo_skips", 0) + 1       # counted, not listed: it adds no information
                         continue
                     memo.add(key)
-                    for cand in sorted(RUNGS[rung](g, ctx) or [], key=lambda c: c["id"])[:CANDS_PER_RUNG]:
-                        tr = ev.trial(cand)
+                    tried += 1
+                    cands = sorted(RUNGS[rung](g, ctx) or [], key=lambda c: c["id"])[:CANDS_PER_RUNG]
+                    winner = None
+                    for cand, tr in zip(cands, ev.trials(cands) if cands else []):
                         ok, check, why = _accept(base, tr, g["id"])
                         yields.setdefault(kind, {}).setdefault(rung, [0, 0])
                         yields[kind][rung][0] += 1
                         if ok:
-                            yields[kind][rung][1] += 1
-                            before = [x["id"] for x in base["gaps"]]
-                            ev.commit(tr)
-                            base = {"gaps": _sort(tr["gaps"]), "state": tr.get("state") or {}, "refusal": None}
-                            out["accepted"].append({"gap": g["id"], "rung": rung, "candidate": cand["id"], "why": why,
-                                                    "refs": sorted(cand.get("moves") or {}), "gaps_before": len(before), "gaps_after": len(base["gaps"])})
-                            EV.emit("parts", stage=stage, i=r, refs=sorted(cand.get("moves") or {}), why=f"{kind}/{rung}")
-                            _narr(stage, f"{stage}: {kind} {g['id'].split(':', 1)[1]} repaired by {rung}")
-                            gain, last = True, clock()
-                            break
+                            if winner is None or score(tr["gaps"], tr.get("state")) < score(winner[1]["gaps"], winner[1].get("state")):
+                                winner = (cand, tr, why)
+                            continue
                         out["refused"].append({"gap": g["id"], "rung": rung, "candidate": cand["id"], "check": check, "why": why})
+                    if winner:                          # the best acceptable candidate of this rung (ties: lowest id) becomes the base
+                        cand, tr, why = winner
+                        yields[kind][rung][1] += 1
+                        n_before = len(base["gaps"])
+                        ev.commit(tr)
+                        base = {"gaps": _sort(tr["gaps"]), "state": tr.get("state") or {}, "refusal": None}
+                        out["accepted"].append({"gap": g["id"], "rung": rung, "candidate": cand["id"], "why": why,
+                                                "refs": sorted(cand.get("moves") or {}), "gaps_before": n_before, "gaps_after": len(base["gaps"])})
+                        EV.emit("parts", stage=stage, i=r, refs=sorted(cand.get("moves") or {}), why=f"{kind}/{rung}")
+                        _narr(stage, f"{stage}: {kind} {g['id'].split(':', 1)[1]} repaired by {rung}")
+                        gain, last = True, clock()
                 if out["stop"]:
                     break
             if out["stop"]:
@@ -518,6 +530,9 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time):
         EV.iteration("place", r, n=max_rounds, metrics=dict(zip(TERMS, sc)), note="placegaps")
         stale = 0 if gain else stale + 1
         if out["stop"]:
+            break
+        if not tried and not gain:
+            out["stop"] = "nothing new to try (every rung ran on these poses)"
             break
         if stale >= no_gain:
             out["stop"] = f"no gain for {stale} round(s)"
@@ -554,6 +569,10 @@ def _ledger(res, stage):
         if n:
             ex = "; ".join(g["id"].split(":", 1)[1] for g in res["gaps"] if g["kind"] == k)[:160]
             rows.append(f"| {stage}: {n} x {k} ({ex}) | measured from the stage data | none yet (placegaps phase 0 is detect-only) | not repaired |")
+    for a in res.get("accepted") or []:
+        rows.append(f"| {stage}: {a['gap']} | {a.get('why', '')} | rung {a['rung']} ({a['candidate']}; moved {','.join(a.get('refs') or [])}) | accepted: gaps {a.get('gaps_before')} -> {a.get('gaps_after')} |")
+    for r in (res.get("refused") or [])[:40]:
+        rows.append(f"| {stage}: {r['gap']} | refused by {r['check']} | rung {r['rung']} {r.get('candidate', '')} | {str(r.get('why', ''))[:90]} |")
     return "| issue | cause | fix | measured result |\n|---|---|---|---|\n" + "\n".join(rows) + "\n"
 
 
@@ -580,7 +599,7 @@ def write_reports(res, outdir, stage, base="placegaps"):
 
 
 def detect_stage(stage, board, cons, spec, outdir, base="placegaps", ds_dir=None, blame=None, parts_gate=None, kinds=None, printer=print,
-                 confirm=None):
+                 confirm=None, attempts=None):
     """The one call the stages make. Detect-only: reads the board and stage data, writes report files into `outdir`, prints the
     table. Never writes a board, never raises. A later step that fails (diagnosis, reports, printing) is recorded in `errors`
     and keeps the gaps already found. -> detect result (+ "line", "report")."""
@@ -600,6 +619,8 @@ def detect_stage(stage, board, cons, spec, outdir, base="placegaps", ds_dir=None
                     g.setdefault("cause", "unconfirmed")
                     g.setdefault("blockers", [])
         res["errors"].update({k: v for k, v in (ctx.get("errors") or {}).items() if k in ("confirm", "routediag", "corridor")})
+    if attempts:                                        # what the close loop did before this measurement: into placegaps.json / the ledger rows
+        res.update(accepted=attempts.get("accepted", []), refused=attempts.get("refused", []))
     for step in (lambda: res.update(line=stage_line(res)),
                  lambda: res.update(report=write_reports(res, outdir, stage, base)),
                  lambda: _narr(stage, narration(res, stage), "end"),
@@ -646,15 +667,16 @@ def corridor(ctx, g):
     from . import budget as BG, escreserve as ES
     B = ctx.B()
     _w, _c, width = _rules(ctx, g)
-    rects, total = [], 0.0
+    rects, total, edges = [], 0.0, []
     for net in g["nets"]:
         pts = {(p["ref"], p["num"]): (p["x"], p["y"]) for p in B["pads"] if p["net"] == net}
         for a, b, d in BG.mst_edges(pts):
             if g["refs"] and a[0] not in g["refs"] and b[0] not in g["refs"]:
                 continue
             total += d
+            edges.append((pts[a], pts[b]))
             rects += ES.seg_rects(pts[a], pts[b], width)
-    return {"rects": rects, "len_mm": round(total, 2), "width_mm": round(width, 3)}
+    return {"rects": rects, "len_mm": round(total, 2), "width_mm": round(width, 3), "edges": edges}
 
 
 def blockers(ctx, g, corr):
@@ -725,3 +747,292 @@ def diagnosis_table(gaps):
         out.append(f"    {'/'.join(g['nets'])}: {g['class']}, {g['cause']}, blockers [{', '.join(g['blockers'][:8]) or '-'}]"
                    f" (movable {len(g['blockers_movable'])}), corridor {g['corridor_mm'] if g['corridor_mm'] is not None else '?'} mm x {g['width_mm'] if g['width_mm'] is not None else '?'}, causes [{', '.join(g.get('causes') or []) or '-'}]")
     return "\n".join(out)
+
+
+# ------------------------------------------------------------------ phase 2: ghost-open rungs (unblock, seal, endpoint) and the JudgeEval
+RUNGABLE = ("blocked", "unconfirmed")        # `order` gaps start at `reserve` (phase 3); a plain net has no diagnosis to act on
+CLEAR_MM = 0.2                               # courtyard clearance added to the minimum translation
+
+
+def _nearest_normal(edges, p):
+    """Unit normal (both signs) of the corridor edge nearest to point `p` -> [(nx, ny), (-nx, -ny)]."""
+    best = None
+    for a, b in edges:
+        L = math.hypot(b[0] - a[0], b[1] - a[1]) or 1e-9
+        t = max(0.0, min(1.0, ((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / (L * L)))
+        d = math.hypot(p[0] - (a[0] + t * (b[0] - a[0])), p[1] - (a[1] + t * (b[1] - a[1])))
+        if best is None or d < best[0]:
+            best = (d, (-(b[1] - a[1]) / L, (b[0] - a[0]) / L))
+    n = best[1] if best else (1.0, 0.0)
+    return [n, (-n[0], -n[1])]
+
+
+def clear_shift(court, rects, vec, step=0.1, maxd=12.0):
+    """Smallest translation along unit `vec` (mm, step 0.1) after which `court` no longer overlaps any rect, + CLEAR_MM; None if none <= maxd."""
+    from . import geom as GM
+    k = 0
+    while k * step <= maxd:
+        d = k * step
+        c = (court[0] + vec[0] * d, court[1] + vec[1] * d, court[2] + vec[0] * d, court[3] + vec[1] * d)
+        if not any(GM.overlap(r, c, -0.02) for r in rects):
+            return round(d + CLEAR_MM, 2)
+        k += 1
+    return None
+
+
+def _P(ctx):
+    from . import placetour as PT
+    return PT.params(ctx["cons"])
+
+
+def _r_unblock(g, ctx):
+    """Per blocker (movable, <= 16 pads, smallest first): the minimum-translation nudge out of the corridor along either normal of the
+    nearest flight line; candidates move the first 1, 2, 3 blockers together (the 1-blocker one also on the other normal); legalised
+    against every non-movable part (placetour._legal)."""
+    from . import placetour as PT
+    if g["kind"] != "ghost-open" or g.get("cause") not in RUNGABLE:
+        return []
+    B = ctx.B()
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    corr = corridor(ctx, g)
+    bl = [b for b in blockers(ctx, g, corr) if b["movable"] and len(B["parts"][b["ref"]]["pads"]) <= 16]
+    plan = []                                               # per blocker: [(dx, dy) via normal 0, via normal 1]
+    for b in bl[:3]:
+        p = B["parts"][b["ref"]]
+        shifts = []
+        for vec in _nearest_normal(corr["edges"], p["pos"]):
+            d = clear_shift(p["court"], corr["rects"], vec)
+            shifts.append(None if d is None else (vec[0] * d, vec[1] * d))
+        plan.append((b["ref"], shifts))
+    out, seen = [], set()
+
+    def add(tag, picks):
+        tg = {}
+        for ref, sh in picks:
+            x, y, a = B["parts"][ref]["pos"][0], B["parts"][ref]["pos"][1], B["parts"][ref]["angle"]
+            tg[ref] = (x + sh[0], y + sh[1], a)
+        mv = PT._legal(B, ctx["cons"], tg, mov) if tg else None
+        k = PT._key(mv) if mv else None
+        if mv and k not in seen:
+            seen.add(k)
+            out.append({"id": f"unblock-{tag}", "rung": "unblock", "moves": mv, "claims": [], "notes": f"clear {','.join(sorted(tg))} of the corridor"})
+
+    best = lambda sh: min((x for x in sh if x), key=lambda v: math.hypot(*v), default=None)
+    for n in (1, 2, 3):
+        picks = [(r, best(sh)) for r, sh in plan[:n] if best(sh)]
+        if len(picks) == n:
+            add(f"n{n}", picks)
+    if plan and len([x for x in plan[0][1] if x]) == 2:                 # the 1-blocker move on the other normal
+        sh = plan[0][1]
+        i = min((0, 1), key=lambda k: (math.hypot(*sh[k]), k))
+        add("n1-other", [(plan[0][0], sh[1 - i])])
+    return out
+
+
+def _r_seal(g, ctx):
+    """When routediag found a SEALED_PAD: breakout.repair on a scratch copy of the board (it evicts what walls a dense part in); the
+    parts it moved are the candidate. No sealed pad in the diagnosis: nothing to propose."""
+    import shutil
+    import tempfile
+    from . import breakout as BO, routediag as RDG
+    if g["kind"] != "ghost-open" or g.get("cause") not in RUNGABLE or "SEALED_PAD" not in (g.get("causes") or []):
+        return []
+    B = ctx.B()
+    d = tempfile.mkdtemp(prefix="seal-", dir=os.path.dirname(os.path.abspath(ctx["board"])))
+    try:
+        tmp = os.path.join(d, "seal.kicad_pcb")
+        shutil.copy(ctx["board"], tmp)
+        rep = BO.repair(tmp, ctx["cons"], ctx["spec"], log=lambda *a, **k: None)
+        B2 = RDG.load(tmp)
+        mv = {r: (p["pos"][0], p["pos"][1], p["angle"]) for r, p in B2["parts"].items()
+              if r in B["parts"] and (abs(p["pos"][0] - B["parts"][r]["pos"][0]) > 1e-3 or abs(p["pos"][1] - B["parts"][r]["pos"][1]) > 1e-3
+                                      or abs(p["angle"] - B["parts"][r]["angle"]) > 1e-3)}
+        return [{"id": "seal-breakout", "rung": "seal", "moves": mv, "claims": [], "notes": f"breakout repair, failed pins {rep.get('before')}->{rep.get('after')}"}] if mv else []
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def endpoint_budget(g):
+    """Length budget (mm) of the gap's class from the net-class table (rf, hs pair), else None (the span is the reference)."""
+    from . import netclass as NC
+    return {"rf": NC.BUDGET.get("rf"), "hs-pair": NC.BUDGET.get("pair:usb2")}.get(g["class"])
+
+
+def _r_endpoint(g, ctx):
+    """The smaller movable endpoint part steps toward the other end along the straight line by 25 / 50 / 100 % of the excess over the
+    class budget (of the whole span when the class has none); legalised (placetour._legal)."""
+    from . import placetour as PT
+    if g["kind"] != "ghost-open" or g.get("cause") not in RUNGABLE or not g["nets"]:
+        return []
+    B = ctx.B()
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    pads = [q for q in B["pads"] if q["net"] in g["nets"]]
+    refs = sorted({q["ref"] for q in pads})
+    if len(refs) < 2:
+        return []
+    area = lambda r: (lambda c: (c[2] - c[0]) * (c[3] - c[1]))(B["parts"][r]["court"])
+    movers = sorted([r for r in refs if r in mov], key=lambda r: (area(r), r))
+    if not movers:
+        return []
+    me = movers[0]
+    mine = [q for q in pads if q["ref"] == me]
+    other = [q for q in pads if q["ref"] != me]
+    mx, my = sum(q["x"] for q in mine) / len(mine), sum(q["y"] for q in mine) / len(mine)
+    ox, oy = sum(q["x"] for q in other) / len(other), sum(q["y"] for q in other) / len(other)
+    span = math.hypot(ox - mx, oy - my)
+    if span < 1e-6:
+        return []
+    bud = endpoint_budget(g)
+    excess = span - bud if bud and span > bud else span
+    out, p = [], B["parts"][me]
+    for frac in (0.25, 0.5, 1.0):
+        d = min(span, excess * frac)
+        tg = {me: (p["pos"][0] + (ox - mx) / span * d, p["pos"][1] + (oy - my) / span * d, p["angle"])}
+        mv = PT._legal(B, ctx["cons"], tg, mov)
+        if mv:
+            out.append({"id": f"endpoint-{me}-{int(frac * 100)}", "rung": "endpoint", "moves": mv, "claims": [],
+                        "notes": f"{me} {d:.1f} mm toward the other end (span {span:.1f}, budget {bud if bud else '-'})"})
+    return out
+
+
+DISPATCH["ghost-open"] = ["unblock", "seal", "endpoint"]
+RUNGS.update({"unblock": _r_unblock, "seal": _r_seal, "endpoint": _r_endpoint})
+
+
+class JudgeEval(Evaluator):
+    """Placetour's evaluator: a candidate is applied (placetour tier-1: guard, carried copper, gate state never worse than the base),
+    judged by the class-first KRT ghost (placetour._worker, parallel), and its gaps are measured again on the candidate board. The
+    base moves only on commit. Legality: tier-1 gates for every candidate, KiCad DRC against the input for each judged candidate
+    that would improve the score (`drc_new`; any new item refuses it)."""
+
+    def __init__(self, ctx, a_cfg, board, blame, key, workdir, P, input_board=None, confirm=None, jobs_fn=None):
+        from . import placetour as PT
+        self.ctx, self.acfg, self.P, self.work = ctx, a_cfg, P, workdir
+        self.board_path, self.blame, self.key, self.n = board, blame, tuple(key), 0
+        self.input_board = input_board or board
+        self.confirm, self.jobs_fn = confirm, jobs_fn
+        self.drc_ref = None
+        self.tier1_state = None
+        self.gaps = None
+        self._sync()
+        self.PT = PT
+
+    def _sync(self):
+        self.ctx["board"] = self.board_path
+        for k in ("B", "_rows", "_intent", "_cl", "_far", "errors"):
+            self.ctx.pop(k, None)
+        self.ctx["blame"] = self.blame
+
+    def _measure(self, board, blame, cons_ctx=None):
+        """Ghost gaps from the judge blame + the placement gaps (rows, supports, side) on `board`."""
+        c = Ctx(stage="placetour", board=board, cons=self.ctx["cons"], spec=self.ctx["spec"], ds_dir=self.ctx.get("ds_dir"), blame=blame)
+        r = detect(c, [k for k in ORDER if k in SCOPE["placetour"]])
+        return r["gaps"], c
+
+    def detect(self, kinds):
+        if self.gaps is None:
+            self.gaps, c = self._measure(self.board_path, self.blame)
+            if self.ctx.get("diagnosed"):
+                prev = {g["id"]: g for g in self.ctx["diagnosed"]}
+                for g in self.gaps:
+                    if g["id"] in prev:
+                        g.update({k: prev[g["id"]][k] for k in prev[g["id"]] if k in ("cause", "blockers", "blockers_movable", "causes", "corridor_mm", "width_mm")})
+            else:
+                diagnose(c, self.gaps, self.confirm)
+        return list(self.gaps)                 # every kind measured: trials return the same set, so scores compare like with like
+
+    def state(self):
+        k = self.key
+        return {"illegal": 0, "open": k[3], "hot": k[4], "hot_occ": k[5], "vias": k[6], "detour": k[7]}
+
+    def board(self):
+        return self.ctx.B()
+
+    def trial(self, cand):
+        return self.trials([cand])[0]
+
+    def trials(self, cands):
+        from . import lookahead as LA
+        PT = self.PT
+        self.n += 1
+        rdir = os.path.join(self.work, f"close{self.n}")
+        B0 = self.ctx.B()
+        base_state = PT.gate_state(B0, self.ctx["cons"], self.ctx["spec"])
+        surv, dropped = PT.tier1(self.board_path, cands, self.ctx["cons"], self.ctx["spec"], self.P, rdir, base_state)
+        why = {c["id"]: r for c, r in dropped}
+        pro = os.path.splitext(self.input_board)[0] + ".kicad_pro"           # the project (rules, netclasses) travels with every candidate
+        for _k, _c, path, _r in surv:
+            if os.path.exists(pro):
+                shutil.copyfile(pro, os.path.splitext(path)[0] + ".kicad_pro")
+        jobs = []
+        for _k, cnd, path, _rem in surv:
+            jd = LA._mk(os.path.join(rdir, "judge", cnd["id"]))
+            job = {"tag": f"c{self.n}-{cnd['id']}", "board": path, "dir": jd, "result": os.path.join(jd, "result.json"), "a": self.acfg,
+                   "judge_min": self.P["judge_min"], "critical": []}
+            job["jobfile"] = os.path.join(LA._mk(os.path.join(rdir, "jobs")), f"{cnd['id']}.json")
+            with open(job["jobfile"], "w") as fh:
+                json.dump(job, fh, default=sorted)
+            jobs.append(job)
+        run = self.jobs_fn or (lambda js: LA._run_jobs(js, self.P, self.P["judge_min"] * 60 + 600, entry="placetour:_worker"))
+        results = run(jobs) if jobs else []
+        by = {}
+        for (_k, cnd, path, _rem), res in zip(surv, results):
+            if not res.get("key"):
+                by[cnd["id"]] = {"gaps": [], "state": {}, "refusal": "judge:no routed copy " + str(res.get("error") or "")[:60]}
+                continue
+            gaps, c = self._measure(path, res["blame"])
+            diag = [g for g in gaps if g["kind"] == "ghost-open"]
+            tr = {"gaps": gaps, "state": {"illegal": 0, "open": res["key"][3], "hot": res["key"][4], "hot_occ": res["key"][5],
+                                          "vias": res["key"][6], "detour": res["key"][7]},
+                  "refusal": None, "board": path, "res": res, "diag": diag}
+            by[cnd["id"]] = tr
+        out = []
+        for cnd in cands:
+            tr = by.get(cnd["id"]) or {"gaps": [], "state": {}, "refusal": why.get(cnd["id"], "legal:tier1")}
+            if not tr["refusal"] and str(why.get(cnd["id"], "")).startswith("worse"):
+                tr["refusal"] = "legal:" + why[cnd["id"]]
+            if tr["refusal"] and not str(tr["refusal"]).startswith(("legal", "drc", "judge")):
+                tr["refusal"] = "legal:" + str(tr["refusal"])
+            out.append(tr)
+        self._drc_gate(out)
+        return out
+
+    def _drc_gate(self, trs):
+        """KiCad DRC against the input board for each judged candidate that would improve the score; a new item refuses it (fails closed)."""
+        from . import legalgate as LG
+        base = {"gaps": self.gaps or [], "state": self.state()}
+        for tr in trs:
+            if tr.get("refusal") or tr.get("board") is None or not score(tr["gaps"], tr["state"]) < score(base["gaps"], base["state"]):
+                continue
+            try:
+                if self.drc_ref is None:
+                    self.drc_ref = LG._drc(self.input_board, pro_from=self.input_board) or []
+                d = LG.drc_new(tr["board"], self.input_board, ref=self.drc_ref)
+            except Exception as e:                                  # noqa: BLE001
+                d = None
+                tr["drc_error"] = f"{type(e).__name__}: {e}"
+            tr["drc"] = None if d is None else {"n": d["n"], "pairs": d["pairs"][:6]}
+            if d is None:
+                tr["refusal"] = "drc:not-run (kicad-cli gave no answer: fails closed)"
+            elif d["items"]:
+                tr["refusal"] = "drc:" + ",".join(f"{t} {n}" for t, n in sorted(d["n"].items())) + " " + ";".join("/".join(p) for p in d["pairs"][:3])
+
+    def commit(self, tr):
+        self.board_path, self.blame, self.key = tr["board"], tr["res"]["blame"], tuple(tr["res"]["key"])
+        self.routed = tr["res"].get("routed")
+        prev = {g["id"]: g for g in (self.gaps or [])}
+        self.gaps = tr["gaps"]
+        self._sync()
+        c = Ctx(stage="placetour", board=self.board_path, cons=self.ctx["cons"], spec=self.ctx["spec"], blame=self.blame)
+        carry = [g for g in self.gaps if g["kind"] == "ghost-open"]
+        for g in carry:
+            if g["id"] in prev:                             # same net still open: it keeps its diagnosis class; blockers are re-derived
+                g["cause"] = prev[g["id"]].get("cause", "unconfirmed")
+        try:
+            diagnose(c, carry, None)
+            for g in carry:
+                if g["id"] in prev and prev[g["id"]].get("cause") in RUNGABLE:
+                    g["cause"] = prev[g["id"]]["cause"]
+        except Exception:                                   # noqa: BLE001
+            pass
+        self.ctx["diagnosed"] = self.gaps

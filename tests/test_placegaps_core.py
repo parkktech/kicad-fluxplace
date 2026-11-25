@@ -25,9 +25,10 @@ def ctx(**kw):
     return c
 
 
-def test_every_kind_has_a_detector_and_an_empty_ladder():
+def test_every_kind_has_a_detector_and_only_ghost_open_has_rungs_so_far():
     assert set(PG.ORDER) == set(PG.DETECT) == set(PG.DISPATCH)
-    assert all(v == [] for v in PG.DISPATCH.values()) and PG.RUNGS == {}          # phase 0: nothing repairs
+    assert {k: v for k, v in PG.DISPATCH.items() if v} == {"ghost-open": ["unblock", "seal", "endpoint"]}
+    assert set(PG.RUNGS) == {"unblock", "seal", "endpoint"}
     assert len(set(PG.ORDER)) == len(PG.ORDER)
     assert PG.ORDER.index("ghost-open") < PG.ORDER.index("row-cin-side") < PG.ORDER.index("support-far") < PG.ORDER.index("part-stock")
 
@@ -218,9 +219,9 @@ def test_close_repairs_refuses_and_remembers(monkeypatch):
     assert [a["gap"] for a in out["accepted"]] == ["support-far:C1"]
     checks = {(r["gap"], r["check"]) for r in out["refused"]}
     assert ("support-far:C3", "legal:overlap") in checks and ("support-far:C2", "score:no-gain") in checks
-    assert ("support-far:C2", "memo") in checks or ("support-far:C3", "memo") in checks     # the second round does not retry the same poses
+    assert out["memo_skips"] >= 1 and len([r for r in out["refused"] if r["gap"] == "support-far:C2"]) == 1   # the second round does not retry the same poses
     assert len(out["gaps_in"]) == 3 and len(out["gaps_out"]) == 2 and out["score_out"] < out["score_in"]
-    assert out["stop"].startswith("no gain")
+    assert out["stop"].startswith(("no gain", "nothing new"))
 
 
 def test_close_is_deterministic(monkeypatch):
