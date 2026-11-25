@@ -64,11 +64,12 @@ ATTACH_MM = 15.0                    # a support farther than this from its modul
 REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
-def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach):
+def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=False):
     """A part the seating put where it adds a pad short, courtyard overlap or other issue the input board did not have is not left
     there when the floorplan cannot move it out: a part that conflicts with another part of its OWN module, or with a held part
     (fixed or mechanical), is seated again (the nearest legal seat within its limit), else returned to its input pose. A conflict
-    between two movable modules is the floorplan's: it moves the unit (the template units stand in isolation on purpose).
+    between two movable modules is the floorplan's: it moves the unit (the template units stand in isolation on purpose), unless
+    `strict` (the source start keeps every other module at its input pose): then a seat that conflicts with ANY part is not kept.
     -> {ref: [what it was refused for]} of the parts returned to their input pose (their flip is undone in `flips`)."""
     from . import clusters as CL, legality as LGL, legalgate as LG
     L = LGL.Legal(B, cons, fixed)
@@ -81,6 +82,8 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
     def mine(r, k, d):                                   # an issue the floorplan cannot move away
         o = LG._other(r, k, d)
         if o is None or held(o):
+            return True
+        if strict:
             return True
         if of.get(o) == of.get(r):                       # one rigid unit: a part that stands where it was and belongs to no IC only came along by distance, it is its own unit
             for x in (o, r):
@@ -115,8 +118,9 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
     return out
 
 
-def build(B, cons=None, spec=None, arrange=True, log=None):
-    """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`)."""
+def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=()):
+    """-> {"modules": [module dicts], "of": {ref: module name}} from the board model B (mutated only when `arrange`).
+    `unseat`: support refs the seating leaves at their input pose (the source start, where a seat blocked a pin's escape)."""
     from . import clusters as CL, powerbudget as PB, legality as LGL, netclass as NC, routable as RB, legalgate as LG
     from . import blocks as BK
     cons = cons or {}
@@ -134,7 +138,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         L = LGL.Legal(B, cons, fixed)
         isolated = set()
         for c in cl:                             # P5b S3: a regulator with a datasheet layout fact is laid out in isolation, as a unit; the
-            tpl = {s["ref"] for s in c["supports"] if s["sure"] and s["rank"] < 9 and s["ref"] not in fixed}   # floorplan places it among the others
+            tpl = {s["ref"] for s in c["supports"] if s["sure"] and s["rank"] < 9 and s["ref"] not in fixed and s["ref"] not in unseat}   # floorplan places it among the others
             if c.get("layout") and tpl and c["ic"] not in fixed:
                 CL.reseat(B, [c], everything=True, only=tpl, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), isolate=True, log=log)
                 isolated |= tpl                  # a unit: the neighbours' legality is the floorplan's, a strict re-seat would trade the datasheet side for a free seat
@@ -143,7 +147,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
         _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
-                      flips=flips, refused=refused, only=set(parts) - fixed - isolated)   # a fixed part is never seated: the model must not show it where the board will not have it
+                      flips=flips, refused=refused, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
             _remeasure(B, cl)
             more = CL.rehome(B, cl, cons, spec)
             if not more:
@@ -238,7 +242,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None):
             mods[o] = {"name": o, "anchor": o, "refs": [o], "group": False}
             of[o] = o
             return True
-        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach)
+        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict)
         L = LGL.Legal(B, cons, fixed)
         own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
         unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}

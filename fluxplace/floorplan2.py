@@ -814,7 +814,12 @@ def _grid(P, i, tx, ty, R, step, placed, x0, y0, x1, y1, occ):
 WATCH_EVERY = 250                   # anneal moves between two calls of the live view
 
 
-def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
+def _within(cost, cap):
+    return cap is None or (cost["wl"] <= cap["wl"] + 1e-6 and cost["cross"] <= cap["cross"])
+
+
+def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None, cap=None):
+    """cap = {"wl":, "cross":}: a state above either is never kept as the best (the source start must not end worse than it began)."""
     rng = random.Random(seed)
     mov = [i for i in range(P.n) if not P.fixed[i] and i not in P.parked]
     if not mov:
@@ -870,7 +875,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
                 if ns <= cs or rng.random() < math.exp(-(ns - cs) / T):
                     cs, cur = ns, nc
                     acc += 1
-                    if cs < best[0]:
+                    if cs < best[0] and _within(nc, cap):
                         best = (cs, P.X.copy(), P.Y.copy(), P.T.copy())
                     continue
                 P.X[i], P.Y[i], P.X[j], P.Y[j] = Xi, Yi, Xj, Yj
@@ -892,7 +897,7 @@ def anneal(P, iters=4000, seed=1, t0=None, log=print, watch=None):
             continue
         cs, cur = ns, nc
         acc += 1
-        if cs < best[0]:
+        if cs < best[0] and _within(nc, cap):
             best = (cs, P.X.copy(), P.Y.copy(), P.T.copy())
     # back to the best state
     _, bx, by, bt = best
@@ -1032,8 +1037,10 @@ def floorplan_once(board, cons, spec, grow, args, text_in, workdir, tag, log=pri
     best = None
     for start in (["construct", "source"] if args.start == "both" else [args.start]):
         r = _one(board, cons, spec, grow, args, text_in, workdir, f"{tag}_{start}", start, log)
-        key = (0 if passes(r[0]) else 1, len(r[0]["blocked"]), r[1].total(r[0]["annealed"]))
+        a = r[0]["annealed"]                    # measured on the written board: the passing start with fewer crossings, then less wire, wins
+        key = (0, a["cross"], a["wl"]) if passes(r[0]) else (1, len(r[0]["blocked"]), r[1].total(a))
         r[0]["start"] = start
+        log(f"  [{tag}] start {start}: {'pass' if passes(r[0]) else 'FAIL'}, fan-out {r[0]['escaped']}/{r[0]['required']}, crossings {a['cross']}, wire length {a['wl']:.0f}")
         if best is None or key < best[0]:
             best = (key, r)
     res = best[1][0]
@@ -1062,7 +1069,22 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     if base_in is None:                          # what the input board already violates, taken before any seating
         base_in = LG.baseline(RD.load(board) if any(grow) else B, cons)
     orig = LG.poses(RD.load(path_g))             # every part's pose on the input: where a part that cannot be seated legally stands
-    M = MD.build(B, cons, spec, arrange=True)
+    from . import fanout as FO0
+    fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
+                            nodes=200000, repairs=12, check_only=True)
+    _B0, fres0 = FO0.run(path_g, cons, spec, None, fa, None)
+    in_blocked = any(v["blocked"] for v in FO0.summarise(_B0, fres0).values())
+    unseat = set()
+    for attempt in range(3):
+        M = MD.build(B, cons, spec, arrange=True, strict=(start != "construct"), unseat=unseat)   # the source start keeps the others at their input poses: a seat is kept only when legal against them
+        if start == "construct" or in_blocked or attempt == 2:
+            break
+        more = _seats_that_block(B, M, path_g, orig, cons, spec, workdir, f"{tag}.arr{attempt}", fa)
+        if not more:
+            break
+        print(f"  [{tag}] seats that blocked a pin's escape on the input's own fan-out and stay at their input pose: {', '.join(sorted(more)[:12])}{' ...' if len(more) > 12 else ''}", flush=True)
+        unseat |= more
+        B = RD.load(path_g)                      # build mutates the model: again from the input
     from . import liveview as LV0                # step 5 criteria on the live view: supports home and seated
     nsup = sum(len(m.get("members") or []) for m in M.get("modules") or [] if not m.get("fixed"))
     LV0.narrate("floorplan", f"Seating {nsup} support parts around {len(M.get('modules') or [])} modules' anchor parts (candidate {tag}).", "doing")
@@ -1081,8 +1103,6 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     # claims = the escape copper the WHOLE-board fan-out found on the board as it comes (a solution that coexists with the
     # neighbours), as geometry relative to each module. (Using the isolated solution for the pins it could not escape was
     # tried and made the result worse: RN400.7/.8 and U302.2 came back.)
-    from . import fanout as FO0
-    _B0, fres0 = FO0.run(path_g, cons, spec, None, fa, None)
     whole = defaultdict(list)
     okpins = set()
     for pin in fres0["pins"]:
@@ -1116,8 +1136,11 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         P.noseat |= set(failed)
     else:
         failed = []
-        rep = repair_claims(P, step=args.step)
-        print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
+        if any(v["blocked"] for v in FO0.summarise(_B0, fres0).values()):     # the input's own fan-out has blocked pins: modules on another's escape copper are re-seated
+            rep = repair_claims(P, step=args.step)
+            print(f"  [{tag}] {len(rep)} module(s) sat on another module's escape copper and were re-seated: {', '.join(rep[:12])}", flush=True)
+        else:
+            print(f"  [{tag}] input fan-out has no blocked pin: no claim repair", flush=True)
     st0 = settle(P, orig, args.step)
     if any(st0.values()):
         print(f"  [{tag}] settled before the search: re-seated {len(st0['reseated'])}, at input poses {len(st0['parked'])}, unplaced {len(st0['unplaced'])}"
@@ -1126,7 +1149,8 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     from . import liveview as LV                 # F16: the constructed placement and the running anneal, when a stream is on
     LV.candidate("floorplan", f"{tag}-construct", P.B, {"modules": P.mods, "of": P.of}, [["cost", round(float(P.total(init)), 3)]], None, cons,
                  lane="trial", phase="construct", verdict="running", full=True)
-    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons))
+    cap = None if start == "construct" else {"wl": init["wl"], "cross": init["cross"]}      # the source start never keeps a state worse than the one it starts the search from
+    acc, best = anneal(P, iters=args.iters, seed=args.seed, watch=LV.watcher("floorplan", tag, P, cons), cap=cap)
     cur = P.cost_parts()
     reverted = {}
     res = {"tag": tag, "grow": list(grow), "modules": P.n, "movable": int((~P.fixed).sum()), "construct_failed": failed,
@@ -1191,7 +1215,7 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
         for i in sorted(bad):
             if not P.fixed[i] and i not in P.parked:
                 reseat_module(P, i, step=args.step)
-        anneal(P, iters=max(500, args.iters // 3), seed=args.seed + rd + 1, t0=1.0)
+        anneal(P, iters=max(500, args.iters // 3), seed=args.seed + rd + 1, t0=1.0, cap=cap)
     res["escaped"], res["required"] = ok, req
     res["blocked"] = [p for v in per.values() for p in v["blocked"]]
     res["fanout_ok"] = not blocked
@@ -1211,6 +1235,41 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     res["secs"] = round(time.time() - t0, 1)
     res["metrics"] = metrics(Bn, cons, spec, P.cls)
     return res, P, Bn
+
+
+def _seats_that_block(B, M, path_g, orig, cons, spec, workdir, tag, fa):
+    """the seated supports of the modules that own or block a pin the whole-board fan-out cannot escape on the arranged board (the input's
+    own fan-out escapes every pin, so the seating did it). -> set of refs."""
+    from . import boardwrite as BW, fanout as FO, flip as FL, legalgate as LG, routediag as RD
+    moves = {r: (round(p["pos"][0], 4), round(p["pos"][1], 4), round(p["angle"], 4)) for r, p in B["parts"].items()
+             if LG.displaced(p, orig[r]) > LG.MOVE_EPS and p["side"] == orig[r][3]}
+    flipped = [r for r, p in B["parts"].items() if p["side"] != orig[r][3]]
+    base = path_g
+    if flipped:
+        base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
+        FL.flip_file(path_g, base, flipped)
+        _pro(path_g, base)
+    f = os.path.join(workdir, f"{tag}.kicad_pcb")
+    BW.move_file(base, f, moves, post=False)
+    _pro(path_g, f)
+    Bn, fres = FO.run(f, cons, spec, None, fa, None)
+    blocked = [p for v in FO.summarise(Bn, fres).values() for p in v["blocked"]]
+    mods = {m["name"]: m for m in M["modules"]}
+    bad = set()
+    for p in blocked:
+        for r in (p["ref"], (re.match(r"(?:escape of )?([A-Z]+\d+)\.", str(p.get("blocker", ""))) or [None, None])[1]):
+            if r in M["of"]:
+                bad.add(M["of"][r])
+        q = Bn["parts"].get(p["ref"])
+        for pad in (q["pads"] if q else ()):
+            if str(pad["num"]) == str(p["pin"]):
+                for m in M["modules"]:
+                    for r in m["members"]:
+                        c = Bn["parts"][r]["court"]
+                        if c[0] - 3 < pad["x"] < c[2] + 3 and c[1] - 3 < pad["y"] < c[3] + 3:
+                            bad.add(m["name"])
+    return {r for n in bad if not mods[n]["fixed"] for r in mods[n]["members"]
+            if r != mods[n]["anchor"] and r in orig and LG.displaced(B["parts"][r], orig[r]) > LG.MOVE_EPS}
 
 
 def measured(path, cons, spec):

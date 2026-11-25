@@ -98,6 +98,50 @@ def test_the_output_gate_flags_an_injected_short_and_repairs_it(tmp_path):
     assert LG.drc_new(out2, src)["items"] == []
 
 
+def test_strict_arrange_does_not_leave_a_seat_on_a_neighbour_at_its_input_pose(tmp_path):
+    """A: the source start keeps the others at their input poses, so a seat that lands on another module's part goes back."""
+    B = RD.load(_two_caps(tmp_path))
+    base, orig = LG.baseline(B, {}), LG.poses(B)
+    GM.place(B["parts"]["C2"], 20.3, 20, 0.0)
+    of = {"C1": "C1", "C2": "C2"}
+    out = MD._legalise_arranged(B, {}, set(), [], of, base, orig, set(), {}, set(), lambda o: False, strict=True)
+    assert "C2" in out and tuple(B["parts"]["C2"]["pos"]) == orig["C2"][:2]
+    assert LG.count_new(LG.new_issues(LGL.Legal(B, {}, ()).issues(), base)) == 0
+
+
+def test_anneal_cap_never_keeps_a_best_state_above_the_start(tmp_path):
+    """C: with a cap below every reachable state the anneal returns to its starting state."""
+    ic = lambda ref, x, y: G.fp(ref, x, y, [G.pad(str(k + 1), -1 + (k % 2) * 2, (k // 2) * 1.0, f"N{k}", 0.6, 0.6) for k in range(8)], court=(-3, -3, 3, 3))
+    body = ic("U1", 8, 8) + ic("U2", 30, 20) + ic("U3", 15, 25)
+    F2, B, P = _plan(tmp_path, body, {"placement": {"fixed": []}})
+    start = P.cost_parts()
+    pos0 = [(P.X[i], P.Y[i]) for i in range(P.n)]
+    F2.anneal(P, iters=300, seed=3, cap={"wl": start["wl"] - 1e9, "cross": -1})
+    assert [(P.X[i], P.Y[i]) for i in range(P.n)] == pos0
+    F2.anneal(P, iters=300, seed=3)                                                   # uncapped it does move
+    assert [(P.X[i], P.Y[i]) for i in range(P.n)] != pos0
+    assert F2._within({"wl": 5.0, "cross": 2}, {"wl": 5.0, "cross": 2}) and not F2._within({"wl": 5.1, "cross": 2}, {"wl": 5.0, "cross": 2})
+
+
+def test_selection_prefers_fewer_crossings_then_wire_among_passing_starts(monkeypatch, tmp_path):
+    """D: both starts pass: the written board with fewer crossings wins, wire length breaks the tie."""
+    import argparse
+    from fluxplace import floorplan2 as F2
+
+    class Pl:
+        def total(self, c):
+            return 0.0
+    mk = lambda cr, wl: {"fanout_ok": True, "construct_failed": [], "legality_new": {}, "blocked": [], "escaped": 1, "required": 1, "annealed": {"cross": cr, "wl": wl}}
+    outs = {"construct": mk(3, 10.0), "source": mk(2, 99.0)}
+    monkeypatch.setattr(F2, "_one", lambda *a, **k: ((outs[a[8]]), Pl(), None))
+    r = F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")
+    assert r[0]["start"] == "source"
+    outs["source"] = mk(3, 12.0)
+    assert F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")[0]["start"] == "construct"
+    outs["construct"] = dict(mk(0, 1.0), fanout_ok=False, blocked=["x"])               # a failing start never beats a passing one
+    assert F2.floorplan_once(None, {}, None, (0, 0, 0, 0), argparse.Namespace(start="both"), "", "", "t")[0]["start"] == "source"
+
+
 # ---- construct, settle, gate fails closed, pipeline
 def _plan(tmp_path, body, cons=None, arrange=False):
     from fluxplace import floorplan2 as F2
