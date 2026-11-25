@@ -130,7 +130,7 @@ def load(path):
     rel = (d.get("docs") or {}).get("datasheets")
     if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
         from . import parts as P
-        d["docs"]["datasheets"] = P.resolve_dir(rel, [path])
+        d["docs"]["datasheets"] = P.resolve_dir(rel, [path], strict=True)
     return d
 
 

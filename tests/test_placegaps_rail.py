@@ -57,7 +57,7 @@ def test_pull_load_moves_the_load_toward_the_source_by_more_than_the_excess(env)
     c = mkctx(B)
     g = PG.detect(c, ["row-rail"])["gaps"][0]
     cands = PG.RUNGS["pull-load"](g, c)
-    loads = [x for x in cands if x["id"].startswith("pull-load-")]
+    loads = [x for x in cands if x["id"].endswith("-load")]
     assert loads and all(list(x["moves"]) == ["U1"] and x["moves"]["U1"][0] < 150.0 for x in loads)
     assert min(150.0 - x["moves"]["U1"][0] for x in loads) >= 140.0 - 122.0 + 1.0 - 1e-6
     assert len({x["id"] for x in cands}) == len(cands)
@@ -67,7 +67,7 @@ def test_pull_source_is_proposed_only_when_no_sibling_load_gets_newly_over(env):
     B = rail_board()
     c = mkctx(B)
     g = PG.detect(c, ["row-rail"])["gaps"][0]
-    src = [x for x in PG.RUNGS["pull-load"](g, c) if x["id"].startswith("pull-src-")]
+    src = [x for x in PG.RUNGS["pull-load"](g, c) if x["id"].endswith("-src")]
     assert src and all(x["moves"]["L1"][0] > 10.0 for x in src)                 # toward U1, U2 (x=60) stays within its limit
     B2 = rail_board()
     B2["parts"]["U2"] = part(10, 50)                                                # a sibling load right at the source
@@ -75,7 +75,7 @@ def test_pull_source_is_proposed_only_when_no_sibling_load_gets_newly_over(env):
     c2 = mkctx(B2)
     c2["rows"][1].update(value=0.0, max=0.5)                                       # moving the source away would push it over its 0.5 mm limit
     g2 = PG.detect(c2, ["row-rail"])["gaps"][0]
-    assert not [x for x in PG.RUNGS["pull-load"](g2, c2) if x["id"].startswith("pull-src-")]
+    assert not [x for x in PG.RUNGS["pull-load"](g2, c2) if x["id"].endswith("-src")]
 
 
 def test_fixed_load_and_source_give_no_candidate_and_pour_need_asks(env, monkeypatch):
@@ -170,3 +170,95 @@ def test_file_eval_refuses_wire_length_over_two_percent_support_far_and_new_lega
     assert ev.trial(cand)["refusal"].startswith("score:decap_far")
     seen["gaps"], seen["ill"] = [], 1
     assert ev.trial(cand)["refusal"].startswith("legal:model")
+
+
+def test_accept_refuses_a_non_target_failing_row_that_gets_worse():
+    tgt = rgap(f"{NET} L1->U1", 0.2)
+    sep = PG.gap("row-away", "gnss|min", "plain", 0.644, refs=["U3"], row="intent:away:gnss")
+    sep2 = dict(sep, mag=0.996)
+    base = {"gaps": [tgt, sep], "state": {}}
+    ok, check, why = PG._accept(base, {"gaps": [sep2], "state": {}, "refusal": None}, tgt["id"])
+    assert not ok and check == "row:intent:away:gnss" and "0.644->0.996" in why
+    ok, _c, _w = PG._accept(base, {"gaps": [dict(sep, mag=0.5)], "state": {}, "refusal": None}, tgt["id"])
+    assert ok
+
+
+def test_rail_overage_inside_the_model_error_is_a_soft_row_and_the_tolerance_is_a_key():
+    B = rail_board(135.0)                                                  # 125 mm vs 122: 2.5 %
+    c = mkctx(B)
+    g = PG.detect(c, ["row-rail"])["gaps"][0]
+    assert g["row"] is None and "soft" in g["detail"] and PG.score_terms([g])["hard_rows"] == 0
+    c2 = mkctx(B)
+    c2["cons"] = {"placegaps": {"rail_tolerance": 0.01}}
+    assert PG.detect(c2, ["row-rail"])["gaps"][0]["row"] == f"rail:{NET} L1->U1"
+
+
+def test_close_trials_a_source_move_inside_the_cap_and_carries_the_supports(env, monkeypatch):
+    from fluxplace import intent as IT
+    B = rail_board()
+    B["parts"]["C1"], B["parts"]["R1"] = part(11, 50), part(9, 52)
+
+    def mws(B_, cons, spec, ref, x, y, a, legal=None, log=None):                  # the supports ride rigidly with the IC
+        p = B_["parts"][ref]
+        dx, dy = x - p["pos"][0], y - p["pos"][1]
+        out = {r: (B_["parts"][r]["pos"][0] + dx, B_["parts"][r]["pos"][1] + dy, B_["parts"][r]["angle"]) for r in (ref, "C1", "R1")}
+        for r, v in out.items():                                                    # the real one relocates parts on the model it is handed
+            B_["parts"][r]["pos"] = (v[0], v[1])
+        return out
+    monkeypatch.setattr(IT, "move_with_support", mws)
+    c = mkctx(B)
+    c["_cl"] = [{"ic": "L1", "supports": [{"ref": "C1"}, {"ref": "R1"}]}]
+    g = PG.detect(c, ["row-rail"])["gaps"][0]
+    snap = {r: p["pos"] for r, p in B["parts"].items()}
+    cands = sorted(PG.RUNGS["pull-load"](g, c), key=lambda x: x["id"])[:PG.CANDS_PER_RUNG]
+    assert {r: p["pos"] for r, p in B["parts"].items()} == snap                      # candidate generation leaves the shared model alone
+    assert any(x["id"].endswith("-src") for x in cands) and any(x["id"].endswith("-load") for x in cands)
+    src = next(x for x in cands if x["id"].endswith("-src"))
+    d = src["moves"]["L1"][0] - 10.0
+    assert d > 0 and src["moves"]["C1"][0] - 11 == pytest.approx(d) and src["moves"]["R1"][0] - 9 == pytest.approx(d)
+    # a template row that was met and is no longer is refused by name (cin_side / sw rows hold or the move does not stay)
+    base = [g]
+    bad = PG.gap("row-template", "U102 template sw_mm|template", "plain", 0.3, refs=["U102"], row="support:U102 template sw_mm")
+    ok, check, _w = PG._accept({"gaps": base, "state": {}}, {"gaps": [bad], "state": {}, "refusal": None}, g["id"])
+    assert not ok and check == "row:support:U102 template sw_mm"
+
+
+def test_pour_need_uses_the_worst_load_over_the_limit_and_is_refreshed_from_the_final_state(env):
+    B = rail_board()
+    c = mkctx(B, session=None)
+    g = PG.detect(c, ["row-rail"])["gaps"][0]
+    PG.RUNGS["pour-need"](g, c)
+    assert c["pour_need"][NET]["copper_factor"] == round(140.0 / 122.0, 3)
+    c["pour_need"][NET]["loads_over"] = ["stale"]
+    B["parts"]["U1"]["pads"][0].update(x=140.0)                                      # a later round brought the load in: 130 mm, still over
+    c["rows"] = rows(B)
+    PG.pour_questions(c, {"gaps_out": [g]})
+    rec = c["pour_need"][NET]
+    assert rec["loads_over"] == ["U1"] and rec["worst_mm"] == 130.0 and rec["copper_factor"] == round(130.0 / 122.0, 3)
+
+
+def test_file_eval_runs_the_drc_gate_on_an_equal_score_and_refuses_far_mm_rise(env, monkeypatch, tmp_path):
+    from fluxplace import legalgate as LG, routediag as RD
+    src = tmp_path / "in.kicad_pcb"
+    src.write_text("x")
+    ev = PG.FileEval(mkctx(rail_board()), str(src), str(src), str(tmp_path / "w"), legal_base={}, measure=lambda p: {"wl": 1.0, "cross": 1},
+                     drc_ref_board=str(src))
+    far = PG.gap("support-far", "C1", "decap", 3.0, refs=["C1"])
+    ev.gaps = [far]
+    seen = {"gaps": [dict(far)], "drc": 0}
+    monkeypatch.setattr(PT, "_apply", lambda b, mv, out, mr: (open(out, "w").write("y"), (True, [], {}))[1])
+    monkeypatch.setattr(RD, "load", lambda p: rail_board())
+    monkeypatch.setattr(LG, "baseline", lambda B, cons: {})
+    monkeypatch.setattr(LG, "new_issues", lambda i, b: {})
+    monkeypatch.setattr(ev, "_gaps", lambda p: list(seen["gaps"]))
+    monkeypatch.setattr(LG, "_drc", lambda *a, **k: [])
+
+    def drc(*a, **k):
+        seen["drc"] += 1
+        return {"n": {"clearance": 1}, "items": [1], "pairs": [["C1", "C2"]]}
+    monkeypatch.setattr(LG, "drc_new", drc)
+    cand = {"id": "c", "moves": {"U1": (1, 2, 0)}}
+    tr = ev.trial(cand)                                                               # equal score: DRC still runs and refuses
+    assert seen["drc"] == 1 and tr["refusal"].startswith("drc:")
+    seen["gaps"] = [dict(far, mag=3.5)]
+    assert ev.trial(cand)["refusal"].startswith("score:far_mm")
