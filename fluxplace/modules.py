@@ -64,7 +64,7 @@ ATTACH_MM = 15.0                    # a support farther than this from its modul
 REHOME_PASSES = 4                   # seat / re-home rounds in build (P5); settles in 3
 
 
-def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=False):
+def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=False, back=None):
     """A part the seating put where it adds a pad short, courtyard overlap or other issue the input board did not have is not left
     there when the floorplan cannot move it out: a part that conflicts with another part of its OWN module, or with a held part
     (fixed or mechanical), is seated again (the nearest legal seat within its limit), else returned to its input pose. A conflict
@@ -109,7 +109,7 @@ def _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isol
                 c, s = sup[v]
                 x0, y0, x1, y1 = B["bbox"]
                 CL.reseat(B, [{"ic": c["ic"], "supports": [s], **({"layout": c["layout"]} if c.get("layout") else {})}], everything=True,
-                          bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, flips=flips, refused=refused, only={v})
+                          bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, flips=flips, refused=refused, only={v}, back=back)
                 if not any(mine(v, k, d) for k, d in LG.part_new(L, v, known)):
                     continue
             if v in flips and B["parts"][v]["side"] != orig[v][3]:
@@ -132,6 +132,13 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
     cl, links = CL.build(B, cons, spec)
     rehomed = CL.rehome(B, cl, cons, spec)      # P5: an IC's own bypass parked at another IC's pin belongs to its own IC's module
     flips, refused = set(), {}
+    from . import backside as BS                  # [placement] sides = both / both-light-back: the back is a seat (guarded); else legacy
+    bk = BS.guard(B, cons, spec, template={s["ref"] for c in cl if c.get("layout") for s in c["supports"]})
+    if bk is not None:                            # fill the back first when the front is crowded: seats under the owner's pins, before any growth
+        from . import density as DN
+        u0 = DN.usage(B, cons, spec)["sides"]["F"]
+        bk.prefer = u0["util"] >= DN.limits(cons)["warn"] or bool(u0["hot"])
+        bk.dense = (cons.get("placement") or {}).get("back_fill") == "max" or bk.prefer       # the density-driven fill (clusters.seat dense mode, backfill.run)
     unit = []
     base0 = orig = None
     if arrange:
@@ -147,9 +154,16 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         for r in isolated:
             L.refresh(r)
         _remeasure(B, cl)
+        if bk is not None and getattr(bk, "dense", False):      # (b) every back-eligible support, not only the far ones, tries the back directly under its owner's pin
+            sup_ok = {s["ref"] for c in cl if not c.get("layout") for s in c["supports"] if s["sure"] and s["ref"] not in fixed | isolated | set(unseat) and bk(s["ref"])}
+            bk.only_back = True
+            CL.reseat(B, cl, everything=True, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
+                      flips=flips, refused={}, back=bk, only=sup_ok)
+            bk.only_back = False
+            _remeasure(B, cl)
         for _pass in range(REHOME_PASSES):       # a part taken home can bare the pin it was parked at: that pin's own part follows
             CL.reseat(B, cl, everything=False, bounds=(x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2), legal=L, strict=True, log=log,
-                      flips=flips, refused=refused, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
+                      flips=flips, refused=refused, back=bk, only=set(parts) - fixed - isolated - set(unseat))   # a fixed part is never seated: the model must not show it where the board will not have it
             _remeasure(B, cl)
             more = CL.rehome(B, cl, cons, spec)
             if not more:
@@ -244,8 +258,13 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
             mods[o] = {"name": o, "anchor": o, "refs": [o], "group": False}
             of[o] = o
             return True
-        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict)
+        legalised = _legalise_arranged(B, cons, fixed, cl, of, base0, orig, flips, refused, isolated, detach, strict=strict, back=bk)
         L = LGL.Legal(B, cons, fixed)
+        backfilled = None
+        if bk is not None and getattr(bk, "dense", False):      # (c) free single parts and (d) whole modules, hottest cells first
+            from . import backfill as BF
+            backfilled = BF.run(B, cons, spec, mods, of, fixed, bk, L, flips, LG.known(base0), log=log)
+            _remeasure(B, cl)
         own = {s["ref"]: c["ic"] for c in cl for s in c["supports"] if s["sure"]}
         unit = [{"ref": r, "ic": own.get(r), "issues": [f"{k} {d}".strip() for k, d in L.part_issues(r)]}
                 for r in sorted(isolated) if L.part_issues(r)]     # P5 R1: a template unit's parts must be legal where the unit stands
@@ -261,6 +280,8 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
         mod = {"name": key, "anchor": m["anchor"], "members": mem, "fixed": bool(m["anchor"] in fixed or MECH.match(m["anchor"])),
                "pos": [round(ax, 4), round(ay, 4)], "angle": round(a["angle"], 4), "side": a["side"],
                "fixed_members": sorted(r for r in m["refs"] if r in fixed and r != m["anchor"])}
+        if m.get("mirror"):
+            mod["mirror"] = True                                  # mirrored to the back as a unit (backfill.py): the input's escape copper is its mirror image
         if bl is not None:
             mod["block"] = bl.get(m["anchor"])
         _geometry(B, mod)
@@ -285,7 +306,7 @@ def build(B, cons=None, spec=None, arrange=True, log=None, strict=False, unseat=
                         q = B["parts"][s["ref"]]["court"]
                         mod.setdefault(key, []).append([round(q[0] - km - ax, 4), round(q[1] - km - ay, 4),
                                                                round(q[2] + km - ax, 4), round(q[3] + km - ay, 4)])
-    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips),
+    return {"modules": out, "of": of, "rehomed": rehomed, "bared": bared, "flipped": sorted(flips), "backfill": backfilled if arrange else None,
             "unseated": CL.unseated(cl, fixed, refused) + [{"ref": r, "dist": 0.0, "ic": "", "pad": "", "limit": 0.0, "why": "input pose kept: " + "; ".join(w[:2])}
                                                           for r, w in sorted(legalised.items()) if r not in refused], "unit_illegal": unit, "legalised": legalised}
 

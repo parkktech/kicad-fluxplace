@@ -547,6 +547,23 @@ class Plan:
     def unplaced(self, i):
         return self.cur[i][0] > 9e4
 
+    def flip_single(self, i):
+        """mirror the one-part module i to the other side (GM.flip about the part origin). The module must stand at th 0 (just unplaced).
+        The module's relative data follow: the member's angle, the pad / port arrays of the nets, the box. Calling it twice restores."""
+        (r, m), = self.mods[i]["members"].items()
+        P = self.B["parts"][r]
+        GM.flip(P)
+        m["ang"] = P["angle"]
+        d = m["dx"]
+        sel = self.pm == i
+        self.px[sel] = 2 * d - self.px[sel]
+        sel = self.tm == i
+        self.tx[sel] = 2 * d - self.tx[sel]
+        b = self.mods[i].get("bbox")
+        if b:
+            self.mods[i]["bbox"] = [round(2 * d - b[2], 3), b[1], round(2 * d - b[0], 3), b[3]]
+        self.L.refresh(r)
+
     def unplace(self, i):
         old = self.apply(i, 1e5 + 50.0 * i, 1e5, 0)
         for k in range(len(self.claims_rel.get(i, ())) + 8):
@@ -956,14 +973,17 @@ def _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1):
     return True
 
 
-def home_supports(P, cons, spec, step=0.5):
+def home_supports(P, cons, spec, step=0.5, back="auto"):
     """after the search: a support the budget rows grade (confidently owned or spread; the clusters' own limits) that is its own single-part
     module and stands beyond its limit is put at the legal pose (courtyards, claims, keep-outs, intent: as the search checks them)
     nearest the pin it serves, within its limit. With no legal seat within the limit, one movable neighbour near the pin is nudged aside
     (<= 1 mm, legal, via try_pose) and the seat tried again; kept only when crossings and the weighted cost do not rise.
     -> (refs seated, refs left)."""
     from . import clusters as CL
+    from . import backside as BS
     cl, _ = CL.build(P.B, cons, spec)
+    if back == "auto":                                   # `[placement] sides` both / both-light-back: the back is a seat; else None = no flip
+        back = BS.guard(P.B, cons, spec, template={s_["ref"] for c_ in cl if c_.get("layout") for s_ in c_["supports"]})
     parts = P.B["parts"]
     x0, y0, x1, y1 = P.B["bbox"]
     done, left = [], []
@@ -1010,6 +1030,11 @@ def home_supports(P, cons, spec, step=0.5):
                             P.X[j], P.Y[j] = jx, jy
                         if ok:
                             break
+            if not ok and back is not None and not c.get("layout") and not parts[r]["tht"] and back(r):
+                P.flip_single(i)                         # no seat on its side: the back, directly under the owner's pin, when the policy lets this part go
+                ok = _seat_near(P, i, pin, s, halo, dist, step, x0, y0, x1, y1)
+                if not ok:
+                    P.flip_single(i)
             if not ok:
                 P.X[i], P.Y[i], P.T[i] = sx, sy, st
                 P.apply(i, sx, sy, st)
@@ -1157,6 +1182,20 @@ def floorplan_once(board, cons, spec, grow, args, text_in, workdir, tag, log=pri
     return best[1]
 
 
+def write_flips(src, dst, flipped, tag=""):
+    """flip `flipped` in file `src` through pcbnew, write `dst`, and check every part against the model and the re-parsed file
+    (flip.verify). A disagreement raises: a flipped part the model and KiCad disagree about must never be written on."""
+    from . import flip as FL, routediag as RD
+    facts = FL.flip_file(src, dst, flipped)
+    bad = FL.verify(RD.load(src), dst, flipped, facts)
+    n_bad = len({b.split(":")[0].split(".")[0] for b in bad})
+    print(f"  [{tag}] back side: {len(flipped)} part(s) flipped, verified by pcbnew / model / file: {len(flipped) - n_bad}/{len(flipped)}"
+          + (f" ({bad[0]})" if bad else ""), flush=True)
+    if bad:
+        raise RuntimeError(f"back side: {n_bad} flipped part(s) disagree between the model, pcbnew and the file: " + "; ".join(bad[:3]))
+    return facts
+
+
 def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print):
     from . import routediag as RD, boardwrite as BW, fanout as FO, legality as LGL
     t0 = time.time()
@@ -1207,6 +1246,10 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                                 "limit": 0, "text": ", ".join(f"{u['ref']} ({'; '.join(u['issues'])})" for u in (M.get("unit_illegal") or [])[:12])}])
         for u in M.get("unseated") or []:
             print(f"  [{tag}] support {u['ref']} stays {u['dist']:g} mm from {u['ic']}.{u['pad']} (limit {u['limit']:g}): {u['why']}", flush=True)
+        if M.get("backfill"):
+            bf = M["backfill"]
+            print(f"  [{tag}] back fill: {len(bf['singles'])} single part(s) flipped, {len(bf['modules'])} module(s) mirrored ({', '.join(bf['modules'][:8])}), {bf['mm2']:.0f} mm2"
+                  + (f"; skipped {bf['skipped']}" if bf["skipped"] else ""), flush=True)
         P = Plan(B, cons, spec, M, log=log, base=base_in)
         fa = argparse.Namespace(track=None, clearance=None, via=None, drill=None, via_pad_gap=0.2, reach=2.2, lane=1.0, max_dom=60,
                                 nodes=200000, repairs=12, check_only=True)
@@ -1221,10 +1264,13 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
                 m = M["modules"][P.idx[M["of"][pin["ref"]]]]
                 ox, oy = m["pos"]
                 e = {"ok": True, "w": pin.get("w", 0.15), "layer": pin.get("layer")}
+                mx = -1.0 if m.get("mirror") else 1.0            # a module mirrored to the back (backfill.py): the input's escape copper is its mirror image, on the other layer
+                if mx < 0 and e["layer"] in ("F.Cu", "B.Cu"):
+                    e["layer"] = "B.Cu" if e["layer"] == "F.Cu" else "F.Cu"
                 if pin.get("stub"):
-                    e["stub"] = [[q[0] - ox, q[1] - oy] for q in pin["stub"]]
+                    e["stub"] = [[mx * (q[0] - ox), q[1] - oy] for q in pin["stub"]]
                 if pin.get("via"):
-                    e["via"] = [pin["via"][0] - ox, pin["via"][1] - oy]
+                    e["via"] = [mx * (pin["via"][0] - ox), pin["via"][1] - oy]
                 whole[m["name"]].append(e)
         for m in M["modules"]:
             m["fanout"] = {"pins": whole.get(m["name"], [])}
@@ -1289,11 +1335,11 @@ def _one(board, cons, spec, grow, args, text_in, workdir, tag, start, log=print)
     out_path = os.path.join(workdir, f"{tag}.kicad_pcb")
     base = path_g
     st1 = settle(P, orig, args.step)
-    flipped = [r for r in M.get("flipped") or [] if not P.unplaced(P.idx[P.of[r]]) and P.idx[P.of[r]] not in P.parked]
+    flipped = sorted({r for r in M.get("flipped") or []} | {r for r, p_ in P.B["parts"].items() if r in orig and p_["side"] != orig[r][3]})
+    flipped = [r for r in flipped if r in P.of and not P.unplaced(P.idx[P.of[r]]) and P.idx[P.of[r]] not in P.parked and P.B["parts"][r]["side"] != orig[r][3]]
     if flipped:                                  # P5b S1: a support seated on the other side is flipped (pcbnew) before the moves are written
-        from . import flip as FL
         base = os.path.join(workdir, f"{tag}.flipped.kicad_pcb")
-        FL.flip_file(path_g, base, flipped)
+        write_flips(path_g, base, flipped, tag)
         _pro(board, base)
     for rd in range(args.rounds + 1):
         if rd:
@@ -1499,6 +1545,17 @@ def cmd_floorplan(a):
     from . import legalgate as LG
     a.legal_base = LG.baseline(RD.load(src_board), cons)       # what the input board as it came in already violates: the stage may add nothing to it
     grow = tuple(float(v) for v in a.grow.split(",")) if a.grow else (0, 0, 0, 0)
+    from . import density as DN
+    ga = DN.parse_grow(QS.board_grow_answer(S))                # the owner's answer to `board-grow` of an earlier run: that outline growth
+    if ga and not a.grow:
+        grow = ga
+        print(f"floorplan: board-grow answered: grow L{ga[0]:g} R{ga[1]:g} T{ga[2]:g} B{ga[3]:g} mm", flush=True)
+    try:                                                       # crowding of the input, before the back fill
+        rep_in = DN.crowding_report(B0, cons, spec, with_size=False)
+        print(f"floorplan: {rep_in['line']}  [input, before the back fill]", flush=True)
+    except Exception as e:                                     # noqa: BLE001 - a measurement must never stop the floorplan
+        rep_in = None
+        print(f"floorplan: density unavailable: {type(e).__name__}: {e}", flush=True)
     if len(grow) != 4:
         raise SystemExit("floorplan: --grow L,R,T,B (four numbers)")
     history = []
@@ -1531,6 +1588,35 @@ def cmd_floorplan(a):
         PN.write(PN.sidecar_path(out), pin_res)
     elif os.path.exists(PN.sidecar_path(out)):
         os.remove(PN.sidecar_path(out))
+    crowd = None
+    try:                                                       # crowding after the back fill (and after the search): verdicts, size when still over
+        pr_out = plan_summary(out, cons, spec)
+    except Exception:                                          # noqa: BLE001
+        pr_out = None
+    try:
+        Bc = RD.load(out)
+        crowd = DN.crowding_report(Bc, cons, spec, overflow=(pr_out or {}).get("overflow"), order=edge_order(Bc, cons))
+        vd = crowd["verdicts"]
+        print(f"floorplan: {crowd['line']}  [output, after the back fill]", flush=True)
+        for s_ in DN.SIDES:
+            if vd[s_]["verdict"] != "ok":
+                print(f"  crowding {s_} {vd[s_]['verdict']}: {'; '.join(vd[s_]['reasons'])}", flush=True)
+        far_hot = any("hot cells" in r for s_ in DN.SIDES for r in vd[s_]["reasons"]) and any(vd[s_]["verdict"] == "fail" for s_ in DN.SIDES)
+        over = any(vd[s_]["verdict"] == "fail" for s_ in DN.SIDES)
+        if any(vd[s_]["verdict"] != "ok" for s_ in DN.SIDES):
+            for ln in DN.size_lines(crowd["suggestion"]):
+                print("floorplan: " + ln if ln.startswith("size") else ln, flush=True)
+            ch, _r, ops = QS.ask_crowding(S, Bc, cons, spec, rep=crowd, out=lambda t: print("floorplan: " + t if t.startswith("crowding") else t, flush=True))
+            crowd["options"] = [{k: v for k, v in o.items()} for o in ops]
+            crowd["question"] = {"id": "crowding", "choice": ch, "open": any(q["id"] == "crowding" for q in S.open)}
+        import fluxplace.backside as BS0
+        print("floorplan: " + BS0.assembly_note(Bc, cons, spec), flush=True)
+        best["crowding"] = DN.jsonable({"input": rep_in and {k: v for k, v in rep_in.items() if k != "usage"}, "output": {k: v for k, v in crowd.items() if k not in ("usage", "options")},
+                                        "options": crowd.get("options"), "question": crowd.get("question"),
+                                        "usage_output": {s_: {k: v for k, v in crowd["usage"]["sides"][s_].items() if k not in ("cells",)} for s_ in DN.SIDES},
+                                        "eligible_out": {k: v for k, v in crowd["usage"]["eligible"].items() if k != "refs"}})
+    except Exception as e:                                     # noqa: BLE001
+        print(f"floorplan: crowding unavailable: {type(e).__name__}: {e}", flush=True)
     S.mark(out)
     from . import wlrefine as WL                    # --- wire length: shorter where the fan-out, the plan and the intent allow it
     wl = WL.stage_step(out, cons, spec, check=lambda p: fanout_blocked(p, cons, spec))

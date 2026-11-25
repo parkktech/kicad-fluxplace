@@ -233,9 +233,10 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         cls = NC.classify(B, cons, spec)
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
                                ("floors", "design-rule floors", QS.check_floors),
-                               ("sides", "placement sides", QS.check_placement_sides)):
+                               ("sides", "placement sides", QS.check_placement_sides),
+                               ("crowding", "crowding", QS.check_crowding)):
             n0 = len(sess.open)
-            fn(sess, B, cons, cls=cls)
+            fn(sess, B, cons, cls=cls, spec=spec)
             new = sess.open[n0:]
             ids = ", ".join(q["id"] for q in new[:4]) + (f" (+{len(new) - 4})" if len(new) > 4 else "")
             lines.append(_line(label, OPEN if new else PASS,
@@ -243,11 +244,13 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                                {"rails": f"every rail of >= {_minpads(cons)} pads has a plane/pour or an answer",
                                 "fixed": "anchors and mounting hardware are locked or declared",
                                 "floors": "floors declared ([fab]/[route] or the project's rules)",
-                                "sides": "[placement] sides decided"}[key]))
+                                "sides": "[placement] sides decided",
+                                "crowding": "no side over the crowding limits, or answered"}[key]))
         lines += power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail)
         lines.append(fixed_reason_line(spec, cons, B, detail))
         lines.append(pair_class_line(cons, cls, detail))
         lines.append(budget_line(spec, cons, B, rows, planes, detail))
+        lines.append(density_line(spec, cons, B))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -260,6 +263,23 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
                 criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED), "value": x["status"],
                            "limit": PASS, "text": x["detail"]} for x in lines])
     return lines, detail
+
+
+def density_line(spec, cons, B):
+    """courtyard crowding per side (density.crowding_report): FAIL only when a side is over `[placement] density_fail` (0.65), WARN text
+    from `density_warn` (0.50) or hot cells; nothing about routing is claimed here"""
+    from . import density as DN
+    try:
+        r = DN.crowding_report(B, cons, spec, with_size=False)
+    except Exception as e:                                      # noqa: BLE001 - a measurement failure is UNCHECKED, never a verdict
+        return _line("density", UNCHECKED, f"not measured ({type(e).__name__}: {e})")
+    lim = r["usage"]["limits"]
+    over = [s for s in DN.SIDES if r["usage"]["sides"][s]["util"] >= lim["fail"]]
+    worn = [s for s in DN.SIDES if r["verdicts"][s]["verdict"] != "ok"]
+    txt = r["line"][len("density: "):]
+    if over:
+        return _line("density", FAIL, f"FAIL {txt}", [f"density: side {', '.join(over)} over {lim['fail'] * 100:.0f} % courtyard utilisation"])
+    return _line("density", PASS, ("WARN " if worn else "") + txt)
 
 
 def _fixed_inputs(spec, cons, B):
