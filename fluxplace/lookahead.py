@@ -362,11 +362,12 @@ def _ghost_out(outdir, text):
         fh.write(text[-20000:] + "\n")
 
 
-def _ghost_stats(copy, out, outdir, secs):
+def _ghost_stats(copy, out, outdir, secs, fragile=(), first_pick=None):
     """nets routed, opens before/after (text count), seconds -> ghost.stats.json (the efficiency log reads it)."""
     from . import routediag as RD, routeconn as RC
     before = RD.load(copy)
-    st = {"secs": secs, "opens_before": len(RC.text_open(before)), "nets_routed": 0, "opens_after": None}
+    st = {"secs": secs, "opens_before": len(RC.text_open(before)), "nets_routed": 0, "opens_after": None,
+          "fragile": sorted(fragile), "first_pick": first_pick}
     if out and os.path.exists(out):
         after = RD.load(out)
         had = {s["net"] for s in before["segs"]}
@@ -414,6 +415,71 @@ def critical_first(copy, cons, spec, nets):
         return []
 
 
+def _depth_delta(line):
+    """Paren depth change of one line, ignoring parens inside double-quoted strings."""
+    d, q, esc = 0, False, False
+    for ch in line:
+        if esc:
+            esc = False
+        elif ch == "\\":
+            esc = q
+        elif ch == '"':
+            q = not q
+        elif not q:
+            d += (ch == "(") - (ch == ")")
+    return d
+
+
+def _ref_key(block):
+    """Natural sort key of a footprint block's Reference: (letters, integer); ("", 0) when none is found."""
+    import re
+    m = re.search(r'\(property "Reference" "([^"]*)"', block) or re.search(r'\(fp_text reference "([^"]*)"', block)
+    r = re.match(r"([^0-9]*)([0-9]*)", m.group(1)) if m else None
+    return (r.group(1), int(r.group(2) or 0)) if r else ("", 0)
+
+
+def _canonical_copy(src, dst, reverse=False):
+    """Copy of the board with its top-level footprint blocks sorted by Reference (natural order; `reverse`: the opposite), placed
+    where the first block was; every other line stays byte-identical. The KRT result depends on the footprint order, so the
+    judge routes two fixed orders. The sidecar .kicad_pro follows dst."""
+    from . import pipeline as PL
+    with open(src, errors="surrogateescape", newline="") as fh:
+        lines = fh.read().splitlines(keepends=True)
+    out, blocks, i, at = [], [], 0, None
+    while i < len(lines):
+        if lines[i].startswith("\t(footprint "):
+            j, d = i, 0
+            while True:
+                d += _depth_delta(lines[j])
+                j += 1
+                if d <= 0 or j >= len(lines):
+                    break
+            blocks.append("".join(lines[i:j]))
+            if at is None:
+                at = len(out)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    if at is not None:
+        out[at:at] = sorted(blocks, key=_ref_key, reverse=reverse)      # stable; reverse keeps equal keys in file order
+    with open(dst, "w", errors="surrogateescape", newline="") as fh:
+        fh.write("".join(out))
+    PL._sidecar(src, dst)
+    return dst
+
+
+def _pick_first(results):
+    """{"fwd": set of open critical nets | None, "rev": ...} -> (pick, fragile): the variant with fewer critical opens (tie: fwd),
+    fragile = nets open in exactly one variant (sorted; [] when only one variant finished). (None, []) when neither did."""
+    f, r = results.get("fwd"), results.get("rev")
+    if f is None and r is None:
+        return None, []
+    if f is None or r is None:
+        return ("rev" if f is None else "fwd"), []
+    return ("rev" if len(r) < len(f) else "fwd"), sorted(f ^ r)
+
+
 def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
     """KRT lean ghost over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets); no planes, rails,
     pairgroups or diff steps. Two passes (PLAN-PLACE-GAPS phase 2): the critical nets first (hs-pair legs, rf, power; class-ranked),
@@ -422,7 +488,7 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
     `info` (a dict) receives {"complete": bool (no pass hit its cap), "secs", "passes", "first": [nets routed first]}."""
     import json as _json
     from types import SimpleNamespace
-    from . import constraints as C, krtchain as KC, routediag as RD, routerules as RR, routestatus as RS
+    from . import constraints as C, krtchain as KC, routeconn as RC, routediag as RD, routerules as RR, routestatus as RS
     copy = _ghost_copy(board, outdir)
     sig, plane_nets = _signal_nets(copy)
     cons = C.load(a.constraints) if getattr(a, "constraints", None) else {}
@@ -445,13 +511,31 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
     cap = budget_min * 60 + 300
     t0, complete, src, left = time.time(), True, copy, nets
     passes = []
+    fragile, pick, nf = [], None, {}
     if first:
+        from concurrent.futures import ThreadPoolExecutor
         mid = os.path.join(outdir, "krt-first.kicad_pcb")
-        cmd = KC.cmd_route(a.router_py, a.router_dir, copy, mid, sig, base, {}, nets=first) + ["--quick", "2"] + list(extra)
-        ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt-first", mid, cap)
-        if ok and os.path.exists(mid):
+
+        def _variant(k):
+            tag, o = f"krt-first-{k}", os.path.join(outdir, f"krt-first-{k}.kicad_pcb")
+            inp = _canonical_copy(copy, os.path.join(outdir, f"in-{k}.kicad_pcb"), reverse=(k == "rev"))
+            cmd = KC.cmd_route(a.router_py, a.router_dir, inp, o, sig, base, {}, nets=first) + ["--quick", "2"] + list(extra)
+            ok, _s = _run_capped(cmd, a.router_dir, outdir, tag, o, cap)
+            return k, (ok and os.path.exists(o)), o
+
+        with ThreadPoolExecutor(2) as ex:
+            runs = list(ex.map(_variant, ("fwd", "rev")))
+        res_open = {}
+        for k, ok, o in runs:
+            res_open[k] = (set(RC.text_open(RD.load(o))) & set(first)) if ok else None
+        pick, fragile = _pick_first(res_open)
+        if pick:
+            shutil.copy(os.path.join(outdir, f"krt-first-{pick}.kicad_pcb"), mid)
             src, left = mid, [n for n in nets if n not in set(first)]
             passes.append("first")
+            nf = {k: len(v) for k, v in res_open.items() if v is not None}
+            _ghost_out(outdir, f"[krt-first] pick {pick}, critical open fwd {nf.get('fwd', 'n/a')} / rev {nf.get('rev', 'n/a')}, "
+                               f"fragile: {','.join(fragile)}")
         else:
             complete = False
             first = []                                          # the critical pass failed: the one-pass judge below, as before
@@ -472,8 +556,8 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
             ckpt = None
         res = ckpt if ckpt and os.path.exists(ckpt) else None
     if info is not None:
-        info.update(complete=complete and res is not None, secs=secs, passes=len(passes) + 1, first=list(first))
-    _ghost_stats(copy, res, outdir, secs)
+        info.update(complete=complete and res is not None, secs=secs, passes=len(passes) + 1, first=list(first), fragile=fragile, first_pick=pick)
+    _ghost_stats(copy, res, outdir, secs, fragile, pick)
     return res
 
 

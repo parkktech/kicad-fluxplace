@@ -326,6 +326,7 @@ def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkey
     monkeypatch.setattr(KC, "base_flags", lambda R, d: [])
     monkeypatch.setattr(LA.RR if hasattr(LA, "RR") else __import__("fluxplace.routerules", fromlist=["x"]), "rules_for", lambda *a, **k: {})
     monkeypatch.setattr(RDG, "load", lambda p: {"pads": [{"net": n} for n in ("RFX", "RFX", "P", "P", "S", "S", "GND", "GND")]})
+    monkeypatch.setattr(__import__("fluxplace.routeconn", fromlist=["x"]), "text_open", lambda B, *a, **k: {})
     envs = {}
     def fake_run(cmd, cwd, outdir, tag, out, cap, env=None):
         envs[tag] = env
@@ -336,12 +337,13 @@ def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkey
     a = SimpleNamespace(constraints=None, spec=None, router_py="py", router_dir="/r", track=None, clearance=None)
     info = {}
     out = LA.lean_krt(a, str(board), str(tmp_path / "o"), 1.0, info=info)
-    assert [t for t, _c in cmds] == ["krt-first", "krt"] and out.endswith("krt-lean.kicad_pcb")
+    assert sorted(t for t, _c in cmds[:2]) == ["krt-first-fwd", "krt-first-rev"] and cmds[2][0] == "krt" and out.endswith("krt-lean.kicad_pcb")
     nets = lambda c: c[c.index("--nets") + 1:c.index("--layers")]
-    assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[1][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
-    assert cmds[0][1][2].endswith("copy.kicad_pcb") and cmds[1][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
-    assert envs["krt-first"] is None and envs["krt"]["KICAD_RIP_PREEXISTING"] == "0"                 # pass 2 may not rip pass 1
-    assert "--keep-input-copper" in cmds[1][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
+    assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[2][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
+    assert dict(cmds)["krt-first-fwd"][2].endswith("in-fwd.kicad_pcb") and cmds[2][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
+    assert envs["krt-first-fwd"] is None and envs["krt"]["KICAD_RIP_PREEXISTING"] == "0"                 # pass 2 may not rip pass 1
+    assert "--keep-input-copper" in cmds[2][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
+    assert info["first_pick"] == "fwd" and info["fragile"] == []
     cmds.clear()
     LA.lean_krt(a, str(board), str(tmp_path / "o2"), 1.0, only={"P"}, info=info)           # a diagnosis run stays one pass
     assert [t for t, _c in cmds] == ["krt"] and nets(cmds[0][1]) == ["P"] and info["passes"] == 1 and envs["krt"] is None
