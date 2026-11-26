@@ -89,7 +89,7 @@ def test_proven_neck_down_is_taken_and_recorded(tmp_path, monkeypatch):
 
 
 def test_plain_step_skips_rail_nets(tmp_path, monkeypatch):
-    from tests.test_krtchain import _ctx
+    from test_krtchain import _ctx
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
     c.cons["power"] = {"X": {"max_current_ma": 500, "max_v": 3.3}}
     monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {})

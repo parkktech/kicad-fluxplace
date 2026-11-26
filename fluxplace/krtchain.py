@@ -406,6 +406,8 @@ def run(c, n, board, runner=run_step):
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
     steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s), extra=xtra)))
+    if branch_nets:                                          # W46: the plain step's tracks split rail zone fills (KRT does not repair zone nets outside its --nets):
+        steps.append(("rails-branch2", lambda s, o: _branch))        # the same class-by-class pass reconnects what it cut, at the same D71da widths
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
     budget = float(getattr(a, "route_budget", CAP_S) or CAP_S)
     t0 = time.time()
@@ -428,7 +430,7 @@ def run(c, n, board, runner=run_step):
             else:
                 rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name, **({"env": no_rip_env()} if name in NO_RIP_STEPS else {}))
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "rails-branch", "pairgroups", "rf") or name.startswith("diff") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "rails-branch", "rails-branch2", "pairgroups", "rf") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
