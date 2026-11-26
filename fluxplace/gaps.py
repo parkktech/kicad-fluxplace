@@ -25,7 +25,7 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
 ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance", "open-gap",
-         "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
+         "rf-impedance", "net-contract", "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 # a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
@@ -72,13 +72,13 @@ SEV = {"pair-open": 3, "pair-unmeasured": 3, "pair-asym": 2, "pair-skew": 1, "pa
 
 
 def impedance_off_nets(board, cons):
-    """net names with a PAIR_IMPEDANCE_OFF finding (routed copper of a pair off its target); empty set on any exception."""
+    """net names with a PAIR_IMPEDANCE_OFF finding (routed copper of a pair off its target); None (UNKNOWN, never "none off") on any exception."""
     from . import review, boardfile
     try:
         facts = boardfile.facts_from_file(board)
         return {(f.get("refs") or [""])[0] for f in review.check_pair_geometry(facts, cons) if f.get("code") == "PAIR_IMPEDANCE_OFF"}
     except Exception:
-        return set()
+        return None
 
 
 def review_gaps(board, cons, opn=None):
@@ -141,6 +141,17 @@ def review_gaps(board, cons, opn=None):
                         "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": nets})
     except Exception:
         failed.append("pair-impedance")
+    try:                                     # A6: RF copper off its impedance (RF_IMPEDANCE_OFF) is a gap of the route gate
+        from . import qualaudit as QA
+        stackup, planes, fmap = QA._ctx(board, B or routediag.load(board), cons)
+        for f in QA.rf_rows(B or routediag.load(board), cons, stackup, planes, fmap):
+            if f.get("code") != "RF_IMPEDANCE_OFF":
+                continue
+            net = f["net"]
+            out.append({"base": f"rf-impedance:{net}", "kind": "rf-impedance", "class": "rf", "nets": [net], "at": None,
+                        "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": [net]})
+    except Exception:
+        failed.append("rf-impedance")
     try:
         for f in preroute.pin_escape_blocked(B or routediag.load(board), only_nets=opn, partners=partners):
             if f.get("code") != "PIN_ESCAPE_BLOCKED":
@@ -196,7 +207,7 @@ def _r5_set(kind, targets, protect, relax, fallback=()):
 # for gated (high-speed) pairs; low-speed pairs are left to the router. [flow.gates] in constraints overrides per stage.
 PAIR_KINDS = ("pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance")
 GATE_DEFAULTS = {"pairs": ["pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance"],
-                 "route": ["power-width", "power-vias"]}          # PHASE3I F2: no `power` stage exists; rails are laid by `route`
+                 "route": ["power-width", "power-vias", "rf-impedance", "net-contract"]}   # A6: RF copper and net contracts are owned by the route gate          # PHASE3I F2: no `power` stage exists; rails are laid by `route`
 
 
 # Gap kinds a LATER stage of the flow owns: a gate that ends with only these left does not stop the flow (verdict warn, stop
@@ -872,6 +883,27 @@ def _r_powervias(base, out, gaps, ctx):
     from . import power as PW
     r = PW.add_vias(base, ctx["cons"], out, nets=_nets(gaps), cons_path=ctx.get("cons_path"))
     return {"status": "ran" if os.path.exists(out) else "no change", "added": sum(r["added"].values()), "refused": sum(r["refused"].values())}
+
+
+def _r_rfroute(base, out, gaps, ctx):
+    """A6: RF nets off their impedance are stripped and re-laid by critroute on the outer layers at the impedance width
+    (rfroute.widths); no output when nothing was re-laid. The guard judges the candidate."""
+    from . import boardwrite as BW, critroute as CR
+    nets = [n for g in gaps if g["kind"] == "rf-impedance" for n in g["nets"]]
+    if not nets:
+        return {"status": "no rf net"}
+    tmp = f"{out}.rfstrip.kicad_pcb"
+    text, cut = BW.strip_nets(open(base, errors="surrogateescape").read(), nets)
+    with open(tmp, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    _sidecars(base, tmp)
+    try:
+        r = CR.apply(tmp, out, None, ctx.get("cons_path"), ctx["cons"], None, crit=[{"net": n, "class": "rf"} for n in nets])
+    finally:
+        _clean_board(tmp)
+    if not os.path.exists(out):
+        return {"status": "no change", "stripped": cut}
+    return {"status": "ran", "stripped": cut, "laid": len(r["kept"]), "open_nets": len(r["open_nets"])}
 
 
 def _r_snapiter(base, out, gaps, ctx):
@@ -2044,7 +2076,7 @@ RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
          "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
-         "powervias": _r_powervias, "tune": _r_tune}
+         "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
@@ -2058,6 +2090,8 @@ DISPATCH = {
     "mask-opening": ["maskcut"],            # PHASE3F A7: re-cut after routing; the close guard judges it
     "power-width": ["powerwiden", "railpour"],     # PHASE3G G4: widen in place, then pour, then (power-vias) vias
     "power-vias": ["powervias"],
+    "rf-impedance": ["rfroute"],           # A6: strip and re-lay at the impedance width on outer layers
+    "net-contract": [],                    # A6: kind defined here; B1 (w49-netcontract) owns detection and repair
     "pair-open": ["pairgroup", "ai"],     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
     "pair-asym": ["pairgroup", "ai"],
     "pair-skew": ["pairgroup", "tune", "ai"],
