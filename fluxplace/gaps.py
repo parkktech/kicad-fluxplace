@@ -15,7 +15,7 @@ import sys
 import time
 from collections import Counter
 
-from . import audit, calllog, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
+from . import audit, calllog, refusal, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
 from . import events as EV
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
@@ -402,23 +402,32 @@ def _cleanup_rungs(base_m, cand_m, kind):
 R6_TERMS = ("hs_pair", "rf", "power")
 
 
-def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=()):
+def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=None, protect=(), trace=None):
     """Repair guard: drcguard.accept (mode repair). base_m["gaps"] supplies the base score (R4).
     A candidate that failed a review source the base did not is refused; a pair target whose sev dropped counts as
-    progress (it is removed from the target list)."""
-    new_failed = sorted(set(cand_m.get("review_failed") or []) - set(base_m.get("review_failed") or []))
-    if new_failed:
-        return False, ("review source failed: " + ", ".join(new_failed))[:120]
+    progress (it is removed from the target list). `trace` (a list): evaluate every rule, record one row each (B6 step 0:
+    refusal record); the decision is the same, an UNKNOWN rule refuses."""
     sb, sc = score_terms(base_m, base_m.get("gaps") or []), score_terms(cand_m, cand_gaps)
-    for t in R6_TERMS:                                  # never-worse: score() is lexicographic, so no trade on these
-        if sc[t] > sb[t]:
-            return False, f"R6 {t} worse {sb[t]:g}->{sc[t]:g}"[:120]
-    # PHASE3F A4: power_mag is judged per net; a rail may gain copper when that closes its own open
-    bm, cm = _mag_by_net(base_m.get("gaps") or []), _mag_by_net(cand_gaps)
+    bm, cm = _mag_by_net(base_m.get("gaps") or []), _mag_by_net(cand_gaps)      # PHASE3F A4: power_mag is judged per net
     bo, co = base_m.get("opens_by_net") or {}, cand_m.get("opens_by_net") or {}
-    for n in sorted(set(bm) | set(cm)):
-        if cm.get(n, 0) > bm.get(n, 0) and co.get(n, 0) >= bo.get(n, 0):
-            return False, f"R6 power_mag worse {n} {bm.get(n, 0):g}->{cm.get(n, 0):g}"[:120]
+
+    def review():
+        new_failed = sorted(set(cand_m.get("review_failed") or []) - set(base_m.get("review_failed") or []))
+        return ("review source failed: " + ", ".join(new_failed))[:120] if new_failed else ""
+
+    def r6(t):                                          # never-worse: score() is lexicographic, so no trade on these
+        return lambda: f"R6 {t} worse {sb[t]:g}->{sc[t]:g}"[:120] if sc[t] > sb[t] else ""
+
+    def r6_mag():                                       # a rail may gain copper when that closes its own open
+        for n in sorted(set(bm) | set(cm)):
+            if cm.get(n, 0) > bm.get(n, 0) and co.get(n, 0) >= bo.get(n, 0):
+                return f"R6 power_mag worse {n} {bm.get(n, 0):g}->{cm.get(n, 0):g}"[:120]
+        return ""
+
+    pre = [("review", review)] + [(f"R6:{t}", r6(t)) for t in R6_TERMS] + [("R6:power_mag", r6_mag)]
+    why = drcguard.run_rules(pre, trace)
+    if why and trace is None:
+        return False, why
     base_sev = {g["id"]: g["sev"] for g in base_m.get("gaps") or [] if "sev" in g}
     cand_sev = {g["id"]: g["sev"] for g in cand_gaps if "sev" in g}
     kept = [t for t in target_ids if not (t in base_sev and t in cand_sev and cand_sev[t] < base_sev[t])]
@@ -434,9 +443,10 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
         kept = []
     target_ids = kept
     cand_m["gap_ids"] = {g["id"] for g in cand_gaps}
-    return drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
-                           score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
-                           snap=_snapshot, protect=protect)
+    ok, why2 = drcguard.accept(base_m, cand_m, "repair", target_ids, kind, base_board, cand_board,
+                               score=lambda m: score(m, cand_gaps if m is cand_m else (m.get("gaps") or [])),
+                               snap=_snapshot, protect=protect, trace=trace)
+    return (False, why or why2) if why else (ok, why2)
 
 
 def _mag_by_net(gs):
@@ -2271,6 +2281,32 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                                           for n in ai_names),)
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
+        rrow_done = []
+
+        def refusal_ctx():
+            return {"run": run_id, "attempt": n_att + 1, "kind": kind, "rung": rung, "result": result, "why": why,
+                    "targets": [g["id"] for g in targets]}
+
+        def _rrow(rctx, cand_board, cand_m, summ_, rule=None, status=None):
+            """B6 step 0: one refusal record (never changes the decision, never raises)."""
+            try:
+                rrow_done.append(1)
+                if cand_m is None:
+                    rec = refusal.no_candidate(rctx, rule, status, rctx["why"])
+                else:
+                    trace = []
+                    try:
+                        _accept(m, best, cand_m, cand_board, rctx["targets"], cand_m["gaps"], kind,
+                                _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))), trace=trace)
+                    except Exception as e:
+                        trace.append({"rule": "guard", "status": "UNKNOWN", "detail": f"{type(e).__name__}: {e}"[:120]})
+                    if all(t["status"] == "pass" for t in trace):      # refused after the guard (manifest / commit point)
+                        trace.append({"rule": "post_accept", "status": "fail", "detail": rctx["why"]})
+                    rec = refusal.record(ctx=rctx, rules=trace, base_m=m, cand_m=cand_m, cand_gaps=cand_m["gaps"],
+                                         target_ids=rctx["targets"], base_board=best, cand_board=cand_board, summ=summ_)
+                refusal.append(work, rec)
+            except Exception:
+                pass
         after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None
         if (key in memo or key in memo_err) and not ai_names:   # PHASE3H A8: a pending answer is always tried
             result, why = "skipped", "memo"
@@ -2366,12 +2402,17 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                             level = max(level, LEVEL[rung])
                     else:
                         result = "refused"
+                        _rrow(refusal_ctx(), final, cm, summ)
             except _RefillError as e:
                 result, why = "refused", str(e)[:120]
+                _rrow(refusal_ctx(), None, None, summ, "refill", "UNKNOWN")
             except (Exception, SystemExit) as e:
                 result, why = "error", f"{type(e).__name__}: {e}"[:120]
+                _rrow(refusal_ctx(), None, None, summ, "rung", "UNKNOWN")
             finally:
                 _clean_board(out)
+            if result == "refused" and not rrow_done:                 # B6 step 0: refused with no measured candidate
+                _rrow(refusal_ctx(), None, None, summ, "no_change" if why == "no change" else "no_candidate", "fail")
         if result == "packet":
             n_packets += 1
         if result not in ("skipped", "packet"):              # PHASE3I B3: per-kind, per-rung yield; F3 R17: answers only
@@ -2591,6 +2632,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             rows.append(f"| {date} | close | {kind} x{n} left | {why} | open |")
     with open(os.path.join(work, "ledger-rows.md"), "w") as fh:
         fh.write("\n".join(rows) + ("\n" if rows else ""))
+    refusal.summarize(work, log)
     return dict(res, best=best)
 
 
