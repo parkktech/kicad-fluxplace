@@ -351,6 +351,23 @@ def run(c, n, board, runner=run_step):
         steps.append(("rails-pour", lambda s0, o0: lambda s, o: _rails_ladder(a, c, base, rails, pour_rail_nets, sig, s, o, xtra, ladder_rec, runner, spath)))
     if other_rail_nets:
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
+    from . import railbranch as RB                           # W46: rail branches at each connection's D71da width; the plain step skips rail nets
+    try:
+        branch_nets = RB.branch_nets(c.cons, {x for x, _l in planes})
+    except Exception:                                        # noqa: BLE001 - no [power] facts: no branch step
+        branch_nets = []
+    branch_rec = {}
+    if branch_nets:
+        def _branch(s, o):
+            mk = lambda src, out, lay, widths, ns: cmd_route(a.router_py, a.router_dir, src, out, lay, base, widths, out[:-10] + ".json", nets=ns, extra=xtra)
+            rn = lambda cmd, log, cap_s: runner(cmd, log, cap_s=min(CAP_S, cap_s), status_path=spath, step="rails-branch", env=no_rip_env())
+            try:
+                return RB.route(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, lambda: budget - (time.time() - t0), branch_rec)
+            except Exception as e:                           # noqa: BLE001 - a failed branch step leaves the board as it was; reported
+                branch_rec["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+                shutil_copy(s, o)
+                return 0
+        steps.append(("rails-branch", lambda s, o: _branch))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
         return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn)
@@ -359,7 +376,10 @@ def run(c, n, board, runner=run_step):
     def _route_nets(src):
         still = set(RC.open_by_net(src))                     # re-read after pairgroups: a pair it completed is back in
         hs_rec["excluded"] = sorted(hs_block & still)
-        return route_net_set(allnets, failed_legs | set(rf_nets), hs_block, still)
+        got = route_net_set(allnets, failed_legs | set(rf_nets), hs_block, still)
+        if not branch_nets:
+            return got
+        return sorted((set(allnets) if got == ("*",) else set(got)) - set(branch_nets))     # W46: rail nets belong to the rail steps
     if diff:
         for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
@@ -408,7 +428,7 @@ def run(c, n, board, runner=run_step):
             else:
                 rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name, **({"env": no_rip_env()} if name in NO_RIP_STEPS else {}))
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups", "rf") or name.startswith("diff") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "rails-branch", "pairgroups", "rf") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -460,7 +480,7 @@ def run(c, n, board, runner=run_step):
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the re-cut
         mask["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
-                 "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
+                 "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets), "branch": branch_rec}
     left = RC.open_by_net(best)
     if rf_nets:
         from . import rfroute as RFR
@@ -507,6 +527,9 @@ def run(c, n, board, runner=run_step):
         line += f"; rails widened {wid.get('widened_mm', 0):g} mm, {len(wid.get('necks') or [])} neck-down(s) proven (D71da)"
     if wid.get("unreached"):
         line += "; rail width NOT reached (placement finding): " + ", ".join(f"{n} {len(v)} run(s) near {','.join(sorted({r for x in v for r in x['refs']})[:4])}" for n, v in sorted(wid["unreached"].items()))
+    if branch_rec:
+        br, bn, bo = RB.summary({k: v for k, v in branch_rec.items() if isinstance(v, dict)})
+        line += f"; rail branches routed {br} ({bn} neck-down(s) proven), {bo} left open at their width" + (f" ({branch_rec['error']})" if branch_rec.get("error") else "")
     if rails_rec["rail_refused"]:
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
