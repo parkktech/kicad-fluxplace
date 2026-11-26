@@ -132,7 +132,7 @@ def test_chain_runs_guarded_cleanup_when_enabled(tmp_path, monkeypatch):
     c.cons["route"]["whole_post"] = True
     seen = []
 
-    def post(best, d, planes, rules):
+    def post(best, d, planes, rules, protect=()):
         seen.append((best, planes, rules["via"]))
         return {"snap": {"moved": 40, "centred_left": 7}, "ties": {"placed": 2}}
 
@@ -185,7 +185,7 @@ def test_post_exception_keeps_board_and_warns(tmp_path, monkeypatch):
     c.cons["route"]["whole_post"] = True
     monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: {})
 
-    def post(best, d, planes, rules):
+    def post(best, d, planes, rules, protect=()):
         open(best, "w").write("half written")
         raise RuntimeError("tie failed")
 
