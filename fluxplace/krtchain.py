@@ -359,7 +359,7 @@ def run(c, n, board, runner=run_step):
     def _route_nets(src):
         still = set(RC.open_by_net(src))                     # re-read after pairgroups: a pair it completed is back in
         hs_rec["excluded"] = sorted(hs_block & still)
-        return route_net_set(allnets, failed_legs, hs_block, still)
+        return route_net_set(allnets, failed_legs | set(rf_nets), hs_block, still)
     if diff:
         for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
@@ -374,8 +374,14 @@ def run(c, n, board, runner=run_step):
     except Exception:                                        # noqa: BLE001 - no board facts: the name rule
         is_rf_net = lambda n: n in rfc or RV.is_rf(n)
     rf_nets = sorted(n for n in allnets if is_rf_net(n) and n not in pn and n not in rail_nets and n not in {x for x, _l in planes})
-    if rf_nets:                                              # RF before plain: one router call on the RF nets, the route step takes the rest
-        steps.append(("rf", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, {}, o[:-10] + ".json", nets=rf_nets, extra=xtra)))
+    rf_rec = {"nets": rf_nets, "layers": [], "widths": {}, "unknown_width": [], "open": [], "routed": []}
+    if rf_nets:                                              # RF before plain: one router call on the RF nets, the route step never takes them
+        from . import rfroute as RFR
+        outer = RFR.outer_layers(sig) or list(sig)           # outer layers over the GND planes first; an unroutable RF net stays open
+        rfw = RFR.widths(board, c.cons, rf_nets, outer)
+        rf_rec.update(layers=outer, widths=rfw, unknown_width=sorted(n for n in rf_nets if not rfw[n]["w"]))
+        rf_power = {n: rfw[n]["w"] for n in rf_nets if rfw[n]["w"]}
+        steps.append(("rf", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, outer, base, rf_power, o[:-10] + ".json", nets=rf_nets, extra=xtra)))
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
@@ -456,6 +462,9 @@ def run(c, n, board, runner=run_step):
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
                  "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
     left = RC.open_by_net(best)
+    if rf_nets:
+        from . import rfroute as RFR
+        rf_rec["routed"], rf_rec["open"] = RFR.split(rf_nets, left)
     try:
         from . import qualaudit as QA, routediag as RD, netclass as NC
         Bq = RD.load(best)
@@ -502,15 +511,20 @@ def run(c, n, board, runner=run_step):
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "mask": mask},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "rf": rf_rec, "mask": mask},
               open(os.path.join(d, "result.json"), "w"), indent=1)
+    if rf_rec["open"]:
+        line += (f"; RF FINDING: {len(rf_rec['open'])} RF net(s) not routable on the outer layers at their impedance width, left OPEN "
+                 f"(never routed at default width): " + ", ".join(rf_rec["open"]))
+    if rf_rec["unknown_width"]:
+        line += "; RF width unknown (no stackup / reference plane): " + ", ".join(rf_rec["unknown_width"])
     if hs_rec["excluded"]:
         line += f"; {len(hs_rec['excluded'])} gated pair leg(s) left to the pairs gate: " + ", ".join(hs_rec["excluded"][:6])
     if left:
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "hs_excluded": hs_rec["excluded"]}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"]}
 
 
 def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):

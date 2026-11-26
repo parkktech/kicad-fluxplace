@@ -1738,20 +1738,23 @@ def _auto_endpoints(M, net, isl):
 
 def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, width=None, via=None, pitch=0.05, margin=2.0,
             via_cost=2.0, layers=None, max_nodes=2500000, any_angle=False, M=None, raw=None, avoid=None, relax=False, relax_cost=1.5, skip_ids=(), explore=False,
-            include_locked=False):
+            include_locked=False, rec=None):
     """Grid A* between two islands of `net`: sources = the island of the item nearest src_pt, targets = the island nearest dst_pt (or the
     connection's two islands). A proposal as a path string, already probed; reports the measured reason when none exists."""
     import numpy as np
     M = M or _model(board, constraints)
-    if conn is not None:
+    if rec is None and conn is not None:
+        # `conn` indexes a fresh kicad-cli listing, whose order is not stable between two calls: a caller that picked the connection
+        # from its own listing passes that record as `rec` (W43: critroute solved a connection of ANOTHER net and laid it as its own)
         R = open_nets(board, constraints, raw=raw, M=M)
         rec = R["connections"][int(conn)]
+    if rec is not None:
         net = rec["net"]
     rule = M.net_rule(net)
     w = width or rule["width"]
     vd, vdr = via or (rule["via_dia"], rule["via_drill"])
     isl, omap = M.islands(net)
-    if conn is not None:
+    if rec is not None:
         ia, ib = rec["a"].get("island"), rec["b"].get("island")
         pa = rec["closest"]["a"] if rec.get("closest") else (rec["a"]["x"], rec["a"]["y"])
         pb = rec["closest"]["b"] if rec.get("closest") else (rec["b"]["x"], rec["b"]["y"])
@@ -1891,7 +1894,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                         combos.append((us, unlocked[i]["ids"] | unlocked[j]["ids"], [items[k] for k in sorted(items)]))
                 for us, ids, items in combos:
                     r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
-                                avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | ids), explore=False)
+                                avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | ids), explore=False, rec=rec)
                     res["explore"].append({"remove": items, "then_found": bool(r.get("found")),
                                            "path": r.get("path"), "length_mm": r.get("length_mm")})
                     if r.get("found") and len(us) == 1:
@@ -1900,7 +1903,7 @@ def suggest(board, net, src_pt=None, dst_pt=None, conn=None, constraints=None, w
                     res["locked_explore"] = []
                     for u in [u for u in units if any(x["locked"] for x in u["remove"])]:
                         r = suggest(board, net, src_pt, dst_pt, conn, constraints, width, via, pitch, margin, via_cost, layers, max_nodes, any_angle, M=M, raw=raw,
-                                    avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | u["ids"]), explore=False)
+                                    avoid=avoid, relax=False, skip_ids=tuple(set(skip_ids) | u["ids"]), explore=False, rec=rec)
                         res["locked_explore"].append({"remove": u["remove"], "then_found": bool(r.get("found")),
                                                       "path": r.get("path"), "length_mm": r.get("length_mm")})
                 res["reason"] = plain["reason"]

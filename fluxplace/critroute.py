@@ -15,6 +15,7 @@ CLASSES = ("rf", "clock")            # netclass classes pre-routed by default; t
 PACKET_MAX = 4096                    # bytes per packet file
 MAX_CONNS, MAX_HOT, MAX_AVOID = 6, 4, 6
 HOT_MM = 15.0                        # a hot region counts when its centre is within this of a connection end
+RF_VIA_COST = 20.0                   # suggest via cost (mm of track) for an RF net: every layer transition is an impedance discontinuity
 GRID_MM = 10.0                       # density.compute default grid: region x/y is the cell corner
 ASK = "order, layers, avoid circles [x, y, r] for this net; no coordinates of copper"
 
@@ -190,14 +191,22 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     order = [n for n in acts.get("order", []) if n in names]
     order += [n for n in names if n not in order]
     default_layers = gaps.signal_layers(board)
+    from . import rfroute as RFR
+    rf_outer = RFR.outer_layers(default_layers)
+    rf_w = RFR.widths(board, cons, [c["net"] for c in crit if c["class"] == "rf"], rf_outer) if rf_outer else {}
     cur, base = board, gaps.measure(board)
     tried, kept, lines, n_try, open_now = set(), [], [], 0, None
     for net in order:
         a = acts.get("nets", {}).get(net, {})
         layers = a.get("layers") or default_layers
+        width = None
+        if net in rf_w:                                 # RF: outer layers at the impedance width, never the default width on an inner layer
+            layers = [x for x in layers if x in rf_outer] or rf_outer
+            width = rf_w[net]["w"]
         avoid = _avoid(a.get("avoid"))
         while True:
-            R = HR.open_nets(cur, constraints=cons_path)
+            M = HR._model(cur, cons_path)
+            R = HR.open_nets(cur, constraints=cons_path, M=M)
             open_now = {r["net"] for r in R["connections"]}
             todo = [(i, r) for i, r in enumerate(R["connections"]) if r["net"] == net and _key(r) not in tried]
             if not todo:
@@ -206,12 +215,12 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             tried.add(_key(rec))
             n_try += 1
             t0 = time.time()
-            r = HR.suggest(cur, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None)
+            r = HR.suggest(cur, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None, width=width, rec=rec, M=M, via_cost=RF_VIA_COST if net in rf_w else 2.0)
             result, why, tmp = "no-path", str(r.get("reason") or "")[:200], None
             if r.get("found"):
-                tmp = HR._tmp_beside(cur, f"critroute{n_try}")
+                tmp = HR._tmp_beside(board, f"critroute{n_try}")   # named from the stage input: a name built on `cur` grew by one tag per kept path (ENAMETOOLONG at ~14)
                 try:
-                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
+                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True, width=width)
                     if not res.get("accepted"):             # a refused lay never writes `tmp`: it is still the empty mkstemp slot (W30: "Unexpected end of input")
                         raise _Refused(str(res.get("reason") or "lay refused")[:200])
                     m = gaps.measure(tmp)
@@ -232,7 +241,7 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                 _drop(tmp)
             rec_log = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "stage": "critroute", "net": net, "conn": i,
                        "class": next((c["class"] for c in crit if c["net"] == net), None), "method": "suggest+lay",
-                       "layers": layers, "avoid": len(avoid), "result": result, "why": why,
+                       "layers": layers, "width": width, "avoid": len(avoid), "result": result, "why": why,
                        "s": round(time.time() - t0, 1), "ai_tokens": acts.get("tokens", 0)}
             calllog.append(rec_log, attempts)
             lines.append(f"{net} conn {i}: {result} ({why})")
