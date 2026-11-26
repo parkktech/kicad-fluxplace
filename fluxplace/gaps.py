@@ -2184,6 +2184,14 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
     os.makedirs(work, exist_ok=True)
+    from . import boardwrite as BW0
+    try:                                                 # B1: an unexplained edit of the input is refused before anything is copied or written
+        BW0.fresh_manifest(board, log)
+    except BW0.ManifestStale as e:
+        res = {"stop": "manifest_stale", "exit": 2, "verdict": "fail", "best": board, "left": [], "diff": e.diff, "reason": str(e),
+               "start": {}, "end": {}, "packets": [], "released": {}}
+        _write_json(os.path.join(work, "stop.json"), res)
+        return res
     best = os.path.join(work, "best.kicad_pcb")
     _copy(board, best)
     _sidecars(board, best)

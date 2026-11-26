@@ -1344,6 +1344,9 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
         return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
                 "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
     stop = r["stop"]
+    if stop == "manifest_stale":                            # B1: refused input; the incumbent board stays
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: {r['reason']}"[:200], "next": r.get("diff", [])[:10],
+                "gate": {"kinds": kinds, "stop": stop, "dir": d}}
     if src:
         _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")

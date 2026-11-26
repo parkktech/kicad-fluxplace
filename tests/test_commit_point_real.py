@@ -168,3 +168,18 @@ def test_a_pair_rung_in_close_releases_only_its_targets_on_the_carried_manifest(
     c2 = carried("b")
     v = BW.commit(c2, both(tmp_path / "b"), c2, release={"D_P"}, manifest=BW.load_manifest(c2), reason="pair-skew pairgroup")
     assert not v["written"] and "PROTECTED_CHANGED D_N" in v["why"]
+
+
+def test_close_on_a_stale_manifest_returns_a_stop_dict_and_leaves_the_incumbent(tmp_path, monkeypatch):
+    from fluxplace import gaps as GP
+    monkeypatch.setenv("FLUXPLACE_VERSIONS", str(tmp_path / "none.json"))
+    base = _open_board(tmp_path)
+    BW.seed(base)
+    txt = open(base).read().replace("(end 50 35)", "(end 50 36)", 1)                                # edited outside the flow
+    open(base, "w").write(txt)
+    before = open(base).read()
+    msgs = []
+    res = GP.close(base, str(tmp_path / "work"), cons={}, attempts=str(tmp_path / "a.jsonl"), runs=str(tmp_path / "r.jsonl"), log=msgs.append, inproc=True)
+    assert res["stop"] == "manifest_stale" and res["verdict"] == "fail" and any(x.startswith("L:") for x in res["diff"])
+    assert any(x.startswith("  L:") for x in msgs) and open(base).read() == before and BW.is_stale(base)
+    assert not os.path.exists(tmp_path / "work" / "best.kicad_pcb") and os.path.exists(tmp_path / "work" / "stop.json")
