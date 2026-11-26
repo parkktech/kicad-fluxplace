@@ -82,6 +82,7 @@ def profile(B, net, want_path=False):
     pads, seg_idx, vn, adj = g["pads"], g["seg_idx"], g["vn"], g["adj"]
     best = max(((math.hypot(p["x"] - q["x"], p["y"] - q["y"]), i, j) for i, p in enumerate(pads) for j, q in enumerate(pads) if i < j))
     _d, ia, ib = best
+    ia, ib = _twin_end(g, pads, ia, ib), _twin_end(g, pads, ib, ia)
     dist, prev, heap = {ia: 0.0}, {}, [(0.0, ia)]
     while heap:
         d, u = heapq.heappop(heap)
@@ -110,6 +111,27 @@ def profile(B, net, want_path=False):
     if want_path:
         out["segs"] = sorted(on)
     return out
+
+
+TWIN_MM = 2.5
+
+
+def twin_group(pads, i):
+    """indices of the pads of the same net on the SAME footprint as pad `i` within TWIN_MM: the double pads of an interleaved
+    receptacle row (a footprint pattern, never a ref name).  A pad with none is its own group."""
+    p = pads[i]
+    return [k for k, q in enumerate(pads) if q["ref"] == p["ref"] and math.hypot(q["x"] - p["x"], q["y"] - p["y"]) <= TWIN_MM]
+
+
+def _twin_end(g, pads, i, other):
+    """the member of pad i's twin group that is electrically nearest `other`: the pair leaves through that pad, the other
+    members are joined to it by tap vias / jumpers (spurs, not part of the pad-to-pad path)."""
+    grp = twin_group(pads, i)
+    if len(grp) < 2:
+        return i
+    d = _dists(g, other)
+    reach = [k for k in grp if k in d]
+    return min(reach, key=lambda k: d[k]) if reach else i
 
 
 def _none_path(want_path):

@@ -736,6 +736,10 @@ def dogbone(ctx, t, rule, pr, limit=2):
     return out
 
 
+def _ekey(pr, t):
+    return (tuple(pr), t["name"], round(t["c"][0], 3), round(t["c"][1], 3))
+
+
 def _variants(ctx, ta, tb, rule, pr):
     """terminal pairs to try, in order: the pads; the fan-out via pair of either end; a new dog-bone via pair of either end."""
     P = ctx["P"]
@@ -744,7 +748,12 @@ def _variants(ctx, ta, tb, rule, pr):
         return ([t["via"]] if t.get("via") else []) + (dogbone(ctx, t, rule, pr) if P["dogbone"] else [])
     A, B_ = alts(ta), alts(tb)
     out = [(ta, tb)] + [(a, tb) for a in A] + [(ta, b) for b in B_] + [(a, b) for a in A[:2] for b in B_[:2]]
-    return out[:8]
+    # B5: the exit the joint escape planner chose for a terminal (pairescape.py) comes first; the plain order stays as the fallback
+    esc = ctx.get("escape") or {}
+    ea, eb = esc.get(_ekey(pr, ta)), esc.get(_ekey(pr, tb))
+    if ea is not None or eb is not None:
+        out = [(ea or ta, eb or tb)] + out
+    return out[:9]
 
 
 def _setup(ctx, D, O, a, b, rule):
@@ -866,6 +875,9 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
         # already steers them): a peer's corridor must not seal a high-speed pair in (W16 PCIE_TX / PCIE_CLK)
         if q != pr and q not in ctx["done"] and (tier is None or tier(q) < tier(pr)):
             grid.put(D, O, fp, "", f"corridor of {q[0]}/{q[1]}")
+    for q, fp in ctx.get("escape_reserve", {}).items():    # B5: the chosen exits of pairs not yet laid, hard for every other pair, released when it is laid
+        if q != pr and q not in ctx["done"]:
+            grid.put(D, O, fp, "", f"escape of {q[0]}/{q[1]}")
     mark = items.mark()
     tp = time.time()
     newdone = set()
@@ -1005,7 +1017,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         info[pr] = (terms, lone, secs, span)
         key[pr] = (rules[pr]["prio"], KIND_RANK.get(cls[pr[0]].get("kind"), 3), span, pr)
     cache = {}
-    neg = {"reserve": {}, "preset": {}}
+    neg = {"reserve": {}, "preset": {}, "escape": {}, "escape_reserve": {}}
 
     def mk_ctx():
         grid = PL.Grid(B, sig, clr, edge, P["step"], pair_nets)
@@ -1018,6 +1030,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 "limit": lambda net: guard_limit(cons, net),
                 "tol": lambda net: min(0.25 * guard_limit(cons, net), 0.25),
                 "reserve": neg["reserve"], "preset": neg["preset"], "done": set(), "guide": guide,
+                "escape": neg["escape"], "escape_reserve": neg["escape_reserve"],
                 "tier": lambda q: key[q][:2] if q in key else (-1, -1)}
 
     def one_pass(order):
@@ -1072,6 +1085,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     order0 = sorted(pl, key=lambda pr: key[pr])
     res["negotiation"] = None
     live = [pr for pr in order0 if info[pr][2] and (open0.get(pr[0]) or open0.get(pr[1]))]
+    res["escape"] = None
     if P["negotiate"] and len(live) > 1:
         # every section alone, in parallel; then only the pairs in a conflict are searched again (pairneg.py)
         from . import pairneg as NG
@@ -1108,6 +1122,27 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         res["negotiation"] = {"sections": len(secs_of), "passes": used, "unresolved": ["/".join(pr) for pr in sorted(unresolved)],
                               "failed_alone": alone_fail, "secs": round(time.time() - tn, 1), "workers": P["workers"]}
         log(f"pairs: negotiation {res['negotiation']}")
+    if live and not only:                                    # B5: joint pair exits per component, proved by a ghost lay of a shortlist
+        from . import pairescape as PE
+
+        def ghost(prs, escape, reserve):
+            ctx = mk_ctx()
+            ctx["escape"], ctx["escape_reserve"] = escape, reserve
+            got = {}
+            for q in prs:
+                got[q] = c = _lay_pair(ctx, q, info[q], rules[q], False)
+                _apply(ctx, q, c, False)
+                ctx["done"].add(q)
+            return got
+        try:
+            esc = PE.plan(mk_ctx, ghost, info, rules, key, live, cons, B, lambda net: guard_limit(cons, net), log, order=order0)
+        except Exception as e:                               # noqa: BLE001 - without an escape plan the stage is what it was
+            log(f"pairs: escape planner failed ({type(e).__name__}: {e}); generic exits")
+            esc = None
+        if esc:
+            neg["escape"].update(esc["choice"])
+            neg["escape_reserve"].update(esc["reserve"])
+            res["escape"] = esc["report"]
     best = one_pass(order0)
     tried = {tuple(best["order"])}
     for _ in range(max(0, P["passes"])):
@@ -1307,7 +1342,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
         plan(board, cons, spec, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
-           "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"),
+           "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"), "escape": res.get("escape"),
            "plane_layers": res["plane_layers"], "pairs": []}
     B2 = res["B"]
     if out and not plan_only:
