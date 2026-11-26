@@ -31,7 +31,7 @@ def test_every_kind_has_a_detector_and_only_ghost_open_and_row_rail_have_rungs_s
                                                           "row-cin-side": ["template-turn", "unit-turn", "clear-side", "unit-shift", "cin-re-deal"],
                                                           "row-template": ["template-turn", "clear-side"], "row-pin-bypass": ["re-deal"],
                                                           "row-away": ["feasible", "push-out", "re-seat"], "row-flight": ["push-out"], "via-forbidden": ["clear-region"],
-                                                          "support-far": ["home", "nudge", "far-re-deal", "swap-seat"], "support-starved": ["make-room"], "net-budget": ["pull"]}
+                                                          "support-far": ["home", "nudge", "far-re-deal", "swap-seat"], "support-starved": ["make-room"], "net-budget": ["pull"], "net-bound": ["pull"]}
     assert set(PG.RUNGS) == {"unblock", "seal", "endpoint", "pull-load", "pour-need", "template-turn", "unit-turn", "clear-side", "re-deal", "cin-re-deal", "clear-region",
                              "unit-shift", "feasible", "push-out", "re-seat", "home", "nudge", "far-re-deal", "swap-seat", "make-room", "pull"}
     assert len(set(PG.ORDER)) == len(PG.ORDER)
@@ -389,6 +389,6 @@ def test_transformer_coupled_pair_is_two_budgets():
     assert len(j) == 1 and j[0]["impossible"]
 
 
-def test_net_bound_kind_is_in_floorplan_and_placetour_scope_and_dispatch_is_a_todo():
+def test_net_bound_kind_is_in_floorplan_and_placetour_scope_and_shares_the_pull_rung():
     assert "net-bound" in PG.SCOPE["floorplan"] and "net-bound" in PG.SCOPE["placetour"] and "net-bound" not in PG.SCOPE["ready"]
-    assert PG.DISPATCH["net-bound"] == []          # TODO: w45supports net-budget "pull" rung once merged (ledger row 2026-11-26 A8)
+    assert PG.DISPATCH["net-bound"] == ["pull"]          # w45supports: the one rung of net-budget and net-bound
