@@ -1697,10 +1697,42 @@ def _ev_stage_end(i, name, res, board, secs):
     LV.narrate(name, f"{name} finished: {res.get('verdict')}.{line_part} Took {secs:.1f} s.", "end")
 
 
+def _link_lib(workdir, board):
+    """Symlink workdir/lib to the project lib (nearest ancestor of board holding lib/3dmodels).
+
+    Stage boards sit at <workdir>/<stage>/board.kicad_pcb, so ${KIPRJMOD}/../lib resolves to <workdir>/lib.
+    -> link path, or None when no project lib is found or the link cannot be made.
+    """
+    d = os.path.dirname(os.path.abspath(board))
+    found = None
+    for _ in range(8):
+        if os.path.isdir(os.path.join(d, "lib", "3dmodels")):
+            found = d
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    if found is None:
+        return None
+    target = os.path.realpath(os.path.join(found, "lib"))
+    link = os.path.join(workdir, "lib")
+    if os.path.lexists(link):
+        return link
+    try:
+        os.symlink(target, link)
+    except OSError as e:
+        print(f"pipeline: lib link not made ({e})", flush=True)
+        return None
+    return link
+
+
 def run(a):
     """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked). Emits the event stream."""
     work = os.path.abspath(a.workdir)
     os.makedirs(work, exist_ok=True)
+    if getattr(a, "board", None):
+        _link_lib(work, a.board)
     saved = {k: os.environ.get(k) for k in _EV_ENV}
     t0 = time.time()
     _ev_call(_ev_begin, a, work)
