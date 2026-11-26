@@ -349,3 +349,43 @@ def test_route_stage_post_runs_the_via_then_joiner_fallbacks_with_the_protected_
     monkeypatch.setattr(SI, "run", lambda *a, **k: {"moved": 1, "centred_left": 0})
     KC._post("b.kicad_pcb", str(tmp_path), [], {"track": 0.2, "clearance": 0.127, "via": 0.6, "drill": 0.3})
     assert calls == []
+
+
+def test_ends_to_centre_moves_locked_and_different_ends_onto_the_via_centre(tmp_path):
+    """W38: two tracks ending at DIFFERENT points inside one via (one locked) both end on the centre; the far ends, widths and lock stay;
+    a joint at the old point moves with it; a track whose both ends land on the centre is removed; protected nets and ends outside the copper stay."""
+    import pcbnew
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, True), ("A", "F", (10, 14), (9.9, 10.1), 0.2, False),
+                      ("A", "B", (10.1, 10.05), (10, 16), 0.2, False), ("A", "F", (10.1, 10.05), (10, 10.05), 0.2, False),
+                      ("A", "F", (3, 3), (10.4, 10), 0.2, False)], [("A", (10, 10), 0.6)])
+    assert SI._ends_to_centre(str(src), str(tmp_path / "o0.kicad_pcb"), set(), None, False)[:2] == [0, [["A", 10.0, 10.0, "locked"]]]
+    assert SI._ends_to_centre(str(src), str(tmp_path / "o0.kicad_pcb"), set(), None, True, ["A"])[0] == 0
+    n, skipped, touched, moves = SI._ends_to_centre(str(src), str(tmp_path / "o.kicad_pcb"), set(), None, True)
+    assert n == 1 and skipped == [] and len(moves) == 5 and max(m[7] for m in moves) < 0.3
+    assert sum(m[2] for m in moves) == 1                                   # the locked move is recorded as such
+    ends = _ends(tmp_path / "o.kicad_pcb")
+    assert sorted(ends) == sorted([((5.0, 10.0), (10.0, 10.0)), ((10.0, 14.0), (10.0, 10.0)), ((10.0, 10.0), (10.0, 16.0)), ((3.0, 3.0), (10.4, 10.0))])
+    t = [x for x in pcbnew.LoadBoard(str(tmp_path / "o.kicad_pcb")).GetTracks() if x.Type() == pcbnew.PCB_TRACE_T and x.IsLocked()]
+    assert len(t) == 1
+
+
+def test_centre_run_clears_the_drc_for_a_locked_off_centre_end(tmp_path):
+    """End to end with the real DRC guard: locked end off the centre, which snap/via/joiner leave -> centre_run leaves none, nothing new."""
+    src = tmp_path / "a.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (10.1, 10.05), 0.2, True), ("A", "F", (10, 14), (9.9, 10.1), 0.2, True)], [("A", (10, 10), 0.6)])
+    _pro(tmp_path)
+    assert _centred(src) == 2
+    rec = SI.centre_run(str(src), str(src), log=lambda m: None)
+    assert rec["centred_left"] == 0 and rec["moved"] == 1 and len(rec["moves"]) == 2 and _centred(src) == 0
+
+
+def test_route_stage_post_ends_with_the_centre_fallback_that_ignores_protection(tmp_path, monkeypatch):
+    KC = _post_stubs(monkeypatch)
+    calls = []
+    monkeypatch.setattr(SI, "run", lambda *a, **k: {"moved": 0, "centred_left": 5})
+    monkeypatch.setattr(SI, "via_run", lambda *a, **k: calls.append(("via", k["protect"])) or {"centred_left": 4})
+    monkeypatch.setattr(SI, "joiner_run", lambda *a, **k: calls.append(("joiner", k["protect"])) or {"centred_left": 3})
+    monkeypatch.setattr(SI, "centre_run", lambda *a, **k: calls.append(("centre", k["protect"])) or {"centred_left": 0})
+    rec = KC._post("b.kicad_pcb", str(tmp_path), [], {"track": 0.2, "clearance": 0.127, "via": 0.6, "drill": 0.3}, protect=["P"])
+    assert calls == [("via", ["P"]), ("joiner", ["P"]), ("centre", [])] and rec["snap"]["centred_left"] == 0

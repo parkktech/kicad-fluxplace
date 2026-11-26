@@ -242,15 +242,15 @@ def _post(best, d, planes, R, protect=()):
     from . import snapiter as SI, planetie as PT, opengate as OG
     snap = SI.run(best, best, log=lambda _m: None)
     if snap.get("centred_left") != 0:
-        for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run)):
+        for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run), ("centre", SI.centre_run)):
             try:
-                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect))
+                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect) if key != "centre" else [])
             except Exception as e:                           # noqa: BLE001 - a fallback failure keeps the snapped board
                 snap[key] = {"error": str(e)[:160]}
                 break
             if snap[key].get("centred_left") == 0:
                 break
-        left = [r.get("centred_left") for r in (snap, snap.get("via") or {}, snap.get("joiner") or {}) if r.get("centred_left") is not None]
+        left = [r.get("centred_left") for r in (snap, snap.get("via") or {}, snap.get("joiner") or {}, snap.get("centre") or {}) if r.get("centred_left") is not None]
         snap["centred_left"] = left[-1] if left else snap.get("centred_left")
     ties = PT.run_guarded(best, best, [net for net, _lay in planes], RC.open_by_net, log=lambda _m: None, workdir=d,
                           plane_layers=[lay for _net, lay in planes],
