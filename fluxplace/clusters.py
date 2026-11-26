@@ -41,8 +41,10 @@ def _is_support(ref, part):
 
 
 def pad_gap(a, b):
-    """Distance between the edges of two pads (their extents, rectangles); 0 when they touch or overlap."""
-    return math.hypot(max(0.0, abs(a["x"] - b["x"]) - a["ex"] - b["ex"]), max(0.0, abs(a["y"] - b["y"]) - a["ey"] - b["ey"]))
+    """Distance between the edges of two pads (their extents, rectangles); 0 when they touch or overlap. Octilinear (the copper an
+    octilinear router needs, budget.pad_bound): the one metric of every placement bound, so a support limit and a net budget agree."""
+    from .budget import pad_bound
+    return pad_bound(a, b)
 
 
 def support_dist(s, sp, pin, halo=0.0):

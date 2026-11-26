@@ -18,7 +18,7 @@ import zlib
 from . import events as EV
 
 ORDER = ("ghost-open", "row-cin-side", "row-template", "row-pin-bypass", "row-away", "row-flight", "row-edge", "row-rail",
-         "row-other", "support-far", "support-starved", "side-illegal", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
+         "row-other", "support-far", "support-starved", "net-bound", "side-illegal", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 SCOPE = {"ready": ("part-datasheet", "part-stock"),
          "floorplan": tuple(k for k in ORDER if not k.startswith(("part-", "ghost-"))),
@@ -275,6 +275,22 @@ def detect_support_starved(ctx):
         if have < need:
             out.append(gap("support-starved", ic, "plain", need - have, [ic] + [f["ref"] for f in lst], (), at=B["parts"][ic]["pos"],
                            detail=f"needs {need:.0f} mm2 within {max(f['limit'] for f in lst):g} mm, free {have:.0f} mm2, {len(lst)} far"))
+    return out
+
+
+@detector("net-bound")
+def detect_net_bound(ctx):
+    """PLACEMENT LOWER BOUND (A8): a net or [[placement.path]] whose free-space octilinear bound (pad access to pad access, no margin,
+    segments summed along series parts, a transformer never joins its two sides) is over its budget: no routing can meet it, so the
+    placement is refused (stage gates: PG.impossible). class rf | plain; mag = bound - limit. Detour margin is a risk grade only
+    (budget.net_bounds "risk"), never a gap. TODO(w45supports): DISPATCH["net-bound"] = ["pull"] once its net-budget rung merges
+    (it pulls movable parts to the anchor; a bound made of fixed parts alone is an owner/budget question)."""
+    from . import budget as BG
+    out = []
+    for r in BG.net_bounds(ctx.B(), ctx["cons"], ctx["spec"]):
+        if r["impossible"]:
+            out.append(gap("net-bound", r["name"], "rf" if r["cls"] == "rf" else "plain", r["bound"] - (r["limit"] or 0.0), r["refs"], r["nets"],
+                           detail=r["why"]))
     return out
 
 
@@ -702,6 +718,11 @@ def open_terms(board, blame, cons, spec):
     ctx = Ctx(stage="placetour", board=board, cons=cons or {}, spec=spec, blame=blame)
     t = score_terms(detect_ghost(ctx) or [])
     return t["hs_open"], t["rf_open"], t["power_open"]
+
+
+def impossible(gaps):
+    """The net-bound gaps: a placement whose nets cannot meet their budget even in free space. The floorplan and placetour gates FAIL on these."""
+    return [g for g in gaps if g["kind"] == "net-bound"]
 
 
 def critical(gaps):
