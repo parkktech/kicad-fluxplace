@@ -179,3 +179,66 @@ def test_5a_rail_pour_is_at_least_the_ipc_width(tmp_path, monkeypatch):
     z = [z for z in pcbnew.LoadBoard(out).Zones() if z.GetNetname() == "VBAT"][0]
     bb = z.GetBoundingBox()
     assert pcbnew.ToMM(bb.GetHeight()) >= PW.plan(cons, layers=2)["VBAT"]["width_outer"]
+
+
+# ---- W34 part 2: branch current per run, zone credit --------------------------------------------------------------
+
+CONS_BR = {"power": {"VB": {"max_current_ma": 3000, "max_v": 5.0, "source": "U1"}},
+           "dcdrop": [{"net": "VB", "from": "U1", "to": ["U2"], "current_a": 3.0, "drop_mv_max": 100.0}]}
+DC_OK = {"VB": {"ok": True, "mv": 10.0, "max": 100.0, "why": ""}}
+
+
+def _br_board(tmp_path, zone=False, extra_pad=None):
+    import pcbnew as P
+    from test_routerules_syn import _board
+    pads = [("U1", 2, 4, "VB"), ("C1", 10, 4, "VB"), ("U2", 18, 4, "VB")] + ([extra_pad] if extra_pad else [])
+    tracks = [(2, 10, 18, 10, "VB"), (2, 4, 2, 10, "VB"), (10, 4, 10, 10, "VB"), (18, 4, 18, 10, "VB")] + (
+        [(extra_pad[1], 4, extra_pad[1], 10, "VB")] if extra_pad else [])
+    p = _board(str(tmp_path / "br.kicad_pcb"), pads=pads, tracks=tracks)
+    b = P.LoadBoard(p)
+    for t in b.GetTracks():
+        if t.GetStart().y != t.GetEnd().y or t.GetStart().x != t.GetEnd().x:
+            if t.GetStart().y == t.GetEnd().y:
+                t.SetWidth(P.FromMM(3.0))                       # the trunk: wide enough for 3 A
+    if zone:
+        z = P.ZONE(b)
+        z.SetLayer(P.F_Cu)
+        z.SetNetCode(b.FindNet("VB").GetNetCode())
+        ch = P.SHAPE_LINE_CHAIN()
+        for x, y in ((15, 2), (19.5, 2), (19.5, 11), (15, 11)):
+            ch.Append(P.FromMM(x), P.FromMM(y))
+        ch.SetClosed(True)
+        z.Outline().AddOutline(ch)
+        b.Add(z)
+        P.ZONE_FILLER(b).Fill(b.Zones())
+    P.SaveBoard(p, b)
+    return p
+
+
+def _check(p, cons=CONS_BR, dc=DC_OK):
+    from fluxplace import boardfile
+    return [f for f in PW.check(boardfile.facts_from_file(p), cons, dc, board=p) if f["code"] == "POWER_WIDTH"]
+
+
+def test_decap_stub_passes_and_load_and_source_stubs_fail_at_0_15(tmp_path):
+    pytest.importorskip("pcbnew")
+    fs = _check(_br_board(tmp_path))
+    assert len(fs) == 1 and "2 narrow run(s)" in fs[0]["msg"]               # source stub + 3 A load pin; the decap stub is cleared
+    assert "3.00 A pin share (source)" in fs[0]["msg"] or "3.00 A budget (dcdrop)" in fs[0]["msg"]
+
+
+def test_unknown_load_current_uses_the_rail_total_and_is_flagged(tmp_path):
+    pytest.importorskip("pcbnew")
+    p = _br_board(tmp_path, extra_pad=("U3", 14, 4, "VB"))
+    fs = _check(p)
+    assert len(fs) == 1 and "3 narrow run(s)" in fs[0]["msg"] and "1 run(s) with current unknown" in fs[0]["msg"]
+
+
+def test_run_inside_a_same_net_pour_gets_zone_credit(tmp_path):
+    pytest.importorskip("pcbnew")
+    base = _check(_br_board(tmp_path / "a" if (tmp_path / "a").mkdir() is None else tmp_path))
+    (tmp_path / "b").mkdir()
+    z = _check(_br_board(tmp_path / "b", zone=True))
+    assert "2 narrow run(s)" in base[0]["msg"]
+    assert not z or "1 narrow run(s)" in z[0]["msg"]                        # the U2 stub lies in the filled pour: credited, source stub still fails
+    assert z and "credited" in z[0]["msg"]

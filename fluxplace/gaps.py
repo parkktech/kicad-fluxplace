@@ -90,7 +90,7 @@ def review_gaps(board, cons, opn=None):
     not_p = C.not_pairs(cons)
     out, failed = [], []
     try:
-        for f in power.check(boardfile.facts_from_file(board), cons, power.dcdrop_status(board, cons)):
+        for f in power.check(boardfile.facts_from_file(board), cons, power.dcdrop_status(board, cons), board=board):
             if f.get("code") not in ("POWER_WIDTH", "POWER_VIAS"):
                 continue
             net = (f.get("refs") or [""])[0]

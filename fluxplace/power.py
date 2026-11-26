@@ -361,11 +361,102 @@ def _neck_tests(run, r, outer, stackup=None):
     return fails
 
 
-def check(facts, cons, dc=None):
+def _is_decap(ref):
+    return str(ref).upper().startswith("C")
+
+
+def _board_ctx(board_path, rails):
+    """pcbnew view for the per-run physics: {pads: {net: [(ref, num, box)]}, board} of the rail nets, or None."""
+    import pcbnew
+    if not (isinstance(board_path, str) and os.path.exists(board_path)):
+        return None
+    b = pcbnew.LoadBoard(board_path)
+    pads = {}
+    for p in b.GetPads():
+        if p.GetNetname() in rails:
+            bb = p.GetBoundingBox()
+            bb.Inflate(pcbnew.FromMM(0.1))
+            pads.setdefault(p.GetNetname(), []).append((p.GetParentFootprint().GetReference(), p.GetNumber(), bb))
+    return {"b": b, "pads": pads}
+
+
+def zone_credit_mm(ctx, net, layer, seg, band_mm):
+    """Conducting width (mm) across segment `seg` ({x1,y1,x2,y2,width}) from filled same-net zones on `layer`: the area of the
+    zone fill inside the rectangle of the segment's length and `2 * band_mm` across, divided by the length (never below the
+    track's own width). Measured on the board's stored fill; no fill, no credit."""
+    import pcbnew
+    b = ctx["b"]
+    L = math.hypot(seg["x2"] - seg["x1"], seg["y2"] - seg["y1"])
+    lid = b.GetLayerID(layer)
+    if L < 0.01:
+        return seg["width"]
+    ux, uy = (seg["x2"] - seg["x1"]) / L, (seg["y2"] - seg["y1"]) / L
+    nx, ny = -uy * band_mm, ux * band_mm
+    rect = pcbnew.SHAPE_POLY_SET()
+    rect.NewOutline()
+    for x, y in ((seg["x1"] + nx, seg["y1"] + ny), (seg["x2"] + nx, seg["y2"] + ny), (seg["x2"] - nx, seg["y2"] - ny), (seg["x1"] - nx, seg["y1"] - ny)):
+        rect.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    got = 0.0
+    for z in b.Zones():
+        if z.GetNetname() != net or not z.IsOnLayer(lid):
+            continue
+        fill = z.GetFilledPolysList(lid)
+        if fill is None or fill.OutlineCount() == 0:
+            continue
+        inter = pcbnew.SHAPE_POLY_SET(rect)
+        inter.BooleanIntersection(fill)
+        got += inter.Area() / 1e12                 # nm^2 -> mm^2
+    return max(seg["width"], got / L)
+
+
+def run_current(ctx, cons, net, r, run, segs):
+    """Current (A) one narrow run really carries, and where the figure comes from: -> (amps, source).
+    The run's end pads are the pads of the net whose box holds a segment end. Decap pads carry no DC current; a pad of the rail's
+    source part carries total / its pins on the net; a load named by a single-load [[dcdrop]] row (`to`) carries that row's
+    current_a (per pin: / the part's pins on the net unless the row names the pin).  Any pad with no such figure -> the rail total,
+    source "unknown" (never a silent pass)."""
+    tot = r["current_a"]
+    pads = (ctx or {}).get("pads", {}).get(net) or []
+    ends = [(g[k1], g[k2]) for i in run["members"] for g in (segs[i],) for k1, k2 in (("x1", "y1"), ("x2", "y2"))]
+    import pcbnew
+    hit = {}
+    for x, y in ends:
+        pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        for ref, num, bb in pads:
+            if bb.Contains(pt):
+                hit[(ref, num)] = True
+    if not hit:
+        return tot, "unknown (no end pad)"
+    pw = (cons or {}).get("power", {}).get(net) or {}
+    rows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
+    src = str(pw.get("source") or (rows[0].get("from") if rows else "") or "").split(".")[0]
+    npins = {}
+    for ref, _n, _b in pads:
+        npins[ref] = npins.get(ref, 0) + 1
+    amps, how = 0.0, set()
+    for ref, num in hit:
+        if _is_decap(ref):
+            how.add("decap")
+        elif ref == src and tot:
+            amps += tot / max(1, npins[ref])
+            how.add("pin share (source)")
+        else:
+            row = next((d for d in rows if (d.get("to") if isinstance(d.get("to"), list) else [d.get("to")]).__len__() == 1
+                        and str((d["to"] if isinstance(d.get("to"), list) else [d["to"]])[0]).split(".")[0] == ref and d.get("current_a")), None)
+            if row is None:
+                return tot, f"unknown ({ref} load current not in the budget)"
+            to = str((row["to"] if isinstance(row["to"], list) else [row["to"]])[0])
+            amps += float(row["current_a"]) / (1 if "." in to else max(1, npins[ref]))
+            how.add("budget (dcdrop)")
+    return amps, "+".join(sorted(how))
+
+
+def check(facts, cons, dc=None, board=None):
     """Review findings (level, code, msg, refs): POWER_WIDTH, POWER_VIAS (FAIL), POWER_NECKDOWN_OK (INFO),
     POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da)."""
     out = []
     dc = dc or {}
+    ctx = None
     has_dc = {d.get("net") for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict)}
     layers = facts.get("copper_layers")
     inner = set(facts.get("plane_layers") or ())
@@ -387,8 +478,23 @@ def check(facts, cons, dc=None):
         if narrow:                                   # D71da has no pour carve-out: a zone on the net proves no track
             bad, ok = [], []
             dropf = _net_drop_fail(net, dc, net in has_dc)
+            if board and ctx is None:
+                ctx = _board_ctx(board, {n for n, rr in plan_.items() if rr and rr.get("track_mm") is not None}) or False
             for run in narrow_runs(narrow, [v for v in facts.get("vias") or [] if v.get("net") == net and "x" in v]):
-                f = _neck_tests(run, r, outer, facts.get("stackup"))
+                rr = r
+                if ctx:                              # W34: the run's own current and conducting width (record both)
+                    amps, how = run_current(ctx, cons, net, r, run, narrow)
+                    cw = min(zone_credit_mm(ctx, net, narrow[i]["layer"], narrow[i], narrow[i]["need"]) for i in run["members"])
+                    rise = r.get("rise_c") or DEFAULT_RISE_C
+                    need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
+                                    ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0
+                    run.update(amps=amps, amps_src=how, cred_w=round(cw, 3), min_w_track=run["min_w"], need_run=round(need_run, 3))
+                    if cw >= need_run - 1e-6:        # wide enough for the current it really carries: not a constriction
+                        run["cleared"] = True
+                        continue
+                    run["min_w"] = cw
+                    rr = dict(r, current_a=amps)
+                f = _neck_tests(run, rr, outer, facts.get("stackup"))
                 (bad if f or dropf else ok).append((run, f))
             if ok:
                 out.append({"level": "INFO", "code": "POWER_NECKDOWN_OK", "refs": [net],
@@ -398,8 +504,11 @@ def check(facts, cons, dc=None):
             if bad:
                 tot = sum(x["len"] for x, _f in bad)
                 bad.sort(key=lambda t: -t[0]["len"])
-                det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x['need']:.2f}"
+                det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x.get('need_run', x['need']):.2f}"
+                                + (f" ({x['amps']:.2f} A {x['amps_src']}, credited {x['cred_w']:g})" if "amps" in x else "")
                                 + (": " + ", ".join(f) if f else "") for x, f in bad[:4])
+                nunk = sum(1 for x, _f in bad if str(x.get("amps_src", "")).startswith("unknown"))
+                det += (f"; {nunk} run(s) with current unknown (rail total used)" if nunk else "")
                 det += (f"; +{len(bad) - 4} more run(s)" if len(bad) > 4 else "") + (f"; net: {dropf}" if dropf else "")
                 out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
                             "msg": f"{net}: {len(bad)} narrow run(s), {tot:.1f} mm, not proven for the {r['current_a']:g} A "
