@@ -9,6 +9,15 @@ set -u
 WT=${1:?worktree}; HERE=$(cd "$(dirname "$0")/.." && pwd); BASE=${2:-$HERE/docs/TEST-BASELINE.txt}
 PY=${PY:-/usr/bin/python3}
 out=$(mktemp); trap 'rm -f "$out"' EXIT
+# Gate queue (2026-11-26): 5-6 concurrent gates on 32 cores gave load 90-170, timeouts (rc 124, 149 failures) and
+# timing flakes. At most GATE_SLOTS gates run at once; the rest wait for a slot (the wait is not part of the timeout).
+SLOTS=${GATE_SLOTS:-2}; LOCKDIR=${GATE_LOCKDIR:-/tmp/fluxplace-merge-gate}; mkdir -p "$LOCKDIR"
+got=; echo "merge-gate: waiting for a slot ($SLOTS max)" >&2
+while [ -z "$got" ]; do
+  for i in $(seq 1 "$SLOTS"); do exec {fd}>"$LOCKDIR/slot$i"; if flock -n "$fd"; then got=$i; break; fi; exec {fd}>&-; done
+  [ -z "$got" ] && sleep 20
+done
+echo "merge-gate: slot $got ($(cut -d' ' -f1 /proc/loadavg) load)" >&2
 ( cd "$WT" && timeout 3600 "$PY" -m pytest -q -p no:cacheprovider -rfE --continue-on-collection-errors tests/ ) > "$out" 2>&1
 rc=$?
 # Completion evidence (outside review 2026-11-26): pytest rc 0 = all passed, 1 = tests failed (judged against the
