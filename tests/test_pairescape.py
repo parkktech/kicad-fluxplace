@@ -15,7 +15,7 @@ from fluxplace import routediag as RD
 def bundle(pr, ti, name, x, cost):
     """a bundle whose footprint is one vertical track at x (width 0.15) on F.Cu"""
     seg = ("seg", "F.Cu", (x, 0.0), (x, 3.0), 0.15)
-    return {"pair": pr, "ti": ti, "var": {"name": name}, "vkey": (name, x, 0.0), "layer": "F.Cu", "dir": (0, 1), "foot": [seg], "own": {},
+    return {"pair": pr, "ti": ti, "var": {"name": name, "c": (x, 0.0)}, "vkey": (name, x, 0.0), "layer": "F.Cu", "dir": (0, 1), "foot": [seg], "own": {},
             "cost": cost, "stub": 0.0, "vias": 0, "margin": None, "sig": (name, "F.Cu", (0, 1))}
 
 
@@ -69,7 +69,7 @@ def fake_world(monkeypatch):
     return p0, p1, info, rules, key
 
 
-def test_far_end_conflict_planner_changes_the_first_choice(monkeypatch):
+def test_far_end_conflict_planner_changes_the_first_choice(monkeypatch, tmp_path):
     p0, p1, info, rules, key = fake_world(monkeypatch)
     calls = []
 
@@ -82,7 +82,7 @@ def test_far_end_conflict_planner_changes_the_first_choice(monkeypatch):
             ok = not (names & bad) and (esc != {} or False is True) if False else bool(esc) and not (names & bad)
             out[q] = {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": "" if ok else "no path"}}
         return out
-    res = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], {}, {}, lambda net: 1.0, order=[p0, p1])
+    res = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], {"pairlay": {"escape_cache_dir": str(tmp_path)}}, {}, lambda net: 1.0, order=[p0, p1])
     nh = res["report"]["neighbourhoods"][0]
     assert nh["verdict"] == "chosen", nh
     assert res["report"]["memory"]["forbidden"] >= 1                 # the first shortlisted combination failed and is forbidden
@@ -90,10 +90,10 @@ def test_far_end_conflict_planner_changes_the_first_choice(monkeypatch):
     assert "left" not in names and res["report"]["expansions"] > 0 and res["reserve"]
 
 
-def test_healthy_neighbourhood_is_left_alone(monkeypatch):
+def test_healthy_neighbourhood_is_left_alone(monkeypatch, tmp_path):
     p0, p1, info, rules, key = fake_world(monkeypatch)
     ok = lambda prs, esc, rsv: {q: {"full": True, "skew": 0.0, "nok": 1, "e": {"status": "laid"}} for q in prs}
-    res = PE.plan(lambda: {"budget": {}}, ok, info, rules, key, [p0, p1], {}, {}, lambda net: 1.0, order=[p0, p1])
+    res = PE.plan(lambda: {"budget": {}}, ok, info, rules, key, [p0, p1], {"pairlay": {"escape_cache_dir": str(tmp_path)}}, {}, lambda net: 1.0, order=[p0, p1])
     assert res["choice"] == {} and res["report"]["neighbourhoods"][0]["verdict"] == "baseline already laid"
 
 
@@ -163,3 +163,24 @@ def test_twin_receptacle_lays_with_tap_vias_and_passes_the_audit(tmp_path):
     assert sum(1 for v in B["vias"] if v["net"] in ("USB_DM", "USB_DP")) >= 2          # the tap vias of the twin joins
     a = PA.audit(B, [("USB_DP", "USB_DM")], {}, set())[("USB_DP", "USB_DM")]
     assert set(a["causes"]) <= {"skew"} and a["status"] in ("complete", "mismatch"), a          # skew of the jumper is the tuner's, never layers or vias
+
+
+def test_plan_is_cached_by_placement_and_constraints(monkeypatch, tmp_path):
+    p0, p1, info, rules, key = fake_world(monkeypatch)
+    cons = {"pairlay": {"escape_cache_dir": str(tmp_path)}}
+    n = []
+
+    def ghost(prs, esc, rsv):
+        n.append(1)
+        ok = bool(esc) and not any(v["name"] == "left" for v in esc.values())
+        return {q: {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}} for q in prs}
+    monkeypatch.setattr(PE, "_variants_of", lambda ctx, t, rule, pr, nmax: [d["var"] for d in two_vars()[(pr, 0)]])
+    B = {"pads": [{"ref": "U1", "num": "1", "net": "A_N", "x": 0, "y": 0, "w": 1, "h": 1, "layers": ["F.Cu"]}]}
+    first = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], cons, B, lambda net: 1.0, order=[p0, p1])
+    calls = len(n)
+    again = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], cons, B, lambda net: 1.0, order=[p0, p1])
+    assert len(n) == calls and again["report"]["cache"] == "hit"                 # the second plan lays nothing
+    assert {k: v["name"] for k, v in again["choice"].items()} == {k: v["name"] for k, v in first["choice"].items()} and set(again["reserve"]) == set(first["reserve"])
+    B2 = {"pads": [dict(B["pads"][0], x=5)]}                                    # a moved pad is a different placement: planned again
+    PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], cons, B2, lambda net: 1.0, order=[p0, p1])
+    assert len(n) > calls

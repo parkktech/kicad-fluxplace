@@ -20,7 +20,11 @@ recorded (with the violation) and does not forbid.
 
 The result is `{"choice": {terminal key: variant}, "reserve": {pair: pieces}, "report": {...}}`; pairs.py puts the chosen variant
 first for its terminal and keeps the chosen exits reserved (hard for the other pairs) until the owning pair is laid."""
+import hashlib
+import json
 import math
+import os
+import tempfile
 import time
 
 from . import pairgeo as G
@@ -320,6 +324,63 @@ def blocker_parts(c, pairs_pads):
     return out
 
 
+def cache_dir(cons):
+    d = ((cons or {}).get("pairlay") or {}).get("escape_cache_dir")
+    return d or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(tempfile.gettempdir(), "fluxplace-cache"), "pair-escape")
+
+
+def fingerprint(B, cons, live):
+    """sha of what the plan depends on: the placement (pads with net, position, size, layers), the board's rule areas and outline, the
+    pairlay / pairs / channel / plan constraints and the pairs to lay.  Tracks and vias are NOT in it: the fan-out stage adds and strips
+    copper, the exits planned before it are the ones the pairs stage reuses."""
+    h = hashlib.sha256()
+    pads = sorted((q["ref"], str(q["num"]), q["net"], round(q["x"], 3), round(q["y"], 3), round(q["w"], 3), round(q["h"], 3), sorted(q["layers"])) for q in B.get("pads", []))
+    h.update(json.dumps(pads, sort_keys=True, default=str).encode())
+    h.update(json.dumps([sorted(map(str, B.get("edge", []))), [(z.get("name"), z["pts"]) for z in B.get("zones", []) if z.get("keepout")]], default=str).encode())
+    sub = {k: (cons or {}).get(k) for k in ("pairlay", "pairs", "channel", "plan", "fab", "netclass")}
+    h.update(json.dumps(sub, sort_keys=True, default=str).encode())
+    h.update(json.dumps(sorted("/".join(q) for q in live)).encode())
+    return h.hexdigest()
+
+
+def _save(cons, fp, out, info):
+    ck = lambda k: "|".join([k[0][0], k[0][1], str(k[1]), str(k[2]), str(k[3])])
+    doc = {"choice": {ck(k): list(vkey(v)) for k, v in out["choice"].items()},
+           "reserve": {"|".join(pr): [list(x) if isinstance(x, tuple) else x for x in pcs] for pr, pcs in out["reserve"].items()}, "report": out["report"]}
+    d = cache_dir(cons)
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, f".{fp}.{os.getpid()}")
+        json.dump(doc, open(tmp, "w"), default=str)
+        os.replace(tmp, os.path.join(d, fp + ".json"))
+    except OSError:
+        pass
+
+
+def _load(cons, fp, ctx, info, rules, p):
+    """the cached plan with its variants rebuilt from the board (matched by terminal and variant key); None when a variant is gone."""
+    try:
+        doc = json.load(open(os.path.join(cache_dir(cons), fp + ".json")))
+    except (OSError, ValueError):
+        return None
+    byk = {}
+    for pr, (terms, _l, _s, _sp) in info.items():
+        for t in terms:
+            byk["|".join([pr[0], pr[1], t["name"], str(round(t["c"][0], 3)), str(round(t["c"][1], 3))])] = (pr, t)
+    choice = {}
+    for k, vk in doc["choice"].items():
+        if k not in byk:
+            return None
+        pr, t = byk[k]
+        v = next((x for x in _variants_of(ctx, t, rules[pr], pr, p["variants"]) if vkey(x) == tuple(vk)), None)
+        if v is None:
+            return None
+        choice[tkey(pr, t)] = v
+    reserve = {tuple(k.split("|")): [tuple(x) if isinstance(x, list) else x for x in pcs] for k, pcs in doc["reserve"].items()}
+    rep = dict(doc["report"], cache="hit")
+    return {"choice": choice, "reserve": reserve, "report": rep}
+
+
 def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None):
     """-> {"choice", "reserve", "report"}.
     ctx_of() -> fresh lay context; ghost(pairs, escape, reserve) -> {pair: lay result} (production lay on a fresh state, in `pairs` order)."""
@@ -333,6 +394,10 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     comps = components(info, live)
     seeds = [c for c, ts in comps.items() if len({q for q, _ti in ts}) >= 2]      # a part with two or more pairs on it
     ctx0 = ctx_of()
+    fp = fingerprint(B, cons, live)
+    hit = _load(cons, fp, ctx0, info, rules, p)
+    if hit is not None:
+        return hit
     forbidden, depri = set(), set()
     done_parts = set()
     for seed in sorted(seeds):
@@ -416,4 +481,6 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
         rep["neighbourhoods"].append(nh)
         log(f"pairs: escape {nh['parts']} {nh['verdict']} ({nh.get('candidates', 0)} candidates, {nh.get('expansions', 0)} expansions)")
     rep["secs"] = round(time.time() - t0, 1)
+    if time.time() - t0 <= p["budget_s"]:
+        _save(cons, fp, out, info)
     return out
