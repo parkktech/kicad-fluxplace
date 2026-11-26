@@ -115,7 +115,10 @@ def test_pre_skips_sites_near_existing_copper(tmp_path):
         assert abs(pcbnew.ToMM(v.GetPosition().x) - 19) > 0.1 + 0.23 + 0.2   # clear of the track centre line
 
 
-def test_post_adds_a_mask_opening_on_the_side(tmp_path):
+def test_post_defers_the_mask_opening_to_the_finish_stage(tmp_path, capsys):
+    # Stale test, updated: PHASE3I-B6 (commit 27a5702, PLAN-W14-FINISH row 6) cut mask openings after copper only. `post` writes no
+    # opening, it logs a deferral, and the finish stage (`recut`) writes the polygon (test_recut_* below). A board-level mask
+    # polygon before routing makes every new B.Cu track a solder_mask_bridge (203 on W14).
     brd, cons = _board(tmp_path), _cons(tmp_path)
     pre = str(tmp_path / "pre.kicad_pcb")
     cli.main(["thermal", brd, "--constraints", cons, "--out", pre])
@@ -123,7 +126,8 @@ def test_post_adds_a_mask_opening_on_the_side(tmp_path):
     cli.main(["thermal", pre, "--constraints", cons, "--out", out, "--stage", "post"])
     shapes = [d for d in pcbnew.LoadBoard(out).GetDrawings()
               if d.GetLayer() == pcbnew.B_Mask and d.Type() == pcbnew.PCB_SHAPE_T and d.IsPolyShapeValid()]
-    assert len(shapes) == 1 and shapes[0].GetPolyShape().Area() > 0
+    assert shapes == []
+    assert "deferred to the finish stage (recut); no mask opening written" in capsys.readouterr().out
 
 
 def test_post_without_mask_open_is_skipped(tmp_path, capsys):

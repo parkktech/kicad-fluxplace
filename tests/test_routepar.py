@@ -257,7 +257,9 @@ def test_parallel_snaps_vias_to_track_ends_and_blocks_helper(tmp_path):
 def test_pipeline_from_stage_creates_the_state(tmp_path):
     from fluxplace import pipeline as PL
     import argparse
-    board = G.board(tmp_path, G.two("R1", 40, 40, "A", "B"))
+    # four_layers: the bare 3-copper-layer HEAD is not a board kicad-cli loads, so the route gate's DRC crashed before any state
+    # was written (ledger/baseline 2026-11-25); the state contract under test is unchanged
+    board = G.four_layers(G.board(tmp_path, G.two("R1", 40, 40, "A", "B")))
     a = argparse.Namespace(board=board, workdir=str(tmp_path / "W"), constraints=None, spec=None, status=False,
                            from_stage="review", to_stage="review", waive=None, api=False, force=False)
     # review will fail on the bare board, but the state file must exist and name the board

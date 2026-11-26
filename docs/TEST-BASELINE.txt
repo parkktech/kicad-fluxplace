@@ -1,0 +1,1 @@
+# Known failures of mainline: none (w47-gatehealth, 2026-11-26: the 2 former entries fixed, see commits). Never add to this list.
