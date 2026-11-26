@@ -7,7 +7,8 @@
           when every ripped pair is complete again)
   b(iii)  completed with a bounded uncoupled break-out at the terminals (`[pairs.FAMILY] max_uncoupled_mm`, else
           `[pairlay] max_uncoupled_mm`, default DEFAULT_UNCOUPLED_MM) and the skew allowed up to its own limit
-  c       none of the above: the pair's own partial copper is not written, the two nets are handed to the general
+  c       none of the above: the pair's own partial copper is not written (reconcile(): a pair that has copper on the board is
+          never c), the two nets are handed to the general
           router as ordinary nets of the pair's class (`handoff`), and `pairuncoupled` reports what it made of them
   a-mismatch  connected, but the legs differ in layer sequence / via count: the copper is kept (connected beats open)
 
@@ -28,7 +29,9 @@ _BLOCK = re.compile(r"^(track|via) (\S*)(?: .*)?$")
 def assign_states(rep):
     """first state of every row of a pairs report (the main pass): a / a-mismatch / None (still to complete)."""
     for r in rep["pairs"]:
-        r["state"] = "a" if r["status"] == "complete" else "a-mismatch" if r["status"] == "mismatch" else None
+        # `unknown` (ungraded: unmeasured / MEASURE_DISAGREE) with both legs connected is copper, never an open pair (W16 ETH_P0/P3)
+        r["state"] = "a" if r["status"] == "complete" else "a-mismatch" if r["status"] == "mismatch" or (
+            r["status"] == "unknown" and r.get("open") == [0, 0]) else None
         r.setdefault("tried", [])
 
 
@@ -163,7 +166,13 @@ def _take(rep, sub, state, only_rows=None):
     n = 0
     for i, r in enumerate(rep["pairs"]):
         s = by.get(tuple(r["pair"]))
-        if not s or s["status"] != "complete":
+        if not s:
+            continue
+        if r.get("state") is None and s["status"] in ("mismatch", "unknown") and s.get("open") == [0, 0]:
+            # the kept trial board carries this pair's copper (connected, graded mismatch / not graded): the report says so
+            rep["pairs"][i] = dict(s, state="a-mismatch", tried=r.get("tried", []))
+            continue
+        if s["status"] != "complete":
             continue
         if r.get("state") is None:
             rep["pairs"][i] = dict(s, state=state, tried=r.get("tried", []))
@@ -198,6 +207,26 @@ def _trial(rep, out, cons_v, spec, run_fn, tag, state, log, src=None, victims=()
             rep.setdefault("fallback_escape", {})[tag] = escape(out, sorted(ripped_nets))
     _drop(trial, src)
     return len(new) if ok else 0
+
+
+def reconcile(rep, aud, opn):
+    """report = board: every row, state c included, takes its status / opens / lengths from the audit of the written board.  A
+    pair the ladder left in state c whose legs are both connected on that board HAS copper (a trial lays more pairs than it is
+    credited with): it is `a` / `a-mismatch`, never handed to the router.  Only pairs without copper stay c / handoff."""
+    for r in rep["pairs"]:
+        a = aud[tuple(r["pair"])]
+        r["open"] = [opn.get(r["pair"][0], 0), opn.get(r["pair"][1], 0)]
+        r["status"] = a["status"]
+        if a["status"] in ("complete", "mismatch"):
+            r.update(length=[a["p"]["length"], a["n"]["length"]], skew=a["skew"], vias=a["p"]["vias"], layers=a["p"]["layers"])
+            if a["status"] == "mismatch":
+                r["audit"] = a["why"]
+        if r.get("state") == "c" and r["open"] == [0, 0]:
+            r["state"], r["handoff"] = ("a" if a["status"] == "complete" else "a-mismatch"), False
+            for k in ("handoff_reason", "handoff_reasons", "handoff_detail"):
+                r.pop(k, None)
+            r.setdefault("tried", []).append("reconciled: copper on the board")
+    return rep
 
 
 def _effort_reasons(row):

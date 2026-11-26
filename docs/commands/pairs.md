@@ -41,7 +41,7 @@ Skew limit (`constraints.skew_limit_source`, shown per pair): `[pairs.FAMILY] sk
 
 Sequencing (round 3).  `fanout` is pair-aware: it first plans every pair on the placement (`pairs.reserve_for_fanout`), leaves
 the pads of every planned pair to this stage (no generic stub / via) and treats the planned exits as copper (both corridor ends
-for `reserve_mm`, the via pairs near them, new dog-bone exits); Opt-in: `[pairlay] reserve_exits = true` (default false: the generic fan-out, which escapes more non-pair pins beside pair pins).
+for `reserve_mm`, the via pairs near them, new dog-bone exits); `[pairlay] reserve_exits`: unset = automatic, on only when a pair ends on a part with two pads per net in an interleaved row (USB-C receptacle: the generic fan-out leaves dead stubs there; `twin_join` joins the two pads of each net); `true` = always; `false` = never (the generic fan-out escapes more non-pair pins beside pair pins).
 A net that is complete with locked copper is never fanned out (`fanout.owned_nets`).
 Negotiation (`pairneg.py`): every section is searched alone in `workers` processes, overlapping paths are negotiated with
 present + history cost (only the pairs in a conflict are searched again, the most constrained keeps its path), then the pairs
@@ -51,7 +51,7 @@ via on the odd pad (connected, but reported as a mismatch: the legs cannot have 
 pad is a question (`pair-pads:<net>`, exit 3 after the board is written), not a silent failure.
 
     [pairlay]
-    negotiate = true   negotiate_passes = 8   workers = 8   dogbone = true   reserve_exits = false   reserve_mm = 3.0
+    negotiate = true   negotiate_passes = 8   workers = 8   dogbone = true   reserve_exits = (auto)   reserve_mm = 3.0
     inner_cost = 1.15   passes = 0   via_exit = true   nodes_per_mm = 25000   pad_max_mm = 16
     enabled = true   step_mm = 0.1   clearance_mm = 0.13   via_cost_mm = 20   turn_cost_mm = 0.4   max_nodes = 400000
     ring_mm = 1.0
