@@ -317,7 +317,8 @@ def left_pair_legs(src, pn, hs_block, failed_legs, cons=None, still=None):
     """W39: legs of the deferred pairs the pairs gate / pairgroups left open on `src`: the pairs of `pn` with a leg in
     `hs_block | failed_legs` and a leg open. Both legs of a pair always travel together."""
     still = set(RC.open_by_net(src)) if still is None else set(still)
-    mine, par = set(hs_block) | set(failed_legs), _partners(pn, cons)
+    mine = set(hs_block) | set(failed_legs)
+    par = _partners(set(pn) | mine, cons)             # pairgroups' failures come from the audit's pair list, which `pn` may lack
     return sorted(x for x in par if (x in mine or par[x] in mine) and (x in still or par[x] in still))
 
 

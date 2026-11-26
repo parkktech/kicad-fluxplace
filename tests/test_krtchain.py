@@ -519,3 +519,7 @@ def test_left_pair_legs_uses_pair_naming_and_open_state():
     assert K.left_pair_legs("b", pn, {"USB_DM_J", "USB_DP_J"}, set(), {}, still={"USB_DP_J"}) == ["USB_DM_J", "USB_DP_J"]
     assert K.left_pair_legs("b", pn, set(), {"ETH_P0_P"}, {}, still={"ETH_P0_N"}) == ["ETH_P0_N", "ETH_P0_P"]
     assert K.left_pair_legs("b", pn, {"USB_DM_J", "USB_DP_J"}, set(), {}, still={"ETH_P0_N"}) == []
+
+
+def test_left_pair_legs_includes_pairgroups_failures_missing_from_pn():
+    assert K.left_pair_legs("b", ["A_P", "A_N"], set(), {"INJ_SEC_P", "INJ_SEC_N"}, {}, still={"INJ_SEC_P"}) == ["INJ_SEC_N", "INJ_SEC_P"]
