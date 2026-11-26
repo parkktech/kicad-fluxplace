@@ -66,6 +66,7 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
 
 
 # ---------------------------------------------------------------------------------------------- D71cx: delay skew
+RECON_JOINT_MM = 0.01          # + this per via and per pad past the second of the worse leg (a 3-section chain with vias sums more per-piece rounding)
 RECON_TOL_MM = 0.05            # D71cx: own per-leg decomposition must equal KiCad's DRC total length within this
 
 
@@ -144,7 +145,8 @@ def leg_decomposition(board, net, rows, planes, tol=0.005):
         delay += mm * d
     if tot > 0 and via_mm and not unknown:
         delay += via_mm * delay / tot
-    return {"layer_mm": {k: round(v, 4) for k, v in lmm.items()}, "via_mm": round(via_mm, 4), "total_mm": round(tot + via_mm, 4),
+    npads = sum(1 for p in board.GetPads() if str(p.GetNetname()) == net)
+    return {"n_vias": len(vias), "n_pads": npads, "layer_mm": {k: round(v, 4) for k, v in lmm.items()}, "via_mm": round(via_mm, 4), "total_mm": round(tot + via_mm, 4),
             "delay_ps": None if unknown else round(delay, 3), "ps_per_mm": psmm, "unknown": unknown}
 
 
@@ -285,6 +287,12 @@ def kicad_delays(board, legs, kicad_cli="kicad-cli", timeout=300):
     return out
 
 
+def recon_tol(dp, dn):
+    """mm: RECON_TOL_MM for a plain 2-terminal leg, growing by RECON_JOINT_MM per via and per pad past two on the worse leg (sections)."""
+    j = max(d.get("n_vias", 0) + max(0, d.get("n_pads", 0) - 2) for d in (dp, dn))
+    return round(RECON_TOL_MM + RECON_JOINT_MM * j, 4)
+
+
 def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=False):
     """THE skew of one pair (REFACTOR-PLAN-W16 1.1, D71cx).  -> dict
       status   "ok" | "unmeasured" (kicad-cli failed or an open leg: cannot pass) | "MEASURE_DISAGREE" (a leg's own decomposition misses
@@ -321,7 +329,7 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
     except Exception as e:                                  # noqa: BLE001 - no pcbnew / odd board: unmeasured, never a guess
         out["why"] = f"decomposition failed: {type(e).__name__}: {e}"
         return out
-    out["recon"] = {"p": round(dp["total_mm"] - kl["p"], 4), "n": round(dn["total_mm"] - kl["n"], 4), "tol": RECON_TOL_MM}
+    out["recon"] = {"p": round(dp["total_mm"] - kl["p"], 4), "n": round(dn["total_mm"] - kl["n"], 4), "tol": recon_tol(dp, dn)}
     out.update(p_ps=dp["delay_ps"], n_ps=dn["delay_ps"], own_ps=[dp["delay_ps"], dn["delay_ps"]])
     ps_bad = []
     if grade_ps and dp["delay_ps"] is not None and dn["delay_ps"] is not None:
@@ -331,7 +339,7 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
             out["why"] = "kicad-cli delay run failed or its rule file was ignored: no own-math fallback (D71cx)"
             return out
         out.update(p_ps=kd[p], n_ps=kd[n])
-        tol_ps = RECON_TOL_MM * max(list(dp["ps_per_mm"].values()) + list(dn["ps_per_mm"].values()) + [1.0])
+        tol_ps = out["recon"]["tol"] * max(list(dp["ps_per_mm"].values()) + list(dn["ps_per_mm"].values()) + [1.0])
         out["recon"].update(p_ps=round(dp["delay_ps"] - kd[p], 3), n_ps=round(dn["delay_ps"] - kd[n], 3), tol_ps=round(tol_ps, 3))
         ps_bad = [k for k in ("p", "n") if abs(out["recon"][k + "_ps"]) > tol_ps]
         dp = dict(dp, delay_ps=kd[p])
@@ -366,7 +374,7 @@ def pair_skew(B, p, n, cons=None, lengths=None, kicad_cli="kicad-cli", grade_ps=
     # the reconciliation gates only where OUR numbers enter the verdict (the per-orientation path basis).  A 2-terminal pair is KiCad's number
     # alone, in mm and in ps (delay-only tuning profile); the own sum is advice there (KiCad clips a detour inside a pad to the shortest
     # path, so such a leg reads longer in our raw sum than in KiCad's number).
-    bad = [k for k in ("p", "n") if abs(out["recon"][k]) > RECON_TOL_MM] if out["basis"] == "path" else []
+    bad = [k for k in ("p", "n") if abs(out["recon"][k]) > out["recon"]["tol"]] if out["basis"] == "path" else []
     ps_bad = ps_bad if out["basis"] == "path" else []
     out["status"] = "MEASURE_DISAGREE" if bad or ps_bad else "ok"
     if bad or ps_bad:
