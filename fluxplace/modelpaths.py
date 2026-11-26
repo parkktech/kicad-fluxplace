@@ -40,6 +40,37 @@ def ancestor_hit(path, board_dir, resolve=None, levels=ANCESTOR_LEVELS):
     return None
 
 
+LIB_DIRS = (("lib", "3dmodels"), ("hardware", "lib", "3dmodels"))
+
+
+def project_lib(board_dir, levels=6):
+    """The project's 3D model library: the nearest `lib/3dmodels` (or `hardware/lib/3dmodels`) folder in the board's folder
+    or an ancestor (up to `levels`), real path. None when the project has none."""
+    d = os.path.abspath(board_dir)
+    for _ in range(levels + 1):
+        for parts in LIB_DIRS:
+            c = os.path.join(d, *parts)
+            if os.path.isdir(c):
+                return os.path.realpath(c)
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return None
+
+
+def outside_lib(path_as_written, full, board_dir):
+    """True when the project has a model library and this model file lies outside it. A `${KICAD*_3DMODEL_DIR}` path
+    (the installed KiCad stock library) is not a project path and is judged by whether it resolves, not by where."""
+    if "${KICAD" in path_as_written:
+        return False
+    lib = project_lib(board_dir)
+    if not lib:
+        return False
+    real = os.path.realpath(full)
+    return not (real == lib or real.startswith(lib + os.sep))
+
+
 def scan(board):
     """-> {"total": n model paths, "unresolved": [path as written]} for a .kicad_pcb file. A path that resolves
     through an ancestor folder (ancestor_hit) is resolved."""

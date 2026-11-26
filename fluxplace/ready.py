@@ -202,7 +202,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     detail["gate"] = g
     if g["ok"]:
         lines.append(_line("parts gate", PASS, PG.summary_line(g)[len("parts gate: "):]))
-    elif allow_undocumented and not g["geometry"]:      # footprint geometry is never bypassed (fpcheck)
+    elif allow_undocumented and not g["geometry"] and not g["models"]:      # footprint geometry and 3D models are never bypassed
         lines.append(_line("parts gate", WAIVED, PG.bypass_note(g)))
         for l in lines:
             if l["name"] == "parts" and l["status"] == FAIL:      # the same documentation failures, already waived loudly above
@@ -504,9 +504,21 @@ def cmd_ready(a):
     spec, cons, facts, mm, ds = PC.load(a)
     board = getattr(a, "board", None)
     sess = PC._session(a, cons, "ready")
+    model_res = None
+    if board and os.path.exists(board) and facts:
+        from . import modelstart as MS
+        model_res = MS.run(board, facts, mm, cons, offline=getattr(a, "no_api", False), log=print)   # bind / fetch / name what the owner must download
+        if model_res["bound"] or model_res["fetched"]:
+            spec, cons, facts, mm, ds = PC.load(a)                     # the board changed: facts again
     cache = os.path.dirname(os.path.abspath(a.spec))
     pres = P.evaluate(spec, cons, facts=facts, mpn_map=mm, ds_dir=ds, api=not a.no_api, cache_dir=cache, session=sess)
     lines, detail = evaluate(spec, cons, facts, board, ds, sess, pres, allow_undocumented=getattr(a, "allow_undocumented", False))
+    if model_res is not None:
+        from . import modelstart as MS
+        bad = model_res["owner"] or model_res["pending"]
+        lines.insert(next((i + 1 for i, l in enumerate(lines) if l["name"] == "parts gate"), len(lines)),
+                     _line("3D models", FAIL if bad else PASS, model_res["line"], MS.detail_lines(model_res)[:50]))
+        detail["models"] = model_res
     if board and os.path.exists(board):
         lines.append(sync_netclasses(board, cons))
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
@@ -552,7 +564,7 @@ def cmd_ready(a):
         raise SystemExit(1)
     other = bool(nfail or nopen)
     if (other and a.allow_incomplete) or (not other and detail["gate"]["parts"] and getattr(a, "allow_undocumented", False)
-                                          and not detail["gate"]["geometry"]):
+                                          and not detail["gate"]["geometry"] and not detail["gate"]["models"]):
         if board:
             try:
                 with open(notready_path(board), "w") as fh:

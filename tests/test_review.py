@@ -805,3 +805,15 @@ def test_model_path_resolves_through_ancestor_is_info_not_fail(tmp_path):
     assert MP.scan(str(board))["unresolved"] == []
     assert MP.ancestor_hit("${KIPRJMOD}/../lib/3dmodels/x.step", str(run))[1] == str(tmp_path / "W14")
     assert MP.ancestor_hit("${KIPRJMOD}/../lib/3dmodels/x.step", str(tmp_path / "elsewhere")) is None
+
+
+def test_model_outside_project_library_fails_in_review(tmp_path):
+    from fluxplace import review as R
+    (tmp_path / "lib" / "3dmodels").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "o.step").write_text(_valid_step_text())
+    (tmp_path / "lib" / "3dmodels" / "i.step").write_text(_valid_step_text())
+    facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
+        "U1": {"footprint": "X", "models": [str(tmp_path / "other" / "o.step")], "mech": False},
+        "U2": {"footprint": "Y", "models": [str(tmp_path / "lib" / "3dmodels" / "i.step")], "mech": False}}}
+    assert [(f["code"], f["refs"][0]) for f in R.check_models(facts) if f["level"] == "FAIL"] == [("MODEL_OUTSIDE_LIB", "U1")]
