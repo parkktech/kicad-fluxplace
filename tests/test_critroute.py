@@ -84,7 +84,7 @@ def _fake_board(monkeypatch, opens_good, shorts_bad=()):
             fh.write("x")
         if opens_good:
             closed.add(out)
-        return {}
+        return {"accepted": True}
 
     def measure(path, kicad_cli="kicad-cli"):
         if path in closed:
@@ -167,3 +167,25 @@ def test_stage_packets_without_actions_and_defaults_in_off_mode(tmp_path, monkey
     assert seen["acts"] is None and res["verdict"] == "pass"
 
 
+
+
+def test_refused_lay_is_a_dropped_try_not_a_measure_of_the_empty_slot(tmp_path, monkeypatch):
+    """W30 root cause: a refused lay writes nothing, so `tmp` stayed the empty mkstemp slot and measure() of it read
+    "Unexpected end of input" (6 of 12 tries). A refusal is its own result and the slot is never measured."""
+    _fake_board(monkeypatch, opens_good=True)
+    monkeypatch.setattr(HR, "suggest", lambda board, net, conn=None, constraints=None, layers=None, avoid=None, **kw:
+                        {"found": True, "path": "P", "length_mm": 1.0})
+    monkeypatch.setattr(HR, "lay", lambda *a, **kw: {"accepted": False, "reason": "new DRC violation(s): 1"})
+    measured = []
+    monkeypatch.setattr(gaps, "measure", lambda path, kicad_cli="kicad-cli": measured.append(path) or
+                        ({"opens": 1, "shorts": 0} if "critroute" not in path else (_ for _ in ()).throw(
+                            RuntimeError("Unexpected end of input"))))
+    board = str(tmp_path / "b.kicad_pcb")
+    open(board, "w").write("base")
+    out = str(tmp_path / "board.kicad_pcb")
+    res = CR.apply(board, out, {"order": ["BT1_RF"], "nets": {}}, None, {}, str(tmp_path / "attempts.jsonl"),
+                   crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}])
+    assert not [p for p in measured if "critroute" in p]
+    rec = json.loads(open(tmp_path / "attempts.jsonl").readline())
+    assert rec["result"] == "refused" and "new DRC violation" in rec["why"]
+    assert res["kept"] == [] and not [f for f in os.listdir(tmp_path) if "critroute" in f]

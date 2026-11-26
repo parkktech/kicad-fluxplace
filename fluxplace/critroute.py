@@ -19,6 +19,10 @@ GRID_MM = 10.0                       # density.compute default grid: region x/y 
 ASK = "order, layers, avoid circles [x, y, r] for this net; no coordinates of copper"
 
 
+class _Refused(Exception):
+    """The guarded lay declined the path (its reason is the message): a measured outcome, not an error."""
+
+
 def _log(msg):
     print("critroute: " + msg, file=sys.stderr)
 
@@ -207,14 +211,10 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             if r.get("found"):
                 tmp = HR._tmp_beside(cur, f"critroute{n_try}")
                 try:
-                    try:
-                        HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
-                        m = gaps.measure(tmp)
-                    except RuntimeError as e:               # kicad-cli exits without a report under load (W30: 10 of 20 tries); one more go
-                        if "no report" not in str(e):
-                            raise
-                        HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
-                        m = gaps.measure(tmp)
+                    res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True)
+                    if not res.get("accepted"):             # a refused lay never writes `tmp`: it is still the empty mkstemp slot (W30: "Unexpected end of input")
+                        raise _Refused(str(res.get("reason") or "lay refused")[:200])
+                    m = gaps.measure(tmp)
                     ok = m["opens"] < base["opens"] and m["shorts"] <= base["shorts"]
                     result = "kept" if ok else "dropped"
                     why = f"opens {base['opens']}->{m['opens']}, shorts {base['shorts']}->{m['shorts']}"
@@ -224,6 +224,8 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                         kept.append({"net": net, "conn": i, "len_mm": r.get("length_mm")})
                         cur, base = tmp, m
                         tmp = None
+                except _Refused as e:
+                    result, why = "refused", str(e)
                 except Exception as e:                      # noqa: BLE001 - a failed lay is one failed try, not a stage error
                     result, why = "error", f"{type(e).__name__}: {str(e)[:160]}"
             if tmp:

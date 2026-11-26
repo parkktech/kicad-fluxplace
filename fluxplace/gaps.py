@@ -473,8 +473,7 @@ def _rm(p):
 
 
 def _copy(src, dst):
-    shutil.copy2(src, dst + ".tmp")
-    os.replace(dst + ".tmp", dst)
+    _procs.atomic_copy(src, dst)
 
 
 def _sidecars(src, dst):
