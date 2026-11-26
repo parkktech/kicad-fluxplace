@@ -76,12 +76,12 @@ def test_strip_escape_removes_gated_legs_and_neighbour_fanout_only(monkeypatch):
     assert len(left) == 1 and "(start 5 0)" in left[0]
 
 
-def test_impedance_off_nets_empty_on_exception(monkeypatch):
+def test_impedance_off_nets_unknown_on_exception(monkeypatch):
     def boom(path):
         raise RuntimeError("no board")
     import fluxplace.boardfile as BF
     monkeypatch.setattr(BF, "facts_from_file", boom)
-    assert GP.impedance_off_nets("nope.kicad_pcb", {}) == set()
+    assert GP.impedance_off_nets("nope.kicad_pcb", {}) is None      # A6: UNKNOWN, never "none off"
 
 
 def test_pair_with_impedance_miss_is_not_already_ok(tmp_path, monkeypatch):
