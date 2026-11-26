@@ -345,6 +345,22 @@ def test_a5_from_on_an_unclean_gate_exits_5_with_gaps_and_no_rung_attempt(tmp_pa
     assert rc == 5 and not seen and "gap g1 short" in out
 
 
+def test_a5_from_critroute_without_state_starts_the_stage(tmp_path, monkeypatch, capsys):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    # pair-skew is owned by `tune`, which runs before critroute: --from critroute skips it, so the finding must not stop the flow
+    left = [{"id": "p1", "kind": "pair-skew", "class": "hs-pair", "nets": ["MIC_P", "MIC_N"], "at": [1.0, 2.0]}]
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 0}, "best": str(board)})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran on --from")))
+    seen = []
+    monkeypatch.setattr(PL, "FUNCS", {name: (lambda name: lambda c, n, b: seen.append(name) or {"verdict": "pass", "board": b})(name)
+                                      for name in PL.STAGES})
+    rc = PL.run(_args(tmp_path, board, from_stage="critroute", to_stage="critroute", flow="constructive"))
+    out = capsys.readouterr().out
+    assert rc == 0 and seen == ["critroute"], out
+    assert "deferred" in out
+
+
 def test_a5_tune_stage_passes_when_pairs_are_still_over_skew(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from fluxplace import tune as TU

@@ -1846,8 +1846,10 @@ def _run(a):
         gst = ((st["stages"].get(k) or {}).get("gate") or {})
         if gk_prev and gst.get("stop") not in ("clean", "deferred") and a.board:
             # M3: --from <stage> BOARD with no or an old state: the missing gate is checked on the input board
-            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds
-            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board, later=STAGES_[i0:])
+            # A5: measure only (one DRC, seconds); the repair loop runs inside the stage that owns the gap kinds.
+            # Ledger 2026-11-25: a finding owned by a stage before --from was handled by that stage's run, which this run
+            # skips, so it is deferred (warn, recorded), not an exit 5. Owners after --from are deferred as before.
+            g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board, later=STAGES_)
             gst = {"stop": g["gate"]["stop"]}
             if g["gate"].get("deferred"):
                 gst["deferred"] = g["gate"]["deferred"]
