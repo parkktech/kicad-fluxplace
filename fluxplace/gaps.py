@@ -837,6 +837,94 @@ def _r_krt(base, out, gaps, ctx):
     return res
 
 
+KRT_LOCK_MAX = 2                                # W39: open nets per krt_locked call
+KRT_LOCK_NETS = 6                               # W39: blocker nets whose locked copper one call may rip
+KRT_LOCK_MARGIN = 2.0                           # W39: mm around the open connection that bounds the rip
+
+
+def krt_blockers(js, net):
+    """W39: nets named as blocking `net` in a KRT --json-out summary (`blockers`: [{net, blocked_by: [{net}]}]), in order."""
+    try:
+        d = json.load(open(js)) if isinstance(js, str) else (js or {})
+    except (OSError, ValueError):
+        return []
+    out = []
+    for b in d.get("blockers") or []:
+        if isinstance(b, dict) and b.get("net") == net:
+            out += [x.get("net") for x in b.get("blocked_by") or [] if isinstance(x, dict) and x.get("net")]
+    return list(dict.fromkeys(out))
+
+
+def _r_krt_locked(base, out, gaps, ctx):
+    """W39: an open plain net that KRT cannot route because LOCKED copper of other plain nets boxes it in (KRT cannot rip locked
+    copper). Per target: the blockers KRT names (one diagnostic call, or the last summary) are filtered to lock level FREE (never
+    a pair leg, RF, controlled net, zone net or rail), their copper inside the connection's box is unlaid in a session (handroute.shove,
+    locked free copper is ripped by the ordinary edit guard), then the target and every ripped net are re-routed by KRT first.
+    session_commit judges the edit; close's _accept (R1/R2/R4/R6: pairs, RF, power, DRC) keeps or reverts the whole result."""
+    from . import handroute as HR, lockpolicy as LP
+    cons, cp = ctx["cons"], ctx.get("cons_path")
+    protect, zones = set(ctx.get("protect") or ()), _zone_nets(base)
+    if _krt_cmd(base, out, ["x"], ctx) is None:
+        return {"status": "krt not found"}
+    rails = set(_rail_widths(base, cons, signal_layers(base), 0.0))
+    try:
+        names = sorted({n for n in _krt_open(base, cp)} | set(_protect_levels(base, cons)))
+    except Exception:                                      # noqa: BLE001
+        names = []
+    targets = [n for n in dict.fromkeys(_nets(gaps)) if n not in zones and n not in rails and LP.level(n, cons, names) == LP.FREE][:KRT_LOCK_MAX]
+    if not targets:
+        return {"status": "no plain net"}
+    w = out + ".session.kicad_pcb"
+    tmps = [w, w + ".krt.kicad_pcb"]
+    res = {"status": "ran", "targets": targets, "ripped": {}, "blockers": {}}
+    try:
+        _clean_board(w)
+        _sidecars(base, w)
+        HR.session_begin(base, w)
+        for net in targets:
+            conns = HR.open_nets(w, constraints=cp)["connections"]
+            i = next((k for k, r in enumerate(conns) if r.get("net") == net), None)
+            if i is None:
+                continue
+            js = f"{out}.lk.json"
+            _rm(js)
+            cmd = _krt_cmd(w, w + ".diag.kicad_pcb", [net], ctx)
+            tmps.append(w + ".diag.kicad_pcb")
+            cmd[cmd.index("--nets"):cmd.index("--nets")] = ["--json-out", js]
+            try:
+                _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+            except subprocess.TimeoutExpired:
+                pass
+            blk = krt_blockers(js, net)
+            res["blockers"][net] = blk
+            cands = [b for b in blk if b != net and b not in protect and b not in zones and b not in rails
+                     and LP.level(b, cons, names) == LP.FREE][:KRT_LOCK_NETS]
+            rec = conns[i]
+            pts = [(rec["a"]["x"], rec["a"]["y"]), (rec["b"]["x"], rec["b"]["y"])]
+            x0, y0 = min(p[0] for p in pts) - KRT_LOCK_MARGIN, min(p[1] for p in pts) - KRT_LOCK_MARGIN
+            x1, y1 = max(p[0] for p in pts) + KRT_LOCK_MARGIN, max(p[1] for p in pts) + KRT_LOCK_MARGIN
+            ripped = []
+            for b in [net] + cands:                        # the target's own locked stub first: it may be what boxes it in
+                try:
+                    HR.shove(w, b, window_box=(x0, y0, x1 - x0, y1 - y0), op="unlay", constraints=cp)
+                    ripped.append(b)
+                except ValueError as e:                    # nothing of that net in the box, or hard-locked: not ripped
+                    res["ripped"].setdefault("refused", []).append(f"{b}: {str(e)[:80]}")
+            res["ripped"][net] = ripped
+            for b in dict.fromkeys(ripped):                # target first, then what it displaced
+                _route_net(w, b, signal_layers(w), ctx)
+        r = HR.session_commit(w, out, constraints=cp, mode="edit")
+        res["commit"] = bool(r.get("accepted"))
+        if not res["commit"]:
+            res["status"] = "refused: " + "; ".join(str(x) for x in (r.get("reasons") or [])[:2])[:160]
+            _rm(out)
+    finally:
+        for t in tmps:
+            _clean_board(t)
+    return res
+
+
+
 def _r_relocate(base, out, gaps, ctx):
     """Move a small support part next to the pin it serves (route-diagnose `moves`), re-lay its nets with KRT, keep what lowers the
     opens (relocate.py). The close loop's guard and the manifest commit judge the candidate like any rung's."""
@@ -2083,7 +2171,7 @@ def _r_pairgroup(base, out, gaps, ctx):
 
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_edgesliver, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
-         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "ai": _r_ai, "prune": _r_prune,
+         "snapiter": _r_snapiter, "krt_region": _r_krt_region, "krt_locked": _r_krt_locked, "ai": _r_ai, "prune": _r_prune,
          "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
          "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute}
 
@@ -2092,7 +2180,7 @@ DISPATCH = {
     "short": ["drcfix"],
     "open-gap": ["joingaps", "patch"],
     "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
-    "open-free": ["prune", "patch", "handrepair", "krt", "relocate", "krt_region", "region", "patch_rip", "ai"],   # relocate (L1, moves a part) after the L0 router
+    "open-free": ["prune", "patch", "handrepair", "krt", "relocate", "krt_region", "krt_locked", "region", "patch_rip", "ai"],   # krt_locked: W39 locked free copper; relocate (L1, moves a part) after the L0 router
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
@@ -2106,7 +2194,7 @@ DISPATCH = {
     "pair-skew": ["pairgroup", "tune", "ai"],
     "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
 }
-LEVEL = {"relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
+LEVEL = {"relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt_locked": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
 
 def _tool():
