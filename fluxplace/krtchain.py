@@ -238,13 +238,13 @@ def _restore_project(source_board, output_board):
 def _post(best, d, planes, R, protect=()):
     """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill.
     Ends the snap leaves (clearance-refused) go to the via-to-end move, then the joiner (the close-stage fallbacks); each is DRC-guarded,
-    lock-respecting and skips the `protect` nets (the manifest's completed nets)."""
+    lock-respecting and skips the `protect` nets (the manifest's nets), the last fallback (centre) included."""
     from . import snapiter as SI, planetie as PT, opengate as OG
     snap = SI.run(best, best, log=lambda _m: None)
     if snap.get("centred_left") != 0:
         for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run), ("centre", SI.centre_run)):
             try:
-                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect) if key != "centre" else [])
+                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect))      # W46: the centre move too (it moved locked copper of 25 protected nets: PROTECTED_CHANGED at the stage commit)
             except Exception as e:                           # noqa: BLE001 - a fallback failure keeps the snapped board
                 snap[key] = {"error": str(e)[:160]}
                 break
