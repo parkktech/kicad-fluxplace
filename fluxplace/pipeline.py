@@ -1354,6 +1354,9 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
         return {"verdict": "fail", "board": board, "line": f"gate {name}: crashed {type(e).__name__}: {str(e)[:80]}", "next": [],
                 "gate": {"kinds": kinds, "stop": "crashed", "dir": d}}      # M2: the caller reads res["gate"] on every path
     stop = r["stop"]
+    if stop == "manifest_stale":                            # B1: refused input; the incumbent board stays
+        return {"verdict": "fail", "board": board, "line": f"gate {name}: {r['reason']}"[:200], "next": r.get("diff", [])[:10],
+                "gate": {"kinds": kinds, "stop": stop, "dir": d}}
     if src:
         _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
@@ -1425,7 +1428,7 @@ def _pcbnew_state_guard(name, res):
                 f"(a Remove() of a discarded item? use Delete or fresh process); stage line was: {res.get('line', '')}")
 
 
-def _commit_point(name, prev, res):
+def _commit_point(name, prev, res, cons=None):
     """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
     colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
     the input path (a stage that edited its board in place): the sealed manifest is the baseline then."""
@@ -1433,6 +1436,14 @@ def _commit_point(name, prev, res):
     new = res.get("board")
     if not new or not os.path.isfile(new) or not os.path.isfile(prev):
         return res
+    if cons is not None and os.path.abspath(new) != os.path.abspath(prev):          # B1: new copper off its net contract (RF, rails, pairs)
+        try:
+            ct = BW.contract_check(prev, new, cons)
+        except Exception as e:                                          # noqa: BLE001 - an unchecked commit must not pass
+            ct = {"ok": False, "why": f"contract check crashed: {type(e).__name__}: {str(e)[:100]}"}
+        if not ct["ok"]:
+            return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {ct['why']}"[:200],
+                        next=[f"{name}: output not adopted ({ct['why'][:150]}); the net stays open with its gap, never off its contract"])
     man = BW.load_manifest(prev)
     if not man["nets"] and name not in SEED_STAGES:
         return res                                                      # nothing protected yet
@@ -1457,6 +1468,17 @@ def _commit_point(name, prev, res):
         return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {v['why']}"[:200],
                     next=[f"{name}: output not adopted ({v['why'][:150]}); release the pair explicitly (boardwrite.release) to re-lay it"])
     return res
+
+
+def _set_aside_evidence(c, stages, i0, board):
+    """B1: an allowed manifest re-seed changed the input: the gate directories of every stage from `i0` on are set aside (`.stale-<sha>`),
+    never reused as evidence for the new input."""
+    sha = _file_sha1(board)[:10]
+    for k in range(i0, len(stages)):
+        gd = os.path.join(c.work, f"{k + 1}-gate")
+        if os.path.isdir(gd):
+            os.rename(gd, gd + ".stale-" + sha)
+            print(f"pipeline: gate evidence of {stages[k]} set aside ({os.path.basename(gd)}.stale-{sha})", flush=True)
 
 
 def st_pairs(c, n, board):
@@ -1849,7 +1871,12 @@ def _run(a):
                 _man = TF_._beating("manifest seed", lambda: BW_.seed_from_board(board, c.cons, log=print), stage="pipeline")
                 print(f"pipeline: input board had no manifest; protecting {len(_man['nets'])} net(s) (locked items + complete pairs)", flush=True)
             elif BW_.is_stale(board, _man):
-                BW_.fresh_manifest(board, log=print)
+                _man = BW_.fresh_manifest(board, log=print)       # B1: refused (ManifestStale) unless `versions accept` recorded this file
+                if _man.get("reseeded") is not None:
+                    _set_aside_evidence(c, STAGES_, i0, board)
+        except BW_.ManifestStale as e:
+            print(f"pipeline: {e} (exit 5, no stage started)", flush=True)
+            return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
     led = _Ledger(work, STAGES_, i0)
@@ -1907,7 +1934,7 @@ def _run(a):
                 res = FUNCS[name](c, i + 1, board)
             res.setdefault("verdict", "pass")
             if res["verdict"] in ("pass", "warn"):
-                res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
+                res = _commit_point(name, board, res, c.cons)   # A3: only a stage that ran (a reused gate board was verified by close)
         res.setdefault("verdict", "pass")
         res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
         if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope

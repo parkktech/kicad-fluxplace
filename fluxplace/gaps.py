@@ -2217,6 +2217,14 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
     os.makedirs(work, exist_ok=True)
+    from . import boardwrite as BW0
+    try:                                                 # B1: an unexplained edit of the input is refused before anything is copied or written
+        BW0.fresh_manifest(board, log)
+    except BW0.ManifestStale as e:
+        res = {"stop": "manifest_stale", "exit": 2, "verdict": "fail", "best": board, "left": [], "diff": e.diff, "reason": str(e),
+               "start": {}, "end": {}, "packets": [], "released": {}}
+        _write_json(os.path.join(work, "stop.json"), res)
+        return res
     best = os.path.join(work, "best.kicad_pcb")
     _copy(board, best)
     _sidecars(board, best)
@@ -2241,7 +2249,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     from . import boardwrite as BW
-    man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing protected yet; stale: re-seeded)
+    man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing; stale: ManifestStale unless the registry recorded it)
     if man["nets"]:
         BW.seed(best, keep=man, locked=False)            # the work copy carries it, so a release is a logged edit of that file
     man0 = json.loads(json.dumps(man))                   # the input's manifest: the baseline the pipeline's commit point judges the final board against

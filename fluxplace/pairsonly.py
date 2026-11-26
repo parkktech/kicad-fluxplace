@@ -158,7 +158,12 @@ def _commit_guard(board, out, sel, rows, log):
     from . import boardwrite as BW
     if not os.path.exists(out):
         return
-    man = BW.fresh_manifest(board, log)
+    try:
+        man = BW.fresh_manifest(board, log)
+    except BW.ManifestStale as e:                       # B1: an unexplained edit is not legitimised: the input board is the output
+        log(f"  commit refused: {e}")
+        shutil.copy(board, out)
+        return
     if not man["nets"]:
         man = BW.seed_from_board(board, None, log=log)
     if not man["nets"]:
