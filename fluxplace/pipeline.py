@@ -604,8 +604,9 @@ def _st_route(c, n, board):
     from . import gaps as GP
     try:                                                 # D71cj: rail widths; a net with a zone on the board is not a rail
         PW = PWR.route_widths(c.cons, layers=len(B["copper"]), track_mm=R["track"], exclude=GP._zone_nets(board))
-    except Exception:                                    # noqa: BLE001 - no widths is a worse route, not a failed stage
-        PW = {}
+    except Exception as e:                               # noqa: BLE001 - A6: no widths would route rails at the default width: the stage fails
+        return {"verdict": "fail", "board": board, "line": f"route: rail width table failed ({type(e).__name__}: {str(e)[:80]}); "
+                "not routing rails at the default width", "next": []}
     first, _rest = ST.escape_first(B, cls)
     first = [x for x in first if x in todo]
     frrec = None

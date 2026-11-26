@@ -9,7 +9,7 @@ from test_pipeline import _board, _args
 
 def test_gate_defaults_and_override():
     assert GP.gate_kinds({}, "pairs") == ["pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance"]
-    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias"]     # PHASE3I F2: rails are laid by route
+    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias", "rf-impedance", "net-contract"]     # A6; PHASE3I F2: rails are laid by route
     assert GP.gate_kinds({"flow": {"gates": {"pairs": []}}}, "pairs") == []
 
 
@@ -143,7 +143,7 @@ def test_pair_impedance_kind_and_route_power_default():
     g = {"kind": "pair-impedance", "class": "hs-pair", "sev": 1}
     assert GP.in_scope(g, ["pair-impedance"]) and not GP.in_scope({**g, "class": "pair"}, ["pair-impedance"])
     assert GP.score_terms({"shorts": 0, "opens": 0, "errors": 0}, [g])["hs_pair"] == 1
-    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias"]     # no `power` stage: rails are laid by `route`
+    assert GP.gate_kinds({}, "route") == ["power-width", "power-vias", "rf-impedance", "net-contract"]     # A6: no `power` stage: rails are laid by `route`
 
 
 def test_gate_budget_from_flow_constraint(tmp_path, monkeypatch):

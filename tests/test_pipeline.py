@@ -399,3 +399,14 @@ def test_trace_finish_sits_directly_before_silk():
     assert PL.CONSTRUCTIVE[PL.CONSTRUCTIVE.index("trace-finish") - 1] == "close"
     assert PL.ALL_STAGES.count("trace-finish") == 1
     assert "trace-finish" in PL.FUNCS
+
+
+def test_route_widths_failure_fails_the_stage_not_a_default_width_route(tmp_path, monkeypatch):
+    from fluxplace import power as PWR
+    b = _board(tmp_path)
+    PL.run(_args(tmp_path, b, to_stage="anchor-check"))
+    monkeypatch.setattr(PWR, "route_widths", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no width table")))
+    a2 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
+    assert PL.run(a2) == 1
+    r = PL.load_state(a2.workdir)["stages"]["route"]
+    assert r["verdict"] == "fail" and "rail width table failed" in r["line"]

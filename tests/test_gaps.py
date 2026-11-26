@@ -723,7 +723,7 @@ def test_classify_mask_opening_bridge():
 
 
 # ---- PHASE3A (D71cj a): review findings as gap kinds, score terms, protect only audit-complete pairs ----
-from fluxplace import power as _PW, boardfile as _BF, preroute as _PR, routediag as _RD
+from fluxplace import power as _PW, boardfile as _BF, preroute as _PR, routediag as _RD, qualaudit as _QA
 
 
 def test_score_counts_new_kinds():
@@ -779,6 +779,8 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
         {"code": "POWER_WIDTH", "refs": ["VBAT"], "msg": "VBAT narrow"},
         {"code": "POWER_CURRENT_UNKNOWN", "refs": ["X"], "msg": "warn"}])
     monkeypatch.setattr(_RD, "load", lambda board: None)
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: ([], set(), None))
+    monkeypatch.setattr(_QA, "rf_rows", lambda *a, **k: [])
     monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U3"], "msg": "U3 blocked"}])
     cons = {"not_pairs": ["SENSE_ADC_P", "SENSE_ADC_N"]}
     rows_out, failed = GP.review_gaps("b.kicad_pcb", cons)
@@ -789,11 +791,35 @@ def test_review_gaps_kinds_classes_and_skips(monkeypatch):
         "pair:USB_D_P/USB_D_N", "pair:Y_P/Y_N", "pair:Z_P/Z_N"}
 
 
+def test_rf_net_at_signal_width_on_inner_layer_is_an_rf_impedance_gap_and_the_gate_is_not_clean(monkeypatch):
+    from test_review import STACK6
+    monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
+    monkeypatch.setattr(_PW, "check", lambda *a, **k: [])
+    monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, []))
+    monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [])
+    monkeypatch.setattr(_RD, "load", lambda board: {"pads": [{"net": "RF_X"}], "zones": []})
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: (STACK6, {"In1.Cu", "In4.Cu"}, None))
+    monkeypatch.setattr(_QA, "tracks_of", lambda B, net: {"length": 30.0, "vias": 0, "layers": {"In2.Cu": 30.0},
+                                                          "segments": [("In2.Cu", 0.15, 30.0)]})
+    rows_out, failed = GP.review_gaps("b.kicad_pcb", {"rf": {"nets": ["RF_X"]}})
+    assert failed == [] and [(g["kind"], g["class"], g["nets"]) for g in rows_out] == [("rf-impedance", "rf", ["RF_X"])]
+    assert "rf-impedance" in GP.gate_kinds({}, "route") and "net-contract" in GP.gate_kinds({}, "route")
+    assert GP.in_scope(rows_out[0], GP.gate_kinds({}, "route")) and GP.DISPATCH["rf-impedance"] == ["rfroute"]
+    assert GP.deferred_left(rows_out, ("tune", "route", "close")) is None      # no later stage owns it: the gate stays closed
+
+
+def test_impedance_off_nets_is_unknown_not_empty_on_exception(monkeypatch):
+    monkeypatch.setattr(_BF, "facts_from_file", lambda board: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert GP.impedance_off_nets("b.kicad_pcb", {}) is None
+
+
 def test_review_gaps_isolates_failing_source(monkeypatch):
     monkeypatch.setattr(_BF, "facts_from_file", lambda board: {})
     monkeypatch.setattr(_PW, "check", lambda facts, cons: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(GP, "_pair_audit", lambda board, cons, opn=None: (None, {}, []))
     monkeypatch.setattr(_RD, "load", lambda board: None)
+    monkeypatch.setattr(_QA, "_ctx", lambda *a, **k: ([], set(), None))
+    monkeypatch.setattr(_QA, "rf_rows", lambda *a, **k: [])
     monkeypatch.setattr(_PR, "pin_escape_blocked", lambda B, **k: [{"code": "PIN_ESCAPE_BLOCKED", "refs": ["U9"], "msg": "m"}])
     rows_out, failed = GP.review_gaps("b.kicad_pcb", {})
     assert [g["kind"] for g in rows_out] == ["pin-escape"] and failed == ["power"]
