@@ -379,3 +379,27 @@ def test_gate_model_failure_listed_for_ready_to_refuse_bypass(tmp_path):
     assert set(g["models"]) == {"R1", "R2", "U1"}
     f2 = _model(tmp_path)
     assert PG.gate(spec, {}, f2, _res(tmp_path, spec, f2), qty=100)["models"] == []
+
+
+def test_find_map_takes_the_registry_version_of_current(tmp_path):
+    """R088: W16/CURRENT.kicad_pcb has no version in its name; the registry entry names the map (or the folder does)."""
+    from fluxplace import sourcing as S
+    (tmp_path / "docs" / "resume").mkdir(parents=True)
+    (tmp_path / "hardware" / "tools").mkdir(parents=True)
+    (tmp_path / "W16" / "stageA" / "ready-1").mkdir(parents=True)
+    for n in ("mpn_map.json", "mpn_map-v20.json", "mpn_map-w17.json"):
+        (tmp_path / "hardware" / "tools" / n).write_text("{}")
+    reg = {"active": "W16", "versions": {"W16": {"status": "active", "mpn_map": "mpn_map-v20.json"}, "W17": {"status": "x"}}}
+    (tmp_path / "docs" / "resume" / "boards.json").write_text(json.dumps(reg))
+    for b in (tmp_path / "W16" / "CURRENT.kicad_pcb", tmp_path / "W16" / "stageA" / "ready-1" / "in.kicad_pcb"):
+        assert S.find_map(str(b)).endswith("mpn_map-v20.json")
+    (tmp_path / "W17").mkdir()
+    assert S.find_map(str(tmp_path / "W17" / "CURRENT.kicad_pcb")).endswith("mpn_map-w17.json")     # no explicit field: the version folder
+
+
+def test_blocked_ready_stage_says_not_ready_with_the_gate_counts():
+    """R077: without bypass flags the stage line is the verdict (NOT READY + gate counts), not the placement-gap table title."""
+    text = ("ready: placement gaps (detect-only; rungs arrive with later phases)\n  kind  count\n"
+            "ready: NOT READY (exit 1) - 15 PASS, 3 FAIL, 39 open question(s)\n  FAIL parts gate BLOCKED - 10 of 333 part(s) not resolved\n")
+    assert PL.ready_line(text).startswith("ready: NOT READY (exit 1)")
+    assert PL.ready_line("ready: placement gaps\nx").startswith("ready: placement gaps")

@@ -32,6 +32,19 @@ from .redact import urlopen as _redact_urlopen, redact as _redact, setting as _r
 
 from .models import credentials
 
+_DEADLINE = [0.0]       # monotonic-free wall deadline of the running check(); 0 = none (R107: the lookup budget caps in-flight requests too)
+
+
+def _urlopen(req, timeout=30):
+    """redact.urlopen under the running check()'s total cap: no request starts after the deadline and none waits past it."""
+    d = _DEADLINE[0]
+    if d:
+        rem = d - time.time()
+        if rem <= 0:
+            raise HostSkipped("lookup budget spent")
+        timeout = min(timeout, max(rem, 0.5))
+    return _redact_urlopen(req, timeout=timeout)
+
 CACHE_NAME = ".sourcing_cache.json"
 NEG_TTL = 3600                              # a failed lookup is remembered this long (s): an outage costs one try per hour, not one per part per run
 PARTDATA_CACHE = ".partdata_cache.json"   # written by partdata.py (same dir)
@@ -81,7 +94,7 @@ def _dk_token(creds):
     req = urllib.request.Request(
         "https://api.digikey.com/v1/oauth2/token", data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"})
-    return json.load(_redact_urlopen(req, timeout=30))["access_token"]
+    return json.load(_urlopen(req, timeout=30))["access_token"]
 
 
 _DK_MIN_INTERVAL = 0.25         # s between calls; DigiKey throttles bursts too
@@ -168,7 +181,7 @@ def _dk(mpn, creds, tok, retries=3, on_token=None):
                      "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
                      "Authorization": "Bearer " + tok})
         try:
-            d = json.load(_redact_urlopen(req, timeout=30))
+            d = json.load(_urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code == 401 and attempt < retries - 1:
@@ -239,7 +252,7 @@ def _mouser_once(term, mpn, creds, retries=3):
             time.sleep(wait)
         _last_mouser[0] = time.time()
         try:
-            d = json.load(_redact_urlopen(req, timeout=30))
+            d = json.load(_urlopen(req, timeout=30))
             break
         except urllib.error.HTTPError as e:
             if e.code in (403, 429, 500, 502, 503, 504) and attempt < retries - 1:
@@ -280,12 +293,52 @@ def grade(dk, mo, need, errors=()):
 
 
 # ------------------------------------------------------------------ mpn map
+def _registry_roots(board_path):
+    """Project roots above the board (symlinks followed too) that hold a version registry (docs/resume/boards.json)."""
+    out = []
+    for p in dict.fromkeys((os.path.abspath(board_path), os.path.realpath(board_path))):
+        d = os.path.dirname(p)
+        while d and d != os.path.dirname(d):
+            if os.path.isfile(os.path.join(d, "docs", "resume", "boards.json")) and d not in out:
+                out.append(d)
+            d = os.path.dirname(d)
+    return out
+
+
+def _registry_tokens(board_path):
+    """mpn map file names the registry names for this board's version, best first: the version entry's own `mpn_map`
+    (a file name or a list), then mpn_map-<version>.json (lowercase). The version is the registry folder the board lies in."""
+    names = []
+    for root in _registry_roots(board_path):
+        try:
+            reg = json.load(open(os.path.join(root, "docs", "resume", "boards.json")))
+        except (OSError, ValueError):
+            continue
+        for p in dict.fromkeys((os.path.abspath(board_path), os.path.realpath(board_path))):
+            rel = os.path.relpath(p, root).split(os.sep)
+            ver = rel[0] if rel and rel[0] in (reg.get("versions") or {}) else None
+            if not ver:
+                continue
+            ent = (reg["versions"].get(ver) or {}).get("mpn_map")
+            names += [ent] if isinstance(ent, str) else list(ent or [])
+            names.append(f"mpn_map-{ver.lower()}.json")
+    return list(dict.fromkeys(n for n in names if isinstance(n, str) and n))
+
+
 def find_map(board_path):
     """Locate an mpn_map.json for this board without being told.
 
     Looks beside the board, then in sibling tool/doc dirs — the common KiCad
     project shapes (hardware/<proj>/board.kicad_pcb + hardware/tools/)."""
     d = os.path.dirname(os.path.abspath(board_path))
+    toks_reg = _registry_tokens(board_path)
+    for name in toks_reg:                  # the registry's version of this board (R088): CURRENT.kicad_pcb has no version in its own name
+        for base in (d, os.path.join(d, "..", "tools"), os.path.join(d, ".."), os.path.join(d, "..", "..", "tools"),
+                     *(os.path.join(r, "tools") for r in _registry_roots(board_path)),
+                     *(os.path.join(r, "hardware", "tools") for r in _registry_roots(board_path))):
+            cand = os.path.normpath(os.path.join(base, name))
+            if os.path.exists(cand):
+                return cand
     # a versioned board (name-v16.kicad_pcb) uses its own map (mpn_map-v16.json) before the unversioned one: the older revision's
     # map has other refs, and reading it silently turns every part of the newer board into "no MPN"
     toks = os.path.splitext(os.path.basename(board_path))[0].split("-")
@@ -341,8 +394,18 @@ def transient(e):
     return isinstance(e, HostSkipped) or (isinstance(e, urllib.error.HTTPError) and e.code == 429)
 
 
-def check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
-          both=False, qty=None):
+def check(*a, **k):
+    """-> (report, counts): _check under the total lookup cap (`[parts] lookup_budget_s`, default 120 s; 0 = none)."""
+    budget = float(_redact_setting("lookup_budget_s"))
+    _DEADLINE[0] = time.time() + budget if budget else 0.0
+    try:
+        return _check(*a, **k)
+    finally:
+        _DEADLINE[0] = 0.0
+
+
+def _check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
+           both=False, qty=None):
     """-> (report, counts). Never raises on a per-part API error: an outage
     must not block a layout, it just leaves that part ungraded.
 
@@ -642,7 +705,7 @@ def datasheet_urls_by_source(mpn, creds):
                 headers={"Authorization": "Bearer " + tok,
                          "X-DIGIKEY-Client-Id": creds["DIGIKEY_CLIENT_ID"],
                          "Content-Type": "application/json"})
-            with _redact_urlopen(req, timeout=30) as r:
+            with _urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in data.get("Products", []) or []:
                 if _same_part(p.get("ManufacturerProductNumber") or "", mpn)[0] and p.get("DatasheetUrl"):
@@ -657,7 +720,7 @@ def datasheet_urls_by_source(mpn, creds):
                 "https://api.mouser.com/api/v1/search/partnumber?apiKey="
                 + creds["MOUSER_API_KEY"], data=body,
                 headers={"Content-Type": "application/json"})
-            with _redact_urlopen(req, timeout=30) as r:
+            with _urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in ((data.get("SearchResults") or {}).get("Parts") or []):
                 if _same_part(p.get("ManufacturerPartNumber") or "", mpn)[0] and p.get("DataSheetUrl"):
@@ -717,7 +780,7 @@ def datasheet_url(mpn, creds):
                          "Content-Type": "application/json",
                          "X-DIGIKEY-Locale-Site": "US",
                          "X-DIGIKEY-Locale-Currency": "USD"})
-            with _redact_urlopen(req, timeout=30) as r:
+            with _urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in data.get("Products", []) or []:
                 if _same_part(p.get("ManufacturerProductNumber") or "", mpn):
@@ -734,7 +797,7 @@ def datasheet_url(mpn, creds):
                 "https://api.mouser.com/api/v1/search/partnumber?apiKey="
                 + creds["MOUSER_API_KEY"], data=body,
                 headers={"Content-Type": "application/json"})
-            with _redact_urlopen(req, timeout=30) as r:
+            with _urlopen(req, timeout=30) as r:
                 data = _json.load(r)
             for p in ((data.get("SearchResults") or {}).get("Parts") or []):
                 if _same_part(p.get("ManufacturerPartNumber") or "", mpn):
@@ -768,7 +831,7 @@ def datasheet_reachable(url, timeout=_DS_TIMEOUT):
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
         "Accept": "application/pdf,*/*"})
     try:
-        with _redact_urlopen(req, timeout=timeout) as r:
+        with _urlopen(req, timeout=timeout) as r:
             ctype = (r.headers.get("Content-Type") or "").lower()
             head = r.read(1024)
         if head.startswith(b"%PDF"):
