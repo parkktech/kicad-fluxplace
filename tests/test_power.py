@@ -280,8 +280,7 @@ def _locked_flags(path, net):
 
 
 def test_locked_rail_track_is_not_widened_by_default_protect_empty_keeps_lock(tmp_path):
-    """PHASE3G G1b d: the cause of the old skip was `t.IsLocked()`; now a locked rail track of an unprotected net is widened
-    in place and stays locked."""
+    """W37: a locked rail track of an unprotected net gets a wider UNLOCKED track over it; the locked original is kept as it was."""
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
@@ -290,8 +289,11 @@ def test_locked_rail_track_is_not_widened_by_default_protect_empty_keeps_lock(tm
     rec = PW.widen(src, G4_CONS, out)
     need = _g4_need()
     assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and rec["skipped"]["locked_mm"] == 0
-    assert [round(w, 4) for w, *_ in _g4_tracks(out, "VBAT")] == [round(need, 4)]
-    assert _locked_flags(out, "VBAT") == [True]
+    assert sorted(round(w, 4) for w, *_ in _g4_tracks(out, "VBAT"))[-1] == round(need, 4)
+    assert sorted(_locked_flags(out, "VBAT")) == [False, True]
+    assert any(abs(w - _g4_tracks(src, "VBAT")[0][0]) < 1e-6 for w, *_ in _g4_tracks(out, "VBAT"))      # the locked original width is intact
+    rec2 = PW.widen(out, G4_CONS, str(tmp_path / "out2.kicad_pcb"))                                     # idempotent: no second overlay
+    assert rec2["widened_mm"] == 0
 
 
 def test_locked_rail_track_of_protected_net_is_skipped_and_counted(tmp_path):
@@ -321,7 +323,7 @@ def test_protected_pair_leg_named_net_is_left_alone_when_passed_in_protect(tmp_p
     assert rec["widened_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["locked_mm"] > 0
 
 
-def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
+def test_necked_locked_rail_track_stays_whole_and_the_far_part_is_overlaid_unlocked(tmp_path):
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     need = _g4_need()
@@ -329,7 +331,7 @@ def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
     _lock_all(src)
     out = str(tmp_path / "out.kicad_pcb")
     PW.widen(src, G4_CONS, out)
-    assert _locked_flags(out, "VBAT") == [True, True]
+    assert sorted(_locked_flags(out, "VBAT")) == [False, True]
     assert len(_g4_tracks(out, "VBAT")) == 2 and any(abs(t[0] - round(need, 4)) < 1e-3 for t in _g4_tracks(out, "VBAT"))
 
 
@@ -392,3 +394,25 @@ def test_pour_rerun_on_a_board_with_rail_zones_does_not_touch_decayed_bindings_a
     assert not [f for f in os.listdir(tmp_path) if ".strip." in f]
     rec = PW.pour_rails(out, CONS_POUR, str(tmp_path / "out3.kicad_pcb"), layers=4, nets=["+3V3"])
     assert rec["added"] == [] and rec["before"] is None and not (tmp_path / "out3.kicad_pcb").exists()
+
+
+def test_widened_locked_rail_stub_passes_the_protection_check_and_a_pair_change_is_refused(tmp_path):
+    """W37 (ledger "route (W16 finish-2, 1f163d6)"): the widen added copper over the locked stub, it did not change it; the manifest
+    commit check accepts that and still refuses a modified protected item."""
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    from test_routerules_syn import _board
+    from fluxplace import boardwrite as BW
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT"), (2, 9, 18, 9, "SIG")])
+    _lock_all(src)
+    man = BW.seed(src)
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    assert BW.verify(src, out, manifest=man)["ok"]
+    b = P.LoadBoard(out)                                                    # a modified protected (locked) item is refused
+    for t in b.GetTracks():
+        if t.GetNetname() == "SIG":
+            t.SetWidth(t.GetWidth() + 100000)
+    bad = str(tmp_path / "bad.kicad_pcb")
+    P.SaveBoard(bad, b)
+    assert BW.verify(src, bad, manifest=man)["changed"] == ["SIG"]

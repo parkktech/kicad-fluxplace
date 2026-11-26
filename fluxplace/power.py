@@ -909,7 +909,8 @@ def widen(board, cons, out, nets=None, protect=()):
     NECK_MAX_MM may stay narrow at the neck-proof width (`neck_width_mm`, heat test with the run's own length) when the probe
     refuses anything wider; each one is recorded in `necks` with its length, dT and DC drop (mV, at the rail's full current).
     PHASE3G G1b d: a LOCKED rail track is a candidate too, unless its net is in `protect` (drcguard.protected_nets: pair legs,
-    RF). Its width changes in place and it stays locked; a necked split part inherits the lock.
+    RF). W37: a locked track is never modified (the protection manifest keeps it intact): the wider piece is a new unlocked track
+    over it, same ends (a pad-end neck splits only an unlocked track).
     Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net", "necks": [...], "unreached": {net: [run]},
     "skipped": {"locked_mm", "pour_zone_mm" (always 0 now), "by_net"}} (skipped = narrow copper left alone: locked copper of a
     protected net; mm of track length)."""
@@ -968,9 +969,15 @@ def widen(board, cons, out, nets=None, protect=()):
         s, e = t.GetStart(), t.GetEnd()
         a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
         L = math.hypot(z[0] - a[0], z[1] - a[1])
-        if t.IsLocked() and net in protect:
+        locked = t.IsLocked()
+        if locked and net in protect:
             skip(net, "locked_mm", L)
             continue
+        if locked and any(o is not t and o.GetClass() == "PCB_TRACK" and not o.IsLocked() and o.GetNetCode() == t.GetNetCode()
+                          and o.GetLayer() == t.GetLayer() and pcbnew.ToMM(o.GetWidth()) >= need - 1e-6
+                          and {(o.GetStart().x, o.GetStart().y), (o.GetEnd().x, o.GetEnd().y)} <= {(s.x, s.y), (e.x, e.y)}
+                          for o in b.GetTracks()):
+            continue                                     # already overlaid by an earlier widen: idempotent
         near = next((k for k, pt in enumerate((a, z)) if (_pad_min_at(pads, net, *pt) or need) < need - 1e-6), None)
         step = max(need, 0.5)
         pad_w = _pad_min_at(pads, net, *(a, z)[near]) if near is not None else None
@@ -1020,13 +1027,25 @@ def widen(board, cons, out, nets=None, protect=()):
             nt.SetWidth(pcbnew.FromMM(near_w))
             nt.SetLayer(t.GetLayer())
             nt.SetNetCode(t.GetNetCode())
-            nt.SetLocked(t.IsLocked())                     # the necked split inherits the lock
-            b.Add(nt)
+            nt.SetLocked(False)                            # W37: the near part overlays unlocked; a locked original stays whole
+            if not locked:
+                b.Add(nt)
             sp = pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1]))
-            t.SetStart(sp) if near == 0 else t.SetEnd(sp)
+            if not locked:
+                t.SetStart(sp) if near == 0 else t.SetEnd(sp)
             tot(net)["left_mm"] += left_mm
             rec["left_mm"] += left_mm
-        t.SetWidth(pcbnew.FromMM(chosen))
+        if locked:                                       # W37: a locked item is never modified: the wide piece is new, unlocked copper over it
+            wt = pcbnew.PCB_TRACK(b)
+            wt.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(lo[0]), pcbnew.FromMM(lo[1])))
+            wt.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(hi[0]), pcbnew.FromMM(hi[1])))
+            wt.SetWidth(pcbnew.FromMM(chosen))
+            wt.SetLayer(t.GetLayer())
+            wt.SetNetCode(t.GetNetCode())
+            wt.SetLocked(False)
+            b.Add(wt)
+        else:
+            t.SetWidth(pcbnew.FromMM(chosen))
         if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)
             oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
             rec["necks"].append({"net": net, "layer": lay, "at": [round(a[0], 2), round(a[1], 2)], "run_len_mm": round(run["len"], 2),
