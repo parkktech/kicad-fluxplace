@@ -36,7 +36,7 @@ from . import snapshot as SN
 
 DEFAULTS = {"enabled": False, "max_rounds": 10, "no_gain_rounds": 2, "jobs": 4, "judge_top": 4, "judge_min": 4.0,
             "cands": 12, "ladder_budget_min": 15.0, "hot": 0.5, "nudge_mm": [0.5, 1.0, 2.0], "move_routed": True,
-            "guard_opens": 2, "guard_vias_frac": 0.03, "budget_min": 45.0}
+            "guard_opens": 2, "guard_vias_frac": 0.03, "budget_min": 45.0, "relieve_empty_rounds": 2}
 _INT = ("max_rounds", "no_gain_rounds", "jobs", "judge_top", "cands", "guard_opens")
 WORST = 10 ** 6
 KINDS = ("turn", "relieve", "nudge", "rot", "pull")
@@ -56,6 +56,7 @@ def params(cons):
     P["hot"] = float(P["hot"])
     P["guard_vias_frac"] = float(P["guard_vias_frac"])
     P["budget_min"] = float(P["budget_min"])
+    P["relieve_empty_rounds"] = int(P["relieve_empty_rounds"])
     P["nudge_mm"] = [float(x) for x in P["nudge_mm"]]
     return P
 
@@ -265,8 +266,9 @@ def _key(moves):
     return tuple(sorted((r, round(v[0], 3), round(v[1], 3), round(v[2], 2)) for r, v in moves.items()))
 
 
-def candidates(B, blame, cons, P, seed=0, spec=None):
-    """-> up to P["cands"] candidates {id, kind, moves {ref: (x, y, rot)}}, round-robin over the kinds, deduplicated."""
+def candidates(B, blame, cons, P, seed=0, spec=None, skip=()):
+    """-> up to P["cands"] candidates {id, kind, moves {ref: (x, y, rot)}}, round-robin over the kinds, deduplicated.
+    `skip`: kinds not generated at all (B11 / R122: relieve costs ~150 s of planning per round)."""
     mov = set(_movable(B, cons, P))
     hot = [dict(h, refs=h["refs"] or _box_parts(B, h["bbox"])) for h in blame["hot"]]
     pool = {k: [] for k in KINDS}
@@ -292,7 +294,7 @@ def candidates(B, blame, cons, P, seed=0, spec=None):
             add("turn", {t["ref"]: tuple(t["swap"])})
     # relieve: the predictor's moves with only the hot-area and open-net parts movable, seeds seed..seed+2
     tgt = (set(r for h in hot[:3] for r in h["refs"]) | set(r for o in blame["open"] for r in o["refs"])) & mov
-    if tgt:
+    if tgt and "relieve" not in skip:
         for s in range(seed, seed + 3):
             Bc = copy.deepcopy(B)
             for r in Bc["parts"]:
@@ -673,6 +675,7 @@ def stage(c, n, board):
     LV.candidate("placetour", "input", board, None, _lv(key0), None, cons, ex, board=board, generation=0, generations=P["max_rounds"],
                  arm="move", is_leader=True, leader="input", full=True)
     stale, rounds, stop = 0, 0, "no round ran"
+    relieve_empty = 0                                                   # rounds in a row with no relieve candidate through tier 1 (R122)
     round_secs, judged_on, t_round = [], set(), time.time()
     for r in range(1, P["max_rounds"] + 1):
         left = budget * 60 - (time.time() - t_stage) if budget else None
@@ -683,9 +686,12 @@ def stage(c, n, board):
         rounds = r
         Bb = RD.load(best["board"])
         _progress(spath, "running", f"round {r}: candidates", timing=timing, rounds=r - 1)
-        cands = candidates(Bb, best["blame"], cons, P, seed=100 * r, spec=spec)
+        skip = ("relieve",) if P["relieve_empty_rounds"] > 0 and relieve_empty >= P["relieve_empty_rounds"] else ()
+        cands = candidates(Bb, best["blame"], cons, P, seed=100 * r, spec=spec, skip=skip)
         rdir = os.path.join(d, f"r{r}")
         surv, _dropped = tier1(best["board"], cands, cons, spec, P, rdir, gate_state(Bb, cons, spec))
+        if not skip:
+            relieve_empty = 0 if any(x[1]["kind"] == "relieve" for x in surv) else relieve_empty + 1
         fresh = [x for x in surv if _key(x[1]["moves"]) not in judged_on]       # a candidate already judged on this very board gives the same key
         if surv and not fresh:
             stop = "no new candidate on this board"
@@ -707,7 +713,10 @@ def stage(c, n, board):
                 json.dump(job, fh, default=sorted)
             jobs.append(job)
         t_judge = time.time()
-        results = LA._run_jobs(jobs, P, P["judge_min"] * 60 + 600, entry="placetour:_worker") if jobs else []
+        cap_s = P["judge_min"] * 60 + 600
+        if budget:                                                      # R113: a round never runs past the stage budget
+            cap_s = min(cap_s, max(60.0, budget * 60 - (time.time() - t_stage)))
+        results = LA._run_jobs(jobs, P, cap_s, entry="placetour:_worker") if jobs else []
         timing[f"round{r}_judge_s"] = round(time.time() - t_judge, 1)
         winner = None
         for (key1, cnd, p, rem), job, res in zip(top, jobs, results):
@@ -770,9 +779,13 @@ def stage(c, n, board):
             break
         stop = "max_rounds"
     ladder = None
-    if tuple(best["key"][:3]) != (0, 0, 0) and best["routed"]:                  # hs / rf / power nets still open: the ghost-open ladder
+    ladder_P = P
+    if budget:                                                                  # R113: the ladder gets what is left of the stage budget
+        left_min = budget - (time.time() - t_stage) / 60
+        ladder_P = dict(P, ladder_budget_min=max(0.0, min(P["ladder_budget_min"], left_min)))
+    if tuple(best["key"][:3]) != (0, 0, 0) and best["routed"] and ladder_P["ladder_budget_min"] > 0:   # hs / rf / power nets still open: the ghost-open ladder
         input_best = best["board"]
-        best, ladder = _close_ghost(a, cons, spec, best, d, P, acfg, board, spath, ds_dir)
+        best, ladder = _close_ghost(a, cons, spec, best, d, ladder_P, acfg, board, spath, ds_dir)
         if ladder:
             stop += f"; ghost ladder: {len(ladder['accepted'])} repair(s), {ladder['stop']}"
             pos = {r: (round(p["pos"][0], 3), round(p["pos"][1], 3), p["angle"]) for r, p in RD.load(input_best)["parts"].items()}

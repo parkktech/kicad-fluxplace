@@ -703,8 +703,18 @@ def _krt_cmd(base, out, nets, ctx, layers=None):
 RUNG_CAP_S = 900                                # PHASE3F A1: one rung gets at most this much of the close budget ([flow] rung_cap_min, minutes)
 
 
-def _rung_cap(cons):
-    return float((((cons or {}).get("flow") or {}).get("rung_cap_min", RUNG_CAP_S / 60))) * 60
+RUNG_FRAC = {"pourisland": 0.05}                # B11: slow rungs get a fraction of the close budget (W16 B6-0: pourisland timed out after 434 s)
+
+
+def _rung_cap(cons, rung=None, budget_s=None):
+    """Seconds one rung may take: [flow] rung_cap_min (default 900 s), and for a rung with a fraction (`[flow.rung_frac]` NAME = F, else
+    RUNG_FRAC) at most F of the close budget `budget_s`."""
+    flow = (cons or {}).get("flow") or {}
+    cap = float(flow.get("rung_cap_min", RUNG_CAP_S / 60)) * 60
+    frac = (flow.get("rung_frac") or {}).get(rung, RUNG_FRAC.get(rung)) if rung else None
+    if frac and budget_s:
+        cap = min(cap, float(frac) * float(budget_s))
+    return cap
 
 
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
@@ -2477,7 +2487,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 _clean_board(out)
                 _sidecars(best, out)
                 ctx = {"cons": cons, "cons_path": cons_path, "kicad_cli": kicad_cli, "work": work,
-                       "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons)),
+                       "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons, rung, budget_s)),
                        "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
                        "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback,

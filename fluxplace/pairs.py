@@ -46,7 +46,9 @@ def params(cons):
             "skew_frac": float(e.get("skew_frac", 0.85)), "max_uncoupled": float(e.get("max_uncoupled_mm", 0.0)),
             "keep_partial": e.get("keep_partial", False) is True, "fallback": e.get("fallback", True) is not False,
             "rip_stubs": e.get("rip_fanout_stubs", True) is not False, "fb_trials": int(e.get("fallback_trials", 12)),
-            "tight": e.get("tight_geometry", False) is True}
+            "tight": e.get("tight_geometry", False) is True,
+            "budget_s": float(e.get("budget_min", 20.0)) * 60,       # B11: wall budget of plan + fallback ladder ([pairlay] budget_min, 0 = off)
+            "deadline": e.get("_deadline")}                         # B11: epoch run() stamps into the cons it hands to plan and to every trial
 
 
 def project_classes(board):
@@ -859,6 +861,10 @@ def _lay_pair(ctx, pr, info, rule, plan_only):
     if rule["gap"] + 1e-9 < ctx["min_clearance"]:
         e["status"], e["why"] = "not-laid", f"class gap {rule['gap']} below the clearance floor"
         return out
+    dl = ctx["P"].get("deadline")
+    if dl and time.time() > dl:                                # B11: out of time budget: not searched, handed on like any failed pair
+        e["status"], e["why"] = "not-laid", "pairs time budget ([pairlay] budget_min) reached before this pair was searched"
+        return out
     D, O = grid.view()
     tier = ctx.get("tier")
     for q, fp in ctx.get("reserve", {}).items():           # corridors the negotiation gave to pairs not yet emitted
@@ -1304,8 +1310,14 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
     """plan (and with `out`, write) -> report dict: complete / total, per pair length, skew, vias, layers, reasons."""
     from . import routediag as RD, pairaudit as PA, routeconn as RC, constraints as C, routerules as RR
     cons = cons or {}
-    res = plan(board, cons, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
-        plan(board, cons, spec, only=only, log=log, guide=guide)
+    P0, cons_plan = params(cons), cons
+    if P0["budget_s"] > 0 and not P0["deadline"] and not plan_only and out and fallback:      # B11: one wall budget for plan + ladder; the main pass gets 60 %
+        from . import pairfb as FB0
+        t_run = time.time()
+        cons = FB0.variant(cons, _deadline=t_run + P0["budget_s"])
+        cons_plan = FB0.variant(cons, _deadline=t_run + 0.6 * P0["budget_s"])
+    res = plan(board, cons_plan, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
+        plan(board, cons_plan, spec, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
            "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"),
            "plane_layers": res["plane_layers"], "pairs": []}

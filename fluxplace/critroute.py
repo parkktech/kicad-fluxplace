@@ -209,7 +209,9 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             M = HR._model(cur, cons_path)
             R = HR.open_nets(cur, constraints=cons_path, M=M)
             open_now = {r["net"] for r in R["connections"]}
-            todo = [(i, r) for i, r in enumerate(R["connections"]) if r["net"] == net and _key(r) not in tried]
+            # canonical try order (ledger 2026-11-25): by endpoint coordinates, never by the order kicad-cli lists the connections in
+            todo = sorted(((i, r) for i, r in enumerate(R["connections"]) if r["net"] == net and _key(r) not in tried),
+                          key=lambda t: _key(t[1]))
             if not todo:
                 break
             i, rec = todo[0]
