@@ -2,7 +2,7 @@
 import json
 import os
 import sys
-import time
+import threading
 
 import pytest
 
@@ -74,23 +74,73 @@ def test_progress_round_gives_a_plain_doing_line(tmp_path, monkeypatch):
     assert row["phase"] == "doing" and "round 2 of 8" in row["text"] and "hard rows 1" in row["text"]
 
 
-def test_no_silence_over_the_limit(tmp_path, monkeypatch):
+def test_no_silence_over_the_limit(tmp_path, monkeypatch, fake_clock):
     W = _on(tmp_path, monkeypatch)
     monkeypatch.setattr(LV, "NARR_S", 0.05)
     with LV.watching("place"):
-        time.sleep(0.5)
+        fake_clock.beats(4)
     beats = [r for r in _narr(W) if r["phase"] == "doing"]
-    assert len(beats) >= 4 and all(b["stage"] == "place" for b in beats)
+    assert len(beats) == 4 and all(b["stage"] == "place" for b in beats)
+    assert fake_clock.waits[:4] == [0.05] * 4        # every pause is at most the limit, so no silence over it
 
 
-def test_watching_is_not_nested(tmp_path, monkeypatch):
+def test_watching_is_not_nested(tmp_path, monkeypatch, fake_clock):
     W = _on(tmp_path, monkeypatch)
     monkeypatch.setattr(LV, "NARR_S", 0.05)
     with LV.watching("floorplan"):
         with LV.watching("floorplan"):
-            time.sleep(0.2)
-    assert len(_narr(W)) <= 3
+            fake_clock.beats(2)
+    assert len(_narr(W)) == 2                        # one heartbeat only: the nested watch adds none
     assert LV._watch["stage"] is None
+
+
+class FakeClock:
+    """Virtual time for the heartbeat. time.monotonic/time.time/time.sleep in liveview read this; each heartbeat pause
+    advances it by the requested seconds and blocks until the test grants that beat, so no assertion depends on wall time."""
+
+    def __init__(self):
+        self.now, self.waits = 0.0, []
+        self.grant = threading.Semaphore(0)     # the test releases one permit per heartbeat it wants
+        self.beaten = threading.Semaphore(0)    # released by each "doing" line the heartbeat writes
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return 1.7e9 + self.now
+
+    def sleep(self, secs):
+        self.now += secs
+
+    def wait(self, stop, secs):
+        self.now += secs
+        self.waits.append(secs)
+        while not self.grant.acquire(timeout=0.01):   # the timeout only lets a stopped heartbeat notice `stop`
+            if stop.is_set():
+                return True
+        return stop.is_set()
+
+    def beats(self, n):
+        for _ in range(n):
+            self.grant.release()
+            assert self.beaten.acquire(timeout=30), "heartbeat did not write a line"
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    fc = FakeClock()
+    real_narrate = LV.narrate
+
+    def narrate(stage, text, phase="doing", *a, **k):
+        out = real_narrate(stage, text, phase, *a, **k)
+        if phase == "doing":
+            fc.beaten.release()
+        return out
+
+    monkeypatch.setattr(LV, "time", fc)
+    monkeypatch.setattr(LV, "_beat_wait", fc.wait)
+    monkeypatch.setattr(LV, "narrate", narrate)
+    return fc
 
 
 def _board(tmp):
@@ -119,12 +169,12 @@ def test_snapshot_marks_parked_and_why(tmp_path):
     assert {p["ref"]: p["parked"] for p in d["parts"]}["C1"] is True
 
 
-def test_direct_command_gets_start_heartbeat_and_end(tmp_path, monkeypatch):
+def test_direct_command_gets_start_heartbeat_and_end(tmp_path, monkeypatch, fake_clock):
     W = _on(tmp_path, monkeypatch)
     monkeypatch.setattr(LV, "NARR_S", 0.05)
 
     def fake(a):
-        time.sleep(0.3)
+        fake_clock.beats(1)
         return 0
 
     assert LV.run_command("ready", fake, None) == 0

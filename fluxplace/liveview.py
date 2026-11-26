@@ -27,6 +27,7 @@ PROGRESS_KEYS = ("phase", "generation", "generations", "trial", "trials", "arm",
                  "is_leader", "criteria", "verdict", "why", "rows_rev", "elapsed_s", "eta_s")
 _last = {}
 NARR_S = 8.0                       # a "doing" narration line at least this often while a stage works (no silence over 10 s)
+_beat_wait = lambda stop, secs: stop.wait(secs)   # the heartbeat's pause (a seam: tests drive it with a fake clock)
 _narr = {}                         # stage -> the latest "doing" text, repeated by the heartbeat
 _narr_gen = {}                     # stage -> the last generation narrated (one round line per generation)
 _watch = {"stage": None}           # the stage whose heartbeat runs in this process (nested watches do nothing)
@@ -126,7 +127,7 @@ def watching(stage):
     _narr_gen.pop(stage, None)
 
     def beat():
-        while not stop.wait(NARR_S):
+        while not _beat_wait(stop, NARR_S):
             text = _narr.get(stage)
             narrate(stage, text or f"Still working on the {stage} stage, {int(time.monotonic() - t0)} s so far.", "doing", remember=False)
 
