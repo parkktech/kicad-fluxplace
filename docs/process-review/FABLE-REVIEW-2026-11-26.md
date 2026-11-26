@@ -213,3 +213,22 @@ Corrected in my round 1: the Manhattan bound; the claim that close attempts shar
    score. If most refusals turn out to be "score equal" with no other rule failing (a legal sideways move), would you accept equal-score
    candidates under a memo that forbids revisiting a state, or keep strict improvement and put the effort into better candidates? And which
    share of "new error key" refusals would make you conclude the candidates, not the gate, are the problem?
+
+## 7. Round 3 (outside round-2 answers)
+
+Source: OUTSIDE-ROUND2-2026-11-26.md. Every point accepted; details and ticket changes in PLAN section 7.
+
+| Point | Decision | Effect on the top-10 |
+|---|---|---|
+| Contracts on all newly added controlled copper | Accepted | Item 4 (contracts): every contract net, protected or not. |
+| Zone errors measured now, enforced on their own track | Accepted | Item 9 (measurement) splits: record zone-inclusive values now; enforce on a reproducibility trigger, not after the close work. |
+| Unexplained reseed refused, old manifest kept, diff reported; intended change invalidates evidence | Accepted | Item 4: explanation comes from the versions registry; no new flag. |
+| Escapes: local generation, joint selection with backtracking (10 000 expansions), shortlist route verification incl. higher-rank pairs | Accepted | Item 3 (escapes) rescoped; solver still deferred, now on a measured criterion. |
+| Close: strict incumbent, refusal record with deltas and UNKNOWN, inspect equal-score cases, then beam 3 x 2 if earned | Accepted | Item 6 (close) gains two ordered pre-steps; the beam is conditional. |
+| Interrupt / resume tests | Accepted | Items 3 and 6 acceptance. |
+
+Order of the top-10 is unchanged from section 6.2.
+
+### 7.1 Round 3 questions
+
+none
