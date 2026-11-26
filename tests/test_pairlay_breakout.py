@@ -50,3 +50,14 @@ def test_stub_reaches_a_leg_end_one_pair_gap_from_the_partner_leg():
     items.seg((3.0, 0.28), (6.0, 0.28), 0.127, "F.Cu", "B")             # the partner leg: 0.28 mm centre to centre from the end of leg A
     pts = PL.stub(B, items, base, set(), pad, (3.0, 0.0), "F.Cu", 0.127, "A", 0.13, ())
     assert pts and pts[0] == (0.0, 0.0) or pts and abs(pts[-1][0] - 3.0) < 1e-6
+
+
+def test_stub_starts_on_the_pad_centre_not_on_a_grid_cell():
+    """W36: a grid-routed stub left a via pad at a cell 0.2 mm off its centre (KiCad track_not_centered_on_via on locked copper)."""
+    B = {"copper": ["F.Cu"], "pads": [], "segs": [], "vias": [], "zones": [], "edge": []}
+    pad = {"ref": "V", "num": "1", "net": "A", "x": 0.0137, "y": 0.0291, "w": 0.46, "h": 0.46, "ex": 0.23, "ey": 0.23, "angle": 0.0,
+           "layers": {"F.Cu"}, "shape": "circle"}
+    B["pads"].append(pad)
+    items = G.Items(["F.Cu"])
+    pts = PL.stub(B, items, items.mark(), set(), pad, (3.0, 1.7), "F.Cu", 0.127, "A", 0.13, ())
+    assert pts and pts[0] == (0.0137, 0.0291) and pts[-1] == (3.0, 1.7)
