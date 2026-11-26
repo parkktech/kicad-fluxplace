@@ -170,7 +170,7 @@ def base_flags(R, d):
     return [*RR.size_args(R), "--escalation", "off", "--strict-sizes", *(["--fab-overrides", fo] if fo else [])]
 
 
-NO_RIP_STEPS = ("rf", "route")      # steps that route over the copper of earlier steps: they must not rip it
+NO_RIP_STEPS = ("rf", "route", "pairleft", "pairleft-single")      # steps that route over the copper of earlier steps: they must not rip it
 
 
 def no_rip_env():
@@ -304,6 +304,40 @@ def route_net_set(allnets, failed_legs, hs_block, still_open):
     return ("*",) if not excluded else sorted(set(allnets) - excluded)
 
 
+def _partners(pn, cons=None):
+    """{leg: partner} over `pn` (graph.diff_pairs naming: _P/_N, _DP/_DM anywhere in the name)."""
+    from . import graph, constraints as C
+    out = {}
+    for slave, master in graph.diff_pairs(list(pn), exclude=C.not_pairs(cons or {})).items():
+        out[slave], out[master] = master, slave
+    return out
+
+
+def left_pair_legs(src, pn, hs_block, failed_legs, cons=None, still=None):
+    """W39: legs of the deferred pairs the pairs gate / pairgroups left open on `src`: the pairs of `pn` with a leg in
+    `hs_block | failed_legs` and a leg open. Both legs of a pair always travel together."""
+    still = set(RC.open_by_net(src)) if still is None else set(still)
+    mine, par = set(hs_block) | set(failed_legs), _partners(pn, cons)
+    return sorted(x for x in par if (x in mine or par[x] in mine) and (x in still or par[x] in still))
+
+
+def pair_fallback_rows(board, legs, cons=None):
+    """W39 pair-quality finding for the pairs `legs` of `board`: [{pair, closed, p_mm, n_mm, skew_mm}] (lengths from KiCad's DRC)."""
+    from . import netlen
+    left = set(RC.open_by_net(board))
+    par = _partners(legs, cons)
+    pairs = sorted({tuple(sorted((x, par[x]))) for x in legs if x in par})
+    try:
+        ln = netlen.pair_lengths(board, pairs) or {}
+    except Exception:                                       # noqa: BLE001 - a finding without lengths is still a finding
+        ln = {}
+    out = []
+    for pr in pairs:
+        m = ln.get(pr) or {}
+        out.append({"pair": list(pr), "closed": not (set(pr) & left), "p_mm": m.get("p"), "n_mm": m.get("n"), "skew_mm": m.get("skew")})
+    return out
+
+
 def run(c, n, board, runner=run_step):
     """the route stage in krt-whole mode -> stage result dict.  `runner(cmd, log)` -> (rc, s): replaceable in tests."""
     import json
@@ -365,6 +399,50 @@ def run(c, n, board, runner=run_step):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
                           lambda s, o, gnets=gnets, glay=glay, gw=gw, ggap=ggap: cmd_diff(
                               a.router_py, a.router_dir, s, o, gnets, glay, base, o[:-10] + ".json", width=gw, gap=ggap)))
+    fb_rec = {"coupled": [], "singles": [], "pairs": []}      # W39: deferred pairs the route stage lays itself, KRT first
+    def _copy_step(src, dst):
+        shutil_copy(src, dst)
+        return 0
+    def _pairleft_coupled(src, dst):
+        """a deferred (gated / pairgroups-failed) pair still open: route_diff, coupled, per geometry group. A failed call keeps its input."""
+        legs = left_pair_legs(src, pn, hs_block, failed_legs, c.cons)
+        if not legs:
+            return _copy_step(src, dst)
+        fb_rec["coupled"] = legs
+        cur = src
+        for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, src, legs, sig)):
+            nxt = f"{dst[:-10]}.g{gi}.kicad_pcb"
+            _carry(cur, nxt)
+            if os.path.exists(nxt):
+                os.remove(nxt)
+            cap = min(CAP_S, max(0.0, budget - (time.time() - t0)))
+            if cap <= 0:
+                break
+            rc, _s = runner(cmd_diff(a.router_py, a.router_dir, cur, nxt, gnets, glay, base, nxt[:-10] + ".json", width=gw, gap=ggap),
+                            nxt[:-10] + ".log", cap_s=cap, status_path=spath, step="pairleft")
+            if rc in (0, 3) and os.path.exists(nxt):
+                _restore_project(board, nxt)
+                cur = nxt
+        shutil_copy(cur, dst)
+        return 0
+    def _pairleft_singles(src, dst):
+        """after the coupled attempt: a pair still open is two plain legs, KRT, never silently: recorded as a pair-quality finding."""
+        legs = left_pair_legs(src, pn, hs_block, failed_legs, c.cons)
+        fb_rec["singles"] = legs
+        if not legs:
+            return _copy_step(src, dst)
+        cap = min(CAP_S, max(0.0, budget - (time.time() - t0)))
+        if cap <= 0:
+            return _copy_step(src, dst)
+        rc, _s = runner(cmd_route(a.router_py, a.router_dir, src, dst, sig, base, {}, dst[:-10] + ".json", nets=legs, extra=xtra),
+                        dst[:-10] + ".log", cap_s=cap, status_path=spath, step="pairleft-single", env=no_rip_env())
+        if rc in (0, 3) and os.path.exists(dst):
+            _restore_project(board, dst)
+            return 0
+        return _copy_step(src, dst)
+    if hs_block or opn:
+        steps.append(("pairleft", lambda s, o: _pairleft_coupled))
+        steps.append(("pairleft-single", lambda s, o: _pairleft_singles))
     from . import review as RV
     rfc = set(((c.cons or {}).get("rf") or {}).get("nets") or [])
     try:                                                     # the same class rule as the placement gaps (name, pin names, mate)
@@ -408,7 +486,7 @@ def run(c, n, board, runner=run_step):
             else:
                 rc, secs = runner(cmd, log, cap_s=cap, status_path=spath, step=name, **({"env": no_rip_env()} if name in NO_RIP_STEPS else {}))
         rows.append({"step": name, "rc": rc, "s": secs, "cap_s": round(cap, 1), "board": dst,
-                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups", "rf") or name.startswith("diff") else None})
+                     "log": log, "summary": dst[:-10] + ".json" if name in ("route", "rails", "rails-pour", "pairgroups", "rf", "pairleft-single") or name.startswith("diff") else None})
         if rc not in (0, 3) or not os.path.exists(dst):
             tail = open(log, errors="replace").read().splitlines()[-8:] if os.path.exists(log) else []
             left = RC.open_by_net(cur)
@@ -421,6 +499,11 @@ def run(c, n, board, runner=run_step):
             discarded.append({"step": name, "sections": changed})
         cur = dst
     shutil_copy(cur, best)
+    if fb_rec["coupled"] or fb_rec["singles"]:                 # W39: the pair-quality finding (lengths on the board before cleanup)
+        try:
+            fb_rec["pairs"] = pair_fallback_rows(best, fb_rec["coupled"] or fb_rec["singles"], c.cons)
+        except Exception as e:                                  # noqa: BLE001
+            fb_rec["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     post, post_error = None, None
     if ((c.cons or {}).get("route") or {}).get("whole_post", True):
         keep = best + ".prepost"
@@ -511,13 +594,16 @@ def run(c, n, board, runner=run_step):
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
         line += f"; NOT DONE {quality['not_done']['count']} pair/RF net(s) out of tolerance (routed {quality['nets_routed']}/{quality['nets_open0']})"
-    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "rf": rf_rec, "mask": mask},
+    json.dump({"line": line, "sizes": sizes, "budget_s": budget, "steps": rows, "open": left, "diff_nets": diff, "planes": planes, "power": power, "post": post, "post_error": post_error, "quality": quality, "pairs_missed": missed, "pairs_already_done": already_done, "router_project_discarded": discarded, "rails": rails_rec, "rf": rf_rec, "mask": mask, "pair_fallback": fb_rec},
               open(os.path.join(d, "result.json"), "w"), indent=1)
     if rf_rec["open"]:
         line += (f"; RF FINDING: {len(rf_rec['open'])} RF net(s) not routable on the outer layers at their impedance width, left OPEN "
                  f"(never routed at default width): " + ", ".join(rf_rec["open"]))
     if rf_rec["unknown_width"]:
         line += "; RF width unknown (no stackup / reference plane): " + ", ".join(rf_rec["unknown_width"])
+    if fb_rec["pairs"]:
+        line += "; pair fallback (pair-quality finding): " + ", ".join(
+            f"{'/'.join(r['pair'])} {'closed' if r['closed'] else 'OPEN'}" + (f" skew {r['skew_mm']:.2f} mm" if r.get("skew_mm") is not None else "") for r in fb_rec["pairs"][:6])
     if hs_rec["excluded"]:
         line += f"; {len(hs_rec['excluded'])} gated pair leg(s) left to the pairs gate: " + ", ".join(hs_rec["excluded"][:6])
     if left:
