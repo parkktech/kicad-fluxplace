@@ -1428,6 +1428,12 @@ def _pcbnew_state_guard(name, res):
                 f"(a Remove() of a discarded item? use Delete or fresh process); stage line was: {res.get('line', '')}")
 
 
+def _call_stage(name, c, n, board):
+    """B4: run one stage in a fresh interpreter (freshproc.run_stage); the pipeline process never touches pcbnew state a stage dirtied."""
+    from . import freshproc
+    return freshproc.run_stage(name, c, n, board, FUNCS)
+
+
 def _commit_point(name, prev, res, cons=None):
     """-> res, refused (verdict fail, board = the last good one) when the stage output changes protected copper, adds duplicate copper or
     colliding item ids, or the input's manifest is stale; else the manifest follows the new board (boardwrite.commit).  The output may be
@@ -1779,7 +1785,7 @@ def _exec_stage(c, n, name, board, later=()):
             gd = c.dir(n, "gate")
         from . import liveview as LV
         with LV.watching(name):                            # N12: a heartbeat line every few seconds while the stage works
-            res = FUNCS[name](c, n, board)
+            res = _call_stage(name, c, n, board)   # B4: the one stage call site (fresh interpreter, [flow] timeout)
         res.setdefault("verdict", "pass")
         if res["verdict"] in ("pass", "warn"):
             res = _commit_point(name, board, res, c.cons)   # A3 (+B1 contract check): only a stage that ran (a reused gate board was verified by close)

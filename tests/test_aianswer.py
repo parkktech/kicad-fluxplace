@@ -62,6 +62,7 @@ def test_gate_optional_continues_required_stops(tmp_path, monkeypatch):
 
 def _close_flow(tmp_path, monkeypatch, cons_text):
     b = _board(tmp_path)
+    monkeypatch.setenv("FLUXPLACE_STAGE_INPROC", "1")           # B4: the test patches PL.in_fresh_process, so close must run in this process
     monkeypatch.setattr(GP, "GATE_DEFAULTS", {})
     monkeypatch.setattr(PL, "in_fresh_process", lambda mod, fn, *a, **k: {"stop": "packets", "best": a[0], "start": {"opens": 3, "errors": 0}, "end": {"opens": 3, "errors": 0},
                                                                            "attempts": 1, "packets": [{"packet": "/p/1.packet.json"}]} if fn == "close" else {})

@@ -2140,20 +2140,25 @@ def _repo_root():
 
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
 
-_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect", "pair_fallback")
+_CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect", "pair_fallback",
+                  "ai_used", "hs_legs", "pair_gap_legs", "open_legs", "attempts")        # B4: the `ai` rung runs in a child too
 JOB_OUT_KRT = "_krt_last"
+JOB_OUT_AI_USED = "_ai_used"
 
 
 def _call_rung(name, base, out, gaps, ctx):
-    """Run one rung. `ai` and ctx["inproc"] runs stay in-process; every other rung runs in a child process
-    (`python -m fluxplace.gaps --rung-job JOB`) so a native crash is a RuntimeError, not a dead close run."""
-    if name == "ai" or ctx.get("inproc"):
+    """Run one rung in a child process (`python -m fluxplace.gaps --rung-job JOB`) so a native crash or a pcbnew Remove() decay is a
+    RuntimeError / a dead child, not a dead or poisoned close run.  Only ctx["inproc"] stays in-process: the child itself (it must not
+    recurse) and tests that patch RUNGS."""
+    if ctx.get("inproc"):
         return RUNGS[name](base, out, gaps, ctx)
     job, jout = out + ".job.json", out + ".job.out.json"
     try:
         cj = {k: ctx.get(k) for k in _CTX_JSON_KEYS}
         if cj.get("protect") is not None:
             cj["protect"] = sorted(cj["protect"])          # a set is not JSON; the child rebuilds it
+        if not cj.get("cons_path"):
+            cj["cons"] = ctx.get("cons")                   # no file to reload: the dict itself (the `ai` rung reads [ai])
         with open(job, "w") as fh:
             json.dump({"name": name, "base": base, "out": out, "gaps": gaps, "ctx": cj}, fh, default=str)
         try:
@@ -2172,6 +2177,10 @@ def _call_rung(name, base, out, gaps, ctx):
         krt = res.pop(JOB_OUT_KRT, None)
         if krt:
             ctx["krt_last"] = krt
+        used = res.pop(JOB_OUT_AI_USED, None)
+        if used is not None and isinstance(ctx.get("ai_used"), dict):
+            ctx["ai_used"].clear()                         # the caller's dict is shared with close(): update it in place
+            ctx["ai_used"].update(used)
         return res
     finally:
         _rm(job)
@@ -2185,10 +2194,10 @@ def _rung_job(job_path):
     cj = j["ctx"]
     if cj.get("protect") is not None:
         cj["protect"] = set(cj["protect"])
-    cons = C.load(cj.get("cons_path")) if cj.get("cons_path") else {}
+    cons = C.load(cj.get("cons_path")) if cj.get("cons_path") else (cj.get("cons") or {})
     ctx = dict(cj, cons=cons, log=lambda m: print(m, file=sys.stderr), inproc=True)
     summ = RUNGS[j["name"]](j["base"], j["out"], j["gaps"], ctx) or {}
-    summ = dict(summ, **{JOB_OUT_KRT: ctx.get("krt_last")})
+    summ = dict(summ, **{JOB_OUT_KRT: ctx.get("krt_last"), JOB_OUT_AI_USED: ctx.get("ai_used")})
     with open(j["out"] + ".job.out.json", "w") as fh:
         json.dump(summ, fh, default=str)
     return 0
