@@ -159,7 +159,7 @@ def findings(m, level="FAIL"):
         for c in m["connections"]:
             out.append({"level": level, "code": "UNROUTED", "refs": sorted({c["net"], c["a"]["ref"], c["b"]["ref"]}),
                         "msg": f"{c['net']}: {_pad(c['a'])} - {_pad(c['b'])} not connected ({c['mm']} mm apart)"})
-        out.append({"level": level, "code": "UNROUTED", "refs": [],
+        out.append({"level": level, "code": "UNROUTED_SUMMARY", "refs": [],
                     "msg": f"{total} open connection(s), kicad-cli after a refill ({len(m['connections'])} pcbnew cluster pair(s) listed)"})
     if m["stale"]:
         out.append({"level": level, "code": "STALE_FILL", "refs": [],
@@ -171,7 +171,7 @@ def findings(m, level="FAIL"):
 def waived(f, waivers):
     for w in waivers or ():
         code, _, rx = w.partition(":")
-        if f["code"] == code and (not rx or re.search(rx, f["msg"]) or any(re.search(rx, r) for r in f.get("refs", []))):
+        if (f["code"] == code or (code == "UNROUTED" and not rx and f["code"] == "UNROUTED_SUMMARY")) and (not rx or re.search(rx, f["msg"]) or any(re.search(rx, r) for r in f.get("refs", []))):
             return True
     return False
 

@@ -18,6 +18,7 @@ flickering with zone fill. Nothing else is filtered; whole types are never ignor
 Measured 2026-11-14: 5/5 identical key multisets on v15 and v16 copies, with and without a
 pcbnew round trip (no flicker reproduced here, so the exclusion is inherited).
 """
+import hashlib
 import json
 import os
 import re
@@ -174,7 +175,9 @@ def measure_from_report(d, severity="error"):
     else:
         keys = Counter(key_of(v) for v in err)
     chosen = [v for v in vs if severity == "all" or v.get("severity") == "error"]
-    return {"opens": len(unc), "opens_by_net": Counter(drcfull.net_of(u) for u in unc),
+    # B3a: zone-item violations measured, not enforced (`keys`/`errors` keep the zone exemption until B3b)
+    zk = Counter(key_of(v) for v in chosen)
+    return {"keys_zone": zk, "errors_zone": len(chosen),"opens": len(unc), "opens_by_net": Counter(drcfull.net_of(u) for u in unc),
             "shorts": sum(1 for v in vs if v.get("type") == "shorting_items"),
             "errors": sum(1 for v in chosen if not _zone_item(v)), "keys": keys, "err_keys": keys}
 
@@ -182,17 +185,74 @@ def measure_from_report(d, severity="error"):
 _CACHE = {}
 
 
+def content_sha(path):
+    """sha1 of a file's bytes ("" when absent): the one cache identity (a path, mtime and size repeat across different content)."""
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def rules_sha(board):
+    """sha1 over the board's rule sources: sibling .kicad_pro and .kicad_dru content (an absent file hashes as empty)."""
+    stem = os.path.splitext(os.path.abspath(board))[0]
+    h = hashlib.sha1()
+    for ext in (".kicad_pro", ".kicad_dru"):
+        h.update(ext.encode() + b"\0" + content_sha(stem + ext).encode() + b"\0")
+    return h.hexdigest()
+
+
 def measure(board, kicad_cli="kicad-cli"):
-    """One DRC per board (cached on abspath, mtime, size; last 4 kept). `errors` excludes unconnected items."""
+    """One DRC per board (cached on board sha + rules sha + kicad-cli; last 4 kept). `errors` excludes unconnected items.
+    The record carries board_sha, rules_sha and status "exact" (a DRC that did not run raises; see measure_record)."""
     p = os.path.abspath(board)
-    st = os.stat(p)
-    key = (p, st.st_mtime_ns, st.st_size)
+    bsha, rsha = content_sha(p), rules_sha(p)
+    key = (bsha, rsha, kicad_cli)
     if key not in _CACHE:
         d = drc_json(p, kicad_cli)
-        _CACHE[key] = dict(measure_from_report(d), drc=d)
+        _CACHE[key] = dict(measure_from_report(d), drc=d, board_sha=bsha, rules_sha=rsha, status="exact")
         while len(_CACHE) > 4:
             _CACHE.pop(next(iter(_CACHE)))
     return _CACHE[key]
+
+
+def measure_record(board, kicad_cli="kicad-cli"):
+    """measure() that never raises: a DRC that cannot run (kicad-cli absent, no report, timeout) -> status "failed" with the
+    error and the shas, no counts. Gated stages read `exact(m)`."""
+    try:
+        return measure(board, kicad_cli)
+    except (RuntimeError, OSError, ValueError) as e:
+        p = os.path.abspath(board)
+        return {"status": "failed", "error": str(e)[:200], "board_sha": content_sha(p), "rules_sha": rules_sha(p)}
+
+
+def repeatability(board, runs=5, kicad_cli="kicad-cli", timeout=600):
+    """B3a: DRC `runs` times, each on a fresh copy of the board with its .kicad_pro/.kicad_dru (drc_json copies again and refills
+    zones). -> {"identical": zone-inclusive key multisets all equal, "runs", "errors_zone": [...], "errors": [...], "keys_zone": [Counter]}.
+    The evidence B3b needs before zone errors are enforced."""
+    import tempfile
+    stem = os.path.splitext(os.path.abspath(board))[0]
+    recs = []
+    for _ in range(runs):
+        with tempfile.TemporaryDirectory(prefix="fxrep-") as td:
+            b = os.path.join(td, "r.kicad_pcb")
+            shutil.copy(stem + ".kicad_pcb", b)
+            for ext in (".kicad_pro", ".kicad_dru"):
+                if os.path.isfile(stem + ext):
+                    shutil.copy(stem + ext, os.path.join(td, "r" + ext))
+            recs.append(measure_from_report(drc_json(b, kicad_cli, timeout)))
+    kz = [r["keys_zone"] for r in recs]
+    return {"identical": all(k == kz[0] for k in kz), "runs": runs, "errors_zone": [r["errors_zone"] for r in recs],
+            "errors": [r["errors"] for r in recs], "keys_zone": kz}
+
+
+def exact(m):
+    """True only for a measure that ran kicad-cli on the whole board (an approx or failed measure may not give a pass)."""
+    return (m or {}).get("status") == "exact"
 
 
 _ZONE_DESC = re.compile(r"^Zone \[([^\]]*)\] on ([^,\s]+)")
