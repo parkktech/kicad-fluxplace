@@ -506,8 +506,8 @@ def _pad_amps(pad, npins, rows, src, tot, volts):
 def rail_flows(ctx, cons, net, r, rows):
     """W40 tree-flow solve of one rail (powerflow.solve) on the copper `rows` (the net's facts track_geom rows) -> the per-row
     current list [{amps | None, unk, mode, loads}] and its context (source label), cached in ctx["flows"]; None when the rail has no
-    pads or copper to solve. Source pads: the [power] source part, the `from` part of its [[dcdrop]] rows, and a part whose
-    single-load row carries the rail's whole current (an inductor / ferrite on the source side). Loads: `_pad_amps` per pad."""
+    pads or copper to solve. Source pads: the [power] source part, the `from` part of its [[dcdrop]] rows, and an inductor / ferrite bead (L, FB) whose
+    single-load row carries the rail's whole current (the source's series element). Loads: `_pad_amps` per pad."""
     from . import powerflow as PF
     import pcbnew
     cache = ctx.setdefault("flows", {})
@@ -515,7 +515,7 @@ def rail_flows(ctx, cons, net, r, rows):
         return cache[net]
     cache[net] = None
     pads = (ctx or {}).get("pads", {}).get(net) or []
-    if not rows or not pads or any(len(p) < 8 for p in pads):
+    if not rows or not pads or any(len(p) < 8 for p in pads) or any("x1" not in g for g in rows):
         return None
     tot = r["current_a"]
     pw = (cons or {}).get("power", {}).get(net) or {}
@@ -526,7 +526,8 @@ def rail_flows(ctx, cons, net, r, rows):
         if d.get("from"):
             srcs.add(str(d["from"]).split(".")[0])
         to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
-        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999:
+        ref0 = str(to[0]).split(".")[0].upper()
+        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
             srcs.add(str(to[0]).split(".")[0])
     volts = r.get("max_v") or 0.0
     npins = {}
@@ -621,8 +622,10 @@ def run_current(ctx, cons, net, r, run, segs):
 def _overlaid(s, rows):
     """True when another same-net track on the layer is wider and lies over `s` (both ends on its copper): a wider piece laid
     over a locked narrow one (power.widen, W37) supersedes it, so the narrow one is not counted twice."""
+    if "x1" not in s:
+        return False
     for o in rows:
-        if o is s or o["layer"] != s["layer"] or o["width"] <= s["width"] + 1e-6:
+        if o is s or "x1" not in o or o["layer"] != s["layer"] or o["width"] <= s["width"] + 1e-6:
             continue
         if all(_seg_dist(x, y, o["x1"], o["y1"], o["x2"], o["y2"]) <= o["width"] / 2 + 0.02 for x, y in ((s["x1"], s["y1"]), (s["x2"], s["y2"]))):
             return True
