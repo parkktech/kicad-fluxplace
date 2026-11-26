@@ -168,3 +168,48 @@ Context for all: you reviewed GitHub `main`, which is older than our mainline br
 10. **Merge gate.** Our owner rule is that every merge passes the full suite (~3100 tests, serial, 20-30 min, 32 idle cores). You propose
     tiers. If tiering is not allowed, is there anything beyond plain parallelism and a serial merge queue that you would add, for example
     running the microboard stage tests first and aborting early?
+
+## 6. Round 2 (outside follow-up)
+
+Source: OUTSIDE-FOLLOWUP-2026-11-26.md. Code re-read in w16merge @ e72d5b8; nothing run.
+
+### 6.1 Their new code claims
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| Close rungs run in child processes via `_call_rung()`; only `ai` and `inproc` stay in-process | CONFIRMED | gaps.py:2104-2118 (`python -m fluxplace.gaps --rung-job`), exception at gaps.py:2107; called at gaps.py:2292 and 2319. My round-1 question 9 was wrong to say close runs its attempts in one process; claim 8 of section 1 stands for stages only. |
+| `measure_from_report()` keeps zone errors in the keys, leaves them out of `errors` | CONFIRMED | keys for severity "error": drcguard.py:175 (no zone filter); count: drcguard.py:179 (`not _zone_item(v)`). For severity "all" the keys also drop them (drcguard.py:173 via drcguard.py:48). |
+| Locked-item policy allows additions to locked nets with no width/layer check | CONFIRMED | boardwrite.py:224 ("copper may be ADDED to the net"), boardwrite.py:338-340 ("additions are fine"). No width or layer test in `changed`. This is how w37protect lays an unlocked wide piece over locked copper, and also how an RF net with locked fan-out could gain 0.15 mm inner copper. |
+| Resume re-seeds the protected manifest | CONFIRMED | boardwrite.py:328-335 (`fresh_manifest`: stale -> `seed(board, keep=man)`), pipeline start pipeline.py:1837-1838, close start gaps.py:2211. It is logged ("re-seeded from the board") but the difference is not recorded and nothing is refused. |
+
+### 6.2 What changes in the top-10
+
+| Round 1 | Round 2 | Change |
+|---|---|---|
+| 1 land branches | 1 | unchanged |
+| 3 placement gate | 2 | Up. Lower bound uses the octilinear metric between pad-access points, per segment through series parts, no margin (my Manhattan bound over-rejects by up to 41 %). Built before the placement re-run (PLAN A8). |
+| 4 escape reservation | 3 | Up. Bundle enumeration with pairwise conflicts and a twin-receptacle template replace min-cost matching. |
+| 2 net contract | 4 | Down one (A1/A2/A6 cover RF and rails meanwhile). Adds: width/layer check on copper added to locked nets; re-seed records its diff. |
+| 6 golden fixtures | 5 | Golden set first in the gate, abort early, full suite still required. |
+| 5 close convergence | 6 | Starts with a refusal histogram (all failing rules per attempt). Error-key rule kept. Adds the write-scope check. History only from routing failure or budget exhaustion. |
+| 10 forbid regions + finishing | 7 | unchanged |
+| 8 stage isolation | 8 | Smaller: rungs are already isolated; stages and the `ai` executor remain. |
+| 7 measurement | 9 | Down. Summary-row code, rules in the cache key, zone errors counted; no new measurement system. |
+| 9 iteration time | 10 | Parallel gate starts conservative, compared with serial; gate completion check done by the coordinator. |
+
+Accepted from them without change: keep the stage manifest as the protection gate; no synthetic keep-outs yet; CP-SAT optional.
+Corrected in my round 1: the Manhattan bound; the claim that close attempts share one process.
+
+### 6.3 Round 2 questions
+
+1. **Scope of the bundle enumeration.** You propose enumerating pair bundles per component. Our failing case has two ends: Ethernet pair P1
+   runs from a 10-pin protection part (0.5 mm pitch, pairs P0 and P1 on the same part) 15 mm to the magnetics and 36 mm to the connector, and
+   P0's escape at the first part is what walls P1 in. If we enumerate per component, the bundle chosen at one end can be the one that makes
+   the far end or the channel between them infeasible. Would you enumerate per component and verify with a ghost route of the affected pairs,
+   or enumerate jointly over the two or three components that share a channel (candidate count multiplies: k per pair, 2 pairs, 3 parts)?
+   At what candidate count would you stop enumerating and accept the solver dependency?
+2. **Reading the refusal histogram.** Before changing the close acceptance rules we will record every failing rule for each of the refused
+   attempts (connectivity, shorts, new error key, protected net, score not lower, target still there). Our acceptance needs a strictly lower
+   score. If most refusals turn out to be "score equal" with no other rule failing (a legal sideways move), would you accept equal-score
+   candidates under a memo that forbids revisiting a state, or keep strict improvement and put the effort into better candidates? And which
+   share of "new error key" refusals would make you conclude the candidates, not the gate, are the problem?
