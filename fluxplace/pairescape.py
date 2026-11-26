@@ -240,9 +240,9 @@ def select(domains, clr, expansions, shortlist, forbidden=frozenset(), access=No
             return
         v = vars_[i]
         for b in doms[v]:
-            used += 1
-            if used > expansions:
+            if used >= expansions:
                 return
+            used += 1
             nd = {u: [c for c in doms[u] if not conflict(b, c)] for u in vars_[i + 1:]}
             if any(not x for x in nd.values()):
                 continue                                       # early conflict pruning
