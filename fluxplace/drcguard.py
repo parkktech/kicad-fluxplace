@@ -302,45 +302,82 @@ def snap_nets(snap):
 MODES = ("repair", "build", "edit")
 
 
+def run_rules(rules, trace=None):
+    """Run [(name, fn)] in order; fn() -> "" (pass) or a reason. trace None: return the first reason (stop there), "" if all
+    pass. trace a list: run EVERY rule and append {"rule", "status", "detail"} per rule, status pass / fail / UNKNOWN (the
+    rule raised, so it could not be judged); returns the first non-pass reason, "UNKNOWN <rule>: ..." for an UNKNOWN."""
+    first = ""
+    for name, fn in rules:
+        if trace is None:
+            why = fn()
+            if why:
+                return why
+            continue
+        try:
+            why = fn()
+            row = {"rule": name, "status": "fail" if why else "pass", "detail": why}
+        except Exception as e:
+            why = f"UNKNOWN {name}: {type(e).__name__}: {e}"[:120]
+            row = {"rule": name, "status": "UNKNOWN", "detail": why}
+        trace.append(row)
+        first = first or why
+    return first
+
+
 def accept(base, cand, mode="repair", target=(), kind=None, base_board=None, cand_board=None, score=None,
-           locked_ok=None, snap=None, protect=()):
+           locked_ok=None, snap=None, protect=(), trace=None):
     """Guard a candidate measure against its base; first failing rule gives `why`. Rules and modes:
     docs/recipes/PHASE2-guard.md. mode: repair (R0-R5, score, target), build (R0, R1, R3, R5, opens), edit (R0, R1,
     R3, R5). R5: no protected net gains opens. Other trades are allowed: no rule compares opens per plain net.
-    Unknown mode raises ValueError. -> (ok, why)."""
+    Unknown mode raises ValueError. -> (ok, why). `trace` (a list) evaluates every rule instead of stopping at the first
+    failure and records one row per rule (run_rules); the verdict is the same: any fail or UNKNOWN refuses."""
     from . import audit
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}")
-    if base_board and cand_board:
-        snap = snap or (lambda p: audit.snapshot(p, checks=False))
-        diff = audit.connectivity_diff(snap(base_board), snap(cand_board))
+
+    def r0():
+        if not (base_board and cand_board):
+            return ""
+        sn = snap or (lambda p: audit.snapshot(p, checks=False))
+        diff = audit.connectivity_diff(sn(base_board), sn(cand_board))
         if not diff["ok"]:
-            return False, ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
-    if cand["shorts"] > base["shorts"]:
-        return False, "R1 shorts up"
-    if protect:
+            return ("R0 " + (diff["violations"][0] if diff.get("violations") else "connectivity"))[:100]
+        return ""
+
+    def r1():
+        return "R1 shorts up" if cand["shorts"] > base["shorts"] else ""
+
+    def r5():
         bo, co = base.get("opens_by_net") or {}, cand.get("opens_by_net") or {}
-        for n in sorted(protect):
+        for n in sorted(protect or ()):
             if co.get(n, 0) > bo.get(n, 0):
-                return False, f"R5 protected net opened {n} {bo.get(n, 0)}->{co.get(n, 0)}"[:120]
-    if mode == "repair":
+                return f"R5 protected net opened {n} {bo.get(n, 0)}->{co.get(n, 0)}"[:120]
+        return ""
+
+    def r2():
         new = new_keys(base.get("keys", base.get("err_keys")), cand.get("keys", cand.get("err_keys")))
         if kind is not None:
             from .gaps import KIND_OF_TYPE
             new = Counter({k: v for k, v in new.items() if KIND_OF_TYPE.get(k[0]) != kind})
-        if new:
-            return False, f"R2 new DRC key {next(iter(new))[0]}"[:120]
-    if locked_ok is not None and not locked_ok():
-        return False, "R3 locked copper changed"
-    if mode == "repair":
+        return f"R2 new DRC key {next(iter(new))[0]}"[:120] if new else ""
+
+    def r3():
+        return "R3 locked copper changed" if locked_ok is not None and not locked_ok() else ""
+
+    def r4():
         sc = score or (lambda m: [m["shorts"], m["opens"], m["errors"]])
-        if not sc(cand) < sc(base):
-            return False, "R4 score not lower"
-        if target and "gap_ids" in cand and not any(t not in cand["gap_ids"] for t in target):
-            return False, "target gap still there"
-    elif mode == "build" and not cand["opens"] < base["opens"]:
-        return False, "R4 opens not lower"
-    return True, ""
+        return "" if sc(cand) < sc(base) else "R4 score not lower"
+
+    def rt():
+        return "target gap still there" if target and "gap_ids" in cand and not any(t not in cand["gap_ids"] for t in target) else ""
+
+    rules = [("R0", r0), ("R1", r1)] + ([("R5", r5)] if protect else []) + ([("R2", r2)] if mode == "repair" else []) + [("R3", r3)]
+    if mode == "repair":
+        rules += [("R4", r4), ("target", rt)]
+    elif mode == "build":
+        rules += [("R4", lambda: "" if cand["opens"] < base["opens"] else "R4 opens not lower")]
+    why = run_rules(rules, trace)
+    return (not why), why
 
 
 def check(candidate, base, kicad_cli="kicad-cli", log=print, stats=None, report=None, keep=None):

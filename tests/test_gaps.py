@@ -3,6 +3,7 @@ from fluxplace import procs as _procs_mod
 import hashlib, json, os, shutil, sys
 from collections import Counter
 import pytest
+from fluxplace import refusal as refusal_mod
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import types
 from fluxplace import gaps as GP
@@ -179,6 +180,8 @@ def _rung(mode):
         shutil.copy(base, out)
         if mode == "fix":
             open(out, "w").write("fixed")
+        if mode == "other":
+            open(out, "w").write("changed")
         return {"mode": mode}
     return fn
 
@@ -1296,3 +1299,61 @@ def test_packets_are_written_after_every_kind_had_its_own_rungs(monkeypatch, tmp
     ai = [i for i, (_k, m) in enumerate(seq) if m == "ai"]
     assert [seq[i][0] for i in ai] == ["open-pour", "open-free"] and ai[0] > max(i for i, (_k, m) in enumerate(seq) if m != "ai")
     assert res["stop"] == "packets"
+
+
+# ---- B6 step 0: refusal record ----
+
+def test_accept_trace_lists_every_rule_same_verdict(guard):
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    cand = _mm(opens=3, err_keys=[("clearance", ("x",))], gaps=[_g("a"), _g("b")])
+    plain = _accept(guard, base, cand)
+    trace = []
+    got = GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], trace=trace)
+    assert got == plain and plain[1] == "R2 new DRC key clearance"
+    st = {t["rule"]: t["status"] for t in trace}
+    assert st["R2"] == st["R4"] == st["target"] == "fail" and st["R0"] == st["R1"] == st["R6:rf"] == "pass"
+    assert {"review", "R6:hs_pair", "R6:power", "R6:power_mag", "R3"} <= set(st)
+
+
+def test_crashed_check_is_unknown_and_refuses(monkeypatch, guard):
+    def boom(*a, **k):
+        raise RuntimeError("snapshot died")
+    monkeypatch.setattr(GP.audit, "connectivity_diff", boom)
+    base = _mm(opens=3, gaps=[_g("a"), _g("b")])
+    cand = _mm(opens=2, gaps=[_g("b")])                       # would be accepted if R0 simply passed
+    trace = []
+    ok, why = GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"], trace=trace)
+    r0 = next(t for t in trace if t["rule"] == "R0")
+    assert not ok and r0["status"] == "UNKNOWN" and why.startswith("UNKNOWN R0")
+    assert all(t["status"] == "pass" for t in trace if t["rule"] != "R0")     # UNKNOWN is not an ordinary violation
+    rec = refusal_mod.record(ctx={"rung": "x"}, rules=trace, base_m=base, cand_m=cand, cand_gaps=cand["gaps"], target_ids=["a"])
+    assert rec["failing"] == ["R0"]
+    with pytest.raises(RuntimeError):                         # the untraced path is unchanged: the crash propagates
+        GP._accept(base, guard["base"], cand, guard["cand"], ["a"], cand["gaps"])
+
+
+def test_close_writes_refusal_records_and_histogram(monkeypatch, loop):
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("other"))
+    for r in GP.DISPATCH["open-free"]:
+        if r != "patch":
+            monkeypatch.setitem(GP.RUNGS, r, _rung("same"))
+    out = []
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=out.append)
+    recs = refusal_mod.load(refusal_mod.path(loop["work"]))
+    cand = [r for r in recs if r["rung"] == "patch"][0]
+    for f in ("run", "attempt", "kind", "rung", "why", "targets", "rules", "blockers", "score_delta", "target", "drc",
+              "changed", "failing", "refused"):
+        assert f in cand
+    assert {"R4", "target"} <= set(cand["failing"]) and cand["score_delta"]["opens"]["delta"] == 0
+    assert cand["target"]["closed_all"] is False and cand["drc"] == {"added": [], "removed": []}
+    assert cand["changed"]["status"] == "UNKNOWN"             # a text stub is not a board: UNKNOWN, no crash
+    assert any(r["failing"] == ["no_change"] for r in recs)   # candidate-less refusals are recorded too
+    assert any(l.startswith("close refusals ") and "score-equal-no-other-failure=" in l for l in out)
+    h = refusal_mod.histogram(recs)
+    assert h["n"] == len(recs) and h["first"]["R4"] >= 1
+
+
+def test_histogram_buckets():
+    r = lambda failing, d: {"failing": failing, "score_delta": {"opens": {"delta": d}}}      # noqa: E731
+    h = refusal_mod.histogram([r(["R4"], 0), r(["R4", "target"], 0), r(["R2", "R4"], 1), r(["R0"], 0)])
+    assert h["first"] == {"R4": 2, "R2": 1, "R0": 1} and h["any"]["R4"] == 3 and h["score_equal_only"] == 1
