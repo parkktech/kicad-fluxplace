@@ -1026,9 +1026,17 @@ def st_close(c, n, board):
         if GP.ai_answer_required(c.cons):
             out.update(verdict="packets", next=[f"close: answer the AI packets ({len(pk)}) in {os.path.join(c.dir(n, 'close'), 'ai')} and re-run from close"])
         else:
-            out["line"] += f"; {len(pk)} packets unanswered, defaults used"
-            out["ai_unanswered"] = {"n": len(pk), "packets": pk}
+            out["ai_unanswered"] = _packet_ua(c, pk, [p.get("gap_id") or os.path.basename(p["packet"]) for p in res["packets"] if p.get("packet")],
+                                              os.path.join(c.dir(n, "close"), "ai"), "the close ai rung")
+            out["line"] += "; " + out["ai_unanswered"]["line"]
     return out
+
+
+def _packet_ua(c, paths, keys, ai_dir, carried):
+    """B12: classify packets the stage's defaults left unanswered (packets.py): -> the `ai_unanswered` record with classes."""
+    from . import packets as PK, questions as QS
+    ans = {**{str(k): str(v) for k, v in ((c.cons or {}).get("answers") or {}).items()}, **QS.parse_answers(getattr(getattr(c, "a", None), "answer", None))}
+    return PK.resolve(list(zip(paths, keys)), set(keys), ans, carried=carried, ai_dir=ai_dir)
 
 
 def st_tune(c, n, board):
@@ -1363,13 +1371,14 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
     pk = [p.get("packet") for p in r.get("packets") or [] if p.get("packet")]
     unans = verdict == "packets" and not GP.ai_answer_required(c.cons)          # [ai] answer = optional: defaults used, the flow goes on
-    ua = {"ai_unanswered": {"n": len(pk), "packets": pk}} if unans else {}
+    ua = {"ai_unanswered": _packet_ua(c, pk, [p.get("gap_id") or os.path.basename(p["packet"]) for p in r.get("packets") or [] if p.get("packet")],
+                                      os.path.join(d, "ai"), "the next stage's gap loop")} if unans else {}
     rows = _defer_gate(r, d, later)
     if rows:                                                # only findings a later stage owns: the flow goes on
         return {"verdict": "warn", "board": r["best"], "line": line.replace(f": {stop},", ": deferred,", 1) + f"; carried to {', '.join(sorted({o for g in rows for o in GP.GATE_DEFER[g['kind']] if o in later}))}: {_deferred_line(rows)}",
                 "next": [], "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "deferred": rows}, **ua}
     if unans:
-        return {"verdict": "warn", "board": r["best"], "line": line + f"; {len(pk)} packets unanswered, defaults used", "next": [],
+        return {"verdict": "warn", "board": r["best"], "line": line + "; " + ua["ai_unanswered"]["line"], "next": [],
                 "gate": {"kinds": kinds, "stop": stop, "dir": d}, **ua}
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
             "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
@@ -1960,12 +1969,16 @@ def _run(a):
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
             res["line"] = res.get("line", "")
-            if "unanswered" not in res["line"]:
-                res["line"] += f"; {ua['n']} packets unanswered, defaults used"
-            st.setdefault("ai_unanswered", {})[name] = {"n": ua["n"], "packets": ua["packets"], "note": f"{ua['n']} packets unanswered, defaults used"}
+            note = ua.get("line") or f"{ua['n']} packets, defaults used"
+            if ua["line"] not in res["line"]:
+                res["line"] += "; " + note
+            st.setdefault("ai_unanswered", {})[name] = {"n": ua["n"], "packets": ua["packets"], "classes": ua.get("classes"), "note": note}
             with open(led.path, "a") as fh:
-                fh.write(f"{name}: {ua['n']} packets unanswered, defaults used: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
-            print(f"pipeline: {name}: {ua['n']} packets unanswered, defaults used (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+                fh.write(f"{name}: {note}: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
+            print(f"pipeline: {name}: {note} (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+            if ua.get("questions") and res["verdict"] != "questions":       # B12: an owner decision suspends the flow (exit 3), resumable
+                res["verdict"] = "questions"
+                res["next"] = [f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]]
         if res.get("undocumented"):
             st["undocumented"] = _clip(res["undocumented"], 200)
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
