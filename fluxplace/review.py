@@ -1005,16 +1005,47 @@ def landpattern_geometry(pad_geom):
     return {"pitch": pitch, "rows": rows, "pad": pad, "pins": len({str(g[0]) for g in pads})}
 
 
+_NUM_TOK = re.compile(r"(?<![\d.])(\d*\.\d+)(?!\d)")
+
+
+def _text_numbers(text):
+    """Decimal numbers printed on a page, as (value, decimals): 0.50, 0.5,
+    (0.5), .5, 0,5 (decimal comma) all read the same."""
+    t = re.sub(r"(?<![\d,.])(0),(\d{1,3})(?![\d,])", r"\1.\2", text or "")
+    t = re.sub(r"(?<![\d,.])(\d),(\d{1,2})(?![\d,])", r"\1.\2", t)
+    out = []
+    for m in _NUM_TOK.finditer(t):
+        tok = m.group(1)
+        out.append((float(tok), len(tok.split(".")[1])))
+    return out
+
+
 def _num_in_text(text, value_mm):
-    """True if value_mm appears on the page in mm (0.99, .99) or inches
-    (0.039, .039), to two decimals either way."""
-    forms = set()
-    for v in (value_mm, value_mm / 25.4):
-        for fmt in ("%.2f", "%.3f"):
-            t = fmt % v
-            forms.add(t)
-            forms.add(t.lstrip("0"))
-    return any(re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text) for f in forms if f)
+    """True if value_mm is printed on the page in mm or inches, in any common
+    form (0.5, 0.50, (0.5), .5, 0,5), to the printed precision (two decimals,
+    or as many as printed up to four)."""
+    vals = (value_mm, value_mm / 25.4)
+    for tok, dec in _text_numbers(text):
+        nd = 2 if dec <= 2 else min(dec, 4)
+        if any(abs(round(v, nd) - tok) < 1e-9 for v in vals):
+            return True
+    return False
+
+
+def _derived_pitch(text, pitch, pad):
+    """Pitch not printed itself but pad width + gap (printed) sum to it:
+    -> "1.45 + 2.55" or None. One of the two numbers must be a cited pad
+    dimension and both must be printed on the page."""
+    if not pad:
+        return None
+    nums = sorted({round(t, 3) for t, _ in _text_numbers(text)})
+    for w in sorted({round(float(x), 3) for x in pad}):
+        if not any(abs(w - n) < 0.006 for n in nums):
+            continue
+        for g in nums:
+            if g > 0 and abs(w + g - pitch) < 0.006:
+                return "%g + %g" % (w, g)
+    return None
 
 
 def project_drawn(project_libs, ds_dir=None):
@@ -1102,12 +1133,38 @@ def check_landpattern(facts, spec, ds_dir, project_libs=(), strict=True):
         # a drawing whose only text is the title block (Amphenol 10164227:
         # part-number structure and a print date, every dimension is line
         # art) is unreadable for this purpose, not a page that lacks the number
-        if len(re.findall(r"\d+\.\d+", text)) < 5:
+        pitch = float(lp["pitch"]) if lp.get("pitch") is not None else None
+        readable = len(re.findall(r"\d+\.\d+", text)) >= 5
+        how = None
+        if readable and (pitch is None or _num_in_text(text, pitch)):
+            continue
+        if readable:
+            how = _derived_pitch(text, pitch, lp.get("pad"))
+            if how:
+                out.append(_f(INFO, "LANDPATTERN_PITCH_DERIVED",
+                              f"{ref}: pitch {pitch} mm is not printed on {src}; derived: {how}",
+                              refs=[ref]))
+                continue
+        ocr = PD.ocr_text(path, pages or [1])
+        if ocr and len(re.findall(r"\d+\.\d+", ocr)) >= 5 and pitch is not None:
+            if _num_in_text(ocr, pitch):
+                out.append(_f(INFO, "LANDPATTERN_PITCH_OCR",
+                              f"{ref}: pitch {pitch} mm read from {src} by ocr", refs=[ref]))
+                continue
+            how = _derived_pitch(ocr, pitch, lp.get("pad"))
+            if how:
+                out.append(_f(INFO, "LANDPATTERN_PITCH_DERIVED",
+                              f"{ref}: pitch {pitch} mm is not printed on {src}; derived (ocr): {how}",
+                              refs=[ref]))
+                continue
+            readable = True
+        if not readable:
+            why = "" if ocr else " (ocr unavailable: tesseract not installed or failed)"
             out.append(_f(WARN, "LANDPATTERN_PAGE_UNREADABLE",
                           f"{ref}: {src} is a text-less drawing — the cited pitch "
                           f"{lp.get('pitch')} mm was read by eye; verify it once more "
-                          f"before ordering", refs=[ref]))
-        elif lp.get("pitch") is not None and not _num_in_text(text, float(lp["pitch"])):
+                          f"before ordering{why}", refs=[ref]))
+        else:
             out.append(_f(FAIL, "LANDPATTERN_NOT_ON_PAGE",
                           f"{ref}: pitch {lp['pitch']} mm is not printed on {src}",
                           refs=[ref]))

@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from fluxplace import procs as _procs
 import time
@@ -207,6 +208,39 @@ def page_text(pdf, pages=None):
     return r.stdout if r.returncode == 0 else None
 
 
+_OCR_CACHE = {}
+
+
+def ocr_text(pdf, pages):
+    """OCR of the given 1-based pages (pdftoppm 300 dpi -> tesseract), or None
+    when tesseract/pdftoppm is not installed or fails. Memoised."""
+    key = (pdf, tuple(pages or ()))
+    if key in _OCR_CACHE:
+        return _OCR_CACHE[key]
+    res = None
+    if shutil.which("tesseract") and shutil.which("pdftoppm"):
+        import tempfile
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                chunks = []
+                for pg in (pages or [1]):
+                    base = os.path.join(td, "p%d" % pg)
+                    r = _procs.run(["pdftoppm", "-r", "300", "-f", str(pg), "-l", str(pg),
+                                    "-png", "-singlefile", pdf, base],
+                                   capture_output=True, text=True, timeout=180)
+                    if r.returncode != 0 or not os.path.exists(base + ".png"):
+                        continue
+                    r = _procs.run(["tesseract", base + ".png", "-", "--psm", "11"],
+                                   capture_output=True, text=True, timeout=300)
+                    if r.returncode == 0:
+                        chunks.append(r.stdout)
+                res = "\n".join(chunks) if chunks else None
+        except (OSError, subprocess.TimeoutExpired):
+            res = None
+    _OCR_CACHE[key] = res
+    return res
+
+
 def parse_source(src):
     """'datasheets/X.pdf#p3' / 'X.pdf#p3-4' / 'X.pdf' -> (file, [pages])."""
     if not src or not isinstance(src, str):
@@ -264,19 +298,15 @@ def _aliases(name):
     return {_norm(a) for a in out if _norm(a)}
 
 
-def evidence(pinmap, pdf_path, pages, min_ratio=0.8):
-    """Does the cited page carry the pinmap's names? -> (ok, found, missing,
-    detail). ok is None when the text could not be read."""
-    if not pinmap:
-        return True, [], [], "no pinmap"
-    if not pdf_path or not os.path.exists(pdf_path):
-        return False, [], sorted(pinmap), "datasheet file missing"
-    txt = page_text(pdf_path, pages or None)
-    if txt is None:
-        return None, [], sorted(pinmap), "pdftotext unavailable or PDF unreadable"
-    if len(txt.strip()) < 40:
-        return None, [], sorted(pinmap), ("cited page(s) carry no text (drawing/scan) — "
-                                          "verify by eye and cite a text page or the family sheet")
+def _alias_hit(term, text):
+    """The printed datasheet term (alternatives split on / , ;) is on the page."""
+    flat = re.sub(r"\s+", " ", (text or "").upper())
+    alts = [t.strip().upper() for t in re.split(r"[/,;]", term or "") if t.strip()]
+    return any(re.search(r"(?<![A-Z0-9])" + re.escape(re.sub(r"\s+", " ", a)) + r"(?![A-Z0-9])", flat)
+               for a in alts)
+
+
+def _match_names(pinmap, txt):
     toks = _tokens(txt)
     flat = _norm(txt)
     found, missing = [], []
@@ -286,10 +316,70 @@ def evidence(pinmap, pdf_path, pages, min_ratio=0.8):
             found.append(name)
         else:
             missing.append(name)
+    return found, missing
+
+
+def evidence(pinmap, pdf_path, pages, min_ratio=0.8, pin_alias=None, ds_dir=None):
+    """Does the cited page carry the pinmap's names? -> (ok, found, missing,
+    detail). ok is None when the text could not be read.
+
+    pin_alias {pin name: {"datasheet": printed term, "page": "file.pdf#pN"}}
+    maps a board pin name to the term the datasheet prints; the pin is found
+    when that term is on its page (default: the cited page). When pdftotext
+    finds no text, or too few names, the cited pages are OCRed (tesseract, if
+    installed); detail then says "ocr"."""
+    if not pinmap:
+        return True, [], [], "no pinmap"
+    if not pdf_path or not os.path.exists(pdf_path):
+        return False, [], sorted(pinmap), "datasheet file missing"
+    txt = page_text(pdf_path, pages or None)
+    if txt is None:
+        return None, [], sorted(pinmap), "pdftotext unavailable or PDF unreadable"
+    pg_s = ",".join(map(str, pages)) if pages else "all"
+    notes = []
+    thin = len(txt.strip()) < 40
+    found, missing = ([], sorted(pinmap)) if thin else _match_names(pinmap, txt)
+    if len(found) / max(1, len(pinmap)) < min_ratio and pages:
+        ot = ocr_text(pdf_path, pages)
+        if ot and len(ot.strip()) >= 40:
+            f2, m2 = _match_names(pinmap, ot)
+            if len(f2) > len(found):
+                found, missing = f2, m2
+                notes.append("ocr")
+            txt = txt + "\n" + ot
+        elif ot is None and thin:
+            notes.append("ocr unavailable: tesseract not installed or failed")
+    if thin and not notes:
+        return None, [], sorted(pinmap), ("cited page(s) carry no text (drawing/scan) — "
+                                          "verify by eye and cite a text page or the family sheet")
+    if thin and "ocr" not in notes:
+        return None, [], sorted(pinmap), ("cited page(s) carry no text (drawing/scan; " + notes[0] +
+                                          ") — verify by eye and cite a text page or the family sheet")
+    for name in list(missing):
+        al = (pin_alias or {}).get(name)
+        if not al or not al.get("datasheet"):
+            continue
+        afile, apages = parse_source(al.get("page"))
+        if afile:
+            cand = [afile, os.path.join(ds_dir or "", os.path.basename(afile))]
+            afile = next((p for p in cand if os.path.exists(p)), None)
+            atxt = (page_text(afile, apages or None) or "") if afile else ""
+            if afile and not _alias_hit(al["datasheet"], atxt):
+                o = ocr_text(afile, apages) if apages else None
+                if o and _alias_hit(al["datasheet"], o):
+                    atxt = o
+                    notes.append("ocr")
+        else:
+            atxt = txt
+        if atxt and _alias_hit(al["datasheet"], atxt):
+            found.append(name)
+            missing.remove(name)
+            notes.append("alias %s=%r" % (name, al["datasheet"]))
     ratio = len(found) / max(1, len(pinmap))
-    return ratio >= min_ratio, sorted(found), sorted(missing), \
-        "%d/%d pin names on page(s) %s" % (len(found), len(pinmap),
-                                           ",".join(map(str, pages)) if pages else "all")
+    detail = "%d/%d pin names on page(s) %s" % (len(found), len(pinmap), pg_s)
+    if notes:
+        detail += " (" + "; ".join(dict.fromkeys(notes)) + ")"
+    return ratio >= min_ratio, sorted(found), sorted(missing), detail
 
 
 # ------------------------------------------------------------------- cite
@@ -452,7 +542,8 @@ def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
                 out.append(("FAIL" if strict else "WARN", "PINMAP_EVIDENCE_WEAK", ref,
                             f"{ref} {mpn}: pinmap has no datasheet to check against"))
                 continue
-            ok, found, missing, detail = evidence(pinmap, sfile, pages)
+            ok, found, missing, detail = evidence(pinmap, sfile, pages,
+                                                  pin_alias=c.get("pin_alias"), ds_dir=ds_dir)
             if ok is None:
                 out.append(("WARN", "PINMAP_EVIDENCE_UNREADABLE", ref,
                             f"{ref} {mpn}: {detail}"))
