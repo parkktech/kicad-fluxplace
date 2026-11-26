@@ -445,3 +445,33 @@ def test_rf_step_uses_the_pin_aware_class(tmp_path, monkeypatch):
     assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]
     rf = calls[1]
     assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["SW_OUT"]
+
+
+def _rf_ctx(tmp_path, monkeypatch, open_after):
+    import fluxplace.gaps as GP
+    from fluxplace import rfroute as RFR
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0])
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "BT1_RF"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    monkeypatch.setattr(K, "plane_plan", lambda b: (["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"], [("GND", "In1.Cu")]))
+    monkeypatch.setattr(RFR, "widths", lambda board, cons, nets, layers: {n: {"w": 0.368, "layers": {}} for n in nets})
+    monkeypatch.setattr(K.RC, "open_by_net", lambda b, **k: open_after)
+    return c, calls, runner
+
+
+def test_rf_net_routes_in_the_rf_step_at_impedance_width_on_outer_layers(tmp_path, monkeypatch):
+    c, calls, runner = _rf_ctx(tmp_path, monkeypatch, {"USB_DP": 1})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    rf, plain = calls[1], calls[2]
+    assert rf[rf.index("--layers") + 1:rf.index("--layers") + 3] == ["F.Cu", "B.Cu"] and "In2.Cu" not in rf[rf.index("--layers"):rf.index("--layers") + 4]
+    assert rf[rf.index("--power-nets") + 1] == "BT1_RF" and rf[rf.index("--power-nets-widths") + 1] == "0.368"
+    assert "BT1_RF" not in plain[plain.index("--nets") + 1:plain.index("--layers")]            # the plain step skips RF nets
+    assert r["rf"]["routed"] == ["BT1_RF"] and r["rf"]["open"] == []
+
+
+def test_unroutable_rf_net_stays_open_with_a_finding(tmp_path, monkeypatch):
+    c, calls, runner = _rf_ctx(tmp_path, monkeypatch, {"BT1_RF": 1})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    plain = calls[2]
+    assert "BT1_RF" not in plain[plain.index("--nets") + 1:plain.index("--layers")]            # never handed to the plain step at default width
+    assert r["rf"]["open"] == ["BT1_RF"] and "RF FINDING" in r["line"] and "BT1_RF" in r["line"] and r["verdict"] == "warn"

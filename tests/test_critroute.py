@@ -94,6 +94,7 @@ def _fake_board(monkeypatch, opens_good, shorts_bad=()):
     monkeypatch.setattr(HR, "open_nets", open_nets)
     monkeypatch.setattr(HR, "suggest", suggest)
     monkeypatch.setattr(HR, "lay", lay)
+    monkeypatch.setattr(HR, "_model", lambda board, cons=None, **kw: None)
     monkeypatch.setattr(gaps, "measure", measure)
     monkeypatch.setattr(gaps, "signal_layers", lambda board: ["F.Cu", "B.Cu"])
     return lays
@@ -189,3 +190,56 @@ def test_refused_lay_is_a_dropped_try_not_a_measure_of_the_empty_slot(tmp_path, 
     rec = json.loads(open(tmp_path / "attempts.jsonl").readline())
     assert rec["result"] == "refused" and "new DRC violation" in rec["why"]
     assert res["kept"] == [] and not [f for f in os.listdir(tmp_path) if "critroute" in f]
+
+
+def test_rf_net_is_laid_at_its_impedance_width_on_an_outer_layer(tmp_path, monkeypatch):
+    from fluxplace import rfroute as RFR
+    seen = {}
+    lays = _fake_board(monkeypatch, opens_good=True)
+    monkeypatch.setattr(gaps, "signal_layers", lambda board: ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"])
+    monkeypatch.setattr(RFR, "widths", lambda board, cons, nets, layers: {n: {"w": 0.368, "layers": {}} for n in nets})
+    monkeypatch.setattr(HR, "suggest", lambda board, net, conn=None, constraints=None, layers=None, avoid=None, width=None, **kw:
+                        seen.update(layers=layers, width=width) or {"found": True, "path": "P", "length_mm": 4.0})
+    monkeypatch.setattr(HR, "lay", lambda board, net, path, out=None, constraints=None, lock=False, width=None, **kw:
+                        seen.update(lay_width=width) or {"accepted": False, "reason": "x"})
+    board = str(tmp_path / "b.kicad_pcb")
+    open(board, "w").write("base")
+    CR.apply(board, str(tmp_path / "o.kicad_pcb"), {"order": [], "nets": {"BT1_RF": {"layers": ["In2.Cu", "F.Cu"]}}, "tokens": 0},
+             None, {}, str(tmp_path / "a.jsonl"), crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}])
+    assert seen["layers"] == ["F.Cu"] and seen["width"] == 0.368 and seen["lay_width"] == 0.368     # an AI-suggested inner layer is dropped for RF
+
+
+def test_suggest_gets_the_connection_record_critroute_chose(tmp_path, monkeypatch):
+    """kicad-cli lists the unconnected items in a different order on each call: an index into a second listing solved a connection of
+    ANOTHER net (W43), so the try carries the record itself."""
+    lays = _fake_board(monkeypatch, opens_good=True)
+    seen = {}
+    monkeypatch.setattr(HR, "_model", lambda board, cons=None, **kw: "M")
+    monkeypatch.setattr(HR, "suggest", lambda board, net, conn=None, constraints=None, rec=None, M=None, via_cost=2.0, **kw:
+                        seen.update(rec=rec, M=M, via_cost=via_cost) or {"found": False, "reason": "x"})
+    board = str(tmp_path / "b.kicad_pcb")
+    open(board, "w").write("base")
+    CR.apply(board, str(tmp_path / "o.kicad_pcb"), None, None, {}, str(tmp_path / "a.jsonl"), crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}])
+    assert seen["rec"]["net"] == "BT1_RF" and seen["M"] == "M" and seen["via_cost"] == CR.RF_VIA_COST
+
+
+def test_scratch_names_do_not_grow_with_every_kept_path(tmp_path, monkeypatch):
+    """W43: the scratch board was named from the last kept board, one tag longer per kept path: ENAMETOOLONG after ~14 paths."""
+    state = {"n": 0}
+    names = []
+    monkeypatch.setattr(HR, "_model", lambda board, cons=None, **kw: None)
+    monkeypatch.setattr(HR, "open_nets", lambda board, constraints=None, **kw: {"connections": [_conn("BT1_RF", state["n"])] if state["n"] < 30 else []})
+    monkeypatch.setattr(HR, "suggest", lambda *a, **kw: {"found": True, "path": "P", "length_mm": 1.0})
+
+    def lay(board, net, path, out=None, **kw):
+        names.append(len(os.path.basename(out)))
+        open(out, "w").write("x")
+        state["n"] += 1
+        return {"accepted": True}
+    monkeypatch.setattr(HR, "lay", lay)
+    monkeypatch.setattr(gaps, "measure", lambda p, kicad_cli="kicad-cli": {"opens": 100 - state["n"], "shorts": 0})
+    monkeypatch.setattr(gaps, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    board = str(tmp_path / "in.kicad_pcb")
+    open(board, "w").write("b")
+    CR.apply(board, str(tmp_path / "o.kicad_pcb"), None, None, {}, str(tmp_path / "a.jsonl"), crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}])
+    assert len(names) == 30 and max(names) < 60
