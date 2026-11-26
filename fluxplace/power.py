@@ -366,18 +366,83 @@ def _is_decap(ref):
 
 
 def _board_ctx(board_path, rails):
-    """pcbnew view for the per-run physics: {pads: {net: [(ref, num, box)]}, board} of the rail nets, or None."""
+    """pcbnew view for the per-run physics: {b, pads: {net: [(ref, num, box, value, pin function)]}, copper: {net: (segs, vias)}}."""
     import pcbnew
     if not (isinstance(board_path, str) and os.path.exists(board_path)):
         return None
     b = pcbnew.LoadBoard(board_path)
-    pads = {}
+    pads, copper = {}, {}
     for p in b.GetPads():
         if p.GetNetname() in rails:
             bb = p.GetBoundingBox()
             bb.Inflate(pcbnew.FromMM(0.1))
-            pads.setdefault(p.GetNetname(), []).append((p.GetParentFootprint().GetReference(), p.GetNumber(), bb))
-    return {"b": b, "pads": pads}
+            fp = p.GetParentFootprint()
+            pads.setdefault(p.GetNetname(), []).append((fp.GetReference(), p.GetNumber(), bb, fp.GetValue(),
+                                                        (p.GetPinFunction() or p.GetName() or "")))
+    for t in b.GetTracks():
+        n = t.GetNetname()
+        if n not in rails:
+            continue
+        segs, vias = copper.setdefault(n, ([], []))
+        if t.GetClass() == "PCB_VIA":
+            vias.append((pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y), pcbnew.ToMM(t.GetWidth()) / 2))
+        elif t.GetClass() == "PCB_TRACK":
+            segs.append((b.GetLayerName(t.GetLayer()), pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y),
+                         pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y), pcbnew.ToMM(t.GetWidth())))
+    return {"b": b, "pads": pads, "copper": copper}
+
+
+def parse_ohms(value):
+    """'10k' -> 10000.0, '4k7' -> 4700.0, '0R' -> 0.0, '220' -> 220.0, '1M' -> 1e6; None when the Value is not a resistance."""
+    import re
+    v = str(value or "").strip().replace("Ω", "R").replace("ohm", "R").replace(" ", "")
+    m = re.match(r"^(\d+)([kKmMrR])(\d+)$", v)              # 4k7, 2R2
+    if m:
+        v = f"{m.group(1)}.{m.group(3)}{m.group(2)}"
+    m = re.match(r"^(\d+(?:\.\d+)?)([kKmMrR]?)", v)
+    if not m:
+        return None
+    return float(m.group(1)) * {"": 1.0, "r": 1.0, "k": 1e3, "m": 1e6}[m.group(2).lower()]
+
+
+def _seg_dist(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def end_kind(ctx, net, run, segs):
+    """What a run with no end pad is: "dangling stub" (an end touches nothing: no pad, via, other same-net copper or zone fill:
+    nothing downstream, 0 A), or "via/junction link" (every end lands on a via, a wider same-net track or a pour: a link
+    inside the rail tree, its current is not resolvable from the pads) -> (kind, free_ends)."""
+    import pcbnew
+    wide, vias = ctx["copper"].get(net, ([], []))
+    mem = [segs[i] for i in run["members"]]
+    deg = {}
+    for g in mem:
+        for k in (("x1", "y1"), ("x2", "y2")):
+            key = (round(g[k[0]], 2), round(g[k[1]], 2))
+            deg[key] = deg.get(key, 0) + 1
+    free = 0
+    for (x, y), d in deg.items():
+        if d != 1:
+            continue
+        others = any(_seg_dist(x, y, x1, y1, x2, y2) <= w / 2 + 0.02 and w > max(g["width"] for g in mem) + 1e-6
+                     for _l, x1, y1, x2, y2, w in wide)
+        onvia = any(math.hypot(x - vx, y - vy) <= vr + 0.02 for vx, vy, vr in vias)
+        inzone = False
+        for z in ctx["b"].Zones():
+            if z.GetNetname() == net:
+                for lname in {g["layer"] for g in mem}:
+                    if not z.IsOnLayer(ctx["b"].GetLayerID(lname)):
+                        continue
+                    fill = z.GetFilledPolysList(ctx["b"].GetLayerID(lname))
+                    if fill is not None and fill.OutlineCount() and fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0):
+                        inzone = True
+        if not (others or onvia or inzone):
+            free += 1
+    return ("dangling stub" if free else "via/junction link"), free
 
 
 def zone_credit_mm(ctx, net, layer, seg, band_mm):
@@ -410,45 +475,68 @@ def zone_credit_mm(ctx, net, layer, seg, band_mm):
 
 
 def run_current(ctx, cons, net, r, run, segs):
-    """Current (A) one narrow run really carries, and where the figure comes from: -> (amps, source).
-    The run's end pads are the pads of the net whose box holds a segment end. Decap pads carry no DC current; a pad of the rail's
-    source part carries total / its pins on the net; a load named by a single-load [[dcdrop]] row (`to`) carries that row's
-    current_a (per pin: / the part's pins on the net unless the row names the pin).  Any pad with no such figure -> the rail total,
-    source "unknown" (never a silent pass)."""
+    """Current (A) one narrow run really carries, and where the figure comes from: -> (amps, source, unknown part refs).
+    The run's end pads are the pads of the net whose box holds a segment end.  Per pad: capacitor 0 A DC; MOSFET gate pin (pin
+    function G / GATE) 0 A; resistor at most V_rail / R from its Value (0R = a series link: unknown); the rail's source part total /
+    its pins on the net; a load named by a single-load [[dcdrop]] row (`to`) that row's current_a (per pin: / the part's pins on the
+    net unless the row names the pin).  Diodes / TVS and anything else without a figure: unknown -> the rail total, flagged.
+    A run with no end pad is classified (`end_kind`): a dangling stub carries 0 A; a via/junction link stays unknown."""
     tot = r["current_a"]
     pads = (ctx or {}).get("pads", {}).get(net) or []
-    ends = [(g[k1], g[k2]) for i in run["members"] for g in (segs[i],) for k1, k2 in (("x1", "y1"), ("x2", "y2"))]
+    ends = [(segs[i][k1], segs[i][k2]) for i in run["members"] for k1, k2 in (("x1", "y1"), ("x2", "y2"))]
     import pcbnew
     hit = {}
     for x, y in ends:
         pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
-        for ref, num, bb in pads:
-            if bb.Contains(pt):
-                hit[(ref, num)] = True
+        for pad in pads:
+            if pad[2].Contains(pt):
+                hit[(pad[0], pad[1])] = pad
     if not hit:
-        return tot, "unknown (no end pad)"
+        kind, _free = end_kind(ctx, net, run, segs)
+        if kind == "dangling stub":
+            return 0.0, "dangling stub (no load behind it)", []
+        return tot, "unknown (no end pad: via/junction link inside the rail tree)", []
     pw = (cons or {}).get("power", {}).get(net) or {}
     rows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
     src = str(pw.get("source") or (rows[0].get("from") if rows else "") or "").split(".")[0]
+    volts = r.get("max_v") or 0.0
     npins = {}
-    for ref, _n, _b in pads:
-        npins[ref] = npins.get(ref, 0) + 1
-    amps, how = 0.0, set()
-    for ref, num in hit:
+    for pad in pads:
+        npins[pad[0]] = npins.get(pad[0], 0) + 1
+    amps, how, unk = 0.0, set(), []
+    for (ref, num), pad in hit.items():
+        pin = str(pad[4]).upper()
         if _is_decap(ref):
-            how.add("decap")
-        elif ref == src and tot:
+            how.add("capacitor 0 A DC")
+            continue
+        if str(ref).upper().startswith("Q") and (pin in ("G", "GATE") or pin.startswith("G") and pin[1:].isdigit()):
+            how.add("MOSFET gate 0 A")
+            continue
+        if str(ref).upper().startswith("R") and ref != src:
+            ohms = parse_ohms(pad[3])
+            if ohms and volts:
+                amps += volts / ohms
+                how.add(f"resistor V/R ({pad[3]})")
+                continue
+            unk.append(ref)
+            how.add(f"unknown ({ref} {pad[3] or 'no value'}: " + ("0R series link" if ohms == 0 else "no resistance value or rail voltage") + ")")
+            continue
+        if ref == src and tot:
             amps += tot / max(1, npins[ref])
             how.add("pin share (source)")
-        else:
-            row = next((d for d in rows if (d.get("to") if isinstance(d.get("to"), list) else [d.get("to")]).__len__() == 1
-                        and str((d["to"] if isinstance(d.get("to"), list) else [d["to"]])[0]).split(".")[0] == ref and d.get("current_a")), None)
-            if row is None:
-                return tot, f"unknown ({ref} load current not in the budget)"
-            to = str((row["to"] if isinstance(row["to"], list) else [row["to"]])[0])
-            amps += float(row["current_a"]) / (1 if "." in to else max(1, npins[ref]))
-            how.add("budget (dcdrop)")
-    return amps, "+".join(sorted(how))
+            continue
+        row = next((d for d in rows if len(d["to"] if isinstance(d.get("to"), list) else [d.get("to")]) == 1
+                    and str((d["to"] if isinstance(d.get("to"), list) else [d["to"]])[0]).split(".")[0] == ref and d.get("current_a")), None)
+        if row is None:
+            unk.append(ref)
+            how.add(f"unknown ({ref} load current not in the budget)")
+            continue
+        to = str((row["to"] if isinstance(row["to"], list) else [row["to"]])[0])
+        amps += float(row["current_a"]) / (1 if "." in to else max(1, npins[ref]))
+        how.add("budget (dcdrop)")
+    if unk:
+        return tot, "+".join(sorted(how)), sorted(set(unk))
+    return amps, "+".join(sorted(how)), []
 
 
 def check(facts, cons, dc=None, board=None):
@@ -483,12 +571,12 @@ def check(facts, cons, dc=None, board=None):
             for run in narrow_runs(narrow, [v for v in facts.get("vias") or [] if v.get("net") == net and "x" in v]):
                 rr = r
                 if ctx:                              # W34: the run's own current and conducting width (record both)
-                    amps, how = run_current(ctx, cons, net, r, run, narrow)
+                    amps, how, unk = run_current(ctx, cons, net, r, run, narrow)
                     cw = min(zone_credit_mm(ctx, net, narrow[i]["layer"], narrow[i], narrow[i]["need"]) for i in run["members"])
                     rise = r.get("rise_c") or DEFAULT_RISE_C
                     need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
                                     ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0
-                    run.update(amps=amps, amps_src=how, cred_w=round(cw, 3), min_w_track=run["min_w"], need_run=round(need_run, 3))
+                    run.update(amps=amps, amps_src=how, unk_refs=unk, cred_w=round(cw, 3), min_w_track=run["min_w"], need_run=round(need_run, 3))
                     if cw >= need_run - 1e-6:        # wide enough for the current it really carries: not a constriction
                         run["cleared"] = True
                         continue
@@ -507,8 +595,9 @@ def check(facts, cons, dc=None, board=None):
                 det = "; ".join(f"{x['layer']} {x['len']:.2f} mm at {x['min_w']:g} < {x.get('need_run', x['need']):.2f}"
                                 + (f" ({x['amps']:.2f} A {x['amps_src']}, credited {x['cred_w']:g})" if "amps" in x else "")
                                 + (": " + ", ".join(f) if f else "") for x, f in bad[:4])
-                nunk = sum(1 for x, _f in bad if str(x.get("amps_src", "")).startswith("unknown"))
-                det += (f"; {nunk} run(s) with current unknown (rail total used)" if nunk else "")
+                nunk = sum(1 for x, _f in bad if x.get("unk_refs") or str(x.get("amps_src", "")).startswith("unknown"))
+                urefs = sorted({r_ for x, _f in bad for r_ in x.get("unk_refs") or []})
+                det += (f"; {nunk} run(s) with current unknown (rail total used)" + (f", parts: {', '.join(urefs[:12])}" if urefs else "") if nunk else "")
                 det += (f"; +{len(bad) - 4} more run(s)" if len(bad) > 4 else "") + (f"; net: {dropf}" if dropf else "")
                 out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
                             "msg": f"{net}: {len(bad)} narrow run(s), {tot:.1f} mm, not proven for the {r['current_a']:g} A "

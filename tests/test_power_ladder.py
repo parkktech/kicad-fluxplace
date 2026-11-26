@@ -242,3 +242,91 @@ def test_run_inside_a_same_net_pour_gets_zone_credit(tmp_path):
     assert "2 narrow run(s)" in base[0]["msg"]
     assert not z or "1 narrow run(s)" in z[0]["msg"]                        # the U2 stub lies in the filled pour: credited, source stub still fails
     assert z and "credited" in z[0]["msg"]
+
+
+# ---- W34 part 3: resistor / diode / gate / no-end-pad physics --------------------------------------------------
+
+def _edit(p, ref, value=None, pinfn=None):
+    import pcbnew as P
+    b = P.LoadBoard(p)
+    for f in b.GetFootprints():
+        if f.GetReference() == ref:
+            if value is not None:
+                f.SetValue(value)
+            if pinfn is not None:
+                for pad in f.Pads():
+                    pad.SetPinFunction(pinfn)
+    P.SaveBoard(p, b)
+    return p
+
+
+def _msg(p):
+    fs = _check(p)
+    return fs[0]["msg"] if fs else ""
+
+
+def test_parse_ohms():
+    for v, o in (("10k", 1e4), ("4.7k", 4700.0), ("4k7", 4700.0), ("0R", 0.0), ("220", 220.0), ("1M", 1e6), ("100R", 100.0)):
+        assert PW.parse_ohms(v) == pytest.approx(o)
+    assert PW.parse_ohms("100nF") is None or PW.parse_ohms("BAT54") is None
+
+
+def test_resistor_pad_carries_at_most_v_over_r_so_its_stub_passes(tmp_path):
+    pytest.importorskip("pcbnew")
+    p = _edit(_br_board(tmp_path, extra_pad=("R1", 14, 4, "VB")), "R1", value="10k")
+    assert "2 narrow run(s)" in _msg(p) and "unknown" not in _msg(p)        # source + U2 only; 5 V / 10 k = 0.5 mA
+
+
+def test_zero_ohm_resistor_is_a_series_link_unknown_and_flagged(tmp_path):
+    pytest.importorskip("pcbnew")
+    m = _msg(_edit(_br_board(tmp_path, extra_pad=("R1", 14, 4, "VB")), "R1", value="0R"))
+    assert "3 narrow run(s)" in m and "parts: R1" in m
+
+
+def test_diode_without_a_dcdrop_row_stays_unknown(tmp_path):
+    pytest.importorskip("pcbnew")
+    m = _msg(_br_board(tmp_path, extra_pad=("D1", 14, 4, "VB")))
+    assert "3 narrow run(s)" in m and "parts: D1" in m
+
+
+def test_mosfet_gate_pin_carries_no_dc_current(tmp_path):
+    pytest.importorskip("pcbnew")
+    p = _edit(_br_board(tmp_path, extra_pad=("Q1", 14, 4, "VB")), "Q1", pinfn="G")
+    assert "2 narrow run(s)" in _msg(p)
+    q = _edit(_br_board(tmp_path / "x" if (tmp_path / "x").mkdir() is None else tmp_path, extra_pad=("Q1", 14, 4, "VB")), "Q1", pinfn="D")
+    assert "parts: Q1" in _msg(q)                                           # a drain pin is not a gate
+
+
+def _stub_board(tmp_path, end_via):
+    import pcbnew as P
+    from test_routerules_syn import _board
+    p = _br_board(tmp_path)
+    b = P.LoadBoard(p)
+    t = P.PCB_TRACK(b)                                                       # a 6 mm stub off the trunk, no pad at its end
+    t.SetStart(P.VECTOR2I(P.FromMM(6), P.FromMM(10)))
+    t.SetEnd(P.VECTOR2I(P.FromMM(6), P.FromMM(4)))
+    t.SetWidth(P.FromMM(0.15))
+    t.SetLayer(P.F_Cu)
+    t.SetNet(b.FindNet("VB"))
+    b.Add(t)
+    if end_via:
+        v = P.PCB_VIA(b)
+        v.SetPosition(P.VECTOR2I(P.FromMM(6), P.FromMM(4)))
+        v.SetWidth(P.FromMM(0.45))
+        v.SetDrill(P.FromMM(0.2))
+        v.SetNet(b.FindNet("VB"))
+        v.SetLayerPair(P.F_Cu, P.B_Cu)
+        b.Add(v)
+    P.SaveBoard(p, b)
+    return p
+
+
+def test_run_with_no_end_pad_is_a_dangling_stub_carrying_nothing(tmp_path):
+    pytest.importorskip("pcbnew")
+    assert "2 narrow run(s)" in _msg(_stub_board(tmp_path, end_via=False))   # the dangling 6 mm stub is cleared (0 A), the others as before
+
+
+def test_run_with_no_end_pad_ending_on_a_via_is_a_link_and_stays_unknown(tmp_path):
+    pytest.importorskip("pcbnew")
+    m = _msg(_stub_board(tmp_path, end_via=True))
+    assert "3 narrow run(s)" in m and "current unknown" in m
