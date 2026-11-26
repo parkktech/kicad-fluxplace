@@ -235,10 +235,23 @@ def _restore_project(source_board, output_board):
     return changed
 
 
-def _post(best, d, planes, R):
-    """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill."""
+def _post(best, d, planes, R, protect=()):
+    """The same guarded cleanup the batch route gets: via-centre snap, plane ties, then a saved fresh fill.
+    Ends the snap leaves (clearance-refused) go to the via-to-end move, then the joiner (the close-stage fallbacks); each is DRC-guarded,
+    lock-respecting and skips the `protect` nets (the manifest's completed nets)."""
     from . import snapiter as SI, planetie as PT, opengate as OG
     snap = SI.run(best, best, log=lambda _m: None)
+    if snap.get("centred_left") != 0:
+        for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run)):
+            try:
+                snap[key] = fn(best, best, log=lambda _m: None, protect=list(protect))
+            except Exception as e:                           # noqa: BLE001 - a fallback failure keeps the snapped board
+                snap[key] = {"error": str(e)[:160]}
+                break
+            if snap[key].get("centred_left") == 0:
+                break
+        left = [r.get("centred_left") for r in (snap, snap.get("via") or {}, snap.get("joiner") or {}) if r.get("centred_left") is not None]
+        snap["centred_left"] = left[-1] if left else snap.get("centred_left")
     ties = PT.run_guarded(best, best, [net for net, _lay in planes], RC.open_by_net, log=lambda _m: None, workdir=d,
                           plane_layers=[lay for _net, lay in planes],
                           rules={"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]})
@@ -406,7 +419,8 @@ def run(c, n, board, runner=run_step):
         keep = best + ".prepost"
         shutil_copy(best, keep)
         try:
-            post = _post(best, d, planes, R)
+            from . import boardwrite as BW
+            post = _post(best, d, planes, R, protect=sorted((BW.load_manifest(board) or {}).get("nets") or {}))
         except Exception as e:                               # snap / plane ties failed: the routed board stands, flagged
             shutil_copy(keep, best)
             post_error = {"type": type(e).__name__, "message": str(e)[:300]}
