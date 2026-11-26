@@ -1709,7 +1709,10 @@ def cmd_floorplan(a):
     refused = not passes(best) or bool(irc or brc) or ill
     hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
     print(hon["line"])
-    from . import placegaps as PG; PG.detect_stage("floorplan", out, cons, spec, os.path.dirname(os.path.abspath(out)), base=os.path.splitext(os.path.basename(out))[0] + ".placegaps", ds_dir=ds_dir, attempts=pgres)
+    from . import placegaps as PG; pgd = PG.detect_stage("floorplan", out, cons, spec, os.path.dirname(os.path.abspath(out)), base=os.path.splitext(os.path.basename(out))[0] + ".placegaps", ds_dir=ds_dir, attempts=pgres)
+    nbd = PG.impossible(pgd["gaps"])                      # A8: a net over its budget even in free space refuses the placement
+    for g_ in nbd:
+        print(f"floorplan: FAIL net-bound {g_['detail']}")
     LV.candidate("floorplan", "result", Bn, None, _live_key(best), (_live_crit(best) or []) + (hon["criteria"] or []) or None, cons, ex, board=out,
                  lane="accepted", phase="gate", verdict="refused" if refused else "kept", why=best["why_not"], full=True)
     for line in fb.finish(Bn) if fb is not None else []:
@@ -1719,7 +1722,7 @@ def cmd_floorplan(a):
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
-    if ill or (not passes(best) and not waive) or irc or brc:
+    if ill or (not passes(best) and not waive) or irc or brc or nbd:
         raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
     return 0
 

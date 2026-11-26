@@ -26,7 +26,7 @@ def ctx(**kw):
 
 
 def test_every_kind_has_a_detector_and_only_ghost_open_and_row_rail_have_rungs_so_far():
-    assert set(PG.ORDER) == set(PG.DETECT) == set(PG.DISPATCH)
+    assert set(PG.ORDER) == set(PG.DETECT) == set(PG.DISPATCH) and "net-bound" in PG.ORDER
     assert {k: v for k, v in PG.DISPATCH.items() if v} == {"ghost-open": ["unblock", "seal", "endpoint"], "row-rail": ["pull-load", "pour-need"],
                                                           "row-cin-side": ["template-turn", "unit-turn", "clear-side", "unit-shift", "cin-re-deal"],
                                                           "row-template": ["template-turn", "clear-side"], "row-pin-bypass": ["re-deal"],
@@ -328,3 +328,65 @@ def test_close_soft_rows_stop_after_soft_budget(monkeypatch):
     ev = SoftEv({"C2"}, bad={"C2"})
     out = PG.close({"cons": {"placegaps": {"soft_budget_min": 1000}}}, ["support-far"], ev, clock=clock)
     assert not out.get("soft_skips") and any(r["gap"] == "support-far:C2" for r in out["refused"])       # inside the budget it is worked
+
+
+# ---- A8: placement lower bounds (octilinear, pad access, per segment)
+def _pad(ref, num, net, x, y, e=0.0):
+    return {"ref": ref, "num": num, "net": net, "x": x, "y": y, "ex": e, "ey": e, "w": 2 * e, "h": 2 * e}
+
+
+def _bound_board(pads, parts=None):
+    refs = parts or sorted({p["ref"] for p in pads})
+    return {"pads": pads, "parts": {r: {"pos": (0, 0), "angle": 0.0, "side": "F.Cu", "court": (0, 0, 1, 1), "n_pads": sum(p["ref"] == r for p in pads),
+                                        "pads": [p for p in pads if p["ref"] == r], "value": ""} for r in refs}, "bbox": (0, 0, 100, 100)}
+
+
+def _cons(mm):
+    return {"placement": {"budget": {"NET": {"mm": mm, "reason": "t"}}}}
+
+
+def test_bound_10x10_offset_budget_15_passes_14_fails():
+    from fluxplace import budget as BG
+    assert abs(BG.octi(10, 10) - 14.142) < 1e-3
+    B = _bound_board([_pad("J1", "1", "NET", 0, 0), _pad("U1", "1", "NET", 10, 10)])
+    ok = BG.net_bounds(B, _cons(15.0))[0]
+    assert ok["bound"] == pytest.approx(14.142, abs=1e-3) and not ok["impossible"]
+    bad = BG.net_bounds(B, _cons(14.0))[0]
+    assert bad["impossible"] and PG.impossible(PG.detect(ctx(B=B, cons=_cons(14.0)), ["net-bound"])["gaps"])
+    assert not PG.detect(ctx(B=B, cons=_cons(15.0)), ["net-bound"])["gaps"]
+
+
+def test_bound_is_pad_access_not_centre_and_has_no_margin():
+    from fluxplace import budget as BG
+    a, b = _pad("A", "1", "NET", 0, 0, 2.0), _pad("B", "1", "NET", 10, 0, 2.0)
+    assert BG.pad_bound(a, b) == pytest.approx(6.0)            # centres 10 apart, 2 mm half pads: 6 mm of copper at least
+    B = _bound_board([a, b])
+    r = BG.net_bounds(B, _cons(6.0))[0]
+    assert not r["impossible"] and r["risk"]                    # exactly on the bound: allowed; margin only grades risk
+    assert BG.net_bounds(B, _cons(100.0))[0]["risk"] is False
+
+
+def test_series_cap_path_sums_two_segments_and_per_segment_limit():
+    from fluxplace import budget as BG
+    B = _bound_board([_pad("J1", "1", "A", 0, 0), _pad("C1", "1", "A", 8, 0), _pad("C1", "2", "B", 9, 0), _pad("U1", "1", "B", 17, 0)])
+    p = {"name": "p", "chain": ["J1", "C1", "U1"], "max_mm": 16.0}
+    r = BG.path_budgets(B, p)
+    assert len(r) == 1 and len(r[0]["segs"]) == 2 and r[0]["bound"] == pytest.approx(16.0) and not r[0]["impossible"]
+    assert BG.path_budgets(B, dict(p, max_mm=15.9))[0]["impossible"]
+    seg = BG.path_budgets(B, dict(p, max_mm=100.0, seg_max_mm=7.0))[0]
+    assert seg["impossible"] and "C1" in seg["why"] or "J1" in seg["why"]
+
+
+def test_transformer_coupled_pair_is_two_budgets():
+    from fluxplace import budget as BG
+    B = _bound_board([_pad("J1", "1", "PRI", 0, 0), _pad("T1", "1", "PRI", 5, 0), _pad("T1", "2", "SEC", 6, 0), _pad("U1", "1", "SEC", 30, 0)])
+    r = BG.path_budgets(B, {"name": "x", "chain": ["J1", "T1", "U1"], "isolating": ["T1"], "max_mm": [6.0, 25.0]})
+    assert len(r) == 2 and [x["chain"] for x in r] == [["J1", "T1"], ["T1", "U1"]]
+    assert r[0]["bound"] == pytest.approx(5.0) and r[1]["bound"] == pytest.approx(24.0) and not any(x["impossible"] for x in r)
+    j = BG.path_budgets(B, {"name": "x", "chain": ["J1", "T1", "U1"], "max_mm": 25.0})          # joined: one budget, 29 mm
+    assert len(j) == 1 and j[0]["impossible"]
+
+
+def test_net_bound_kind_is_in_floorplan_and_placetour_scope_and_dispatch_is_a_todo():
+    assert "net-bound" in PG.SCOPE["floorplan"] and "net-bound" in PG.SCOPE["placetour"] and "net-bound" not in PG.SCOPE["ready"]
+    assert PG.DISPATCH["net-bound"] == []          # TODO: w45supports net-budget "pull" rung once merged (ledger row 2026-11-26 A8)

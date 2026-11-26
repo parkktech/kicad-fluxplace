@@ -232,7 +232,7 @@ def test_floorplan_command_resolves_pins_first(tmp_path, capsys, monkeypatch):
     from fluxplace import floorplan2 as FP2
     path = load(tmp_path, D1_BODY)
     cf = tmp_path / "c.toml"
-    cf.write_text('[placement]\nfixed = ["J1"]\n[lock.at]\nJ2 = [33, 3.5, "F"]\n')
+    cf.write_text('[placement]\nfixed = ["J1"]\n[placement.budget]\nsignal = 500\n[lock.at]\nJ2 = [33, 3.5, "F"]\n')
     seen = {}
 
     def once(b, cons, spec, grow, args, text_in, wd, tag, log=print):

@@ -801,6 +801,10 @@ def stage(c, n, board):
     nxt.append(pg["line"])
     crit_gaps = PG.critical(pg["gaps"])
     fatal = [x for x in crit_gaps if x.get("cause", "unconfirmed") != "order"]    # an hs / rf net stays a FAIL unless the router alone routed it ("order")
+    imp = PG.impossible(pg["gaps"])                                  # A8: a net that cannot meet its budget even in free space refuses the placement
+    if imp:
+        fatal = fatal + imp
+        nxt.append("FAIL: " + "; ".join(f"net-bound {g['detail']}" for g in imp[:8]) + (f" (+{len(imp) - 8} more)" if len(imp) > 8 else ""))
     if crit_gaps:
         nxt.append(("FAIL: " if fatal else "WARN: ") + "; ".join(
             f"{x['class']} {'/'.join(x['nets'])} ghost-unrouted ({x.get('cause', '?')}, blockers {','.join(x.get('blockers', [])[:6]) or '-'})"

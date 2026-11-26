@@ -534,3 +534,107 @@ def honoured_summary(h):
     soft = sum(1 for r in h if r["status"] == "not_honoured" and not r["hard"])
     return (f"rows on the output: {cnt('honoured')} honoured, {sum(1 for r in h if r['status'] == 'not_honoured' and r['hard'])} "
             f"hard not honoured ({names(True)}), {soft} soft not honoured, {cnt('not_measured')} not measured")
+
+
+# ---------------------------------------------------------------- placement lower bounds (A8)
+# The shortest copper an octilinear router can lay between two points: along the long axis, with the short axis taken diagonally.
+# A bound, not an estimate: no margin, measured between pad access (the nearest points of the two pad rectangles), never centres.
+SQRT2M1 = 2 ** 0.5 - 1.0
+DETOUR_MARGIN = 1.3          # [placement] detour_margin: risk grade only (ghost judge); never refuses
+
+
+def octi(dx, dy):
+    dx, dy = abs(dx), abs(dy)
+    return max(dx, dy) + SQRT2M1 * min(dx, dy)
+
+
+def pad_bound(a, b):
+    """Octilinear lower bound between the access of two pads (rectangles with centre x, y and half extents ex, ey)."""
+    return octi(max(0.0, abs(a["x"] - b["x"]) - a.get("ex", 0.0) - b.get("ex", 0.0)),
+                max(0.0, abs(a["y"] - b["y"]) - a.get("ey", 0.0) - b.get("ey", 0.0)))
+
+
+def net_bound(pads):
+    """Lower bound of any tree joining `pads`: its longest pad-to-pad access bound (an MST is an upper estimate, not a bound)."""
+    return max((pad_bound(a, b) for i, a in enumerate(pads) for b in pads[i + 1:]), default=0.0)
+
+
+def link_bound(B, a, b):
+    """(bound mm, net) of the mandatory copper segment between parts a and b: the nearest pad pair on a shared signal net."""
+    best = None
+    for p in B["parts"][a]["pads"]:
+        for q in B["parts"][b]["pads"]:
+            if p["net"] and p["net"] == q["net"] and not _GND.match(p["net"]):
+                d = pad_bound(p, q)
+                if best is None or d < best[0]:
+                    best = (d, p["net"])
+    return best
+
+
+import re as _re
+_GND = _re.compile(r"^(?:/?|.*[_/])(?:A?GND\w*|VSS\w*|GROUND|0V)$", _re.I)
+
+
+def path_budgets(B, path):
+    """[{name, chain, segs: [(a, b, net, bound)], bound, limit, seg_limit, impossible, why}]: one budget per run of a `chain` of
+    refs joined by series parts, each link a mandatory copper segment (bound per segment, summed). An `isolating` ref (transformer:
+    primary and secondary share no copper) ends one budget and starts the next: never joined. `max_mm` is a number, or a list
+    with one limit per run; `seg_max_mm` limits every segment on its own. A link with no shared net is listed with bound None."""
+    ch = [r for r in path.get("chain") or [] if r in B["parts"]]
+    iso = set(path.get("isolating") or [])
+    runs, cur = [], [ch[0]] if ch else []
+    for r in ch[1:]:
+        cur.append(r)
+        if r in iso and r != ch[-1]:
+            runs.append(cur)
+            cur = [r]
+    if len(cur) > 1:
+        runs.append(cur)
+    mx = path.get("max_mm")
+    out = []
+    for i, run in enumerate(runs):
+        lim = mx[min(i, len(mx) - 1)] if isinstance(mx, (list, tuple)) else mx
+        segs = []
+        for a, b in zip(run, run[1:]):
+            lb = link_bound(B, a, b)
+            segs.append((a, b, lb[1] if lb else None, None if lb is None else round(lb[0], 3)))
+        tot = round(sum(s[3] for s in segs if s[3] is not None), 3)
+        sl = path.get("seg_max_mm")
+        bad = [s for s in segs if sl is not None and s[3] is not None and s[3] > float(sl) + 1e-9]
+        why = ""
+        if lim is not None and tot > float(lim) + 1e-9:
+            why = f"sum of {len(segs)} segment bound(s) {tot:g} mm > {float(lim):g} mm"
+        elif bad:
+            why = f"segment {bad[0][0]}-{bad[0][1]} bound {bad[0][3]:g} mm > {float(sl):g} mm"
+        out.append({"name": f"{path.get('name', 'path')}#{i + 1}", "chain": run, "segs": segs, "bound": tot,
+                    "limit": None if lim is None else float(lim), "seg_limit": None if sl is None else float(sl),
+                    "impossible": bool(why), "why": why})
+    return out
+
+
+def net_bounds(B, cons, spec=None):
+    """Every budgeted net (class budgets, [[placement.path]] chains) with its free-space lower bound:
+    [{name, kind: net|path, cls, nets, refs, bound, limit, impossible, risk, why}]. impossible = bound > limit, no margin (refuses);
+    risk = bound x detour_margin > limit (a grade for the ghost judge, never a refusal)."""
+    from . import netclass as NC
+    cons = cons or {}
+    pl = cons.get("placement") or {}
+    margin = float(pl.get("detour_margin", DETOUR_MARGIN))
+    cls, pads, out = NC.classify(B, cons, spec), NC.net_pads(B), []
+    for net, info in sorted(cls.items()):
+        lim = NC.effective_budget(info)
+        if lim is None or net not in pads:
+            continue
+        bd = net_bound(pads[net])
+        refs = sorted({p["ref"] for p in pads[net]})
+        out.append({"name": net, "kind": "net", "cls": info["class"], "nets": [net], "refs": refs, "bound": round(bd, 3), "limit": lim,
+                    "impossible": bd > lim + 1e-9, "risk": bd * margin > lim + 1e-9,
+                    "why": f"{net} [{info['class']}] needs >= {bd:.1f} mm of copper, budget {lim:g} mm"})
+    for p in pl.get("path") or []:
+        for r in path_budgets(B, p):
+            nets = sorted({s[2] for s in r["segs"] if s[2]})
+            out.append({"name": r["name"], "kind": "path", "cls": str(p.get("class", "signal")), "nets": nets, "refs": r["chain"],
+                        "bound": r["bound"], "limit": r["limit"], "impossible": r["impossible"],
+                        "risk": r["limit"] is not None and r["bound"] * margin > r["limit"] + 1e-9,
+                        "why": r["why"] or f"path {' - '.join(r['chain'])} needs >= {r['bound']:.1f} mm"})
+    return out
