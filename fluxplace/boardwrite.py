@@ -546,7 +546,8 @@ def commit(base, cand, dst, release=(), complete=None, reason="", log=None, lock
     cand is dst) and write dst's manifest = base's entries minus `release` (re-read from the new copper) + `complete` {net: why} + the
     locked items.  -> verify's dict plus "written".  Refused: nothing is written."""
     man = manifest if manifest is not None else load_manifest(base)
-    r = verify(base, cand, release, manifest=man if manifest is not None else None, cons=cons, spec=spec)
+    kw = {} if cons is None else {"cons": cons, "spec": spec}
+    r = verify(base, cand, release, manifest=man if manifest is not None else None, **kw)
     r["written"] = False
     if not r["ok"]:
         if log:
