@@ -294,3 +294,13 @@ def test_a_repair_that_breaks_a_hard_row_is_refused_whatever_it_gained():
     cand = {"gaps": [row], "state": {}}
     ok, check, _why = PG._accept(base, cand, "support-far:C1")
     assert not ok and check.startswith("row:")
+
+
+def test_pull_is_the_one_rung_for_a_net_bound_gap_too(tmp_path):
+    """A8's `net-bound` gap names its nets; the rung reads them and computes no bound of its own."""
+    board, cons = xtal(tmp_path)
+    c = ctx_of(board, cons)
+    gp = PG.gap("net-bound", "XIN", "plain", 5.0, ("U1", "Y1", "C5"), ("XIN",))
+    cands = PG.RUNGS["pull"](gp, c)
+    assert cands and set(cands[0]["moves"]) <= {"Y1", "C5"}
+    assert ("net-bound" not in PG.ORDER) or PG.DISPATCH["net-bound"] == ["pull"]

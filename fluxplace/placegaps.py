@@ -2709,52 +2709,58 @@ def _r_make_room(g, ctx):
 
 
 def _r_pull(g, ctx):
-    """`pull` (gap net-budget): the movable non-IC parts of the net (passives, crystal, match parts: not a connector, not an IC) are pulled to
-    the pad of the part that anchors the net (an IC pin, else a fixed part) nearest them: each alone and then all together, at a seat limit of
-    1/4 and 1/2 of the budget, by the seater (strict). The evaluator keeps a pull that shortens the net and worsens nothing else."""
+    """`pull` (gaps net-budget and net-bound: the one dispatcher entry for both; it computes no bound, it reads the gap's nets): the movable
+    non-IC parts of each net of the gap (passives, crystal, match parts: not a connector, not an IC) are pulled to the pad of the part that
+    anchors the net (an IC pin, else a fixed part) nearest them: each alone and then all together, at a seat limit of 1/4 and 1/2 of the net's
+    class budget (a net without one: of its pad MST), by the seater (strict). The evaluator keeps a pull that shortens the gap and worsens
+    nothing else; a gap whose parts are all fixed is an owner / budget question and ends with the reason."""
     from . import netclass as NC, placetour as PT
     B, mov = ctx.B(), _movable_set(ctx)
-    net = g["nets"][0]
-    pads = NC.net_pads(B).get(net, [])
     cls = ctx.need("_netcls", lambda: NC.classify(B, ctx["cons"], ctx["spec"])) or {}
-    lim = NC.effective_budget(cls[net]) if net in cls else None
-    anchors = [q for q in pads if NC.is_ic(q["ref"], B["parts"][q["ref"]]) or q["ref"] not in mov]
-    pulls = sorted({q["ref"] for q in pads if q["ref"] in mov and not NC.is_ic(q["ref"], B["parts"][q["ref"]]) and B["parts"][q["ref"]]["n_pads"] <= 4
-                    and not q["ref"].startswith(("J", "H", "MH", "TP"))})
-    if not anchors or not pulls or not lim:
-        _why(ctx, "pull", g, "no movable passive on the net" if not pulls else "no anchor pad")
-        return []
-    out, seen = [], set()
+    allpads = NC.net_pads(B)
+    out, seen, why = [], set(), []
+    for net in g["nets"][:4]:
+        pads = allpads.get(net, [])
+        lim = NC.effective_budget(cls[net]) if net in cls else None
+        lim = lim or NC.mst_length([NC.pad_xy(q) for q in pads]) / 2.0 if pads else None
+        anchors = [q for q in pads if NC.is_ic(q["ref"], B["parts"][q["ref"]]) or q["ref"] not in mov]
+        pulls = sorted({q["ref"] for q in pads if q["ref"] in mov and not NC.is_ic(q["ref"], B["parts"][q["ref"]]) and B["parts"][q["ref"]]["n_pads"] <= 4
+                        and not q["ref"].startswith(("J", "H", "MH", "TP"))})
+        if not anchors or not pulls or not lim:
+            why.append(f"{net}: " + ("no movable passive on the net" if not pulls else "no anchor pad"))
+            continue
 
-    def item(r, limit, B2):
-        via = next((q for q in B2["parts"][r]["pads"] if q["net"] == net), None)
-        a = min((q for q in anchors if q["ref"] != r), key=lambda q: (math.hypot(q["x"] - via["x"], q["y"] - via["y"]), q["ref"], str(q["num"])), default=None) if via else None
-        if via is None or a is None:
-            return None, None
-        s = {"ref": r, "net": net, "pad": a["num"], "via": via["num"], "how": "pin-demand", "sure": True, "cls": "signal", "weight": 1.0,
-             "dist": math.hypot(a["x"] - via["x"], a["y"] - via["y"]), "limit": limit, "target": limit, "role": "net", "unit": "mm", "source": "net budget",
-             "klass": "", "edge": False, "derived": "", "rank": 9, "nets": [q["net"] for q in B2["parts"][r]["pads"]], "ic": a["ref"]}
-        return a["ref"], s
+        def item(r, limit, B2, net=net, anchors=anchors):
+            via = next((q for q in B2["parts"][r]["pads"] if q["net"] == net), None)
+            a = min((q for q in anchors if q["ref"] != r), key=lambda q: (math.hypot(q["x"] - via["x"], q["y"] - via["y"]), q["ref"], str(q["num"])), default=None) if via else None
+            if via is None or a is None:
+                return None, None
+            s = {"ref": r, "net": net, "pad": a["num"], "via": via["num"], "how": "pin-demand", "sure": True, "cls": "signal", "weight": 1.0,
+                 "dist": math.hypot(a["x"] - via["x"], a["y"] - via["y"]), "limit": limit, "target": limit, "role": "net", "unit": "mm", "source": "net budget",
+                 "klass": "", "edge": False, "derived": "", "rank": 9, "nets": [q["net"] for q in B2["parts"][r]["pads"]], "ic": a["ref"]}
+            return a["ref"], s
 
-    for frac in (0.25, 0.5):
-        limit = max(1.0, lim * frac)
-        for group in [[r] for r in pulls] + ([pulls] if len(pulls) > 1 else []):
-            B2 = copy.deepcopy(B)
-            for r in group:
-                ic, s = item(r, limit, B2)
-                if s is not None:
-                    _reseat_on(ctx, B2, {"ic": ic, "supports": [s]}, only={r}, everything=True)
-            mv = _moves_between(B, B2)
-            k = PT._key(mv) if mv else None
-            if mv and k not in seen:
-                seen.add(k)
-                out.append(_cand("pull", net, f"{'+'.join(group)}-{limit:g}", mv, f"{', '.join(sorted(mv))} pulled to the net's anchor within {limit:g} mm"))
+        for frac in (0.25, 0.5):
+            limit = max(1.0, lim * frac)
+            for group in [[r] for r in pulls] + ([pulls] if len(pulls) > 1 else []):
+                B2 = copy.deepcopy(B)
+                for r in group:
+                    ic, s = item(r, limit, B2)
+                    if s is not None:
+                        _reseat_on(ctx, B2, {"ic": ic, "supports": [s]}, only={r}, everything=True)
+                mv = _moves_between(B, B2)
+                k = PT._key(mv) if mv else None
+                if mv and k not in seen:
+                    seen.add(k)
+                    out.append(_cand("pull", net, f"{'+'.join(group)}-{limit:g}", mv, f"{', '.join(sorted(mv))} pulled to the net's anchor within {limit:g} mm"))
     if not out:
-        _why(ctx, "pull", g, "no legal seat nearer the anchor")
+        _why(ctx, "pull", g, "; ".join(why) or "no legal seat nearer the anchor")
     return out[:CANDS_PER_RUNG]
 
 
 DISPATCH["support-far"] = ["home", "nudge", "far-re-deal", "swap-seat"]
 DISPATCH["support-starved"] = ["make-room"]
 DISPATCH["net-budget"] = ["pull"]
+if "net-bound" in DISPATCH:                     # A8 (w62-placebounds) adds the kind; its gaps use this same rung (adapter keyed on the kind name)
+    DISPATCH["net-bound"] = ["pull"]
 RUNGS.update({"home": _r_home, "nudge": _r_nudge, "far-re-deal": _r_far_re_deal, "swap-seat": _r_swap_seat, "make-room": _r_make_room, "pull": _r_pull})
