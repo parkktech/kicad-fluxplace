@@ -552,6 +552,26 @@ def build(B, cons=None, spec=None, facts=None, mpn_map=None):
     return out, links
 
 
+def graded_supports(cl, waive=(), near=()):
+    """[{ref, ic, pad, dist, limit, kind, cls, how}]: the support parts the budget rows grade (the one rule, intent.support_rows and
+    placegaps both read it): confidently owned, or guessed by `spread` (bulk storage is not a per-pin bypass: not graded); not
+    waived and not placed by a `near` item (graded there). kind = decap | other (fluxmap._kind)."""
+    from . import fluxmap as FM
+    out = []
+    for c in cl:
+        for s in c["supports"]:
+            if s["ref"] in waive or s["ref"] in near or (not s["sure"] and s["how"] != "spread"):
+                continue
+            out.append({"ref": s["ref"], "ic": c["ic"], "pad": s["pad"], "dist": s["dist"], "limit": s["limit"], "cls": s["cls"], "how": s["how"],
+                        "kind": "decap" if FM._kind(s["ref"], s["cls"]) == "decap" else "other"})
+    return out
+
+
+def far_supports(cl, waive=(), near=()):
+    """The graded supports beyond their limit (plan section 4 detector): graded_supports with dist > limit."""
+    return [f for f in graded_supports(cl, waive, near) if f["dist"] > f["limit"] + 1e-6]
+
+
 def far_parts(cl):
     """Confidently-owned support parts beyond their limit (guessed ownership,
     `how == "spread"`, is never graded)."""

@@ -23,7 +23,7 @@ CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 SCOPE = {"ready": ("part-datasheet", "part-stock"),
          "floorplan": tuple(k for k in ORDER if not k.startswith(("part-", "ghost-"))),
          "placetour": tuple(k for k in ORDER if not k.startswith("part-"))}
-TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows", "hard_mag", "decap_far", "support_far", "far_mm",
+TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows", "hard_mag", "decap_far", "support_far", "far_mm", "budget_over", "budget_mm",
          "open", "hot", "hot_occ", "vias", "detour")
 R6_TERMS = ("hs_open", "rf_open", "power_open", "illegal", "hard_rows")        # never worse, whatever the target gap gained
 DIAG_RUNGS = {"feasible"}                     # diagnosis-only rungs: no candidate by design, no "no-candidate" entry
@@ -210,20 +210,11 @@ def detect_rows(ctx):
 
 
 def far_supports(ctx):
-    """[{ref, ic, pad, dist, limit, kind}]: the rule of intent.support_rows, one entry per graded support beyond its limit
-    (phase 4 moves this into clusters.far_supports; one source then)."""
-    from . import fluxmap as FM, intent as IT
+    """[{ref, ic, pad, dist, limit, kind}]: clusters.far_supports (the rule of intent.support_rows, one source) on this board."""
+    from . import clusters as CL, intent as IT
     it = IT.items(ctx.B(), ctx["cons"])
     near = {r for n in it["near"] for r in (n.get("chain") or n.get("refs") or ())}
-    out = []
-    for c in ctx.clusters():
-        for s in c["supports"]:
-            if s["ref"] in it["support"]["waive"] or s["ref"] in near or (not s["sure"] and s["how"] != "spread"):
-                continue
-            if s["dist"] > s["limit"] + 1e-6:
-                out.append({"ref": s["ref"], "ic": c["ic"], "pad": s["pad"], "dist": s["dist"], "limit": s["limit"],
-                            "kind": "decap" if FM._kind(s["ref"], s["cls"]) == "decap" else "other"})
-    return out
+    return CL.far_supports(ctx.clusters(), it["support"]["waive"], near)
 
 
 @detector("support-far")
@@ -431,7 +422,8 @@ def score_terms(gaps, state=None):
          "power_open": n(lambda g: g["kind"] == "ghost-open" and g["class"] == "power"),
          "illegal": int(state.get("illegal", 0)), "hard_rows": len(rows), "hard_mag": round(sum(g["mag"] for g in rows if g["kind"].startswith("row-")), 3),
          "decap_far": sum(1 for g in far if g["class"] == "decap"), "support_far": sum(1 for g in far if g["class"] != "decap"),
-         "far_mm": round(sum(g["mag"] for g in far), 3)}
+         "far_mm": round(sum(g["mag"] for g in far), 3),
+         "budget_over": n(lambda g: g["kind"] == "net-budget"), "budget_mm": round(sum(g["mag"] for g in gaps if g["kind"] == "net-budget"), 3)}
     for k in ("open", "hot", "hot_occ", "vias", "detour"):
         t[k] = state.get(k, 0)
     return t
@@ -529,6 +521,9 @@ class Evaluator:
 
     def commit(self, trial):                            # make the trial the base
         raise NotImplementedError
+
+    def finish(self, res):                              # end of `close`: the late guards; -> None | {"gaps", "state", "kept": n accepted kept, "refused": [..]}
+        return None
 
     def trials(self, cands):                            # a batch of candidates (JudgeEval judges them in parallel) -> [trial] in order
         return [self.trial(c) for c in cands]
@@ -643,6 +638,15 @@ def close(ctx, kinds, ev, stage="placegaps", clock=time.time, budget_min=None):
             out["stop"] = f"no gain for {stale} round(s)"
             break
     out["stop"] = out["stop"] or "max_rounds"
+    try:
+        fin = ev.finish(out)
+    except Exception as e:                              # noqa: BLE001 - a late guard that cannot run keeps the base it has (the stage gates still run)
+        fin = None
+        ctx.setdefault("errors", {})["finish"] = f"{type(e).__name__}: {e}"
+    if fin:
+        out["accepted"] = out["accepted"][:fin["kept"]]
+        out["refused"] += fin["refused"]
+        base = {"gaps": _sort(fin["gaps"]), "state": fin["state"], "refusal": None}
     out.update(gaps_out=list(base["gaps"]), score_out=score(base["gaps"], base["state"]))
     try:
         cin_questions(ctx, out)
@@ -1589,6 +1593,7 @@ class FileEval(Evaluator):
         self.n, self.drc_ref, self.gaps = 0, None, None
         self.m = self._cost(self.board_path)
         self.g0 = {k: f(self.board_path) for k, f in self.guards.items()}
+        self.hist = []                       # (board, gaps, m) before each commit: the late guards roll back to any of them
         self._sync()
 
     def _cost(self, path):
@@ -1631,7 +1636,7 @@ class FileEval(Evaluator):
             tr["refusal"] = f"legal:model {ill} new issue(s) against the input"
             return tr
         before, after = score_terms(self.gaps or [], self.state()), score_terms(gaps, tr["state"])
-        for t in ("decap_far", "support_far", "far_mm"):
+        for t in ("decap_far", "support_far", "far_mm", "budget_over"):
             if after[t] > before[t] + 1e-9:
                 tr["refusal"] = f"score:{t} {before[t]}->{after[t]}"
                 return tr
@@ -1641,11 +1646,6 @@ class FileEval(Evaluator):
                 tr["refusal"] = f"score:{k} {self.m[k]:.0f}->{m[k]:.0f} (+{100 * (m[k] / self.m[k] - 1):.1f} % > 2 %)"
                 return tr
         tr["m"] = m
-        for k, f in sorted(self.guards.items()):
-            v = f(p)
-            if v > self.g0[k]:
-                tr["refusal"] = f"score:{k} {self.g0[k]}->{v}"
-                return tr
         if score(gaps, tr["state"]) <= score(self.gaps or [], self.state()):
             try:
                 if self.drc_ref is None:
@@ -1660,8 +1660,44 @@ class FileEval(Evaluator):
         return tr
 
     def commit(self, tr):
+        self.hist.append((self.board_path, self.gaps, self.m))
         self.board_path, self.gaps, self.m = tr["board"], tr["gaps"], tr.get("m") or self.m
         self._sync()
+
+    def _late_ok(self, path):
+        """-> None when every guard (fan-out blocked pins, ...: whole-board and slow, so measured once per board here, not per trial) is not
+        above the input's, else "<name> a->b"."""
+        for k, f in sorted(self.guards.items()):
+            v = f(path)
+            if v > self.g0[k]:
+                return f"{k} {self.g0[k]}->{v}"
+        return None
+
+    def finish(self, res):
+        """The late guards on the board that stands; when one rose, the accepts are rolled back to the longest prefix that passes (bisection:
+        a guard measured on a board is monotone enough in the number of repairs kept; prefix 0 is the input, which passes by definition)."""
+        if not self.guards or not self.hist:
+            return None
+        chain = [h[0] for h in self.hist] + [self.board_path]               # chain[k] = the board after k accepts
+        bad = self._late_ok(chain[-1])
+        if bad is None:
+            return None
+        lo, hi, why = 0, len(chain) - 1, {len(chain) - 1: bad}              # chain[lo] passes, chain[hi] fails
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            w = self._late_ok(chain[mid])
+            if w is None:
+                lo = mid
+            else:
+                hi, why[mid] = mid, w
+        gaps, m = (self.hist[lo][1], self.hist[lo][2]) if lo < len(self.hist) else (self.gaps, self.m)
+        dropped = res["accepted"][lo:]
+        self.board_path, self.gaps, self.m = chain[lo], gaps, m
+        del self.hist[lo:]
+        self._sync()
+        return {"gaps": list(gaps or []), "state": self.state(), "kept": lo,
+                "refused": [{"gap": a["gap"], "rung": a["rung"], "candidate": a["candidate"], "check": f"score:{why[hi].split(' ')[0]}", "why": f"late guard {why[hi]}: rolled back"}
+                            for a in dropped]}
 
 
 # ------------------------------------------------------------------ phase 7: row-cin-side, row-template, row-pin-bypass
@@ -2393,3 +2429,325 @@ class JudgeEval(Evaluator):
             if g["id"] in prev and prev[g["id"]].get("cause"):
                 g["cause"] = prev[g["id"]]["cause"]
         self.ctx["diagnosed"] = self.gaps
+
+
+# ------------------------------------------------------------------ phases 4-5: support-far, support-starved, net-budget
+NUDGE_MAX_MM = 4.0                      # a neighbour steps aside at most this far (w20home: 1 mm; the plan: 4 mm)
+NUDGE_MAGS = (1.0, 2.0, NUDGE_MAX_MM)
+PIN_TRY = 3                             # far-re-deal / home: pins tried per part
+SWAP_TRY = 4                            # swap-seat: partners tried per part
+ROOM_STEPS = (1, 2, 3)                  # make-room: neighbours stepped out per candidate
+NO_RE_DEAL = ("net", "explicit")        # a part tied to ONE IC by its net (sense / feedback / own pair) has no other pin to serve
+_DIRS8 = tuple((math.cos(i * math.pi / 4), math.sin(i * math.pi / 4)) for i in range(8))
+
+
+def _sup_of(ctx, ref):
+    return next(((c, s) for c in ctx.clusters() or [] for s in c["supports"] if s["ref"] == ref), (None, None))
+
+
+def _movable_set(ctx):
+    from . import placetour as PT
+    return ctx.need("_mov", lambda: set(PT._movable(ctx.B(), ctx["cons"], _P(ctx))))
+
+
+def _as_sure(ctx, B, s, ic, pad):
+    """The support `s` as the seater needs it for the pin `ic`.`pad` (sure, its limit from the one support table for that pin)."""
+    from . import powerbudget as PB
+    pin = next(q for q in B["parts"][ic]["pads"] if str(q["num"]) == str(pad))
+    out = dict(s, ic=ic, pad=pin["num"], how="pin-demand", sure=True, rank=9)
+    sp = next(q for q in B["parts"][s["ref"]]["pads"] if q["num"] == s["via"])
+    out["dist"] = math.hypot(sp["x"] - pin["x"], sp["y"] - pin["y"])
+    try:
+        row = PB.support_row(B, ctx["cons"], ctx["spec"], s["ref"], s["net"], None, ic=ic, pad=pin["num"])
+        out.update(limit=row["max"], target=row["target"])
+    except Exception:                                   # noqa: BLE001 - the part keeps the limit it had
+        pass
+    return out
+
+
+def _seat(ctx, B, s, ic, pad, pre=None):
+    """-> (moves {ref: (x, y, a)}, refused check | None): `s` seated by the seater (strict: within its limit of ic.pad) on a copy of `B`
+    after the moves `pre` were applied to it. Moves include `pre`."""
+    B2 = _on_copy(B, pre) if pre else copy.deepcopy(B)
+    ref = {}
+    ss = _as_sure(ctx, B, s, ic, pad)
+    _reseat_on(ctx, B2, {"ic": ic, "supports": [ss]}, only={s["ref"]}, everything=True, refused=ref)
+    mv = _moves_between(B, B2)
+    if s["ref"] not in mv:
+        return {}, ref.get(s["ref"]) or "no legal seat within the limit"
+    return mv, None
+
+
+def _pins(B, ic, net, near_xy, k):
+    """The IC's pads on `net`, nearest the point first (distinct numbers), at most k."""
+    ps = sorted((q for q in B["parts"][ic]["pads"] if q["net"] == net), key=lambda q: (math.hypot(q["x"] - near_xy[0], q["y"] - near_xy[1]), str(q["num"])))
+    return ps[:k]
+
+
+def _cand(rung, ref, tag, moves, notes):
+    return {"id": f"{rung}-{ref}-{tag}", "rung": rung, "moves": moves, "claims": [], "notes": notes}
+
+
+def _why(ctx, rung, g, why):
+    ctx.setdefault("why_none", {})[(rung, g["id"])] = why
+
+
+def _support_gap(g, ctx):
+    ref = g["refs"][0]
+    c, s = _sup_of(ctx, ref)
+    if s is None or ref not in _movable_set(ctx):
+        return None
+    return ref, c, s
+
+
+def _r_home(g, ctx):
+    """`home` (plan 4 rung 1, and `detach`: a file move takes a part out of its module by itself): the support is seated by the seater at the
+    legal pose nearest its pin within its limit; for a guessed owner the owner's nearest pins on the net are tried in turn."""
+    got = _support_gap(g, ctx)
+    if not got:
+        return []
+    ref, c, s = got
+    B = ctx.B()
+    sp = next(q for q in B["parts"][ref]["pads"] if q["num"] == s["via"])
+    pins = [next(q for q in B["parts"][c["ic"]]["pads"] if str(q["num"]) == str(s["pad"]))]
+    if s["how"] not in NO_RE_DEAL:
+        pins += [q for q in _pins(B, c["ic"], s["net"], (sp["x"], sp["y"]), PIN_TRY) if str(q["num"]) != str(s["pad"])][:PIN_TRY - 1]
+    out, why = [], []
+    for q in pins:
+        mv, refused = _seat(ctx, B, s, c["ic"], q["num"])
+        if mv:
+            out.append(_cand("home", ref, str(q["num"]), mv, f"{ref} seated at {c['ic']}.{q['num']} within {s['limit']:g} mm"))
+        else:
+            why.append(f"{c['ic']}.{q['num']}: {refused}")
+    if not out:
+        _why(ctx, "home", g, "; ".join(why[:2]))
+    return out
+
+
+def _blockers(B, ref, ic, pad, limit, mov, held):
+    """Movable non-IC parts on the support's side whose courtyard reaches into the disc of radius `limit` around the pin, nearest first."""
+    from . import netclass as NC
+    pin = next(q for q in B["parts"][ic]["pads"] if str(q["num"]) == str(pad))
+    side = B["parts"][ref]["side"]
+    out = []
+    for r, p in B["parts"].items():
+        if r in (ref, ic) or r not in mov or p["side"] != side or r in held or NC.is_ic(r, p):
+            continue
+        x0, y0, x1, y1 = p["court"]
+        d = math.hypot(max(x0 - pin["x"], 0.0, pin["x"] - x1), max(y0 - pin["y"], 0.0, pin["y"] - y1))
+        if d <= limit:
+            out.append((round(d, 3), r))
+    return [r for _d, r in sorted(out)]
+
+
+def _r_nudge(g, ctx):
+    """`nudge` (rung 2): one movable neighbour inside the support's ring steps aside along one of 8 directions, by 1 / 2 / NUDGE_MAX_MM
+    (legalised against the parts that may not move: placetour._legal), then the support is seated; the first step of each neighbour that
+    leaves a seat is a candidate. A neighbour that is another support within its own limit does not move."""
+    got = _support_gap(g, ctx)
+    if not got:
+        return []
+    ref, c, s = got
+    B, mov = ctx.B(), _movable_set(ctx)
+    from . import placetour as PT
+    held = {x["ref"] for cc in ctx.clusters() or [] for x in cc["supports"] if x["dist"] <= x["limit"] + 1e-6}
+    out, seen = [], set()
+    for j in _blockers(B, ref, c["ic"], s["pad"], s["limit"], mov, held)[:4]:
+        x, y, a = B["parts"][j]["pos"][0], B["parts"][j]["pos"][1], B["parts"][j]["angle"]
+        found = False
+        for mag in NUDGE_MAGS:
+            for dx, dy in _DIRS8:
+                mv0 = PT._legal(B, ctx["cons"], {j: (x + dx * mag, y + dy * mag, a)}, mov)
+                if not mv0 or set(mv0) - mov or any(math.hypot(v[0] - B["parts"][r]["pos"][0], v[1] - B["parts"][r]["pos"][1]) > NUDGE_MAX_MM + 1e-6
+                                                    for r, v in mv0.items()):
+                    continue
+                mv, _ref = _seat(ctx, B, s, c["ic"], s["pad"], pre=mv0)
+                k = PT._key(mv) if mv else None
+                if mv and k not in seen:
+                    seen.add(k)
+                    out.append(_cand("nudge", ref, f"{j}-{mag:g}-{len(out)}", mv, f"{j} steps {mag:g} mm aside; {ref} seated within {s['limit']:g} mm"))
+                    found = True
+                    break
+            if found:
+                break
+    if not out:
+        _why(ctx, "nudge", g, "no neighbour step of <= %g mm leaves a seat" % NUDGE_MAX_MM)
+    return out[:CANDS_PER_RUNG]
+
+
+def _pin_cover(B, pin, net, skip):
+    """Number of 2-pad capacitors of `net` (other than `skip`) with a pad within powerbudget.BYPASS_MAX_MM of `pin`."""
+    from . import powerbudget as PB
+    n = 0
+    for r, p in B["parts"].items():
+        if r in skip or p["n_pads"] != 2 or not r.startswith("C"):
+            continue
+        n += any(q["net"] == net and math.hypot(q["x"] - pin["x"], q["y"] - pin["y"]) <= PB.BYPASS_MAX_MM for q in p["pads"])
+    return n
+
+
+def _r_far_re_deal(g, ctx):
+    """`far-re-deal` (rung 5): a rail part (block / refdes / spread owner: any pin of the rail counts, clusters.build's near rule) is served to
+    ANOTHER pin of the rail: the IC pads on its net, bare pins (no capacitor within the bypass limit) first, then nearest the part; the part is
+    seated there. A part tied to one IC by its own net has no other pin."""
+    got = _support_gap(g, ctx)
+    if not got:
+        return []
+    ref, c, s = got
+    if s["how"] in NO_RE_DEAL:
+        _why(ctx, "far-re-deal", g, f"{ref} serves one IC by its net ({s['net']})")
+        return []
+    B = ctx.B()
+    from . import netclass as NC
+    sp = next(q for q in B["parts"][ref]["pads"] if q["num"] == s["via"])
+    pins = [q for q in NC.net_pads(B).get(s["net"], []) if q["ref"] != ref and q["ref"] in B["parts"] and NC.is_ic(q["ref"], B["parts"][q["ref"]])
+            and (q["ref"] != c["ic"] or str(q["num"]) != str(s["pad"]))]
+    rank = sorted(pins, key=lambda q: (_pin_cover(B, q, s["net"], {ref}) > 0, round(math.hypot(q["x"] - sp["x"], q["y"] - sp["y"]), 3), q["ref"], str(q["num"])))
+    out, tried, why = [], set(), []
+    for q in rank:
+        if len(out) >= PIN_TRY or len(tried) >= 2 * PIN_TRY:
+            break
+        if q["ref"] in tried:
+            continue
+        tried.add(q["ref"])
+        mv, refused = _seat(ctx, B, s, q["ref"], q["num"])
+        if mv:
+            out.append(_cand("far-re-deal", ref, f"{q['ref']}.{q['num']}", mv, f"{ref} served to {q['ref']}.{q['num']} ({s['net']}) and seated there"))
+        else:
+            why.append(f"{q['ref']}.{q['num']}: {refused}")
+    if not out:
+        _why(ctx, "far-re-deal", g, "; ".join(why[:2]) or "no other IC pin on the net")
+    return out
+
+
+def _r_swap_seat(g, ctx):
+    """`swap-seat` (rung 6): the far support and a movable same-footprint part standing inside its ring exchange poses (the support turned as
+    the partner stood, and +180 degrees); nearest partner first, SWAP_TRY partners. The evaluator keeps it only when both parts end within
+    their limits (partner far -> support_far rises -> refused) and no row, crossing-cost or legality term is worse."""
+    got = _support_gap(g, ctx)
+    if not got:
+        return []
+    ref, c, s = got
+    B, mov = ctx.B(), _movable_set(ctx)
+    from . import netclass as NC
+    pin = next(q for q in B["parts"][c["ic"]]["pads"] if str(q["num"]) == str(s["pad"]))
+    me = B["parts"][ref]
+    held = {x["ref"] for cc in ctx.clusters() or [] for x in cc["supports"] if x["dist"] <= x["limit"] + 1e-6 and x["ref"] != ref}
+    partners = []
+    for r, p in B["parts"].items():
+        if r == ref or r not in mov or p["side"] != me["side"] or p.get("fp") != me.get("fp") or p["n_pads"] != me["n_pads"] or NC.is_ic(r, p):
+            continue
+        d = math.hypot(p["pos"][0] - pin["x"], p["pos"][1] - pin["y"])
+        if d <= s["limit"] and r not in held:
+            partners.append((round(d, 3), r))
+    out = []
+    for _d, r in sorted(partners)[:SWAP_TRY]:
+        p = B["parts"][r]
+        for turn in (0.0, 180.0):
+            mv = {ref: (p["pos"][0], p["pos"][1], (p["angle"] + turn) % 360.0), r: (me["pos"][0], me["pos"][1], me["angle"])}
+            out.append(_cand("swap-seat", ref, f"{r}-{int(turn)}", mv, f"{ref} and {r} exchange poses"))
+    if not out:
+        _why(ctx, "swap-seat", g, "no free same-footprint partner inside the ring")
+    return out[:CANDS_PER_RUNG]
+
+
+def _r_make_room(g, ctx):
+    """`make-room` (rung 7, gap support-starved): the movable neighbours of the IC step out radially (half the ring, legalised against the parts
+    that may not move: placetour._legal), 1 / 2 / 3 of them nearest first, then the IC's far supports are seated by the seater in the same
+    candidate. The evaluator keeps it when the far count drops and nothing else is worse."""
+    ic = g["id"].split(":", 1)[1]                       # the gap is named by its IC (refs are sorted)
+    B, mov = ctx.B(), _movable_set(ctx)
+    from . import placetour as PT
+    far = {f["ref"]: f for f in ctx.need("_far", lambda: far_supports(ctx)) or [] if f["ic"] == ic}
+    c = next((x for x in ctx.clusters() or [] if x["ic"] == ic), None)
+    if c is None or not far:
+        return []
+    ring = max(f["limit"] for f in far.values())
+    icp = B["parts"][ic]
+    cx, cy = icp["pos"][0], icp["pos"][1]
+    mine = {x["ref"] for x in c["supports"]}
+    ix0, iy0, ix1, iy1 = icp["court"]
+    near = []
+    for r, p in B["parts"].items():
+        if r == ic or r not in mov or r in mine or p["side"] != icp["side"]:
+            continue
+        x0, y0, x1, y1 = p["court"]
+        d = math.hypot(max(x0 - ix1, ix0 - x1, 0.0), max(y0 - iy1, iy0 - y1, 0.0))
+        if d <= ring:
+            near.append((round(d, 3), r))
+    near = [r for _d, r in sorted(near)]
+    out, seen = [], set()
+    for k in ROOM_STEPS:
+        tg = {}
+        for r in near[:k]:
+            p = B["parts"][r]
+            vx, vy = p["pos"][0] - cx, p["pos"][1] - cy
+            n = math.hypot(vx, vy) or 1.0
+            tg[r] = (p["pos"][0] + vx / n * ring * 0.5, p["pos"][1] + vy / n * ring * 0.5, p["angle"])
+        mv0 = PT._legal(B, ctx["cons"], tg, mov) if tg else None
+        if not mv0:
+            continue
+        B2 = _on_copy(B, mv0)
+        for ref in sorted(r for r in far if r in mov):
+            s = next(x for x in c["supports"] if x["ref"] == ref)
+            _reseat_on(ctx, B2, {"ic": ic, "supports": [_as_sure(ctx, B2, s, ic, s["pad"])]}, only={ref}, everything=True)
+        mv = _moves_between(B, B2)
+        key = PT._key(mv) if mv else None
+        if mv and key not in seen and any(r in far for r in mv):
+            seen.add(key)
+            out.append(_cand("make-room", ic, str(k), mv, f"{', '.join(near[:k])} step out; {', '.join(sorted(r for r in mv if r in far))} seated at {ic}"))
+    if not out:
+        _why(ctx, "make-room", g, "no neighbour step frees a seat")
+    return out[:4]
+
+
+def _r_pull(g, ctx):
+    """`pull` (gap net-budget): the movable non-IC parts of the net (passives, crystal, match parts: not a connector, not an IC) are pulled to
+    the pad of the part that anchors the net (an IC pin, else a fixed part) nearest them: each alone and then all together, at a seat limit of
+    1/4 and 1/2 of the budget, by the seater (strict). The evaluator keeps a pull that shortens the net and worsens nothing else."""
+    from . import netclass as NC, placetour as PT
+    B, mov = ctx.B(), _movable_set(ctx)
+    net = g["nets"][0]
+    pads = NC.net_pads(B).get(net, [])
+    cls = ctx.need("_netcls", lambda: NC.classify(B, ctx["cons"], ctx["spec"])) or {}
+    lim = NC.effective_budget(cls[net]) if net in cls else None
+    anchors = [q for q in pads if NC.is_ic(q["ref"], B["parts"][q["ref"]]) or q["ref"] not in mov]
+    pulls = sorted({q["ref"] for q in pads if q["ref"] in mov and not NC.is_ic(q["ref"], B["parts"][q["ref"]]) and B["parts"][q["ref"]]["n_pads"] <= 4
+                    and not q["ref"].startswith(("J", "H", "MH", "TP"))})
+    if not anchors or not pulls or not lim:
+        _why(ctx, "pull", g, "no movable passive on the net" if not pulls else "no anchor pad")
+        return []
+    out, seen = [], set()
+
+    def item(r, limit, B2):
+        via = next((q for q in B2["parts"][r]["pads"] if q["net"] == net), None)
+        a = min((q for q in anchors if q["ref"] != r), key=lambda q: (math.hypot(q["x"] - via["x"], q["y"] - via["y"]), q["ref"], str(q["num"])), default=None) if via else None
+        if via is None or a is None:
+            return None, None
+        s = {"ref": r, "net": net, "pad": a["num"], "via": via["num"], "how": "pin-demand", "sure": True, "cls": "signal", "weight": 1.0,
+             "dist": math.hypot(a["x"] - via["x"], a["y"] - via["y"]), "limit": limit, "target": limit, "role": "net", "unit": "mm", "source": "net budget",
+             "klass": "", "edge": False, "derived": "", "rank": 9, "nets": [q["net"] for q in B2["parts"][r]["pads"]], "ic": a["ref"]}
+        return a["ref"], s
+
+    for frac in (0.25, 0.5):
+        limit = max(1.0, lim * frac)
+        for group in [[r] for r in pulls] + ([pulls] if len(pulls) > 1 else []):
+            B2 = copy.deepcopy(B)
+            for r in group:
+                ic, s = item(r, limit, B2)
+                if s is not None:
+                    _reseat_on(ctx, B2, {"ic": ic, "supports": [s]}, only={r}, everything=True)
+            mv = _moves_between(B, B2)
+            k = PT._key(mv) if mv else None
+            if mv and k not in seen:
+                seen.add(k)
+                out.append(_cand("pull", net, f"{'+'.join(group)}-{limit:g}", mv, f"{', '.join(sorted(mv))} pulled to the net's anchor within {limit:g} mm"))
+    if not out:
+        _why(ctx, "pull", g, "no legal seat nearer the anchor")
+    return out[:CANDS_PER_RUNG]
+
+
+DISPATCH["support-far"] = ["home", "nudge", "far-re-deal", "swap-seat"]
+DISPATCH["support-starved"] = ["make-room"]
+DISPATCH["net-budget"] = ["pull"]
+RUNGS.update({"home": _r_home, "nudge": _r_nudge, "far-re-deal": _r_far_re_deal, "swap-seat": _r_swap_seat, "make-room": _r_make_room, "pull": _r_pull})

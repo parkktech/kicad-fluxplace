@@ -1683,7 +1683,7 @@ def cmd_floorplan(a):
             ctx_pg = PG.Ctx(stage="floorplan", board=out, cons=cons, spec=spec, ds_dir=ds_dir, session=S)
             ev_pg = PG.FileEval(ctx_pg, out, src_board, wd_pg, legal_base=a.legal_base, measure=lambda p_: measured(p_, cons, spec),
                                 guards={"fanout": lambda p_: fanout_blocked(p_, cons, spec)}, drc_ref_board=src_board)
-            pgres = PG.close(ctx_pg, ["row-cin-side", "row-template", "row-pin-bypass", "row-away", "row-flight", "row-rail"], ev_pg, stage="floorplan")
+            pgres = PG.close(ctx_pg, ["row-cin-side", "row-template", "row-pin-bypass", "row-away", "row-flight", "row-rail", "support-far", "support-starved", "net-budget"], ev_pg, stage="floorplan")
             if pgres["accepted"]:
                 shutil.copyfile(ev_pg.board_path, out)
                 Bn = RD.load(out)
