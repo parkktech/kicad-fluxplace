@@ -158,7 +158,7 @@ def test_stage_packets_without_actions_and_defaults_in_off_mode(tmp_path, monkey
         seen["acts"] = acts
         return {"board": board, "kept": [], "tried": 0, "open_nets": [], "lines": []}
     monkeypatch.setattr(CR, "apply", fake_apply)
-    c = _Ctx(str(tmp_path / "w"))
+    c = _Ctx(str(tmp_path / "w"), {"ai": {"answer": "required"}})
     res = CR.stage(c, 3, "b.kicad_pcb")
     assert res["verdict"] == "packets" and "acts" not in seen
     assert os.path.exists(os.path.join(c.dir(3, "critroute"), "ai", "BT1_RF.packet.json"))

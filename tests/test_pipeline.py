@@ -294,7 +294,7 @@ def test_h1_packets_gate_is_reused_only_for_the_input_it_was_written_for(tmp_pat
     gd = tmp_path / "gate"; gd.mkdir()
     best = gd / "best.kicad_pcb"; best.write_text("best")
     _fake_gate(monkeypatch, "packets", gd, best)
-    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={}, board_in=str(a))
+    c = SimpleNamespace(dir=lambda n, name: str(gd), cons_path=None, cons={"ai": {"answer": "required"}}, board_in=str(a))
     g = PL._gate_check(c, 1, "pairs", str(best), ["pair-open"], src=str(a))
     assert g["verdict"] == "packets"
     assert PL._gate_reusable(str(gd), str(a))                 # the stop.json carries the input's fingerprint

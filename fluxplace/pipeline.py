@@ -1008,8 +1008,17 @@ def st_close(c, n, board):
                  else f"; post-route refused ({post['refused'][:60]})")
     if res.get("protection_broken_by"):
         line += f"; protection broken by {res['protection_broken_by']}: fell back to the last verified state"
-    return {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
-            "released": sorted(res.get("released") or {})}
+    out = {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
+           "released": sorted(res.get("released") or {})}
+    if res["stop"] == "packets":
+        from . import gaps as GP
+        pk = [p.get("packet") for p in res.get("packets") or [] if p.get("packet")]
+        if GP.ai_answer_required(c.cons):
+            out.update(verdict="packets", next=[f"close: answer the AI packets ({len(pk)}) in {os.path.join(c.dir(n, 'close'), 'ai')} and re-run from close"])
+        else:
+            out["line"] += f"; {len(pk)} packets unanswered, defaults used"
+            out["ai_unanswered"] = {"n": len(pk), "packets": pk}
+    return out
 
 
 def st_tune(c, n, board):
@@ -1339,10 +1348,16 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
         _stamp_gate(d, src)                                 # H1: this verdict belongs to the stage input `src`
     verdict = "pass" if stop == "clean" else ("packets" if stop == "packets" else "fail")
     line = f"gate {name} ({', '.join(kinds)}): {stop}, opens {r['start']['opens']}->{r['end']['opens']}"
+    pk = [p.get("packet") for p in r.get("packets") or [] if p.get("packet")]
+    unans = verdict == "packets" and not GP.ai_answer_required(c.cons)          # [ai] answer = optional: defaults used, the flow goes on
+    ua = {"ai_unanswered": {"n": len(pk), "packets": pk}} if unans else {}
     rows = _defer_gate(r, d, later)
     if rows:                                                # only findings a later stage owns: the flow goes on
         return {"verdict": "warn", "board": r["best"], "line": line.replace(f": {stop},", ": deferred,", 1) + f"; carried to {', '.join(sorted({o for g in rows for o in GP.GATE_DEFER[g['kind']] if o in later}))}: {_deferred_line(rows)}",
-                "next": [], "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "deferred": rows}}
+                "next": [], "gate": {"kinds": kinds, "stop": "deferred", "dir": d, "deferred": rows}, **ua}
+    if unans:
+        return {"verdict": "warn", "board": r["best"], "line": line + f"; {len(pk)} packets unanswered, defaults used", "next": [],
+                "gate": {"kinds": kinds, "stop": stop, "dir": d}, **ua}
     return {"verdict": verdict, "board": r["best"], "line": line, "gate": {"kinds": kinds, "stop": stop, "dir": d},
             "next": [] if verdict == "pass" else [f"gate {name}: the hs pairs above are not closed; the next stage does not run: {os.path.join(d, 'stop.json')}"]
             + [f"gate {name}: AI brief (agent lays copper in the session, then writes its done file): {p['brief']}"
@@ -1859,6 +1874,15 @@ def _run(a):
             from . import questions as QS
             QS.inherit(prev, res["board"])
         board = res.get("board", board)
+        if res.get("ai_unanswered"):
+            ua = res["ai_unanswered"]
+            res["line"] = res.get("line", "")
+            if "unanswered" not in res["line"]:
+                res["line"] += f"; {ua['n']} packets unanswered, defaults used"
+            st.setdefault("ai_unanswered", {})[name] = {"n": ua["n"], "packets": ua["packets"], "note": f"{ua['n']} packets unanswered, defaults used"}
+            with open(led.path, "a") as fh:
+                fh.write(f"{name}: {ua['n']} packets unanswered, defaults used: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
+            print(f"pipeline: {name}: {ua['n']} packets unanswered, defaults used (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
         if res.get("undocumented"):
             st["undocumented"] = _clip(res["undocumented"], 200)
             print("pipeline: " + st["undocumented"] + " (recorded in state.json and the ledger; repeated in the final report)", flush=True)
@@ -1903,7 +1927,7 @@ def _run(a):
             if res.get("gate_packets"):
                 print(f"pipeline: gate {name} is open; the flow stops here (exit 5), later stages not started")
             else:
-                print("pipeline: critroute wrote AI packets; answer them (actions.json) and re-run from critroute (exit 5)")
+                print(f"pipeline: {name} wrote AI packets ([ai] answer = required); answer them and re-run from {name} (exit 5)")
             break
         if res["verdict"] == "questions":
             rc = 3
