@@ -11,7 +11,7 @@ constraints first, name patterns only for nets the constraints do not mention), 
 documented fallback for projects without classes)."""
 import re
 
-CONTROLLED_CLASSES = ("pair", "rf", "clock", "switch_node")
+from .netclass import CONTROLLED_CLASSES
 
 
 def policy(cons):
@@ -21,34 +21,14 @@ def policy(cons):
 
 def plain_nets(cons):
     """Nets that must be plain straight copper: `[nets.X] straight = true` or `straight_copper = [pads]`."""
-    out = set()
-    for n, v in ((cons or {}).get("nets") or {}).items():
-        if isinstance(v, dict) and (v.get("straight") is True or v.get("straight_copper")):
-            out.add(n)
-    return out
+    from . import netclass as NC
+    return NC.plain_nets(cons)
 
 
 def controlled_nets(cls, cons, names=()):
-    """{net: why} for the nets that a rip may never touch."""
-    out = {}
-    for n, info in (cls or {}).items():
-        if info.get("class") in CONTROLLED_CLASSES:
-            out[n] = info["class"]
-    r = (cons or {}).get("route") or {}
-    for n in (cons or {}).get("rf", {}).get("nets", []) or []:
-        out[n] = "rf"
-    for n in r.get("controlled", []) or []:
-        out[n] = "route.controlled"
-    for n, v in ((cons or {}).get("nets") or {}).items():
-        if isinstance(v, dict) and (v.get("max_vias") is not None or v.get("impedance")):
-            out[n] = "nets rule"
-    for n in plain_nets(cons):
-        out[n] = "plain copper"
-    pats = [re.compile(x) for x in (r.get("controlled_patterns") or [])]
-    for n in names:
-        if n not in out and any(p.search(n) for p in pats):
-            out[n] = "pattern"
-    return out
+    """{net: why} for the nets that a rip may never touch (the net contract: netclass.controlled_map)."""
+    from . import netclass as NC
+    return NC.controlled_map(cls, cons, names)
 
 
 def affected(rem, job_net_set):

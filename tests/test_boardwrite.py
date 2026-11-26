@@ -148,18 +148,26 @@ def test_a_complete_pair_is_protected_whole(tmp_path):
     assert BW.verify(base, grown)["changed"] == ["D_P"]                                       # an added item changes a pair: it was complete
 
 
-def test_a_stale_manifest_is_refused_and_reseeded_loudly(tmp_path):
+def test_a_stale_manifest_is_refused_with_the_diff_and_reseeded_only_when_the_registry_recorded_it(tmp_path, monkeypatch):
     base = board(tmp_path, "base.kicad_pcb", BASE())
-    BW.seed(base)
+    old = BW.seed(base)
     assert not BW.is_stale(base)
-    with open(base, "a") as fh:
-        fh.write("\n")                                                                          # edited outside the flow
+    txt = open(base).read().replace("(end 30 20)", "(end 30 22)", 1)                            # edited outside the flow
+    open(base, "w").write(txt)
     assert BW.is_stale(base)
     r = BW.verify(base, base)
     assert not r["ok"] and "MANIFEST_STALE" in r["why"]
     msgs = []
-    man = BW.fresh_manifest(base, msgs.append)
-    assert msgs and "stale" in msgs[0] and not BW.is_stale(base) and set(man["nets"]) == {"D_P", "D_N"}
+    reg = tmp_path / "boards.json"
+    monkeypatch.setenv("FLUXPLACE_VERSIONS", str(reg))
+    reg.write_text(json.dumps({"versions": {"W1": {"history": [{"board": "x.kicad_pcb"}]}}}))      # an entry with no sha explains nothing
+    with pytest.raises(BW.ManifestStale) as ei:
+        BW.fresh_manifest(base, msgs.append)
+    assert any(ln.startswith("D_P: -1 +1 items") for ln in ei.value.diff) and any("D_P: -1 +1" in m for m in msgs)
+    assert BW.is_stale(base) and BW.load_manifest(base)["nets"] == old["nets"]                      # the old manifest is kept
+    reg.write_text(json.dumps({"versions": {"W1": {"history": [{"board": "x.kicad_pcb", "sha": BW.file_sha(base)}]}}}))
+    man = BW.fresh_manifest(base, msgs.append)                                                        # `versions accept` recorded this file
+    assert not BW.is_stale(base) and set(man["nets"]) == {"D_P", "D_N"} and man["reseeded"]
 
 
 def test_a_stage_that_edits_its_input_in_place_is_checked(tmp_path):

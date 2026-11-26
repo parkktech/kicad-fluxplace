@@ -290,7 +290,8 @@ def cmd_accept(a):
     except ValueError as ex:
         sys.exit("refused: %s" % ex)
     e["current"] = rel(b)
-    e.setdefault("history", []).append({"time": now(), "board": rel(b), "metrics": m, "note": a.note})
+    e.setdefault("history", []).append({"time": now(), "board": rel(b), "metrics": m, "note": a.note,
+                                  "sha": hashlib.sha1(open(b, "rb").read()).hexdigest()})      # boardwrite.registry_explains: an accepted edit is not a stale manifest
     save(r)
     link_current(v, b)
     st = "%s. CURRENT = `%s` (%s/CURRENT.kicad_pcb)" % (fmt(m), rel(b), v)

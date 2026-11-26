@@ -27,6 +27,7 @@ def table(open_conn, cls, claims, diag):
         if owner is None:
             unowned.append(n)
         rows.append({"net": n, "class": (cls or {}).get(n, {}).get("class", "?"), "open": open_conn[n], "owner": owner or "NONE",
+                     "contract_owner": (cls or {}).get(n, {}).get("owner", "?"),          # the net contract's owner step (netclass.OWNER)
                      "reason": ",".join(causes.get(n, [])) or ("not diagnosed" if owner else "-")})
     return rows, unowned
 

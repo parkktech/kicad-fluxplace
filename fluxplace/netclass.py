@@ -280,12 +280,195 @@ def classify(B, cons=None, spec=None):
         if net in per_net_budget:
             pb = per_net_budget[net]
             budget, reason = (None if pb.get("mm") is None else float(pb["mm"])), str(pb.get("reason", ""))
-        out[net] = {"class": cls, "weight": weight, "budget": budget, "reason": why,
+        out[net] = {"class": cls, "owner": OWNER.get(cls, "router"), "weight": weight, "budget": budget, "reason": why,
                     "partner": pair_of.get(net), "pads": len(ps), "drops": len(set(refs)),
                     "kind": kind, "override": net in per_net_budget or "budget" in o,
                     "override_reason": reason or str(o.get("reason", ""))}
     _mark_coupled_preferred(B, cons, out)
     return out
+
+
+# ---- the net contract: one table every consumer reads (B1) -----------------------------------------------------------------
+CRIT_RANK = {"pair": 0, "rf": 1, "clock": 2}                      # routing order of the controlled classes (batchroute)
+CONTROLLED_CLASSES = ("pair", "rf", "clock", "switch_node")       # a rip may never touch these (ripolicy)
+OWNER = {"rf": "rf", "pair": "pairs", "rail": "rails"}            # the step that owns the copper of a class; others: the router
+NECK_MM = 1.5                                                     # a run this short is a pad neck: exempt from the width contract
+OUTER_LAYERS = ("F.Cu", "B.Cu")
+
+
+def plain_nets(cons):
+    """Nets that must be plain straight copper: `[nets.X] straight = true` or `straight_copper = [pads]`."""
+    return {n for n, v in ((cons or {}).get("nets") or {}).items()
+            if isinstance(v, dict) and (v.get("straight") is True or v.get("straight_copper"))}
+
+
+def protected_set(cons, names):
+    """Nets no trade may open (R5) and whose copper stays locked: the [rf] nets, nets named as RF (review.is_rf), every pair leg from
+    the constraints (krtchain.pair_nets) and every leg found by naming (graph.diff_pairs)."""
+    from . import krtchain, review, constraints as C
+    names = sorted(names)
+    nopair = C.not_pairs(cons)
+    rf = set(((cons or {}).get("rf") or {}).get("nets") or []) | {n for n in names if review.is_rf(n)}
+    try:
+        pairs = set(krtchain.pair_nets(cons, names, None))
+    except Exception:                                   # noqa: BLE001
+        pairs = set()
+    try:
+        dp = G.diff_pairs(names, exclude=nopair)
+        pairs |= set(dp) | set(dp.values())
+    except Exception:                                   # noqa: BLE001
+        pass
+    return rf | (pairs - nopair)
+
+
+def controlled_map(cls, cons, names=()):
+    """{net: why} for the nets that a rip may never touch (ripolicy.controlled_nets)."""
+    out = {n: i["class"] for n, i in (cls or {}).items() if i.get("class") in CONTROLLED_CLASSES}
+    r = (cons or {}).get("route") or {}
+    for n in (cons or {}).get("rf", {}).get("nets", []) or []:
+        out[n] = "rf"
+    for n in r.get("controlled", []) or []:
+        out[n] = "route.controlled"
+    for n, v in ((cons or {}).get("nets") or {}).items():
+        if isinstance(v, dict) and (v.get("max_vias") is not None or v.get("impedance")):
+            out[n] = "nets rule"
+    for n in plain_nets(cons):
+        out[n] = "plain copper"
+    pats = [re.compile(x) for x in (r.get("controlled_patterns") or [])]
+    for n in names:
+        if n not in out and any(p.search(n) for p in pats):
+            out[n] = "pattern"
+    return out
+
+
+def lock_level(net, cons, names=None, protected=None, ctl=None):
+    """hard | soft | free: how a locked copper item of `net` may be ripped (lockpolicy.level). No names or no constraints -> hard."""
+    if names is None or not cons:
+        return "hard"
+    from . import review as RV, krtchain as K, constraints as C
+    names = set(names) | {net}
+    rf = set(((cons or {}).get("rf") or {}).get("nets") or [])
+    dp = G.diff_pairs(sorted(names), exclude=C.not_pairs(cons))
+    pn = set(K.pair_nets(cons, sorted(names), None))
+    legs = set(dp) | set(dp.values()) | pn
+    gated = {x for slave, master in dp.items() if RV.pair_gated(cons, master) for x in (slave, master)}
+    gated |= {x for x in pn if RV.pair_gated(cons, x)}
+    protected = protected_set(cons, sorted(names)) if protected is None else protected
+    ctl = controlled_map(None, cons, sorted(names)) if ctl is None else ctl
+    if net in protected and (net in rf or RV.is_rf(net) or net in gated):
+        return "hard"
+    if net in ctl and ctl[net] != "plain copper":
+        return "hard"
+    if net in protected and net in legs:
+        return "soft"
+    if pair_kind(net) == "audio":
+        return "soft"
+    return "free"
+
+
+def _rf_width_map(cons, board, net, layers, fmap=None):
+    """{layer: mm} the RF net must be laid at: the declared width, else the impedance width (rfroute.widths)."""
+    from . import qualaudit as QA
+    out = {}
+    for lay in layers:
+        w = QA.declared_width(cons, fmap, net, lay)
+        if w:
+            out[lay] = w
+    miss = [lay for lay in layers if lay not in out]
+    if miss and board:
+        from . import rfroute as RFR
+        for lay, v in (RFR.widths(board, cons, [net], miss).get(net, {}).get("layers") or {}).items():
+            if v.get("w"):
+                out[lay] = float(v["w"])
+    return out
+
+
+def contract(B, cons=None, spec=None, cls=None, board=None, lock=True):
+    """THE per-net contract.  {net: {class, owner, protected, controlled (why|None), lock (hard|soft|free), rank, layers (allowed copper
+    layers or None), width ({layer: mm} the net must be laid at, or None), width_min (mm, or None), width_tol (mm), neck_mm}}.
+    drcguard.protected_nets, ripolicy.controlled_nets, lockpolicy.level, batchroute.CRIT_RANK and routeowners read this; the commit
+    point refuses new copper off `layers` / `width` / `width_min` (CONTRACT_CHANGED).  `board` (a path) lets the RF width come from the
+    stackup; without it only declared widths are enforced.  Pair legs are enforced only for an explicit `[pairs.FAMILY] width_mm`."""
+    cons = cons or {}
+    cls = cls if cls is not None else classify(B, cons, spec)
+    names = sorted(set(cls) | {p["net"] for p in B["pads"] if p["net"]})
+    prot = protected_set(cons, names)
+    ctl = controlled_map(cls, cons, names)
+    ctl_lock = controlled_map(None, cons, names)          # lockpolicy has always judged by the constraints only (no class-controlled nets)
+    from . import review as RV, power as PWR
+    rfn = set((cons.get("rf") or {}).get("nets") or []) | {n for n in names if RV.is_rf(n)} | {n for n, i in cls.items() if i["class"] == "rf"}
+    copper = list(B.get("copper") or [])
+    outer = [x for x in copper if x in OUTER_LAYERS] or copper
+    rf = cons.get("rf") or {}
+    wtol = float(rf.get("width_tol_mm", 0.02))
+    neck = float(rf.get("neck_max_mm", NECK_MM))
+    rails = {}
+    try:
+        zones = set()
+        if board:
+            from . import gaps as GP
+            zones = GP._zone_nets(board)
+        fixed = {n for n, v in (cons.get("nets") or {}).items() if isinstance(v, dict) and v.get("role") == "signal"}
+        ladder_min = min([float(x) for x in ((cons.get("route") or {}).get("power_ladder_mm") or PWR.LADDER_MM)] or [0.0])
+        for n, r in PWR.plan(cons, layers=len(copper) or None).items():
+            if r and r.get("track_mm") and n not in zones and n not in fixed:
+                explicit = bool(((cons.get("power") or {}).get(n) or {}).get("width_mm"))
+                rails[n] = round(float(r["track_mm"]) if explicit else min(float(r["track_mm"]), ladder_min), 3)
+    except Exception:                                   # noqa: BLE001 - no power facts: rails carry no width contract
+        rails = {}
+    spine_outer = (cons.get("route") or {}).get("power_spine") == "ipc-outer"
+    fams = cons.get("pairs") or {}
+    out = {}
+    for n in names:
+        i = cls.get(n) or {}
+        c = i.get("class", "signal")
+        if n in rfn:
+            c = "rf"
+        elif n in prot:
+            c = "pair"
+        e = {"class": c, "owner": OWNER.get(c, "router"), "protected": n in prot, "controlled": ctl.get(n),
+             "lock": lock_level(n, cons, names, prot, ctl_lock) if lock else None, "rank": CRIT_RANK.get(c),
+             "layers": None, "width": None, "width_min": None, "width_tol": wtol, "neck_mm": neck}
+        if c == "rf":
+            e["layers"] = list(outer)
+            e["width"] = _rf_width_map(cons, board, n, outer) or None
+        elif n in rails:
+            e["width_min"] = rails[n]
+            e["layers"] = list(outer) if spine_outer and (cons.get("power") or {}).get(n, {}).get("pour") else None
+        elif c == "pair" and fams:
+            from . import budget as BU
+            f = BU.family_of(fams, n)
+            if f and (fams[f] or {}).get("width_mm"):
+                e["width"] = {lay: float(fams[f]["width_mm"]) for lay in copper}
+        out[n] = e
+    return out
+
+
+def contract_violations(con, rows):
+    """rows = {net: [{kind, layer, w, len}]} (the NEW copper of a candidate) -> {net: [reason]} for every net whose new copper is off
+    its contract (layer not allowed, width off the per-layer width by more than the tolerance, width under the minimum).  A run no
+    longer than `neck_mm` is a pad neck: its width is exempt (not its layer)."""
+    bad = {}
+    for n, items in rows.items():
+        e = con.get(n)
+        if not e or not (e["layers"] or e["width"] or e["width_min"]):
+            continue
+        for it in items:
+            if it["kind"] != "track":
+                continue
+            lay, w = it["layer"], it["w"]
+            why = None
+            if e["layers"] and lay not in e["layers"]:
+                why = f"{lay} not in {'/'.join(e['layers'])}"
+            elif it["len"] > e["neck_mm"]:
+                want = (e["width"] or {}).get(lay)
+                if want and abs(w - want) > e["width_tol"] + 1e-9:
+                    why = f"{w:g} mm on {lay}, contract {want:g}"
+                elif e["width_min"] and w < e["width_min"] - 1e-6:
+                    why = f"{w:g} mm under minimum {e['width_min']:g}"
+            if why:
+                bad.setdefault(n, []).append(why)
+    return bad
 
 
 def _mark_coupled_preferred(B, cons, out):

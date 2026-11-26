@@ -225,7 +225,7 @@ def carry_copper(text, moves_by_ref, pieces):
 # "pair P/N" (both legs of a pair the audit calls complete: the whole copper of the net is protected, nothing added or removed).
 # commit()/verify() refuse a candidate that changes protected copper (PROTECTED_CHANGED), adds duplicate copper or colliding item ids; a
 # legitimate re-lay names the nets in `release` (logged to attempts.jsonl).  The manifest stores the sha of the board it describes: a
-# board edited outside the flow is MANIFEST_STALE (re-seeded loudly at a pipeline start, refused in the middle of a flow).
+# board edited outside the flow is MANIFEST_STALE (refused with the per-net item diff, old manifest kept; re-seeded only when `versions accept` recorded this file's sha).
 import hashlib
 import json
 import os
@@ -325,14 +325,132 @@ def seed(board, why_by_net=None, keep=None, locked=True):
     return man
 
 
+class ManifestStale(Exception):
+    """The board changed after its manifest was sealed and no `versions step/accept` recorded the edit (MANIFEST_STALE).  `.diff` =
+    per-net item diff lines (old manifest -> board); the old manifest is kept."""
+
+    def __init__(self, board, diff):
+        self.diff = diff
+        super().__init__(f"MANIFEST_STALE {os.path.basename(board)} was edited after it was sealed and no accepted version records it: "
+                         f"{len(diff)} protected net(s) differ; the old manifest is kept")
+
+
+def registry_explains(board):
+    """True when the versions registry recorded this exact file: a history entry of `versions accept` (key `sha`, the file's sha1).
+    Registry entries written before 2026-11-26 carry no sha: they never explain an edit (open item: re-accept the board)."""
+    sha = file_sha(board)
+    d = os.path.dirname(os.path.abspath(board))
+    while True:
+        reg = os.path.join(d, os.environ.get("FLUXPLACE_VERSIONS") or os.path.join("docs", "resume", "boards.json"))
+        if os.path.isfile(reg):
+            try:
+                with open(reg) as fh:
+                    r = json.load(fh)
+            except (OSError, ValueError):
+                return False
+            return any(h.get("sha") == sha for v in (r.get("versions") or {}).values() for h in (v.get("history") or []))
+        if os.path.dirname(d) == d:
+            return False
+        d = os.path.dirname(d)
+
+
+def manifest_diff(board, man):
+    """[line] per protected net whose items differ between the manifest and `board`: `NET: -removed +added (items old -> new)`."""
+    now = net_items(board, set(man["nets"]))
+    out = []
+    for n, e in sorted(man["nets"].items()):
+        old, new = {}, {}
+        for x in e["items"]:
+            old[x] = old.get(x, 0) + 1
+        for x in now.get(n, []):
+            new[x] = new.get(x, 0) + 1
+        rem = sum(max(0, c - new.get(x, 0)) for x, c in old.items())
+        add = sum(max(0, c - old.get(x, 0)) for x, c in new.items())
+        if rem or add:
+            out.append(f"{n}: -{rem} +{add} items ({len(e['items'])} -> {len(now.get(n, []))}, {e['why']})")
+    return out
+
+
 def fresh_manifest(board, log=None):
-    """The manifest of `board`, re-seeded loudly when it is stale (the board was edited outside the flow)."""
+    """The manifest of `board`.  Stale (the board changed after it was sealed): refused with ManifestStale (old manifest kept, the per-net item
+    diff printed) unless the versions registry recorded this file (`versions accept`); then re-seeded, the diff logged to attempts.jsonl and
+    returned as man["reseeded"] (the caller sets aside the evidence downstream of the change)."""
     man = load_manifest(board)
-    if is_stale(board, man):
+    if not is_stale(board, man):
+        return man
+    diff = manifest_diff(board, man)
+    if not registry_explains(board):
         if log:
-            log(f"manifest of {os.path.basename(board)} is stale (the board changed after it was sealed): re-seeded from the board")
-        man = seed(board, keep=man)
-    return man
+            log(f"MANIFEST_STALE {os.path.basename(board)}: edited after it was sealed, no accepted version records it; old manifest kept")
+            for ln in diff or ["(no protected item differs: only the file changed; accept the board to seal it)"]:
+                log("  " + ln)
+        raise ManifestStale(board, diff)
+    if log:
+        log(f"manifest of {os.path.basename(board)} is stale but the versions registry recorded this board: re-seeded; {len(diff)} net(s) differ")
+        for ln in diff:
+            log("  " + ln)
+    new = seed(board, keep=man)
+    _log_reseed(board, diff)
+    return dict(new, reseeded=diff)
+
+
+def _log_reseed(board, diff):
+    try:
+        from . import calllog
+        if calllog.enabled():
+            calllog.append({"ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"), "event": "manifest_reseed", "board": os.path.basename(board),
+                            "diff": diff}, calllog.attempts_path(board))
+    except Exception:                                                       # noqa: BLE001 - the log is advice
+        pass
+
+
+def new_copper(prev, cand, nets):
+    """{net: [{kind, layer, w, len}]} of the copper `cand` has on `nets` that `prev` does not (multiset difference by item hash;
+    pcbnew, 1 um): the copper a stage ADDED.  Vias are listed with kind "via" (no layer/width contract)."""
+    import pcbnew
+
+    def rows(path):
+        b = pcbnew.LoadBoard(path)
+        mm = lambda v: round(v / 1e6, 3)                                    # noqa: E731
+        out = {}
+        for t in b.GetTracks():
+            n = t.GetNetname()
+            if n not in nets:
+                continue
+            if t.GetClass() == "PCB_VIA":
+                r = (("via", mm(t.GetPosition().x), mm(t.GetPosition().y), mm(t.GetWidth(pcbnew.F_Cu))), {"kind": "via", "layer": "", "w": mm(t.GetWidth(pcbnew.F_Cu)), "len": 0.0})
+            else:
+                r = (("track", b.GetLayerName(t.GetLayer()), tuple(sorted([(mm(t.GetStart().x), mm(t.GetStart().y)), (mm(t.GetEnd().x), mm(t.GetEnd().y))])), mm(t.GetWidth())),
+                     {"kind": "track", "layer": b.GetLayerName(t.GetLayer()), "w": mm(t.GetWidth()), "len": round(t.GetLength() / 1e6, 3)})
+            out.setdefault(n, {}).setdefault(r[0], []).append(r[1])
+        return out
+    a, b = rows(prev), rows(cand)
+    res = {}
+    for n, d in b.items():
+        for k, items in d.items():
+            extra = len(items) - len(a.get(n, {}).get(k, []))
+            if extra > 0:
+                res.setdefault(n, []).extend(items[:extra])
+    return res
+
+
+def contract_check(prev, cand, cons, spec=None):
+    """CONTRACT_CHANGED: new copper of `cand` (against `prev`) on a net with a width / layer contract (netclass.contract: RF, rails with a
+    current figure, pair legs with an explicit width), protected or not, that is off its contract.
+    -> {"ok", "why", "changed": [nets], "detail": {net: [reason]}}."""
+    from . import netclass as NC, routediag as RD
+    B = RD.load(cand)
+    con = NC.contract(B, cons, spec, board=cand, lock=False)
+    watch = {n for n, e in con.items() if e["layers"] or e["width"] or e["width_min"]}
+    if not watch:
+        return {"ok": True, "why": "", "changed": [], "detail": {}}
+    bad = NC.contract_violations(con, new_copper(prev, cand, watch))
+    names = sorted(bad)
+    why = ""
+    if names:
+        why = "CONTRACT_CHANGED " + ", ".join(names[:6]) + (f" (+{len(names) - 6})" if len(names) > 6 else "")
+        why += " [" + "; ".join(f"{n}: {bad[n][0]}" + (f" +{len(bad[n]) - 1}" if len(bad[n]) > 1 else "") for n in names[:3]) + "]"
+    return {"ok": not names, "why": why, "changed": names, "detail": bad}
 
 
 def changed(board, manifest, release=()):
@@ -375,7 +493,7 @@ def _dups(path):
     return len(dedupe.duplicates(open(path, errors="surrogateescape").read()))
 
 
-def verify(base, cand, release=(), manifest=None):
+def verify(base, cand, release=(), manifest=None, cons=None, spec=None):
     """Read-only check of `cand` against the manifest of `base` (or `manifest`).
     -> {"ok", "why", "changed": [nets], "duplicates": n, "uuid_collisions": n}.  A duplicate or id collision already in `base` does not
     block a candidate that does not add more (a repair that removes them must pass).  `cand` may be `base` itself (a stage that edited
@@ -392,6 +510,10 @@ def verify(base, cand, release=(), manifest=None):
     why = []
     if bad:
         why.append("PROTECTED_CHANGED " + ", ".join(bad[:6]) + (f" (+{len(bad) - 6})" if len(bad) > 6 else ""))
+    if cons is not None and not os.path.samefile(base, cand):
+        ct = contract_check(base, cand, cons, spec)
+        if ct["why"]:
+            why.append(ct["why"])
     if d1 > d0:
         why.append(f"DUPLICATE_COPPER {d1 - d0} new")
     if u1 > u0:
@@ -419,12 +541,12 @@ def release(board, names, reason, attempts=None):
     return gone
 
 
-def commit(base, cand, dst, release=(), complete=None, reason="", log=None, locked=True, manifest=None):
+def commit(base, cand, dst, release=(), complete=None, reason="", log=None, locked=True, manifest=None, cons=None, spec=None):
     """THE write of a candidate over a stage board: verify(base, cand), then copy cand -> dst (and its project sidecars; no copy when
     cand is dst) and write dst's manifest = base's entries minus `release` (re-read from the new copper) + `complete` {net: why} + the
     locked items.  -> verify's dict plus "written".  Refused: nothing is written."""
     man = manifest if manifest is not None else load_manifest(base)
-    r = verify(base, cand, release, manifest=man if manifest is not None else None)
+    r = verify(base, cand, release, manifest=man if manifest is not None else None, cons=cons, spec=spec)
     r["written"] = False
     if not r["ok"]:
         if log:

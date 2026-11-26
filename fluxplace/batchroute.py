@@ -82,7 +82,7 @@ def has_fanout(board):
         return False
 
 
-CONTROLLED = {"pair": 0, "rf": 1, "clock": 2}
+CONTROLLED = NC.CRIT_RANK                       # the net contract's routing rank (netclass)
 
 
 PHASES = ("escape", "plain", "power_pins", "rails", "controlled", "rest")

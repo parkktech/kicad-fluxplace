@@ -2208,7 +2208,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     from . import boardwrite as BW
-    man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing protected yet; stale: re-seeded)
+    man = BW.fresh_manifest(board, log)                  # A3: the input board's protected copper (empty: nothing; stale: ManifestStale unless the registry recorded it)
     if man["nets"]:
         BW.seed(best, keep=man, locked=False)            # the work copy carries it, so a release is a logged edit of that file
     man0 = json.loads(json.dumps(man))                   # the input's manifest: the baseline the pipeline's commit point judges the final board against
