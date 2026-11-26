@@ -1579,10 +1579,11 @@ class FileEval(Evaluator):
     (breakout / fan-out), and, when it would improve the score, a new KiCad DRC item against the input (`drc_new`). The base moves only on commit."""
     TOL = 0.02
 
-    def __init__(self, ctx, board, input_board, workdir, legal_base=None, measure=None, guards=None, drc_ref_board=None):
+    def __init__(self, ctx, board, input_board, workdir, legal_base=None, measure=None, guards=None, drc_ref_board=None, quick=None):
         self.ctx, self.input_board, self.work = ctx, input_board, workdir
         self.drc_board = drc_ref_board or input_board
         self.legal_base, self.measure, self.guards = legal_base, measure, dict(guards or {})
+        self.quick = dict(quick or {})       # cheap guards (seconds): checked per trial that would improve the score, with the DRC
         os.makedirs(workdir, exist_ok=True)
         self.board_path = os.path.join(workdir, "base.kicad_pcb")
         shutil.copyfile(board, self.board_path)
@@ -1593,6 +1594,7 @@ class FileEval(Evaluator):
         self.n, self.drc_ref, self.gaps = 0, None, None
         self.m = self._cost(self.board_path)
         self.g0 = {k: f(self.board_path) for k, f in self.guards.items()}
+        self.q0 = {k: f(self.board_path) for k, f in self.quick.items()}
         self.hist = []                       # (board, gaps, m) before each commit: the late guards roll back to any of them
         self._sync()
 
@@ -1647,6 +1649,11 @@ class FileEval(Evaluator):
                 return tr
         tr["m"] = m
         if score(gaps, tr["state"]) <= score(self.gaps or [], self.state()):
+            for k, f in sorted(self.quick.items()):
+                v = f(p)
+                if v > self.q0[k]:
+                    tr["refusal"] = f"score:{k} {self.q0[k]}->{v}"
+                    return tr
             try:
                 if self.drc_ref is None:
                     self.drc_ref = LG._drc(self.drc_board, pro_from=self.drc_board) or []
