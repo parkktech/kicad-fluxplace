@@ -123,6 +123,44 @@ def terminals(B, p, n, pad_max, merge_twins=False):
     return out, lone
 
 
+def twin_template(row, pnet, far_terms):
+    """polarity-checked template of an interleaved double-pad row (USB-C receptacle: DM DP DM DP): `row` = its four pads sorted along the
+    row, `pnet` = the pair's P net, `far_terms` = the other terminals of the pair.  Every adjacent pad pair with one pad per net is a
+    candidate primary pair; its two other pads are the twins, joined to it by twin_join (dog-bone tap vias + a jumper on another layer).
+    A candidate is polarity-right when its P->N side seen along the heading to the far terminals equals the far terminals' own (else the
+    legs cross and the pair would need a layer-swapping via pair).  Validated against the footprint pin identities (one footprint, four
+    distinct pin numbers, two pads per net, nets alternating) and the netlist (the nets are the pair's).  Polarity-right candidates
+    first, the one nearest the far terminals among them; none polarity-right: the nearest end pair (the old choice), `polarity_ok` False.
+    -> {p, n, tp, tn, info} | None when the row is no valid twin row.  Pure geometry and pin identity: no refs, no net names."""
+    if len(row) != 4 or len({q["ref"] for q in row}) != 1 or len({q["num"] for q in row}) != 4:
+        return None
+    nets = [q["net"] for q in row]
+    if len(set(nets)) != 2 or any(nets[k] == nets[k + 1] for k in range(3)) or nets[0] != nets[2] or nets[1] != nets[3] or pnet not in nets:
+        return None
+    cx, cy = sum(q["x"] for q in row) / 4, sum(q["y"] for q in row) / 4
+    if far_terms:
+        fx, fy = sum(t["c"][0] for t in far_terms) / len(far_terms), sum(t["c"][1] for t in far_terms) / len(far_terms)
+        head = G.unit((cx, cy), (fx, fy))
+        far_cross = sum(head[0] * (t["n"]["y"] - t["p"]["y"]) - head[1] * (t["n"]["x"] - t["p"]["x"]) for t in far_terms)
+    else:
+        fx = fy = head = None
+        far_cross = 0.0
+    cands = []
+    for i in range(3):
+        a, b = row[i], row[i + 1]
+        p, n = (a, b) if a["net"] == pnet else (b, a)
+        rest = [q for k, q in enumerate(row) if k not in (i, i + 1)]
+        tp_ = next(q for q in rest if q["net"] == p["net"])
+        tn_ = next(q for q in rest if q is not tp_)
+        cross = 0.0 if head is None else head[0] * (n["y"] - p["y"]) - head[1] * (n["x"] - p["x"])
+        ok = head is None or cross * far_cross > 0
+        d = 0.0 if fx is None else math.hypot((p["x"] + n["x"]) / 2 - fx, (p["y"] + n["y"]) / 2 - fy)
+        cands.append((not ok, d, i, {"p": p, "n": n, "tp": tp_, "tn": tn_, "polarity_ok": bool(ok), "via_only": i == 1, "primary": (p["num"], n["num"]), "twins": (tp_["num"], tn_["num"])}))
+    cands.sort(key=lambda c: c[:3])
+    best = cands[0][3]
+    return dict(best, info={k: best[k] for k in ("polarity_ok", "via_only", "primary", "twins")})
+
+
 def _merge_twins(terms, Pp, Np):
     by = {}
     for t in terms:
@@ -144,20 +182,12 @@ def _merge_twins(terms, Pp, Np):
             far = [t["c"] for t in terms if t not in ts]
             by_pad = {id(q): x for x, q in ((proj(q), q) for q in pads)}
             sel = sorted(pads, key=lambda q: by_pad[id(q)])
-            lo, hi = sel[:2], sel[2:]
-            if far:
-                fx, fy = sum(c[0] for c in far) / len(far), sum(c[1] for c in far) / len(far)
-                dlo = math.hypot(sum(q["x"] for q in lo) / 2 - fx, sum(q["y"] for q in lo) / 2 - fy)
-                dhi = math.hypot(sum(q["x"] for q in hi) / 2 - fx, sum(q["y"] for q in hi) / 2 - fy)
-                pri, twn = (lo, hi) if dlo <= dhi else (hi, lo)
-            else:
-                pri, twn = lo, hi
-            pp = next(q for q in pri if q["net"] == ts[0]["p"]["net"])
-            pn = next(q for q in pri if q is not pp)
-            tp_ = next(q for q in twn if q["net"] == pp["net"])
-            tn_ = next(q for q in twn if q is not tp_)
+            tpl = twin_template(sel, ts[0]["p"]["net"], [t for t in terms if t not in ts])
+            if tpl is None:
+                continue
+            pp, pn, tp_, tn_ = tpl["p"], tpl["n"], tpl["tp"], tpl["tn"]
             terms = [dict(ts[0], p=pp, n=pn, c=((pp["x"] + pn["x"]) / 2, (pp["y"] + pn["y"]) / 2), sep=math.hypot(pp["x"] - pn["x"], pp["y"] - pn["y"]),
-                          twin={"p": tp_, "n": tn_}) if t is ts[0] else t for t in terms if t is not ts[1]]
+                          twin={"p": tp_, "n": tn_, "template": tpl["info"]}) if t is ts[0] else t for t in terms if t is not ts[1]]
     return terms
 
 
@@ -631,7 +661,9 @@ def twin_join(ctx, t, rule, pr):
             done = None
             play = next((l for l in sig if l in a["layers"]), None)
             # first a jumper on the pad layer round the end of the other net's pad (no via), then dog-bone vias and a jumper on another layer
-            for with_via in (False, True):
+            # an interior primary pair (the middle two pads) has the other net's primary pad between every jumper's ends: a jumper on the pad
+            # layer would cross that net's exit, so the joins are dog-bone tap vias + a jumper on another layer
+            for with_via in ((True,) if (tw.get("template") or {}).get("via_only") else (False, True)):
                 for L in (0.8, 1.1, 1.5, 2.0, 2.6):
                     for side in sides:
                         for La, Lb in ((L, L), (L, L + 0.4), (L + 0.4, L)):

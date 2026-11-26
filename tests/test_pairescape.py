@@ -134,3 +134,32 @@ def test_twin_tap_vias_are_spurs_not_part_of_the_pair_path(tmp_path):
     assert p["path"] and p["layers"] == ["F.Cu"] and p["vias"] == 0
     grp = PA.twin_group([q for q in B["pads"] if q["net"] == "DP" and q["ref"] == "J5"], 0)
     assert len(grp) == 2                                             # matched by footprint pattern (same net, same footprint, near)
+
+
+def usbc_body():
+    row = [PB.pad(str(i + 1), 0.5 * i, 0, net, 0.3, 0.8) for i, net in enumerate(("USB_DM", "USB_DP", "USB_DM", "USB_DP"))]
+    duo = [PB.pad("1", 0, 0, "USB_DP", 0.3, 0.8), PB.pad("2", 0.8, 0, "USB_DM", 0.3, 0.8)]
+    return PB.fp("J5", 40, 60, row) + PB.fp("U8", 40.5, 45, duo)
+
+
+def test_twin_template_picks_the_polarity_right_middle_pair(tmp_path):
+    B = RD.load(PB.write(tmp_path, usbc_body()))
+    terms, lone = PR.terminals(B, "USB_DP", "USB_DM", 16.0, merge_twins=True)
+    j5 = next(t for t in terms if t["p"]["ref"] == "J5" or t["name"] == "J5")
+    tpl = j5["twin"]["template"]
+    assert tpl["polarity_ok"] and tpl["primary"] == ("2", "3") and set(tpl["twins"]) == {"1", "4"}
+    # an invalid row (nets not alternating) gives no template
+    row = [q for q in B["pads"] if q["ref"] == "J5"]
+    assert PR.twin_template(row[:3], "USB_DP", []) is None
+
+
+def test_twin_receptacle_lays_with_tap_vias_and_passes_the_audit(tmp_path):
+    b = PB.write(tmp_path, usbc_body())
+    out = str(tmp_path / "o.kicad_pcb")
+    rep = PR.run(b, {"pairlay": {"workers": 1}}, None, out, fallback=False)
+    row = rep["pairs"][0]
+    assert row["open"] == [0, 0], row
+    B = RD.load(out)
+    assert sum(1 for v in B["vias"] if v["net"] in ("USB_DM", "USB_DP")) >= 2          # the tap vias of the twin joins
+    a = PA.audit(B, [("USB_DP", "USB_DM")], {}, set())[("USB_DP", "USB_DM")]
+    assert set(a["causes"]) <= {"skew"} and a["status"] in ("complete", "mismatch"), a          # skew of the jumper is the tuner's, never layers or vias
