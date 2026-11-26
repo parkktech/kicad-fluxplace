@@ -222,6 +222,42 @@ def neck_heat_c(current_a, length_mm, width_mm, oz):
     return current_a ** 2 * CU_RHO_OHM_M * (length_mm * 1e-3) ** 2 / (8 * CU_K_W_MK * a * a)
 
 
+def neck_width_mm(current_a, length_mm, oz, rise_c=DEFAULT_RISE_C):
+    """D71da test 2 inverted: the narrowest width (mm) for which a run `length_mm` long holds dT <= rise_c at `current_a`
+    (dT = I^2 rho L^2 / (8 k A^2) -> w = I L sqrt(rho / (8 k dT)) / t)."""
+    t = CU_UM_PER_OZ * oz * 1e-6
+    return current_a * (length_mm * 1e-3) * math.sqrt(CU_RHO_OHM_M / (8 * CU_K_W_MK * rise_c)) / t * 1e3
+
+
+def neck_drop_mv(current_a, length_mm, width_mm, oz):
+    """DC drop (mV) across a neck-down at full rail current: I rho L / (w t)."""
+    return current_a * CU_RHO_OHM_M * (length_mm * 1e-3) / ((width_mm * 1e-3) * (CU_UM_PER_OZ * oz * 1e-6)) * 1e3
+
+
+LADDER_MM = (1.4, 1.0, 0.6)     # W14 measured (ONE-SHOT-LEDGER 2026-11-19 "rails first"): widest first IPC, 1.4, 1.0, 0.6
+LADDER_INNER_MAX_MM = 1.0       # inner layers only at the small widths (W14: a wide inner spine eats pair capacity)
+
+
+def ladder_widths(cons, net, top_mm, track_mm=0.15):
+    """Rung widths (mm, widest first) the rails step tries for one pour rail: its routed width `top_mm` (IPC outer), then
+    `[route] power_ladder_mm` (default 1.4, 1.0, 0.6) below it, never under the signal width `track_mm`."""
+    rt = (cons or {}).get("route") or {}
+    rungs = [float(x) for x in rt.get("power_ladder_mm", LADDER_MM)]
+    out = [round(float(top_mm), 2)]
+    for w in sorted(rungs, reverse=True):
+        if w < out[-1] - 1e-6 and w >= float(track_mm) - 1e-6:
+            out.append(round(w, 2))
+    return out
+
+
+def ladder_layers(cons, sig, width_mm, fallback=False):
+    """Layers of a rung: outer copper for the rail's own (first) rung and for any width above LADDER_INNER_MAX_MM; every
+    signal layer for a fallback rung at or below it."""
+    if not fallback or width_mm > LADDER_INNER_MAX_MM + 1e-9:
+        return rail_layers(cons, sig)
+    return list(sig)
+
+
 def narrow_runs(segs, vias=()):
     """Group narrow segments [{layer, x1, y1, x2, y2, len, width, need}] into connected runs (shared endpoints within
     NECK_JOIN_MM on a layer; narrow ends that meet at one of the net's `vias` [{x, y, dia_mm}] are one run across the
@@ -254,7 +290,10 @@ def narrow_runs(segs, vias=()):
             par[find(i)] = find(at[0])
     runs = {}
     for i, g in enumerate(segs):
-        d = runs.setdefault(find(i), {"layers": set(), "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0})
+        d = runs.setdefault(find(i), {"layers": set(), "len": 0.0, "min_w": g["width"], "need": g["need"], "n": 0, "members": []})
+        d["members"].append(i)
+        if "x1" in g and "at" not in d:
+            d["at"] = (round(g["x1"], 2), round(g["y1"], 2))
         d["layers"].add(g["layer"])
         d["len"] += g.get("len", 0.0)
         d["min_w"] = min(d["min_w"], g["width"])
@@ -630,34 +669,93 @@ def _pad_min_at(pads, net, x, y):
     return min(hit) if hit else None
 
 
+def _unreached(b, rails, pads, vias_of):
+    """{net: [{layer, len_mm, width_mm, need_mm, at, refs}]} narrow runs (check()'s own grouping) still failing D71da's
+    length / heat tests: the rail cannot reach its width there, a placement finding (parts around `at`, free a corridor)."""
+    import pcbnew
+    out = {}
+    outer = ("F.Cu", "B.Cu")
+    for net, r in rails.items():
+        segs = []
+        for t in b.GetTracks():
+            if t.GetClass() != "PCB_TRACK" or t.GetNetname() != net:
+                continue
+            lay = b.GetLayerName(t.GetLayer())
+            need = _need_on(r, lay)
+            w = pcbnew.ToMM(t.GetWidth())
+            if w < need - 1e-6:
+                s, e = t.GetStart(), t.GetEnd()
+                segs.append({"layer": lay, "x1": pcbnew.ToMM(s.x), "y1": pcbnew.ToMM(s.y), "x2": pcbnew.ToMM(e.x),
+                             "y2": pcbnew.ToMM(e.y), "len": pcbnew.ToMM(t.GetLength()), "width": w, "need": need})
+        for run in narrow_runs(segs, vias_of.get(net, ())):
+            if not _neck_tests(run, r, set(outer)):
+                continue
+            refs = sorted({ref for n_, ref, x, y in pads if n_ == net and
+                           any(math.hypot(segs[i][k] - c, segs[i][m] - d) < 1.5 for i in run["members"]
+                               for k, m, c, d in (("x1", "y1", x, y), ("x2", "y2", x, y)))})
+            out.setdefault(net, []).append({"layer": run["layer"], "len_mm": round(run["len"], 2), "width_mm": round(run["min_w"], 3),
+                                            "need_mm": round(run["need"], 3), "at": run.get("at"), "refs": refs[:6]})
+    for net in out:
+        out[net].sort(key=lambda x: -x["len_mm"])
+    return out
+
+
 def widen(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
     the segment's own copper skipped; the probe model is built once, so widenings do not see each other: the close guard
     judges the result). A segment that ends in a pad narrower than its new width is split max(W, 0.5 mm) from that pad and
-    only the far part is widened. Rails that check() exempts (pour rail with a same-net zone) are left alone.
+    only the far part is widened.
+    W34 (ledger "route gate (W16 route-4)"): copper inside a same-net pour is widened too (check() has no pour carve-out, D71da:
+    skipping it made this rung refuse every rail that had a zone). Last rung of the ladder: a run no longer than D71da's
+    NECK_MAX_MM may stay narrow at the neck-proof width (`neck_width_mm`, heat test with the run's own length) when the probe
+    refuses anything wider; each one is recorded in `necks` with its length, dT and DC drop (mV, at the rail's full current).
     PHASE3G G1b d: a LOCKED rail track is a candidate too, unless its net is in `protect` (drcguard.protected_nets: pair legs,
     RF). Its width changes in place and it stays locked; a necked split part inherits the lock.
-    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net": {net: {"widened_mm", "left_mm"}},
-    "skipped": {"locked_mm", "pour_zone_mm", "by_net": {net: {"locked_mm", "pour_zone_mm"}}}} (skipped = narrow copper
-    left alone: locked copper of a protected net, copper inside a same-net pour zone; mm of track length)."""
+    Writes `out` only when a track changed. -> {"widened_mm", "left_mm", "by_net", "necks": [...], "unreached": {net: [run]},
+    "skipped": {"locked_mm", "pour_zone_mm" (always 0 now), "by_net"}} (skipped = narrow copper left alone: locked copper of a
+    protected net; mm of track length)."""
     import pcbnew
     from . import gaps as GP, handroute as HR
-    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}, "skipped": {"locked_mm": 0.0, "pour_zone_mm": 0.0, "by_net": {}}}
+    rec = {"widened_mm": 0.0, "left_mm": 0.0, "by_net": {}, "necks": [], "unreached": {},
+           "skipped": {"locked_mm": 0.0, "pour_zone_mm": 0.0, "by_net": {}}}
     protect = set(protect or ())
     rails = _rails_on(board, cons, nets)
     if not rails:
         return rec
-    zone_nets = GP._zone_nets(board)
     b = pcbnew.LoadBoard(board)
     M = HR._model(board)                                 # the board's own rules (constraints: a file path, not used here)
     pads = [(p.GetNetname(), p.GetBoundingBox(), min(pcbnew.ToMM(p.GetSize().x), pcbnew.ToMM(p.GetSize().y)))
             for p in b.GetPads() if p.GetNetname()]
+    pad_pos = [(p.GetNetname(), p.GetParentFootprint().GetReference(), pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y))
+               for p in b.GetPads() if p.GetNetname()]
+    vias_of = {}
+    for v in b.GetTracks():
+        if v.GetClass() == "PCB_VIA" and v.GetNetname() in rails:
+            vias_of.setdefault(v.GetNetname(), []).append({"x": pcbnew.ToMM(v.GetPosition().x), "y": pcbnew.ToMM(v.GetPosition().y),
+                                                           "dia_mm": pcbnew.ToMM(v.GetWidth())})
     tot = lambda net: rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
 
     def skip(net, kind, mm):
         rec["skipped"][kind] += mm
         rec["skipped"]["by_net"].setdefault(net, {"locked_mm": 0.0, "pour_zone_mm": 0.0})[kind] += mm
+    # the D71da runs of every narrow rail track: a short run may be necked, so its length bounds the last rung
+    cand, segs = {}, {}
+    for t in b.GetTracks():
+        r = rails.get(t.GetNetname())
+        if t.GetClass() != "PCB_TRACK" or r is None:
+            continue
+        lay = b.GetLayerName(t.GetLayer())
+        need = _need_on(r, lay)
+        if pcbnew.ToMM(t.GetWidth()) < need - 1e-6:
+            s_, e_ = t.GetStart(), t.GetEnd()
+            segs.setdefault(t.GetNetname(), []).append((t, {"layer": lay, "x1": pcbnew.ToMM(s_.x), "y1": pcbnew.ToMM(s_.y), "x2": pcbnew.ToMM(e_.x),
+                                                          "y2": pcbnew.ToMM(e_.y), "len": pcbnew.ToMM(t.GetLength()),
+                                                          "width": pcbnew.ToMM(t.GetWidth()), "need": need}))
+    for net, lst in segs.items():
+        for run in narrow_runs([g for _t, g in lst], vias_of.get(net, ())):
+            for i in run["members"]:
+                cand[lst[i][0].m_Uuid.AsString()] = run
     changed = 0
     for t in list(b.GetTracks()):
         net = t.GetNetname()
@@ -672,16 +770,17 @@ def widen(board, cons, out, nets=None, protect=()):
         s, e = t.GetStart(), t.GetEnd()
         a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
         L = math.hypot(z[0] - a[0], z[1] - a[1])
-        if r["pour"] and net in zone_nets:
-            skip(net, "pour_zone_mm", L)
-            continue
         if t.IsLocked() and net in protect:
             skip(net, "locked_mm", L)
             continue
         near = next((k for k, pt in enumerate((a, z)) if (_pad_min_at(pads, net, *pt) or need) < need - 1e-6), None)
         step = max(need, 0.5)
+        pad_w = _pad_min_at(pads, net, *(a, z)[near]) if near is not None else None
+        if near is not None:                             # the pad-end neck: at most D71da's NECK_MAX_MM long, as wide as the pad
+            step = min(step, NECK_MAX_MM)
+        near_w = max(cur, math.floor((pad_w or 0.0) * 20 + 1e-9) / 20.0) if pad_w else cur
         split = None
-        if near is not None:                             # necked: the near part (step long) keeps the old width
+        if near is not None:                             # necked: the near part (step long) is the pad neck
             if L < step + 0.05:
                 tot(net)["left_mm"] += L
                 rec["left_mm"] += L
@@ -692,9 +791,16 @@ def widen(board, cons, out, nets=None, protect=()):
             lo, hi = split, far
         else:
             lo, hi = a, z
+        ladder = [round(need * f, 4) for f in WIDEN_FRACS]
+        run = cand.get(t.m_Uuid.AsString())
+        wn = None
+        if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and near is None:
+            oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
+            wn = math.ceil(neck_width_mm(r["current_a"], run["len"], oz, r.get("rise_c") or DEFAULT_RISE_C) * 20 + 1e-9) / 20.0
+            if wn < need - 1e-6:
+                ladder = sorted({*ladder, round(wn, 4)}, reverse=True)
         chosen = None
-        for f in WIDEN_FRACS:
-            W = round(need * f, 4)
+        for W in ladder:
             if W <= cur + 1e-6:
                 break
             if HR.probe_prims(M, net, [("seg", lay, lo, hi)], width=W, skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
@@ -707,10 +813,13 @@ def widen(board, cons, out, nets=None, protect=()):
         wide_mm = math.hypot(hi[0] - lo[0], hi[1] - lo[1])
         if split is not None:
             left_mm = step
+            if near_w > cur + 1e-6 and not HR.probe_prims(M, net, [("seg", lay, near_pt, split)], width=near_w,
+                                                          skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
+                near_w = cur                                 # the pad neck takes the pad's width only where the probe accepts it
             nt = pcbnew.PCB_TRACK(b)                       # the near part: its own track at the old width
             nt.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(near_pt[0]), pcbnew.FromMM(near_pt[1])))
             nt.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(split[0]), pcbnew.FromMM(split[1])))
-            nt.SetWidth(pcbnew.FromMM(cur))
+            nt.SetWidth(pcbnew.FromMM(near_w))
             nt.SetLayer(t.GetLayer())
             nt.SetNetCode(t.GetNetCode())
             nt.SetLocked(t.IsLocked())                     # the necked split inherits the lock
@@ -720,6 +829,11 @@ def widen(board, cons, out, nets=None, protect=()):
             tot(net)["left_mm"] += left_mm
             rec["left_mm"] += left_mm
         t.SetWidth(pcbnew.FromMM(chosen))
+        if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)
+            oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
+            rec["necks"].append({"net": net, "layer": lay, "at": [round(a[0], 2), round(a[1], 2)], "run_len_mm": round(run["len"], 2),
+                                 "width_mm": chosen, "dT_c": round(neck_heat_c(r["current_a"], run["len"], chosen, oz), 2),
+                                 "drop_mv": round(neck_drop_mv(r["current_a"], run["len"], chosen, oz), 2), "amps": r["current_a"]})
         tot(net)["widened_mm"] += wide_mm
         rec["widened_mm"] += wide_mm
         changed += 1
@@ -730,9 +844,31 @@ def widen(board, cons, out, nets=None, protect=()):
     for n in list(sk["by_net"]):
         sk["by_net"][n] = {k: round(v, 3) for k, v in sk["by_net"][n].items()}
     rec["widened_mm"], rec["left_mm"] = round(rec["widened_mm"], 3), round(rec["left_mm"], 3)
+    try:
+        rec["unreached"] = _unreached(b, rails, pad_pos, vias_of)
+    except Exception as e:                                # noqa: BLE001 - the findings are a report, never a reason to lose the widening
+        rec["unreached_error"] = f"{type(e).__name__}: {str(e)[:100]}"
     if changed:
         pcbnew.SaveBoard(out, b)
         GP._sidecars(board, out)
+    return rec
+
+
+def widen_guarded(board, cons, out, nets=None, protect=()):
+    """W34: `widen` for the route stage: kept only when the DRC guard (shorts, errors, track opens) is no higher afterwards, else
+    `out` is removed. -> widen's record plus {"dropped": reason | None, "before", "after"}."""
+    from . import drcguard as DG
+    rec = widen(board, cons, out, nets=nets, protect=protect)
+    rec.update(dropped=None, before=None, after=None)
+    if not os.path.exists(out):
+        return rec
+    rec["before"], rec["after"] = _guard_measure(DG.measure(board), DG), _guard_measure(DG.measure(out), DG)
+    worse = [k for k in GUARD_KEYS if rec["after"][k] > rec["before"][k]]
+    if worse:
+        rec["dropped"] = ", ".join(f"{k} {rec['before'][k]} -> {rec['after'][k]}" for k in worse)
+        for f in (out, os.path.splitext(out)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_prl"):
+            if os.path.exists(f):
+                os.remove(f)
     return rec
 
 

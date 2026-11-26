@@ -856,7 +856,8 @@ def _r_powerwiden(base, out, gaps, ctx):
     from . import power as PW
     r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps), protect=set(ctx.get("protect") or ()))
     return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"],
-            "skipped": r["skipped"]}
+            "skipped": r["skipped"], "necks": len(r.get("necks") or []),
+            "unreached": {n: len(v) for n, v in (r.get("unreached") or {}).items()}}
 
 
 def _r_railpour(base, out, gaps, ctx):

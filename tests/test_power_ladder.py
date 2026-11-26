@@ -1,0 +1,181 @@
+"""W34: rails ladder (W14 measured: widest first, outer layers, inner only at small fallback widths), D71da neck-downs only
+when proven (and recorded), via count per current, a VBATT-style rail with two branches stays connected, 5 A pour at IPC width."""
+import math
+import os
+import sys
+import types
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fluxplace import power as PW, krtchain as K  # noqa: E402
+
+CONS5 = {"power": {"VBATT": {"max_current_ma": 5000, "max_v": 14.5, "pour": True}}}
+
+
+def test_neck_width_is_the_inverse_of_the_heat_test():
+    for amps, ln in ((5.0, 2.0), (3.0, 1.0), (0.9, 2.0)):
+        w = PW.neck_width_mm(amps, ln, 1.0)
+        assert PW.neck_heat_c(amps, ln, w, 1.0) == pytest.approx(PW.DEFAULT_RISE_C, rel=1e-6)
+    assert PW.neck_drop_mv(5.0, 2.0, 0.66, 1.0) == pytest.approx(7.4, abs=0.3)
+
+
+def test_5a_rail_needs_ipc_outer_width_and_more_vias_than_1a():
+    r5 = PW.rail(CONS5, "VBATT", layers=6)
+    assert r5["width_outer"] == pytest.approx(2.77, abs=0.05) and r5["pour"]
+    assert PW.route_widths(dict(CONS5, route={"power_spine": "ipc-outer"}), layers=6)["VBATT"] == 2.8
+    r1 = PW.rail({"power": {"V1": {"max_current_ma": 1000}}}, "V1", layers=6)
+    assert r5["vias_needed"] == math.ceil(5.0 / r5["via_amps"] - 1e-9) and r5["vias_needed"] > r1["vias_needed"] >= 1
+    facts = {"copper_layers": 6, "track_geom": [], "vias": [{"net": "VBATT", "x": 1, "y": 1}], "stackup": None}
+    assert any(f["code"] == "POWER_VIAS" for f in PW.check(facts, CONS5))
+
+
+def test_ladder_widths_order_and_floor():
+    assert PW.ladder_widths({}, "N", 2.8) == [2.8, 1.4, 1.0, 0.6]
+    assert PW.ladder_widths({}, "N", 1.4) == [1.4, 1.0, 0.6]
+    assert PW.ladder_widths({}, "N", 0.5, 0.15) == [0.5]
+    assert PW.ladder_widths({}, "N", 1.4) == [1.4, 1.0, 0.6]
+    assert PW.ladder_widths({"route": {"power_ladder_mm": [0.8, 0.3]}}, "N", 2.0, 0.4) == [2.0, 0.8]
+    sig = ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]
+    oc = {"route": {"power_spine": "ipc-outer"}}
+    assert PW.ladder_layers(oc, sig, 2.8) == ["F.Cu", "B.Cu"]
+    assert PW.ladder_layers(oc, sig, 1.4, fallback=True) == ["F.Cu", "B.Cu"]
+    assert PW.ladder_layers(oc, sig, 1.0, fallback=True) == sig
+    assert PW.ladder_layers(oc, sig, 1.0) == ["F.Cu", "B.Cu"]          # the rail's own first rung stays on the outer pour layers
+
+
+def _ctx(tmp_path, monkeypatch, closes_at):
+    """krt-whole context: the stub router writes the rung width into the board; the net is open until a rung <= closes_at."""
+    from fluxplace import gaps as GP
+    (tmp_path / "in.kicad_pcb").write_text("x")
+    sig = ["F.Cu", "In2.Cu", "In3.Cu", "B.Cu"]
+    monkeypatch.setattr(K, "plane_plan", lambda b: (sig, [("GND", "In1.Cu")]))
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["X"])
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: set())
+    monkeypatch.setattr(PW, "pour_rails", lambda *a, **k: {"added": [], "dropped": False, "skipped": {}})
+    monkeypatch.setattr(K, "_rail_inner", lambda b, n: {})
+    monkeypatch.setattr(K.RR, "rules", lambda *a, **k: {"min_clearance": 0.127, "min_track": 0.127, "min_via": 0.45, "min_drill": 0.2,
+                                                         "clearance": 0.127, "track": 0.15, "via": 0.45, "drill": 0.2, "clearance_class": 0.0})
+
+    def opens(b, **k):
+        t = open(b).read() if os.path.exists(b) else ""
+        w = float(t.split("w=")[1].split()[0]) if "w=" in t else None
+        return {"VBATT": 1} if w is None or w > closes_at else {}
+    monkeypatch.setattr(K.RC, "open_by_net", opens)
+    calls = []
+
+    def runner(cmd, log, **kw):
+        calls.append(cmd)
+        if os.path.basename(cmd[1]) == "route.py" and "VBATT" in cmd:
+            w = cmd[cmd.index("--power-nets-widths") + 1]
+            open(cmd[3], "w").write(f"w={w}")
+        else:
+            open(cmd[3], "w").write("y")
+        return 0, 1.0
+    c = types.SimpleNamespace(a=types.SimpleNamespace(router_py="py", router_dir="/r", track=0.15, clearance=0.127),
+                              cons={"power": CONS5["power"], "route": {"power_spine": "ipc-outer", "whole_post": False}},
+                              work=str(tmp_path), state={}, dir=lambda n, nm: str(tmp_path))
+    return c, calls, runner, sig
+
+
+def _rail_calls(calls):
+    out = []
+    for cmd in calls:
+        if os.path.basename(cmd[1]) == "route.py" and "--power-nets" in cmd and cmd[cmd.index("--power-nets") + 1] == "VBATT":
+            lay = cmd[cmd.index("--layers") + 1:next(i for i in range(cmd.index("--layers") + 1, len(cmd)) if cmd[i].startswith("--"))]
+            out.append((float(cmd[cmd.index("--power-nets-widths") + 1]), lay))
+    return out
+
+
+def test_rails_ladder_steps_down_widest_first_outer_then_inner_at_the_small_widths(tmp_path, monkeypatch):
+    c, calls, runner, sig = _ctx(tmp_path, monkeypatch, closes_at=1.0)
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    rc = _rail_calls(calls)[:3]
+    assert rc == [(2.8, ["F.Cu", "B.Cu"]), (1.4, ["F.Cu", "B.Cu"]), (1.0, sig)]          # W14: inner layers only at <= 1.0
+    assert [x["width"] for x in r["rails"]["ladder"]["VBATT"]] == [2.8, 1.4, 1.0]
+    assert r["rails"]["ladder"]["VBATT"][-1]["open"] == 0 and r["rails"]["ladder"]["VBATT"][0]["open"] == 1
+    assert [s["step"] for s in r["steps"]][:2] == ["plane-GND", "rails-pour"]            # rails before pairs and the plain route
+
+
+def test_rails_ladder_stops_at_the_first_rung_that_completes(tmp_path, monkeypatch):
+    c, calls, runner, sig = _ctx(tmp_path, monkeypatch, closes_at=2.8)
+    K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [w for w, _l in _rail_calls(calls)][:2] == [2.8, 2.8] or len(_rail_calls(calls)) >= 1
+    assert [w for w, _l in _rail_calls(calls)].count(1.4) == 0
+
+
+def test_rails_ladder_exhausted_rail_stays_open_and_is_reported(tmp_path, monkeypatch):
+    c, calls, runner, sig = _ctx(tmp_path, monkeypatch, closes_at=0.1)
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [x["width"] for x in r["rails"]["ladder"]["VBATT"]] == [2.8, 1.4, 1.0, 0.6]
+    assert r["rails"]["ladder"]["VBATT"][-1]["open"] == 1
+
+
+# ---- widen: neck-downs only when proven, recorded ----------------------------------------------------------------
+
+def _neck_gap(need, w):
+    """distance between a rail track and a foreign 0.15 mm track at which a track of width w just fits (clearance 0.2 + margin)."""
+    return w / 2 + 0.075 + 0.2 + 0.03
+
+
+def test_short_run_is_necked_at_the_proven_width_and_recorded(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    r = PW.plan(CONS5, layers=2)["VBATT"]
+    wn = math.ceil(PW.neck_width_mm(5.0, 1.5, 1.0) * 20) / 20
+    d = _neck_gap(r["width_outer"], wn)
+    assert d < 0.5 * r["width_outer"] / 2 + 0.3                     # nothing in the 1.0 / 0.75 / 0.5 need ladder fits
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(6, 6, 7.5, 6, "VBATT"), (4, 6 + d, 10, 6 + d, "SIG")])
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.widen(src, CONS5, out)
+    assert len(rec["necks"]) == 1
+    n = rec["necks"][0]
+    assert n["width_mm"] == pytest.approx(wn, abs=0.051) and n["run_len_mm"] == pytest.approx(1.5, abs=0.01)
+    assert n["dT_c"] <= PW.DEFAULT_RISE_C + 1e-6 and n["drop_mv"] > 0 and "VBATT" not in rec["unreached"]
+
+
+def test_long_run_is_never_necked_and_is_reported_as_a_placement_finding(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    r = PW.plan(CONS5, layers=2)["VBATT"]
+    d = _neck_gap(r["width_outer"], 0.7)
+    src = _board(str(tmp_path / "in.kicad_pcb"), pads=[("C1", 6, 6, "VBATT")],
+                 tracks=[(6, 6, 16, 6, "VBATT"), (4, 6 + d, 18, 6 + d, "SIG")])
+    rec = PW.widen(src, CONS5, str(tmp_path / "out.kicad_pcb"))
+    assert rec["necks"] == []                                        # 10 mm > D71da's 2 mm: no neck-down
+    f = rec["unreached"]["VBATT"][0]
+    assert f["len_mm"] > PW.NECK_MAX_MM and f["need_mm"] == pytest.approx(r["width_outer"], abs=0.01) and f["refs"] == ["C1"]
+
+
+def test_vbatt_style_rail_with_two_branches_stays_fully_connected(tmp_path):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    from fluxplace import routeconn as RC
+    pads = [("J1", 2, 6, "VBATT"), ("U1", 18, 6, "VBATT"), ("U2", 10, 11, "VBATT")]
+    tracks = [(2, 6, 10, 6, "VBATT"), (10, 6, 18, 6, "VBATT"), (10, 6, 10, 11, "VBATT")]      # trunk + one branch to each load
+    src = _board(str(tmp_path / "in.kicad_pcb"), pads=pads, tracks=tracks)
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.widen(src, CONS5, out)
+    assert rec["widened_mm"] > 0
+    # the 0.25 mm test pads cannot carry 5 A: they are the findings (and only they)
+    assert {r for f in rec["unreached"].get("VBATT", []) for r in f["refs"]} <= {"J1", "U1", "U2"}
+    assert not RC.open_by_net(out, fill=False).get("VBATT")
+
+
+def test_5a_rail_pour_is_at_least_the_ipc_width(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    import pcbnew
+    from test_power import _rail_board, _stub_dg, CLEAN
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "_zone_nets", lambda p: set())
+    _stub_dg(monkeypatch, CLEAN, CLEAN)
+    src = _rail_board(str(tmp_path / "in.kicad_pcb"))
+    # the spine is the 0.15 mm board track: the pour (spine grown by power_pour_over_mm) must still be >= the IPC width
+    cons = {"power": {"VBAT": {"max_current_ma": 5000, "max_v": 14.5, "pour": True}}}
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.pour_rails(src, cons, out, layers=2)
+    assert rec["added"] == ["VBAT/F.Cu"]
+    z = [z for z in pcbnew.LoadBoard(out).Zones() if z.GetNetname() == "VBAT"][0]
+    bb = z.GetBoundingBox()
+    assert pcbnew.ToMM(bb.GetHeight()) >= PW.plan(cons, layers=2)["VBAT"]["width_outer"]

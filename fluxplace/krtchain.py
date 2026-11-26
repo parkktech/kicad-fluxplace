@@ -333,8 +333,9 @@ def run(c, n, board, runner=run_step):
     pour_rail_nets = [n for n in rail_nets if PWR.is_pour(c.cons, n)]     # PHASE3E 5: only pour rails are outer-only
     other_rail_nets = [n for n in rail_nets if n not in pour_rail_nets]
     steps = [(f"plane-{net}", lambda s, o, net=net, lay=lay: cmd_planes(a.router_py, a.router_dir, s, o, net, lay, base)) for net, lay in planes]
+    ladder_rec = {}                                          # W34: net -> [{width, layers, connected}] per rung, for the result
     if pour_rail_nets:
-        steps.append(("rails-pour", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, PWR.rail_layers(c.cons, sig), base, rails, o[:-10] + ".json", nets=pour_rail_nets, extra=xtra)))
+        steps.append(("rails-pour", lambda s0, o0: lambda s, o: _rails_ladder(a, c, base, rails, pour_rail_nets, sig, s, o, xtra, ladder_rec, runner, spath)))
     if other_rail_nets:
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
@@ -420,6 +421,14 @@ def run(c, n, board, runner=run_step):
             shutil_copy(os.path.join(d, "poured.kicad_pcb"), best)
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the pour
         pour["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+    wid = {"widened_mm": 0.0, "necks": [], "unreached": {}, "dropped": None}   # W34: narrow rail copper widened / necked per D71da
+    try:
+        wo = os.path.join(d, "widened.kicad_pcb")
+        wid = PWR.widen_guarded(best, c.cons, wo, nets=set(rail_nets) | set(PWR.plan(c.cons, layers=nl)))
+        if os.path.exists(wo):
+            shutil_copy(wo, best)
+    except Exception as e:                                   # noqa: BLE001 - the routed board stands without the widening
+        wid["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     mask = {"blocks": 0, "inferred": 0, "skipped": 0, "written": False}   # PHASE3F A7: mask openings re-cut after the copper
     try:
         from . import thermal as TH
@@ -431,7 +440,7 @@ def run(c, n, board, runner=run_step):
     except Exception as e:                                   # noqa: BLE001 - the routed board stands without the re-cut
         mask["error"] = f"{type(e).__name__}: {str(e)[:120]}"
     rails_rec = {"routed": rail_nets, "widths": {n: rails[n] for n in rail_nets}, "error": rails_error,
-                 "pour": pour, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
+                 "pour": pour, "widen": wid, "ladder": ladder_rec, "rail_refused": _rail_refused(rail_nets, rows), "rail_inner_mm": _rail_inner(best, rail_nets)}
     left = RC.open_by_net(best)
     try:
         from . import qualaudit as QA, routediag as RD, netclass as NC
@@ -471,6 +480,10 @@ def run(c, n, board, runner=run_step):
         line += f"; poured {len(pour['added'])} rail zone(s): {', '.join(pour['added'])}"
     elif pour["dropped"]:
         line += f"; rail pour dropped ({pour['dropped_reason']})"
+    if wid.get("widened_mm") or wid.get("necks"):
+        line += f"; rails widened {wid.get('widened_mm', 0):g} mm, {len(wid.get('necks') or [])} neck-down(s) proven (D71da)"
+    if wid.get("unreached"):
+        line += "; rail width NOT reached (placement finding): " + ", ".join(f"{n} {len(v)} run(s) near {','.join(sorted({r for x in v for r in x['refs']})[:4])}" for n, v in sorted(wid["unreached"].items()))
     if rails_rec["rail_refused"]:
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:
@@ -484,6 +497,54 @@ def run(c, n, board, runner=run_step):
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
     return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "hs_excluded": hs_rec["excluded"]}
+
+
+def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):
+    """W34 (W14 measured ladder, ONE-SHOT-LEDGER 2026-11-19 "rails first"): the pour rails, before everything else, one router
+    call per rung: widest first (the rail's IPC outer width, then `[route] power_ladder_mm` 1.4 / 1.0 / 0.6), outer layers above
+    1.0 mm and every signal layer at or below it (power.ladder_layers).  A rung routes only the rails the previous rung left
+    open, on the board it wrote (a rail keeps its wide copper and finishes narrower, as W14 did).  A single call for a rail with
+    one rung.  -> rc; rung 0 writes dst's summary json, later rungs `<dst>.r<k>.json`, `rec` gets {net: [{width, layers, open}]}."""
+    from . import power as PWR
+    cur, todo, k = src, list(nets), 0
+    ladders = {n: PWR.ladder_widths(c.cons, n, rails[n], R_TRACK(base, a)) for n in nets}
+    base_json = dst[:-10] + ".json"
+    while todo:
+        widths = {n: ladders[n][k] for n in todo if k < len(ladders[n])}
+        if not widths:
+            break
+        lows = {n: w for n, w in widths.items() if w <= PWR.LADDER_INNER_MAX_MM + 1e-9 and k > 0}
+        groups = [(g, PWR.ladder_layers(c.cons, sig, min(g.values()), fallback=k > 0)) for g in
+                  ({n: w for n, w in widths.items() if n not in lows}, lows) if g]
+        for gi, (g, lay) in enumerate(groups):
+            out_k = f"{dst[:-10]}.r{k}{gi}.kicad_pcb"
+            summ = base_json if (k == 0 and gi == 0) else f"{dst[:-10]}.r{k}{gi}.json"
+            cmd = cmd_route(a.router_py, a.router_dir, cur, out_k, lay, base, {**rails, **g}, summ, nets=list(g), extra=xtra)
+            rc, _s = runner(cmd, dst[:-10] + (".log" if (k == 0 and gi == 0) else f".r{k}{gi}.log"), cap_s=CAP_S, status_path=spath, step="rails-pour")
+            if rc not in (0, 3) or not os.path.exists(out_k):
+                if k == 0 and gi == 0:
+                    return rc
+                continue
+            _restore_project(src, out_k)
+            cur = out_k
+            for n, w in g.items():
+                rec.setdefault(n, []).append({"width": w, "layers": lay})
+        still = RC.open_by_net(cur, fill=False)
+        for n in todo:
+            if rec.get(n):
+                rec[n][-1]["open"] = int(still.get(n, 0))
+        todo = [n for n in todo if still.get(n)]
+        k += 1
+    shutil_copy(cur, dst)
+    return 0
+
+
+def R_TRACK(base, a):
+    """the signal track width the rails never go below: the --track-width of the recipe flags."""
+    try:
+        return float(base[base.index("--track-width") + 1])
+    except (ValueError, IndexError):
+        return float(getattr(a, "track", 0.15) or 0.15)
 
 
 def _rail_refused(rail_nets, rows):
