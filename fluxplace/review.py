@@ -8,7 +8,7 @@ because each tool checked the board against ITSELF (schematic vs copper,
 netclass vs track) and none checked it against the SPEC, the DATASHEET or the
 ENVIRONMENT. This module does that:
 
-  UNROUTED / STALE_FILL  an open connection (FAIL each; pcbnew after a fresh fill, cross-checked with kicad-cli) / zone fills
+  UNROUTED / UNROUTED_SUMMARY / STALE_FILL  an open connection (FAIL each; the total row is UNROUTED_SUMMARY; pcbnew after a fresh fill, cross-checked with kicad-cli) / zone fills
                          in the saved file that no longer match the copper (opengate.py)
   NET_STRAIGHT_COPPER    a spec-protected net has a component on it
   PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH

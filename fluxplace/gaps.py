@@ -381,8 +381,7 @@ _SNAP = {}
 
 
 def _snapshot(path):
-    st = os.stat(path)
-    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    key = drcguard.content_sha(path)                   # B3a: content, not path + mtime + size
     if key not in _SNAP:
         _SNAP[key] = audit.snapshot(path)
         while len(_SNAP) > 4:

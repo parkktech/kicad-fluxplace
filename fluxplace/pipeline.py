@@ -103,13 +103,15 @@ def _unc_nets(path, conn=None):
         return conn(path) if conn else {}
 
 
-def _open_count(board, B):
+def _open_count(board, B, exact=None):
     """The open-connection count of a scorecard: kicad-cli after refill; when kicad-cli has no report (a board it cannot read,
     e.g. a synthetic test fixture) the in-process count, labelled approximate by the caller's `open_approx`."""
     from . import opengate as OG
     try:
         return OG.unconnected(board)
     except (RuntimeError, OSError, ValueError):
+        if exact is not None:                   # B3a: the caller's flag; an approx count cannot pass a gated stage
+            exact.append(False)
         return sum(RC.text_open(B).values())
 
 
@@ -117,6 +119,7 @@ def _scorecard(board, cons, spec, waivers=()):
     from . import routediag as RD, preroute as PR, opengate as OG
     B = RD.load(board)
     f, card = PR.run(B, cons, spec, waivers=list(waivers), plan=PR.use_plan(cons), collide=True, surface=PR.surface_pins(board), board_path=board)
+    approx = []
     codes = {}
     for x in f:
         if x["level"] == "FAIL":
@@ -125,7 +128,9 @@ def _scorecard(board, cons, spec, waivers=()):
           "ratsnest_mm": card.get("weighted_ratsnest_mm"),
           "overflow": (card.get("congestion") or {}).get("overflow"),
           "fail": card.get("fail"),
-          "open": _open_count(board, B)}
+          "open": _open_count(board, B, approx)}
+    if approx:
+        sc["open_approx"] = True
     sc = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in sc.items() if v is not None}
     return sc, f, codes
 
@@ -380,6 +385,10 @@ def st_route_ready(c, n, board):
                         os.path.join(d, "stage.log"))
     sc, f, codes = _scorecard(board, c.cons, c.spec, c.a.waive or [])
     _collision_report(c, d, board)
+    if rc == 0 and sc.get("open_approx"):                  # B3a: an approx measure cannot pass a gated stage
+        return {"verdict": "pass" if c.a.force else "blocked", "board": board, "scorecard": sc,
+                "line": "open count approximate (kicad-cli gave no report): gate cannot pass",
+                "next": ["install/repair kicad-cli, or --force to pass on the in-process count"]}
     if rc == 0:
         return {"verdict": "pass", "line": f"gate passed, {sc.get('fail', 0)} FAIL", "board": board,
                 "scorecard": sc}
@@ -1817,6 +1826,10 @@ def _run(a):
             board = os.path.abspath(a.board)
         for k in STAGES_[i0:]:
             st["stages"].pop(k, None)
+    if os.path.isfile(board) and not os.path.isfile(os.path.splitext(board)[0] + ".kicad_pro"):
+        # ledger 2026-11-25: without its .kicad_pro KiCad runs default rules (+1100 false errors, FANOUT_FAIL 138/142)
+        raise SystemExit(f"pipeline: REFUSED: {board} has no sibling {os.path.splitext(os.path.basename(board))[0]}.kicad_pro "
+                         "(the project rules would silently default); copy the board with its .kicad_pro")
     if STAGES_[i0] in ("ready", "modules", "floorplan") and a.constraints:
         board = _apply_lock_at(a, work, board)         # [lock.at] is authoritative before any placement stage
         st["board"] = board
