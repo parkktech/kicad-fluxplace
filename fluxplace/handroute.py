@@ -970,10 +970,10 @@ def _edit(board, out, mutate, op, net, what, constraints=None, partial=False, re
                 shutil.copy(tmp, S.work)
                 json.dump(cand_raw, open(os.path.join(S.dir, "cur_drc.json"), "w"))
             else:
-                shutil.copy(tmp, out)
+                _procs.atomic_copy(tmp, out)
                 s, d = os.path.splitext(src)[0], os.path.splitext(out)[0]
                 if os.path.exists(s + ".kicad_pro") and os.path.abspath(s) != os.path.abspath(d):
-                    shutil.copy(s + ".kicad_pro", d + ".kicad_pro")
+                    _procs.atomic_copy(s + ".kicad_pro", d + ".kicad_pro")
             if op == "shove":
                 prev = {frozenset(i.get("uuid") for i in u["items"]) for u in base["pairs"].get(net, [])}
                 res["opened"] = [{"a": _item_desc(u["items"][0]), "b": _item_desc(u["items"][1])} for u in cand["pairs"].get(net, [])
