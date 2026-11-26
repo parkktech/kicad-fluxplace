@@ -82,6 +82,9 @@ def write(tmp_path, body, inner=True):
     """a board pcbnew loads: 4 copper layers (In1 plane, In2 signal) or 2."""
     p = tmp_path / "b.kicad_pcb"
     p.write_text(H % ('(4 "In1.Cu" signal) (6 "In2.Cu" signal) ' if inner else "") + body + ")\n")
+    pro = tmp_path / "b.kicad_pro"                        # B3a: the pipeline refuses a board with no sibling .kicad_pro
+    if not pro.exists():
+        pro.write_text("{}\n")
     return str(p)
 
 
