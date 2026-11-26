@@ -1426,7 +1426,7 @@ def _gate_measure(c, n, name, board, kinds, src=None, later=()):
 # every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
 # its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
 SEED_STAGES = ("pairs", "tune")
-RELEASING_STAGES = ("tune",)
+RELEASING_STAGES = ("tune", "trace-finish")      # B8: the T2 clean / centre pass edits copper-neutral items of protected nets; those nets are re-protected at the new copper
 
 
 def _pcbnew_state_guard(name, res):

@@ -192,10 +192,10 @@ def _worse(f0_rec, f8_rec):
 CLEAN_CATS = ("zero", "duplicate", "stacked", "dangling")      # order matters: dangling last (it sees the copper the others left)
 
 
-def _clean_worker(src, dst, cats):
+def _clean_worker(src, dst, cats, dangling=()):
     """Fresh-process worker of `clean`: remove the items of the categories `cats` from `src`, save as `dst`.
-    -> {category: count}. Connectivity is geometric: a track end touches a same-net track end / body, via, pad or filled zone on its layer.
-    Items are only marked while the passes run and removed at the end (a board.Remove mid-way decays pcbnew's bindings)."""
+    -> {category: count, "nets": [net names of the removed items]}. `dangling`: the item uuids KiCad's DRC reports as track_dangling /
+    via_dangling (KiCad's own connectivity decides, never a geometry of ours). Items are only marked while the passes run and removed at the end (a board.Remove mid-way decays pcbnew's bindings)."""
     import pcbnew
     b = pcbnew.LoadBoard(src)
     got = {c: 0 for c in cats}
@@ -247,67 +247,16 @@ def _clean_worker(src, dst, cats):
                 seen[k] = v
             kill(loser, "stacked")
     if "dangling" in cats:
-        _mark_dangling(b, pcbnew, items, lambda t: kill(t, "dangling"))
+        want = set(dangling)
+        for t in tracks + vias:
+            if uid(t) in want:
+                kill(t, "dangling")
+    got["nets"] = sorted({t.GetNetname() for t in gone.values()})
     for t in gone.values():
         b.Remove(t)
-    pcbnew.SaveBoard(dst, b)
+    if gone:
+        pcbnew.SaveBoard(dst, b)
     return got
-
-
-def _mark_dangling(b, pcbnew, items, kill):
-    """Mark, until none is left, every track with an end that touches no same-net copper, and every via that connects fewer than two
-    layers (`items()` returns the tracks / vias not yet marked). Net 0 (no net) is never touched."""
-    zones = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
-    pads = [p for p in b.GetPads() if p.GetNetCode() > 0]
-
-    def zone_hit(net, lid, pt):
-        for z in zones:
-            if z.GetNetCode() == net and z.IsOnLayer(lid):
-                if (z.IsFilled() and z.HitTestFilledArea(lid, pt, 0)) or (not z.IsFilled() and z.Outline().Contains(pt)):
-                    return True
-        return False
-
-    def seg_dist(p, a, c):
-        ax, ay, cx, cy = a.x, a.y, c.x, c.y
-        dx, dy = cx - ax, cy - ay
-        L = dx * dx + dy * dy
-        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p.x - ax) * dx + (p.y - ay) * dy) / L))
-        return ((p.x - ax - t * dx) ** 2 + (p.y - ay - t * dy) ** 2) ** 0.5
-
-    copper = [l for l in range(pcbnew.PCB_LAYER_ID_COUNT) if pcbnew.IsCopperLayer(l) and b.IsLayerEnabled(l)]
-    pby = {}
-    for p in pads:
-        pby.setdefault(p.GetNetCode(), []).append(p)
-    for _ in range(50):
-        tracks, vias = items()
-        tracks = [t for t in tracks if t.GetNetCode() > 0]
-        vias = [t for t in vias if t.GetNetCode() > 0]
-        by, vby = {}, {}
-        for t in tracks:
-            by.setdefault((t.GetNetCode(), t.GetLayer()), []).append(t)
-        for v in vias:
-            vby.setdefault(v.GetNetCode(), []).append(v)
-
-        def touches(net, lid, pt, me):
-            for o in by.get((net, lid), ()):
-                if o is not me and seg_dist(pt, o.GetStart(), o.GetEnd()) <= o.GetWidth() / 2 + 1000:
-                    return True
-            for v in vby.get(net, ()):
-                if v is not me and v.IsOnLayer(lid) and ((v.GetPosition().x - pt.x) ** 2 + (v.GetPosition().y - pt.y) ** 2) ** 0.5 <= v.GetWidth(lid) / 2 + 1000:
-                    return True
-            for p in pby.get(net, ()):
-                if p.IsOnLayer(lid) and p.HitTest(pt):
-                    return True
-            return zone_hit(net, lid, pt)
-
-        dead = [t for t in tracks if not all(touches(t.GetNetCode(), t.GetLayer(), e, t) for e in (t.GetStart(), t.GetEnd()))]
-        for v in vias:
-            if sum(1 for l in copper if v.IsOnLayer(l) and touches(v.GetNetCode(), l, v.GetPosition(), v)) < 2:
-                dead.append(v)
-        if not dead:
-            break
-        for t in dead:
-            kill(t)
 
 
 def _guard_ok(d0, d1):
@@ -316,36 +265,89 @@ def _guard_ok(d0, d1):
     return not DG.new_keys(DG.keys_per_net(d0), DG.keys_per_net(d1))
 
 
+DANGLING_TYPES = ("track_dangling", "via_dangling")
+
+
+def _dangling_uuids(d, typ):
+    return sorted({it["uuid"] for v in d.get("violations", []) if v.get("type") == typ for it in v.get("items", []) if it.get("uuid")})
+
+
 def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
-    """T2 guarded clean pass: each category in `cats` is applied to the accepted board and kept only when `_guard_ok`; `out` is written
-    (a copy of `board` when nothing was kept). -> {"removed": {cat: n}, "refused": {cat: reason}, "drc_before": n, "drc_after": n}."""
+    """T2 guarded clean pass: each category in `cats` is applied to the accepted board and kept only when `_guard_ok` (no DRC key that the
+    accepted board does not have as often, opens counted per net); `out` is written (a copy of `board` when nothing was kept).
+    "dangling" removes what KiCad's DRC reports as track_dangling, then via_dangling, repeated while something is removed (a removed
+    stub can expose the next one), each batch its own guarded step.
+    -> {"removed": {cat: n}, "refused": {cat: reason}, "nets": [nets touched], "drc_before": n, "drc_after": n, "report": DRC of out}."""
     from .freshproc import in_fresh_process
     cur = out + ".clean-cur.kicad_pcb"
     shutil.copyfile(board, cur)
     _pro_copy(board, cur)
     d_cur = _drc(cur, kicad_cli=kicad_cli)
-    res = {"removed": {}, "refused": {}, "drc_before": len(d_cur.get("violations", []))}
+    res = {"removed": {}, "refused": {}, "nets": [], "drc_before": len(d_cur.get("violations", []))}
+    trial = out + ".clean-trial.kicad_pcb"
+
+    def step(cat, uuids=()):
+        """one guarded batch -> True when kept (the accepted board and its report advance)."""
+        nonlocal d_cur
+        r = in_fresh_process("fluxplace.tracefinish", "_clean_worker", cur, trial, [cat], uuids)
+        n = r[cat]
+        if not n or not os.path.exists(trial):
+            return False
+        _pro_copy(board, trial)
+        d_new = _drc(trial, kicad_cli=kicad_cli)
+        ok = _guard_ok(d_cur, d_new)
+        if ok:
+            res["removed"][cat] = res["removed"].get(cat, 0) + n
+            res["nets"] = sorted(set(res["nets"]) | set(r["nets"]))
+            shutil.copyfile(trial, cur)
+            d_cur = d_new
+        else:
+            res["refused"][cat] = res["refused"].get(cat, 0) + n
+        _rm(trial)
+        return ok
+
     try:
         for cat in cats:
-            trial = out + f".clean-{cat}.kicad_pcb"
-            n = in_fresh_process("fluxplace.tracefinish", "_clean_worker", cur, trial, [cat])[cat]
-            if n and os.path.exists(trial):
-                _pro_copy(board, trial)
-                d_new = _drc(trial, kicad_cli=kicad_cli)
-                if _guard_ok(d_cur, d_new):
-                    res["removed"][cat] = n
-                    shutil.copyfile(trial, cur)
-                    d_cur = d_new
-                else:
-                    res["refused"][cat] = f"{n} item(s): DRC would get worse"
-            _rm(trial)
+            if cat != "dangling":
+                step(cat)
+                continue
+            for _ in range(3):
+                kept = False
+                for typ in DANGLING_TYPES:
+                    ids = _dangling_uuids(d_cur, typ)
+                    kept = (ids and step("dangling", ids)) or kept
+                if not kept:
+                    break
         shutil.copyfile(cur, out)
         _pro_copy(board, out)
         res["drc_after"] = len(d_cur.get("violations", []))
         res["report"] = d_cur
     finally:
         _rm(cur)
+        _rm(trial)
     return res
+
+
+def _changed_nets_run(a, b):
+    from .freshproc import in_fresh_process
+    return in_fresh_process("fluxplace.tracefinish", "_changed_nets", a, b)
+
+
+def _changed_nets(a, b):
+    """Fresh-process worker: names of the nets whose tracks / vias differ (position, layer, width) between boards `a` and `b`."""
+    import pcbnew
+
+    def sig(path):
+        bd = pcbnew.LoadBoard(path)
+        out = set()
+        for t in bd.GetTracks():
+            via = t.Type() == pcbnew.PCB_VIA_T
+            out.add((t.GetNetname(), via, t.GetLayer() if not via else -1, t.GetStart().x, t.GetStart().y,
+                     t.GetEnd().x if not via else 0, t.GetEnd().y if not via else 0, t.GetWidth() if not via else t.GetWidth(pcbnew.F_Cu)))
+        return out
+    sa, sb = sig(a), sig(b)
+    sa, sb = {(x[0], x[1], x[2], frozenset(((x[3], x[4]), (x[5], x[6]))), x[7]) for x in sa}, {(x[0], x[1], x[2], frozenset(((x[3], x[4]), (x[5], x[6]))), x[7]) for x in sb}
+    return sorted({x[0] for x in sa ^ sb})
 
 
 def _centred(d):
@@ -411,6 +413,7 @@ def stage(c, n, board):
     d_clean = clean_rec.pop("report", None) or {}
     centre_rec = _beating("T2 centre", lambda: centre(cleaned, out, d_clean, kicad_cli))
     centre_rec.pop("report", None)
+    released = sorted(set(clean_rec.get("nets") or []) | (set(_changed_nets_run(cleaned, out)) if centre_rec["moves"] else set()))
     _rm(cleaned)
     changed = bool(clean_rec["removed"]) or bool(centre_rec["moves"])
     if changed:
@@ -437,4 +440,4 @@ def stage(c, n, board):
             f"not_measured rules {len(nm)})" + (f" ILLEGAL: {','.join(worse)}" if worse else "")
             + f"; T2 removed {sum(clean_rec['removed'].values())} {clean_rec['removed']}, off-centre {centre_rec['before']} -> {centre_rec['after']}"
             + f" score board {sc0.get('board')} -> {sc8.get('board')}")
-    return {"verdict": verdict, "line": line, "board": out}
+    return {"verdict": verdict, "line": line, "board": out, "released": released}
