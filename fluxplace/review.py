@@ -25,6 +25,7 @@ ENVIRONMENT. This module does that:
   TEMP_RATING            part rated narrower than the product environment
   MODEL_MISSING          electrical footprint without a 3D model
   MODEL_FILE_MISSING     3D model path that resolves to no file
+  MODEL_OUTSIDE_LIB      3D model file outside the project's lib/3dmodels (a project that has one)
   MODEL_STANDIN          model file named as a stand-in / placeholder
   SPEC_SIZE_MISMATCH / SPEC_LAYER_MISMATCH / SPEC_COMPONENT_MISMATCH /
   SPEC_FOOTPRINT_MISMATCH
@@ -1201,6 +1202,12 @@ def check_models(facts, board_path=None):
                 out.append(_f(FAIL, "MODEL_FILE_MISSING",
                               f"{ref} 3D model {m} does not resolve to a file"
                               + (f" (same name exists as {alt[0]})" if alt else ""),
+                              refs=[ref]))
+                continue
+            if bp and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
+                out.append(_f(FAIL, "MODEL_OUTSIDE_LIB",
+                              f"{ref} 3D model {m} resolves outside the project model library "
+                              f"(copy the vendor STEP into the project lib/3dmodels and bind it there)",
                               refs=[ref]))
                 continue
             # a file that EXISTS is not the same as a file that RENDERS —

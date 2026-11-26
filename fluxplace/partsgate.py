@@ -18,6 +18,7 @@ import re
 import tempfile
 
 from . import parts as P
+from . import modelpaths as MP
 
 NEEDS = ("mpn", "mfr", "stock", "datasheet", "pinmap", "package", "model")
 _CODE_NEED = {"PART_GENERIC": "mpn", "PART_MPN_MISSING": "mpn", "PART_MPN_IN_VALUE": "mpn", "PART_MFR_MISSING": "mfr",
@@ -38,14 +39,27 @@ def model_state(ref, facts):
     if p is None:
         return False, "part not on the board"
     models = p.get("models") or []
+    if p.get("mech"):
+        return True, "mechanical (no nets): no body needed"   # review.check_models exempts mech the same way
     if not models:
         return False, "footprint has no 3D model"
+    bp = facts.get("board_path", "")
+    bd = os.path.dirname(os.path.abspath(bp)) if bp else ""
+    why = "3D model is a stand-in or does not resolve to a file"
     for m in models:
         if _STANDIN.search(os.path.basename(m)):
             continue
-        if os.path.exists(R.resolve_model(m, facts.get("board_path", ""))):
-            return True, os.path.basename(m)
-    return False, "3D model is a stand-in or does not resolve to a file"
+        full = R.resolve_model(m, bp)
+        if not os.path.exists(full) and bp:       # a stage copy below the folder its lib/ paths were written for (review G5a)
+            hit = MP.ancestor_hit(m, bd, resolve=lambda q, d: R.resolve_model(q, os.path.join(d, "_")))
+            full = hit[0] if hit else full
+        if not os.path.exists(full):
+            continue
+        if bd and MP.outside_lib(m, full, bd):
+            why = f"3D model {os.path.basename(m)} resolves outside the project model library"
+            continue
+        return True, os.path.basename(m)
+    return False, why
 
 
 def gate(spec, cons, facts, res, qty=None, ds_dir=None):
@@ -53,7 +67,9 @@ def gate(spec, cons, facts, res, qty=None, ds_dir=None):
     "geometry": [FP_*/LANDPATTERN_PAD_* FAIL findings]}.
     `res` is parts.evaluate()'s result (findings, rows, stock_data).
     Footprint geometry (fpcheck: FP_*, landpattern pad tables) is a "package" blocker. It is NEVER bypassed:
-    `--allow-undocumented` does not pass FP_* / LANDPATTERN_PAD_* failures (ready refuses them)."""
+    `--allow-undocumented` does not pass FP_* / LANDPATTERN_PAD_* failures (ready refuses them).
+    A footprint with no 3D model, or one that does not resolve (or lies outside the project model library), is likewise
+    never bypassed (`g["models"]`): a board that renders with holes is not documented, it is unchecked."""
     from . import fpcheck as FC
     out = {}
     geometry = []
@@ -75,6 +91,7 @@ def gate(spec, cons, facts, res, qty=None, ds_dir=None):
         for r in f["refs"]:
             out.setdefault(r, []).append({"need": need, "code": f["code"], "detail": f["msg"]})
     unchecked = []
+    models = []                            # refs with a missing / unresolvable / out-of-library 3D model: never bypassed
     stock = res.get("stock_data")
     if not res.get("lookup"):
         unchecked.append("distributor data and stock NOT CHECKED (offline / no credentials)")
@@ -85,7 +102,12 @@ def gate(spec, cons, facts, res, qty=None, ds_dir=None):
         if row.get("mpn") and "stock" not in {g["need"] for g in got} and "stock" not in row:
             got.append({"need": "stock", "code": "STOCK_UNCHECKED", "detail": f"{ref} {row['mpn']}: stock not checked"})
         ok, detail = model_state(ref, facts)
+        if not ok and "NOT CHECKED" not in detail and detail != "part not on the board":
+            from . import modelstart as MS
+            ok = MS.waived(ref, cons, ((facts.get("parts") or {}).get(ref) or {}).get("footprint", ""))   # [review] waive, with its reason
         if not ok:
+            if "NOT CHECKED" not in detail and detail != "part not on the board":
+                models.append(ref)
             got.append({"need": "model", "code": "MODEL_" + ("UNCHECKED" if "NOT CHECKED" in detail else "MISSING"),
                         "detail": f"{ref}: {detail}"})
         if not got:
@@ -96,7 +118,7 @@ def gate(spec, cons, facts, res, qty=None, ds_dir=None):
         for n in {g["need"] for g in items}:
             by_need[n] = by_need.get(n, 0) + 1
     return {"ok": not out, "qty": qty, "parts": out, "by_need": by_need, "unchecked": unchecked,
-            "n_parts": len(res["rows"]), "geometry": geometry}
+            "n_parts": len(res["rows"]), "geometry": geometry, "models": models}
 
 
 def summary_line(g):
