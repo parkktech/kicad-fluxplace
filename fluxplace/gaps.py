@@ -97,7 +97,7 @@ def review_gaps(board, cons, opn=None):
             kind = "power-width" if f["code"] == "POWER_WIDTH" else "power-vias"
             out.append({"base": f"{kind}:{net}", "kind": kind, "class": "power", "nets": [net], "at": None,
                         "layer": None, "evidence": str(f.get("msg") or "")[:120], "refs": list(f.get("refs") or []),
-                        "mag": round(float(f.get("value") or 0))})
+                        "mag": round(float(f.get("value") or 0), 2) if kind == "power-width" else round(float(f.get("value") or 0))})
     except Exception:
         failed.append("power")
     B, rows = None, []

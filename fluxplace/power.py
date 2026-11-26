@@ -632,9 +632,11 @@ def _overlaid(s, rows):
     return False
 
 
-def check(facts, cons, dc=None, board=None):
+def check(facts, cons, dc=None, board=None, detail=None):
     """Review findings (level, code, msg, refs): POWER_WIDTH, POWER_VIAS (FAIL), POWER_NECKDOWN_OK (INFO),
-    POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da)."""
+    POWER_CURRENT_UNKNOWN (WARN). `dc` = dcdrop_status(): without it no neck-down is exempt (D71da).
+    POWER_WIDTH `value` = the shortfall in equivalent narrow mm: sum over failing runs of length x (1 - width / the run's own need), so
+    any widening lowers it (W42). `detail` (a dict) receives {net: [{run, segs, need_run, cleared, amps}]} for every narrow run."""
     out = []
     dc = dc or {}
     ctx = None
@@ -680,11 +682,19 @@ def check(facts, cons, dc=None, board=None):
                     need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
                                     ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0
                     run.update(amps=amps, amps_src=how, unk_refs=unk, cred_w=round(cw, 3), min_w_track=run["min_w"], need_run=round(need_run, 3))
+                    if detail is not None:
+                        detail.setdefault(net, []).append({"run": run, "segs": [narrow[i] for i in run["members"]], "need_run": need_run,
+                                                           "amps": amps, "cleared": cw >= need_run - 1e-6})
                     if cw >= need_run - 1e-6:        # wide enough for the current it really carries: not a constriction
                         run["cleared"] = True
                         continue
                     run["min_w"] = cw
                     rr = dict(r, current_a=amps)
+                elif detail is not None:
+                    detail.setdefault(net, []).append({"run": run, "segs": [narrow[i] for i in run["members"]], "need_run": run["need"],
+                                                       "amps": r["current_a"], "cleared": False})
+                nr_ = run.get("need_run") or run["need"]
+                run["short_mm"] = run["len"] * max(0.0, 1.0 - run["min_w"] / nr_) if nr_ else 0.0
                 f = _neck_tests(run, rr, outer, facts.get("stackup"))
                 (bad if f or dropf else ok).append((run, f))
             if ok:
@@ -702,7 +712,7 @@ def check(facts, cons, dc=None, board=None):
                 urefs = sorted({r_ for x, _f in bad for r_ in x.get("unk_refs") or []})
                 det += (f"; {nunk} run(s) with current unknown (rail total used)" + (f", parts: {', '.join(urefs[:12])}" if urefs else "") if nunk else "")
                 det += (f"; +{len(bad) - 4} more run(s)" if len(bad) > 4 else "") + (f"; net: {dropf}" if dropf else "")
-                out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": tot,
+                out.append({"level": "FAIL", "code": "POWER_WIDTH", "refs": [net], "value": round(sum(x["short_mm"] for x, _f in bad), 3),
                             "msg": f"{net}: {len(bad)} narrow run(s), {tot:.1f} mm, not proven for the {r['current_a']:g} A "
                                    f"copper ({r['width_source']}, {r['oz_outer']:g}/{r['oz_inner']:g} oz): {det}"})
         nv = sum(1 for v in facts.get("vias") or [] if v["net"] == net)
@@ -1001,6 +1011,29 @@ def _unreached(b, rails, pads, vias_of):
     return out
 
 
+def _run_targets(board, cons):
+    """W42: each failing run's own width target from its solved current (check()'s per-run physics) ->
+    {(layer, x1, y1, x2, y2 rounded 0.01 mm, both orientations): {"need": width (0.05 mm steps, never above the rail's need),
+    "amps", "cleared"}}. {} when the check cannot run: widen then falls back to the rail's need."""
+    from . import boardfile
+    out = {}
+    try:
+        detail = {}
+        check(boardfile.facts_from_file(board), cons, None, board=board, detail=detail)
+    except Exception:                                    # noqa: BLE001 - the per-run target is an improvement; the rail need stays
+        return out
+    for net, runs in detail.items():
+        for d in runs:
+            if not d["need_run"]:                        # no current behind it (dangling stub): the rail's need stays
+                continue
+            for g in d["segs"]:
+                tgt = min(g["need"], max(0.05, _ceil05(d["need_run"])))
+                for a, b in (((g["x1"], g["y1"]), (g["x2"], g["y2"])), ((g["x2"], g["y2"]), (g["x1"], g["y1"]))):
+                    out[(g["layer"], round(a[0], 2), round(a[1], 2), round(b[0], 2), round(b[1], 2))] = {
+                        "need": tgt, "amps": d["amps"], "cleared": d["cleared"]}
+    return out
+
+
 def widen(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
@@ -1059,6 +1092,7 @@ def widen(board, cons, out, nets=None, protect=()):
             for i in run["members"]:
                 cand[lst[i][0].m_Uuid.AsString()] = run
     changed = 0
+    tg = _run_targets(board, cons)
     for t in list(b.GetTracks()):
         net = t.GetNetname()
         r = rails.get(net)
@@ -1071,6 +1105,12 @@ def widen(board, cons, out, nets=None, protect=()):
             continue
         s, e = t.GetStart(), t.GetEnd()
         a, z = (pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)), (pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))
+        own = tg.get((lay, round(a[0], 2), round(a[1], 2), round(z[0], 2), round(z[1], 2)))
+        amps = r["current_a"]
+        if own is not None:                              # W42: the run's own D71da width from its solved current
+            if own["cleared"] or cur >= own["need"] - 1e-6:
+                continue
+            need, amps = own["need"], own["amps"] or r["current_a"]
         L = math.hypot(z[0] - a[0], z[1] - a[1])
         locked = t.IsLocked()
         if locked and net in protect:
@@ -1104,7 +1144,7 @@ def widen(board, cons, out, nets=None, protect=()):
         wn = None
         if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and near is None:
             oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
-            wn = math.ceil(neck_width_mm(r["current_a"], run["len"], oz, r.get("rise_c") or DEFAULT_RISE_C) * 20 + 1e-9) / 20.0
+            wn = math.ceil(neck_width_mm(amps, run["len"], oz, r.get("rise_c") or DEFAULT_RISE_C) * 20 + 1e-9) / 20.0
             if wn < need - 1e-6:
                 ladder = sorted({*ladder, round(wn, 4)}, reverse=True)
         chosen = None
@@ -1152,8 +1192,8 @@ def widen(board, cons, out, nets=None, protect=()):
         if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)
             oz = _run_oz(run, r, {"F.Cu", "B.Cu"}, None)
             rec["necks"].append({"net": net, "layer": lay, "at": [round(a[0], 2), round(a[1], 2)], "run_len_mm": round(run["len"], 2),
-                                 "width_mm": chosen, "dT_c": round(neck_heat_c(r["current_a"], run["len"], chosen, oz), 2),
-                                 "drop_mv": round(neck_drop_mv(r["current_a"], run["len"], chosen, oz), 2), "amps": r["current_a"]})
+                                 "width_mm": chosen, "dT_c": round(neck_heat_c(amps, run["len"], chosen, oz), 2),
+                                 "drop_mv": round(neck_drop_mv(amps, run["len"], chosen, oz), 2), "amps": amps})
         tot(net)["widened_mm"] += wide_mm
         rec["widened_mm"] += wide_mm
         changed += 1

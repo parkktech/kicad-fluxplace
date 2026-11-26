@@ -416,3 +416,47 @@ def test_widened_locked_rail_stub_passes_the_protection_check_and_a_pair_change_
     bad = str(tmp_path / "bad.kicad_pcb")
     P.SaveBoard(bad, b)
     assert BW.verify(src, bad, manifest=man)["changed"] == ["SIG"]
+
+
+# ---- W42: widen to each run's own need; power_mag weighted by shortfall -----------------------------------------------
+def test_widen_targets_the_runs_own_solved_need_not_the_rail_need(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    need = _g4_need()
+    run = {"layers": ["F.Cu"], "len": 16.0, "min_w": 0.15, "need": need, "n": 1, "members": [0], "layer": "F.Cu"}
+    seg = {"layer": "F.Cu", "x1": 2.0, "y1": 6.0, "x2": 18.0, "y2": 6.0, "width": 0.15, "need": need, "len": 16.0}
+    real = PW.check
+
+    def fake(facts, cons, dc=None, board=None, detail=None):
+        detail["VBAT"] = [{"run": run, "segs": [seg], "need_run": 0.32, "amps": 0.3, "cleared": False}]
+        return []
+    monkeypatch.setattr(PW, "check", fake)
+    out = str(tmp_path / "out.kicad_pcb")
+    PW.widen(src, G4_CONS, out)
+    monkeypatch.setattr(PW, "check", real)
+    ws = [w for w, *_ in _g4_tracks(out, "VBAT")]
+    assert ws and min(ws) == pytest.approx(0.35, abs=1e-3) and need > 0.7       # ceil05(0.32), not the rail's need
+
+
+def test_widen_leaves_a_run_that_is_already_wide_enough_for_its_own_current(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 6, "VBAT")])
+    need = _g4_need()
+    run = {"layers": ["F.Cu"], "len": 16.0, "min_w": 0.15, "need": need, "n": 1, "members": [0], "layer": "F.Cu"}
+    seg = {"layer": "F.Cu", "x1": 2.0, "y1": 6.0, "x2": 18.0, "y2": 6.0, "width": 0.15, "need": need, "len": 16.0}
+    monkeypatch.setattr(PW, "check", lambda f, c, dc=None, board=None, detail=None: detail.update(
+        VBAT=[{"run": run, "segs": [seg], "need_run": 0.15, "amps": 0.05, "cleared": True}]) or [])
+    out = str(tmp_path / "out.kicad_pcb")
+    assert PW.widen(src, G4_CONS, out)["widened_mm"] == 0 and not os.path.exists(out)
+
+
+def test_power_width_value_is_a_shortfall_so_a_partial_widen_scores_lower():
+    from test_power_neck import seg, cons, STACK
+    def val(w):
+        f = {"copper_layers": 2, "stackup": STACK, "track_geom": [seg(0, 0, 30, 0, w)]}
+        return [x for x in PW.check(f, cons(2.0, False)) if x["code"] == "POWER_WIDTH"][0]["value"]
+    a, b, c = val(0.15), val(0.4), val(0.8)
+    assert a > b > 0 and a < 30.0 + 1e-9 and 0 < b < a
+    assert c == 0 or c < b
