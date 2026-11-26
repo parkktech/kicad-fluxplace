@@ -259,10 +259,10 @@ def test_widen_necks_a_narrow_pad_end_and_widens_only_the_far_part(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     PW.widen(src, G4_CONS, out)
     trs = _g4_tracks(out, "VBAT")
-    pad_piece = [t for t in trs if abs(t[0] - 0.15) < 1e-3]     # the piece at the pad keeps the old width
+    pad_piece = [t for t in trs if abs(t[0] - 0.25) < 1e-3]     # the piece at the pad takes the pad's width (0.25 mm, probe ok)
     far_piece = [t for t in trs if abs(t[0] - round(need, 4)) < 1e-3]
     assert len(pad_piece) == 1 and len(far_piece) == 1
-    assert abs(pad_piece[0][1] - 2) < 1e-3 and abs(pad_piece[0][3] - (2 + need)) < 1e-3   # split max(W, 0.5) from the pad
+    assert abs(pad_piece[0][1] - 2) < 1e-3 and abs(pad_piece[0][3] - (2 + max(need, 0.5))) < 1e-3   # split max(W, 0.5) from the pad
     assert abs(far_piece[0][3] - 18) < 1e-3
 
 
@@ -333,7 +333,9 @@ def test_necked_split_part_of_a_locked_rail_track_inherits_the_lock(tmp_path):
     assert len(_g4_tracks(out, "VBAT")) == 2 and any(abs(t[0] - round(need, 4)) < 1e-3 for t in _g4_tracks(out, "VBAT"))
 
 
-def test_pour_zone_skip_is_counted_per_net(tmp_path, monkeypatch):
+def test_copper_inside_a_same_net_pour_is_widened_too(tmp_path, monkeypatch):
+    """W34: check() (D71da) gives a zone no carve-out, so the rung must not skip the narrow copper inside one (it refused every rail
+    that had a zone: ledger "route gate (W16 route-4)")."""
     pytest.importorskip("pcbnew")
     from test_routerules_syn import _board
     from fluxplace import gaps as GP
@@ -343,10 +345,8 @@ def test_pour_zone_skip_is_counted_per_net(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda board: {"VBAT"})
     out = tmp_path / "out.kicad_pcb"
     rec = PW.widen(src, G4_CONS, str(out))
-    assert rec["widened_mm"] == 0 and not out.exists()
-    assert rec["skipped"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
-    assert rec["skipped"]["locked_mm"] == 0 and rec["skipped"]["by_net"]["VBAT"]["pour_zone_mm"] == pytest.approx(16.0, abs=0.01)
-
+    assert rec["widened_mm"] == pytest.approx(16.0, abs=0.01) and out.exists()
+    assert rec["skipped"]["pour_zone_mm"] == 0
 
 def test_add_vias_places_the_missing_via_beside_the_existing_one(tmp_path, monkeypatch):
     from fluxplace import handroute as HR, routediag as RD

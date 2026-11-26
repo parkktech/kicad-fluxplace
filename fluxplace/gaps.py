@@ -90,7 +90,7 @@ def review_gaps(board, cons, opn=None):
     not_p = C.not_pairs(cons)
     out, failed = [], []
     try:
-        for f in power.check(boardfile.facts_from_file(board), cons, power.dcdrop_status(board, cons)):
+        for f in power.check(boardfile.facts_from_file(board), cons, power.dcdrop_status(board, cons), board=board):
             if f.get("code") not in ("POWER_WIDTH", "POWER_VIAS"):
                 continue
             net = (f.get("refs") or [""])[0]
@@ -856,7 +856,8 @@ def _r_powerwiden(base, out, gaps, ctx):
     from . import power as PW
     r = PW.widen(base, ctx["cons"], out, nets=_nets(gaps), protect=set(ctx.get("protect") or ()))
     return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"],
-            "skipped": r["skipped"]}
+            "skipped": r["skipped"], "necks": len(r.get("necks") or []),
+            "unreached": {n: len(v) for n, v in (r.get("unreached") or {}).items()}}
 
 
 def _r_railpour(base, out, gaps, ctx):

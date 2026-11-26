@@ -2189,7 +2189,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_power(facts, cons)
     from . import power as PWR
     out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
-            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons))]
+            for x in PWR.check(facts, cons, PWR.dcdrop_status(bp, cons), board=bp)]
     out += check_spec_nets(facts, spec)
     out += check_magnetics(facts, spec, cons)
     out += check_part_entry(facts, spec, cons, partdata, ds_dir)
