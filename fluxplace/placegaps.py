@@ -18,7 +18,7 @@ import zlib
 from . import events as EV
 
 ORDER = ("ghost-open", "row-cin-side", "row-template", "row-pin-bypass", "row-away", "row-flight", "row-edge", "row-rail",
-         "row-other", "support-far", "support-starved", "side-illegal", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
+         "row-other", "support-far", "support-starved", "net-budget", "side-illegal", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 SCOPE = {"ready": ("part-datasheet", "part-stock"),
          "floorplan": tuple(k for k in ORDER if not k.startswith(("part-", "ghost-"))),
@@ -275,6 +275,21 @@ def detect_support_starved(ctx):
         if have < need:
             out.append(gap("support-starved", ic, "plain", need - have, [ic] + [f["ref"] for f in lst], (), at=B["parts"][ic]["pos"],
                            detail=f"needs {need:.0f} mm2 within {max(f['limit'] for f in lst):g} mm, free {have:.0f} mm2, {len(lst)} far"))
+    return out
+
+
+@detector("net-budget")
+def detect_net_budget(ctx):
+    """The pre-route gate's NET_OVER_BUDGET FAIL as a placement gap (B10): a net whose pad MST is over its class budget while moving
+    parts could still fix it (a floor made of fixed parts alone is ANCHOR_SPACING, an owner question, not a gap). mag = mm over."""
+    from . import netclass as NC, preroute as PR
+    B = ctx.B()
+    cls = NC.classify(B, ctx["cons"], ctx.get("spec"))
+    of = _net_class(ctx)
+    out = []
+    for f in PR.net_over_budget(B, cls, ctx["cons"]):
+        if f["level"] == "FAIL":
+            out.append(gap("net-budget", f["net"], of(f["net"])[0], f["value"] - f["limit"], f["refs"], (f["net"],), detail=f["msg"]))
     return out
 
 

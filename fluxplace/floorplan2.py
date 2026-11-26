@@ -1457,6 +1457,30 @@ def measured(path, cons, spec):
     return Plan(B, cons, spec, MD.build(B, cons, spec, arrange=False), log=lambda *a, **k: None).cost_parts()
 
 
+NEVER_WORSE_WL_PCT = 10.0        # [floorplan] max_wl_growth_pct: written wire length over the input's, percent
+NEVER_WORSE_CROSS_PCT = 5.0      # [floorplan] max_cross_growth_pct (with a slack of 2 crossings for a small count)
+
+
+def never_worse(src, out, cons=None):
+    """B10 / R096: the never-worse gate on the written floorplan. src, out = measured() dicts (wl, cross) of the input and of the
+    output. -> (ok, why): a legal board whose weighted wire length rose more than max_wl_growth_pct, or whose crossings rose more than
+    max_cross_growth_pct (plus 2), is refused: legality is not quality. `[floorplan] never_worse = false` turns it off (an input that
+    is not a placement, e.g. all parts unplaced, has no cost worth keeping)."""
+    f = (cons or {}).get("floorplan") or {}
+    if f.get("never_worse", True) is False:
+        return True, ""
+    wl_pct = float(f.get("max_wl_growth_pct", NEVER_WORSE_WL_PCT))
+    cr_pct = float(f.get("max_cross_growth_pct", NEVER_WORSE_CROSS_PCT))
+    why = []
+    w0, w1 = float(src["wl"]), float(out["wl"])
+    if w0 > 0 and w1 > w0 * (1 + wl_pct / 100.0) + 1e-9:
+        why.append(f"wire length {w0:.0f} -> {w1:.0f} (+{100.0 * (w1 / w0 - 1):.0f} %, limit +{wl_pct:g} %)")
+    c0, c1 = float(src["cross"]), float(out["cross"])
+    if c1 > c0 * (1 + cr_pct / 100.0) + 2:
+        why.append(f"crossings {c0:.0f} -> {c1:.0f} (limit +{cr_pct:g} % and 2)")
+    return (not why), "; ".join(why)
+
+
 def fanout_blocked(path, cons, spec):
     """pins the whole-board fan-out cannot escape on the board at `path` (check only, nothing written)."""
     from . import routediag as RD, fanout as FO
@@ -1702,11 +1726,16 @@ def cmd_floorplan(a):
     try:
         w = measured(out, cons, spec)
         print(f"  written board: crossings {w['cross']}, weighted wire length {w['wl']:.0f} (input {best['source']['cross']}, {best['source']['wl']:.0f})")
+        nw_ok, nw_why = never_worse(best["source"], w, cons)
+        if not nw_ok:
+            print(f"floorplan: WORSE - legal but worse than the input: {nw_why}")
+            best["why_not"] = "never-worse: " + nw_why
     except Exception as e:                          # noqa: BLE001
+        nw_ok = True
         print(f"  written-board metrics unavailable: {type(e).__name__}: {e}")
     brc = BO.gate_file(out, cons, spec, rp)
     irc = IT.gate(out, cons, spec) if IT.section(cons) or IT.items(Bn, cons)["edge"] else 0     # --- INTENT gate
-    refused = not passes(best) or bool(irc or brc) or ill
+    refused = not passes(best) or bool(irc or brc) or ill or not nw_ok
     hon = RDY.stage_honoured("floorplan", spec, cons, rows_in, out, RD.load(out), failed=refused, ds_dir=ds_dir)
     print(hon["line"])
     from . import placegaps as PG; PG.detect_stage("floorplan", out, cons, spec, os.path.dirname(os.path.abspath(out)), base=os.path.splitext(os.path.basename(out))[0] + ".placegaps", ds_dir=ds_dir, attempts=pgres)
@@ -1719,7 +1748,7 @@ def cmd_floorplan(a):
     waive = (cons.get("floorplan") or {}).get("waive_fail")
     if not passes(best) and waive:
         print(f"floorplan: WAIVED - the FAIL above is accepted by [floorplan] waive_fail = {str(waive)!r} (recorded)")
-    if ill or (not passes(best) and not waive) or irc or brc:
+    if ill or (not passes(best) and not waive) or irc or brc or (not nw_ok and not waive):
         raise SystemExit(1)                 # a FAIL must reach the caller (the pipeline stage): never a silent pass
     return 0
 

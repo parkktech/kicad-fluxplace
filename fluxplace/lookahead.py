@@ -480,6 +480,40 @@ def _pick_first(results):
     return ("rev" if len(r) < len(f) else "fwd"), sorted(f ^ r)
 
 
+def contract_widths(copy, cons, spec, nets, sig=()):
+    """B10: {net: mm} the ghost judge lays `nets` at: rails and RF at the width the real route will use, so a net that only routes thin
+    is an open here too. Reads the B1 net contract (netclass.contract: RF `width` per layer, rail `width_min`) when it exists; until B1
+    merges it falls back to what the route steps read today (rfroute.widths for RF, power.route_widths for rails). Never raises: a
+    net with no known width keeps the default width (logged by the caller as absent)."""
+    from . import netclass as NC, routediag as RD
+    nets = set(nets)
+    out = {}
+    try:
+        B = RD.load(copy)
+        if hasattr(NC, "contract"):                                   # B1 (w49-netcontract)
+            con = NC.contract(B, cons, spec, board=copy, lock=False)
+            for n in nets:
+                e = con.get(n) or {}
+                ws = [float(w) for w in (e.get("width") or {}).values() if w]
+                if ws:
+                    out[n] = round(sum(ws) / len(ws), 3)
+                elif e.get("width_min"):
+                    out[n] = float(e["width_min"])
+            return out
+        # TODO(B1 / w49-netcontract): delete this fallback once netclass.contract is merged (the branch above then always runs).
+        from . import power as PWR, gaps as GP, rfroute as RFR, placegaps as PG
+        rails = PWR.route_widths(cons or {}, layers=len(sig) or None, exclude=GP._zone_nets(copy))
+        out.update({n: float(w) for n, w in rails.items() if n in nets and w})
+        of = PG._net_class(PG.Ctx(stage="judge", board=copy, cons=cons or {}, spec=spec))
+        rf = sorted(n for n in nets if n not in out and of(n)[0] == "rf")
+        if rf:
+            outer = RFR.outer_layers(list(sig)) or list(sig)
+            out.update({n: v["w"] for n, v in RFR.widths(copy, cons, rf, outer).items() if v.get("w")})
+    except Exception as e:                                           # noqa: BLE001 - no width contract: the default width, as before
+        print(f"lean_krt: contract widths not read ({type(e).__name__}: {str(e)[:100]}); default width")
+    return out
+
+
 def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
     """KRT lean ghost over every non-plane net with >= 2 pads on the signal layers (`only`: just those nets); no planes, rails,
     pairgroups or diff steps. Two passes (PLAN-PLACE-GAPS phase 2): the critical nets first (hs-pair legs, rf, power; class-ranked),
@@ -505,6 +539,7 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
             cnt[p["net"]] = cnt.get(p["net"], 0) + 1
     nets = sorted(n for n, k in cnt.items() if k >= 2 and n not in plane_nets and (only is None or n in only))   # only: route just these nets
     first = [] if only is not None else critical_first(copy, cons, spec, nets)
+    cw = contract_widths(copy, cons, spec, set(first) | (set(nets) if only is not None else set()), sig)   # rails + RF at contract width
     out = os.path.join(outdir, "krt-lean.kicad_pcb")
     # --quick 2: route to judge (main pass only; no rescue, escalation, plane finalize, cleanup, late sweeps) - about half
     # the time of level 1, and it writes its output. The wall cap is only a safety (SIGINT does not stop it softly).
@@ -519,7 +554,7 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
         def _variant(k):
             tag, o = f"krt-first-{k}", os.path.join(outdir, f"krt-first-{k}.kicad_pcb")
             inp = _canonical_copy(copy, os.path.join(outdir, f"in-{k}.kicad_pcb"), reverse=(k == "rev"))
-            cmd = KC.cmd_route(a.router_py, a.router_dir, inp, o, sig, base, {}, nets=first) + ["--quick", "2"] + list(extra)
+            cmd = KC.cmd_route(a.router_py, a.router_dir, inp, o, sig, base, {n: cw[n] for n in first if n in cw}, nets=first) + ["--quick", "2"] + list(extra)
             ok, _s = _run_capped(cmd, a.router_dir, outdir, tag, o, cap)
             return k, (ok and os.path.exists(o)), o
 
@@ -539,7 +574,7 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
         else:
             complete = False
             first = []                                          # the critical pass failed: the one-pass judge below, as before
-    cmd = KC.cmd_route(a.router_py, a.router_dir, src, out, sig, base, {}, nets=left or nets) + ["--quick", "2"] + list(extra)
+    cmd = KC.cmd_route(a.router_py, a.router_dir, src, out, sig, base, {n: cw[n] for n in (left or nets) if n in cw}, nets=left or nets) + ["--quick", "2"] + list(extra)
     # pass 2 must not rip pass 1: KRT registers unlocked pre-existing nets (<= 30 segments, <= 6 vias) as rip candidates and
     # --keep-input-copper only guards the cleanup; KICAD_RIP_PREEXISTING=0 is the engine's kill switch
     ok, _s = _run_capped(cmd, a.router_dir, outdir, "krt", out, max(60.0, cap - (time.time() - t0)) if first else cap,

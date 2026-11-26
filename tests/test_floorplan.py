@@ -169,3 +169,24 @@ def test_floorplan_near_row_the_moved_output_breaks_is_not_honoured_with_both_va
     near = next(r for r in bj["honoured"] if r["kind"] == "separation" and r["name"] == "near")
     assert near["value_in"] is not None and near["value_in"] != near["value_out"]
     assert near["status"] == "not_honoured"
+
+
+def test_never_worse_gate_refuses_a_legal_output_with_wire_length_plus_20_percent():
+    from fluxplace import floorplan2 as F2
+    src = {"wl": 15000.0, "cross": 1600}
+    assert F2.never_worse(src, {"wl": 15000.0, "cross": 1600})[0]
+    assert F2.never_worse(src, {"wl": 16000.0, "cross": 1650})[0]           # +6.7 % wire, +50 crossings (3 %): within the limits
+    ok, why = F2.never_worse(src, {"wl": 18000.0, "cross": 1600})           # R096: +20 %
+    assert not ok and "wire length 15000 -> 18000 (+20 %" in why
+    ok, why = F2.never_worse(src, {"wl": 15000.0, "cross": 2945})           # R096: crossings 1607 -> 2945
+    assert not ok and "crossings" in why
+    assert F2.never_worse({"wl": 100.0, "cross": 0}, {"wl": 100.0, "cross": 2})[0]       # small counts get a slack of 2
+    assert not F2.never_worse({"wl": 100.0, "cross": 0}, {"wl": 100.0, "cross": 3})[0]
+
+
+def test_never_worse_gate_limits_and_switch_come_from_the_floorplan_section():
+    from fluxplace import floorplan2 as F2
+    src, out = {"wl": 1000.0, "cross": 100}, {"wl": 1200.0, "cross": 100}
+    assert not F2.never_worse(src, out, {})[0]
+    assert F2.never_worse(src, out, {"floorplan": {"max_wl_growth_pct": 25}})[0]
+    assert F2.never_worse(src, out, {"floorplan": {"never_worse": False}})[0]
