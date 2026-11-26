@@ -224,14 +224,15 @@ def test_decap_stub_passes_and_load_and_source_stubs_fail_at_0_15(tmp_path):
     pytest.importorskip("pcbnew")
     fs = _check(_br_board(tmp_path))
     assert len(fs) == 1 and "2 narrow run(s)" in fs[0]["msg"]               # source stub + 3 A load pin; the decap stub is cleared
-    assert "3.00 A pin share (source)" in fs[0]["msg"] or "3.00 A budget (dcdrop)" in fs[0]["msg"]
+    assert "3.00 A tree flow U1" in fs[0]["msg"]                         # W40: the loads behind the stub (U2, 3 A), from the source U1
 
 
 def test_unknown_load_current_uses_the_rail_total_and_is_flagged(tmp_path):
     pytest.importorskip("pcbnew")
     p = _br_board(tmp_path, extra_pad=("U3", 14, 4, "VB"))
     fs = _check(p)
-    assert len(fs) == 1 and "3 narrow run(s)" in fs[0]["msg"] and "1 run(s) with current unknown" in fs[0]["msg"]
+    # W40: unknown only on the branches upstream of the unknown load: U3's own stub and the source stub; the U2 stub stays known
+    assert len(fs) == 1 and "3 narrow run(s)" in fs[0]["msg"] and "2 run(s) with current unknown" in fs[0]["msg"]
 
 
 def test_run_inside_a_same_net_pour_gets_zone_credit(tmp_path):
@@ -326,7 +327,7 @@ def test_run_with_no_end_pad_is_a_dangling_stub_carrying_nothing(tmp_path):
     assert "2 narrow run(s)" in _msg(_stub_board(tmp_path, end_via=False))   # the dangling 6 mm stub is cleared (0 A), the others as before
 
 
-def test_run_with_no_end_pad_ending_on_a_via_is_a_link_and_stays_unknown(tmp_path):
+def test_stub_ending_on_a_via_with_nothing_behind_it_carries_nothing(tmp_path):
     pytest.importorskip("pcbnew")
-    m = _msg(_stub_board(tmp_path, end_via=True))
-    assert "3 narrow run(s)" in m and "current unknown" in m
+    # W40: a via link is solved in the rail tree (powerflow, via_joins_layers); a via that leads nowhere has no load behind it
+    assert "2 narrow run(s)" in _msg(_stub_board(tmp_path, end_via=True))
