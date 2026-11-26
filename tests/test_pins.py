@@ -243,6 +243,7 @@ def test_floorplan_command_resolves_pins_first(tmp_path, capsys, monkeypatch):
         return res, None, RD.load(b)
     monkeypatch.setattr(FP2, "floorplan_once", once)
     monkeypatch.setattr(FP2, "edge_order", lambda B, cons: ["L", "R", "T", "B"])
+    monkeypatch.setattr(FP2, "measured", lambda p, c, s: {"cross": 0, "wl": 1.0})      # as the stub's own source/annealed: the never-worse gate sees no change
     monkeypatch.setattr(FP2, "span_summary", lambda s: "-")
     monkeypatch.setattr(FP2, "plan_summary", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skipped")))
     out = str(tmp_path / "o.kicad_pcb")

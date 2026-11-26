@@ -107,11 +107,11 @@ def net_over_budget(B, cls, cons=None):
             if ln <= 1.15 * floor + 1.0:
                 continue
             lim = floor                      # the rest of the excess is placement's
-        out.append(_f(FAIL, "NET_OVER_BUDGET",
-                      f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm"
-                      f"{f' (the fixed parts alone need {floor:.1f})' if floor > 0 and lim == floor else ''} "
-                      f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''}){why}",
-                      refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]))
+        out.append({**_f(FAIL, "NET_OVER_BUDGET",
+                         f"{net} [{info['class']}]{pr}: {ln:.1f} mm, budget {lim:g} mm"
+                         f"{f' (the fixed parts alone need {floor:.1f})' if floor > 0 and lim == floor else ''} "
+                         f"({' - '.join(ends[:4])}{'...' if len(ends) > 4 else ''}){why}",
+                         refs=ends, value=round(ln, 2), limit=lim, cls=info["class"]), "net": net})
     return out
 
 
