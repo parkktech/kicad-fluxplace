@@ -414,14 +414,23 @@ def stub(B, items, base_n, ignore, pad, e, layer, w, net, clr, skip_old, step=0.
     out = G.clean(out[::-1], 1e-4)
     if len(out) < 2:
         return None
-    c, dx, dy = out[-2], e[0] - out[-2][0], e[1] - out[-2][1]
-    k = min(abs(dx), abs(dy))
-    dg = (math.copysign(k, dx), math.copysign(k, dy))
-    for m in ((c[0] + dg[0], c[1] + dg[1]), (c[0] + dx - dg[0], c[1] + dy - dg[1]), None):      # the last hop off the grid as a 45 degree dog-leg
-        pts = G.clean(out[:-1] + ([m] if m else []) + [e], 1e-4)
-        pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
-        if pcs and check(items, pcs, net, clr, skip_old)[0] >= clr - 1e-6:
-            return pts
+    c0 = (pad["x"], pad["y"])
+    heads = [out]
+    if math.hypot(out[0][0] - c0[0], out[0][1] - c0[1]) > 1e-6:      # the grid cell it left the pad from is not the pad centre: a via / pad end must sit on its centre
+        dg, st = _octi((out[0][0] - c0[0], out[0][1] - c0[1]))
+        heads = [[c0, (c0[0] + dg[0], c0[1] + dg[1])] + out, [c0, (c0[0] + st[0], c0[1] + st[1])] + out]
+    for out in heads:
+        out = G.clean(out, 1e-4)
+        if len(out) < 2:
+            continue
+        c, dx, dy = out[-2], e[0] - out[-2][0], e[1] - out[-2][1]
+        k = min(abs(dx), abs(dy))
+        dg = (math.copysign(k, dx), math.copysign(k, dy))
+        for m in ((c[0] + dg[0], c[1] + dg[1]), (c[0] + dx - dg[0], c[1] + dy - dg[1]), None):      # the last hop off the grid as a 45 degree dog-leg
+            pts = G.clean(out[:-1] + ([m] if m else []) + [e], 1e-4)
+            pcs = [("seg", layer, a, b, w) for a, b in zip(pts, pts[1:])]
+            if pcs and check(items, pcs, net, clr, skip_old)[0] >= clr - 1e-6:
+                return pts
     return None
 
 

@@ -648,6 +648,7 @@ def twin_join(ctx, t, rule, pr):
                                     jp = [("seg", lay, va, vb, rule["geo"].get(lay, (rule["w"],))[0])]
                                     if PL.check(items, jp, net, clr, ctx["skip"])[0] >= clr - 1e-6:
                                         done = (la[0] + lb[0] + jp, la[0])
+                                        _claim(items, jp, net)           # the other net's stubs and jumper see this one
                                         break
                             if done:
                                 break

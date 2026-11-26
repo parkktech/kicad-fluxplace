@@ -162,3 +162,4 @@ def test_usbc_reservation_for_fanout_is_on_by_default_and_carries_the_join(tmp_p
     assert r and set(r[2]) == {"USB_DM", "USB_DP"} and r[1]
     plain = PB.write(tmp_path, duo("U1", 20, 20, "A_P", "A_N") + duo("J1", 40, 20, "A_P", "A_N"), name="p.kicad_pcb")
     assert PR.reserve_for_fanout(plain, plain, {}, None, str(tmp_path)) is None              # no double pads: opt-in as before
+
