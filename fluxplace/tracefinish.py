@@ -194,24 +194,31 @@ CLEAN_CATS = ("zero", "duplicate", "stacked", "dangling")      # order matters: 
 
 def _clean_worker(src, dst, cats):
     """Fresh-process worker of `clean`: remove the items of the categories `cats` from `src`, save as `dst`.
-    -> {category: count}. Connectivity is geometric: a track end touches a same-net track end / body, via, pad or filled zone on its layer."""
+    -> {category: count}. Connectivity is geometric: a track end touches a same-net track end / body, via, pad or filled zone on its layer.
+    Items are only marked while the passes run and removed at the end (a board.Remove mid-way decays pcbnew's bindings)."""
     import pcbnew
     b = pcbnew.LoadBoard(src)
     got = {c: 0 for c in cats}
     if b is None:                                       # a file pcbnew cannot read has nothing to clean (and nothing is written)
         return got
+    gone = {}                                           # uuid -> item
+
+    def uid(t):
+        return t.m_Uuid.AsString()
 
     def items():
-        tr = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
-        vi = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
-        return tr, vi
+        trk = [t for t in b.GetTracks() if uid(t) not in gone]
+        return ([t for t in trk if t.Type() == pcbnew.PCB_TRACE_T], [t for t in trk if t.Type() == pcbnew.PCB_VIA_T])
+
+    def kill(t, cat):
+        gone[uid(t)] = t
+        got[cat] += 1
 
     tracks, vias = items()
     if "zero" in cats:
         for t in tracks:
             if t.GetStart() == t.GetEnd():
-                b.Remove(t)
-                got["zero"] += 1
+                kill(t, "zero")
         tracks, vias = items()
     if "duplicate" in cats:
         seen = {}
@@ -224,8 +231,7 @@ def _clean_worker(src, dst, cats):
             loser = keep if (t.GetWidth(), t.IsLocked()) > (keep.GetWidth(), keep.IsLocked()) else t
             if loser is keep:
                 seen[k] = t
-            b.Remove(loser)
-            got["duplicate"] += 1
+            kill(loser, "duplicate")
         tracks, vias = items()
     if "stacked" in cats:
         seen = {}
@@ -239,19 +245,18 @@ def _clean_worker(src, dst, cats):
             loser = keep if big(v) > big(keep) else v
             if loser is keep:
                 seen[k] = v
-            b.Remove(loser)
-            got["stacked"] += 1
-        tracks, vias = items()
+            kill(loser, "stacked")
     if "dangling" in cats:
-        got["dangling"] = _drop_dangling(b, pcbnew)
+        _mark_dangling(b, pcbnew, items, lambda t: kill(t, "dangling"))
+    for t in gone.values():
+        b.Remove(t)
     pcbnew.SaveBoard(dst, b)
     return got
 
 
-def _drop_dangling(b, pcbnew):
-    """Remove, until none is left, every track with an end that touches no same-net copper, and every via that connects fewer than two
-    layers. Net 0 (no net) is never touched. -> count removed."""
-    removed = 0
+def _mark_dangling(b, pcbnew, items, kill):
+    """Mark, until none is left, every track with an end that touches no same-net copper, and every via that connects fewer than two
+    layers (`items()` returns the tracks / vias not yet marked). Net 0 (no net) is never touched."""
     zones = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
     pads = [p for p in b.GetPads() if p.GetNetCode() > 0]
 
@@ -269,16 +274,19 @@ def _drop_dangling(b, pcbnew):
         t = 0.0 if L == 0 else max(0.0, min(1.0, ((p.x - ax) * dx + (p.y - ay) * dy) / L))
         return ((p.x - ax - t * dx) ** 2 + (p.y - ay - t * dy) ** 2) ** 0.5
 
+    copper = [l for l in range(pcbnew.PCB_LAYER_ID_COUNT) if pcbnew.IsCopperLayer(l) and b.IsLayerEnabled(l)]
+    pby = {}
+    for p in pads:
+        pby.setdefault(p.GetNetCode(), []).append(p)
     for _ in range(50):
-        tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T and t.GetNetCode() > 0]
-        vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetCode() > 0]
-        by, vby, pby = {}, {}, {}
+        tracks, vias = items()
+        tracks = [t for t in tracks if t.GetNetCode() > 0]
+        vias = [t for t in vias if t.GetNetCode() > 0]
+        by, vby = {}, {}
         for t in tracks:
             by.setdefault((t.GetNetCode(), t.GetLayer()), []).append(t)
         for v in vias:
             vby.setdefault(v.GetNetCode(), []).append(v)
-        for p in pads:
-            pby.setdefault(p.GetNetCode(), []).append(p)
 
         def touches(net, lid, pt, me):
             for o in by.get((net, lid), ()):
@@ -294,15 +302,12 @@ def _drop_dangling(b, pcbnew):
 
         dead = [t for t in tracks if not all(touches(t.GetNetCode(), t.GetLayer(), e, t) for e in (t.GetStart(), t.GetEnd()))]
         for v in vias:
-            lids = [l for l in v.GetLayerSet().Seq() if pcbnew.IsCopperLayer(l)]
-            if sum(1 for l in lids if touches(v.GetNetCode(), l, v.GetPosition(), v)) < 2:
+            if sum(1 for l in copper if v.IsOnLayer(l) and touches(v.GetNetCode(), l, v.GetPosition(), v)) < 2:
                 dead.append(v)
         if not dead:
             break
         for t in dead:
-            b.Remove(t)
-        removed += len(dead)
-    return removed
+            kill(t)
 
 
 def _guard_ok(d0, d1):
