@@ -10,7 +10,13 @@ WT=${1:?worktree}; HERE=$(cd "$(dirname "$0")/.." && pwd); BASE=${2:-$HERE/docs/
 PY=${PY:-/usr/bin/python3}
 out=$(mktemp); trap 'rm -f "$out"' EXIT
 ( cd "$WT" && timeout 3600 "$PY" -m pytest -q -p no:cacheprovider -rfE --continue-on-collection-errors tests/ ) > "$out" 2>&1
-grep -qE '[0-9]+ (passed|failed)' "$out" || { echo "merge-gate: suite did not run"; tail -5 "$out"; exit 2; }
+rc=$?
+# Completion evidence (outside review 2026-11-26): pytest rc 0 = all passed, 1 = tests failed (judged against the
+# baseline below); anything else (2 interrupted, 3 internal, 4 usage, 5 none collected, 124 timeout) is a failed gate.
+case $rc in 0|1) ;; *) echo "merge-gate: suite did not complete (pytest rc=$rc)"; tail -5 "$out"; exit 2;; esac
+grep -qE '^=*.*[0-9]+ (passed|failed).* in [0-9.]+s' "$out" || { echo "merge-gate: no completed summary line"; tail -5 "$out"; exit 2; }
+grep -qE '[0-9]+ errors? during collection|Interrupted' "$out" && { echo "merge-gate: collection errors / interrupted"; grep -E 'ERROR collecting|Interrupted' "$out" | head; exit 2; }
+[ $rc -eq 1 ] && ! grep -qE '^(FAILED|ERROR) ' "$out" && { echo "merge-gate: rc=1 without failure rows"; exit 2; }
 now=$(grep -E '^(FAILED|ERROR) ' "$out" | sed -E 's/^(FAILED|ERROR) //; s/ - .*//' | sort -u)
 base=$(grep -vE '^\s*(#|$)' "$BASE" 2>/dev/null | sort -u)
 new=$(comm -23 <(echo "$now") <(echo "$base") | grep .)
