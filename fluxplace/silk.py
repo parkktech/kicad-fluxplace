@@ -2,8 +2,9 @@
 
 check(scene, cfg) -> findings; fit(scene, cfg) -> plan. Both are pure Python on a *scene* (polygons in mm) that
 `silk_helper.py` extracts from the board under KiCad's python; `apply_plan` writes the plan back through the same
-helper. Only footprint REFERENCE texts are ever changed (moved, resized, or, last resort, hidden from the
-silkscreen and kept on the Fab layer). Footprints, tracks, vias, zones, board texts and footprint graphics are
+helper. Only silkscreen is ever changed: footprint REFERENCE texts (moved, resized, or, last resort, hidden from the
+silkscreen and kept on the Fab layer), and (B8) a value / free footprint text or a footprint silk shape that is hard-offending
+(off the board, over a pad or hole) moves to the Fab layer. Footprints, tracks, vias, zones and board texts are
 never modified. Deterministic: no randomness, ordered containers, explicit tie-breaks.
 
 Finding codes (level): SILK_OFF_BOARD, SILK_OVER_PAD, SILK_OVER_HOLE = FAIL; SILK_OVERLAP, SILK_UNDER_PART,
@@ -629,7 +630,7 @@ def check(sc, cfg, side="both"):
                                     f"(max {cfg['max_ref_distance_mm']:g})", [own], t["id"], x, y))
     # footprint graphics
     if cfg.get("check_graphics", True):
-        seen = {}
+        seen, bad_gi = {}, {}
         for gi, gobj in enumerate(sc["gfx"]):
             own = gobj["owner"]
             if side != "both" and gobj["side"] != side[0].upper():
@@ -640,18 +641,22 @@ def check(sc, cfg, side="both"):
                 # off board: the polygon's own vertices (an AABB would flag every diagonal inside a corner cut)
                 if lay.rings and any(lay.off_board(rect(p[0], p[1], 0.001, 0.001), cfg["edge_clearance_mm"]) for p in poly[::max(1, len(poly) // 8)]):
                     seen.setdefault((own, "SILK_OFF_BOARD"), set()).add(own)
+                    bad_gi.setdefault((own, "SILK_OFF_BOARD"), set()).add(gobj.get("gi"))
                 for _, p in lay.pads[gobj["side"]].query(bb):
                     if p["owner"] != own and _poly_poly(poly, p["poly"]):
                         seen.setdefault((own, "SILK_OVER_PAD"), set()).add(f"{p['owner']}.{p['num']}")
+                        bad_gi.setdefault((own, "SILK_OVER_PAD"), set()).add(gobj.get("gi"))
                 for _, h in lay.holes[gobj["side"]].query(bb):
                     if h["owner"] != own and _poly_poly(poly, h["poly"]):
                         seen.setdefault((own, "SILK_OVER_HOLE"), set()).add(h["owner"] or h["kind"])
+                        bad_gi.setdefault((own, "SILK_OVER_HOLE"), set()).add(gobj.get("gi"))
         for (own, code), who in sorted(seen.items()):
             what = {"SILK_OFF_BOARD": "outside the board or too close to Edge.Cuts",
                     "SILK_OVER_PAD": "over pad " + ", ".join(sorted(who)[:3]),
                     "SILK_OVER_HOLE": "over hole " + ", ".join(sorted(who)[:3])}[code]
-            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: edit the footprint, silk --fix only moves text]", [own] + [w.split(".")[0] for w in who]
+            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: the fit moves the offending shapes to the fab layer]", [own] + [w.split(".")[0] for w in who]
                             if code != "SILK_OFF_BOARD" else [own]))
+            out[-1]["gfx"] = sorted(g for g in bad_gi.get((own, code), ()) if g is not None)
     # reference visibility / marks
     ref_on_silk = {t["owner"] for t in sc["texts"] if t["kind"] == "ref"}
     for ref in sorted(parts):
@@ -1029,10 +1034,16 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, titl
                 if only is not None and not ({t["owner"]} | set(f["refs"])) & set(only):
                     continue
                 bad.setdefault(i, set()).add(f["code"])
+    fields = {}                                            # B8: a value / free text that is hard-offending is no reference: hidden (moved to Fab)
+    for f in findings:
+        if f["code"] in HARD and f.get("tid") is not None and texts[f["tid"]]["kind"] in ("value", "fptext"):
+            t = texts[f["tid"]]
+            if (side == "both" or t["side"] == side[0].upper()) and (only is None or t["owner"] in set(only)):
+                fields[t["id"]] = "@field:" + t["owner"] + "|" + t["text"]
     lay = Layout(sc, cfg)
     own_title = bool(title and cfg.get("title"))
     for t in texts:
-        if t["id"] not in bad and not (own_title and t.get("title")):
+        if t["id"] not in bad and t["id"] not in fields and not (own_title and t.get("title")):
             lay.add_text(t)
     refs_va = {t["owner"]: _view_angle(t["angle"]) for t in texts if t["kind"] == "ref" and t["id"] not in bad}
 
@@ -1114,6 +1125,18 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, titl
         else:
             kept.append(t["owner"])
             lay.add_text(t)
+    for i, key in fields.items():
+        plan[key] = {"hide": True}
+        hidden.append(key)
+    for f in findings:                                     # B8: footprint artwork over a pad / off the board: the offending shapes go to Fab
+        if f["code"] in HARD and f.get("gfx") and f["refs"] and (only is None or f["refs"][0] in set(only)):
+            own = f["msg"].split()[0]
+            if own != "board" and own in sc["parts"] and (side == "both" or sc["parts"][own]["side"] == side[0].upper()):
+                key = "@gfx:" + own
+                ent = plan.setdefault(key, {"hide": True, "items": []})
+                ent["items"] = sorted(set(ent["items"]) | set(f["gfx"]))
+                if key not in hidden:
+                    hidden.append(key)
     tinfo, tfind = {}, []
     if own_title:                                        # AFTER the references: it sees their final places
         for sd in cfg["title"]["sides"]:

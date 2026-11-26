@@ -411,6 +411,11 @@ def _via_names(d0):
     return out
 
 
+def centred_count(board, cli="kicad-cli"):
+    """KiCad's own count of `track_not_centered_on_via` errors on `board`."""
+    return sum(v["type"] == CENTRED for v in _report(board, cli)["violations"])
+
+
 def via_run(src, dst, iters=3, log=print, func="_via_to_end", locked_ok=False, protect=()):
     """After `run`: the ends it refused for clearance are fixed by moving the via to the track end (see _via_to_end), DRC-guarded like `run`
     (no new violation, no more opens; a via whose move creates one is left: the items a new violation names are mapped back to their via

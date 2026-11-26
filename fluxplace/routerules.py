@@ -27,6 +27,41 @@ DEFAULT_SNPC = 0.2
 DEFAULT_SIZE = 0.2
 
 
+HOLE_TO_HOLE_SEVERITY = "error"        # D71dz: drills that break into each other are a fab refusal, never a warning
+
+
+def _fab_hole_to_hole(fab):
+    """The fab's via-to-via hole figure (the `hard` limits of the manufacturer row for this layer count), 0 when the profile names none."""
+    return float(((fab or {}).get("hard") or {}).get("hole_to_hole_via") or 0.0)
+
+
+def project_rules(R):
+    """The `.kicad_pro` entries that make the router's hole-to-hole floor binding: {"rules": {...}, "rule_severities": {...}}."""
+    return {"rules": {"min_hole_to_hole": R["hole_to_hole"]} if R.get("hole_to_hole") else {},
+            "rule_severities": {"hole_to_hole": R.get("hole_to_hole_severity", HOLE_TO_HOLE_SEVERITY)}}
+
+
+def enforce_project(pro_path, R=None):
+    """Write `project_rules(R)` into a .kicad_pro (hole_to_hole = error; min_hole_to_hole raised to the floor, never lowered).
+    R=None: severity only. -> True when the file changed."""
+    try:
+        d = json.load(open(pro_path))
+    except (OSError, ValueError):
+        return False
+    ds = d.setdefault("board", {}).setdefault("design_settings", {})
+    want = project_rules(R or {})
+    before = json.dumps(d, sort_keys=True)
+    ds.setdefault("rule_severities", {}).update(want["rule_severities"])
+    for k, v in want["rules"].items():
+        cur = ds.setdefault("rules", {}).get(k) or 0.0
+        ds["rules"][k] = max(float(cur), float(v))
+    if json.dumps(d, sort_keys=True) == before:
+        return False
+    with open(pro_path, "w") as fh:
+        json.dump(d, fh, indent=2)
+    return True
+
+
 def _pro_rules(board):
     if hasattr(board, "GetDesignSettings"):
         try:
@@ -82,7 +117,9 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
          "min_clearance": floor(fab.get("min_clearance_mm"), r.get("min_clearance_mm"), pro.get("min_clearance")),
          "min_via": floor(fab.get("min_via_dia_mm"), r.get("min_via_mm"), pro.get("min_via_diameter")),
          "min_drill": floor(fab.get("min_drill_mm"), r.get("min_drill_mm"), pro.get("min_through_hole_diameter")),
-         "hole_to_hole": floor(r.get("hole_to_hole_mm"), pro.get("min_hole_to_hole"), default=0.0)}
+         "hole_to_hole": floor(_fab_hole_to_hole(fab), r.get("hole_to_hole_mm"), pro.get("min_hole_to_hole"), default=0.0)}
+    R["hole_to_hole_fab"] = _fab_hole_to_hole(fab)
+    R["hole_to_hole_severity"] = HOLE_TO_HOLE_SEVERITY
     # HARD fab limits (manufacturer row for this board's layer count): the router may never go below them, and a
     # rule that cannot be met at the preferred floor above is judged against these (pairs, fabcaps.judge)
     R["fab_min_track"] = float(fab.get("min_track_mm") or 0.0)

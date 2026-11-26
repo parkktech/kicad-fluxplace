@@ -25,7 +25,7 @@ KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
 MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
 ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance", "open-gap",
-         "rf-impedance", "net-contract", "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape"]   # PHASE3I B6: mask after copper
+         "rf-impedance", "net-contract", "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape", "silk-fit", "silk-title"]   # PHASE3I B6: mask after copper
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 # a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
@@ -2212,6 +2212,8 @@ DISPATCH = {
     "power-width": ["powerwiden", "railpour"],     # PHASE3G G4: widen in place, then pour, then (power-vias) vias
     "power-vias": ["powervias"],
     "rf-impedance": ["rfroute"],           # A6: strip and re-lay at the impedance width on outer layers
+    "silk-fit": [],                        # B8: silkscreen text / artwork off the board or over a pad: the `silk` stage's fit repairs it (copper is never touched)
+    "silk-title": [],                      # B8: title text without a version or without room: the `silk` stage writes it; no version = owner data
     "net-contract": [],                    # A6: kind defined here; B1 (w49-netcontract) owns detection and repair
     "pair-open": ["pairgroup", "ai"],     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
     "pair-asym": ["pairgroup", "ai"],

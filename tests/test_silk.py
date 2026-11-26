@@ -375,6 +375,6 @@ def test_unfixable_graphics_are_named(tmp_path):
     g = '(fp_line (start -1 0) (end -1 -40) (stroke (width 0.15) (type solid)) (layer "F.SilkS"))'
     p = brd(tmp_path, part("U9", 20, 5, extra=g))
     out = str(tmp_path / "o.kicad_pcb")
-    _, a, _ = SK.fix_board(p, out)
-    assert SK.unfixable_graphics(a) == [("U9", "SILK_OFF_BOARD")]
-    assert "edit the footprint" in [f["msg"] for f in a if f["code"] == "SILK_OFF_BOARD"][0]
+    b, a, res = SK.fix_board(p, out)
+    assert SK.unfixable_graphics(b) == [("U9", "SILK_OFF_BOARD")]          # named by the check ...
+    assert "@gfx:U9" in res["hidden"] and SK.unfixable_graphics(a) == []     # B8: ... and the fit moves the offending shape to Fab

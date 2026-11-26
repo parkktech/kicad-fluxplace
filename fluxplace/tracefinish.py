@@ -1,5 +1,9 @@
 """Trace-finishing stage driver (TRACE-FINISH-SPEC 3.3, 4; RECIPE-TRACE-FINISH T1a).
 
+T2 (B8): the stage ends with a guarded clean pass (`clean`): zero-length segments, duplicate segments, stacked vias and dangling
+segments / vias are removed category by category, each kept only when the DRC key multiset (opens per net) does not get worse;
+the ends KiCad flags "track not centred on via" are then moved onto the via centre (`centre`, snapiter fallbacks, same guard).
+
 T1a: frame only. F0 base record (HARD rows that have a measure now), the corner / bend / junction measures of
 tfmeasure, the score, events, and finish.json. No pass edits copper yet: F8 = F0 again and the output board is a byte
 copy of the input. Disabled ([finish] enabled not true): the stage is a no-op and writes nothing.
@@ -183,6 +187,201 @@ def _worse(f0_rec, f8_rec):
     return worse
 
 
+# ---- T2 clean pass (B8) ------------------------------------------------------------------------------------------------------
+
+CLEAN_CATS = ("zero", "duplicate", "stacked", "dangling")      # order matters: dangling last (it sees the copper the others left)
+
+
+def _clean_worker(src, dst, cats):
+    """Fresh-process worker of `clean`: remove the items of the categories `cats` from `src`, save as `dst`.
+    -> {category: count}. Connectivity is geometric: a track end touches a same-net track end / body, via, pad or filled zone on its layer."""
+    import pcbnew
+    b = pcbnew.LoadBoard(src)
+    got = {c: 0 for c in cats}
+    if b is None:                                       # a file pcbnew cannot read has nothing to clean (and nothing is written)
+        return got
+
+    def items():
+        tr = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+        vi = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+        return tr, vi
+
+    tracks, vias = items()
+    if "zero" in cats:
+        for t in tracks:
+            if t.GetStart() == t.GetEnd():
+                b.Remove(t)
+                got["zero"] += 1
+        tracks, vias = items()
+    if "duplicate" in cats:
+        seen = {}
+        for t in tracks:
+            k = (t.GetNetCode(), t.GetLayer(), frozenset(((t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y))))
+            keep = seen.get(k)
+            if keep is None:
+                seen[k] = t
+                continue
+            loser = keep if (t.GetWidth(), t.IsLocked()) > (keep.GetWidth(), keep.IsLocked()) else t
+            if loser is keep:
+                seen[k] = t
+            b.Remove(loser)
+            got["duplicate"] += 1
+        tracks, vias = items()
+    if "stacked" in cats:
+        seen = {}
+        for v in vias:
+            k = (v.GetNetCode(), v.GetPosition().x, v.GetPosition().y)
+            keep = seen.get(k)
+            if keep is None:
+                seen[k] = v
+                continue
+            big = lambda x: (x.GetWidth(pcbnew.F_Cu), x.GetDrill(), x.IsLocked())
+            loser = keep if big(v) > big(keep) else v
+            if loser is keep:
+                seen[k] = v
+            b.Remove(loser)
+            got["stacked"] += 1
+        tracks, vias = items()
+    if "dangling" in cats:
+        got["dangling"] = _drop_dangling(b, pcbnew)
+    pcbnew.SaveBoard(dst, b)
+    return got
+
+
+def _drop_dangling(b, pcbnew):
+    """Remove, until none is left, every track with an end that touches no same-net copper, and every via that connects fewer than two
+    layers. Net 0 (no net) is never touched. -> count removed."""
+    removed = 0
+    zones = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+    pads = [p for p in b.GetPads() if p.GetNetCode() > 0]
+
+    def zone_hit(net, lid, pt):
+        for z in zones:
+            if z.GetNetCode() == net and z.IsOnLayer(lid):
+                if (z.IsFilled() and z.HitTestFilledArea(lid, pt, 0)) or (not z.IsFilled() and z.Outline().Contains(pt)):
+                    return True
+        return False
+
+    def seg_dist(p, a, c):
+        ax, ay, cx, cy = a.x, a.y, c.x, c.y
+        dx, dy = cx - ax, cy - ay
+        L = dx * dx + dy * dy
+        t = 0.0 if L == 0 else max(0.0, min(1.0, ((p.x - ax) * dx + (p.y - ay) * dy) / L))
+        return ((p.x - ax - t * dx) ** 2 + (p.y - ay - t * dy) ** 2) ** 0.5
+
+    for _ in range(50):
+        tracks = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T and t.GetNetCode() > 0]
+        vias = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T and t.GetNetCode() > 0]
+        by, vby, pby = {}, {}, {}
+        for t in tracks:
+            by.setdefault((t.GetNetCode(), t.GetLayer()), []).append(t)
+        for v in vias:
+            vby.setdefault(v.GetNetCode(), []).append(v)
+        for p in pads:
+            pby.setdefault(p.GetNetCode(), []).append(p)
+
+        def touches(net, lid, pt, me):
+            for o in by.get((net, lid), ()):
+                if o is not me and seg_dist(pt, o.GetStart(), o.GetEnd()) <= o.GetWidth() / 2 + 1000:
+                    return True
+            for v in vby.get(net, ()):
+                if v is not me and v.IsOnLayer(lid) and ((v.GetPosition().x - pt.x) ** 2 + (v.GetPosition().y - pt.y) ** 2) ** 0.5 <= v.GetWidth(lid) / 2 + 1000:
+                    return True
+            for p in pby.get(net, ()):
+                if p.IsOnLayer(lid) and p.HitTest(pt):
+                    return True
+            return zone_hit(net, lid, pt)
+
+        dead = [t for t in tracks if not all(touches(t.GetNetCode(), t.GetLayer(), e, t) for e in (t.GetStart(), t.GetEnd()))]
+        for v in vias:
+            lids = [l for l in v.GetLayerSet().Seq() if pcbnew.IsCopperLayer(l)]
+            if sum(1 for l in lids if touches(v.GetNetCode(), l, v.GetPosition(), v)) < 2:
+                dead.append(v)
+        if not dead:
+            break
+        for t in dead:
+            b.Remove(t)
+        removed += len(dead)
+    return removed
+
+
+def _guard_ok(d0, d1):
+    """True when the DRC report d1 is not worse than d0: no key (opens counted per net) that d0 does not have at least as often."""
+    from . import drcguard as DG
+    return not DG.new_keys(DG.keys_per_net(d0), DG.keys_per_net(d1))
+
+
+def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
+    """T2 guarded clean pass: each category in `cats` is applied to the accepted board and kept only when `_guard_ok`; `out` is written
+    (a copy of `board` when nothing was kept). -> {"removed": {cat: n}, "refused": {cat: reason}, "drc_before": n, "drc_after": n}."""
+    from .freshproc import in_fresh_process
+    cur = out + ".clean-cur.kicad_pcb"
+    shutil.copyfile(board, cur)
+    _pro_copy(board, cur)
+    d_cur = _drc(cur, kicad_cli=kicad_cli)
+    res = {"removed": {}, "refused": {}, "drc_before": len(d_cur.get("violations", []))}
+    try:
+        for cat in cats:
+            trial = out + f".clean-{cat}.kicad_pcb"
+            n = in_fresh_process("fluxplace.tracefinish", "_clean_worker", cur, trial, [cat])[cat]
+            if n and os.path.exists(trial):
+                _pro_copy(board, trial)
+                d_new = _drc(trial, kicad_cli=kicad_cli)
+                if _guard_ok(d_cur, d_new):
+                    res["removed"][cat] = n
+                    shutil.copyfile(trial, cur)
+                    d_cur = d_new
+                else:
+                    res["refused"][cat] = f"{n} item(s): DRC would get worse"
+            _rm(trial)
+        shutil.copyfile(cur, out)
+        _pro_copy(board, out)
+        res["drc_after"] = len(d_cur.get("violations", []))
+        res["report"] = d_cur
+    finally:
+        _rm(cur)
+    return res
+
+
+def _centred(d):
+    return sum(1 for v in d.get("violations", []) if v.get("type") == "track_not_centered_on_via")
+
+
+def centre(board, out, d0, kicad_cli="kicad-cli", log=print):
+    """Ends KiCad flags `track_not_centered_on_via` in the DRC report `d0` of `board`: snapiter's guarded fallbacks in order (end onto the
+    via centre, then joiners), each DRC-guarded by snapiter (a via whose fix creates a new key is left alone). `out` is written.
+    -> {"before": n, "after": n, "moves": n, "report": DRC report of out}."""
+    from . import snapiter as SN
+    shutil.copyfile(board, out)
+    _pro_copy(board, out)
+    n0, moved, d = _centred(d0), 0, d0
+    if n0:
+        for fn in (SN.centre_run, SN.joiner_run):
+            nxt = out + ".step.kicad_pcb"
+            _pro_copy(board, nxt)
+            r = fn(out, nxt, log=log, **({"locked_ok": True} if fn is SN.joiner_run else {}))
+            if r.get("moved") and os.path.exists(nxt):
+                shutil.copyfile(nxt, out)
+                moved += r["moved"]
+            _rm(nxt)
+            d = _drc(out, kicad_cli=kicad_cli)
+            if not _centred(d):
+                break
+    return {"before": n0, "after": _centred(d), "moves": moved, "report": d}
+
+
+def _pro_copy(board, dst):
+    s, d = os.path.splitext(board)[0] + ".kicad_pro", os.path.splitext(dst)[0] + ".kicad_pro"
+    if os.path.exists(s) and os.path.abspath(s) != os.path.abspath(d):
+        shutil.copyfile(s, d)
+
+
+def _rm(path):
+    for f in (path, os.path.splitext(path)[0] + ".kicad_pro", os.path.splitext(path)[0] + ".kicad_prl"):
+        if os.path.exists(f):
+            os.remove(f)
+
+
 def stage(c, n, board):
     """Stage entry (pipeline FUNCS['trace-finish']). Disabled -> pass, nothing written. Enabled -> F0, F8, outputs."""
     cons = getattr(c, "cons", None) or {}
@@ -199,14 +398,26 @@ def stage(c, n, board):
     rows0, nm = practice_rows(rec0, cls, rules)
     sc0 = TM.class_scores(rows0, rules)
     _emit_criteria("F0", rec0, rows0, sc0)
-    rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"], phase="F8")   # F8 = F0 again (no pass edits copper yet)
+    clean_rec, centre_rec = {"removed": {}, "refused": {}}, {"before": 0, "after": 0, "moves": 0}
+    cleaned = os.path.join(d, "clean.kicad_pcb")
+    out = os.path.join(d, "board.kicad_pcb")
+    events.emit("progress", STAGE, phase="T2 clean", note="guarded pass")
+    clean_rec = _beating("T2 clean", lambda: clean(board, cleaned, kicad_cli))
+    d_clean = clean_rec.pop("report", None) or {}
+    centre_rec = _beating("T2 centre", lambda: centre(cleaned, out, d_clean, kicad_cli))
+    centre_rec.pop("report", None)
+    _rm(cleaned)
+    changed = bool(clean_rec["removed"]) or bool(centre_rec["moves"])
+    if changed:
+        B8 = routediag.load(out, project=None)
+        rec8 = f0(out, B8, cons, getattr(c, "spec", None), cls, kicad_cli, phase="F8")     # new copper: measured afresh
+    else:
+        rec8 = f0(board, B, cons, getattr(c, "spec", None), cls, kicad_cli, X=rec0["_X"], audit=rec0["_audit"], phase="F8")
     rows8, _ = practice_rows(rec8, cls, rules)
     sc8 = TM.class_scores(rows8, rules)
     worse = _worse(rec0, rec8)
     _emit_criteria("F8", rec8, rows8, sc8, worse)
-    out = os.path.join(d, "board.kicad_pcb")
-    shutil.copyfile(board, out)
-    fj = {"stage": STAGE, "passes": {"F0": "done", "F8": "done"},
+    fj = {"stage": STAGE, "passes": {"F0": "done", "T2": "done", "F8": "done"}, "clean": clean_rec, "centre": centre_rec,
           "not_built": ["F1", "F2", "F3", "F4", "F5", "F6", "F7"],
           "legality": rec8["hard"], "score": rows8, "not_measured_rules": nm, "facts": rec8["facts"],
           "degenerate": rec8["facts"]["degenerate"], "worse_hard": worse,
@@ -219,5 +430,6 @@ def stage(c, n, board):
     verdict = "fail" if worse else "pass"
     line = (f"trace-finish: {verdict} (F0 base: opens {rec0['opens']}, DRC violations {rec0['violations']}; "
             f"not_measured rules {len(nm)})" + (f" ILLEGAL: {','.join(worse)}" if worse else "")
+            + f"; T2 removed {sum(clean_rec['removed'].values())} {clean_rec['removed']}, off-centre {centre_rec['before']} -> {centre_rec['after']}"
             + f" score board {sc0.get('board')} -> {sc8.get('board')}")
     return {"verdict": verdict, "line": line, "board": out}

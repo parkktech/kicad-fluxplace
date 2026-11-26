@@ -122,7 +122,7 @@ def scene(path):
                 d = _text(f, kind, ref, lay)
                 if d:
                     out["texts"].append(d)
-        for g in fp.GraphicalItems():
+        for gi, g in enumerate(fp.GraphicalItems()):
             lay = silk.get(g.GetLayer())
             if not lay:
                 continue
@@ -138,7 +138,7 @@ def scene(path):
             else:
                 polys = _shape_poly(g, g.GetLayer())
                 if polys:
-                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys})
+                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys, "gi": gi})
                 if lay == fside:
                     part["silk_gfx"] += 1
                     if g.GetClass() == "PCB_SHAPE" and g.GetShapeStr() in ("Circle", "Polygon", "Arc"):
@@ -248,6 +248,21 @@ def apply(path, dst, plan):
     for key in sorted(k for k in plan if k.startswith("@title")):
         _apply_title(b, drawings, plan[key])
         n["title"] += 1
+    for key in sorted(k for k in plan if k.startswith("@field:")):          # a hard-offending value / free text goes to the fab layer
+        ref, _, text = key[len("@field:"):].partition("|")
+        fp = b.FindFootprintByReference(ref)
+        for f in (fp.GetFields() if fp else []):
+            if not f.IsReference() and f.GetText() == text and f.GetLayer() in (pcbnew.F_SilkS, pcbnew.B_SilkS):
+                back = f.GetLayer() == pcbnew.B_SilkS
+                f.SetLayer(pcbnew.B_Fab if back else pcbnew.F_Fab)
+                n["hidden"] += 1
+    for key in sorted(k for k in plan if k.startswith("@gfx:")):              # footprint artwork over a pad / off the board goes to the fab layer
+        fp = b.FindFootprintByReference(key[len("@gfx:"):])
+        gl = list(fp.GraphicalItems()) if fp else []
+        for i in plan[key].get("items", []):
+            if i < len(gl) and gl[i].GetLayer() in (pcbnew.F_SilkS, pcbnew.B_SilkS):
+                gl[i].SetLayer(pcbnew.B_Fab if gl[i].GetLayer() == pcbnew.B_SilkS else pcbnew.F_Fab)
+                n["hidden"] += 1
     for ref, p in sorted((k, v) for k, v in plan.items() if not k.startswith("@")):
         fp = b.FindFootprintByReference(ref)
         if fp is None:
