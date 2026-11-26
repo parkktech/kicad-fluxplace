@@ -1727,6 +1727,40 @@ def _link_lib(workdir, board):
     return link
 
 
+def _exec_stage(c, n, name, board, later=()):
+    """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
+    commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
+    from . import gaps as GP
+    gd = c.dir(n, "gate")
+    gk = GP.gate_kinds(c.cons, name)
+    best_g = os.path.join(gd, "best.kicad_pcb")
+    if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
+        rp = os.path.join(gd, "resume.kicad_pcb")
+        for ext in ("", ".kicad_pro", ".kicad_dru"):
+            if os.path.exists(best_g + ext):
+                shutil.copy2(best_g + ext, rp + ext)
+        res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
+    else:
+        if gk and os.path.isdir(gd) and os.listdir(gd):
+            # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
+            os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
+            gd = c.dir(n, "gate")
+        from . import liveview as LV
+        with LV.watching(name):                            # N12: a heartbeat line every few seconds while the stage works
+            res = FUNCS[name](c, n, board)
+        res.setdefault("verdict", "pass")
+        if res["verdict"] in ("pass", "warn"):
+            res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
+    res.setdefault("verdict", "pass")
+    res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
+    if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
+        g = _gate_check(c, n, name, res.get("board") or board, gk, src=board, later=later)
+        res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
+        if g["verdict"] == "packets":
+            res["gate_packets"] = True
+    return res
+
+
 def run(a):
     """Execute the stage range. -> exit code (0 ok, 1 stopped on fail/blocked). Emits the event stream."""
     work = os.path.abspath(a.workdir)
@@ -1872,33 +1906,7 @@ def _run(a):
         _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
         led.before(prev)
-        gd = c.dir(i + 1, "gate")
-        gk = GP_.gate_kinds(c.cons, name)
-        best_g = os.path.join(gd, "best.kicad_pcb")
-        if gk and _gate_reusable(gd, board):              # PHASE3I F2 + H1: packets answered for this input; not re-run
-            rp = os.path.join(gd, "resume.kicad_pcb")
-            for ext in ("", ".kicad_pro", ".kicad_dru"):
-                if os.path.exists(best_g + ext):
-                    shutil.copy2(best_g + ext, rp + ext)
-            res = {"verdict": "pass", "line": f"{name}: stage not re-run; gate re-checked on the gate's best board", "board": rp}
-        else:
-            if gk and os.path.isdir(gd) and os.listdir(gd):
-                # H1: a gate dir not written for this input is set aside (its ai/ answers are kept), never reused
-                os.rename(gd, gd + ".stale-" + _file_sha1(board)[:10])
-                gd = c.dir(i + 1, "gate")
-            from . import liveview as LV
-            with LV.watching(name):                            # N12: a heartbeat line every few seconds while the stage works
-                res = FUNCS[name](c, i + 1, board)
-            res.setdefault("verdict", "pass")
-            if res["verdict"] in ("pass", "warn"):
-                res = _commit_point(name, board, res)           # A3: only a stage that ran (a reused gate board was verified by close)
-        res.setdefault("verdict", "pass")
-        res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
-        if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
-            g = _gate_check(c, i + 1, name, res.get("board") or board, gk, src=board, later=STAGES_[i + 1:])
-            res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
-            if g["verdict"] == "packets":
-                res["gate_packets"] = True
+        res = _exec_stage(c, i + 1, name, board, STAGES_[i + 1:])
         led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict
         if res.get("board") and os.path.exists(res["board"]):
             _stage_link(work, name, res["board"])
