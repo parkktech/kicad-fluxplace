@@ -139,14 +139,17 @@ def render_block(tb):
     return "\n".join(rows)
 
 
-def plan_fill(board, cons=None, spec=None, date=None):
-    """-> (new field dict, notes, missing) ; `missing` lists what could not be filled from the records."""
+def plan_fill(board, cons=None, spec=None, date=None, overwrite=False):
+    """-> (new field dict, missing) ; `missing` lists what could not be filled from the records.
+    `overwrite`: a title / company the constraints name replaces the board's (the silk stage); fields they do not name stay."""
     cur = read(board)
     new = dict(cur)
     new["comments"] = dict(cur["comments"])
     missing = []
     name, _src = project_name(cons, spec)
-    if not cur["title"].strip():
+    if overwrite and name:
+        new["title"] = name
+    elif not cur["title"].strip():
         if name:
             new["title"] = name
         else:
@@ -159,7 +162,7 @@ def plan_fill(board, cons=None, spec=None, date=None):
         missing.append("revision")
     new["date"] = date or datetime.date.today().isoformat()
     co = company(cons)
-    if co and not cur["company"].strip():
+    if co and (overwrite or not cur["company"].strip()):
         new["company"] = co
     return new, missing
 
@@ -180,11 +183,11 @@ def write_block(text, tb):
     return text[:m.start()] + "\n" + blk + text[m.start():]
 
 
-def fill(board, out=None, cons=None, spec=None, date=None, session=None):
+def fill(board, out=None, cons=None, spec=None, date=None, session=None, overwrite=False):
     """Fill the title block of `board`, writing to `out` (default: in place). `session` is a
     questions.Session: a title the records do not name is ASKED (the facility's exit code 3, nothing
     written). -> {"before", "after", "missing", "path"}."""
-    new, missing = plan_fill(board, cons, spec, date)
+    new, missing = plan_fill(board, cons, spec, date, overwrite)
     if "title" in missing and session is not None:
         ch = session.ask(
             "title-block-name", "title-block",

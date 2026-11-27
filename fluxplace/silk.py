@@ -23,7 +23,7 @@ HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "silk_helper.p
 MARK = "@@SILK@@"
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
-LEVEL = {"SILK_VERSION_STALE": FAIL, "SILK_TITLE_MISSING": WARN, "SILK_TITLE_NO_ROOM": FAIL, "SILK_OFF_BOARD": FAIL, "SILK_OVER_PAD": FAIL, "SILK_OVER_HOLE": FAIL, "SILK_OVERLAP": WARN,
+LEVEL = {"SILK_VERSION_STALE": FAIL, "SILK_TITLE_MISSING": WARN, "SILK_TITLEBLOCK_STALE": WARN, "SILK_TITLE_NO_ROOM": FAIL, "SILK_OFF_BOARD": FAIL, "SILK_OVER_PAD": FAIL, "SILK_OVER_HOLE": FAIL, "SILK_OVERLAP": WARN,
          "SILK_UNDER_PART": WARN, "SILK_TOO_SMALL": WARN, "SILK_FAR_FROM_PART": WARN,
          "SILK_REF_HIDDEN": INFO, "SILK_MISSING_MARK": INFO}
 CODES = tuple(LEVEL)
@@ -562,6 +562,24 @@ def _check_title(sc, cfg, side, out):
                 out.append(f)
 
 
+def _check_titleblock(sc, cfg, out):
+    """The KiCad title-block revision must equal the resolved board version (the block itself is never the source)."""
+    ver = cfg.get("_version")
+    if not ver or ver[1] == "board title-block revision":
+        return
+    from . import titleblock as TB
+    have = (sc.get("title_rev") or "").strip()
+    if TB._parse_rev(have) != ver[0]:
+        out.append(_fnd("SILK_TITLEBLOCK_STALE", f"title-block revision {have!r} differs from the board version "
+                        f"{_vshow(ver[0])} (from {ver[1]}); the silk stage fills it", ["TITLE"]))
+
+
+def fill_titleblock(out, cons=None, spec=None, date=None):
+    """Silk stage: write revision / title / company / date named by the constraints into the title block of `out`."""
+    from . import titleblock as TB
+    return TB.fill(out, None, cons, spec, date=date, overwrite=True)
+
+
 # ------------------------------------------------------------------ check
 def _txt_label(t):
     if t["kind"] == "ref":
@@ -676,6 +694,7 @@ def check(sc, cfg, side="both"):
             out.append(_fnd("SILK_MISSING_MARK", f"{ref} ({'/'.join(sorted(cls & {'polar', 'ic'}))}) has no silkscreen "
                             f"graphics, so no pin-1/polarity mark", [ref]))
     _check_title(sc, cfg, side, out)
+    _check_titleblock(sc, cfg, out)
     for f in out:
         if f.get("tid") is not None and sc["texts"][f["tid"]].get("title") and "TITLE" not in f["refs"]:
             f["refs"] = sorted(set(f["refs"]) | {"TITLE"})
@@ -1204,6 +1223,14 @@ def apply_guarded(board, out, sc, cfg, before, res, side="both", py=None):
     return after + res.get("findings", []), reverted
 
 
+def settle_titleblock(out, cons, spec, findings):
+    """Fill the title block of the written board when it is stale; -> findings without the stale-title-block one."""
+    if any(f["code"] == "SILK_TITLEBLOCK_STALE" for f in findings):
+        fill_titleblock(out, cons, spec)
+        return [f for f in findings if f["code"] != "SILK_TITLEBLOCK_STALE"]
+    return findings
+
+
 def unfixable_graphics(findings):
     """FAIL findings on footprint artwork (the fit cannot touch these): [(ref, code)]."""
     return sorted({(f["msg"].split()[0], f["code"]) for f in findings if f["level"] == FAIL and " silk graphics " in f["msg"]})
@@ -1214,6 +1241,7 @@ def fix_board(board, out, cons=None, side="both", only=None, py=None, log=print,
     sc, cfg, before = run_check(board, cons, side, py, spec=spec, title=title)
     res = fit(sc, cfg, before, only=only, side=side, log=log)
     after, _ = apply_guarded(board, out, sc, cfg, before, res, side, py)
+    after = settle_titleblock(out, cons, spec, after)
     return before, after, res
 
 

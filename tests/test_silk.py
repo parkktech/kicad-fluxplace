@@ -391,3 +391,44 @@ def test_polarity_mark_off_the_board_is_kept_on_silk_and_reported_not_hidden(tmp
     assert f["marks"] and f["gfx"] and not set(f["marks"]) & set(f["gfx"])
     assert res["plan"]["@gfx:U9"]["items"] == f["gfx"]                       # only the outline stroke goes to Fab
     assert [x for x in a if x["code"] == "SILK_OFF_BOARD" and x["refs"] == ["U9"]]          # the mark stays and is still reported
+
+
+# ------------------------------------------------------------------ title block (w71)
+def _tbk(p):
+    from fluxplace import titleblock as TBK
+    return TBK.read(p)
+
+
+def test_silk_stage_fills_the_title_block_and_follows_the_version(tmp_path):
+    cons = {"project": {"version": "1.5.1", "name": "Demo Box"}, "silk": {"title": {"company": "Parkktech.com"}}}
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 3)), name="plain.kicad_pcb")
+    f = SK.run_check(p, cons)[2]
+    assert [x["level"] for x in f if x["code"] == "SILK_TITLEBLOCK_STALE"] == ["WARN"]
+    o1 = str(tmp_path / "o1.kicad_pcb")
+    _, after, _ = SK.fix_board(p, o1, cons=cons)
+    t = _tbk(o1)
+    assert (t["rev"], t["title"], t["company"]) == ("1.5.1", "Demo Box", "Parkktech.com") and len(t["date"]) == 10
+    assert not [x for x in SK.run_check(o1, cons)[2] if x["code"] == "SILK_TITLEBLOCK_STALE"]
+    assert not [x for x in after if x["code"] == "SILK_TITLEBLOCK_STALE"]
+    cons2 = {**cons, "project": {**cons["project"], "version": "1.5.2"}}          # next stage: only the version moved
+    assert [x["code"] for x in SK.run_check(o1, cons2)[2] if x["code"] == "SILK_TITLEBLOCK_STALE"]
+    o2 = str(tmp_path / "o2.kicad_pcb")
+    SK.fix_board(o1, o2, cons=cons2)
+    assert _tbk(o2)["rev"] == "1.5.2"
+
+
+def test_silk_stage_keeps_title_block_fields_the_constraints_do_not_name(tmp_path):
+    from fluxplace import titleblock as TBK
+    p = tb(tmp_path, part("R1", 20, 15, ref_at=(0, 3)), name="plain.kicad_pcb")
+    txt = open(p).read()
+    open(p, "w").write(TBK.write_block(txt, {"title": "Old", "rev": "1.0", "company": "Acme", "date": "2020-01-01",
+                                             "comments": {1: "keep me"}}))
+    o = str(tmp_path / "o.kicad_pcb")
+    SK.fix_board(p, o, cons={"project": {"version": "2.0"}})
+    t = _tbk(o)
+    assert (t["rev"], t["title"], t["company"], t["comments"]) == ("2.0", "Old", "Acme", {1: "keep me"})
+
+
+def test_titleblock_stale_maps_to_the_silk_title_gap():
+    from fluxplace import gapmap as GM
+    assert GM.lookup("SILK_TITLEBLOCK_STALE") == ("silk-title", "silk")
