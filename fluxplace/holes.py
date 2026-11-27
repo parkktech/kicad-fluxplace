@@ -50,6 +50,33 @@ def required_mm(cons, board_path):
     return None, "no hole-to-hole minimum in the [fab] profile or the .kicad_pro"
 
 
+def board_holes(board):
+    """Every drilled hole on a live pcbnew board (vias, PTH and NPTH pads): [(x_mm, y_mm, drill_mm)]."""
+    out = []
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA":
+            c = t.GetPosition()
+            out.append((c.x / 1e6, c.y / 1e6, t.GetDrillValue() / 1e6))
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            d = p.GetDrillSize()
+            if max(d.x, d.y) > 0:
+                c = p.GetPosition()
+                out.append((c.x / 1e6, c.y / 1e6, max(d.x, d.y) / 1e6))
+    return out
+
+
+def hole_floor(board, floor=None):
+    """Hole-to-hole minimum (mm) a new drill must keep: the larger of the board's own rule and `floor` (the fab/route rule)."""
+    own = board.GetDesignSettings().m_HoleToHoleMin / 1e6
+    return max(own, float(floor or 0.0))
+
+
+def hole_clear(holes, x, y, drill, h2h):
+    """True when a drill of `drill` mm at (x, y) keeps edge-to-edge distance >= h2h to every hole in `holes`."""
+    return all(math.hypot(x - hx, y - hy) - (hd + drill) / 2 >= h2h - 1e-6 for hx, hy, hd in holes)
+
+
 def _file_pad_holes(path):
     """Every drilled pad in the board file (PTH and NPTH): dicts with ref, pad, x, y, drill_mm."""
     root = BF.parse(open(path, errors="replace").read())

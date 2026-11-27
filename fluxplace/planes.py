@@ -69,9 +69,12 @@ def pour(board, netname="GND", layers=None, clearance=0.25, min_thickness=0.2,
 
 
 def stitch(board, netname="GND", pitch=3.0, via_d=0.6, via_drill=0.3,
-           keep=0.55, edge_in=1.0):
+           keep=0.55, edge_in=1.0, hole_to_hole=None):
     """Collision-safe stitching via grid tying the surface pours to the inner
-    planes. Avoids every non-plane pad and track with `keep` mm margin."""
+    planes. Avoids every non-plane pad and track with `keep` mm margin, and keeps
+    the hole-to-hole minimum (board rule, raised to `hole_to_hole`) to every drilled hole, NPTH included."""
+    from . import holes as H
+    holes, h2h, drill_mm = H.board_holes(board), H.hole_floor(board, hole_to_hole), via_drill
     net = board.FindNet(netname)
     if net is None:
         return 0
@@ -113,7 +116,8 @@ def stitch(board, netname="GND", pitch=3.0, via_d=0.6, via_drill=0.3,
     while x < bb.GetRight() - E:
         y = bb.GetY() + E
         while y < bb.GetBottom() - E:
-            if clear(int(x), int(y)):
+            if clear(int(x), int(y)) and H.hole_clear(holes, x / 1e6, y / 1e6, drill_mm, h2h):
+                holes.append((x / 1e6, y / 1e6, drill_mm))
                 v = pcbnew.PCB_VIA(board)
                 v.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
                 v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
@@ -135,7 +139,9 @@ def via_stub_ends(board, netnames=("GND",), via_d=0.6, via_drill=0.3,
     Drop a through-via at every DANGLING plane-net track endpoint — an
     endpoint not already near a same-net via or pad — wherever it clears
     other-net copper. Redundant plane vias are harmless; missing ones are
-    open circuits. Returns vias placed."""
+    open circuits. Returns vias placed. New vias keep the hole-to-hole minimum to every drilled hole."""
+    from . import holes as H
+    holes, h2h = H.board_holes(board), H.hole_floor(board)
     placed = 0
     K = _mm(keep)
     for netname in netnames:
@@ -191,8 +197,9 @@ def via_stub_ends(board, netnames=("GND",), via_d=0.6, via_drill=0.3,
                 if any((end.x - ox) ** 2 + (end.y - oy) ** 2 < r * r
                        for ox, oy, r in obst):
                     continue
-                if _seg_hit(end.x, end.y):
+                if _seg_hit(end.x, end.y) or not H.hole_clear(holes, end.x / 1e6, end.y / 1e6, via_drill, h2h):
                     continue
+                holes.append((end.x / 1e6, end.y / 1e6, via_drill))
                 v = pcbnew.PCB_VIA(board)
                 v.SetPosition(pcbnew.VECTOR2I(end.x, end.y))
                 v.SetWidth(_mm(via_d)); v.SetDrill(_mm(via_drill))
