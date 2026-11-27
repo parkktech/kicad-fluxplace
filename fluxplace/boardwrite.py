@@ -226,6 +226,7 @@ def carry_copper(text, moves_by_ref, pieces):
 # commit()/verify() refuse a candidate that changes protected copper (PROTECTED_CHANGED), adds duplicate copper or colliding item ids; a
 # legitimate re-lay names the nets in `release` (logged to attempts.jsonl).  The manifest stores the sha of the board it describes: a
 # board edited outside the flow is MANIFEST_STALE (refused with the per-net item diff, old manifest kept; re-seeded only when `versions accept` recorded this file's sha).
+import collections
 import hashlib
 import json
 import os
@@ -486,22 +487,13 @@ def changed(board, manifest, release=(), allow=None):
     bad = []
     for n in names:
         e = manifest["nets"][n]
-        have = now.get(n, [])
-        hv, need = {}, {}
-        for x in have:
-            hv[x] = hv.get(x, 0) + 1
-        for x in e["items"]:
-            need[x] = need.get(x, 0) + 1
-        ok_rm, ok_add = {}, {}
-        for x in (allow.get(n) or {}).get("remove", []):
-            ok_rm[x] = ok_rm.get(x, 0) + 1
-        for x in (allow.get(n) or {}).get("add", []):
-            ok_add[x] = ok_add.get(x, 0) + 1
-        missing = {x: c - hv.get(x, 0) for x, c in need.items() if hv.get(x, 0) < c}
-        extra = {x: c - need.get(x, 0) for x, c in hv.items() if need.get(x, 0) < c}
-        if any(c > ok_rm.get(x, 0) for x, c in missing.items()):
+        hv, need = collections.Counter(now.get(n, [])), collections.Counter(e["items"])
+        ok = allow.get(n) or {}
+        ok_rm, ok_add = collections.Counter(ok.get("remove", [])), collections.Counter(ok.get("add", []))
+        missing, extra = need - hv, hv - need
+        if any(c > ok_rm[x] for x, c in missing.items()):
             bad.append(n)
-        elif e["why"] != "locked" and any(c > ok_add.get(x, 0) for x, c in extra.items()):
+        elif e["why"] != "locked" and any(c > ok_add[x] for x, c in extra.items()):
             bad.append(n)
     return sorted(bad)
 

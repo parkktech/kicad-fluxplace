@@ -4,9 +4,9 @@ T2 (B8): the stage ends with a guarded clean pass (`clean`): zero-length segment
 segments / vias are removed category by category, each kept only when the DRC key multiset (opens per net) does not get worse;
 the ends KiCad flags "track not centred on via" are then moved onto the via centre (`centre`, snapiter fallbacks, same guard).
 
-T1a: frame only. F0 base record (HARD rows that have a measure now), the corner / bend / junction measures of
-tfmeasure, the score, events, and finish.json. No pass edits copper yet: F8 = F0 again and the output board is a byte
-copy of the input. Disabled ([finish] enabled not true): the stage is a no-op and writes nothing.
+T1a: F0 base record (HARD rows that have a measure now), the corner / bend / junction measures of tfmeasure, the score,
+events, and finish.json. F8 is measured afresh when T2 changed copper, else F8 = F0 again. Disabled ([finish] enabled not
+true): the stage is a no-op and writes nothing.
 """
 import collections
 import json
@@ -229,14 +229,11 @@ def authorize(base, cand, clean_rows=()):
         rem = left
         vias = [r for _h, r in A.get(net, []) + C.get(net, []) if r[0] == "via"]
 
-        def inside(p, via=None):
-            for v in ([via] if via else vias):
-                if math.hypot(p[0] - v[1][0], p[1] - v[1][1]) <= v[2] / 2 + 1e-3:
-                    return True
-            return False
+        def in_via(p, v):
+            return math.hypot(p[0] - v[1][0], p[1] - v[1][1]) <= v[2] / 2 + 1e-3
 
         def same_via(p, q):
-            return any(math.hypot(p[0] - v[1][0], p[1] - v[1][1]) <= v[2] / 2 + 1e-3 and math.hypot(q[0] - v[1][0], q[1] - v[1][1]) <= v[2] / 2 + 1e-3 for v in vias)
+            return any(in_via(p, v) and in_via(q, v) for v in vias)
 
         # tracks inside one via's copper vanish (both ends on the centre)
         left = []
@@ -252,7 +249,7 @@ def authorize(base, cand, clean_rows=()):
         for h, r in rem:
             hit = None
             if r[0] != "via":
-                for i, (h2, r2) in enumerate(add_left):
+                for i, (_h2, r2) in enumerate(add_left):
                     if r2[0] == r[0] and r2[1] == r[1] and r2[3:] == r[3:]:
                         shared = set(r[2]) & set(r2[2])
                         if len(shared) == 1:
@@ -261,8 +258,8 @@ def authorize(base, cand, clean_rows=()):
                             if same_via(p, q):
                                 hit = i
                                 break
-            elif True:                                  # a via moved by at most its radius onto a same-net track end of the candidate
-                for i, (h2, r2) in enumerate(add_left):
+            else:                                       # a via moved by at most its radius onto a same-net track end of the candidate
+                for i, (_h2, r2) in enumerate(add_left):
                     if r2[0] == "via" and r2[2:] == r[2:] and math.hypot(r2[1][0] - r[1][0], r2[1][1] - r[1][1]) <= r[2] / 2 + 1e-3 and any(
                             r3[0] != "via" and r2[1] in r3[2] for _h3, r3 in C.get(net, [])):
                         hit = i
@@ -488,7 +485,6 @@ def stage(c, n, board):
     rows0, nm = practice_rows(rec0, cls, rules)
     sc0 = TM.class_scores(rows0, rules)
     _emit_criteria("F0", rec0, rows0, sc0)
-    clean_rec, centre_rec = {"removed": {}, "refused": {}}, {"before": 0, "after": 0, "moves": 0}
     cleaned = os.path.join(d, "clean.kicad_pcb")
     out = os.path.join(d, "board.kicad_pcb")
     events.emit("progress", STAGE, phase="T2 clean", note="guarded pass")

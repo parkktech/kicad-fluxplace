@@ -635,21 +635,22 @@ def check(sc, cfg, side="both"):
             own = gobj["owner"]
             if side != "both" and gobj["side"] != side[0].upper():
                 continue
+            bad = bad_mark if gobj.get("mark") else bad_gi
             for poly in gobj["polys"]:
                 bb = _aabb(poly)
                 q = [[bb[0], bb[1]], [bb[2], bb[1]], [bb[2], bb[3]], [bb[0], bb[3]]]
                 # off board: the polygon's own vertices (an AABB would flag every diagonal inside a corner cut)
                 if lay.rings and any(lay.off_board(rect(p[0], p[1], 0.001, 0.001), cfg["edge_clearance_mm"]) for p in poly[::max(1, len(poly) // 8)]):
                     seen.setdefault((own, "SILK_OFF_BOARD"), set()).add(own)
-                    (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OFF_BOARD"), set()).add(gobj.get("gi"))
+                    bad.setdefault((own, "SILK_OFF_BOARD"), set()).add(gobj.get("gi"))
                 for _, p in lay.pads[gobj["side"]].query(bb):
                     if p["owner"] != own and _poly_poly(poly, p["poly"]):
                         seen.setdefault((own, "SILK_OVER_PAD"), set()).add(f"{p['owner']}.{p['num']}")
-                        (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OVER_PAD"), set()).add(gobj.get("gi"))
+                        bad.setdefault((own, "SILK_OVER_PAD"), set()).add(gobj.get("gi"))
                 for _, h in lay.holes[gobj["side"]].query(bb):
                     if h["owner"] != own and _poly_poly(poly, h["poly"]):
                         seen.setdefault((own, "SILK_OVER_HOLE"), set()).add(h["owner"] or h["kind"])
-                        (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OVER_HOLE"), set()).add(gobj.get("gi"))
+                        bad.setdefault((own, "SILK_OVER_HOLE"), set()).add(gobj.get("gi"))
         for (own, code), who in sorted(seen.items()):
             what = {"SILK_OFF_BOARD": "outside the board or too close to Edge.Cuts",
                     "SILK_OVER_PAD": "over pad " + ", ".join(sorted(who)[:3]),
@@ -1127,7 +1128,7 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, titl
         else:
             kept.append(t["owner"])
             lay.add_text(t)
-    for i, key in fields.items():
+    for key in fields.values():
         plan[key] = {"hide": True}
         hidden.append(key)
     for f in findings:                                     # B8: footprint artwork over a pad / off the board: the offending shapes go to Fab
