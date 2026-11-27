@@ -39,7 +39,7 @@ def test_parse_recorded_spice_output_skips_passes():
     raw = HP.parse_spice(_j("spice-sample.json"))
     assert {r["code"] for r in raw} == {"SPICE_CRYSTAL_CIRCUIT", "SPICE_LC_FILTER"}
     assert all(r["severity"] == "warning" for r in raw)
-    assert any("Y300" in r["refs"] or r["refs"] for r in raw)
+    assert any(r["refs"] for r in raw)
 
 
 def test_no_happy_table_means_not_analysed():

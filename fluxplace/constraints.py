@@ -116,8 +116,8 @@ Width rule: conservative 1oz external copper, ~0.5 mm per amp with a 0.3 mm
 floor — wide enough for a 10C rise at the stated current, narrow enough not to
 eat the board. The engineer can always state width_mm directly instead.
 """
-import re
 import os
+import re
 import tomllib
 
 

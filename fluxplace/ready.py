@@ -277,9 +277,9 @@ def spice_lines(board, cons, detail):
         return [_line("spice", UNCHECKED, f"SPICE subcircuits NOT CHECKED: {r['reason']}")]
     fs = HP.as_findings(r["findings"], cons)
     detail["spice"] = fs
-    nf = sum(f["level"] == FAIL for f in fs)
     if not fs:
         return [_line("spice", PASS, "SPICE subcircuits simulated: no warnings")]
+    nf = sum(f["level"] == FAIL for f in fs)
     return [_line("spice", FAIL if nf else WARN, f"{len(fs)} SPICE finding(s) ({', '.join(sorted({f['code'] for f in fs}))}), {nf} promoted to FAIL; listed in .ready.json",
                   [f"{f['code']} {f['msg']}" for f in fs[:6]] if nf else [])]
 

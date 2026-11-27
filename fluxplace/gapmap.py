@@ -131,11 +131,6 @@ _NOT_REVIEW = ("gapmap.py", "planroute.py", "globalroute.py", "batchroute.py", "
 _CODE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$")
 
 
-def _happy_codes():
-    from . import happy
-    return happy.codes()
-
-
 def lookup(code):
     """(kind | None, owner) of a code: the exact row, else the longest family prefix; None when unmapped."""
     if code in _X:
@@ -203,7 +198,8 @@ def fail_codes(pkg_dir=None):
                 for k, v in zip(n.value.keys, n.value.values):                  # silk.LEVEL = {"CODE": FAIL, ...}
                     if isinstance(k, ast.Constant) and _is_fail(v) and _CODE.match(str(k.value)):
                         res.setdefault(k.value, set()).add(mod)
-    for c in EXTRA_FAIL + _happy_codes():            # B15: the adapter's codes are built at run time and promotable to FAIL
+    from . import happy
+    for c in EXTRA_FAIL + happy.codes():            # B15: the adapter's codes are built at run time and promotable to FAIL
         res.setdefault(c, set()).add("(dynamic)")
     return {c: sorted(m) for c, m in sorted(res.items())}
 

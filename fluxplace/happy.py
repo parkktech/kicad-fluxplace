@@ -97,7 +97,7 @@ _memo = {}
 
 
 def _sig(*paths):
-    return tuple((p, os.stat(p).st_mtime_ns, os.stat(p).st_size) for p in paths if p)
+    return tuple((p, st.st_mtime_ns, st.st_size) for p in paths if p for st in (os.stat(p),))
 
 
 def _analyze(sk, sch, board, work, timeout):
@@ -122,10 +122,8 @@ def parse_emc(doc):
     """analyze_emc.py JSON -> [{code, severity, msg, refs, rule}]; INFO rows are kept (severity 'info') for the report, not dropped."""
     out = []
     for f in (doc or {}).get("findings") or []:
-        if f.get("suppressed"):
-            continue
         rule = str(f.get("rule_id") or "")
-        if not rule:
+        if f.get("suppressed") or not rule:
             continue
         out.append({"code": "EMC_" + rule.replace("-", "_"), "rule": rule, "severity": str(f.get("severity") or "info").lower(),
                     "msg": f"{rule} {f.get('title') or f.get('summary') or ''}: {f.get('description') or ''}".strip()[:300],
@@ -163,35 +161,29 @@ def as_findings(raw, cons):
              "nets": r["nets"], "severity": r["severity"], "tool": "kicad-happy"} for r in raw if r["severity"] != "info"]
 
 
-def _guard(cons, board, need_board, need_sim):
-    """(settings, skills dir, schematic, None) or (None, None, None, UNKNOWN result): the preconditions every run shares."""
+def _go(kind, board, cons, need_board, need_sim, script, extra, parse):
+    """Shared run: preconditions (each miss is UNKNOWN), memo by input stamps, analyze, run `script`, parse its JSON."""
     cfg = settings(cons)
     if cfg is None:
-        return None, None, None, _unknown("no [happy] table in the constraints")
+        return _unknown("no [happy] table in the constraints")
     sk = skills_dir(cfg)
     if not sk:
-        return None, None, None, _unknown("kicad-happy plugin not found (set [happy] plugin or $KICAD_HAPPY_SKILLS)")
+        return _unknown("kicad-happy plugin not found (set [happy] plugin or $KICAD_HAPPY_SKILLS)")
     if need_board and not (board and os.path.isfile(board)):
-        return None, None, None, _unknown("no board file")
+        return _unknown("no board file")
     sch = find_schematic(board, cons)
     if not sch:
-        return None, None, None, _unknown("schematic not found (set [happy] schematic)")
+        return _unknown("schematic not found (set [happy] schematic)")
     if need_sim and not simulator():
-        return None, None, None, _unknown("no SPICE simulator (ngspice, LTspice or Xyce) installed")
-    return cfg, sk, sch, None
-
-
-def _go(kind, board, cons, need_board, need_sim, script, extra, parse):
-    cfg, sk, sch, bad = _guard(cons, board, need_board, need_sim)
-    if bad:
-        return bad
-    key = (kind,) + _sig(sch, board if need_board else None)
+        return _unknown("no SPICE simulator (ngspice, LTspice or Xyce) installed")
+    pcb = board if need_board else None
+    key = (kind,) + _sig(sch, pcb)
     if key in _memo:
         return _memo[key]
     timeout = float(cfg.get("timeout_s", 300))
     work = tempfile.mkdtemp(prefix="fluxplace-happy-")
     try:
-        sj, pj, err = _analyze(sk, sch, board if need_board else None, work, timeout)
+        sj, pj, err = _analyze(sk, sch, pcb, work, timeout)
         if err:
             return _unknown(err)
         out = os.path.join(work, kind + ".json")
