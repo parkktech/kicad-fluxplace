@@ -33,6 +33,7 @@ import sys
 import datetime
 import fnmatch
 
+from fluxplace import drcguard as DG
 from fluxplace import progress as PG
 
 REG_DEFAULT = os.path.join("docs", "resume", "boards.json")
@@ -137,8 +138,21 @@ def copper_fingerprint(path):
     return hashlib.sha1(json.dumps(sorted(repr(r) for r in rows)).encode()).hexdigest()
 
 
-def measure(board):
-    """Error-level DRC of a temp copy (zones refilled): unconnected, shorts, errors, ... (progress.measure)."""
+def measure(board, base_pro=None):
+    """Error-level DRC of a temp copy (zones refilled): unconnected, shorts, errors, ... (progress.measure).
+    base_pro: the version's project (start.kicad_pro). When the board's own .kicad_pro has different DRC rules (the router rewrites
+    them) the board is measured under base_pro, so accept judges every board by the same rules."""
+    own = os.path.splitext(os.path.abspath(board))[0] + ".kicad_pro"
+    if base_pro and os.path.isfile(base_pro) and os.path.isfile(own):
+        drift = DG.rules_drift(own, base_pro)
+        if drift:
+            print("rules drift: %s differs from %s in %d DRC setting(s) (%s); measuring under the project rules"
+                  % (os.path.basename(own), os.path.basename(base_pro), len(drift), ", ".join(drift[:4])))
+            import tempfile
+            with tempfile.TemporaryDirectory(prefix="fxver-") as td:
+                shutil.copy(board, os.path.join(td, "b.kicad_pcb"))
+                shutil.copy(base_pro, os.path.join(td, "b.kicad_pro"))
+                return PG.measure(os.path.join(td, "b.kicad_pcb"))
     return PG.measure(board)
 
 
@@ -276,7 +290,7 @@ def cmd_accept(a):
             copper_fingerprint(b) == copper_fingerprint(os.path.join(ROOT, cur)):
         print("no change: %s has the same copper as CURRENT (%s)" % (rel(b), cur))
         sys.exit(4)
-    m = measure(b)
+    m = measure(b, os.path.join(ROOT, v, "start.kicad_pro"))
     islands = m.pop("islands", None)
     prev = e["history"][-1]["metrics"] if e.get("history") else None
     if prev and not a.allow_worse:

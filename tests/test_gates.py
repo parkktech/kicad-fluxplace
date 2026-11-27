@@ -179,3 +179,12 @@ def test_krt_extra_and_summary(tmp_path):
                        ' "pad_pairs_open": {"count": 4}}')
     assert "113 routed / 4 failed" in s and "open pad pairs 4" in s
     assert AD.krt_summary("") == ""
+
+
+def test_declared_unwired_and_wired_undeclared_name_ref_pin_and_net():
+    f = facts({"U13": part({"4": "IMU_INT1"}), "J10": part({"24": "OTHER", "25": "IMU_INT1"})})
+    out = {x["code"]: x for x in R.check_spec_nets(f, SPEC)}
+    assert "J10.24 (OTHER)" in out["SPEC_DECLARED_UNWIRED"]["msg"] and out["SPEC_DECLARED_UNWIRED"]["level"] == R.FAIL
+    assert "J10.25" in out["SPEC_WIRED_UNDECLARED"]["msg"]
+    f = facts({"U13": part({"4": "IMU_INT1"}), "J10": part({"24": ""})})
+    assert "J10.24 (NO NET)" in [x for x in R.check_spec_nets(f, SPEC) if x["code"] == "SPEC_DECLARED_UNWIRED"][0]["msg"]

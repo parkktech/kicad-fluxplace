@@ -206,6 +206,34 @@ def rules_sha(board):
     return h.hexdigest()
 
 
+_RULE_NC_KEYS = ("clearance", "track_width", "via_diameter", "via_drill", "diff_pair_gap", "diff_pair_width",
+                 "diff_pair_via_gap", "microvia_diameter", "microvia_drill")
+
+
+def _rule_view(pro):
+    """The DRC-relevant part of a .kicad_pro as {key: value}: board rules, severities, per-class geometry (keyed by class name,
+    so a reordered class list is no drift)."""
+    try:
+        d = json.load(open(pro))
+    except (OSError, ValueError):
+        return None
+    ds = (d.get("board") or {}).get("design_settings") or {}
+    v = {f"rules/{k}": x for k, x in (ds.get("rules") or {}).items()}
+    v.update({f"severity/{k}": x for k, x in (ds.get("rule_severities") or {}).items()})
+    for c in (d.get("net_settings") or {}).get("classes") or []:
+        v.update({f"class {c.get('name')}/{k}": c.get(k) for k in _RULE_NC_KEYS if k in c})
+    return v
+
+
+def rules_drift(pro_a, pro_b):
+    """Sorted keys whose DRC-relevant value differs between two .kicad_pro files ([] when equal or either is unreadable). The
+    router rewrites its output's .kicad_pro, so DRC under a routed board's own project can differ from the input's rules."""
+    a, b = _rule_view(pro_a), _rule_view(pro_b)
+    if a is None or b is None:
+        return []
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
 def measure(board, kicad_cli="kicad-cli"):
     """One DRC per board (cached on board sha + rules sha + kicad-cli; last 4 kept). `errors` excludes unconnected items.
     The record carries board_sha, rules_sha and status "exact" (a DRC that did not run raises; see measure_record)."""
