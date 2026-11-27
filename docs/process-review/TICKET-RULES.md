@@ -20,3 +20,4 @@
   - Measurement runs against mainline use a detached worktree pinned to a sha (`worktree add --detach`), never the live w16merge worktree (merges move its HEAD).
   - Reap: when your result is reported, no background process of yours remains (`ps -eo pid,args | grep <your scratch dir>`).
   - Conflicts: resolve hunk by hunk. Whole-file `--ours`/`--theirs` only after `git diff $(git merge-base A B) B -- FILE` shows the conflicting hunk is the other side's only change (ledger: w69 hook rename lost, session 7).
+  - Full suite: agents run targeted tests + their new tests only; the lead runs ONE full parallel suite per merge batch (session 7: several -n 8 suites at once drove load to 190 and timed every run out).
