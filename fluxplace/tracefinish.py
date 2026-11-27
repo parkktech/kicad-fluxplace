@@ -326,10 +326,11 @@ def _clean_worker(src, dst, cats, dangling=()):
             seen.add((v.GetNetCode(), h))
     if "dangling" in cats:
         want = set(dangling)
-        areas = [z for z in b.Zones() if z.GetIsRuleArea()]
+        areas = [z.Outline() for z in b.Zones() if z.GetIsRuleArea()]
         for t in tracks + vias:
-            if uid(t) in want and not (t.Type() == pcbnew.PCB_VIA_T and any(a.Outline().Contains(t.GetPosition()) for a in areas)):
-                kill(t, "dangling")                     # a via inside a rule area (thermal array / forbid window, B7) stays
+            in_area = t.Type() == pcbnew.PCB_VIA_T and any(a.Contains(t.GetPosition()) for a in areas)
+            if uid(t) in want and not in_area:          # a via inside a rule area (thermal array / forbid window, B7) stays
+                kill(t, "dangling")
     got["nets"] = sorted({t.GetNetname() for t in gone.values()})
     got["rows"] = rows
     for t in gone.values():
@@ -384,23 +385,25 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
         if not n or not os.path.exists(trial):
             return False
         _pro_copy(board, trial)
+        d_new = _drc(trial, kicad_cli=kicad_cli)
         if cascade:
-            seen = {u for v in _dangling_by_net(d_cur, "track_dangling").values() for u in v}
+            def dangling_tracks(d):
+                return {u for v in _dangling_by_net(d, "track_dangling").values() for u in v}
+            seen = dangling_tracks(d_cur)
+            nxt = trial + ".next"
             for _ in range(8):
-                d_t = _drc(trial, kicad_cli=kicad_cli)
-                new = [u for v in _dangling_by_net(d_t, "track_dangling").values() for u in v if u not in seen]
+                new = sorted(dangling_tracks(d_new) - seen)
                 if not new:
                     break
-                nxt = trial + ".next"
                 r2 = in_fresh_process("fluxplace.tracefinish", "_clean_worker", trial, nxt, [cat], new)
                 if not r2[cat] or not os.path.exists(nxt):
                     break
                 os.replace(nxt, trial)
                 _pro_copy(board, trial)
                 n += r2[cat]
-                r["nets"] = sorted(set(r["nets"]) | set(r2["nets"]))
-                r["rows"] = r["rows"] + r2["rows"]
-        d_new = _drc(trial, kicad_cli=kicad_cli)
+                r["nets"] += r2["nets"]
+                r["rows"] += r2["rows"]
+                d_new = _drc(trial, kicad_cli=kicad_cli)
         ok = _guard_ok(d_cur, d_new)
         if ok:
             res["removed"][cat] = res["removed"].get(cat, 0) + n
