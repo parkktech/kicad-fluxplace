@@ -2354,7 +2354,8 @@ def _cons_hash(path):
 
 
 def _repo_root():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from fluxplace import codefreeze
+    return codefreeze.root()
 
 
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----

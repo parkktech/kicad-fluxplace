@@ -2015,6 +2015,11 @@ def run(a):
     if getattr(a, "board", None):
         _link_lib(work, a.board)
     saved = {k: os.environ.get(k) for k in _EV_ENV}
+    from . import codefreeze as CF
+    pre = (os.environ.get("PYTHONPATH"), list(sys.path), os.environ.get(CF.ENV))
+    if not getattr(a, "status", False):
+        a.code = CF.freeze(work)                      # every child and lazy import of this run reads <work>/.code, not the checkout
+        print(f"pipeline: code {a.code['sha'][:12]}{' +dirty' if a.code['dirty'] else ''} frozen at {a.code['dir']}", flush=True)
     t0 = time.time()
     _ev_call(_ev_begin, a, work)
     rc = 1
@@ -2023,6 +2028,8 @@ def run(a):
         return rc
     finally:
         _ev_call(_ev_end, work, rc, t0, os.path.abspath(a.board) if getattr(a, "board", None) else None)
+        if pre[2] is None and getattr(a, "code", None):
+            CF.release(pre[0], pre[1])
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -2109,6 +2116,8 @@ def _run(a):
     sc = st.get("route_scope")
     if sc and a.board and os.path.abspath(a.board) != sc.get("input"):
         st.pop("route_scope")                       # a scope belongs to the run that made it: another BOARD argument is a normal whole-board run
+    if getattr(a, "code", None):
+        st["code"] = a.code
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
