@@ -477,7 +477,7 @@ def is_passive(ref, fp="", pins=None):
 def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
     """Findings [(level, code, ref, msg)] for a netlist spec dict.
     mpn_map: {ref: mpn} (the spec may also carry 'mpn' per component).
-    PINMAP_DOSSIER_MISMATCH (WARN): the part's component dossier (dossier.py) puts other pin names on a pad the pinmap names."""
+    PINMAP_DOSSIER_MISMATCH (WARN): the part's component dossier (dossier.py) has the pinmap's name on another pad, or disagrees on which pad is ground."""
     from . import dossier as DO
     out = []
     man = load_manifest(ds_dir) if ds_dir else {}
@@ -548,8 +548,8 @@ def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
             bad = DO.pinmap_mismatches(pinmap, dos) if dos else []
             if bad:
                 out.append(("WARN", "PINMAP_DOSSIER_MISMATCH", ref,
-                            f"{ref} {mpn}: the component dossier ({dos['file']}) names other pins on "
-                            + "; ".join(f"pad {pd}: spec {n}, datasheet {'/'.join(h[:3])}" for n, pd, h in bad[:6])))
+                            f"{ref} {mpn}: the component dossier ({dos['file']}) disagrees: "
+                            + "; ".join(f"pad {pd}: spec {n}, {why}" for n, pd, why in bad[:6])))
             ok, found, missing, detail = evidence(pinmap, sfile, pages,
                                                   pin_alias=c.get("pin_alias"), ds_dir=ds_dir)
             if ok is None:

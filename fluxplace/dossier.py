@@ -11,9 +11,10 @@ Contents (every fact carries `p`, the datasheet page it was read from; the file 
   decoupling[{pins[],value,distance_mm}] keepouts[] thermal{} rf[] crystal{} app_circuit[]
   unknown[]                                             every section the datasheet did not give (never guessed)
 
-Trust: the model is told to copy numbers as printed; `verify` keeps a fact only when its page exists and every number in it is on
+Trust (`evidence` "text"): the model is told to copy numbers as printed; `verify` keeps a fact only when its page exists and every number in it is on
 that page (pin names: the name is on the page), else the fact moves to `rejected` with the reason. Downstream (elec.load_facts,
-partdocs.spec_check) reads only verified facts, and a hand-entered parts-fact always wins over a dossier one.
+partdocs.spec_check) reads only verified facts, and a hand-entered parts-fact always wins over a dossier one. A drawing-only PDF
+with no OCR is read from its page pictures (`evidence` "vision", page range checked only): kept for the reader, never used downstream.
 The model call is `claude -p` (haiku by default; FLUXPLACE_DOSSIER_MODEL); FLUXPLACE_AI=0 or no `claude` CLI = offline: the dossier
 is reported missing (not cached, retried next run). Nothing here names a board, a reference or an MPN.
 """
@@ -23,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 VERSION = 1
@@ -65,6 +67,8 @@ Connectors: pins are contacts; contacts of one kind (signal / power) form a swap
 DATASHEET TEXT:
 {text}
 """
+VISION = """(This datasheet has no text layer. Its pages are pictures in the current directory: {pics}. Read every one with the Read tool;
+"p" is the page number given here. Copy what the drawings print; anything not legible is unknown.)"""
 
 
 # ------------------------------------------------------------------ cache
@@ -143,11 +147,13 @@ def _on_page(n, text):
     return any(re.search(r"(?<![\d.])" + re.escape(a) + r"(?!\d)", text) for a in alts)
 
 
-def _check(fact, pg):
-    """None when the fact stands on its page, else the reason it does not."""
+def _check(fact, pg, vision=False):
+    """None when the fact stands on its page, else the reason it does not. A page read from its picture (vision) has no text to check."""
     p = fact.get("p")
     if not isinstance(p, int) or not 1 <= p <= len(pg):
         return f"page {p!r} is not in the datasheet"
+    if vision:
+        return None
     text = _flat(pg[p - 1])
     for k, v in fact.items():
         if k == "p" or k in _TEXT_KEYS:
@@ -163,13 +169,13 @@ def _check(fact, pg):
     return None
 
 
-def verify(raw, pg):
+def verify(raw, pg, vision=False):
     """The model's dossier with every fact checked against its page: unverified facts move to `rejected`. -> dossier dict."""
     out = {"category": raw.get("category") or "unknown", "description": raw.get("description") or "", "rejected": []}
     unknown = {x for x in raw.get("unknown") or [] if isinstance(x, str)}
 
     def stands(s, f):
-        why = _check(f, pg)
+        why = _check(f, pg, vision)
         if why:
             out["rejected"].append({"section": s, "fact": f, "why": why})
         return not why
@@ -203,12 +209,13 @@ def online():
     return os.environ.get("FLUXPLACE_AI", "1") not in ("0", "off", "no") and shutil.which("claude") is not None
 
 
-def call_model(prompt, model=None, timeout=900):
-    """-> (reply text, cost USD). The local `claude -p` CLI, no tools, no project settings, run outside any project."""
+def call_model(prompt, model=None, timeout=900, tools="", cwd=None):
+    """-> (reply text, cost USD). The local `claude -p` CLI, no project settings, run outside any project; tools="" (text) or "Read"
+    (page pictures in `cwd`)."""
     cmd = ["claude", "-p", "--model", _model(model), "--output-format", "json",
-           "--tools", "", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+           "--tools", tools, "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
            "--system-prompt", "You extract datasheet facts into JSON. Output JSON only."]
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cache_dir())
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cwd or cache_dir())
     env = json.loads(r.stdout or "{}")
     if r.returncode or env.get("is_error"):
         raise RuntimeError((env.get("result") or r.stderr or "claude -p failed").strip()[:300])
@@ -232,18 +239,29 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False):
     if ask is None and not online():
         return None, "offline (FLUXPLACE_AI=0 or no claude CLI)", 0.0
     pg = pages(pdf)
-    if not any(t.strip() for t in pg):
-        return None, "no text (no text layer and OCR read nothing)", 0.0
-    sel = select(pg)
-    text = "\n".join(f"=== PAGE {n} ===\n{pg[n - 1]}" for n in sel)
+    vision = not any(t.strip() for t in pg)
     t0 = time.time()
-    try:
-        reply, cost = (ask or (lambda pr: call_model(pr, model)))(PROMPT.format(mpn=mpn, text=text))
-        raw = _json_of(reply)
-    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as e:
-        return None, f"model failed: {e}", 0.0
-    dos = verify(raw, pg)
+    with tempfile.TemporaryDirectory(dir=cache_dir(d)) as td:
+        if vision:                       # a drawing-only PDF and no OCR: the model reads the page pictures (facts: page range checked only)
+            from . import partcite as PC
+            n = min(PC.page_count(pdf) or 1, OCR_PAGES)
+            sel = [k for k in range(1, n + 1) if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
+            if not sel:
+                return None, "no text layer and the pages did not render", 0.0
+            pg = [""] * n
+            text = VISION.format(pics=", ".join(f"page-{k}.png (page {k})" for k in sel))
+        else:
+            sel = select(pg)
+            text = "\n".join(f"=== PAGE {n} ===\n{pg[n - 1]}" for n in sel)
+        try:
+            call = ask or (lambda pr: call_model(pr, model, tools="Read" if vision else "", cwd=td))
+            reply, cost = call(PROMPT.format(mpn=mpn, text=text))
+            raw = _json_of(reply)
+        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as e:
+            return None, f"model failed: {e}", 0.0
+    dos = verify(raw, pg, vision)
     dos.update(mpn=mpn, file=os.path.basename(pdf), sha256=sha, version=VERSION, pages_read=sel, n_pages=len(pg),
+               evidence="vision" if vision else "text",
                model=_model(model), cost_usd=round(cost, 5),
                seconds=round(time.time() - t0, 1), made=time.strftime("%Y-%m-%dT%H:%M:%S"))
     from . import sourcing as S
@@ -287,17 +305,19 @@ def _si(v, unit, want):
 
 def elec_facts(dos):
     """{key: {value, source}} in the elec fact-store shape, from a dossier's verified facts: supply range per supply pin, decoupling
-    distance per pin, connector contact rating. A key the dossier does not back is absent."""
+    distance per pin, connector contact rating. A key the dossier does not back is absent; a dossier read from pictures backs none."""
+    if dos.get("evidence") == "vision":
+        return {}
     def src(p):
         return f"{dos['file']}#p{p} (dossier)"
 
     out = {}
     lo, hi, pins, srcs = {}, {}, [], []
-    gnd = {p.get("name") for p in dos.get("pins") or [] if p.get("type") == "ground"}
+    kind = {p.get("name"): p.get("type") for p in dos.get("pins") or []}      # a range row may name a ground (VS = V+ - V-) or SW pin
     for s in dos.get("supplies") or []:
         mn, mx = _si(s.get("min"), s.get("unit"), "V"), _si(s.get("max"), s.get("unit"), "V")
         for pn in s.get("pins") or []:
-            if pn not in gnd and (mn is not None or mx is not None):      # a range "VS = V+ - V-" names the ground pin too
+            if kind.get(pn, "power_in") == "power_in" and (mn is not None or mx is not None):
                 pins.append(pn)
                 srcs.append(s["p"])
                 if mn is not None:
@@ -327,24 +347,41 @@ def elec_facts(dos):
 
 
 def pin_table(dos):
-    """{pad number: {normalized name, alternates}} of a dossier's verified pins."""
+    """{pad number: (names, ground)} of a dossier's verified pins: every printed spelling (a combined "EN/SYNC" is EN and SYNC too),
+    and whether the datasheet calls the pin ground."""
     from . import partdocs as PD
     out = {}
     for p in dos.get("pins") or []:
-        names = {PD._norm(p.get("name") or "")} | {PD._norm(a) for a in p.get("alt") or [] if isinstance(a, str)}
+        raw = [p.get("name") or ""] + [a for a in p.get("alt") or [] if isinstance(a, str)]
+        names = {PD._norm(x) for r in raw for x in [r, *re.split(r"[/,\s()]+", r)]} - {""}
         for n in p.get("num") or []:
-            out.setdefault(str(n), set()).update(x for x in names if x)
+            names_n, gnd = out.get(str(n), (set(), False))
+            out[str(n)] = (names_n | names, gnd or p.get("type") == "ground" or any(_GNDNAME.match(x) for x in names))
     return out
 
 
+_GNDNAME = re.compile(r"^(A|D|P|S)?(GND|VSS|VEE|EP|PAD|V-)\w*$", re.I)
+
+
 def pinmap_mismatches(pinmap, dos):
-    """[(spec name, pad, dossier names)] where the spec puts a name on a pad the dossier gives other names."""
+    """[(spec name, pad, why)] where the spec and the dossier disagree in a way a synonym cannot explain: the spec's name is printed on
+    another pad and not this one, or one side calls the pad ground and the other does not (the V1.4 ESD-array miss). Spelling
+    differences (FLT vs OC, VCC vs 3V3) are not findings: the page evidence check covers names."""
     from . import partdocs as PD
+    if dos.get("evidence") == "vision":
+        return []
     tab = pin_table(dos)
     bad = []
     for name, pad in (pinmap or {}).items():
+        al, exact = PD._aliases(name), {PD._norm(name), PD._norm(name.replace("_", ""))}
+        gname = bool(_GNDNAME.match(PD._norm(name)))
         for pd in (pad if isinstance(pad, list) else [pad]):
-            have = tab.get(str(pd))
-            if have and not (PD._aliases(name) & have):
-                bad.append((name, str(pd), sorted(have)))
+            here = tab.get(str(pd))
+            if not here or al & here[0] or (gname and here[1]):
+                continue
+            elsewhere = sorted(k for k, (nm, _) in tab.items() if exact & nm)       # exact spelling: VCC_IO is not VCC
+            if elsewhere and not any(n.isdigit() for n in here[0]):
+                bad.append((name, str(pd), f"datasheet has {name} on pad {'/'.join(elsewhere[:3])}"))
+            elif here[1] != gname and not here[0] <= {str(pd)}:
+                bad.append((name, str(pd), f"datasheet pad {pd} is {'ground' if here[1] else 'not ground'} ({'/'.join(sorted(here[0])[:2])})"))
     return bad
