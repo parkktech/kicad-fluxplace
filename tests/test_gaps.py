@@ -1417,3 +1417,36 @@ def test_krt_blockers_reads_the_summary(tmp_path):
     js = tmp_path / "s.json"
     json.dump({"blockers": [{"net": "A", "blocked_by": [{"net": "B"}, {"net": "C"}, {"net": "B"}]}, {"net": "D", "blocked_by": [{"net": "E"}]}]}, open(js, "w"))
     assert GP.krt_blockers(str(js), "A") == ["B", "C"] and GP.krt_blockers(str(js), "Z") == [] and GP.krt_blockers(str(tmp_path / "no"), "A") == []
+
+
+# ---- B11: per-rung timeout from constraints ----
+
+def test_rung_cap_slow_rung_fraction_of_close_budget():
+    assert GP._rung_cap({}, "pourisland", 7200) == 360                                  # RUNG_FRAC 0.05 of 120 min, under the 900 s cap
+    assert GP._rung_cap({}, "krt", 7200) == 900                                         # no fraction: the plain cap
+    assert GP._rung_cap({"flow": {"rung_frac": {"krt": 0.01}}}, "krt", 7200) == 72      # constraints set a fraction per rung
+    assert GP._rung_cap({"flow": {"rung_frac": {"pourisland": 0.5}}}, "pourisland", 7200) == 900   # never above rung_cap_min
+    assert GP._rung_cap({"flow": {"rung_cap_min": 5}}, "pourisland", 7200) == 300
+
+
+def test_rung_timeout_is_a_recorded_unknown_refusal_and_close_continues(monkeypatch, loop):
+    import subprocess
+    seen = []
+    real = GP._call_rung
+    monkeypatch.setattr(GP, "DISPATCH", dict(GP.DISPATCH, **{"open-free": ["pourisland", "patch"]}))
+    monkeypatch.setattr(GP._procs, "run", lambda cmd, **kw: (seen.append(kw["timeout"]), (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd, kw["timeout"])))[1])
+
+    def call(name, base, out, gaps, ctx):
+        if name == "pourisland":
+            return real(name, base, out, gaps, ctx)                                      # the real child-process path: times out
+        seen.append(name)
+        return {}                                                                        # the next rung runs
+    monkeypatch.setattr(GP, "_call_rung", call)
+    GP.close(loop["board"], loop["work"], budget_min=84, attempts=loop["attempts"], log=lambda m: None)
+    rows = [json.loads(x) for x in open(loop["attempts"])]
+    assert rows[0]["method"] == "pourisland" and rows[0]["result"] == "error" and "rung timeout" in rows[0]["why"]
+    assert any(r["method"] == "patch" for r in rows[1:])                                 # close went on to the next rung
+    assert seen[0] == 0.05 * 84 * 60 + 120                                               # child timeout: the rung's fraction, not the whole budget
+    recs = refusal_mod.load(refusal_mod.path(loop["work"]))
+    to = [r for r in recs if r["rung"] == "pourisland"]
+    assert to and to[0]["rules"][0]["status"] == "UNKNOWN" and to[0]["rules"][0]["rule"] == "rung" and "rung timeout" in to[0]["why"]

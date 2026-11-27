@@ -213,7 +213,7 @@ def _script_stage(monkeypatch, tmp_path, rounds, keys):
     monkeypatch.setattr(PTm, "judge", lambda a, b, outdir, P, cons=None, spec=None, log=None:
                         {"routed": "/routed/input", "blame": {"k": keys["input"]}, "source": "route_review", "secs": 0})
     monkeypatch.setattr(PTm, "class_key", lambda routed, blame, cons=None, spec=None: (0, 0, 0) + tuple(blame["k"]))
-    monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None: [{"id": "x", "kind": "nudge", "moves": {}}])
+    monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None, skip=(): [{"id": "x", "kind": "nudge", "moves": {}}])
     monkeypatch.setattr(PTm, "tier1", fake_tier1)
     monkeypatch.setattr(PTm, "gate_state", lambda B, cons, spec: {"collision": 0})
     monkeypatch.setattr(PTm.RD, "load", lambda p: _board())
@@ -470,3 +470,78 @@ def test_stage_budget_skips_a_round_that_does_not_fit(monkeypatch, tmp_path):
 
 def test_params_budget_default():
     assert PT.params({})["budget_min"] == 45.0 and PT.params({"placetour": {"budget_min": "10"}})["budget_min"] == 10.0
+
+
+def test_stage_stays_within_budget_min_judge_cap_and_ladder(monkeypatch, tmp_path):
+    """R113: the judge cap never exceeds what is left of budget_min, and the ghost ladder gets only the remainder (none when spent)."""
+    from fluxplace import placetour as PTm
+    keys = {"input": (9, 0, 0.0, 0, 0.0), "A": (8, 0, 0.0, 0, 0.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"]], keys)
+    now, caps, ladder, fake = {"t": 1000.0}, [], [], PTm.LA._run_jobs
+
+    def slow_jobs(jobs, P, timeout, entry="x"):
+        caps.append(timeout)
+        now["t"] += 100.0                                                             # one round of judging: 100 s of a 2-minute budget
+        return fake(jobs, P, timeout, entry)
+    monkeypatch.setattr(PTm.LA, "_run_jobs", slow_jobs)
+    monkeypatch.setattr(PTm.time, "time", lambda: now["t"])
+    monkeypatch.setattr(PTm, "class_key", lambda routed, blame, cons=None, spec=None: (1, 0, 0) + tuple(blame["k"]))   # a critical net stays open
+    monkeypatch.setattr(PTm, "_close_ghost", lambda a, cons, spec, best, d, P, *r, **k: ladder.append(P["ladder_budget_min"]) or (best, None))
+    c = _stage_ctx(tmp_path, {"max_rounds": 5, "no_gain_rounds": 9, "budget_min": 2.0, "ladder_budget_min": 15.0})
+    PTm.stage(c, 3, board)
+    assert caps and caps[0] <= 120.0                                                  # not judge_min*60+600
+    assert ladder == [] or ladder[0] <= (2.0 - 100 / 60) + 1e-6                       # 15 min ladder cut to the ~20 s left
+
+
+def test_relieve_generator_skipped_after_empty_rounds(monkeypatch, tmp_path):
+    """R122: after relieve_empty_rounds rounds with no relieve survivor the generator (3 plan_place runs a round) is not called."""
+    from fluxplace import placetour as PTm
+    keys = {"input": (9, 0, 0.0, 0, 0.0), "A": (8, 0, 0.0, 0, 0.0), "B": (7, 0, 0.0, 0, 0.0), "C": (6, 0, 0.0, 0, 0.0),
+            "D": (5, 0, 0.0, 0, 0.0)}
+    board = _script_stage(monkeypatch, tmp_path, [["A"], ["B"], ["C"], ["D"]], keys)
+    skips = []
+    monkeypatch.setattr(PTm, "candidates", lambda B, blame, cons, P, seed=0, spec=None, skip=():
+                        skips.append(tuple(skip)) or [{"id": "x", "kind": "nudge", "moves": {}}])
+    c = _stage_ctx(tmp_path, {"max_rounds": 4, "no_gain_rounds": 9, "relieve_empty_rounds": 2})
+    PTm.stage(c, 3, board)
+    assert skips == [(), (), ("relieve",), ("relieve",)]
+
+
+def test_candidates_skip_relieve_never_plans(monkeypatch):
+    called = []
+    monkeypatch.setattr(PT.PP, "plan_place", lambda *a, **k: called.append(1) or ({}, {}))
+    monkeypatch.setattr(PT, "_movable", lambda B, cons, P: ["R1"])
+    B = {"parts": {"R1": {"pos": (0, 0), "angle": 0, "pads": []}}, "pads": []}
+    blame = {"open": [{"net": "N", "refs": ["R1"]}], "costly": [], "hot": [], "turned": []}
+    PT.candidates(B, blame, {}, PT.params({}), skip=("relieve",))
+    assert not called
+    PT.candidates(B, blame, {}, PT.params({}))
+    assert len(called) == 3
+
+
+def test_lean_krt_reverse_order_only_when_forward_leaves_critical_open(monkeypatch, tmp_path):
+    """R124: a forward order that closes every critical net is the pick and the reverse KRT run is never started."""
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_lookahead import _lean_fixture, _pad
+    from fluxplace import lookahead as LAm, routeconn as RCm
+    pads = [_pad("A", 1), _pad("A", 2), _pad("B", 3), _pad("B", 4)]
+    a, src = _lean_fixture(monkeypatch, tmp_path, pads)
+    runs, still_open = [], {"fwd": {}, "rev": {}}
+
+    def fake_capped(cmd, d, outdir, tag, out, cap, env=None):
+        runs.append(tag)
+        open(out, "w").write(tag)
+        return True, 1.0
+    monkeypatch.setattr(LAm, "_run_capped", fake_capped)
+    monkeypatch.setattr(LAm, "critical_first", lambda copy, cons, spec, nets: ["A"])
+    monkeypatch.setattr(LAm, "contract_widths", lambda *x, **k: {})
+    monkeypatch.setattr(LAm, "_canonical_copy", lambda s_, d_, reverse=False: (open(d_, "w").write("x"), d_)[1])
+    monkeypatch.setattr(LAm.RD, "load", lambda path, **kw: {"pads": pads, "segs": [], "vias": [], "tag": open(path).read() if os.path.exists(path) else ""})
+    monkeypatch.setattr(RCm, "text_open", lambda B, **kw: still_open.get(B.get("tag", "").replace("krt-first-", ""), {}))
+    LAm.lean_krt(a, src, str(tmp_path / "g"), 3)
+    assert "krt-first-fwd" in runs and "krt-first-rev" not in runs
+    runs.clear()
+    still_open["fwd"] = {"A": 1}                                                      # forward leaves a critical net open: judge both orders
+    LAm.lean_krt(a, src, str(tmp_path / "g2"), 3)
+    assert "krt-first-fwd" in runs and "krt-first-rev" in runs

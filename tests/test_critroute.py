@@ -243,3 +243,26 @@ def test_scratch_names_do_not_grow_with_every_kept_path(tmp_path, monkeypatch):
     open(board, "w").write("b")
     CR.apply(board, str(tmp_path / "o.kicad_pcb"), None, None, {}, str(tmp_path / "a.jsonl"), crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}])
     assert len(names) == 30 and max(names) < 60
+
+
+def test_try_order_is_canonical_across_runs(tmp_path, monkeypatch):
+    """B11 / ledger 2026-11-25: kicad-cli lists the open connections in a different order per call; the tried-path list is the same."""
+    import random
+
+    def run(seed):
+        conns = [_conn("BT1_RF", i) for i in range(6)] + [_conn("XTAL_IN", 100 + i) for i in range(3)]
+        rnd, tried = random.Random(seed), []
+        monkeypatch.setattr(HR, "open_nets", lambda board, constraints=None, **kw: {"connections": rnd.sample(conns, len(conns))})
+        monkeypatch.setattr(HR, "_model", lambda board, cons=None, **kw: None)
+        monkeypatch.setattr(HR, "suggest", lambda board, net, conn=None, rec=None, **kw:
+                            tried.append((net, rec["a"]["x"], rec["b"]["x"])) or {"found": False, "reason": "no path"})
+        monkeypatch.setattr(gaps, "measure", lambda path, kicad_cli="kicad-cli": {"opens": 9, "shorts": 0})
+        monkeypatch.setattr(gaps, "signal_layers", lambda board: ["F.Cu", "B.Cu"])
+        board = str(tmp_path / f"b{seed}.kicad_pcb")
+        open(board, "w").write("base")
+        CR.apply(board, str(tmp_path / f"o{seed}.kicad_pcb"), None, None, {}, str(tmp_path / f"a{seed}.jsonl"),
+                 crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}, {"net": "XTAL_IN", "class": "clock", "reason": ""}])
+        return tried
+    r1, r2, r3 = run(1), run(2), run(3)
+    assert len(r1) == 9 and r1 == r2 == r3
+    assert r1[:6] == sorted(r1[:6], key=lambda t: t[1])                              # by endpoint coordinates within a net

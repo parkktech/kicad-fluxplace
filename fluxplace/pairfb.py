@@ -16,10 +16,13 @@ Every trial runs on a copy of the stage's board through `pairs.run` (which check
 audits the written board); a trial is kept only when it completes a pair that was not complete and every pair it ripped
 is complete again, so a step never leaves the board worse than it found it."""
 import copy
+import hashlib
+import json
 import math
 import os
 import re
 import shutil
+import time
 
 DEFAULT_UNCOUPLED_MM = 5.0        # 10 pitches of a 0.5 mm part: about the length one fan-out escape needs to leave a pad row
 STATES = ("a", "b(i)", "b(ii)", "b(iii)", "c")
@@ -182,20 +185,71 @@ def _take(rep, sub, state, only_rows=None):
     return n
 
 
+def _digest(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def pair_key(board_sha, cons_v, row, victims=()):
+    """B11 memo key of one pair's attempt: input geometry (board digest), constraints (the [pairlay] and [pairs] tables the trial
+    changes, minus the deadline stamp), the blocker set the last failure named, and the ripped pairs. Same key = same attempt."""
+    pl = {k: v for k, v in ((cons_v or {}).get("pairlay") or {}).items() if not k.startswith("_")}
+    c = json.dumps([pl, (cons_v or {}).get("pairs")], sort_keys=True, default=str)
+    return hashlib.sha1(json.dumps([board_sha, c, row["pair"], sorted(row.get("blockers") or []), sorted(map(list, victims))],
+                                   default=str).encode()).hexdigest()
+
+
+def trial_deadline(rep, P, now=None):
+    """B11: the epoch this trial may run to: an equal share of what is left of the stage budget over the ladder steps still planned
+    (time a quick or memoised step leaves unused flows to the later steps). None = no budget."""
+    dl = P.get("deadline")
+    if not dl:
+        return None
+    now = now or time.time()
+    fb = rep.setdefault("fallback_budget", {})
+    slots = max(1, fb.get("slots", 1))
+    fb["slots"] = max(1, slots - 1)
+    return min(dl, now + max(30.0, (dl - now) / slots))
+
+
 def _trial(rep, out, cons_v, spec, run_fn, tag, state, log, src=None, victims=(), cs_args=None, escape=None, ripped_nets=()):
-    """one trial on a copy of `out`; kept (moved onto `out`) when it completes a pending pair and every victim is complete again."""
+    """one trial on a copy of `out`; kept (moved onto `out`) when it completes a pending pair and every victim is complete again.
+    B11: a pair whose attempt key (input geometry, constraints, blocker set) was already tried and failed is not searched again; no
+    trial starts after the stage's time budget."""
     pend = pending(rep)
     if not pend:
         return 0
     d = os.path.dirname(out)
     srcb = src or out
+    dl_stage = ((cons_v or {}).get("pairlay") or {}).get("_deadline")
+    if dl_stage and time.time() > dl_stage:
+        log(f"pairs fallback {tag}: skipped (stage time budget reached)")
+        for r in pend:
+            r.setdefault("tried", []).append(f"{state}:budget")
+        return 0
+    sha = _digest(srcb)
+    memo = rep.setdefault("trial_memo", [])
+    keys = {tuple(r["pair"]): pair_key(sha, cons_v, r, victims) for r in pend}
+    fresh = [r for r in pend if keys[tuple(r["pair"])] not in memo]
+    if not fresh:
+        log(f"pairs fallback {tag}: skipped (same input, constraints and blocker set as an earlier trial)")
+        for r in pend:
+            r.setdefault("tried", []).append(f"{state}:memo")
+        rep.setdefault("memo_skips", []).append(tag)
+        return 0
+    if dl_stage:
+        cons_v = variant(cons_v, _deadline=trial_deadline(rep, {"deadline": dl_stage}))
     trial = os.path.join(d, f"fb-{tag}.kicad_pcb")
-    only = {n for r in pend for n in r["pair"]} | {n for v in victims for n in v}
+    only = {n for r in fresh for n in r["pair"]} | {n for v in victims for n in v}
     sub = run_fn(srcb, cons_v, spec, trial, only=only, fallback=False)
     got = {tuple(r["pair"]) for r in sub["pairs"] if r["status"] == "complete"}
-    new = [r for r in pend if tuple(r["pair"]) in got]
+    new = [r for r in fresh if tuple(r["pair"]) in got]
     ok = bool(new) and all(tuple(v) in got for v in victims)
-    log(f"pairs fallback {tag}: {len(new)} of {len(pend)} pending pair(s) completed" + (f", {len(victims)} ripped pair(s) laid again" if victims else "")
+    memo.extend(keys[tuple(r["pair"])] for r in fresh if tuple(r["pair"]) not in got)     # a pair that failed here fails the same way again
+    log(f"pairs fallback {tag}: {len(new)} of {len(fresh)} pending pair(s) completed" + (f", {len(victims)} ripped pair(s) laid again" if victims else "")
         + ("" if ok else " (trial discarded)"))
     for r in pend:                                              # what was tried, per pair
         r.setdefault("tried", []).append(f"{state}:{'ok' if ok and tuple(r['pair']) in got else 'no'}")
@@ -276,6 +330,7 @@ def ladder(rep, out, cons, spec, P, run_fn, cs_args=None, escape=None, log=lambd
     from . import routediag as RD, netclass as NC, pairaudit as PA
     t0 = __import__("time").time()
     steps = []
+    rep["fallback_budget"] = {"slots": 4 + min(len(pending(rep)), 3), "budget_s": P.get("budget_s"), "deadline": P.get("deadline")}   # B11: b(i) x2, b(ii) all + <= 3 per pair, b(iii)
     if pending(rep) and P.get("fallback", True):
         # b(i): another via / layer pattern
         k = 0

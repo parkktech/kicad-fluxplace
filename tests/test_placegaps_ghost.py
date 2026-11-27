@@ -337,12 +337,12 @@ def test_lean_krt_routes_critical_nets_first_then_the_rest_on_that_copper(monkey
     a = SimpleNamespace(constraints=None, spec=None, router_py="py", router_dir="/r", track=None, clearance=None)
     info = {}
     out = LA.lean_krt(a, str(board), str(tmp_path / "o"), 1.0, info=info)
-    assert sorted(t for t, _c in cmds[:2]) == ["krt-first-fwd", "krt-first-rev"] and cmds[2][0] == "krt" and out.endswith("krt-lean.kicad_pcb")
+    assert [t for t, _c in cmds] == ["krt-first-fwd", "krt"] and out.endswith("krt-lean.kicad_pcb")      # B11 / R124: fwd closed every critical net, no rev run
     nets = lambda c: c[c.index("--nets") + 1:c.index("--layers")]
-    assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[2][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
-    assert dict(cmds)["krt-first-fwd"][2].endswith("in-fwd.kicad_pcb") and cmds[2][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
+    assert nets(cmds[0][1]) == ["RFX", "P"] and nets(cmds[1][1]) == ["S"]                  # critical first, then the rest (GND is a plane)
+    assert dict(cmds)["krt-first-fwd"][2].endswith("in-fwd.kicad_pcb") and cmds[1][1][2].endswith("krt-first.kicad_pcb")   # the second pass starts from the first's copper
     assert envs["krt-first-fwd"] is None and envs["krt"]["KICAD_RIP_PREEXISTING"] == "0"                 # pass 2 may not rip pass 1
-    assert "--keep-input-copper" in cmds[2][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
+    assert "--keep-input-copper" in cmds[1][1] and info["complete"] and info["passes"] == 2 and info["first"] == ["RFX", "P"]
     assert info["first_pick"] == "fwd" and info["fragile"] == []
     cmds.clear()
     LA.lean_krt(a, str(board), str(tmp_path / "o2"), 1.0, only={"P"}, info=info)           # a diagnosis run stays one pass
