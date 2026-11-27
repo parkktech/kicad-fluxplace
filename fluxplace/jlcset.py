@@ -254,3 +254,45 @@ def emit(board, out, pos_csv, cons=None, prev_bom=None, check=None, log=print, r
     except Exception as e:
         log("FAIL jlcpcb set: %s: %s" % (type(e).__name__, e))
         return {"error": str(e), "files": sorted(os.listdir(jdir))}
+
+
+def check(out_dir, bom_rows, dnp_refs):
+    """P4 (packrules): problems with the JLC set in <out_dir>/jlcpcb (or out_dir itself). BOM and CPL must be present and parse; DNP refs
+    absent from both; every BOM line has an LCSC # or is listed in CONSIGNED.txt; CPL refs == BOM refs. bom_rows is the PCBWay BOM (unused)."""
+    d = os.path.join(out_dir, SECTION)
+    d = d if os.path.isdir(d) else out_dir
+    bom, cpl = os.path.join(d, "BOM-JLCPCB.csv"), os.path.join(d, "CPL-JLCPCB.csv")
+    if not (os.path.isfile(bom) and os.path.isfile(cpl)):
+        return ["JLCPCB set incomplete (BOM-JLCPCB.csv / CPL-JLCPCB.csv missing)"]
+    try:
+        with open(bom, newline="", encoding="utf-8-sig") as f:
+            brows = list(csv.DictReader(f))
+        with open(cpl, newline="", encoding="utf-8-sig") as f:
+            crows = list(csv.DictReader(f))
+        for r in brows:
+            r["Designator"], r["LCSC Part #"]
+        for r in crows:
+            r["Designator"]
+    except (KeyError, csv.Error, UnicodeDecodeError) as e:
+        return ["JLCPCB BOM/CPL do not parse (%s: %s)" % (type(e).__name__, e)]
+    probs = []
+    consigned = set()
+    cp = os.path.join(d, "CONSIGNED.txt")
+    if os.path.isfile(cp):
+        for ln in open(cp).read().split("\n\n")[0].splitlines()[1:]:
+            if ln.strip():
+                consigned.add(ln.split("\t")[0])
+    bom_refs = set()
+    for r in brows:
+        refs = [x.strip() for x in r["Designator"].split(",") if x.strip()]
+        bom_refs.update(refs)
+        if not r["LCSC Part #"].strip() and not set(refs) <= consigned:
+            probs.append("JLC BOM line %s has no LCSC # and no consigned reason" % ",".join(refs[:4]))
+    cpl_refs = {r["Designator"].strip() for r in crows}
+    for r in sorted((set(dnp_refs) & (bom_refs | cpl_refs)), key=_nkey):
+        probs.append("DNP %s is in the JLC %s" % (r, "BOM" if r in bom_refs else "CPL"))
+    for r in sorted(bom_refs - cpl_refs, key=_nkey):
+        probs.append("%s is in the JLC BOM but not the CPL" % r)
+    for r in sorted(cpl_refs - bom_refs, key=_nkey):
+        probs.append("%s is in the JLC CPL but not the BOM" % r)
+    return probs

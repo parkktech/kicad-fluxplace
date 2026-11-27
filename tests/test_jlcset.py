@@ -138,3 +138,23 @@ def test_offline_cpl_warns_with_refs(tmp_path):
     logs = []
     s = J.emit(board, str(out), pos, {}, None, None, log=logs.append, rotations=([], "offline"))
     assert s["uncorrected"] == ["J1", "Q1", "Q2"] and any("JLC_ROTATION_UNCORRECTED" in l and "Q1" in l for l in logs)
+
+
+def _jset(tmp_path, bom, cpl, consigned=""):
+    d = tmp_path / "jlcpcb"; d.mkdir(exist_ok=True)
+    (d / "BOM-JLCPCB.csv").write_text("Comment,Designator,Footprint,LCSC Part #\n" + bom)
+    (d / "CPL-JLCPCB.csv").write_text("Designator,Mid X,Mid Y,Layer,Rotation\n" + cpl)
+    (d / "CONSIGNED.txt").write_text("CONSIGNED: x\n" + consigned + "\nTHIN STOCK: y\n")
+    return str(tmp_path)
+
+
+def test_check_ok_and_problems(tmp_path):
+    from fluxplace import jlcset
+    cpl = "R1,1mm,1mm,Top,0\nU1,1mm,1mm,Top,0\n"
+    o = _jset(tmp_path, '10k,R1,0603,C25804\nIC,U1,QFN,\n', cpl, "U1\tmpn\twhy\n")
+    assert jlcset.check(o, [], []) == []
+    o = _jset(tmp_path, '10k,R1,0603,C25804\nIC,U1,QFN,\n', cpl + "R9,1mm,1mm,Top,0\n")
+    p = " | ".join(jlcset.check(o, [], ["R1"]))
+    assert "U1 has no LCSC" in p or "no LCSC # and no consigned" in p
+    assert "DNP R1" in p and "R9 is in the JLC CPL but not the BOM" in p
+    assert jlcset.check(str(tmp_path / "none"), [], [])[0].startswith("JLCPCB set incomplete")

@@ -177,6 +177,7 @@ def cmd_deliver(a):
         print("deliver: gerber check FAILED with [fab] gerber_check = fail; nothing delivered")
         raise SystemExit(1)
     fc_rep = _deliver_fabconform(a)
+    a._fc_rep = fc_rep
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -194,10 +195,19 @@ def cmd_deliver(a):
     from fluxplace import constraints as C
     inc = tuple(C.load(a.constraints).get("deliver", {}).get("include_formats", ()))
     if a.no_pcbway:
-        _deliver_xcheck(a, bom=(a.bom or [None])[0])
-        F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
+        from fluxplace import deliverver as DV, pcbway
+        vctx, boms = DV.start(a, list(a.bom or []), pcbway.board_facts(a.board) if a.board else {},
+                              log=lambda m: print(m, flush=True))
+        _deliver_xcheck(a, bom=(boms or [None])[0])
+        F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=boms,
                   log=lambda m: print(m, flush=True), include_formats=inc)
         _write_house_notes(fc_rep, a.out, a.name)
+        if vctx:
+            for k, v in DV.finish(vctx, a, findings, {}, pcbway.board_facts(a.board), kicad_cli=a.kicad_cli,
+                                  log=lambda m: print(m, flush=True)).items():
+                print(f"    version delivery {k}: {v}", flush=True)
+            if not vctx.get("ready"):
+                raise SystemExit("deliver: NOT-READY - packaging rules failed (docs/PACKAGING-RULES.md); see NOT-READY in the folder")
         return
 
     # PCBWay's assembly page takes FOUR separate uploads — gerbers, BOM,

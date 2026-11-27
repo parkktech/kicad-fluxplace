@@ -75,3 +75,21 @@ def test_gate_aborts_only_on_new_and_json_records_baseline(tmp_path, monkeypatch
     with pytest.raises(SystemExit):
         cli._review_gate(argparse.Namespace(board=str(board), baseline=str(base), json=None, no_review=False), stage="fab")
     cli._review_gate(argparse.Namespace(board=str(board), baseline=None, json=None, no_review=False), stage="review", hard=False)
+
+
+def test_baseline_check_new_fails_inherited_warns():
+    old = [F("PIN_ESCAPE_BLOCKED", "U5: 1 pin", ["U5"])]
+    new = [F("PIN_ESCAPE_BLOCKED", "U5: 1 pin", ["U5"]), F("PIN_ESCAPE_BLOCKED", "U6: 1 pin", ["U6"]),
+           F("X", "w", level="WARN")]
+    r = R.baseline_check("b", "p", new, {}, base_findings=old)
+    assert r["fail"] == ["PIN_ESCAPE_BLOCKED U6"] and r["warn"] == ["inherited PIN_ESCAPE_BLOCKED U5"]
+
+
+def test_interface_pair_check_grades(monkeypatch):
+    fs = [R._f(R.FAIL, "PAIR_SKEW", "a/b over"), R._f(R.WARN, "PAIR_SKEW_REGRADED", "c/d within limit [cite]"),
+          R._f(R.INFO, "PAIR_SKEW_OVER_TARGET", "e/f"), R._f(R.WARN, "PAIR_VIA_MISMATCH", "g")]
+    monkeypatch.setattr(R, "_pairs_from_audit", lambda f, c: fs)
+    r = R.interface_pair_check("b", {})
+    assert r["fail"] == ["PAIR_SKEW: a/b over"] and len(r["warn"]) == 2
+    monkeypatch.setattr(R, "_pairs_from_audit", lambda f, c: None)
+    assert R.interface_pair_check("b", {})["fail"]

@@ -9,7 +9,7 @@ the reason is listed in README-FIRST. P8 debt rows use the same list
 
 Hooks owned by other branches are looked up by name; while the function does
 not exist the rule line says NOT CHECKED, never PASS:
-  P1  fluxplace.tune.interface_pair_check(board, cons) -> {"fail": [str], "warn": [str]}
+  P1  fluxplace.review.interface_pair_check(board, cons) -> {"fail": [str], "warn": [str]}
   P2  fluxplace.review.baseline_check(board, prev_board, findings, cons) -> {"fail": [str], "warn": [str]}
   P4  fluxplace.jlcset.check(out_dir, bom_rows, dnp_refs) -> [problem str]
 """
@@ -72,7 +72,7 @@ def _hooked(rule, mod, fn, args, waivers):
 
 
 def p1(ctx, W):
-    return _hooked("P1", "tune", "interface_pair_check", (ctx["board"], ctx["cons"]), W)
+    return _hooked("P1", "review", "interface_pair_check", (ctx["board"], ctx["cons"]), W)
 
 
 def p2(ctx, W):
@@ -117,27 +117,35 @@ def _csv_refs(path):
 
 def p4(ctx, W):
     out, probs = ctx["out"], []
-    boms = sorted(glob.glob(os.path.join(out, "2-BOM-*.csv")))
-    cpls = sorted(glob.glob(os.path.join(out, "3-CENTROID-*.csv")))
-    if not (boms and cpls) or not glob.glob(os.path.join(out, "1-GERBERS-*.zip")):
-        probs.append("PCBWay set incomplete (gerber zip / BOM / centroid)")
-    else:
-        cpl_refs = _csv_refs(cpls[0])
-        for r in sorted(set(ctx["dnp"]) & cpl_refs, key=DV._refkey):
-            probs.append("DNP %s is in the PCBWay centroid" % r)
-        for row in ctx["bom_rows"]:
-            for r in row["Refs"]:
-                if r in ctx["dnp"] and not DV.is_dnp(row):
-                    probs.append("DNP %s is on a BOM line not marked DO NOT POPULATE" % r)
+    no_pw = ctx.get("no_pcbway")
+    if not no_pw:
+        boms = sorted(glob.glob(os.path.join(out, "2-BOM-*.csv")))
+        cpls = sorted(glob.glob(os.path.join(out, "3-CENTROID-*.csv")))
+        if not (boms and cpls) or not glob.glob(os.path.join(out, "1-GERBERS-*.zip")):
+            probs.append("PCBWay set incomplete (gerber zip / BOM / centroid)")
+        else:
+            cpl_refs = _csv_refs(cpls[0])
+            for r in sorted(set(ctx["dnp"]) & cpl_refs, key=DV._refkey):
+                probs.append("DNP %s is in the PCBWay centroid" % r)
+            for row in ctx["bom_rows"]:
+                for r in row["Refs"]:
+                    if r in ctx["dnp"] and not DV.is_dnp(row):
+                        probs.append("DNP %s is on a BOM line not marked DO NOT POPULATE" % r)
+    fc = ctx.get("fabconform")
+    if fc is not None:
+        cv = fc.get("coverage") or {}
+        if not cv.get("ok", True):
+            probs.append("fabconform: %s sub-minimum item(s), only %s FIXED / ORDER-OPTION / listed" % (cv.get("raw"), cv.get("listed")))
     left, waived = _resolve("P4", probs, W)
-    pcbway = _res("P4", left, waived, "PCBWay set ok; DNP %s excluded and listed" % (", ".join(sorted(ctx["dnp"])) or "none"))
+    ok = "%s; DNP %s excluded and listed" % ("PCBWay set n/a (--no-pcbway)" if no_pw else "PCBWay set ok", ", ".join(sorted(ctx["dnp"])) or "none")
+    pcbway = _res("P4", left, waived, ok)
     h = _hook("jlcset", "check")
     if h is None:
         r = _nc("P4", "JLCPCB set: fluxplace.jlcset.check not on this branch" + ("; " + pcbway["reason"] if pcbway["status"] == "FAIL" else ""))
         r["waived"] = pcbway["waived"]
         return r
     jl, jw = _resolve("P4", list(h(out, ctx["bom_rows"], ctx["dnp"])), W)
-    return _res("P4", left + jl, waived + jw, "PCBWay + JLCPCB sets ok")
+    return _res("P4", left + jl, waived + jw, ("JLCPCB set ok (PCBWay n/a)" if no_pw else "PCBWay + JLCPCB sets ok"))
 
 
 def p5(ctx, W):

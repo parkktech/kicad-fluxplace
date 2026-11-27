@@ -39,8 +39,9 @@ def _status(res, rule):
 
 
 def test_p1_p2_p4_hooks_missing_are_not_checked_never_pass(tmp_path, monkeypatch):
-    import fluxplace.tune as T
-    monkeypatch.delattr(T, "interface_pair_check", raising=False)
+    import fluxplace.review as R, fluxplace.jlcset as J
+    for m, n in ((R, "interface_pair_check"), (R, "baseline_check"), (J, "check")):
+        monkeypatch.delattr(m, n)
     res = PR.check(_ctx(tmp_path, prev_board="x.kicad_pcb"))
     assert _status(res, "P1")["status"] == "NOT CHECKED"
     assert _status(res, "P2")["status"] == "NOT CHECKED"
@@ -49,8 +50,8 @@ def test_p1_p2_p4_hooks_missing_are_not_checked_never_pass(tmp_path, monkeypatch
 
 
 def test_p1_hook_fail_warn_and_waiver(tmp_path, monkeypatch):
-    import fluxplace.tune as T
-    monkeypatch.setattr(T, "interface_pair_check", lambda b, c: {"fail": ["ETH0 skew 40 mm"], "warn": ["ETH1 13 mm > target"]}, raising=False)
+    import fluxplace.review as T
+    monkeypatch.setattr(T, "interface_pair_check", lambda b, c: {"fail": ["ETH0 skew 40 mm"], "warn": ["ETH1 13 mm > target"]})
     r = _status(PR.check(_ctx(tmp_path)), "P1")
     assert r["status"] == "FAIL" and r["warns"] == ["ETH1 13 mm > target"]
     r = _status(PR.check(_ctx(tmp_path), ["P1:ETH0: IEEE 802.3 allows it, source X"]), "P1")
@@ -149,3 +150,21 @@ def test_known_open_status_lines_in_readme():
 def test_p6_schematic_missing_and_steps(tmp_path):
     r = _status(PR.check(_ctx(tmp_path)), "P6")
     assert "schematic missing" in r["all"] and "missing: assembly STEP" in r["all"] and "missing: bare-board STEP" in r["all"]
+
+
+def test_p1_p2_wired_to_review(tmp_path, monkeypatch):
+    from fluxplace import review as R
+    monkeypatch.setattr(R, "interface_pair_check", lambda b, c: {"fail": ["PAIR_SKEW: x"], "warn": ["PAIR_SKEW_REGRADED: y"]})
+    r = _status(PR.check(_ctx(tmp_path)), "P1")
+    assert r["status"] == "FAIL" and r["warns"] == ["PAIR_SKEW_REGRADED: y"]
+    monkeypatch.setattr(R, "baseline_check", lambda b, p, f, c: {"fail": [], "warn": ["inherited A"]})
+    r = _status(PR.check(_ctx(tmp_path, prev_board="p.kicad_pcb")), "P2")
+    assert r["status"] == "PASS" and r["warns"] == ["inherited A"]
+
+
+def test_p4_no_pcbway_and_fabconform(tmp_path):
+    c = _ctx(tmp_path, no_pcbway=True)
+    r = _status(PR.check(c), "P4")
+    assert "PCBWay set incomplete" not in r["reason"]
+    c = _ctx(tmp_path, no_pcbway=True, fabconform={"coverage": {"raw": 3, "listed": 2, "ok": False}})
+    assert "fabconform" in _status(PR.check(c), "P4")["reason"]
