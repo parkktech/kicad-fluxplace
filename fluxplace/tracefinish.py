@@ -363,10 +363,10 @@ def centre(board, out, d0, kicad_cli="kicad-cli", log=print):
     _pro_copy(board, out)
     n0, moved, d = _centred(d0), 0, d0
     if n0:
-        for fn in (SN.centre_run, SN.joiner_run):
+        for fn in (SN.centre_run, SN.via_run, SN.centre_run, SN.joiner_run):
             nxt = out + ".step.kicad_pcb"
             _pro_copy(board, nxt)
-            r = fn(out, nxt, log=log, **({"locked_ok": True} if fn is SN.joiner_run else {}))
+            r = fn(out, nxt, log=log, **({"locked_ok": True} if fn is not SN.centre_run else {}))
             if r.get("moved") and os.path.exists(nxt):
                 shutil.copyfile(nxt, out)
                 moved += r["moved"]
