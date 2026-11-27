@@ -165,3 +165,11 @@ def test_support_distance_facts_store_and_read_with_source(tmp_path, monkeypatch
     assert EL.per_pin(fx, "decap_mm") == {"VIN": 3} and EL.per_pin(fx, "bulk_mm") == {"VIN": 12} and EL.per_pin(fx, "nope") == {}
     with pytest.raises(ValueError):
         EL.set_facts(str(tmp_path), "X1", {"bogus_mm": 3}, "X.pdf#p4")
+
+
+def test_no_supply_fact_silences_supply_range_not_evaluated():
+    spec = {"components": [{"ref": "U9", "mpn": "TVS1", "value": "TVS"}], "nets": {"N": [["U9", "1"]]}}
+    f = EL.check_spec(spec, {}, facts={"TVS1": {"no_supply": True, "_src": {"no_supply": "x.pdf#p1"}}})
+    assert not [x for x in f if "SUPPLY_RANGE" in x["msg"]]
+    f = EL.check_spec(spec, {}, facts={})
+    assert any("SUPPLY_RANGE not evaluated" in x["msg"] for x in f)

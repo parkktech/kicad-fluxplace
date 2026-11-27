@@ -1345,7 +1345,7 @@ def check_china(facts, cons, cache_path=None, log=lambda m: None):
             out.append(_f(WARN, "CN_LOW", f"{' '.join(refs)} {mpn}: LCSC {row.get('lcsc')} "
                           f"stock {row.get('stock')} < {need}", refs=refs))
         elif r["grade"] == "ERR":
-            out.append(_f(WARN, "CN_UNCHECKED", f"{' '.join(refs)} {mpn}: LCSC lookup failed",
+            out.append(_f(WARN, "CN_UNCHECKED", f"{' '.join(refs)} {mpn}: LCSC stock not checked: {r.get('why') or 'lookup failed'}",
                           refs=refs))
         # (JLCPCB's basic/extended tier is not reliably exposed by this endpoint
         #  — a known basic 10k resistor comes back "expand" — so no tier INFO)

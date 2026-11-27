@@ -371,7 +371,7 @@ def load_map(path):
 # ------------------------------------------------------------------- check
 def cache_home(cache_dir=None):
     """The directory of the lookup caches: the one given, else ~/.cache/fluxplace (never the current directory)."""
-    d = cache_dir or os.path.join(os.path.expanduser("~"), ".cache", "fluxplace")
+    d = cache_dir or os.environ.get("FLUXPLACE_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "fluxplace")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -388,6 +388,37 @@ def write_json(path, obj, indent=None):
         os.replace(tmp, path)
     except Exception:                                   # noqa: BLE001
         pass
+
+
+def _read_json(path):
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:                                   # noqa: BLE001
+        return {}
+
+
+def _newest(a, b):
+    """Merge two {mpn: row} caches; the row with the later `_t` wins."""
+    out = dict(a)
+    for k, v in b.items():
+        if k not in out or (v or {}).get("_t", 0) > (out[k] or {}).get("_t", 0):
+            out[k] = v
+    return out
+
+
+def cache_load(name, cache_dir=None):
+    """One lookup cache by file name: the shared per-user one (~/.cache/fluxplace) filling the misses of the board folder's copy (the folder's row wins).
+    A fact fetched for one board, stage or folder is reused by every other (w76)."""
+    return {**_read_json(os.path.join(cache_home(None), name)), **_read_json(os.path.join(cache_home(cache_dir), name))}
+
+
+def cache_save(name, cache_dir, cache, indent=None):
+    """Write the cache to the board folder and merge it into the shared per-user copy (never clobbers a newer row another run wrote)."""
+    write_json(os.path.join(cache_home(cache_dir), name), cache, indent)
+    shared = os.path.join(cache_home(None), name)
+    write_json(shared, _newest(_read_json(shared), cache), indent)
 
 
 def transient(e):
@@ -420,13 +451,7 @@ def _check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
         log("    sourcing: no DigiKey/Mouser credentials — skipped")
         return {}, {}
     cache_dir = cache_home(cache_dir)
-    cache_path = os.path.join(cache_dir, CACHE_NAME)
-    cache = {}
-    if not refresh and os.path.exists(cache_path):
-        try:
-            cache = json.load(open(cache_path))
-        except Exception:
-            cache = {}
+    cache = {} if refresh else cache_load(CACHE_NAME, cache_dir)
     tok, report, counts = None, {}, {}
     skipped = set()
     t_start, budget, done = time.time(), float(_redact_setting("lookup_budget_s")), 0
@@ -448,10 +473,7 @@ def _check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
             done += 1
             tr = False
             if done % 10 == 0:
-                try:
-                    write_json(cache_path, cache)
-                except Exception:
-                    pass
+                cache_save(CACHE_NAME, cache_dir, cache)
             dk = mo = None
             try:
                 if "DIGIKEY_CLIENT_ID" in creds:
@@ -491,10 +513,7 @@ def _check(by_mpn, need=10, cache_dir=None, refresh=False, log=print,
                        "mouser_skipped": mpn in skipped,
                        "required": req, "per_board": len(by_mpn[mpn]),
                        "quantity": qty}
-    try:
-        write_json(cache_path, cache)
-    except Exception:
-        pass
+    cache_save(CACHE_NAME, cache_dir, cache)
     if qty:
         price_lines(report, qty)
         alternates(report, cache, cache_dir)

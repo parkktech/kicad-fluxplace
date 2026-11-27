@@ -7,6 +7,7 @@ Every fact carries the page it came from; a fact with no source is ignored (repo
 
 Fact keys
   vin_min, vin_max   V   recommended supply range of the pins in `supply_pins` (list of pin names or numbers); a number, or {pin: V} when pins differ
+  no_supply          bool  true: the part has no supply pin (TVS array, passive divider); the datasheet page says what it is
   supply_pins        []  which pins the range / `i_max_ma` apply to
   i_max_ma           mA  maximum supply current (a number for the first supply pin, or {pin: mA})
   i_out_max_a        A   rated output current of a regulator / switch (the source limit)
@@ -35,7 +36,7 @@ import os
 import re
 
 CODES = ("SUPPLY_RANGE", "SOURCE_OVERLOAD", "CONTACT_CURRENT", "FUSE_SIZING", "PIN_STRAP", "CAP_VOLTAGE_MARGIN", "SUPPLY_RANGE_UNKNOWN", "ELEC_NOT_EVALUATED")
-FACT_KEYS = ("vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm", "layout")
+FACT_KEYS = ("no_supply", "vin_min", "vin_max", "supply_pins", "i_max_ma", "i_out_max_a", "contact_a", "v_rated", "pin_rules", "decap_mm", "bulk_mm", "layout")
 _GND = re.compile(r"^(GND\w*|AGND|DGND|PGND|VSS\w*|EARTH|0V)$", re.I)
 _POWER = re.compile(r"^(\+?\d+V\d*\w*|V(CC|DD|BAT|BATT|IN|BUS)\w*)$", re.I)
 _VRATE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*V(?![\w])", re.I)
@@ -195,6 +196,8 @@ def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
     for c in spec.get("components", []):
         mpn = _mpn(c, mpn_map)
         fx = facts.get(mpn) or {}
+        if fx.get("no_supply"):
+            continue                    # a passive / protection part with no supply pin, stated by its datasheet: nothing to range-check
         if "vin_min" not in fx and "vin_max" not in fx:
             if c["ref"][:1] in ("U", "Y"):
                 on_rail = [n for n in by_ref.get(c["ref"], {}) if not _is_gnd(n) and any(v is not None for v in _vrange(_rail(cons, n)))]

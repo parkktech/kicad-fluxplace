@@ -22,3 +22,5 @@ openpyxl>=3.1
 # NOT pip-installable, and deliberately absent:
 #   pcbnew   ships with KiCad 10 (not on PyPI)
 #   wx       ships with KiCad 10
+curl_cffi>=0.7        # LCSC/JLCPCB stock check in review
+pytest-xdist>=3.0     # parallel merge-gate suite

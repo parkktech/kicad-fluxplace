@@ -1603,6 +1603,11 @@ def _review_gate(a, stage="review", hard=True):
         spec = _json.load(open(spec_path))
     cons = C.load(getattr(a, "constraints", None))
     partdata = {}
+    if (cons.get("sourcing") or {}).get("china"):
+        try:
+            import curl_cffi  # noqa: F401
+        except ImportError:
+            print("LCSC check disabled: curl_cffi not installed (/usr/bin/python3 -m pip install --user curl_cffi; see fluxplace doctor)", flush=True)
     if not getattr(a, "no_api", False) and facts["mpn_map"]:
         from fluxplace import partdata as PD
         cache_dir = os.path.dirname(facts.get("mpn_map_path") or board) or "."

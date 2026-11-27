@@ -23,7 +23,6 @@ failure is soft: a part with no data is reported as UNCHECKED, never silently
 passed and never a hard abort over an API hiccup.
 """
 import json
-import os
 import re
 import time
 import urllib.error
@@ -232,13 +231,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
     if not have_dk and not have_mo:
         log("    partdata: no DigiKey/Mouser credentials — part data unchecked")
         return {m: None for m in mpns}
-    cache_path = os.path.join(S.cache_home(cache_dir), CACHE_NAME)
-    cache = {}
-    if not refresh and os.path.exists(cache_path):
-        try:
-            cache = json.load(open(cache_path))
-        except Exception:
-            cache = {}
+    cache = {} if refresh else S.cache_load(CACHE_NAME, cache_dir)
     tok = None
     t_start, budget, left, done = time.time(), float(_redact_setting("lookup_budget_s")), 0, 0
     for mpn in sorted(set(mpns)):
@@ -252,7 +245,7 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             continue
         done += 1
         if done % 10 == 0:                                  # progress survives a killed run
-            S.write_json(cache_path, cache, indent=1)
+            S.cache_save(CACHE_NAME, cache_dir, cache, indent=1)
         dk = mo = None
         tr = False
         if have_dk:
@@ -305,5 +298,5 @@ def fetch(mpns, cache_dir=None, refresh=False, log=print, creds=None):
             cache[mpn] = {"_t": time.time(), "_neg": True, "data": None}
     if left:
         log(f"    partdata: lookup budget {budget:g} s spent, {left} part(s) UNCHECKED (rerun continues from the cache)")
-    S.write_json(cache_path, cache, indent=1)
+    S.cache_save(CACHE_NAME, cache_dir, cache, indent=1)
     return out

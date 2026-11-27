@@ -18,7 +18,7 @@ Grades (per part, `need` units):
   CN_NONE    catalogued at LCSC, 0 stock   (order-in / consign)
   CN_ABSENT  not in the JLCPCB library at all  (consign, or pick another part)
 """
-import json
+import os
 import re
 import time
 
@@ -98,32 +98,68 @@ def grade(row, need):
     return "CN_NONE"
 
 
-def check(mpns, need=100, cache_path=None, refresh=False, log=print):
-    """{mpn: {"grade", "row"}} with a 24 h cache. need defaults to 100: a
-    China assembly run wants a margin, not the 10 units a prototype needs."""
-    cache = {}
-    if cache_path and not refresh:
-        try:
-            cache = json.load(open(cache_path))
-        except Exception:
-            cache = {}
-    out = {}
+NEG_TTL = 3600           # a failed lookup is remembered this long (s): an outage costs one try per hour, not one per part per run
+CACHE_NAME = ".lcsc_cache.json"
+
+
+def _why(e):
+    """The reason a lookup could not run, in words the finding can carry."""
+    if isinstance(e, ImportError):
+        return "curl_cffi is not installed (pip install curl_cffi)"
+    return f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def check(mpns, need=100, cache_path=None, refresh=False, log=print, budget=None):
+    """{mpn: {"grade", "row", "why"?}} with a 24 h cache shared across boards and runs (sourcing.cache_load/save, per-MPN `_t`).
+    Grade "ERR" = not looked up: `why` says the reason ("lookup budget spent" is retried first on the next run, never cached;
+    a transport failure is remembered NEG_TTL; a missing curl_cffi stops the pass at once, one reason for every part).
+    budget = total seconds for live lookups (default `[parts] lookup_budget_s`; 0 = none). need defaults to 100: a China
+    assembly run wants a margin, not the 10 units a prototype needs."""
+    from . import sourcing as S
+    cache_dir = os.path.dirname(cache_path) if cache_path else None
+    cache = {} if refresh else S.cache_load(CACHE_NAME, cache_dir)
+    if budget is None:
+        budget = float(S._redact_setting("lookup_budget_s"))
+    t0, out, fatal, done = time.time(), {}, None, 0
+
+    def err(why):
+        return {"grade": "ERR", "row": None, "why": why}
+
     for mpn in sorted(set(m for m in mpns if m)):
         hit = cache.get(mpn)
-        if hit and time.time() - hit.get("_t", 0) < CACHE_TTL:
-            row = hit.get("row")
-        else:
-            try:
-                row = lookup(mpn)
-            except Exception as e:
-                log(f"    ! LCSC {mpn}: {e}")
-                out[mpn] = {"grade": "ERR", "row": None}
-                continue
-            cache[mpn] = {"_t": time.time(), "row": row}
-        out[mpn] = {"grade": grade(row, need), "row": row}
-    if cache_path:
+        age = time.time() - (hit or {}).get("_t", 0)
+        if hit and hit.get("_neg") and age < NEG_TTL:
+            out[mpn] = err(hit.get("why") or "cached failure")
+            continue
+        if hit and not hit.get("_neg") and age < CACHE_TTL:
+            out[mpn] = {"grade": grade(hit.get("row"), need), "row": hit.get("row")}
+            continue
+        if fatal:
+            out[mpn] = err(fatal)
+            continue
+        if budget and time.time() - t0 > budget:
+            out[mpn] = err("lookup budget spent")   # not cached: the next run starts here
+            continue
+        done += 1
+        if done % 10 == 0 and cache_path:
+            S.cache_save(CACHE_NAME, cache_dir, cache)
         try:
-            json.dump(cache, open(cache_path, "w"), indent=1)
-        except Exception:
-            pass
+            row = lookup(mpn)
+        except ImportError as e:
+            fatal = _why(e)
+            log(f"    ! LCSC lookups stopped: {fatal}")
+            out[mpn] = err(fatal)
+            continue
+        except Exception as e:
+            log(f"    ! LCSC {mpn}: {e}")
+            why = _why(e)
+            cache[mpn] = {"_t": time.time(), "_neg": True, "why": why, "row": None}
+            out[mpn] = err(why)
+            continue
+        cache[mpn] = {"_t": time.time(), "row": row}
+        out[mpn] = {"grade": grade(row, need), "row": row}
+    left = sum(1 for r in out.values() if r.get("why") == "lookup budget spent")
+    if left:
+        log(f"    lcsc: lookup budget {budget:g} s spent, {left} part(s) UNCHECKED (rerun continues from the cache)")
+    S.cache_save(CACHE_NAME, cache_dir, cache)
     return out
