@@ -8,7 +8,7 @@ from . import boardwrite as BW, netclass as NC, routeconn as RC, routediag as RD
 
 
 def _scan(B):
-    """-> (set of seg indexes, set of via indexes) to strip, the pad refs that disagree with their copper."""
+    """-> (seg indexes, via indexes) to strip, the pad refs that disagree with their copper, the nets those pads now carry."""
     pads = [p for p in B["pads"] if not p.get("np")]
     trk = [("seg", s) for s in B["segs"]] + [("via", v) for v in B["vias"]]
     items = [("pad", p) for p in pads] + trk
@@ -27,7 +27,7 @@ def _scan(B):
     net = [o["net"] for _, o in trk]
     seeds = {t for t, ps in touch_pads.items() if any(p["net"] != net[t] for p in ps)}
     if not seeds:
-        return set(), set(), []
+        return set(), set(), [], set()
     comp, todo = set(seeds), list(seeds)
     while todo:
         for u in same[todo.pop()]:
@@ -54,9 +54,9 @@ def _scan(B):
             if dead:
                 gone.add(t)
                 grew = True
-    refs = sorted({f"{p['ref']}.{p['num']}" for t in seeds for p in touch_pads[t] if p["net"] != net[t]})
+    bad = [p for t in seeds for p in touch_pads[t] if p["net"] != net[t]]
     ns = len(B["segs"])
-    return {t for t in gone if t < ns}, {t - ns for t in gone if t >= ns}, refs
+    return {t for t in gone if t < ns}, {t - ns for t in gone if t >= ns}, sorted({f"{p['ref']}.{p['num']}" for p in bad}), {p["net"] for p in bad if p["net"]}
 
 
 def _rows(B):
@@ -66,10 +66,10 @@ def _rows(B):
 
 def apply(board, out, cons=None):
     """Write `out` = `board` minus its mismatched copper (`board` is never touched). -> report {nets, release, removed {net: n}, pads, items}
-    or None (nothing written) when no copper disagrees with a pad net.  `release` = `nets` plus the partner leg of every stripped pair leg
+    or None (nothing written) when no copper disagrees with a pad net.  `release` = every net to re-route: `nets`, the nets the re-netted pads now carry, and the partner leg of each pair leg
     (constraints), so the pairs machinery can re-lay the pair coupled.  A strip that removes other copper than chosen raises."""
     B = RD.load(board)
-    segs, vias, refs = _scan(B)
+    segs, vias, refs, padnets = _scan(B)
     if not segs and not vias:
         return None
     with open(board, errors="surrogateescape") as fh:
@@ -83,6 +83,7 @@ def apply(board, out, cons=None):
         raise RuntimeError("re-net strip removed other copper than chosen")
     removed = collections.Counter([B["segs"][i]["net"] for i in segs] + [B["vias"][i]["net"] for i in vias])
     mate = NC._pairs(sorted({p["net"] for p in B["pads"] if p["net"]}), cons or {})
-    rel = set(removed) | {mate[n] for n in removed if n in mate}
+    rel = set(removed) | padnets
+    rel |= {mate[n] for n in rel if n in mate}
     return {"nets": sorted(removed), "release": sorted(rel), "removed": dict(sorted(removed.items())), "pads": refs,
             "items": len(segs) + len(vias)}

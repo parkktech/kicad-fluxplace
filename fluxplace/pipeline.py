@@ -1860,8 +1860,9 @@ def _renet_entry(c, work, board, st):
     v = BW_.commit(board, out, out, release=rep["release"], reason="re-net", log=print)
     if not v["written"]:
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
+    BW_.release(out, rep["release"], "re-net")                 # commit() re-protects every net's locked items; a released net's leftovers are re-laid with it
     c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
-    st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))
+    st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]), board=out)      # `release` stays whole: it is the route scope
     st["board"] = out
     print(f"pipeline: re-net: {rep['items']} item(s) stripped from {len(rep['nets'])} net(s) at pad(s) {', '.join(rep['pads'][:8])}; "
           f"they are routed as open nets ({out})", flush=True)
@@ -2104,7 +2105,7 @@ def _run(a):
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
         if i == i0 and st.get("renet"):
-            st["stages"][name]["renet"] = st["renet"]
+            st["stages"][name]["renet"] = {k: st["renet"][k] for k in ("nets", "items", "pads")}
         if res.get("gate"):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
             if res["gate"].get("deferred"):
