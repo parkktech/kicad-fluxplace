@@ -77,3 +77,7 @@ def test_a_spent_budget_still_gives_the_needed_drc_its_floor_and_critroute_logs_
     assert b.drc_timeout() >= 120.0 and TU.Budget(None, 0).drc_timeout() == 600
     import inspect
     assert "if attempts:" in inspect.getsource(CR.apply)  # attempts=None (close driver) must not crash the rung
+
+
+def test_slow_rungs_get_a_share_of_the_close_budget_not_the_full_cap():
+    assert GP._rung_cap({}, "rfroute", 2400) == 240 and GP._rung_cap({}, "handrepair", 2400) == 360 and GP._rung_cap({}, "krt", 2400) == 900

@@ -747,7 +747,7 @@ def _left(ctx, cap=None):
 RUNG_CAP_S = 900                                # PHASE3F A1: one rung gets at most this much of the close budget ([flow] rung_cap_min, minutes)
 
 
-RUNG_FRAC = {"pourisland": 0.05}                # B11: slow rungs get a fraction of the close budget (W16 B6-0: pourisland timed out after 434 s)
+RUNG_FRAC = {"pourisland": 0.05, "rfroute": 0.10, "handrepair": 0.15, "pairgroup": 0.15}   # B11: slow rungs get a fraction of the close budget (W16: pourisland 434 s; w70: rfroute 900 s and handrepair 900 s each took 40 % of a 40 min close with 0 connections closed)
 
 
 def _rung_cap(cons, rung=None, budget_s=None):
