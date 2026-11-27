@@ -75,3 +75,13 @@ def test_join_gaps_cli_and_sidecars(tmp_path, capsys):
     assert os.path.exists(os.path.splitext(out)[0] + ".kicad_pro")
     with pytest.raises(SystemExit):
         cli.main(["join-gaps", b, "--out", b])
+
+
+def test_two_same_net_pads_with_no_track_are_joined_up_to_gap_max(tmp_path):
+    """w78: the U12/U11 case: two pads of one net 0.77 mm apart, no copper between them."""
+    body = PB.fp("U1", 20, 20, [PB.pad("1", 0, 0, "N", 0.3, 0.3), PB.pad("2", 0.77, 0, "N", 0.3, 0.3)]) + \
+        PB.fp("U2", 40, 40, [PB.pad("1", 0, 0, "N", 0.3, 0.3), PB.pad("2", 0, 3.0, "N", 0.3, 0.3)])      # 3 mm: too far
+    f = PB.write(tmp_path, body)
+    rep = JG.plan(f, gap=JG.GAP_MAX)
+    assert [(s["net"], s["kind"]) for s in rep["add"]] == [("N", "pad")] and abs(rep["add"][0]["gap"] - 0.77) < 0.01
+    assert JG.plan(f, gap=JG.GAP)["add"] == []                   # the old 0.3 mm limit does not reach it

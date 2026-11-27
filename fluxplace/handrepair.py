@@ -83,7 +83,7 @@ def repair(work, out, constraints=None, max_attempts=2, budget=900.0, layers=Non
         kw = {"pitch": pitch, "layers": layers.split(",") if isinstance(layers, str) else layers}
         names = {c["net"] for c in H.open_nets(work, constraints)["connections"]}
         pairs = _pairs(constraints, names | set(_unc(work)))
-        done = set()
+        done, committed = set(), 0
         while time.time() - t0 < budget:
             conns = H.open_nets(work, constraints)["connections"]
             todo = [(i, c) for i, c in enumerate(conns) if _key(c) not in done]
@@ -105,9 +105,13 @@ def repair(work, out, constraints=None, max_attempts=2, budget=900.0, layers=Non
             key = _key(c)
             done.add(key)
             rows.append(_one(work, constraints, key, c, start, kw, max_attempts, pairs, t0, budget))
+            if rows[-1]["status"] == "closed":           # w78: commit per closed connection, a kill at the deadline keeps what is closed
+                res["commit"] = H.session_commit(work, out, constraints)
+                committed = len(rows)
             save()
         res["budget_exhausted"] = time.time() - t0 >= budget
-        res["commit"] = H.session_commit(work, out, constraints)
+        if committed != len(rows) or "commit" not in res:
+            res["commit"] = H.session_commit(work, out, constraints)
     except Exception as e:
         res["error"] = {"type": type(e).__name__, "message": str(e)}
         save()

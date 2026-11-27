@@ -235,9 +235,9 @@ def test_close_groups_opens_by_shared_blocker_and_runs_each_groups_cheap_rung_fi
     for r in GP.DISPATCH["open-free"]:
         monkeypatch.setitem(GP.RUNGS, r, spy(r))
     _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
-    first = GP.DISPATCH["open-free"][0]
-    assert calls[:2] == [(first, ("N0", "N1")), (first, ("N2",))]       # both groups tried before a second rung
-    assert all(c[0] != first for c in calls[2:])
+    assert calls[0] == ("patch", ("N0", "N1", "N2"))                    # a whole-board rung runs once for the kind (w78), on its first group's slot
+    assert calls[1] == ("krt", ("N2",))                                  # the other group's first rung is a router rung, not a repeat of patch
+    assert [c for c in calls if c[0] in GP.WHOLE_BOARD].count(("patch", ("N0", "N1", "N2"))) == 1
 
 
 # ---- crash suppression ----
