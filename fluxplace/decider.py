@@ -68,8 +68,10 @@ def _cmd(cons):
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
 
 
-def call_model(text, cons, model):
-    """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped."""
+def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None):
+    """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped.
+    tools: the built-in tools the model may use ("Read" for page pictures in `cwd`, "WebSearch,WebFetch" to find documents; default
+    none), run without session or project settings; info: a dict that receives cost_usd (the CLI's total_cost_usd)."""
     if os.environ.get("FLUXPLACE_AI_OFFLINE"):
         return None, "offline (FLUXPLACE_AI_OFFLINE)"
     cmd = _cmd(cons)
@@ -77,9 +79,12 @@ def call_model(text, cons, model):
         return None, f"no model command ({cmd[0] if cmd else 'empty'})"
     if cmd == DEFAULT_CMD:
         cmd = cmd + ["--model", model]
+        if tools is not None:
+            cmd[cmd.index("--tools") + 1] = tools
+            cmd += ["--no-session-persistence", "--setting-sources", ""] + (["--allowedTools", tools] if tools else [])   # -p asks for no permission
     try:
-        r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=float(_ai(cons).get("decide_timeout_s", 120)),
-                           env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
+        r = subprocess.run(cmd, input=text, capture_output=True, text=True, cwd=cwd,
+                           timeout=float(timeout or _ai(cons).get("decide_timeout_s", 120)), env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"model call failed ({type(e).__name__})"
     if r.returncode != 0:
@@ -88,6 +93,8 @@ def call_model(text, cons, model):
         env = json.loads(r.stdout)
     except ValueError:
         return r.stdout, ""
+    if info is not None and isinstance(env, dict):
+        info["cost_usd"] = float(env.get("total_cost_usd") or 0.0)
     return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
 
 
