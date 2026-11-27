@@ -69,15 +69,19 @@ def obstacle_gap(a, bb, hq, kind, geom):
 VIA_MOVE_MM = 0.25     # w80: the furthest a via moves onto a locked track end
 
 
-def _move_via(via, pt, tracks, board, clear_ok, mm, done):
+def _move_via(via, pt, tracks, clear_ok, mm, done):
     """Move unlocked `via` to `pt` (a locked same-net track end inside its copper) when every unlocked same-net track end at the via centre
     can follow with the clearance kept; the locked ends stay. True when moved."""
-    import pcbnew
     old = via.GetPosition()
     if math.hypot(pt.x - old.x, pt.y - old.y) > VIA_MOVE_MM * 1e6:
         return False
-    ends = [(u, w) for u in tracks if u.GetNetCode() == via.GetNetCode()
-            for w in (0, 1) if math.hypot((u.GetStart() if w == 0 else u.GetEnd()).x - old.x, (u.GetStart() if w == 0 else u.GetEnd()).y - old.y) <= JOINT_MM * 1e6]
+    ends = []
+    for u in tracks:
+        if u.GetNetCode() != via.GetNetCode():
+            continue
+        for w, q in ((0, u.GetStart()), (1, u.GetEnd())):
+            if math.hypot(q.x - old.x, q.y - old.y) <= JOINT_MM * 1e6:
+                ends.append((u, w))
     if any(u.IsLocked() for u, _w in ends):
         return False
     new = (mm(pt.x), mm(pt.y))
@@ -218,9 +222,10 @@ def _snap(src, dst, skip, locked_ok=False, via_follow=False):
             if any((u.IsLocked() and not locked_ok) or u.m_Uuid.AsString() in skip for u, _w in joint):
                 # w80: a LOCKED track end sits in the via (a router via placed on its 0.05 grid beside it): the via moves onto the
                 # locked end and its own track ends follow, so locked copper is never edited
-                if not via_follow or vt.IsLocked() and not locked_ok or vt.m_Uuid.AsString() in skip or any(u.m_Uuid.AsString() in skip for u, _w in joint):
+                via_held = (vt.IsLocked() and not locked_ok) or vt.m_Uuid.AsString() in skip
+                if not via_follow or via_held or any(u.m_Uuid.AsString() in skip for u, _w in joint):
                     continue
-                if _move_via(vt, p, tracks, b, clear_ok, mm, done):
+                if _move_via(vt, p, tracks, clear_ok, mm, done):
                     moved += 1
                 continue
             new = (mm(target.x), mm(target.y))

@@ -307,8 +307,7 @@ def next_task(units, done, stats):
         for r in u["rungs"]:
             if (u["key"], r) in done:
                 continue
-            i = order.index(r)
-            k = (starved(stats, u["kind"], r), u["prio"], -rate(stats, u["kind"], r), i, u["key"])
+            k = (starved(stats, u["kind"], r), u["prio"], -rate(stats, u["kind"], r), order.index(r), u["key"])
             if best is None or k < best[0]:
                 best = (k, u, r)
     return (best[1], best[2]) if best else None

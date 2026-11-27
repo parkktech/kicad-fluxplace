@@ -3000,7 +3000,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 break
             unit, rung = pick
             kind = unit["kind"]
-            targets = unit["kind_targets"] if rung == "ai" or rung in WHOLE_BOARD else unit["targets"]
+            targets = unit["kind_targets"] if rung in ("ai", *WHOLE_BOARD) else unit["targets"]
             if over():
                 stop = "budget"
                 break
