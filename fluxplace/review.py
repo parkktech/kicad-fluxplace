@@ -245,6 +245,25 @@ def pair_gated(cons, master):
     return master.startswith(fams) or fam in _HS_FAMILIES
 
 
+TAP_STUB_INFO_MM = 10.0
+
+
+def _limit_challenge(r, unit, facts, cons):
+    """w110: a PAIR_SKEW FAIL is challenged against the sourced hard limit of its interface (limits registry): inside it = WARN with
+    the citation, over it = FAIL with the citation.  None = no sourced limit (or the project set its own maximum): FAIL as before."""
+    if unit != "mm":
+        return None
+    from . import limits as LM, netclass as NC
+    try:
+        explicit = C.skew_max_source(cons or {}, r["p"], 1.0)[1] != C.skew_limit_source(cons or {}, r["p"], 1.0)[1]
+    except ValueError:
+        explicit = False
+    bp = facts.get("board_path") or facts.get("board")
+    log_dir = os.path.dirname(os.path.abspath(bp)) if isinstance(bp, str) and bp else None
+    return LM.regrade("pair_skew", NC.pair_kind(r["p"]), f"{r['p']}/{r['n']}", float(r["skew"]), float(r["limit"]), unit,
+                      r.get("target") or r["limit"], explicit, cons, log_dir, f"intra-pair skew of {r['p']}/{r['n']}")
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -274,6 +293,9 @@ def _pairs_from_audit(facts, cons):
                                                    f"{vs['stub_mm']:.2f} mm barrel stub" + (" (the pair never changes layer there: remove the via)" if vs["dead"] else "")))
         if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
             out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"], r.get("unit", "mm"))))
+        tap = max([x["mm"] for x in r.get("stubs") or []] + [0.0])
+        if tap > TAP_STUB_INFO_MM and gated(r["p"]):          # a part hung on the trunk by a long stub (ESD / series array)
+            out.append(_f(INFO, "PAIR_TAP_STUB", f"{r['p']}/{r['n']}: tap stub {tap:.1f} mm to a part hung on the trunk (limit for a note {TAP_STUB_INFO_MM:g} mm)"))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
         if "stub" in r["causes"]:
@@ -281,7 +303,14 @@ def _pairs_from_audit(facts, cons):
         if "skew" in r["causes"]:
             u = r.get("unit", "mm")
             note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
+            if r.get("basis") == "path" and None not in (r.get("net_mm") or (None,)):      # advisory: the whole-net copper sums (stubs included)
+                np_, nn_ = r["net_mm"]
+                note += f" [advisory, whole-net KiCad length (vias, in-pad copper, stubs included) P {np_:.2f} / N {nn_:.2f} mm: diff {np_ - nn_:+.2f}; trunk path measure is the graded one]"
+            rg = _limit_challenge(r, u, facts, cons)
+            if rg:
+                out.append(_f(FAIL, "PAIR_SKEW", rg[1] + note) if rg[0] == "FAIL" else _f(WARN, "PAIR_SKEW_REGRADED", rg[1] + note))
+            else:
+                out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
@@ -1505,6 +1534,9 @@ def check_fab_capability(facts, cons):
         out.append(_f(INFO, "FAB_PROFILE", f"{fab['profile']} @ {fab['layers']} copper layers: hard limits track "
                       f"{fab['min_track_mm']:g} / space {fab['min_clearance_mm']:g} / drill {fab['min_drill_mm']:g} / via ring "
                       f"{fab['min_annular_mm']:g} mm{prov}{unv}"))
+
+    for w in fab.get("floor_warns") or []:
+        out.append(_f(WARN, "FAB_FLOOR_BELOW_RECOMMENDED", w))
 
     narrow = sorted(
         (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),

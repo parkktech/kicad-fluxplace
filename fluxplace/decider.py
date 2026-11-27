@@ -22,6 +22,7 @@ import time
 RULE = "fewest FAILs without growing the outline or adding layers"
 DEFAULT_CMD = ["claude", "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config"]   # no tools: evidence is inline
 MODELS = ["haiku", "sonnet"]
+LAST = {}                                        # the last model call: {"cost_usd": ...} (CLI envelope)
 LOG, ANSWERS = "decisions.jsonl", "decisions.answers.toml"
 EV_LINES, EV_CHARS = 24, 240                     # prompt budget: evidence lines kept, chars per line
 
@@ -68,10 +69,11 @@ def _cmd(cons):
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
 
 
-def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None):
+def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None, budget_usd=None):
     """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped.
     tools: the built-in tools the model may use ("Read" for page pictures in `cwd`, "WebSearch,WebFetch" to find documents; default
-    none), run without session or project settings; info: a dict that receives cost_usd (the CLI's total_cost_usd)."""
+    none), run without session or project settings; info: a dict that receives cost_usd (the CLI's total_cost_usd);
+    timeout / budget_usd cap one call. The cost of the last call is also kept in LAST["cost_usd"]."""
     if os.environ.get("FLUXPLACE_AI_OFFLINE"):
         return None, "offline (FLUXPLACE_AI_OFFLINE)"
     cmd = _cmd(cons)
@@ -82,6 +84,8 @@ def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None)
         if tools is not None:
             cmd[cmd.index("--tools") + 1] = tools
             cmd += ["--no-session-persistence", "--setting-sources", ""] + (["--allowedTools", tools] if tools else [])   # -p asks for no permission
+        if budget_usd:
+            cmd += ["--max-budget-usd", str(budget_usd)]
     try:
         r = subprocess.run(cmd, input=text, capture_output=True, text=True, cwd=cwd,
                            timeout=float(timeout or _ai(cons).get("decide_timeout_s", 120)), env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
@@ -93,8 +97,10 @@ def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None)
         env = json.loads(r.stdout)
     except ValueError:
         return r.stdout, ""
-    if info is not None and isinstance(env, dict):
-        info["cost_usd"] = float(env.get("total_cost_usd") or 0.0)
+    cost = float(env.get("total_cost_usd") or 0.0) if isinstance(env, dict) else None
+    LAST["cost_usd"] = cost
+    if info is not None and cost is not None:
+        info["cost_usd"] = cost
     return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
 
 
