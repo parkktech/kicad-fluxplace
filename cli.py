@@ -1586,21 +1586,11 @@ def _open_gate(a):
         OG.refuse(board, C.load(getattr(a, "constraints", None)), getattr(a, "waive", None))
 
 
-def _review_gate(a, stage="review", hard=True):
-    """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
-    distributor package/pin/temperature data, pinmap vs the official symbol,
-    spec/board sync, hold-up and TVS margins. Runs before anything leaves for
-    a fab. FAIL aborts unless --no-review; returns the findings."""
+def _review_findings(a, board, stage):
+    """Run the design review on `board` with the args of `a`; returns (findings, facts)."""
     import json as _json
     from fluxplace import review as R
     from fluxplace import constraints as C
-    if getattr(a, "no_review", False):
-        print(f"    review gate SKIPPED (--no-review) before {stage}", flush=True)
-        return []
-    board = getattr(a, "board", None)
-    if not board:
-        print(f"    review gate: no --board given, nothing to review before {stage}")
-        return []
     facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None))
     facts.setdefault("board_path", board)
     spec = None
@@ -1633,11 +1623,39 @@ def _review_gate(a, stage="review", hard=True):
                       os.path.normpath(cand[0]))
     findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
                      waivers=waivers, ds_dir=ds_dir, stage=stage)
+    return findings, facts
+
+
+def _review_gate(a, stage="review", hard=True):
+    """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
+    distributor package/pin/temperature data, pinmap vs the official symbol,
+    spec/board sync, hold-up and TVS margins. Runs before anything leaves for
+    a fab. FAIL aborts unless --no-review; returns the findings."""
+    import json as _json
+    from fluxplace import review as R
+    from fluxplace import constraints as C
+    if getattr(a, "no_review", False):
+        print(f"    review gate SKIPPED (--no-review) before {stage}", flush=True)
+        return []
+    board = getattr(a, "board", None)
+    if not board:
+        print(f"    review gate: no --board given, nothing to review before {stage}")
+        return []
+    findings, facts = _review_findings(a, board, stage)
+    base = getattr(a, "baseline", None)
+    base_info = None
+    if base:
+        if not os.path.isfile(base):
+            raise SystemExit(f"--baseline: {base} is not a file")
+        base_findings, _bf = _review_findings(a, base, stage)
+        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()))
+        base_info = {"board": os.path.abspath(base), "sha256": R.file_sha(base)}
+        print(f"baseline: {base} sha {base_info['sha256']}", flush=True)
     print(f"REVIEW ({stage}) — {board}")
     n = R.summarize(findings, log=lambda m: print(m, flush=True))
     if getattr(a, "json", None) and stage == "review":
         with open(a.json, "w") as fh:
-            _json.dump(findings, fh, indent=1)
+            _json.dump({"baseline": base_info, "findings": findings} if base_info else findings, fh, indent=1)
         print(f"review: wrote {a.json}")
     if hard and n["fail"]:
         raise SystemExit(f"ABORT before {stage}: {n['fail']} review FAIL(s). "
@@ -2114,6 +2132,7 @@ def cmd_review(a):
     """Standalone design review; exit 1 per --fail-on."""
     from fluxplace import review as R
     findings = _review_gate(a, stage="review", hard=False)
+    findings = [f for f in findings if f.get("baseline") != "inherited"]     # --baseline: inherited findings never gate
     n = {"fail": sum(f["level"] == "FAIL" for f in findings),
          "warning": sum(f["level"] == "WARN" for f in findings)}
     if a.fail_on == "warning" and (n["fail"] or n["warning"]):
@@ -2550,6 +2569,9 @@ def _add_review_args(p, gate=False):
                    help="ignore the 7-day part-data cache")
     p.add_argument("--waive", action="append", default=[],
                    help="suppress findings: CODE:REGEX, repeatable")
+    p.add_argument("--baseline", default=None,
+                   help="previous version's shipped board: only findings NEW vs it gate; inherited ones are listed "
+                        "(matched by code + refs/nets, worse numeric severity = new)")
     if gate:
         p.add_argument("--no-review", action="store_true",
                        help="skip the design-review gate (ships known FAILs)")
