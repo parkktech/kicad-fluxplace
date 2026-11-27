@@ -159,9 +159,19 @@ def test_a_dru_syntax_error_trips_the_canary(tmp_path):
     f = board(tmp_path, 4, 8)
     good = "(version 1)\n(rule \"cn0\" (condition \"A.NetName == 'E_P'\") (constraint length (max 0.0001mm)))\n"
     bad = good + "(rule \"cn1\" (condition \"A.NetName == 'E_N'\") (constraint skew (max 0.001mm) within_diff_pairs))\n"       # unparenthesised: drops the file
-    DG.drc_json(f, rules=good, only_rules=["length_out_of_range"], canary=["cn0"], complete=False)
+    DG.drc_json(f, rules=good, only_rules=["length_out_of_range"], complete=False)
     with pytest.raises(RuntimeError, match="rule file ignored"):
-        DG.drc_json(f, rules=bad, only_rules=["length_out_of_range"], canary=["cn0"], complete=False)
+        DG.drc_json(f, rules=bad, only_rules=["length_out_of_range"], complete=False)
+
+
+def test_nets_without_copper_are_zero_length_not_a_rule_file_failure(tmp_path):
+    """w69: a pre-route board (nets with pads only) must not read as 'rule file ignored': the fxcanary fires, the length rules do not."""
+    body = PB.fp("A", 0, 0, [PB.pad("1", 30, 30, "P", 1.0, 1.0), PB.pad("2", 30, 33, "N", 1.0, 1.0)]) + \
+        PB.fp("B", 0, 0, [PB.pad("1", 60, 30, "P", 1.0, 1.0), PB.pad("2", 60, 33, "N", 1.0, 1.0)])
+    f = tmp_path / "bare.kicad_pcb"
+    f.write_text('(kicad_pcb (version 20260206) (generator "pcbnew")\n(layers (0 "F.Cu" signal) (2 "B.Cu" signal))\n' + EDGE + body + ")\n")
+    r = netlen.pair_lengths(str(f), [("P", "N")])
+    assert r is not None and r[("P", "N")]["p"] == 0.0 and r[("P", "N")]["skew"] == 0.0
 
 
 def test_kicad_counts_copper_inside_a_pad(tmp_path):

@@ -25,7 +25,7 @@ _close = functools.partial(GP.close, inproc=True)
 @pytest.fixture(autouse=True)
 def _no_prune(monkeypatch):
     monkeypatch.setitem(GP.DISPATCH, "open-free", [r for r in GP.DISPATCH["open-free"] if r != "prune"])
-    monkeypatch.setattr(GP, "_blockers_of", lambda *a, **k: None)      # fake boards: no blocker data, a kind stays whole
+    monkeypatch.setattr(GP, "_blocker_items", lambda *a, **k: None)    # fake boards: no blocker data, a kind stays whole
 
 
 def _write(mode):
@@ -59,13 +59,14 @@ def test_every_attempt_has_one_outcome_and_only_a_candidate_has_a_verdict(monkey
     monkeypatch.setitem(R, "krt", _write("same"))                                           # board identical: no change
     monkeypatch.setitem(R, "relocate", fail("timeout", "rung timeout after 9 s"))
     monkeypatch.setitem(R, "krt_region", fail("child_error", "rung exit 1", code=1, stderr_tail="Traceback: boom"))
+    monkeypatch.setitem(R, "krt_locked", lambda b, o, g, c: {"status": "no pair"})          # not applicable (rung added after B6a)
     monkeypatch.setitem(R, "region", fail("invalid_output", "rung wrote no result", code=0))
     monkeypatch.setitem(R, "patch_rip", lambda b, o, g, c: boom())
     monkeypatch.setitem(R, "ai", lambda b, o, g, c: {"status": "no packet"})
     res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     rows = _by_rung(loop["work"])
     assert {k: v["outcome"] for k, v in rows.items()} == {
-        "patch": "candidate", "handrepair": "not_applicable", "krt": "no_change", "relocate": "timeout",
+        "patch": "candidate", "handrepair": "not_applicable", "krt": "no_change", "relocate": "timeout", "krt_locked": "not_applicable",
         "krt_region": "child_error", "region": "invalid_output", "patch_rip": "child_error", "ai": "not_applicable"}
     assert rows["patch"]["verdict"] == "guard_refused"
     assert all(v["verdict"] is None for k, v in rows.items() if k != "patch")             # never guard_refused without a candidate
@@ -201,7 +202,7 @@ def _three_open_gaps(opens_fixed=()):
 
 def test_close_groups_opens_by_shared_blocker_and_runs_each_groups_cheap_rung_first(monkeypatch, loop):
     blockers = {"N0": ["X"], "N1": ["X"], "N2": ["Y"]}                  # N0 and N1 share a blocker, N2 has its own
-    monkeypatch.setattr(GP, "_blockers_of", lambda board, gaps, skip=(), r=3.0: sorted({b for g in gaps for n in g["nets"] for b in blockers[n]}))
+    monkeypatch.setattr(GP, "_blocker_items", lambda board, gaps, skip=(), r=3.0: set({b for g in gaps for n in g["nets"] for b in blockers[n]}))
 
     def measure(board, kicad_cli="kicad-cli"):
         d = _three_open_gaps()
@@ -335,3 +336,4 @@ def test_hung_island_job_is_reaped_and_the_cheap_open_is_committed_within_the_st
     assert any(l["method"] == "patch" and l["result"] in ("closed", "partial") for l in lines)
     assert open(res["best"]).read().endswith("free_fixed") and res["end"]["opens"] == 1       # committed; only the island stays open
     assert res["time_accounting"]["child_start"] >= 5.0                 # the hung child's wall is accounted, to the kill
+
