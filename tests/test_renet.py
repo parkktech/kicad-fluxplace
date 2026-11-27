@@ -177,3 +177,21 @@ def test_incremental_seat_scopes_the_route_to_the_new_parts_nets(tmp_path, monke
     shutil.copy(str(tmp_path / "b.kicad_pro"), str(tmp_path / "other.kicad_pro"))
     PL.run(a2)
     assert PL.load_state(a2.workdir)["route_scope"]["input"] == os.path.abspath(a2.board)      # another BOARD: the old scope is dropped, a new one made
+
+
+def _via(x, y, net):
+    return f'(via (at {x} {y}) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net "{net}"))\n'
+
+
+def test_foreign_via_inside_the_clearance_of_a_swapped_pad_is_stripped(tmp_path):
+    """in-place swap: a GND stitching via sits 0.10 mm (< clearance) from the new pad R3.1 without touching it; the same gap at an unchanged part stays."""
+    body = (two("R1", 10, 10, "A", "G") + two("R3", 25, 20, "N", "M") + _via(24.5, 19.45, "G") + _via(10, 9.45, "G") + seg((9.5, 10), (9.5, 14), "A"))
+    b = G.write(tmp_path, body, name="v.kicad_pcb")
+    (tmp_path / "v.kicad_pro").write_text("{}")
+    out = str(tmp_path / "o" / "v.kicad_pcb")
+    assert RN.apply(b, out) is None                                          # a plain re-net run ignores clearance
+    rep = RN.apply(b, out, None, {"R3"})
+    assert rep["pads"] == ["R3.1"] and rep["removed"] == {"G": 1} and rep["release"] == ["G"]
+    text = open(out).read()
+    assert "(at 24.5 19.45)" not in text and "(at 10 9.45)" in text           # only the swapped part's neighbour went
+    assert RN.changed_refs(b, out) == set()                                  # same pads: refs compare by pads, not copper
