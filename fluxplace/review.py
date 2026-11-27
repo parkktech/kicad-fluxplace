@@ -1569,18 +1569,21 @@ def check_fab_capability(facts, cons):
                                 f"{s['width']:g}mm ({s['x']:g},{s['y']:g})"),
                       refs={s["net"] for s in narrow}))
 
+    # vias/PTH are FAILed only below the houses' HARD (reject) values, never the recommended design floors fab[...] carries (k10 rule)
+    gr = fab.get("grade") or {}
+    g_drill, g_dia, g_ring = (gr.get(k, fab[k]) for k in ("min_drill_mm", "min_via_dia_mm", "min_annular_mm"))
     vias = facts.get("vias") or []
     bad_drill = [v for v in vias if v.get("drill_mm") is not None
-                and v["drill_mm"] < fab["min_drill_mm"]]
+                and v["drill_mm"] < g_drill]
     bad_via = [v for v in vias if v.get("dia_mm") is not None
-              and v["dia_mm"] < fab["min_via_dia_mm"]]
+              and v["dia_mm"] < g_dia]
     bad_ann = [v for v in vias if v.get("dia_mm") is not None and v.get("drill_mm") is not None
-              and (v["dia_mm"] - v["drill_mm"]) / 2.0 < fab["min_annular_mm"]]
+              and (v["dia_mm"] - v["drill_mm"]) / 2.0 < g_ring - FC.HOUSE_TOL_MM]
     for p in facts.get("pth_pads") or []:
-        if p.get("drill_mm") is not None and p["drill_mm"] < fab["min_drill_mm"]:
+        if p.get("drill_mm") is not None and p["drill_mm"] < g_drill:
             bad_drill.append(p)
         if p.get("dia_mm") is not None and p.get("drill_mm") is not None and \
-                (p["dia_mm"] - p["drill_mm"]) / 2.0 < max(fab["min_annular_mm"], hard.get("pth_annular_min", 0.0)):
+                (p["dia_mm"] - p["drill_mm"]) / 2.0 < max(g_ring, hard.get("pth_annular_min", 0.0)) - FC.HOUSE_TOL_MM:
             bad_ann.append(p)
 
     def _via_ref(it):

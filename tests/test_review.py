@@ -379,7 +379,7 @@ def test_fab_min_drill_annular_and_via_diameter():
     f = facts(
         track_geom=[],
         vias=[{"net": "GND", "type": "through", "x": 1.0, "y": 1.0,
-               "layers": "F.Cu-B.Cu", "dia_mm": 0.35, "drill_mm": 0.15}],
+               "layers": "F.Cu-B.Cu", "dia_mm": 0.34, "drill_mm": 0.15}],
         pth_pads=[{"ref": "J1A", "pad": "1", "drill_mm": 0.18, "dia_mm": 0.5,
                    "x": 5.0, "y": 5.0}],
         design_min={"track_mm": 0.1, "via_mm": 0.4, "drill_mm": 0.2, "clearance_mm": 0.1},

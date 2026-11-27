@@ -275,3 +275,15 @@ def test_fabadvise_via_sizes_keys_are_strings_and_result_is_json():
     assert all(isinstance(k, str) for k in res["features"]["via_sizes"])
     assert res["features"]["via_sizes"] == {"0.45/0.2": 1, "0.6/0.3": 1}
     json.dumps(res)
+
+
+def test_review_grades_vias_at_house_hard_not_recommended_without_explicit_floor():
+    cons = {"fab": {"profile": ["jlcpcb-standard", "pcbway-standard"]}}
+    fab = C.fab_profile(cons, layers=6)
+    assert fab["grade"]["min_annular_mm"] < fab["min_annular_mm"]            # recommended 0.15 stays the design floor
+    ok = [{"net": "GND", "dia_mm": 0.455, "drill_mm": 0.2, "x": 0, "y": 0}]   # ring 0.1275 (pad >= drill + 2 x PCBWay hard 0.127): legal at both houses
+    assert not [x for x in R.check_fab_capability(_facts([], ok), cons) if x["level"] == "FAIL"]
+    bad = [{"net": "GND", "dia_mm": 0.40, "drill_mm": 0.2, "x": 0, "y": 0}]   # ring 0.10 < PCBWay hard 0.127
+    assert "FAB_MIN_ANNULAR" in [x["code"] for x in R.check_fab_capability(_facts([], bad), cons) if x["level"] == "FAIL"]
+    ex = {"fab": dict(cons["fab"], min_annular_mm=0.2)}                       # an explicit project floor above recommended still grades
+    assert "FAB_MIN_ANNULAR" in [x["code"] for x in R.check_fab_capability(_facts([], ok), ex) if x["level"] == "FAIL"]

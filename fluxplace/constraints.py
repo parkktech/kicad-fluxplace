@@ -221,6 +221,8 @@ def fab_profile(cons, layers=None, board=None):
                          for k, v in res["floor_prov"].items()} if res else {}
     out["provenance"].update(overridden)
     out["floor_warns"] = warns
+    # grading floors: the houses' HARD values (hf) unless the project set the floor itself (explicit above the recommended, or D71fs override)
+    out["grade"] = {k: (out[k] if (explicit.get(k) or k in overridden or k not in hf) else hf[k]) for k in _FAB_DEFAULTS if k in out}
     out["hard_provenance"] = {k: " = ".join(v) for k, v in res["provenance"].items()} if res else {}
     out["hard"] = res["limits"] if res else {}
     out["vendor"], out["tier"] = (res["vendor"], res["tier"]) if res else (None, None)
