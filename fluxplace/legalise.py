@@ -99,7 +99,8 @@ def keepout_rects(B, cons):
 
 
 class _Model:
-    def __init__(self, B, cons, fixed, bounds, escape=True, reserve=None):
+    def __init__(self, B, cons, fixed, bounds, escape=True, reserve=None, ko_margin=0.0):
+        self.ko_margin = ko_margin
         self.B, self.cons, self.bounds, self.escape = B, cons, bounds, escape
         self.reserve = reserve if (reserve and escape) else {"rects": [], "inflate": {}}      # escreserve.for_legalise
         self.fixed = set(fixed) | {r for r, p in B["parts"].items() if p.get("locked")}
@@ -165,7 +166,7 @@ class _Model:
             if any(fnmatch.fnmatch(ref, g) for g in allow) or (exact and name.startswith("hardware:")):
                 continue
             if sd & ks and (part["tht"] or mh is None):
-                out.append((name, r))
+                out.append((name, _grow(r, self.ko_margin)))
         for r in self.reserve["rects"]:                  # the first escape row of another part: hard
             if r["hard"] and r["owner"] != ref and sd & r["sides"]:
                 out.append((r["why"], r["rect"]))
@@ -175,9 +176,13 @@ class _Model:
         for x0, y0, x1, y1, z in self.zones:
             if (layer in z["layers"] or part["tht"]) and ref.upper() not in z["name"].upper() \
                     and z.get("owner") != ref:
-                out.append((z["name"] or "rule area", (x0, y0, x1, y1)))
+                out.append((z["name"] or "rule area", _grow((x0, y0, x1, y1), self.ko_margin)))
         out += self.intent.for_ref(ref)                      # --- intent (intent.py)
         return out
+
+
+def _grow(r, m):
+    return (r[0] - m, r[1] - m, r[2] + m, r[3] + m) if m else r
 
 
 def _rect(pos, rel):
@@ -241,8 +246,9 @@ def check_outline(B, positions, bounds=None):
 
 
 def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400, log=None,
-             strict=True, units=None, escape=True, rigid=(), reserve=None):
-    """`targets` = {ref: (x, y, angle)} desired origins of the MOVABLE parts (every
+             strict=True, units=None, escape=True, rigid=(), reserve=None, ko_margin=0.0):
+    """`ko_margin`: mm the part keeps from every keep-out / rule area (the stage-end gate passes [placement] edge_clearance_mm).
+    `targets` = {ref: (x, y, angle)} desired origins of the MOVABLE parts (every
     other part stays put). `units` = {key: [refs]} makes those parts move as one
     rigid body (an IC with its support parts); keys in `rigid` (structure templates) are never split. -> ({ref: (x, y, angle)}, report).
     Raises PlacementError when a part cannot be kept inside the outline / out of
@@ -250,7 +256,7 @@ def legalise(B, targets, fixed=(), cons=None, bounds=None, hot=(), max_iter=400,
     bounds = bounds or B["bbox"]
     em = float(((cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3))
     bounds = (bounds[0] + em, bounds[1] + em, bounds[2] - em, bounds[3] - em)   # copper-to-edge
-    M = _Model(B, cons, fixed, bounds, escape, reserve)
+    M = _Model(B, cons, fixed, bounds, escape, reserve, ko_margin)
     parts = B["parts"]
     want = {r: tuple(v) for r, v in targets.items() if r in parts and r not in M.fixed}
     groups, seen = [], set()

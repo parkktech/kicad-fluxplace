@@ -1190,7 +1190,8 @@ def _placement_collision_gate(c, n, name, res):
     tg = {r: (parts[r]["pos"][0], parts[r]["pos"][1], parts[r]["angle"]) for r in sorted(bad - fixed) if r in parts}
     if tg and not (B["segs"] or B["vias"]):
         try:
-            pos, _rep = LG.legalise(B, tg, fixed=sorted(set(parts) - set(tg)), cons=c.cons, strict=False)
+            pos, _rep = LG.legalise(B, tg, fixed=sorted(set(parts) - set(tg)), cons=c.cons, strict=False,
+                                  ko_margin=float(((c.cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3)))
             moves = {r: tuple(v) for r, v in pos.items() if r in tg and tuple(v) != tg[r]}
             if moves:
                 out = os.path.join(d, "legal.kicad_pcb")

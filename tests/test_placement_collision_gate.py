@@ -26,7 +26,10 @@ def test_movable_offender_is_legalised(tmp_path):
     b = _board(tmp_path)
     res = PL._placement_collision_gate(_ctx(tmp_path), 1, "floorplan", {"verdict": "pass", "board": b, "line": "floorplan: ok"})
     assert res["verdict"] == "pass" and res["board"] != b and "legalised R1" in res["line"]
-    assert LGL.collision_gate(RD.load(res["board"]))[0]
+    B = RD.load(res["board"])
+    assert LGL.collision_gate(B)[0]
+    x0, y0, x1, y1 = B["parts"]["R1"]["court"]                  # keeps [placement] edge_clearance_mm (0.3) from J1's rule area (29..31)
+    assert max(29 - x1, x0 - 31, 29 - y1, y0 - 31) >= 0.3 - 1e-6
 
 
 def test_unmovable_offender_fails_the_stage_naming_it(tmp_path):
