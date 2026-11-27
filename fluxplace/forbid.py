@@ -11,7 +11,9 @@ from . import geom as GM
 
 
 def windows(cons):
-    """-> [{name, side "F"|"B", pts, owner}] of the [thermal.*] blocks with mask_open (empty when none)."""
+    """-> [{name, side "F"|"B", pts, owner}] of the [thermal.*] blocks with mask_open (empty when none).
+    The rule (lead, D71cd: exposed GND copper + GND thermal-via array + soft pad): no via or track of any non-GND net in the opening, a GND
+    via is allowed and wanted; the same in every stage, whether the opening is on the board or stripped."""
     from . import thermal as TH
     out = []
     for sp in TH.blocks(cons, pre=False):
@@ -40,7 +42,10 @@ def augment(B, wins):
         if not B.get("copper"):
             break
         r = {"name": w["name"], "layers": {_layer(B["copper"], w["side"])}, "pts": w["pts"], "owner": w["owner"], "mask": w["side"] + ".Mask"}
-        if not any(_same(r, m) for m in B.get("mask_open", [])):
+        same = [m for m in B.get("mask_open", []) if _same(r, m)]
+        for m in same:
+            m["owner"] = m["owner"] or r["owner"]            # the board polygon has no covering zone on its own layer: the block names the owner
+        if not same:
             B.setdefault("mask_open", []).append(r)
     return B
 

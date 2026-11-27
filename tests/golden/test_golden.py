@@ -122,9 +122,9 @@ def test_mask_window_via(fanned):
 
 
 def window_board(tmp):
-    """An 8-pin IC standing 2 mm inside the window's edge (window x 5..35, B side, GND), two of its pins on a rail whose plane is on In1.Cu:
-    their vias are foreign-net vias, which the window forbids."""
-    nets = ["V1", "V1", "N2", "N3", "N4", "N5", "N6", "N7"]
+    """An 8-pin IC standing 2 mm inside the window's edge (window x 5..35, B side, GND), two of its pins on a rail whose plane is on In1.Cu
+    (their vias are foreign-net vias, which the window forbids) and one on GND (its via is the owner's: allowed and kept)."""
+    nets = ["V1", "V1", "N2", "GND", "N4", "N5", "N6", "N7"]
     plane = ('(zone (net 2) (net_name "V1") (layer "In1.Cu") (hatch edge 0.5) (polygon (pts (xy 1 1) (xy 39 1) (xy 39 29) (xy 1 29))))\n')
     body = g.ic("U1", 33, 15, nets, pitch=0.5) + g.two("R1", 38, 15, "N2", "N3")
     return H.write_board(tmp, body + plane + MASK.replace("(xy 10 10) (xy 25 10) (xy 25 25) (xy 10 25)", "(xy 5 5) (xy 35 5) (xy 35 28) (xy 5 28)"))
@@ -141,7 +141,7 @@ def test_mask_window_no_foreign_via(tmp_path):
     of every stage output has the same solder_mask_bridge count as the input's re-cut (delta 0)."""
     from fluxplace import forbid as FB, thermal as TH
     b = window_board(tmp_path)
-    c = H.context(tmp_path, b, THERMAL.replace("rect = [5, 5, 35, 28]", "rect = [5, 5, 35, 28]"))
+    c = H.context(tmp_path, b, THERMAL)
     win = FB.windows(c.cons)
     assert [(w["side"], w["owner"]) for w in win] == [("B", "GND")]
     res = H.chain(c, b, ["fanout", "pour-tie"])
@@ -151,9 +151,17 @@ def test_mask_window_no_foreign_via(tmp_path):
                if v.GetClass() == "PCB_VIA" and v.GetNetname() != "GND" and 5 - 0.3 <= v.GetPosition().x / 1e6 <= 35 + 0.3
                and 5 - 0.3 <= v.GetPosition().y / 1e6 <= 28 + 0.3]
         assert not bad, f"{r['line']}: foreign vias in the window {bad}"
+        gnd = [v for v in bd.GetTracks() if v.GetClass() == "PCB_VIA" and v.GetNetname() == "GND" and 5 <= v.GetPosition().x / 1e6 <= 35
+               and 5 <= v.GetPosition().y / 1e6 <= 28]
+        assert gnd, f"{r['line']}: the GND via inside the window (the owner net) must be kept"
         rc = r["board"].replace(".kicad_pcb", ".recut.kicad_pcb")
         TH.recut(r["board"], c.cons, rc)
         assert _mask_bridges(rc if os.path.exists(rc) else r["board"], tmp_path) == 0
+    # boundary: the same predicate refuses a foreign via and keeps a GND via exactly on the edge, for the stripped window
+    from fluxplace import routediag as RD
+    B = FB.augment(RD.load(b), FB.windows(c.cons))
+    assert FB.blocked(B, 34.9, 15, "N9") and FB.blocked(B, 35.02, 15, "N9") and not FB.blocked(B, 35.5, 15, "N9")
+    assert not FB.blocked(B, 34.9, 15, "GND") and not FB.blocked(B, 20, 15, "GND")
 
 
 def test_via_forbidden_gap_is_a_row_for_an_ic_not_a_passive(tmp_path):
