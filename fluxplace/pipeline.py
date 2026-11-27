@@ -1459,9 +1459,8 @@ def _input_baseline(c, kinds, d):
 def _preexisting_only(c, r, d, kinds):
     """Re-net / incremental run (state `route_scope`): a gate that ended on gaps only (stop flat/no-gain/rounds) and where every left gap
     is also on the input board (same id, not worse) does not stop the flow. -> the pre-existing rows or None. Stamps stop.json."""
-    sc = (getattr(c, "state", None) or {}).get("route_scope")
     left = r.get("left") or []
-    if not (sc and sc.get("input") and left) or r["stop"] in ("clean", "packets", "protection", "crashed", "manifest_stale"):
+    if not left or r["stop"] in ("clean", "packets", "protection", "crashed", "manifest_stale"):
         return None
     base = _input_baseline(c, kinds, d)
     if base is None:

@@ -266,7 +266,8 @@ def split_preexisting(left, base_left, tol=0.01):
     base = {g["id"]: g.get("mag") or 0 for g in base_left or ()}
     new, pre = [], []
     for g in left or ():
-        (pre if g["id"] in base and (g.get("mag") or 0) <= base[g["id"]] + tol else new).append(g)
+        was_there = g["id"] in base and (g.get("mag") or 0) <= base[g["id"]] + tol
+        (pre if was_there else new).append(g)
     return new, pre
 
 
