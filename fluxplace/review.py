@@ -1723,6 +1723,9 @@ def _spec_pads(comp, pin, pads):
 def _spec_wiring(parts, net_pads, nets, comps):
     """Declared-but-unwired: a pad the spec puts on net N whose board net is not N. Wired-but-undeclared: a pad on board
     net N that spec net N does not list (only nets the spec declares; a part the board lacks is SPEC_COMPONENT_MISMATCH)."""
+    def listed(items):
+        return ", ".join(items[:8]) + (f" (+{len(items) - 8})" if len(items) > 8 else "")
+
     out = []
     for name, pins in sorted(nets.items()):
         declared, complete = set(), True
@@ -1733,12 +1736,13 @@ def _spec_wiring(parts, net_pads, nets, comps):
             declared.update((ref, pad) for pad in got)
         bad = sorted(f"{r}.{pd} ({parts[r]['pads'][pd] or 'NO NET'})" for r, pd in declared if parts[r]["pads"][pd] != name)
         if bad:
-            out.append(_f(FAIL, "SPEC_DECLARED_UNWIRED", f"{name}: spec pins not on this net on the board: {', '.join(bad[:8])}"
-                          + (f" (+{len(bad) - 8})" if len(bad) > 8 else ""), refs=sorted({b.split(".")[0] for b in bad})))
-        extra = sorted(f"{r}.{pd}" for r, pd in map(tuple, net_pads.get(name, ())) if complete and (r, pd) not in declared and r in comps)
+            out.append(_f(FAIL, "SPEC_DECLARED_UNWIRED", f"{name}: spec pins not on this net on the board: {listed(bad)}",
+                          refs=sorted({b.split(".")[0] for b in bad})))
+        if not complete:
+            continue
+        extra = sorted(f"{r}.{pd}" for r, pd in map(tuple, net_pads.get(name, ())) if (r, pd) not in declared and r in comps)
         if extra:
-            out.append(_f(FAIL, "SPEC_WIRED_UNDECLARED", f"{name}: board pads on this net that the spec does not list: "
-                          f"{', '.join(extra[:8])}" + (f" (+{len(extra) - 8})" if len(extra) > 8 else ""),
+            out.append(_f(FAIL, "SPEC_WIRED_UNDECLARED", f"{name}: board pads on this net that the spec does not list: {listed(extra)}",
                           refs=sorted({e.split(".")[0] for e in extra})))
     return out
 

@@ -214,7 +214,8 @@ def _rule_view(pro):
     """The DRC-relevant part of a .kicad_pro as {key: value}: board rules, severities, per-class geometry (keyed by class name,
     so a reordered class list is no drift)."""
     try:
-        d = json.load(open(pro))
+        with open(pro) as f:
+            d = json.load(f)
     except (OSError, ValueError):
         return None
     ds = (d.get("board") or {}).get("design_settings") or {}

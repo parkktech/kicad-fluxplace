@@ -531,8 +531,10 @@ def pad_undeclared(board, netlist_xml):
         names = {pad.GetPadName() for pad in fp.Pads()}
         if not pins or not pins <= names:       # not in the schematic, or symbolic pin names that never match pad numbers (SCH_PIN_NO_PAD)
             continue
-        out += [(ref, pad.GetPadName(), pad.GetNetname()) for pad in fp.Pads()
-                if pad.GetNetname() and not pad.GetNetname().startswith("unconnected-") and (ref, pad.GetPadName()) not in truth]
+        for pad in fp.Pads():
+            net = pad.GetNetname()
+            if net and not net.startswith("unconnected-") and (ref, pad.GetPadName()) not in truth:
+                out.append((ref, pad.GetPadName(), net))
     return out
 
 

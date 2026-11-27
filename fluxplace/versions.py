@@ -32,6 +32,7 @@ import subprocess
 import sys
 import datetime
 import fnmatch
+import tempfile
 
 from fluxplace import drcguard as DG
 from fluxplace import progress as PG
@@ -148,7 +149,6 @@ def measure(board, base_pro=None):
         if drift:
             print("rules drift: %s differs from %s in %d DRC setting(s) (%s); measuring under the project rules"
                   % (os.path.basename(own), os.path.basename(base_pro), len(drift), ", ".join(drift[:4])))
-            import tempfile
             with tempfile.TemporaryDirectory(prefix="fxver-") as td:
                 shutil.copy(board, os.path.join(td, "b.kicad_pcb"))
                 shutil.copy(base_pro, os.path.join(td, "b.kicad_pro"))
