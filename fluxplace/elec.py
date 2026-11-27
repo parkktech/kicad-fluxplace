@@ -60,8 +60,9 @@ def load_facts(ds_dir):
         dos = DO.load(mpn, ent.get("sha256")) if ent.get("sha256") else None
         hand = ent.get("facts") or {}
         auto = DO.elec_facts(dos) if dos else {}
-        if hand.keys() & {"vin_min", "vin_max", "supply_pins"}:                      # the supply range is one fact: all hand or all dossier
-            auto = {k: v for k, v in auto.items() if k not in ("vin_min", "vin_max", "supply_pins")}
+        supply = {"vin_min", "vin_max", "supply_pins"}                                # the supply range is one fact: all hand or all dossier
+        if hand.keys() & supply:
+            auto = {k: v for k, v in auto.items() if k not in supply}
         fx = {**auto, **hand}                                                         # a hand-entered fact wins over the dossier's
         if not fx:
             continue

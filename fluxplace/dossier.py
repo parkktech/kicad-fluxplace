@@ -166,27 +166,22 @@ def _check(fact, pg):
 def verify(raw, pg):
     """The model's dossier with every fact checked against its page: unverified facts move to `rejected`. -> dossier dict."""
     out = {"category": raw.get("category") or "unknown", "description": raw.get("description") or "", "rejected": []}
-    unknown = set(x for x in (raw.get("unknown") or []) if isinstance(x, str))
+    unknown = {x for x in raw.get("unknown") or [] if isinstance(x, str)}
+
+    def stands(s, f):
+        why = _check(f, pg)
+        if why:
+            out["rejected"].append({"section": s, "fact": f, "why": why})
+        return not why
+
     for s in DICT_SECTIONS:
         f = raw.get(s)
-        if isinstance(f, dict) and f:
-            why = _check(f, pg)
-            if why:
-                out["rejected"].append({"section": s, "fact": f, "why": why})
-            else:
-                out[s] = f
-        if s not in out:
+        if isinstance(f, dict) and f and stands(s, f):
+            out[s] = f
+        else:
             unknown.add(s)
     for s in LIST_SECTIONS:
-        keep = []
-        for f in raw.get(s) or []:
-            if not isinstance(f, dict):
-                continue
-            why = _check(f, pg)
-            if why:
-                out["rejected"].append({"section": s, "fact": f, "why": why})
-            else:
-                keep.append(f)
+        keep = [f for f in raw.get(s) or [] if isinstance(f, dict) and stands(s, f)]
         if keep:
             out[s] = keep
         else:
@@ -200,13 +195,17 @@ def n_facts(d):
 
 
 # ------------------------------------------------------------------ model
+def _model(model=None):
+    return model or os.environ.get("FLUXPLACE_DOSSIER_MODEL") or MODEL
+
+
 def online():
     return os.environ.get("FLUXPLACE_AI", "1") not in ("0", "off", "no") and shutil.which("claude") is not None
 
 
 def call_model(prompt, model=None, timeout=900):
     """-> (reply text, cost USD). The local `claude -p` CLI, no tools, no project settings, run outside any project."""
-    cmd = ["claude", "-p", "--model", model or os.environ.get("FLUXPLACE_DOSSIER_MODEL") or MODEL, "--output-format", "json",
+    cmd = ["claude", "-p", "--model", _model(model), "--output-format", "json",
            "--tools", "", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
            "--system-prompt", "You extract datasheet facts into JSON. Output JSON only."]
     r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cache_dir())
@@ -245,7 +244,7 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False):
         return None, f"model failed: {e}", 0.0
     dos = verify(raw, pg)
     dos.update(mpn=mpn, file=os.path.basename(pdf), sha256=sha, version=VERSION, pages_read=sel, n_pages=len(pg),
-               model=model or os.environ.get("FLUXPLACE_DOSSIER_MODEL") or MODEL, cost_usd=round(cost, 5),
+               model=_model(model), cost_usd=round(cost, 5),
                seconds=round(time.time() - t0, 1), made=time.strftime("%Y-%m-%dT%H:%M:%S"))
     from . import sourcing as S
     S.write_json(_path(mpn, sha, d), dos, indent=1)
@@ -289,7 +288,9 @@ def _si(v, unit, want):
 def elec_facts(dos):
     """{key: {value, source}} in the elec fact-store shape, from a dossier's verified facts: supply range per supply pin, decoupling
     distance per pin, connector contact rating. A key the dossier does not back is absent."""
-    src = lambda p: f"{dos['file']}#p{p} (dossier)"     # noqa: E731
+    def src(p):
+        return f"{dos['file']}#p{p} (dossier)"
+
     out = {}
     lo, hi, pins, srcs = {}, {}, [], []
     gnd = {p.get("name") for p in dos.get("pins") or [] if p.get("type") == "ground"}
