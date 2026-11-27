@@ -59,8 +59,8 @@ def test_house_verdicts_ok_option_impossible():
     v = FX.classify("via_ring", 0.125, hs, 6, l)                          # JLC standard 0.125 ok; PCBWay standard 0.127 -> medium difficulty
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and "capabilities.html" in v["pcbway"]["source"]
     assert FX.action_of(v, False) == "ORDER-OPTION"
-    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry hard 0.05
-    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "ok"
+    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry hard 0.05 < 0.1 < rec 0.125 -> option
+    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "option"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), True) == "FIXED"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), False) == "OK"
 
@@ -68,7 +68,7 @@ def test_house_verdicts_ok_option_impossible():
 def test_house_rule_pro_edit_sets_house_space_not_project_preference():
     pd = {"net_settings": {"classes": [{"clearance": 0.12}]}}
     FX._house_pro_edit(_lims())(pd)
-    assert pd["net_settings"]["classes"][0]["clearance"] == 0.1 and pd["board"]["design_settings"]["rules"]["min_via_annular_width"] == 0.127
+    assert pd["net_settings"]["classes"][0]["clearance"] == 0.1 and pd["board"]["design_settings"]["rules"]["min_via_annular_width"] == 0.15   # design floor = strictest recommended (PCBWay 0.15)
     pd = {"net_settings": {"classes": [{"clearance": 0.2}]}}
     FX._relax_edit(_lims())(pd)
     assert pd["net_settings"]["classes"][0]["clearance"] == 0.1

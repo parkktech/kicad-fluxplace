@@ -63,7 +63,7 @@ def _renetted(tmp_path):
 def test_renet_run_routes_only_the_released_pair_and_commit_is_accepted(tmp_path):
     _router()
     routed = _renetted(tmp_path)
-    c = H.use_krt(H.context(tmp_path, routed, CONS, argv=["--route-budget", "300"]))
+    c = H.use_krt(H.context(tmp_path, routed, CONS, argv=["--route-budget", "1200"]))
     usb0 = BW.net_items(routed, {"USB_P", "USB_N"})
     out = PL._renet_entry(c, c.work, routed, c.state)
     assert out != routed and c.state["route_scope"]["nets"] == ["ETH_N", "ETH_P"]

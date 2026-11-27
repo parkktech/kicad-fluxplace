@@ -1513,10 +1513,16 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
                 FB.reconcile(rep, aud, opn)
                 FB.handoff_effort(rep, P)
         rep["complete"] = sum(1 for r in rep["pairs"] if r["status"] == "complete")
+        rep["laid"] = laid_count(rep)
         rep["states"] = {k: sum(1 for r in rep["pairs"] if r.get("state") == k) for k in FB.STATES + ("a-mismatch",)}
         rep["handoff"] = sorted(n for r in rep["pairs"] if r.get("handoff") for n in r["pair"])
     rep["verdict"] = "PAIRS_OK" if rep["complete"] == rep["total"] else "PAIRS_WARN"
     return rep
+
+
+def laid_count(rep):
+    """Pairs laid as coupled copper: complete within the target skew + laid over it (audit 'mismatch'). Owner realistic-limit rule (D71ft)."""
+    return sum(1 for r in rep["pairs"] if r["status"] in ("complete", "mismatch"))
 
 
 def format_text(rep, top=None):

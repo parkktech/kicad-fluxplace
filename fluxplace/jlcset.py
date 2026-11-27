@@ -66,8 +66,8 @@ def rotation_rules(cache_dir=None, fetch=None):
             if fetch:
                 body = fetch(ROT_URL)
             else:
-                import urllib.request
-                body = urllib.request.urlopen(ROT_URL, timeout=20).read()
+                from .redact import urlopen as _redact_urlopen
+                body = _redact_urlopen(ROT_URL, timeout=20).read()
         except Exception as e:
             return [], "JLC rotation table not fetched (%s: %s)" % (type(e).__name__, e)
         if not pinned(body):
