@@ -28,6 +28,7 @@ from . import drcguard as DG
 from . import fabcaps as FC
 
 EPS = 1e-6
+REG_CITE = {}                               # (house, limit key) -> w110 registry citation of the value in use
 DRILL_STEP = 0.05                          # standard drill grid (0.2 / 0.25 / 0.3 ...)
 PAD_STEP = 0.005
 RING_MARGIN = 0.003                        # mm above the strictest house via ring (the sourced limits are rounded to 0.003)
@@ -58,8 +59,19 @@ def resolve_houses(spec):
 
 
 def house_limits(houses, layers):
-    """{house: limits dict of its profile row at `layers` copper layers}."""
-    return {h: FC.limits(p, layers)["limits"] for h, p in houses}
+    """{house: limits dict of its profile row at `layers` copper layers}, each feature the limits registry (w110, fab_<feature>:<house>-<n>l)
+    sources replaced by that sourced HARD value; fabcaps supplies the rest. REG_CITE[(house, key)] = the registry citation used."""
+    from . import limits as L
+    out = {}
+    for h, p in houses:
+        r = FC.limits(p, layers)
+        lim = dict(r["limits"])
+        for f, (hard, _rec, cite) in L.fab_bounds({"vendor": r["vendor"], "layers": layers, "hard": r["limits"], "name": p}, layers).items():
+            if f in lim and not cite.startswith("fabcaps"):
+                lim[f] = hard
+                REG_CITE[(h, f)] = cite
+        out[h] = lim
+    return out
 
 
 def strictest(lims, key):
@@ -236,11 +248,7 @@ class Plan:
         return kw
 
     def edits(self):
-        out = []
-        for it in self.items:
-            if 0 <= it["rung"] < len(it["ladder"]):
-                out.append((it["span"], it["ladder"][it["rung"]]["edit"]))
-        return out
+        return [(it["span"], it["ladder"][it["rung"]]["edit"]) for it in self.active()]
 
     def active(self):
         return [it for it in self.items if 0 <= it["rung"] < len(it["ladder"])]
@@ -263,7 +271,12 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
         centre[id(s)] = centre_distance(s, by_nl, pn) if pn else None
     for s in segs:
         lad = track_ladder(s["w"], lims)
-        if not lad or s["locked"]:
+        if not lad:
+            continue
+        where = dict(kind="track", span=s["span"], net=s["net"], layer=s["layer"], x=(s["x1"] + s["x2"]) / 2, y=(s["y1"] + s["y2"]) / 2,
+                     geom=((s["x1"], s["y1"]), (s["x2"], s["y2"])), old=s["w"])
+        if s["locked"]:
+            plan.add(**where, ladder=[], z=None, info={}, rung=-1, why="locked")
             continue
         kind = zm.kind(s["net"]) if zm else None
         rungs, info = [], {}
@@ -285,12 +298,15 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
                 info["z_blocked"] = {"want": w, "z_new": None, "limit_w": None, "note": "no reference plane / stackup: impedance not computable"}
             else:
                 rungs.append({"edit": {"width": w}, "to": w})
-        plan.add(kind="track", span=s["span"], net=s["net"], layer=s["layer"], x=(s["x1"] + s["x2"]) / 2, y=(s["y1"] + s["y2"]) / 2,
-                 geom=((s["x1"], s["y1"]), (s["x2"], s["y2"])), old=s["w"], ladder=rungs, z=kind, info=info,
+        plan.add(**where, ladder=rungs, z=kind, info=info,
                  rung=0 if rungs else -1, why="" if rungs else "impedance-blocked" if info.get("z_blocked") else "no rung")
     for v in vias:
         ring = (v["size"] - v["drill"]) / 2
-        if ring >= strict_ring + RING_MARGIN - EPS or not v["through"] or v["locked"]:
+        if ring >= strict_ring + RING_MARGIN - EPS:
+            continue
+        where = dict(kind="via_ring", span=v["span"], net=v["net"], layer="F.Cu-B.Cu", x=v["x"], y=v["y"], geom=((v["x"], v["y"]),), old=ring)
+        if not v["through"] or v["locked"]:
+            plan.add(**where, ladder=[], z=None, info={}, rung=-1, why="locked" if v["locked"] else "not a through via")
             continue
         keep = v["net"] in zone_nets
         cands, seen = [], set()
@@ -302,13 +318,21 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
                     seen.add(c[:2])
                     cands.append(c)
         rungs = [{"edit": {"size": p, "drill": d}, "to": (p, d), "label": lab.strip()} for p, d, lab in cands]
-        plan.add(kind="via_ring", span=v["span"], net=v["net"], layer="F.Cu-B.Cu", x=v["x"], y=v["y"], geom=((v["x"], v["y"]),),
-                 old=ring, old_size=v["size"], old_drill=v["drill"], ladder=rungs, z=None, info={"keep_drill": keep},
+        plan.add(**where, old_size=v["size"], old_drill=v["drill"], ladder=rungs, z=None, info={"keep_drill": keep},
                  rung=0 if rungs else -1, why="" if rungs else "no candidate")
     return plan, centre
 
 
 # ---------------------------------------------------------------- guard loop
+def _copy_sidecars(board, dst_pcb, exts=(".kicad_pro", ".kicad_dru")):
+    """Copy `board`'s project sidecars next to `dst_pcb` (an existing one is kept)."""
+    for ext in exts:
+        src = os.path.splitext(board)[0] + ext
+        dst = os.path.splitext(dst_pcb)[0] + ext
+        if os.path.isfile(src) and not os.path.exists(dst):
+            shutil.copy(src, dst)
+
+
 def _new_instances(base_m, drc):
     """Error violations of `drc` the base does not already have (per key, the count above the base's), plus the unconnected items
     of every net whose open count rose. The key set is drcguard's own (error severity), so it matches the base measure."""
@@ -345,12 +369,9 @@ def guard_loop(text, base_path, plan, base_measure, workdir, max_rounds=8, log=p
         cand = apply_edits(text, plan.edits())
         p = os.path.join(workdir, f"cand-{rnd}.kicad_pcb")
         open(p, "w").write(cand)
-        for ext in (".kicad_pro", ".kicad_dru"):
-            src = os.path.splitext(base_path)[0] + ext
-            if os.path.isfile(src):
-                shutil.copy(src, os.path.splitext(p)[0] + ext)
+        _copy_sidecars(base_path, p)
         drc = DG.drc_json(p, pro_edit=pro_edit)
-        new, extra = _new_instances(base_measure, drc)
+        new, _extra = _new_instances(base_measure, drc)
         rounds.append({"round": rnd, "edited": len(act), "new_violations": len(new)})
         log(f"  fabconform round {rnd}: {len(act)} edits, {len(new)} new violations")
         if not new:
@@ -385,7 +406,7 @@ def house_verdict(house, profile, kind, value, layers, lims_by_house):
     if need is None or value >= need - EPS:
         return {"status": "ok"}
     v, t0 = FC.split(profile)
-    for (vv, t) in FC.all_tiers():
+    for vv, t in FC.all_tiers():
         if vv != v or t == t0 or not FC.offers(vv, t, layers):
             continue
         lim, _u = FC.row_for(vv, t, layers)
@@ -398,8 +419,9 @@ def house_verdict(house, profile, kind, value, layers, lims_by_house):
         if o["kind"] == kind and value >= o["limit_mm"] - EPS:
             return {"status": "option", "tier": o["option"], "source": o["source"], "retrieved": o["retrieved"],
                     "text": f"{o['option']}: {kind} >= {o['limit_mm']:g} mm ({o['cost']})"}
+    cite, std = REG_CITE.get((house, key), ""), FC.tier_info(v, t0)
     return {"status": "impossible", "text": f"{value:g} mm is below every published {house} option for {KIND_LABEL[kind]} (standard {need:g} mm)",
-            "source": FC.tier_info(v, t0)["source"], "retrieved": FC.tier_info(v, t0)["retrieved"]}
+            "source": cite or std["source"], "retrieved": std["retrieved"]}
 
 
 def classify(kind, value, houses, layers, lims_by_house):
@@ -451,18 +473,29 @@ def _loc(x, y):
     return f"({x:.3f}, {y:.3f})"
 
 
-def run(board, cons=None, houses="jlcpcb,pcbway", out=None, log=print, kicad_cli="kicad-cli", relax_clearance=False):
-    """-> report dict (rows, counts, impedance, order lines). Writes `out` (+ sidecars) only when the guard accepts."""
-    from . import review as R, opengate as OG
+def _limits_view(lims, hs):
+    return {h: {k: lims[h].get(k) for k in LIMIT_KEY.values()} for h, _p in hs}
+
+
+def _prepare(board, cons, houses, log):
+    """Shared run/audit setup -> (hs, layers, lims, facts, text, segs, vias, zm, plan, centre)."""
+    from . import review as R
     hs = resolve_houses(houses)
     layers = FC.board_layer_count(board) or 6
     lims = house_limits(hs, layers)
-    facts, _stk = R.apply_constraint_stackup(R.facts_from_board(board), cons or {})
+    facts, _stk = R.apply_constraint_stackup(R.facts_from_board(board), cons)
     text = open(board, errors="replace").read()
     segs, vias = parse(text)
     facts["_segs"] = segs
-    zm = ZModel(cons or {}, board, facts)
-    plan, centre = build_plan(text, segs, vias, lims, zm, cons or {}, facts, log)
+    zm = ZModel(cons, board, facts)
+    plan, centre = build_plan(text, segs, vias, lims, zm, cons, facts, log)
+    return hs, layers, lims, facts, text, segs, vias, zm, plan, centre
+
+
+def run(board, cons=None, houses="jlcpcb,pcbway", out=None, log=print, kicad_cli="kicad-cli", relax_clearance=False):
+    """-> report dict (rows, counts, impedance, order lines). Writes `out` (+ sidecars) only when the guard accepts."""
+    from . import opengate as OG
+    hs, layers, lims, facts, text, segs, vias, zm, plan, centre = _prepare(board, cons or {}, houses, log)
     log(f"fabconform: {len(segs)} segments, {len(vias)} vias; houses {', '.join(p for _h, p in hs)} ({layers} layers); "
         f"{len(plan.items)} items under a house minimum")
     work = tempfile.mkdtemp(prefix="fxconform-")
@@ -477,10 +510,7 @@ def run(board, cons=None, houses="jlcpcb,pcbway", out=None, log=print, kicad_cli
         elif plan.active():
             cand_path = os.path.join(work, "final.kicad_pcb")
             open(cand_path, "w").write(new_text)
-            for ext in (".kicad_pro", ".kicad_dru"):
-                src = os.path.splitext(board)[0] + ext
-                if os.path.isfile(src):
-                    shutil.copy(src, os.path.splitext(cand_path)[0] + ext)
+            _copy_sidecars(board, cand_path)
             cand_m = measure(cand_path)
             accepted, why = DG.accept(base_m, cand_m, mode="edit", base_board=board, cand_board=cand_path)
             why = why or ""
@@ -491,11 +521,7 @@ def run(board, cons=None, houses="jlcpcb,pcbway", out=None, log=print, kicad_cli
             new_text = text
         final_path = out or os.path.join(work, "final.kicad_pcb")
         open(final_path, "w").write(new_text)
-        for ext in (".kicad_pro", ".kicad_prl", ".kicad_dru"):
-            src = os.path.splitext(board)[0] + ext
-            dst = os.path.splitext(final_path)[0] + ext
-            if os.path.isfile(src) and not os.path.exists(dst):
-                shutil.copy(src, dst)
+        _copy_sidecars(board, final_path, (".kicad_pro", ".kicad_prl", ".kicad_dru"))
         if out and accepted and plan.active():
             try:
                 OG.refill(final_path)                 # zone fill follows the widened copper (pcbnew refill + save)
@@ -507,21 +533,35 @@ def run(board, cons=None, houses="jlcpcb,pcbway", out=None, log=print, kicad_cli
         shutil.rmtree(work, ignore_errors=True)
     return {"board": board, "out": out if out else None, "accepted": accepted, "why": why, "layers": layers,
             "houses": [p for _h, p in hs], "rounds": rounds, "rows": rows, "counts": count(rows),
-            "limits": {h: {k: lims[h].get(k) for k in LIMIT_KEY.values()} for h, _p in hs},
+            "limits": _limits_view(lims, hs),
             "residual_drc": dict(Counter(v["type"] for v in house_drc.get("violations", []))),
             "impedance": impedance_summary(plan, zm), "relax_clearance": relax_clearance}
+
+
+def audit(board, cons=None, houses="jlcpcb,pcbway", log=print):
+    """Read-only inventory of a FINISHED board (what `deliver` ships): every item under a house minimum, classified per house.
+    rep["coverage"] = raw sub-minimum count vs rows listed (P4: nothing sub-minimum may be unlisted)."""
+    hs, layers, lims, facts, text, segs, vias, zm, plan, centre = _prepare(board, cons or {}, houses, log)
+    for it in plan.items:
+        it["rung"] = -1
+    house_drc = DG.drc_json(board, pro_edit=_house_pro_edit(lims))
+    rows = [g for g in build_rows(plan, hs, layers, lims, zm, facts, house_drc, centre, segs, vias, text) if g["action"] != "OK"]
+    tmin, rmin = strictest(lims, "track_min"), strictest(lims, "via_annular_min")
+    raw = sum(1 for s in segs if s["w"] < tmin - EPS) + sum(1 for v in vias if (v["size"] - v["drill"]) / 2 < rmin - EPS)
+    listed = sum(g["n"] for g in rows if g["kind"] in ("track", "via_ring"))
+    return {"board": board, "layers": layers, "houses": [p for _h, p in hs], "rows": rows, "counts": count(rows),
+            "limits": _limits_view(lims, hs),
+            "coverage": {"raw": raw, "listed": listed, "ok": raw == listed}}
 
 
 def build_rows(plan, hs, layers, lims, zm, facts, house_drc, centre, segs, vias, final_text):
     """Group the per-item outcomes into table rows: (kind, net, layer, old, new) with a count and the first location."""
     groups = {}
     for it in plan.items:
-        final = None
+        final = r = None
         if 0 <= it["rung"] < len(it["ladder"]):
             r = it["ladder"][it["rung"]]
-            final = r["to"][0] - r["to"][1] if it["kind"] == "via_ring" and isinstance(r["to"], tuple) else r["to"]
-            if it["kind"] == "via_ring":
-                final = (r["to"][0] - r["to"][1]) / 2
+            final = (r["to"][0] - r["to"][1]) / 2 if it["kind"] == "via_ring" else r["to"]
         value = final if final is not None else it["old"]
         v = classify(it["kind"], value, hs, layers, lims)
         act = action_of(v, final is not None)
@@ -530,8 +570,7 @@ def build_rows(plan, hs, layers, lims, zm, facts, house_drc, centre, segs, vias,
                                   "loc": _loc(it["x"], it["y"]), "action": act, "verdicts": v, "why": it["why"], "info": it["info"],
                                   "detail": ""})
         g["n"] += 1
-        if final is not None and it["ladder"]:
-            r = it["ladder"][it["rung"]]
+        if r is not None:
             g["detail"] = r.get("label") or (f"Z {r['z_old']} -> {r['z_new']} ohm (target {r['target']:g} +-{r['tol_pct']:g}%)" if "z_new" in r else "")
     # house-rule DRC residue that is not a track / via item: clearance, PTH and drill
     for vio in house_drc.get("violations", []):
@@ -618,20 +657,30 @@ def table(rep):
     return "\n".join(lines)
 
 
+def house_lines(rep, house):
+    """(order_options, confirmations) for one house: text lines. Options = items the house builds only with a named option/tier;
+    confirmations = items below every published option (engineering must confirm or the copper changes)."""
+    opts, conf = [], []
+    for g in rep["rows"]:
+        v = g["verdicts"].get(house)
+        if not v or v["status"] == "ok":
+            continue
+        what = f"{g['n']} x {KIND_LABEL.get(g['kind'], g['kind'])} {g['old']:.3f} mm" + (f" on {g['net']}" if g["net"] else "") + f", first at {g['loc']}"
+        if v["status"] == "option":
+            opts.append(f"ORDER OPTION: {what}: {v['text']} [{v.get('source', '')}, retrieved {v.get('retrieved', '')}]")
+        else:
+            lim = rep["limits"].get(house, {}).get(LIMIT_KEY[g["kind"]])
+            conf.append(f"ENGINEERING CONFIRMATION: {what} vs {house} limit {lim:g} mm: {v['text']} [{v.get('source', '')}, retrieved {v.get('retrieved', '')}]")
+    return opts, conf
+
+
 def order_notes(rep):
-    """{house: markdown} - the order options each house needs for what remains."""
+    """{house: markdown} - the order options and engineering confirmations each house needs for what remains."""
     res = {}
-    for h, p in [(x.split("-")[0], x) for x in rep["houses"]]:
-        L = [f"# Order options - {h.upper()} ({p}), generated by fluxplace fabconform", ""]
-        any_ = False
-        for g in rep["rows"]:
-            v = g["verdicts"].get(h)
-            if not v or v["status"] == "ok":
-                continue
-            any_ = True
-            lab = f"{g['n']} x {KIND_LABEL.get(g['kind'], g['kind'])} {g['old']:.3f} mm" + (f" on {g['net']}" if g["net"] else "") + f" at {g['loc']}"
-            L.append(f"- {v['status'].upper()}: {lab}: {v['text']}  [{v.get('source', '')}, retrieved {v.get('retrieved', '')}]")
-        if not any_:
-            L.append("None: every copper feature meets the standard table of this house.")
+    for h in [x.split("-")[0] for x in rep["houses"]]:
+        opts, conf = house_lines(rep, h)
+        L = [f"# Order notes - {h.upper()} (fluxplace fabconform, {rep['layers']} layers)", ""]
+        L += ["## Order options"] + ([f"- {x}" for x in opts] or ["- None."])
+        L += ["", "## Engineering confirmation (below every published option as drawn)"] + ([f"- {x}" for x in conf] or ["- None."])
         res[h] = "\n".join(L) + "\n"
     return res

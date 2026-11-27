@@ -55,12 +55,12 @@ def test_house_verdicts_ok_option_impossible():
     v = FX.classify("track", 0.09, hs, 6, l)                              # PCBWay Advanced local 3.5/3.5 mil = 0.0889
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and FX.action_of(v, True) == "ORDER-OPTION"
     v = FX.classify("track", 0.085, hs, 6, l)
-    assert v["jlcpcb"]["status"] == "option" and v["pcbway"]["status"] == "impossible" and FX.action_of(v, True) == "IMPOSSIBLE"
+    assert v["pcbway"]["status"] == "impossible" and FX.action_of(v, True) == "IMPOSSIBLE"
     v = FX.classify("via_ring", 0.125, hs, 6, l)                          # JLC standard 0.125 ok; PCBWay standard 0.127 -> medium difficulty
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and "capabilities.html" in v["pcbway"]["source"]
     assert FX.action_of(v, False) == "ORDER-OPTION"
-    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there, fine-drill tier at JLC
-    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "option" and v["jlcpcb"]["tier"] == "jlcpcb-fine-drill"
+    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry hard 0.05
+    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "ok"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), True) == "FIXED"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), False) == "OK"
 
@@ -110,3 +110,29 @@ def test_run_fixes_track_and_via_and_leaves_the_rest_as_order_options(tmp_path):
     assert {g["action"] for g in vias_rows} <= {"FIXED"} and sum(g["n"] for g in vias_rows) == 3
     notes = FX.order_notes(rep)
     assert set(notes) == {"jlcpcb", "pcbway"} and "None" in notes["pcbway"]
+
+
+def test_audit_lists_every_sub_minimum_item_and_notes_split_options_from_confirmations(tmp_path):
+    src = tmp_path / "a.kicad_pcb"
+    _mini(src, [("A", (5, 5), (15, 5), 0.088), ("A", (5, 8), (15, 8), 0.2)], [("A", (30, 30), 0.45, 0.2), ("B", (40, 40), 0.6, 0.3)])
+    rep = FX.audit(str(src), {}, houses="jlcpcb,pcbway", log=lambda *_a: None)
+    assert rep["coverage"] == {"raw": 2, "listed": 2, "ok": True}
+    opts, conf = FX.house_lines(rep, "pcbway")
+    assert any("0.088" in x and "capabilities.html" in x for x in conf) and any("via annular ring" in x for x in opts)
+    assert "Engineering confirmation" in FX.order_notes(rep)["pcbway"]
+    assert FX.house_lines(rep, "jlcpcb")[1] == []
+
+
+def test_deliver_helpers_write_house_notes_and_skip_without_fab_profile(tmp_path):
+    import types
+    import cli
+    src, cons = tmp_path / "a.kicad_pcb", tmp_path / "c.toml"
+    _mini(src, [("A", (5, 5), (15, 5), 0.088)], [("A", (30, 30), 0.45, 0.2)])
+    cons.write_text("[fab]\nprofile = [\"jlcpcb-standard\", \"pcbway-standard\"]\n")
+    a = types.SimpleNamespace(board=str(src), constraints=str(cons))
+    rep = cli._deliver_fabconform(a)
+    assert rep["coverage"]["ok"] and set(rep["houses"]) == {"jlcpcb-standard", "pcbway-standard"}
+    cli._write_house_notes(rep, str(tmp_path), "pkg")
+    assert "0.088" in (tmp_path / "pkg-order-notes-pcbway.md").read_text() and (tmp_path / "pkg-order-notes-jlcpcb.md").exists()
+    cons.write_text("[route]\nmin_track_mm = 0.1\n")
+    assert cli._deliver_fabconform(a) is None

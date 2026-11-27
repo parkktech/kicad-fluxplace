@@ -134,6 +134,35 @@ def _deliver_xcheck(a, bom):
     print(f"    {X.CODE}=PASS (pos{' + BOM' if bom else ''})", flush=True)
 
 
+def _deliver_fabconform(a):
+    """P4: every copper item under a selected house's minimum is listed (order option or engineering confirmation) for that house.
+    Houses = the [fab] profile list; none set -> skipped. Prints one line; a sub-minimum item missing from the lists fails the delivery."""
+    from fluxplace import constraints as C, fabcaps as FC, fabconform as FX
+    cons = C.load(a.constraints)
+    prof = FC.profile_list((cons.get("fab") or {}).get("profile"))
+    if not prof or not a.board:
+        return None
+    rep = FX.audit(a.board, cons, houses=",".join(prof))
+    cv = rep["coverage"]
+    print(f"    fabconform: {cv['raw']} item(s) under a house minimum, {cv['listed']} listed in the order notes ({rep['counts']})", flush=True)
+    if not cv["ok"]:
+        print("deliver: fabconform coverage FAILED (a sub-minimum item is not in the order notes); nothing delivered")
+        raise SystemExit(1)
+    return rep
+
+
+def _write_house_notes(rep, out_dir, name):
+    """<name>-order-notes-<house>.md for every house (PCBWay's lines also ride in its worksheet)."""
+    if not rep:
+        return
+    from fluxplace import fabconform as FX
+    for h, md in FX.order_notes(rep).items():
+        path = os.path.join(out_dir, f"{name}-order-notes-{h}.md")
+        with open(path, "w") as fh:
+            fh.write(md)
+        print(f"    order notes -> {os.path.basename(path)}", flush=True)
+
+
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
@@ -147,6 +176,7 @@ def cmd_deliver(a):
     if gerber["blocking"]:
         print("deliver: gerber check FAILED with [fab] gerber_check = fail; nothing delivered")
         raise SystemExit(1)
+    fc_rep = _deliver_fabconform(a)
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -167,6 +197,7 @@ def cmd_deliver(a):
         _deliver_xcheck(a, bom=(a.bom or [None])[0])
         F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
                   log=lambda m: print(m, flush=True), include_formats=inc)
+        _write_house_notes(fc_rep, a.out, a.name)
         return
 
     # PCBWay's assembly page takes FOUR separate uploads — gerbers, BOM,
@@ -193,8 +224,11 @@ def cmd_deliver(a):
     notes = ""
     if a.assembly_notes and os.path.exists(a.assembly_notes):
         notes = open(a.assembly_notes, encoding="utf-8").read()
-    pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"],
+    from fluxplace import fabconform as FX
+    fc_lines = sum(FX.house_lines(fc_rep, "pcbway"), []) if fc_rep else []
+    pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"], extra_notes=fc_lines,
                  docx=not a.no_docx, title=a.title, assembly_extra=notes)
+    _write_house_notes(fc_rep, a.out, a.name)
     # spreadsheet twins of the two CSV uploads — an upload widget that refuses
     # one CSV will take the .xlsx, and mid-order is the wrong time to find out
     for slot in ("slot_bom", "slot_centroid"):
