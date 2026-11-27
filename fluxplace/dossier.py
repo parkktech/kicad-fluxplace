@@ -491,7 +491,8 @@ def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False,
         again = []
         for m, f, s in todo:                             # an unknowable part: the manufacturer's other documents, then the escalation again
             dos = res[m][0]
-            if dos and not dos.get("knowable") and fetch_docs(m, ds_dir, dos["missing"], log=log, **(fetch if isinstance(fetch, dict) else {})):
+            kw = fetch if isinstance(fetch, dict) else {"mfr": (_dist_row(m) or {}).get("manufacturer") or ""}
+            if dos and not dos.get("knowable") and fetch_docs(m, ds_dir, dos["missing"], log=log, **kw):
                 again.append((m, f, s))
         for m, r in _run(again, jobs, ask, model, d, False, log, retry=True).items():
             res[m] = (r[0], r[1], res[m][2] + r[2])
@@ -665,8 +666,9 @@ def record_replacement(mpn, sha, rows, choice=None, d=None):
 _DOC_TYPES = ("Datasheets", "Product Drawings", "Other Related Documents", "Design Resources", "Manuals", "Application Notes",
               "Featured Product", "User Guides", "Technical Reference")
 WEB = """Find the manufacturer's official PDF documents for the electronic part {mpn}{mfr} that state: {need}
-(product specification, hardware integration manual, user guide, application note, customer drawing). Use web search; prefer the
-manufacturer's own site. Return ONE JSON object, no prose: {{"urls": ["https://...pdf", ...]}} with at most 4 direct PDF links."""
+(product specification, hardware integration manual, user guide, application note, customer drawing). Use web search (e.g.
+"{mpn} integration manual pdf", "{mpn} product specification pdf"); prefer the manufacturer's own site; a document the datasheet names
+(e.g. an integration manual number) is searched by that name too. Give direct links even when the fetch tool cannot read the PDF. Return ONE JSON object, no prose: {{"urls": ["https://...pdf", ...]}} with at most 4 direct PDF links."""
 
 
 def _dk_media(mpn):
@@ -706,16 +708,20 @@ def doc_urls(mpn, need, mfr="", media=None, web=None):
     out = [(u, f"digikey {t}: {ti}") for t, ti, u in (media or _dk_media)(mpn)
            if u and t in _DOC_TYPES and (u.lower().split("?")[0].endswith(".pdf") or "/docus/" in u or "/prints/" in u)]
     if web is not None or online():
-        try:
-            reply, _ = (web or (lambda pr: call_model(pr, timeout=300, tools="WebSearch,WebFetch")))(
-                WEB.format(mpn=mpn, mfr=f" ({mfr})" if mfr else "", need=", ".join(need)))
-            out += [(u, "web search") for u in _json_of(reply).get("urls") or [] if isinstance(u, str) and u.startswith("http")]
-        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
-            pass
+        for m in (None, ESCALATE_MODEL):                    # Haiku searches first, Sonnet when it finds nothing
+            try:
+                reply, _ = (web or (lambda pr: call_model(pr, m, timeout=300, tools="WebSearch,WebFetch")))(
+                    WEB.format(mpn=mpn, mfr=f" ({mfr})" if mfr else "", need=", ".join(need)))
+                urls = [u for u in _json_of(reply).get("urls") or [] if isinstance(u, str) and u.startswith("http")]
+            except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+                urls = []
+            out += [(u, f"web search ({_model(m)})") for u in urls]
+            if urls or web is not None:
+                break
     return list(dict(out).items())
 
 
-def fetch_docs(mpn, ds_dir, need, mfr="", media=None, web=None, download=None, log=lambda m: None, limit=6):
+def fetch_docs(mpn, ds_dir, need, mfr="", media=None, web=None, download=None, log=lambda m: None, limit=8):
     """Download the part's other documents into the datasheets folder as `<MPN>__<name>.pdf` (dossier.siblings reads them). A file
     whose bytes are already in the folder is not kept twice. -> [new file paths]."""
     from . import partdocs as PD
@@ -724,7 +730,7 @@ def fetch_docs(mpn, ds_dir, need, mfr="", media=None, web=None, download=None, l
     for url, why in doc_urls(mpn, need, mfr, media, web)[:limit]:
         stem = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(url.split("?")[0]))[:60] or "doc"
         dest = os.path.join(ds_dir, f"{PD._safe_name(mpn)}__{stem if stem.lower().endswith('.pdf') else stem + '.pdf'}")
-        ok, detail = (download or PD._download)(url, dest + ".part")
+        ok, detail = (download or (lambda u, f: PD._download(u, f, timeout=150)))(url, dest + ".part")   # manufacturer hosts are slow
         if ok and PD._sha(dest + ".part") not in have:
             os.replace(dest + ".part", dest)
             have.add(PD._sha(dest))

@@ -81,7 +81,7 @@ def call_model(text, cons, model, tools=None, cwd=None, timeout=None, info=None)
         cmd = cmd + ["--model", model]
         if tools is not None:
             cmd[cmd.index("--tools") + 1] = tools
-            cmd += ["--no-session-persistence", "--setting-sources", ""]
+            cmd += ["--no-session-persistence", "--setting-sources", ""] + (["--allowedTools", tools] if tools else [])   # -p asks for no permission
     try:
         r = subprocess.run(cmd, input=text, capture_output=True, text=True, cwd=cwd,
                            timeout=float(timeout or _ai(cons).get("decide_timeout_s", 120)), env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
