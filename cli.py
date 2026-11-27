@@ -163,6 +163,19 @@ def _write_house_notes(rep, out_dir, name):
         print(f"    order notes -> {os.path.basename(path)}", flush=True)
 
 
+def _deliver_jlc(a):
+    """Rebuild the fab dir's JLCPCB set with the LCSC picks of this delivery: [sourcing.lcsc], the previous BOM's LCSC notes
+    (--prev-bom / --prev-delivery), then the live lookup (skipped by --no-api). A run with no source says so."""
+    from fluxplace import constraints as C, fab as F, jlcset, deliverver as DV
+    cons = C.load(a.constraints)
+    pos = os.path.join(a.fab_dir, "place", "pos.csv")
+    if not a.board or not os.path.isfile(pos):
+        return
+    prev_bom = a.prev_bom or (DV.prev_files(a.prev_delivery).get("bom") if a.prev_delivery else None)
+    log = lambda m: print(m, flush=True)
+    jlcset.emit(a.board, a.fab_dir, pos, cons, prev_bom, F.jlc_lookup(cons, prev_bom, log, live=not getattr(a, "no_api", False)), log)
+
+
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
@@ -178,6 +191,7 @@ def cmd_deliver(a):
         raise SystemExit(1)
     fc_rep = _deliver_fabconform(a)
     a._fc_rep = fc_rep
+    _deliver_jlc(a)
     a._review_prev = lambda board: _review_findings(a, board, "deliver")[0]     # P2: same spec/constraints/waivers/datasheets as the delivered board
     docs = list(a.doc or [])
     if a.brief:
@@ -1722,7 +1736,10 @@ def _review_gate(a, stage="review", hard=True):
         if not os.path.isfile(base):
             raise SystemExit(f"--baseline: {base} is not a file")
         base_findings, _bf = _review_findings(a, base, stage)
-        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()))
+        from fluxplace import pairbase as _PB
+        findings += [R._f(f["level"], f["code"], f["msg"]) for f in _PB.findings(board, base)]       # PAIR_NARROWED: an update-laid pair thinner than on the baseline
+        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()),
+                        equal=lambda ns: R.copper_equal(facts, _bf, ns))
         base_info = {"board": os.path.abspath(base), "sha256": R.file_sha(base)}
         print(f"baseline: {base} sha {base_info['sha256']}", flush=True)
     print(f"REVIEW ({stage}) — {board}")
@@ -2021,7 +2038,7 @@ def cmd_tune(a):
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
-                        log=lambda m: print(m, flush=True))
+                        allow_mismatch=a.allow_layer_mismatch, log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
     from fluxplace import tune as TU
     TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
@@ -4154,6 +4171,9 @@ def build_parser():
                           "or on SIGTERM/SIGINT, the best accepted board is written to --out (exit 2)")
     ptu.add_argument("--stall", type=int, default=8,
                      help="stop a pair/net after N DRC-guarded tries without an accepted step (default 8)")
+    ptu.add_argument("--allow-layer-mismatch", action="store_true",
+                     help="also length-tune pairs whose legs run on different layers / via counts (default: they are needs_reroute); "
+                          "a last resort when `pairs --only` cannot re-lay them: the pair stays uncoupled but meets its skew limit")
     ptu.add_argument("--report", default=None, help="JSON report (default OUT.tune.json)")
     ptu.add_argument("--match", default=None, metavar="NAME|all",
                      help="tune [match.*] length groups instead of diff pairs")

@@ -28,3 +28,5 @@ with P1 tuning (w104-renettune), P2 baseline (w105-baseline), P4 JLC set (w107-j
 - **Baseline gating**: `review|fab|deliver --baseline PREV` fails only on new findings; inherited ones are listed.
 - **Spec sync**: `fluxplace spec-sync BOARD --sch S --spec J [--write]` (schematic = electrical truth, board fields = part truth; constraints `[specsync] sch=`).
 - **Fab-house conformance**: `fluxplace fabconform BOARD --houses jlcpcb,pcbway --write OUT` fixes sub-minimum features or writes per-house order options.
+
+- **Browser fetch (last resort)**: `[docs] browser_fetch = "on"|"off"` (default on). Public datasheet/document PDFs only, after DigiKey/Mouser/LCSC/element14/manufacturer/web search; fingerprinted client, no cookies, never a login/cookie wall, 1 request per 2 s per host.

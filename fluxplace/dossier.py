@@ -436,6 +436,46 @@ def _dist_row(mpn):
     return row
 
 
+# ------------------------------------------------------------------ a same-family sibling's tables
+def _in_text(text, mpn, other):
+    """True when `text` lists `mpn`: written out, or as a series row with the shared leading digits wild (10164227-XXX4A1RLF for
+    10164227-1004A1RLF) - the form a product-number-structure drawing prints."""
+    t, a, b = text.upper(), mpn.upper(), other.upper()
+    if a in t:
+        return True
+    i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), None)
+    cut = max(a.rfind(c, 0, i) for c in "-_/ ") if i else -1
+    return cut >= 0 and re.search(re.escape(a[:cut + 1]) + r"X{1,6}" + re.escape(a[i:]), t) is not None
+
+
+def family_sibling(mpn, dos, texts, d=None):
+    """Fill the REQUIRED sections `dos` still lacks from the dossier of a same-family sibling (the same series, a suffix apart: same
+    length, 8+ shared leading characters, at most 2 differing) when this part's own documents (`texts`: page texts of its datasheet and
+    sibling documents) list BOTH part numbers, i.e. one series drawing covers both. The facts carry `sib`: the sibling's MPN, and the
+    dossier records it under `sibling` (cited). Never fills from a sibling the documents do not name. -> the sibling's MPN or None."""
+    miss = gaps(dos)
+    if not miss:
+        return None
+    flat = "\n".join(texts)
+    for f in sorted(os.listdir(cache_dir(d))):
+        try:
+            sib = json.load(open(os.path.join(cache_dir(d), f)))
+        except (OSError, ValueError):
+            continue
+        m2 = sib.get("mpn") or ""
+        if m2 == mpn or not sib.get("knowable") or len(m2) != len(mpn) or sum(x != y for x, y in zip(m2, mpn)) > 2 \
+                or len(os.path.commonprefix([m2, mpn])) < 8 or not (set(miss) <= {s for s in miss if sib.get(s)}):
+            continue
+        if not (_in_text(flat, mpn, m2) and _in_text(flat, m2, mpn)):
+            continue
+        add = {s: [dict(x, sib=m2) for x in sib[s]] if isinstance(sib[s], list) else dict(sib[s], sib=m2) for s in miss}
+        merge(dos, add)
+        dos["sibling"] = {"mpn": m2, "sections": miss, "file": sib.get("file"),
+                          "why": "the series drawing in this part's documents lists both part numbers"}
+        return m2
+    return None
+
+
 def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributor=None, retry=False):
     """The dossier of one part: cached when the datasheet is unchanged, else read by the model, verified and escalated through the
     sources until every REQUIRED section is found (else `knowable` false, `missing` named).
@@ -474,6 +514,10 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributo
     if gaps(dos) and "distributor" not in sources:
         _distributor(dos, (distributor or _dist_row)(mpn))
         sources.append("distributor")
+    if gaps(dos):
+        docs = [pdf] + siblings(pdf, mpn)
+        if family_sibling(mpn, dos, ["\n".join(pages(x)) for x in docs], d):
+            sources.append("family sibling " + dos["sibling"]["mpn"])
     miss = gaps(dos)
     dos.update(mpn=mpn, file=os.path.basename(pdf), sha256=sha, version=VERSION, pages_read=sel, n_pages=len(pg),
                evidence="vision" if vision else "text", model=_model(model), cost_usd=round(cost + (hit or {}).get("cost_usd", 0), 5),

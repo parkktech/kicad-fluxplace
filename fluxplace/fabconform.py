@@ -59,16 +59,18 @@ def resolve_houses(spec):
 
 
 def house_limits(houses, layers):
-    """{house: limits dict of its profile row at `layers` copper layers}, each feature the limits registry (w110, fab_<feature>:<house>-<n>l)
-    sources replaced by that sourced HARD value; fabcaps supplies the rest. REG_CITE[(house, key)] = the registry citation used."""
+    """{house: limits dict of its profile row at `layers` copper layers} graded against the HARD (reject) value of every feature the
+    limits registry (fab_<feature>:<house>-<n>l) or the fabcaps row knows. fabcaps.limits() now carries the RECOMMENDED value as the
+    design floor; a value between hard and recommended is not a fab failure, so it is never edited here.
+    REG_CITE[(house, key)] = the registry citation of the hard value."""
     from . import limits as L
     out = {}
     for h, p in houses:
-        r = FC.limits(p, layers)
-        lim = dict(r["limits"])
-        for f, (hard, _rec, cite) in L.fab_bounds({"vendor": r["vendor"], "layers": layers, "hard": r["limits"], "name": p}, layers).items():
-            if f in lim and not cite.startswith("fabcaps"):
-                lim[f] = hard
+        lim = dict(FC.limits(p, layers)["limits"])
+        v, tier = FC.split(p)
+        for f, (hard, _rec, cite) in (L.fab_bounds(v, layers) if tier == "standard" else {}).items():
+            lim[f] = hard
+            if not cite.startswith("fabcaps"):
                 REG_CITE[(h, f)] = cite
         out[h] = lim
     return out
@@ -354,8 +356,8 @@ def _new_instances(base_m, drc):
 
 def _near(it, pos, r=0.6):
     p = (pos["x"], pos["y"])
-    if len(it["geom"]) == 2:
-        return _seg_dist(p, it["geom"][0], it["geom"][1]) <= r + it["ladder"][max(it["rung"], 0)]["to"] / 2 if it["kind"] == "track" else False
+    if len(it["geom"]) == 2:                      # a track: reach = the DRC radius + half the widest width a rung can give (<= 0.2 mm)
+        return _seg_dist(p, it["geom"][0], it["geom"][1]) <= r + 0.1
     return math.hypot(p[0] - it["geom"][0][0], p[1] - it["geom"][0][1]) <= r + 0.5
 
 

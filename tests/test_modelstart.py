@@ -139,3 +139,17 @@ def test_rebind_swapped_leaves_a_resolving_path_and_warns_when_nothing_matches(t
     assert MS.rebind_swapped(b, "FPA", [("${KIPRJMOD}/../lib/3dmodels/a.step", (0, 0, 0), (1, 1, 1), (0, 0, 0))])["bound"] is None
     r = MS.rebind_swapped(b, "FPA", [("${KICAD10_3DMODEL_DIR}/X.3dshapes/zzz.step", (0, 0, 0), (1, 1, 1), (0, 0, 0))])
     assert r["bound"] is None and r["line"].startswith("WARNING")
+
+
+def test_rebind_swapped_searches_every_library_up_the_tree_not_only_the_nearest(tmp_path):
+    """k8: a board inside a delivery folder sees the delivery's partial lib first; the source project's lib holds the file."""
+    stock = "${KICAD10_3DMODEL_DIR}/Connector_Molex.3dshapes/Molex_Micro-Fit_3.0_43650-0315_1x03_P3.00mm_Vertical.step"
+    src = tmp_path / "src"
+    (src / "lib" / "3dmodels").mkdir(parents=True)
+    _step(str(src / "lib" / "3dmodels" / "MOLEX_43650-0315.step"))
+    (src / "delivery" / "lib" / "3dmodels").mkdir(parents=True)               # nearer, partial
+    _step(str(src / "delivery" / "lib" / "3dmodels" / "other.step"))
+    b = src / "delivery" / "b.kicad_pcb"
+    b.write_text('(kicad_pcb (footprint "Connector_Molex:Molex_Micro-Fit_3.0_43650-0315_1x03_P3.00mm_Vertical" (property "Reference" "J3")))')
+    r = MS.rebind_swapped(str(b), "Connector_Molex:Molex_Micro-Fit_3.0_43650-0315_1x03_P3.00mm_Vertical", [(stock, (0, 0, 0), (1, 1, 1), (0, 0, 0))])
+    assert r["bound"] and r["bound"].endswith("MOLEX_43650-0315.step") and str(src / "lib") in r["bound"]

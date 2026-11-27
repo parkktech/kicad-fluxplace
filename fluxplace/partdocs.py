@@ -105,8 +105,46 @@ def _get(url, timeout=60):
         return r.status, r.headers.get("Content-Type", ""), r.read()
 
 
-def _download(url, dest, timeout=60):
-    """-> (ok, detail). A 200 that is not a PDF is a bot page, not a document."""
+BROWSER_FETCH = os.environ.get("FLUXPLACE_BROWSER_FETCH", "on") != "off"      # constraints [docs] browser_fetch = "on"|"off" (default on)
+BROWSER_GAP_S = 2.0
+_last_browser = {}
+
+
+def _browser_get(url, timeout=60):
+    """-> bytes | None: LAST RESORT for a public datasheet/document PDF that a host serves to browsers only. A browser-fingerprinted
+    client (curl_cffi), no cookies kept, never a login/sign-in/cookie wall (such URLs are skipped), at most one request per 2 s per host.
+    None when switched off ([docs] browser_fetch = "off"), curl_cffi is missing, or the request fails."""
+    import urllib.parse
+    if not BROWSER_FETCH or re.search(r"log-?in|sign-?in|auth|account|consent", url, re.I):
+        return None
+    host = urllib.parse.urlsplit(url).netloc
+    wait = BROWSER_GAP_S - (time.time() - _last_browser.get(host, 0))
+    if wait > 0:
+        time.sleep(wait)
+    _last_browser[host] = time.time()
+    try:
+        from curl_cffi import requests as cffi
+        r = cffi.get(url, impersonate="chrome", timeout=timeout, allow_redirects=True)
+        return r.content if r.status_code == 200 else None
+    except Exception:                                   # noqa: BLE001 - not installed / blocked: the plain result stands
+        return None
+
+
+def _download(url, dest, timeout=60, browser=True):
+    """-> (ok, detail). A 200 that is not a PDF is a bot page, not a document; then (browser=True) the same URL is tried once
+    through a browser-fingerprinted client before giving up."""
+    ok, detail = _download_plain(url, dest, timeout)
+    if ok or not browser or not url:
+        return ok, detail
+    data = _browser_get(url if not url.startswith("//") else "https:" + url, timeout)
+    if data and data.startswith(b"%PDF"):
+        with open(dest, "wb") as fh:
+            fh.write(data)
+        return True, "%d bytes (browser client)" % len(data)
+    return False, detail
+
+
+def _download_plain(url, dest, timeout=60):
     if not url:
         return False, "no URL"
     url = url.strip()
@@ -131,6 +169,48 @@ def _download(url, dest, timeout=60):
     with open(dest, "wb") as fh:
         fh.write(data)
     return True, "%d bytes" % len(data)
+
+
+def _more_sources(mpn, dest, creds, detail, url, log):
+    """The chain beyond DigiKey/Mouser: LCSC (JLCPCB part pages), element14, manufacturer templates (dsfetch.SOURCES), then the
+    manufacturer's own documents by web search (dossier.doc_urls). A manufacturer-template or web-search file is kept only when its text
+    carries the part (dsfetch.validate_pdf); a distributor / LCSC listing keyed on this MPN is the part's own sheet.
+    -> (ok, detail, url)."""
+    from . import dsfetch as DF, dossier as DS
+    seen, cands = set(), []
+    for name, fn in DF.SOURCES:
+        try:
+            cands += [(name, u) for _n, u in fn(mpn, creds)]
+        except Exception as e:                           # noqa: BLE001 - a source failing is an outcome
+            detail = type(e).__name__
+    try:
+        cands += [("web search", u) for u, _w in DS.doc_urls(mpn, ["datasheet"], media=lambda m: [])]
+    except Exception:                                    # noqa: BLE001 - offline / no model
+        pass
+    for name, u in cands:
+        if u in seen:
+            continue
+        seen.add(u)
+        ok, d = False, ""
+        try:                                              # dsfetch.get follows the site's own one-hop JavaScript redirect page
+            st, _ct, data = DF.get(u)
+            if st == 200 and data.startswith(b"%PDF"):
+                open(dest + ".part", "wb").write(data)
+                ok, d = True, "%d bytes" % len(data)
+        except Exception:                                 # noqa: BLE001 - the browser client below decides
+            pass
+        if not ok:
+            ok, d = _download(u, dest + ".part")
+        if not ok:
+            detail, url = d, u
+            continue
+        level, why = DF.validate_pdf(dest + ".part", mpn) if name in ("manufacturer", "web search") else ("listed", "")
+        if level:                                          # a listing keyed on this MPN (LCSC, distributors) is the part's own sheet
+            os.replace(dest + ".part", dest)
+            return True, "%s (%s, %s)" % (d, name, level), u
+        detail, url = "rejected: " + why, u
+        os.remove(dest + ".part")
+    return False, detail, url
 
 
 def fetch(mpns, ds_dir, creds=None, refresh=False, log=print, urls=None):
@@ -160,16 +240,17 @@ def fetch(mpns, ds_dir, creds=None, refresh=False, log=print, urls=None):
             if m and "ti.com" in u:
                 import urllib.parse
                 cands.append(urllib.parse.unquote(m.group(1)))
-        if not cands:
-            log(f"    {mpn}: no datasheet URL from DigiKey or Mouser")
-            out[mpn] = None
-            continue
         dest = os.path.join(ds_dir, _safe_name(mpn) + ".pdf")
         ok, detail, url = False, "", None
+        if not cands:
+            log(f"    {mpn}: no datasheet URL from DigiKey or Mouser; trying LCSC, element14, the manufacturer and a web search")
+            detail = "no URL"
         for url in cands:
             ok, detail = _download(url, dest)
             if ok:
                 break
+        if not ok:
+            ok, detail, url = _more_sources(mpn, dest, creds, detail, url, log)
         if not ok:
             log(f"    {mpn}: {detail} ({(url or '')[:60]}) — fetch it in a browser and drop "
                 f"it in as {os.path.basename(dest)}")

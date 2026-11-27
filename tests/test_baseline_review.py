@@ -66,6 +66,7 @@ def test_gate_aborts_only_on_new_and_json_records_baseline(tmp_path, monkeypatch
     old = [F("OLD", "o 1", ["U1"])]
     cur = {str(board): [F("OLD", "o 1", ["U1"])], str(base): old}
     monkeypatch.setattr(cli, "_review_findings", lambda a, b, stage: ([dict(f) for f in cur[b]], {"net_pads": {}}))
+    monkeypatch.setattr("fluxplace.pairbase.findings", lambda b, p: [])   # the dummy board files are not parseable
     out = tmp_path / "r.json"
     a = argparse.Namespace(board=str(board), baseline=str(base), json=str(out), no_review=False)
     cli._review_gate(a, stage="review")                       # inherited only: no abort
@@ -93,3 +94,41 @@ def test_interface_pair_check_grades(monkeypatch):
     assert r["fail"] == ["PAIR_SKEW: a/b over"] and len(r["warn"]) == 2
     monkeypatch.setattr(R, "_pairs_from_audit", lambda f, c: None)
     assert R.interface_pair_check("b", {})["fail"]
+
+
+def _imp(net, mm, w, layer):
+    return F("PAIR_IMPEDANCE_OFF", f"{net}: {mm} mm of {w} mm on {layer} is -30% off 100 ohm at the planned gap; this layer needs 0.12/0.152 (pairs.geometry)", [net])
+
+
+def test_impedance_run_resegmented_is_inherited_per_geometry():
+    assert mark([_imp("NA_N", 3.1, 0.15, "F.Cu")], [_imp("NA_N", 3.0, 0.15, "F.Cu")]) == ["inherited"]
+    assert mark([_imp("NA_P", 4.7, 0.15, "F.Cu")], [_imp("NA_P", 4.5, 0.15, "F.Cu")]) == ["inherited"]
+
+
+def test_impedance_new_geometry_or_real_growth_is_new():
+    assert mark([_imp("NA_N", 1.1, 0.2, "F.Cu")], [_imp("NA_N", 2.3, 0.15, "B.Cu")]) == ["new"]
+    assert mark([_imp("NA_N", 6.0, 0.15, "F.Cu")], [_imp("NA_N", 3.0, 0.15, "F.Cu")]) == ["new"]
+
+
+def test_pair_finding_magnitude_is_skew_not_via_count():
+    code = "PAIR_LAYER_MISMATCH"
+    old = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 4 vs 2; skew 5.00 > 1 mm", level="WARN")
+    same = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 3 vs 2; skew 5.00 > 1 mm", level="WARN")
+    worse = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 1 vs 2; skew 9.00 > 1 mm", level="WARN")
+    assert mark([same], [old]) == ["inherited"]
+    assert mark([worse], [old]) == ["new"]
+
+
+def _tr(mm, vias=2):
+    return {"net_tracks": {n: {"vias": vias, "segments": [("F.Cu", 0.15, mm)]} for n in ("NA_P", "NA_N")}}
+
+
+def test_ungraded_baseline_with_equal_copper_is_inherited():
+    old = [F("PAIR_UNMEASURED", "NA_N/NA_P: no end-to-end path for both legs; pair not graded", level="FAIL")]
+    new = [F("PAIR_SKEW_REGRADED", "NA_N/NA_P: 12.96 mm over vendor guidance; skew 12.96", level="WARN")]
+    r = R.mark_baseline([dict(x) for x in new], old, NETS, equal=lambda ns: R.copper_equal(_tr(10.1), _tr(10.0), ns))
+    assert r[0]["baseline"] == "inherited" and "baseline ungraded, copper equal" in r[0]["msg"]
+    r = R.mark_baseline([dict(x) for x in new], old, NETS, equal=lambda ns: R.copper_equal(_tr(14.0), _tr(10.0), ns))
+    assert r[0]["baseline"] == "new"
+    r = R.mark_baseline([dict(x) for x in new], [], NETS, equal=lambda ns: True)
+    assert r[0]["baseline"] == "new"
