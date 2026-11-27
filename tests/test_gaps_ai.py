@@ -274,7 +274,7 @@ def test_krt_json_out_before_nets(monkeypatch, tmp_path):
     res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [dict(GAP, nets=["N"])], ctx)
     cmd = seen["cmd"]
     assert cmd.index("--json-out") < cmd.index("--nets")
-    assert res == {"status": "ran", "rc": 0, "failed": 1, "open": 0, "closed": 1, "ripped": 0}
+    assert res == {"status": "ran", "rc": 0, "failed": 1, "open": 0, "closed": 1, "ripped": 0, "calls": 1}
     assert ctx["krt_last"] == str(out) + ".krt0.json" and os.path.exists(ctx["krt_last"])
 
 
@@ -563,7 +563,7 @@ def test_close_stop_lists_packets_then_second_close_applies(close_env, apply_env
 # ---- PHASE3G G1: pair gaps reach the ai rung; pair actions are filtered; one packet key per pair -----------------
 def test_pair_gaps_dispatch_to_ai_after_pairgroup():
     for k in ("pair-open", "pair-asym"):
-        assert GP.DISPATCH[k] == ["pairgroup", "ai"]
+        assert GP.DISPATCH[k] == (["pairgroup", "krt", "ai"] if k == "pair-open" else ["pairgroup", "ai"])   # w78: krt takes the legs pairgroup could not lay
     assert GP.DISPATCH["pair-skew"] == ["pairgroup", "tune", "ai"]     # PHASE3H B8
 
 

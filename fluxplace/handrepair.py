@@ -105,9 +105,12 @@ def repair(work, out, constraints=None, max_attempts=2, budget=900.0, layers=Non
             key = _key(c)
             done.add(key)
             rows.append(_one(work, constraints, key, c, start, kw, max_attempts, pairs, t0, budget))
+            if rows[-1]["status"] == "closed":           # w78: commit per closed connection, a kill at the deadline keeps what is closed
+                res["commit"] = H.session_commit(work, out, constraints)
             save()
         res["budget_exhausted"] = time.time() - t0 >= budget
-        res["commit"] = H.session_commit(work, out, constraints)
+        if not rows or rows[-1]["status"] != "closed":           # the last closed row was committed already
+            res["commit"] = H.session_commit(work, out, constraints)
     except Exception as e:
         res["error"] = {"type": type(e).__name__, "message": str(e)}
         save()

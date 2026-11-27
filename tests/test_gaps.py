@@ -162,7 +162,7 @@ def _no_prune(monkeypatch, request):
 
 
 def test_prune_is_first_rung_for_open_free_and_dangling():
-    assert GP.DISPATCH["open-free"][0] == "prune" and GP.DISPATCH["dangling"][0] == "prune"
+    assert "prune" in GP.DISPATCH["open-free"] and GP.DISPATCH["dangling"][0] == "prune"   # w78: open-free tries a router rung before the whole-board prune
     assert "prune" in GP.RUNGS
 
 
@@ -298,7 +298,7 @@ def test_close_rounds_stop(monkeypatch, tmp_path, guard):
     res = _close(str(board), str(tmp_path / "w"), max_rounds=1, attempts=str(tmp_path / "a.jsonl"),
                    log=lambda m: None)
     assert res["stop"] == "rounds"
-    assert res["end"]["opens"] == 1 and res["start"]["opens"] == 2
+    assert res["end"]["opens"] < res["start"]["opens"] == 2          # w78: the next group of a connection kind goes on after an accept, in the same round
 
 
 def test_memo_dropped_when_cons_changes(monkeypatch, loop, tmp_path):
@@ -415,7 +415,7 @@ def test_krt_command_carries_nets_and_layers(monkeypatch, tmp_path):
     res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(out), [gap],
                     {"cons": {}, "work": str(tmp_path), "budget_s": 60})
     cmd = seen["cmd"]
-    assert res == {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 1, "ripped": 0} and out.exists()
+    assert res == {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 1, "ripped": 0, "calls": 1} and out.exists()
     assert cmd[cmd.index("--nets") + 1:] == ["NET[[]0]"]
     i = cmd.index("--rip-existing-nets")                               # the window nets are KRT's rip candidates
     assert cmd[i + 1:i + 3] == ["BLOCK[[]1]", "OTHER"] and i < cmd.index("--nets")
@@ -1167,7 +1167,7 @@ def test_pair_refused_by_pairgroup_goes_to_fallback(monkeypatch, loop):
     assert st["fallback"] == [["PX", "NX"]]
 
 
-def test_hs_pair_refused_is_never_in_fallback(monkeypatch, loop):
+def test_hs_pair_refused_goes_to_the_krt_fallback_too(monkeypatch, loop):
     pair_gap = dict(_g("pg", kind="pair-open", cls="hs-pair"), nets=["PX", "NX"])
     monkeypatch.setitem(GP.RUNGS, "pairgroup", lambda base, out, gaps, ctx: {"status": "nothing laid"})
     monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
@@ -1179,7 +1179,26 @@ def test_hs_pair_refused_is_never_in_fallback(monkeypatch, loop):
     monkeypatch.setattr(GP, "_clean_board", lambda p: None)
     _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
     st = json.load(open(os.path.join(loop["work"], "gaps.json")))
-    assert st["fallback"] == []
+    assert st["fallback"] == [["PX", "NX"]]                 # w78: a gated pair pairgroup could not lay is routed by KRT, both legs in one call
+
+
+def _boom(base, out, gaps, ctx):
+    raise CX.RungFailure('timeout', 'rung timeout after 9 s')
+
+
+def test_a_timed_out_pairgroup_also_feeds_the_krt_fallback(monkeypatch, loop):
+    pair_gap = dict(_g("pg", kind="pair-open", cls="hs-pair"), nets=["PX", "NX"])
+    monkeypatch.setitem(GP.RUNGS, "pairgroup", _boom)
+    monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
+    monkeypatch.setattr(GP, "_remeasure", lambda p, kicad_cli="kicad-cli": {"drc": {}, "opens": 2, "shorts": 0,
+                                                                              "errors": 0, "err_keys": Counter(),
+                                                                              "gaps": [pair_gap]})
+    monkeypatch.setattr(GP, "_classify_into", lambda mm, cons, board: None)
+    monkeypatch.setattr(GP, "_protect", lambda board, cons: set())
+    monkeypatch.setattr(GP, "_clean_board", lambda p: None)
+    _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    st = json.load(open(os.path.join(loop["work"], "gaps.json")))
+    assert st["fallback"] == [["PX", "NX"]]                 # w78: a gated pair pairgroup could not lay is routed by KRT, both legs in one call
 
 
 def _fb_krt_env(monkeypatch, tmp_path, opens_seq):

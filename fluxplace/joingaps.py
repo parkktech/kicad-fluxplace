@@ -15,6 +15,7 @@ from . import routeconn as RC
 
 HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "joingaps_helper.py")
 GAP = 0.3
+GAP_MAX = 2.0                                  # w78: close's open-gap kind and rung reach same-net ends this far apart (pad to pad too)
 
 
 def _f(v):

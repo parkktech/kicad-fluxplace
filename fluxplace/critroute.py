@@ -246,7 +246,8 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                        "class": next((c["class"] for c in crit if c["net"] == net), None), "method": "suggest+lay",
                        "layers": layers, "width": width, "avoid": len(avoid), "result": result, "why": why,
                        "s": round(time.time() - t0, 1), "ai_tokens": acts.get("tokens", 0)}
-            calllog.append(rec_log, attempts)
+            if attempts:
+                calllog.append(rec_log, attempts)
             lines.append(f"{net} conn {i}: {result} ({why})")
     if open_now is None:
         open_now = {r["net"] for r in HR.open_nets(cur, constraints=cons_path)["connections"]}

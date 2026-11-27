@@ -67,3 +67,65 @@ def test_pair_audit_measures_only_the_pairs_whose_signature_is_new(tmp_path, mon
     r1 = GP._pair_audit(f, {}, set())[2]
     r2 = GP._pair_audit(f, {}, set())[2]
     assert calls == [[("D_P", "D_N")]] and r1 == r2          # the second audit of the same legs measured nothing
+
+
+def test_a_spent_budget_still_gives_the_needed_drc_its_floor_and_critroute_logs_without_a_path(tmp_path):
+    from fluxplace import tune as TU, critroute as CR
+    t = [0.0]
+    b = TU.Budget(10, 0, clock=lambda: t[0])
+    t[0] = 500.0                                          # spent: remaining < 0
+    assert b.drc_timeout() >= 120.0 and TU.Budget(None, 0).drc_timeout() == 600
+    import inspect
+    assert "if attempts:" in inspect.getsource(CR.apply)  # attempts=None (close driver) must not crash the rung
+
+
+def test_slow_rungs_get_a_share_of_the_close_budget_not_the_full_cap():
+    assert GP._rung_cap({}, "rfroute", 2400) == 240 and GP._rung_cap({}, "handrepair", 2400) == 360 and GP._rung_cap({}, "krt", 2400) == 900
+
+
+def _pair_gap(nets, kind, sev, cls="hs-pair"):
+    return {"id": f"{kind}:{'/'.join(nets)}", "kind": kind, "class": cls, "nets": nets, "sev": sev}
+
+
+def test_a_pair_counts_once_by_its_worst_state_and_copper_on_an_open_pair_is_not_worse():
+    base = [_pair_gap(["P", "N"], "pair-open", 3)]
+    cand = [_pair_gap(["P", "N"], "pair-open", 3), _pair_gap(["P", "N"], "pair-impedance", 1), _pair_gap(["P", "N"], "pair-skew", 1)]
+    assert GP.pair_worst(base, "hs-pair") == {("N", "P"): 3} == GP.pair_worst(cand, "hs-pair")
+    m = lambda gaps: {"opens": 4, "shorts": 0, "errors": 0, "gaps": gaps}
+    assert GP.score_terms(m(base), base)["hs_pair"] == GP.score_terms(m(cand), cand)["hs_pair"] == 3
+    worse = [_pair_gap(["P", "N"], "pair-open", 3), _pair_gap(["Q", "R"], "pair-skew", 1)]
+    assert GP.score_terms(m(worse), worse)["hs_pair"] == 4         # a pair that was clean and is now a gap IS worse
+
+
+def test_open_gap_reaches_two_mm_and_pair_open_falls_back_to_krt_after_pairgroup():
+    from fluxplace import joingaps
+    assert joingaps.GAP_MAX == 2.0
+    assert GP.DISPATCH["open-gap"][-1] == "krt" and GP.DISPATCH["pair-open"][:2] == ["pairgroup", "krt"]
+    assert {"pair-open", "open-gap", "open-free"} <= set(GP.CLOSE_FIRST)
+
+
+def test_krt_takes_every_target_in_one_call_and_falls_back_to_singles_when_it_closes_nothing(monkeypatch, tmp_path):
+    import types
+    from fluxplace import routerloc as RL, routerules as RR, adaptive, batchroute as BR, procs
+    monkeypatch.setattr(RL, "resolve", lambda *a, **k: {"py": "/usr/bin/python3", "dir": str(tmp_path / "krt")})
+    monkeypatch.setattr(RR, "rules", lambda cons, board=None, default=None, **k: {"track": 0.2})
+    monkeypatch.setattr(RR, "size_args", lambda R: [])
+    monkeypatch.setattr(RR, "flags", lambda R, d, w, script="route.py": [])
+    monkeypatch.setattr(adaptive, "krt_extra", lambda d, s: [])
+    monkeypatch.setattr(BR, "has_fanout", lambda src: False)
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[cmd.index("--nets") + 1:])
+        open(cmd[cmd.index("--output") + 1], "w").write("routed")
+        return types.SimpleNamespace(returncode=0)
+    monkeypatch.setattr(procs, "run", fake_run)
+    state = {"open": {"A", "B"}}
+    # the group call leaves A open and trades nothing: closes B only; the A single then closes A
+    seq = iter([{"A", "B"}, {"A"}, {"A"}, {"A"}, set()])
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: next(seq, set()))
+    monkeypatch.setattr(GP, "_krt_rip", lambda b, net, cp, skip: [])
+    gaps = [{"id": "a", "kind": "open-free", "class": "plain", "nets": ["A"]}, {"id": "b", "kind": "open-free", "class": "plain", "nets": ["B"]}]
+    res = GP._r_krt(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "o.kicad_pcb"), gaps, {"cons": {}, "work": str(tmp_path), "budget_s": 60})
+    assert calls[0] == ["A", "B"] and len(calls) == 2 and res["calls"] == 2 and res["closed"] == 2

@@ -66,7 +66,37 @@ def obstacle_gap(a, bb, hq, kind, geom):
     return _seg_rect(a, bb, geom) - hq
 
 
-def _snap(src, dst, skip, locked_ok=False):
+VIA_MOVE_MM = 0.25     # w80: the furthest a via moves onto a locked track end
+
+
+def _move_via(via, pt, tracks, clear_ok, mm, done):
+    """Move unlocked `via` to `pt` (a locked same-net track end inside its copper) when every unlocked same-net track end at the via centre
+    can follow with the clearance kept; the locked ends stay. True when moved."""
+    old = via.GetPosition()
+    if math.hypot(pt.x - old.x, pt.y - old.y) > VIA_MOVE_MM * 1e6:
+        return False
+    ends = []
+    for u in tracks:
+        if u.GetNetCode() != via.GetNetCode():
+            continue
+        for w, q in ((0, u.GetStart()), (1, u.GetEnd())):
+            if math.hypot(q.x - old.x, q.y - old.y) <= JOINT_MM * 1e6:
+                ends.append((u, w))
+    if any(u.IsLocked() for u, _w in ends):
+        return False
+    new = (mm(pt.x), mm(pt.y))
+    for u, w in ends:
+        a = u.GetEnd() if w == 0 else u.GetStart()
+        if not clear_ok(u, (mm(a.x), mm(a.y)), new, mm(u.GetWidth()), u.GetLayer(), u.GetNetCode()):
+            return False
+    via.SetPosition(pt)
+    for u, w in ends:
+        (u.SetStart if w == 0 else u.SetEnd)(pt)
+        done.add((u.m_Uuid.AsString(), w))
+    return True
+
+
+def _snap(src, dst, skip, locked_ok=False, via_follow=False):
     """Snap every track end inside a same-net via to the via centre. PHASE3F A6: a snap that would bring the moved
     segment closer than the clearance to copper of ANOTHER net on its layer (tracks, vias reaching the layer, pads) is
     refused; the whole joint (every track end within JOINT_MM of the old point) stays. A joint with a locked or skipped
@@ -190,6 +220,13 @@ def _snap(src, dst, skip, locked_ok=False):
             for u, w in joint:
                 done.add((u.m_Uuid.AsString(), w))
             if any((u.IsLocked() and not locked_ok) or u.m_Uuid.AsString() in skip for u, _w in joint):
+                # w80: a LOCKED track end sits in the via (a router via placed on its 0.05 grid beside it): the via moves onto the
+                # locked end and its own track ends follow, so locked copper is never edited
+                via_held = (vt.IsLocked() and not locked_ok) or vt.m_Uuid.AsString() in skip
+                if not via_follow or via_held or any(u.m_Uuid.AsString() in skip for u, _w in joint):
+                    continue
+                if _move_via(vt, p, tracks, clear_ok, mm, done):
+                    moved += 1
                 continue
             new = (mm(target.x), mm(target.y))
             # each joint end's new segment: the other end of the track to the via centre
@@ -232,18 +269,18 @@ def _snap(src, dst, skip, locked_ok=False):
 _SNAP_REAL = _snap
 
 
-def _snap_json(src, dst, skip, locked_ok=False):
+def _snap_json(src, dst, skip, locked_ok=False, via_follow=False):
     """_snap with a JSON-able signature (runs in a fresh process): -> [moved, refused]."""
-    return list(_snap(src, dst, set(skip), locked_ok))
+    return list(_snap(src, dst, set(skip), locked_ok, via_follow))
 
 
-def _snap_fresh(src, dst, skip, locked_ok=False):
+def _snap_fresh(src, dst, skip, locked_ok=False, via_follow=False):
     """_snap in its own interpreter: its board.Remove() decays pcbnew's bindings for the process (freshproc), and the caller (the
     pipeline's krt-whole chain, then close) goes on loading boards."""
     if _snap is not _SNAP_REAL:                           # a test double stands in for the board edit: call it directly
-        return _snap(src, dst, skip) if not locked_ok else _snap(src, dst, skip, locked_ok)
+        return _snap(src, dst, skip) if not (locked_ok or via_follow) else _snap(src, dst, skip, locked_ok, via_follow)
     from .freshproc import in_fresh_process
-    moved, refused = in_fresh_process("fluxplace.snapiter", "_snap_json", src, dst, sorted(skip), locked_ok)
+    moved, refused = in_fresh_process("fluxplace.snapiter", "_snap_json", src, dst, sorted(skip), locked_ok, *([True] if via_follow else []))
     return moved, refused
 
 
@@ -261,8 +298,9 @@ def _ids_of_nets(path, nets):
     return {t.m_Uuid.AsString() for t in pcbnew.LoadBoard(path).GetTracks() if t.GetNetname() in nets}
 
 
-def run(src, dst, iters=6, log=print, locked_ok=False, protect=()):
+def run(src, dst, iters=6, log=print, locked_ok=False, protect=(), via_follow=False):
     """-> {"moved", "excluded", "iters", "centred_left", "refused_geom"}; `dst` = the last accepted board (src when none is).
+    via_follow (close cleanup): a via with a locked track end in it moves onto that end, its unlocked ends following.
     refused_geom: joints _snap refused for clearance (PHASE3F A6) on the accepted iteration."""
     base = _keys(_report(src))
     skip = _ids_of_nets(src, set(protect)) if protect else set()     # protected nets' copper is never snapped
@@ -270,7 +308,7 @@ def run(src, dst, iters=6, log=print, locked_ok=False, protect=()):
     for i in range(iters):
         tmp = dst + f".i{i}.kicad_pcb"
         tmps.append(tmp)
-        moved, refused_geom = _snap_fresh(src, tmp, skip, locked_ok)
+        moved, refused_geom = _snap_fresh(src, tmp, skip, locked_ok, via_follow)
         shutil.copy(os.path.splitext(src)[0] + ".kicad_pro", os.path.splitext(tmp)[0] + ".kicad_pro")
         d = _report(tmp)
         new = DG.new_keys(base, _keys(d))

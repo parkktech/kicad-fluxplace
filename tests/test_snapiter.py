@@ -409,3 +409,19 @@ def test_protected_nets_are_skipped_by_the_snap(tmp_path, monkeypatch):
     monkeypatch.setattr(SI, "_snap", snap)
     SI.run(str(src), str(src), protect=["P1", "P2"])
     assert seen["skip"] == {"id-P1", "id-P2"}
+
+
+def _via_pos(path):
+    import pcbnew
+    return [(round(pcbnew.ToMM(t.GetPosition().x), 3), round(pcbnew.ToMM(t.GetPosition().y), 3))
+            for t in pcbnew.LoadBoard(str(path)).GetTracks() if t.Type() == pcbnew.PCB_VIA_T]
+
+
+def test_via_follow_moves_an_unlocked_via_onto_a_locked_track_end_and_never_edits_locked_copper(tmp_path):
+    """w80: a router via placed on its grid beside a locked stub end: the via moves, the locked track stays."""
+    src, dst = tmp_path / "a.kicad_pcb", tmp_path / "b.kicad_pcb"
+    _mini_board(src, [("A", "F", (5, 10), (9.9, 10.05), 0.2, True)], [("A", (10, 10), 0.6)])
+    assert SI._snap(str(src), str(dst), set()) == (0, 0)                      # default: nothing moves
+    assert _via_pos(dst) == [(10.0, 10.0)]
+    moved, _ref = SI._snap(str(src), str(dst), set(), via_follow=True)
+    assert moved == 1 and _via_pos(dst) == [(9.9, 10.05)] and _ends(dst) == [((5.0, 10.0), (9.9, 10.05))]

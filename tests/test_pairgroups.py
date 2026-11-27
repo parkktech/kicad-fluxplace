@@ -152,7 +152,7 @@ def test_route_nets_exclude_failed_pair_legs(tmp_path, monkeypatch):
 
 
 def test_gaps_pairgroup_rung_and_dispatch(tmp_path, monkeypatch):
-    assert GP.DISPATCH["pair-open"] == ["pairgroup", "ai"] and GP.DISPATCH["pair-asym"] == ["pairgroup", "ai"]   # PHASE3G G1
+    assert GP.DISPATCH["pair-open"] == ["pairgroup", "krt", "ai"] and GP.DISPATCH["pair-asym"] == ["pairgroup", "ai"]   # PHASE3G G1
     assert GP.DISPATCH["pair-skew"] == ["pairgroup", "tune", "ai"] and GP.LEVEL["pairgroup"] == "L1"
     monkeypatch.setattr(RD, "load", lambda p: {})
     monkeypatch.setattr(NC, "classify", lambda *a, **k: {})

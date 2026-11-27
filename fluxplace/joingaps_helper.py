@@ -159,6 +159,33 @@ def main():
                 if cid(opt[3]) != ct:
                     cands.append((opt[0], t, end, opt))
                     break
+    class _PadEnd:                                      # a pad standing in for a track end: same accessors the loop below uses
+        def __init__(self, p, l):
+            self.p, self.l = p, l
+            self.m_Uuid = p.m_Uuid
+
+        def GetNetCode(self):
+            return self.p.GetNetCode()
+
+        def GetNetname(self):
+            return self.p.GetNetname()
+
+        def GetLayer(self):
+            return self.l
+
+        def GetWidth(self):                             # the narrowest legal track: the join must fit between the pads
+            return max(ds.m_TrackMinWidth, 1)
+    for net in open_nets:                               # pad <-> pad / via of one net on a common layer (no track end to start from)
+        lst = pv.get(net, [])
+        for i, a in enumerate(lst):
+            for o in lst[i + 1:]:
+                for l in layers:
+                    if not (on(a, l) and on(o, l)) or cid(a) == cid(o):
+                        continue
+                    if a.GetEffectiveShape(l).Collide(o.GetEffectiveShape(l), gnm):
+                        d = (a.GetPosition() - o.GetPosition()).EuclideanNorm()
+                        cands.append((d, _PadEnd(a, l), a.GetPosition(), (d, o.GetPosition(), "pad", o)))
+                        break
     cands.sort(key=lambda c: c[0])
     added, skipped, new_items = [], [], []
     merged = {}                                         # cluster-key union: key -> root
