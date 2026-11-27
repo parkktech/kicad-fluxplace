@@ -79,6 +79,31 @@ def write_bom(rows, path):
     return path
 
 
+def board_bom(board, fps, mpn_map=None):
+    """BOM rows from the board itself: footprint Value/MPN fields (mpn_map wins), grouped by value+footprint+MPN, DNP flagged."""
+    mp = dict(mpn_map or {})
+    groups = {}
+    for p in fps:
+        fp = (p.get("lib") or "").split(":")[-1]
+        key = (p.get("value", ""), fp, mp.get(p["ref"]) or p.get("mpn", ""), bool(p.get("dnp")))
+        groups.setdefault(key, []).append(p["ref"])
+    return [{"Refs": refs, "Qty": str(len(refs)), "Value": v, "Footprint": fp, "MPN": m, "Manufacturer": "",
+             "Notes": "DO NOT POPULATE" if dnp else ""} for (v, fp, m, dnp), refs in groups.items()]
+
+
+def _own_bom(board, fps, tmp):
+    """No --bom: write the board's own BOM into tmp -> path or None."""
+    if not board or not fps:
+        return None
+    from . import sourcing as S
+    mp = {}
+    path = S.find_map(board)
+    if path and os.path.exists(path):
+        mp = {k: v for k, v in json.load(open(path)).items() if not k.startswith("_") and isinstance(v, str) and v}
+    rows = board_bom(board, fps, mp)
+    return write_bom(rows, os.path.join(tmp, os.path.splitext(os.path.basename(board))[0] + "-BOM.csv")) if rows else None
+
+
 def is_dnp(row):
     return bool(_DNP_RX.search(row.get("Notes", "")))
 
@@ -480,6 +505,11 @@ def start(a, boms, board_facts, log=print):
     ctx["tmp"] = tempfile.mkdtemp(prefix="fp-deliverver-")
     boms = list(boms)
     own = next((b for b in boms if b and os.path.isfile(b) and read_bom(b)), None)
+    if not own:
+        own = _own_bom(getattr(a, "board", None), ctx["fps"], ctx["tmp"])
+        if own:
+            boms.append(own)
+            log("    no --bom: built the board BOM (%s)" % os.path.basename(own))
     if prev_bom and own:
         out = os.path.join(ctx["tmp"], os.path.basename(own))
         ctx["rep"] = carry_bom(prev_bom, own, out, label=ctx["label"],

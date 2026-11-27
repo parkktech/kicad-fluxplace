@@ -156,3 +156,13 @@ def test_project_bundles_every_referenced_model_into_the_delivery(tmp_path):
     assert "${KIPRJMOD}/lib/3dmodels/MOLEX_43650-0315.step" in txt          # unresolved stock path -> the project library's copy
     assert "${KIPRJMOD}/lib/3dmodels/gone.step" in txt and not (out / "lib" / "3dmodels" / "gone.step").exists()   # unresolved: left, reported
     assert any("MODEL_BUNDLE_UNRESOLVED" in m for m in logs)
+
+
+def test_no_bom_builds_board_bom_with_dnp(tmp_path):
+    fps = [dict(FPS[0], value="10uF"), dict(FPS[1], value="10uF"), dict(FPS[2], value="100k"), dict(FPS[3], value="IC", mpn="U-1")]
+    rows = DV.board_bom("b.kicad_pcb", fps, {"C1": "AAA1", "C2": "AAA1"})
+    by = {tuple(r["Refs"]): r for r in rows}
+    assert by[("C1", "C2")]["MPN"] == "AAA1" and by[("C1", "C2")]["Qty"] == "2"
+    assert DV.is_dnp(by[("R38",)]) and by[("U1",)]["MPN"] == "U-1"
+    p = DV.write_bom(rows, str(tmp_path / "o.csv"))
+    assert {r["Refs"][0] for r in DV.read_bom(p)} == {"C1", "R38", "U1"}
