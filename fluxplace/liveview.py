@@ -977,6 +977,25 @@ GATE_POLL_S = 2.0
 EXIT_NEEDS_OWNER = 5
 
 
+def _ai_gate(gid, machine, g, default, cons, log_dir):
+    """w94: the gate settled by the AI decider.  Machine verdict: proceed / stop; none: a choice among the candidates (approve).
+    Never exits 5: a "stop" is recorded, the stage's own verdict decides the run."""
+    from . import decider as DC
+    cands = [c["cand"] for c in g["candidates"]]
+    ev = [f"machine verdict: {machine}"] + [f"candidate {c['cand']}: {json.dumps(c.get('criteria'), default=str)[:200]}" for c in g["candidates"][:6]]
+    if machine is None and cands:
+        opts = {c: f"approve candidate {c}" for c in cands}
+        dflt = cands[0]
+    else:
+        opts = {"proceed": "the stage result is used", "stop": "the stage result is set aside (recorded)"}
+        dflt = default if default in opts else "proceed"
+    d = DC.ask(f"gate:{gid}", "live gate", f"gate {gid}: machine {machine}, {len(cands)} candidate(s)", opts, dflt,
+               "the candidates' criteria against the board's rules", ev, cons, log_dir)
+    if machine is None and cands:
+        return {"by": "ai" if d["reasoned"] else "default", "action": "approve", "choice": d["choice"], "text": d["rationale"], "reasoned": d["reasoned"]}
+    return {"by": "ai" if d["reasoned"] else "default", "action": d["choice"], "text": d["rationale"], "reasoned": d["reasoned"]}
+
+
 def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sleep=time.sleep, stage=None):
     """Open gate `gid` for the owner and wait as `[live.gate.<gid>]` says. machine = "PASS", "FAIL" or None (no machine
     verdict: a choice among candidates); candidates = [{cand, key, criteria, snapshot, board}], rank 1 first.
@@ -1011,13 +1030,15 @@ def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sle
                 if c.get("board"):
                     exporter.request(c["cand"], "gate", c["board"], c.get("moves"), c.get("snapshot"))
         fb.open_gates[gid] = [c["cand"] for c in g["candidates"]]
+        from . import decider as DC
+        ai = DC.enabled(cons)                    # w94: an owner answer already in wins; else the AI decider, no wait
         ans = None
         while True:
             fb.boundary(generation="gate")
             ans = fb.answers.pop(gid, None)
             if exporter is not None:
                 exporter.poll()
-            if ans is not None or g["deadline"] is None or clock() >= g["deadline"]:
+            if ans is not None or ai or g["deadline"] is None or clock() >= g["deadline"]:
                 break
             sleep(GATE_POLL_S)
         fb.open_gates.pop(gid, None)
@@ -1027,6 +1048,10 @@ def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sle
             out.update(by="owner", action=act, text=ans.get("text", ""), choice=ans["gate"].get("choice") or out["choice"])
             out["passed"] = act == "approve" and machine != "FAIL"
             note = "recorded only: the machine side failed" if machine == "FAIL" else ""
+        elif ai:
+            out.update(_ai_gate(gid, machine, g, default, cons, fb.dir))
+            out["passed"] = out["action"] in ("approve", "proceed") and machine != "FAIL"
+            note = "AI decider" + ("" if out["reasoned"] else ", default, not reasoned") + (": " + out["text"][:120] if out["text"] else "")
         elif g["deadline"] is None:
             out.update(by=None, action=None)
             note = "not waiting"

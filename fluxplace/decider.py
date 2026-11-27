@@ -205,3 +205,16 @@ def act(packet, cons=None, log_dir=None, key=""):
                          "rationale": str(env.get("why"))[:400], "evidence": ["packet " + str(key)], "envelope": env,
                          "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
     return env
+
+
+def ask(qid, topic, found, options, default, settle, evidence=(), cons=None, log_dir=None):
+    """decide() for a call site that is not a questions.Session: `options` {choice: consequence}.  -> the decision row."""
+    q = {"id": qid, "topic": topic, "found": found, "default": default, "settle": settle,
+         "options": [{"choice": k, "consequence": v} for k, v in options.items()]}
+    return decide(q, evidence, cons, log_dir)
+
+
+def cited(row, sources):
+    """True when a reasoned decision cites at least one of `sources` (e.g. 'X.pdf#p3') in its evidence."""
+    ev = " ".join(row.get("evidence") or [])
+    return bool(row.get("reasoned")) and any(s and s in ev for s in sources)

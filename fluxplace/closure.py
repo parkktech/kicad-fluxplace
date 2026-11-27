@@ -458,6 +458,23 @@ def _clusters(ctx):
 Ctx.clusters = _clusters
 
 
+def _decide_pair(ctx, board, net, o, opts):
+    """w94: the AI decider settles a re-lay through controlled copper ([ai] decide); the decision rides on the option."""
+    from . import decider as DC
+    if not DC.enabled(ctx.cons):
+        return
+    pairs = [f"[pairs.{k}] {json.dumps(v, default=str)[:200]}" for k, v in ((ctx.cons or {}).get("pairs") or {}).items()
+             if any(n in json.dumps(v, default=str) or k in n for n in o["nets"])]
+    ev = [f"needs: {o['needs']}", f"controlled copper touched: {o['controlled_mm']} mm, {o['controlled_vias']} via(s) on {', '.join(o['nets'])}"]
+    ev += [f"other option {x['type']} at {x['pad']}: cost {x['cost']}" for x in opts if x is not o][:4] + pairs[:4]
+    d = DC.ask(f"closure-relay:{net}:{o['pad']}", "re-lay controlled copper", f"{net} open at {o['pad']}: closing it re-lays {', '.join(o['nets'])}",
+               {"re-lay": f"re-lay {o['controlled_mm']} mm / {o['controlled_vias']} via(s) of {', '.join(o['nets'])}, then re-tune the pair(s)",
+                "leave-open": f"{net} stays open at {o['pad']}; the controlled copper is untouched"},
+               "leave-open", "pair budgets (skew / length / via count) against the change", ev, ctx.cons,
+               os.path.dirname(os.path.abspath(board)))
+    o["decision"] = {k: d[k] for k in ("choice", "by", "reasoned", "rationale")}
+
+
 def run(board, cons=None, spec=None, conns=None, log=lambda m: None):
     """-> {board, open, connections: [...]}; `conns` (opengate.connections format) defaults to the measured ones."""
     cons = cons or {}
@@ -495,6 +512,9 @@ def run(board, cons=None, spec=None, conns=None, log=lambda m: None):
             opts.append({"type": "escape", "pad": f"{esc[0]['pad']}+{esc[1]['pad']}", "parts": esc, "mm": c["mm"],
                          "cost": round(esc[0]["cost"] + esc[1]["cost"], 1)})
         opts.sort(key=lambda o: o["cost"])
+        for o in opts:
+            if o["type"] == "pair":
+                _decide_pair(ctx, board, net, o, opts)
         out.append({"net": net, "class": ctx.label(net), "a": ends[0]["pad"], "b": ends[1]["pad"], "mm": c["mm"],
                     "exact_clusters": exact, "ends": ends, "options": opts})
     out.sort(key=lambda r: (r["options"][0]["cost"] if r["options"] else 1e9, r["net"]))
@@ -519,6 +539,9 @@ def _opt_line(o):
         return f"re-lay {len(o['items'])} low-speed item(s) at {o['pad']}: {its}; {nxt}"
     if t == "nudge":
         return f"nudge {o['ref']} by ({o['dx']}, {o['dy']}) mm rot {o['rot']} ({o['attached']} attached track/via follow); {nxt}"
+    d = o.get("decision")
+    if d:
+        return f"AI DECISION ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'}): {d['choice']} - {d['rationale'][:120]}; {o['needs']}; {nxt}"
     return f"NEEDS OWNER DECISION: {o['needs']}; {nxt}"
 
 

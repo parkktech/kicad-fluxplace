@@ -141,8 +141,12 @@ def test_pipeline_entry_decides_and_renets_into_the_work_dir(tmp_path, monkeypat
     monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
     path = sealed_board(tmp_path)
     work = str(tmp_path / "work")
-    c = types.SimpleNamespace(cons=dict(group(), **stub({"choice": "U1.20", "rationale": "r"})), answers={}, state={}, spec=None,
-                              a=types.SimpleNamespace(board=path))
+    spec = {"components": [{"ref": "U1", "pinmap": {"IO2": "3", "IO20": "20"}}, {"ref": "J1"}],
+            "nets": {"S2": [["U1", "IO2"], ["J1", "3"]]}}
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps(spec, indent=1) + "\n")
+    c = types.SimpleNamespace(cons=dict(group(), **stub({"choice": "U1.20", "rationale": "r"})), answers={}, state={}, spec=spec,
+                              spec_path=str(sp), a=types.SimpleNamespace(board=path))
     st = {}
     out = P._pinswap_entry(c, work, path, st)
     assert out == os.path.join(work, "0-pinswap", "board.kicad_pcb") and st["pinswap"] == [("U1", "3", "20")]
@@ -150,6 +154,10 @@ def test_pipeline_entry_decides_and_renets_into_the_work_dir(tmp_path, monkeypat
     assert os.path.exists(os.path.join(work, DC.LOG)) and not os.path.exists(tmp_path / DC.LOG)
     pads = {p["num"]: p["net"] for p in RD.load(out)["parts"]["U1"]["pads"]}
     assert pads["3"] == "" and pads["20"] == "S2"
+    # the spec follows the board (pin name of the new pad), the old spec is kept, the schematic gets a change list
+    assert json.loads(sp.read_text())["nets"]["S2"] == [["U1", "IO20"], ["J1", "3"]] and (tmp_path / "spec.json.bak-pinswap").exists()
+    rows = json.load(open(os.path.join(work, "0-pinswap", "schematic-changes.json")))["moves"]
+    assert rows == [{"ref": "U1", "net": "S2", "from_pad": "3", "to_pad": "20", "from_pin": "IO2", "to_pin": "IO20"}]
     assert P._pinswap_entry(c, work, out, {}) == out           # re-run on the moved board: nothing sealed in the group, no change
 
 
@@ -178,3 +186,76 @@ def test_ai_rung_asks_the_model_and_applies_through_the_guard(tmp_path, monkeypa
     res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"), [gap], ctx(stub(env)))
     assert res == {"status": "packet", "n": 1}
     assert not (ai_dir / (critroute._safe(GP.ai_key(gap))[:80] + ".action.json")).exists()
+
+
+# ---- the other human gates (w94 b-e) ----
+
+def test_closure_pair_option_is_decided(tmp_path, monkeypatch):
+    import types
+    from fluxplace import closure as CL
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    o = {"type": "pair", "pad": "U1.3", "nets": ["D_P", "D_N"], "controlled_mm": 1.2, "controlled_vias": 0, "needs": "owner decision: re-lay D_P",
+         "mm": 2.0, "cost": 1002.0, "then": {"type": "track", "mm": 2.0}}
+    ctx = types.SimpleNamespace(cons=stub({"choice": "re-lay", "rationale": "1.2 mm is inside the skew budget", "evidence": ["x"]}))
+    CL._decide_pair(ctx, str(tmp_path / "b.kicad_pcb"), "S2", o, [o])
+    assert o["decision"]["choice"] == "re-lay" and CL._opt_line(o).startswith("AI DECISION (ai): re-lay")
+    o.pop("decision")
+    CL._decide_pair(types.SimpleNamespace(cons={}), str(tmp_path / "b.kicad_pcb"), "S2", o, [o])
+    assert "decision" not in o and CL._opt_line(o).startswith("NEEDS OWNER DECISION")
+
+
+def test_waiver_only_with_a_cited_datasheet_line(tmp_path, monkeypatch):
+    from fluxplace import partdocs as PD, review as RV
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    (tmp_path / "ABC1.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(PD, "page_text", lambda pdf, pages=None: "Features\fOperating temperature -40 to +125 C")
+    f = {"level": RV.FAIL, "code": "PART_TEMP_RANGE", "msg": "U1 ABC1 rated -20 C", "refs": ["U1"]}
+    facts = {"mpn_map": {"U1": "ABC1"}, "board_path": str(tmp_path / "b.kicad_pcb")}
+    cite = "ABC1.pdf#p2"
+    out = RV.ai_waive([dict(f)], facts, stub({"choice": "waive", "rationale": "rated -40 C", "evidence": [cite + ": Operating temperature"]}), str(tmp_path))
+    assert out[0]["level"] == RV.INFO and out[0]["code"] == "AI_WAIVED" and cite in out[0]["msg"]
+    out = RV.ai_waive([dict(f, refs=["U1"], msg="U1 ABC1 rated -20 C.")], facts, stub({"choice": "waive", "rationale": "fine", "evidence": ["trust me"]}), str(tmp_path))
+    assert out[0]["level"] == RV.FAIL and "AI waiver refused" in out[0]["msg"]
+    assert RV.ai_waive([dict(f)], facts, {}, str(tmp_path)) == [f]                         # decider off: unchanged
+
+
+def test_dropin_owner_stop_settled_by_the_decider(tmp_path, monkeypatch):
+    from fluxplace import partsgate as PG
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    sp = tmp_path / "spec.json"
+    sp.write_text(json.dumps({"components": [{"ref": "U1", "mpn": "OLD"}], "nets": {}}, indent=1) + "\n")
+    seen = []
+
+    def validate(*a, ai_ok=False):
+        seen.append(ai_ok)
+        return ("apply", [], {"refs": ["U1"], "mpn": "NEW"}) if ai_ok else ("owner", ["replaces OLD with NEW, not a verified drop-in: Vmax"], None)
+    monkeypatch.setattr(PG, "validate", validate)
+    prop = [{"ref": "U1", "mpn": "NEW"}]
+    rep = PG.apply(str(sp), None, prop, stub({"choice": "apply", "rationale": "same pinout", "evidence": ["NEW.pdf#p3"]}), {}, None, None, None)
+    assert seen == [False, True] and rep["applied"][0]["ai"] == "same pinout" and json.loads(sp.read_text())["components"][0]["mpn"] == "NEW"
+    (tmp_path / "h").mkdir()                                  # a fresh folder: the first decision is cached beside the first spec
+    sp2 = tmp_path / "h" / "spec.json"
+    sp2.write_text(json.dumps({"components": [{"ref": "U1", "mpn": "OLD"}], "nets": {}}, indent=1) + "\n")
+    rep = PG.apply(str(sp2), None, prop, stub({"choice": "hold", "rationale": "Vmax lower"}), {}, None, None, None)
+    assert rep["owner"] and not rep["applied"]
+
+
+def test_owner_packets_never_suspend(tmp_path, monkeypatch):
+    import types
+    from fluxplace import packets as PK, pipeline as P
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    q = PK.question({"key": "NET1", "needs": "board-size", "packet": str(tmp_path / "NET1.packet.json")})
+    c = types.SimpleNamespace(cons=stub({"choice": "change", "rationale": "grow 2 mm"}), answers={})
+    assert P._decide_packets(c, str(tmp_path), "route", [q]) == [] and c.answers == {"packet:NET1": "accept-open"}
+    assert json.loads(open(tmp_path / DC.LOG).readline())["choice"] == "change"
+
+
+def test_live_gate_decided_without_waiting(tmp_path, monkeypatch):
+    from fluxplace import liveview as LV
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    g = {"candidates": [{"cand": "c1", "criteria": {"opens": 2}}, {"cand": "c2", "criteria": {"opens": 0}}]}
+    r = LV._ai_gate("place", None, g, "stop", stub({"choice": "c2", "rationale": "0 opens", "evidence": ["candidate c2"]}), str(tmp_path))
+    assert r == {"by": "ai", "action": "approve", "choice": "c2", "text": "0 opens", "reasoned": True}
+    monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
+    r = LV._ai_gate("route", "PASS", g, "stop", stub({}), str(tmp_path / "x"))
+    assert r["action"] == "stop" and r["by"] == "default" and not r["reasoned"]

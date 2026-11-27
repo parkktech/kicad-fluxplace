@@ -1940,6 +1940,19 @@ def _scope_add(c, nets):
     sc["nets"] = sorted(set(sc["nets"]) | set(nets))
 
 
+def _decide_packets(c, work, name, qs):
+    """Owner packets (packets.question rows) through the AI decider.  The stage already ran with accept-open; a decided
+    "change" cannot be applied by the flow (it edits board size / stackup / a fixed constraint), so it is logged as a
+    proposal and the run goes on.  -> the questions still open ([] whenever the decider is on)."""
+    from . import decider as DC_
+    for q in qs:
+        d = DC_.decide(q, [q["found"]], c.cons, work)
+        c.answers[q["id"]] = "accept-open"
+        print(f"pipeline: {name}: DECIDED {q['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})"
+              + (" - proposal only, the flow continues accept-open: " + d["rationale"][:160] if d["choice"] != "accept-open" else ""), flush=True)
+    return []
+
+
 def _pinswap_entry(c, work, board, st):
     """[pinswap] at pipeline entry: a sealed group pad is settled (answers, else the AI decider, else left open for the stages'
     own question) and each decided move re-nets the pads into `0-pinswap/`; the route entry's re-net strip handles old copper."""
@@ -1965,6 +1978,17 @@ def _pinswap_entry(c, work, board, st):
         print(f"pipeline: pinswap re-net refused: {v['why']}", flush=True)
         return board
     st["pinswap"] = mv
+    if c.spec is not None and c.spec_path:                               # the spec follows the board; the schematic gets a change list
+        from . import partsgate as PG_
+        rows = PS_.change_list(c.spec, mv)
+        _c, spec2 = S.apply(c.cons, c.spec)
+        shutil.copy(c.spec_path, c.spec_path + ".bak-pinswap")
+        PG_._write_json(c.spec_path, spec2)
+        c.spec = spec2
+        with open(os.path.join(work, "0-pinswap", "schematic-changes.json"), "w") as fh:
+            json.dump({"spec": os.path.abspath(c.spec_path), "moves": rows}, fh, indent=1)
+        print("pipeline: pinswap: spec updated (" + ", ".join(f"{r['ref']}.{r['from_pin']}->{r['to_pin']} {r['net']}" for r in rows)
+              + "); schematic change list 0-pinswap/schematic-changes.json", flush=True)
     _scope_add(c, nets)
     st["board"] = out
     return out
@@ -2243,6 +2267,9 @@ def _run(a):
             with open(led.path, "a") as fh:
                 fh.write(f"{name}: {note}: {', '.join(os.path.basename(x) for x in ua['packets'])}\n")
             print(f"pipeline: {name}: {note} (kept on disk; answer and re-run from {name} for an agent pass)", flush=True)
+            from . import decider as DC_
+            if ua.get("questions") and DC_.enabled(c.cons):                # w94: the AI decider settles owner packets; never suspends
+                ua["questions"] = _decide_packets(c, work, name, ua["questions"])
             if ua.get("questions") and res["verdict"] != "questions":       # B12: an owner decision suspends the flow (exit 3), resumable
                 res["verdict"] = "questions"
                 res["next"] = [f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]]

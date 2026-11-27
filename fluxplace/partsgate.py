@@ -17,7 +17,7 @@ import os
 import re
 import tempfile
 
-from . import parts as P
+from . import decider as DC, parts as P
 from . import modelpaths as MP
 
 NEEDS = ("mpn", "mfr", "stock", "datasheet", "pinmap", "package", "model")
@@ -315,11 +315,13 @@ def _norm_pm(pm):
     return {str(k).upper(): str(v) for k, v in (pm or {}).items()}
 
 
-def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds_ok=None, dropin=None):
+def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds_ok=None, dropin=None, ai_ok=False):
     """-> ("apply"|"owner"|"reject", [reasons], patch).  `lookup(mpn)` -> distributor row|None; `stocker(mpn, refs)` -> {verdict, stock}|None;
     `model_ok(ref, comp, prop)` -> (bool, why); `ds_ok(mpn, prop)` -> bool (datasheet file on disk or fetched).
     A proposal that CHANGES an existing MPN (not a packaging variant of it) is a substitution: it is applied only when
-    `dropin(old, new, refs)` -> dropin.classify() result says `drop_in`, otherwise it is an owner decision listing what differs."""
+    `dropin(old, new, refs)` -> dropin.classify() result says `drop_in`, otherwise it is an owner decision listing what differs.
+    `ai_ok` (w94: the AI decider accepted the owner reasons with cited evidence): the owner stops are passed, every other
+    check (distributor, stock, part entry, 3D model) still runs and still rejects."""
     refs = prop.get("refs") or ([prop["ref"]] if prop.get("ref") else [])
     mpn = (prop.get("mpn") or "").strip()
     comps = {c.get("ref"): c for c in spec.get("components", [])}
@@ -341,14 +343,14 @@ def validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok=None, ds
             old = comps[r].get("pinmap")
             if old and _norm_pm(old) != _norm_pm(prop["pinmap"]):
                 owner.append(f"{r}: proposed pinmap differs from the spec pinmap")
-    if owner:
+    if owner and not ai_ok:
         return "owner", sorted(set(owner)), None
     reasons = []
     from . import dropin as DI
     olds = {(comps[r].get("mpn") or mm.get(r) or "").strip() for r in refs} - {""}
     subst = sorted(o for o in olds if not DI.packaging_equivalent(o, mpn))
     evid = None
-    if subst:
+    if subst and not ai_ok:
         if dropin is None or len(subst) > 1:
             return "owner", [f"replaces {', '.join(subst)} with {mpn}: needs drop-in verification (none available)"], None
         evid = dropin(subst[0], mpn, refs)
@@ -411,6 +413,16 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
     for i, prop in enumerate(proposals):
         label = (",".join(prop.get("refs") or [prop.get("ref", "?")]) + " " + str(prop.get("mpn", ""))).strip()
         verdict, why, patch = validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok, ds_ok, dropin)
+        if verdict == "owner" and DC.enabled(cons):            # w94: the AI decider instead of the owner, cited evidence only
+            d = DC.ask(f"dropin:{label}", "part substitution", "; ".join(why)[:300],
+                       {"apply": f"apply {prop.get('mpn')} to {label}: every distributor / stock / part / model check still runs",
+                        "hold": "the proposal waits; the spec keeps its part"}, "hold",
+                       "the datasheets of both parts: pinout, ratings, package", [str(w) for w in why] + [f"proposal: {json.dumps(prop, default=str)[:300]}"],
+                       cons, os.path.dirname(os.path.abspath(spec_path)))
+            if d["choice"] == "apply" and d["reasoned"] and d["evidence"]:
+                verdict, why, patch = validate(spec, cons, facts, mm, ds, prop, lookup, stocker, model_ok, ds_ok, dropin, ai_ok=True)
+                if patch:
+                    patch["ai"] = d["rationale"][:200]
         if verdict == "apply":
             dup = [r for r in patch["refs"] if r in claimed]
             if dup:
@@ -420,7 +432,8 @@ def apply(spec_path, mpn_map_path, proposals, cons, facts, ds, lookup, stocker, 
             patches.append(patch)
             rep["applied"].append({"proposal": i, "what": label, "refs": patch["refs"],
                                    **({"note": f"distributor lists it as {patch['matched']}"} if patch.get("matched") else {}),
-                                   **({"replaces": patch["replaces"]} if patch.get("replaces") else {})})
+                                   **({"replaces": patch["replaces"]} if patch.get("replaces") else {}),
+                                   **({"ai": patch["ai"]} if patch.get("ai") else {})})
         else:
             rep["owner" if verdict == "owner" else "rejected"].append(
                 {"proposal": i, "what": label, "reasons": why, "refs": prop.get("refs") or [prop.get("ref")]})

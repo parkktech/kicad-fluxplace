@@ -100,11 +100,24 @@ def _applier(ref, old):
             return
         new = choice.rsplit(".", 1)[1]
         pm = _spec_part(box["spec"], ref).get("pinmap") or {}
+        name = next((k for k, v in pm.items() if str(v) == new), new)        # the spec names a pinmapped pad by its pin name
         for pins in (box["spec"].get("nets") or {}).values():
             for pr in pins:
                 if pr[0] == ref and str(pm.get(pr[1], pr[1])) == old:
-                    pr[1] = new
+                    pr[1] = name
     return f
+
+
+def change_list(spec, mv):
+    """The schematic edits a set of moves needs, so the schematic follows the board: one row per move
+    {ref, net, from_pad, to_pad, from_pin, to_pin} (pin = the spec pinmap name, else the pad number)."""
+    rows = []
+    for ref, old, new in mv:
+        inv = {str(v): k for k, v in (_spec_part(spec, ref).get("pinmap") or {}).items()}
+        tok = {old, inv.get(old, old)}
+        net = next((n for n, pins in ((spec or {}).get("nets") or {}).items() if any(r == ref and str(p) in tok for r, p in pins)), None)
+        rows.append({"ref": ref, "net": net, "from_pad": old, "to_pad": new, "from_pin": inv.get(old, old), "to_pin": inv.get(new, new)})
+    return rows
 
 
 def ask(S, B, cons, spec=None):
