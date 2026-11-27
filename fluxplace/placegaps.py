@@ -1642,6 +1642,10 @@ class FileEval(Evaluator):
             if after[t] > before[t] + 1e-9:
                 tr["refusal"] = f"score:{t} {before[t]}->{after[t]}"
                 return tr
+        nv = lambda gs: sum(1 for x in gs if x["kind"] == "via-forbidden")
+        if nv(gaps) > nv(self.gaps or []):                  # a move may not put a pin that needs a via inside a forbidden region
+            tr["refusal"] = f"score:via-forbidden {nv(self.gaps or [])}->{nv(gaps)}"
+            return tr
         m = self._cost(p)
         for k in ("wl", "cross"):
             if self.m.get(k) and m.get(k, 0) > self.m[k] * (1 + self.TOL):
