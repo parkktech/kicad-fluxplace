@@ -314,11 +314,12 @@ def _guide_cost(ctx, grid, sig, nets, cost):
 
 NODE_RATE = 30000          # A* pops per second measured on W16 (6M nodes ~ 200 s)
 NODE_CAP_S = 300           # w82: one section's search never plans for more than this many seconds
+ATTEMPTS = 4               # searches one pair makes inside its share (gate retries); a retry at budget_x=3 reuses the same share
 NODE_MIN_S = 30            # w82: seconds of search a section keeps even when the stage deadline is near
 STATES_PER_CELL = 8        # direction x polarity states per cell and layer the search can visit
 
 
-def node_limit(P, span, grid, ta, tb, budget_x=1):
+def node_limit(P, span, grid, ta, tb, budget_x=1, left=1):
     """A* node limit of one section: the old span formula, or the corridor's own size when that is larger -- the cells of the box
     round the two terminals (padded by the pair's break-out reach) x layers x states per cell -- capped at NODE_CAP_S of search.
     The 6M-node W16 ETH_P1 search got 4 mm further than the 1.4M one; a long congested corridor needs the room."""
@@ -328,8 +329,10 @@ def node_limit(P, span, grid, ta, tb, budget_x=1):
     h = abs(ta["c"][1] - tb["c"][1]) + 2 * pad
     area = w * h / (grid.step * grid.step) * len(grid.sig) * STATES_PER_CELL
     cap_s = NODE_CAP_S
-    if P.get("deadline"):                               # [pairlay] budget_min: the extra room never outlives the stage's own wall budget
-        cap_s = min(cap_s, max(NODE_MIN_S, P["deadline"] - time.time()))
+    if P.get("deadline"):                               # [pairlay] budget_min: one pair's extra room is a fair share of what is left (W16 route-8: ETH_P3
+        cap_s = min(cap_s, max(NODE_MIN_S, (P["deadline"] - time.time()) / max(1, left)))      # took 335 s and 7 pairs were never searched)
+    if P.get("deadline"):                               # the share also bounds the base: a section tries up to 5 searches, x3 on a budget retry
+        return int(min(budget_x * max(base, area), budget_x * max(P["nodes"], NODE_RATE * cap_s / ATTEMPTS)))
     return int(min(budget_x * max(base, area), max(budget_x * base, NODE_RATE * cap_s)))
 
 
@@ -387,7 +390,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             states, info = preset[0], {"pol": preset[1]}
         else:
             states, info = PL.astar(grid.nx, grid.ny, sig, allowed, vm if nl > 1 else None, seeds, goals, H, 4, K, step,
-                                    P["turn_cost"], P["via_cost"], node_limit(P, span, grid, ta, tb, budget_x),
+                                    P["turn_cost"], P["via_cost"], node_limit(P, span, grid, ta, tb, budget_x, ctx["left"]() if ctx.get("left") else 1),
                                     layer_cost(grid.B["copper"], sig, P, ctx["gated"](nets)),
                                     ccost=_guide_cost(ctx, grid, sig, nets, cost)) if seeds else (None, {"reason": "no gate with a matching polarity"})
         if not states:
@@ -1097,6 +1100,7 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     def one_pass(order):
         ctx = mk_ctx()
         grid = ctx["grid"]
+        ctx["left"] = lambda: len(order) - len(ctx["done"])          # pairs still to search in this pass (incl. the current one)
         st = {"res": {}, "grid": grid, "order": list(order)}
         prefix = ()
         for pr in order:

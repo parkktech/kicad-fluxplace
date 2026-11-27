@@ -506,6 +506,13 @@ def sync_netclasses(board, cons, log=lambda *a, **k: None, write=False):
         if write and managed:
             C.inject_netclasses(pro, cons, log=log, board=board)
         after = C.netclass_mismatch(pro, cons, board) if (write and managed) else before
+        if not write:                      # a class only missing is what the pipeline writes into its stage copy: not a conflict
+            miss = {x[len("managed missing "):] for x in before if x.startswith("managed missing ")}
+            pend = [x for x in before if x.startswith("managed missing ") or
+                    (x.startswith("managed pattern ") and x[len("managed pattern "):].split("=", 1)[0] in miss)]
+            after = [x for x in before if x not in pend]
+            if pend and not after:
+                return _line("netclasses", PASS, f"INFO: {len(miss)} managed class(es) not in the project yet; the pipeline writes them to its stage copy ({', '.join(sorted(miss)[:3])})")
     except (OSError, ValueError) as e:
         return _line("netclasses", FAIL, f"NETCLASS_MISMATCH: project file not readable or writable ({e})", [f"NETCLASS_MISMATCH {e}"])
     if after:

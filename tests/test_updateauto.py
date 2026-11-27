@@ -67,7 +67,7 @@ def test_pipeline_without_from_runs_silk_and_review_only_and_records_the_class(t
     rc, seen, st = _run(tmp_path, monkeypatch, routed(tmp_path, "b.kicad_pcb", ("B", "P")))
     assert rc == 0 and seen == ["silk", "review"]
     assert st["update"]["from"] == "silk" and st["update"]["line"].startswith("update: re-net 0 nets, 0 new parts")
-    assert capsys.readouterr().out.lstrip().startswith("update:")
+    assert any(l.startswith("update:") for l in capsys.readouterr().out.splitlines())   # w93 prints its code-freeze line first
 
 
 def test_explicit_from_wins(tmp_path, monkeypatch):

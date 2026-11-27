@@ -549,11 +549,16 @@ def pad_net_parity(board, netlist_xml):
     diffs = []
     for fp in board.GetFootprints():
         ref = fp.GetReference()
+        named = {}                              # pad name -> nets of its copies (twin pads: one pin, joined inside the part)
+        for pad in fp.Pads():
+            named.setdefault(pad.GetPadName(), set()).add(pad.GetNetname())
         for pad in fp.Pads():
             t = truth.get((ref, pad.GetPadName()))
             cur = pad.GetNetname()
             if t is None or cur == t:
                 continue
+            if not cur and t in named[pad.GetPadName()]:
+                continue                        # unnetted twin of a pin whose other copy carries the net: not a defect
             if (t.startswith("unconnected-") and
                     cur.startswith("unconnected-")):
                 continue                    # same meaning, per-instance names

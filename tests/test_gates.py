@@ -212,3 +212,28 @@ def test_schematic_netlist_declared_unwired_and_undeclared(tmp_path):
                  '<net name="Q"><node ref="SYM" pin="A"/></net></nets></export>')
     assert IO.pad_net_parity(B(), str(x)) == [("J10", "24", "", "IMU_INT1")]
     assert IO.pad_undeclared(B(), str(x)) == [("J10", "25", "STRAY")]
+
+
+def test_pad_net_parity_twin_pad_one_pin(tmp_path):
+    """A switch with two pads per pin number (KMR2 style): one copy netted, the twin bare = one pin on its net, no defect."""
+    from fluxplace import kicad_io as IO
+
+    class Pad:
+        def __init__(s, n, net): s.n, s.net = n, net
+        def GetPadName(s): return s.n
+        def GetNetname(s): return s.net
+
+    class FP:
+        def __init__(s, ref, pads): s.ref, s.pads = ref, pads
+        def GetReference(s): return s.ref
+        def Pads(s): return s.pads
+
+    class B:
+        def GetFootprints(s):
+            return [FP("SW1", [Pad("1", "SW_SETUP"), Pad("1", "SW_SETUP"), Pad("2", "GND"), Pad("2", "")]),
+                    FP("SW2", [Pad("2", ""), Pad("2", "")])]
+
+    x = tmp_path / "n.xml"
+    x.write_text('<export><nets><net name="SW_SETUP"><node ref="SW1" pin="1"/></net>'
+                 '<net name="GND"><node ref="SW1" pin="2"/><node ref="SW2" pin="2"/></net></nets></export>')
+    assert IO.pad_net_parity(B(), str(x)) == [("SW2", "2", "", "GND"), ("SW2", "2", "", "GND")]
