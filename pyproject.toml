@@ -39,6 +39,7 @@ fab = [
 # DigiKey CAD Models link is login-walled (SnapEDA/UL/CSE) or absent.
 models = [
     "easyeda2kicad>=0.8",
+    "curl_cffi>=0.7",
 ]
 # Everything a workstation needs to run the whole pipeline.
 all = [
@@ -49,6 +50,7 @@ all = [
 ]
 dev = [
     "pytest>=7.4",
+    "pytest-xdist>=3.0",
 ]
 
 [project.scripts]
