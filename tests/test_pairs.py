@@ -498,3 +498,16 @@ def test_not_laid_blockers_are_the_closest_approach_layers_and_other_layers_only
         assert not any(b.startswith("track WB") for b in own)
     else:
         assert not any(b.startswith("pad W1") for b in own)
+
+
+def test_node_limit_grows_with_the_corridor_box_and_is_capped_by_search_time():
+    import types
+    P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0}
+    grid = types.SimpleNamespace(step=0.1, sig=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    t = lambda x, y: {"c": (x, y)}
+    short = PR.node_limit(P, 5.0, grid, t(0, 0), t(5, 0))
+    assert short == 400000 + 125000                                      # a short span keeps the old formula
+    big = PR.node_limit(P, 40.0, grid, t(0, 0), t(30, 25))
+    assert big > 400000 + 25000 * 40 and big <= PR.NODE_RATE * PR.NODE_CAP_S
+    assert PR.node_limit(P, 40.0, grid, t(0, 0), t(300, 250)) == PR.NODE_RATE * PR.NODE_CAP_S      # capped by search time
+    assert PR.node_limit(P, 40.0, grid, t(0, 0), t(30, 25), budget_x=3) == min(3 * big, max(3 * (400000 + 25000 * 40), PR.NODE_RATE * PR.NODE_CAP_S))
