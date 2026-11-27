@@ -81,7 +81,7 @@ def _cons(tmp, extra=""):
                  "".join('[[stackup.layers]]\nname = "%s"\ntype = "%s"\nthickness = %s\n%s' %
                          (l["name"] or "", l["type"], l["thickness"], "epsilon_r = %s\n" % l["epsilon_r"] if "epsilon_r" in l else "")
                          for l in LAYERS) +
-                 '[pairs.USB_]\nimpedance_diff = 90\n[rf]\ntarget_z = 50\n' + extra)
+                 '[pairs.USB_]\nimpedance_diff = 90\n[rf]\ntarget_z = 50\n[finish]\nenabled = true\n[lookahead]\nenabled = false\n[placetour]\nenabled = false\n' + extra)
     return str(c)
 
 

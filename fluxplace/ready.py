@@ -231,6 +231,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         from . import routediag as RD, netclass as NC
         B = RD.load(board)
         cls = NC.classify(B, cons, spec)
+        detail["_cls"] = cls
         for key, label, fn in (("rails", "rails", QS.check_rail_pour), ("fixed", "fixed parts", QS.check_fixed_parts),
                                ("floors", "design-rule floors", QS.check_floors),
                                ("sides", "placement sides", QS.check_placement_sides),
@@ -252,6 +253,10 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         lines.append(pair_class_line(cons, cls, detail))
         lines.append(budget_line(spec, cons, B, rows, planes, detail))
         lines.append(density_line(spec, cons, B))
+        from . import readychecks as KO
+        pl, pf = KO.placement_line(B, cons, spec)
+        lines.append(pl)
+        detail["placement_classes"] = pf
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",
@@ -259,6 +264,10 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    from . import readychecks as KO
+    sl, sd = KO.stage_lines(cons, npairs=sum(1 for i in detail.pop("_cls", {}).values() if i["class"] == "pair") // 2)
+    lines += sl
+    detail.update(sd)
     lines += spice_lines(board, cons, detail)
     from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
     LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED, WARN) for x in lines) else "refused",
@@ -299,7 +308,7 @@ def density_line(spec, cons, B):
     txt = r["line"][len("density: "):]
     if over:
         return _line("density", FAIL, f"FAIL {txt}", [f"density: side {', '.join(over)} over {lim['fail'] * 100:.0f} % courtyard utilisation"])
-    return _line("density", PASS, ("WARN " if worn else "") + txt)
+    return _line("density", WARN if worn else PASS, txt)
 
 
 def _fixed_inputs(spec, cons, B):
@@ -436,13 +445,21 @@ def budget_line(spec, cons, B, rows, planes, detail):
     note = "".join("; " + t for t in (BG.summary(tab), f"{len(under)} rail class(es) narrower than the plan ({', '.join(under)})" if under else "") if t)
     kinds = ", ".join(f"{sum(1 for r in tab if r['kind'] == k)} {k}" for k in BG.KINDS if any(r["kind"] == k for r in tab))
     items = BG.open_items(tab)
-    if not items:
-        return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
+    hard = [r for r in tab if r["verdict"] == "fail" and r["hard"]]
+    soft = [r for r in tab if r["verdict"] == "fail" and not r["hard"]]
     by = {}
     for code, text in items:
         by.setdefault(code, []).append(text)
-    return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}",
-                      [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]), open_items=len(items))
+    blockers = [f"{c} {len(t)}: {'; '.join(t)}" for c, t in sorted(by.items())]
+    if hard:                                                   # a hard fail row is FAIL whatever else is open
+        names = ", ".join(r["name"] for r in hard[:6]) + (f" (+{len(hard) - 6})" if len(hard) > 6 else "")
+        return dict(_line("budgets", FAIL, f"{len(hard)} hard row(s) fail ({names}); {len(tab)} row(s): {kinds}{note}",
+                          [f"{r['kind']} {r['name']} {r['metric']}: {r.get('detail', '')}"[:200] for r in hard[:10]] + blockers), open_items=len(items))
+    if items:
+        return dict(_line("budgets", OPEN, f"{len(items)} open item(s) in {len(tab)} row(s): {kinds}{note}", blockers), open_items=len(items))
+    if soft:                                                   # soft fail rows are listed, never PASS
+        return _line("budgets", OPEN, f"{len(soft)} soft row(s) fail, none hard; {len(tab)} row(s): {kinds}{note}")
+    return _line("budgets", PASS, f"{len(tab)} row(s): {kinds or 'none'}{note}")
 
 
 def power_plan_lines(spec, cons, facts, B, ds_dir, sess, rows, planes, board, detail):
@@ -558,7 +575,9 @@ def cmd_ready(a):
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
                        "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
-                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", [])}, fh, indent=1)
+                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", []),
+                       "placement_classes": detail.get("placement_classes", []), "stages": detail.get("stages", []),
+                       "pair_budget": detail.get("pair_budget")}, fh, indent=1)
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)

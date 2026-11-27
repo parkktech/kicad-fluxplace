@@ -1210,6 +1210,22 @@ def _placement_collision_gate(c, n, name, res):
                 next=col["lines"][:4] + [col["txt"], "fix the placement or waive (COLLISION:REGEX)"])
 
 
+def _placement_class_report(c, n, name, res):
+    """readychecks T2: after every placement stage the placement classes (preroute FAILs + collision gate) are counted into the stage line.
+    Report only: the collision gate above and the stage gates decide; a check that cannot run says so."""
+    board = res.get("board")
+    if name not in PLACEMENT_STAGES or res.get("verdict") not in ("pass", "warn") or not board or not os.path.isfile(board):
+        return res
+    from . import routediag as RD, readychecks as KO
+    try:
+        fs = KO.placement_findings(RD.load(board), c.cons, c.spec)
+    except Exception as e:                               # noqa: BLE001 - reported, never silent
+        return dict(res, line=f"{res.get('line', '')}; placement classes NOT CHECKED ({type(e).__name__})".lstrip("; "))
+    by = KO.summarise(fs)
+    txt = ", ".join(f"{k} {len(v)}" for k, v in sorted(by.items())) if fs else "0 FAIL"
+    return dict(res, line=f"{res.get('line', '')}; placement classes: {txt}".lstrip("; "))
+
+
 def _incremental_floorplan(c, board, out):
     """A routed board whose only unlocked parts are new and off the outline (incplace.detect): seat those parts in free space and
     touch nothing else; the stages that would re-place or re-lay copper are skipped for the rest of the run. -> result or None."""
@@ -2086,6 +2102,7 @@ def _exec_stage(c, n, name, board, later=()):
     res.setdefault("verdict", "pass")
     res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
     res = _placement_collision_gate(c, n, name, res)       # w83: a placement stage ends without a collision FAIL (legalised or failed, named)
+    res = _placement_class_report(c, n, name, res)         # readychecks T2: the placement classes, counted into the stage line
     if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
         g = _gate_check(c, n, name, res.get("board") or board, gk, src=board, later=later)
         res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
