@@ -165,3 +165,68 @@ def test_design_floors_use_recommended_never_the_reject_value(tmp_path, monkeypa
     assert FC.limits("jlcpcb-standard", 6)["floors"]["min_annular_mm"] == 0.125          # JLC 6L via ring, 0.45 pad on a 0.2 drill
     assert FC.limits("pcbway-standard", 6)["floors"]["min_annular_mm"] == 0.15
     assert LM.get("fab_via_annular_min", "jlcpcb-6l")["hard"] == 0.05                    # the reject value stays for grading
+
+
+W16 = {"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"]}}
+
+
+def test_project_via_floor_at_or_above_hard_wins_with_a_warn(tmp_path, monkeypatch):           # D71fs
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import constraints as C
+    fp = C.fab_profile(dict(W16, route={"min_via_mm": 0.46}), layers=6)
+    assert fp["min_via_dia_mm"] == 0.46                                  # not lifted to the recommended 0.5 (0.2 drill + 2 x 0.15)
+    assert any("min_via_dia_mm" in w and "0.46" in w and "0.5" in w and "0.454" in w for w in fp["floor_warns"])
+    assert C.fab_profile(W16, layers=6)["min_via_dia_mm"] == 0.5         # no project value: the recommended floor
+
+
+def test_project_floor_below_hard_is_lifted_to_hard(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import constraints as C
+    fp = C.fab_profile(dict(W16, route={"min_via_mm": 0.40, "min_track_mm": 0.05}), layers=6)
+    assert fp["min_via_dia_mm"] == 0.454 and fp["min_track_mm"] == 0.1    # hard values: never below
+    assert len(fp["floor_warns"]) == 2
+
+
+def test_review_lists_the_floor_warn(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import review as RV
+    out = RV.check_fab_capability(dict(copper_layers=6, track_geom=[]), dict(W16, route={"min_via_mm": 0.46}))
+    assert any(f["code"] == "FAB_FLOOR_BELOW_RECOMMENDED" and f["level"] == "WARN" for f in out)
+
+
+def _pair_facts(stub):
+    return {"board_path": None}
+
+
+def test_tap_stub_info_fires_over_10_mm_not_at_5_9(monkeypatch):
+    from fluxplace import review as RV, qualaudit as QA
+    rows = [{"p": "ETH_P0_P", "n": "ETH_P0_N", "status": "complete", "causes": [], "stubs": [{"path": "a>b", "mm": 11.7}]},
+            {"p": "ETH_P1_P", "n": "ETH_P1_N", "status": "complete", "causes": [], "stubs": [{"path": "a>b", "mm": 5.9}]}]
+    out = _audit_with(rows, monkeypatch)
+    tap = [f for f in out if f["code"] == "PAIR_TAP_STUB"]
+    assert len(tap) == 1 and tap[0]["level"] == "INFO" and "ETH_P0_P" in tap[0]["msg"] and "11.7 mm" in tap[0]["msg"]
+
+
+def test_skew_finding_carries_the_advisory_whole_net_note(monkeypatch):
+    row = {"p": "ETH_P0_P", "n": "ETH_P0_N", "status": "mismatch", "causes": ["skew"], "stubs": [], "skew": 12.96, "limit": 1.0, "target": 1.0,
+           "unit": "mm", "basis": "path", "net_mm": (63.7, 61.7), "why": "skew"}
+    out = _audit_with([row], monkeypatch)
+    f = [x for x in out if x["code"].startswith("PAIR_SKEW")]
+    assert len(f) == 1 and "advisory, whole-net KiCad length" in f[0]["msg"] and "diff +2.00" in f[0]["msg"]
+    row2 = dict(row, basis="kicad")
+    assert "advisory" not in [x for x in _audit_with([row2], monkeypatch) if x["code"].startswith("PAIR_SKEW")][0]["msg"]
+
+
+def _audit_with(rows, monkeypatch):
+    """review._pairs_from_audit with the audit rows stubbed: only the finding assembly is under test."""
+    import tempfile
+    from fluxplace import review as RV, qualaudit as QA, routediag as RD, routeconn as RC, netclass as NC, pairuncoupled as PU
+    f = tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False).name
+    monkeypatch.setattr(RD, "load", lambda p: {})
+    monkeypatch.setattr(NC, "classify", lambda B, c: {})
+    monkeypatch.setattr(RC, "open_by_net", lambda p: [])
+    monkeypatch.setattr(QA, "pair_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(PU, "rows", lambda *a, **k: [])
+    monkeypatch.setattr(PU, "flagged", lambda r: [])
+    monkeypatch.setattr(RV, "pair_gated", lambda cons, m: True)
+    return RV._pairs_from_audit({"board_path": f}, {"limits": {"research": "off"}})

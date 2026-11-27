@@ -41,7 +41,7 @@ import time
 
 import numpy as np
 
-from fluxplace import limits as LM
+from fluxplace import fabcaps as FCAPS, limits as LM
 
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 RESOLUTION_MM = 0.02
@@ -697,7 +697,7 @@ def _edge_open(objs):
 
 
 # ----------------------------------------------------------------- package
-HOUSE_TOL_MM = 0.003            # mil -> mm rounding (5 mil = 0.127 vs a 0.125 ring): not a violation
+HOUSE_TOL_MM = FCAPS.HOUSE_TOL_MM         # mil -> mm rounding (5 mil = 0.127 vs a 0.125 ring)
 VIA_MAX_DRILL_MM = 0.5          # plated holes up to this drill are vias (via ring rule), larger are component holes
 
 

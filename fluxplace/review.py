@@ -1534,6 +1534,9 @@ def check_fab_capability(facts, cons):
                       f"{fab['min_track_mm']:g} / space {fab['min_clearance_mm']:g} / drill {fab['min_drill_mm']:g} / via ring "
                       f"{fab['min_annular_mm']:g} mm{prov}{unv}"))
 
+    for w in fab.get("floor_warns") or []:
+        out.append(_f(WARN, "FAB_FLOOR_BELOW_RECOMMENDED", w))
+
     narrow = sorted(
         (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),
         key=lambda s: (s["net"], s["layer"], s["x"], s["y"]))
