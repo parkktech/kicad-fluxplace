@@ -1931,7 +1931,7 @@ def cmd_tune(a):
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
-                        allow_mismatch=a.allow_layer_mismatch, log=lambda m: print(m, flush=True))
+                        log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
     from fluxplace import tune as TU
     TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
@@ -4002,9 +4002,6 @@ def build_parser():
                           "or on SIGTERM/SIGINT, the best accepted board is written to --out (exit 2)")
     ptu.add_argument("--stall", type=int, default=8,
                      help="stop a pair/net after N DRC-guarded tries without an accepted step (default 8)")
-    ptu.add_argument("--allow-layer-mismatch", action="store_true",
-                     help="also length-tune pairs whose legs run on different layers / via counts (default: they are needs_reroute); "
-                          "a last resort when `pairs --only` cannot re-lay them: the pair stays uncoupled but meets its skew limit")
     ptu.add_argument("--report", default=None, help="JSON report (default OUT.tune.json)")
     ptu.add_argument("--match", default=None, metavar="NAME|all",
                      help="tune [match.*] length groups instead of diff pairs")

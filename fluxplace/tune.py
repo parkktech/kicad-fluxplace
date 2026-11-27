@@ -245,7 +245,7 @@ def path_segs(src, net):
     return {seg_key(B["segs"][i]["a"], B["segs"][i]["b"], B["segs"][i]["layer"]) for i in p["segs"]}
 
 
-def classify_pairs(board_path, pairs, allow_mismatch=False):
+def classify_pairs(board_path, pairs):
     """{master: reason} for the pairs {slave: master} whose legs cannot be tuned: a leg open, or the legs run through
     different layer sequences / via counts (pairaudit.profile). Length tuning cannot fix those; they need a re-route
     (`fluxplace pairs --only`)."""
@@ -262,7 +262,7 @@ def classify_pairs(board_path, pairs, allow_mismatch=False):
             why.append(f"layers {'>'.join(pm['layers'])} vs {'>'.join(ps['layers'])}")
         if pm["vias"] != ps["vias"]:
             why.append(f"vias {pm['vias']} vs {ps['vias']}")
-        if why and not allow_mismatch:                    # allow_mismatch: legs on different layers/vias are length-tuned anyway (last resort after a re-lay failed)
+        if why:
             out[master] = "; ".join(why)
     return out
 
@@ -481,7 +481,7 @@ def _copy_sidecars(board_path, work):
 
 
 def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
-               amp_mm=0.6, max_rounds=6, log=print, budget=None, stall=STALL_TRIES, result=None, cons=None, allow_mismatch=False):
+               amp_mm=0.6, max_rounds=6, log=print, budget=None, stall=STALL_TRIES, result=None, cons=None):
     """pairs: {slave: master}. limit_mm: float or callable(master). Works on files so every step is a fresh pcbnew session
     (SWIG decays otherwise). Returns [(master, slave, P mm, N mm)].
 
@@ -505,7 +505,7 @@ def tune_pairs(board_path, out_path, pairs, limit_mm, kicad_cli="kicad-cli",
         with bud:
             shutil.copy(board_path, work)
             _copy_sidecars(board_path, work)
-            need = classify_pairs(board_path, pairs, True) if allow_mismatch else classify_pairs(board_path, pairs)
+            need = classify_pairs(board_path, pairs)
             for master, why in need.items():
                 log(f"  {master}: needs_reroute ({why}); not tuned")
             base = drc_report(work, kicad_cli, timeout=bud.drc_timeout()) if bud.seconds else drc_report(work, kicad_cli)
