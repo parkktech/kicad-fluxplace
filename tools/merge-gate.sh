@@ -36,8 +36,13 @@ if [ -d "$WT/tests/golden" ]; then
   echo "merge-gate: golden set $(tail -1 "$gout")"; rm -f "$gout"; IGN=(--ignore=tests/golden)
 fi
 if [ "$W" -gt 0 ]; then X=(-n "$W" --dist loadgroup); else X=(); fi
-( cd "$WT" && timeout 3600 "${PT[@]}" "${X[@]}" "${IGN[@]}" tests/ ) > "$out" 2>&1
-rc=$?
+# The suite runs in its own process group with the slot fd closed, and a TERM/INT/HUP trap kills that group: a killed
+# gate used to leave timeout+pytest orphaned under init, still holding the slot flock (queue stalled until it ended).
+setsid bash -c 'eval "exec $1>&-"; cd "$2" && shift 2 && exec timeout 3600 "$@"' _ "$fd" "$WT" "${PT[@]}" "${X[@]}" "${IGN[@]}" tests/ > "$out" 2>&1 &
+child=$!
+trap 'kill -TERM -- -"$child" 2>/dev/null; sleep 2; kill -KILL -- -"$child" 2>/dev/null; echo "merge-gate: killed, suite group $child stopped" >&2; exit 143' TERM INT HUP
+wait "$child"; rc=$?
+trap - TERM INT HUP
 echo "merge-gate: suite wall $(( $(date +%s)-t0 )) s, workers $W"
 # Completion evidence (outside review 2026-11-26): pytest rc 0 = all passed, 1 = tests failed (judged against the
 # baseline below); anything else (2 interrupted, 3 internal, 4 usage, 5 none collected, 124 timeout) is a failed gate.
