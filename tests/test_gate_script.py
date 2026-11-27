@@ -125,3 +125,19 @@ def test_queue_listing_names_holder_and_waiters_in_order(tmp_path):
         for p in (b, c, a):
             p.send_signal(signal.SIGTERM); p.wait(timeout=20)
     assert not [f for f in os.listdir(lock) if f.startswith("wait.") or f.endswith(".info")], "queue files left behind"
+
+
+def test_status_reports_stale_when_no_row_for_current_sha(tmp_path):
+    """Owner 2026-11-27: an old gate output was reported as current. --status only calls a result CURRENT for REF's sha."""
+    import os, subprocess, pathlib
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    gate = repo / "tools" / "merge-gate.sh"
+    res = tmp_path / "r.tsv"
+    res.write_text("2026-11-27 13:31:00\t000000000000\tbatch14\tFAIL\t4\n")
+    env = {"GATE_RESULTS": str(res), "PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
+    p = subprocess.run(["bash", str(gate), "--status", "HEAD"], capture_output=True, text=True, env=env)
+    assert p.returncode == 1 and "STALE" in p.stdout and "NO GATE RESULT" in p.stdout
+    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    res.write_text(res.read_text() + f"2026-11-27 15:00:00\t{sha[:12]}\tmain\tPASS\t0\n")
+    p = subprocess.run(["bash", str(gate), "--status", "HEAD"], capture_output=True, text=True, env=env)
+    assert p.returncode == 0 and p.stdout.startswith("CURRENT") and "PASS" in p.stdout

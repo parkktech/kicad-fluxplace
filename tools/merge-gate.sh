@@ -25,6 +25,18 @@ waiters() {   # live waiters, head first: priority class, then ticket; stale fil
   for f in "$LOCKDIR"/wait.*; do [ -e "$f" ] || continue; p=${f#"$LOCKDIR"/wait.}; p=${p#*.}; p=${p%.prio}
     if live "$p"; then case $f in *.prio) echo "0${f##*/}";; *) echo "1${f##*/}";; esac; else rm -f "$f"; fi; done | sort | sed 's/^.//'
 }
+# Result ledger (owner 2026-11-27: stale gate outputs were reported as current). Every finished gate appends one row
+# to $GATE_RESULTS: time, sha, branch, verdict, new-failure count. `merge-gate.sh --status [REF]` prints the newest
+# row for REF (default main) and says STALE when that row is not for REF's current sha. Read results this way, never
+# from an old output file.
+RESULTS=${GATE_RESULTS:-$HOME/.cache/fluxplace/gate-results.tsv}; mkdir -p "$(dirname "$RESULTS")"
+if [ "${1:-}" = "--status" ]; then
+  ref=${2:-main}; repo=$(cd "$(dirname "$0")/.." && pwd); cur=$(git -C "$repo" rev-parse --short=7 "$ref") || { echo "merge-gate: cannot resolve $ref"; exit 2; }
+  row=$(awk -F'\t' -v s="$cur" 'index($2,s)==1' "$RESULTS" 2>/dev/null | tail -1)
+  if [ -n "$row" ]; then echo "CURRENT $ref=$cur: $row"; exit 0; fi
+  echo "NO GATE RESULT for $ref=$cur (current sha). Newest rows are for other shas (STALE, do not report as current):"
+  tail -3 "$RESULTS" 2>/dev/null | sed 's/^/  STALE /'; exit 1
+fi
 if [ "${1:-}" = "--queue" ]; then
   for i in $(seq 1 "$SLOTS"); do
     exec {qfd}>>"$LOCKDIR/slot$i"
@@ -38,7 +50,10 @@ WT=${1:?worktree}; HERE=$(cd "$(dirname "$0")/.." && pwd); BASE=${2:-$HERE/docs/
 PY=${PY:-/usr/bin/python3}
 "$PY" "$HERE/tools/ledger-lint.py" "$WT" || true          # B2: information only, never fails the gate (yet)
 out=$(mktemp); child=; wfile=; got=
-cleanup() { [ -n "${GATE_KEEP:-}" ] && cp "$out" "$GATE_KEEP"; rm -f "$out" "$wfile"; [ -n "$got" ] && rm -f "$LOCKDIR/slot$got.info"; }
+cleanup() { local rc=$? v; case $rc in 0) v=PASS;; 1) v=FAIL;; 143) v=KILLED;; *) v=NO-RUN;; esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date '+%F %T')" "$(echo ${head0:-none} | cut -c1-12)" "${branch:-?}" "$v" "${nnew:-0}" >> "$RESULTS"
+  echo "merge-gate: RESULT $v for sha $(echo ${head0:-none} | cut -c1-12) (${branch:-?}) at $(date '+%F %T')"
+  [ -n "${GATE_KEEP:-}" ] && cp "$out" "$GATE_KEEP"; rm -f "$out" "$wfile"; [ -n "$got" ] && rm -f "$LOCKDIR/slot$got.info"; }
 trap cleanup EXIT
 # TERM/INT/HUP: kill the suite's process group (a killed gate used to leave timeout+pytest orphaned under init, still
 # holding the slot flock), then exit; the EXIT trap removes the queue files.
@@ -59,6 +74,7 @@ echo "$branch $(git -C "$WT" rev-parse --short HEAD) pid $$ started $(date +%H:%
 echo "merge-gate: slot $got ($(cut -d' ' -f1 /proc/loadavg) load)" >&2
 head0=$(git -C "$WT" rev-parse HEAD); dirty0=$(git -C "$WT" status --porcelain --untracked-files=no | wc -l)
 echo "merge-gate: queue: testing HEAD $head0 ($WT, $dirty0 modified tracked files) - merge exactly this sha" >&2
+echo "merge-gate: testing sha ${head0:0:12} branch $branch started $(date '+%F %T')"
 W=${GATE_WORKERS:-8}; PT=("$PY" -m pytest -q -p no:cacheprovider -rfE --continue-on-collection-errors)
 t0=$(date +%s)
 # pytest in its own process group (killable by the trap) with the slot fd closed (an orphan must not hold the flock)
@@ -95,5 +111,6 @@ new=$(comm -23 <(echo "$now") <(echo "$base") | grep .)
 gone=$(comm -13 <(echo "$now") <(echo "$base") | grep .)
 echo "merge-gate: $(tail -1 "$out")"
 [ -n "$gone" ] && { echo "fixed since the baseline (remove from $BASE):"; echo "$gone" | sed 's/^/  /'; }
+nnew=$(echo "$new" | grep -c .)
 if [ -n "$new" ]; then echo "NEW FAILURES - do not merge:"; echo "$new" | sed 's/^/  /'; exit 1; fi
 echo "merge-gate: OK (no failure outside the baseline) tested HEAD $head1"; exit 0
