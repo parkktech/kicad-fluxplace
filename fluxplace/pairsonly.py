@@ -203,7 +203,8 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     def run_drc(p):
         if drc:
             return drc(p)
-        return DG.drc_keys(p, kicad_cli, timeout=bud.drc_timeout())
+        d = DG.drc_json(p, kicad_cli, timeout=bud.drc_timeout())      # w82: opens are keyed per NET (keys_per_net): an open's item text changes whenever nearby copper does
+        return DG.keys_per_net(d), (len(d.get("violations", [])), len(d.get("unconnected_items", [])))
 
     def put_pre(text):
         with open(pre, "w") as f:
@@ -313,7 +314,7 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                     new = DG.new_keys(base[0], keys)
                     if shoved:                                   # the nets removed on purpose are open: that is the report, not a defect
                         new = type(new)({k: v for k, v in new.items()
-                                         if not (k[0].startswith("U") and any(s in d for s in shoved for d in k[1]))})
+                                         if not (k[0] == "Unet" and k[1] in shoved)})
                     if new:
                         why = f"new DRC violation: {sorted(new)[0][0]} {sorted(new)[0][1][:2]}"
                 if why:

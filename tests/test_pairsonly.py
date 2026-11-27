@@ -486,3 +486,21 @@ def test_centreline_stripped_counts_old_locked_pair_copper(tmp_path, cl_geo):
     src = _cl_board(tmp_path, seg((1, 1), (2, 1), "P", locked=True))
     r = PO.lay_centreline(src, None, ("P", "N"), "F.Cu", WPS, {})
     assert r["laid"] and r["stripped"]["locked"] >= 1 and r["stripped"]["items"] >= r["stripped"]["locked"]
+
+
+def test_an_existing_open_whose_item_text_changes_is_not_a_new_drc_key(tmp_path, monkeypatch):
+    """w82: the guard keyed unconnected items by item text, so an open on an untouched net looked new whenever nearby copper
+    changed (W16 U101_CB blocked an ETH_P1 lay). Opens are keyed per net now."""
+    src = PB.write(tmp_path, bad_pair("A", 20))
+    out = str(tmp_path / "o.kicad_pcb")
+    calls = []
+
+    def fake(p, cli="kicad-cli", timeout=600, **k):
+        calls.append(p)
+        items = ["Pad 1 [U_CB] of C1 on F.Cu", "Track [U_CB] on F.Cu, length 1.0 mm"] if len(calls) == 1 else \
+            ["Track [U_CB] on F.Cu, length 1.0 mm", "Track [U_CB] on F.Cu, length 0.6 mm"]
+        return {"violations": [], "unconnected_items": [{"type": "unconnected_items", "items": [{"description": d} for d in items]}]}
+    from fluxplace import drcguard as DGm
+    monkeypatch.setattr(DGm, "drc_json", fake)
+    rep = PO.reroute(src, out, ["A_P/A_N"], {}, None, log=lambda m: None)
+    assert rep["pairs"][0]["status"] == "rerouted", rep["pairs"][0].get("reason")
