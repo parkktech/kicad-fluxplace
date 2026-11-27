@@ -417,16 +417,28 @@ def _gcall(i):
     return _G["fn"](*_G["args"][i])
 
 
-def pmap(fn, arglist, workers):
+def pmap(fn, arglist, workers, timeout=900.0):
     """[fn(*a) for a in arglist] in input order, the calls spread over forked workers (fn and its closure are inherited, never pickled;
-    only the arguments' indices and the results cross the pipe).  One worker or one call: in this process."""
-    if workers <= 1 or len(arglist) < 2:
+    only the arguments' indices and the results cross the pipe).  Serial (same result) when there is one worker or call, when this is
+    not the main thread or another Python thread is alive (fork() in a threaded process can leave the child on a held lock: xdist,
+    pcbnew callbacks), and on any pool error or a task past `timeout` s (the pool is terminated, the calls run here)."""
+    import threading
+    if workers <= 1 or len(arglist) < 2 or threading.current_thread() is not threading.main_thread() or threading.active_count() > 1:
         return [fn(*a) for a in arglist]
     _G.clear()
     _G.update(fn=fn, args=arglist)
+    pool = None
     try:
-        with mp.get_context("fork").Pool(min(workers, len(arglist))) as pool:
-            return pool.map(_gcall, range(len(arglist)), chunksize=1)
+        pool = mp.get_context("fork").Pool(min(workers, len(arglist)))
+        jobs = [pool.apply_async(_gcall, (i,)) for i in range(len(arglist))]
+        out = [j.get(timeout) for j in jobs]
+        pool.close()
+        pool.join()
+        return out
+    except Exception:                                    # noqa: BLE001 - a broken / stuck pool: the serial path gives the same answer
+        if pool is not None:
+            pool.terminate()
+        return [fn(*a) for a in arglist]
     finally:
         _G.clear()
 

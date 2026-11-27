@@ -361,3 +361,18 @@ def test_coarse_dist_is_bit_identical_to_the_reference():
         a = PL.coarse_dist(free, viaok, goals, 4, 0.1, 20.0)
         b = _coarse_dist_reference(free, viaok, goals, 4, 0.1, 20.0)
         assert a.dtype == b.dtype and np.array_equal(a, b)
+
+
+def test_pmap_falls_back_to_serial_in_a_thread_and_on_a_stuck_pool():
+    import os
+    import threading
+    import time
+    pid = os.getpid()
+    f = lambda a: (a, os.getpid() == pid)
+    got = []
+    t = threading.Thread(target=lambda: got.append(PE.pmap(f, [(1,), (2,), (3,)], 3)))
+    t.start()
+    t.join()
+    assert got[0] == [(1, True), (2, True), (3, True)]                          # not the main thread: no fork
+    stuck = lambda a: (time.sleep(30) if os.getpid() != pid else None, a)[1]
+    assert PE.pmap(stuck, [(1,), (2,)], 2, timeout=0.5) == [1, 2]                # a stuck worker: serial answer
