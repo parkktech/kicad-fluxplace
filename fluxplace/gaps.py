@@ -26,7 +26,7 @@ MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
 ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance", "open-gap",
          "rf-impedance", "net-contract", "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape", "silk-fit", "silk-title"]   # PHASE3I B6: mask after copper
-CLOSE_FIRST = ("short", "open-gap", "open-pour", "open-free")   # close dispatch: a connection comes before copper quality (power width, pairs)
+CLOSE_FIRST = ("short", "pair-open", "open-gap", "open-pour", "open-free")   # close dispatch: a connection comes before copper quality (power width, pairs)
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 # a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
@@ -350,7 +350,7 @@ def classify(d, cons=None, board=None, failed_out=None):
             kind = "open-pour"
         elif len(items) >= 2 and _pos(items[0]) and _pos(items[1]) \
                 and math.hypot(_pos(items[0])[0] - _pos(items[1])[0],
-                               _pos(items[0])[1] - _pos(items[1])[1]) <= joingaps.GAP:
+                               _pos(items[0])[1] - _pos(items[1])[1]) <= joingaps.GAP_MAX:
             kind = "open-gap"
         else:
             kind = "open-free"
@@ -388,6 +388,18 @@ def classify(d, cons=None, board=None, failed_out=None):
     return gaps
 
 
+def pair_worst(gaps, cls):
+    """w78: {pair (sorted nets): worst sev of its pair-* gap rows} for the pairs of class `cls`. A pair counts once, by its worst state
+    (open / unmeasured 3 > asym 2 > skew, stub, impedance 1): copper added to an open pair that makes it measurable and adds rows
+    is not 'worse' (W63: opens 22 -> 19 was refused as hs_pair 12 -> 14)."""
+    out = {}
+    for g in gaps:
+        if g["class"] == cls and g["kind"].startswith("pair-"):
+            k = tuple(sorted(g.get("nets") or [g.get("id", "")]))
+            out[k] = max(out.get(k, 0), g.get("sev", 0))
+    return out
+
+
 def score_terms(m, gaps):
     """Named score terms, in score() order: hs_pair, rf, shorts, opens, power, power_mag, pair, pin_escape, errors, quality.
     hs_pair / pair: SUM of sev over pair-open|asym|skew gaps of a gated / plain pair; power: power-width|power-vias
@@ -397,11 +409,11 @@ def score_terms(m, gaps):
 
     def sev(pred):
         return sum(g.get("sev", 0) for g in gaps if pred(g))
-    return {"hs_pair": sev(lambda g: g["class"] == "hs-pair" and g["kind"].startswith("pair-")),
+    return {"hs_pair": sum(pair_worst(gaps, "hs-pair").values()),
             "rf": n(lambda g: g["class"] == "rf"), "shorts": m["shorts"], "opens": m["opens"],
             "power": n(lambda g: g["kind"] in ("power-width", "power-vias")),
             "power_mag": sum(g.get("mag", 0) for g in gaps if g["kind"] in ("power-width", "power-vias")),
-            "pair": sev(lambda g: g["class"] == "pair" and g["kind"].startswith("pair-")),
+            "pair": sum(pair_worst(gaps, "pair").values()),
             "pin_escape": n(lambda g: g["kind"] == "pin-escape"), "errors": m["errors"],
             "quality": n(lambda g: g["kind"] in ("dangling", "via-offcentre", "other"))}
 
@@ -468,7 +480,11 @@ def _accept(base_m, base_board, cand_m, cand_board, target_ids, cand_gaps, kind=
                 return f"R6 power_mag worse {n} {bm.get(n, 0):g}->{cm.get(n, 0):g}"[:120]
         return ""
 
-    pre = [("review", review)] + [(f"R6:{t}", r6(t)) for t in R6_TERMS] + [("R6:power_mag", r6_mag)]
+    def r6_pairs():                                     # w78: a gated pair may not move to a worse state; the sum of rows is not the judge
+        pb, pc = pair_worst(base_m.get("gaps") or [], "hs-pair"), pair_worst(cand_gaps, "hs-pair")
+        bad = next((k for k, v in sorted(pc.items()) if v > pb.get(k, 0)), None)
+        return f"R6 hs_pair worse {'/'.join(bad)} {pb.get(bad, 0)}->{pc[bad]}"[:120] if bad else ""
+    pre = [("review", review)] + [(f"R6:{t}", r6_pairs if t == "hs_pair" else r6(t)) for t in R6_TERMS] + [("R6:power_mag", r6_mag)]
     why = drcguard.run_rules(pre, trace)
     if why and trace is None:
         return False, why
@@ -596,7 +612,7 @@ def signal_layers(board):
 
 def _r_joingaps(base, out, gaps, ctx):
     from . import joingaps as J
-    return _brief(J.run(base, out, nets=_nets(gaps)))
+    return _brief(J.run(base, out, gap=J.GAP_MAX, nets=_nets(gaps)))
 
 
 def _r_pourisland(base, out, gaps, ctx):
@@ -669,7 +685,7 @@ def _r_handrepair(base, out, gaps, ctx):
         _clean_board(w)
         HR.session_begin(base, w, ctx["kicad_cli"])
         with CX.phase(ctx.get("phase_file"), "router"):
-            r = HP.repair(w, out, constraints=ctx["cons_path"], budget=_left(ctx, 900), layers=layers)
+            r = HP.repair(w, out, constraints=ctx["cons_path"], budget=max(1.0, _left(ctx, 900) - 60.0), layers=layers)
         if soft and os.path.exists(out):
             # a soft-locked net whose copper was ripped is written only when the same rung re-laid it (no new opens)
             ripped = [n for n in soft if _rows_count(out, n) < _rows_count(base, n)]
@@ -810,7 +826,7 @@ def _zone_nets(board):
 
 
 def _pair_fallback_legs(ctx):
-    """PHASE3F A5: {leg: partner} for the non-gated pairs the pair builder refused (ctx["pair_fallback"], [p, n] each)."""
+    """PHASE3F A5 / w78: {leg: partner} for the pairs (gated too) the pair builder refused (ctx["pair_fallback"], [p, n] each)."""
     out = {}
     for p, n in (ctx.get("pair_fallback") or []):
         out[p], out[n] = n, p
@@ -834,55 +850,73 @@ def _r_krt(base, out, gaps, ctx):
     if not targets:
         return {"status": "no plain net"}
     skip = protect | _zone_nets(base) | set(targets) | set(_rail_widths(base, ctx["cons"], signal_layers(base), 0.0))
-    res = {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 0, "ripped": 0}
-    cur, tmps, t0, done = base, [], time.time(), set()
+    res = {"status": "ran", "rc": 0, "failed": 0, "open": 0, "closed": 0, "ripped": 0, "calls": 0}
+    cur, tmps, t0 = base, [], time.time()
+    # w78: KRT has a fixed cost per call (obstacle map, ~170-250 s on W16): ONE call takes every target (pairs as [p, n]); only when
+    # that closes nothing (or opens another net) does it fall back to one call per target
+    units = [list(dict.fromkeys(l for n in targets for l in next((list(pr) for pr in ctx.get("pair_fallback") or [] if n in pr), [n])))]
+    if len(targets) > 1:
+        units += [next((list(pr) for pr in ctx.get("pair_fallback") or [] if n in pr), [n]) for n in targets]
+        units = [list(u) for u in dict.fromkeys(tuple(u) for u in units)]
+
+    def one(k, legs):
+        """-> (board kept, nets closed). One KRT call on `cur` for `legs`; the board is kept only when no other net opened."""
+        before = _krt_open(cur, cp)
+        mine = [x for x in legs if x in before]
+        if not mine:
+            return None, 0
+        rip = set()
+        for x in mine:
+            r = _krt_rip(cur, x, cp, skip)
+            if r is None:
+                return None, 0
+            rip |= set(r)
+        nxt, js = f"{out}.n{k}.kicad_pcb", f"{out}.krt{k}.json"     # js outlives the temp board (AI packet)
+        tmps.append(nxt)
+        _clean_board(nxt)
+        _sidecars(cur, nxt)
+        cmd = _krt_cmd(cur, nxt, legs, ctx)
+        at = cmd.index("--nets")
+        cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in sorted(rip)]] if rip else [])
+        with CX.phase(ctx.get("phase_file"), "router"):
+            proc = _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900), cwd=ctx["work"])
+        res["calls"] += 1
+        res["rc"] = proc.returncode
+        if os.path.exists(js):
+            ctx["krt_last"] = js
+            try:
+                with open(js) as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                d = {}
+            d = d if isinstance(d, dict) else {}
+            res["failed"] += len(d.get("failed_single") or [])
+            res["open"] += len(d.get("open_single") or [])
+            res["ripped"] += len(d.get("preexisting_rips") or [])
+        if not os.path.exists(nxt):
+            return None, 0
+        after = _krt_open(nxt, cp)
+        if after - before:
+            return None, 0                                    # a trade: previous stands
+        closed = len(set(mine) - after)
+        if any((p in after) != (n in after) for p, n in ctx.get("pair_fallback") or [] if p in mine and n in mine):
+            return None, 0                                    # half a pair laid: the previous board stands
+        return (nxt, closed) if closed else (None, 0)
     try:
-        for k, net in enumerate(targets):
+        for k, legs in enumerate(units):
             if time.time() - t0 > ctx["budget_s"] or CX.expired(ctx.get("deadline")):            # out of budget: what is closed so far is written
                 res["status"] = "budget"
                 break
-            if net in done:
-                continue
-            legs = next((list(pr) for pr in ctx.get("pair_fallback") or [] if net in pr), [net])   # [p, n] order
-            done |= set(legs)
-            before = _krt_open(cur, cp)
-            anchor = next((x for x in legs if x in before), net)  # the window is the open leg's
-            rip = _krt_rip(cur, anchor, cp, skip)
-            if rip is None:
-                continue
-            nxt, js = f"{out}.n{k}.kicad_pcb", f"{out}.krt{k}.json"     # js outlives the temp board (AI packet)
-            tmps.append(nxt)
-            _clean_board(nxt)
-            _sidecars(cur, nxt)
-            cmd = _krt_cmd(cur, nxt, legs, ctx)
-            at = cmd.index("--nets")
-            cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in rip]] if rip else [])
+            if k and not set(units[0]) & _krt_open(cur, cp):
+                break                                         # the group call closed every target
             try:
-                with CX.phase(ctx.get("phase_file"), "router"):
-                    proc = _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900),
-                                      cwd=ctx["work"])
+                nxt, closed = one(k, legs)
             except subprocess.TimeoutExpired:
                 res["status"] = "krt timeout"
                 break
-            res["rc"] = proc.returncode
-            if os.path.exists(js):
-                ctx["krt_last"] = js
-                try:
-                    with open(js) as fh:
-                        d = json.load(fh)
-                except (OSError, ValueError):
-                    d = {}
-                d = d if isinstance(d, dict) else {}
-                res["failed"] += len(d.get("failed_single") or [])
-                res["open"] += len(d.get("open_single") or [])
-                res["ripped"] += len(d.get("preexisting_rips") or [])
-            if not os.path.exists(nxt):
-                continue
-            after = _krt_open(nxt, cp)
-            if set(legs) & after or (after - before):
-                continue                                      # not closed (a pair: either leg), or a trade: previous stands
-            cur = nxt
-            res["closed"] += len(legs)
+            if nxt:
+                cur = nxt
+                res["closed"] += closed
         if cur != base:
             _copy(cur, out)
             _sidecars(cur, out)
@@ -2260,9 +2294,9 @@ RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
     "short": ["drcfix"],
-    "open-gap": ["joingaps", "patch"],
+    "open-gap": ["joingaps", "patch", "krt"],
     "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
-    "open-free": ["prune", "patch", "handrepair", "krt", "relocate", "krt_region", "krt_locked", "region", "patch_rip", "ai"],   # krt_locked: W39 locked free copper; relocate (L1, moves a part) after the L0 router
+    "open-free": ["patch", "krt", "prune", "handrepair", "relocate", "krt_region", "krt_locked", "region", "patch_rip", "ai"],   # krt_locked: W39 locked free copper; relocate (L1, moves a part) after the L0 router
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
@@ -2273,7 +2307,7 @@ DISPATCH = {
     "silk-fit": [],                        # B8: silkscreen text / artwork off the board or over a pad: the `silk` stage's fit repairs it (copper is never touched)
     "silk-title": [],                      # B8: title text without a version or without room: the `silk` stage writes it; no version = owner data
     "net-contract": [],                    # A6: kind defined here; B1 (w49-netcontract) owns detection and repair
-    "pair-open": ["pairgroup", "ai"],     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
+    "pair-open": ["pairgroup", "krt", "ai"],   # w78: legs pairgroup could not lay (gated too) go to KRT, both in one call (pair_fallback), tune fixes skew     # PHASE3G G1: an agent centre line (pair_path) after the group re-lay
     "pair-asym": ["pairgroup", "ai"],
     "pair-skew": ["pairgroup", "tune", "ai"],
     "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
@@ -2429,6 +2463,9 @@ class _NoTime(Exception):
     """attempt(): not enough of the stage budget is left before the verification reserve."""
 
 
+ROUTER_RUNGS = ("krt", "krt_region", "krt_locked", "handrepair", "pairgroup", "rfroute", "patch_rip")   # w78: rungs that start KRT / a router
+ROUTER_FIXED_S = 150.0                           # w78: below this a router call cannot finish (W16 obstacle map + search 170-250 s): not launched
+WHOLE_BOARD = ("prune", "patch", "handrepair")        # w78: rungs that take no net list: one attempt per round for the whole kind, not one per blocker group
 GROUPED = ("open-gap", "open-pour", "open-free")          # B6a: kinds whose gaps are attempted per blocker group
 _ZONES = {}
 
@@ -2671,7 +2708,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         elif crashes.has(ckey) and not ai_names:                # B6a: an identical retry of a crashed / timed-out attempt
             result, why = "skipped", "crash memo (same input, rung, params)"
         else:
-            al = CX.allowance(deadline, CX.mono(), _rung_cap(cons, rung, budget_s), reserve, min_s=min_s)
+            al = CX.allowance(deadline, CX.mono(), _rung_cap(cons, rung, budget_s), reserve,
+                              min_s=max(min_s, min(ROUTER_FIXED_S, 0.1 * budget_s)) if rung in ROUTER_RUNGS else min_s)
             if al is None:
                 result, why = "skipped", "no time before the verification reserve"
             else:
@@ -2848,7 +2886,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             memo_err.add(key)
         if rung == "pairgroup" and result == "refused":      # PHASE3F A5: a refused non-gated pair goes to the router
             for g in targets:
-                if g["class"] == "pair" and len(g["nets"]) == 2 and g["nets"] not in fallback:
+                if g["class"] in ("pair", "hs-pair") and len(g["nets"]) == 2 and g["nets"] not in fallback:
                     fallback.append(list(g["nets"]))
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id,
                "board_fp": fp[:8] if len(fp) > 8 else fp, "tool": tool, "stage": "close",
@@ -2936,7 +2974,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             for gi, grp in enumerate(groups):
                 key = kind + "|" + hashlib.sha1(",".join(sorted(g["id"] for g in grp)).encode()).hexdigest()[:12]
                 units.append({"key": key, "kind": kind, "targets": grp, "kind_targets": tg,
-                              "rungs": rungs if gi == 0 else [x for x in rungs if x != "ai"],
+                              "order": rungs, "rungs": rungs if gi == 0 else [x for x in rungs if x != "ai" and x not in WHOLE_BOARD],
                               "prio": (-1 if kind in CLOSE_FIRST else 0, ORDER.index(kind), min(CLASS_RANK[g["class"]] for g in grp))})
         return units
 
@@ -2959,7 +2997,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 break
             unit, rung = pick
             kind = unit["kind"]
-            targets = unit["kind_targets"] if rung == "ai" else unit["targets"]
+            targets = unit["kind_targets"] if rung == "ai" or rung in WHOLE_BOARD else unit["targets"]
             if over():
                 stop = "budget"
                 break

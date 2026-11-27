@@ -303,9 +303,11 @@ def next_task(units, done, stats):
         return u, u["rungs"][0]
     best = None
     for u in units:
-        for i, r in enumerate(u["rungs"]):
+        order = u.get("order") or u["rungs"]            # the kind's full rung order: a unit without the whole-board rungs keeps the same ranks
+        for r in u["rungs"]:
             if (u["key"], r) in done:
                 continue
+            i = order.index(r)
             k = (starved(stats, u["kind"], r), u["prio"], -rate(stats, u["kind"], r), i, u["key"])
             if best is None or k < best[0]:
                 best = (k, u, r)
