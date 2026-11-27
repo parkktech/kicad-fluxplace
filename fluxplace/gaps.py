@@ -854,9 +854,11 @@ def _r_krt(base, out, gaps, ctx):
     cur, tmps, t0 = base, [], time.time()
     # w78: KRT has a fixed cost per call (obstacle map, ~170-250 s on W16): ONE call takes every target (pairs as [p, n]); only when
     # that closes nothing (or opens another net) does it fall back to one call per target
-    units = [list(dict.fromkeys(l for n in targets for l in next((list(pr) for pr in ctx.get("pair_fallback") or [] if n in pr), [n])))]
+    def legs_of(n):                                       # [p, n] for a pair_fallback leg, else [n]
+        return next((list(pr) for pr in ctx.get("pair_fallback") or [] if n in pr), [n])
+    units = [list(dict.fromkeys(l for n in targets for l in legs_of(n)))]
     if len(targets) > 1:
-        units += [next((list(pr) for pr in ctx.get("pair_fallback") or [] if n in pr), [n]) for n in targets]
+        units += [legs_of(n) for n in targets]
         units = [list(u) for u in dict.fromkeys(tuple(u) for u in units)]
 
     def one(k, legs):
@@ -3021,10 +3023,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 save(r)
             if accepted:
                 hit = True
-                if kind not in CLOSE_FIRST:                       # w78: a connection accept ends only its own group: the other groups of the kind go on at once
-                    accepted_kinds.add(kind)
-                else:
+                if kind in CLOSE_FIRST:                           # w78: a connection accept ends only its own group: the other groups of the kind go on at once
                     accepted_units.add(unit["key"])
+                else:
+                    accepted_kinds.add(kind)
         deferred = [] if stop else [k for k in ORDER if "ai" in DISPATCH.get(k, [])
                                     and any(g["kind"] == k for g in vis(m["gaps"]))
                                     and not _ai_pending(ctx_dir_ai(work), [g for g in vis(m["gaps"]) if g["kind"] == k])]
