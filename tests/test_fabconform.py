@@ -52,8 +52,10 @@ def test_track_ladder_strictest_first():
 
 def test_house_verdicts_ok_option_impossible():
     hs, l = FX.resolve_houses("jlcpcb,pcbway"), _lims()
-    v = FX.classify("track", 0.09, hs, 6, l)
-    assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "impossible" and FX.action_of(v, True) == "IMPOSSIBLE"
+    v = FX.classify("track", 0.09, hs, 6, l)                              # PCBWay Advanced local 3.5/3.5 mil = 0.0889
+    assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and FX.action_of(v, True) == "ORDER-OPTION"
+    v = FX.classify("track", 0.085, hs, 6, l)
+    assert v["jlcpcb"]["status"] == "option" and v["pcbway"]["status"] == "impossible" and FX.action_of(v, True) == "IMPOSSIBLE"
     v = FX.classify("via_ring", 0.125, hs, 6, l)                          # JLC standard 0.125 ok; PCBWay standard 0.127 -> medium difficulty
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and "capabilities.html" in v["pcbway"]["source"]
     assert FX.action_of(v, False) == "ORDER-OPTION"
@@ -101,7 +103,7 @@ def test_run_fixes_track_and_via_and_leaves_the_rest_as_order_options(tmp_path):
     assert rep["accepted"]
     segs, vias = FX.parse(out.read_text())
     assert min(s["w"] for s in segs) >= 0.1 - 1e-9
-    assert all((v["size"] - v["drill"]) / 2 >= 0.127 - 1e-9 for v in vias if v["net"] in ("A", "B"))
+    assert all((v["size"] - v["drill"]) / 2 >= 0.130 - 1e-9 for v in vias if v["net"] in ("A", "B"))
     t = [g for g in rep["rows"] if g["kind"] == "track"][0]
     assert t["action"] == "FIXED" and t["old"] == 0.088 and t["new"] == 0.1
     vias_rows = [g for g in rep["rows"] if g["kind"] == "via_ring"]

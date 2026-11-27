@@ -30,6 +30,7 @@ from . import fabcaps as FC
 EPS = 1e-6
 DRILL_STEP = 0.05                          # standard drill grid (0.2 / 0.25 / 0.3 ...)
 PAD_STEP = 0.005
+RING_MARGIN = 0.003                        # mm above the strictest house via ring (the sourced limits are rounded to 0.003)
 UNCOUPLED_GAP = 5.0                        # mm: a pair leg with no partner beside it is a lone microstrip (coupling term ~ 0)
 HOUSE_DEFAULT_TIER = "standard"
 _OPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fabconform_options.json")
@@ -249,7 +250,7 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
     strict_ring = strictest(lims, "via_annular_min") or 0.0
     drill_min = strictest(lims, "drill_min") or 0.0
     dia_min = strictest(lims, "via_dia_min") or 0.0
-    ring_targets = sorted({l["via_annular_min"] for l in lims.values() if l.get("via_annular_min")} |
+    ring_targets = sorted({l["via_annular_min"] + RING_MARGIN for l in lims.values() if l.get("via_annular_min")} |
                           {o["limit_mm"] for h in lims for o in options_data().get(h, []) if o["kind"] == "via_ring"}, reverse=True)
     zone_nets = set(facts.get("zone_nets") or []) | set((cons.get("power") or {}))
     plan = Plan()
@@ -289,7 +290,7 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
                  rung=0 if rungs else -1, why="" if rungs else "impedance-blocked" if info.get("z_blocked") else "no rung")
     for v in vias:
         ring = (v["size"] - v["drill"]) / 2
-        if ring >= strict_ring - EPS or not v["through"] or v["locked"]:
+        if ring >= strict_ring + RING_MARGIN - EPS or not v["through"] or v["locked"]:
             continue
         keep = v["net"] in zone_nets
         cands, seen = [], set()
