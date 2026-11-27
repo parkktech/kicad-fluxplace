@@ -16,6 +16,7 @@ pipeline definition never fails because of it.
 import contextlib
 import io
 import json
+from . import stopgate as SG
 import os
 import re
 import shutil
@@ -30,7 +31,7 @@ STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "c
 CONSTRUCTIVE = ["ready", "modules", "floorplan", "fanout", "pour-tie", "placetour", "lookahead", "pairs", "tune", "critroute", "plan-route", "route", "close", "trace-finish", "silk", "review"]
 FLOWS = {"classic": STAGES, "constructive": CONSTRUCTIVE}
 ALL_STAGES = list(dict.fromkeys(STAGES + CONSTRUCTIVE + ["relieve"]))
-STATE_MAX = 2400   # router + engine records joined the stage entries
+STATE_MAX = 2700   # router + engine records joined the stage entries
 VERDICTS = ("pass", "warn", "fail", "blocked", "na", "skipped", "packets")   # warn: ran, its own gate line says FAIL, does not block
 
 
@@ -1030,7 +1031,7 @@ def st_close(c, n, board):
             pass
         last = (str(e).strip().splitlines() or [""])[-1][:100]
         return {"verdict": "warn", "line": "close: crashed " + (last if re.match(r"\w*(Error|Exception|Exit)\b", last) else f"{type(e).__name__}: {last}"),
-                "board": board}
+                "board": board, "crashed": True}
     line = (f"close: opens {res['start']['opens']}->{res['end']['opens']}, errors {res['start']['errors']}->"
             f"{res['end']['errors']}, {res['attempts']} attempts, stop {res['stop']}")
     if post:
@@ -1040,6 +1041,8 @@ def st_close(c, n, board):
         line += f"; protection broken by {res['protection_broken_by']}: fell back to the last verified state"
     out = {"verdict": "pass" if res["stop"] == "clean" else "warn", "line": line, "board": res["best"],
            "released": sorted(res.get("released") or {})}
+    if res["stop"] not in ("clean", "packets"):
+        out["unclosed"] = res["stop"]
     if res["stop"] == "packets":
         from . import gaps as GP
         pk = [p.get("packet") for p in res.get("packets") or [] if p.get("packet")]
@@ -1213,6 +1216,8 @@ def st_review(c, n, board):
             if f["level"] == "FAIL":
                 codes[f["code"]] = codes.get(f["code"], 0) + 1
         res["next"] = [f"{k} x{v}" for k, v in sorted(codes.items(), key=lambda kv: -kv[1])[:5]]
+        res["metrics"] = {"fail": sum(codes.values()),
+                          "placement_data_fail": sum(v for k, v in codes.items() if k.startswith(("PART_DATA", "PLACEMENT_DATA")))}
     except (OSError, ValueError):
         pass
     return res
@@ -2285,6 +2290,11 @@ def _run(a):
                 STAGES_.insert(STAGES_.index("fanout"), "relieve")
             else:
                 STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")
+    rp = None if a.from_stage or getattr(a, "status", False) else SG.resume_point(work, st, STAGES_, os.path.abspath(a.board) if a.board else (st or {}).get("board0"))
+    if rp and rp[0] < len(STAGES_):
+        a.from_stage = STAGES_[rp[0]]
+        st["board"], a.board = rp[1], None
+        print(f"pipeline: resume at {a.from_stage} (stages 1..{rp[0]} passed, input sha {SG.board_sha(rp[1])})", flush=True)
     upd = None if a.from_stage else _classify_update(a, STAGES_)
     if upd:
         a.from_stage = upd["from"]
@@ -2502,6 +2512,10 @@ def _run(a):
         if res.get("engine"):
             st["stages"][name]["engine"] = res["engine"]
         st["stage"], st["verdict"], st["board"] = name, res["verdict"], board
+        stop = [] if res["verdict"] in ("fail", "blocked", "packets", "questions") else \
+            SG.check(c.cons, st, name, i, STAGES_, res, board, os.path.join(work, f"{i + 1}-{name}"))
+        if not stop and res["verdict"] in ("pass", "warn", "na", "skipped"):
+            st["stages"][name]["go"] = SG.board_sha(prev)      # k13: resume skips a stage with this stamp on this input
         _ev_call(_ev_stage_end, i + 1, name, res, board, time.time() - t)
         st["next"] = res.get("next", [])
         if res.get("scorecard"):
@@ -2542,11 +2556,20 @@ def _run(a):
             done = i
             continue
         if res["verdict"] in ("fail", "blocked"):
+            SG.write_stop(work, name, i + 1, f"{res['verdict']}: {_clip(res.get('line', ''), 100)}",
+                          [{"check": name, "measured": res["verdict"], "limit": "pass"}], board, SG.board_sha(prev))
             rc = 1
+            break
+        if stop:
+            SG.write_stop(work, name, i + 1, "; ".join(f"{x['check']} {x['measured']} (limit {x['limit']})" for x in stop)[:200],
+                          stop, board, SG.board_sha(prev))
+            rc = SG.EXIT
             break
         if name == "close" and res["verdict"] in ("pass", "warn") and "tune" not in STAGES_[i + 1:i1 + 1]:
             board = _retune_relaid(c, work, board, st, i + 1, STAGES_[i + 1:])
         done = i
+    if rc == 0:
+        SG.clear_stop(work)
     inc = led.finish(done)
     if failed_on:
         note = "stage(s) FAILED on sealed pins, passed by --allow-incomplete: " + ", ".join(failed_on)

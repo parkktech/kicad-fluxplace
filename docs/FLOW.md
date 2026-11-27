@@ -40,3 +40,13 @@ Written back to `<board>.fluxmap.json`: `modules` + ports (modules), `fanout` (g
 (planned pours), `sources` (the winner per fact above), `answers`. The pipeline copies the map with each stage board.
 
 Open connections at the end are a gate failure (`review`: UNROUTED, STALE_FILL); `closure BOARD` explains each one (pocket, walls, via sites, ranked options).
+
+## Stop on fail, go thresholds, resume (k13, 2026-11-27)
+
+After each stage the pipeline stops (exit 3, `<workdir>/STOP.json`, one line `pipeline: stop at <stage>: <reason>`) when the stage failed,
+crashed or stalled with findings it owns, when a finding deferred by an earlier gate is still open after its last owner stage ran, or when a
+`[go.<stage>]` threshold is missed: `opens_max` (kicad-cli unconnected), `power_width_max`, `complete_min`, `not_searched_max` (pairs),
+`fail_max`, `placement_data_fail_max` (review), `post_error_max` (DRC errors after the stage; any stage). A missing key = the stage's own
+verdict only. Findings owned by a stage that has not run yet are still deferred. `[flow] on_fail = "continue"` restores the old behaviour.
+STOP.json holds stage, n, reason, checks (measured vs limit), stored board, input sha and the resume command. Re-running the same command
+with the same `--workdir` resumes at the first stage without a go stamp for its input sha (`pipeline: resume at <stage> (...)`).

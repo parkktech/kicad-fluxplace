@@ -500,3 +500,80 @@ def test_ctx_makes_the_constraints_and_spec_paths_absolute(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     c = PL.Ctx(_args(tmp_path, str(b), constraints="c.toml", spec="s.json"), str(tmp_path / "W"), str(b), None)
     assert c.cons_path == str(tmp_path / "c.toml") and c.spec_path == str(tmp_path / "s.json")
+
+
+# ---- k13: stop on fail, [go.<stage>] thresholds, resume
+def _stub_flow(monkeypatch, tmp_path, results):
+    """FUNCS stubs returning results[name] (default pass); returns the list of stages that ran."""
+    seen = []
+    def mk(name):
+        def f(c, n, b):
+            seen.append(name)
+            return dict({"verdict": "pass", "board": b, "line": "stub"}, **results.get(name, {}))
+        return f
+    monkeypatch.setattr(PL, "FUNCS", {name: mk(name) for name in PL.STAGES})
+    from fluxplace import gaps as GP
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {})
+    return seen
+
+
+def _cons(tmp_path, text):
+    p = tmp_path / "c.toml"; p.write_text(text)
+    return str(p)
+
+
+def test_k13_close_stalled_stops_before_trace_finish(tmp_path, monkeypatch, capsys):
+    seen = _stub_flow(monkeypatch, tmp_path, {"close": {"verdict": "warn", "unclosed": "stalled", "line": "close: opens 12->12, stop stalled"}})
+    rc = PL.run(_args(tmp_path, _board(tmp_path), flow="classic"))
+    out = capsys.readouterr().out
+    assert rc == 3 and "trace-finish" not in seen and seen[-1] == "close"
+    assert "pipeline: stop at close:" in out
+    s = json.load(open(tmp_path / "W" / "STOP.json"))
+    assert s["stage"] == "close" and s["checks"][0]["measured"] == "stalled" and s["input_sha1"] and s["resume"]
+
+
+def test_k13_go_route_opens_max_miss_stops(tmp_path, monkeypatch):
+    from fluxplace import stopgate as SGm
+    seen = _stub_flow(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(SGm, "_opens", lambda b, w: 12)
+    cons = _cons(tmp_path, "[go.route]\nopens_max = 8\n")
+    rc = PL.run(_args(tmp_path, _board(tmp_path), constraints=cons))
+    assert rc == 3 and seen[-1] == "route"
+    s = json.load(open(tmp_path / "W" / "STOP.json"))
+    assert s["checks"] == [{"check": "opens", "measured": 12, "limit": "<= 8"}]
+
+
+def test_k13_on_fail_continue_keeps_old_behaviour(tmp_path, monkeypatch):
+    seen = _stub_flow(monkeypatch, tmp_path, {"close": {"verdict": "warn", "unclosed": "stalled"}})
+    cons = _cons(tmp_path, '[flow]\non_fail = "continue"\n')
+    rc = PL.run(_args(tmp_path, _board(tmp_path), constraints=cons))
+    assert rc == 0 and seen[-1] == "review"
+    assert not (tmp_path / "W" / "STOP.json").exists()
+
+
+def test_k13_rerun_resumes_at_the_stopped_stage(tmp_path, monkeypatch, capsys):
+    from fluxplace import stopgate as SGm
+    seen = _stub_flow(monkeypatch, tmp_path, {})
+    opens = [12]
+    monkeypatch.setattr(SGm, "_opens", lambda b, w: opens[0])
+    cons = _cons(tmp_path, "[go.route]\nopens_max = 8\n")
+    b = _board(tmp_path)
+    assert PL.run(_args(tmp_path, b, constraints=cons)) == 3
+    seen.clear(); opens[0] = 0
+    rc = PL.run(_args(tmp_path, b, constraints=cons))
+    out = capsys.readouterr().out
+    assert rc == 0 and seen[0] == "route" and "ready" not in seen and "critroute" not in seen
+    assert "pipeline: resume at route (stages 1..6 passed" in out
+    assert not (tmp_path / "W" / "STOP.json").exists()
+
+
+def test_k13_deferral_to_a_later_owner_still_continues(tmp_path, monkeypatch):
+    from fluxplace import gaps as GP
+    seen = _stub_flow(monkeypatch, tmp_path, {})
+    row = {"id": "p1", "kind": "pair-skew", "class": "hs-pair", "nets": ["A", "B"], "at": [1.0, 2.0]}
+    monkeypatch.setattr(GP, "GATE_DEFAULTS", {"critroute": ["pair-skew"]})
+    monkeypatch.setattr(GP, "GATE_DEFER", dict(GP.GATE_DEFER, **{"pair-skew": ("tune", "close")}))
+    monkeypatch.setattr(GP, "close", lambda *a, **k: {"stop": "open", "left": [row], "start": {"opens": 0}, "end": {"opens": 0}, "best": str(_board(tmp_path))})
+    rc = PL.run(_args(tmp_path, _board(tmp_path), to_stage="critroute"))
+    assert rc == 0 and seen[-1] == "critroute"
+    assert json.load(open(tmp_path / "W" / "state.json"))["stages"]["critroute"]["gate"]["stop"] == "deferred"

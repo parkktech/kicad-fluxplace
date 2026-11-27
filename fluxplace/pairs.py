@@ -1742,7 +1742,9 @@ def stage(c, n, board):
     _stage_status(spath, "done" if rep["verdict"] == "PAIRS_OK" else "warn", line, board=out,
                   complete=rep["complete"], total=rep["total"], report=os.path.join(d, "board.pairs.json"))
     res = {"verdict": "pass", "line": ("WARN " if rep["verdict"] != "PAIRS_OK" else "") + line, "board": out,
-           "complete_pairs": [tuple(r["pair"]) for r in rep.get("pairs") or [] if r.get("status") == "complete" and len(r.get("pair") or ()) == 2]}
+           "complete_pairs": [tuple(r["pair"]) for r in rep.get("pairs") or [] if r.get("status") == "complete" and len(r.get("pair") or ()) == 2],
+           "metrics": {"complete": rep["complete"], "total": rep["total"],
+                       "not_searched": sum(1 for r in rep.get("pairs") or [] if "budget" in str(r.get("why", "")))}}
     if rep["verdict"] != "PAIRS_OK":
         S = pad_questions(rep, out, c.cons, getattr(c, "answers", None), getattr(c, "assume", False))
         res["next"] = [f"question {q['id']}: {q['found']}" for q in S.open][:3] + \
