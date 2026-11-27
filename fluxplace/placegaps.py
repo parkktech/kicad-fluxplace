@@ -269,6 +269,28 @@ def detect_support_starved(ctx):
     return out
 
 
+def _len_feas(ctx):
+    """{net: {T, T_src, B_current, B_all, U, verdict, text}} (B14): the length-budget verdict carried by every net-bound / net-budget gap.
+    Measurement only: no rung reads it yet. A failure is recorded in ctx["len_feas_error"], never raised."""
+    from . import budget as BG
+
+    def make():
+        try:
+            return {r["net"]: {k: r[k] for k in ("T", "T_src", "T_why", "B_current", "B_all", "U", "verdict", "text")}
+                    for r in BG.length_feasibility(ctx.B(), ctx["cons"], ctx.get("spec"))}
+        except Exception as e:                              # noqa: BLE001
+            ctx["len_feas_error"] = f"{type(e).__name__}: {e}"
+            return {}
+    return ctx.need("len_feas", make)
+
+
+def _with_len(g, feas, net):
+    """Attach the B14 length verdict of `net` (if any) to gap `g`; returns `g`."""
+    if net in feas:
+        g["len"] = feas[net]
+    return g
+
+
 @detector("net-bound")
 def detect_net_bound(ctx):
     """PLACEMENT LOWER BOUND (A8): a net or [[placement.path]] whose free-space octilinear bound (pad access to pad access, no margin,
@@ -278,10 +300,12 @@ def detect_net_bound(ctx):
     (it pulls movable parts to the anchor; a bound made of fixed parts alone is an owner/budget question)."""
     from . import budget as BG
     out = []
+    feas = _len_feas(ctx)
     for r in BG.net_bounds(ctx.B(), ctx["cons"], ctx["spec"]):
         if r["impossible"]:
-            out.append(gap("net-bound", r["name"], "rf" if r["cls"] == "rf" else "plain", r["bound"] - (r["limit"] or 0.0), r["refs"], r["nets"],
-                           detail=r["why"]))
+            g = gap("net-bound", r["name"], "rf" if r["cls"] == "rf" else "plain", r["bound"] - (r["limit"] or 0.0), r["refs"], r["nets"],
+                    detail=r["why"])
+            out.append(_with_len(g, feas, r["name"]))
     return out
 
 
@@ -294,9 +318,11 @@ def detect_net_budget(ctx):
     cls = NC.classify(B, ctx["cons"], ctx.get("spec"))
     of = _net_class(ctx)
     out = []
+    feas = _len_feas(ctx)
     for f in PR.net_over_budget(B, cls, ctx["cons"]):
         if f["level"] == "FAIL":
-            out.append(gap("net-budget", f["net"], of(f["net"])[0], f["value"] - f["limit"], f["refs"], (f["net"],), detail=f["msg"]))
+            g = gap("net-budget", f["net"], of(f["net"])[0], f["value"] - f["limit"], f["refs"], (f["net"],), detail=f["msg"])
+            out.append(_with_len(g, feas, f["net"]))
     return out
 
 
