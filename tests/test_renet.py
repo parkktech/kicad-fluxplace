@@ -26,7 +26,7 @@ def routed(tmp_path, name, nets):
     a, b = nets
     body = (two("R1", 10, 10, "A", "B") + two("R2", 30, 10, a, b) + two("R3", 50, 10, "A", "P")
             + seg((10.5, 10), (29.5, 10), "B")                   # R1.2 - R2.1 (B)
-            + seg((30.5, 10), (50.5, 10), "P")                   # R2.2 - R3.2  (a pair leg)
+            + seg((30.5, 10), (30.5, 12), "P") + seg((30.5, 12), (50.5, 12), "P") + seg((50.5, 12), (50.5, 10), "P")      # R2.2 - R3.2 (a pair leg)
             + seg((9.5, 10), (9.5, 20), "A") + seg((9.5, 20), (49.5, 20), "A") + seg((49.5, 20), (49.5, 10), "A"))   # R1.1 - R3.1
     p = G.write(tmp_path, body, name=name)
     (tmp_path / (name[:-10] + ".kicad_pro")).write_text("{}")
@@ -47,7 +47,7 @@ def test_apply_strips_only_the_wrong_copper(tmp_path):
     b2 = routed(tmp_path, "c.kicad_pcb", ("Q", "A"))
     out = str(tmp_path / "o" / "c.kicad_pcb")
     rep = RN.apply(b2, out)
-    assert rep["nets"] == ["B", "P"] and rep["removed"] == {"B": 1, "P": 1} and rep["pads"] == ["R2.1", "R2.2"]
+    assert rep["nets"] == ["B", "P"] and rep["removed"] == {"B": 1, "P": 3} and rep["pads"] == ["R2.1", "R2.2"]
     before, after = BW.net_items(b2), BW.net_items(out)
     assert "B" not in after and "P" not in after
     assert after["A"] == before["A"]                              # the correct net is byte-for-byte the same copper
@@ -144,3 +144,36 @@ def test_renet_pre_answers_rip_existing_never_unless_the_owner_answered(tmp_path
     c3 = PL.Ctx(_args(tmp_path, ok), str(tmp_path / "W3"), ok, {"stages": {}})
     PL._renet_entry(c3, str(tmp_path / "W3"), ok, {})
     assert "rip-existing" not in c3.answers                      # no mismatch: nothing pre-answered
+
+
+def test_copper_running_across_a_new_pad_is_stripped(tmp_path):
+    """in-place footprint swap: a shipped track crosses a NEW pad of another net without ending in it; a via annulus reaches another."""
+    body = (two("R1", 10, 10, "A", "G") + two("R2", 40, 10, "G", "A") + two("R3", 25, 20, "N", "M")      # R3 is the swapped part: pads N, M
+            + seg((10.5, 10), (39.5, 10), "G")                                                          # G, clear of R3
+            + seg((24.5, 18), (24.5, 22), "G")                                                          # G runs across R3.1 (N): crosses the body, no end in it
+            + seg((9.5, 10), (9.5, 14), "A") + seg((40.5, 10), (40.5, 14), "A"))
+    b = G.write(tmp_path, body, name="x.kicad_pcb")
+    (tmp_path / "x.kicad_pro").write_text("{}")
+    rep = RN.apply(b, str(tmp_path / "o" / "x.kicad_pcb"))
+    assert rep["pads"] == ["R3.1"] and rep["removed"] == {"G": 1}
+    assert sorted(rep["release"]) == ["G", "N"]                      # the pad's new net is released too
+
+
+def test_incremental_seat_scopes_the_route_to_the_new_parts_nets(tmp_path, monkeypatch):
+    b = routed(tmp_path, "b.kicad_pcb", ("B", "P"))
+    seen = {}
+
+    def fake(c, n, board):
+        seen["scope"] = dict(c.state.get("route_scope") or {})
+        return {"verdict": "pass", "line": "fake", "board": board, "incremental": True, "placed": {"R2": [30, 10, 0]}}
+    monkeypatch.setitem(PL.FUNCS, "floorplan", fake)
+    a = _args(tmp_path, b, from_stage="floorplan", to_stage="floorplan", flow="constructive")
+    assert PL.run(a) == 0
+    st = PL.load_state(a.workdir)
+    assert st["route_scope"]["nets"] == ["B", "P"]                      # R2's pad nets
+    a2 = _args(tmp_path, str(tmp_path / "other.kicad_pcb"), from_stage="floorplan", to_stage="floorplan", flow="constructive", workdir=str(tmp_path / "W"))
+    import shutil
+    shutil.copy(b, a2.board)
+    shutil.copy(str(tmp_path / "b.kicad_pro"), str(tmp_path / "other.kicad_pro"))
+    PL.run(a2)
+    assert PL.load_state(a2.workdir)["route_scope"]["input"] == os.path.abspath(a2.board)      # another BOARD: the old scope is dropped, a new one made

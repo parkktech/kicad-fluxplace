@@ -2,9 +2,20 @@
 copper plus the strands the removal leaves dangling, and hand the affected nets to the route stage as ordinary open nets.
 Connectivity is routeconn's (T-junctions, vias inside a segment, rotated pads); no ref, net name or constant of any board."""
 import collections
+import math
 import os
 
 from . import boardwrite as BW, netclass as NC, routeconn as RC, routediag as RD
+
+
+def _crosses(p, seg):
+    """True when the centre line of track `seg` runs through pad `p` (a track across a pad without ending in it; an in-place footprint swap
+    puts new pads under shipped copper).  Centre line only: copper beside a pad is a clearance matter, not a connection."""
+    if seg["layer"] not in p["layers"]:
+        return False
+    (x0, y0), (x1, y1) = seg["a"], seg["b"]
+    n = max(1, int(math.hypot(x1 - x0, y1 - y0) / 0.05))
+    return any(RC._in_pad(p, x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n, 0.0) for k in range(n + 1))
 
 
 def _scan(B):
@@ -19,8 +30,9 @@ def _scan(B):
         if j < off:
             continue
         if i < off:
-            if RC.touch(B, items[i], items[j]):
-                touch_pads[j - off].append(items[i][1])
+            p, (kind, o) = items[i][1], items[j]
+            if RC.touch(B, items[i], items[j]) or (kind == "seg" and p["net"] != o["net"] and _crosses(p, o)):
+                touch_pads[j - off].append(p)
         elif items[i][1]["net"] == items[j][1]["net"] and RC.touch(B, items[i], items[j]):
             same[i - off].add(j - off)
             same[j - off].add(i - off)

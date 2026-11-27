@@ -347,12 +347,9 @@ def pair_fallback_rows(board, legs, cons=None):
     return out
 
 
-def renet_scope(c, board):
-    """The nets a re-netted routed board hands to the route stage (state `renet.release`, written by the route-entry re-net check), or None.
-    Valid for the stripped board only: any other input is a normal whole-board run."""
-    r = (getattr(c, "state", None) or {}).get("renet") or {}
-    ok = r.get("release") and r.get("board") and os.path.abspath(r["board"]) == os.path.abspath(board)
-    return set(r["release"]) if ok else None
+def renet_scope(c):
+    """The nets a routed board hands to the route stage (state `route_scope`: re-net released nets, nets of new parts), or None."""
+    return set(((getattr(c, "state", None) or {}).get("route_scope") or {}).get("nets") or ()) or None
 
 
 def run(c, n, board, runner=run_step):
@@ -367,7 +364,7 @@ def run(c, n, board, runner=run_step):
     base = base_flags(R, d)
     xtra = list(getattr(c, "krt_extra", None) or [])         # D71ct: variant flags, route.py calls only (not route_diff/planes)
     sig, planes = plane_plan(board)
-    scope = renet_scope(c, board)                            # a re-net run: only these nets are touched, every other net is protected copper
+    scope = renet_scope(c)                            # a re-net run: only these nets are touched, every other net is protected copper
     plane_steps = [(x, lay) for x, lay in planes if scope is None or x in scope]
     names = set(RC.open_by_net(board))                       # nets that are open
     rep = None

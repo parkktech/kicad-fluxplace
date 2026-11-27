@@ -30,7 +30,7 @@ def _usb_unrouted_to_spec():
     """An unrelated, protected, locked USB pair whose legs are far apart and 8 mm out of skew: a whole-board pairgroups pass would
     re-lay it (the audit calls it incomplete), which the manifest forbids."""
     parts = duo("U1", 8, 8, "USB_P", "USB_N") + duo("J1", 30, 8, "USB_P", "USB_N")
-    cu = "".join(H_seg(a, b, n) for a, b, n in [((8, 8), (30, 8), "USB_P"), ((8.5, 8), (8.5, 12), "USB_N"),
+    cu = "".join(H_seg(a, b, n) for a, b, n in [((8, 8), (8, 6), "USB_P"), ((8, 6), (30, 6), "USB_P"), ((30, 6), (30, 8), "USB_P"), ((8.5, 8), (8.5, 12), "USB_N"),
                                                  ((8.5, 12), (30.5, 12), "USB_N"), ((30.5, 12), (30.5, 8), "USB_N")])
     return parts + cu
 
@@ -65,7 +65,7 @@ def test_renet_run_routes_only_the_released_pair_and_commit_is_accepted(tmp_path
     c = H.use_krt(H.context(tmp_path, routed, CONS, argv=["--route-budget", "300"]))
     usb0 = BW.net_items(routed, {"USB_P", "USB_N"})
     out = PL._renet_entry(c, c.work, routed, c.state)
-    assert out != routed and c.state["renet"]["release"] == ["ETH_N", "ETH_P"]
+    assert out != routed and c.state["route_scope"]["nets"] == ["ETH_N", "ETH_P"]
     res = PL._exec_stage(c, 7, "route", out, ())
     assert "commit refused" not in res["line"] and res["verdict"] in ("pass", "warn"), res["line"]
     assert BW.net_items(res["board"], {"USB_P", "USB_N"}) == usb0            # the protected pair is byte-for-byte the same copper
