@@ -87,6 +87,8 @@ def needy(B, cons, spec, cls=None):
 def plan(B, cons, spec, cls=None, log=lambda m: None, h2h=0.0, snv="hole"):
     """-> {reserved: [...], unreserved: [{ref, pin, net, why, crowd}], needy: n}.  `h2h` = the board's hole-to-hole rule (wall to wall):
     two reserved vias of ONE net are still two drilled holes, so their sites keep drill + h2h centre to centre."""
+    from . import forbid as FB
+    B = FB.augment(B, FB.windows(cons))                 # B7: a stripped mask window stays forbidden to foreign vias
     cls = cls or NC.classify(B, cons, spec)
     ep = params(cons)
     R = RR.rules(cons, None, B=B)

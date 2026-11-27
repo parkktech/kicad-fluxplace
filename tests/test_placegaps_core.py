@@ -30,8 +30,8 @@ def test_every_kind_has_a_detector_and_only_ghost_open_and_row_rail_have_rungs_s
     assert {k: v for k, v in PG.DISPATCH.items() if v} == {"ghost-open": ["unblock", "seal", "endpoint"], "row-rail": ["pull-load", "pour-need"],
                                                           "row-cin-side": ["template-turn", "unit-turn", "clear-side", "unit-shift", "cin-re-deal"],
                                                           "row-template": ["template-turn", "clear-side"], "row-pin-bypass": ["re-deal"],
-                                                          "row-away": ["feasible", "push-out", "re-seat"], "row-flight": ["push-out"]}
-    assert set(PG.RUNGS) == {"unblock", "seal", "endpoint", "pull-load", "pour-need", "template-turn", "unit-turn", "clear-side", "re-deal", "cin-re-deal",
+                                                          "row-away": ["feasible", "push-out", "re-seat"], "row-flight": ["push-out"], "via-forbidden": ["clear-region"]}
+    assert set(PG.RUNGS) == {"unblock", "seal", "endpoint", "pull-load", "pour-need", "template-turn", "unit-turn", "clear-side", "re-deal", "cin-re-deal", "clear-region",
                              "unit-shift", "feasible", "push-out", "re-seat"}
     assert len(set(PG.ORDER)) == len(PG.ORDER)
     assert PG.ORDER.index("ghost-open") < PG.ORDER.index("row-cin-side") < PG.ORDER.index("support-far") < PG.ORDER.index("part-stock")

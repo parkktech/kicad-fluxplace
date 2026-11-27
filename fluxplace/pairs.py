@@ -953,7 +953,8 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
     t0 = time.time()
     cons = cons or {}
     P = params(cons)
-    B = B or RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(B or RD.load(board), FB.windows(cons))    # B7: a stripped mask window stays forbidden to the pair copper
     if board:                                              # holes without a pad number are obstacles too
         try:
             B = dict(B, pads=B["pads"] + G.holes(board, B["copper"]))

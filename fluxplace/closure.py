@@ -462,7 +462,8 @@ def run(board, cons=None, spec=None, conns=None, log=lambda m: None):
     """-> {board, open, connections: [...]}; `conns` (opengate.connections format) defaults to the measured ones."""
     cons = cons or {}
     P = _params(cons)
-    B = RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(RD.load(board), FB.windows(cons))      # B7: close rungs see the stripped mask window
     R = RR.rules(cons, board, B=B)
     R["track"] = float(P["track"] or max(R["track"], B["track"]))
     R["clearance"] = float(P["clearance"] or max(R["clearance"], B["clearance"]))

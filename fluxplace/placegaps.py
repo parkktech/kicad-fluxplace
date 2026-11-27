@@ -18,7 +18,7 @@ import zlib
 from . import events as EV
 
 ORDER = ("ghost-open", "row-cin-side", "row-template", "row-pin-bypass", "row-away", "row-flight", "row-edge", "row-rail",
-         "row-other", "support-far", "support-starved", "net-bound", "net-budget", "side-illegal", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
+         "row-other", "support-far", "support-starved", "net-bound", "net-budget", "side-illegal", "via-forbidden", "ghost-costly", "ghost-hot", "part-datasheet", "part-stock")
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 SCOPE = {"ready": ("part-datasheet", "part-stock"),
          "floorplan": tuple(k for k in ORDER if not k.startswith(("part-", "ghost-"))),
@@ -68,7 +68,8 @@ class Ctx(dict):
 
     def B(self):
         from . import routediag as RD
-        return self.need("B", lambda: RD.load(self["board"]))
+        from . import forbid as FB
+        return self.need("B", lambda: FB.augment(RD.load(self["board"]), FB.windows(self["cons"])))
 
     def rows(self):
         def make():
@@ -333,6 +334,21 @@ def detect_side_illegal(ctx):
             out.append(gap("side-illegal", ref, "plain", 1.0 + (h or 0), (ref,), (), at=p["pos"], detail="; ".join(why)))
     if unknown and out:
         out[0]["detail"] += f"; {unknown} back part(s) of unknown height"
+    return out
+
+
+@detector("via-forbidden")
+def detect_via_forbidden(ctx):
+    """B7: a part (>= 3 pads) with pads of foreign nets inside a via/track-forbidden region (a mask window of the other side that is
+    re-cut after routing) cannot drop its pins' vias there: one row per part, mag = number of such pads. Two-pad parts escape by a track."""
+    from . import forbid as FB
+    B = ctx.B()
+    out = []
+    for ref in sorted(B["parts"]):
+        pins = FB.via_pins(B, ref)
+        if pins:
+            out.append(gap("via-forbidden", ref, "plain", len(pins), (ref,), sorted({q["net"] for q in pins}), at=B["parts"][ref]["pos"],
+                           detail=f"{len(pins)} pad(s) need a via inside a mask window / keep-out"))
     return out
 
 
@@ -1429,6 +1445,45 @@ def _r_re_seat(g, ctx):
     return out
 
 
+def _r_clear_region(g, ctx):
+    """via-forbidden: the part steps (8 directions) by the least distance at which none of its pads needing a via stands in a forbidden
+    region (forbid.via_pins on the shifted pads); supports travel with it; the legaliser decides what is reachable."""
+    from . import forbid as FB, placetour as PT
+    if g["kind"] != "via-forbidden":
+        return []
+    ref = g["refs"][0]
+    B = ctx.B()
+    p = B["parts"].get(ref)
+    if not p or p.get("locked") or ref not in set(PT._movable(B, ctx["cons"], _P(ctx))):
+        return []
+    mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    out, seen, found = [], set(), []
+    for k in range(8):
+        a = k * math.pi / 4
+        ux, uy = math.cos(a), math.sin(a)
+        for i in range(1, 121):
+            d = i * 0.5
+            sh = copy.deepcopy(p)
+            for q in sh["pads"]:
+                q["x"] += ux * d
+                q["y"] += uy * d
+            B2 = dict(B, parts=dict(B["parts"], **{ref: sh}))
+            if not FB.via_pins(B2, ref):
+                found.append((d, k, ux, uy))
+                break
+    for d, k, ux, uy in sorted(found)[:4]:
+        tg = {ref: (p["pos"][0] + ux * (d + CLEAR_MM), p["pos"][1] + uy * (d + CLEAR_MM), p["angle"])}
+        mv = _with_supports(B, ctx, mov, tg)
+        key = PT._key(mv) if mv else None
+        if mv and key not in seen:
+            seen.add(key)
+            out.append({"id": f"clear-{k}", "rung": "clear-region", "moves": mv, "claims": [], "notes": f"{ref} {d:.1f} mm out of the forbidden region ({k * 45} deg)"})
+    return out
+
+
+RUNGS["clear-region"] = _r_clear_region
+
+
 def _flight_push(g, ctx):
     from . import budget as BG, geom as GM, placetour as PT
     B, cons = ctx.B(), ctx["cons"]
@@ -2188,6 +2243,7 @@ def cin_questions(ctx, res):
 DISPATCH["row-cin-side"] = ["template-turn", "unit-turn", "clear-side", "unit-shift", "cin-re-deal"]
 DISPATCH["row-template"] = ["template-turn", "clear-side"]
 DISPATCH["row-pin-bypass"] = ["re-deal"]
+DISPATCH["via-forbidden"] = ["clear-region"]
 RUNGS.update({"template-turn": _r_template_turn, "unit-turn": _r_unit_turn, "clear-side": _r_clear_side, "re-deal": _r_re_deal, "cin-re-deal": _r_cin_re_deal, "unit-shift": _r_unit_shift})
 
 
