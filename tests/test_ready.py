@@ -205,7 +205,7 @@ def test_ready_reports_and_never_writes_the_project(tmp_path):
     b, pro, cons = _pair_project(tmp_path)
     before = open(pro, "rb").read()
     line = RY.sync_netclasses(b, cons)
-    assert line["status"] == "FAIL" and "NETCLASS_MISMATCH" in line["detail"] and "managed" in line["detail"]
+    assert line["status"] == "PASS" and "INFO" in line["detail"] and "stage copy" in line["detail"]   # classes only missing: written by the pipeline
     assert open(pro, "rb").read() == before
 
 
