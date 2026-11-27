@@ -25,7 +25,7 @@ _close = functools.partial(GP.close, inproc=True)
 @pytest.fixture(autouse=True)
 def _no_prune(monkeypatch):
     monkeypatch.setitem(GP.DISPATCH, "open-free", [r for r in GP.DISPATCH["open-free"] if r != "prune"])
-    monkeypatch.setattr(GP, "_blockers_of", lambda *a, **k: None)      # fake boards: no blocker data, a kind stays whole
+    monkeypatch.setattr(GP, "_blocker_items", lambda *a, **k: None)    # fake boards: no blocker data, a kind stays whole
 
 
 def _write(mode):
@@ -206,7 +206,7 @@ def _three_open_gaps(opens_fixed=()):
 
 def test_close_groups_opens_by_shared_blocker_and_runs_each_groups_cheap_rung_first(monkeypatch, loop):
     blockers = {"N0": ["X"], "N1": ["X"], "N2": ["Y"]}                  # N0 and N1 share a blocker, N2 has its own
-    monkeypatch.setattr(GP, "_blockers_of", lambda board, gaps, skip=(), r=3.0: sorted({b for g in gaps for n in g["nets"] for b in blockers[n]}))
+    monkeypatch.setattr(GP, "_blocker_items", lambda board, gaps, skip=(), r=3.0: {b for g in gaps for n in g["nets"] for b in blockers[n]})
 
     def measure(board, kicad_cli="kicad-cli"):
         d = _three_open_gaps()

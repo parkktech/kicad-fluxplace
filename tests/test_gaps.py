@@ -1446,7 +1446,7 @@ def test_rung_timeout_is_a_recorded_unknown_refusal_and_close_continues(monkeypa
     rows = [json.loads(x) for x in open(loop["attempts"])]
     assert rows[0]["method"] == "pourisland" and rows[0]["result"] == "error" and "rung timeout" in rows[0]["why"]
     assert any(r["method"] == "patch" for r in rows[1:])                                 # close went on to the next rung
-    assert seen[0] == 0.05 * 84 * 60 + 120                                               # child timeout: the rung's fraction, not the whole budget
+    assert 0 < seen[0] <= 0.05 * 84 * 60 + 10                                            # child timeout: the rung's fraction (B6a: allowance + 10 s kill slack), not the whole budget
     recs = refusal_mod.load(refusal_mod.path(loop["work"]))
     to = [r for r in recs if r["rung"] == "pourisland"]
     assert to and to[0]["rules"][0]["status"] == "UNKNOWN" and to[0]["rules"][0]["rule"] == "rung" and "rung timeout" in to[0]["why"]
