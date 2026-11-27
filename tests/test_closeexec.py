@@ -202,7 +202,7 @@ def _three_open_gaps(opens_fixed=()):
 
 def test_close_groups_opens_by_shared_blocker_and_runs_each_groups_cheap_rung_first(monkeypatch, loop):
     blockers = {"N0": ["X"], "N1": ["X"], "N2": ["Y"]}                  # N0 and N1 share a blocker, N2 has its own
-    monkeypatch.setattr(GP, "_blocker_items", lambda board, gaps, skip=(), r=3.0: set({b for g in gaps for n in g["nets"] for b in blockers[n]}))
+    monkeypatch.setattr(GP, "_blocker_items", lambda board, gaps, skip=(), r=3.0: {b for g in gaps for n in g["nets"] for b in blockers[n]})
 
     def measure(board, kicad_cli="kicad-cli"):
         d = _three_open_gaps()
@@ -336,4 +336,3 @@ def test_hung_island_job_is_reaped_and_the_cheap_open_is_committed_within_the_st
     assert any(l["method"] == "patch" and l["result"] in ("closed", "partial") for l in lines)
     assert open(res["best"]).read().endswith("free_fixed") and res["end"]["opens"] == 1       # committed; only the island stays open
     assert res["time_accounting"]["child_start"] >= 5.0                 # the hung child's wall is accounted, to the kill
-

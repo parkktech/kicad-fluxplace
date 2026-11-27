@@ -71,8 +71,9 @@ def _pair_audit(board, cons, opn=None):
     (classify passes the DRC unconnected set); None -> routeconn.open_by_net. w69: a pair whose legs' copper, pads and open state are
     those of an audited pair of an earlier board keeps that row; only the changed pairs are measured (kicad-cli)."""
     from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC, pairaudit as PA
+    cons = cons or {}
     B = RD.load(board)
-    cls = NC.classify(B, cons or {})
+    cls = NC.classify(B, cons)
     if opn is None:
         try:
             opn = set(RC.open_by_net(board))
@@ -80,22 +81,23 @@ def _pair_audit(board, cons, opn=None):
             opn = set(RC.text_open(B))
     pairs = PA.pair_list(cls)
     try:
-        ck = hashlib.sha1(repr(sorted((cons or {}).items(), key=lambda kv: str(kv[0]))).encode()).hexdigest()
+        ck = hashlib.sha1(repr(sorted(cons.items(), key=lambda kv: str(kv[0]))).encode()).hexdigest()
         sig = {pr: _pair_sig(board, pr[0], pr[1], opn, ck) for pr in pairs}
     except Exception:
         sig = {}
     todo = [pr for pr in pairs if sig.get(pr) not in _PAIR_ROWS]
-    fresh = {r["pair"]: r for r in QA.pair_rows(B, cls, cons or {}, opn, pairs=todo)} if todo else {}
+    fresh = {r["pair"]: r for r in QA.pair_rows(B, cls, cons, opn, pairs=todo)} if todo else {}
     rows = []
     for pr in pairs:
-        r = fresh.get(f"{pr[0]}/{pr[1]}") or _PAIR_ROWS.get(sig.get(pr))
-        if r is None:
-            continue
-        if sig.get(pr) and f"{pr[0]}/{pr[1]}" in fresh and r.get("status") != "unknown":     # an unmeasured pair is retried, never cached
+        s = sig.get(pr)
+        r = fresh.get(f"{pr[0]}/{pr[1]}")
+        if r is not None and s and r.get("status") != "unknown":     # an unmeasured pair is retried, never cached
             if len(_PAIR_ROWS) > 512:
                 _PAIR_ROWS.clear()
-            _PAIR_ROWS[sig[pr]] = r
-        rows.append(r)
+            _PAIR_ROWS[s] = r
+        r = r or _PAIR_ROWS.get(s)
+        if r is not None:
+            rows.append(r)
     return B, cls, rows
 
 
@@ -2450,17 +2452,20 @@ def _blocker_items(board, gaps, skip=(), r=WINDOW_MM):
         out = set()
         for g in gaps:
             own = set(g.get("nets") or [])
-            pts = [pcbnew.FromMM(c) for c in g["at"][:2]] if g.get("at") else None
-            pts = [pts] if pts else [(x, y) for n, _ref, x, y in rows["pads"] if n in own]
+            excl = own | set(skip)
+            if g.get("at"):
+                pts = [(pcbnew.FromMM(g["at"][0]), pcbnew.FromMM(g["at"][1]))]
+            else:
+                pts = [(x, y) for n, _ref, x, y in rows["pads"] if n in own]
             if not pts:
                 return None
             for cx, cy in pts:
                 x0, y0, x1, y1 = cx - R, cy - R, cx + R, cy + R
                 for i, (n, _l, _sx, _sy, _ex, _ey, _w, l, t, rt, bt) in enumerate(rows["tracks"]):
-                    if n and n not in own and n not in skip and rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
+                    if n and n not in excl and rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
                         out.add(f"{n}#t{i}")
                 for i, (n, _l, x, y, _w, _d) in enumerate(rows["vias"]):
-                    if n and n not in own and n not in skip and x0 <= x <= x1 and y0 <= y <= y1:
+                    if n and n not in excl and x0 <= x <= x1 and y0 <= y <= y1:
                         out.add(f"{n}#v{i}")
         return out
     except Exception:

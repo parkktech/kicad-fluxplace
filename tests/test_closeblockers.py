@@ -8,7 +8,6 @@ from fluxplace import closeexec as CX
 from fluxplace import gaps as GP
 
 
-
 def _blocker_board(tmp_path):
     import planboards as PB
 

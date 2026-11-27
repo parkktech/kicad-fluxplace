@@ -46,7 +46,8 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
             if ml:                                           # the net's total copper length (reported for every net, equal or not)
                 tot[nets[int(ml.group(1))]] = max(tot.get(nets[int(ml.group(1))], 0.0), float(ml.group(2)))
         for (p, n) in pairs:                                 # the rule reports every net with copper: a missing net has none (length 0)
-            res[(p, n)].update(p=tot.get(p, 0.0), n=tot.get(n, 0.0), skew=round(tot.get(p, 0.0) - tot.get(n, 0.0), 4))
+            lp, ln = tot.get(p, 0.0), tot.get(n, 0.0)
+            res[(p, n)].update(p=lp, n=ln, skew=round(lp - ln, 4))
         for v in rep.get("violations", []):
             m = _RE.search(v.get("description", ""))
             if not m:
