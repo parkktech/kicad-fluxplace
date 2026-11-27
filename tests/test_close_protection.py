@@ -116,3 +116,54 @@ def test_final_commit_falls_back_to_the_newest_verified_accepted_state(tmp_path,
     assert os.path.isdir(str(tmp_path / "W" / "accepted"))            # kept as evidence after a fallback
     assert real(inp, res["best"], release=set(res["released"]), manifest=BW.load_manifest(inp))["ok"]
     assert set(res["released"]) == {"D_P", "D_N"}
+
+
+def test_final_commit_falls_back_to_the_tuned_state_when_a_later_connection_state_breaks_protection(tmp_path, monkeypatch):
+    """w78 order (connections first): patch accepted (A), pair-skew tune accepted and released (B), a later patch accepted but it moves
+    protected SIG (C): the final commit lands on B, the newest accepted state that verifies, with the pair released."""
+    extra = seg("X", (40, 40), (45, 40))
+    inp = board(tmp_path, "in.kicad_pcb", BASE())
+    BW.seed(inp, why_by_net={"D_P": "pair D_P/D_N", "D_N": "pair D_P/D_N", "SIG": "kept"})
+    tuned = board(tmp_path, "tuned.kicad_pcb", seg("D_P", (20, 20), (30, 20.6), True) + seg("D_N", (20, 21), (30, 21.7), True) + seg("SIG", (20, 23), (30, 23)) + extra)
+    stage_a = board(tmp_path, "a.kicad_pcb", BASE() + extra)
+    broken = board(tmp_path, "c.kicad_pcb", seg("D_P", (20, 20), (30, 20.6), True) + seg("D_N", (20, 21), (30, 21.7), True) + seg("SIG", (20, 23), (30, 29)) + extra)
+    o1, o2 = dict(OPEN, id="o1"), dict(OPEN, id="o2", nets=["SIG2"], at=[50.0, 50.0])
+
+    def remeasure(path, cli="kicad-cli"):
+        t = open(path, errors="replace").read()
+        if "30 29" in t:
+            return _m([], 0)
+        if "20.6" in t:
+            return _m([o2], 1)
+        if "(40 40)" in t:
+            return _m([SKEW, o2], 1)
+        return _m([SKEW, o1, o2], 2)
+    monkeypatch.setattr(G, "_remeasure", remeasure)
+    monkeypatch.setattr(G, "_classify_into", lambda *a, **k: None)
+    monkeypatch.setattr(G, "_protect", lambda *a, **k: set())
+    monkeypatch.setattr(G, "_accept", lambda *a, **k: (True, ""))
+
+    def rung(name, base, out, gaps, ctx):
+        t = open(base, errors="replace").read()
+        if name == "tune" and gaps and gaps[0]["kind"] == "pair-skew":
+            shutil.copy(tuned, out)
+        elif name == "patch":
+            shutil.copy(broken if "20.6" in t else stage_a, out)
+        else:
+            return {}
+        return {"status": "ran"}
+    monkeypatch.setattr(G, "_call_rung", rung)
+    real = BW.verify         # the per-accept verify passes for every patch candidate (as in the test above); only the final commit point judges C
+    monkeypatch.setattr(BW, "verify", lambda base, cand, release=(), manifest=None: (
+        {"ok": True, "why": "", "changed": [], "duplicates": 0, "uuid_collisions": 0} if "patch" in os.path.basename(cand)
+        else real(base, cand, release, manifest)))
+    res = G.close(inp, str(tmp_path / "W"), cons={}, attempts=str(tmp_path / "a.jsonl"), log=lambda *a: None, max_rounds=3)
+    monkeypatch.setattr(BW, "verify", real)
+    assert res["stop"] == "protection" and res["protection_broken_by"]
+    assert real_ok(inp, res)
+    assert set(res["released"]) == {"D_P", "D_N"}
+    assert "20.6" in open(res["best"], errors="replace").read() and "30 29" not in open(res["best"], errors="replace").read()
+
+
+def real_ok(inp, res):
+    return BW.verify(inp, res["best"], release=set(res["released"]), manifest=BW.load_manifest(inp))["ok"]
