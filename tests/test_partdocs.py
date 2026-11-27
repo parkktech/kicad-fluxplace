@@ -127,3 +127,57 @@ def test_datasheet_named_for_mpn_without_manifest_entry_passes(tmp_path):
     finds = PD.spec_check(spec, d, mpn_map={"U9": "TLV7031DBVR", "U7": "TLV7031DBVS"})
     missing = {ref for lvl, code, ref, _ in finds if code == "DATASHEET_MISSING"}
     assert missing == {"U7"}, finds
+
+
+def test_fetch_falls_back_to_lcsc_chain_and_a_browser_client(tmp_path, monkeypatch):
+    """k8: no DigiKey/Mouser URL, the plain client gets an HTML page: the chain's LCSC URL is tried through the browser client."""
+    from fluxplace import dsfetch as DF, sourcing as S
+    monkeypatch.setattr(S, "datasheet_urls", lambda mpn, creds: [])
+    monkeypatch.setattr(DF, "SOURCES", [("lcsc", lambda mpn, creds: [("lcsc", "https://x/ds.html")])])
+    monkeypatch.setattr(DF, "get", lambda url, timeout=30, headers=None: (200, "text/html", b"<html>"))
+    monkeypatch.setattr(PD, "_get", lambda url, timeout: (200, "text/html", b"<html>"))
+    monkeypatch.setattr(PD, "_browser_get", lambda url, timeout=60: b"%PDF-1.4 x")
+    from fluxplace import dossier as DS
+    monkeypatch.setattr(DS, "doc_urls", lambda *a, **k: [])
+    r = PD.fetch(["ABC-1"], str(tmp_path), creds={})
+    assert r["ABC-1"] and open(os.path.join(str(tmp_path), r["ABC-1"]["file"]), "rb").read().startswith(b"%PDF")
+
+
+def _fake_cffi(monkeypatch, calls):
+    import types
+    mod = types.ModuleType("curl_cffi")
+    mod.requests = types.SimpleNamespace(get=lambda url, **k: calls.append(url) or types.SimpleNamespace(status_code=200, content=b"%PDF-x"))
+    monkeypatch.setitem(sys.modules, "curl_cffi", mod)
+
+
+def test_browser_fetch_switch_off_makes_no_client_call(monkeypatch):
+    calls = []
+    _fake_cffi(monkeypatch, calls)
+    monkeypatch.setattr(PD, "BROWSER_FETCH", False)
+    assert PD._browser_get("https://a.example/ds.pdf") is None and calls == []
+    monkeypatch.setattr(PD, "BROWSER_FETCH", True)
+    monkeypatch.setattr(PD, "_last_browser", {})
+    assert PD._browser_get("https://a.example/ds.pdf") == b"%PDF-x" and calls == ["https://a.example/ds.pdf"]
+
+
+@pytest.mark.parametrize("url", ["https://a.example/login?next=/ds.pdf", "https://a.example/SignIn/ds.pdf",
+                                 "https://a.example/cookie-consent/x.pdf", "https://a.example/auth/ds.pdf"])
+def test_browser_fetch_skips_login_and_consent_urls(monkeypatch, url):
+    calls = []
+    _fake_cffi(monkeypatch, calls)
+    monkeypatch.setattr(PD, "BROWSER_FETCH", True)
+    assert PD._browser_get(url) is None and calls == []
+
+
+def test_browser_fetch_spaces_requests_two_seconds_per_host(monkeypatch):
+    import types
+    calls, slept, now = [], [], [1000.0]
+    _fake_cffi(monkeypatch, calls)
+    monkeypatch.setattr(PD, "BROWSER_FETCH", True)
+    monkeypatch.setattr(PD, "_last_browser", {})
+    monkeypatch.setattr(PD, "time", types.SimpleNamespace(time=lambda: now[0], sleep=lambda s: (slept.append(s), now.__setitem__(0, now[0] + s))))
+    PD._browser_get("https://a.example/1.pdf")
+    now[0] += 0.5
+    PD._browser_get("https://a.example/2.pdf")                 # same host 0.5 s later: waits the remaining 1.5 s
+    PD._browser_get("https://b.example/3.pdf")                 # another host: no wait
+    assert len(calls) == 3 and slept == [1.5]

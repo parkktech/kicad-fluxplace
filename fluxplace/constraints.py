@@ -137,6 +137,9 @@ def load(path, project=None):
     from . import placerules as PR
     with open(path, "rb") as f:
         d = PR.expand(tomllib.load(f))             # [placement.module.*] with an explicit outline -> keep-out / no_tht
+    if "browser_fetch" in (d.get("docs") or {}):
+        from . import partdocs as _pd
+        _pd.BROWSER_FETCH = str(d["docs"]["browser_fetch"]).lower() != "off"
     rel = (d.get("docs") or {}).get("datasheets")
     if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
         from . import parts as P

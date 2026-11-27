@@ -230,11 +230,11 @@ def p7(ctx, W):
 
 
 def p8(ctx, W):
+    """Every footprint has a model file INSIDE the delivery (self-contained: a stock-library or ../lib path resolves on the
+    builder's machine only)."""
     from . import pcbway as PW
     text = open(ctx["board"], encoding="utf-8").read()
-    env = {"KIPRJMOD": ctx["out"]}
-    for k in ("KICAD10_3DMODEL_DIR", "KICAD9_3DMODEL_DIR", "KISYS3DMOD"):
-        env[k] = os.environ.get(k) or "/usr/share/kicad/3dmodels"
+    out = os.path.realpath(ctx["out"])
     probs = []
     for fp in PW._blocks(text, "footprint"):
         ref = re.search(r'\(property "Reference" "([^"]+)"', fp)
@@ -244,10 +244,11 @@ def p8(ctx, W):
             if re.search(r"\(pad ", fp) and not re.search(r"MountingHole|Fiducial|TestPoint", fp[:200]):
                 probs.append("%s has no 3D model" % ref)
             continue
-        if not any(os.path.isfile(re.sub(r"\$\{(\w+)\}", lambda m: env.get(m.group(1), m.group(0)), p)) for p in mods):
-            probs.append("%s model %s does not resolve" % (ref, os.path.basename(mods[0])))
+        fs = [os.path.realpath(p.replace("${KIPRJMOD}", out)) for p in mods]
+        if not any(os.path.isfile(f) and f.startswith(out + os.sep) and "${" not in p.replace("${KIPRJMOD}", "") for f, p in zip(fs, mods)):
+            probs.append("%s model %s does not resolve inside the delivery" % (ref, os.path.basename(mods[0])))
     left, waived = _resolve("P8", probs, W)
-    return _res("P8", left, waived, "every footprint's model resolves")
+    return _res("P8", left, waived, "every footprint's model resolves inside the delivery")
 
 
 CHECKS = (p1, p2, p3, p4, p5, p6, p7, p8)
