@@ -1114,7 +1114,20 @@ def _covered_by_twin(b, t, width_mm):
                and pcbnew.ToMM(o.GetWidth()) >= width_mm - 1e-6 and ends(o) == mine for o in b.GetTracks())
 
 
-def widen(board, cons, out, nets=None, protect=()):
+def _widen_ok(HR, M, net, lay, lo, hi, W, cur, uid):
+    """K14: the clearance probe accepts a segment at width W when it has no violation the segment does not already have at its current
+    width `cur`. Angle and via-centre findings (angle_not_45_90, track_not_centered_on_via) belong to the segment's geometry, not to its
+    width: a router's pad stub at 15 deg failed every widening, so rails stayed at 0.15 mm (ledger 2026-11-27 k14)."""
+    prim = [("seg", lay, lo, hi)]
+    r = HR.probe_prims(M, net, prim, width=W, skip_ids=(uid,))
+    if r.get("ok"):
+        return True
+    key = lambda v: (v.get("kind"), v.get("item"), tuple(round(x, 1) for x in (v.get("at") or ())))
+    old = {key(v) for v in HR.probe_prims(M, net, prim, width=cur, skip_ids=(uid,)).get("violations") or ()}
+    return all(key(v) in old for v in r.get("violations") or ())
+
+
+def _widen_once(board, cons, out, nets=None, protect=()):
     """PHASE3G G4.1: every unlocked rail track narrower than the need of its layer (the numbers check() uses) is widened to the
     widest of need, 0.75 need, 0.5 need that the clearance probe accepts (handroute.probe_prims, the segment as one prim,
     the segment's own copper skipped; the probe model is built once, so widenings do not see each other: the close guard
@@ -1231,7 +1244,7 @@ def widen(board, cons, out, nets=None, protect=()):
         for W in ladder:
             if W <= cur + 1e-6:
                 break
-            if HR.probe_prims(M, net, [("seg", lay, lo, hi)], width=W, skip_ids=(t.m_Uuid.AsString(),)).get("ok"):
+            if _widen_ok(HR, M, net, lay, lo, hi, W, cur, t.m_Uuid.AsString()):
                 chosen = W
                 break
         if chosen is None:
@@ -1294,6 +1307,35 @@ def widen(board, cons, out, nets=None, protect=()):
     if changed:
         pcbnew.SaveBoard(out, b)
         GP._sidecars(board, out)
+    return rec
+
+
+WIDEN_PASSES = 4
+
+
+def widen(board, cons, out, nets=None, protect=()):
+    """K14: `_widen_once` repeated while it changes copper (max WIDEN_PASSES): a widened run lowers the solved flow of its neighbours and
+    the per-run targets move, so one pass left runs at the first target (route-9 VBATT_PROT 6.57 -> 5.90 one pass, 2.82 at the fixpoint).
+    -> the last pass's record with widened_mm / necks / by_net summed over the passes ("passes" = how many changed copper)."""
+    rec, src, n = None, board, 0
+    for _ in range(WIDEN_PASSES):
+        r = _widen_once(src, cons, out, nets=nets, protect=protect)
+        moved = r["widened_mm"] > 0 and os.path.exists(out)
+        if rec is None:
+            rec = r
+        else:
+            keep = {k: v for k, v in rec.items() if k in ("widened_mm", "by_net", "necks")}
+            rec = r
+            rec["widened_mm"] = round(rec["widened_mm"] + keep["widened_mm"], 3)
+            for net, v in keep["by_net"].items():
+                d = rec["by_net"].setdefault(net, {"widened_mm": 0.0, "left_mm": 0.0})
+                d["widened_mm"] = round(d["widened_mm"] + v["widened_mm"], 3)
+            rec["necks"] = keep["necks"] + [x for x in rec["necks"] if x not in keep["necks"]]
+        if not moved:
+            break
+        n += 1
+        src = out
+    rec["passes"] = n
     return rec
 
 

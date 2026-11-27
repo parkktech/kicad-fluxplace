@@ -476,3 +476,29 @@ def test_widen_never_stacks_an_exact_duplicate_under_a_wide_twin(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     PW.widen(src, G4_CONS, out)
     assert _dups(out) == 0 and len(_g4_tracks(out, "VBAT")) == 1, _g4_tracks(out, "VBAT")
+
+
+def test_widen_widens_a_stub_at_an_odd_angle_the_angle_finding_is_not_a_width_finding(tmp_path):
+    """K14 (route-9 VBATT_PROT/VMODEM): a router pad stub at 15 deg carries angle_not_45_90 at every width; widening must still pass."""
+    pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    src = _board(str(tmp_path / "in.kicad_pcb"), tracks=[(2, 6, 18, 9.2, "VBAT")])
+    out = str(tmp_path / "out.kicad_pcb")
+    rec = PW.widen(src, G4_CONS, out)
+    ws = [w for w, *_ in _g4_tracks(out, "VBAT")]
+    assert rec["widened_mm"] > 0 and ws and min(ws) >= 0.5 * _g4_need() - 1e-3
+
+
+def test_widen_repeats_until_the_per_run_targets_stop_moving(monkeypatch, tmp_path):
+    pytest.importorskip("pcbnew")
+    calls = []
+
+    def once(board, cons, out, nets=None, protect=()):
+        calls.append(board)
+        open(out, "w").write("x")
+        return {"widened_mm": 1.0 if len(calls) < 3 else 0.0, "left_mm": 0, "by_net": {}, "necks": [], "unreached": {}}
+    monkeypatch.setattr(PW, "_widen_once", once)
+    out = str(tmp_path / "o.kicad_pcb")
+    rec = PW.widen("in", {}, out)
+    assert calls == ["in", out, out], calls
+    assert rec["passes"] == 2 and rec["widened_mm"] == 2.0, rec
