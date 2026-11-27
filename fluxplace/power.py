@@ -478,6 +478,47 @@ def zone_credit_mm(ctx, net, layer, seg, band_mm):
     return max(seg["width"], got / L)
 
 
+PLANE_END_TOL_MM = 0.1       # a run end is tied to a plane when a same-net via barrel / through pad centre is within its radius + this
+
+
+def plane_parallel_credit(ctx, net, mem):
+    """D71da zone credit for a run PARALLELED by a same-net plane on another layer: every end of the run (a point used by one member
+    only) sits on a same-net via or through pad that reaches the plane layer, and the plane's fill covers the run's band; the
+    credit is the plane's conducting width across the run (zone_credit_mm on that layer, worst member). 0.0 when the run is not
+    tied at both ends or no plane covers it. `mem`: the run's segment rows ({layer, x1,y1,x2,y2, width, need})."""
+    import pcbnew
+    b = ctx["b"]
+    cnt = {}
+    for g in mem:
+        for k in (("x1", "y1"), ("x2", "y2")):
+            pt = (round(g[k[0]], 2), round(g[k[1]], 2))
+            cnt[pt] = cnt.get(pt, 0) + 1
+    ends = [pt for pt, n in cnt.items() if n == 1]
+    if len(ends) < 2:
+        return 0.0
+    vias = ctx["copper"].get(net, ([], []))[1]
+    pads = [(p[5], p[6]) for p in (ctx.get("pads", {}).get(net) or []) if len(p) >= 7]
+    own = {g["layer"] for g in mem}
+    best = 0.0
+    for z in b.Zones():
+        if z.GetNetname() != net or z.GetIsRuleArea():
+            continue
+        for lname in [b.GetLayerName(l) for l in z.GetLayerSet().CuStack()]:
+            if lname in own:
+                continue
+            ok = True
+            for x, y in ends:
+                tied = any(math.hypot(x - vx, y - vy) <= vr + PLANE_END_TOL_MM for vx, vy, vr in vias) or \
+                    any(lname in (ly or ()) and math.hypot(x - px, y - py) <= PLANE_END_TOL_MM + 0.5 for (px, py), ly in pads)
+                fill = z.GetFilledPolysList(b.GetLayerID(lname))
+                if not tied or fill is None or not fill.OutlineCount() or not fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0):
+                    ok = False
+                    break
+            if ok:
+                best = max(best, min(zone_credit_mm(ctx, net, lname, g, g.get("need") or g["width"]) for g in mem))
+    return best
+
+
 def _pad_amps(pad, npins, rows, src, tot, volts):
     """Current (A) one pad of a rail draws, and the source of the figure: -> (amps | None, how). None = unknown.
     Capacitor 0 A DC; MOSFET gate pin 0 A; resistor at most V_rail / R from its Value (0R = a series link: unknown); the
@@ -503,6 +544,42 @@ def _pad_amps(pad, npins, rows, src, tot, volts):
     return float(row["current_a"]) / (1 if "." in to else max(1, npins[ref])), "budget (dcdrop)"
 
 
+def _rail_sources(cons, net, tot):
+    """-> (source part refs {ref}, the [power] source part, the net's [[dcdrop]] rows): the [power] source, the `from` part of its rows, and
+    an inductor / ferrite bead (L, FB) whose single-load row carries the rail's whole current (the source's series element)."""
+    pw = (cons or {}).get("power", {}).get(net) or {}
+    drows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
+    src = str(pw.get("source") or (drows[0].get("from") if drows else "") or "").split(".")[0]
+    srcs = {src} - {""}
+    for d in drows:
+        if d.get("from"):
+            srcs.add(str(d["from"]).split(".")[0])
+        to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
+        ref0 = str(to[0]).split(".")[0].upper()
+        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
+            srcs.add(str(to[0]).split(".")[0])
+    return srcs, src, drows
+
+
+def unknown_loads(board, cons, layers=None):
+    """Kickoff check: {rail net: [refs]} of the loads on each [power] rail with a current figure whose draw is not known
+    (`_pad_amps` has no figure: no [[dcdrop]] row, not a capacitor / gate / resistor / the source). The route-stage run current
+    falls back to the rail total for these, so a rail with any is sized by guesswork. {} when nothing is unknown."""
+    rails = {n: r for n, r in plan(cons, layers=layers).items() if r and r.get("track_mm") is not None and r.get("current_a")}
+    ctx = _board_ctx(board, set(rails)) if rails else None
+    out = {}
+    for net, r in rails.items():
+        pads = (ctx or {}).get("pads", {}).get(net) or []
+        srcs, src, drows = _rail_sources(cons, net, r["current_a"])
+        npins = {}
+        for pad in pads:
+            npins[pad[0]] = npins.get(pad[0], 0) + 1
+        unk = sorted({pad[0] for pad in pads if pad[0] not in srcs and _pad_amps(pad, npins, drows, src, r["current_a"], r.get("max_v") or 0.0)[0] is None})
+        if unk:
+            out[net] = unk
+    return out
+
+
 def rail_flows(ctx, cons, net, r, rows):
     """W40 tree-flow solve of one rail (powerflow.solve) on the copper `rows` (the net's facts track_geom rows) -> the per-row
     current list [{amps | None, unk, mode, loads}] and its context (source label), cached in ctx["flows"]; None when the rail has no
@@ -518,17 +595,7 @@ def rail_flows(ctx, cons, net, r, rows):
     if not rows or not pads or any(len(p) < 8 for p in pads) or any("x1" not in g for g in rows):
         return None
     tot = r["current_a"]
-    pw = (cons or {}).get("power", {}).get(net) or {}
-    drows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
-    src = str(pw.get("source") or (drows[0].get("from") if drows else "") or "").split(".")[0]
-    srcs = {src} - {""}
-    for d in drows:
-        if d.get("from"):
-            srcs.add(str(d["from"]).split(".")[0])
-        to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
-        ref0 = str(to[0]).split(".")[0].upper()
-        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
-            srcs.add(str(to[0]).split(".")[0])
+    srcs, src, drows = _rail_sources(cons, net, tot)
     volts = r.get("max_v") or 0.0
     npins = {}
     for pad in pads:
@@ -678,6 +745,7 @@ def check(facts, cons, dc=None, board=None, detail=None):
                         if amps is None:             # a load on the branch is unknown: the rail total, flagged
                             amps = r["current_a"]
                     cw = min(zone_credit_mm(ctx, net, narrow[i]["layer"], narrow[i], narrow[i]["need"]) for i in run["members"])
+                    cw = max(cw, plane_parallel_credit(ctx, net, [narrow[i] for i in run["members"]]))
                     rise = r.get("rise_c") or DEFAULT_RISE_C
                     need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
                                     ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0
