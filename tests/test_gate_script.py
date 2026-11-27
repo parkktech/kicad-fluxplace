@@ -25,7 +25,8 @@ def _wt(tmp_path, name="wt", body="def test_ok():\n    pass\n"):
 
 def _gate(tmp_path, wt, extra=None):
     (tmp_path / "base").write_text("")
-    env = dict(os.environ, GATE_SLOTS="1", GATE_LOCKDIR=str(tmp_path / "lock"), GATE_WORKERS="0", GATE_POLL="0.3",
+    env = {k: v for k, v in os.environ.items() if k != "GATE_PRIORITY"}   # the outer mainline gate runs with GATE_PRIORITY=1
+    env = dict(env, GATE_SLOTS="1", GATE_LOCKDIR=str(tmp_path / "lock"), GATE_WORKERS="0", GATE_POLL="0.3",
                PY=sys.executable, **(extra or {}))
     return subprocess.Popen(["bash", GATE, str(wt), str(tmp_path / "base")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
