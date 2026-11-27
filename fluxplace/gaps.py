@@ -1129,7 +1129,7 @@ AI_PAIR_WPTS = 40                               # PHASE3H A5: most waypoints in 
 FEEDBACK_BYTES = 1200                           # PHASE3F B4: ai_dir/<sid>.feedback.json size cap
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,}$")
 _PACKET_ACTIONS = (
-    'Envelope {"actions":[...],"why","tokens"}. Apply order: nudge -> rip -> path -> pair_path -> route. '
+    'Envelope {"actions":[...],"why","tokens"}; each action is {"do": "<verb>", ...fields}. Apply order: nudge -> rip -> path -> pair_path -> route. '
     "Route on signal layers only. "
     "rip {net, ids} (one net per rip, <= " + str(AI_RIP_IDS) + " hex ids); "
     "rip_locked {net, ids} (plain locked copper only, same id cap; pairs/rf refused); "
@@ -1165,6 +1165,17 @@ def _ai_budget(cons):
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _verb_form(x):
+    """{"path": {...}} -> {"do": "path", ...}. The prompt writes actions as `verb {fields}`, and models answer in that
+    keyed form; without this every action (even a valid stitching via) was dropped as "unknown do 'None'" (2026-11-27,
+    W16 route-9 fix-1 close: 10 ai attempts, 0 applied)."""
+    if isinstance(x, dict) and "do" not in x and len(x) == 1:
+        (verb, body), = x.items()
+        if isinstance(body, dict):
+            return {"do": verb, **body}
+    return x
 
 
 def _ai_action(x, copper, hs_legs=(), open_legs=(), rip_mm=0.0):
@@ -1287,7 +1298,7 @@ def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=N
     if _num(a.get("tokens")):
         out["tokens"] = int(a["tokens"])
     out["why"] = str(a.get("why") or "")[:200]
-    raw = a.get("actions") if isinstance(a.get("actions"), list) else []
+    raw = [_verb_form(x) for x in a.get("actions")] if isinstance(a.get("actions"), list) else []
     if not isinstance(a.get("actions"), list):
         out["refused"] = "no actions list"
     rip_mm = {}                                  # PHASE3H B9: rips on a high-speed leg in this same file

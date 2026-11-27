@@ -1011,3 +1011,13 @@ def test_hs_leg_stub_join_boundary_and_rip_allowance():
     assert ok(GP.HS_STUB_MM) is not None and ok(GP.HS_STUB_MM + 0.1) is None
     assert ok(GP.HS_STUB_MM + 0.5, rip_mm=1.0) is not None                  # copper ripped in the same file extends the cap
     assert ok(9.0, open_legs={"LEG"}) is not None                           # an open leg has no stub cap
+
+
+def test_load_ai_action_accepts_keyed_verb_form(monkeypatch, tmp_path):
+    """W16 route-9 fix-1: models answered {"path": {...}} / {"give_up": {...}}; all 10 were dropped as unknown do 'None'."""
+    monkeypatch.setattr(GP, "copper_layers", lambda b: ["F.Cu", "B.Cu"]); monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    acts = [{"path": {"net": "GND", "path": "via 99.17,39.1", "lock": False}}, {"give_up": {"why": "sealed"}}]
+    f = tmp_path / "a.json"
+    f.write_text(json.dumps({"actions": acts, "why": "x"}))
+    a = GP.load_ai_action(str(f), str(tmp_path / "b.kicad_pcb"))
+    assert [x["do"] for x in a["actions"]] == ["path", "give_up"] and not a["dropped"]
