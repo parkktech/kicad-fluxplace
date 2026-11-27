@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 import time
 
-VERSION = 5                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
+VERSION = 6                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
 MODEL = "haiku"
 TEXT_BUDGET = 240_000                 # characters of datasheet text sent per part (~60k tokens)
 LIST_SECTIONS = ("pins", "swap_groups", "supplies", "currents", "abs_max", "io_levels", "interfaces", "decoupling", "keepouts",
@@ -249,8 +249,14 @@ def required(dos):
 
 
 def gaps(dos):
-    """REQUIRED sections no source has given (and not declared not applicable)."""
-    return [s for s in required(dos) if not dos.get(s) and s not in (dos.get("na") or {})]
+    """REQUIRED sections no source has given (and not declared not applicable). A pin table that numbers fewer pins than the package
+    has is not given: every pin must be known."""
+    out = [s for s in required(dos) if not dos.get(s) and s not in (dos.get("na") or {})]
+    pk = (dos.get("package") or {}).get("pins")
+    if "pins" in required(dos) and "pins" not in out and isinstance(pk, int) and not isinstance(pk, bool) and pk > 2 \
+            and len({str(n) for p in dos["pins"] for n in p.get("num") or []}) < pk:
+        out.append("pins")
+    return out
 
 
 def merge(dos, add):
@@ -259,7 +265,7 @@ def merge(dos, add):
     if add.get("category") not in (None, "unknown"):
         dos["category"] = add["category"]
     for s in gaps(dos):
-        if add.get(s):
+        if add.get(s) and (s != "pins" or len(add[s]) > len(dos.get(s) or [])):
             dos[s] = add[s]
         elif s in (add.get("na") or {}):
             dos.setdefault("na", {})[s] = add["na"][s]

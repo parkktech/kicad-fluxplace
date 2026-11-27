@@ -11,7 +11,8 @@ RAW = {"category": "regulator", "description": "buck",
        "package": {"name": "SOT-23-5", "pins": 5, "p": 1},
        "pins": [{"num": ["1"], "name": "VIN", "type": "power_in", "p": 1}, {"num": ["2"], "name": "GND", "type": "ground", "p": 1},
                 {"num": ["5"], "name": "EN", "type": "input", "p": 1},
-                {"num": ["4"], "name": "BOGUS", "type": "input", "p": 1}, {"num": ["3"], "name": "SW", "type": "output", "p": 1}],
+                {"num": ["4"], "name": "BOGUS", "type": "input", "p": 1}, {"num": ["3"], "name": "SW", "type": "output", "p": 1},
+                {"num": ["4"], "name": "FB", "type": "analog", "p": 1}],
        "supplies": [{"pins": ["VIN", "GND", "SW"], "min": 3.0, "max": 17, "unit": "V", "p": 2},
                     {"pins": ["VIN"], "min": 2.5, "max": 40, "unit": "V", "p": 2}],
        "decoupling": [{"pins": ["VIN"], "value": "10 uF", "distance_mm": 2, "p": 2}],
@@ -23,7 +24,7 @@ RAW = {"category": "regulator", "description": "buck",
 
 def test_verify_keeps_page_backed_facts_and_rejects_the_rest():
     d = DO.verify(RAW, PAGES)
-    assert [p["name"] for p in d["pins"]] == ["VIN", "GND", "EN", "SW"]              # BOGUS is not on its page
+    assert [p["name"] for p in d["pins"]] == ["VIN", "GND", "EN", "SW", "FB"]              # BOGUS is not on its page
     assert len(d["supplies"]) == 1 and d["supplies"][0]["max"] == 17           # 40 V is not printed on p2
     assert "crystal" in d["unknown"] and "crystal" not in d                    # page 9 does not exist
     assert {r["section"] for r in d["rejected"]} == {"pins", "supplies", "crystal"}
@@ -212,3 +213,11 @@ def test_distributor_ratings_fill_a_passive_abs_max():
                         {"raw_params": {"Voltage - Rated": "50V", "Capacitance": "100nF", "Tolerance": "-"}})
     assert d["abs_max"] == [{"param": "Voltage - Rated", "max": "50V", "src": "distributor"}] and DO.gaps(d) == []
     assert DO.elec_facts(dict(d, file="x.pdf")) == {}                          # a distributor fact never feeds a check
+
+
+def test_a_pin_table_shorter_than_the_package_is_a_gap():
+    d = {"category": "connector", "package": {"pins": 4, "p": 1}, "temp_range": {"p": 1}, "currents": [{"p": 1}],
+         "pins": [{"num": ["1"]}, {"num": ["2"]}]}
+    assert DO.gaps(d) == ["pins"]
+    DO.merge(d, {"pins": [{"num": [str(k)]} for k in range(1, 5)]})
+    assert DO.gaps(d) == []
