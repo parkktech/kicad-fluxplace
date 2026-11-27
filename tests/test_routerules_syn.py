@@ -10,6 +10,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from fluxplace import routefr as FR  # noqa: E402
 from fluxplace import legality as LGL  # noqa: E402
 from fluxplace import routediag as RD  # noqa: E402
+from fluxplace import routeconn as RC  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _real_pcbnew(monkeypatch):
+    # other test modules set RC.PY to a dead path at import time (module global): these tests passed only when an
+    # earlier file (test_pourtie) had reset it; under pytest-xdist the file order per worker differs (B9)
+    monkeypatch.setattr(RC, "PY", "/usr/bin/python3")
 
 try:
     import pcbnew as P
