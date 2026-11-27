@@ -2082,6 +2082,13 @@ def cmd_speccheck(a):
         raise SystemExit(1)
 
 
+def cmd_specsync(a):
+    """Diff the netlist spec against the schematic netlist + board footprints; --write applies it (backup + log)."""
+    from fluxplace import specsync as SY
+    _d, rc = SY.sync(a.board, a.sch, a.spec, write=a.write)
+    raise SystemExit(rc)
+
+
 def cmd_lock(a):
     from fluxplace import review as R
     facts = R.facts_from_board(a.board)
@@ -3719,6 +3726,15 @@ def build_parser():
     psc2.add_argument("--recite", action="store_true", help="re-cite even when cited")
     psc2.add_argument("--write", action="store_true", help="write citations into --spec")
     psc2.set_defaults(fn=cmd_speccheck)
+
+    pss = sub.add_parser("spec-sync",
+                         help="make the derived spec follow the schematic netlist (nets) and the board footprints "
+                              "(MPN, Manufacturer, value, footprint, DNP); refuses on a schematic/board net mismatch")
+    pss.add_argument("board")
+    pss.add_argument("--sch", required=True, help=".kicad_sch (via kicad-cli) or a KiCad XML netlist")
+    pss.add_argument("--spec", required=True)
+    pss.add_argument("--write", action="store_true", help="apply in place (backup + spec-sync.log); default prints the diff")
+    pss.set_defaults(fn=cmd_specsync)
 
     plk = sub.add_parser("lock",
                          help="print a [lock.at] constraints block for the "
