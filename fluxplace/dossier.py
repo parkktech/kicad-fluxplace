@@ -349,7 +349,7 @@ def siblings(pdf, mpn, limit=5):
     return sorted(out, key=lambda f: not os.path.basename(f).startswith(mine))[:limit]
 
 
-_GAP_WORDS = {"pins": r"pin|terminal|pad|polarity|cathode|marking", "abs_max": r"absolute|maximum rating|rated|rating|drive level",
+_GAP_WORDS = {"pins": r"pin|terminal|pad|polarity|cathode|marking", "abs_max": r"absolute|abs\.? ?max|maximum rating|rated|rating|drive level",
               "temp_range": r"temperature", "supplies": r"supply|operating conditions", "io_levels": r"V[\s_]?IH|V[\s_]?IL|input high|logic level",
               "interfaces": r"interface|protocol|I2C|SPI|UART|USB|clock frequency", "decoupling": r"bypass|decoupl|capacitor",
               "currents": r"current|contact", "package": r"package|dimension|outline"}
@@ -374,12 +374,14 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
         budget -= len(pg[k - 1])
         chunks.append(f"=== PAGE {k} ===\n{pg[k - 1]}")
     n_own = len(chunks)
-    for name, dp in docs.items():
-        for n, t in enumerate(dp, 1):
-            if budget - len(t) < 0:
-                break
-            budget -= len(t)
-            chunks.append(f"=== DOC {name} PAGE {n} ===\n{t}")
+    hits = sorted(((-len(pat.findall(t)), name, n, t) for name, dp in docs.items() for n, t in enumerate(dp, 1) if pat.search(t)),
+                  key=lambda x: x[:3])                      # the other documents' pages on the missing subject, most mentions first
+    hits = hits or [(0, name, n, t) for name, dp in docs.items() for n, t in enumerate(dp, 1)]   # none names it: in page order
+    for _, name, n, t in hits:
+        if budget - len(t) < 0:
+            continue
+        budget -= len(t)
+        chunks.append(f"=== DOC {name} PAGE {n} ===\n{t}")
     sources = []
     if pics:
         sources.append("- page pictures of the datasheet (Read them): " + ", ".join(f"page-{k}.png (page {k})" for k in pics))
