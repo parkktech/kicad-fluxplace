@@ -240,17 +240,44 @@ def grade_min(rule, iface, measured, unit="mm"):
     return None, ""
 
 
-def fab_bounds(prof, layers):
-    """{feature: (hard, recommended, citation)} for the house row of a fab profile (`prof` = constraints.fab_profile).  Registry value
-    when sourced, else the fabcaps row's hard limit (no recommended).  {} without a profile or layer count."""
-    v, n = prof.get("vendor"), layers or prof.get("layers")
-    if not v or not n:
+def fab_bounds(vendor, layers):
+    """{feature: (hard, recommended, citation)} of one house at `layers` copper layers: the registry value when sourced, else the
+    fabcaps row's own number (no recommended).  {} when neither knows the house / layer count."""
+    from . import fabcaps as FC
+    if not vendor or not layers:
         return {}
+    try:
+        row = FC.row_for(vendor, "standard", int(layers))[0]
+    except Exception:                                       # noqa: BLE001 - unknown house or layer count
+        row = {}
     out = {}
     for f in FAB_FEATURES:
-        e = get("fab_" + f, f"{v}-{n}l")
+        e = get("fab_" + f, f"{vendor}-{layers}l")
         if sourced(e):
             out[f] = (float(e["hard"]), None if e.get("target") is None else float(e["target"]), f"{cite(e)}, {e['date']}")
-        elif (prof.get("hard") or {}).get(f) is not None:
-            out[f] = (float(prof["hard"][f]), None, f"fabcaps {prof.get('name')}")
+        elif row.get(f) is not None:
+            out[f] = (float(row[f]), None, f"fabcaps {vendor}-standard (not in the registry)")
     return out
+
+
+def registry_houses(layers):
+    return sorted({k.split(":", 1)[1].rsplit("-", 1)[0] for k in load() if k.startswith("fab_") and k.endswith(f"-{layers}l")})
+
+
+def fab_houses(prof, layers, cons=None):
+    """-> ({house: {feature: (hard, rec, cite)}}, note).  Houses: `[fab] houses = [...]`, else the profile's vendor, else every house the
+    registry has for this layer count, graded as ONE row of the strictest value per feature (named "strictest") and the note says so."""
+    names = [str(h).lower() for h in ((cons or {}).get("fab") or {}).get("houses") or []] or ([prof["vendor"]] if prof.get("vendor") else [])
+    if names:
+        return {h: b for h in names if (b := fab_bounds(h, layers))}, ""
+    allh = {h: fab_bounds(h, layers) for h in registry_houses(layers)}
+    if not allh:
+        return {}, f"gerber check: no house row for {layers} layers in the registry: [fab] floors used"
+    strict = {}
+    for f in FAB_FEATURES:
+        rows = [b[f] for b in allh.values() if f in b]
+        if rows:
+            hard = max(r[0] for r in rows)
+            recs = [r[1] for r in rows if r[1] is not None]
+            strict[f] = (hard, max(recs) if recs else None, "strictest of " + ", ".join(sorted(allh)) + ": " + "; ".join(r[2] for r in rows))
+    return {"strictest": strict}, "gerber check: no [fab] houses / profile: graded against the strictest registry row of " + ", ".join(sorted(allh))

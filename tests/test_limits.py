@@ -124,9 +124,36 @@ def test_research_fab_drops_values_without_a_quote_and_caches(tmp_path, monkeypa
 def test_gerbercheck_grades_tracks_against_the_house_row(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
     from fluxplace import gerbercheck as GC
-    prof = {"min_track_mm": 0.1, "_house": LM.fab_bounds({"vendor": "pcbway", "hard": {}}, 6)}
+    prof = {"min_track_mm": 0.1, "_house": {"pcbway": LM.fab_bounds("pcbway", 6)}}
     objs = [("draw", None, ("C", 0.088), [(1.0, 2.0), (3.0, 2.0)]), ("draw", None, ("C", 0.2), [(1.0, 5.0), (3.0, 5.0)])]
     f = []
     GC._check_copper(objs, "F_Cu", dict(prof, min_clearance_mm=0.1), (0, 0, 5, 6), 0.05, f, lambda m: None)
     w = [x for x in f if x["code"] == "GERBER_MIN_WIDTH"]
     assert len(w) == 1 and w[0]["level"] == "FAIL" and "pcbway.com" in w[0]["msg"]
+
+
+def test_no_house_configured_grades_the_strictest_row_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    h, note = LM.fab_houses({}, 6, {})
+    assert list(h) == ["strictest"] and "strictest registry row" in note
+    assert h["strictest"]["track_min"][0] == 0.1 and h["strictest"]["via_annular_min"][0] == 0.127
+    h2, note2 = LM.fab_houses({}, 6, {"fab": {"houses": ["jlcpcb", "pcbway"]}})
+    assert sorted(h2) == ["jlcpcb", "pcbway"] and not note2 and h2["jlcpcb"]["track_min"][0] == 0.09
+
+
+def test_gerbercheck_one_verdict_line_per_house(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import gerbercheck as GC
+    res = {"status": "FAIL", "seconds": 0, "resolution_mm": 0.02, "copper_layers": 6, "holes": 0, "counts": {}, "findings": [],
+           "houses": {"jlcpcb": "PASS", "pcbway": "FAIL"}}
+    t = GC.format_report(res)
+    assert "house jlcpcb: PASS" in t and "house pcbway: FAIL" in t
+
+
+def test_fabcaps_rows_read_the_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import fabcaps as FC
+    lim, unv = FC.row_for("jlcpcb", "standard", 6)
+    assert lim["via_annular_min"] == 0.05 and lim["track_min"] == 0.09
+    lim8, unv8 = FC.row_for("jlcpcb", "standard", 8)                       # no registry row at 8 layers: JSON number, flagged
+    assert any("not in the limits registry" in u for u in unv8)

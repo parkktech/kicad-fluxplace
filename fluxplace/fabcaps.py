@@ -75,12 +75,26 @@ def all_tiers():
                   key=lambda vt: (data()["vendors"][vt[0]]["tiers"][vt[1]]["rank"], vt[0]))
 
 
+def _registry_overlay(vendor, layers, lim, unv):
+    """ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l): its sourced hard value
+    replaces the JSON number; a layer count the registry has no row for keeps the JSON number, flagged unverified."""
+    from . import limits as LM
+    lim, unv = dict(lim), list(unv)
+    for f in LM.FAB_FEATURES:
+        e = LM.get("fab_" + f, f"{vendor}-{layers}l")
+        if LM.sourced(e):
+            lim[f] = float(e["hard"])
+        elif f in lim:
+            unv.append(f"{f} {lim[f]:g} is not in the limits registry for {layers} layers (JSON number, unsourced)")
+    return lim, unv
+
+
 def row_for(vendor, tier, layers):
     """-> (limits, unverified) of the row covering `layers`; FabProfileError when the tier does not offer it."""
     rows = tier_rows(vendor, tier)
     for lo, hi, lim, unv in rows:
         if lo <= layers <= hi:
-            return lim, unv
+            return _registry_overlay(vendor, layers, lim, unv)
     have = ", ".join(f"{lo}-{hi}" for lo, hi, _l, _u in rows)
     raise FabProfileError(f"{vendor}-{tier} does not offer {layers} copper layers (rows: {have})")
 

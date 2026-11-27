@@ -600,17 +600,18 @@ def _min_gaps(lab, min_mm, res):
 
 def _check_copper(objs, layer, prof, bbox, res, findings, log, gap_level=WARN):
     # exact: aperture width of drawn tracks
-    hb = (prof.get("_house") or {}).get("track_min")
-    if hb:                                 # house row (limits registry): below hard = FAIL, below recommended = WARN
+    houses = {h: b["track_min"] for h, b in (prof.get("_house") or {}).items() if "track_min" in b}
+    if houses:                             # one verdict per house (limits registry): below hard = FAIL, below recommended = WARN
         ws = [(_ap_w(o[2]), o) for o in objs if o[0] == "draw"]
-        for lvl, lo, hi, tag in ((FAIL, 0, hb[0], "hard limit"), (WARN, hb[0], hb[1], "recommended")):
-            bad = [(w, o) for w, o in ws if hi is not None and lo - HOUSE_TOL_MM <= w < hi - HOUSE_TOL_MM]
-            if bad:
-                w, o = min(bad, key=lambda t: t[0])
-                findings.append(_f(lvl, "GERBER_MIN_WIDTH", f"{len(bad)} drawn segment(s) below the house {tag} {hi:g} mm; narrowest "
-                                   f"{w:.4f} mm [{hb[2]}]", layer, o[3][0][0], o[3][0][1]))
+        for house, hb in houses.items():
+            for lvl, lo, hi, tag in ((FAIL, 0, hb[0], "hard limit"), (WARN, hb[0], hb[1], "recommended")):
+                bad = [(w, o) for w, o in ws if hi is not None and lo - HOUSE_TOL_MM <= w < hi - HOUSE_TOL_MM]
+                if bad:
+                    w, o = min(bad, key=lambda t: t[0])
+                    findings.append(dict(_f(lvl, "GERBER_MIN_WIDTH", f"[{house}] {len(bad)} drawn segment(s) below the {tag} {hi:g} mm; "
+                                           f"narrowest {w:.4f} mm [{hb[2]}]", layer, o[3][0][0], o[3][0][1]), house=house))
         thin = []
-    else:
+    else:                                  # no registry row for this layer count: the [fab] floor
         thin = [o for o in objs if o[0] == "draw" and _ap_w(o[2]) < prof["min_track_mm"] - 1e-6]
     if thin:
         o = thin[0]
@@ -752,7 +753,9 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 findings.append(_f(INFO, "GERBER_LAYER_EMPTY", f"{lay} has no features (nothing to mask or print)", lay))
         parsed[lay] = objs
     log(f"gerber check: {len(parsed)} layer(s) parsed, copper {copper_layers} layer(s)")
-    prof["_house"] = LM.fab_bounds(prof, copper_layers)
+    prof["_house"], house_note = LM.fab_houses(prof, copper_layers, cons)
+    if house_note:
+        log(house_note)
 
     # edge closure
     if parsed.get("Edge_Cuts"):
@@ -806,12 +809,14 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 near = np.flatnonzero(np.hypot(fx - hx, fy - hy) <= 0.02)   # same hole
                 for jj in near.tolist():
                     ring = (pd[jj] - hd) / 2
-                    hb = (prof.get("_house") or {}).get("via_annular_min" if hd <= VIA_MAX_DRILL_MM else "pth_annular_min")
-                    if hb:
-                        for lvl, lo, hi in ((FAIL, 0, hb[0]), (WARN, hb[0], hb[1])):
-                            if hi is not None and lo - HOUSE_TOL_MM <= ring < hi - HOUSE_TOL_MM:
-                                house_rings.setdefault(lvl, []).append((ring, hd, hx, hy, pl[jj], hb, hi))
-                                break
+                    feat = "via_annular_min" if hd <= VIA_MAX_DRILL_MM else "pth_annular_min"
+                    hs = {h: bb[feat] for h, bb in (prof.get("_house") or {}).items() if feat in bb}
+                    if hs:
+                        for house, hb in hs.items():
+                            for lvl, lo, hi in ((FAIL, 0, hb[0]), (WARN, hb[0], hb[1])):
+                                if hi is not None and lo - HOUSE_TOL_MM <= ring < hi - HOUSE_TOL_MM:
+                                    house_rings.setdefault((house, lvl), []).append((ring, hd, hx, hy, pl[jj], hb, hi))
+                                    break
                         continue
                     if ring < prof["min_annular_mm"] - 1e-6:
                         findings.append(_f(FAIL, "GERBER_ANNULAR",
@@ -819,11 +824,11 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                                            f"{pl[jj]} ring {ring:.3f} mm < min_annular "
                                            f"{prof['min_annular_mm']:g} mm", pl[jj], hx, hy))
                         break
-        for lvl, rows in house_rings.items():              # one finding per level: the count and the worst ring
+        for (house, lvl), rows in house_rings.items():     # one finding per house and level: the count and the worst ring
             ring, hd, hx, hy, lay, hb, hi = min(rows, key=lambda t: t[0])
-            findings.append(_f(lvl, "GERBER_ANNULAR", f"{len(rows)} plated hole(s) with a ring below the house "
-                               f"{'hard limit' if lvl == FAIL else 'recommended'} {hi:g} mm; worst d{hd:.3f} at ({hx:.3f},{hy:.3f}) "
-                               f"{lay} ring {ring:.3f} mm [{hb[2]}]", lay, hx, hy))
+            findings.append(dict(_f(lvl, "GERBER_ANNULAR", f"[{house}] {len(rows)} plated hole(s) with a ring below the "
+                                   f"{'hard limit' if lvl == FAIL else 'recommended'} {hi:g} mm; worst d{hd:.3f} at ({hx:.3f},{hy:.3f}) "
+                                   f"{lay} ring {ring:.3f} mm [{hb[2]}]", lay, hx, hy), house=house))
         if holes_cov is not None:
             ox0, oy0, ox1, oy1 = gbox
             nocopper = 0
@@ -846,7 +851,11 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     counts = {}
     for f in findings:
         counts[f["code"]] = counts.get(f["code"], 0) + 1
-    return {"status": status, "findings": findings, "counts": counts,
+    houses = {}
+    for h in prof.get("_house") or {}:
+        fs = [f for f in findings if f.get("house") in (None, h)]
+        houses[h] = "FAIL" if any(f["level"] == FAIL for f in fs) else ("WARN" if any(f["level"] == WARN for f in fs) else "PASS")
+    return {"status": status, "findings": findings, "counts": counts, "houses": houses,
             "seconds": round(time.time() - t0, 2), "resolution_mm": res_mm,
             "copper_layers": copper_layers, "holes": len(holes)}
 
@@ -854,6 +863,8 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
 def format_report(res):
     lines = [f"gerber check : {res['status']}  ({res['seconds']} s, raster {res['resolution_mm']} mm, "
              f"{res['copper_layers']} copper layer(s), {res['holes']} drill hit(s))"]
+    for h, st in sorted((res.get("houses") or {}).items()):
+        lines.append(f"  house {h}: {st}")
     for code, n in sorted(res["counts"].items()):
         lines.append(f"  {code}: {n}")
     for f in res["findings"][:20]:
