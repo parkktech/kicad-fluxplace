@@ -92,6 +92,7 @@ same contract as preflight and lint.
 """
 import glob
 import math
+from collections import defaultdict
 import os
 import re
 
@@ -244,6 +245,25 @@ def pair_gated(cons, master):
     return master.startswith(fams) or fam in _HS_FAMILIES
 
 
+TAP_STUB_INFO_MM = 10.0
+
+
+def _limit_challenge(r, unit, facts, cons):
+    """w110: a PAIR_SKEW FAIL is challenged against the sourced hard limit of its interface (limits registry): inside it = WARN with
+    the citation, over it = FAIL with the citation.  None = no sourced limit (or the project set its own maximum): FAIL as before."""
+    if unit != "mm":
+        return None
+    from . import limits as LM, netclass as NC
+    try:
+        explicit = C.skew_max_source(cons or {}, r["p"], 1.0)[1] != C.skew_limit_source(cons or {}, r["p"], 1.0)[1]
+    except ValueError:
+        explicit = False
+    bp = facts.get("board_path") or facts.get("board")
+    log_dir = os.path.dirname(os.path.abspath(bp)) if isinstance(bp, str) and bp else None
+    return LM.regrade("pair_skew", NC.pair_kind(r["p"]), f"{r['p']}/{r['n']}", float(r["skew"]), float(r["limit"]), unit,
+                      r.get("target") or r["limit"], explicit, cons, log_dir, f"intra-pair skew of {r['p']}/{r['n']}")
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -273,6 +293,9 @@ def _pairs_from_audit(facts, cons):
                                                    f"{vs['stub_mm']:.2f} mm barrel stub" + (" (the pair never changes layer there: remove the via)" if vs["dead"] else "")))
         if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
             out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"], r.get("unit", "mm"))))
+        tap = max([x["mm"] for x in r.get("stubs") or []] + [0.0])
+        if tap > TAP_STUB_INFO_MM and gated(r["p"]):          # a part hung on the trunk by a long stub (ESD / series array)
+            out.append(_f(INFO, "PAIR_TAP_STUB", f"{r['p']}/{r['n']}: tap stub {tap:.1f} mm to a part hung on the trunk (limit for a note {TAP_STUB_INFO_MM:g} mm)"))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
         if "stub" in r["causes"]:
@@ -280,7 +303,14 @@ def _pairs_from_audit(facts, cons):
         if "skew" in r["causes"]:
             u = r.get("unit", "mm")
             note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
+            if r.get("basis") == "path" and None not in (r.get("net_mm") or (None,)):      # advisory: the whole-net copper sums (stubs included)
+                np_, nn_ = r["net_mm"]
+                note += f" [advisory, whole-net KiCad length (vias, in-pad copper, stubs included) P {np_:.2f} / N {nn_:.2f} mm: diff {np_ - nn_:+.2f}; trunk path measure is the graded one]"
+            rg = _limit_challenge(r, u, facts, cons)
+            if rg:
+                out.append(_f(FAIL, "PAIR_SKEW", rg[1] + note) if rg[0] == "FAIL" else _f(WARN, "PAIR_SKEW_REGRADED", rg[1] + note))
+            else:
+                out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
@@ -1505,6 +1535,9 @@ def check_fab_capability(facts, cons):
                       f"{fab['min_track_mm']:g} / space {fab['min_clearance_mm']:g} / drill {fab['min_drill_mm']:g} / via ring "
                       f"{fab['min_annular_mm']:g} mm{prov}{unv}"))
 
+    for w in fab.get("floor_warns") or []:
+        out.append(_f(WARN, "FAB_FLOOR_BELOW_RECOMMENDED", w))
+
     narrow = sorted(
         (s for s in (facts.get("track_geom") or []) if s["width"] < fab["min_track_mm"]),
         key=lambda s: (s["net"], s["layer"], s["x"], s["y"]))
@@ -2394,15 +2427,94 @@ def incomplete(findings):
 
 def summarize(findings, log=print):
     n = {FAIL: 0, WARN: 0, INFO: 0}
+    inh = {FAIL: 0, WARN: 0, INFO: 0}
     for f in findings:
-        n[f["level"]] += 1
-        log(f"  {f['level']:4s} {f['code']:28s} {f['msg']}")
+        old = f.get("baseline") == "inherited"
+        (inh if old else n)[f["level"]] += 1
+        log(f"  {f['level']:4s} {'INHERITED ' if old else ''}{f['code']:28s} {f['msg']}")
     log(f"review: {n[FAIL]} FAIL, {n[WARN]} WARN, {n[INFO]} INFO")
+    if any(f.get("baseline") for f in findings):
+        log(f"review: vs baseline: {n[FAIL]} FAIL / {n[WARN]} WARN new; INHERITED (listed, not gating) "
+            f"{inh[FAIL]} FAIL, {inh[WARN]} WARN, {inh[INFO]} INFO")
     inc = incomplete(findings)
     if inc:
         log("review: INCOMPLETE - not covered: " + ", ".join(f"{c} x{k}" for c, k, _m in inc)
             + " (waive the code with a reason, or --allow-incomplete)")
     return {"fail": n[FAIL], "warning": n[WARN], "info": n[INFO], "incomplete": sum(k for _c, k, _m in inc)}
+
+
+_NUM = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
+_NAME_SPLIT = re.compile(r"[\s,;:()\[\]=<>]+")
+
+
+def baseline_key(f, nets=()):
+    """Identity of a finding across two boards: (code, refs), or (code, nets named in the msg) when it has no refs.
+    Never the message text: counts and measured values in it change between versions."""
+    if f.get("refs"):
+        return (f["code"], tuple(sorted(f["refs"])), ())
+    toks = {t for w in _NAME_SPLIT.split(f.get("msg", "")) for t in [w, *w.split("/")] if t}
+    hit = {n for n in nets if n in toks or ("/" in n and n in f.get("msg", ""))}
+    return (f["code"], (), tuple(sorted(hit)))
+
+
+def finding_mag(f):
+    """Numeric severity: the finding's own `mag`, else the first standalone number of its msg (the measured value)."""
+    if f.get("mag") is not None:
+        return float(f["mag"])
+    m = _NUM.search(f.get("msg", ""))
+    return float(m.group()) if m else None
+
+
+def mark_baseline(findings, base_findings, nets=()):
+    """Tag each finding f["baseline"] = "new" | "inherited" against the previous version's findings.
+    Multiset match on baseline_key (a second instance of a key is new); a matched finding whose magnitude
+    grew (> 0.5 % + 1e-3) is new. Returns the findings (mutated)."""
+    pool = defaultdict(list)
+    for b in base_findings:
+        pool[baseline_key(b, nets)].append(finding_mag(b))
+    for f in findings:
+        mags = pool.get(baseline_key(f, nets))
+        if not mags:
+            f["baseline"] = "new"
+            continue
+        old, new = mags.pop(0), finding_mag(f)
+        worse = old is not None and new is not None and new > old * 1.005 + 1e-3
+        f["baseline"] = "new" if worse else "inherited"
+    return findings
+
+
+def interface_pair_check(board, cons):
+    """P1 (packrules): the graded pair findings of the routing audit on `board`. -> {"fail": [str], "warn": [str]}.
+    FAIL: PAIR_SKEW over the registry/project hard limit and every other FAIL pair finding (unmeasured, stub, ...).
+    WARN: PAIR_SKEW_REGRADED (inside the sourced hard limit, citation in the text) and PAIR_SKEW_OVER_TARGET."""
+    fs = _pairs_from_audit({"board_path": board}, cons or {})
+    if fs is None:
+        return {"fail": ["pair audit could not run: board file not readable"], "warn": []}
+    line = lambda f: f"{f['code']}: {f['msg']}"
+    return {"fail": [line(f) for f in fs if f["level"] == FAIL],
+            "warn": [line(f) for f in fs if f["code"] in ("PAIR_SKEW_REGRADED", "PAIR_SKEW_OVER_TARGET")]}
+
+
+def baseline_check(board, prev_board, findings, cons, base_findings=None):
+    """P2 (packrules): review vs the previous version's board. -> {"fail": [str], "warn": [str]}.
+    Findings new vs prev (mark_baseline) that are FAIL -> fail; inherited FAIL -> warn, listed. base_findings defaults to a
+    review of prev_board with the same constraints (no distributor data)."""
+    if base_findings is None:
+        facts = facts_from_board(prev_board)
+        facts.setdefault("board_path", prev_board)
+        cons = cons or {}
+        base_findings = run(facts, spec=None, cons=cons, partdata={}, idx=lib_index(),
+                            waivers=list((cons.get("review") or {}).get("waive", [])), ds_dir=None, stage="deliver")
+    marked = mark_baseline([dict(f) for f in findings], base_findings)
+    line = lambda f: "%s %s" % (f["code"], " ".join(f.get("refs") or ()) or f["msg"][:60])
+    return {"fail": [line(f) for f in marked if f["level"] == FAIL and f.get("baseline") == "new"],
+            "warn": ["inherited " + line(f) for f in marked if f["level"] == FAIL and f.get("baseline") == "inherited"]}
+
+
+def file_sha(path, n=12):
+    import hashlib
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()[:n]
 
 
 # ==========================================================================

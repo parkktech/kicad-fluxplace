@@ -24,8 +24,9 @@ def _runs_log_isolated(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _shared_cache_isolated(monkeypatch, tmp_path):
-    """The shared per-user lookup cache (~/.cache/fluxplace) is a tmp dir in tests."""
+    """The shared per-user lookup cache (~/.cache/fluxplace) is a tmp dir in tests; no test calls the model (dossier.online)."""
     monkeypatch.setenv("FLUXPLACE_CACHE_HOME", str(tmp_path / "_shared_cache"))
+    monkeypatch.setenv("FLUXPLACE_AI", "0")
     yield
 
 

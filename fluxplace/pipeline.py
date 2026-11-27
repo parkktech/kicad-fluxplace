@@ -1021,7 +1021,8 @@ def st_close(c, n, board):
         post = None
     base = _input_baseline(c, None, c.dir(n, "close"))      # re-net / incremental run: the input board's gaps are reported, not worked
     try:
-        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, baseline=base)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, baseline=base,
+                               input_board=((getattr(c, "state", None) or {}).get("route_scope") or {}).get("input"))
     except (Exception, SystemExit) as e:
         try:
             open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
@@ -2037,6 +2038,27 @@ def _pinswap_entry(c, work, board, st):
     return out
 
 
+def _specsync_entry(c, work, board, st):
+    """`[specsync] sch = "x.kicad_sch"` (path relative to the constraints file): the spec follows the schematic and the board
+    before any stage judges against it.  A schematic/board net disagreement is a real defect: exit 2, nothing written."""
+    from . import specsync as SY_
+    cfg = c.cons["specsync"]
+    sch = cfg.get("sch") if isinstance(cfg, dict) else None
+    if not sch:
+        print("pipeline: specsync: [specsync] sch is not set (exit 2)", flush=True)
+        return 2
+    if not os.path.isabs(sch) and c.cons_path:
+        sch = os.path.join(os.path.dirname(c.cons_path), sch)
+    d, rc = SY_.sync(board, sch, c.spec_path, write=True, log=lambda m: print("pipeline: specsync: " + m, flush=True),
+                      ds_dir=((c.cons.get("docs") or {}).get("datasheets")))
+    st["specsync"] = {"errors": d["errors"], "fails": d["fails"], "changes": {k: len(v) for g in ("parts", "nets") for k, v in d[g].items()}}
+    if rc == 2:
+        print("pipeline: specsync: schematic and board disagree (exit 2, no stage started)", flush=True)
+        return rc
+    c.spec = json.load(open(c.spec_path))
+    return 0
+
+
 def _renet_entry(c, work, board, st, near=(), open_pads=False):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
@@ -2276,6 +2298,10 @@ def _run(a):
             return 5
         except Exception as e:                                        # noqa: BLE001 - a board pcbnew cannot read has nothing to protect
             print(f"pipeline: manifest seed skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+    if (c.cons or {}).get("specsync") and c.spec_path and os.path.isfile(board):
+        rc = _specsync_entry(c, work, board, st)
+        if rc:
+            return rc
     if (c.cons or {}).get("pinswap") and os.path.isfile(board):
         board = _pinswap_entry(c, work, board, st)
     if STAGES_[i0] in RENET_FROM and os.path.isfile(board):

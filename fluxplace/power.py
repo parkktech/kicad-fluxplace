@@ -503,6 +503,60 @@ def _pad_amps(pad, npins, rows, src, tot, volts):
     return float(row["current_a"]) / (1 if "." in to else max(1, npins[ref])), "budget (dcdrop)"
 
 
+def _rail_sources(cons, net, tot):
+    """-> (source part refs {ref}, the [power] source part, the net's [[dcdrop]] rows): the [power] source, the `from` part of its rows, and
+    an inductor / ferrite bead (L, FB) whose single-load row carries the rail's whole current (the source's series element)."""
+    pw = (cons or {}).get("power", {}).get(net) or {}
+    drows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
+    src = str(pw.get("source") or (drows[0].get("from") if drows else "") or "").split(".")[0]
+    srcs = {src} - {""}
+    for d in drows:
+        if d.get("from"):
+            srcs.add(str(d["from"]).split(".")[0])
+        to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
+        ref0 = str(to[0]).split(".")[0].upper()
+        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
+            srcs.add(str(to[0]).split(".")[0])
+    return srcs, src, drows
+
+
+def unknown_loads(board, cons, layers=None):
+    """Kickoff check: {rail net: [refs]} of the loads on each [power] rail with a current figure whose draw is not known
+    (`_pad_amps` has no figure: no [[dcdrop]] row, not a capacitor / gate / resistor / the source). The route-stage run current
+    falls back to the rail total for these, so a rail with any is sized by guesswork. {} when nothing is unknown."""
+    rails = {n: r for n, r in plan(cons, layers=layers).items() if r and r.get("track_mm") is not None and r.get("current_a")}
+    ctx = _board_ctx(board, set(rails)) if rails else None
+    out = {}
+    for net, r in rails.items():
+        pads = (ctx or {}).get("pads", {}).get(net) or []
+        srcs, src, drows = _rail_sources(cons, net, r["current_a"])
+        npins = {}
+        for pad in pads:
+            npins[pad[0]] = npins.get(pad[0], 0) + 1
+        unk = sorted({pad[0] for pad in pads if pad[0] not in srcs and _pad_amps(pad, npins, drows, src, r["current_a"], r.get("max_v") or 0.0)[0] is None})
+        if unk:
+            out[net] = unk
+    return out
+
+
+def _fill_contains(fill):
+    import pcbnew
+    return lambda x, y: fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0)
+
+
+def _fill_island(fill):
+    """x, y -> index of the fill outline (island) holding the point, -1 when none: contacts in different islands are not joined."""
+    import pcbnew
+
+    def isl(x, y):
+        pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        for k in range(fill.OutlineCount()):
+            if fill.COutline(k).PointInside(pt):
+                return k
+        return -1
+    return isl
+
+
 def rail_flows(ctx, cons, net, r, rows):
     """W40 tree-flow solve of one rail (powerflow.solve) on the copper `rows` (the net's facts track_geom rows) -> the per-row
     current list [{amps | None, unk, mode, loads}] and its context (source label), cached in ctx["flows"]; None when the rail has no
@@ -518,17 +572,7 @@ def rail_flows(ctx, cons, net, r, rows):
     if not rows or not pads or any(len(p) < 8 for p in pads) or any("x1" not in g for g in rows):
         return None
     tot = r["current_a"]
-    pw = (cons or {}).get("power", {}).get(net) or {}
-    drows = [d for d in (cons or {}).get("dcdrop", []) or [] if isinstance(d, dict) and d.get("net") == net]
-    src = str(pw.get("source") or (drows[0].get("from") if drows else "") or "").split(".")[0]
-    srcs = {src} - {""}
-    for d in drows:
-        if d.get("from"):
-            srcs.add(str(d["from"]).split(".")[0])
-        to = d["to"] if isinstance(d.get("to"), list) else [d.get("to")]
-        ref0 = str(to[0]).split(".")[0].upper()
-        if len(to) == 1 and tot and d.get("current_a") and float(d["current_a"]) >= tot * 0.999 and ref0.startswith(("L", "FB")):
-            srcs.add(str(to[0]).split(".")[0])
+    srcs, src, drows = _rail_sources(cons, net, tot)
     volts = r.get("max_v") or 0.0
     npins = {}
     for pad in pads:
@@ -546,15 +590,15 @@ def rail_flows(ctx, cons, net, r, rows):
     zones = []
     b = ctx["b"]
     for z in b.Zones():
-        if z.GetNetname() != net:
+        if z.GetNetname() != net or z.GetIsRuleArea():
             continue
-        for lname in {g["layer"] for g in rows}:
-            lid = b.GetLayerID(lname)
-            if not z.IsOnLayer(lid):
-                continue
+        for lid in z.GetLayerSet().CuStack():           # every layer the zone is on, not only the layers the rail has tracks on
             fill = z.GetFilledPolysList(lid)
-            if fill is not None and fill.OutlineCount():
-                zones.append({"layer": lname, "contains": (lambda f: lambda x, y: f.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0))(fill)})
+            if fill is None or not fill.OutlineCount():
+                continue
+            lname = b.GetLayerName(lid)
+            oz = float(r.get("oz_outer" if lname in outer else "oz_inner") or 1.0)
+            zones.append({"layer": lname, "t_mm": 0.035 * oz, "contains": _fill_contains(fill), "island": _fill_island(fill)})
     res = PF.solve(segs, vias, gp, zones, cap=tot or None)
     res["src"] = sorted(srcs)
     cache[net] = res
@@ -1268,6 +1312,175 @@ def widen_guarded(board, cons, out, nets=None, protect=()):
         for f in (out, os.path.splitext(out)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_prl"):
             if os.path.exists(f):
                 os.remove(f)
+    return rec
+
+
+STITCH_PITCH_MM = 2.0        # centre spacing of the stitching vias laid on a still-failing run
+STITCH_MAX_PER_RUN = 8
+
+
+def _seg_key(g):
+    return (g["layer"], frozenset(((round(g["x1"], 2), round(g["y1"], 2)), (round(g["x2"], 2), round(g["y2"], 2)))))
+
+
+def _seg_keys(board):
+    """{(layer, endpoints)} of every track of `board` (mm, 0.01): what an update run's input already had."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    mm = pcbnew.ToMM
+    return {(b.GetLayerName(t.GetLayer()), frozenset(((round(mm(t.GetStart().x), 2), round(mm(t.GetStart().y), 2)),
+                                                     (round(mm(t.GetEnd().x), 2), round(mm(t.GetEnd().y), 2)))))
+            for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"}
+
+
+def _vias_guarded(cur, nxt, board, net, at, dia, drill, ref_m, DG):
+    """Copy of `cur` with a via of the given size at each (x, y) of `at` -> `nxt`; kept only when the DRC guard is no higher than
+    `ref_m`. -> (ok, measure | None, why)."""
+    import pcbnew
+    from . import gaps as GP
+    bb = pcbnew.LoadBoard(cur)
+    nc = bb.FindNet(net).GetNetCode()
+    for sx, sy in at:
+        v = pcbnew.PCB_VIA(bb)
+        v.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(sx), pcbnew.FromMM(sy)))
+        v.SetWidth(dia)
+        v.SetDrill(drill)
+        v.SetNetCode(nc)
+        bb.Add(v)
+    pcbnew.SaveBoard(nxt, bb)
+    GP._sidecars(board, nxt)
+    m = _guard_measure(DG.measure(nxt), DG)
+    worse = [g for g in GUARD_KEYS if m[g] > ref_m[g]]
+    if worse:
+        return False, None, ", ".join(f"{g} {ref_m[g]} -> {m[g]}" for g in worse)
+    return True, m, ""
+
+
+PAD_VIA_SPACING_MM = 0.9      # centre spacing of vias laid inside one pad
+
+
+def add_pad_vias(board, cons, out, nets=None, cons_path=None, only_new_vs=None):
+    """POWER_WIDTH repair for a plane-adjacent narrow trunk: a narrow run of a rail that has a same-net zone ends in a pad (a source /
+    load pad bigger than its via); the pad gets via-in-pad vias into the plane, so the pad reaches the plane directly and the
+    narrow track is only a parallel path (the rail solve then gives it its small share). Vias per pad = ceil(run current / via amps),
+    at least 2, less the vias already inside the pad; sites come from handroute.window inside the pad, best margin first; the pad's vias are
+    added together at the rail's own via size and kept only when the DRC guard (shorts, errors, track opens) is no higher. Writes `out` only when a via was added.
+    `only_new_vs`: the board an update run started from; only runs with a segment that is not on it are repaired (inherited copper
+    is left as shipped). -> {"pads": {"REF.num": {"net", "need": n, "added": k}}}"""
+    import pcbnew
+    from . import gaps as GP, handroute as HR, boardfile
+    rec = {"pads": {}}
+    rails = _rails_on(board, cons, nets)
+    ctx = _board_ctx(board, set(rails)) if rails else None
+    if not ctx:
+        return rec
+    zoned = {z.GetNetname() for z in ctx["b"].Zones() if not z.GetIsRuleArea()}
+    rails = {n: r for n, r in rails.items() if n in zoned}
+    if not rails:
+        return rec
+    det = {}
+    check(boardfile.facts_from_file(board), cons, dcdrop_status(board, cons), board=board, detail=det)
+    old = _seg_keys(only_new_vs) if only_new_vs else None
+    todo = {}                                                # (net, ref, num) -> (pad, amps the run carries)
+    for net, runs in det.items():
+        if net not in rails:
+            continue
+        for rn in runs:
+            if rn["cleared"] or (old is not None and all(_seg_key(g) in old for g in rn["segs"])):
+                continue
+            cnt = {}
+            for g in rn["segs"]:
+                for k in (("x1", "y1"), ("x2", "y2")):
+                    pt = (round(g[k[0]], 2), round(g[k[1]], 2))
+                    cnt[pt] = cnt.get(pt, 0) + 1
+            for (x, y), n_ in cnt.items():
+                if n_ != 1:
+                    continue
+                pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+                for pad in ctx["pads"].get(net, []):
+                    if len(pad) >= 8 and pad[2].Contains(pt):
+                        key = (net, pad[0], pad[1])
+                        todo[key] = (pad, max(todo.get(key, (None, 0.0))[1], float(rn.get("amps") or 0.0)))
+    from . import drcguard as DG
+    b = ctx["b"]
+    cur, tmps, k = board, [], 0
+    ref_m = _guard_measure(DG.measure(board), DG)
+    try:
+        for (net, ref, num), (pad, amps) in sorted(todo.items()):
+            r = rails[net]
+            x0, y0, x1, y1 = pad[7]
+            same = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetname() == net]
+            have = sum(1 for vx, vy, _vr in ctx["copper"].get(net, ([], []))[1] if x0 <= vx <= x1 and y0 <= vy <= y1)
+            need_n = max(2, math.ceil(amps / max(float(r.get("via_amps") or 1.0), 1e-3) - 1e-9)) - have
+            if need_n <= 0 or not same:
+                continue
+            dia, drill = same[0].GetWidth(), same[0].GetDrillValue()           # the rail's own via size
+            rad = pcbnew.ToMM(dia) / 2 + 0.1
+            W = HR.window(cur, at=((x0 + x1) / 2, (y0 + y1) / 2), size=(x1 - x0 + 1.0, y1 - y0 + 1.0), net=net, constraints=cons_path)
+            sites = [(sx, sy) for sx, sy, *_m in ((W.get("via_sites") or {}).get("sites") or [])
+                     if x0 + rad <= sx <= x1 - rad and y0 + rad <= sy <= y1 - rad]
+            chosen = []
+            for sx, sy in sites:
+                if len(chosen) >= need_n:
+                    break
+                if all(math.hypot(sx - cx, sy - cy) >= PAD_VIA_SPACING_MM for cx, cy in chosen):
+                    chosen.append((sx, sy))
+            done = 0
+            if chosen:
+                k += 1
+                nxt = f"{out}.pv{k}.kicad_pcb"
+                tmps.append(nxt)
+                ok, m, why = _vias_guarded(cur, nxt, board, net, chosen, dia, drill, ref_m, DG)
+                if ok:
+                    cur, ref_m, done = nxt, m, len(chosen)
+                else:
+                    rec["pads"][f"{ref}.{num}"] = {"net": net, "need": need_n, "added": 0, "refused": why}
+                    continue
+            rec["pads"][f"{ref}.{num}"] = {"net": net, "need": need_n, "added": done, "at": chosen[:done]}
+        # runs still failing: stitching vias on the run's own centre line into the plane (a via on the track joins it to the plane)
+        det2 = {}
+        check(boardfile.facts_from_file(cur), cons, dcdrop_status(cur, cons), board=cur, detail=det2)
+        M = HR._model(cur)
+        for net, runs in sorted(det2.items()):
+            if net not in rails:
+                continue
+            same = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA" and t.GetNetname() == net]
+            if not same:
+                continue
+            dia, drill = same[0].GetWidth(), same[0].GetDrillValue()
+            for rn in runs:
+                if rn["cleared"] or (old is not None and all(_seg_key(g) in old for g in rn["segs"])):
+                    continue
+                pts = []
+                for g in rn["segs"]:
+                    n_ = max(1, int(g["len"] // STITCH_PITCH_MM)) if "len" in g else 1
+                    for q in range(n_ + 1):
+                        t_ = q / n_
+                        pts.append((g["x1"] + (g["x2"] - g["x1"]) * t_, g["y1"] + (g["y2"] - g["y1"]) * t_))
+                chosen = []
+                for x, y in pts:
+                    if len(chosen) >= STITCH_MAX_PER_RUN:
+                        break
+                    if all(math.hypot(x - cx, y - cy) >= STITCH_PITCH_MM for cx, cy in chosen) and HR.probe_prims(M, net, [("via", (x, y))]).get("ok"):
+                        chosen.append((round(x, 3), round(y, 3)))
+                if not chosen:
+                    continue
+                k += 1
+                nxt = f"{out}.pv{k}.kicad_pcb"
+                tmps.append(nxt)
+                ok, m, why = _vias_guarded(cur, nxt, board, net, chosen, dia, drill, ref_m, DG)
+                key = f"run@{rn['segs'][0]['x1']:.1f},{rn['segs'][0]['y1']:.1f}"
+                rec["pads"][key] = {"net": net, "need": len(chosen), "added": len(chosen) if ok else 0, **({} if ok else {"refused": why})}
+                if ok:
+                    cur, ref_m = nxt, m
+                    M = HR._model(cur)
+        if cur != board:
+            os.replace(cur, out)
+            tmps.remove(cur)
+            GP._sidecars(board, out)
+    finally:
+        for q in tmps:
+            GP._rm(q)
     return rec
 
 

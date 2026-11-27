@@ -13,6 +13,7 @@ _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fab_ca
 _CACHE = {}
 
 # limits key -> the [fab] key the rest of the tool reads
+HOUSE_TOL_MM = 0.003            # mil -> mm rounding of the printed limits (one value for grading and floors)
 FLOOR_MAP = {"track_min": "min_track_mm", "space_min": "min_clearance_mm", "drill_min": "min_drill_mm",
              "via_annular_min": "min_annular_mm", "silk_width_min": "min_silk_width_mm"}
 
@@ -75,12 +76,27 @@ def all_tiers():
                   key=lambda vt: (data()["vendors"][vt[0]]["tiers"][vt[1]]["rank"], vt[0]))
 
 
+def _registry_overlay(vendor, layers, lim, unv):
+    """ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l); standard tier only.
+    These feed DESIGN floors, so a sourced entry's recommended (target) value replaces the JSON number, else its hard value; the
+    hard/reject value is for grading only (gerbercheck). A layer count with no registry row keeps the JSON number, flagged unverified."""
+    from . import limits as LM
+    lim, unv = dict(lim), list(unv)
+    for f in LM.FAB_FEATURES:
+        e = LM.get("fab_" + f, f"{vendor}-{layers}l")
+        if LM.sourced(e):
+            lim[f] = float(e["target"] if e.get("target") is not None else e["hard"])
+        elif f in lim:
+            unv.append(f"{f} {lim[f]:g} is not in the limits registry for {layers} layers (JSON number, unsourced)")
+    return lim, unv
+
+
 def row_for(vendor, tier, layers):
     """-> (limits, unverified) of the row covering `layers`; FabProfileError when the tier does not offer it."""
     rows = tier_rows(vendor, tier)
     for lo, hi, lim, unv in rows:
         if lo <= layers <= hi:
-            return lim, unv
+            return _registry_overlay(vendor, layers, lim, unv) if tier == "standard" else (lim, unv)
     have = ", ".join(f"{lo}-{hi}" for lo, hi, _l, _u in rows)
     raise FabProfileError(f"{vendor}-{tier} does not offer {layers} copper layers (rows: {have})")
 
@@ -212,6 +228,28 @@ def limits(name, layers=None):
         fl["min_via_dia_mm"] = round(max(lim.get("via_dia_min", 0.0), drill + 2 * ann), 4)
     return {"limits": lim, "floors": fl, "vendor": v, "tier": t, "layers": layers, "unverified": unv, "legacy": False,
             "name": name, "profiles": [name], "provenance": {k: [name] for k in lim}, "floor_prov": {k: [name] for k in fl}}
+
+
+def hard_floors(names, layers, floors):
+    """{[fab] floor key: value} at the houses' HARD (reject) values, strictest over `names`; a key the registry has no hard value for keeps
+    its floor.  The design floors in `floors` are the recommended values; a project floor between this and those wins (D71fs)."""
+    from . import limits as LM
+    merged = {}
+    for n in names:
+        if is_legacy(n):
+            continue
+        v, t = split(n)
+        h = dict(limits(n, layers)["floors"])
+        b = LM.fab_bounds(v, layers) if t == "standard" and layers else {}
+        for f, k in (("track_min", "min_track_mm"), ("space_min", "min_clearance_mm"), ("via_annular_min", "min_annular_mm")):
+            if f in b:
+                h[k] = b[f][0]
+        if "via_annular_min" in b:
+            row = row_for(v, t, int(layers))[0]
+            h["min_via_dia_mm"] = round(max(row.get("via_dia_min", 0.0), row["drill_min"] + 2 * b["via_annular_min"][0]), 4)
+        for k, x in h.items():
+            merged[k] = max(merged.get(k, 0.0), x)
+    return {k: min(merged.get(k, x), x) for k, x in floors.items()}
 
 
 def judge(value_mm, preferred_mm, hard_mm):

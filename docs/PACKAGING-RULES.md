@@ -19,3 +19,12 @@ is listed in README-FIRST, never hidden.
 
 Source: owner via ParkkRouter (1.5.3 delivery review, 2026-11-27). Enforcement: `deliver` gate (branch w106-deliverver),
 with P1 tuning (w104-renettune), P2 baseline (w105-baseline), P4 JLC set (w107-jlcset).
+
+## Packaging and update features
+
+- **Packaging-rules gate P1-P8**: a package is not ready unless all eight rules pass. Rules: [docs/PACKAGING-RULES.md](PACKAGING-RULES.md).
+- **Fab sets for PCBWay and JLCPCB**: BOM and CPL in each house's format, DNP parts excluded, every part with an LCSC pick or a consigned reason.
+- **New version of an existing delivery**: `fluxplace deliver --prev-delivery DIR --prev-bom F --prev-assembly F --changes F`
+- **Baseline gating**: `review|fab|deliver --baseline PREV` fails only on new findings; inherited ones are listed.
+- **Spec sync**: `fluxplace spec-sync BOARD --sch S --spec J [--write]` (schematic = electrical truth, board fields = part truth; constraints `[specsync] sch=`).
+- **Fab-house conformance**: `fluxplace fabconform BOARD --houses jlcpcb,pcbway --write OUT` fixes sub-minimum features or writes per-house order options.

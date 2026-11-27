@@ -188,7 +188,7 @@ def test_profile_list_takes_strictest_with_provenance():
     fp = C.fab_profile({"fab": {"profile": ["pcbway-standard", "jlcpcb-standard"]}}, layers=6)
     assert fp["min_track_mm"] == 0.1 and fp["provenance"]["min_track_mm"] == "pcbway-standard"     # 0.1 beats 0.09
     assert fp["min_drill_mm"] == 0.2 and set(fp["provenance"]["min_drill_mm"].split(" = ")) == {"pcbway-standard", "jlcpcb-standard"}
-    assert fp["min_via_dia_mm"] == pytest.approx(0.454, abs=1e-3)                                  # PCBWay drill + 2 x ring > JLC 0.45
+    assert fp["min_via_dia_mm"] == pytest.approx(0.5, abs=1e-3)                                    # PCBWay drill + 2 x recommended ring 0.15 > JLC 0.45
     assert fp["hard"]["hole_to_hole_via"] == 0.279 and fp["hard_provenance"]["hole_to_hole_via"] == "pcbway-standard"
     assert fp["hard"]["inner_oz"] == [1, 2] and fp["hard"]["outer_oz"] == [1, 2]                   # copper weights both offer
     assert fp["hard"]["hole_to_copper_inner"] == 0.203 and fp["hard"]["thickness_options"][0] == 0.9

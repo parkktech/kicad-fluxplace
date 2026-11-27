@@ -20,7 +20,7 @@ import shutil
 import subprocess
 from fluxplace import procs as _procs
 
-from . import fabxcheck
+from . import fabxcheck, jlcset
 
 
 # Extra manufacturing exports. name -> (kicad-cli subcommand, subfolder, file name
@@ -75,7 +75,7 @@ def _listfiles(d):
     return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
 
 
-def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None, cons=None):
+def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None, cons=None, jlc_prev_bom=None):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
     the failure in the manifest so the engineer sees exactly what did and didn't emit."""
@@ -118,6 +118,14 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
         xcheck = [f"{fabxcheck.CODE}: no position file was produced"]
     for m in xcheck:
         log("FAIL " + m)
+
+    # JLCPCB upload set beside the PCBWay one (jlcset.py); live LCSC lookups only for a China build
+    jlc_check = None
+    if (cons or {}).get("sourcing", {}).get("china"):
+        from . import lcsc
+        jlc_check = lambda mpns, need: lcsc.check(mpns, need=need, log=log)
+    jlc = jlcset.emit(board, out, pos_path, cons, jlc_prev_bom, jlc_check, log)
+    done["jlcpcb"] = "FAIL" if "error" in jlc or jlc.get("cpl_missing") else True
 
     # extra formats (ODB++, IPC-2581, IPC-D-356). formats=None -> every format
     # this kicad-cli supports. A format that fails is a FAIL line, never silent.
@@ -188,7 +196,7 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
     # (it would have to appear in this listing, which means this export
     # wrote it moments ago).
     files = {"gerbers": _listfiles(gdir), "drill": _listfiles(ddir),
-             "place": _listfiles(pdir)}
+             "place": _listfiles(pdir), jlcset.SECTION: jlc.get("files", [])}
 
     man = os.path.join(out, "MANIFEST.txt")
     with open(man, "w") as f:
@@ -211,7 +219,7 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
         # Machine-readable file list — deliver() parses these "FILE" lines
         # and zips exactly them, never a directory glob, so this manifest
         # is the one and only source of truth for what ships.
-        for section in ("gerbers", "drill", "place"):
+        for section in ("gerbers", "drill", "place", jlcset.SECTION):
             for name in files[section]:
                 f.write(f"FILE         : {section}/{name}\n")
         # extra formats: every file with its size, so a reviewer sees what each
@@ -331,7 +339,7 @@ def deliver(fab_dir, out_dir, name, docs=(), extras=(), centroid_name=None,
             shutil.copy2(src, centroid)
 
     loose = []
-    for sec in FORMAT_SECTIONS:
+    for sec in FORMAT_SECTIONS + (jlcset.SECTION,):      # the JLCPCB set ships loose beside the PCBWay zip
         if sec in include_formats or sec not in manifest:
             continue
         ldir = os.path.join(out_dir, sec)

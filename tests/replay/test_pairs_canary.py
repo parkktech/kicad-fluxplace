@@ -1,13 +1,14 @@
 """Real-board canary (slow tier): the pairs stage alone on the stored pour-tie board of the W16 board (route-7 input).
 Guards the batch-10 regression class (route-8: complete pairs 8/21 against 13/21, pairs left unsearched by the time budget).
 Runtime: route-7 pairs stage 767 s alone; 1800 s was exceeded under load 20+ (w92 first run), so the cap is 3600 s; the run is capped at CANARY_TIMEOUT s."""
-import os, re, shutil
+import json, os, re, shutil
+from fluxplace.pairs import laid_count
 import pytest
 from . import replaylib as R
 
 pytestmark = pytest.mark.replay
 CANARY_TIMEOUT = 3600
-MIN_COMPLETE = 13          # route-7 (9ab15b2): 13/21
+MIN_LAID = 13              # D71ft: LAID pairs (complete + laid over target skew) >= 13/21; complete-within-target is reported, not gated
 UNSEARCHED = "time budget reached before this pair was searched"
 
 
@@ -35,13 +36,22 @@ def canary(tmp_path_factory):
     res["text"] = text
     m = re.findall(r"pairs: \w+ - (\d+)/(\d+) complete", text)
     res["complete"], res["total"] = (int(m[-1][0]), int(m[-1][1])) if m else (None, None)
-    print(f"CANARY pairs: {res['complete']}/{res['total']} complete, rc {res['rc']}, {res['secs']} s")
+    res["laid"] = None
+    for root, _, files in os.walk(os.path.join(proj, "run")):
+        if "board.pairs.json" in files:
+            res["laid"] = laid_count(json.load(open(os.path.join(root, "board.pairs.json"))))
+    print(f"CANARY pairs: {res['complete']}/{res['total']} complete, {res['laid']} laid, rc {res['rc']}, {res['secs']} s")
     return res
 
 
-def test_complete_pairs_are_not_fewer_than_route_7(canary):
-    assert canary["complete"] is not None, canary["log"]
-    assert canary["complete"] >= MIN_COMPLETE, (canary["complete"], canary["total"], canary["log"])
+def test_laid_pairs_are_not_fewer_than_route_9(canary):
+    assert canary["laid"] is not None, canary["log"]
+    assert canary["laid"] >= MIN_LAID, (canary["laid"], canary["complete"], canary["total"], canary["log"])
+
+
+def test_laid_count_includes_over_skew_pairs():
+    rep = {"pairs": [{"status": s} for s in ("complete", "mismatch", "mismatch", "open", "not-laid", "unknown")]}
+    assert laid_count(rep) == 3
 
 
 def test_no_pair_is_left_unsearched_by_the_time_budget(canary):

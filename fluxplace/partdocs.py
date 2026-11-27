@@ -101,7 +101,7 @@ def _get(url, timeout=60):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0",
         "Accept": "application/pdf,*/*"})
-    with _redact_urlopen(req, timeout=timeout) as r:
+    with _redact_urlopen(req, timeout=timeout, slow=True) as r:
         return r.status, r.headers.get("Content-Type", ""), r.read()
 
 
@@ -112,10 +112,18 @@ def _download(url, dest, timeout=60):
     url = url.strip()
     if url.startswith("//"):
         url = "https:" + url
-    try:
-        status, ctype, data = _get(url, timeout)
-    except Exception as e:
-        return False, type(e).__name__ + (" %s" % getattr(e, "code", "") if hasattr(e, "code") else "")
+    for attempt in range(2):            # a slow or busy manufacturer host gets one retry with twice the time
+        try:
+            status, ctype, data = _get(url, timeout * (attempt + 1))
+        except Exception as e:
+            if attempt == 0 and not hasattr(e, "code") and type(e).__name__ != "HostSkipped":
+                time.sleep(3)
+                continue
+            return False, type(e).__name__ + (" %s" % getattr(e, "code", "") if hasattr(e, "code") else "")
+        if status in (429, 500, 502, 503, 504) and attempt == 0:
+            time.sleep(3)
+            continue
+        break
     if status != 200:
         return False, "HTTP %s" % status
     if not data.startswith(b"%PDF"):
@@ -476,7 +484,9 @@ def is_passive(ref, fp="", pins=None):
 
 def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
     """Findings [(level, code, ref, msg)] for a netlist spec dict.
-    mpn_map: {ref: mpn} (the spec may also carry 'mpn' per component)."""
+    mpn_map: {ref: mpn} (the spec may also carry 'mpn' per component).
+    PINMAP_DOSSIER_MISMATCH (WARN): the part's component dossier (dossier.py) has the pinmap's name on another pad, or disagrees on which pad is ground."""
+    from . import dossier as DO
     out = []
     man = load_manifest(ds_dir) if ds_dir else {}
     mpn_map = mpn_map or {}
@@ -542,6 +552,12 @@ def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
                 out.append(("FAIL" if strict else "WARN", "PINMAP_EVIDENCE_WEAK", ref,
                             f"{ref} {mpn}: pinmap has no datasheet to check against"))
                 continue
+            dos = DO.load(mpn, ent.get("sha256")) if ent and ent.get("sha256") and not is_conn else None
+            bad = DO.pinmap_mismatches(pinmap, dos) if dos else []
+            if bad:
+                out.append(("WARN", "PINMAP_DOSSIER_MISMATCH", ref,
+                            f"{ref} {mpn}: the component dossier ({dos['file']}) disagrees: "
+                            + "; ".join(f"pad {pd}: spec {n}, {why}" for n, pd, why in bad[:6])))
             ok, found, missing, detail = evidence(pinmap, sfile, pages,
                                                   pin_alias=c.get("pin_alias"), ds_dir=ds_dir)
             if ok is None:

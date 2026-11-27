@@ -57,31 +57,27 @@ def drc_counts(board, pro, td):
     return {"violations": len(d.get("violations", [])), "opens": len(d.get("unconnected_items", []))}
 
 
-_STUBS = r"""
-import json, sys, pcbnew
-b = pcbnew.LoadBoard(sys.argv[1]); mm = pcbnew.FromMM
-tr = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"]
-vias = [t for t in b.GetTracks() if t.GetClass() == "PCB_VIA"]
-pads = [p for f in b.GetFootprints() for p in f.Pads()]
-tol = 5000
-def near(a, c): return abs(a.x - c.x) <= tol and abs(a.y - c.y) <= tol
-def held(t, pt):
-    for o in tr:
-        if o is not t and o.GetLayer() == t.GetLayer() and (near(o.GetStart(), pt) or near(o.GetEnd(), pt)): return True
-    if any(near(v.GetPosition(), pt) for v in vias): return True
-    return any(p.IsOnLayer(t.GetLayer()) and p.HitTest(pt) for p in pads)
-out = []
-for t in tr:
-    if t.GetLength() < mm(0.2) and not (held(t, t.GetStart()) and held(t, t.GetEnd())):
-        out.append([t.GetNetname(), pcbnew.ToMM(t.GetLength()), pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y)])
-print(json.dumps(out))
-"""
-
-
 def short_stubs(board):
-    """Track segments shorter than 0.2 mm with a free end: [[net, len_mm, x, y]] (pcbnew)."""
-    p = subprocess.run([PY, "-I", "-c", _STUBS, board], capture_output=True, text=True, timeout=300)
-    return json.loads(p.stdout.strip().splitlines()[-1])
+    """Track segments shorter than 0.2 mm that KiCad's own connectivity flags `track_dangling` (kicad-cli DRC, default rules):
+    [[net, len_mm, x, y]]. An end inside a same-net zone fill, on a via's copper or on a pad is connected for KiCad and is not
+    listed (a pcbnew geometry test of ours over-counted exactly those: w101)."""
+    td = tempfile.mkdtemp(prefix="stubs-")
+    try:
+        b = os.path.join(td, "m.kicad_pcb"); shutil.copy(board, b)
+        rep = os.path.join(td, "drc.json")
+        subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--severity-all", "--units", "mm", "--refill-zones",
+                        "--output", rep, b], capture_output=True, text=True, timeout=900)
+        out = []
+        for v in json.load(open(rep)).get("violations", []):
+            if v.get("type") != "track_dangling":
+                continue
+            for it in v.get("items", []):
+                m = re.match(r"Track \[(.*)\] on .*, length ([0-9.]+) mm", it.get("description", ""))
+                if m and float(m.group(2)) < 0.2:
+                    out.append([m.group(1), float(m.group(2)), it["pos"]["x"], it["pos"]["y"]])
+        return out
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def stage_verdict(out, stage):

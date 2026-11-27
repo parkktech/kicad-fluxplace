@@ -15,7 +15,8 @@ Codes (FAIL unless noted): PART_MPN_MISSING, PART_MPN_IN_VALUE, PART_MFR_MISSING
 when `[parts] passive_datasheet = "warn"`), PART_PINMAP_UNSOURCED, PART_PACKAGE_MISMATCH, PART_PINCOUNT_MISMATCH, PART_NO_STOCK
 (NONE/RISK/LEAD; LOW is WARN), PART_GENERIC (a passive given by value only: FAIL unless `[parts] generic_passives = true` or the
 answer `generic-passives=accept`), PART_FOOTPRINT_MISSING, PART_PACKAGE_MISSING (WARN; FAIL with `[parts] package = "required"`),
-PART_MPN_VALUE_CONFLICT (WARN: the part number written in the value text is not the MPN on record).
+PART_MPN_VALUE_CONFLICT (WARN: the part number written in the value text is not the MPN on record), PART_UNKNOWABLE (the part's
+component dossier found no source for a REQUIRED fact: a hard blocker, no waiver; the message names the proposed knowable replacement).
 
 `--fix --out SPEC2` writes a COPY with only what is unambiguous (a value that a distributor lookup confirms as exactly that MPN
 gets its `mpn`; `mfr` and `package` come from an exact lookup).  Everything else is a QUESTION (`part-mpn:<value>`), never a guess.
@@ -30,7 +31,7 @@ from . import questions as QS
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 CODES = ("PART_MPN_MISSING", "PART_MPN_IN_VALUE", "PART_MFR_MISSING", "PART_DATASHEET_MISSING", "PART_PINMAP_UNSOURCED",
          "PART_PACKAGE_MISMATCH", "PART_PINCOUNT_MISMATCH", "PART_NO_STOCK", "PART_GENERIC", "PART_FOOTPRINT_MISSING",
-         "PART_PACKAGE_MISSING", "PART_MPN_VALUE_CONFLICT")
+         "PART_PACKAGE_MISSING", "PART_MPN_VALUE_CONFLICT", "PART_UNKNOWABLE")
 _MECH_REF = re.compile(r"^(MH|MK|H|TP|FID|NT|LOGO|G|MP|SH)\d", re.I)
 _MECH_FP = re.compile(r"MountingHole|Fiducial|TestPoint|Logo|Symbol:|NetTie|Mounting_|Standoff", re.I)
 _PASSIVE_REF = re.compile(r"^(R|C|L|FB|RN)\d", re.I)
@@ -271,6 +272,13 @@ def is_skipped(c, facts, st):
     return None
 
 
+def _dossier(mpn, man):
+    """The part's component dossier (dossier.py) for the datasheet on record, or None (not made: the gate cannot say it is unknowable)."""
+    from . import dossier as DO
+    ent = man.get(mpn)
+    return DO.load(mpn, ent.get("sha256")) if isinstance(ent, dict) and ent.get("sha256") else None
+
+
 def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock=None, answers=None, session=None):
     """-> {"findings": [...], "rows": {ref: {...}}, "skipped": {reason: [refs]}, "unchecked": {what: n}, "generic": [refs],
     "values": {token: [refs]}}.  `data` = {mpn: distributor row|None} (partdata.fetch), `stock` = {mpn: {verdict, stock}}
@@ -334,6 +342,15 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
             if not f:
                 lvl = WARN if (passive and npins <= 2 and st["passive_datasheet"] == "warn") else FAIL
                 out.append(_f(lvl, "PART_DATASHEET_MISSING", f"{ref} {mpn}: no datasheet file on disk", refs=[ref]))
+            dos = _dossier(mpn, man)
+            if dos and not dos.get("knowable", True):
+                ch = dos.get("replacement_choice") or {}
+                tail = (f"verified drop-in {ch['choice']} (same footprint and pinout) may replace it" if ch.get("choice") else
+                        f"blocker for the kickoff decision: proposal {ch['proposal']}, D-row: {ch['d_row']}" if ch.get("proposal") else
+                        "no knowable replacement found (fluxplace datasheets searches)")
+                out.append(_f(FAIL, "PART_UNKNOWABLE", f"{ref} {mpn}: no source gives {', '.join(dos['missing'])} (datasheet, page pictures, "
+                              f"the manufacturer's other documents, distributor) - a part that cannot be fully known is not used; " + tail,
+                              refs=[ref]))
         # ---- 4. pinmap source for > 2 pins
         if npins > 2 and not any(re.fullmatch(p.replace("*", ".*"), ref) for p in st["pinmap_exempt"]):
             sfile, pages = parse_source(c.get("pinmap_source"))
@@ -427,7 +444,7 @@ def run(spec, cons=None, facts=None, mpn_map=None, ds_dir=None, data=None, stock
     from . import elec as EL
     out += EL.check_spec(spec, cons, ds_dir, mpn_map)          # datasheet-driven electrical checks, before placement
     order = {FAIL: 0, WARN: 1, INFO: 2}
-    out = [x for x in out if not _waived(x, st["waive"])]
+    out = [x for x in out if x["code"] == "PART_UNKNOWABLE" or not _waived(x, st["waive"])]     # an unknowable part has no waiver
     out.sort(key=lambda x: (order[x["level"]], x["code"], x["msg"]))
     return {"findings": out, "rows": rows, "skipped": skipped, "unchecked": unchecked, "generic": sorted(generic),
             "values": values, "lookup": lookup_on, "stock_on": stock is not None}

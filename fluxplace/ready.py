@@ -257,6 +257,7 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
         pl, pf = KO.placement_line(B, cons, spec)
         lines.append(pl)
         detail["placement_classes"] = pf
+        lines.append(KO.load_current_line(board, cons))
         has_outline = bool((facts or {}).get("outline_bbox"))
         lines.append(_line("outline", PASS if has_outline else FAIL,
                            "Edge.Cuts outline present" if has_outline else "no board outline (Edge.Cuts)",

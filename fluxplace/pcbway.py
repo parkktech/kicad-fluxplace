@@ -275,12 +275,12 @@ def bom_facts(paths, board_refs=None):
             continue
         if not rows:
             continue
-        col = next((c for c in ("Refs", "refs", "Reference", "Designator")
+        col = next((c for c in ("Refs", "refs", "Reference", "Designator", "Designators")
                     if c in rows[0]), None)
         if not col:
             continue
         if board_refs is not None and not any(
-                set((r.get(col) or "").split()) & board_refs for r in rows):
+                set(re.split(r"[,\s]+", r.get(col) or "")) & board_refs for r in rows):
             continue
         used.append(os.path.basename(p))
         for r in rows:
@@ -861,7 +861,7 @@ def to_xlsx(csv_path, out_path, log=print):
 
 
 def write(out_dir, f, zip_name=None, extra_notes=(), docx=True, title=None,
-          assembly_extra="", log=print):
+          assembly_extra="", log=print, assembly_post=None):
     """Write the worksheet and the assembly-instructions doc into `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
     from fluxplace import fabdoc
@@ -890,7 +890,8 @@ def write(out_dir, f, zip_name=None, extra_notes=(), docx=True, title=None,
     nbase = "assembly-instructions-%s" % f["name"]
     nmd = os.path.join(out_dir, nbase + ".md")
     with open(nmd, "w", encoding="utf-8") as fh:
-        fh.write(assembly_notes(f, extra=assembly_extra))
+        md_text = assembly_notes(f, extra=assembly_extra)
+        fh.write(assembly_post(md_text) if assembly_post else md_text)
     ndocx = os.path.join(out_dir, nbase + ".docx")
     _emit(nmd, ndocx, "Assembly instructions",
           "%s — upload with the assembly order" % (title or f["name"]))
