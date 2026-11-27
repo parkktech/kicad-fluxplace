@@ -170,6 +170,14 @@ def base_flags(R, d):
     return [*RR.size_args(R), "--escalation", "off", "--strict-sizes", *(["--fab-overrides", fo] if fo else [])]
 
 
+ROUTE_S_PER_CONN = 4.0   # plain route step: ~390 open connections took 949-1204 s on the W16 board (~3 s each) + margin
+
+
+def route_cap(open_conns):
+    """Seconds a plain `route` call may run: CAP_S, or more for many open connections (the caller bounds it by the stage budget)."""
+    return max(CAP_S, ROUTE_S_PER_CONN * float(open_conns))
+
+
 NO_RIP_STEPS = ("rf", "route", "pairleft", "pairleft-single")      # steps that route over the copper of earlier steps: they must not rip it
 
 
@@ -521,7 +529,13 @@ def run(c, n, board, runner=run_step):
             os.remove(dst)
         log = dst[:-10] + ".log"
         left_s = budget - (time.time() - t0)
-        cap = min(CAP_S, max(0.0, left_s))
+        step_cap = CAP_S
+        if name == "route" and left_s > CAP_S:               # only then can a larger route cap matter
+            try:
+                step_cap = route_cap(RC.measure(cur)["total"])
+            except Exception:                                # noqa: BLE001 - unmeasurable: the fixed cap
+                pass
+        cap = min(step_cap, max(0.0, left_s))
         if cap <= 0:
             rc, secs = 124, 0.0
         else:
