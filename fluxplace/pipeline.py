@@ -1184,12 +1184,12 @@ def _incremental_floorplan(c, board, out):
             print(f"floorplan: not incremental ({det['why']}): the normal floorplan runs", flush=True)
         return None
     try:
-        moves = IP.place(board, out, c.cons)
+        moves, back = IP.place(board, out, c.cons)
     except IP.IncError as e:
         return {"verdict": "fail", "line": f"floorplan: incremental placement refused: {e}", "board": board, "incremental": True}
     _sidecar(board, out)
     return {"verdict": "pass", "board": out, "incremental": True, "placed": {r: [round(v, 3) for v in m] for r, m in moves.items()},
-            "line": f"floorplan: incremental: {len(moves)} new part(s) seated ({', '.join(sorted(moves))}); {det['why']}; "
+            "line": f"floorplan: incremental: {len(moves)} new part(s) seated ({', '.join(sorted(moves))}{'; back: ' + ', '.join(sorted(back)) if back else ''}); {det['why']}; "
                     f"stages skipped: {', '.join(IP.SKIP_STAGES)}"}
 
 
@@ -2084,6 +2084,7 @@ def _run(a):
         if res.get("incremental") and res["verdict"] in ("pass", "warn"):
             incremental = st["incremental"] = True
             c.answers.setdefault("rip-existing", "never")      # the existing copper stays: routing only adds (an owner --answer wins)
+            board = _renet_entry(c, work, board, st)           # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet)
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
             res["line"] = res.get("line", "")

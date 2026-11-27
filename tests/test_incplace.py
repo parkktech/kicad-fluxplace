@@ -58,7 +58,7 @@ def test_detect(tmp_path):
 def test_place_seats_new_parts_and_changes_nothing_else(tmp_path):
     p, cp = routed(tmp_path)
     out = str(tmp_path / "out.kicad_pcb")
-    moves = IP.place(p, out, C.load(cp))
+    moves, _back = IP.place(p, out, C.load(cp))
     assert set(moves) == {"R3", "R4", "R5"}
     f0, rest0 = blocks(p)
     f1, rest1 = blocks(out)
@@ -138,3 +138,58 @@ def test_pipeline_floorplan_to_review(tmp_path):
     p0, p1 = pos(b0), pos(b1)
     assert all(p1[r] == p0[r] for r in ("R1", "R2", "J1"))
     assert set(BW.net_items(p)["B"]) <= set(BW.net_items(final)["B"])                          # the shipped track is still there, same geometry
+
+
+def _packed(tmp, cons):
+    """12 x 8 board whose front is filled by two locked parts; the new R3 has a 6 x 6 courtyard that fits nowhere on the front."""
+    old = (g.fp("R1", 3, 4, [g.pad("1", -0.5, 0, "A"), g.pad("2", 0.5, 0, "B")], locked=True, court=(-2, -3, 2, 3))
+           + g.fp("R2", 9, 4, [g.pad("1", -0.5, 0, "B"), g.pad("2", 0.5, 0, "C")], locked=True, court=(-2, -3, 2, 3)))
+    p, cp = routed(tmp, existing=old, outline=(0, 0, 12, 8), cons=cons)
+    txt = open(p).read().replace(TRACK, '(segment (start 3.5 4) (end 8.5 4) (width 0.2) (layer "F.Cu") (net "B"))\n')
+    txt = re.sub(r'(\(footprint "X" \(layer "F.Cu"\) \(at 60 10 0.0\) \(property "Reference" "R3"\))', r'\1 (fp_rect (start -2.5 -2.5) (end 2.5 2.5) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))', txt)
+    open(p, "w").write(txt)
+    return p, cp
+
+
+def test_back_side_seat_when_the_policy_allows(tmp_path):
+    p, cp = _packed(tmp_path, '[placement]\nsides = "both"\nfixed = ["R1","R2"]\n[placement.heights]\n"R*" = 0.6\n')
+    out = str(tmp_path / "o.kicad_pcb")
+    moves, back = IP.place(p, out, C.load(cp))
+    assert "R3" in back
+    f0, rest0 = blocks(p)
+    f1, rest1 = blocks(out)
+    assert rest0 == rest1 and f0["R1"] == f1["R1"] and f0["R2"] == f1["R2"]
+    B = RD.load(out)
+    assert B["parts"]["R3"]["side"] == "B.Cu" and GM.in_outline(B, B["parts"]["R3"]["court"], 0.3)
+    assert all(q["layers"] == {"B.Cu"} for q in B["parts"]["R3"]["pads"])
+
+
+def test_back_side_refused_by_the_front_policy(tmp_path):
+    p, cp = _packed(tmp_path, '[placement]\nsides = "front"\nfixed = ["R1","R2"]\n')
+    with pytest.raises(IP.IncError, match=r"no legal seat for R3.*back side not allowed"):
+        IP.place(p, str(tmp_path / "o.kicad_pcb"), C.load(cp))
+
+
+@pytest.mark.skipif(not shutil.which("kicad-cli"), reason="the stage gates measure with kicad-cli")
+def test_swapped_connector_pad_on_foreign_copper_is_stripped_and_routed(tmp_path):
+    """J1 was swapped in place (its third pin is new, net N9) and a shipped track of net B ends on that pin: the pipeline hands that copper
+    to the re-net strip; the rest of the shipped copper stays and the board ends fully connected."""
+    import json
+    import cli
+    from fluxplace import pipeline as P
+    p, cp = routed(tmp_path)
+    txt = open(p).read().replace('(pad "3" smd rect (at 4 0 0.0) (size 0.8 0.8) (layers "F.Cu"))', '(pad "3" smd rect (at 4 0 0.0) (size 0.8 0.8) (layers "F.Cu") (net "N9"))')
+    txt = txt.replace(TRACK, TRACK + '(segment (start 34 17) (end 34 20) (width 0.2) (layer "F.Cu") (net "B"))\n')
+    txt = txt.replace('(pad "1" smd rect (at -0.5 0 0.0) (size 0.5 0.5) (layers "F.Cu") (net "N1")))\n(footprint "X" (layer "F.Cu") (at 60 15',
+                      '(pad "1" smd rect (at -0.5 0 0.0) (size 0.5 0.5) (layers "F.Cu") (net "N9")))\n(footprint "X" (layer "F.Cu") (at 60 15')
+    open(p, "w").write(txt)
+    assert 'net "N9"' in txt.split('"J1"')[1].split("(footprint")[0]
+    work = str(tmp_path / "W")
+    a = cli.build_parser().parse_args(["pipeline", p, "--flow", "constructive", "--from", "floorplan", "--to", "route",
+                                       "--workdir", work, "--constraints", cp])
+    P.run(a)
+    st = json.load(open(os.path.join(work, "state.json")))
+    assert st.get("renet") and "B" in st["renet"]["nets"] and any("J1" in x for x in st["renet"]["pads"])
+    b = pcbnew.LoadBoard(st["board"])
+    b.BuildConnectivity()
+    assert b.GetConnectivity().GetUnconnectedCount(True) == 0

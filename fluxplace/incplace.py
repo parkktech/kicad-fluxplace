@@ -13,7 +13,9 @@ Legal seat: courtyard inside the outline (edge margin), clear of every other par
 every pad clear of tracks and vias (the board's clearance), clear of keep-out areas that forbid footprints / pads / tracks.
 Choice: minimum wire length to the partners ([[intent.near]] rows first, else the other pads of the part's nets), then the
 nearest. Board-agnostic: nothing here names a ref or a net."""
+import copy
 import math
+import os
 from collections import Counter
 
 from . import boardwrite as BW
@@ -217,8 +219,8 @@ def _order(B, free):
     return sorted(free, key=lambda r: (rank[r], r))
 
 
-def _seat(world, B, cons, ref, radius=40.0):
-    part = B["parts"][ref]
+def _seat_on(world, B, cons, ref, part, closed=None, radius=40.0):
+    """best legal pose of `part` (the board's part, or its flipped copy) -> (key, pose, pads, court) or None."""
     tg, near = _pull_points(B, cons, ref, world)
     ax, ay = _anchor(B, tg, near)
     n = int(radius / STEP)
@@ -232,22 +234,41 @@ def _seat(world, B, cons, ref, radius=40.0):
         x, y = round(ax + dx * STEP, 3), round(ay + dy * STEP, 3)
         for ang in angs:
             pads, court = GM.moved(part, x, y, ang)
-            if not world.legal(ref, pads, court, part["side"], part["tht"]):
+            if not world.legal(ref, pads, court, part["side"], part["tht"]) or (closed and closed(court)):
                 continue
             key = (_cost(pads, tg, near) + 0.01 * d, d, ang)
             if best is None or key < best[0]:
                 best = (key, (x, y, ang), pads, court)
             if first_d is None:
                 first_d = d
+    return best, (ax, ay)
+
+
+def _seat(world, B, cons, ref, radius=40.0):
+    """-> (pose, pads, court, part model, flipped). Own side first; the other side only when the [placement] sides policy lets this part
+    stand on the back (backside.back_ok: not through-hole, height, heavy class) and no front seat exists."""
+    part = B["parts"][ref]
+    best, (ax, ay) = _seat_on(world, B, cons, ref, part, radius=radius)
+    flipped, why_back = False, ""
+    if best is None:
+        from . import backside as BS
+        ctx = BS.Ctx(B, cons)
+        ok, why_back = BS.back_ok(B, cons, ref, ctx=ctx, at_pose=False)
+        if ok:
+            part = copy.deepcopy(part)
+            GM.flip(part)
+            best, _ = _seat_on(world, B, cons, ref, part, closed=lambda c: BS.in_closed(ctx, ref, c), radius=radius)
+            flipped = best is not None
     if best is None:
         why = ", ".join(sorted(world.blockers, key=lambda r: -world.blockers[r])[:5])
         raise IncError(f"no legal seat for {ref} within {radius:g} mm of ({ax:.1f},{ay:.1f}) without moving a locked part"
-                       + (f"; locked parts in the way: {why}" if why else "; copper, keep-out or the outline blocks every candidate"))
-    return best
+                       + (f"; locked parts in the way: {why}" if why else "; copper, keep-out or the outline blocks every candidate")
+                       + (f"; back side not allowed: {why_back}" if why_back and why_back != "ok" else "; back side tried, no seat"))
+    return best[1], best[2], best[3], part, flipped
 
 
 def place(board_in, board_out, cons):
-    """Seat every free part. -> {ref: (x, y, angle)}. Writes board_out (board_in with only those footprints edited)."""
+    """Seat every free part. -> ({ref: (x, y, angle)}, [refs flipped to the back]). Writes board_out (board_in with only those footprints edited)."""
     from . import routediag as RD
     B = RD.load(board_in)
     d = detect(B, cons)
@@ -258,17 +279,26 @@ def place(board_in, board_out, cons):
                        + ", ".join(f"{r} ({a[0]:.2f},{a[1]:.2f}) -> ({b[0]:.2f},{b[1]:.2f})" for r, a, b in d["drift"][:6])
                        + "; fix the rows or the board, nothing was written")
     world = _World(B, d["free"])
-    moves = {}
+    moves, back = {}, []
     for ref in _order(B, d["free"]):
         world.blockers.clear()
-        _, pose, pads, court = _seat(world, B, cons, ref)
-        world.placed[ref] = (pads, court, B["parts"][ref]["side"], B["parts"][ref]["tht"])
+        pose, pads, court, part, flipped = _seat(world, B, cons, ref)
+        world.placed[ref] = (pads, court, part["side"], part["tht"])
         moves[ref] = pose
-    with open(board_in, errors="surrogateescape") as fh:
+        if flipped:
+            back.append(ref)
+    src = board_in
+    if back:                                             # the text writer cannot mirror: pcbnew flips them, only their nodes are spliced in
+        from . import flip as FL
+        src = board_out + ".flip.tmp"
+        FL.flip_file(board_in, src, back)
+    with open(src, errors="surrogateescape") as fh:
         text = fh.read()
+    if back:
+        os.remove(src)
     text, done = BW.apply_moves(text, moves)
     if set(done) != set(moves):
         raise IncError("footprint(s) not found in the board text: " + ", ".join(sorted(set(moves) - set(done))))
     with open(board_out, "w", errors="surrogateescape") as fh:
         fh.write(text)
-    return moves
+    return moves, back
