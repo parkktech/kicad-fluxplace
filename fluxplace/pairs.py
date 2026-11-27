@@ -314,6 +314,7 @@ def _guide_cost(ctx, grid, sig, nets, cost):
 
 NODE_RATE = 30000          # A* pops per second measured on W16 (6M nodes ~ 200 s)
 NODE_CAP_S = 300           # w82: one section's search never plans for more than this many seconds
+NODE_MIN_S = 30            # w82: seconds of search a section keeps even when the stage deadline is near
 STATES_PER_CELL = 8        # direction x polarity states per cell and layer the search can visit
 
 
@@ -326,7 +327,10 @@ def node_limit(P, span, grid, ta, tb, budget_x=1):
     w = abs(ta["c"][0] - tb["c"][0]) + 2 * pad
     h = abs(ta["c"][1] - tb["c"][1]) + 2 * pad
     area = w * h / (grid.step * grid.step) * len(grid.sig) * STATES_PER_CELL
-    return int(min(budget_x * max(base, area), max(budget_x * base, NODE_RATE * NODE_CAP_S)))
+    cap_s = NODE_CAP_S
+    if P.get("deadline"):                               # [pairlay] budget_min: the extra room never outlives the stage's own wall budget
+        cap_s = min(cap_s, max(NODE_MIN_S, P["deadline"] - time.time()))
+    return int(min(budget_x * max(base, area), max(budget_x * base, NODE_RATE * cap_s)))
 
 
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):

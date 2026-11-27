@@ -511,3 +511,15 @@ def test_node_limit_grows_with_the_corridor_box_and_is_capped_by_search_time():
     assert big > 400000 + 25000 * 40 and big <= PR.NODE_RATE * PR.NODE_CAP_S
     assert PR.node_limit(P, 40.0, grid, t(0, 0), t(300, 250)) == PR.NODE_RATE * PR.NODE_CAP_S      # capped by search time
     assert PR.node_limit(P, 40.0, grid, t(0, 0), t(30, 25), budget_x=3) == min(3 * big, max(3 * (400000 + 25000 * 40), PR.NODE_RATE * PR.NODE_CAP_S))
+
+
+def test_node_limit_never_plans_past_the_stage_deadline():
+    import time as _t
+    import types
+    grid = types.SimpleNamespace(step=0.1, sig=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    t = lambda x, y: {"c": (x, y)}
+    P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0}
+    free = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250))
+    near = PR.node_limit(dict(P, deadline=_t.time() + 60), 5.0, grid, t(0, 0), t(300, 250))
+    over = PR.node_limit(dict(P, deadline=_t.time() - 500), 5.0, grid, t(0, 0), t(300, 250))
+    assert free == PR.NODE_RATE * PR.NODE_CAP_S and PR.NODE_RATE * 55 <= near <= PR.NODE_RATE * 61 and over == PR.NODE_RATE * PR.NODE_MIN_S
