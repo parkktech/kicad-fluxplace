@@ -95,6 +95,7 @@ def test_final_commit_falls_back_to_the_newest_verified_accepted_state(tmp_path,
     tuned = _moved(tmp_path)
     broken = board(tmp_path, "broken.kicad_pcb", seg("D_P", (20, 20), (30, 20.6), True) + seg("D_N", (20, 21), (30, 21.7), True) + seg("SIG", (20, 23), (30, 29)))
     inp = _setup(tmp_path, monkeypatch, tuned, broken)
+    monkeypatch.setattr(G, "CLOSE_FIRST", ())          # the premise is pair-skew (tune) accepted BEFORE the open-gap patch; w78 puts connections first
     state = {"n": 0}
 
     def rm(p, cli="kicad-cli"):
