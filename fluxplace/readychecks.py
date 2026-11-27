@@ -55,6 +55,22 @@ def gate_refusal(board, cons, spec=None):
         "): fix, or cover each with a [review] waive row or a budget row with a reason"
 
 
+def load_current_line(board, cons):
+    """-> ready line. WARN naming each rail and the parts whose draw is unknown (power.unknown_loads): the route stage sizes their
+    branches by the rail total. PASS when every load has a figure; UNCHECKED when it could not run."""
+    from .ready import _line, PASS, WARN, UNCHECKED
+    from . import power as PW
+    try:
+        unk = PW.unknown_loads(board, cons)
+    except Exception as e:                                       # noqa: BLE001 - a check that could not run is never PASS
+        return _line("rail load currents", UNCHECKED, f"NOT CHECKED ({type(e).__name__}: {str(e)[:100]})")
+    if not unk:
+        return _line("rail load currents", PASS, "every [power] rail load has a known current ([[dcdrop]] row, part figure or 0 A DC)")
+    return _line("rail load currents", WARN, f"{sum(len(v) for v in unk.values())} load(s) of {len(unk)} rail(s) with no known current: "
+                 + "; ".join(f"{n}: {', '.join(v)}" for n, v in sorted(unk.items())),
+                 [f"{n}: add a sourced [[dcdrop]] row (from the source part, to {u}) for each" for n, v in sorted(unk.items()) for u in v[:1]])
+
+
 # ------------------------------------------------------------------ stage table (K2)
 def stage_table(cons, flow=None, noted=None):
     """-> [{stage, on, why, unset}]. `noted`: {stage: reason} the constraints record for a deliberate off ([ready.stage_off])."""

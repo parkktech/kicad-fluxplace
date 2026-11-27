@@ -789,7 +789,7 @@ def _rung_cap(cons, rung=None, budget_s=None):
 
 
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
-SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden", "relocate")   # the rungs whose candidate depends on the gap list
+SPLIT_RUNGS = ("krt", "krt_region", "region", "pairgroup", "powerwiden", "padvias", "relocate")   # the rungs whose candidate depends on the gap list
 SPLIT_WHY = ("R1 ", "R2 ", "R4 ", "R5 ", "R6 ", "target gap still there")
 
 
@@ -1068,6 +1068,14 @@ def _r_powerwiden(base, out, gaps, ctx):
     return {"status": "ran" if os.path.exists(out) else "no change", "widened_mm": r["widened_mm"], "left_mm": r["left_mm"],
             "skipped": r["skipped"], "necks": len(r.get("necks") or []),
             "unreached": {n: len(v) for n, v in (r.get("unreached") or {}).items()}}
+
+
+def _r_padvias(base, out, gaps, ctx):
+    """POWER_WIDTH on a plane-adjacent narrow trunk: via-in-pad vias from the run's end pads into the same-net plane (power.add_pad_vias).
+    An update run (ctx input_board) repairs only copper it laid; inherited copper is never touched."""
+    from . import power as PW
+    r = PW.add_pad_vias(base, ctx["cons"], out, nets=_nets(gaps), cons_path=ctx.get("cons_path"), only_new_vs=ctx.get("input_board"))
+    return {"status": "ran" if os.path.exists(out) else "no change", "pads": r["pads"], "added": sum(v["added"] for v in r["pads"].values())}
 
 
 def _r_railpour(base, out, gaps, ctx):
@@ -2309,7 +2317,7 @@ def _r_pairgroup(base, out, gaps, ctx):
 RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_edgesliver, "patch": _r_patch, "patch_rip": _r_patch_rip,
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "krt_locked": _r_krt_locked, "ai": _r_ai, "prune": _r_prune,
-         "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "railpour": _r_railpour,
+         "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "padvias": _r_padvias, "railpour": _r_railpour,
          "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
@@ -2322,7 +2330,7 @@ DISPATCH = {
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
     "mask-opening": ["maskcut"],            # PHASE3F A7: re-cut after routing; the close guard judges it
-    "power-width": ["powerwiden", "railpour"],     # PHASE3G G4: widen in place, then pour, then (power-vias) vias
+    "power-width": ["padvias", "powerwiden", "railpour"],     # w109: via-in-pad to the plane, then PHASE3G G4: widen in place, then pour, then (power-vias) vias
     "power-vias": ["powervias"],
     "rf-impedance": ["rfroute"],           # A6: strip and re-lay at the impedance width on outer layers
     "silk-fit": [],                        # B8: silkscreen text / artwork off the board or over a pad: the `silk` stage's fit repairs it (copper is never touched)
@@ -2576,10 +2584,11 @@ def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, 
 
 
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, runs=None, log=print, inproc=False, kinds=None, baseline=None):
+          attempts=None, runs=None, log=print, inproc=False, kinds=None, baseline=None, input_board=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md.  `baseline`: gap rows of the input board (re-net / incremental run): a gap
-    already there (same id, not worse) is reported, never worked or counted as left."""
+    already there (same id, not worse) is reported, never worked or counted as left. `input_board`: the board an update run started
+    from; the padvias rung touches only copper that is not on it."""
     clock = CX.Clock()                                   # B6a: every second of this stage lands in exactly one category
     clock.switch("queue")
     os.makedirs(work, exist_ok=True)
@@ -2748,7 +2757,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                        "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons, rung, budget_s)),
                        "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
-                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback,
+                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback, "input_board": input_board,
                        "hs_legs": sorted({n for g in m["gaps"] if g.get("class") == "hs-pair" for n in g.get("nets", [])}),
                        "pair_gap_legs": sorted({n for g in m["gaps"] if str(g["kind"]).startswith("pair-")
                                                 for n in g.get("nets", [])}),
