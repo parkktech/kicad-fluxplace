@@ -289,3 +289,12 @@ def test_decider_call_model_passes_tools_cwd_and_reports_cost(tmp_path, monkeypa
     info = {}
     assert DC.call_model("q", None, "haiku", tools="Read", cwd=str(tmp_path), info=info) == ("{}", "")
     assert seen["cmd"][seen["cmd"].index("--tools") + 1] == "Read" and seen["cwd"] == str(tmp_path) and info["cost_usd"] == 0.02
+
+
+def test_connector_terminals_named_without_numbers_cover_the_package():
+    d = {"category": "connector", "package": {"pins": 4, "p": 1}, "temp_range": {"p": 1}, "currents": [{"p": 1}],
+         "pins": [{"num": ["1"], "name": "SIG"}]}
+    assert DO.gaps(d) == ["pins"]
+    DO.merge(d, {"pins": [{"num": [], "name": n} for n in ("CONTACT", "GND", "GND", "GND")]})
+    assert DO.gaps(d) == [] and len(d["pins"]) == 4
+    assert "pins" in DO.gaps(dict(d, category="logic", pins=d["pins"]))     # an IC's pins must be numbered

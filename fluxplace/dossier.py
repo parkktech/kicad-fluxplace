@@ -255,9 +255,19 @@ def gaps(dos):
     out = [s for s in required(dos) if not dos.get(s) and s not in (dos.get("na") or {})]
     pk = (dos.get("package") or {}).get("pins")
     if "pins" in required(dos) and "pins" not in out and isinstance(pk, int) and not isinstance(pk, bool) and pk > 2 \
-            and len({str(n) for p in dos["pins"] for n in p.get("num") or []}) < pk:
+            and _cover(dos) < pk:
         out.append("pins")
     return out
+
+
+def _cover(dos):
+    """How many package pins the pin table knows: its numbered pins; a connector whose drawing names terminals without numbers (a coax
+    centre contact and its ground contacts) counts its named terminals - the footprint numbers them."""
+    pins = dos.get("pins") or []
+    nums = {str(n) for p in pins for n in p.get("num") or []}
+    if not nums and dos.get("category") == "connector":
+        return sum(1 for p in pins if (p.get("name") or "").strip())
+    return len(nums)
 
 
 def merge(dos, add):
@@ -266,7 +276,7 @@ def merge(dos, add):
     if add.get("category") not in (None, "unknown"):
         dos["category"] = add["category"]
     for s in gaps(dos):
-        if add.get(s) and (s != "pins" or len(add[s]) > len(dos.get(s) or [])):
+        if add.get(s) and (s != "pins" or _cover({**dos, "pins": add[s]}) > _cover(dos)):
             dos[s] = add[s]
         elif s in (add.get("na") or {}):
             dos.setdefault("na", {})[s] = add["na"][s]
