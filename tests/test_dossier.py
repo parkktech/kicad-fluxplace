@@ -149,7 +149,7 @@ def test_missing_required_facts_escalate_to_pictures_and_other_documents(tmp_pat
     assert st == "made" and d["knowable"] and d["missing"] == [] and len(calls) == 2 and abs(cost - 0.02) < 1e-9
     assert "missing: temp_range, abs_max, io_levels, interfaces" in calls[1] and "=== DOC TPS0000-appnote.pdf PAGE 1 ===" in calls[1] and "page-" in calls[1]
     assert d["abs_max"][0]["doc"] == "TPS0000-appnote.pdf" and d["io_levels"][0]["img"] and d["temp_range"]["src"] == "distributor"
-    assert d["na"] == {"interfaces": "no digital interface"} and d["sources"] == ["datasheet", "pictures+documents", "distributor"]
+    assert d["na"] == {"interfaces": "no digital interface"} and d["sources"] == ["datasheet", "pictures+documents (haiku)", "distributor"]
 
 
 def test_a_part_no_source_completes_is_unknowable_and_the_parts_gate_fails_without_waiver(tmp_path, monkeypatch):
@@ -157,6 +157,7 @@ def test_a_part_no_source_completes_is_unknowable_and_the_parts_gate_fails_witho
                                                                          "doc": "TPS0000-appnote.pdf"}]})
     d, st, _ = DO.build("TPS0000", os.path.join(ds, "X.pdf"), "ab" * 32, ask=ask, distributor=lambda m: None)
     assert st == "UNKNOWABLE" and not d["knowable"] and d["missing"] == ["temp_range", "abs_max", "io_levels", "interfaces"]
+    assert len(calls) == 3 and d["sources"][1:] == ["pictures+documents (haiku)", "distributor", "pictures+documents (sonnet)"]
     assert d["rejected"][-1]["why"] == "max=99 is not on page 1"                 # 99 V is not printed in the app note
     DO.record_replacement("TPS0000", "ab" * 32, [{"mpn": "TPS0001", "drop_in": True, "differs": [], "knowable": True, "missing": []}])
     from fluxplace import parts as P
@@ -179,6 +180,8 @@ def test_a_v1_dossier_is_upgraded_without_a_second_text_pass(tmp_path, monkeypat
 
 def test_passive_and_connector_requirements_follow_the_category():
     assert DO.gaps({"category": "passive", "package": {"p": 1}, "temp_range": {"p": 1}, "abs_max": [{"p": 1}]}) == []
+    assert DO.gaps({"category": "magnetics", "package": {"pins": 2}, "temp_range": {"p": 1}, "abs_max": [{"p": 1}]}) == []
+    assert DO.gaps({"category": "magnetics", "package": {"pins": 4}, "temp_range": {"p": 1}, "abs_max": [{"p": 1}]}) == ["pins"]
     assert DO.gaps({"category": "connector", "pins": [{"num": ["1"], "type": "passive"}]}) == ["package", "temp_range", "currents"]
     ic = {"pins": [{"num": ["1"], "type": "input"}]}                              # no supply pin: no supplies / decoupling needed
     assert "supplies" not in DO.gaps(ic) and "decoupling" not in DO.gaps(ic)
@@ -202,3 +205,10 @@ def test_replacement_takes_the_first_knowable_drop_in(tmp_path, monkeypatch):
     rows = DO.propose_replacement("OLD", fetch=fetch, ask=lambda p: (json.dumps(bad if "A1" in p else RAW), 0.0), enricher=False)
     assert [r["mpn"] for r in rows] == ["B2", "A1"] and rows[0]["knowable"] and rows[1]["missing"] == ["temp_range"]
     assert os.path.isdir(cd)
+
+
+def test_distributor_ratings_fill_a_passive_abs_max():
+    d = DO._distributor({"category": "passive", "package": {"p": 1}, "temp_range": {"p": 1}},
+                        {"raw_params": {"Voltage - Rated": "50V", "Capacitance": "100nF", "Tolerance": "-"}})
+    assert d["abs_max"] == [{"param": "Voltage - Rated", "max": "50V", "src": "distributor"}] and DO.gaps(d) == []
+    assert DO.elec_facts(dict(d, file="x.pdf")) == {}                          # a distributor fact never feeds a check

@@ -36,16 +36,21 @@ import subprocess
 import tempfile
 import time
 
-VERSION = 2                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
+VERSION = 4                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
 MODEL = "haiku"
 TEXT_BUDGET = 240_000                 # characters of datasheet text sent per part (~60k tokens)
 LIST_SECTIONS = ("pins", "swap_groups", "supplies", "currents", "abs_max", "io_levels", "interfaces", "decoupling", "keepouts",
                  "rf", "app_circuit")
 DICT_SECTIONS = ("package", "msl", "temp_range", "thermal", "crystal")
 _IC = ("package", "temp_range", "pins", "supplies", "abs_max", "io_levels", "interfaces", "decoupling")
+_TWO = ("package", "temp_range", "pins", "abs_max")
 REQUIRED = {"connector": ("package", "temp_range", "pins", "currents"), "passive": ("package", "temp_range", "abs_max"),
-            "diode": ("package", "temp_range", "pins", "abs_max"), "transistor": ("package", "temp_range", "pins", "abs_max")}
+            "magnetics": _TWO, "diode": _TWO, "led": _TWO, "transistor": _TWO, "crystal": _TWO, "relay": _TWO,
+            "antenna": ("package", "temp_range", "pins"), "battery": ("package", "temp_range", "abs_max"), "button": _TWO,
+            "mechanical": ("package",)}
+_NONPOLAR = ("passive", "magnetics", "antenna")      # a 2-terminal part of these has no pin identity to know
 NA_OK = ("io_levels", "interfaces")      # may be declared not applicable with a reason (an analog part has no logic levels)
+ESCALATE_MODEL = os.environ.get("FLUXPLACE_DOSSIER_MODEL2", "sonnet")    # second gap pass (Haiku first, Sonnet when it falls short)
 GAP_PAGES = 8                            # page pictures per gap pass
 _TEXT_KEYS = {"name", "function", "type", "domain", "why", "protocol", "what", "note", "param", "unit", "pad", "vias", "alt", "pins",
               "num", "description", "category"}     # prose: not digit-checked (value, speed, edge_rate, msl v are: their numbers are printed)
@@ -60,7 +65,7 @@ Use ONLY the datasheet text below (pages are marked "=== PAGE n ==="). Every fac
 Copy numbers exactly as printed with the unit as printed (do not convert units). Anything the datasheet does not state: leave it out
 and add the section name to "unknown". Never guess. When the datasheet covers several packages, use the package of {mpn}.
 Return ONE JSON object, no prose, with these keys (omit empty ones):
-{{"category": "mcu|regulator|switch|interface|codec|sensor|rf|connector|passive|diode|transistor|logic|module|other",
+{{"category": "mcu|regulator|switch|interface|codec|sensor|rf|oscillator|connector|passive|magnetics|diode|led|transistor|crystal|relay|antenna|battery|button|mechanical|logic|module|other",
  "description": "one line",
  "package": {{"name": "...", "pins": 0, "p": 0}}, "msl": {{"v": "...", "p": 0}}, "temp_range": {{"min": 0, "max": 0, "unit": "C", "p": 0}},
  "pins": [{{"num": ["1"], "name": "...", "function": "short", "alt": ["mux alternates"], "type": "power_in|power_out|ground|input|output|bidir|open_drain|analog|rf|passive|nc|other", "domain": "supply pin name this pin's level follows, or null", "p": 0}}],
@@ -75,7 +80,10 @@ Return ONE JSON object, no prose, with these keys (omit empty ones):
  "rf": [{{"what": "matching / antenna clearance", "p": 0}}], "crystal": {{"load_pf": 0, "p": 0}},
  "app_circuit": [{{"what": "reference circuit element and value", "p": 0}}],
  "unknown": ["section names not stated"]}}
-Pins: every pin of the package; for a GPIO give every mux alternate in "alt" naming its peripheral (e.g. "SPI0_MOSI", "I2C1_SDA", "UART2_TX").
+temp_range is the operating range (ambient, or the operating junction range when that is all the datasheet gives).
+abs_max holds every limiting rating: absolute maximum ratings, and for passives / magnetics / relays / crystals the rated voltage,
+rated or saturation current, power rating, drive level, contact and coil ratings.
+Pins: every pin of the package (a 2-terminal part: both terminals with their polarity as the drawing marks them, e.g. 1 = cathode); for a GPIO give every mux alternate in "alt" naming its peripheral (e.g. "SPI0_MOSI", "I2C1_SDA", "UART2_TX").
 "na": {{"io_levels": "reason"}} only when a section does not apply to this part (io_levels, interfaces). Swap groups: only pins the datasheet shows as equivalent (same function class, any one usable).
 Connectors: pins are contacts; contacts of one kind (signal / power) form a swap group; contact current rating goes in currents (what=contact).
 
@@ -87,7 +95,8 @@ Fill ONLY those sections (same JSON shape as below), from these sources:
 {sources}
 Every fact carries "p" (page number) and, when it comes from another document, "doc": that file name; a fact read from a page picture
 carries "img": true. Copy numbers exactly as printed. Never guess: a section no source states stays out. A section that does not apply to
-this part may be declared in "na": {{"section": "reason"}} (only {na_ok}). Return ONE JSON object, no prose.
+this part may be declared in "na": {{"section": "reason"}} (only {na_ok}). Also return "category" (the list in the shapes).
+Return ONE JSON object, no prose.
 Shapes: {shapes}
 
 {text}
@@ -232,6 +241,8 @@ def verify(raw, pg, vision=False, docs=None):
 def required(dos):
     """The REQUIRED sections of a part by its category; supplies and decoupling only when the part has a supply pin."""
     req = REQUIRED.get(dos.get("category"), _IC)
+    if dos.get("category") in _NONPOLAR and ((dos.get("package") or {}).get("pins") or 2) <= 2:
+        req = tuple(x for x in req if x != "pins")
     if dos.get("pins") and not any(p.get("type") == "power_in" for p in dos["pins"]):
         req = tuple(x for x in req if x not in ("supplies", "decoupling"))
     return req
@@ -243,7 +254,10 @@ def gaps(dos):
 
 
 def merge(dos, add):
-    """Fill `dos` from a later source's verified dossier: only sections still missing, and its `na` / `rejected`."""
+    """Fill `dos` from a later source's verified dossier: only sections still missing, and its `na` / `rejected`; a later reading's
+    category replaces the first (it decides which sections are required)."""
+    if add.get("category") not in (None, "unknown"):
+        dos["category"] = add["category"]
     for s in gaps(dos):
         if add.get(s):
             dos[s] = add[s]
@@ -319,6 +333,12 @@ def siblings(pdf, mpn, limit=3):
     return out[:limit]
 
 
+_GAP_WORDS = {"pins": r"pin|terminal|pad|polarity|cathode|marking", "abs_max": r"absolute|maximum rating|rated|rating|drive level",
+              "temp_range": r"temperature", "supplies": r"supply|operating conditions", "io_levels": r"V[\s_]?IH|V[\s_]?IL|input high|logic level",
+              "interfaces": r"interface|protocol|I2C|SPI|UART|USB|clock frequency", "decoupling": r"bypass|decoupl|capacitor",
+              "currents": r"current|contact", "package": r"package|dimension|outline"}
+
+
 def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     """-> (verified additions, cost): the missing REQUIRED sections from the datasheet's page pictures and the family's other documents."""
     from . import partcite as PC
@@ -327,10 +347,18 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     hot = [k for k in range(1, len(pg) + 1) if k not in thin and re.search(r"pin (configuration|description|function)|pinout|"
                                                                            r"absolute maximum|recommended operating", pg[k - 1], re.I)]
     pics = [k for k in (thin + hot)[:GAP_PAGES] if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
+    pat = re.compile("|".join(_GAP_WORDS[s] for s in need if s in _GAP_WORDS) or "$^", re.I)
+    own = [k for k in range(1, len(pg) + 1) if k not in thin and pat.search(pg[k - 1])]
     docs = {}
     for f in siblings(pdf, mpn):
         docs[os.path.basename(f)] = pages(f)
     budget, chunks = TEXT_BUDGET // 2, []
+    for k in own:
+        if budget - len(pg[k - 1]) < 0:
+            break
+        budget -= len(pg[k - 1])
+        chunks.append(f"=== PAGE {k} ===\n{pg[k - 1]}")
+    n_own = len(chunks)
     for name, dp in docs.items():
         for n, t in enumerate(dp, 1):
             if budget - len(t) < 0:
@@ -340,8 +368,14 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     sources = []
     if pics:
         sources.append("- page pictures of the datasheet (Read them): " + ", ".join(f"page-{k}.png (page {k})" for k in pics))
-    if chunks:
+    if n_own:
+        sources.append("- the datasheet's own pages on these subjects again (=== PAGE n ===): read them closely")
+    if len(chunks) > n_own:
         sources.append("- text of other documents below (marked === DOC file PAGE n ===)")
+    bad = [f"{r['section']}: {r['why']}" for r in dos.get("rejected") or [] if r.get("section") in need][:12]
+    if bad:
+        sources.append("- an earlier reading was rejected (the number or name is not on the cited page; cite the page it IS on): "
+                       + "; ".join(bad))
     if not sources:
         return {"rejected": []}, 0.0
     shapes = PROMPT[PROMPT.index("{{\"category\""):PROMPT.index("Pins: every pin")].replace("{{", "{").replace("}}", "}")
@@ -361,7 +395,16 @@ def _distributor(dos, row):
         dos["package"] = {"name": row["package"], "pins": row.get("pins"), "src": "distributor"}
     if "temp_range" in need and row.get("temp_min") is not None and row.get("temp_max") is not None:
         dos["temp_range"] = {"min": row["temp_min"], "max": row["temp_max"], "unit": "C", "src": "distributor"}
+    params = row.get("raw_params") or row.get("params") or {}
+    rated = [{"param": k, "max": v, "src": "distributor"} for k, v in params.items()
+             if _RATING.search(k) and v and str(v).strip() not in ("-", "")]
+    if "abs_max" in need and rated:
+        dos["abs_max"] = rated
     return dos
+
+
+_RATING = re.compile(r"voltage - rated|rated voltage|current rating|current - saturation|power \(watts\)|voltage - (reverse standoff|"
+                     r"breakdown|zener|dc reverse)|drive level|contact rating|coil voltage|current - max|voltage - max", re.I)
 
 
 def _dist_row(mpn):
@@ -398,14 +441,19 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributo
                 dos = verify(raw, pg, vision)
             dos.setdefault("na", {})
             sources = ["datasheet"]
-            if gaps(dos):
-                add, c2 = _gap_pass(mpn, pdf, pg, dos, td, ask, model)
+            for i, m2 in enumerate((model, model or ESCALATE_MODEL)):   # the cheap model, then a stronger one on what is still missing
+                if i and gaps(dos):                            # the distributor's parametrics before the stronger model
+                    _distributor(dos, (distributor or _dist_row)(mpn))
+                    sources.append("distributor")
+                if not gaps(dos):
+                    break
+                add, c2 = _gap_pass(mpn, pdf, pg, dos, td, ask, m2)
                 cost += c2
                 merge(dos, add)
-                sources.append("pictures+documents")
+                sources.append(f"pictures+documents ({_model(m2)})")
         except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as e:
             return None, f"model failed: {e}", 0.0
-    if gaps(dos):
+    if gaps(dos) and "distributor" not in sources:
         _distributor(dos, (distributor or _dist_row)(mpn))
         sources.append("distributor")
     miss = gaps(dos)
