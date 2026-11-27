@@ -2026,8 +2026,9 @@ def _tune_match(a):
 def cmd_datasheets(a):
     """Fetch every MPN's datasheet into the project (DigiKey/Mouser APIs),
     record it in datasheets.json with a hash, and say which ones need a
-    browser. With --adopt, register PDFs dropped in by hand."""
-    import json as _json
+    browser. With --adopt, register PDFs dropped in by hand. Then the
+    component dossier of every part (fluxplace/dossier.py)."""
+    import json as _json, time as _time
     from fluxplace import partdocs as PD2, sourcing as S
     mpns = []
     if a.mpn_map:
@@ -2048,6 +2049,20 @@ def cmd_datasheets(a):
     have = sum(1 for v in res.values() if v)
     miss = sorted(k for k, v in res.items() if not v)
     print(f"datasheets: {have}/{len(res)} on disk in {a.out}")
+    from fluxplace import dossier as DO                  # w95: read every part before placement (cached per MPN + datasheet hash)
+    docs = [k for k in PD2.load_manifest(a.out) if k.lower().endswith(".pdf")]   # a module datasheet a pinmap cites (no MPN of its own)
+    t0, dres = _time.time(), DO.build_all(a.out, [k for k, v in res.items() if v] + docs,
+                                         jobs=int(os.environ.get("FLUXPLACE_DOSSIER_JOBS", 4)), log=lambda m: print(m, flush=True))
+    ok = [d for d, _, _ in dres.values() if d]
+    picks = DO.replace_unknowable({k: v for k, v in dres.items() if k not in docs}, a.out, log=lambda x: print(x, flush=True)) \
+        if DO.online() else {}
+    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {sum(1 for d in ok if d['knowable'])} fully knowable, "
+          f"${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) in {DO.cache_dir()}")
+    for d in ok:
+        if not d["knowable"]:
+            pick = picks.get(d["mpn"]) or {}
+            print(f"  UNKNOWABLE {d['mpn']}: missing {', '.join(d['missing'])}; replacement {pick.get('choice') or 'none'} "
+                  f"({pick.get('by', 'not searched')}: {pick.get('rationale', '')[:80]})")
     if miss:
         print("  need a browser (drop the PDF in and run --adopt MPN=file.pdf): "
               + ", ".join(miss))
@@ -3700,7 +3715,8 @@ def build_parser():
     pds = sub.add_parser("datasheets",
                          help="fetch every MPN's datasheet into the project "
                               "(DigiKey/Mouser), hash it into datasheets.json, "
-                              "list the ones that need a browser")
+                              "list the ones that need a browser, then read each "
+                              "into a cached component dossier (pins, supplies, layout)")
     pds.add_argument("--out", required=True, help="datasheet directory")
     pds.add_argument("--board", default=None, help="board (mpn_map.json auto-found)")
     pds.add_argument("--mpn-map", default=None)

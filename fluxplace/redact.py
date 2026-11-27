@@ -85,16 +85,20 @@ def _host(req):
     return urllib.parse.urlsplit(getattr(req, "full_url", None) or str(req)).hostname or ""
 
 
-def urlopen(req, timeout=30):
+def urlopen(req, timeout=30, slow=False):
     """urllib.request.urlopen whose failures carry no credentials. HTTPError keeps its type (callers branch on
     .code); other exceptions are re-raised with the same type when constructible, else as RuntimeError. The
     replacement is raised with no __cause__ and no __context__, so the original (unredacted) exception and its
     URL are not reachable from the traceback.
     Bounded: one request waits at most `http_timeout_s` (default 15); a host that fails `http_down_after` (2)
     times in a row at the network level (timeout, DNS, refused; an HTTP status is an answer) is skipped for
-    `http_down_s` (300) s, so a dead distributor costs two timeouts, not one per part."""
+    `http_down_s` (300) s, so a dead distributor costs two timeouts, not one per part.
+    slow: a manufacturer document host (large PDFs, slow CDNs): the caller's timeout is not capped and the host gets two more
+    failures of grace before it is skipped."""
     import time
     cap, after, down_s = _limits()
+    if slow:
+        cap, after = max(cap, timeout), after + 2
     host = _host(req)
     st = _DOWN.get(host)
     if st and st[1] > time.time():

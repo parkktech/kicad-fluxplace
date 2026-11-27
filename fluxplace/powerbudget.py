@@ -450,8 +450,8 @@ def support_row(B, cons, spec, ref, net, info, ic=None, pad=None, facts=None, mp
         mm = _fact_mm((facts or {}).get(mpn), key, names)
         if mm is not None:
             src = ((facts.get(mpn) or {}).get("_src") or {}).get(key, "datasheet")
-            row = {"target": mm, "max": mm, "klass": "REQ", "derived": "", "source": f"datasheet fact {key} of {mpn} ({src})",
-                   "edge": True}               # a datasheet "within x mm of the pin" is pad edge to pad edge (P5b S2)
+            row = {"target": mm, "max": mm, "klass": "INF" if "(dossier)" in src else "REQ", "derived": "",
+                   "source": f"datasheet fact {key} of {mpn} ({src})", "edge": True}   # pad edge to pad edge (P5b S2); a model-read (dossier) limit informs until confirmed
     row.update(role=role, unit="mm")
     return row
 
