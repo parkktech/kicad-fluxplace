@@ -4,6 +4,7 @@ import hashlib, json, os, shutil, sys
 from collections import Counter
 import pytest
 from fluxplace import refusal as refusal_mod
+from fluxplace import closeexec as CX
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import types
 from fluxplace import gaps as GP
@@ -530,7 +531,7 @@ def test_call_rung_exit_and_timeout(monkeypatch, tmp_path):
         GP._call_rung("patch", "in", out, [], _rung_ctx(tmp_path))
 
     def slow(*a, **k):
-        assert k["timeout"] == 60 + 120
+        assert k["timeout"] == 60 + CX.KILL_SLACK_S          # B6a: bounded slack, no more +120 s
         raise subprocess.TimeoutExpired(cmd="x", timeout=k["timeout"])
     monkeypatch.setattr(_procs_mod, "run", slow)
     with pytest.raises(RuntimeError, match="rung timeout"):

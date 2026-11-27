@@ -15,7 +15,7 @@ import sys
 import time
 from collections import Counter
 
-from . import audit, calllog, refusal, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
+from . import audit, calllog, closeexec as CX, refusal, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
 from . import events as EV
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
@@ -634,7 +634,8 @@ def _r_handrepair(base, out, gaps, ctx):
             return {"status": "no signal layers"}
         _clean_board(w)
         HR.session_begin(base, w, ctx["kicad_cli"])
-        r = HP.repair(w, out, constraints=ctx["cons_path"], budget=min(900, ctx["budget_s"]), layers=layers)
+        with CX.phase(ctx.get("phase_file"), "router"):
+            r = HP.repair(w, out, constraints=ctx["cons_path"], budget=_left(ctx, 900), layers=layers)
         if soft and os.path.exists(out):
             # a soft-locked net whose copper was ripped is written only when the same rung re-laid it (no new opens)
             ripped = [n for n in soft if _rows_count(out, n) < _rows_count(base, n)]
@@ -700,11 +701,30 @@ def _krt_cmd(base, out, nets, ctx, layers=None):
     return P._route_cmd(a, base, out, [KC.glob_escape(n) for n in nets], power_nets=pw, R=R, rflags=rflags)
 
 
+def _left(ctx, cap=None):
+    """Seconds a rung (or a router it starts) may still run: to the shared monotonic deadline when the close set one, else its
+    nominal budget; at most `cap`."""
+    if ctx.get("deadline") is not None:
+        return CX.left(ctx["deadline"], cap)
+    b = float(ctx["budget_s"])
+    return b if cap is None else min(cap, b)
+
+
 RUNG_CAP_S = 900                                # PHASE3F A1: one rung gets at most this much of the close budget ([flow] rung_cap_min, minutes)
 
 
-def _rung_cap(cons):
-    return float((((cons or {}).get("flow") or {}).get("rung_cap_min", RUNG_CAP_S / 60))) * 60
+RUNG_FRAC = {"pourisland": 0.05}                # B11: slow rungs get a fraction of the close budget (W16 B6-0: pourisland timed out after 434 s)
+
+
+def _rung_cap(cons, rung=None, budget_s=None):
+    """Seconds one rung may take: [flow] rung_cap_min (default 900 s), and for a rung with a fraction (`[flow.rung_frac]` NAME = F, else
+    RUNG_FRAC) at most F of the close budget `budget_s`."""
+    flow = (cons or {}).get("flow") or {}
+    cap = float(flow.get("rung_cap_min", RUNG_CAP_S / 60)) * 60
+    frac = (flow.get("rung_frac") or {}).get(rung, RUNG_FRAC.get(rung)) if rung else None
+    if frac and budget_s:
+        cap = min(cap, float(frac) * float(budget_s))
+    return cap
 
 
 SPLIT_MAX = 6                                   # PHASE3F A3: extra attempts per (kind, rung) per round for split halves
@@ -784,7 +804,7 @@ def _r_krt(base, out, gaps, ctx):
     cur, tmps, t0, done = base, [], time.time(), set()
     try:
         for k, net in enumerate(targets):
-            if time.time() - t0 > ctx["budget_s"]:            # out of budget: what is closed so far is written
+            if time.time() - t0 > ctx["budget_s"] or CX.expired(ctx.get("deadline")):            # out of budget: what is closed so far is written
                 res["status"] = "budget"
                 break
             if net in done:
@@ -804,7 +824,8 @@ def _r_krt(base, out, gaps, ctx):
             at = cmd.index("--nets")
             cmd[at:at] = ["--json-out", js] + (["--rip-existing-nets", *[KC.glob_escape(n) for n in rip]] if rip else [])
             try:
-                proc = _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]),
+                with CX.phase(ctx.get("phase_file"), "router"):
+                    proc = _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900),
                                       cwd=ctx["work"])
             except subprocess.TimeoutExpired:
                 res["status"] = "krt timeout"
@@ -1418,7 +1439,8 @@ def _route_net(w, net, layers, ctx):
     cmd = _krt_cmd(w, dst, [net], ctx, layers)
     if cmd is not None:
         try:
-            _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+            with CX.phase(ctx.get("phase_file"), "router"):
+                _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900), cwd=ctx["work"])
         except subprocess.TimeoutExpired:
             pass
         if os.path.exists(dst):
@@ -1983,7 +2005,7 @@ def _r_tune(base, out, gaps, ctx):
     if not pairs:
         return {"status": "no pair"}
     res = {}
-    TU.tune_pairs(base, out, pairs, limit_mm=lambda m: limits[m], budget=ctx["budget_s"], result=res, cons=ctx["cons"])
+    TU.tune_pairs(base, out, pairs, limit_mm=lambda m: limits[m], budget=_left(ctx), result=res, cons=ctx["cons"])
     return {"status": "ran" if os.path.exists(out) else "no change", "pairs": len(pairs), "stopped": res.get("stopped")}
 
 
@@ -2065,7 +2087,8 @@ def _r_krt_region(base, out, gaps, ctx):
                 return {"status": "krt not found"}
             _rm(out)
             try:
-                _procs.run(cmd, capture_output=True, text=True, timeout=min(900, ctx["budget_s"]), cwd=ctx["work"])
+                with CX.phase(ctx.get("phase_file"), "router"):
+                    _procs.run(cmd, capture_output=True, text=True, timeout=_left(ctx, 900), cwd=ctx["work"])
             except subprocess.TimeoutExpired:
                 _rm(out)
                 return {"status": "krt timeout", "margin": margin}
@@ -2093,10 +2116,11 @@ def _r_pairgroup(base, out, gaps, ctx):
     pairs = [p for p in PA.pair_list(NC.classify(B, cons, None)) if set(p) & want]
     if not pairs:
         return {"status": "no pair"}
-    budget = min(PO.PER_PAIR_S * len(pairs), float(ctx["budget_s"]))     # PHASE3E 7: per pair, capped by the close budget left
+    budget = min(PO.PER_PAIR_S * len(pairs), float(_left(ctx)))     # PHASE3E 7: per pair, capped by the close budget left
     if budget <= 0:
         return {"status": "no budget", "pairs": len(pairs)}
-    rep = PO.regroup(base, out, cons, None, pairs, log=ctx["log"], budget_s=budget)
+    with CX.phase(ctx.get("phase_file"), "router"):
+        rep = PO.regroup(base, out, cons, None, pairs, log=ctx["log"], budget_s=budget)
     laid = sum(len(g["laid"]) for g in rep["groups"].values())
     if not laid:
         if os.path.exists(out):
@@ -2165,17 +2189,23 @@ def _repo_root():
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
 
 _CTX_JSON_KEYS = ("cons_path", "kicad_cli", "work", "budget_s", "krt_last", "ai_mode", "ai_dir", "protect", "pair_fallback",
-                  "ai_used", "hs_legs", "pair_gap_legs", "open_legs", "attempts")        # B4: the `ai` rung runs in a child too
+                  "ai_used", "hs_legs", "pair_gap_legs", "open_legs", "attempts", "deadline", "phase_file")        # B4: the `ai` rung runs in a child too
 JOB_OUT_KRT = "_krt_last"
 JOB_OUT_AI_USED = "_ai_used"
 
 
 def _call_rung(name, base, out, gaps, ctx):
     """Run one rung in a child process (`python -m fluxplace.gaps --rung-job JOB`) so a native crash or a pcbnew Remove() decay is a
-    RuntimeError / a dead child, not a dead or poisoned close run.  Only ctx["inproc"] stays in-process: the child itself (it must not
-    recurse) and tests that patch RUNGS."""
+    RungFailure, not a dead or poisoned close run.  Only ctx["inproc"] stays in-process: the child itself (it must not recurse) and
+    tests that patch RUNGS.  B6a: the supervisor kills the child group at ctx["deadline_hard"] (monotonic); the child and its router
+    descendants work to ctx["deadline"], KILL_SLACK_S earlier, so the slack is part of the rung's allowance. A failure is a
+    RungFailure: outcome timeout / child_error (exit code or signal, stderr tail) / invalid_output."""
     if ctx.get("inproc"):
-        return RUNGS[name](base, out, gaps, ctx)
+        CX.mark(ctx.get("phase_file"), "child_start")
+        try:
+            return RUNGS[name](base, out, gaps, ctx)
+        finally:
+            CX.mark(ctx.get("phase_file"), "child_done")
     job, jout = out + ".job.json", out + ".job.out.json"
     try:
         cj = {k: ctx.get(k) for k in _CTX_JSON_KEYS}
@@ -2185,19 +2215,31 @@ def _call_rung(name, base, out, gaps, ctx):
             cj["cons"] = ctx.get("cons")                   # no file to reload: the dict itself (the `ai` rung reads [ai])
         with open(job, "w") as fh:
             json.dump({"name": name, "base": base, "out": out, "gaps": gaps, "ctx": cj}, fh, default=str)
+        hard = ctx.get("deadline_hard")
+        tmo = CX.left(hard) if hard is not None else float(ctx["budget_s"]) + CX.KILL_SLACK_S
+        env = dict(os.environ)
+        if ctx.get("deadline") is not None:
+            env[CX.ENV_DEADLINE] = repr(float(ctx["deadline"]))
+        CX.mark(ctx.get("phase_file"), "launch")
         try:
             p = _procs.run([sys.executable, "-m", "fluxplace.gaps", "--rung-job", job], capture_output=True,
-                               text=True, timeout=ctx["budget_s"] + 120, cwd=_repo_root())
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("rung timeout")
+                           text=True, timeout=tmo, cwd=_repo_root(), env=env)
+        except subprocess.TimeoutExpired as e:
+            raise CX.RungFailure("timeout", f"rung timeout after {tmo:.0f} s", stderr_tail=CX.tail(getattr(e, "stderr", None)))
+        err = CX.tail(getattr(p, "stderr", None))
         if not os.path.exists(jout):
             if p.returncode < 0:
-                raise RuntimeError(f"rung crashed (signal {-p.returncode})")
+                raise CX.RungFailure("child_error", f"rung crashed (signal {-p.returncode})", sig=-p.returncode, stderr_tail=err)
             if p.returncode > 0:
-                raise RuntimeError(f"rung exit {p.returncode}")
-            raise RuntimeError("rung wrote no result")
-        with open(jout) as fh:
-            res = json.load(fh)
+                raise CX.RungFailure("child_error", f"rung exit {p.returncode}", code=p.returncode, stderr_tail=err)
+            raise CX.RungFailure("invalid_output", "rung wrote no result", code=0, stderr_tail=err)
+        try:
+            with open(jout) as fh:
+                res = json.load(fh)
+        except (OSError, ValueError) as e:
+            raise CX.RungFailure("invalid_output", f"rung result unreadable ({type(e).__name__})", code=p.returncode, stderr_tail=err)
+        if not isinstance(res, dict):
+            raise CX.RungFailure("invalid_output", "rung result unreadable (not an object)", code=p.returncode, stderr_tail=err)
         krt = res.pop(JOB_OUT_KRT, None)
         if krt:
             ctx["krt_last"] = krt
@@ -2220,7 +2262,11 @@ def _rung_job(job_path):
         cj["protect"] = set(cj["protect"])
     cons = C.load(cj.get("cons_path")) if cj.get("cons_path") else (cj.get("cons") or {})
     ctx = dict(cj, cons=cons, log=lambda m: print(m, file=sys.stderr), inproc=True)
+    if ctx.get("deadline") is not None:
+        os.environ[CX.ENV_DEADLINE] = repr(float(ctx["deadline"]))     # router descendants inherit the one deadline
+    CX.mark(ctx.get("phase_file"), "child_start")
     summ = RUNGS[j["name"]](j["base"], j["out"], j["gaps"], ctx) or {}
+    CX.mark(ctx.get("phase_file"), "child_done")
     summ = dict(summ, **{JOB_OUT_KRT: ctx.get("krt_last"), JOB_OUT_AI_USED: ctx.get("ai_used")})
     with open(j["out"] + ".job.out.json", "w") as fh:
         json.dump(summ, fh, default=str)
@@ -2255,10 +2301,92 @@ def gate_measure(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", 
     return dict(res, best=board)
 
 
+class _NoTime(Exception):
+    """attempt(): not enough of the stage budget is left before the verification reserve."""
+
+
+GROUPED = ("open-gap", "open-pour", "open-free")          # B6a: kinds whose gaps are attempted per blocker group
+_ZONES = {}
+
+
+def _zones_of(board, fp):
+    """Zone nets of `board` (cached per copper fingerprint)."""
+    if fp not in _ZONES:
+        if len(_ZONES) > 4:
+            _ZONES.clear()
+        _ZONES[fp] = _zone_nets(board)
+    return _ZONES[fp]
+
+
+def _blockers_of(board, gaps, skip=(), r=WINDOW_MM):
+    """B6a: nets (not in `skip`, not a gap's own) with a track or via in the window (`at` +- r mm) of any of `gaps`: the copper a
+    repair of those gaps would have to move. None when the board cannot be read or a gap has no position."""
+    try:
+        import pcbnew
+        rows = _board_rows(board)
+        out = set()
+        for g in gaps:
+            if not g.get("at"):
+                return None
+            R = pcbnew.FromMM(r)
+            cx, cy = pcbnew.FromMM(g["at"][0]), pcbnew.FromMM(g["at"][1])
+            x0, y0, x1, y1 = cx - R, cy - R, cx + R, cy + R
+            own = set(g.get("nets") or [])
+            for n, _l, _sx, _sy, _ex, _ey, _w, l, t, rt, bt in rows["tracks"]:
+                if n and n not in own and rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
+                    out.add(n)
+            for n, _l, x, y, _w, _d in rows["vias"]:
+                if n and n not in own and x0 <= x <= x1 and y0 <= y <= y1:
+                    out.add(n)
+        return sorted(out - set(skip))
+    except Exception:
+        return None
+
+
+def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, targets, blockers, ctx, al, deadline, reserve):
+    """B6a: the record written BEFORE the child is launched: what it is given and when it must be done."""
+    base = os.path.splitext(board)[0]
+    try:
+        from . import boardwrite as BW, routerloc as RL
+        man_sha = CX.sha_file(BW.done_path(board))
+    except Exception:
+        man_sha, RL = None, None
+    pads = []
+    try:
+        nets = {x for g in targets for x in g.get("nets") or []}
+        pads = [[nm, ref, round(x / 1e6, 3), round(y / 1e6, 3)] for nm, ref, x, y in _board_rows(board)["pads"] if nm in nets][:60]
+    except Exception:
+        pass
+    router = None
+    try:
+        rl = RL.resolve()
+        router = {"dir": rl["dir"], "py": rl["py"], "version": rl.get("version"), "commit": rl.get("commit")}
+    except Exception as e:
+        router = {"unavailable": f"{type(e).__name__}: {e}"[:100]}
+    now_m, now_w = CX.mono(), time.time()
+    return {"schema": 1, "run": run_id, "attempt": n, "round": rnd, "kind": kind, "rung": rung,
+            "input": {"board": board, "board_sha": bsha, "rules_sha": CX.sha_files([cons_path, base + ".kicad_pro", base + ".kicad_dru"]),
+                      "cons_hash": cons_hash, "manifest_sha": man_sha},
+            "targets": {"gap_ids": [g["id"] for g in targets], "nets": sorted({x for g in targets for x in g.get("nets") or []}),
+                        "pads": pads},
+            "blockers": blockers,
+            "params": {"budget_s": round(ctx["budget_s"], 1), "rung_cap_s": al["allow_s"], "krt_max": KRT_MAX,
+                       "krt_window_mm": KRT_WINDOW_MM, "protect_n": len(ctx.get("protect") or ()), "inproc": bool(ctx.get("inproc")),
+                       "pair_fallback": ctx.get("pair_fallback")},
+            "router": dict(router or {}, order=sorted({x for g in targets for x in g.get("nets") or []}),
+                           seed=((ctx.get("cons") or {}).get("router") or {}).get("seed")),
+            "deadline": {"stage_mono": deadline, "reserve_s": reserve, "hard_mono": al["hard"], "child_mono": al["child"],
+                         "slack_s": al["slack"], "allow_s": round(al["allow_s"], 1),
+                         "hard_wall": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now_w + al["hard"] - now_m))},
+            "launched_wall": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now_w)), "launched_mono": now_m}
+
+
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
           attempts=None, runs=None, log=print, inproc=False, kinds=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md."""
+    clock = CX.Clock()                                   # B6a: every second of this stage lands in exactly one category
+    clock.switch("queue")
     os.makedirs(work, exist_ok=True)
     from . import boardwrite as BW0
     try:                                                 # B1: an unexplained edit of the input is refused before anything is copied or written
@@ -2284,11 +2412,21 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     cons_hash = _cons_hash(cons_path)
     t0 = time.time()
     budget_s = budget_min * 60
+    deadline = CX.mono() + budget_s                      # B6a: the one stage deadline (monotonic); rungs, children and routers work to it
+    reserve = CX.reserve_s(cons, budget_s)               # verification time kept before it
+    min_s = min(CX.MIN_RUNG_S, 0.1 * budget_s)
+    tally, crashes, stats = CX.Tally(), CX.CrashMemo(work), {}      # stats: (kind, rung) -> [seconds, connections closed]
+
+    def over():
+        """No time for another attempt: less than min_s of work fits before the verification reserve."""
+        return CX.mono() >= deadline - reserve - min_s
+    clock.switch("measure")
     try:
         m = _remeasure(best, kicad_cli)
     except Exception as e:                               # PHASE3E 3: the initial measure must not kill close()
         log(f"initial refill failed ({str(e)[:80]}); measuring the copy unrefilled")
         m = dict(measure(best, kicad_cli))
+    clock.switch("diagnose")
     _classify_into(m, cons, best)
     protect = _protect(best, cons)
     from . import boardwrite as BW
@@ -2300,6 +2438,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     snaps = []                                           # [(label, path, frozenset(released))] after each accepted attempt, newest last
     relax = relax_nets(m["gaps"])
     start = _vitals(m)
+    clock.switch("idle")
     board_fp0 = versions.copper_fingerprint(best)
     if runs is None and calllog.enabled():
         runs = os.path.join(_repo_root(), "docs", "corpus", "runs.jsonl")
@@ -2338,8 +2477,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     ai_mode = (cons.get("ai") or {}).get("mode", "packet")
 
     def attempt(r, kind, rung, targets, sub=False):
-        """One try. Returns True when the candidate was accepted (m is then the new base)."""
+        """One try. Returns True when the candidate was accepted (m is then the new base). B6a: ends in exactly one outcome
+        (closeexec.OUTCOMES); only a measured candidate has a verdict (guard_refused / accepted)."""
         nonlocal m, n_att, level, n_packets, protect, relax, man
+        clock.switch("queue")
         nets = _nets(targets)
         fp = versions.copper_fingerprint(best)
         # PHASE3I B3: memo key = rung, kind, gap signature and the copper in each gap window (not the whole board)
@@ -2352,16 +2493,21 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         if rung == "ai":                                     # PHASE3G-H2: an answer file refused once must not block the next one
             # PHASE3I B3: an answer is keyed by its content, so a rewritten answer with the same name is tried again
             key = key + (ai_memo_part(ctx_dir_ai(work), ai_names),)
-        vec0, t_try = score(m, m["gaps"]), time.time()
+        vec0, t_try, opens0 = score(m, m["gaps"]), time.time(), m["opens"]
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         rrow_done = []
+        outcome, verdict, detail, rec_a, closed_n = None, None, {}, None, 0
+        bsha = CX.sha_file(best)
+        ckey = CX.crash_key(bsha, rung, {"tool": tool, "cons": cons_hash, "cap": _rung_cap(cons, rung, budget_s)}, [g["id"] for g in targets])
 
         def refusal_ctx():
             return {"run": run_id, "attempt": n_att + 1, "kind": kind, "rung": rung, "result": result, "why": why,
-                    "targets": [g["id"] for g in targets]}
+                    "targets": [g["id"] for g in targets], "outcome": outcome, "verdict": verdict, "exit": detail or None}
 
         def _rrow(rctx, cand_board, cand_m, summ_, rule=None, status=None):
             """B6 step 0: one refusal record (never changes the decision, never raises)."""
+            prev = clock.cur
+            clock.switch("cleanup")
             try:
                 rrow_done.append(1)
                 if cand_m is None:
@@ -2377,19 +2523,32 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         trace.append({"rule": "post_accept", "status": "fail", "detail": rctx["why"]})
                     rec = refusal.record(ctx=rctx, rules=trace, base_m=m, cand_m=cand_m, cand_gaps=cand_m["gaps"],
                                          target_ids=rctx["targets"], base_board=best, cand_board=cand_board, summ=summ_)
+                if rec.get("blockers") is None and blk_ids:
+                    rec["blockers"] = blk_ids
                 refusal.append(work, rec)
             except Exception:
                 pass
-        after, runs, why, summ, cleanup, cand = None, 0, "", {}, [], None
+            clock.switch(prev)
+        after, runs, result, why, summ, cleanup, cand = None, 0, None, "", {}, [], None
+        blk_ids = _blockers_of(best, targets, protect | _zones_of(best, fp))
         if (key in memo or key in memo_err) and not ai_names:   # PHASE3H A8: a pending answer is always tried
             result, why = "skipped", "memo"
+        elif crashes.has(ckey) and not ai_names:                # B6a: an identical retry of a crashed / timed-out attempt
+            result, why = "skipped", "crash memo (same input, rung, params)"
         else:
+            al = CX.allowance(deadline, CX.mono(), _rung_cap(cons, rung, budget_s), reserve, min_s=min_s)
+            if al is None:
+                result, why = "skipped", "no time before the verification reserve"
+            else:
+                rec_a = CX.AttemptRecord(work, n_att + 1)
             try:
+                if al is None:
+                    raise _NoTime()
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 _clean_board(out)
                 _sidecars(best, out)
                 ctx = {"cons": cons, "cons_path": cons_path, "kicad_cli": kicad_cli, "work": work,
-                       "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons)),
+                       "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons, rung, budget_s)),
                        "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
                        "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback,
@@ -2398,21 +2557,41 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                                                 for n in g.get("nets", [])}),
                        "open_legs": sorted(n for n, c in (m.get("opens_by_net") or {}).items() if c)}   # PHASE3H B3
                 ctx["inproc"] = inproc
-                summ = _call_rung(rung, best, out, targets, ctx) or {}
+                ctx.update(deadline=al["child"], deadline_hard=al["hard"], phase_file=rec_a.phase_file)   # B6a: one monotonic deadline
+                try:
+                    doc = _attempt_doc(n_att + 1, run_id, kind, rung, r, best, bsha, cons_path, cons_hash, targets, blk_ids,
+                                       ctx, al, deadline, reserve)
+                except Exception as e:                  # the record never changes the attempt
+                    doc = {"attempt": n_att + 1, "kind": kind, "rung": rung, "record_error": f"{type(e).__name__}: {e}"[:160]}
+                rec_a.start(**doc)
+                clock.hook = lambda c: CX.mark(rec_a.phase_file, c)
+                clock.switch("child_start")
+                t_launch = clock.last
+                try:
+                    summ = _call_rung(rung, best, out, targets, ctx) or {}
+                finally:
+                    clock.split(CX.child_parts(CX.read_marks(rec_a.phase_file), t_launch, CX.mono()), then="refill_drc")
                 if ctx.get("krt_last"):
                     krt_state["last"] = ctx["krt_last"]
                 if not os.path.exists(out) and summ.get("status") == "packet":
-                    result, why = "packet", "action file pending"
+                    result, why, outcome = "packet", "action file pending", "no_change"
                 elif not os.path.exists(out):
                     result = "refused"
                     why_ai = summ.get("why") if rung == "ai" else None
                     why = str(why_ai or summ.get("status") or summ.get("reason") or "no board written")[:120]
+                    outcome = CX.classify_no_board(summ)
                 elif versions.copper_fingerprint(out) == fp:
-                    result, why = "refused", "no change"
+                    result, why, outcome = "refused", "no change", "no_change"
+                elif CX.truncated_board(out):
+                    result, why, outcome = "refused", "candidate board truncated", "invalid_output"
                 else:
+                    outcome = "candidate"
                     cm = _remeasure(out, kicad_cli)
                     runs = 1
+                    clock.switch("diagnose")
                     _classify_into(cm, cons, out)
+                    clock.switch("refill_drc")
+                    CX.mark(rec_a.phase_file, "verify")
                     cand = score(cm, cm["gaps"])          # PHASE3F A2: what the candidate cost, accepted or not
                     final = out
                     ok, why = _accept(m, best, cm, out, [g["id"] for g in targets], cm["gaps"], kind,
@@ -2420,23 +2599,28 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                     names = _cleanup_rungs(m, cm, kind) if (not ok and why.startswith("R2 ")) else []
                     if names:
                         # cleanup: one pass per rung on the candidate; a rung that writes nothing keeps the file
+                        clock.switch("cleanup")
                         for name in names:
                             nxt = f"{out}.{name}.kicad_pcb"
                             _clean_board(nxt)
                             _sidecars(final, nxt)
                             try:
-                                _call_rung(name, final, nxt, [], ctx)
+                                _call_rung(name, final, nxt, [], dict(ctx, phase_file=None))
                             except Exception:
                                 pass
                             cleanup.append(name)
                             if os.path.exists(nxt):
                                 final = nxt
+                        clock.switch("refill_drc")
                         cm = _remeasure(final, kicad_cli)
                         runs += 1
+                        clock.switch("diagnose")
                         _classify_into(cm, cons, final)
+                        clock.switch("refill_drc")
                         cand = score(cm, cm["gaps"])
                         ok, why = _accept(m, best, cm, final, [g["id"] for g in targets], cm["gaps"], kind,
                                           _r5_set(kind, targets, protect, relax, set(_pair_fallback_legs(ctx))))
+                    clock.switch("commit")
                     if ok and man0["nets"]:                 # A3: protected copper (boardwrite manifest) stays; a pair rung releases its target pairs
                         # least release: only the target pair nets this candidate re-laid (an untouched target pair is not released)
                         rel = _release_nets(kind, targets, man) & set(BW.changed(final, man))
@@ -2471,21 +2655,42 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                         result = "closed" if all(g["id"] not in cur_ids for g in targets) else "partial"
                         after = score(m, m["gaps"])
                         why = json.dumps(summ)[:120]
+                        verdict, closed_n = "accepted", max(0, opens0 - m["opens"])
                         if rung in LEVEL:
                             level = max(level, LEVEL[rung])
                     else:
-                        result = "refused"
+                        result, verdict = "refused", "guard_refused"
                         _rrow(refusal_ctx(), final, cm, summ)
+            except _NoTime:
+                pass
             except _RefillError as e:
-                result, why = "refused", str(e)[:120]
+                result, why, outcome = "refused", str(e)[:120], "invalid_output"
                 _rrow(refusal_ctx(), None, None, summ, "refill", "UNKNOWN")
             except (Exception, SystemExit) as e:
                 result, why = "error", f"{type(e).__name__}: {e}"[:120]
+                outcome, detail = CX.failure_outcome(e)
                 _rrow(refusal_ctx(), None, None, summ, "rung", "UNKNOWN")
             finally:
+                clock.switch("cleanup")
+                clock.hook = None
                 _clean_board(out)
+                if rec_a is not None:
+                    mk = CX.read_marks(rec_a.phase_file)
+                    rec_a.finish(outcome=outcome, verdict=verdict, result=result, why=why, exit=detail or None,
+                                 summary=_brief(summ), artifact=out, artifact_kept=os.path.exists(out), closed=closed_n,
+                                 phases=CX.phase_times(mk), **CX.last_phase(mk))
             if result == "refused" and not rrow_done:                 # B6 step 0: refused with no measured candidate
                 _rrow(refusal_ctx(), None, None, summ, "no_change" if why == "no change" else "no_candidate", "fail")
+            if outcome in CX.CRASH_OUTCOMES and not ai_names:
+                crashes.add(ckey, outcome, why)
+        clock.switch("queue")
+        if result == "skipped":
+            tally.skipped += 1
+        elif outcome:
+            tally.add(outcome, verdict, {g["id"] for g in targets if g["kind"].startswith("open-")}, closed_n)
+            st = stats.setdefault((kind, rung), [0.0, 0])
+            st[0] += time.time() - t_try
+            st[1] += closed_n
         if result == "packet":
             n_packets += 1
         if result not in ("skipped", "packet"):              # PHASE3I B3: per-kind, per-rung yield; F3 R17: answers only
@@ -2533,7 +2738,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         for h in _halves(ts):
             ids = {g["id"] for g in h}
             cur = [g for g in vis(m["gaps"]) if g["id"] in ids and g["kind"] == kind]   # re-read: an accepted half moved m
-            if not cur or left[0] <= 0 or time.time() - t0 > budget_s:
+            if not cur or left[0] <= 0 or over():
                 continue
             left[0] -= 1
             ok = attempt(r, kind, rung, cur, sub=True)
@@ -2559,16 +2764,47 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             continue
         for _ in range(len(_ai_pending_names(ctx_dir_ai(work), [g for g in vis(m["gaps"]) if g["kind"] == kind]))):
             tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
-            if not _ai_pending(ctx_dir_ai(work), tg) or time.time() - t0 > budget_s:
+            if not _ai_pending(ctx_dir_ai(work), tg) or over():
                 break
             if not attempt(0, kind, "ai", tg) and kind not in ai_refused:
                 ai_refused.append(kind)
             save(0)
     for kind in ai_refused:
         tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
-        if tg and time.time() - t0 <= budget_s:
+        if tg and not over():
             attempt(0, kind, "ai", tg)
             save(0)
+    round_rank = {}                                      # kind -> rung order fixed at the first use in a round (one cheap order for every group)
+
+    def units_of(gs):
+        """B6a: the schedulable units, in electrical priority order. Gaps of an open kind are grouped by shared blocker set (nets
+        with copper in their windows; gaps that share a blocker or a net are one group); every other kind is one unit. An unreadable
+        board keeps a kind whole. `ai` (kind-wide targets) belongs to the first unit of its kind only."""
+        by_kind = {}
+        for g in gs:
+            by_kind.setdefault(g["kind"], []).append(g)
+        fpn = versions.copper_fingerprint(best)
+        skip = protect | _zones_of(best, fpn)
+        units = []
+        for kind in ORDER:
+            tg = by_kind.get(kind)
+            if not tg or kind not in DISPATCH:
+                continue
+            groups = [tg]
+            if kind in GROUPED and len(tg) > 1:
+                blk = {g["id"]: _blockers_of(best, [g], skip) for g in tg}
+                if all(v is not None for v in blk.values()):
+                    byid = {g["id"]: g for g in tg}
+                    groups = [[byid[i] for i in grp] for grp in
+                              CX.group_by_shared([(g["id"], g.get("nets") or [], blk[g["id"]]) for g in tg])]
+            rungs = [x for x in round_rank.setdefault(kind, _rank(kind, DISPATCH[kind], yields)) if not (x == "ai" and not _ai_pending(ctx_dir_ai(work), tg))]
+            for gi, grp in enumerate(groups):
+                key = kind + "|" + hashlib.sha1(",".join(sorted(g["id"] for g in grp)).encode()).hexdigest()[:12]
+                units.append({"key": key, "kind": kind, "targets": grp, "kind_targets": tg,
+                              "rungs": rungs if gi == 0 else [x for x in rungs if x != "ai"],
+                              "prio": (ORDER.index(kind), min(CLASS_RANK[g["class"]] for g in grp))})
+        return units
+
     for r in range(max_rounds):
         if kinds is None and not any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in m["gaps"]) or kinds is not None and not vis(m["gaps"]):
             stop = "clean"                               # a scoped gap with no rung keeps the gate open: stop "flat"
@@ -2576,43 +2812,49 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         hit = False
         packets_before = n_packets
         round_vec0 = score(m, m["gaps"])                 # PHASE3E 9: the round's start, for the no-gain counter
-        deferred = []
-        for kind in ORDER:
-            targets = [g for g in vis(m["gaps"]) if g["kind"] == kind]
-            if not targets or kind not in DISPATCH:
-                continue
-            for rung in _rank(kind, DISPATCH[kind], yields):
-                if rung == "ai" and not _ai_pending(ctx_dir_ai(work), targets):
-                    deferred.append(kind)                    # a packet changes no board in this pass: it is written after every kind
-                    continue                                 # had its own rungs (W15: 9 pair packets took 9 of 30 min, opens got none)
-                if time.time() - t0 > budget_s:
-                    stop = "budget"
-                    break
-                if time.time() - last_acc[0] > stall_s:      # PHASE3I B3: no accept for stall_min: stop, do not re-run
-                    for k2 in ORDER:                         # PHASE3I F3 R8: every kind with gaps gets its ai packet first
-                        tg2 = [g for g in vis(m["gaps"]) if g["kind"] == k2]
-                        if tg2 and "ai" in DISPATCH.get(k2, []):
-                            attempt(r, k2, "ai", tg2)
-                            save(r)
-                    stop = "packets" if n_packets > packets_before else "stalled"
-                    break
-                accepted = attempt_split(r, kind, rung, targets)
-                save(r)
-                extra = len(targets) if rung == "ai" else 0   # every pending AI action gets its try this round
-                while (extra and not accepted and _ai_pending(ctx_dir_ai(work), targets)
-                       and time.time() - t0 <= budget_s):
-                    extra -= 1
-                    accepted = attempt(r, kind, rung, targets)
-                    save(r)
-                if accepted:
-                    hit = True
-                    break
-            if stop:
+        round_rank.clear()
+        done = set()                                     # B6a: (unit key, rung) tried this round
+        accepted_kinds = set()                           # a kind that had an accept is done for the round (the next round re-reads it)
+        clock.switch("queue")
+        while True:
+            units = [u for u in units_of(vis(m["gaps"])) if u["kind"] not in accepted_kinds]
+            pick = CX.next_task(units, done, {k: tuple(v) for k, v in stats.items()})
+            clock.switch("idle")
+            if pick is None:
                 break
+            unit, rung = pick
+            kind = unit["kind"]
+            targets = unit["kind_targets"] if rung == "ai" else unit["targets"]
+            if over():
+                stop = "budget"
+                break
+            if time.time() - last_acc[0] > stall_s:      # PHASE3I B3: no accept for stall_min: stop, do not re-run
+                for k2 in ORDER:                         # PHASE3I F3 R8: every kind with gaps gets its ai packet first
+                    tg2 = [g for g in vis(m["gaps"]) if g["kind"] == k2]
+                    if tg2 and "ai" in DISPATCH.get(k2, []):
+                        attempt(r, k2, "ai", tg2)
+                        save(r)
+                stop = "packets" if n_packets > packets_before else "stalled"
+                break
+            done.add((unit["key"], rung))
+            accepted = attempt_split(r, kind, rung, targets)
+            save(r)
+            extra = len(targets) if rung == "ai" else 0   # every pending AI action gets its try this round
+            while (extra and not accepted and _ai_pending(ctx_dir_ai(work), targets)
+                   and not over()):
+                extra -= 1
+                accepted = attempt(r, kind, rung, targets)
+                save(r)
+            if accepted:
+                hit = True
+                accepted_kinds.add(kind)
+        deferred = [] if stop else [k for k in ORDER if "ai" in DISPATCH.get(k, [])
+                                    and any(g["kind"] == k for g in vis(m["gaps"]))
+                                    and not _ai_pending(ctx_dir_ai(work), [g for g in vis(m["gaps"]) if g["kind"] == k])]
         for kind in deferred:                                # the packets of this round, kinds in ORDER
             if stop or hit:                                  # after an accept the next round re-reads the gaps first
                 break
-            if time.time() - t0 > budget_s:
+            if over():
                 stop = "budget"
                 break
             tg = [g for g in vis(m["gaps"]) if g["kind"] == kind]
@@ -2637,6 +2879,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     else:
         stop = "rounds"
 
+    clock.switch("commit")
     broke = None
     if man0["nets"]:                                     # the final board must pass the commit point's verify; else the newest accepted state that does
         vf = BW.verify(board, best, release=set(released), manifest=man0)
@@ -2664,6 +2907,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         else:
             shutil.rmtree(os.path.join(work, "accepted"), ignore_errors=True)       # the final board verifies: the snapshots are not needed
 
+    clock.switch("cleanup")
     left = []
     for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
@@ -2706,6 +2950,13 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     with open(os.path.join(work, "ledger-rows.md"), "w") as fh:
         fh.write("\n".join(rows) + ("\n" if rows else ""))
     refusal.summarize(work, log)
+    tot = clock.total()                                  # B6a: the intervals add up to the stage wall time
+    res.update(time_accounting=dict({c: round(v, 2) for c, v in clock.acc.items()}, total=round(tot, 2)),
+               outcomes=dict(tally.outcomes), verdicts=dict(tally.verdicts), skipped=tally.skipped,
+               components_attempted=len(tally.components), candidates_read=tally.candidates, connections_closed=tally.closed)
+    _write_json(os.path.join(work, "stop.json"), res)
+    log(clock.line())
+    log(tally.line())
     return dict(res, best=best)
 
 
