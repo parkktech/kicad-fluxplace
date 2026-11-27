@@ -23,6 +23,7 @@ import sys
 import time
 
 from . import routeconn as RC
+from . import kickoff as KO_
 
 STAGES = ["ready", "floorplan-check", "anchor-check", "place", "route-ready", "critroute", "route", "close", "tune", "trace-finish", "silk", "review"]
 # the constructive flow (docs/FLOW.md): modules -> floorplan -> fan-out (gate FANOUT_OK) -> plan-route (channels, WARN) -> route -> audit -> silk -> review
@@ -294,6 +295,14 @@ def st_ready(c, n, board):
         out["line"] += f" (netclass write skipped: {type(e).__name__})"
     if und:
         out["undocumented"] = und.strip()
+    try:                                    # T5: the stamp ready wrote beside the board travels with the run
+        from . import kickoff as KO
+        from . import reportdir as RD_
+        sp = KO.stamp_path(RD_.redirect(c.a, os.path.splitext(board)[0]))
+        if os.path.isfile(sp):
+            shutil.copy2(sp, os.path.join(c.work, "kickoff.json"))
+    except OSError:
+        pass
     return out
 
 
@@ -2284,6 +2293,16 @@ def _run(a):
         os.environ["FLUXPLACE_STAGE"] = name
         _ev_call(_ev_stage, "stage_start", i + 1, name)
         prev = board
+        if name in KO_.GATED:                                  # T5: an input changed since ready passed -> ready's checklists run again first
+            ko = KO_.reopen(c, board, work)
+            if ko and ko["choice"] == "reopen":
+                rr = st_ready(c, 0, board)
+                print(f"pipeline: kickoff re-run: {rr['verdict']} - {_clip(rr.get('line', ''), 120)}", flush=True)
+                if rr["verdict"] not in ("pass", "warn"):
+                    st["stages"]["ready"] = {"verdict": rr["verdict"], "line": rr.get("line", ""), "dir": f"{i}-ready", "board": board}
+                    save_state(work, st)
+                    print(f"pipeline: kickoff checklists FAIL after an input change ({ko['changed'][0][0]}...); {name} not started (exit 1)")
+                    return 1
         led.before(prev)
         res = _exec_stage(c, i + 1, name, board, STAGES_[i + 1:])
         led.after(name, i + 1, res)                            # PHASE3I F2: the ledger records the gated verdict

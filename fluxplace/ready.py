@@ -541,6 +541,9 @@ def cmd_ready(a):
         detail["models"] = model_res
     if board and os.path.exists(board):
         lines.append(sync_netclasses(board, cons))
+    from . import kickoff as KO                    # T4: inputs checklist (absolute manifest, .kicad_pro, derived_from, doctor)
+    ko_lines, ko_man = KO.inputs_lines(board, a.spec, getattr(a, "constraints", None), cons, ds, (facts or {}).get("mpn_map_path"))
+    lines += ko_lines
     gate_fail = any(l["name"] == "parts gate" and l["status"] == FAIL for l in lines)
     nfail = sum(l["status"] == FAIL for l in lines)
     nopen = len(sess.open) + sum(l.get("open_items", 0) for l in lines)      # OPEN lines with no question behind them count too
@@ -567,6 +570,10 @@ def cmd_ready(a):
                 json.dump(detail["budgets"], fh, indent=1, default=list)
     except OSError:
         path = None
+    if path and not (nfail or nopen):              # T5: the kickoff stamp, only when ready passes
+        KO.write_stamp(KO.stamp_path(stem), ko_man, KO.shas(ko_man, facts), lines)
+    if path:
+        KO.annotate_ready_json(stem + ".ready.json", ko_man)
     from . import placegaps as PG                  # detect-only (PLAN-PLACE-GAPS phase 0): the parts gaps; changes no result, no board
     PG.detect_stage("ready", board or a.spec, cons, spec, os.path.dirname(stem) or ".", base=os.path.basename(stem) + ".placegaps", ds_dir=ds,
                     parts_gate=detail.get("gate"), printer=None if getattr(a, "json", False) or getattr(a, "quiet", False) else print)
