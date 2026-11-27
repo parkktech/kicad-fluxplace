@@ -647,6 +647,11 @@ VERDICT = {"infeasible": "infeasible under declared fixed parts and pose domains
            "excluded": "current poses excluded; search other legal placements", "unresolved": "unresolved; inspect access constraints and routing detour"}
 
 
+def _half(p):
+    """Square half extent of a pad: the larger of its x / y half extents."""
+    return max(p.get("ex", 0.0), p.get("ey", 0.0))
+
+
 def _orients(part, pads):
     """Pad offsets (dx, dy, e) of one footprint under every pose it may take: 4 rotations x both sides (mirror in x). e = the larger pad
     half extent (a square that contains the rectangle at any rotation: only shrinks the pad gap, so the bound stays a lower bound)."""
@@ -659,7 +664,7 @@ def _orients(part, pads):
                 dx, dy = mirror * (p["x"] - px), p["y"] - py
                 for _ in range(k):
                     dx, dy = -dy, dx
-                offs.append((dx, dy, max(p.get("ex", 0.0), p.get("ey", 0.0))))
+                offs.append((dx, dy, _half(p)))
             out.append(offs)
     return out
 
@@ -683,17 +688,16 @@ def pose_lower_bound(B, ref, anchors, pads, step=LEN_GRID):
     xs = np.arange(x0 + m, max(x0 + m, x1 - m) + step, step)
     ys = np.arange(y0 + m, max(y0 + m, y1 - m) + step, step)
     X, Y = np.meshgrid(xs, ys)
-    best = None
+    best = float("inf")
     for offs in _orients(part, pads):
         f = np.zeros_like(X)
         for i, (dx, dy, e) in enumerate(offs):
             for a in anchors:
-                f = np.maximum(f, _gap_bound(X + dx - a["x"], Y + dy - a["y"], e, max(a.get("ex", 0.0), a.get("ey", 0.0))))
+                f = np.maximum(f, _gap_bound(X + dx - a["x"], Y + dy - a["y"], e, _half(a)))
             for dx2, dy2, e2 in offs[i + 1:]:
                 f = np.maximum(f, float(_gap_bound(dx - dx2, dy - dy2, e, e2)))
-        v = float(f.min())
-        best = v if best is None else min(best, v)
-    return max(0.0, (best or 0.0) - LIP * step / 2 ** 0.5)
+        best = min(best, float(f.min()))
+    return max(0.0, best - LIP * step / 2 ** 0.5)
 
 
 def routed_length(B, net):
@@ -702,8 +706,10 @@ def routed_length(B, net):
     pads = [p for p in B["pads"] if p["net"] == net]
     if not segs or len(pads) < 2:
         return None
-    key = lambda q: (round(q[0], 2), round(q[1], 2))          # noqa: E731
     par = {}
+
+    def key(q):
+        return round(q[0], 2), round(q[1], 2)
 
     def find(a):
         par.setdefault(a, a)
@@ -761,13 +767,13 @@ def length_feasibility(B, cons, spec=None, fixed=None, nets=None):
         fx = [p for p in ps if p["ref"] in fixed]
         mv = sorted({p["ref"] for p in ps if p["ref"] not in fixed})
         b_all = net_bound(fx) if len(fx) > 1 else 0.0
-        for ref in mv:
-            b_all = max(b_all, pose_lower_bound(B, ref, fx, [p for p in ps if p["ref"] == ref]) if fx else 0.0)
+        if fx:
+            for ref in mv:
+                b_all = max(b_all, pose_lower_bound(B, ref, fx, [p for p in ps if p["ref"] == ref]))
         b_all = min(b_all, r["bound"])                          # the current pose is one of the poses: the bound cannot exceed it
         U = routed_length(B, net)
-        T = r["limit"]
-        v = verdict_of(T, b_all, r["bound"], U)
-        out.append({"net": net, "cls": r["cls"], "T": T, "T_src": "override" if cls[net].get("override") else "default", "T_why": cls[net].get("override_reason") or "",
+        v = verdict_of(r["limit"], b_all, r["bound"], U)
+        out.append({"net": net, "cls": r["cls"], "T": r["limit"], "T_src": "override" if cls[net].get("override") else "default", "T_why": cls[net].get("override_reason") or "",
                     "B_current": r["bound"], "B_all": round(b_all, 3), "U": U, "verdict": v, "text": VERDICT[v],
                     "fixed_refs": sorted({p["ref"] for p in fx}), "movable_refs": mv})
     return out

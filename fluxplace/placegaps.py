@@ -294,6 +294,13 @@ def _len_feas(ctx):
     return ctx.need("len_feas", make)
 
 
+def _with_len(g, feas, net):
+    """Attach the B14 length verdict of `net` (if any) to gap `g`; returns `g`."""
+    if net in feas:
+        g["len"] = feas[net]
+    return g
+
+
 @detector("net-bound")
 def detect_net_bound(ctx):
     """PLACEMENT LOWER BOUND (A8): a net or [[placement.path]] whose free-space octilinear bound (pad access to pad access, no margin,
@@ -308,9 +315,7 @@ def detect_net_bound(ctx):
         if r["impossible"]:
             g = gap("net-bound", r["name"], "rf" if r["cls"] == "rf" else "plain", r["bound"] - (r["limit"] or 0.0), r["refs"], r["nets"],
                     detail=r["why"])
-            if r["name"] in feas:
-                g["len"] = feas[r["name"]]
-            out.append(g)
+            out.append(_with_len(g, feas, r["name"]))
     return out
 
 
@@ -327,9 +332,7 @@ def detect_net_budget(ctx):
     for f in PR.net_over_budget(B, cls, ctx["cons"]):
         if f["level"] == "FAIL":
             g = gap("net-budget", f["net"], of(f["net"])[0], f["value"] - f["limit"], f["refs"], (f["net"],), detail=f["msg"])
-            if f["net"] in feas:
-                g["len"] = feas[f["net"]]
-            out.append(g)
+            out.append(_with_len(g, feas, f["net"]))
     return out
 
 
