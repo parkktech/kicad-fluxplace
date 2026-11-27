@@ -127,16 +127,21 @@
   "function": "Retrieved 2026-11-27. The page states these as diameters, not as an annular ring. The values here are my derivation: hard = (0.25-0.15)/2, and recommended = 0.15/2 from 'preferred'. The page also says: 'Preferred Min. Via hole size: 0.2mm'. Surcharge: '0.1mm or 0.15mm hole size with any size via dia",
   "hard": 0.05,
   "interface": "jlcpcb-6l",
-  "notes": "ring = (via dia - hole)/2 from the printed 0.25/0.15 mm and the preferred +0.15 mm; page states diameters, not a ring. No-surcharge pad for 0.2 mm holes is 0.45 mm (ring 0.125, fabcaps standard row).",
+  "notes": "hard 0.05 = house reject (arithmetic from printed 0.25/0.15 mm); recommended 0.125 = (0.45 pad - 0.2 hole)/2, the no-surcharge threshold: DESIGN floors use this.",
   "rule": "fab_via_annular_min",
   "sources": [
    {
     "page": "Rigid PCB capabilities: Drilling, row 'Min. Via hole size/diameter', Multilayer,",
     "quote": "0.15 mm hole size / 0.25 mm via diameter ... Via diameter should be 0.1mm(0.15mm preferred) larger than Via hole size.",
     "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
+   },
+   {
+    "page": "Drilling, note 3",
+    "quote": "0.2mm or 0.25mm hole size with via diameter less than 0.45mm, will cost more.",
+    "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
    }
   ],
-  "target": 0.075,
+  "target": 0.125,
   "unit": "mm",
   "unverified": []
  },

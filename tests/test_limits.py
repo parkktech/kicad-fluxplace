@@ -154,6 +154,14 @@ def test_fabcaps_rows_read_the_registry(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
     from fluxplace import fabcaps as FC
     lim, unv = FC.row_for("jlcpcb", "standard", 6)
-    assert lim["via_annular_min"] == 0.05 and lim["track_min"] == 0.09
+    assert lim["via_annular_min"] == 0.125 and lim["track_min"] == 0.09          # design floor = recommended, not the 0.05 reject
     lim8, unv8 = FC.row_for("jlcpcb", "standard", 8)                       # no registry row at 8 layers: JSON number, flagged
     assert any("not in the limits registry" in u for u in unv8)
+
+
+def test_design_floors_use_recommended_never_the_reject_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import fabcaps as FC
+    assert FC.limits("jlcpcb-standard", 6)["floors"]["min_annular_mm"] == 0.125          # JLC 6L via ring, 0.45 pad on a 0.2 drill
+    assert FC.limits("pcbway-standard", 6)["floors"]["min_annular_mm"] == 0.15
+    assert LM.get("fab_via_annular_min", "jlcpcb-6l")["hard"] == 0.05                    # the reject value stays for grading

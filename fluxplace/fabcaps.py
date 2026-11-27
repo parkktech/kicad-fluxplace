@@ -76,14 +76,15 @@ def all_tiers():
 
 
 def _registry_overlay(vendor, layers, lim, unv):
-    """ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l): its sourced hard value
-    replaces the JSON number; a layer count the registry has no row for keeps the JSON number, flagged unverified."""
+    """(standard tier only: the registry researched the no-surcharge service.)  ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l).  These limits feed DESIGN
+    floors (router / rules), so the house's RECOMMENDED (no-surcharge) value is used, else its hard value; the reject value is for
+    grading only (gerbercheck FAIL).  A sourced entry replaces the JSON number; a layer count the registry has no row for keeps the JSON number, flagged unverified."""
     from . import limits as LM
     lim, unv = dict(lim), list(unv)
     for f in LM.FAB_FEATURES:
         e = LM.get("fab_" + f, f"{vendor}-{layers}l")
         if LM.sourced(e):
-            lim[f] = float(e["hard"])
+            lim[f] = float(e["target"] if e.get("target") is not None else e["hard"])
         elif f in lim:
             unv.append(f"{f} {lim[f]:g} is not in the limits registry for {layers} layers (JSON number, unsourced)")
     return lim, unv
@@ -94,7 +95,7 @@ def row_for(vendor, tier, layers):
     rows = tier_rows(vendor, tier)
     for lo, hi, lim, unv in rows:
         if lo <= layers <= hi:
-            return _registry_overlay(vendor, layers, lim, unv)
+            return _registry_overlay(vendor, layers, lim, unv) if tier == "standard" else (lim, unv)
     have = ", ".join(f"{lo}-{hi}" for lo, hi, _l, _u in rows)
     raise FabProfileError(f"{vendor}-{tier} does not offer {layers} copper layers (rows: {have})")
 
