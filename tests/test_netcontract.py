@@ -118,3 +118,15 @@ def test_rails_ladder_layers_follow_the_contract_per_net():
     out = KC._contract_split(groups, {"A": ["F.Cu", "B.Cu"]})
     assert sorted((sorted(g), l) for g, l in out) == [(["A"], ["F.Cu", "B.Cu"]), (["B"], ["F.Cu", "In2.Cu", "B.Cu"])]
     assert KC._contract_split([({"A": 0.6}, ["In2.Cu"])], {"A": ["F.Cu", "B.Cu"]}) == []        # no allowed layer in the call: the rail stays open
+
+
+def test_the_route_stage_releases_the_pairs_its_pairgroups_step_re_laid(tmp_path):
+    """w84: route-7 was refused PROTECTED_CHANGED USB2_M2_DM/DP after its pairgroups step re-laid the pair (its old locked copper is
+    replaced by the new lay): the pairs the step reports in `released` are released at the commit point."""
+    prev = mk(tmp_path, "prev.kicad_pcb", seg("RF_ANT", (20, 20), (40, 20), True) + seg("VRAIL", (20, 22), (40, 22), True))
+    BW.seed(prev, why_by_net={"RF_ANT": "pair RF_ANT/VRAIL", "VRAIL": "pair RF_ANT/VRAIL"})
+    new = mk(tmp_path, "new.kicad_pcb", seg("RF_ANT", (20, 20), (30, 21), True) + seg("RF_ANT", (30, 21), (40, 20), True) + seg("VRAIL", (20, 22), (40, 22), True))
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": new, "line": "routed"}, None)
+    assert r["verdict"] == "fail" and "PROTECTED_CHANGED" in r["line"]
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": new, "line": "routed", "released": ["RF_ANT", "VRAIL"]}, None)
+    assert r["verdict"] == "pass"

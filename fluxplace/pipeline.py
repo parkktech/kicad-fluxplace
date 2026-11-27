@@ -1619,7 +1619,7 @@ def _commit_point(name, prev, res, cons=None):
                 return res
         except Exception:                                               # noqa: BLE001
             return res
-    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES or name == "close" else set())      # tune / close release the pairs they re-laid, not the manifest
+    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES or name in ("close", "route") else set())      # tune / close release the pairs they re-laid, not the manifest
     complete = {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}
     for x in rel & set(man["nets"]):                                    # a released pair is protected again at its new copper
         if man["nets"][x].get("why") != "locked":

@@ -267,7 +267,7 @@ def _post(best, d, planes, R, protect=()):
     return {"snap": snap, "ties": ties}
 
 
-def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=None):
+def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=None, released=None):
     """PHASE3C C.1 `pairgroups`: regroup the incomplete pairs (pairaudit) per connector group -> dst. No incomplete pair:
     dst is a copy of src. Legs of the pairs still failed go to `failed_legs` (the route step leaves them to the pair stage).
     PHASE3E 4: budget = PER_PAIR_S x incomplete pairs, capped by budget_s (the stage budget left). Any exception puts
@@ -292,6 +292,8 @@ def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=N
                 raise RuntimeError("no stage budget left for pairgroups")
             rep = PO.regroup(src, dst, c.cons, spec, todo, log=lines.append, budget_s=budget)
             failed_legs.update(x for p in rep["failed"] for x in p)
+            if released is not None:                          # w84: the pairs this step re-laid replace their old (locked) copper: the commit point releases them
+                released.update(x for g in rep["groups"].values() for nm in g.get("laid", []) for x in str(nm).split("/"))
         else:
             shutil_copy(src, dst)
             rep = {"skipped": "no incomplete pair"}
@@ -429,9 +431,10 @@ def run(c, n, board, runner=run_step):
                 shutil_copy(s, o)
                 return 0
         steps.append(("rails-branch", lambda s, o: _branch))
+    relaid = set()                                           # w84: legs of the pairs pairgroups re-laid (released at the commit point)
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
-        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope)
+        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope, released=relaid)
     steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
     hs_rec = {"excluded": []}
     def _route_nets(src):
@@ -700,7 +703,7 @@ def run(c, n, board, runner=run_step):
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"]}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"], "released": sorted(relaid)}
 
 
 def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):
