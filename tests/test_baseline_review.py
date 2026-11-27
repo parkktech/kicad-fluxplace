@@ -66,6 +66,7 @@ def test_gate_aborts_only_on_new_and_json_records_baseline(tmp_path, monkeypatch
     old = [F("OLD", "o 1", ["U1"])]
     cur = {str(board): [F("OLD", "o 1", ["U1"])], str(base): old}
     monkeypatch.setattr(cli, "_review_findings", lambda a, b, stage: ([dict(f) for f in cur[b]], {"net_pads": {}}))
+    monkeypatch.setattr("fluxplace.pairbase.findings", lambda b, p: [])   # the dummy board files are not parseable
     out = tmp_path / "r.json"
     a = argparse.Namespace(board=str(board), baseline=str(base), json=str(out), no_review=False)
     cli._review_gate(a, stage="review")                       # inherited only: no abort
@@ -116,3 +117,18 @@ def test_pair_finding_magnitude_is_skew_not_via_count():
     worse = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 1 vs 2; skew 9.00 > 1 mm", level="WARN")
     assert mark([same], [old]) == ["inherited"]
     assert mark([worse], [old]) == ["new"]
+
+
+def _tr(mm, vias=2):
+    return {"net_tracks": {n: {"vias": vias, "segments": [("F.Cu", 0.15, mm)]} for n in ("NA_P", "NA_N")}}
+
+
+def test_ungraded_baseline_with_equal_copper_is_inherited():
+    old = [F("PAIR_UNMEASURED", "NA_N/NA_P: no end-to-end path for both legs; pair not graded", level="FAIL")]
+    new = [F("PAIR_SKEW_REGRADED", "NA_N/NA_P: 12.96 mm over vendor guidance; skew 12.96", level="WARN")]
+    r = R.mark_baseline([dict(x) for x in new], old, NETS, equal=lambda ns: R.copper_equal(_tr(10.1), _tr(10.0), ns))
+    assert r[0]["baseline"] == "inherited" and "baseline ungraded, copper equal" in r[0]["msg"]
+    r = R.mark_baseline([dict(x) for x in new], old, NETS, equal=lambda ns: R.copper_equal(_tr(14.0), _tr(10.0), ns))
+    assert r[0]["baseline"] == "new"
+    r = R.mark_baseline([dict(x) for x in new], [], NETS, equal=lambda ns: True)
+    assert r[0]["baseline"] == "new"

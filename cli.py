@@ -1724,7 +1724,8 @@ def _review_gate(a, stage="review", hard=True):
         base_findings, _bf = _review_findings(a, base, stage)
         from fluxplace import pairbase as _PB
         findings += [R._f(f["level"], f["code"], f["msg"]) for f in _PB.findings(board, base)]       # PAIR_NARROWED: an update-laid pair thinner than on the baseline
-        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()))
+        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()),
+                        equal=lambda ns: R.copper_equal(facts, _bf, ns))
         base_info = {"board": os.path.abspath(base), "sha256": R.file_sha(base)}
         print(f"baseline: {base} sha {base_info['sha256']}", flush=True)
     print(f"REVIEW ({stage}) — {board}")
