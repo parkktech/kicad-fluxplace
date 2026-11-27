@@ -378,3 +378,16 @@ def test_unfixable_graphics_are_named(tmp_path):
     b, a, res = SK.fix_board(p, out)
     assert SK.unfixable_graphics(b) == [("U9", "SILK_OFF_BOARD")]          # named by the check ...
     assert "@gfx:U9" in res["hidden"] and SK.unfixable_graphics(a) == []     # B8: ... and the fit moves the offending shape to Fab
+
+
+def test_polarity_mark_off_the_board_is_kept_on_silk_and_reported_not_hidden(tmp_path):
+    """B8: pin-1 / polarity artwork (a circle, by pattern, not by reference) is never moved to Fab; a plain outline stroke beside it is."""
+    mark = '(fp_circle (center -1 -40) (end -0.5 -40) (stroke (width 0.15) (type solid)) (layer "F.SilkS"))'
+    line = '(fp_line (start -1 0) (end -1 -40) (stroke (width 0.15) (type solid)) (layer "F.SilkS"))'
+    p = brd(tmp_path, part("U9", 20, 5, extra=mark + line))
+    out = str(tmp_path / "o.kicad_pcb")
+    b, a, res = SK.fix_board(p, out)
+    f = [x for x in b if x["code"] == "SILK_OFF_BOARD" and x["refs"] == ["U9"]][0]
+    assert f["marks"] and f["gfx"] and not set(f["marks"]) & set(f["gfx"])
+    assert res["plan"]["@gfx:U9"]["items"] == f["gfx"]                       # only the outline stroke goes to Fab
+    assert [x for x in a if x["code"] == "SILK_OFF_BOARD" and x["refs"] == ["U9"]]          # the mark stays and is still reported

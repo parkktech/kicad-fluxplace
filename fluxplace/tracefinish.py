@@ -10,6 +10,7 @@ copy of the input. Disabled ([finish] enabled not true): the stage is a no-op an
 """
 import collections
 import json
+import math
 import os
 import shutil
 import threading
@@ -192,6 +193,93 @@ def _worse(f0_rec, f8_rec):
 CLEAN_CATS = ("zero", "duplicate", "stacked", "dangling")      # order matters: dangling last (it sees the copper the others left)
 
 
+def authorize(base, cand, clean_rows=()):
+    """The authorized write set of the T2 passes (B8): {net: {"remove": [hash], "add": [hash]}} for the items that differ between `base`
+    and `cand` AND qualify: an item the clean pass named (zero-length, exact duplicate, KiCad-flagged dangling); a track end moved
+    (old and new point both inside the copper of a same-net via); a track inside one via's copper dropped; a via moved by no more than its
+    radius onto a same-net track end; a joiner inside via copper. Any other difference is left out, so the commit point refuses it."""
+    from . import boardwrite as BW
+    A, C = BW.net_rows(base), BW.net_rows(cand)
+    allow = {}
+
+    def put(net, kind, h):
+        allow.setdefault(net, {"remove": [], "add": []})[kind].append(h)
+
+    for net in sorted(set(A) | set(C)):
+        ca, cc = {}, {}
+        for h, r in A.get(net, []):
+            ca.setdefault(h, [r, 0])[1] += 1
+        for h, r in C.get(net, []):
+            cc.setdefault(h, [r, 0])[1] += 1
+        rem = [(h, r) for h, (r, n) in ca.items() for _ in range(max(0, n - cc.get(h, [0, 0])[1]))]
+        add = [(h, r) for h, (r, n) in cc.items() for _ in range(max(0, n - ca.get(h, [0, 0])[1]))]
+        if not rem and not add:
+            continue
+        named = {}
+        for n_, h, _cat in clean_rows:
+            if n_ == net:
+                named[h] = named.get(h, 0) + 1
+        left = []
+        for h, r in rem:
+            if named.get(h, 0) > 0:
+                named[h] -= 1
+                put(net, "remove", h)
+            else:
+                left.append((h, r))
+        rem = left
+        vias = [r for _h, r in A.get(net, []) + C.get(net, []) if r[0] == "via"]
+
+        def inside(p, via=None):
+            for v in ([via] if via else vias):
+                if math.hypot(p[0] - v[1][0], p[1] - v[1][1]) <= v[2] / 2 + 1e-3:
+                    return True
+            return False
+
+        def same_via(p, q):
+            return any(math.hypot(p[0] - v[1][0], p[1] - v[1][1]) <= v[2] / 2 + 1e-3 and math.hypot(q[0] - v[1][0], q[1] - v[1][1]) <= v[2] / 2 + 1e-3 for v in vias)
+
+        # tracks inside one via's copper vanish (both ends on the centre)
+        left = []
+        for h, r in rem:
+            if r[0] != "via" and same_via(r[2][0], r[2][1]):
+                put(net, "remove", h)
+            else:
+                left.append((h, r))
+        rem = left
+        # track end moves: same net, layer, width, lock; one end kept, the other moved inside one via's copper
+        add_left = list(add)
+        left = []
+        for h, r in rem:
+            hit = None
+            if r[0] != "via":
+                for i, (h2, r2) in enumerate(add_left):
+                    if r2[0] == r[0] and r2[1] == r[1] and r2[3:] == r[3:]:
+                        shared = set(r[2]) & set(r2[2])
+                        if len(shared) == 1:
+                            p = (set(r[2]) - shared).pop()
+                            q = (set(r2[2]) - shared).pop()
+                            if same_via(p, q):
+                                hit = i
+                                break
+            elif True:                                  # a via moved by at most its radius onto a same-net track end of the candidate
+                for i, (h2, r2) in enumerate(add_left):
+                    if r2[0] == "via" and r2[2:] == r[2:] and math.hypot(r2[1][0] - r[1][0], r2[1][1] - r[1][1]) <= r[2] / 2 + 1e-3 and any(
+                            r3[0] != "via" and r2[1] in r3[2] for _h3, r3 in C.get(net, [])):
+                        hit = i
+                        break
+            if hit is None:
+                left.append((h, r))
+            else:
+                h2, _r2 = add_left.pop(hit)
+                put(net, "remove", h)
+                put(net, "add", h2)
+        rem = left
+        for h, r in add_left:                           # a joiner: a short track inside a via's copper
+            if r[0] != "via" and same_via(r[2][0], r[2][1]):
+                put(net, "add", h)
+    return allow
+
+
 def _clean_worker(src, dst, cats, dangling=()):
     """Fresh-process worker of `clean`: remove the items of the categories `cats` from `src`, save as `dst`.
     -> {category: count, "nets": [net names of the removed items]}. `dangling`: the item uuids KiCad's DRC reports as track_dangling /
@@ -210,9 +298,13 @@ def _clean_worker(src, dst, cats, dangling=()):
         trk = [t for t in b.GetTracks() if uid(t) not in gone]
         return ([t for t in trk if t.Type() == pcbnew.PCB_TRACE_T], [t for t in trk if t.Type() == pcbnew.PCB_VIA_T])
 
+    from . import boardwrite as BW
+    rows = []                                           # [net, hash, category] of every item removed: the authorized write set
+
     def kill(t, cat):
         gone[uid(t)] = t
         got[cat] += 1
+        rows.append([t.GetNetname(), BW.row_hash(BW.item_row(b, t)), cat])
 
     tracks, vias = items()
     if "zero" in cats:
@@ -220,38 +312,28 @@ def _clean_worker(src, dst, cats, dangling=()):
             if t.GetStart() == t.GetEnd():
                 kill(t, "zero")
         tracks, vias = items()
-    if "duplicate" in cats:
-        seen = {}
+    if "duplicate" in cats:                             # EXACT duplicates only: same net, layer, ends, width and lock
+        seen = set()
         for t in tracks:
-            k = (t.GetNetCode(), t.GetLayer(), frozenset(((t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y))))
-            keep = seen.get(k)
-            if keep is None:
-                seen[k] = t
-                continue
-            loser = keep if (t.GetWidth(), t.IsLocked()) > (keep.GetWidth(), keep.IsLocked()) else t
-            if loser is keep:
-                seen[k] = t
-            kill(loser, "duplicate")
+            h = BW.row_hash(BW.item_row(b, t))
+            if (t.GetNetCode(), h) in seen:
+                kill(t, "duplicate")
+            seen.add((t.GetNetCode(), h))
         tracks, vias = items()
-    if "stacked" in cats:
-        seen = {}
+    if "stacked" in cats:                               # identical stacked vias (same position, size, drill, span, lock)
+        seen = set()
         for v in vias:
-            k = (v.GetNetCode(), v.GetPosition().x, v.GetPosition().y)
-            keep = seen.get(k)
-            if keep is None:
-                seen[k] = v
-                continue
-            big = lambda x: (x.GetWidth(pcbnew.F_Cu), x.GetDrill(), x.IsLocked())
-            loser = keep if big(v) > big(keep) else v
-            if loser is keep:
-                seen[k] = v
-            kill(loser, "stacked")
+            h = BW.row_hash(BW.item_row(b, v))
+            if (v.GetNetCode(), h) in seen:
+                kill(v, "stacked")
+            seen.add((v.GetNetCode(), h))
     if "dangling" in cats:
         want = set(dangling)
         for t in tracks + vias:
             if uid(t) in want:
                 kill(t, "dangling")
     got["nets"] = sorted({t.GetNetname() for t in gone.values()})
+    got["rows"] = rows
     for t in gone.values():
         b.Remove(t)
     if gone:
@@ -268,8 +350,17 @@ def _guard_ok(d0, d1):
 DANGLING_TYPES = ("track_dangling", "via_dangling")
 
 
-def _dangling_uuids(d, typ):
-    return sorted({it["uuid"] for v in d.get("violations", []) if v.get("type") == typ for it in v.get("items", []) if it.get("uuid")})
+def _dangling_by_net(d, typ):
+    """{net: [uuid]} of the items KiCad reports under violation `typ` (the net comes from the item description 'Track [NET] on ...')."""
+    import re
+    out = {}
+    for v in d.get("violations", []):
+        if v.get("type") == typ:
+            for it in v.get("items", []):
+                if it.get("uuid"):
+                    m = re.search(r"\[([^\]]*)\]", str(it.get("description", "")))
+                    out.setdefault(m.group(1) if m else "?", set()).add(it["uuid"])
+    return {n: sorted(u) for n, u in out.items()}
 
 
 def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
@@ -283,10 +374,10 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
     shutil.copyfile(board, cur)
     _pro_copy(board, cur)
     d_cur = _drc(cur, kicad_cli=kicad_cli)
-    res = {"removed": {}, "refused": {}, "nets": [], "drc_before": len(d_cur.get("violations", []))}
+    res = {"removed": {}, "refused": {}, "nets": [], "rows": [], "drc_before": len(d_cur.get("violations", []))}
     trial = out + ".clean-trial.kicad_pcb"
 
-    def step(cat, uuids=()):
+    def step(cat, uuids=(), count_refused=True):
         """one guarded batch -> True when kept (the accepted board and its report advance)."""
         nonlocal d_cur
         r = in_fresh_process("fluxplace.tracefinish", "_clean_worker", cur, trial, [cat], uuids)
@@ -299,12 +390,27 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
         if ok:
             res["removed"][cat] = res["removed"].get(cat, 0) + n
             res["nets"] = sorted(set(res["nets"]) | set(r["nets"]))
+            res["rows"] += r["rows"]
             shutil.copyfile(trial, cur)
             d_cur = d_new
-        else:
+        elif count_refused:
             res["refused"][cat] = res["refused"].get(cat, 0) + n
         _rm(trial)
         return ok
+
+    def _batch(by_net, depth):
+        """the whole batch first; a refused one is split by net (halves, at most `depth` levels) so one bad net does not cost the rest."""
+        if not by_net:
+            return False
+        if step("dangling", [u for n in sorted(by_net) for u in by_net[n]], count_refused=depth == 0 or len(by_net) == 1):
+            return True
+        if len(by_net) < 2 or depth == 0:
+            return False
+        ns = sorted(by_net)
+        h = len(ns) // 2
+        a = _batch({n: by_net[n] for n in ns[:h]}, depth - 1)
+        b = _batch({n: by_net[n] for n in ns[h:]}, depth - 1)
+        return a or b
 
     try:
         for cat in cats:
@@ -314,8 +420,7 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
             for _ in range(3):
                 kept = False
                 for typ in DANGLING_TYPES:
-                    ids = _dangling_uuids(d_cur, typ)
-                    kept = (ids and step("dangling", ids)) or kept
+                    kept = _batch(_dangling_by_net(d_cur, typ), 3) or kept
                 if not kept:
                     break
         shutil.copyfile(cur, out)
@@ -326,28 +431,6 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
         _rm(cur)
         _rm(trial)
     return res
-
-
-def _changed_nets_run(a, b):
-    from .freshproc import in_fresh_process
-    return in_fresh_process("fluxplace.tracefinish", "_changed_nets", a, b)
-
-
-def _changed_nets(a, b):
-    """Fresh-process worker: names of the nets whose tracks / vias differ (position, layer, width) between boards `a` and `b`."""
-    import pcbnew
-
-    def sig(path):
-        bd = pcbnew.LoadBoard(path)
-        out = set()
-        for t in bd.GetTracks():
-            via = t.Type() == pcbnew.PCB_VIA_T
-            out.add((t.GetNetname(), via, t.GetLayer() if not via else -1, t.GetStart().x, t.GetStart().y,
-                     t.GetEnd().x if not via else 0, t.GetEnd().y if not via else 0, t.GetWidth() if not via else t.GetWidth(pcbnew.F_Cu)))
-        return out
-    sa, sb = sig(a), sig(b)
-    sa, sb = {(x[0], x[1], x[2], frozenset(((x[3], x[4]), (x[5], x[6]))), x[7]) for x in sa}, {(x[0], x[1], x[2], frozenset(((x[3], x[4]), (x[5], x[6]))), x[7]) for x in sb}
-    return sorted({x[0] for x in sa ^ sb})
 
 
 def _centred(d):
@@ -413,7 +496,7 @@ def stage(c, n, board):
     d_clean = clean_rec.pop("report", None) or {}
     centre_rec = _beating("T2 centre", lambda: centre(cleaned, out, d_clean, kicad_cli))
     centre_rec.pop("report", None)
-    released = sorted(set(clean_rec.get("nets") or []) | (set(_changed_nets_run(cleaned, out)) if centre_rec["moves"] else set()))
+    authorized = authorize(board, out, clean_rec.pop("rows", []))
     _rm(cleaned)
     changed = bool(clean_rec["removed"]) or bool(centre_rec["moves"])
     if changed:
@@ -440,4 +523,4 @@ def stage(c, n, board):
             f"not_measured rules {len(nm)})" + (f" ILLEGAL: {','.join(worse)}" if worse else "")
             + f"; T2 removed {sum(clean_rec['removed'].values())} {clean_rec['removed']}, off-centre {centre_rec['before']} -> {centre_rec['after']}"
             + f" score board {sc0.get('board')} -> {sc8.get('board')}")
-    return {"verdict": verdict, "line": line, "board": out, "released": released}
+    return {"verdict": verdict, "line": line, "board": out, "authorized": authorized}

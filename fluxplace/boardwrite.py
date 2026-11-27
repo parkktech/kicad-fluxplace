@@ -246,25 +246,45 @@ def file_sha(path):
     return h.hexdigest()
 
 
+def item_row(b, t):
+    """The comparable row of one track / via (1 um rounding, no UUID) of an open pcbnew board."""
+    import pcbnew
+    mm = lambda v: round(v / 1e6, 3)                                            # noqa: E731
+    xy = lambda p: (mm(p.x), mm(p.y))                                           # noqa: E731
+    cls = t.GetClass()
+    if cls == "PCB_VIA":
+        return ("via", xy(t.GetPosition()), mm(t.GetWidth(pcbnew.F_Cu)), mm(t.GetDrillValue()), b.GetLayerName(t.TopLayer()),
+                b.GetLayerName(t.BottomLayer()), int(t.GetViaType()), bool(t.IsLocked()))
+    ends = sorted([xy(t.GetStart()), xy(t.GetEnd())])
+    return (cls, b.GetLayerName(t.GetLayer()), tuple(ends), mm(t.GetWidth()), xy(t.GetMid()) if cls == "PCB_ARC" else None, bool(t.IsLocked()))
+
+
+def row_hash(row):
+    return hashlib.sha1(repr(row).encode()).hexdigest()[:16]
+
+
+def net_rows(path):
+    """{net: [(hash, row)]} of every item of every net (the readable twin of net_items)."""
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    out = {}
+    for t in (b.GetTracks() if b is not None else ()):
+        if t.GetNetname():
+            r = item_row(b, t)
+            out.setdefault(t.GetNetname(), []).append((row_hash(r), r))
+    return out
+
+
 def net_items(path, nets=None, locked_only=False):
     """{net: sorted list of item hashes} of that net's copper (all items, or only the locked ones); pcbnew, 1 um rounding, no UUIDs."""
     import pcbnew
     b = pcbnew.LoadBoard(path)
-    mm = lambda v: round(v / 1e6, 3)                                            # noqa: E731
-    xy = lambda p: (mm(p.x), mm(p.y))                                           # noqa: E731
     rows = {}
     for t in b.GetTracks():
         net = t.GetNetname()
         if not net or (nets is not None and net not in nets) or (locked_only and not t.IsLocked()):
             continue
-        cls = t.GetClass()
-        if cls == "PCB_VIA":
-            row = ("via", xy(t.GetPosition()), mm(t.GetWidth(pcbnew.F_Cu)), mm(t.GetDrillValue()), b.GetLayerName(t.TopLayer()),
-                   b.GetLayerName(t.BottomLayer()), int(t.GetViaType()), bool(t.IsLocked()))
-        else:
-            ends = sorted([xy(t.GetStart()), xy(t.GetEnd())])
-            row = (cls, b.GetLayerName(t.GetLayer()), tuple(ends), mm(t.GetWidth()), xy(t.GetMid()) if cls == "PCB_ARC" else None, bool(t.IsLocked()))
-        rows.setdefault(net, []).append(hashlib.sha1(repr(row).encode()).hexdigest()[:16])
+        rows.setdefault(net, []).append(row_hash(item_row(b, t)))
     return {n: sorted(r) for n, r in rows.items()}
 
 
@@ -453,10 +473,12 @@ def contract_check(prev, cand, cons, spec=None):
     return {"ok": not names, "why": why, "changed": names, "detail": bad}
 
 
-def changed(board, manifest, release=()):
+def changed(board, manifest, release=(), allow=None):
     """Protected nets whose protected copper is not intact in `board`: a "locked" net lost or moved one of its locked items (additions are
-    fine); a "pair" net differs at all."""
+    fine); a "pair" net differs at all.  `allow` = {net: {"remove": [hash], "add": [hash]}}: the exact items an authorized pass removed
+    or added on that net (an item may be missing / extra only when named there, once per name); any other difference is still a change."""
     rel = set(release)
+    allow = allow or {}
     names = [n for n in manifest["nets"] if n not in rel]
     if not names:
         return []
@@ -465,16 +487,21 @@ def changed(board, manifest, release=()):
     for n in names:
         e = manifest["nets"][n]
         have = now.get(n, [])
-        if e["why"] == "locked":
-            hv = {}
-            for x in have:
-                hv[x] = hv.get(x, 0) + 1
-            need = {}
-            for x in e["items"]:
-                need[x] = need.get(x, 0) + 1
-            if any(hv.get(x, 0) < c for x, c in need.items()):
-                bad.append(n)
-        elif have != e["items"]:
+        hv, need = {}, {}
+        for x in have:
+            hv[x] = hv.get(x, 0) + 1
+        for x in e["items"]:
+            need[x] = need.get(x, 0) + 1
+        ok_rm, ok_add = {}, {}
+        for x in (allow.get(n) or {}).get("remove", []):
+            ok_rm[x] = ok_rm.get(x, 0) + 1
+        for x in (allow.get(n) or {}).get("add", []):
+            ok_add[x] = ok_add.get(x, 0) + 1
+        missing = {x: c - hv.get(x, 0) for x, c in need.items() if hv.get(x, 0) < c}
+        extra = {x: c - need.get(x, 0) for x, c in hv.items() if need.get(x, 0) < c}
+        if any(c > ok_rm.get(x, 0) for x, c in missing.items()):
+            bad.append(n)
+        elif e["why"] != "locked" and any(c > ok_add.get(x, 0) for x, c in extra.items()):
             bad.append(n)
     return sorted(bad)
 
@@ -493,7 +520,7 @@ def _dups(path):
     return len(dedupe.duplicates(open(path, errors="surrogateescape").read()))
 
 
-def verify(base, cand, release=(), manifest=None, cons=None, spec=None):
+def verify(base, cand, release=(), manifest=None, cons=None, spec=None, allow=None):
     """Read-only check of `cand` against the manifest of `base` (or `manifest`).
     -> {"ok", "why", "changed": [nets], "duplicates": n, "uuid_collisions": n}.  A duplicate or id collision already in `base` does not
     block a candidate that does not add more (a repair that removes them must pass).  `cand` may be `base` itself (a stage that edited
@@ -502,7 +529,7 @@ def verify(base, cand, release=(), manifest=None, cons=None, spec=None):
     if manifest is None and is_stale(base, man):
         return {"ok": False, "why": f"MANIFEST_STALE {os.path.basename(base)} was edited after it was sealed", "changed": [],
                 "duplicates": 0, "uuid_collisions": 0}
-    bad = changed(cand, man, release)
+    bad = changed(cand, man, release, allow)
     d1 = _dups(cand)
     u1 = uuid_collisions(cand)
     same = os.path.abspath(base) == os.path.abspath(cand)
@@ -541,13 +568,13 @@ def release(board, names, reason, attempts=None):
     return gone
 
 
-def commit(base, cand, dst, release=(), complete=None, reason="", log=None, locked=True, manifest=None, cons=None, spec=None):
+def commit(base, cand, dst, release=(), complete=None, reason="", log=None, locked=True, manifest=None, cons=None, spec=None, allow=None):
     """THE write of a candidate over a stage board: verify(base, cand), then copy cand -> dst (and its project sidecars; no copy when
     cand is dst) and write dst's manifest = base's entries minus `release` (re-read from the new copper) + `complete` {net: why} + the
     locked items.  -> verify's dict plus "written".  Refused: nothing is written."""
     man = manifest if manifest is not None else load_manifest(base)
     kw = {} if cons is None else {"cons": cons, "spec": spec}
-    r = verify(base, cand, release, manifest=man if manifest is not None else None, **kw)
+    r = verify(base, cand, release, manifest=man if manifest is not None else None, allow=allow, **kw)
     r["written"] = False
     if not r["ok"]:
         if log:
@@ -561,7 +588,7 @@ def commit(base, cand, dst, release=(), complete=None, reason="", log=None, lock
             if os.path.exists(s) and os.path.abspath(s) != os.path.abspath(os.path.splitext(dst)[0] + ext):
                 shutil.copy2(s, os.path.splitext(dst)[0] + ext)
     rel = set(release)
-    keep = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}
+    keep = {"nets": {n: e for n, e in man["nets"].items() if n not in rel}}        # `allow`ed nets stay protected, re-read from the new copper
     seed(dst, complete, keep=keep, locked=locked)
     gone = sorted(n for n in rel if n in man["nets"])
     if gone:

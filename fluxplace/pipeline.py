@@ -1426,7 +1426,7 @@ def _gate_measure(c, n, name, board, kinds, src=None, later=()):
 # every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
 # its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
 SEED_STAGES = ("pairs", "tune")
-RELEASING_STAGES = ("tune", "trace-finish")      # B8: the T2 clean / centre pass edits copper-neutral items of protected nets; those nets are re-protected at the new copper
+RELEASING_STAGES = ("tune",)
 
 
 def _pcbnew_state_guard(name, res):
@@ -1488,7 +1488,8 @@ def _commit_point(name, prev, res, cons=None):
         if man["nets"][x].get("why") != "locked":
             complete.setdefault(x, man["nets"][x].get("why", "kept"))
     try:
-        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
+        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man,
+                      allow=res.get("authorized") if name == "trace-finish" else None)      # B8: trace-finish writes only the items it names      # the stage ran: items decide, not the sha
     except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
         return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
                     next=[f"{name}: output not adopted"])

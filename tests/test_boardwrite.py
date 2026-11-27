@@ -187,3 +187,27 @@ def test_via_identity_includes_the_layer_pair(tmp_path):
     f1.write_text(head + via("B.Cu") + ")\n")
     f2.write_text(head + via("In1.Cu") + ")\n")
     assert BW.net_items(str(f1)) != BW.net_items(str(f2))
+
+
+# ---- B8: trace-finish writes only the items it names (no stage-wide release) --------------------------------------------------
+
+def test_trace_finish_may_drop_a_named_duplicate_on_a_protected_net_but_not_any_other_segment(tmp_path):
+    from fluxplace import tracefinish as TF
+    base = board(tmp_path, "base.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (20, 20), (30, 20), True)
+                 + seg("D_P", (30, 20), (40, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    BW.seed(base)
+    nodup = board(tmp_path, "nodup.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (30, 20), (40, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    h = BW.net_rows(base)["D_P"][0][0]
+    # the clean pass names the exact duplicate it removed: authorized, committed
+    ok = TF.authorize(base, nodup, [["D_P", h, "duplicate"]])
+    assert BW.verify(base, nodup, allow=ok)["ok"]
+    assert not BW.verify(base, nodup)["ok"]                                  # without the write set the same change is PROTECTED_CHANGED
+    # a different, non-duplicate segment deleted on the protected net: nothing authorizes it
+    gone = board(tmp_path, "gone.kicad_pcb", seg("D_P", (20, 20), (30, 20), True) + seg("D_P", (20, 20), (30, 20), True) + seg("SIG", (20, 23), (30, 23)))
+    bad = TF.authorize(base, gone, [["D_P", h, "duplicate"]])               # the named hash is a different item than the one deleted
+    r = BW.verify(base, gone, allow=bad)
+    assert not r["ok"] and "PROTECTED_CHANGED D_P" in r["why"]
+    # and a stage-level check: the commit point refuses it as well
+    from fluxplace import pipeline as PL
+    res = PL._commit_point("trace-finish", base, {"verdict": "pass", "board": gone, "authorized": bad})
+    assert res["verdict"] == "fail" and "PROTECTED_CHANGED" in res["line"]

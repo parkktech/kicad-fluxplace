@@ -630,7 +630,7 @@ def check(sc, cfg, side="both"):
                                     f"(max {cfg['max_ref_distance_mm']:g})", [own], t["id"], x, y))
     # footprint graphics
     if cfg.get("check_graphics", True):
-        seen, bad_gi = {}, {}
+        seen, bad_gi, bad_mark = {}, {}, {}
         for gi, gobj in enumerate(sc["gfx"]):
             own = gobj["owner"]
             if side != "both" and gobj["side"] != side[0].upper():
@@ -641,22 +641,23 @@ def check(sc, cfg, side="both"):
                 # off board: the polygon's own vertices (an AABB would flag every diagonal inside a corner cut)
                 if lay.rings and any(lay.off_board(rect(p[0], p[1], 0.001, 0.001), cfg["edge_clearance_mm"]) for p in poly[::max(1, len(poly) // 8)]):
                     seen.setdefault((own, "SILK_OFF_BOARD"), set()).add(own)
-                    bad_gi.setdefault((own, "SILK_OFF_BOARD"), set()).add(gobj.get("gi"))
+                    (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OFF_BOARD"), set()).add(gobj.get("gi"))
                 for _, p in lay.pads[gobj["side"]].query(bb):
                     if p["owner"] != own and _poly_poly(poly, p["poly"]):
                         seen.setdefault((own, "SILK_OVER_PAD"), set()).add(f"{p['owner']}.{p['num']}")
-                        bad_gi.setdefault((own, "SILK_OVER_PAD"), set()).add(gobj.get("gi"))
+                        (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OVER_PAD"), set()).add(gobj.get("gi"))
                 for _, h in lay.holes[gobj["side"]].query(bb):
                     if h["owner"] != own and _poly_poly(poly, h["poly"]):
                         seen.setdefault((own, "SILK_OVER_HOLE"), set()).add(h["owner"] or h["kind"])
-                        bad_gi.setdefault((own, "SILK_OVER_HOLE"), set()).add(gobj.get("gi"))
+                        (bad_mark if gobj.get("mark") else bad_gi).setdefault((own, "SILK_OVER_HOLE"), set()).add(gobj.get("gi"))
         for (own, code), who in sorted(seen.items()):
             what = {"SILK_OFF_BOARD": "outside the board or too close to Edge.Cuts",
                     "SILK_OVER_PAD": "over pad " + ", ".join(sorted(who)[:3]),
                     "SILK_OVER_HOLE": "over hole " + ", ".join(sorted(who)[:3])}[code]
-            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: the fit moves the offending shapes to the fab layer]", [own] + [w.split(".")[0] for w in who]
+            out.append(_fnd(code, f"{own or 'board'} silk graphics {what} [footprint artwork: the fit moves the offending shapes to the fab layer, never an assembly mark]", [own] + [w.split(".")[0] for w in who]
                             if code != "SILK_OFF_BOARD" else [own]))
             out[-1]["gfx"] = sorted(g for g in bad_gi.get((own, code), ()) if g is not None)
+            out[-1]["marks"] = sorted(g for g in bad_mark.get((own, code), ()) if g is not None)       # assembly marks: never hidden, reported
     # reference visibility / marks
     ref_on_silk = {t["owner"] for t in sc["texts"] if t["kind"] == "ref"}
     for ref in sorted(parts):
@@ -1036,7 +1037,8 @@ def fit(sc, cfg, findings=None, only=None, side="both", log=lambda m: None, titl
                 bad.setdefault(i, set()).add(f["code"])
     fields = {}                                            # B8: a value / free text that is hard-offending is no reference: hidden (moved to Fab)
     for f in findings:
-        if f["code"] in HARD and f.get("tid") is not None and texts[f["tid"]]["kind"] in ("value", "fptext"):
+        if f["code"] in HARD and f.get("tid") is not None and texts[f["tid"]]["kind"] in ("value", "fptext") \
+                and len(texts[f["tid"]]["text"].strip()) > 2:          # a 1-2 character text ('+', '1', 'K') is an assembly mark: kept
             t = texts[f["tid"]]
             if (side == "both" or t["side"] == side[0].upper()) and (only is None or t["owner"] in set(only)):
                 fields[t["id"]] = "@field:" + t["owner"] + "|" + t["text"]

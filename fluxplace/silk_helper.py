@@ -53,6 +53,27 @@ def _ink(t):
     return (mm(bb.GetLeft() - pos.x), mm(bb.GetTop() - pos.y), mm(bb.GetRight() - pos.x), mm(bb.GetBottom() - pos.y))
 
 
+def _is_mark(g):
+    """An assembly mark by PATTERN (never by reference): a polarity / pin-1 shape of a footprint's silk artwork. Circles, polygons and arcs (dots, triangles,
+    diode-bar caps, polarity arcs), a filled rectangle, a short stroke (<= 1.5 mm: the arms of a cap '+'), a heavy stroke (>= 0.3 mm: a diode bar) and a
+    diagonal stroke (a chamfered pin-1 corner) are marks; a plain horizontal / vertical outline stroke is not. A one- or two-character text is a mark."""
+    try:
+        if g.GetClass() == "PCB_TEXT":
+            return len(pcbnew.Cast_to_PCB_TEXT(g).GetText().strip()) <= 2
+        if g.GetClass() != "PCB_SHAPE":
+            return False
+        sh = g.GetShapeStr()
+        if sh in ("Circle", "Polygon", "Arc", "Bezier"):
+            return True
+        if sh == "Rect":
+            return bool(g.IsFilled())
+        s, e = g.GetStart(), g.GetEnd()
+        dx, dy = mm(e.x - s.x), mm(e.y - s.y)
+        return (dx * dx + dy * dy) ** 0.5 <= 1.5 or mm(g.GetWidth()) >= 0.3 or (abs(dx) > 0.01 and abs(dy) > 0.01)
+    except Exception:                                    # noqa: BLE001 - an unreadable shape is kept, never removed
+        return True
+
+
 def _text(t, kind, owner, side):
     ang = t.GetTextAngleDegrees()
     t.SetTextAngleDegrees(0)
@@ -138,7 +159,7 @@ def scene(path):
             else:
                 polys = _shape_poly(g, g.GetLayer())
                 if polys:
-                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys, "gi": gi})
+                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys, "gi": gi, "mark": _is_mark(g)})
                 if lay == fside:
                     part["silk_gfx"] += 1
                     if g.GetClass() == "PCB_SHAPE" and g.GetShapeStr() in ("Circle", "Polygon", "Arc"):
