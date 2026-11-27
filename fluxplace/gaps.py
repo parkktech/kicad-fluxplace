@@ -54,18 +54,51 @@ def _class(nets, rf, pairs):
     return "plain"
 
 
+_PAIR_ROWS = {}                                  # w69: (cons, leg copper, open flags) -> audited pair row (the audit reads only the two legs)
+
+
+def _pair_sig(board, p, n, opn, cons_key):
+    """Everything the audit of pair (p, n) reads from the board: the copper and pads of its two legs and whether each leg is open."""
+    rows = _board_rows(board)
+    legs = {p, n}
+    return hashlib.sha1(repr((cons_key, sorted(legs), p in opn, n in opn,
+                              [r for r in rows["tracks"] if r[0] in legs], [r for r in rows["vias"] if r[0] in legs],
+                              [r for r in rows["pads"] if r[0] in legs])).encode()).hexdigest()
+
+
 def _pair_audit(board, cons, opn=None):
     """(B, cls, rows) of the routing pair audit, built as review._pairs_from_audit builds it. `opn`: open-net set
-    (classify passes the DRC unconnected set); None -> routeconn.open_by_net."""
-    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC
+    (classify passes the DRC unconnected set); None -> routeconn.open_by_net. w69: a pair whose legs' copper, pads and open state are
+    those of an audited pair of an earlier board keeps that row; only the changed pairs are measured (kicad-cli)."""
+    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC, pairaudit as PA
+    cons = cons or {}
     B = RD.load(board)
-    cls = NC.classify(B, cons or {})
+    cls = NC.classify(B, cons)
     if opn is None:
         try:
             opn = set(RC.open_by_net(board))
         except Exception:
             opn = set(RC.text_open(B))
-    return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
+    pairs = PA.pair_list(cls)
+    try:
+        ck = hashlib.sha1(repr(sorted(cons.items(), key=lambda kv: str(kv[0]))).encode()).hexdigest()
+        sig = {pr: _pair_sig(board, pr[0], pr[1], opn, ck) for pr in pairs}
+    except Exception:
+        sig = {}
+    todo = [pr for pr in pairs if sig.get(pr) not in _PAIR_ROWS]
+    fresh = {r["pair"]: r for r in QA.pair_rows(B, cls, cons, opn, pairs=todo)} if todo else {}
+    rows = []
+    for pr in pairs:
+        s = sig.get(pr)
+        r = fresh.get(f"{pr[0]}/{pr[1]}")
+        if r is not None and s and r.get("status") != "unknown":     # an unmeasured pair is retried, never cached
+            if len(_PAIR_ROWS) > 512:
+                _PAIR_ROWS.clear()
+            _PAIR_ROWS[s] = r
+        r = r or _PAIR_ROWS.get(s)
+        if r is not None:
+            rows.append(r)
+    return B, cls, rows
 
 
 SEV = {"pair-open": 3, "pair-unmeasured": 3, "pair-asym": 2, "pair-skew": 1, "pair-stub": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
@@ -2408,29 +2441,41 @@ def _zones_of(board, fp):
     return _ZONES[fp]
 
 
-def _blockers_of(board, gaps, skip=(), r=WINDOW_MM):
-    """B6a: nets (not in `skip`, not a gap's own) with a track or via in the window (`at` +- r mm) of any of `gaps`: the copper a
-    repair of those gaps would have to move. None when the board cannot be read or a gap has no position."""
+def _blocker_items(board, gaps, skip=(), r=WINDOW_MM):
+    """B6a: the copper items (`net#i`: i = row index of the track or via) not of `skip` nets nor a gap's own, inside the window
+    (`at` +- r mm) of any of `gaps`: the copper a repair of those gaps would have to move. A gap without `at` is windowed at
+    the pads of its nets. None when the board cannot be read or a gap has no position at all."""
     try:
         import pcbnew
         rows = _board_rows(board)
         R = pcbnew.FromMM(r)
         out = set()
         for g in gaps:
-            if not g.get("at"):
-                return None
-            cx, cy = pcbnew.FromMM(g["at"][0]), pcbnew.FromMM(g["at"][1])
-            x0, y0, x1, y1 = cx - R, cy - R, cx + R, cy + R
             own = set(g.get("nets") or [])
-            for n, _l, _sx, _sy, _ex, _ey, _w, l, t, rt, bt in rows["tracks"]:
-                if n and n not in own and rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
-                    out.add(n)
-            for n, _l, x, y, _w, _d in rows["vias"]:
-                if n and n not in own and x0 <= x <= x1 and y0 <= y <= y1:
-                    out.add(n)
-        return sorted(out - set(skip))
+            excl = own | set(skip)
+            if g.get("at"):
+                pts = [(pcbnew.FromMM(g["at"][0]), pcbnew.FromMM(g["at"][1]))]
+            else:
+                pts = [(x, y) for n, _ref, x, y in rows["pads"] if n in own]
+            if not pts:
+                return None
+            for cx, cy in pts:
+                x0, y0, x1, y1 = cx - R, cy - R, cx + R, cy + R
+                for i, (n, _l, _sx, _sy, _ex, _ey, _w, l, t, rt, bt) in enumerate(rows["tracks"]):
+                    if n and n not in excl and rt >= x0 and l <= x1 and bt >= y0 and t <= y1:
+                        out.add(f"{n}#t{i}")
+                for i, (n, _l, x, y, _w, _d) in enumerate(rows["vias"]):
+                    if n and n not in excl and x0 <= x <= x1 and y0 <= y <= y1:
+                        out.add(f"{n}#v{i}")
+        return out
     except Exception:
         return None
+
+
+def _blockers_of(board, gaps, skip=(), r=WINDOW_MM):
+    """The nets of `_blocker_items` (sorted), None when unreadable."""
+    items = _blocker_items(board, gaps, skip, r)
+    return None if items is None else sorted({i.rsplit("#", 1)[0] for i in items})
 
 
 def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, targets, blockers, ctx, al, deadline, reserve):
@@ -2881,7 +2926,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 continue
             groups = [tg]
             if kind in GROUPED and len(tg) > 1:
-                blk = {g["id"]: _blockers_of(best, [g], skip) for g in tg}
+                blk = {g["id"]: _blocker_items(best, [g], skip, KRT_WINDOW_MM) for g in tg}
                 if all(v is not None for v in blk.values()):
                     byid = {g["id"]: g for g in tg}
                     groups = [[byid[i] for i in grp] for grp in

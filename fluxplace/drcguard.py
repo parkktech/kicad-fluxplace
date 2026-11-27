@@ -88,14 +88,15 @@ CANARY_RULE = ("(rule \"fxcanary\" (condition \"A.Type == 'Footprint' || A.Type 
                "(constraint assertion \"A.Type == 'Nothing'\"))")
 
 
-def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True, pro_edit=None, canary=None):
+def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_rules=None, complete=True, pro_edit=None, refill=True):
     """THE kicad-cli DRC runner (all severities, zones always refilled). Runs on a temp COPY of the board (never refills or
     rewrites the original) with its .kicad_pro/.kicad_dru beside it, and a unique report path (concurrent calls never collide).
     rules: .kicad_dru text that replaces the board's rule file. only_rules: list of rule-severity keys left on, every other
     check set to ignore in the temp project (a 2 s run for one rule). complete: complete the capped unconnected list.
-    pro_edit(dict): edits the temp project (e.g. a tuning profile). canary: names of rules in `rules` at least one of which must fire:
-    a syntax error anywhere in a .kicad_dru silently disables EVERY rule (kicad-cli still exits 0), so a report in which none of
-    the canary rules appears raises RuntimeError("rule file ignored").
+    pro_edit(dict): edits the temp project (e.g. a tuning profile). A syntax error anywhere in a .kicad_dru silently disables EVERY
+    rule (kicad-cli still exits 0): the always-firing fxcanary rule missing from the report raises RuntimeError("rule file ignored").
+    A caller's own rule that does not fire (a net with no copper) is NOT a rule-file failure: its absence means "nothing to report".
+    refill=False skips the zone refill (a length / skew rule reads only copper: no zone changes it).
     Raises RuntimeError when kicad-cli writes no report.  Never saves a board (BOARD.Save() would rewrite a neighbouring .kicad_pro)."""
     import shutil
     import tempfile
@@ -133,7 +134,7 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
         for attempt in (1, 2):                         # kicad-cli sometimes exits without a report under load (critroute: 10 of 13 tries); once more
             try:
                 r = _procs.run([kicad_cli, "pcb", "drc", "--format", "json", "--severity-all", "--all-track-errors",
-                                    "--refill-zones", "--output", out, b], capture_output=True, text=True, timeout=timeout)
+                                    *(["--refill-zones"] if refill else []), "--output", out, b], capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired as e:
                 raise RuntimeError(f"DRC timed out after {timeout} s") from e
             rc = getattr(r, "returncode", 0)
@@ -149,9 +150,6 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
                                "or the board has no footprints or tracks)")
         if dtext is not None:                                                  # our canary is a probe, never a finding
             d["violations"] = [v for v in d.get("violations", []) if "rule 'fxcanary'" not in str(v.get("description", ""))]
-        if canary and not any(f"rule '{c}'" in str(v.get("description", "")) for v in d.get("violations", []) for c in canary):
-            raise RuntimeError("rule file ignored: no canary rule fired (" + ", ".join(canary[:3]) + "); a syntax error in the .kicad_dru "
-                               "disables every rule, or the nets have no copper")
         if complete:
             from . import drcfull as DF
             d = DF.complete(b, d, fill=True)

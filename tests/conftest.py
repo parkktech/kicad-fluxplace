@@ -12,6 +12,14 @@ def _events_isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _pair_rows_cache_reset():
+    """gaps._PAIR_ROWS is keyed by copper content: a test that mocks a failing measure must not see a row cached by another test."""
+    from fluxplace import gaps
+    gaps._PAIR_ROWS.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _http_breaker_reset():
     """redact.urlopen remembers a dead host per process; a test that fails a host must not poison the next one."""
     from fluxplace import redact

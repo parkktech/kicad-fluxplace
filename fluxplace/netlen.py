@@ -18,7 +18,7 @@ def _q(net):
 def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
     """{(p, n): {"p": mm | None, "n": mm | None, "skew": P - N signed mm}} for the pairs of `board` (a path), from KiCad's DRC.
     Lengths come from one `length` rule per net (every net with copper reports, equal or not).  None when kicad-cli fails or the rule file
-    is ignored (the canary rule did not fire): the pair is unmeasured and cannot pass, there is no fallback.  skew = P - N for the pair as
+    is ignored (the fxcanary rule did not fire): the pair is unmeasured and cannot pass, there is no fallback.  skew = P - N for the pair as
     given (p, n)."""
     pairs = [tuple(p) for p in pairs]
     if not pairs or not board or not os.path.isfile(board):
@@ -35,8 +35,7 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
             f"(rule \"ln{i}\" (condition \"A.NetName == '{_q(x)}'\") (constraint length (max 0.0001mm)))\n" for i, x in enumerate(nets))
         from . import drcguard as DG
         try:
-            rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["skew_out_of_range", "length_out_of_range"], complete=False,
-                              canary=[f"ln{i}" for i in range(len(nets))])
+            rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["skew_out_of_range", "length_out_of_range"], complete=False, refill=False)
         except RuntimeError as e:
             print(f"netlen: kicad-cli drc failed: {e}", file=sys.stderr)
             return None
@@ -46,9 +45,9 @@ def pair_lengths(board, pairs, kicad_cli="kicad-cli", timeout=300):
             ml = _RL.search(v.get("description", ""))
             if ml:                                           # the net's total copper length (reported for every net, equal or not)
                 tot[nets[int(ml.group(1))]] = max(tot.get(nets[int(ml.group(1))], 0.0), float(ml.group(2)))
-        for (p, n) in pairs:
-            if p in tot and n in tot:
-                res[(p, n)].update(p=tot[p], n=tot[n], skew=round(tot[p] - tot[n], 4))
+        for (p, n) in pairs:                                 # the rule reports every net with copper: a missing net has none (length 0)
+            lp, ln = tot.get(p, 0.0), tot.get(n, 0.0)
+            res[(p, n)].update(p=lp, n=ln, skew=round(lp - ln, 4))
         for v in rep.get("violations", []):
             m = _RE.search(v.get("description", ""))
             if not m:
@@ -251,7 +250,7 @@ def kicad_delays(board, legs, kicad_cli="kicad-cli", timeout=300):
     leg_decomposition of each net).  A delay-only tuning profile (width and gap 0, so no geometry rule is created) carrying those
     per-layer ps/mm and the via propagation delay goes into a TEMP .kicad_pro, every net gets a netclass naming it, and one
     `(constraint length (max 0ps))` rule per net makes kicad-cli report the net's delay (tracks x ps/mm per layer, via span x
-    via_prop_delay, pad-to-die).  None when kicad-cli fails or the rule file is ignored (the canary rule did not fire)."""
+    via_prop_delay, pad-to-die).  None when kicad-cli fails or the rule file is ignored (the fxcanary rule did not fire)."""
     nets = sorted(legs)
     if not nets:
         return {}
@@ -274,8 +273,7 @@ def kicad_delays(board, legs, kicad_cli="kicad-cli", timeout=300):
     rules = "(version 1)\n" + "".join(
         f"(rule \"pl{i}\" (condition \"A.NetName == '{_q(x)}'\") (constraint length (max 0ps)))\n" for i, x in enumerate(nets))
     try:
-        rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["length_out_of_range"], complete=False, pro_edit=edit,
-                          canary=[f"pl{i}" for i in range(len(nets))])
+        rep = DG.drc_json(board, kicad_cli, timeout, rules=rules, only_rules=["length_out_of_range"], complete=False, pro_edit=edit, refill=False)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
         print(f"netlen: kicad delay run failed: {e}", file=sys.stderr)
         return None
