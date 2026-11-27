@@ -481,3 +481,20 @@ def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
     assert a["length_src"] == "kicad" and a["basis"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 1e-3
     netlen.CACHE.clear()
     assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None
+
+
+def test_not_laid_blockers_are_the_closest_approach_layers_and_other_layers_only_as_via_sites(tmp_path):
+    """w82: the obstacle list of a PAIR_NOT_LAID names what shuts the closest-approach layer; copper on the other layer appears only
+    as a via-site blocker (it used to list every layer's obstacles around the last point, which sent a fix after an F.Cu pad on In2.Cu)."""
+    wall_f = PB.fp("W1", 40, 40, [PB.pad("1", 0, 0, "WF", 1.0, 82.0)])                        # F.Cu pad wall, full height
+    wall_b = '(segment (start 40 -1) (end 40 81) (width 1.0) (layer "B.Cu") (net "WB"))\n'      # B.Cu track wall
+    rep, B, txt = lay(tmp_path, duo("U1", 20, 40, "D_P", "D_N") + duo("J1", 70, 40, "D_P", "D_N") + wall_f + wall_b)
+    r = rep["pairs"][0]
+    assert r["status"] != "complete" and "closest approach" in r["why"]
+    layer = "F.Cu" if " F.Cu," in r["why"] or "F.Cu," in r["why"].split("closest approach")[1] else "B.Cu"
+    own = [b for b in r["blockers"] if "[via site]" not in b]
+    assert own, r["blockers"]
+    if layer == "F.Cu":
+        assert not any(b.startswith("track WB") for b in own)
+    else:
+        assert not any(b.startswith("pad W1") for b in own)

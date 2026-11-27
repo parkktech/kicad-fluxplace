@@ -382,7 +382,9 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
                 li, j, i = near
                 x, y = grid.xy(j, i)
                 reason += f"; closest approach ({x:.1f}, {y:.1f}) {sig[li]}, {math.hypot(x - tb['c'][0], y - tb['c'][1]):.1f} mm short of {tb['name']}"
-                blockers = grid.blockers(D, O, sig, x, y, env + clr + 0.6, thr)
+                blockers = grid.blockers(D, O, [sig[li]], x, y, env + clr + 0.6, thr)        # the closest-approach layer's own obstacles (w82)
+                blockers += [b + " [via site]" for b in grid.blockers(D, O, [l for l in sig if l != sig[li]], x, y, env + clr + 0.6, thr)
+                             if b not in blockers][:2]                                      # other layers: only as the via sites they shut
             return {"ok": False, "reason": reason, "blockers": blockers}
         pol = info["pol"]
         runs, vias = PL.runs_of(states, sig, grid.xy)
