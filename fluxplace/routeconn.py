@@ -47,8 +47,10 @@ def touch(B, ia, ib):
     (ka, a), (kb, b) = ia, ib
     if ka == "zone" and kb == "zone":
         return False
-    if ka == "pad" and kb in ("seg", "via"):
-        return any(_in_pad(a, x, y, TOL) and (l & a["layers"]) for x, y, l in _pts_of(B, ib))
+    if ka == "pad" and kb == "seg":
+        return b["layer"] in a["layers"] and pad_seg_dist(a, b["a"], b["b"]) <= b["w"] / 2 + TOL
+    if ka == "pad" and kb == "via":
+        return bool((b["layers"] | set(B["copper"])) & a["layers"]) and pad_seg_dist(a, (b["x"], b["y"]), (b["x"], b["y"])) <= b["d"] / 2 + TOL
     if ka in ("seg", "via") and kb == "pad":
         return touch(B, ib, ia)
     if ka == "zone" and kb in ("pad", "seg", "via"):
@@ -108,6 +110,40 @@ def _in_pad(p, x, y, tol):
     if p.get("shape") == "circle":
         return math.hypot(lx, ly) <= max(w, h)
     return abs(lx) <= w and abs(ly) <= h
+
+
+def _pad_local(p, x, y):
+    rad = math.radians(-(p.get("angle") or 0.0))
+    dx, dy = x - p["x"], y - p["y"]
+    return dx * math.cos(rad) - dy * math.sin(rad), dx * math.sin(rad) + dy * math.cos(rad)
+
+
+def pad_seg_dist(p, a, b):
+    """Distance from the pad's rotated rectangle / circle to the segment a-b (0 when they overlap).  KiCad joins a track
+    to a pad when the track's body (centre line grown by half its width) overlaps the pad, not only when its end point is inside."""
+    (ax, ay), (bx, by) = _pad_local(p, *a), _pad_local(p, *b)
+    w, h = p["w"] / 2, p["h"] / 2
+    if p.get("shape") == "circle":
+        return max(0.0, RD._seg_dist(0.0, 0.0, ax, ay, bx, by) - max(w, h))
+    t0, t1, dx, dy = 0.0, 1.0, bx - ax, by - ay
+    for pk, qk in ((-dx, ax + w), (dx, w - ax), (-dy, ay + h), (dy, h - ay)):
+        if pk == 0:
+            if qk < 0:
+                break
+        else:
+            r = qk / pk
+            if pk < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+    else:
+        if t0 <= t1:
+            return 0.0
+    cs = [(-w, -h), (w, -h), (w, h), (-w, h)]
+    d = min(RD._seg_dist(cx, cy, ax, ay, bx, by) for cx, cy in cs)
+    for ex, ey in ((ax, ay), (bx, by)):
+        d = min(d, math.hypot(max(abs(ex) - w, 0.0), max(abs(ey) - h, 0.0)))
+    return d
 
 
 def _in_poly(pts, x, y):

@@ -1513,10 +1513,16 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
                 FB.reconcile(rep, aud, opn)
                 FB.handoff_effort(rep, P)
         rep["complete"] = sum(1 for r in rep["pairs"] if r["status"] == "complete")
+        rep["laid"] = laid_count(rep)
         rep["states"] = {k: sum(1 for r in rep["pairs"] if r.get("state") == k) for k in FB.STATES + ("a-mismatch",)}
         rep["handoff"] = sorted(n for r in rep["pairs"] if r.get("handoff") for n in r["pair"])
     rep["verdict"] = "PAIRS_OK" if rep["complete"] == rep["total"] else "PAIRS_WARN"
     return rep
+
+
+def laid_count(rep):
+    """Pairs laid as coupled copper: complete within the target skew + laid over it (audit 'mismatch'). Owner realistic-limit rule (D71ft)."""
+    return sum(1 for r in rep["pairs"] if r["status"] in ("complete", "mismatch"))
 
 
 def format_text(rep, top=None):
@@ -1629,7 +1635,7 @@ def cmd_only(a, cons, spec):
     if os.path.abspath(out) == os.path.abspath(a.board):
         raise SystemExit("pairs: --out must differ from the input board")
     rep = PO.reroute(a.board, out, [x for x in a.only.split(",") if x.strip()], cons, spec, budget=a.budget,
-                     allow_shove=a.allow_shove, unlock=a.unlock, log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
+                     allow_shove=a.allow_shove, unlock=a.unlock, baseline=getattr(a, "baseline", None), accept_skew_x=getattr(a, "accept_skew_x", 1.0), log=lambda m: print(m, file=sys.stderr, flush=True) if getattr(a, "verbose", False) else None)
     rp = out + ".pairsonly.json"
     json.dump(rep, open(rp, "w"), indent=1)
     print(PO.format_text(rep))
@@ -1757,6 +1763,12 @@ def add_parser(sub):
                         "a pair is kept as it was unless the new one is connected, in tolerance and DRC/open-clean")
     p.add_argument("--allow-shove", dest="allow_shove", action="store_true",
                    help="with --only: when blocked, remove the unlocked signal-net neighbours the blocker report names and report the nets opened")
+    p.add_argument("--baseline", default=None, metavar="BOARD",
+                   help="with --only: the previous version's board; each named pair is re-laid at the track width it has there "
+                        "(else the input board's width above the DRC minimum; never the DRC minimum)")
+    p.add_argument("--accept-skew-x", dest="accept_skew_x", type=float, default=1.0, metavar="X",
+                   help="with --only: keep a coupled re-laid pair whose only defect is skew when it is within X times its limit "
+                        "(default 1 = strict); the review still reports the skew")
     p.add_argument("--unlock", action="store_true",
                    help="with --only: temporarily unlock the named pairs' own copper; re-lock accepted results, restore original locks on failure")
     p.add_argument("--budget", type=float, default=None, metavar="S",

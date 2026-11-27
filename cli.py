@@ -134,12 +134,54 @@ def _deliver_xcheck(a, bom):
     print(f"    {X.CODE}=PASS (pos{' + BOM' if bom else ''})", flush=True)
 
 
+def _deliver_fabconform(a):
+    """P4: every copper item under a selected house's minimum is listed (order option or engineering confirmation) for that house.
+    Houses = the [fab] profile list; none set -> skipped. Prints one line; a sub-minimum item missing from the lists fails the delivery."""
+    from fluxplace import constraints as C, fabcaps as FC, fabconform as FX
+    cons = C.load(a.constraints)
+    prof = FC.profile_list((cons.get("fab") or {}).get("profile"))
+    if not prof or not a.board:
+        return None
+    rep = FX.audit(a.board, cons, houses=",".join(prof))
+    cv = rep["coverage"]
+    print(f"    fabconform: {cv['raw']} item(s) under a house minimum, {cv['listed']} listed in the order notes ({rep['counts']})", flush=True)
+    if not cv["ok"]:
+        print("deliver: fabconform coverage FAILED (a sub-minimum item is not in the order notes); nothing delivered")
+        raise SystemExit(1)
+    return rep
+
+
+def _write_house_notes(rep, out_dir, name):
+    """<name>-order-notes-<house>.md for every house (PCBWay's lines also ride in its worksheet)."""
+    if not rep:
+        return
+    from fluxplace import fabconform as FX
+    for h, md in FX.order_notes(rep).items():
+        path = os.path.join(out_dir, f"{name}-order-notes-{h}.md")
+        with open(path, "w") as fh:
+            fh.write(md)
+        print(f"    order notes -> {os.path.basename(path)}", flush=True)
+
+
+def _deliver_jlc(a):
+    """Rebuild the fab dir's JLCPCB set with the LCSC picks of this delivery: [sourcing.lcsc], the previous BOM's LCSC notes
+    (--prev-bom / --prev-delivery), then the live lookup (skipped by --no-api). A run with no source says so."""
+    from fluxplace import constraints as C, fab as F, jlcset, deliverver as DV
+    cons = C.load(a.constraints)
+    pos = os.path.join(a.fab_dir, "place", "pos.csv")
+    if not a.board or not os.path.isfile(pos):
+        return
+    prev_bom = a.prev_bom or (DV.prev_files(a.prev_delivery).get("bom") if a.prev_delivery else None)
+    log = lambda m: print(m, flush=True)
+    jlcset.emit(a.board, a.fab_dir, pos, cons, prev_bom, F.jlc_lookup(cons, prev_bom, log, live=not getattr(a, "no_api", False)), log)
+
+
 def cmd_deliver(a):
     """Split a fab package for its two audiences: a CAM-only zip for the
     fab's engineer, plus loose readable docs for whoever places the order."""
     from fluxplace import fab as F, fabdoc, questions as QS
     QS.refuse_assumed(a.board, "deliver")
-    _review_gate(a, stage="deliver")
+    findings = _review_gate(a, stage="deliver")
     _open_gate(a)
     from fluxplace import constraints as C, gerbercheck as GC
     gerber = GC.run_stage(a.fab_dir, a.board, cons=C.load(a.constraints),
@@ -147,6 +189,10 @@ def cmd_deliver(a):
     if gerber["blocking"]:
         print("deliver: gerber check FAILED with [fab] gerber_check = fail; nothing delivered")
         raise SystemExit(1)
+    fc_rep = _deliver_fabconform(a)
+    a._fc_rep = fc_rep
+    _deliver_jlc(a)
+    a._review_prev = lambda board: _review_findings(a, board, "deliver")[0]     # P2: same spec/constraints/waivers/datasheets as the delivered board
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
@@ -164,9 +210,19 @@ def cmd_deliver(a):
     from fluxplace import constraints as C
     inc = tuple(C.load(a.constraints).get("deliver", {}).get("include_formats", ()))
     if a.no_pcbway:
-        _deliver_xcheck(a, bom=(a.bom or [None])[0])
-        F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=(a.bom or []),
+        from fluxplace import deliverver as DV, pcbway
+        vctx, boms = DV.start(a, list(a.bom or []), pcbway.board_facts(a.board) if a.board else {},
+                              log=lambda m: print(m, flush=True))
+        _deliver_xcheck(a, bom=(boms or [None])[0])
+        F.deliver(a.fab_dir, a.out, a.name, docs=docs, extras=boms,
                   log=lambda m: print(m, flush=True), include_formats=inc)
+        _write_house_notes(fc_rep, a.out, a.name)
+        if vctx:
+            for k, v in DV.finish(vctx, a, findings, {}, pcbway.board_facts(a.board), kicad_cli=a.kicad_cli,
+                                  log=lambda m: print(m, flush=True)).items():
+                print(f"    version delivery {k}: {v}", flush=True)
+            if not vctx.get("ready"):
+                raise SystemExit("deliver: NOT-READY - packaging rules failed (docs/PACKAGING-RULES.md); see NOT-READY in the folder")
         return
 
     # PCBWay's assembly page takes FOUR separate uploads — gerbers, BOM,
@@ -177,6 +233,9 @@ def cmd_deliver(a):
     slots = pcbway.slot_names(base)
     extras = []
     boms = list(a.bom or [])
+    from fluxplace import deliverver as DV
+    vctx, boms = DV.start(a, boms, pcbway.board_facts(a.board) if a.board else {},
+                          log=lambda m: print(m, flush=True))
     facts = pcbway.collect(board=a.board, fab_dir=a.fab_dir, boms=boms,
                            sourcing=a.sourcing_json, quantity=a.quantity,
                            name=a.name)
@@ -193,8 +252,12 @@ def cmd_deliver(a):
     notes = ""
     if a.assembly_notes and os.path.exists(a.assembly_notes):
         notes = open(a.assembly_notes, encoding="utf-8").read()
-    pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"],
-                 docx=not a.no_docx, title=a.title, assembly_extra=notes)
+    from fluxplace import fabconform as FX
+    fc_lines = sum(FX.house_lines(fc_rep, "pcbway"), []) if fc_rep else []
+    pcbway.write(a.out, facts, zip_name=slots["slot_gerbers"], extra_notes=fc_lines,
+                 docx=not a.no_docx, title=a.title, assembly_extra=notes,
+                 assembly_post=DV.assembly_post(vctx, a, log=lambda m: print(m, flush=True)) if vctx else None)
+    _write_house_notes(fc_rep, a.out, a.name)
     # spreadsheet twins of the two CSV uploads — an upload widget that refuses
     # one CSV will take the .xlsx, and mid-order is the wrong time to find out
     for slot in ("slot_bom", "slot_centroid"):
@@ -203,6 +266,12 @@ def cmd_deliver(a):
             alt = pcbway.to_xlsx(src, os.path.splitext(src)[0] + ".xlsx")
             if alt:
                 print(f"    alt format -> {os.path.basename(alt)}")
+    if vctx:
+        for k, v in DV.finish(vctx, a, findings, slots, facts, kicad_cli=a.kicad_cli,
+                              log=lambda m: print(m, flush=True)).items():
+            print(f"    version delivery {k}: {v}", flush=True)
+        if not vctx.get("ready"):
+            raise SystemExit("deliver: NOT-READY - packaging rules failed (docs/PACKAGING-RULES.md); see NOT-READY in the folder")
 
 
 def cmd_pcbway(a):
@@ -1022,6 +1091,8 @@ def cmd_replacefp(a):
     rep = IO.replace_footprint(board, a.ref, a.lib, a.name,
                                net_by_pin=net_by_pin, renames=renames)
     IO.save(board, a.out or a.board)
+    from fluxplace import modelstart as MS_
+    print(MS_.rebind_swapped(a.out or a.board, a.name, rep.get("models") or [])["line"])    # a model path that does not resolve is bound from the project library
     print(f"{a.ref} -> {a.name}: {rep['assigned']} pads netted"
           + (f"; created nets {rep['created_nets']}" if rep['created_nets'] else ""))
     if rep["unnetted_pads"]:
@@ -1504,6 +1575,23 @@ def cmd_compact(a):
     _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="COMPACT")
 
 
+def cmd_fabconform(a):
+    """Fix copper under any fab house's minimum (guarded); the rest becomes per-house order options."""
+    import json as _json
+    from fluxplace import fabconform as FX, constraints as C
+    cons = C.load(a.constraints) if a.constraints else {}
+    rep = FX.run(a.board, cons, houses=a.houses, out=a.out, relax_clearance=a.relax_clearance)
+    print(FX.table(rep))
+    if a.out:
+        base = a.out[:-len(".kicad_pcb")] if a.out.endswith(".kicad_pcb") else a.out
+        _json.dump(rep, open(base + ".fabconform.json", "w"), indent=1, default=str)
+        for h, md in FX.order_notes(rep).items():
+            open(f"{base}.order-{h}.md", "w").write(md)
+        print(f"wrote {a.out} (+ .fabconform.json, .order-<house>.md)" if rep["accepted"] else "board NOT changed (guard refused)")
+    if not rep["accepted"]:
+        raise SystemExit(1)
+
+
 def cmd_fab_advise(a):
     """Which manufacturer tier builds this board as designed; what each constraint costs."""
     import json as _json
@@ -1586,21 +1674,11 @@ def _open_gate(a):
         OG.refuse(board, C.load(getattr(a, "constraints", None)), getattr(a, "waive", None))
 
 
-def _review_gate(a, stage="review", hard=True):
-    """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
-    distributor package/pin/temperature data, pinmap vs the official symbol,
-    spec/board sync, hold-up and TVS margins. Runs before anything leaves for
-    a fab. FAIL aborts unless --no-review; returns the findings."""
+def _review_findings(a, board, stage):
+    """Run the design review on `board` with the args of `a`; returns (findings, facts)."""
     import json as _json
     from fluxplace import review as R
     from fluxplace import constraints as C
-    if getattr(a, "no_review", False):
-        print(f"    review gate SKIPPED (--no-review) before {stage}", flush=True)
-        return []
-    board = getattr(a, "board", None)
-    if not board:
-        print(f"    review gate: no --board given, nothing to review before {stage}")
-        return []
     facts = R.facts_from_board(board, mpn_map=getattr(a, "mpn_map", None))
     facts.setdefault("board_path", board)
     spec = None
@@ -1633,11 +1711,42 @@ def _review_gate(a, stage="review", hard=True):
                       os.path.normpath(cand[0]))
     findings = R.run(facts, spec=spec, cons=cons, partdata=partdata, idx=idx,
                      waivers=waivers, ds_dir=ds_dir, stage=stage)
+    return findings, facts
+
+
+def _review_gate(a, stage="review", hard=True):
+    """The design-review gate: spec rules, diff pairs, per-layer RF impedance,
+    distributor package/pin/temperature data, pinmap vs the official symbol,
+    spec/board sync, hold-up and TVS margins. Runs before anything leaves for
+    a fab. FAIL aborts unless --no-review; returns the findings."""
+    import json as _json
+    from fluxplace import review as R
+    from fluxplace import constraints as C
+    if getattr(a, "no_review", False):
+        print(f"    review gate SKIPPED (--no-review) before {stage}", flush=True)
+        return []
+    board = getattr(a, "board", None)
+    if not board:
+        print(f"    review gate: no --board given, nothing to review before {stage}")
+        return []
+    findings, facts = _review_findings(a, board, stage)
+    base = getattr(a, "baseline", None)
+    base_info = None
+    if base:
+        if not os.path.isfile(base):
+            raise SystemExit(f"--baseline: {base} is not a file")
+        base_findings, _bf = _review_findings(a, base, stage)
+        from fluxplace import pairbase as _PB
+        findings += [R._f(f["level"], f["code"], f["msg"]) for f in _PB.findings(board, base)]       # PAIR_NARROWED: an update-laid pair thinner than on the baseline
+        R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()),
+                        equal=lambda ns: R.copper_equal(facts, _bf, ns))
+        base_info = {"board": os.path.abspath(base), "sha256": R.file_sha(base)}
+        print(f"baseline: {base} sha {base_info['sha256']}", flush=True)
     print(f"REVIEW ({stage}) — {board}")
     n = R.summarize(findings, log=lambda m: print(m, flush=True))
     if getattr(a, "json", None) and stage == "review":
         with open(a.json, "w") as fh:
-            _json.dump(findings, fh, indent=1)
+            _json.dump({"baseline": base_info, "findings": findings} if base_info else findings, fh, indent=1)
         print(f"review: wrote {a.json}")
     if hard and n["fail"]:
         raise SystemExit(f"ABORT before {stage}: {n['fail']} review FAIL(s). "
@@ -1929,7 +2038,7 @@ def cmd_tune(a):
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
-                        log=lambda m: print(m, flush=True))
+                        allow_mismatch=a.allow_layer_mismatch, log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
     from fluxplace import tune as TU
     TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
@@ -2026,8 +2135,9 @@ def _tune_match(a):
 def cmd_datasheets(a):
     """Fetch every MPN's datasheet into the project (DigiKey/Mouser APIs),
     record it in datasheets.json with a hash, and say which ones need a
-    browser. With --adopt, register PDFs dropped in by hand."""
-    import json as _json
+    browser. With --adopt, register PDFs dropped in by hand. Then the
+    component dossier of every part (fluxplace/dossier.py)."""
+    import json as _json, time as _time
     from fluxplace import partdocs as PD2, sourcing as S
     mpns = []
     if a.mpn_map:
@@ -2048,6 +2158,20 @@ def cmd_datasheets(a):
     have = sum(1 for v in res.values() if v)
     miss = sorted(k for k, v in res.items() if not v)
     print(f"datasheets: {have}/{len(res)} on disk in {a.out}")
+    from fluxplace import dossier as DO                  # w95: read every part before placement (cached per MPN + datasheet hash)
+    docs = [k for k in PD2.load_manifest(a.out) if k.lower().endswith(".pdf")]   # a module datasheet a pinmap cites (no MPN of its own)
+    t0, dres = _time.time(), DO.build_all(a.out, [k for k, v in res.items() if v] + docs,
+                                         jobs=int(os.environ.get("FLUXPLACE_DOSSIER_JOBS", 4)), log=lambda m: print(m, flush=True))
+    ok = [d for d, _, _ in dres.values() if d]
+    picks = DO.replace_unknowable({k: v for k, v in dres.items() if k not in docs}, a.out, log=lambda x: print(x, flush=True)) \
+        if DO.online() else {}
+    print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {sum(1 for d in ok if d['knowable'])} fully knowable, "
+          f"${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) in {DO.cache_dir()}")
+    for d in ok:
+        if not d["knowable"]:
+            pick = picks.get(d["mpn"]) or {}
+            print(f"  UNKNOWABLE {d['mpn']}: missing {', '.join(d['missing'])}; replacement {pick.get('choice') or 'none'} "
+                  f"({pick.get('by', 'not searched')}: {pick.get('rationale', '')[:80]})")
     if miss:
         print("  need a browser (drop the PDF in and run --adopt MPN=file.pdf): "
               + ", ".join(miss))
@@ -2082,6 +2206,13 @@ def cmd_speccheck(a):
         raise SystemExit(1)
 
 
+def cmd_specsync(a):
+    """Diff the netlist spec against the schematic netlist + board footprints; --write applies it (backup + log)."""
+    from fluxplace import specsync as SY
+    _d, rc = SY.sync(a.board, a.sch, a.spec, write=a.write, ds_dir=a.datasheets)
+    raise SystemExit(rc)
+
+
 def cmd_lock(a):
     from fluxplace import review as R
     facts = R.facts_from_board(a.board)
@@ -2092,6 +2223,7 @@ def cmd_review(a):
     """Standalone design review; exit 1 per --fail-on."""
     from fluxplace import review as R
     findings = _review_gate(a, stage="review", hard=False)
+    findings = [f for f in findings if f.get("baseline") != "inherited"]     # --baseline: inherited findings never gate
     n = {"fail": sum(f["level"] == "FAIL" for f in findings),
          "warning": sum(f["level"] == "WARN" for f in findings)}
     if a.fail_on == "warning" and (n["fail"] or n["warning"]):
@@ -2528,6 +2660,9 @@ def _add_review_args(p, gate=False):
                    help="ignore the 7-day part-data cache")
     p.add_argument("--waive", action="append", default=[],
                    help="suppress findings: CODE:REGEX, repeatable")
+    p.add_argument("--baseline", default=None,
+                   help="previous version's shipped board: only findings NEW vs it gate; inherited ones are listed "
+                        "(matched by code + refs/nets, worse numeric severity = new)")
     if gate:
         p.add_argument("--no-review", action="store_true",
                        help="skip the design-review gate (ships known FAILs)")
@@ -3251,6 +3386,19 @@ def build_parser():
     pd.add_argument("--assembly-notes", help="markdown file appended verbatim "
                                              "to the assembly-instructions doc "
                                              "(upload slot 4)")
+    pd.add_argument("--prev-delivery", help="the previous version's delivery folder: "
+                    "its BOM format, Manufacturer/Notes, hand-written assembly "
+                    "sections, README rules, datasheets and libs are carried forward")
+    pd.add_argument("--prev-bom", help="previous BOM csv (overrides the one in --prev-delivery)")
+    pd.add_argument("--prev-assembly", help="previous assembly-instructions .md (overrides --prev-delivery)")
+    pd.add_argument("--changes", help="text file: what changed since the previous version "
+                    "(README-FIRST and the last assembly section)")
+    pd.add_argument("--kicad-cli", default="kicad-cli")
+    pd.add_argument("--sch", help="the project's real .kicad_sch (never regenerated from a spec; "
+                    "absent and none beside the board -> P6 FAIL 'schematic missing')")
+    pd.add_argument("--pack-waive", action="append", default=[],
+                    help="recorded reason for a packaging-rule problem: 'P6:REGEX: reason', repeatable "
+                         "(also [packaging] waive in the constraints)")
     _add_review_args(pd, gate=True)
     pd.set_defaults(fn=cmd_deliver)
 
@@ -3680,6 +3828,18 @@ def build_parser():
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
 
+    pfc = sub.add_parser("fabconform",
+                         help="make the board build first time at every selected fab house: guarded fixes for copper under a house "
+                              "minimum (track, via ring, drill), per-house order options for the rest")
+    pfc.add_argument("board")
+    pfc.add_argument("--houses", default="jlcpcb,pcbway", help="comma list of vendors or <vendor>-<tier> profiles (default jlcpcb,pcbway)")
+    pfc.add_argument("--constraints", default=None, help="[pairs] impedance targets / [rf] / [power] are read")
+    pfc.add_argument("--write", dest="out", default=None, metavar="OUT", help="write the fixed board here (+ sidecars); without it nothing is written")
+    pfc.add_argument("--relax-clearance", action="store_true",
+                     help="guard against the strictest HOUSE space instead of the project's own (larger) clearance: a gap legal at every fab but "
+                          "under the project preference is accepted (the board's own DRC then reports it)")
+    pfc.set_defaults(fn=cmd_fabconform)
+
     pfa = sub.add_parser("fab-advise",
                          help="cheapest manufacturer tier that builds the board as designed + what each constraint costs")
     pfa.add_argument("--board", default=None)
@@ -3693,7 +3853,8 @@ def build_parser():
     pds = sub.add_parser("datasheets",
                          help="fetch every MPN's datasheet into the project "
                               "(DigiKey/Mouser), hash it into datasheets.json, "
-                              "list the ones that need a browser")
+                              "list the ones that need a browser, then read each "
+                              "into a cached component dossier (pins, supplies, layout)")
     pds.add_argument("--out", required=True, help="datasheet directory")
     pds.add_argument("--board", default=None, help="board (mpn_map.json auto-found)")
     pds.add_argument("--mpn-map", default=None)
@@ -3719,6 +3880,16 @@ def build_parser():
     psc2.add_argument("--recite", action="store_true", help="re-cite even when cited")
     psc2.add_argument("--write", action="store_true", help="write citations into --spec")
     psc2.set_defaults(fn=cmd_speccheck)
+
+    pss = sub.add_parser("spec-sync",
+                         help="make the derived spec follow the schematic netlist (nets) and the board footprints "
+                              "(MPN, Manufacturer, value, footprint, DNP); refuses on a schematic/board net mismatch")
+    pss.add_argument("board")
+    pss.add_argument("--sch", required=True, help=".kicad_sch (via kicad-cli) or a KiCad XML netlist")
+    pss.add_argument("--spec", required=True)
+    pss.add_argument("--datasheets", default=None, help="datasheets dir (a swapped part's pinmap is rebuilt from its dossier)")
+    pss.add_argument("--write", action="store_true", help="apply in place (backup + spec-sync.log); default prints the diff")
+    pss.set_defaults(fn=cmd_specsync)
 
     plk = sub.add_parser("lock",
                          help="print a [lock.at] constraints block for the "
@@ -4000,6 +4171,9 @@ def build_parser():
                           "or on SIGTERM/SIGINT, the best accepted board is written to --out (exit 2)")
     ptu.add_argument("--stall", type=int, default=8,
                      help="stop a pair/net after N DRC-guarded tries without an accepted step (default 8)")
+    ptu.add_argument("--allow-layer-mismatch", action="store_true",
+                     help="also length-tune pairs whose legs run on different layers / via counts (default: they are needs_reroute); "
+                          "a last resort when `pairs --only` cannot re-lay them: the pair stays uncoupled but meets its skew limit")
     ptu.add_argument("--report", default=None, help="JSON report (default OUT.tune.json)")
     ptu.add_argument("--match", default=None, metavar="NAME|all",
                      help="tune [match.*] length groups instead of diff pairs")
@@ -4320,7 +4494,7 @@ def _silk_hook(a):
 
 
 # commands that never write a board: no connectivity snapshot is taken for them
-_GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
+_GUARD_READ_ONLY = {"lint", "review", "fab-advise", "fabconform", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
                     "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress", "versions"}
 
 

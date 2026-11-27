@@ -137,6 +137,9 @@ def load(path, project=None):
     from . import placerules as PR
     with open(path, "rb") as f:
         d = PR.expand(tomllib.load(f))             # [placement.module.*] with an explicit outline -> keep-out / no_tht
+    if "browser_fetch" in (d.get("docs") or {}):
+        from . import partdocs as _pd
+        _pd.BROWSER_FETCH = str(d["docs"]["browser_fetch"]).lower() != "off"
     rel = (d.get("docs") or {}).get("datasheets")
     if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
         from . import parts as P
@@ -156,6 +159,7 @@ def power_width_mm(cons, net, default_mm):
     return PW.track_width_mm(cons, net, default_mm)
 
 
+_ROUTE_FLOOR_KEY = {"min_track_mm": "min_track_mm", "min_clearance_mm": "min_clearance_mm", "min_via_dia_mm": "min_via_mm"}
 _FAB_DEFAULTS = {
     "min_track_mm": 0.1, "min_clearance_mm": 0.1, "min_drill_mm": 0.2,
     "min_annular_mm": 0.1, "min_via_dia_mm": 0.4, "min_silk_width_mm": 0.15,
@@ -185,17 +189,38 @@ def fab_profile(cons, layers=None, board=None):
             layers = n or None
         res = FC.limits(name, layers)                   # a list of profiles = the strictest of all of them
         out.update(res["floors"])
-    explicit = {}
+    explicit, warns, overridden = {}, [], {}
+    hf = FC.hard_floors(res["profiles"], layers, res["floors"]) if res else {}
+    route = (cons or {}).get("route") or {}
     for k in _FAB_DEFAULTS:
-        if k in fab:
-            v = float(fab[k])
-            if res and k in res["floors"] and v > out[k] + 1e-9:
-                explicit[k] = True
-            out[k] = max(v, out[k]) if (res and k in res["floors"]) else v
+        src, raw, route_key = f"[fab] {k}", fab.get(k), _ROUTE_FLOOR_KEY.get(k)
+        if raw is None and res and k in res["floors"] and route_key in route:
+            raw, src = route[route_key], f"[route] {route_key}"
+        if raw is None:
+            continue
+        v = float(raw)
+        if not (res and k in res["floors"]):
+            out[k] = v
+            continue
+        rec, hard = out[k], hf[k]
+        if v >= rec - 1e-9:
+            if src.startswith("[fab]"):                  # a [route] value above the floor is the router's own, not the fab floor
+                out[k] = v
+                explicit[k] = v > rec + 1e-9
+        elif v >= hard - FC.HOUSE_TOL_MM:      # D71fs: a project floor at/above the house HARD value wins over the recommended lift
+            out[k] = v
+            overridden[k] = src
+            warns.append(f"{k}: project {v:g} mm ({src}) below the houses' recommended {rec:g} mm, at/above their hard limit {hard:g} mm")
+        else:
+            out[k] = hard                      # below the hard limit: lifted to it, never below
+            overridden[k] = f"{src} lifted to the hard limit"
+            warns.append(f"{k}: project {v:g} mm ({src}) is below the houses' hard limit {hard:g} mm: lifted to {hard:g} (recommended {rec:g})")
     out["profile"] = res["name"] if res else name
     out["profiles"] = res["profiles"] if res else []
     out["provenance"] = {k: ("[fab] explicit value" if explicit.get(k) else " = ".join(v))
                          for k, v in res["floor_prov"].items()} if res else {}
+    out["provenance"].update(overridden)
+    out["floor_warns"] = warns
     out["hard_provenance"] = {k: " = ".join(v) for k, v in res["provenance"].items()} if res else {}
     out["hard"] = res["limits"] if res else {}
     out["vendor"], out["tier"] = (res["vendor"], res["tier"]) if res else (None, None)

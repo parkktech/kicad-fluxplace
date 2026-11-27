@@ -120,7 +120,8 @@ def findings(tb, board, cons=None, spec=None, stage="review"):
         if ver:
             from . import silk as SK
             have = _parse_rev(rev)
-            if have != ver[0]:
+            weak = ver[1] == "board file name" and have and have[:len(ver[0])] == ver[0]      # utv-comms-v15 names the line 1.5; rev 1.5.3 is a patch of it
+            if have != ver[0] and not weak:
                 out.append({"level": "FAIL", "code": "TITLEBLOCK_REV_STALE", "refs": [],
                             "msg": f"title-block revision {rev!r} disagrees with the board version "
                                    f"{SK._vshow(ver[0])} (from {ver[1]}) — run `fluxplace title-block`"})

@@ -58,7 +58,7 @@ def test_st_tune_reports_the_pairs_it_worked_on(tmp_path, monkeypatch):
     from fluxplace import tune as TU
     b = tmp_path / "in.kicad_pcb"; b.write_text("(kicad_pcb)\n")
     d = tmp_path
-    c = SimpleNamespace(dir=lambda n, name: str(d), cons_path=None)
+    c = SimpleNamespace(dir=lambda n, name: str(d), cons_path=None, cs=lambda: [])      # st_tune re-lays needs_reroute pairs via c.cs() like every stage
     out = str(d / "board.kicad_pcb")
 
     def fake(argv, log):

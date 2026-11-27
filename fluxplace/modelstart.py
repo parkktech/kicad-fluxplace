@@ -143,6 +143,38 @@ def bind_board(board_path, bindings):
     return n
 
 
+def rebind_swapped(board_path, fp_name, models, log=print):
+    """After an in-place footprint swap (`replace-footprint`): the library footprint's (model ...) paths (`models` = [(path, offset, scale,
+    rotate)]) that resolve on this machine stay; the first that does not is replaced by a project-library file that does: the sources
+    file's binding for the footprint, the same file name, or the file carrying the part number in the footprint / model name
+    (a copy of the vendor model, as the 3D chain keeps them), written as the project-relative path.  -> {"bound": file|None, "line": str}."""
+    bd = os.path.dirname(os.path.abspath(board_path))
+    bad = [m for m in models if not _resolve_in(m[0], bd)]
+    if not models or not bad:
+        return {"bound": None, "line": "3D model: resolves" if models else "3D model: the library footprint names none"}
+    name = fp_name.split(":")[-1]
+    hit, lib = None, None
+    for lib in MP.project_libs(bd):                     # every library up the tree: the source project's, not only the nearest
+        src = find_sources(lib)
+        row = ((json.load(open(src)).get("bindings") or {}).get(name)) if src else None
+        if row and os.path.isfile(os.path.join(lib, row["file"])):
+            hit = os.path.join(lib, row["file"])
+        files = [os.path.join(r, f) for r, _d, fs in os.walk(lib) for f in fs if f.lower().endswith((".step", ".stp", ".wrl"))]
+        base = os.path.basename(bad[0][0]).lower()
+        if not hit:
+            hit = next((f for f in files if os.path.basename(f).lower() == base), None)
+        if not hit:
+            toks = set(re.findall(r"\d{3,}-\d{2,}", name + " " + base))
+            hit = next((f for f in sorted(files) if any(t in os.path.basename(f) for t in toks)), None) if toks else None
+        if hit:
+            break
+    if not hit:
+        return {"bound": None, "line": f"WARNING 3D model {bad[0][0]} does not resolve and the project library has no match: run `fluxplace ready` model start"}
+    _p, off, sc, rot = bad[0]
+    bind_board(board_path, {name: (kiprjmod_path(hit, lib, bd), off, sc, rot)})
+    return {"bound": hit, "line": f"3D model: {os.path.basename(bad[0][0])} unresolved -> project library {os.path.relpath(hit, lib)}"}
+
+
 # ------------------------------------------------------------------ the owner-action page
 def owner_page(mpn, registry):
     """A page to download the model from: a URL the project's sources file already names for the part, else the DigiKey

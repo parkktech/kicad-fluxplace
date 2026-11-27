@@ -54,6 +54,7 @@ _X = {
     "PAIR_SKEW": ("pair-skew", "tune"),
     "PAIR_STUB": ("pair-stub", "tune"),
     "PAIR_IMPEDANCE_OFF": ("pair-impedance", "pairs"),
+    "PAIR_NARROWED": ("pair-impedance", "pairs"),
     "PAIR_IMPEDANCE_UNREACHABLE": (None, OWNER_DATA),
     "MATCH_GROUP_SKEW": ("pair-skew", "tune"),
     "MATCH_CONFIG": (None, OWNER_DATA),

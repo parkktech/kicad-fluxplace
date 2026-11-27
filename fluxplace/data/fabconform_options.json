@@ -1,0 +1,22 @@
+{
+ "_comment": "Order options a house publishes beyond the tiers in fab_capabilities.json. kind = fabconform item kind, limit_mm = the smallest value the option accepts. Read from the vendor page itself.",
+ "pcbway": [
+  {
+   "kind": "via_ring",
+   "limit_mm": 0.1016,
+   "option": "pcbway Advanced table, 'Medium difficulty' column",
+   "cost": "medium-difficulty class, priced at instant quote; price not published",
+   "source": "https://www.pcbway.com/capabilities.html (Advanced PCB table, row 17 'Minimum weld ring (outer layer)': via hole >= 5 mil normal, >= 4 mil medium difficulty, 18 um and 35 um outer copper)",
+   "retrieved": "2026-11-27"
+  },
+  {
+   "kind": "track",
+   "limit_mm": 0.0889,
+   "option": "pcbway Advanced table row 15: outer 18 um copper, 'Medium difficulty' local 3.5/3.5 mil track/space",
+   "cost": "medium-difficulty class + non-standard review (limit printed for the BGA chip-area line-to-pad only; needs 0.5 oz outer copper, not the 1 oz stackup); price not published",
+   "source": "https://www.pcbway.com/capabilities.html (Advanced PCB table, row 15 'width/spacing of outer layer (before compensation)')",
+   "retrieved": "2026-11-27"
+  }
+ ],
+ "jlcpcb": []
+}

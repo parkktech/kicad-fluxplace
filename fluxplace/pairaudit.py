@@ -15,7 +15,7 @@ import os
 import re
 import sys
 
-from . import routeconn as RC
+from . import routeconn as RC, routediag as RD
 
 TOL = 0.02
 
@@ -44,11 +44,12 @@ def _graph(B, net, via_h=None):
     def link(u, v, w=0.0, layer=None, sid=None):
         adj.setdefault(u, []).append((v, w, layer, sid))
         adj.setdefault(v, []).append((u, w, layer, sid))
-    ends = []
+    ends, bodies = [], []
     for k, s in enumerate(segs):
         a, b = np_ + 2 * k, np_ + 2 * k + 1
         link(a, b, math.hypot(s["a"][0] - s["b"][0], s["a"][1] - s["b"][1]), s["layer"], k)
         ends += [(a, s["a"], s["layer"]), (b, s["b"], s["layer"])]
+        bodies.append((a, b, s))
     vn = [np_ + 2 * ns + j for j in range(len(vias))]
     vl = [_range(v, cu) for v in vias]
     hh = [(via_h(v) / 2 if via_h else 0.0) for v in vias]
@@ -60,15 +61,30 @@ def _graph(B, net, via_h=None):
             if lu in vl[j] and math.hypot(pu[0] - v["x"], pu[1] - v["y"]) <= v["d"] / 2 + TOL:
                 link(u, vn[j], hh[j])
         for k, p in enumerate(pads):
-            if lu in p["layers"] and RC._in_pad(p, pu[0], pu[1], TOL):
+            if lu in p["layers"] and RC.pad_seg_dist(p, pu, pu) <= segs[(u - np_) // 2]["w"] / 2 + TOL:
                 link(u, k)
+        for a, b, s in bodies:                  # an end on the body of another segment (KiCad: within half its width)
+            if s["layer"] == lu and u not in (a, b) and RD._seg_dist(pu[0], pu[1], s["a"][0], s["a"][1], s["b"][0], s["b"][1]) <= s["w"] / 2 + TOL:
+                link(u, a if math.hypot(pu[0] - s["a"][0], pu[1] - s["a"][1]) <= math.hypot(pu[0] - s["b"][0], pu[1] - s["b"][1]) else b)
     for j, v in enumerate(vias):
+        for a, b, s in bodies:                  # a via on the body of a segment (not at an end): joined, the path runs along the body
+            if s["layer"] in vl[j] and RD._seg_dist(v["x"], v["y"], s["a"][0], s["a"][1], s["b"][0], s["b"][1]) <= v["d"] / 2 + TOL:
+                da, db = (math.hypot(v["x"] - s[e][0], v["y"] - s[e][1]) for e in ("a", "b"))
+                k = (a - np_) // 2
+                link(vn[j], a, hh[j] + da, s["layer"], k)
+                link(vn[j], b, hh[j] + db, s["layer"], k)
         for k, p in enumerate(pads):
             if vl[j] & set(p["layers"]) and RC._in_pad(p, v["x"], v["y"], TOL):
                 link(vn[j], k)
         for j2 in range(j):
             if math.hypot(v["x"] - vias[j2]["x"], v["y"] - vias[j2]["y"]) <= (v["d"] + vias[j2]["d"]) / 2 + TOL:
                 link(vn[j], vn[j2])
+    for a, b, s in bodies:                      # a pad under the body of a segment (no end in it): joined, the path runs along the body
+        for k, p in enumerate(pads):
+            if s["layer"] in p["layers"] and RC.pad_seg_dist(p, s["a"], s["b"]) <= s["w"] / 2 + TOL:
+                sk = (a - np_) // 2
+                link(k, a, math.hypot(p["x"] - s["a"][0], p["y"] - s["a"][1]), s["layer"], sk)
+                link(k, b, math.hypot(p["x"] - s["b"][0], p["y"] - s["b"][1]), s["layer"], sk)
     return {"pads": pads, "seg_idx": seg_idx, "vn": vn, "adj": adj}
 
 

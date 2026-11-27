@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fluxplace"
-version = "0.8.0"
+version = "0.9.0"
 description = "Signal-flow placement, routing, DFM and fab packaging for KiCad 10 — a full PCB engineering suite."
 readme = "README.md"
 license = { text = "MIT" }

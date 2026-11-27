@@ -33,7 +33,7 @@ def pair_rows(B, cls, cons, open_nets, pairs=None):
     return [{"pair": f"{p}/{n}", "p": p, "n": n, "status": e["status"], "causes": e.get("causes", []), "why": e["why"],
              "skew": e.get("skew"), "limit": e.get("limit"), "target": e.get("target"), "over_target": e.get("over_target"),
              "paths": e.get("paths"), "stubs": e.get("stubs"), "unit": e.get("unit", "mm"), "code": e.get("code"),
-             "via_stubs": e.get("via_stubs"), "basis": e.get("basis"), "skew_mm": e.get("skew_mm"), "skew_ps": e.get("skew_ps")} for (p, n), e in res.items()]
+             "via_stubs": e.get("via_stubs"), "net_mm": ((e.get("p") or {}).get("length"), (e.get("n") or {}).get("length")), "basis": e.get("basis"), "skew_mm": e.get("skew_mm"), "skew_ps": e.get("skew_ps")} for (p, n), e in res.items()]
 
 
 # ---------------------------------------------------------------- RF

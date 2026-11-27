@@ -66,13 +66,30 @@ def outer_geometry(cons, family, board=None, B=None, facts=None):
     return (g["w"], g["gap"]) if g and g["status"] in ("ok", "off", "unreachable") and g["w"] else None
 
 
+def _project_floors(board):
+    """(min track, min clearance) mm from the board's sibling .kicad_pro (rule minimum; the Default net class's clearance when larger), else (0, 0).
+    A `board` that is not a path (a pcbnew BOARD, None) gives (0, 0)."""
+    import json
+    import os
+    if not isinstance(board, (str, os.PathLike)):
+        return 0.0, 0.0
+    try:
+        d = json.load(open(os.path.splitext(os.fspath(board))[0] + ".kicad_pro"))
+        rules = ((d.get("board") or {}).get("design_settings") or {}).get("rules") or {}
+        dflt = next((c for c in ((d.get("net_settings") or {}).get("classes") or []) if c.get("name") == "Default"), {})
+        return float(rules.get("min_track_width") or 0.0), max(float(rules.get("min_clearance") or 0.0), float(dflt.get("clearance") or 0.0))
+    except (OSError, ValueError, TypeError):
+        return 0.0, 0.0
+
+
 def floors(cons, board=None, layers=None):
     """(preferred mm, fab hard track mm, fab hard space mm). Preferred = the larger [route] floor; hard = [fab] profile row."""
     from . import constraints as C
     r = (cons or {}).get("route") or {}
     fab = C.fab_profile(cons, layers=layers, board=board) if (cons or {}).get("fab") is not None else {}
-    ht = float(fab.get("min_track_mm") or 0.0) or float(r.get("min_track_mm") or 0.05)
-    hs = float(fab.get("min_clearance_mm") or 0.0) or float(r.get("min_clearance_mm") or 0.05)
+    bt, bs = _project_floors(board)                 # constraints without [fab]/[route] floors: the board's own rules, not 0.05 mm
+    ht = float(fab.get("min_track_mm") or 0.0) or float(r.get("min_track_mm") or 0.0) or bt or 0.05
+    hs = float(fab.get("min_clearance_mm") or 0.0) or float(r.get("min_clearance_mm") or 0.0) or bs or 0.05
     pref = max(float(r.get("min_track_mm") or 0.0), float(r.get("min_clearance_mm") or 0.0), ht, hs)
     return pref, ht, hs
 
