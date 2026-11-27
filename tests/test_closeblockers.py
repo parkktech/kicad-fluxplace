@@ -67,3 +67,13 @@ def test_pair_audit_measures_only_the_pairs_whose_signature_is_new(tmp_path, mon
     r1 = GP._pair_audit(f, {}, set())[2]
     r2 = GP._pair_audit(f, {}, set())[2]
     assert calls == [[("D_P", "D_N")]] and r1 == r2          # the second audit of the same legs measured nothing
+
+
+def test_a_spent_budget_still_gives_the_needed_drc_its_floor_and_critroute_logs_without_a_path(tmp_path):
+    from fluxplace import tune as TU, critroute as CR
+    t = [0.0]
+    b = TU.Budget(10, 0, clock=lambda: t[0])
+    t[0] = 500.0                                          # spent: remaining < 0
+    assert b.drc_timeout() >= 120.0 and TU.Budget(None, 0).drc_timeout() == 600
+    import inspect
+    assert "if attempts:" in inspect.getsource(CR.apply)  # attempts=None (close driver) must not crash the rung

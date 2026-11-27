@@ -110,9 +110,10 @@ class Budget:
     def remaining(self):
         return None if self.seconds is None else self.seconds - self.elapsed()
 
-    def drc_timeout(self, cap=600):
+    def drc_timeout(self, cap=600, floor=120.0):
+        """A DRC the pass needs always gets `floor` s (a spent budget used to give 5 s: kicad-cli then timed out and the rung crashed)."""
         r = self.remaining()
-        return cap if r is None else max(5.0, min(cap, r + 5.0))
+        return cap if r is None else max(floor, min(cap, r + 5.0))
 
     def check(self):
         if self.reason:
