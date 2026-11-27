@@ -2139,15 +2139,7 @@ def cmd_datasheets(a):
     component dossier of every part (fluxplace/dossier.py)."""
     import json as _json, time as _time
     from fluxplace import partdocs as PD2, sourcing as S
-    mpns = []
-    if a.mpn_map:
-        m = _json.load(open(a.mpn_map))
-        mpns = [v for k, v in m.items() if not k.startswith("_") and isinstance(v, str) and v]
-    elif a.board:
-        path = S.find_map(a.board)
-        if path:
-            m = _json.load(open(path))
-            mpns = [v for k, v in m.items() if not k.startswith("_") and isinstance(v, str) and v]
+    mpns = PD2.collect_mpns(a.mpn_map, a.board, getattr(a, "spec", None))   # map, board footprint fields, spec components
     mpns += list(a.mpn or [])
     if a.adopt:
         files = dict(x.split("=", 1) for x in a.adopt)
@@ -3858,6 +3850,7 @@ def build_parser():
     pds.add_argument("--out", required=True, help="datasheet directory")
     pds.add_argument("--board", default=None, help="board (mpn_map.json auto-found)")
     pds.add_argument("--mpn-map", default=None)
+    pds.add_argument("--spec", default=None, help="netlist spec: its components' mpn fields are fetched too")
     pds.add_argument("--mpn", action="append", default=[], help="extra MPN, repeatable")
     pds.add_argument("--url", action="append", default=[], metavar="MPN=URL",
                      help="datasheet URL found by hand, repeatable")

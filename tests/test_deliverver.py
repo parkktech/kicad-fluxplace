@@ -174,3 +174,17 @@ def test_verify_line_with_baseline_counts_new_and_inherited():
     line = DV._verify_line(f, "/nonexistent", baseline="/x/W15.kicad_pcb")
     assert "0 new FAIL vs W15.kicad_pcb; 1 inherited FAIL, 1 inherited WARN" in line
     assert "FAIL," in DV._verify_line(f, "/nonexistent") and "new FAIL" not in DV._verify_line(f, "/nonexistent")
+
+
+def test_datasheets_reads_mpns_from_board_and_spec_without_a_map(tmp_path):
+    import json
+    from fluxplace import partdocs as PD
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text('(kicad_pcb (footprint "L:SOIC" (layer "F.Cu") (property "Reference" "U1") (property "Value" "IC") (property "MPN" "BOARD-1") '
+                 '(pad "1" smd rect (at 0 0) (size 1 1))))\\n'.replace("\\n", "\n"))
+    sp = tmp_path / "s.json"
+    sp.write_text(json.dumps({"components": [{"ref": "U2", "mpn": "SPEC-2"}, {"ref": "R1"}]}))
+    assert PD.collect_mpns(None, str(b), str(sp)) == ["BOARD-1", "SPEC-2"]
+    mp = tmp_path / "m.json"
+    mp.write_text(json.dumps({"_x": "no", "U3": "MAP-3"}))
+    assert PD.collect_mpns(str(mp), None, None) == ["MAP-3"]

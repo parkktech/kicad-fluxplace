@@ -563,6 +563,24 @@ def is_passive(ref, fp="", pins=None):
     return pfx in ("MH", "MK", "H", "TP", "JP", "NT", "LOGO", "G")
 
 
+def collect_mpns(mpn_map=None, board=None, spec=None):
+    """MPNs to fetch datasheets for, without being handed a map: an explicit mpn_map file, else the mpn_map.json found beside the board;
+    plus the MPN fields of the board's footprints and the `mpn` of every spec component. Sorted, de-duplicated, "_" keys skipped."""
+    import json
+    from . import sourcing as S
+    found = set()
+    path = mpn_map or (S.find_map(board) if board else None)
+    if path and os.path.isfile(path):
+        found |= {v for k, v in json.load(open(path)).items() if not k.startswith("_") and isinstance(v, str) and v}
+    if board and os.path.isfile(board):
+        from . import pcbway
+        found |= {p["mpn"] for p in pcbway._footprints(open(board, encoding="utf-8").read()) if p.get("mpn")}
+    if spec:
+        sp = spec if isinstance(spec, dict) else json.load(open(spec))
+        found |= {c["mpn"] for c in sp.get("components", []) if isinstance(c.get("mpn"), str) and c["mpn"]}
+    return sorted(found)
+
+
 def spec_check(spec, ds_dir, mpn_map=None, strict=True, log=print):
     """Findings [(level, code, ref, msg)] for a netlist spec dict.
     mpn_map: {ref: mpn} (the spec may also carry 'mpn' per component).
