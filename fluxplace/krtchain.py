@@ -431,10 +431,10 @@ def run(c, n, board, runner=run_step):
                 shutil_copy(s, o)
                 return 0
         steps.append(("rails-branch", lambda s, o: _branch))
-    relaid = set()                                           # w84: legs of the pairs pairgroups re-laid (released at the commit point)
+    laid_legs = set()                                        # w84: legs of the pairs pairgroups re-laid (released at the commit point)
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
-        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope, released=relaid)
+        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope, released=laid_legs)
     steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
     hs_rec = {"excluded": []}
     def _route_nets(src):
@@ -703,7 +703,7 @@ def run(c, n, board, runner=run_step):
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"], "released": sorted(relaid)}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"], "released": sorted(laid_legs)}
 
 
 def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):
