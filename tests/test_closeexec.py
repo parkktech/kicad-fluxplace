@@ -54,6 +54,8 @@ def test_every_attempt_has_one_outcome_and_only_a_candidate_has_a_verdict(monkey
             raise CX.RungFailure(outcome, msg, **kw)
         return fn
     R = GP.RUNGS
+    for name in list(R):                                   # a rung added by a later merge must not run for real here
+        monkeypatch.setitem(R, name, lambda b, o, g, c: {"status": "not applicable (test default)"})
     monkeypatch.setitem(R, "patch", _write("other"))                                       # candidate, guard refuses
     monkeypatch.setitem(R, "handrepair", lambda b, o, g, c: {"status": "no pair"})          # not applicable
     monkeypatch.setitem(R, "krt", _write("same"))                                           # board identical: no change
@@ -64,9 +66,12 @@ def test_every_attempt_has_one_outcome_and_only_a_candidate_has_a_verdict(monkey
     monkeypatch.setitem(R, "ai", lambda b, o, g, c: {"status": "no packet"})
     res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     rows = _by_rung(loop["work"])
-    assert {k: v["outcome"] for k, v in rows.items()} == {
-        "patch": "candidate", "handrepair": "not_applicable", "krt": "no_change", "relocate": "timeout",
-        "krt_region": "child_error", "region": "invalid_output", "patch_rip": "child_error", "ai": "not_applicable"}
+    want = {k: "not_applicable" for k in R}                # default for every rung, explicit ones below
+    want.update({"patch": "candidate", "handrepair": "not_applicable", "krt": "no_change", "relocate": "timeout",
+                 "krt_region": "child_error", "region": "invalid_output", "patch_rip": "child_error", "ai": "not_applicable"})
+    assert {k: v["outcome"] for k, v in rows.items()} == {k: v for k, v in want.items() if k in rows}
+    assert set(want) - set(rows) <= {k for k in R if k not in ("patch", "handrepair", "krt", "relocate", "krt_region",
+                                                               "region", "patch_rip", "ai")}
     assert rows["patch"]["verdict"] == "guard_refused"
     assert all(v["verdict"] is None for k, v in rows.items() if k != "patch")             # never guard_refused without a candidate
     assert rows["krt_region"]["exit"]["code"] == 1 and "boom" in rows["krt_region"]["exit"]["stderr_tail"]
