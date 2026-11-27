@@ -136,3 +136,16 @@ def test_deliver_helpers_write_house_notes_and_skip_without_fab_profile(tmp_path
     assert "0.088" in (tmp_path / "pkg-order-notes-pcbway.md").read_text() and (tmp_path / "pkg-order-notes-jlcpcb.md").exists()
     cons.write_text("[route]\nmin_track_mm = 0.1\n")
     assert cli._deliver_fabconform(a) is None
+
+
+def test_near_never_indexes_the_ladder_and_limits_are_hard_not_recommended():
+    it = {"kind": "track", "geom": ((0.0, 0.0), (1.0, 0.0)), "ladder": [], "rung": 3, "old": 0.088}
+    assert FX._near(it, {"x": 0.5, "y": 0.3}) and not FX._near(it, {"x": 0.5, "y": 2.0})
+    via = {"kind": "via_ring", "geom": ((5.0, 5.0),), "ladder": [], "rung": -1, "old": 0.1}
+    assert FX._near(via, {"x": 5.2, "y": 5.0})
+    from fluxplace import limits as L
+    hs = FX.resolve_houses("jlcpcb,pcbway")
+    lims = FX.house_limits(hs, 6)
+    for h, _p in hs:
+        for f, (hard, _rec, _c) in L.fab_bounds(h, 6).items():
+            assert lims[h][f] == hard                                  # never the recommended design floor FC.limits() carries
