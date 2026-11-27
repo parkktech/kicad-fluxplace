@@ -1168,6 +1168,47 @@ def _residual_fail(res, c, d):
     return res
 
 
+PLACEMENT_STAGES = ("floorplan", "placetour", "place", "relieve")      # stages that seat parts: they must not hand on a collision FAIL
+
+
+def _placement_collision_gate(c, n, name, res):
+    """A placement stage never ends with a collision-gate FAIL (the gate the route stage runs, same waivers). Offending parts that
+    are movable (not fixed, not locked) are legalised in place; a FAIL that remains fails the stage naming the pair(s).
+    A board that already carries copper is not legalised (the copper would no longer match): it fails instead."""
+    from . import routediag as RD, legalise as LG, boardwrite as BW, routable as RB
+    board = res.get("board")
+    if name not in PLACEMENT_STAGES or res.get("verdict") not in ("pass", "warn") or not board or not os.path.isfile(board):
+        return res
+    d = c.dir(n, name)
+    col = _collision_report(c, d, board)
+    if not col["fail"]:
+        return res
+    B = RD.load(board)
+    parts = B["parts"]
+    bad = {r for x in json.load(open(col["txt"][:-4] + ".json")) if x["level"] == "FAIL" for r in x.get("refs", [])}
+    fixed = set(RB._fixed_set(B, c.cons)) | {r for r, p in parts.items() if p.get("locked")}
+    tg = {r: (parts[r]["pos"][0], parts[r]["pos"][1], parts[r]["angle"]) for r in sorted(bad - fixed) if r in parts}
+    if tg and not (B["segs"] or B["vias"]):
+        try:
+            pos, _rep = LG.legalise(B, tg, fixed=sorted(set(parts) - set(tg)), cons=c.cons, strict=False,
+                                  ko_margin=float(((c.cons or {}).get("placement") or {}).get("edge_clearance_mm", 0.3)))
+            moves = {r: tuple(v) for r, v in pos.items() if r in tg and tuple(v) != tg[r]}
+            if moves:
+                out = os.path.join(d, "legal.kicad_pcb")
+                BW.move_file(board, out, moves, post=False)
+                pro = board[:-len(".kicad_pcb")] + ".kicad_pro"
+                if os.path.exists(pro):
+                    shutil.copy2(pro, out[:-len(".kicad_pcb")] + ".kicad_pro")
+                col2 = _collision_report(c, d, out)
+                if not col2["fail"]:
+                    return dict(res, board=out, line=f"{res.get('line', '')}; collision gate: legalised {', '.join(sorted(moves))}".lstrip("; "))
+                col = col2
+        except Exception as e:                           # noqa: BLE001 - a legaliser that cannot seat the part leaves the FAIL to report
+            col["lines"].append(f"legaliser: {type(e).__name__}: {e}")
+    return dict(res, verdict="fail", line=f"{name}: collision gate: {col['fail']} FAIL footprint pair(s) ({col['kinds']})",
+                next=col["lines"][:4] + [col["txt"], "fix the placement or waive (COLLISION:REGEX)"])
+
+
 def _incremental_floorplan(c, board, out):
     """A routed board whose only unlocked parts are new and off the outline (incplace.detect): seat those parts in free space and
     touch nothing else; the stages that would re-place or re-lay copper are skipped for the rest of the run. -> result or None."""
@@ -1904,6 +1945,7 @@ def _exec_stage(c, n, name, board, later=()):
             res = _commit_point(name, board, res, c.cons)   # A3 (+B1 contract check): only a stage that ran (a reused gate board was verified by close)
     res.setdefault("verdict", "pass")
     res = _pcbnew_state_guard(name, res)                   # a stage that broke pcbnew in this process fails here, named
+    res = _placement_collision_gate(c, n, name, res)       # w83: a placement stage ends without a collision FAIL (legalised or failed, named)
     if res["verdict"] in ("pass", "warn") and gk:          # PHASE3I B1: a gated stage hands on only a clean scope
         g = _gate_check(c, n, name, res.get("board") or board, gk, src=board, later=later)
         res.update(verdict=g["verdict"], line=g["line"], next=g["next"], board=g["board"], gate=g["gate"])
