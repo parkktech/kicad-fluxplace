@@ -225,7 +225,7 @@ class Ctx:
     def __init__(self, a, work, board_in, state):
         self.a, self.work, self.board_in, self.state = a, work, board_in, state
         from . import constraints as C
-        self.cons_path, self.spec_path = a.constraints, a.spec
+        self.cons_path, self.spec_path = (os.path.abspath(x) if x else x for x in (a.constraints, a.spec))   # w84: close's rung children run in the work dir: a relative path is gone there
         from . import questions as QS
         self.answers = dict((state or {}).get("answers") or {})
         self.answers.update(QS.parse_answers(getattr(a, "answer", None)))
