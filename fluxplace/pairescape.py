@@ -431,7 +431,7 @@ def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
     return rows
 
 
-def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None, focus=None):
+def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None, focus=()):
     """-> {"choice", "reserve", "report"}.
     ctx_of() -> fresh lay context; ghost(pairs, escape, reserve) -> {pair: lay result} (production lay on a fresh state, in `pairs` order)."""
     p = params(cons)
@@ -444,7 +444,7 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     comps = components(info, live)
     seeds = [c for c, ts in comps.items() if len({q for q, _ti in ts}) >= 2 and (not focus or any(q in focus for q, _ti in ts))]      # a part with two or more pairs on it (one of them a failed pair, in a repair)
     ctx0 = ctx_of()
-    fp = fingerprint(B, cons, live, focus or ())
+    fp = fingerprint(B, cons, live, focus)
     hit = _load(cons, fp, ctx0, info, rules, p)
     if hit is not None:
         return hit
