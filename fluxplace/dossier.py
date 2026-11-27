@@ -350,9 +350,7 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     own = [k for k in range(1, len(pg) + 1) if k not in thin and pat.search(pg[k - 1])]
     order = list(dict.fromkeys(thin + own + hot))           # a drawing page that names the subject is a picture too (pin diagrams)
     pics = [k for k in order[:GAP_PAGES] if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
-    docs = {}
-    for f in siblings(pdf, mpn):
-        docs[os.path.basename(f)] = pages(f)
+    docs = {os.path.basename(f): pages(f) for f in siblings(pdf, mpn)}
     budget, chunks = TEXT_BUDGET // 2, []
     for k in own:
         if budget - len(pg[k - 1]) < 0:
@@ -387,6 +385,10 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     return verify(_json_of(reply), pg, docs=docs), cost
 
 
+_RATING = re.compile(r"voltage - rated|rated voltage|current rating|current - saturation|power \(watts\)|voltage - (reverse standoff|"
+                     r"breakdown|zener|dc reverse)|drive level|contact rating|coil voltage|current - max|voltage - max", re.I)
+
+
 def _distributor(dos, row):
     """Package and temperature range from a distributor row (partdata), only where still missing."""
     if not row:
@@ -402,10 +404,6 @@ def _distributor(dos, row):
     if "abs_max" in need and rated:
         dos["abs_max"] = rated
     return dos
-
-
-_RATING = re.compile(r"voltage - rated|rated voltage|current rating|current - saturation|power \(watts\)|voltage - (reverse standoff|"
-                     r"breakdown|zener|dc reverse)|drive level|contact rating|coil voltage|current - max|voltage - max", re.I)
 
 
 def _dist_row(mpn):
@@ -465,7 +463,7 @@ def build(mpn, pdf, sha, ask=None, model=None, d=None, refresh=False, distributo
     dos["unknown"] = sorted(set(dos.get("unknown") or []) - set(dos))
     from . import sourcing as S
     S.write_json(_path(mpn, sha, d), dos, indent=1)
-    return dos, "made" if not miss else "UNKNOWABLE", cost
+    return dos, "UNKNOWABLE" if miss else "made", cost
 
 
 def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False, log=print):
@@ -485,9 +483,14 @@ def build_all(ds_dir, mpns, jobs=4, ask=None, model=None, d=None, refresh=False,
             m = futs[fu]
             res[m] = fu.result()
             dos, st, cost = res[m]
-            log(f"  dossier {m}: {st}" + (f", {n_facts(dos)} facts, {len(dos['rejected'])} rejected"
-                                          + (f", missing {', '.join(dos['missing'])}" if dos["missing"] else "") if dos else "")
-                + (f", ${cost:.3f}" if cost else ""))
+            line = f"  dossier {m}: {st}"
+            if dos:
+                line += f", {n_facts(dos)} facts, {len(dos['rejected'])} rejected"
+                if dos["missing"]:
+                    line += f", missing {', '.join(dos['missing'])}"
+            if cost:
+                line += f", ${cost:.3f}"
+            log(line)
     return res
 
 
@@ -614,11 +617,12 @@ def propose_replacement(mpn, fp=None, required=1, temp=(None, None), searcher=No
         ent = PD.load_manifest(cd).get(o["mpn"])
         f = os.path.join(cd, ent["file"]) if ent and ent.get("file") else None
         cdos = build(o["mpn"], f, ent.get("sha256") or PD._sha(f), ask=ask)[0] if f and os.path.isfile(f) else None
-        out.append({"mpn": o["mpn"], "mfr": o.get("mfr"), "stock": o.get("stock"), "drop_in": bool(o.get("drop_in")),
-                    "differs": o.get("differs") or [], "knowable": bool(cdos and cdos.get("knowable")),
-                    "missing": (cdos or {}).get("missing", ["no datasheet fetched"] if not f else ["dossier not made"])})
-        log(f"  candidate {o['mpn']}: drop_in {out[-1]['drop_in']}, knowable {out[-1]['knowable']}")
-        if out[-1]["drop_in"] and out[-1]["knowable"]:
+        r = {"mpn": o["mpn"], "mfr": o.get("mfr"), "stock": o.get("stock"), "drop_in": bool(o.get("drop_in")),
+             "differs": o.get("differs") or [], "knowable": bool(cdos and cdos.get("knowable")),
+             "missing": (cdos or {}).get("missing", ["dossier not made"] if f else ["no datasheet fetched"])}
+        out.append(r)
+        log(f"  candidate {r['mpn']}: drop_in {r['drop_in']}, knowable {r['knowable']}")
+        if r["drop_in"] and r["knowable"]:
             break
     return sorted(out, key=lambda r: (not r["knowable"], not r["drop_in"], len(r["differs"])))
 

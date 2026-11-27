@@ -2050,8 +2050,7 @@ def cmd_datasheets(a):
     bad = sorted(d["mpn"] for d in ok if not d["knowable"])
     if bad and DO.online():                              # an unknowable part is replaced, never used: propose a knowable one
         for m in bad:
-            d = dres[m][0]
-            DO.record_replacement(m, d["sha256"], DO.propose_replacement(m, log=lambda x: print(x, flush=True)))
+            DO.record_replacement(m, dres[m][0]["sha256"], DO.propose_replacement(m, log=lambda x: print(x, flush=True)))
     print(f"dossiers: {len(ok)}/{len(dres)} ({sum(DO.n_facts(d) for d in ok)} facts, {len(ok) - len(bad)} fully knowable, "
           f"${sum(c for _, _, c in dres.values()):.2f}, {_time.time() - t0:.0f} s) in {DO.cache_dir()}")
     for m in bad:
