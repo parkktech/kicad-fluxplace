@@ -326,8 +326,10 @@ def _clean_worker(src, dst, cats, dangling=()):
             seen.add((v.GetNetCode(), h))
     if "dangling" in cats:
         want = set(dangling)
+        areas = [z.Outline() for z in b.Zones() if z.GetIsRuleArea()]
         for t in tracks + vias:
-            if uid(t) in want:
+            in_area = t.Type() == pcbnew.PCB_VIA_T and any(a.Contains(t.GetPosition()) for a in areas)
+            if uid(t) in want and not in_area:          # a via inside a rule area (thermal array / forbid window, B7) stays
                 kill(t, "dangling")
     got["nets"] = sorted({t.GetNetname() for t in gone.values()})
     got["rows"] = rows
@@ -374,8 +376,9 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
     res = {"removed": {}, "refused": {}, "nets": [], "rows": [], "drc_before": len(d_cur.get("violations", []))}
     trial = out + ".clean-trial.kicad_pcb"
 
-    def step(cat, uuids=(), count_refused=True):
-        """one guarded batch -> True when kept (the accepted board and its report advance)."""
+    def step(cat, uuids=(), count_refused=True, cascade=False):
+        """one guarded batch -> True when kept (the accepted board and its report advance). `cascade`: the tracks the removal leaves
+        dangling (a via was their only far end) go in the same batch, so a dead-end via and its stub leave together (w70)."""
         nonlocal d_cur
         r = in_fresh_process("fluxplace.tracefinish", "_clean_worker", cur, trial, [cat], uuids)
         n = r[cat]
@@ -383,6 +386,24 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
             return False
         _pro_copy(board, trial)
         d_new = _drc(trial, kicad_cli=kicad_cli)
+        if cascade:
+            def dangling_tracks(d):
+                return {u for v in _dangling_by_net(d, "track_dangling").values() for u in v}
+            seen = dangling_tracks(d_cur)
+            nxt = trial + ".next"
+            for _ in range(8):
+                new = sorted(dangling_tracks(d_new) - seen)
+                if not new:
+                    break
+                r2 = in_fresh_process("fluxplace.tracefinish", "_clean_worker", trial, nxt, [cat], new)
+                if not r2[cat] or not os.path.exists(nxt):
+                    break
+                os.replace(nxt, trial)
+                _pro_copy(board, trial)
+                n += r2[cat]
+                r["nets"] += r2["nets"]
+                r["rows"] += r2["rows"]
+                d_new = _drc(trial, kicad_cli=kicad_cli)
         ok = _guard_ok(d_cur, d_new)
         if ok:
             res["removed"][cat] = res["removed"].get(cat, 0) + n
@@ -395,18 +416,18 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
         _rm(trial)
         return ok
 
-    def _batch(by_net, depth):
+    def _batch(by_net, depth, cascade=False):
         """the whole batch first; a refused one is split by net (halves, at most `depth` levels) so one bad net does not cost the rest."""
         if not by_net:
             return False
-        if step("dangling", [u for n in sorted(by_net) for u in by_net[n]], count_refused=depth == 0 or len(by_net) == 1):
+        if step("dangling", [u for n in sorted(by_net) for u in by_net[n]], count_refused=depth == 0 or len(by_net) == 1, cascade=cascade):
             return True
         if len(by_net) < 2 or depth == 0:
             return False
         ns = sorted(by_net)
         h = len(ns) // 2
-        a = _batch({n: by_net[n] for n in ns[:h]}, depth - 1)
-        b = _batch({n: by_net[n] for n in ns[h:]}, depth - 1)
+        a = _batch({n: by_net[n] for n in ns[:h]}, depth - 1, cascade)
+        b = _batch({n: by_net[n] for n in ns[h:]}, depth - 1, cascade)
         return a or b
 
     try:
@@ -417,7 +438,7 @@ def clean(board, out, kicad_cli="kicad-cli", cats=CLEAN_CATS):
             for _ in range(3):
                 kept = False
                 for typ in DANGLING_TYPES:
-                    kept = _batch(_dangling_by_net(d_cur, typ), 3) or kept
+                    kept = _batch(_dangling_by_net(d_cur, typ), 3, cascade=typ == "via_dangling") or kept
                 if not kept:
                     break
         shutil.copyfile(cur, out)
