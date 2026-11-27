@@ -31,6 +31,19 @@ def test_reasoned_decision_is_logged_mirrored_and_cached(tmp_path, monkeypatch):
     assert d2["choice"] == "standard" and d2["by"] == "cache"
 
 
+def test_retry_on_the_next_model_when_no_evidence_is_cited(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    code = ("import json, os, sys; sys.stdin.read(); m = os.environ['FLUXPLACE_AI_MODEL']; "
+            "print(json.dumps({'result': json.dumps({'choice': 'relaxed' if m == 'haiku' else 'standard', 'rationale': m, "
+            "'evidence': [] if m == 'haiku' else ['fab sheet']})}))")
+    cons = {"ai": {"decide": "on", "decide_cmd": [sys.executable, "-c", code]}}
+    d = DC.decide(Q, ["fab sheet"], cons, str(tmp_path))
+    assert d["choice"] == "standard" and d["model"] == "sonnet" and d["evidence"] == ["fab sheet"] and d["cached"] is False
+    d2 = DC.decide(Q, ["fab sheet"], cons, str(tmp_path))
+    rows = [json.loads(l) for l in open(tmp_path / DC.LOG)]
+    assert d2["cached"] and rows[-1]["cached"] and rows[-1]["options"] == ["standard", "relaxed"]
+
+
 def test_offline_and_off_menu_fall_back_to_default_not_reasoned(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
     d = DC.decide(Q, [], stub({"choice": "standard"}), str(tmp_path))

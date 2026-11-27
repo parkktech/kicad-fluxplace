@@ -2,13 +2,14 @@
 
     [ai] decide = "on"          # off (default): open questions stop the stage (exit 3) as before
     [ai] rule   = "..."         # what to optimise; default RULE
-    [ai] decide_cmd = [...]     # model command, prompt on stdin, answer on stdout; default `claude -p --model haiku`
-    [ai] decide_timeout_s = 90
+    [ai] decide_cmd = [...]     # model command, prompt on stdin, answer on stdout (env FLUXPLACE_AI_MODEL = the model)
+    [ai] models = ["haiku", "sonnet"]   # tried in order: the next one only when an answer is unparsable or cites nothing
+    [ai] decide_timeout_s = 120
 
 decide() sends one small prompt (question, options with consequences, default, evidence lines, rule) and expects
 {"choice", "rationale", "evidence"}.  Every decision is appended to `<dir>/decisions.jsonl` and mirrored as an [answers]
 table in `<dir>/decisions.answers.toml`; a question whose hash (id, text, options, evidence, rule) is already in the log is
-answered from it without a model call, so a re-run is deterministic and reviewable.  No model (FLUXPLACE_AI_OFFLINE=1, no
+answered from it without a model call (logged with cached = true), so a re-run is deterministic and reviewable.  No model (FLUXPLACE_AI_OFFLINE=1, no
 command, timeout, unparsable or off-menu answer): the question's default, marked "default, not reasoned".  Never raises."""
 import hashlib
 import json
@@ -19,7 +20,8 @@ import subprocess
 import time
 
 RULE = "fewest FAILs without growing the outline or adding layers"
-DEFAULT_CMD = ["claude", "-p", "--model", "haiku"]
+DEFAULT_CMD = ["claude", "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config"]   # no tools: evidence is inline
+MODELS = ["haiku", "sonnet"]
 LOG, ANSWERS = "decisions.jsonl", "decisions.answers.toml"
 EV_LINES, EV_CHARS = 24, 240                     # prompt budget: evidence lines kept, chars per line
 
@@ -62,20 +64,27 @@ def _cmd(cons):
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
 
 
-def call_model(text, cons):
-    """-> (stdout text or None, model label or why not)."""
+def call_model(text, cons, model):
+    """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped."""
     if os.environ.get("FLUXPLACE_AI_OFFLINE"):
         return None, "offline (FLUXPLACE_AI_OFFLINE)"
     cmd = _cmd(cons)
     if not cmd or not shutil.which(cmd[0]):
         return None, f"no model command ({cmd[0] if cmd else 'empty'})"
+    if cmd == DEFAULT_CMD:
+        cmd = cmd + ["--model", model]
     try:
-        r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=float(_ai(cons).get("decide_timeout_s", 90)))
+        r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=float(_ai(cons).get("decide_timeout_s", 120)),
+                           env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"model call failed ({type(e).__name__})"
     if r.returncode != 0:
         return None, f"model exit {r.returncode}"
-    return r.stdout, " ".join(cmd)[:80]
+    try:
+        env = json.loads(r.stdout)
+        return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
+    except ValueError:
+        return r.stdout, ""
 
 
 def parse(out, options):
@@ -123,18 +132,27 @@ def decide(q, evidence=(), cons=None, log_dir=None):
     rule_ = rule(cons)
     h = qhash(q, evidence, rule_)
     options = [o["choice"] for o in q["options"]]
-    if log_dir:
-        hit = next((r for r in reversed(_log_rows(log_dir)) if r.get("hash") == h and r.get("reasoned")), None)
-        if hit and hit["choice"] in options:
-            return dict(hit, by="cache")
-    out, model = call_model(prompt(q, evidence, rule_), cons)
-    got = parse(out, options) if out is not None else None
-    if got:
-        row = dict(got, by="ai", reasoned=True, model=model)
+    hit = next((r for r in reversed(_log_rows(log_dir)) if r.get("hash") == h and r.get("reasoned")), None) if log_dir else None
+    if hit and hit["choice"] in options:
+        row = dict(hit, by="cache", cached=True)
     else:
-        row = {"choice": q["default"], "by": "default", "reasoned": False, "evidence": [],
-               "rationale": "default, not reasoned: " + (model if out is None else "no valid choice in the model answer"), "model": model}
-    row.update(id=q["id"], hash=h, at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        text, got, why = prompt(q, evidence, rule_), None, ""
+        for m in [str(x) for x in _ai(cons).get("models") or MODELS]:
+            out, why = call_model(text, cons, m)
+            if out is None:
+                break                                            # no model at all (offline, missing CLI, timeout): no retry
+            p = parse(out, options)
+            if p:
+                got = dict(p, model=m)
+                if p["evidence"]:
+                    break
+            why = why or "no valid choice in the model answer"
+        if got:
+            row = dict(got, by="ai", reasoned=True, cached=False)
+        else:
+            row = {"choice": q["default"], "by": "default", "reasoned": False, "evidence": [], "cached": False, "model": None,
+                   "rationale": "default, not reasoned: " + why}
+    row.update(id=q["id"], hash=h, options=options, at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     if log_dir:
         _write(log_dir, row)
     return row
