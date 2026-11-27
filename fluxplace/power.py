@@ -1319,6 +1319,20 @@ STITCH_PITCH_MM = 2.0        # centre spacing of the stitching vias laid on a st
 STITCH_MAX_PER_RUN = 8
 
 
+def _seg_key(g):
+    return (g["layer"], frozenset(((round(g["x1"], 2), round(g["y1"], 2)), (round(g["x2"], 2), round(g["y2"], 2)))))
+
+
+def _seg_keys(board):
+    """{(layer, endpoints)} of every track of `board` (mm, 0.01): what an update run's input already had."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    mm = pcbnew.ToMM
+    return {(b.GetLayerName(t.GetLayer()), frozenset(((round(mm(t.GetStart().x), 2), round(mm(t.GetStart().y), 2)),
+                                                     (round(mm(t.GetEnd().x), 2), round(mm(t.GetEnd().y), 2)))))
+            for t in b.GetTracks() if t.GetClass() == "PCB_TRACK"}
+
+
 def _vias_guarded(cur, nxt, board, net, at, dia, drill, ref_m, DG):
     """Copy of `cur` with a via of the given size at each (x, y) of `at` -> `nxt`; kept only when the DRC guard is no higher than
     `ref_m`. -> (ok, measure | None, why)."""
@@ -1345,13 +1359,14 @@ def _vias_guarded(cur, nxt, board, net, at, dia, drill, ref_m, DG):
 PAD_VIA_SPACING_MM = 0.9      # centre spacing of vias laid inside one pad
 
 
-def add_pad_vias(board, cons, out, nets=None, cons_path=None):
+def add_pad_vias(board, cons, out, nets=None, cons_path=None, only_new_vs=None):
     """POWER_WIDTH repair for a plane-adjacent narrow trunk: a narrow run of a rail that has a same-net zone ends in a pad (a source /
     load pad bigger than its via); the pad gets via-in-pad vias into the plane, so the pad reaches the plane directly and the
     narrow track is only a parallel path (the rail solve then gives it its small share). Vias per pad = ceil(run current / via amps),
     at least 2, less the vias already inside the pad; sites come from handroute.window inside the pad, best margin first; the pad's vias are
     added together at the rail's own via size and kept only when the DRC guard (shorts, errors, track opens) is no higher. Writes `out` only when a via was added.
-    -> {"pads": {"REF.num": {"net", "need": n, "added": k}}}"""
+    `only_new_vs`: the board an update run started from; only runs with a segment that is not on it are repaired (inherited copper
+    is left as shipped). -> {"pads": {"REF.num": {"net", "need": n, "added": k}}}"""
     import pcbnew
     from . import gaps as GP, handroute as HR, boardfile
     rec = {"pads": {}}
@@ -1365,12 +1380,13 @@ def add_pad_vias(board, cons, out, nets=None, cons_path=None):
         return rec
     det = {}
     check(boardfile.facts_from_file(board), cons, dcdrop_status(board, cons), board=board, detail=det)
+    old = _seg_keys(only_new_vs) if only_new_vs else None
     todo = {}                                                # (net, ref, num) -> (pad, amps the run carries)
     for net, runs in det.items():
         if net not in rails:
             continue
         for rn in runs:
-            if rn["cleared"]:
+            if rn["cleared"] or (old is not None and all(_seg_key(g) in old for g in rn["segs"])):
                 continue
             cnt = {}
             for g in rn["segs"]:
@@ -1433,7 +1449,7 @@ def add_pad_vias(board, cons, out, nets=None, cons_path=None):
                 continue
             dia, drill = same[0].GetWidth(), same[0].GetDrillValue()
             for rn in runs:
-                if rn["cleared"]:
+                if rn["cleared"] or (old is not None and all(_seg_key(g) in old for g in rn["segs"])):
                     continue
                 pts = []
                 for g in rn["segs"]:

@@ -1071,9 +1071,10 @@ def _r_powerwiden(base, out, gaps, ctx):
 
 
 def _r_padvias(base, out, gaps, ctx):
-    """POWER_WIDTH on a plane-adjacent narrow trunk: via-in-pad vias from the run's end pads into the same-net plane (power.add_pad_vias)."""
+    """POWER_WIDTH on a plane-adjacent narrow trunk: via-in-pad vias from the run's end pads into the same-net plane (power.add_pad_vias).
+    An update run (ctx input_board) repairs only copper it laid; inherited copper is never touched."""
     from . import power as PW
-    r = PW.add_pad_vias(base, ctx["cons"], out, nets=_nets(gaps), cons_path=ctx.get("cons_path"))
+    r = PW.add_pad_vias(base, ctx["cons"], out, nets=_nets(gaps), cons_path=ctx.get("cons_path"), only_new_vs=ctx.get("input_board"))
     return {"status": "ran" if os.path.exists(out) else "no change", "pads": r["pads"], "added": sum(v["added"] for v in r["pads"].values())}
 
 
@@ -2583,10 +2584,11 @@ def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, 
 
 
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, runs=None, log=print, inproc=False, kinds=None, baseline=None):
+          attempts=None, runs=None, log=print, inproc=False, kinds=None, baseline=None, input_board=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
     work/gaps.json, work/stop.json, work/ledger-rows.md.  `baseline`: gap rows of the input board (re-net / incremental run): a gap
-    already there (same id, not worse) is reported, never worked or counted as left."""
+    already there (same id, not worse) is reported, never worked or counted as left. `input_board`: the board an update run started
+    from; the padvias rung touches only copper that is not on it."""
     clock = CX.Clock()                                   # B6a: every second of this stage lands in exactly one category
     clock.switch("queue")
     os.makedirs(work, exist_ok=True)
@@ -2755,7 +2757,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                        "budget_s": min(max(0.0, budget_s - (time.time() - t0)), _rung_cap(cons, rung, budget_s)),
                        "log": log, "attempts": attempts,
                        "ai_dir": os.path.join(work, "ai"), "ai_used": ai_used, "ai_mode": ai_mode,
-                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback,
+                       "krt_last": krt_state.get("last"), "protect": protect, "pair_fallback": fallback, "input_board": input_board,
                        "hs_legs": sorted({n for g in m["gaps"] if g.get("class") == "hs-pair" for n in g.get("nets", [])}),
                        "pair_gap_legs": sorted({n for g in m["gaps"] if str(g["kind"]).startswith("pair-")
                                                 for n in g.get("nets", [])}),

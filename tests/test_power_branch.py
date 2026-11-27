@@ -57,28 +57,88 @@ def test_padvias_rung_is_registered_first_for_power_width():
     assert GP.DISPATCH["power-width"][0] == "padvias" and GP.RUNGS["padvias"] and "padvias" in GP.SPLIT_RUNGS
 
 
-def test_padvias_does_nothing_on_a_rail_without_a_plane(tmp_path):
-    pytest.importorskip("pcbnew")
+def test_pad_in_the_zone_needs_no_trace_the_solve_sees_the_fill_contact():
+    from fluxplace import powerflow as PF
+    segs, _v, pads = _thin_trace_rail()
+    for p in pads:
+        p["layers"] = {"F.Cu"}
+    plane = {"layer": "F.Cu", "t_mm": 0.035, "contains": lambda x, y: True}      # both pads stand in a same-net F.Cu fill
+    assert PF.solve(segs, [], pads, zones=[plane], cap=1.0)["flow"][0]["amps"] < 0.03
+    assert PF.solve(segs, [], pads, zones=[dict(plane, layer="In1.Cu")], cap=1.0)["flow"][0]["amps"] == pytest.approx(1.0)   # a fill on another layer: no pad contact
+
+
+def _trunk_board(path):
+    """4-layer board: a big source pad (L1.2) tied to a VB plane on In1 only by a 0.15 mm track to a via outside the pad; a load pad U2 with its own via."""
     import pcbnew as P
     b = P.BOARD()
     b.SetCopperLayerCount(4)
     net = P.NETINFO_ITEM(b, "VB")
     b.Add(net)
-    fp = P.FOOTPRINT(b)
-    fp.SetReference("L1")
-    b.Add(fp)
-    pad = P.PAD(fp)
-    pad.SetShape(P.PAD_SHAPE_RECTANGLE)
-    pad.SetAttribute(P.PAD_ATTRIB_SMD)
-    pad.SetSize(P.VECTOR2I(P.FromMM(2.0), P.FromMM(6.0)))
-    pad.SetPosition(P.VECTOR2I(P.FromMM(10), P.FromMM(10)))
-    pad.SetNumber("2")
-    pad.SetNet(net)
-    fp.Add(pad)
-    path = str(tmp_path / "b.kicad_pcb")
+
+    def pad(ref, x, y, w, h):
+        fp = P.FOOTPRINT(b)
+        fp.SetReference(ref)
+        fp.SetPosition(P.VECTOR2I(P.FromMM(x), P.FromMM(y)))
+        b.Add(fp)
+        pd = P.PAD(fp)
+        pd.SetShape(P.PAD_SHAPE_RECTANGLE)
+        pd.SetAttribute(P.PAD_ATTRIB_SMD)
+        ls = P.LSET()
+        ls.AddLayer(P.F_Cu)
+        pd.SetLayerSet(ls)
+        pd.SetSize(P.VECTOR2I(P.FromMM(w), P.FromMM(h)))
+        pd.SetPosition(P.VECTOR2I(P.FromMM(x), P.FromMM(y)))
+        pd.SetNumber("2")
+        pd.SetNet(net)
+        fp.Add(pd)
+
+    def via(x, y):
+        v = P.PCB_VIA(b)
+        v.SetPosition(P.VECTOR2I(P.FromMM(x), P.FromMM(y)))
+        v.SetWidth(P.FromMM(0.6))
+        v.SetDrill(P.FromMM(0.3))
+        v.SetNet(net)
+        b.Add(v)
+    pad("L1", 10, 10, 2.0, 6.0)
+    pad("U2", 30, 10, 1.0, 1.0)
+    via(13, 10)
+    via(30, 11.5)
+    for (x1, y1, x2, y2) in ((10, 10, 13, 10), (30, 10, 30, 11.5)):
+        t = P.PCB_TRACK(b)
+        t.SetStart(P.VECTOR2I(P.FromMM(x1), P.FromMM(y1)))
+        t.SetEnd(P.VECTOR2I(P.FromMM(x2), P.FromMM(y2)))
+        t.SetWidth(P.FromMM(0.15))
+        t.SetLayer(P.F_Cu)
+        t.SetNet(net)
+        b.Add(t)
+    z = P.ZONE(b)
+    z.SetLayer(P.In1_Cu)
+    z.SetNetCode(net.GetNetCode())
+    ch = P.SHAPE_LINE_CHAIN()
+    for x, y in ((0, 0), (40, 0), (40, 20), (0, 20)):
+        ch.Append(P.FromMM(x), P.FromMM(y))
+    ch.SetClosed(True)
+    z.Outline().AddOutline(ch)
+    b.Add(z)
+    P.ZONE_FILLER(b).Fill(b.Zones())
     P.SaveBoard(path, b)
-    # the via placement is measured on the real 1.5.3 board (ledger); this pins the guard: no same-net zone, no vias
-    from fluxplace import power as PW
-    cons = {"power": {"VB": {"max_current_ma": 4000, "max_v": 5.0}}}
-    out = str(tmp_path / "o.kicad_pcb")
-    assert PW.add_pad_vias(path, cons, out, nets={"VB"}) == {"pads": {}} and not os.path.exists(out)
+    return path
+
+
+TRUNK_CONS = {"power": {"VB": {"max_current_ma": 3000, "max_v": 5.0, "source": "L1"}},
+              "dcdrop": [{"net": "VB", "from": "L1", "to": ["U2"], "current_a": 3.0, "drop_mv_max": 100.0}]}
+
+
+def test_padvias_repairs_new_trunk_copper_but_never_inherited_copper(tmp_path):
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    from fluxplace import drcguard as DG
+    src = _trunk_board(str(tmp_path / "in.kicad_pcb"))
+    nv = lambda f: sum(1 for t in P.LoadBoard(f).GetTracks() if t.GetClass() == "PCB_VIA")
+    out0 = str(tmp_path / "inherited.kicad_pcb")
+    r0 = PW.add_pad_vias(src, TRUNK_CONS, out0, nets={"VB"}, only_new_vs=src)           # the input already had this copper: untouched
+    assert not os.path.exists(out0) and not any(v.get("added") for v in r0["pads"].values())
+    out1 = str(tmp_path / "new.kicad_pcb")
+    r1 = PW.add_pad_vias(src, TRUNK_CONS, out1, nets={"VB"})                               # laid by this run (no baseline): repaired
+    assert os.path.exists(out1) and nv(out1) > nv(src) and sum(v["added"] for v in r1["pads"].values()) >= 1
+

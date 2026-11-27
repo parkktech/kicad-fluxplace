@@ -1021,7 +1021,8 @@ def st_close(c, n, board):
         post = None
     base = _input_baseline(c, None, c.dir(n, "close"))      # re-net / incremental run: the input board's gaps are reported, not worked
     try:
-        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, baseline=base)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, baseline=base,
+                               input_board=((getattr(c, "state", None) or {}).get("route_scope") or {}).get("input"))
     except (Exception, SystemExit) as e:
         try:
             open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
