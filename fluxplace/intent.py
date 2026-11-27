@@ -493,19 +493,24 @@ def check(B, cons, spec=None, among=None, only_kinds=None):
     return rows
 
 
+def near_refs(it):
+    """The parts placed by a `near` item (graded there, not by the support rows)."""
+    return {r for n in it["near"] for r in (n.get("chain") or n.get("refs") or ())}
+
+
 def support_rows(B, cons, spec, it=None):
     """decoupling caps and the other support parts against their distance limits: offenders listed."""
     from . import clusters as CL, fluxmap as FM
     it = it or items(B, cons)
     cl, _links = CL.build(B, cons, spec)
-    near_refs = {r for n in it["near"] for r in (n.get("chain") or n.get("refs") or ())}
-    gr = CL.graded_supports(cl, it["support"]["waive"], near_refs)
+    near = near_refs(it)
+    gr = CL.graded_supports(cl, it["support"]["waive"], near)
     n_dec = sum(1 for f in gr if f["kind"] == "decap")
     n_oth = len(gr) - n_dec
     bad = lambda k: [(f["ref"], f["ic"], f["pad"], f["dist"], f["limit"]) for f in gr if f["kind"] == k and f["dist"] > f["limit"] + 1e-6]
     dec, oth = bad("decap"), bad("other")
     guess = sum(1 for c in cl for s in c["supports"] if not s["sure"] and s["how"] != "spread" and s["ref"] not in it["support"]["waive"]
-                and s["ref"] not in near_refs and FM._kind(s["ref"], s["cls"]) == "decap" and s["dist"] > s["limit"])
+                and s["ref"] not in near and FM._kind(s["ref"], s["cls"]) == "decap" and s["dist"] > s["limit"])
     fmt = lambda v: ", ".join(f"{r} {d:.1f}>{l:g} mm of {ic}.{pad}" for r, ic, pad, d, l in sorted(v, key=lambda t: -t[3] / t[4])[:12])
     rows = [_row("support", f"decoupling caps within their limit ({n_dec} owned)", it["support"]["decap_hard"], not dec, len(dec), 0,
                  fmt(dec) + (f"; {guess} bulk cap(s) beyond the per-pin limit are not graded" if guess else ""), [t[0] for t in dec])]
@@ -570,7 +575,7 @@ class Seater:
         self.group_of = {r: g["refs"] for g in self.it["group"] if g["rigid"] for r in g["refs"]}
         self.nets = _signal_nets(B)
         self.cls = NC.classify(B, self.cons, spec)
-        self.near_refs = {r for n in self.it["near"] for r in (n.get("chain") or n.get("refs") or ())}
+        self.near_refs = near_refs(self.it)
         self.front = {}
         for e in self.it["edge"]:
             for r in e["refs"]:
