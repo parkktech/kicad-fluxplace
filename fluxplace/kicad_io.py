@@ -500,6 +500,12 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
         pad.SetNet(ni)
         assigned += 1
     new_nums = {p.GetPadName() for p in new.Pads()}
+    models = []
+    for m in new.Models():                                  # the library's own 3D entries: their paths may not resolve on this machine
+        try:
+            models.append((m.m_Filename, tuple(m.m_Offset), tuple(m.m_Scale), tuple(m.m_Rotation)))
+        except Exception:                                   # noqa: BLE001 - an API shape we cannot read: bound later by `ready` model start
+            models.append((m.m_Filename, (0, 0, 0), (1, 1, 1), (0, 0, 0)))
     board.Remove(old)
     board.Add(new)
     if was_flipped:                     # Flip on a footprint with no parent board segfaults (KiCad 10): flip after Add,
@@ -510,7 +516,7 @@ def replace_footprint(board, ref, pretty_dir, fp_name, net_by_pin=None,
             "unnetted_pads": sorted(set(unnetted), key=lambda s: (len(s), s)),
             "pins_without_pads": sorted(set(pin_net) - new_nums,
                                         key=lambda s: (len(s), s)),
-            "created_nets": created}
+            "created_nets": created, "models": models}
 
 
 def _netlist_truth(netlist_xml):

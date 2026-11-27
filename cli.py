@@ -1077,6 +1077,8 @@ def cmd_replacefp(a):
     rep = IO.replace_footprint(board, a.ref, a.lib, a.name,
                                net_by_pin=net_by_pin, renames=renames)
     IO.save(board, a.out or a.board)
+    from fluxplace import modelstart as MS_
+    print(MS_.rebind_swapped(a.out or a.board, a.name, rep.get("models") or [])["line"])    # a model path that does not resolve is bound from the project library
     print(f"{a.ref} -> {a.name}: {rep['assigned']} pads netted"
           + (f"; created nets {rep['created_nets']}" if rep['created_nets'] else ""))
     if rep["unnetted_pads"]:
