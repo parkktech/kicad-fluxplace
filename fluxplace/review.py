@@ -2265,6 +2265,8 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += HO.check_hole_spacing(facts, cons)
     out += SW.check_switch_loops(facts, cons, spec)
     out += RP.check_return_path(facts, cons)
+    from . import happy as HP                   # B15: kicad-happy EMC pre-compliance (opt-in by a [happy] table; warn-only unless promoted)
+    out += HP.check_emc(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
     from . import fpcheck as FC

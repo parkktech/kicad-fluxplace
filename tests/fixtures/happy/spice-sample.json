@@ -1,0 +1,98 @@
+{
+ "analyzer_type": "spice",
+ "simulator": "/usr/bin/ngspice",
+ "simulation_results": [
+  {
+   "subcircuit_type": "crystal_circuit",
+   "components": [
+    "Y300"
+   ],
+   "expected": {
+    "frequency_hz": 24000000.0,
+    "load_capacitance_pF": 16.5
+   },
+   "simulated": {
+    "load_capacitance_pF": 16.5,
+    "f_series_hz": 0.0,
+    "f_error_pct": 100.0,
+    "motional_resistance_ohm": 30.0
+   },
+   "delta": {},
+   "model_note": "generic crystal equivalent circuit \u2014 actual Rm may differ",
+   "status": "warn",
+   "note": "Load caps present: C300, C301 Series resonance 0.000 MHz deviates 100.0% from nominal.",
+   "elapsed_s": 0.007,
+   "reference": "Y300"
+  },
+  {
+   "subcircuit_type": "lc_filter",
+   "components": [
+    "L100",
+    "C105"
+   ],
+   "expected": {
+    "resonant_hz": 232151.34,
+    "impedance_ohms": 6.86
+   },
+   "simulated": {
+    "resonant_hz": 232199.0,
+    "gain_peak_dB": 39.9901,
+    "Q_factor": 115.6,
+    "bandwidth_hz": 2009.0
+   },
+   "delta": {
+    "f_error_pct": 0.02
+   },
+   "status": "warn",
+   "warnings": [
+    "High Q factor (115.6) \u2014 underdamped, risk of oscillation or ringing in power path"
+   ],
+   "elapsed_s": 0.008,
+   "reference": "L100/C105"
+  },
+  {
+   "subcircuit_type": "rc_filter",
+   "components": [
+    "R203",
+    "C204"
+   ],
+   "filter_type": "low-pass",
+   "expected": {
+    "cutoff_hz": 106.1,
+    "type": "low-pass"
+   },
+   "simulated": {
+    "cutoff_hz": 105.852,
+    "phase_at_fc_deg": -0.784199
+   },
+   "delta": {
+    "fc_error_pct": 0.23
+   },
+   "status": "pass",
+   "elapsed_s": 0.031,
+   "reference": "R203/C204"
+  },
+  {
+   "subcircuit_type": "rc_filter",
+   "components": [
+    "R200",
+    "C205"
+   ],
+   "filter_type": "low-pass",
+   "expected": {
+    "cutoff_hz": 723431559.51,
+    "type": "low-pass"
+   },
+   "simulated": {
+    "cutoff_hz": 721716000.0,
+    "phase_at_fc_deg": -0.784199
+   },
+   "delta": {
+    "fc_error_pct": 0.24
+   },
+   "status": "pass",
+   "elapsed_s": 0.005,
+   "reference": "R200/C205"
+  }
+ ]
+}
