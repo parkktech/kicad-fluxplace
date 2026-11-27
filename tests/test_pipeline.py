@@ -472,3 +472,14 @@ def test_pipeline_intake_with_copied_constraints_finds_the_project_datasheets(tm
     monkeypatch.setattr(C, "PROJECT_REF", None)
     c = PL.Ctx(_args(tmp_path, str(board), constraints=str(cp)), str(tmp_path / "W"), str(board), None)
     assert c.cons["docs"]["datasheets"] == str(ds)
+
+
+def test_ctx_makes_the_constraints_and_spec_paths_absolute(tmp_path, monkeypatch):
+    """w84: close's rungs run as children with cwd = the work dir; a relative --constraints path made all 46 of them fail (FileNotFoundError)."""
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text("x")
+    (tmp_path / "c.toml").write_text("")
+    (tmp_path / "s.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    c = PL.Ctx(_args(tmp_path, str(b), constraints="c.toml", spec="s.json"), str(tmp_path / "W"), str(b), None)
+    assert c.cons_path == str(tmp_path / "c.toml") and c.spec_path == str(tmp_path / "s.json")
