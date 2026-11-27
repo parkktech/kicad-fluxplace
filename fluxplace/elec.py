@@ -4,6 +4,8 @@ Per-part facts live in the datasheet manifest (`<datasheets>/datasheets.json`), 
     {"TPS2051CDBVR": {"file": ..., "sha256": ..., "facts": {"vin_min": {"value": 4.5, "source": "TPS2051CDBVR.pdf#p5"}, ...}}}
 Add one with `fluxplace parts-fact MPN vin_min=4.5 vin_max=5.5 supply_pins='["IN"]' --source TPS2051CDBVR.pdf#p5`.
 Every fact carries the page it came from; a fact with no source is ignored (reported as such), never trusted.
+A part with no hand fact for a key takes it from its component dossier (dossier.elec_facts: verified supply range, decoupling distance,
+contact rating; source "file.pdf#pN (dossier)").
 
 Fact keys
   vin_min, vin_max   V   recommended supply range of the pins in `supply_pins` (list of pin names or numbers); a number, or {pin: V} when pins differ
@@ -26,6 +28,7 @@ Constraint keys read (all optional; a check without its inputs reports "not eval
   [elec]         cap_margin = 1.25  source_warn_pct = 10
   [nets.NAME]    role = "signal"    declares a net a signal, not a power rail (power.unknown_rails skips it)
 
+SUPPLY_RANGE from a dossier fact (model-read, page-verified) is a WARN until a parts-fact confirms it.
 SUPPLY_RANGE_UNKNOWN (WARN): an IC (U*/Y*) with a pin on a declared [power] rail and no vin_min/vin_max fact; add one with parts-fact.
 Codes: SUPPLY_RANGE SUPPLY_RANGE_UNKNOWN SOURCE_OVERLOAD CONTACT_CURRENT FUSE_SIZING PIN_STRAP CAP_VOLTAGE_MARGIN (FAIL/WARN), ELEC_NOT_EVALUATED (INFO).
 Nothing here names a board, a reference or an MPN.
@@ -49,10 +52,17 @@ def _f(level, code, msg, refs=()):
 # ------------------------------------------------------------------ the fact store (inside datasheets.json)
 def load_facts(ds_dir):
     """{mpn: {key: value}} - only facts that cite a source."""
-    from . import partdocs as PD
+    from . import partdocs as PD, dossier as DO
     out = {}
     for mpn, ent in (PD.load_manifest(ds_dir) if ds_dir else {}).items():
-        fx = (ent or {}).get("facts") if isinstance(ent, dict) else None
+        if not isinstance(ent, dict):
+            continue
+        dos = DO.load(mpn, ent.get("sha256")) if ent.get("sha256") else None
+        hand = ent.get("facts") or {}
+        auto = DO.elec_facts(dos) if dos else {}
+        if hand.keys() & {"vin_min", "vin_max", "supply_pins"}:                      # the supply range is one fact: all hand or all dossier
+            auto = {k: v for k, v in auto.items() if k not in ("vin_min", "vin_max", "supply_pins")}
+        fx = {**auto, **hand}                                                         # a hand-entered fact wins over the dossier's
         if not fx:
             continue
         ok = {k: v["value"] for k, v in fx.items() if isinstance(v, dict) and v.get("source") and "value" in v}
@@ -224,7 +234,7 @@ def check_supply_range(spec, cons, facts, mpn_map, nets, by_ref, noeval):
             if bad:
                 srcs = (facts.get(mpn) or {}).get("_src", {})
                 src = srcs.get("vin_min") or srcs.get("vin_max") or ""
-                out.append(_f("FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net} (rail {_fmt(lo)}..{_fmt(hi)} V, part {_fmt(vmin)}..{_fmt(vmax)} V"
+                out.append(_f("WARN" if "(dossier)" in src else "FAIL", "SUPPLY_RANGE", f"{c['ref']} ({mpn}) pin {sp} on {net} (rail {_fmt(lo)}..{_fmt(hi)} V, part {_fmt(vmin)}..{_fmt(vmax)} V"
                               + (f", {src}" if src else "") + "): " + "; ".join(bad), refs=[c["ref"]]))
     if unknown:
         out.append(_f("WARN", "SUPPLY_RANGE_UNKNOWN", f"{len(unknown)} IC(s) on a declared rail have no datasheet supply-range fact "
