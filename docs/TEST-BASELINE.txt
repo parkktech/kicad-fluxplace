@@ -1,1 +1,3 @@
 # Known failures of mainline: none (w47-gatehealth, 2026-11-26: the 2 former entries fixed, see commits). Never add to this list.
+tests/replay/test_update_replay.py::TestRouteUpdate::test_no_dangling_stub_under_0p2_mm_after_trace_finish[v152-1.5.2]
+tests/replay/test_update_replay.py::TestRouteUpdate::test_no_dangling_stub_under_0p2_mm_after_trace_finish[v153-1.5.3]

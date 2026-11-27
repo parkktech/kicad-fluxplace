@@ -1,0 +1,10394 @@
+{
+ "name": "utv-comms",
+ "board": {
+  "width_mm": 104.1,
+  "height_mm": 94.1,
+  "layer_count": 6
+ },
+ "components": [
+  {
+   "ref": "J3",
+   "value": "MicroFit-3 PWR (43650-0300)",
+   "lib": "Connector_Molex",
+   "fp": "Molex_Micro-Fit_3.0_43650-0300_1x03_P3.00mm_Horizontal",
+   "mpn": "43650-0300",
+   "mfr": "Molex",
+   "pinmap_source": "43650-0315.pdf#p1"
+  },
+  {
+   "ref": "D1",
+   "value": "SMDJ18A",
+   "lib": "Diode_SMD",
+   "fp": "D_SMC",
+   "mpn": "SMDJ18A",
+   "mfr": "Littelfuse",
+   "package": "DO-214AB (SMCJ)"
+  },
+  {
+   "ref": "Q1",
+   "value": "SI7155DP",
+   "lib": "Package_SO",
+   "fp": "PowerPAK_SO-8_Single",
+   "pinmap_source": "SI7155DP-T1-GE3.pdf#p1",
+   "pinmap": {
+    "S1": "1",
+    "S2": "2",
+    "S3": "3",
+    "G": "4",
+    "D": "5"
+   },
+   "mpn": "SI7155DP-T1-GE3",
+   "mfr": "Vishay Siliconix",
+   "package": "PowerPAK\u00ae SO-8"
+  },
+  {
+   "ref": "D2",
+   "value": "MMSZ5242B 12V",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-123",
+   "mpn": "MMSZ5242BT1G",
+   "mfr": "onsemi",
+   "package": "SOD-123"
+  },
+  {
+   "ref": "R1",
+   "value": "1M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "AF0603FR-071ML",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "R2",
+   "value": "10M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0710ML",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "C1",
+   "value": "4.7uF 100V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CGA6M3X7S2A475K200AB",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C2",
+   "value": "4.7uF 100V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CGA6M3X7S2A475K200AB",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C49",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "GRM188R72A104KA35D",
+   "mfr": "Murata"
+  },
+  {
+   "ref": "C3",
+   "value": "47uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C4",
+   "value": "47uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C5",
+   "value": "47uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C8",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C9",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C10",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C11",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "U7",
+   "value": "TLV7031",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "INP": "3",
+    "INN": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "TLV7031DBVR.pdf#p3",
+   "mpn": "TLV7031DBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "R29",
+   "value": "16.9k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0716K9L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R40",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0710KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R41",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-074K7L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "J10",
+   "value": "CM5 conn 1-100 10164227-1001A1RLF",
+   "lib": "Connector_Hirose_DF40",
+   "fp": "Hirose_DF40C-100DS-0.4V_2x50_P0.4mm",
+   "landpattern": {
+    "source": "10164227-1001A1RLF.pdf#p1",
+    "pitch": 0.4,
+    "pad": [
+     0.2,
+     0.7
+    ],
+    "rows": 3.08,
+    "pins": 100,
+    "note": "Amphenol drawing 10164227 sheet 1, recommended PCB layout; matches the KiCad Hirose_DF40C library land"
+   },
+   "pinmap_source": "CM5-datasheet.pdf#p18",
+   "mpn": "10164227-1001A1RLF",
+   "mfr": "Amphenol ICC (FCI)"
+  },
+  {
+   "ref": "J11",
+   "value": "CM5 conn 101-200 10164227-1001A1RLF",
+   "lib": "Connector_Hirose_DF40",
+   "fp": "Hirose_DF40C-100DS-0.4V_2x50_P0.4mm",
+   "landpattern": {
+    "source": "10164227-1001A1RLF.pdf#p1",
+    "pitch": 0.4,
+    "pad": [
+     0.2,
+     0.7
+    ],
+    "rows": 3.08,
+    "pins": 100,
+    "note": "Amphenol drawing 10164227 sheet 1, recommended PCB layout; matches the KiCad Hirose_DF40C library land"
+   },
+   "pinmap_source": "10164227-1001A1RLF.pdf#p1",
+   "mpn": "10164227-1001A1RLF",
+   "mfr": "Amphenol ICC (FCI)"
+  },
+  {
+   "ref": "C20",
+   "value": "22uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CL21A226MOQNNNE",
+   "mfr": "Samsung Electro-Mechanics"
+  },
+  {
+   "ref": "C21",
+   "value": "22uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CL21A226MOQNNNE",
+   "mfr": "Samsung Electro-Mechanics"
+  },
+  {
+   "ref": "C22",
+   "value": "22uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CL21A226MOQNNNE",
+   "mfr": "Samsung Electro-Mechanics"
+  },
+  {
+   "ref": "C23",
+   "value": "22uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CL21A226MOQNNNE",
+   "mfr": "Samsung Electro-Mechanics"
+  },
+  {
+   "ref": "C24",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C25",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C26",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C27",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C28",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C29",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "BT1",
+   "value": "MS621T",
+   "lib": "Battery",
+   "fp": "BatteryHolder_Seiko_MS621F",
+   "pinmap_source": "MS621T-FL11E.pdf#p16 (ratings), #p14-15 (tabs), #p7 (charge resistor)",
+   "mpn": "MS621T-FL11E",
+   "mfr": "Seiko Instruments"
+  },
+  {
+   "ref": "MK1",
+   "value": "M2.5 mount",
+   "lib": "MountingHole",
+   "fp": "MountingHole_2.7mm_M2.5_DIN965_Pad_TopBottom"
+  },
+  {
+   "ref": "MK2",
+   "value": "M2.5 mount",
+   "lib": "MountingHole",
+   "fp": "MountingHole_2.7mm_M2.5_DIN965_Pad_TopBottom"
+  },
+  {
+   "ref": "MK3",
+   "value": "M2.5 mount",
+   "lib": "MountingHole",
+   "fp": "MountingHole_2.7mm_M2.5_DIN965_Pad_TopBottom"
+  },
+  {
+   "ref": "MK4",
+   "value": "M2.5 mount",
+   "lib": "MountingHole",
+   "fp": "MountingHole_2.7mm_M2.5_DIN965_Pad_TopBottom"
+  },
+  {
+   "ref": "MH1",
+   "value": "M3 corner",
+   "lib": "MountingHole",
+   "fp": "MountingHole_3.2mm_M3_Pad"
+  },
+  {
+   "ref": "MH2",
+   "value": "M3 corner",
+   "lib": "MountingHole",
+   "fp": "MountingHole_3.2mm_M3_Pad"
+  },
+  {
+   "ref": "MH3",
+   "value": "M3 corner",
+   "lib": "MountingHole",
+   "fp": "MountingHole_3.2mm_M3_Pad"
+  },
+  {
+   "ref": "MH4",
+   "value": "M3 corner",
+   "lib": "MountingHole",
+   "fp": "MountingHole_3.2mm_M3_Pad"
+  },
+  {
+   "ref": "D9",
+   "value": "BAT54",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "A": "1",
+    "K": "3"
+   },
+   "pinmap_source": "BAT54LT1G.pdf#p1",
+   "mpn": "BAT54LT1G",
+   "mfr": "onsemi",
+   "package": "SOT-23-3 (TO-236)"
+  },
+  {
+   "ref": "R31",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-071KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "J5",
+   "value": "USB-C",
+   "lib": "Connector_USB",
+   "fp": "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal",
+   "mpn": "USB4105-GF-A",
+   "mfr": "GCT",
+   "pinmap": {
+    "GND_A1": "A1",
+    "VBUS_A4": "A4",
+    "CC1": "A5",
+    "DP1": "A6",
+    "DN1": "A7",
+    "SBU1": "A8",
+    "VBUS_A9": "A9",
+    "GND_A12": "A12",
+    "GND_B1": "B1",
+    "VBUS_B4": "B4",
+    "CC2": "B5",
+    "DP2": "B6",
+    "DN2": "B7",
+    "SBU2": "B8",
+    "VBUS_B9": "B9",
+    "GND_B12": "B12",
+    "SHELL": "SH"
+   },
+   "datasheet": "USB4105-drawing.pdf",
+   "pinmap_source": "USB4105-drawing.pdf#p1"
+  },
+  {
+   "ref": "U8",
+   "value": "USBLC6-2SC6",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-6",
+   "pinmap": {
+    "IO1": "1",
+    "GND": "2",
+    "IO2": "3",
+    "IO2_2": "4",
+    "VBUS": "5",
+    "IO1_2": "6"
+   },
+   "pinmap_source": "USBLC6-2SC6.pdf#p1",
+   "mpn": "USBLC6-2SC6",
+   "mfr": "ST",
+   "package": "SOT-23-6"
+  },
+  {
+   "ref": "R12",
+   "value": "5.1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "AC0603FR-075K1L",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "R13",
+   "value": "5.1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "AC0603FR-075K1L",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "J6",
+   "value": "DBG UART",
+   "lib": "Connector_JST",
+   "fp": "JST_SH_BM03B-SRSS-TB_1x03-1MP_P1.00mm_Vertical",
+   "pinmap_source": "BM03B-SRSS-TB_LF_SN.pdf#p3",
+   "mpn": "BM03B-SRSS-TB(LF)(SN)",
+   "mfr": "JST Sales America Inc."
+  },
+  {
+   "ref": "J7",
+   "value": "nRPIBOOT",
+   "lib": "Connector_PinHeader_2.54mm",
+   "fp": "PinHeader_1x02_P2.54mm_Vertical",
+   "mpn": "61300211121",
+   "mfr": "Wurth Elektronik"
+  },
+  {
+   "ref": "J9",
+   "value": "LED link",
+   "lib": "Connector_JST",
+   "fp": "JST_GH_BM03B-GHS-TBT_1x03-1MP_P1.25mm_Vertical",
+   "pinmap_source": "BM03B-GHS-TBT_LF_SN.pdf#p3",
+   "mpn": "BM03B-GHS-TBT(LF)(SN)",
+   "mfr": "JST Sales America Inc."
+  },
+  {
+   "ref": "SW1",
+   "value": "KMR221G",
+   "lib": "Button_Switch_SMD",
+   "fp": "SW_Push_1P1T-SH_NO_CK_KMR2xxG",
+   "pinmap_source": "KMR221GLFS.pdf#p2",
+   "mpn": "KMR221GLFS",
+   "mfr": "C&K"
+  },
+  {
+   "ref": "R30",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0710KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "C43",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "U3",
+   "value": "MAX-M10M",
+   "lib": "RF_GPS",
+   "fp": "ublox_MAX",
+   "pinmap": {
+    "GND1": "1",
+    "TXD": "2",
+    "RXD": "3",
+    "TIMEPULSE": "4",
+    "EXTINT": "5",
+    "V_BCKP": "6",
+    "VCC_IO": "7",
+    "VCC": "8",
+    "RESET_N": "9",
+    "GND10": "10",
+    "RF_IN": "11",
+    "GND12": "12",
+    "LNA_EN": "13",
+    "VCC_RF": "14",
+    "VIO_SEL": "15",
+    "SDA": "16",
+    "SCL": "17",
+    "SAFEBOOT": "18"
+   },
+   "pinmap_source": "MAX-M10M-20B.pdf#p9",
+   "mpn": "MAX-M10M-20B",
+   "mfr": "u-blox",
+   "package": "-"
+  },
+  {
+   "ref": "BT2",
+   "value": "MS621T",
+   "lib": "Battery",
+   "fp": "BatteryHolder_Seiko_MS621F",
+   "pinmap_source": "MS621T-FL11E.pdf#p16 (ratings), #p14-15 (tabs), #p7 (charge resistor)",
+   "mpn": "MS621T-FL11E",
+   "mfr": "Seiko Instruments"
+  },
+  {
+   "ref": "D10",
+   "value": "BAT60A",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-323",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "BAT60AE6327HTSA1.pdf#p1",
+   "mpn": "BAT60AE6327HTSA1",
+   "mfr": "Infineon",
+   "package": "PG-SOD323-3D"
+  },
+  {
+   "ref": "R32",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-071KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "J4",
+   "value": "SMA edge jack GPS",
+   "lib": "Connector_Coaxial",
+   "fp": "SMA_Samtec_SMA-J-P-H-ST-EM1_EdgeMount",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "SMA-J-P-H-ST-EM1.pdf#p1",
+   "mpn": "SMA-J-P-H-ST-EM1",
+   "mfr": "Samtec Inc.",
+   "pin_alias": {
+    "GND": {
+     "datasheet": "OUTER CONTACT",
+     "page": "SMA-J-P-H-ST-EM1.pdf#p1"
+    }
+   }
+  },
+  {
+   "ref": "L3",
+   "value": "47nH",
+   "lib": "Inductor_SMD",
+   "fp": "L_0402_1005Metric",
+   "mpn": "LQW15AN47NJ00D",
+   "mfr": "Murata",
+   "package": "-"
+  },
+  {
+   "ref": "R11",
+   "value": "10R",
+   "lib": "Resistor_SMD",
+   "fp": "R_1206_3216Metric",
+   "mpn": "AC1206FR-0710RL",
+   "mfr": "YAGEO",
+   "package": "1206"
+  },
+  {
+   "ref": "U9",
+   "value": "TLV7031",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "INP": "3",
+    "INN": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "TLV7031DBVR.pdf#p3",
+   "mpn": "TLV7031DBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "R33",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-071KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R34",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-07100KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "D4",
+   "value": "PESD0402",
+   "lib": "Diode_SMD",
+   "fp": "D_0402_1005Metric",
+   "mpn": "PESD0402-140",
+   "mfr": "Littelfuse",
+   "package": "0402"
+  },
+  {
+   "ref": "C50",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C51",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C52",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C57",
+   "value": "100pF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM1555C1H101JA01D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "U5",
+   "value": "TLV320AIC3104",
+   "lib": "Package_DFN_QFN",
+   "fp": "Texas_RHB0032E_VQFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm",
+   "pinmap": {
+    "MCLK": "1",
+    "BCLK": "2",
+    "WCLK": "3",
+    "DIN": "4",
+    "DOUT": "5",
+    "DVSS": "6",
+    "IOVDD": "7",
+    "SCL": "8",
+    "SDA": "9",
+    "MIC1LP": "10",
+    "MIC1LM": "11",
+    "MIC1RP": "12",
+    "MIC1RM": "13",
+    "MIC2L": "14",
+    "MICBIAS": "15",
+    "MIC2R": "16",
+    "AVSS1": "17",
+    "DRVDD18": "18",
+    "HPLOUT": "19",
+    "HPLCOM": "20",
+    "DRVSS": "21",
+    "HPRCOM": "22",
+    "HPROUT": "23",
+    "DRVDD24": "24",
+    "AVDD": "25",
+    "AVSS2": "26",
+    "LEFT_LOP": "27",
+    "LEFT_LOM": "28",
+    "RIGHT_LOP": "29",
+    "RIGHT_LOM": "30",
+    "RESET": "31",
+    "DVDD": "32",
+    "PAD": "33"
+   },
+   "pinmap_source": "TLV320AIC3104IRHBR.pdf#p5",
+   "mpn": "TLV320AIC3104IRHBT",
+   "mfr": "TI",
+   "package": "32-VQFN (5x5)"
+  },
+  {
+   "ref": "T1",
+   "value": "SM-LP-5001",
+   "lib": "utv-comms",
+   "fp": "Bourns_SM-LP-5001",
+   "pinmap": {
+    "P1": "1",
+    "P2": "3",
+    "S1": "6",
+    "S2": "4"
+   },
+   "pinmap_source": "SM-LP-5001.pdf#p1",
+   "landpattern": {
+    "source": "SM-LP-5001.pdf#p1",
+    "pitch": 2.54,
+    "pad": [
+     3.0,
+     1.5
+    ],
+    "rows": 15.0,
+    "pins": 6
+   },
+   "mpn": "SM-LP-5001",
+   "mfr": "Bourns"
+  },
+  {
+   "ref": "T2",
+   "value": "SM-LP-5001",
+   "lib": "utv-comms",
+   "fp": "Bourns_SM-LP-5001",
+   "pinmap": {
+    "P1": "1",
+    "P2": "3",
+    "S1": "6",
+    "S2": "4"
+   },
+   "pinmap_source": "SM-LP-5001.pdf#p1",
+   "landpattern": {
+    "source": "SM-LP-5001.pdf#p1",
+    "pitch": 2.54,
+    "pad": [
+     3.0,
+     1.5
+    ],
+    "rows": 15.0,
+    "pins": 6
+   },
+   "mpn": "SM-LP-5001",
+   "mfr": "Bourns"
+  },
+  {
+   "ref": "R20",
+   "value": "2.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-072K2L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R21",
+   "value": "2.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-072K2L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "C30",
+   "value": "1uF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CC0805KKX7R9BB105",
+   "mfr": "Yageo",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C31",
+   "value": "1uF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CC0805KKX7R9BB105",
+   "mfr": "Yageo",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "R22",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0710KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R23",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-071KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "C32",
+   "value": "1uF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "CC0805KKX7R9BB105",
+   "mfr": "Yageo",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C44",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C45",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C46",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C47",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "R36",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-074K7L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "R37",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-074K7L",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "FB3",
+   "value": "BLM18SG331",
+   "lib": "Inductor_SMD",
+   "fp": "L_0603_1608Metric",
+   "mpn": "BLM18SG331TN1D",
+   "mfr": "Murata",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "FB4",
+   "value": "BLM18SG331",
+   "lib": "Inductor_SMD",
+   "fp": "L_0603_1608Metric",
+   "mpn": "BLM18SG331TN1D",
+   "mfr": "Murata",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "K1",
+   "value": "G6K-2F-Y-T1",
+   "lib": "Relay_SMD",
+   "fp": "Relay_DPDT_Omron_G6K-2F-Y",
+   "pinmap": {
+    "COILP": "1",
+    "COILN": "8",
+    "COM_A": "6",
+    "NC_A": "7",
+    "NO_A": "5",
+    "COM_B": "3",
+    "NC_B": "2",
+    "NO_B": "4"
+   },
+   "pinmap_source": "G6K-2F-Y_DC5.pdf#p9",
+   "mpn": "G6K-2F-Y-T1-TRS DC5",
+   "mfr": "Aratas (Formerly Omron Components)"
+  },
+  {
+   "ref": "Q2",
+   "value": "NX3008NBK",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "NX3008NBK.pdf#p2",
+   "mpn": "NX3008NBKVL",
+   "mfr": "Nexperia USA Inc.",
+   "package": "TO-236AB"
+  },
+  {
+   "ref": "D5",
+   "value": "1N4148WS",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-323",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "1N4148WS.pdf#p1",
+   "mpn": "1N4148WS",
+   "mfr": "onsemi",
+   "package": "SOD-323"
+  },
+  {
+   "ref": "D6",
+   "value": "BAT54S",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "A": "1",
+    "K": "2",
+    "COM": "3"
+   },
+   "pinmap_source": "BAT54SLT1G.pdf#p1",
+   "mpn": "BAT54SLT1G",
+   "mfr": "onsemi",
+   "package": "SOT-23-3 (TO-236)"
+  },
+  {
+   "ref": "C35",
+   "value": "470nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB474",
+   "mfr": "YAGEO",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C36",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "R25",
+   "value": "47k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-0747KL",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "R26",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-071KL",
+   "mfr": "Yageo",
+   "package": "0603"
+  },
+  {
+   "ref": "C34",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C37",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C56",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C58",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C40",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "FB5",
+   "value": "BLM18PG221",
+   "lib": "Inductor_SMD",
+   "fp": "L_0603_1608Metric",
+   "mpn": "BLM18PG221SN1D",
+   "mfr": "Murata",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "U10",
+   "value": "AP2112K-1.8",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "VIN": "1",
+    "GND": "2",
+    "EN": "3",
+    "NC": "4",
+    "VOUT": "5"
+   },
+   "pinmap_source": "AP2112K-1.8TRG1.pdf#p1",
+   "mpn": "AP2112K-1.8TRG1",
+   "mfr": "Diodes Inc",
+   "package": "SOT-25"
+  },
+  {
+   "ref": "C54",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C55",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "J1A",
+   "value": "COMM link",
+   "lib": "Connector_JST",
+   "fp": "JST_GH_BM05B-GHS-TBT_1x05-1MP_P1.25mm_Vertical",
+   "pinmap_source": "BM05B-GHS-TBT_LF_SN.pdf#p3",
+   "mpn": "BM05B-GHS-TBT(LF)(SN)",
+   "mfr": "JST Sales America Inc."
+  },
+  {
+   "ref": "J2A",
+   "value": "RADIO link",
+   "lib": "Connector_JST",
+   "fp": "JST_GH_BM05B-GHS-TBT_1x05-1MP_P1.25mm_Vertical",
+   "pinmap_source": "BM05B-GHS-TBT_LF_SN.pdf#p3",
+   "mpn": "BM05B-GHS-TBT(LF)(SN)",
+   "mfr": "JST Sales America Inc."
+  },
+  {
+   "ref": "T3",
+   "value": "HX5084NLT",
+   "lib": "utv-comms",
+   "fp": "Pulse_H5084_SMD24",
+   "pinmap_source": "HX5084NLT.pdf#p2",
+   "channels": [
+    {
+     "chip_p": "2",
+     "chip_n": "3",
+     "chip_ct": "1",
+     "line_p": "23",
+     "line_n": "22",
+     "line_ct": "24"
+    },
+    {
+     "chip_p": "5",
+     "chip_n": "6",
+     "chip_ct": "4",
+     "line_p": "20",
+     "line_n": "19",
+     "line_ct": "21"
+    },
+    {
+     "chip_p": "8",
+     "chip_n": "9",
+     "chip_ct": "7",
+     "line_p": "17",
+     "line_n": "16",
+     "line_ct": "18"
+    },
+    {
+     "chip_p": "11",
+     "chip_n": "12",
+     "chip_ct": "10",
+     "line_p": "14",
+     "line_n": "13",
+     "line_ct": "15"
+    }
+   ],
+   "pinmap": {
+    "TCT1": "1",
+    "TD1+": "2",
+    "TD1-": "3",
+    "TCT2": "4",
+    "TD2+": "5",
+    "TD2-": "6",
+    "TCT3": "7",
+    "TD3+": "8",
+    "TD3-": "9",
+    "TCT4": "10",
+    "TD4+": "11",
+    "TD4-": "12",
+    "MX4-": "13",
+    "MX4+": "14",
+    "MCT4": "15",
+    "MX3-": "16",
+    "MX3+": "17",
+    "MCT3": "18",
+    "MX2-": "19",
+    "MX2+": "20",
+    "MCT2": "21",
+    "MX1-": "22",
+    "MX1+": "23",
+    "MCT1": "24"
+   },
+   "landpattern": {
+    "source": "HX5084NLT.pdf#p3",
+    "pitch": 0.99,
+    "pad": [
+     0.64,
+     1.78
+    ],
+    "rows": 8.99,
+    "pins": 24,
+    "note": "Pulse PS-2325.001-C sheet 3 (drawing-only page, read by eye 2026-09-04; identical to HX5084FNL PS-2759.001-A sheet 3)"
+   },
+   "mpn": "HX5084NLT",
+   "mfr": "Pulse Electronics"
+  },
+  {
+   "ref": "J12",
+   "value": "RJ45 RJHSE-5384 (G/Y LEDs)",
+   "lib": "Connector_RJ",
+   "fp": "RJ45_Amphenol_RJHSE538X",
+   "pinmap_source": "RJHSE-X38X-A4-drawing.pdf#p1",
+   "landpattern": {
+    "source": "RJHSE-X38X-A4-drawing.pdf#p1",
+    "pins": 12,
+    "note": "RJHSE-5384 (single port, right angle, shield, LED code 4: LED2 left green, LED1 right yellow; RJHSE-catalog-pp3-7-raster.pdf#p1) replaces RJHSE5M80 (D71az). Contacts 1-8, two 3.25 mm pegs and two shield pads are the same pattern as before; the stock KiCad footprint RJ45_Amphenol_RJHSE538X adds LED pins 9-12 on a 6.6 mm row. LED pins from the maker LED schematic (component-side view), RJHSE-X38X-A4-drawing.pdf#p1: 12 = LED2 anode, 11 = LED2 cathode, 10 = LED1 anode, 9 = LED1 cathode. Not drawn for the single-port part itself (the drawing is the 4-port -X38X-A4): confirm LED polarity with a meter on the first sample."
+   },
+   "mpn": "RJHSE-5384",
+   "mfr": "Amphenol"
+  },
+  {
+   "ref": "U11",
+   "value": "TPD4E02B04",
+   "lib": "Package_SON",
+   "fp": "USON-10_2.5x1.0mm_P0.5mm",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3",
+    "IO3": "4",
+    "IO4": "5",
+    "NC_6": "6",
+    "NC_7": "7",
+    "GND_8": "8",
+    "NC_9": "9",
+    "NC_10": "10"
+   },
+   "pinmap_source": "TPD4E02B04DQAR.pdf#p3",
+   "mpn": "TPD4E02B04QDQARQ1",
+   "mfr": "TI",
+   "package": "10-USON (2.5x1)"
+  },
+  {
+   "ref": "U12",
+   "value": "TPD4E02B04",
+   "lib": "Package_SON",
+   "fp": "USON-10_2.5x1.0mm_P0.5mm",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3",
+    "IO3": "4",
+    "IO4": "5",
+    "NC_6": "6",
+    "NC_7": "7",
+    "GND_8": "8",
+    "NC_9": "9",
+    "NC_10": "10"
+   },
+   "pinmap_source": "TPD4E02B04DQAR.pdf#p3",
+   "mpn": "TPD4E02B04QDQARQ1",
+   "mfr": "TI",
+   "package": "10-USON (2.5x1)"
+  },
+  {
+   "ref": "C59",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R44",
+   "value": "75R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0775RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R45",
+   "value": "75R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0775RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R46",
+   "value": "75R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0775RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R47",
+   "value": "75R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0775RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R48",
+   "value": "270R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07270RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R49",
+   "value": "270R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07270RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "C60",
+   "value": "1nF 2kV",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1206_3216Metric",
+   "mpn": "C1206C102KGRACTU",
+   "mfr": "KEMET",
+   "package": "1206 (3216 Metric)"
+  },
+  {
+   "ref": "U13",
+   "value": "BMI270",
+   "lib": "Package_LGA",
+   "fp": "Bosch_LGA-14_3x2.5mm_P0.5mm",
+   "pinmap": {
+    "SDO": "1",
+    "ASDX": "2",
+    "ASCX": "3",
+    "INT1": "4",
+    "VDDIO": "5",
+    "GNDIO": "6",
+    "GND": "7",
+    "VDD": "8",
+    "INT2": "9",
+    "OCSB": "10",
+    "OSDO": "11",
+    "CSB": "12",
+    "SCX": "13",
+    "SDX": "14"
+   },
+   "pinmap_source": "BMI270.pdf#p137-138",
+   "mpn": "BMI270",
+   "mfr": "Bosch Sensortec",
+   "package": "14-LGA (2.5x3)"
+  },
+  {
+   "ref": "C61",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C62",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "U100",
+   "value": "LM61460 5V",
+   "lib": "utv-comms",
+   "fp": "Texas_RJR0014A_VQFN-HR-14_4x3.5mm",
+   "pinmap": {
+    "BIAS": "1",
+    "VCC": "2",
+    "AGND": "3",
+    "FB": "4",
+    "PGOOD": "5",
+    "RT": "6",
+    "EN": "7",
+    "VIN1": "8",
+    "PGND1": "9",
+    "SW": "10",
+    "PGND2": "11",
+    "VIN2": "12",
+    "RBOOT": "13",
+    "CBOOT": "14"
+   },
+   "pinmap_source": "LM61460AASQRJRRQ1.pdf#p4",
+   "landpattern": {
+    "source": "LM61460AASQRJRRQ1.pdf#p56",
+    "pitch": 0.5,
+    "pad": [
+     0.4,
+     1.0
+    ],
+    "rows": 3.2,
+    "pins": 14,
+    "note": "TI RJR0014A example board layout (4223976/H): pad 1 and 5 are L-shaped (0.7x0.4 + 0.35x1.0), 4x 1x0.4 corner pads, 6x 0.25x0.7, thermal strip 2.4x0.4; every pad read from the drawing"
+   },
+   "mpn": "LM61460AANQRJRRQ1",
+   "mfr": "Texas Instruments",
+   "package": "14-VQFN-HR (4x3.5)"
+  },
+  {
+   "ref": "U101",
+   "value": "LM61460 VMODEM",
+   "lib": "utv-comms",
+   "fp": "Texas_RJR0014A_VQFN-HR-14_4x3.5mm",
+   "pinmap": {
+    "BIAS": "1",
+    "VCC": "2",
+    "AGND": "3",
+    "FB": "4",
+    "PGOOD": "5",
+    "RT": "6",
+    "EN": "7",
+    "VIN1": "8",
+    "PGND1": "9",
+    "SW": "10",
+    "PGND2": "11",
+    "VIN2": "12",
+    "RBOOT": "13",
+    "CBOOT": "14"
+   },
+   "pinmap_source": "LM61460AASQRJRRQ1.pdf#p4",
+   "landpattern": {
+    "source": "LM61460AASQRJRRQ1.pdf#p56",
+    "pitch": 0.5,
+    "pad": [
+     0.4,
+     1.0
+    ],
+    "rows": 3.2,
+    "pins": 14,
+    "note": "TI RJR0014A example board layout (4223976/H): pad 1 and 5 are L-shaped (0.7x0.4 + 0.35x1.0), 4x 1x0.4 corner pads, 6x 0.25x0.7, thermal strip 2.4x0.4; every pad read from the drawing"
+   },
+   "mpn": "LM61460AANQRJRRQ1",
+   "mfr": "Texas Instruments",
+   "package": "14-VQFN-HR (4x3.5)"
+  },
+  {
+   "ref": "U102",
+   "value": "TPS628502-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-583-8",
+   "pinmap": {
+    "VIN": "1",
+    "EN": "2",
+    "MODE": "3",
+    "FSET": "4",
+    "FB": "5",
+    "PG": "6",
+    "SW": "7",
+    "GND": "8"
+   },
+   "pinmap_source": "TPS628502QDRLRQ1.pdf#p4",
+   "mpn": "TPS628502QDRLRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-583"
+  },
+  {
+   "ref": "L100",
+   "value": "4.7uH",
+   "lib": "utv-comms",
+   "fp": "Wurth_WE-XHMI-6060_744393465047",
+   "landpattern": {
+    "source": "744393465047.pdf#p1",
+    "pad": [
+     1.45,
+     5.5
+    ],
+    "pitch": 4.0,
+    "note": "Wurth recommended land pattern: pads 1.45 x 5.5 mm, 2.55 mm gap, no vias or traces in the restricted area"
+   },
+   "mpn": "744393465047",
+   "mfr": "Wurth Elektronik",
+   "package": "-"
+  },
+  {
+   "ref": "L101",
+   "value": "4.7uH",
+   "lib": "utv-comms",
+   "fp": "Wurth_WE-XHMI-6060_744393465047",
+   "landpattern": {
+    "source": "744393465047.pdf#p1",
+    "pad": [
+     1.45,
+     5.5
+    ],
+    "pitch": 4.0,
+    "note": "Wurth recommended land pattern: pads 1.45 x 5.5 mm, 2.55 mm gap, no vias or traces in the restricted area"
+   },
+   "mpn": "744393465047",
+   "mfr": "Wurth Elektronik",
+   "package": "-"
+  },
+  {
+   "ref": "L102",
+   "value": "0.47uH",
+   "lib": "Inductor_SMD",
+   "fp": "L_1008_2520Metric",
+   "mpn": "DFE252012P-R47M=P2",
+   "mfr": "Murata"
+  },
+  {
+   "ref": "Q102",
+   "value": "BSS84AK",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "BSS84AK.pdf#p2",
+   "mpn": "BSS84AK,215",
+   "mfr": "Nexperia",
+   "package": "TO-236AB"
+  },
+  {
+   "ref": "Q103",
+   "value": "BSS138",
+   "mpn": "BSS138-7-F",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "BSS138-7-F.pdf#p1",
+   "mfr": "Diodes Incorporated"
+  },
+  {
+   "ref": "Q104",
+   "value": "BSS138",
+   "mpn": "BSS138-7-F",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "BSS138-7-F.pdf#p1",
+   "mfr": "Diodes Incorporated"
+  },
+  {
+   "ref": "Q110",
+   "value": "BSS138",
+   "mpn": "BSS138-7-F",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "BSS138-7-F.pdf#p1",
+   "mfr": "Diodes Incorporated"
+  },
+  {
+   "ref": "Q111",
+   "value": "BSS138",
+   "mpn": "BSS138-7-F",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "BSS138-7-F.pdf#p1",
+   "mfr": "Diodes Incorporated"
+  },
+  {
+   "ref": "D100",
+   "value": "SMAJ18CAQ",
+   "lib": "Diode_SMD",
+   "fp": "D_SMA",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "SMAJ18CAQ-13-F.pdf#p1",
+   "mpn": "SMAJ18CAQ-13-F",
+   "mfr": "Diodes Incorporated",
+   "package": "SMA"
+  },
+  {
+   "ref": "D101",
+   "value": "BZT52C3V3Q",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-123",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "BZT52C3V3Q-7-F.pdf#p1",
+   "mpn": "BZT52C3V3Q-7-F",
+   "mfr": "Diodes Incorporated",
+   "package": "SOD-123"
+  },
+  {
+   "ref": "D104",
+   "value": "BZT52C3V6",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-123",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "BZT52C3V6-7-F.pdf#p1",
+   "mpn": "BZT52C3V6-7-F",
+   "mfr": "Diodes Incorporated",
+   "package": "SOD-123"
+  },
+  {
+   "ref": "D102",
+   "value": "MMSZ5242B 12V",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-123",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "MMSZ5242BT1G.pdf#p1",
+   "mpn": "MMSZ5242BT1G",
+   "mfr": "onsemi",
+   "package": "SOD-123"
+  },
+  {
+   "ref": "C101",
+   "value": "100nF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71H104KE02D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C102",
+   "value": "100nF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71H104KE02D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C111",
+   "value": "100nF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71H104KE02D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C112",
+   "value": "100nF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71H104KE02D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C103",
+   "value": "10uF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "GCM32EC71H106KA03L",
+   "mfr": "Murata Electronics",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C113",
+   "value": "10uF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "GCM32EC71H106KA03L",
+   "mfr": "Murata Electronics",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C105",
+   "value": "100nF 16V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C114",
+   "value": "100nF 16V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C106",
+   "value": "1uF 16V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "GCM188R71C105KA64D",
+   "mfr": "Murata Electronics",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C115",
+   "value": "1uF 16V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "GCM188R71C105KA64D",
+   "mfr": "Murata Electronics",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C107",
+   "value": "47uF 10V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C116",
+   "value": "47uF 10V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C117",
+   "value": "47uF 10V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C118",
+   "value": "47uF 10V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_1210_3225Metric",
+   "mpn": "CNA6P1X7S1A476M250AE",
+   "mfr": "TDK",
+   "package": "1210 (3225 Metric)"
+  },
+  {
+   "ref": "C110",
+   "value": "33pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM1555C1H330JA16D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R100",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0805_2012Metric",
+   "mpn": "AF0805FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0805"
+  },
+  {
+   "ref": "R101",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R106",
+   "value": "1M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-071ML",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R107",
+   "value": "2.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-072K2L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R109",
+   "value": "1M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-071ML",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R110",
+   "value": "162k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07162KL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R111",
+   "value": "619k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07619KL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R115",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R116",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R117",
+   "value": "24.9k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-0724K9L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R118",
+   "value": "33.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-0733K2L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R121",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R122",
+   "value": "36.5k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0736K5L",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R123",
+   "value": "33.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-0733K2L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R125",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R126",
+   "value": "453k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07453KL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R127",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AF0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R136",
+   "value": "124k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07124KL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "J200",
+   "value": "M.2 Key B socket 3052/3042 Attend 123A-30B00",
+   "mpn": "123A-30B00",
+   "lib": "utv-comms",
+   "fp": "Attend_123A-30B00_M2_KeyB_Socket",
+   "pinmap": {
+    "CONFIG_3": "1",
+    "VCC2": "2",
+    "GND3": "3",
+    "VCC4": "4",
+    "GND5": "5",
+    "FULL_CARD_POWER_OFF_N": "6",
+    "USB_DP": "7",
+    "W_DISABLE1_N": "8",
+    "USB_DM": "9",
+    "LED1_N": "10",
+    "GND11": "11",
+    "RSVD20": "20",
+    "CONFIG_0": "21",
+    "RSVD22": "22",
+    "WAKE_ON_WAN_N": "23",
+    "RSVD24": "24",
+    "DPR": "25",
+    "W_DISABLE2_N": "26",
+    "GND27": "27",
+    "RSVD28": "28",
+    "PERN1_USB3_RXN": "29",
+    "UIM_RESET": "30",
+    "PERP1_USB3_RXP": "31",
+    "UIM_CLK": "32",
+    "GND33": "33",
+    "UIM_DATA": "34",
+    "PETN1_USB3_TXN": "35",
+    "UIM_PWR": "36",
+    "PETP1_USB3_TXP": "37",
+    "RSVD38": "38",
+    "GND39": "39",
+    "RSVD40": "40",
+    "PERN0": "41",
+    "RSVD42": "42",
+    "PERP0": "43",
+    "RSVD44": "44",
+    "GND45": "45",
+    "RSVD46": "46",
+    "PETN0": "47",
+    "RSVD48": "48",
+    "PETP0": "49",
+    "PERST_N": "50",
+    "GND51": "51",
+    "CLKREQ_N": "52",
+    "REFCLKN": "53",
+    "PEWAKE_N": "54",
+    "REFCLKP": "55",
+    "RSVD56": "56",
+    "GND57": "57",
+    "RSVD58": "58",
+    "RSVD59": "59",
+    "RSVD60": "60",
+    "RSVD61": "61",
+    "RSVD62": "62",
+    "RSVD63": "63",
+    "RSVD64": "64",
+    "RSVD65": "65",
+    "SIM_DETECT": "66",
+    "RESET_N": "67",
+    "SUSCLK": "68",
+    "CONFIG_1": "69",
+    "VCC70": "70",
+    "GND71": "71",
+    "VCC72": "72",
+    "GND73": "73",
+    "VCC74": "74",
+    "CONFIG_2": "75",
+    "SH1": "SH1",
+    "SH2": "SH2"
+   },
+   "pinmap_source": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p20-24",
+   "mfr": "Attend Technology",
+   "pinmap_note": "Pin numbers/functions: Quectel RM520N-GL Table 5 (p19-23, M.2 Key B module side); pin names are the PCI-SIG M.2 generic names; socket land pattern 123A-30A00_drawing.pdf#p1; temp 123A-30B00.pdf#p1; w88 2026-11-27: pin_alias covers every pin whose module-side printed name differs from the generic M.2 name, by pin number (Quectel Table 5 pages 21-23, #p24 for pin 68). SH1/SH2 are the socket shield tabs, not module pins.",
+   "landpattern": {
+    "source": "123A-30A00_drawing.pdf#p1",
+    "pitch": 0.5,
+    "pad": [
+     0.3,
+     1.55
+    ],
+    "pins": 67,
+    "note": "Attend 123A-30A00 drawing (A key; B key differs only in the key notch/pin 12-19 gap) recommended layout: 0.50P, 67 x 0.300 wide pads (printed \"67-0.300\"), 1.55 long; rows (front/back pad-row offset) not cited; 123A-30B00 own drawing not on disk"
+   },
+   "pin_alias": {
+    "LED1_N": {
+     "datasheet": "LED_WWAN#",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "PERN0": {
+     "datasheet": "PCIE_TX_M",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PERP0": {
+     "datasheet": "PCIE_TX_P",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PETN0": {
+     "datasheet": "PCIE_RX_M",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PETP0": {
+     "datasheet": "PCIE_RX_P",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "PERN1_USB3_RXN": {
+     "datasheet": "USB_SS_TX_M",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PERP1_USB3_RXP": {
+     "datasheet": "USB_SS_TX_P",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PETN1_USB3_TXN": {
+     "datasheet": "USB_SS_RX_M",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PETP1_USB3_TXP": {
+     "datasheet": "USB_SS_RX_P",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "PERST_N": {
+     "datasheet": "PCIE_RST_N",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "CLKREQ_N": {
+     "datasheet": "PCIE_CLKREQ_N",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "REFCLKN": {
+     "datasheet": "PCIE_REFCLK_M",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "REFCLKP": {
+     "datasheet": "PCIE_REFCLK_P",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "PEWAKE_N": {
+     "datasheet": "PCIE_WAKE_N",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "SUSCLK": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p24"
+    },
+    "UIM_RESET": {
+     "datasheet": "USIM1_RST",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "UIM_CLK": {
+     "datasheet": "USIM1_CLK",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "UIM_DATA": {
+     "datasheet": "USIM1_DATA",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "UIM_PWR": {
+     "datasheet": "USIM1_VDD",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "W_DISABLE1_N": {
+     "datasheet": "W_DISABLE1#",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "W_DISABLE2_N": {
+     "datasheet": "W_DISABLE2#",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "RSVD20": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "RSVD22": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "RSVD24": {
+     "datasheet": "VDDIO_1V8",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p21"
+    },
+    "RSVD28": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD38": {
+     "datasheet": "WLAN_TX_EN*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD40": {
+     "datasheet": "USIM2_DET",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD42": {
+     "datasheet": "USIM2_DATA",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD44": {
+     "datasheet": "USIM2_CLK",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD46": {
+     "datasheet": "USIM2_RST",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p22"
+    },
+    "RSVD48": {
+     "datasheet": "USIM2_VDD",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD56": {
+     "datasheet": "RFFE_CLK*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD58": {
+     "datasheet": "RFFE_DATA*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD59": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD60": {
+     "datasheet": "N79_TX_EN*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD61": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD62": {
+     "datasheet": "COEX_RXD*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD63": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD64": {
+     "datasheet": "COEX_TXD*",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    },
+    "RSVD65": {
+     "datasheet": "RESERVED",
+     "page": "Quectel_RM520N-GL_Hardware_Design_V1.0.pdf#p23"
+    }
+   }
+  },
+  {
+   "ref": "H200",
+   "value": "M2 SMT standoff H1.5 (3052 position, 52 mm)",
+   "lib": "Mounting_Wuerth",
+   "fp": "Mounting_Wuerth_WA-SMSI-M2_H1.5mm_9774015243",
+   "mpn": "9774015243R",
+   "mfr": "W\u00fcrth Elektronik"
+  },
+  {
+   "ref": "H201",
+   "value": "M2 SMT standoff H1.5 (3042 position, 42 mm)",
+   "lib": "Mounting_Wuerth",
+   "fp": "Mounting_Wuerth_WA-SMSI-M2_H1.5mm_9774015243",
+   "mpn": "9774015243R",
+   "mfr": "W\u00fcrth Elektronik"
+  },
+  {
+   "ref": "J201",
+   "value": "MHF4 jack, card ANT0 (MAIN) jumper",
+   "lib": "utv-comms",
+   "fp": "IPEX_MHF4_20449-001E",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "20449-001E-03.pdf#p1 (pads: p4)",
+   "landpattern": {
+    "source": "20449-001E-03.pdf#p4",
+    "pitch": 1.92,
+    "pad": [
+     0.58,
+     1.58
+    ],
+    "rows": 1.975,
+    "pins": 2,
+    "note": "I-PEX 20449 sheet 4 recommended footprint (text-less drawing, read by eye +-0.05): ground pads 0.58x1.58 (2.50 outer, 1.34 inner), signal pads ~0.5 long at the 2.50 overall height"
+   },
+   "mpn": "20449-001E-03",
+   "mfr": "I-PEX"
+  },
+  {
+   "ref": "J202",
+   "value": "MHF4 jack, card ANT1 (DIVERSITY) jumper",
+   "lib": "utv-comms",
+   "fp": "IPEX_MHF4_20449-001E",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "20449-001E-03.pdf#p1 (pads: p4)",
+   "landpattern": {
+    "source": "20449-001E-03.pdf#p4",
+    "pitch": 1.92,
+    "pad": [
+     0.58,
+     1.58
+    ],
+    "rows": 1.975,
+    "pins": 2,
+    "note": "I-PEX 20449 sheet 4 recommended footprint (text-less drawing, read by eye +-0.05): ground pads 0.58x1.58 (2.50 outer, 1.34 inner), signal pads ~0.5 long at the 2.50 overall height"
+   },
+   "mpn": "20449-001E-03",
+   "mfr": "I-PEX"
+  },
+  {
+   "ref": "J203",
+   "value": "SMA edge jack 5G/SAT 1 (MAIN)",
+   "lib": "Connector_Coaxial",
+   "fp": "SMA_Samtec_SMA-J-P-H-ST-EM1_EdgeMount",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "SMA-J-P-H-ST-EM1.pdf#p1",
+   "mpn": "SMA-J-P-H-ST-EM1",
+   "mfr": "Samtec Inc.",
+   "pin_alias": {
+    "GND": {
+     "datasheet": "OUTER CONTACT",
+     "page": "SMA-J-P-H-ST-EM1.pdf#p1"
+    }
+   }
+  },
+  {
+   "ref": "J204",
+   "value": "SMA edge jack 5G/SAT 2 (DIVERSITY)",
+   "lib": "Connector_Coaxial",
+   "fp": "SMA_Samtec_SMA-J-P-H-ST-EM1_EdgeMount",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "SMA-J-P-H-ST-EM1.pdf#p1",
+   "mpn": "SMA-J-P-H-ST-EM1",
+   "mfr": "Samtec Inc.",
+   "pin_alias": {
+    "GND": {
+     "datasheet": "OUTER CONTACT",
+     "page": "SMA-J-P-H-ST-EM1.pdf#p1"
+    }
+   }
+  },
+  {
+   "ref": "J205",
+   "value": "Nano-SIM holder, push-push, edge access, card detect NC to GND, GCT SIM8066-6-1-14-01-A",
+   "mpn": "SIM8066-6-1-14-01-A",
+   "lib": "utv-comms",
+   "fp": "nanoSIM_GCT_SIM8066-6-1-14-01-A",
+   "pinmap": {
+    "C1_VCC": "1",
+    "C2_RST": "2",
+    "C3_CLK": "3",
+    "C5_GND": "5",
+    "C6_VPP": "6",
+    "C7_IO": "7",
+    "GND_SH": "SH",
+    "CD": "SW"
+   },
+   "pinmap_source": "SIM8066-drawing.pdf#p1",
+   "mfr": "GCT",
+   "pinmap_note": "SIM8066-drawing.pdf#p1: C1..C7 contacts, CD = card-detect switch contact, shell tabs marked GND (board names GND_SH, CD)",
+   "landpattern": {
+    "source": "SIM8066-drawing.pdf#p1",
+    "pitch": 1.27,
+    "pad": [
+     0.8,
+     1.14
+    ],
+    "pins": 6,
+    "note": "GCT SIM8066 recommended PCB layout (viewed from component side): contact pads 0.80 x 1.14 at 1.27 pitch (C3 C7 C2 C6 C1 C5 + CD), GND shell tabs"
+   }
+  },
+  {
+   "ref": "U200",
+   "value": "SN74LVC1G07 open-drain buffer, M.2 RESET# 1.8 V drive",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "NC1": "1",
+    "A": "2",
+    "GND": "3",
+    "Y": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "SN74LVC1G07DBVR.pdf#p3",
+   "mpn": "SN74LVC1G07DBVR",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "D200",
+   "value": "TPD4E02B04-Q1 SIM ESD array",
+   "lib": "Package_SON",
+   "fp": "USON-10_2.5x1.0mm_P0.5mm",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3",
+    "IO3": "4",
+    "IO4": "5",
+    "NC_6": "6",
+    "NC_7": "7",
+    "GND_8": "8",
+    "NC_9": "9",
+    "NC_10": "10"
+   },
+   "pinmap_source": "TPD4E02B04-Q1.pdf#p3",
+   "mpn": "TPD4E02B04QDQARQ1",
+   "mfr": "TI",
+   "package": "10-USON (2.5x1)"
+  },
+  {
+   "ref": "D201",
+   "value": "SMF5.0A TVS 5 V working on VMODEM",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-123F",
+   "pinmap": {
+    "K": "1",
+    "A": "2"
+   },
+   "pinmap_source": "SMF5.0A datasheet NOT obtained",
+   "mpn": "SMF5.0A",
+   "mfr": "Littelfuse Inc.",
+   "package": "SOD-123"
+  },
+  {
+   "ref": "C200",
+   "value": "220uF 6.3V polymer tantalum low ESR (15 mohm)",
+   "lib": "Capacitor_Tantalum_SMD",
+   "fp": "CP_EIA-7343-31_Kemet-D",
+   "mpn": "T520D227M006ATE015",
+   "mfr": "KEMET",
+   "package": "2917 (7343 Metric)"
+  },
+  {
+   "ref": "C201",
+   "value": "220uF 6.3V polymer tantalum low ESR (15 mohm)",
+   "lib": "Capacitor_Tantalum_SMD",
+   "fp": "CP_EIA-7343-31_Kemet-D",
+   "mpn": "T520D227M006ATE015",
+   "mfr": "KEMET",
+   "package": "2917 (7343 Metric)"
+  },
+  {
+   "ref": "C202",
+   "value": "100nF X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C203",
+   "value": "100nF X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C204",
+   "value": "100nF X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C205",
+   "value": "10pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM1555C1H100JA16D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C206",
+   "value": "10pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM1555C1H100JA16D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C207",
+   "value": "10pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM1555C1H100JA16D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C208",
+   "value": "100nF X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R200",
+   "value": "22R SIM series",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0722RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R201",
+   "value": "22R SIM series",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0722RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R202",
+   "value": "22R SIM series",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0722RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R203",
+   "value": "15k SIM DATA pull-up",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0715KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R204",
+   "value": "100k SIM_DET pull-up",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R205",
+   "value": "10k MODEM_RST_N pull-up",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "U300",
+   "value": "USB2514B-I/M2",
+   "lib": "Package_DFN_QFN",
+   "fp": "QFN-36-1EP_6x6mm_P0.5mm_EP3.7x3.7mm",
+   "pinmap": {
+    "USBDM_DN1": "1",
+    "USBDP_DN1": "2",
+    "USBDM_DN2": "3",
+    "USBDP_DN2": "4",
+    "VDDA33_1": "5",
+    "USBDM_DN3": "6",
+    "USBDP_DN3": "7",
+    "USBDM_DN4": "8",
+    "USBDP_DN4": "9",
+    "VDDA33_2": "10",
+    "TEST": "11",
+    "PRTPWR1": "12",
+    "OCS_N1": "13",
+    "CRFILT": "14",
+    "VDD33_1": "15",
+    "PRTPWR2": "16",
+    "OCS_N2": "17",
+    "PRTPWR3": "18",
+    "OCS_N3": "19",
+    "PRTPWR4": "20",
+    "OCS_N4": "21",
+    "SDA": "22",
+    "VDD33_2": "23",
+    "CFG_SEL0": "24",
+    "CFG_SEL1": "25",
+    "RESET_N": "26",
+    "VBUS_DET": "27",
+    "SUSP_IND": "28",
+    "VDDA33_3": "29",
+    "USBDM_UP": "30",
+    "USBDP_UP": "31",
+    "XTALOUT": "32",
+    "XTALIN": "33",
+    "PLLFILT": "34",
+    "RBIAS": "35",
+    "VDDA33_4": "36",
+    "EP": "37"
+   },
+   "pinmap_source": "USB2514BI-AEZG.pdf#p9 (Fig 3-3) and p10-11 (Table 3-1); package p48",
+   "mpn": "USB2514B-I/M2",
+   "mfr": "Microchip Technology",
+   "package": "36-SQFN (6x6)"
+  },
+  {
+   "ref": "Y300",
+   "value": "24MHz 18pF",
+   "lib": "Crystal",
+   "fp": "Crystal_SMD_3225-4Pin_3.2x2.5mm",
+   "pinmap": {
+    "X1": "1",
+    "GND_A": "2",
+    "X2": "3",
+    "GND_B": "4"
+   },
+   "pinmap_source": "ABM8G-24.000MHZ-18-D2Y-T.pdf#p2 (top view, an image: GND labelled on pins 2 and 4, crystal on 1 and 3; read by eye 2026-11-27, w88)",
+   "mpn": "ABM8G-24.000MHZ-18-D2Y-T",
+   "mfr": "Abracon LLC",
+   "package": "4-SMD (3.2x2.5)"
+  },
+  {
+   "ref": "C300",
+   "value": "27pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C270J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C301",
+   "value": "27pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C270J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C302",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C303",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C304",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R300",
+   "value": "12k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0712KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R301",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "U301",
+   "value": "TPS2051B",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "FLT": "3",
+    "EN": "4",
+    "IN": "5"
+   },
+   "pinmap_source": "TPS2051BDBVR.pdf#p4",
+   "mpn": "TPS2051BDBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "U302",
+   "value": "TPS2051B",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "FLT": "3",
+    "EN": "4",
+    "IN": "5"
+   },
+   "pinmap_source": "TPS2051BDBVR.pdf#p4",
+   "mpn": "TPS2051BDBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "U303",
+   "value": "TPS2051B",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "FLT": "3",
+    "EN": "4",
+    "IN": "5"
+   },
+   "pinmap_source": "TPS2051BDBVR.pdf#p4",
+   "mpn": "TPS2051BDBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "U304",
+   "value": "TPS2051B",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "FLT": "3",
+    "EN": "4",
+    "IN": "5"
+   },
+   "pinmap_source": "TPS2051BDBVR.pdf#p4",
+   "mpn": "TPS2051BDBVR",
+   "mfr": "TI",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "U305",
+   "value": "BT850-ST",
+   "mpn": "BT850-ST",
+   "lib": "utv-comms",
+   "fp": "Ezurio_BT850-ST_28pad",
+   "pinmap": {
+    "NC1": "1",
+    "NC2": "2",
+    "GND3": "3",
+    "USB_DP": "4",
+    "USB_DM": "5",
+    "GND6": "6",
+    "NC7": "7",
+    "RESET_N": "8",
+    "VCC": "9",
+    "NC10": "10",
+    "GND11": "11",
+    "GND12": "12",
+    "GND13": "13",
+    "GND14": "14",
+    "GND15": "15",
+    "GND16": "16",
+    "RF": "17",
+    "GND18": "18",
+    "PCM_SYNC": "19",
+    "PCM_CLK": "20",
+    "PCM_IN": "21",
+    "PCM_OUT": "22",
+    "NC23": "23",
+    "GND24": "24",
+    "SECI_IN": "25",
+    "SECI_OUT": "26",
+    "NC27": "27",
+    "GPIO5": "28"
+   },
+   "pinmap_source": "BT85x.pdf#p8 (Table 3), land pattern p22-23",
+   "mfr": "Ezurio",
+   "landpattern": {
+    "source": "BT85x.pdf#p23",
+    "pitch": 0.8,
+    "pad": [
+     1.35,
+     0.5
+    ],
+    "pins": 28,
+    "note": "Ezurio BT850 recommended PCB layout (text-less drawing, read by eye): pads 1.35 x 0.50; pitch 0.80 = 2.63-1.83 printed offsets"
+   }
+  },
+  {
+   "ref": "U306",
+   "value": "BT850-ST",
+   "mpn": "BT850-ST",
+   "lib": "utv-comms",
+   "fp": "Ezurio_BT850-ST_28pad",
+   "pinmap": {
+    "NC1": "1",
+    "NC2": "2",
+    "GND3": "3",
+    "USB_DP": "4",
+    "USB_DM": "5",
+    "GND6": "6",
+    "NC7": "7",
+    "RESET_N": "8",
+    "VCC": "9",
+    "NC10": "10",
+    "GND11": "11",
+    "GND12": "12",
+    "GND13": "13",
+    "GND14": "14",
+    "GND15": "15",
+    "GND16": "16",
+    "RF": "17",
+    "GND18": "18",
+    "PCM_SYNC": "19",
+    "PCM_CLK": "20",
+    "PCM_IN": "21",
+    "PCM_OUT": "22",
+    "NC23": "23",
+    "GND24": "24",
+    "SECI_IN": "25",
+    "SECI_OUT": "26",
+    "NC27": "27",
+    "GPIO5": "28"
+   },
+   "pinmap_source": "BT85x.pdf#p8 (Table 3), land pattern p22-23",
+   "mfr": "Ezurio",
+   "landpattern": {
+    "source": "BT85x.pdf#p23",
+    "pitch": 0.8,
+    "pad": [
+     1.35,
+     0.5
+    ],
+    "pins": 28,
+    "note": "Ezurio BT850 recommended PCB layout (text-less drawing, read by eye): pads 1.35 x 0.50; pitch 0.80 = 2.63-1.83 printed offsets"
+   }
+  },
+  {
+   "ref": "U307",
+   "value": "BT850-ST",
+   "mpn": "BT850-ST",
+   "lib": "utv-comms",
+   "fp": "Ezurio_BT850-ST_28pad",
+   "pinmap": {
+    "NC1": "1",
+    "NC2": "2",
+    "GND3": "3",
+    "USB_DP": "4",
+    "USB_DM": "5",
+    "GND6": "6",
+    "NC7": "7",
+    "RESET_N": "8",
+    "VCC": "9",
+    "NC10": "10",
+    "GND11": "11",
+    "GND12": "12",
+    "GND13": "13",
+    "GND14": "14",
+    "GND15": "15",
+    "GND16": "16",
+    "RF": "17",
+    "GND18": "18",
+    "PCM_SYNC": "19",
+    "PCM_CLK": "20",
+    "PCM_IN": "21",
+    "PCM_OUT": "22",
+    "NC23": "23",
+    "GND24": "24",
+    "SECI_IN": "25",
+    "SECI_OUT": "26",
+    "NC27": "27",
+    "GPIO5": "28"
+   },
+   "pinmap_source": "BT85x.pdf#p8 (Table 3), land pattern p22-23",
+   "mfr": "Ezurio",
+   "landpattern": {
+    "source": "BT85x.pdf#p23",
+    "pitch": 0.8,
+    "pad": [
+     1.35,
+     0.5
+    ],
+    "pins": 28,
+    "note": "Ezurio BT850 recommended PCB layout (text-less drawing, read by eye): pads 1.35 x 0.50; pitch 0.80 = 2.63-1.83 printed offsets"
+   }
+  },
+  {
+   "ref": "U308",
+   "value": "BT850-ST",
+   "mpn": "BT850-ST",
+   "lib": "utv-comms",
+   "fp": "Ezurio_BT850-ST_28pad",
+   "pinmap": {
+    "NC1": "1",
+    "NC2": "2",
+    "GND3": "3",
+    "USB_DP": "4",
+    "USB_DM": "5",
+    "GND6": "6",
+    "NC7": "7",
+    "RESET_N": "8",
+    "VCC": "9",
+    "NC10": "10",
+    "GND11": "11",
+    "GND12": "12",
+    "GND13": "13",
+    "GND14": "14",
+    "GND15": "15",
+    "GND16": "16",
+    "RF": "17",
+    "GND18": "18",
+    "PCM_SYNC": "19",
+    "PCM_CLK": "20",
+    "PCM_IN": "21",
+    "PCM_OUT": "22",
+    "NC23": "23",
+    "GND24": "24",
+    "SECI_IN": "25",
+    "SECI_OUT": "26",
+    "NC27": "27",
+    "GPIO5": "28"
+   },
+   "pinmap_source": "BT85x.pdf#p8 (Table 3), land pattern p22-23",
+   "mfr": "Ezurio",
+   "landpattern": {
+    "source": "BT85x.pdf#p23",
+    "pitch": 0.8,
+    "pad": [
+     1.35,
+     0.5
+    ],
+    "pins": 28,
+    "note": "Ezurio BT850 recommended PCB layout (text-less drawing, read by eye): pads 1.35 x 0.50; pitch 0.80 = 2.63-1.83 printed offsets"
+   }
+  },
+  {
+   "ref": "C305",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C306",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C307",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "C2012X7R1A106K125AC",
+   "mfr": "TDK",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C308",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "C2012X7R1A106K125AC",
+   "mfr": "TDK",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C309",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "C2012X7R1A106K125AC",
+   "mfr": "TDK",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C310",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "C2012X7R1A106K125AC",
+   "mfr": "TDK",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "U309",
+   "value": "PD2425J5050S2HF",
+   "lib": "utv-comms",
+   "fp": "TTM_PD2425J5050S2HF_0805-6",
+   "pinmap": {
+    "GND1": "1",
+    "IN": "2",
+    "GND3": "3",
+    "OUT1": "4",
+    "GND5": "5",
+    "OUT2": "6"
+   },
+   "pinmap_source": "PD2425J5050S2HF.pdf#p1",
+   "landpattern": {
+    "source": "PD2425J5050S2HF.pdf#p4",
+    "pitch": 0.66,
+    "pad": [
+     0.41,
+     0.33
+    ],
+    "rows": 0.99,
+    "pins": 6,
+    "note": "TTM sheet p4 pad footprint: 6x 0.41x0.33, 0.25 gap between pads in a row (0.41+0.25=0.66 pitch; footprint uses 0.65), 0.66 gap between rows (0.66+0.33=0.99 centres). Pitch is derived from the printed gap, not printed itself"
+   },
+   "mpn": "PD2425J5050S2HF",
+   "mfr": "TTM Technologies, Inc.",
+   "package": "0805 (2012 Metric), 6 PC Pad"
+  },
+  {
+   "ref": "U310",
+   "value": "PD2425J5050S2HF",
+   "lib": "utv-comms",
+   "fp": "TTM_PD2425J5050S2HF_0805-6",
+   "pinmap": {
+    "GND1": "1",
+    "IN": "2",
+    "GND3": "3",
+    "OUT1": "4",
+    "GND5": "5",
+    "OUT2": "6"
+   },
+   "pinmap_source": "PD2425J5050S2HF.pdf#p1",
+   "landpattern": {
+    "source": "PD2425J5050S2HF.pdf#p4",
+    "pitch": 0.66,
+    "pad": [
+     0.41,
+     0.33
+    ],
+    "rows": 0.99,
+    "pins": 6,
+    "note": "TTM sheet p4 pad footprint: 6x 0.41x0.33, 0.25 gap between pads in a row (0.41+0.25=0.66 pitch; footprint uses 0.65), 0.66 gap between rows (0.66+0.33=0.99 centres). Pitch is derived from the printed gap, not printed itself"
+   },
+   "mpn": "PD2425J5050S2HF",
+   "mfr": "TTM Technologies, Inc.",
+   "package": "0805 (2012 Metric), 6 PC Pad"
+  },
+  {
+   "ref": "U311",
+   "value": "PD2425J5050S2HF",
+   "lib": "utv-comms",
+   "fp": "TTM_PD2425J5050S2HF_0805-6",
+   "pinmap": {
+    "GND1": "1",
+    "IN": "2",
+    "GND3": "3",
+    "OUT1": "4",
+    "GND5": "5",
+    "OUT2": "6"
+   },
+   "pinmap_source": "PD2425J5050S2HF.pdf#p1",
+   "landpattern": {
+    "source": "PD2425J5050S2HF.pdf#p4",
+    "pitch": 0.66,
+    "pad": [
+     0.41,
+     0.33
+    ],
+    "rows": 0.99,
+    "pins": 6,
+    "note": "TTM sheet p4 pad footprint: 6x 0.41x0.33, 0.25 gap between pads in a row (0.41+0.25=0.66 pitch; footprint uses 0.65), 0.66 gap between rows (0.66+0.33=0.99 centres). Pitch is derived from the printed gap, not printed itself"
+   },
+   "mpn": "PD2425J5050S2HF",
+   "mfr": "TTM Technologies, Inc.",
+   "package": "0805 (2012 Metric), 6 PC Pad"
+  },
+  {
+   "ref": "R302",
+   "value": "100R 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-07100RL",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "R303",
+   "value": "100R 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-07100RL",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "R304",
+   "value": "100R 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "RC0603FR-07100RL",
+   "mfr": "YAGEO",
+   "package": "0603"
+  },
+  {
+   "ref": "U312",
+   "value": "SKY13351-378LF",
+   "lib": "utv-comms",
+   "fp": "Skyworks_SKY13351_MLPD-6",
+   "pinmap": {
+    "RF1": "1",
+    "GND": "2",
+    "RF2": "3",
+    "V2": "4",
+    "RFC": "5",
+    "V1": "6"
+   },
+   "pinmap_source": "SKY13351-378LF.pdf#p1",
+   "landpattern": {
+    "source": "SKY13351-378LF.pdf#p7",
+    "pitch": 0.35,
+    "pad": [
+     0.65,
+     0.15
+    ],
+    "rows": 1.07,
+    "pins": 6,
+    "note": "Skyworks Fig 12: pads 0.65x0.15 at 0.35 pitch, 0.21 from centre-line to pad inner edge (rows 2*(0.21+0.65/2)=1.07), paddle strip 0.13 wide"
+   },
+   "mpn": "SKY13351-378LF",
+   "mfr": "Skyworks",
+   "package": "6-MLPD (1x1)"
+  },
+  {
+   "ref": "U313",
+   "value": "SN74LVC1G04-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "NC": "1",
+    "A": "2",
+    "GND": "3",
+    "Y": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "SN74LVC1G04QDBVRQ1.pdf#p3",
+   "mpn": "SN74LVC1G04QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "C315",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C316",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C317",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C318",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C319",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R305",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "C311",
+   "value": "22pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C220J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C312",
+   "value": "22pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C220J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C313",
+   "value": "22pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C220J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "ANT300",
+   "value": "2450AT18A0100001E",
+   "lib": "RF_Antenna",
+   "fp": "Johanson_2450AT18x100",
+   "pinmap": {
+    "FEED": "1",
+    "NC": "2"
+   },
+   "pinmap_source": "2450AT18A0100001E.pdf#p2",
+   "mpn": "2450AT18A0100001E",
+   "mfr": "Johanson Technology Inc."
+  },
+  {
+   "ref": "C314",
+   "value": "1.0pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C109B5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "L300",
+   "value": "2.7nH",
+   "lib": "Inductor_SMD",
+   "fp": "L_0402_1005Metric",
+   "mpn": "LQW15AN2N7B00D",
+   "mfr": "Murata Electronics",
+   "package": "-"
+  },
+  {
+   "ref": "L301",
+   "value": "3.9nH",
+   "lib": "Inductor_SMD",
+   "fp": "L_0402_1005Metric",
+   "mpn": "LQW15AN3N9B00D",
+   "mfr": "Murata Electronics",
+   "package": "-"
+  },
+  {
+   "ref": "J300",
+   "value": "SMA edge jack BT",
+   "lib": "Connector_Coaxial",
+   "fp": "SMA_Samtec_SMA-J-P-H-ST-EM1_EdgeMount",
+   "pinmap": {
+    "SIG": "1",
+    "GND": "2"
+   },
+   "pinmap_source": "SMA-J-P-H-ST-EM1.pdf#p1",
+   "mpn": "SMA-J-P-H-ST-EM1",
+   "mfr": "Samtec Inc.",
+   "pin_alias": {
+    "GND": {
+     "datasheet": "OUTER CONTACT",
+     "page": "SMA-J-P-H-ST-EM1.pdf#p1"
+    }
+   }
+  },
+  {
+   "ref": "U400",
+   "value": "MCP2518FDT-H/QBB",
+   "lib": "Package_DFN_QFN",
+   "fp": "DFN-14-1EP_3x4.5mm_P0.65mm_EP1.65x4.25mm",
+   "pinmap": {
+    "TXCAN": "1",
+    "RXCAN": "2",
+    "CLKO/SOF": "3",
+    "INT": "4",
+    "OSC2": "5",
+    "OSC1": "6",
+    "VSS": "7",
+    "INT1/GPIO1": "8",
+    "INT0/GPIO0/XSTBY": "9",
+    "SCK": "10",
+    "SDI": "11",
+    "SDO": "12",
+    "nCS": "13",
+    "VDD": "14",
+    "EP": "15"
+   },
+   "pinmap_source": "MCP2518FD.pdf#p4",
+   "mpn": "MCP2518FDT-H/QBB",
+   "mfr": "Microchip Technology",
+   "package": "14-VDFN (4.5x3)"
+  },
+  {
+   "ref": "U401",
+   "value": "MCP2518FDT-H/QBB",
+   "lib": "Package_DFN_QFN",
+   "fp": "DFN-14-1EP_3x4.5mm_P0.65mm_EP1.65x4.25mm",
+   "pinmap": {
+    "TXCAN": "1",
+    "RXCAN": "2",
+    "CLKO/SOF": "3",
+    "INT": "4",
+    "OSC2": "5",
+    "OSC1": "6",
+    "VSS": "7",
+    "INT1/GPIO1": "8",
+    "INT0/GPIO0/XSTBY": "9",
+    "SCK": "10",
+    "SDI": "11",
+    "SDO": "12",
+    "nCS": "13",
+    "VDD": "14",
+    "EP": "15"
+   },
+   "pinmap_source": "MCP2518FD.pdf#p4",
+   "mpn": "MCP2518FDT-H/QBB",
+   "mfr": "Microchip Technology",
+   "package": "14-VDFN (4.5x3)"
+  },
+  {
+   "ref": "Y400",
+   "value": "ASE-40.000MHz-L-C-T 40MHz",
+   "lib": "Oscillator",
+   "fp": "Oscillator_SMD_EuroQuartz_XO32-4Pin_3.2x2.5mm",
+   "pinmap": {
+    "OE/ST/NC": "1",
+    "GND": "2",
+    "OUT": "3",
+    "VDD": "4"
+   },
+   "pinmap_source": "ASE-40.000MHz-L-C-T.pdf#p5 (pin table is an image: 1 Tri-State (STBY), 2 GND/Case, 3 Output, 4 Vdd; read by eye 2026-11-27, w88)",
+   "mpn": "ASE-40.000MHz-L-C-T",
+   "mfr": "Abracon",
+   "package": "4-PQFN (3.2x2.5)"
+  },
+  {
+   "ref": "U402",
+   "value": "SN74LVC1G97-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-6",
+   "pinmap": {
+    "In1": "1",
+    "GND": "2",
+    "In0": "3",
+    "Y": "4",
+    "VCC": "5",
+    "In2": "6"
+   },
+   "pinmap_source": "SN74LVC1G97-Q1.pdf#p1",
+   "mpn": "SN74LVC1G97QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-6"
+  },
+  {
+   "ref": "U403",
+   "value": "SN74LVC1G97-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-6",
+   "pinmap": {
+    "In1": "1",
+    "GND": "2",
+    "In0": "3",
+    "Y": "4",
+    "VCC": "5",
+    "In2": "6"
+   },
+   "pinmap_source": "SN74LVC1G97-Q1.pdf#p1",
+   "mpn": "SN74LVC1G97QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-6"
+  },
+  {
+   "ref": "U404",
+   "value": "ISOW1044",
+   "mpn": "ISOW1044DFMR",
+   "lib": "Package_SO",
+   "fp": "SOIC-20W_7.5x12.8mm_P1.27mm",
+   "pinmap": {
+    "VIO": "1",
+    "IN": "2",
+    "TXD": "3",
+    "STB": "4",
+    "RXD": "5",
+    "GNDIO": "6",
+    "NC": "7",
+    "EN/FLT": "8",
+    "VDD": "9",
+    "GND1": "10",
+    "GND2": "11",
+    "VISOOUT": "12",
+    "VSIN": "13",
+    "OUT": "14",
+    "GISOIN": "15",
+    "GISOIN_16": "16",
+    "GISOIN_17": "17",
+    "CANL": "18",
+    "CANH": "19",
+    "VISOIN": "20"
+   },
+   "pinmap_source": "ISOW1044.pdf#p4",
+   "mfr": "Texas Instruments"
+  },
+  {
+   "ref": "U405",
+   "value": "ISOW1044",
+   "mpn": "ISOW1044DFMR",
+   "lib": "Package_SO",
+   "fp": "SOIC-20W_7.5x12.8mm_P1.27mm",
+   "pinmap": {
+    "VIO": "1",
+    "IN": "2",
+    "TXD": "3",
+    "STB": "4",
+    "RXD": "5",
+    "GNDIO": "6",
+    "NC": "7",
+    "EN/FLT": "8",
+    "VDD": "9",
+    "GND1": "10",
+    "GND2": "11",
+    "VISOOUT": "12",
+    "VSIN": "13",
+    "OUT": "14",
+    "GISOIN": "15",
+    "GISOIN_16": "16",
+    "GISOIN_17": "17",
+    "CANL": "18",
+    "CANH": "19",
+    "VISOIN": "20"
+   },
+   "pinmap_source": "ISOW1044.pdf#p4",
+   "mfr": "Texas Instruments"
+  },
+  {
+   "ref": "U410",
+   "value": "ADS7128",
+   "lib": "Package_DFN_QFN",
+   "fp": "WQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm",
+   "pinmap": {
+    "AIN2/GPIO2": "1",
+    "AIN3/GPIO3": "2",
+    "AIN4/GPIO4": "3",
+    "AIN5/GPIO5": "4",
+    "AIN6/GPIO6": "5",
+    "AIN7/GPIO7": "6",
+    "AVDD": "7",
+    "DECAP": "8",
+    "GND": "9",
+    "DVDD": "10",
+    "ADDR": "11",
+    "ALERT": "12",
+    "SCL": "13",
+    "SDA": "14",
+    "AIN0/GPIO0": "15",
+    "AIN1/GPIO1": "16",
+    "Thermal_pad": "17"
+   },
+   "pinmap_source": "ADS7128.pdf#p4",
+   "mpn": "ADS7128IRTER",
+   "mfr": "Texas Instruments",
+   "package": "16-WQFN (3x3)"
+  },
+  {
+   "ref": "U412",
+   "value": "TLIN1029-Q1",
+   "lib": "Package_SO",
+   "fp": "SOIC-8_3.9x4.9mm_P1.27mm",
+   "pinmap": {
+    "RXD": "1",
+    "EN": "2",
+    "NC_3": "3",
+    "TXD": "4",
+    "GND": "5",
+    "LIN": "6",
+    "VSUP": "7",
+    "NC_8": "8"
+   },
+   "pinmap_source": "TLIN1029-Q1.pdf#p4",
+   "mpn": "TLIN1029DRQ1",
+   "mfr": "Texas Instruments",
+   "package": "8-SOIC"
+  },
+  {
+   "ref": "U413",
+   "value": "TPS2553-Q1",
+   "mpn": "TPS2553QDBVRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-6",
+   "pinmap": {
+    "IN": "1",
+    "GND": "2",
+    "EN": "3",
+    "FAULT": "4",
+    "ILIM": "5",
+    "OUT": "6"
+   },
+   "pinmap_source": "TPS2553-Q1.pdf#p3",
+   "mfr": "Texas Instruments"
+  },
+  {
+   "ref": "U414",
+   "value": "VNLD5160-E",
+   "lib": "Package_SO",
+   "fp": "SOIC-8_3.9x4.9mm_P1.27mm",
+   "pinmap": {
+    "IN1": "1",
+    "STATUS1": "2",
+    "IN2": "3",
+    "STATUS2": "4",
+    "SOURCE2": "5",
+    "DRAIN2": "6",
+    "SOURCE1": "7",
+    "DRAIN1": "8"
+   },
+   "pinmap_source": "VNLD5160TR-E.pdf#p5",
+   "mpn": "VNLD5160TR-E",
+   "mfr": "STMicroelectronics",
+   "package": "8-SOIC"
+  },
+  {
+   "ref": "U417",
+   "value": "SN74LV1T34-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "N.C.": "1",
+    "A": "2",
+    "GND": "3",
+    "Y": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "SN74LV1T34-Q1.pdf#p3",
+   "mpn": "SN74LV1T34QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "U418",
+   "value": "SN74LV1T34-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "N.C.": "1",
+    "A": "2",
+    "GND": "3",
+    "Y": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "SN74LV1T34-Q1.pdf#p3",
+   "mpn": "SN74LV1T34QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "L400",
+   "value": "ACT45B-510-2P",
+   "lib": "utv-comms",
+   "fp": "TDK_ACT45B_CMC_4532",
+   "pinmap": {
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4"
+   },
+   "pinmap_source": "ACT45B-510-2P-TL003.pdf#p3",
+   "landpattern": {
+    "source": "ACT45B-510-2P-TL003.pdf#p3",
+    "pad": [
+     1.35,
+     0.9
+    ],
+    "rows": 4.55,
+    "pins": 4,
+    "note": "TDK recommended land: outer 5.9 x 3.4, gap 3.2 x 1.6 -> pad 1.35x0.9, centre spacing 4.55 (x) and 2.5 (y). Centre spacings are derived (3.2+1.35, 1.6+0.9); the page prints only the outer and gap dimensions, so no pitch is cited. Footprint matches the page."
+   },
+   "mpn": "ACT45B-510-2P-TL003",
+   "mfr": "TDK",
+   "package": "Horizontal, 4 PC Pad"
+  },
+  {
+   "ref": "L401",
+   "value": "ACT45B-510-2P",
+   "lib": "utv-comms",
+   "fp": "TDK_ACT45B_CMC_4532",
+   "pinmap": {
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4"
+   },
+   "pinmap_source": "ACT45B-510-2P-TL003.pdf#p3",
+   "landpattern": {
+    "source": "ACT45B-510-2P-TL003.pdf#p3",
+    "pad": [
+     1.35,
+     0.9
+    ],
+    "rows": 4.55,
+    "pins": 4,
+    "note": "TDK recommended land: outer 5.9 x 3.4, gap 3.2 x 1.6 -> pad 1.35x0.9, centre spacing 4.55 (x) and 2.5 (y). Centre spacings are derived (3.2+1.35, 1.6+0.9); the page prints only the outer and gap dimensions, so no pitch is cited. Footprint matches the page."
+   },
+   "mpn": "ACT45B-510-2P-TL003",
+   "mfr": "TDK",
+   "package": "Horizontal, 4 PC Pad"
+  },
+  {
+   "ref": "D400",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D401",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D402",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D403",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D404",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D405",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D406",
+   "value": "1N4148WS",
+   "lib": "Diode_SMD",
+   "fp": "D_SOD-323",
+   "mpn": "1N4148WS",
+   "mfr": "onsemi",
+   "package": "SOD-323"
+  },
+  {
+   "ref": "RN400",
+   "value": "100k x4 array YC124",
+   "lib": "Resistor_SMD",
+   "fp": "R_Array_Convex_4x0402",
+   "pinmap": {
+    "1": "1",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8"
+   },
+   "pinmap_source": "kicad:Device:R_Pack04",
+   "mpn": "YC124-JR-07100KL",
+   "mfr": "YAGEO",
+   "package": "-",
+   "pinmap_note": "YC124 Fig. 11 (YC124-JR-07100KL.pdf#p5): R1 1-8, R2 2-7, R3 3-6, R4 4-5, identical to KiCad Device:R_Pack04; datasheet numbers pins only"
+  },
+  {
+   "ref": "J400",
+   "value": "CLIK-Mate 502382-1470",
+   "mpn": "502382-1470",
+   "lib": "Connector_Molex",
+   "fp": "Molex_CLIK-Mate_502382-1470_1x14-1MP_P1.25mm_Vertical",
+   "landpattern": {
+    "source": "502382-1470.pdf#p2",
+    "pitch": 1.25,
+    "pad": [
+     0.6,
+     1.7
+    ],
+    "rows": 0,
+    "pins": 14,
+    "note": "Molex SD-502382-002 sheet 2 recommended PCB pattern layout: pitch 1.25 printed; signal pad 0.6 x 1.7 scaled from the drawing (+-0.05, text-less); mounting pads 1.0 x 2.8 printed. Replaces the earlier 0.8x1.6 citation, which did not match the drawing"
+   },
+   "pinmap_source": "502382-1470.pdf#p2",
+   "mfr": "Molex"
+  },
+  {
+   "ref": "R400",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "C400",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C401",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C402",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C404",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C406",
+   "value": "10uF 10V X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C408",
+   "value": "10uF 10V X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C410",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C405",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C407",
+   "value": "10uF 10V X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C409",
+   "value": "10uF 10V X7R",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C411",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C412",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C413",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71C104KA55D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R401",
+   "value": "10k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R402",
+   "value": "1.43k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071K43L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R403",
+   "value": "10k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R404",
+   "value": "1.43k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071K43L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R405",
+   "value": "10k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R406",
+   "value": "1.43k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071K43L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R407",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R408",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R409",
+   "value": "82k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0782KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R410",
+   "value": "10k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "C414",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "MAASL105CC7105MFCA01",
+   "mfr": "Taiyo Yuden",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C415",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "MAASL105CC7105MFCA01",
+   "mfr": "Taiyo Yuden",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C416",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "MAASL105CC7105MFCA01",
+   "mfr": "Taiyo Yuden",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R411",
+   "value": "200k 1%",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07200KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "C417",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "MAASL105CC7105MFCA01",
+   "mfr": "Taiyo Yuden",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C418",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "MAASL105CC7105MFCA01",
+   "mfr": "Taiyo Yuden",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C419",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GCM155R71H104KE02D",
+   "mfr": "Murata Electronics",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R412",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R413",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R414",
+   "value": "1k 0.25W",
+   "lib": "Resistor_SMD",
+   "fp": "R_0603_1608Metric",
+   "mpn": "ERJ-PA3F1001V",
+   "mfr": "Panasonic Industry",
+   "package": "0603"
+  },
+  {
+   "ref": "T500",
+   "value": "SM-LP-5001",
+   "lib": "utv-comms",
+   "fp": "Bourns_SM-LP-5001",
+   "pinmap": {
+    "P1": "1",
+    "P2": "3",
+    "S1": "6",
+    "S2": "4"
+   },
+   "pinmap_source": "SM-LP-5001.pdf#p1",
+   "landpattern": {
+    "source": "SM-LP-5001.pdf#p1",
+    "pitch": 2.54,
+    "pad": [
+     3.0,
+     1.5
+    ],
+    "rows": 15.0,
+    "pins": 6
+   },
+   "mpn": "SM-LP-5001",
+   "mfr": "Bourns"
+  },
+  {
+   "ref": "T501",
+   "value": "SM-LP-5001",
+   "lib": "utv-comms",
+   "fp": "Bourns_SM-LP-5001",
+   "pinmap": {
+    "P1": "1",
+    "P2": "3",
+    "S1": "6",
+    "S2": "4"
+   },
+   "pinmap_source": "SM-LP-5001.pdf#p1",
+   "landpattern": {
+    "source": "SM-LP-5001.pdf#p1",
+    "pitch": 2.54,
+    "pad": [
+     3.0,
+     1.5
+    ],
+    "rows": 15.0,
+    "pins": 6
+   },
+   "mpn": "SM-LP-5001",
+   "mfr": "Bourns"
+  },
+  {
+   "ref": "U500",
+   "value": "VORA1010M4T",
+   "lib": "utv-comms",
+   "fp": "Vishay_VORA1010M4_SOP-4",
+   "pinmap": {
+    "A": "1",
+    "K": "2",
+    "S2": "3",
+    "S1": "4"
+   },
+   "pinmap_source": "VORA1010M4T.pdf#p1",
+   "landpattern": {
+    "source": "VORA1010M4T.pdf#p5",
+    "pitch": 2.54,
+    "pad": [
+     1.15,
+     0.9
+    ],
+    "rows": 6.25,
+    "pins": 4,
+    "note": "Vishay Fig 12 recommended footprint: pad 1.15 x 0.90, 5.10 inner, 7.40 outer (rows 7.40-1.15=6.25), 2.54 pitch. Footprint pad height is 0.70, drawing says 0.90"
+   },
+   "mpn": "VORA1010M4T",
+   "mfr": "Vishay Semiconductor Opto Division",
+   "package": "4-SOP"
+  },
+  {
+   "ref": "U501",
+   "value": "TLV7031-Q1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-5",
+   "pinmap": {
+    "OUT": "1",
+    "GND": "2",
+    "INP": "3",
+    "INN": "4",
+    "VCC": "5"
+   },
+   "pinmap_source": "TLV7031QDBVRQ1.pdf#p3",
+   "mpn": "TLV7031QDBVRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-5"
+  },
+  {
+   "ref": "Q501",
+   "value": "NX3008NBK",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "NX3008NBK.pdf#p2",
+   "mpn": "NX3008NBKVL",
+   "mfr": "Nexperia USA Inc.",
+   "package": "TO-236AB"
+  },
+  {
+   "ref": "Q502",
+   "value": "NX3008NBK",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "G": "1",
+    "S": "2",
+    "D": "3"
+   },
+   "pinmap_source": "NX3008NBK.pdf#p2",
+   "mpn": "NX3008NBKVL",
+   "mfr": "Nexperia USA Inc.",
+   "package": "TO-236AB"
+  },
+  {
+   "ref": "Y500",
+   "value": "CDC6C012288ADLRRQ1",
+   "lib": "Oscillator",
+   "fp": "Oscillator_SMD_SiT_PQFN-4Pin_2.0x1.6mm",
+   "pinmap": {
+    "OE_NC": "1",
+    "GND": "2",
+    "CLK": "3",
+    "VDD": "4"
+   },
+   "pinmap_source": "CDC6C-Q1.pdf#p4",
+   "dnp": true
+  },
+  {
+   "ref": "D500",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D501",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D502",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "D503",
+   "value": "ESD2CANFD24DBZRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23",
+   "pinmap": {
+    "IO1": "1",
+    "IO2": "2",
+    "GND": "3"
+   },
+   "pinmap_source": "ESD2CANFD24DBZRQ1.pdf#p3",
+   "mpn": "ESD2CANFD24DBZRQ1",
+   "mfr": "Texas Instruments",
+   "package": "SOT-23-3"
+  },
+  {
+   "ref": "C500",
+   "value": "10uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0805_2012Metric",
+   "mpn": "GCM21BR71A106KE22L",
+   "mfr": "Murata Electronics",
+   "package": "0805 (2012 Metric)"
+  },
+  {
+   "ref": "C504",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C505",
+   "value": "470nF 50V",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R9BB474",
+   "mfr": "YAGEO",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C507",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C508",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "C509",
+   "value": "1uF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0603_1608Metric",
+   "dnp": true,
+   "mpn": "CC0603KRX7R8BB105",
+   "mfr": "Yageo",
+   "package": "0603 (1608 Metric)"
+  },
+  {
+   "ref": "R500",
+   "value": "100R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07100RL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R503",
+   "value": "2M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-072ML",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R504",
+   "value": "499k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07499KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R505",
+   "value": "2M",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-072ML",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R506",
+   "value": "205k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07205KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R510",
+   "value": "8.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-078K2L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R511",
+   "value": "8.2k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-078K2L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R512",
+   "value": "47k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0747KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R513",
+   "value": "47k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0747KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R514",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-074K7L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R515",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-074K7L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R516",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R518",
+   "value": "270R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07270RL",
+   "mfr": "Yageo",
+   "package": "0402"
+  },
+  {
+   "ref": "R519",
+   "value": "100R",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "RC0402FR-07100RL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "U600",
+   "value": "TCA9539AQPWRQ1",
+   "lib": "Package_SO",
+   "fp": "TSSOP-24_4.4x7.8mm_P0.65mm",
+   "pinmap": {
+    "INT": "1",
+    "A1": "2",
+    "RESET": "3",
+    "P00": "4",
+    "P01": "5",
+    "P02": "6",
+    "P03": "7",
+    "P04": "8",
+    "P05": "9",
+    "P06": "10",
+    "P07": "11",
+    "GND": "12",
+    "P10": "13",
+    "P11": "14",
+    "P12": "15",
+    "P13": "16",
+    "P14": "17",
+    "P15": "18",
+    "P16": "19",
+    "P17": "20",
+    "A0": "21",
+    "SCL": "22",
+    "SDA": "23",
+    "VCC": "24"
+   },
+   "pinmap_source": "TCA9539A-Q1.pdf#p3",
+   "mpn": "TCA9539AQPWRQ1",
+   "mfr": "TI",
+   "package": "24-TSSOP"
+  },
+  {
+   "ref": "C600",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "R600",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R601",
+   "value": "10k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-0710KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R602",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R603",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R604",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R605",
+   "value": "100k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-07100KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "D600",
+   "value": "APBA2006SURKCGKC",
+   "mpn": "APBA2006SURKCGKC",
+   "lib": "utv-comms",
+   "fp": "LED_Kingbright_APBA2006_2x0.6mm_RA",
+   "pinmap": {
+    "RED_A": "1",
+    "GREEN_A": "2",
+    "GREEN_K": "3",
+    "RED_K": "4"
+   },
+   "pinmap_source": "APBA2006SURKCGKC.pdf#p1",
+   "landpattern": {
+    "source": "APBA2006SURKCGKC.pdf#p1",
+    "pitch": 0.63,
+    "pad": [
+     0.45,
+     0.72
+    ],
+    "rows": 0.245,
+    "pins": 4,
+    "note": "Kingbright recommended soldering pattern: end pads 0.45x0.72 at 2.4 outer (centres 1.95 apart), centre pads 0.38x0.23 at 0.63 apart, flush with the end pads' lower edge (0.72/2-0.23/2=0.245 offset)"
+   },
+   "mfr": "Kingbright"
+  },
+  {
+   "ref": "R606",
+   "value": "4.7k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-074K7L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R607",
+   "value": "1.5k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071K5L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R608",
+   "value": "3.3k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-073K3L",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "R609",
+   "value": "1k",
+   "lib": "Resistor_SMD",
+   "fp": "R_0402_1005Metric",
+   "mpn": "AC0402FR-071KL",
+   "mfr": "YAGEO",
+   "package": "0402"
+  },
+  {
+   "ref": "U601",
+   "value": "TPS2553QDBVRQ1",
+   "mpn": "TPS2553QDBVRQ1",
+   "lib": "Package_TO_SOT_SMD",
+   "fp": "SOT-23-6",
+   "pinmap": {
+    "IN": "1",
+    "GND": "2",
+    "EN": "3",
+    "FAULT": "4",
+    "ILIM": "5",
+    "OUT": "6"
+   },
+   "pinmap_source": "TPS2553-Q1.pdf#p3",
+   "mfr": "Texas Instruments"
+  },
+  {
+   "ref": "C601",
+   "value": "100nF",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "GRM155R71H104KE14D",
+   "mfr": "Murata",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C520",
+   "value": "1nF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C102J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C220",
+   "value": "100pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C101J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  },
+  {
+   "ref": "C221",
+   "value": "100pF C0G",
+   "lib": "Capacitor_SMD",
+   "fp": "C_0402_1005Metric",
+   "mpn": "C0402C101J5GACTU",
+   "mfr": "KEMET",
+   "package": "0402 (1005 Metric)"
+  }
+ ],
+ "nets": {
+  "VBATT_IN": [
+   [
+    "J3",
+    "1"
+   ],
+   [
+    "D1",
+    "1"
+   ],
+   [
+    "Q1",
+    "5"
+   ]
+  ],
+  "VBATT_PROT": [
+   [
+    "Q1",
+    "1"
+   ],
+   [
+    "Q1",
+    "2"
+   ],
+   [
+    "Q1",
+    "3"
+   ],
+   [
+    "D2",
+    "1"
+   ],
+   [
+    "R2",
+    "1"
+   ],
+   [
+    "C1",
+    "1"
+   ],
+   [
+    "C2",
+    "1"
+   ],
+   [
+    "C49",
+    "1"
+   ],
+   [
+    "Q102",
+    "S"
+   ],
+   [
+    "R106",
+    "1"
+   ],
+   [
+    "D102",
+    "K"
+   ],
+   [
+    "U100",
+    "VIN1"
+   ],
+   [
+    "U100",
+    "VIN2"
+   ],
+   [
+    "C101",
+    "1"
+   ],
+   [
+    "C102",
+    "1"
+   ],
+   [
+    "C103",
+    "1"
+   ],
+   [
+    "U101",
+    "VIN1"
+   ],
+   [
+    "U101",
+    "VIN2"
+   ],
+   [
+    "C111",
+    "1"
+   ],
+   [
+    "C112",
+    "1"
+   ],
+   [
+    "C113",
+    "1"
+   ],
+   [
+    "R409",
+    "1"
+   ],
+   [
+    "U412",
+    "VSUP"
+   ],
+   [
+    "C419",
+    "1"
+   ],
+   [
+    "R414",
+    "1"
+   ]
+  ],
+  "Q1_GATE": [
+   [
+    "Q1",
+    "4"
+   ],
+   [
+    "R1",
+    "1"
+   ],
+   [
+    "D2",
+    "2"
+   ],
+   [
+    "R2",
+    "2"
+   ]
+  ],
+  "+5V": [
+   [
+    "C3",
+    "1"
+   ],
+   [
+    "C4",
+    "1"
+   ],
+   [
+    "C5",
+    "1"
+   ],
+   [
+    "C8",
+    "1"
+   ],
+   [
+    "C9",
+    "1"
+   ],
+   [
+    "J10",
+    "77"
+   ],
+   [
+    "J10",
+    "79"
+   ],
+   [
+    "J10",
+    "81"
+   ],
+   [
+    "J10",
+    "83"
+   ],
+   [
+    "J10",
+    "85"
+   ],
+   [
+    "J10",
+    "87"
+   ],
+   [
+    "C20",
+    "1"
+   ],
+   [
+    "C21",
+    "1"
+   ],
+   [
+    "C22",
+    "1"
+   ],
+   [
+    "C23",
+    "1"
+   ],
+   [
+    "C24",
+    "1"
+   ],
+   [
+    "C25",
+    "1"
+   ],
+   [
+    "C26",
+    "1"
+   ],
+   [
+    "K1",
+    "COILP"
+   ],
+   [
+    "D5",
+    "K"
+   ],
+   [
+    "Q110",
+    "G"
+   ],
+   [
+    "U102",
+    "VIN"
+   ],
+   [
+    "U102",
+    "EN"
+   ],
+   [
+    "C107",
+    "1"
+   ],
+   [
+    "U100",
+    "BIAS"
+   ],
+   [
+    "R116",
+    "1"
+   ],
+   [
+    "C110",
+    "1"
+   ],
+   [
+    "L100",
+    "2"
+   ],
+   [
+    "U404",
+    "VDD"
+   ],
+   [
+    "C406",
+    "1"
+   ],
+   [
+    "U405",
+    "VDD"
+   ],
+   [
+    "C407",
+    "1"
+   ],
+   [
+    "U417",
+    "VCC"
+   ],
+   [
+    "U418",
+    "VCC"
+   ],
+   [
+    "C412",
+    "1"
+   ],
+   [
+    "C413",
+    "1"
+   ],
+   [
+    "U413",
+    "IN"
+   ],
+   [
+    "U413",
+    "EN"
+   ],
+   [
+    "C417",
+    "1"
+   ],
+   [
+    "R606",
+    "1"
+   ],
+   [
+    "R608",
+    "1"
+   ]
+  ],
+  "+3V3": [
+   [
+    "C10",
+    "1"
+   ],
+   [
+    "C11",
+    "1"
+   ],
+   [
+    "R30",
+    "1"
+   ],
+   [
+    "R36",
+    "1"
+   ],
+   [
+    "R37",
+    "1"
+   ],
+   [
+    "D9",
+    "A"
+   ],
+   [
+    "D10",
+    "A"
+   ],
+   [
+    "R33",
+    "1"
+   ],
+   [
+    "R40",
+    "1"
+   ],
+   [
+    "U3",
+    "VCC"
+   ],
+   [
+    "U3",
+    "VCC_IO"
+   ],
+   [
+    "C50",
+    "1"
+   ],
+   [
+    "C51",
+    "1"
+   ],
+   [
+    "C52",
+    "1"
+   ],
+   [
+    "FB5",
+    "1"
+   ],
+   [
+    "C40",
+    "1"
+   ],
+   [
+    "U7",
+    "VCC"
+   ],
+   [
+    "U9",
+    "VCC"
+   ],
+   [
+    "C27",
+    "1"
+   ],
+   [
+    "C28",
+    "1"
+   ],
+   [
+    "C29",
+    "1"
+   ],
+   [
+    "U5",
+    "IOVDD"
+   ],
+   [
+    "U10",
+    "VIN"
+   ],
+   [
+    "U10",
+    "EN"
+   ],
+   [
+    "U13",
+    "5"
+   ],
+   [
+    "U13",
+    "8"
+   ],
+   [
+    "U13",
+    "12"
+   ],
+   [
+    "U13",
+    "2"
+   ],
+   [
+    "U13",
+    "3"
+   ],
+   [
+    "C61",
+    "1"
+   ],
+   [
+    "C62",
+    "1"
+   ],
+   [
+    "R125",
+    "1"
+   ],
+   [
+    "R126",
+    "1"
+   ],
+   [
+    "L102",
+    "2"
+   ],
+   [
+    "U200",
+    "VCC"
+   ],
+   [
+    "C208",
+    "1"
+   ],
+   [
+    "R204",
+    "2"
+   ],
+   [
+    "R205",
+    "2"
+   ],
+   [
+    "U300",
+    "VDD33_1"
+   ],
+   [
+    "U300",
+    "VDD33_2"
+   ],
+   [
+    "U300",
+    "VDDA33_1"
+   ],
+   [
+    "U300",
+    "VDDA33_2"
+   ],
+   [
+    "U300",
+    "VDDA33_3"
+   ],
+   [
+    "U300",
+    "VDDA33_4"
+   ],
+   [
+    "U300",
+    "VBUS_DET"
+   ],
+   [
+    "C302",
+    "1"
+   ],
+   [
+    "C303",
+    "1"
+   ],
+   [
+    "C304",
+    "1"
+   ],
+   [
+    "U301",
+    "IN"
+   ],
+   [
+    "U302",
+    "IN"
+   ],
+   [
+    "U303",
+    "IN"
+   ],
+   [
+    "U304",
+    "IN"
+   ],
+   [
+    "C305",
+    "1"
+   ],
+   [
+    "C306",
+    "1"
+   ],
+   [
+    "U313",
+    "VCC"
+   ],
+   [
+    "C315",
+    "1"
+   ],
+   [
+    "R400",
+    "1"
+   ],
+   [
+    "Y400",
+    "VDD"
+   ],
+   [
+    "Y400",
+    "OE/ST/NC"
+   ],
+   [
+    "U400",
+    "VDD"
+   ],
+   [
+    "U401",
+    "VDD"
+   ],
+   [
+    "U400",
+    "INT0/GPIO0/XSTBY"
+   ],
+   [
+    "U400",
+    "INT1/GPIO1"
+   ],
+   [
+    "U401",
+    "INT0/GPIO0/XSTBY"
+   ],
+   [
+    "U401",
+    "INT1/GPIO1"
+   ],
+   [
+    "C400",
+    "1"
+   ],
+   [
+    "C401",
+    "1"
+   ],
+   [
+    "C402",
+    "1"
+   ],
+   [
+    "U402",
+    "In1"
+   ],
+   [
+    "U402",
+    "VCC"
+   ],
+   [
+    "U404",
+    "VIO"
+   ],
+   [
+    "U404",
+    "EN/FLT"
+   ],
+   [
+    "C404",
+    "1"
+   ],
+   [
+    "C410",
+    "1"
+   ],
+   [
+    "U403",
+    "In1"
+   ],
+   [
+    "U403",
+    "VCC"
+   ],
+   [
+    "U405",
+    "VIO"
+   ],
+   [
+    "U405",
+    "EN/FLT"
+   ],
+   [
+    "C405",
+    "1"
+   ],
+   [
+    "C411",
+    "1"
+   ],
+   [
+    "R408",
+    "1"
+   ],
+   [
+    "U410",
+    "AVDD"
+   ],
+   [
+    "U410",
+    "DVDD"
+   ],
+   [
+    "C414",
+    "1"
+   ],
+   [
+    "C415",
+    "1"
+   ],
+   [
+    "U412",
+    "EN"
+   ],
+   [
+    "R412",
+    "1"
+   ],
+   [
+    "R413",
+    "1"
+   ],
+   [
+    "R505",
+    "1"
+   ],
+   [
+    "R518",
+    "1"
+   ],
+   [
+    "U501",
+    "VCC"
+   ],
+   [
+    "C504",
+    "1"
+   ],
+   [
+    "Y500",
+    "VDD"
+   ],
+   [
+    "C509",
+    "1"
+   ],
+   [
+    "U600",
+    "VCC"
+   ],
+   [
+    "C600",
+    "1"
+   ],
+   [
+    "R600",
+    "1"
+   ],
+   [
+    "U601",
+    "IN"
+   ],
+   [
+    "U601",
+    "EN"
+   ],
+   [
+    "U601",
+    "ILIM"
+   ],
+   [
+    "C601",
+    "1"
+   ],
+   [
+    "R48",
+    "1"
+   ],
+   [
+    "R49",
+    "1"
+   ],
+   [
+    "C56",
+    "1"
+   ]
+  ],
+  "CM5_3V3": [
+   [
+    "J10",
+    "84"
+   ],
+   [
+    "J10",
+    "86"
+   ],
+   [
+    "J10",
+    "78"
+   ],
+   [
+    "R601",
+    "2"
+   ],
+   [
+    "R604",
+    "2"
+   ],
+   [
+    "R605",
+    "2"
+   ]
+  ],
+  "PWRFAIL_DIV": [
+   [
+    "R29",
+    "1"
+   ],
+   [
+    "U7",
+    "INP"
+   ],
+   [
+    "R136",
+    "2"
+   ]
+  ],
+  "PWRFAIL_REF": [
+   [
+    "R40",
+    "2"
+   ],
+   [
+    "R41",
+    "1"
+   ],
+   [
+    "U7",
+    "INN"
+   ]
+  ],
+  "PWRFAIL": [
+   [
+    "U7",
+    "OUT"
+   ],
+   [
+    "J10",
+    "29"
+   ]
+  ],
+  "VBAT_CHG": [
+   [
+    "D9",
+    "K"
+   ],
+   [
+    "R31",
+    "1"
+   ]
+  ],
+  "VBAT": [
+   [
+    "R31",
+    "2"
+   ],
+   [
+    "BT1",
+    "1"
+   ],
+   [
+    "J10",
+    "76"
+   ]
+  ],
+  "USB_DP_J": [
+   [
+    "J5",
+    "A6"
+   ],
+   [
+    "J5",
+    "B6"
+   ],
+   [
+    "U8",
+    "1"
+   ]
+  ],
+  "USB_DM_J": [
+   [
+    "J5",
+    "A7"
+   ],
+   [
+    "J5",
+    "B7"
+   ],
+   [
+    "U8",
+    "3"
+   ]
+  ],
+  "USB_DP_CM5": [
+   [
+    "U8",
+    "6"
+   ],
+   [
+    "J11",
+    "5"
+   ]
+  ],
+  "USB_DM_CM5": [
+   [
+    "U8",
+    "4"
+   ],
+   [
+    "J11",
+    "3"
+   ]
+  ],
+  "VBUS": [
+   [
+    "J5",
+    "A4"
+   ],
+   [
+    "J5",
+    "B4"
+   ],
+   [
+    "J5",
+    "A9"
+   ],
+   [
+    "J5",
+    "B9"
+   ],
+   [
+    "U8",
+    "5"
+   ]
+  ],
+  "USB_CC1": [
+   [
+    "J5",
+    "A5"
+   ],
+   [
+    "R12",
+    "1"
+   ]
+  ],
+  "USB_CC2": [
+   [
+    "J5",
+    "B5"
+   ],
+   [
+    "R13",
+    "1"
+   ]
+  ],
+  "DBG_TX": [
+   [
+    "J10",
+    "55"
+   ],
+   [
+    "J6",
+    "1"
+   ]
+  ],
+  "DBG_RX": [
+   [
+    "J10",
+    "51"
+   ],
+   [
+    "J6",
+    "2"
+   ]
+  ],
+  "NRPIBOOT": [
+   [
+    "J10",
+    "93"
+   ],
+   [
+    "J7",
+    "1"
+   ]
+  ],
+  "SW_SETUP": [
+   [
+    "SW1",
+    "1"
+   ],
+   [
+    "R30",
+    "2"
+   ],
+   [
+    "C43",
+    "1"
+   ],
+   [
+    "U600",
+    "P16"
+   ]
+  ],
+  "BCKP_CHG": [
+   [
+    "D10",
+    "K"
+   ],
+   [
+    "R32",
+    "1"
+   ]
+  ],
+  "V_BCKP": [
+   [
+    "R32",
+    "2"
+   ],
+   [
+    "BT2",
+    "1"
+   ],
+   [
+    "U3",
+    "V_BCKP"
+   ]
+  ],
+  "GNSS_RX": [
+   [
+    "U3",
+    "RXD"
+   ],
+   [
+    "J10",
+    "36"
+   ]
+  ],
+  "GNSS_TX": [
+   [
+    "U3",
+    "TXD"
+   ],
+   [
+    "J10",
+    "35"
+   ]
+  ],
+  "GNSS_PPS": [
+   [
+    "U3",
+    "TIMEPULSE"
+   ],
+   [
+    "J10",
+    "30"
+   ]
+  ],
+  "RF_EXT": [
+   [
+    "J4",
+    "1"
+   ],
+   [
+    "D4",
+    "1"
+   ],
+   [
+    "L3",
+    "2"
+   ],
+   [
+    "C57",
+    "1"
+   ]
+  ],
+  "ANT_BIAS": [
+   [
+    "L3",
+    "1"
+   ],
+   [
+    "R11",
+    "2"
+   ],
+   [
+    "U9",
+    "INN"
+   ]
+  ],
+  "ANT_REF": [
+   [
+    "R33",
+    "2"
+   ],
+   [
+    "R34",
+    "1"
+   ],
+   [
+    "U9",
+    "INP"
+   ]
+  ],
+  "ANT_DET": [
+   [
+    "U9",
+    "OUT"
+   ],
+   [
+    "J10",
+    "47"
+   ]
+  ],
+  "RF_GNSS": [
+   [
+    "U3",
+    "RF_IN"
+   ],
+   [
+    "C57",
+    "2"
+   ]
+  ],
+  "I2C_SDA": [
+   [
+    "J10",
+    "58"
+   ],
+   [
+    "U5",
+    "SDA"
+   ],
+   [
+    "R36",
+    "2"
+   ],
+   [
+    "U13",
+    "14"
+   ],
+   [
+    "U410",
+    "SDA"
+   ],
+   [
+    "U600",
+    "SDA"
+   ]
+  ],
+  "I2C_SCL": [
+   [
+    "J10",
+    "56"
+   ],
+   [
+    "U5",
+    "SCL"
+   ],
+   [
+    "R37",
+    "2"
+   ],
+   [
+    "U13",
+    "13"
+   ],
+   [
+    "U410",
+    "SCL"
+   ],
+   [
+    "U600",
+    "SCL"
+   ]
+  ],
+  "I2S_BCLK": [
+   [
+    "J10",
+    "49"
+   ],
+   [
+    "U5",
+    "BCLK"
+   ]
+  ],
+  "I2S_LRCLK": [
+   [
+    "J10",
+    "26"
+   ],
+   [
+    "U5",
+    "WCLK"
+   ]
+  ],
+  "I2S_DAC": [
+   [
+    "J10",
+    "25"
+   ],
+   [
+    "U5",
+    "DIN"
+   ]
+  ],
+  "I2S_ADC": [
+   [
+    "J10",
+    "27"
+   ],
+   [
+    "U5",
+    "DOUT"
+   ]
+  ],
+  "MCLK": [
+   [
+    "U5",
+    "MCLK"
+   ],
+   [
+    "R516",
+    "1"
+   ],
+   [
+    "Y500",
+    "CLK"
+   ]
+  ],
+  "CODEC_RST": [
+   [
+    "J10",
+    "45"
+   ],
+   [
+    "U5",
+    "RESET"
+   ]
+  ],
+  "PTT_THRU": [
+   [
+    "J1A",
+    "1"
+   ],
+   [
+    "J2A",
+    "1"
+   ],
+   [
+    "R503",
+    "1"
+   ],
+   [
+    "R519",
+    "2"
+   ]
+  ],
+  "MIC_P": [
+   [
+    "J1A",
+    "3"
+   ],
+   [
+    "J2A",
+    "3"
+   ],
+   [
+    "R20",
+    "1"
+   ],
+   [
+    "C505",
+    "2"
+   ],
+   [
+    "D501",
+    "IO1"
+   ],
+   [
+    "D503",
+    "IO1"
+   ]
+  ],
+  "MIC_N": [
+   [
+    "J1A",
+    "5"
+   ],
+   [
+    "J2A",
+    "5"
+   ],
+   [
+    "R21",
+    "1"
+   ],
+   [
+    "R511",
+    "2"
+   ],
+   [
+    "D501",
+    "IO2"
+   ],
+   [
+    "D503",
+    "IO2"
+   ]
+  ],
+  "MIC_TAP_P1": [
+   [
+    "R20",
+    "2"
+   ],
+   [
+    "C30",
+    "1"
+   ]
+  ],
+  "MIC_TAP_P2": [
+   [
+    "C30",
+    "2"
+   ],
+   [
+    "T1",
+    "P1"
+   ]
+  ],
+  "MIC_TAP_N1": [
+   [
+    "R21",
+    "2"
+   ],
+   [
+    "C31",
+    "1"
+   ]
+  ],
+  "MIC_TAP_N2": [
+   [
+    "C31",
+    "2"
+   ],
+   [
+    "T1",
+    "P2"
+   ]
+  ],
+  "MIC_SEC_P": [
+   [
+    "T1",
+    "S1"
+   ],
+   [
+    "C44",
+    "1"
+   ]
+  ],
+  "MIC_ADC_P": [
+   [
+    "C44",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC1LP"
+   ]
+  ],
+  "MIC_SEC_N": [
+   [
+    "T1",
+    "S2"
+   ],
+   [
+    "C45",
+    "1"
+   ]
+  ],
+  "MIC_ADC_N": [
+   [
+    "C45",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC1LM"
+   ]
+  ],
+  "SPK_RADIO_P": [
+   [
+    "J2A",
+    "2"
+   ],
+   [
+    "K1",
+    "NC_A"
+   ],
+   [
+    "R22",
+    "1"
+   ],
+   [
+    "D502",
+    "IO1"
+   ]
+  ],
+  "SPK_RADIO_N": [
+   [
+    "J2A",
+    "4"
+   ],
+   [
+    "K1",
+    "NC_B"
+   ],
+   [
+    "R23",
+    "2"
+   ],
+   [
+    "T2",
+    "P2"
+   ],
+   [
+    "D502",
+    "IO2"
+   ]
+  ],
+  "RX_ATT": [
+   [
+    "R22",
+    "2"
+   ],
+   [
+    "R23",
+    "1"
+   ],
+   [
+    "C32",
+    "1"
+   ]
+  ],
+  "RX_TAP": [
+   [
+    "C32",
+    "2"
+   ],
+   [
+    "T2",
+    "P1"
+   ]
+  ],
+  "RX_SEC_P": [
+   [
+    "T2",
+    "S1"
+   ],
+   [
+    "C46",
+    "1"
+   ]
+  ],
+  "RX_ADC_P": [
+   [
+    "C46",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC1RP"
+   ]
+  ],
+  "RX_SEC_N": [
+   [
+    "T2",
+    "S2"
+   ],
+   [
+    "C47",
+    "1"
+   ]
+  ],
+  "RX_ADC_N": [
+   [
+    "C47",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC1RM"
+   ]
+  ],
+  "MIX_OUT_P": [
+   [
+    "K1",
+    "NO_A"
+   ],
+   [
+    "T500",
+    "S1"
+   ]
+  ],
+  "MIX_OUT_N": [
+   [
+    "K1",
+    "NO_B"
+   ],
+   [
+    "T500",
+    "S2"
+   ]
+  ],
+  "SPK_COMM_P": [
+   [
+    "K1",
+    "COM_A"
+   ],
+   [
+    "FB3",
+    "1"
+   ]
+  ],
+  "SPK_COMM_P_J": [
+   [
+    "FB3",
+    "2"
+   ],
+   [
+    "J1A",
+    "2"
+   ],
+   [
+    "R512",
+    "1"
+   ],
+   [
+    "D500",
+    "IO1"
+   ]
+  ],
+  "SPK_COMM_N": [
+   [
+    "K1",
+    "COM_B"
+   ],
+   [
+    "FB4",
+    "1"
+   ]
+  ],
+  "SPK_COMM_N_J": [
+   [
+    "FB4",
+    "2"
+   ],
+   [
+    "J1A",
+    "4"
+   ],
+   [
+    "R513",
+    "1"
+   ],
+   [
+    "D500",
+    "IO2"
+   ]
+  ],
+  "HB_PWM": [
+   [
+    "J10",
+    "28"
+   ],
+   [
+    "R500",
+    "1"
+   ]
+  ],
+  "HB_AC": [
+   [
+    "C35",
+    "2"
+   ],
+   [
+    "D6",
+    "COM"
+   ]
+  ],
+  "HB_HOLD": [
+   [
+    "D6",
+    "K"
+   ],
+   [
+    "C36",
+    "1"
+   ],
+   [
+    "R25",
+    "1"
+   ],
+   [
+    "R26",
+    "1"
+   ],
+   [
+    "Q111",
+    "G"
+   ],
+   [
+    "Q502",
+    "G"
+   ]
+  ],
+  "Q2_BASE": [
+   [
+    "R26",
+    "2"
+   ],
+   [
+    "Q2",
+    "G"
+   ]
+  ],
+  "COIL_N": [
+   [
+    "Q2",
+    "D"
+   ],
+   [
+    "D5",
+    "A"
+   ],
+   [
+    "K1",
+    "COILN"
+   ]
+  ],
+  "AVDD": [
+   [
+    "FB5",
+    "2"
+   ],
+   [
+    "U5",
+    "AVDD"
+   ],
+   [
+    "U5",
+    "DRVDD18"
+   ],
+   [
+    "U5",
+    "DRVDD24"
+   ],
+   [
+    "C34",
+    "1"
+   ],
+   [
+    "C37",
+    "1"
+   ],
+   [
+    "C58",
+    "1"
+   ]
+  ],
+  "+1V8": [
+   [
+    "U10",
+    "VOUT"
+   ],
+   [
+    "C55",
+    "1"
+   ],
+   [
+    "U5",
+    "DVDD"
+   ],
+   [
+    "C54",
+    "1"
+   ]
+  ],
+  "GND": [
+   [
+    "J3",
+    "2"
+   ],
+   [
+    "D1",
+    "2"
+   ],
+   [
+    "R1",
+    "2"
+   ],
+   [
+    "C1",
+    "2"
+   ],
+   [
+    "C2",
+    "2"
+   ],
+   [
+    "C49",
+    "2"
+   ],
+   [
+    "C3",
+    "2"
+   ],
+   [
+    "C4",
+    "2"
+   ],
+   [
+    "C5",
+    "2"
+   ],
+   [
+    "C8",
+    "2"
+   ],
+   [
+    "C9",
+    "2"
+   ],
+   [
+    "C10",
+    "2"
+   ],
+   [
+    "C11",
+    "2"
+   ],
+   [
+    "U7",
+    "GND"
+   ],
+   [
+    "R29",
+    "2"
+   ],
+   [
+    "R41",
+    "2"
+   ],
+   [
+    "BT1",
+    "2"
+   ],
+   [
+    "BT2",
+    "2"
+   ],
+   [
+    "U8",
+    "2"
+   ],
+   [
+    "R12",
+    "2"
+   ],
+   [
+    "R13",
+    "2"
+   ],
+   [
+    "J5",
+    "A1"
+   ],
+   [
+    "J5",
+    "B1"
+   ],
+   [
+    "J5",
+    "A12"
+   ],
+   [
+    "J5",
+    "B12"
+   ],
+   [
+    "J5",
+    "SH"
+   ],
+   [
+    "J6",
+    "3"
+   ],
+   [
+    "J7",
+    "2"
+   ],
+   [
+    "J9",
+    "3"
+   ],
+   [
+    "SW1",
+    "2"
+   ],
+   [
+    "C43",
+    "2"
+   ],
+   [
+    "U3",
+    "GND1"
+   ],
+   [
+    "U3",
+    "GND10"
+   ],
+   [
+    "U3",
+    "GND12"
+   ],
+   [
+    "C50",
+    "2"
+   ],
+   [
+    "C51",
+    "2"
+   ],
+   [
+    "C52",
+    "2"
+   ],
+   [
+    "J4",
+    "2"
+   ],
+   [
+    "D4",
+    "2"
+   ],
+   [
+    "U9",
+    "GND"
+   ],
+   [
+    "R34",
+    "2"
+   ],
+   [
+    "U5",
+    "PAD"
+   ],
+   [
+    "C34",
+    "2"
+   ],
+   [
+    "C37",
+    "2"
+   ],
+   [
+    "C40",
+    "2"
+   ],
+   [
+    "D6",
+    "A"
+   ],
+   [
+    "C36",
+    "2"
+   ],
+   [
+    "R25",
+    "2"
+   ],
+   [
+    "Q2",
+    "S"
+   ],
+   [
+    "C20",
+    "2"
+   ],
+   [
+    "C21",
+    "2"
+   ],
+   [
+    "C22",
+    "2"
+   ],
+   [
+    "C23",
+    "2"
+   ],
+   [
+    "C24",
+    "2"
+   ],
+   [
+    "C25",
+    "2"
+   ],
+   [
+    "C26",
+    "2"
+   ],
+   [
+    "C27",
+    "2"
+   ],
+   [
+    "C28",
+    "2"
+   ],
+   [
+    "C29",
+    "2"
+   ],
+   [
+    "J10",
+    "1"
+   ],
+   [
+    "J10",
+    "2"
+   ],
+   [
+    "J10",
+    "7"
+   ],
+   [
+    "J10",
+    "8"
+   ],
+   [
+    "J10",
+    "13"
+   ],
+   [
+    "J10",
+    "14"
+   ],
+   [
+    "J10",
+    "22"
+   ],
+   [
+    "J10",
+    "23"
+   ],
+   [
+    "J10",
+    "32"
+   ],
+   [
+    "J10",
+    "33"
+   ],
+   [
+    "J10",
+    "42"
+   ],
+   [
+    "J10",
+    "43"
+   ],
+   [
+    "J10",
+    "52"
+   ],
+   [
+    "J10",
+    "53"
+   ],
+   [
+    "J10",
+    "59"
+   ],
+   [
+    "J10",
+    "60"
+   ],
+   [
+    "J10",
+    "65"
+   ],
+   [
+    "J10",
+    "66"
+   ],
+   [
+    "J10",
+    "71"
+   ],
+   [
+    "J10",
+    "74"
+   ],
+   [
+    "J10",
+    "98"
+   ],
+   [
+    "J11",
+    "7"
+   ],
+   [
+    "J11",
+    "8"
+   ],
+   [
+    "J11",
+    "13"
+   ],
+   [
+    "J11",
+    "14"
+   ],
+   [
+    "J11",
+    "19"
+   ],
+   [
+    "J11",
+    "20"
+   ],
+   [
+    "J11",
+    "25"
+   ],
+   [
+    "J11",
+    "26"
+   ],
+   [
+    "J11",
+    "31"
+   ],
+   [
+    "J11",
+    "32"
+   ],
+   [
+    "J11",
+    "37"
+   ],
+   [
+    "J11",
+    "38"
+   ],
+   [
+    "J11",
+    "44"
+   ],
+   [
+    "J11",
+    "50"
+   ],
+   [
+    "J11",
+    "55"
+   ],
+   [
+    "J11",
+    "56"
+   ],
+   [
+    "J11",
+    "61"
+   ],
+   [
+    "J11",
+    "62"
+   ],
+   [
+    "J11",
+    "67"
+   ],
+   [
+    "J11",
+    "68"
+   ],
+   [
+    "J11",
+    "73"
+   ],
+   [
+    "J11",
+    "74"
+   ],
+   [
+    "J11",
+    "79"
+   ],
+   [
+    "J11",
+    "80"
+   ],
+   [
+    "J11",
+    "85"
+   ],
+   [
+    "J11",
+    "86"
+   ],
+   [
+    "J11",
+    "91"
+   ],
+   [
+    "J11",
+    "92"
+   ],
+   [
+    "J11",
+    "97"
+   ],
+   [
+    "J11",
+    "98"
+   ],
+   [
+    "U5",
+    "AVSS1"
+   ],
+   [
+    "U5",
+    "AVSS2"
+   ],
+   [
+    "U5",
+    "DVSS"
+   ],
+   [
+    "U5",
+    "DRVSS"
+   ],
+   [
+    "U10",
+    "GND"
+   ],
+   [
+    "C54",
+    "2"
+   ],
+   [
+    "C55",
+    "2"
+   ],
+   [
+    "MK1",
+    "1"
+   ],
+   [
+    "MK2",
+    "1"
+   ],
+   [
+    "MK3",
+    "1"
+   ],
+   [
+    "MK4",
+    "1"
+   ],
+   [
+    "MH1",
+    "1"
+   ],
+   [
+    "MH2",
+    "1"
+   ],
+   [
+    "MH3",
+    "1"
+   ],
+   [
+    "MH4",
+    "1"
+   ],
+   [
+    "J1A",
+    "MP"
+   ],
+   [
+    "J2A",
+    "MP"
+   ],
+   [
+    "J9",
+    "MP"
+   ],
+   [
+    "C59",
+    "2"
+   ],
+   [
+    "C60",
+    "2"
+   ],
+   [
+    "J12",
+    "SH"
+   ],
+   [
+    "U11",
+    "3"
+   ],
+   [
+    "U11",
+    "8"
+   ],
+   [
+    "U12",
+    "3"
+   ],
+   [
+    "U12",
+    "8"
+   ],
+   [
+    "U13",
+    "1"
+   ],
+   [
+    "U13",
+    "6"
+   ],
+   [
+    "U13",
+    "7"
+   ],
+   [
+    "C61",
+    "2"
+   ],
+   [
+    "C62",
+    "2"
+   ],
+   [
+    "D100",
+    "A"
+   ],
+   [
+    "R101",
+    "2"
+   ],
+   [
+    "D104",
+    "A"
+   ],
+   [
+    "Q103",
+    "S"
+   ],
+   [
+    "Q111",
+    "S"
+   ],
+   [
+    "Q110",
+    "S"
+   ],
+   [
+    "R110",
+    "2"
+   ],
+   [
+    "R115",
+    "1"
+   ],
+   [
+    "C101",
+    "2"
+   ],
+   [
+    "C102",
+    "2"
+   ],
+   [
+    "C103",
+    "2"
+   ],
+   [
+    "C111",
+    "2"
+   ],
+   [
+    "C112",
+    "2"
+   ],
+   [
+    "C113",
+    "2"
+   ],
+   [
+    "U100",
+    "AGND"
+   ],
+   [
+    "U100",
+    "PGND1"
+   ],
+   [
+    "U100",
+    "PGND2"
+   ],
+   [
+    "U101",
+    "AGND"
+   ],
+   [
+    "U101",
+    "PGND1"
+   ],
+   [
+    "U101",
+    "PGND2"
+   ],
+   [
+    "C106",
+    "2"
+   ],
+   [
+    "C115",
+    "2"
+   ],
+   [
+    "R117",
+    "2"
+   ],
+   [
+    "R118",
+    "2"
+   ],
+   [
+    "C107",
+    "2"
+   ],
+   [
+    "C116",
+    "2"
+   ],
+   [
+    "C117",
+    "2"
+   ],
+   [
+    "C118",
+    "2"
+   ],
+   [
+    "R122",
+    "2"
+   ],
+   [
+    "R123",
+    "2"
+   ],
+   [
+    "U102",
+    "GND"
+   ],
+   [
+    "U102",
+    "MODE"
+   ],
+   [
+    "U102",
+    "FSET"
+   ],
+   [
+    "R127",
+    "2"
+   ],
+   [
+    "J200",
+    "GND3"
+   ],
+   [
+    "J200",
+    "GND5"
+   ],
+   [
+    "J200",
+    "GND11"
+   ],
+   [
+    "J200",
+    "GND27"
+   ],
+   [
+    "J200",
+    "GND33"
+   ],
+   [
+    "J200",
+    "GND39"
+   ],
+   [
+    "J200",
+    "GND45"
+   ],
+   [
+    "J200",
+    "GND51"
+   ],
+   [
+    "J200",
+    "GND57"
+   ],
+   [
+    "J200",
+    "GND71"
+   ],
+   [
+    "J200",
+    "GND73"
+   ],
+   [
+    "J200",
+    "SH1"
+   ],
+   [
+    "J200",
+    "SH2"
+   ],
+   [
+    "C200",
+    "2"
+   ],
+   [
+    "C201",
+    "2"
+   ],
+   [
+    "C202",
+    "2"
+   ],
+   [
+    "C203",
+    "2"
+   ],
+   [
+    "C204",
+    "2"
+   ],
+   [
+    "C205",
+    "2"
+   ],
+   [
+    "C206",
+    "2"
+   ],
+   [
+    "C207",
+    "2"
+   ],
+   [
+    "C208",
+    "2"
+   ],
+   [
+    "D201",
+    "A"
+   ],
+   [
+    "J205",
+    "C5_GND"
+   ],
+   [
+    "J205",
+    "GND_SH"
+   ],
+   [
+    "D200",
+    "GND"
+   ],
+   [
+    "D200",
+    "GND_8"
+   ],
+   [
+    "U200",
+    "GND"
+   ],
+   [
+    "J201",
+    "GND"
+   ],
+   [
+    "J202",
+    "GND"
+   ],
+   [
+    "J203",
+    "GND"
+   ],
+   [
+    "J204",
+    "GND"
+   ],
+   [
+    "C302",
+    "2"
+   ],
+   [
+    "C303",
+    "2"
+   ],
+   [
+    "C304",
+    "2"
+   ],
+   [
+    "U300",
+    "EP"
+   ],
+   [
+    "R300",
+    "2"
+   ],
+   [
+    "C300",
+    "2"
+   ],
+   [
+    "C301",
+    "2"
+   ],
+   [
+    "Y300",
+    "GND_A"
+   ],
+   [
+    "Y300",
+    "GND_B"
+   ],
+   [
+    "R301",
+    "2"
+   ],
+   [
+    "U301",
+    "GND"
+   ],
+   [
+    "C307",
+    "2"
+   ],
+   [
+    "U305",
+    "GND3"
+   ],
+   [
+    "U305",
+    "GND6"
+   ],
+   [
+    "U305",
+    "GND11"
+   ],
+   [
+    "U305",
+    "GND12"
+   ],
+   [
+    "U305",
+    "GND13"
+   ],
+   [
+    "U305",
+    "GND14"
+   ],
+   [
+    "U305",
+    "GND15"
+   ],
+   [
+    "U305",
+    "GND16"
+   ],
+   [
+    "U305",
+    "GND18"
+   ],
+   [
+    "U305",
+    "GND24"
+   ],
+   [
+    "U302",
+    "GND"
+   ],
+   [
+    "C308",
+    "2"
+   ],
+   [
+    "U306",
+    "GND3"
+   ],
+   [
+    "U306",
+    "GND6"
+   ],
+   [
+    "U306",
+    "GND11"
+   ],
+   [
+    "U306",
+    "GND12"
+   ],
+   [
+    "U306",
+    "GND13"
+   ],
+   [
+    "U306",
+    "GND14"
+   ],
+   [
+    "U306",
+    "GND15"
+   ],
+   [
+    "U306",
+    "GND16"
+   ],
+   [
+    "U306",
+    "GND18"
+   ],
+   [
+    "U306",
+    "GND24"
+   ],
+   [
+    "U303",
+    "GND"
+   ],
+   [
+    "C309",
+    "2"
+   ],
+   [
+    "U307",
+    "GND3"
+   ],
+   [
+    "U307",
+    "GND6"
+   ],
+   [
+    "U307",
+    "GND11"
+   ],
+   [
+    "U307",
+    "GND12"
+   ],
+   [
+    "U307",
+    "GND13"
+   ],
+   [
+    "U307",
+    "GND14"
+   ],
+   [
+    "U307",
+    "GND15"
+   ],
+   [
+    "U307",
+    "GND16"
+   ],
+   [
+    "U307",
+    "GND18"
+   ],
+   [
+    "U307",
+    "GND24"
+   ],
+   [
+    "U304",
+    "GND"
+   ],
+   [
+    "C310",
+    "2"
+   ],
+   [
+    "U308",
+    "GND3"
+   ],
+   [
+    "U308",
+    "GND6"
+   ],
+   [
+    "U308",
+    "GND11"
+   ],
+   [
+    "U308",
+    "GND12"
+   ],
+   [
+    "U308",
+    "GND13"
+   ],
+   [
+    "U308",
+    "GND14"
+   ],
+   [
+    "U308",
+    "GND15"
+   ],
+   [
+    "U308",
+    "GND16"
+   ],
+   [
+    "U308",
+    "GND18"
+   ],
+   [
+    "U308",
+    "GND24"
+   ],
+   [
+    "C305",
+    "2"
+   ],
+   [
+    "C306",
+    "2"
+   ],
+   [
+    "U309",
+    "GND1"
+   ],
+   [
+    "U309",
+    "GND3"
+   ],
+   [
+    "U309",
+    "GND5"
+   ],
+   [
+    "U310",
+    "GND1"
+   ],
+   [
+    "U310",
+    "GND3"
+   ],
+   [
+    "U310",
+    "GND5"
+   ],
+   [
+    "U311",
+    "GND1"
+   ],
+   [
+    "U311",
+    "GND3"
+   ],
+   [
+    "U311",
+    "GND5"
+   ],
+   [
+    "U312",
+    "GND"
+   ],
+   [
+    "L300",
+    "2"
+   ],
+   [
+    "J300",
+    "GND"
+   ],
+   [
+    "R305",
+    "2"
+   ],
+   [
+    "U313",
+    "GND"
+   ],
+   [
+    "C315",
+    "2"
+   ],
+   [
+    "C316",
+    "2"
+   ],
+   [
+    "C317",
+    "2"
+   ],
+   [
+    "C318",
+    "2"
+   ],
+   [
+    "C319",
+    "2"
+   ],
+   [
+    "Y400",
+    "GND"
+   ],
+   [
+    "U400",
+    "VSS"
+   ],
+   [
+    "U400",
+    "EP"
+   ],
+   [
+    "U401",
+    "VSS"
+   ],
+   [
+    "U401",
+    "EP"
+   ],
+   [
+    "C400",
+    "2"
+   ],
+   [
+    "C401",
+    "2"
+   ],
+   [
+    "C402",
+    "2"
+   ],
+   [
+    "U402",
+    "GND"
+   ],
+   [
+    "U404",
+    "STB"
+   ],
+   [
+    "U404",
+    "GNDIO"
+   ],
+   [
+    "U404",
+    "GND1"
+   ],
+   [
+    "C404",
+    "2"
+   ],
+   [
+    "C406",
+    "2"
+   ],
+   [
+    "C410",
+    "2"
+   ],
+   [
+    "U403",
+    "GND"
+   ],
+   [
+    "U405",
+    "STB"
+   ],
+   [
+    "U405",
+    "GNDIO"
+   ],
+   [
+    "U405",
+    "GND1"
+   ],
+   [
+    "C405",
+    "2"
+   ],
+   [
+    "C407",
+    "2"
+   ],
+   [
+    "C411",
+    "2"
+   ],
+   [
+    "RN400",
+    "5"
+   ],
+   [
+    "RN400",
+    "6"
+   ],
+   [
+    "RN400",
+    "7"
+   ],
+   [
+    "RN400",
+    "8"
+   ],
+   [
+    "U417",
+    "GND"
+   ],
+   [
+    "U418",
+    "GND"
+   ],
+   [
+    "U414",
+    "SOURCE1"
+   ],
+   [
+    "U414",
+    "SOURCE2"
+   ],
+   [
+    "C412",
+    "2"
+   ],
+   [
+    "C413",
+    "2"
+   ],
+   [
+    "D403",
+    "GND"
+   ],
+   [
+    "D402",
+    "GND"
+   ],
+   [
+    "D404",
+    "GND"
+   ],
+   [
+    "D405",
+    "GND"
+   ],
+   [
+    "J400",
+    "14"
+   ],
+   [
+    "R402",
+    "2"
+   ],
+   [
+    "R404",
+    "2"
+   ],
+   [
+    "R406",
+    "2"
+   ],
+   [
+    "R410",
+    "2"
+   ],
+   [
+    "U410",
+    "GND"
+   ],
+   [
+    "U410",
+    "Thermal_pad"
+   ],
+   [
+    "U410",
+    "AIN5/GPIO5"
+   ],
+   [
+    "U410",
+    "AIN6/GPIO6"
+   ],
+   [
+    "U410",
+    "AIN7/GPIO7"
+   ],
+   [
+    "C414",
+    "2"
+   ],
+   [
+    "C415",
+    "2"
+   ],
+   [
+    "C416",
+    "2"
+   ],
+   [
+    "U413",
+    "GND"
+   ],
+   [
+    "R411",
+    "2"
+   ],
+   [
+    "C417",
+    "2"
+   ],
+   [
+    "C418",
+    "2"
+   ],
+   [
+    "U412",
+    "GND"
+   ],
+   [
+    "C419",
+    "2"
+   ],
+   [
+    "R504",
+    "2"
+   ],
+   [
+    "R506",
+    "2"
+   ],
+   [
+    "U501",
+    "GND"
+   ],
+   [
+    "C504",
+    "2"
+   ],
+   [
+    "Q502",
+    "S"
+   ],
+   [
+    "R514",
+    "2"
+   ],
+   [
+    "R515",
+    "2"
+   ],
+   [
+    "Y500",
+    "GND"
+   ],
+   [
+    "C509",
+    "2"
+   ],
+   [
+    "R516",
+    "2"
+   ],
+   [
+    "D500",
+    "GND"
+   ],
+   [
+    "D501",
+    "GND"
+   ],
+   [
+    "D502",
+    "GND"
+   ],
+   [
+    "D503",
+    "GND"
+   ],
+   [
+    "U500",
+    "S2"
+   ],
+   [
+    "U600",
+    "GND"
+   ],
+   [
+    "U600",
+    "A0"
+   ],
+   [
+    "U600",
+    "A1"
+   ],
+   [
+    "C600",
+    "2"
+   ],
+   [
+    "R602",
+    "2"
+   ],
+   [
+    "R603",
+    "2"
+   ],
+   [
+    "D600",
+    "RED_K"
+   ],
+   [
+    "D600",
+    "GREEN_K"
+   ],
+   [
+    "U601",
+    "GND"
+   ],
+   [
+    "C601",
+    "2"
+   ],
+   [
+    "C520",
+    "2"
+   ],
+   [
+    "H200",
+    "1"
+   ],
+   [
+    "H201",
+    "1"
+   ],
+   [
+    "C56",
+    "2"
+   ],
+   [
+    "C58",
+    "2"
+   ]
+  ],
+  "ETH_P0_P": [
+   [
+    "J10",
+    "12"
+   ],
+   [
+    "U12",
+    "5"
+   ],
+   [
+    "U12",
+    "6"
+   ],
+   [
+    "T3",
+    "2"
+   ]
+  ],
+  "ETH_P0_N": [
+   [
+    "J10",
+    "10"
+   ],
+   [
+    "U12",
+    "4"
+   ],
+   [
+    "U12",
+    "7"
+   ],
+   [
+    "T3",
+    "3"
+   ]
+  ],
+  "ETH_P1_P": [
+   [
+    "J10",
+    "4"
+   ],
+   [
+    "U12",
+    "1"
+   ],
+   [
+    "U12",
+    "10"
+   ],
+   [
+    "T3",
+    "5"
+   ]
+  ],
+  "ETH_P1_N": [
+   [
+    "J10",
+    "6"
+   ],
+   [
+    "U12",
+    "2"
+   ],
+   [
+    "U12",
+    "9"
+   ],
+   [
+    "T3",
+    "6"
+   ]
+  ],
+  "ETH_P2_P": [
+   [
+    "J10",
+    "11"
+   ],
+   [
+    "U11",
+    "5"
+   ],
+   [
+    "U11",
+    "6"
+   ],
+   [
+    "T3",
+    "8"
+   ]
+  ],
+  "ETH_P2_N": [
+   [
+    "J10",
+    "9"
+   ],
+   [
+    "U11",
+    "4"
+   ],
+   [
+    "U11",
+    "7"
+   ],
+   [
+    "T3",
+    "9"
+   ]
+  ],
+  "ETH_P3_P": [
+   [
+    "J10",
+    "3"
+   ],
+   [
+    "U11",
+    "1"
+   ],
+   [
+    "U11",
+    "10"
+   ],
+   [
+    "T3",
+    "11"
+   ]
+  ],
+  "ETH_P3_N": [
+   [
+    "J10",
+    "5"
+   ],
+   [
+    "U11",
+    "2"
+   ],
+   [
+    "U11",
+    "9"
+   ],
+   [
+    "T3",
+    "12"
+   ]
+  ],
+  "ETH_CT": [
+   [
+    "T3",
+    "4"
+   ],
+   [
+    "T3",
+    "10"
+   ],
+   [
+    "C59",
+    "1"
+   ],
+   [
+    "T3",
+    "1"
+   ],
+   [
+    "T3",
+    "7"
+   ]
+  ],
+  "ETH_L0_P": [
+   [
+    "T3",
+    "23"
+   ],
+   [
+    "J12",
+    "1"
+   ]
+  ],
+  "ETH_L0_N": [
+   [
+    "T3",
+    "22"
+   ],
+   [
+    "J12",
+    "2"
+   ]
+  ],
+  "ETH_L1_P": [
+   [
+    "T3",
+    "20"
+   ],
+   [
+    "J12",
+    "3"
+   ]
+  ],
+  "ETH_L1_N": [
+   [
+    "T3",
+    "19"
+   ],
+   [
+    "J12",
+    "6"
+   ]
+  ],
+  "ETH_L2_P": [
+   [
+    "T3",
+    "17"
+   ],
+   [
+    "J12",
+    "4"
+   ]
+  ],
+  "ETH_L2_N": [
+   [
+    "T3",
+    "16"
+   ],
+   [
+    "J12",
+    "5"
+   ]
+  ],
+  "ETH_L3_P": [
+   [
+    "T3",
+    "14"
+   ],
+   [
+    "J12",
+    "7"
+   ]
+  ],
+  "ETH_L3_N": [
+   [
+    "T3",
+    "13"
+   ],
+   [
+    "J12",
+    "8"
+   ]
+  ],
+  "ETH_CX0": [
+   [
+    "T3",
+    "24"
+   ],
+   [
+    "R44",
+    "1"
+   ]
+  ],
+  "ETH_CX1": [
+   [
+    "T3",
+    "21"
+   ],
+   [
+    "R45",
+    "1"
+   ]
+  ],
+  "ETH_CX2": [
+   [
+    "T3",
+    "18"
+   ],
+   [
+    "R46",
+    "1"
+   ]
+  ],
+  "ETH_CX3": [
+   [
+    "T3",
+    "15"
+   ],
+   [
+    "R47",
+    "1"
+   ]
+  ],
+  "ETH_BOBSMITH": [
+   [
+    "R44",
+    "2"
+   ],
+   [
+    "R45",
+    "2"
+   ],
+   [
+    "R46",
+    "2"
+   ],
+   [
+    "R47",
+    "2"
+   ],
+   [
+    "C60",
+    "1"
+   ]
+  ],
+  "IMU_INT1": [
+   [
+    "U13",
+    "4"
+   ],
+   [
+    "J10",
+    "24"
+   ]
+  ],
+  "KLINE_TX": [
+   [
+    "J10",
+    "54"
+   ],
+   [
+    "U412",
+    "TXD"
+   ],
+   [
+    "R412",
+    "2"
+   ]
+  ],
+  "KLINE_RX": [
+   [
+    "J10",
+    "34"
+   ],
+   [
+    "U412",
+    "RXD"
+   ],
+   [
+    "R413",
+    "2"
+   ]
+  ],
+  "CAN_INT": [
+   [
+    "J10",
+    "31"
+   ],
+   [
+    "U400",
+    "INT"
+   ],
+   [
+    "U401",
+    "INT"
+   ],
+   [
+    "R400",
+    "2"
+   ]
+  ],
+  "CAN2_CS": [
+   [
+    "J10",
+    "37"
+   ],
+   [
+    "U401",
+    "nCS"
+   ],
+   [
+    "R605",
+    "1"
+   ]
+  ],
+  "CAN1_CS": [
+   [
+    "J10",
+    "39"
+   ],
+   [
+    "U400",
+    "nCS"
+   ],
+   [
+    "R604",
+    "1"
+   ]
+  ],
+  "CAN_MISO": [
+   [
+    "J10",
+    "40"
+   ],
+   [
+    "U400",
+    "SDO"
+   ],
+   [
+    "U401",
+    "SDO"
+   ]
+  ],
+  "CAN_MOSI": [
+   [
+    "J10",
+    "44"
+   ],
+   [
+    "U400",
+    "SDI"
+   ],
+   [
+    "U401",
+    "SDI"
+   ]
+  ],
+  "CAN_SCK": [
+   [
+    "J10",
+    "38"
+   ],
+   [
+    "U400",
+    "SCK"
+   ],
+   [
+    "U401",
+    "SCK"
+   ]
+  ],
+  "HB_PWM_R": [
+   [
+    "C35",
+    "1"
+   ],
+   [
+    "R500",
+    "2"
+   ]
+  ],
+  "PTT_SENSE": [
+   [
+    "J10",
+    "41"
+   ],
+   [
+    "U501",
+    "OUT"
+   ]
+  ],
+  "EXP_INT": [
+   [
+    "J10",
+    "50"
+   ],
+   [
+    "R601",
+    "1"
+   ],
+   [
+    "U600",
+    "INT"
+   ]
+  ],
+  "PTT_KEY_CMD": [
+   [
+    "J10",
+    "46"
+   ],
+   [
+    "Q501",
+    "G"
+   ],
+   [
+    "R603",
+    "1"
+   ]
+  ],
+  "PWR_HOLD": [
+   [
+    "J10",
+    "48"
+   ],
+   [
+    "Q104",
+    "G"
+   ],
+   [
+    "R602",
+    "1"
+   ]
+  ],
+  "STATUS_R_EXT": [
+   [
+    "J9",
+    "1"
+   ],
+   [
+    "R608",
+    "2"
+   ]
+  ],
+  "STATUS_G_EXT": [
+   [
+    "J9",
+    "2"
+   ],
+   [
+    "R609",
+    "2"
+   ]
+  ],
+  "ACC_IN": [
+   [
+    "J3",
+    "3"
+   ],
+   [
+    "D100",
+    "K"
+   ],
+   [
+    "R100",
+    "1"
+   ]
+  ],
+  "ACC_S": [
+   [
+    "R100",
+    "2"
+   ],
+   [
+    "D101",
+    "K"
+   ]
+  ],
+  "ACC_STATE": [
+   [
+    "D101",
+    "A"
+   ],
+   [
+    "R101",
+    "1"
+   ],
+   [
+    "D104",
+    "K"
+   ],
+   [
+    "Q103",
+    "G"
+   ],
+   [
+    "U600",
+    "P14"
+   ]
+  ],
+  "HOLD_MID": [
+   [
+    "Q104",
+    "S"
+   ],
+   [
+    "Q111",
+    "D"
+   ]
+  ],
+  "PSW_G": [
+   [
+    "Q102",
+    "G"
+   ],
+   [
+    "R106",
+    "2"
+   ],
+   [
+    "D102",
+    "A"
+   ],
+   [
+    "R107",
+    "1"
+   ]
+  ],
+  "VBAT_SW": [
+   [
+    "Q102",
+    "D"
+   ],
+   [
+    "R109",
+    "1"
+   ],
+   [
+    "R136",
+    "1"
+   ]
+  ],
+  "U100_EN": [
+   [
+    "U100",
+    "EN"
+   ],
+   [
+    "R109",
+    "2"
+   ],
+   [
+    "R110",
+    "1"
+   ],
+   [
+    "R111",
+    "1"
+   ]
+  ],
+  "UVLO_X": [
+   [
+    "R111",
+    "2"
+   ],
+   [
+    "Q110",
+    "D"
+   ]
+  ],
+  "U100_SW": [
+   [
+    "U100",
+    "SW"
+   ],
+   [
+    "L100",
+    "1"
+   ],
+   [
+    "C105",
+    "2"
+   ]
+  ],
+  "U100_CB": [
+   [
+    "U100",
+    "CBOOT"
+   ],
+   [
+    "U100",
+    "RBOOT"
+   ],
+   [
+    "C105",
+    "1"
+   ]
+  ],
+  "U100_VCC": [
+   [
+    "U100",
+    "VCC"
+   ],
+   [
+    "C106",
+    "1"
+   ]
+  ],
+  "U100_FB": [
+   [
+    "U100",
+    "FB"
+   ],
+   [
+    "R116",
+    "2"
+   ],
+   [
+    "R117",
+    "1"
+   ],
+   [
+    "C110",
+    "2"
+   ]
+  ],
+  "U100_RT": [
+   [
+    "U100",
+    "RT"
+   ],
+   [
+    "R118",
+    "1"
+   ]
+  ],
+  "MODEM_EN": [
+   [
+    "U101",
+    "EN"
+   ],
+   [
+    "R115",
+    "2"
+   ],
+   [
+    "U600",
+    "P07"
+   ]
+  ],
+  "U101_SW": [
+   [
+    "U101",
+    "SW"
+   ],
+   [
+    "L101",
+    "1"
+   ],
+   [
+    "C114",
+    "2"
+   ]
+  ],
+  "U101_CB": [
+   [
+    "U101",
+    "CBOOT"
+   ],
+   [
+    "U101",
+    "RBOOT"
+   ],
+   [
+    "C114",
+    "1"
+   ]
+  ],
+  "U101_VCC": [
+   [
+    "U101",
+    "VCC"
+   ],
+   [
+    "C115",
+    "1"
+   ]
+  ],
+  "VMODEM": [
+   [
+    "U101",
+    "BIAS"
+   ],
+   [
+    "R121",
+    "1"
+   ],
+   [
+    "C116",
+    "1"
+   ],
+   [
+    "C117",
+    "1"
+   ],
+   [
+    "C118",
+    "1"
+   ],
+   [
+    "L101",
+    "2"
+   ],
+   [
+    "J200",
+    "VCC2"
+   ],
+   [
+    "J200",
+    "VCC4"
+   ],
+   [
+    "J200",
+    "VCC70"
+   ],
+   [
+    "J200",
+    "VCC72"
+   ],
+   [
+    "J200",
+    "VCC74"
+   ],
+   [
+    "C200",
+    "1"
+   ],
+   [
+    "C201",
+    "1"
+   ],
+   [
+    "D201",
+    "K"
+   ],
+   [
+    "C202",
+    "1"
+   ],
+   [
+    "C203",
+    "1"
+   ]
+  ],
+  "U101_FB": [
+   [
+    "U101",
+    "FB"
+   ],
+   [
+    "R121",
+    "2"
+   ],
+   [
+    "R122",
+    "1"
+   ]
+  ],
+  "U101_RT": [
+   [
+    "U101",
+    "RT"
+   ],
+   [
+    "R123",
+    "1"
+   ]
+  ],
+  "PG_MODEM": [
+   [
+    "U101",
+    "PGOOD"
+   ],
+   [
+    "R125",
+    "2"
+   ],
+   [
+    "U600",
+    "P15"
+   ]
+  ],
+  "U102_SW": [
+   [
+    "U102",
+    "SW"
+   ],
+   [
+    "L102",
+    "1"
+   ]
+  ],
+  "U102_FB": [
+   [
+    "U102",
+    "FB"
+   ],
+   [
+    "R126",
+    "2"
+   ],
+   [
+    "R127",
+    "1"
+   ]
+  ],
+  "USB3_M2_TX_P": [
+   [
+    "J11",
+    "42"
+   ],
+   [
+    "J200",
+    "PETP1_USB3_TXP"
+   ]
+  ],
+  "USB3_M2_TX_N": [
+   [
+    "J11",
+    "40"
+   ],
+   [
+    "J200",
+    "PETN1_USB3_TXN"
+   ]
+  ],
+  "USB3_M2_RX_P": [
+   [
+    "J11",
+    "30"
+   ],
+   [
+    "J200",
+    "PERP1_USB3_RXP"
+   ]
+  ],
+  "USB3_M2_RX_N": [
+   [
+    "J11",
+    "28"
+   ],
+   [
+    "J200",
+    "PERN1_USB3_RXN"
+   ]
+  ],
+  "USB2_M2_DP": [
+   [
+    "J200",
+    "USB_DP"
+   ],
+   [
+    "J11",
+    "34"
+   ]
+  ],
+  "USB2_M2_DM": [
+   [
+    "J200",
+    "USB_DM"
+   ],
+   [
+    "J11",
+    "36"
+   ]
+  ],
+  "PCIE_TX_P": [
+   [
+    "J11",
+    "22"
+   ],
+   [
+    "J200",
+    "PETN0"
+   ]
+  ],
+  "PCIE_TX_N": [
+   [
+    "J11",
+    "24"
+   ],
+   [
+    "J200",
+    "PETP0"
+   ]
+  ],
+  "PCIE_RX_P": [
+   [
+    "J11",
+    "16"
+   ],
+   [
+    "J200",
+    "PERN0"
+   ]
+  ],
+  "PCIE_RX_N": [
+   [
+    "J11",
+    "18"
+   ],
+   [
+    "J200",
+    "PERP0"
+   ]
+  ],
+  "PCIE_CLK_P": [
+   [
+    "J11",
+    "10"
+   ],
+   [
+    "J200",
+    "REFCLKP"
+   ]
+  ],
+  "PCIE_CLK_N": [
+   [
+    "J11",
+    "12"
+   ],
+   [
+    "J200",
+    "REFCLKN"
+   ]
+  ],
+  "PCIE_RST_N": [
+   [
+    "J11",
+    "9"
+   ],
+   [
+    "J200",
+    "PERST_N"
+   ]
+  ],
+  "PCIE_CLKREQ_N": [
+   [
+    "J11",
+    "2"
+   ],
+   [
+    "J200",
+    "CLKREQ_N"
+   ]
+  ],
+  "PCIE_WAKE_N": [
+   [
+    "J11",
+    "4"
+   ],
+   [
+    "J200",
+    "PEWAKE_N"
+   ]
+  ],
+  "MODEM_OFF_N": [
+   [
+    "J200",
+    "FULL_CARD_POWER_OFF_N"
+   ],
+   [
+    "U600",
+    "P00"
+   ]
+  ],
+  "MODEM_RST_N": [
+   [
+    "U200",
+    "A"
+   ],
+   [
+    "R205",
+    "1"
+   ],
+   [
+    "U600",
+    "P01"
+   ]
+  ],
+  "M2_RESET_N": [
+   [
+    "U200",
+    "Y"
+   ],
+   [
+    "J200",
+    "RESET_N"
+   ]
+  ],
+  "MODEM_WDIS1_N": [
+   [
+    "J200",
+    "W_DISABLE1_N"
+   ],
+   [
+    "U600",
+    "P02"
+   ]
+  ],
+  "SIM_VDD": [
+   [
+    "J200",
+    "UIM_PWR"
+   ],
+   [
+    "J205",
+    "C1_VCC"
+   ],
+   [
+    "C204",
+    "1"
+   ],
+   [
+    "R203",
+    "1"
+   ],
+   [
+    "D200",
+    "IO1"
+   ]
+  ],
+  "M2_UIM_RST": [
+   [
+    "J200",
+    "UIM_RESET"
+   ],
+   [
+    "R200",
+    "1"
+   ]
+  ],
+  "M2_UIM_CLK": [
+   [
+    "J200",
+    "UIM_CLK"
+   ],
+   [
+    "R201",
+    "1"
+   ]
+  ],
+  "M2_UIM_DATA": [
+   [
+    "J200",
+    "UIM_DATA"
+   ],
+   [
+    "R202",
+    "1"
+   ]
+  ],
+  "SIM_RST": [
+   [
+    "R200",
+    "2"
+   ],
+   [
+    "J205",
+    "C2_RST"
+   ],
+   [
+    "C205",
+    "1"
+   ],
+   [
+    "D200",
+    "IO2"
+   ]
+  ],
+  "SIM_CLK": [
+   [
+    "R201",
+    "2"
+   ],
+   [
+    "J205",
+    "C3_CLK"
+   ],
+   [
+    "C206",
+    "1"
+   ],
+   [
+    "D200",
+    "IO3"
+   ]
+  ],
+  "SIM_DATA": [
+   [
+    "R202",
+    "2"
+   ],
+   [
+    "J205",
+    "C7_IO"
+   ],
+   [
+    "C207",
+    "1"
+   ],
+   [
+    "D200",
+    "IO4"
+   ],
+   [
+    "R203",
+    "2"
+   ]
+  ],
+  "SIM_DET": [
+   [
+    "J205",
+    "CD"
+   ],
+   [
+    "R204",
+    "1"
+   ],
+   [
+    "U600",
+    "P03"
+   ]
+  ],
+  "HUB_RBIAS": [
+   [
+    "U300",
+    "RBIAS"
+   ],
+   [
+    "R300",
+    "1"
+   ]
+  ],
+  "HUB_XTAL1": [
+   [
+    "U300",
+    "XTALIN"
+   ],
+   [
+    "Y300",
+    "X1"
+   ],
+   [
+    "C300",
+    "1"
+   ]
+  ],
+  "HUB_XTAL2": [
+   [
+    "U300",
+    "XTALOUT"
+   ],
+   [
+    "Y300",
+    "X2"
+   ],
+   [
+    "C301",
+    "1"
+   ]
+  ],
+  "HUB_RST_N": [
+   [
+    "U300",
+    "RESET_N"
+   ],
+   [
+    "R301",
+    "1"
+   ],
+   [
+    "U600",
+    "P04"
+   ]
+  ],
+  "USB_HUB_DP": [
+   [
+    "U300",
+    "USBDP_UP"
+   ],
+   [
+    "J11",
+    "63"
+   ]
+  ],
+  "USB_HUB_DM": [
+   [
+    "U300",
+    "USBDM_UP"
+   ],
+   [
+    "J11",
+    "65"
+   ]
+  ],
+  "PRTPWR1": [
+   [
+    "U300",
+    "PRTPWR1"
+   ],
+   [
+    "U301",
+    "EN"
+   ]
+  ],
+  "OCS1_N": [
+   [
+    "U300",
+    "OCS_N1"
+   ],
+   [
+    "U301",
+    "FLT"
+   ]
+  ],
+  "BT1_VDD": [
+   [
+    "U301",
+    "OUT"
+   ],
+   [
+    "U305",
+    "VCC"
+   ],
+   [
+    "C307",
+    "1"
+   ]
+  ],
+  "BT1_RESET_N": [
+   [
+    "U305",
+    "RESET_N"
+   ],
+   [
+    "C316",
+    "1"
+   ]
+  ],
+  "BT1_DP": [
+   [
+    "U300",
+    "USBDP_DN1"
+   ],
+   [
+    "U305",
+    "USB_DP"
+   ]
+  ],
+  "BT1_DM": [
+   [
+    "U300",
+    "USBDM_DN1"
+   ],
+   [
+    "U305",
+    "USB_DM"
+   ]
+  ],
+  "PRTPWR2": [
+   [
+    "U300",
+    "PRTPWR2"
+   ],
+   [
+    "U302",
+    "EN"
+   ]
+  ],
+  "OCS2_N": [
+   [
+    "U300",
+    "OCS_N2"
+   ],
+   [
+    "U302",
+    "FLT"
+   ]
+  ],
+  "BT2_VDD": [
+   [
+    "U302",
+    "OUT"
+   ],
+   [
+    "U306",
+    "VCC"
+   ],
+   [
+    "C308",
+    "1"
+   ]
+  ],
+  "BT2_RESET_N": [
+   [
+    "U306",
+    "RESET_N"
+   ],
+   [
+    "C317",
+    "1"
+   ]
+  ],
+  "BT2_DP": [
+   [
+    "U300",
+    "USBDP_DN2"
+   ],
+   [
+    "U306",
+    "USB_DP"
+   ]
+  ],
+  "BT2_DM": [
+   [
+    "U300",
+    "USBDM_DN2"
+   ],
+   [
+    "U306",
+    "USB_DM"
+   ]
+  ],
+  "PRTPWR3": [
+   [
+    "U300",
+    "PRTPWR3"
+   ],
+   [
+    "U303",
+    "EN"
+   ]
+  ],
+  "OCS3_N": [
+   [
+    "U300",
+    "OCS_N3"
+   ],
+   [
+    "U303",
+    "FLT"
+   ]
+  ],
+  "BT3_VDD": [
+   [
+    "U303",
+    "OUT"
+   ],
+   [
+    "U307",
+    "VCC"
+   ],
+   [
+    "C309",
+    "1"
+   ]
+  ],
+  "BT3_RESET_N": [
+   [
+    "U307",
+    "RESET_N"
+   ],
+   [
+    "C318",
+    "1"
+   ]
+  ],
+  "BT3_DP": [
+   [
+    "U300",
+    "USBDP_DN3"
+   ],
+   [
+    "U307",
+    "USB_DP"
+   ]
+  ],
+  "BT3_DM": [
+   [
+    "U300",
+    "USBDM_DN3"
+   ],
+   [
+    "U307",
+    "USB_DM"
+   ]
+  ],
+  "PRTPWR4": [
+   [
+    "U300",
+    "PRTPWR4"
+   ],
+   [
+    "U304",
+    "EN"
+   ]
+  ],
+  "OCS4_N": [
+   [
+    "U300",
+    "OCS_N4"
+   ],
+   [
+    "U304",
+    "FLT"
+   ]
+  ],
+  "BT4_VDD": [
+   [
+    "U304",
+    "OUT"
+   ],
+   [
+    "U308",
+    "VCC"
+   ],
+   [
+    "C310",
+    "1"
+   ]
+  ],
+  "BT4_RESET_N": [
+   [
+    "U308",
+    "RESET_N"
+   ],
+   [
+    "C319",
+    "1"
+   ]
+  ],
+  "BT4_DP": [
+   [
+    "U300",
+    "USBDP_DN4"
+   ],
+   [
+    "U308",
+    "USB_DP"
+   ]
+  ],
+  "BT4_DM": [
+   [
+    "U300",
+    "USBDM_DN4"
+   ],
+   [
+    "U308",
+    "USB_DM"
+   ]
+  ],
+  "BT_COMB": [
+   [
+    "U309",
+    "IN"
+   ],
+   [
+    "C311",
+    "1"
+   ]
+  ],
+  "BT_G1": [
+   [
+    "U309",
+    "OUT1"
+   ],
+   [
+    "U310",
+    "IN"
+   ],
+   [
+    "R302",
+    "1"
+   ]
+  ],
+  "BT_G2": [
+   [
+    "U309",
+    "OUT2"
+   ],
+   [
+    "U311",
+    "IN"
+   ],
+   [
+    "R302",
+    "2"
+   ]
+  ],
+  "BT1_RF": [
+   [
+    "U310",
+    "OUT1"
+   ],
+   [
+    "U305",
+    "RF"
+   ],
+   [
+    "R303",
+    "1"
+   ]
+  ],
+  "BT2_RF": [
+   [
+    "U310",
+    "OUT2"
+   ],
+   [
+    "U306",
+    "RF"
+   ],
+   [
+    "R303",
+    "2"
+   ]
+  ],
+  "BT3_RF": [
+   [
+    "U311",
+    "OUT1"
+   ],
+   [
+    "U307",
+    "RF"
+   ],
+   [
+    "R304",
+    "1"
+   ]
+  ],
+  "BT4_RF": [
+   [
+    "U311",
+    "OUT2"
+   ],
+   [
+    "U308",
+    "RF"
+   ],
+   [
+    "R304",
+    "2"
+   ]
+  ],
+  "BT_SW_RFC": [
+   [
+    "C311",
+    "2"
+   ],
+   [
+    "U312",
+    "RFC"
+   ]
+  ],
+  "BT_SW_RF1": [
+   [
+    "U312",
+    "RF1"
+   ],
+   [
+    "C312",
+    "1"
+   ]
+  ],
+  "BT_INT_FEED": [
+   [
+    "C312",
+    "2"
+   ],
+   [
+    "C314",
+    "1"
+   ]
+  ],
+  "BT_INT_M": [
+   [
+    "C314",
+    "2"
+   ],
+   [
+    "L300",
+    "1"
+   ],
+   [
+    "L301",
+    "1"
+   ]
+  ],
+  "BT_INT_ANT": [
+   [
+    "L301",
+    "2"
+   ],
+   [
+    "ANT300",
+    "FEED"
+   ]
+  ],
+  "BT_SW_RF2": [
+   [
+    "U312",
+    "RF2"
+   ],
+   [
+    "C313",
+    "1"
+   ]
+  ],
+  "BT_SMA": [
+   [
+    "C313",
+    "2"
+   ],
+   [
+    "J300",
+    "SIG"
+   ]
+  ],
+  "BT_ANT_SEL": [
+   [
+    "U313",
+    "A"
+   ],
+   [
+    "U312",
+    "V1"
+   ],
+   [
+    "R305",
+    "1"
+   ],
+   [
+    "U600",
+    "P06"
+   ]
+  ],
+  "BT_ANT_SEL_N": [
+   [
+    "U313",
+    "Y"
+   ],
+   [
+    "U312",
+    "V2"
+   ]
+  ],
+  "CAN_CLK": [
+   [
+    "Y400",
+    "OUT"
+   ],
+   [
+    "U400",
+    "OSC1"
+   ],
+   [
+    "U401",
+    "OSC1"
+   ]
+  ],
+  "CAN1_TXCAN": [
+   [
+    "U400",
+    "TXCAN"
+   ],
+   [
+    "U402",
+    "In0"
+   ]
+  ],
+  "CAN1_TXD": [
+   [
+    "U402",
+    "Y"
+   ],
+   [
+    "U404",
+    "TXD"
+   ]
+  ],
+  "CAN1_RXD": [
+   [
+    "U400",
+    "RXCAN"
+   ],
+   [
+    "U404",
+    "RXD"
+   ]
+  ],
+  "CAN1_TXEN": [
+   [
+    "U402",
+    "In2"
+   ],
+   [
+    "RN400",
+    "3"
+   ],
+   [
+    "U600",
+    "P10"
+   ]
+  ],
+  "VISO1": [
+   [
+    "U404",
+    "VISOOUT"
+   ],
+   [
+    "U404",
+    "VSIN"
+   ],
+   [
+    "U404",
+    "VISOIN"
+   ],
+   [
+    "C408",
+    "1"
+   ]
+  ],
+  "GND_ISO": [
+   [
+    "U404",
+    "GND2"
+   ],
+   [
+    "U404",
+    "GISOIN"
+   ],
+   [
+    "U404",
+    "GISOIN_16"
+   ],
+   [
+    "U404",
+    "GISOIN_17"
+   ],
+   [
+    "D400",
+    "GND"
+   ],
+   [
+    "C408",
+    "2"
+   ],
+   [
+    "U405",
+    "GND2"
+   ],
+   [
+    "U405",
+    "GISOIN"
+   ],
+   [
+    "U405",
+    "GISOIN_16"
+   ],
+   [
+    "U405",
+    "GISOIN_17"
+   ],
+   [
+    "D401",
+    "GND"
+   ],
+   [
+    "C409",
+    "2"
+   ],
+   [
+    "J400",
+    "6"
+   ]
+  ],
+  "CAN1_XH": [
+   [
+    "U404",
+    "CANH"
+   ],
+   [
+    "L400",
+    "1"
+   ]
+  ],
+  "CAN1_XL": [
+   [
+    "U404",
+    "CANL"
+   ],
+   [
+    "L400",
+    "2"
+   ]
+  ],
+  "CAN1_H": [
+   [
+    "L400",
+    "4"
+   ],
+   [
+    "D400",
+    "IO1"
+   ],
+   [
+    "J400",
+    "1"
+   ]
+  ],
+  "CAN1_L": [
+   [
+    "L400",
+    "3"
+   ],
+   [
+    "D400",
+    "IO2"
+   ],
+   [
+    "J400",
+    "2"
+   ]
+  ],
+  "CAN2_TXCAN": [
+   [
+    "U401",
+    "TXCAN"
+   ],
+   [
+    "U403",
+    "In0"
+   ]
+  ],
+  "CAN2_TXD": [
+   [
+    "U403",
+    "Y"
+   ],
+   [
+    "U405",
+    "TXD"
+   ]
+  ],
+  "CAN2_RXD": [
+   [
+    "U401",
+    "RXCAN"
+   ],
+   [
+    "U405",
+    "RXD"
+   ]
+  ],
+  "CAN2_TXEN": [
+   [
+    "U403",
+    "In2"
+   ],
+   [
+    "RN400",
+    "2"
+   ],
+   [
+    "U600",
+    "P11"
+   ]
+  ],
+  "VISO2": [
+   [
+    "U405",
+    "VISOOUT"
+   ],
+   [
+    "U405",
+    "VSIN"
+   ],
+   [
+    "U405",
+    "VISOIN"
+   ],
+   [
+    "C409",
+    "1"
+   ]
+  ],
+  "CAN2_XH": [
+   [
+    "U405",
+    "CANH"
+   ],
+   [
+    "L401",
+    "1"
+   ]
+  ],
+  "CAN2_XL": [
+   [
+    "U405",
+    "CANL"
+   ],
+   [
+    "L401",
+    "2"
+   ]
+  ],
+  "CAN2_H": [
+   [
+    "L401",
+    "4"
+   ],
+   [
+    "D401",
+    "IO1"
+   ],
+   [
+    "J400",
+    "3"
+   ]
+  ],
+  "CAN2_L": [
+   [
+    "L401",
+    "3"
+   ],
+   [
+    "D401",
+    "IO2"
+   ],
+   [
+    "J400",
+    "4"
+   ]
+  ],
+  "VEH_OUT1": [
+   [
+    "RN400",
+    "1"
+   ],
+   [
+    "U417",
+    "A"
+   ],
+   [
+    "U600",
+    "P12"
+   ]
+  ],
+  "VEH_OUT2": [
+   [
+    "RN400",
+    "4"
+   ],
+   [
+    "U418",
+    "A"
+   ],
+   [
+    "U600",
+    "P13"
+   ]
+  ],
+  "OUT1_G": [
+   [
+    "U417",
+    "Y"
+   ],
+   [
+    "U414",
+    "IN1"
+   ]
+  ],
+  "OUT2_G": [
+   [
+    "U418",
+    "Y"
+   ],
+   [
+    "U414",
+    "IN2"
+   ]
+  ],
+  "VEH_OUT1_HDR": [
+   [
+    "U414",
+    "DRAIN1"
+   ],
+   [
+    "D403",
+    "IO1"
+   ],
+   [
+    "J400",
+    "7"
+   ]
+  ],
+  "VEH_OUT2_HDR": [
+   [
+    "U414",
+    "DRAIN2"
+   ],
+   [
+    "D403",
+    "IO2"
+   ],
+   [
+    "J400",
+    "8"
+   ]
+  ],
+  "VEH_IN1": [
+   [
+    "J400",
+    "9"
+   ],
+   [
+    "D402",
+    "IO1"
+   ],
+   [
+    "R401",
+    "1"
+   ]
+  ],
+  "VEH_IN2": [
+   [
+    "J400",
+    "10"
+   ],
+   [
+    "D402",
+    "IO2"
+   ],
+   [
+    "R403",
+    "1"
+   ]
+  ],
+  "VEH_IN3": [
+   [
+    "J400",
+    "13"
+   ],
+   [
+    "D404",
+    "IO1"
+   ],
+   [
+    "R405",
+    "1"
+   ]
+  ],
+  "HDR_ID": [
+   [
+    "J400",
+    "12"
+   ],
+   [
+    "D404",
+    "IO2"
+   ],
+   [
+    "R407",
+    "1"
+   ]
+  ],
+  "+5V_SENS": [
+   [
+    "J400",
+    "11"
+   ],
+   [
+    "D405",
+    "IO1"
+   ],
+   [
+    "U413",
+    "OUT"
+   ],
+   [
+    "C418",
+    "1"
+   ]
+  ],
+  "KLINE": [
+   [
+    "J400",
+    "5"
+   ],
+   [
+    "D405",
+    "IO2"
+   ],
+   [
+    "U412",
+    "LIN"
+   ],
+   [
+    "D406",
+    "1"
+   ]
+  ],
+  "VEH_IN1_A": [
+   [
+    "R401",
+    "2"
+   ],
+   [
+    "R402",
+    "1"
+   ],
+   [
+    "U410",
+    "AIN0/GPIO0"
+   ]
+  ],
+  "VEH_IN2_A": [
+   [
+    "R403",
+    "2"
+   ],
+   [
+    "R404",
+    "1"
+   ],
+   [
+    "U410",
+    "AIN1/GPIO1"
+   ]
+  ],
+  "VEH_IN3_A": [
+   [
+    "R405",
+    "2"
+   ],
+   [
+    "R406",
+    "1"
+   ],
+   [
+    "U410",
+    "AIN2/GPIO2"
+   ]
+  ],
+  "HID_A": [
+   [
+    "R407",
+    "2"
+   ],
+   [
+    "R408",
+    "2"
+   ],
+   [
+    "U410",
+    "AIN3/GPIO3"
+   ]
+  ],
+  "VBATT_SENSE": [
+   [
+    "R409",
+    "2"
+   ],
+   [
+    "R410",
+    "1"
+   ],
+   [
+    "U410",
+    "AIN4/GPIO4"
+   ]
+  ],
+  "ADC_DECAP": [
+   [
+    "U410",
+    "DECAP"
+   ],
+   [
+    "C416",
+    "1"
+   ]
+  ],
+  "ILIM": [
+   [
+    "U413",
+    "ILIM"
+   ],
+   [
+    "R411",
+    "1"
+   ]
+  ],
+  "KLINE_PU": [
+   [
+    "R414",
+    "2"
+   ],
+   [
+    "D406",
+    "2"
+   ]
+  ],
+  "HPL_OUT": [
+   [
+    "U5",
+    "HPLOUT"
+   ],
+   [
+    "C500",
+    "1"
+   ]
+  ],
+  "HPL_PRI_P": [
+   [
+    "C500",
+    "2"
+   ],
+   [
+    "T500",
+    "P1"
+   ]
+  ],
+  "HPL_PRI_N": [
+   [
+    "U5",
+    "HPLCOM"
+   ],
+   [
+    "T500",
+    "P2"
+   ]
+  ],
+  "SENSE_P_DIV": [
+   [
+    "R512",
+    "2"
+   ],
+   [
+    "R514",
+    "1"
+   ],
+   [
+    "C507",
+    "1"
+   ]
+  ],
+  "SENSE_N_DIV": [
+   [
+    "R513",
+    "2"
+   ],
+   [
+    "R515",
+    "1"
+   ],
+   [
+    "C508",
+    "1"
+   ]
+  ],
+  "SENSE_ADC_P": [
+   [
+    "C507",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC2L"
+   ]
+  ],
+  "SENSE_ADC_N": [
+   [
+    "C508",
+    "2"
+   ],
+   [
+    "U5",
+    "MIC2R"
+   ]
+  ],
+  "PTT_DIV": [
+   [
+    "R503",
+    "2"
+   ],
+   [
+    "R504",
+    "1"
+   ],
+   [
+    "U501",
+    "INN"
+   ],
+   [
+    "C520",
+    "1"
+   ]
+  ],
+  "PTT_REF": [
+   [
+    "R505",
+    "2"
+   ],
+   [
+    "R506",
+    "1"
+   ],
+   [
+    "U501",
+    "INP"
+   ]
+  ],
+  "KEY_LED_A": [
+   [
+    "R518",
+    "2"
+   ],
+   [
+    "U500",
+    "A"
+   ]
+  ],
+  "KEY_LED_K": [
+   [
+    "U500",
+    "K"
+   ],
+   [
+    "Q501",
+    "D"
+   ]
+  ],
+  "KEY_MID": [
+   [
+    "Q501",
+    "S"
+   ],
+   [
+    "Q502",
+    "D"
+   ]
+  ],
+  "KEY_SW": [
+   [
+    "U500",
+    "S1"
+   ],
+   [
+    "R519",
+    "1"
+   ]
+  ],
+  "INJ_PRI_P": [
+   [
+    "U5",
+    "RIGHT_LOP"
+   ],
+   [
+    "T501",
+    "P1"
+   ]
+  ],
+  "INJ_PRI_N": [
+   [
+    "U5",
+    "RIGHT_LOM"
+   ],
+   [
+    "T501",
+    "P2"
+   ]
+  ],
+  "INJ_SEC_P": [
+   [
+    "T501",
+    "S1"
+   ],
+   [
+    "R510",
+    "1"
+   ]
+  ],
+  "INJ_SEC_N": [
+   [
+    "T501",
+    "S2"
+   ],
+   [
+    "R511",
+    "1"
+   ]
+  ],
+  "INJ_MIC_P": [
+   [
+    "R510",
+    "2"
+   ],
+   [
+    "C505",
+    "1"
+   ]
+  ],
+  "STATUS_G": [
+   [
+    "U600",
+    "P05"
+   ],
+   [
+    "R607",
+    "1"
+   ],
+   [
+    "R609",
+    "1"
+   ]
+  ],
+  "EXPA_RESET": [
+   [
+    "R600",
+    "2"
+   ],
+   [
+    "U600",
+    "RESET"
+   ]
+  ],
+  "LED_R_A": [
+   [
+    "R606",
+    "2"
+   ],
+   [
+    "D600",
+    "RED_A"
+   ]
+  ],
+  "LED_G_A": [
+   [
+    "R607",
+    "2"
+   ],
+   [
+    "D600",
+    "GREEN_A"
+   ]
+  ],
+  "ANT_SW": [
+   [
+    "U601",
+    "OUT"
+   ],
+   [
+    "R11",
+    "1"
+   ]
+  ],
+  "CELL_MAIN_CARD": [
+   [
+    "J201",
+    "SIG"
+   ],
+   [
+    "C220",
+    "1"
+   ]
+  ],
+  "CELL_MAIN_ANT": [
+   [
+    "J203",
+    "SIG"
+   ],
+   [
+    "C220",
+    "2"
+   ]
+  ],
+  "CELL_DIV_CARD": [
+   [
+    "J202",
+    "SIG"
+   ],
+   [
+    "C221",
+    "1"
+   ]
+  ],
+  "CELL_DIV_ANT": [
+   [
+    "J204",
+    "SIG"
+   ],
+   [
+    "C221",
+    "2"
+   ]
+  ],
+  "ETH_LED_LINK_N": [
+   [
+    "J12",
+    "11"
+   ],
+   [
+    "J10",
+    "17"
+   ]
+  ],
+  "ETH_LED_ACT_N": [
+   [
+    "J12",
+    "9"
+   ],
+   [
+    "J10",
+    "15"
+   ]
+  ],
+  "ETH_LED_LINK_A": [
+   [
+    "R48",
+    "2"
+   ],
+   [
+    "J12",
+    "12"
+   ]
+  ],
+  "ETH_LED_ACT_A": [
+   [
+    "R49",
+    "2"
+   ],
+   [
+    "J12",
+    "10"
+   ]
+  ],
+  "PSW_GD": [
+   [
+    "R107",
+    "2"
+   ],
+   [
+    "Q103",
+    "D"
+   ],
+   [
+    "Q104",
+    "D"
+   ]
+  ]
+ }
+}
