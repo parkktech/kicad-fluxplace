@@ -676,7 +676,7 @@ def _dk_media(mpn):
     """[(media type, title, url)] of the part's DigiKey media links (by MPN, else by its DigiKey number from a keyword search)."""
     import urllib.parse
     import urllib.request
-    from . import partsearch as PS, redact as R, sourcing as S
+    from . import partsearch as PS, sourcing as S
     c = PS.credentials()
     if "DIGIKEY_CLIENT_ID" not in c:
         return []
@@ -686,7 +686,7 @@ def _dk_media(mpn):
         req = urllib.request.Request(f"https://api.digikey.com/products/v4/search/{urllib.parse.quote(key, safe='')}/media",
                                      headers={"X-DIGIKEY-Client-Id": c["DIGIKEY_CLIENT_ID"], "Authorization": "Bearer " + tok})
         return [(m.get("MediaType") or "", m.get("Title") or "", m.get("Url") or "")
-                for m in json.load(R.urlopen(req, timeout=30)).get("MediaLinks") or []]
+                for m in json.load(S._redact_urlopen(req, timeout=30)).get("MediaLinks") or []]
     try:
         return get(mpn)
     except Exception:                                       # noqa: BLE001 - not found by MPN: its DigiKey number
