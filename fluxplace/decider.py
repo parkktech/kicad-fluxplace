@@ -22,6 +22,7 @@ import time
 RULE = "fewest FAILs without growing the outline or adding layers"
 DEFAULT_CMD = ["claude", "-p", "--output-format", "json", "--tools", "", "--strict-mcp-config"]   # no tools: evidence is inline
 MODELS = ["haiku", "sonnet"]
+LAST = {}                                        # the last model call: {"cost_usd": ...} (CLI envelope)
 LOG, ANSWERS = "decisions.jsonl", "decisions.answers.toml"
 EV_LINES, EV_CHARS = 24, 240                     # prompt budget: evidence lines kept, chars per line
 
@@ -68,8 +69,9 @@ def _cmd(cons):
     return shlex.split(c) if isinstance(c, str) else [str(x) for x in c]
 
 
-def call_model(text, cons, model):
-    """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped."""
+def call_model(text, cons, model, tools=None, timeout=None, budget_usd=None):
+    """-> (answer text or None, why not).  The CLI's JSON envelope ({"result": ...}) is unwrapped.  `tools` ("WebSearch,WebFetch")
+    switches the default command from no tools to those tools (allowed without a prompt); `timeout` / `budget_usd` cap one call."""
     if os.environ.get("FLUXPLACE_AI_OFFLINE"):
         return None, "offline (FLUXPLACE_AI_OFFLINE)"
     cmd = _cmd(cons)
@@ -77,8 +79,14 @@ def call_model(text, cons, model):
         return None, f"no model command ({cmd[0] if cmd else 'empty'})"
     if cmd == DEFAULT_CMD:
         cmd = cmd + ["--model", model]
+        if tools:
+            cmd[cmd.index("--tools") + 1] = tools
+            cmd += ["--allowedTools", tools]
+        if budget_usd:
+            cmd += ["--max-budget-usd", str(budget_usd)]
     try:
-        r = subprocess.run(cmd, input=text, capture_output=True, text=True, timeout=float(_ai(cons).get("decide_timeout_s", 120)),
+        r = subprocess.run(cmd, input=text, capture_output=True, text=True,
+                           timeout=float(timeout or _ai(cons).get("decide_timeout_s", 120)),
                            env=dict(os.environ, FLUXPLACE_AI_MODEL=model))
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"model call failed ({type(e).__name__})"
@@ -88,6 +96,7 @@ def call_model(text, cons, model):
         env = json.loads(r.stdout)
     except ValueError:
         return r.stdout, ""
+    LAST["cost_usd"] = env.get("total_cost_usd") if isinstance(env, dict) else None
     return (str(env["result"]) if isinstance(env, dict) and "result" in env else r.stdout), ""
 
 
