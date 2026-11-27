@@ -283,11 +283,19 @@ def rate(stats, kind, rung):
     return (closed + 0.5) / (secs / 60.0 + 1.0)
 
 
+STARVE_S = 300.0                                 # a (kind, rung) that spent this long and closed nothing goes behind every rung that has not
+
+
+def starved(stats, kind, rung):
+    secs, closed = stats.get((kind, rung), (0.0, 0))
+    return secs >= STARVE_S and closed == 0
+
+
 def next_task(units, done, stats):
     """units: [{key, kind, prio, rungs}] (prio: (kind order, class rank); rungs: eligible rungs in rank order); done: {(key, rung)}.
     -> (unit, rung) | None. First pass: a unit with no attempt yet this round gets its first rung, in priority order, before any unit
     gets a second one. After that: the remaining (unit, rung) pairs by electrical priority, then the measured rate of closed
-    connections per minute of the (kind, rung), then the rung's rank order."""
+    connections per minute (a starved rung -- STARVE_S spent, nothing closed -- goes last) of the (kind, rung), then the rung's rank order."""
     tried = {k for k, _ in done}
     fresh = [u for u in units if u["rungs"] and u["key"] not in tried]
     if fresh:
@@ -298,7 +306,7 @@ def next_task(units, done, stats):
         for i, r in enumerate(u["rungs"]):
             if (u["key"], r) in done:
                 continue
-            k = (u["prio"], -rate(stats, u["kind"], r), i, u["key"])
+            k = (starved(stats, u["kind"], r), u["prio"], -rate(stats, u["kind"], r), i, u["key"])
             if best is None or k < best[0]:
                 best = (k, u, r)
     return (best[1], best[2]) if best else None

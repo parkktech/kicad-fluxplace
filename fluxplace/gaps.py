@@ -26,6 +26,7 @@ MASK_POLY = ("Polygon on F.Mask", "Polygon on B.Mask")
 MASK_OPENING_EVIDENCE = "board-level mask opening exposes copper of several nets: cut mask openings after routing"
 ORDER = ["short", "power-width", "power-vias", "pair-open", "pair-asym", "pair-unmeasured", "pair-skew", "pair-stub", "pair-impedance", "open-gap",
          "rf-impedance", "net-contract", "open-pour", "open-free", "mask-opening", "clearance", "dangling", "via-offcentre", "pin-escape", "silk-fit", "silk-title"]   # PHASE3I B6: mask after copper
+CLOSE_FIRST = ("short", "open-gap", "open-pour", "open-free")   # close dispatch: a connection comes before copper quality (power width, pairs)
 CLASS_RANK = {"hs-pair": 0, "rf": 1, "power": 2, "pair": 3, "plain": 4}
 _NET = re.compile(r"\[([^\]]*)\]")
 # a path on a high-speed pair leg is allowed only as a stub join this short; the R6 gate still refuses any hs_pair worsening
@@ -2936,7 +2937,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 key = kind + "|" + hashlib.sha1(",".join(sorted(g["id"] for g in grp)).encode()).hexdigest()[:12]
                 units.append({"key": key, "kind": kind, "targets": grp, "kind_targets": tg,
                               "rungs": rungs if gi == 0 else [x for x in rungs if x != "ai"],
-                              "prio": (ORDER.index(kind), min(CLASS_RANK[g["class"]] for g in grp))})
+                              "prio": (-1 if kind in CLOSE_FIRST else 0, ORDER.index(kind), min(CLASS_RANK[g["class"]] for g in grp))})
         return units
 
     for r in range(max_rounds):
