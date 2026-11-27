@@ -3126,14 +3126,14 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         refused = Counter(t["why"] for t in tries if t["result"] == "refused")
         methods = Counter(t["method"] for t in ok)
         os.makedirs(os.path.dirname(runs), exist_ok=True)
-        rec = ({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id, "tool": tool,
-                        "board": os.path.basename(board), "board_fp": board_fp0[:8] if len(board_fp0) > 8
-                        else board_fp0, "stage": "close", "variant": None, "start": start,
-                        "end": _vitals(m), "stop": stop, "minutes": res["minutes"], "attempts": n_att,
-                        "closed": len(ok), "methods_closed": dict(methods),
-                        "top_refusals": [[w, n] for w, n in refused.most_common(3)],
-                        "full_pass": m["opens"] == 0 and m["shorts"] == 0 and m["errors"] == 0,
-                        "ai_tokens": 0})
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id, "tool": tool,
+               "board": os.path.basename(board), "board_fp": board_fp0[:8] if len(board_fp0) > 8 else board_fp0,
+               "stage": "close", "variant": None, "start": start,
+               "end": _vitals(m), "stop": stop, "minutes": res["minutes"], "attempts": n_att,
+               "closed": len(ok), "methods_closed": dict(methods),
+               "top_refusals": [[w, n] for w, n in refused.most_common(3)],
+               "full_pass": m["opens"] == 0 and m["shorts"] == 0 and m["errors"] == 0,
+               "ai_tokens": 0}
         calllog.append(rec, runs)
         _copy_record(work, rec)
     date, rows = time.strftime("%Y-%m-%d"), []

@@ -187,24 +187,31 @@ def _rkey(r):
     return (r.get("run"), r.get("ts"), r.get("stage"), r.get("tool")) if r.get("run") or r.get("ts") else json.dumps(r, sort_keys=True)
 
 
+def _iter_jsonl(path):
+    """Yield the dict records of a jsonl file; unreadable file or bad lines are skipped."""
+    try:
+        fh = open(path)
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                yield r
+
+
 def read_runs(path=None):
     """Union, de-duplicated, oldest first: the committed history + the data log (or `path` when given: just that file)."""
     srcs = [path] if path and os.path.abspath(path) != os.path.abspath(runs_log_path()) else [history_path(), runs_log_path()]
     out, seen = [], set()
     for src in srcs:
-        try:
-            fh = open(src)
-        except OSError:
-            continue
-        with fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(r, dict) and _rkey(r) not in seen:
-                    seen.add(_rkey(r))
-                    out.append(r)
+        for r in _iter_jsonl(src):
+            if _rkey(r) not in seen:
+                seen.add(_rkey(r))
+                out.append(r)
     return out
 
 
@@ -213,18 +220,10 @@ def import_runs(src, dst=None):
     dst = dst or runs_log_path()
     have = {_rkey(r) for r in read_runs(dst)} if os.path.exists(dst) else set()
     add = []
-    try:
-        with open(src) as fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(r, dict) and _rkey(r) not in have:
-                    have.add(_rkey(r))
-                    add.append(r)
-    except OSError:
-        return 0
+    for r in _iter_jsonl(src):
+        if _rkey(r) not in have:
+            have.add(_rkey(r))
+            add.append(r)
     if add:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(dst, "a") as fh:
