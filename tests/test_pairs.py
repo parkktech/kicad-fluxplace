@@ -481,3 +481,45 @@ def test_audit_skew_is_kicads_length_not_the_pad_to_pad_walk(tmp_path):
     assert a["length_src"] == "kicad" and a["basis"] == "kicad" and abs(a["skew"] - abs(k[("ETH_N", "ETH_P")]["skew"])) < 1e-3
     netlen.CACHE.clear()
     assert netlen.pair_lengths(out, [("ETH_N", "ETH_P")], kicad_cli="/nonexistent/kicad-cli") is None       # CLI fails -> None
+
+
+def test_not_laid_blockers_are_the_closest_approach_layers_and_other_layers_only_as_via_sites(tmp_path):
+    """w82: the obstacle list of a PAIR_NOT_LAID names what shuts the closest-approach layer; copper on the other layer appears only
+    as a via-site blocker (it used to list every layer's obstacles around the last point, which sent a fix after an F.Cu pad on In2.Cu)."""
+    wall_f = PB.fp("W1", 40, 40, [PB.pad("1", 0, 0, "WF", 1.0, 82.0)])                        # F.Cu pad wall, full height
+    wall_b = '(segment (start 40 -1) (end 40 81) (width 1.0) (layer "B.Cu") (net "WB"))\n'      # B.Cu track wall
+    rep, B, txt = lay(tmp_path, duo("U1", 20, 40, "D_P", "D_N") + duo("J1", 70, 40, "D_P", "D_N") + wall_f + wall_b)
+    r = rep["pairs"][0]
+    assert r["status"] != "complete" and "closest approach" in r["why"]
+    layer = "F.Cu" if " F.Cu," in r["why"] or "F.Cu," in r["why"].split("closest approach")[1] else "B.Cu"
+    own = [b for b in r["blockers"] if "[via site]" not in b]
+    assert own, r["blockers"]
+    if layer == "F.Cu":
+        assert not any(b.startswith("track WB") for b in own)
+    else:
+        assert not any(b.startswith("pad W1") for b in own)
+
+
+def test_node_limit_grows_with_the_corridor_box_and_is_capped_by_search_time():
+    import types
+    P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0}
+    grid = types.SimpleNamespace(step=0.1, sig=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    t = lambda x, y: {"c": (x, y)}
+    short = PR.node_limit(P, 5.0, grid, t(0, 0), t(5, 0))
+    assert 400000 + 125000 <= short < 1100000                            # a short span: the old formula or its small box
+    big = PR.node_limit(P, 40.0, grid, t(0, 0), t(30, 25))
+    assert big > 400000 + 25000 * 40 and big <= PR.NODE_RATE * PR.NODE_CAP_S
+    assert PR.node_limit(P, 40.0, grid, t(0, 0), t(300, 250)) == PR.NODE_RATE * PR.NODE_CAP_S      # capped by search time
+    assert PR.node_limit(P, 40.0, grid, t(0, 0), t(30, 25), budget_x=3) == min(3 * big, max(3 * (400000 + 25000 * 40), PR.NODE_RATE * PR.NODE_CAP_S))
+
+
+def test_node_limit_never_plans_past_the_stage_deadline():
+    import time as _t
+    import types
+    grid = types.SimpleNamespace(step=0.1, sig=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+    t = lambda x, y: {"c": (x, y)}
+    P = {"nodes": 400000, "nodes_per_mm": 25000, "ring": 1.0}
+    free = PR.node_limit(P, 5.0, grid, t(0, 0), t(300, 250))
+    near = PR.node_limit(dict(P, deadline=_t.time() + 60), 5.0, grid, t(0, 0), t(300, 250))
+    over = PR.node_limit(dict(P, deadline=_t.time() - 500), 5.0, grid, t(0, 0), t(300, 250))
+    assert free == PR.NODE_RATE * PR.NODE_CAP_S and PR.NODE_RATE * 55 <= near <= PR.NODE_RATE * 61 and over == PR.NODE_RATE * PR.NODE_MIN_S

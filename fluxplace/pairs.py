@@ -312,6 +312,27 @@ def _guide_cost(ctx, grid, sig, nets, cost):
             for x, y in zip(arrs, cost)]
 
 
+NODE_RATE = 30000          # A* pops per second measured on W16 (6M nodes ~ 200 s)
+NODE_CAP_S = 300           # w82: one section's search never plans for more than this many seconds
+NODE_MIN_S = 30            # w82: seconds of search a section keeps even when the stage deadline is near
+STATES_PER_CELL = 8        # direction x polarity states per cell and layer the search can visit
+
+
+def node_limit(P, span, grid, ta, tb, budget_x=1):
+    """A* node limit of one section: the old span formula, or the corridor's own size when that is larger -- the cells of the box
+    round the two terminals (padded by the pair's break-out reach) x layers x states per cell -- capped at NODE_CAP_S of search.
+    The 6M-node W16 ETH_P1 search got 4 mm further than the 1.4M one; a long congested corridor needs the room."""
+    base = P["nodes"] + P["nodes_per_mm"] * span
+    pad = max(8.0, 2 * P["ring"])
+    w = abs(ta["c"][0] - tb["c"][0]) + 2 * pad
+    h = abs(ta["c"][1] - tb["c"][1]) + 2 * pad
+    area = w * h / (grid.step * grid.step) * len(grid.sig) * STATES_PER_CELL
+    cap_s = NODE_CAP_S
+    if P.get("deadline"):                               # [pairlay] budget_min: the extra room never outlives the stage's own wall budget
+        cap_s = min(cap_s, max(NODE_MIN_S, P["deadline"] - time.time()))
+    return int(min(budget_x * max(base, area), max(budget_x * base, NODE_RATE * cap_s)))
+
+
 def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, preset=None, search_only=False, cost=None, budget_x=1):
     """one pair section between terminals ta and tb -> {ok, P, N, vias, layers, lenP, lenN, corridor | reason, blockers}."""
     grid, items, P = ctx["grid"], ctx["items"], ctx["P"]
@@ -366,7 +387,7 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
             states, info = preset[0], {"pol": preset[1]}
         else:
             states, info = PL.astar(grid.nx, grid.ny, sig, allowed, vm if nl > 1 else None, seeds, goals, H, 4, K, step,
-                                    P["turn_cost"], P["via_cost"], int(budget_x * (P["nodes"] + P["nodes_per_mm"] * span)),
+                                    P["turn_cost"], P["via_cost"], node_limit(P, span, grid, ta, tb, budget_x),
                                     layer_cost(grid.B["copper"], sig, P, ctx["gated"](nets)),
                                     ccost=_guide_cost(ctx, grid, sig, nets, cost)) if seeds else (None, {"reason": "no gate with a matching polarity"})
         if not states:
@@ -382,7 +403,9 @@ def lay_section(ctx, D, O, ta, tb, rule, nets, plan_only=False, ring=None, prese
                 li, j, i = near
                 x, y = grid.xy(j, i)
                 reason += f"; closest approach ({x:.1f}, {y:.1f}) {sig[li]}, {math.hypot(x - tb['c'][0], y - tb['c'][1]):.1f} mm short of {tb['name']}"
-                blockers = grid.blockers(D, O, sig, x, y, env + clr + 0.6, thr)
+                blockers = grid.blockers(D, O, [sig[li]], x, y, env + clr + 0.6, thr)        # the closest-approach layer's own obstacles (w82)
+                blockers += [b + " [via site]" for b in grid.blockers(D, O, [l for l in sig if l != sig[li]], x, y, env + clr + 0.6, thr)
+                             if b not in blockers][:2]                                      # other layers: only as the via sites they shut
             return {"ok": False, "reason": reason, "blockers": blockers}
         pol = info["pol"]
         runs, vias = PL.runs_of(states, sig, grid.xy)
