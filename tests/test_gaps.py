@@ -1357,3 +1357,62 @@ def test_histogram_buckets():
     r = lambda failing, d: {"failing": failing, "score_delta": {"opens": {"delta": d}}}      # noqa: E731
     h = refusal_mod.histogram([r(["R4"], 0), r(["R4", "target"], 0), r(["R2", "R4"], 1), r(["R0"], 0)])
     assert h["first"] == {"R4": 2, "R2": 1, "R0": 1} and h["any"]["R4"] == 3 and h["score_equal_only"] == 1
+
+# ---- W39: krt_locked (locked FREE copper of plain blockers is unlaid in a session, target + displaced nets re-routed) ----
+
+def _lock_fakes(monkeypatch, tmp_path, blockers, commit=True):
+    from fluxplace import handroute as HR, lockpolicy as LP
+    base = tmp_path / "base.kicad_pcb"
+    base.write_text("x")
+    shoved, routed = [], []
+    js_nets = blockers
+
+    def run(cmd, **k):
+        js = cmd[cmd.index("--json-out") + 1]
+        json.dump({"blockers": [{"net": "HPL_OUT", "blocked_by": [{"net": n} for n in js_nets]}]}, open(js, "w"))
+        return _cp(0)
+    monkeypatch.setattr(HR, "session_begin", lambda b, w, **k: open(w, "w").write("s"))
+    monkeypatch.setattr(HR, "open_nets", lambda p, constraints=None, **k: {"connections": [{"net": "HPL_OUT", "a": {"x": 0, "y": 0}, "b": {"x": 10, "y": 5}}]})
+    monkeypatch.setattr(HR, "shove", lambda w, net, **k: shoved.append((net, k.get("window_box"), k.get("allow_locked"))))
+    monkeypatch.setattr(HR, "session_commit", lambda w, out, **k: (open(out, "w").write("done"), {"accepted": commit, "reasons": ["R1 worse"]})[1])
+    monkeypatch.setattr(GP, "_route_net", lambda w, net, layers, ctx: routed.append(net))
+    monkeypatch.setattr(GP, "_krt_cmd", lambda board, out, nets, ctx, layers=None: ["krt", "--nets", *nets])
+    monkeypatch.setattr(GP, "_krt_open", lambda b, cp: {"HPL_OUT"})
+    monkeypatch.setattr(GP, "_protect_levels", lambda b, c: {"HPL_OUT": LP.FREE, "I2C_SDA": LP.FREE, "RX_SEC_N": LP.SOFT, "AVDD": LP.FREE, "VMODEM": LP.FREE})
+    monkeypatch.setattr(GP, "_rail_widths", lambda *a, **k: {"VMODEM": 0.4})
+    monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
+    monkeypatch.setattr(GP, "signal_layers", lambda b: ["F.Cu", "B.Cu"])
+    monkeypatch.setattr(LP, "level", lambda n, cons, names=None: {"RX_SEC_N": LP.SOFT}.get(n, LP.FREE))
+    monkeypatch.setattr(_procs_mod, "run", run)
+    ctx = {"cons": {}, "cons_path": None, "work": str(tmp_path), "budget_s": 60, "protect": {"RX_SEC_N"}}
+    return base, ctx, shoved, routed
+
+
+def test_krt_locked_rips_only_free_plain_blockers_then_reroutes_target_first(monkeypatch, tmp_path):
+    base, ctx, shoved, routed = _lock_fakes(monkeypatch, tmp_path, ["RX_SEC_N", "I2C_SDA", "VMODEM", "GND", "AVDD"])
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_locked(str(base), str(out), [dict(_g("a"), nets=["HPL_OUT"])], ctx)
+    assert res["status"] == "ran" and res["commit"] and res["ripped"]["HPL_OUT"] == ["HPL_OUT", "I2C_SDA", "AVDD"]
+    assert [s[0] for s in shoved] == ["HPL_OUT", "I2C_SDA", "AVDD"]       # soft pair leg, rail and zone net are never ripped
+    assert shoved[0][1] == (-2.0, -2.0, 14.0, 9.0) and not any(s[2] for s in shoved)    # a box around the connection; no allow_locked opt-in
+    assert routed == ["HPL_OUT", "I2C_SDA", "AVDD"]                        # target first, then the displaced nets
+    assert open(out).read() == "done"
+    assert not [p for p in os.listdir(tmp_path) if "session" in p]
+
+
+def test_krt_locked_refused_commit_writes_nothing(monkeypatch, tmp_path):
+    base, ctx, shoved, routed = _lock_fakes(monkeypatch, tmp_path, ["I2C_SDA"], commit=False)
+    out = tmp_path / "out.kicad_pcb"
+    res = GP._r_krt_locked(str(base), str(out), [dict(_g("a"), nets=["HPL_OUT"])], ctx)
+    assert res["status"].startswith("refused: R1 worse") and not os.path.exists(out)
+
+
+def test_krt_locked_is_a_free_open_rung_after_krt_region():
+    d = GP.DISPATCH["open-free"]
+    assert d.index("krt_locked") == d.index("krt_region") + 1 and GP.LEVEL["krt_locked"] == "L1" and "krt_locked" in GP.RUNGS
+
+
+def test_krt_blockers_reads_the_summary(tmp_path):
+    js = tmp_path / "s.json"
+    json.dump({"blockers": [{"net": "A", "blocked_by": [{"net": "B"}, {"net": "C"}, {"net": "B"}]}, {"net": "D", "blocked_by": [{"net": "E"}]}]}, open(js, "w"))
+    assert GP.krt_blockers(str(js), "A") == ["B", "C"] and GP.krt_blockers(str(js), "Z") == [] and GP.krt_blockers(str(tmp_path / "no"), "A") == []

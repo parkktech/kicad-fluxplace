@@ -20,7 +20,8 @@ def test_flags(tmp_path):
     assert "--keep-input-copper" in c and "--keep-input-copper" not in K.cmd_planes("py", "/r", "a", "b", "GND", "In1.Cu", f)
 
 
-def _ctx(tmp_path, monkeypatch, rcs):
+def _ctx(tmp_path, monkeypatch, rcs, left=()):
+    monkeypatch.setattr(K, "left_pair_legs", lambda *a, **k: list(left))      # W39: no deferred pair leg left unless a test says so
     (tmp_path / "in.kicad_pcb").write_text("x")
     monkeypatch.setattr(K, "plane_plan", lambda b: (["F.Cu", "B.Cu"], [("GND", "In1.Cu")]))
     monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X"])
@@ -65,9 +66,9 @@ def test_router_relaxed_project_is_discarded_after_every_step(tmp_path, monkeypa
 
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), relaxed_runner)
     assert json.load(open(tmp_path / "board.kicad_pro")) == approved
-    assert json.load(open(tmp_path / "3-route.kicad_pro")) == approved
+    assert json.load(open(tmp_path / "5-route.kicad_pro")) == approved
     assert "router project rules discarded:" in r["line"]
-    routed = [s for s in r["steps"] if s["step"] != "pairgroups"]           # pairgroups is a Python step, no router project
+    routed = [s for s in r["steps"] if s["step"] not in ("pairgroups", "pairleft", "pairleft-single")]           # Python steps, no router project
     assert len(routed) == 2 and all(s["router_project_discarded"] for s in routed)
     assert all(cmd[cmd.index("--via-size") + 1] == "0.46" for cmd in calls)
 
@@ -272,7 +273,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     names = [s["step"] for s in r["steps"]]
-    assert names == ["plane-GND", "rails-pour", "pairgroups", "route"]      # VBAT is a pour rail (PHASE3E 5)
+    assert names == ["plane-GND", "rails-pour", "pairgroups", "pairleft", "pairleft-single", "route"]      # VBAT is a pour rail (PHASE3E 5)
     rails_cmd = calls[1]
     assert os.path.basename(rails_cmd[1]) == "route.py"
     assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
@@ -283,7 +284,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     c2.cons["power"] = c.cons["power"]
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND", "VBAT"})
     r2 = K.run(c2, 5, str(tmp_path / "in.kicad_pcb"), runner2)
-    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "pairgroups", "route"] and r2["rails"]["routed"] == []
+    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "route"] and r2["rails"]["routed"] == []
 
 
 def test_no_rails_no_step(tmp_path, monkeypatch):
@@ -291,7 +292,7 @@ def test_no_rails_no_step(tmp_path, monkeypatch):
     c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0])
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "route"]
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "route"]
 
 
 def test_pour_runs_before_final_measurement(tmp_path, monkeypatch):
@@ -403,7 +404,7 @@ def test_rf_nets_route_before_the_rest(tmp_path, monkeypatch):
     monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X", "BT_SW_RFC", "RF_EN"])
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]    # RF_EN is a control line, not RF
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "rf", "route"]    # RF_EN is a control line, not RF
     rf = calls[1]
     assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["BT_SW_RFC"]
 
@@ -419,7 +420,7 @@ def test_route_and_rf_steps_may_not_rip_earlier_copper(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     steps = [s["step"] for s in r["steps"]]
-    assert steps == ["plane-GND", "pairgroups", "rf", "route"]
+    assert steps == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "rf", "route"]
     by = {n: envs.get(i) for i, n in enumerate(["plane-GND", "rf", "route"])}
     assert by["plane-GND"] is None                                                                    # the plane step keeps the default
     assert by["rf"]["KICAD_RIP_PREEXISTING"] == "0" and by["route"]["KICAD_RIP_PREEXISTING"] == "0"   # KRT would register earlier copper as rip candidates
@@ -442,7 +443,7 @@ def test_rf_step_uses_the_pin_aware_class(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})
     monkeypatch.setattr(PG, "_net_class", lambda ctx: lambda n: ("rf", None) if n == "SW_OUT" else ("plain", None))   # SW_OUT sits on an RFC pin
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
-    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "rf", "route"]
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "rf", "route"]
     rf = calls[1]
     assert rf[rf.index("--nets") + 1:rf.index("--layers")] == ["SW_OUT"]
 
@@ -475,3 +476,50 @@ def test_unroutable_rf_net_stays_open_with_a_finding(tmp_path, monkeypatch):
     plain = calls[2]
     assert "BT1_RF" not in plain[plain.index("--nets") + 1:plain.index("--layers")]            # never handed to the plain step at default width
     assert r["rf"]["open"] == ["BT1_RF"] and "RF FINDING" in r["line"] and "BT1_RF" in r["line"] and r["verdict"] == "warn"
+
+def test_deferred_pair_is_routed_coupled_then_as_singles_and_recorded(tmp_path, monkeypatch):
+    """W39: a gated pair the pairs gate deferred is laid by route_diff (coupled, KRT) in the route stage; if it stays open its
+    two legs go to route.py as singles and the pair-quality finding (closed, lengths, skew) is recorded, never silent."""
+    import json
+    from fluxplace import netlen
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0, 0], left=["USB_DM", "USB_DP"])
+    monkeypatch.setattr(K, "_all_nets", lambda b: ["USB_DP", "USB_DM", "X"])
+    monkeypatch.setattr(netlen, "pair_lengths", lambda b, pairs, **k: {tuple(p): {"p": 10.0, "n": 11.5, "skew": -1.5} for p in pairs})
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [s["step"] for s in r["steps"]] == ["plane-GND", "pairgroups", "pairleft", "pairleft-single", "route"]
+    names = [os.path.basename(x[1]) for x in calls]
+    assert names == ["route_planes.py", "route_diff.py", "route.py", "route.py"]       # KRT: coupled first, then singles, then the rest
+    diff, single, rest = calls[1], calls[2], calls[3]
+    assert diff[diff.index("--nets") + 1:diff.index("--layers")] == ["USB_DM", "USB_DP"]
+    assert single[single.index("--nets") + 1:single.index("--layers")] == ["USB_DM", "USB_DP"]
+    assert "USB_DP" not in rest[rest.index("--nets") + 1:rest.index("--power-nets")]       # the final route still leaves them alone
+    fb = json.load(open(tmp_path / "result.json"))["pair_fallback"]
+    assert fb["coupled"] == fb["singles"] == ["USB_DM", "USB_DP"]
+    assert fb["pairs"][0]["pair"] == ["USB_DM", "USB_DP"] and fb["pairs"][0]["skew_mm"] == -1.5 and not fb["pairs"][0]["closed"]
+    assert "pair fallback (pair-quality finding): USB_DM/USB_DP OPEN skew -1.50 mm" in r["line"]
+
+
+def test_deferred_pair_closed_by_the_coupled_step_skips_the_singles(tmp_path, monkeypatch):
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 0, 0], left=["USB_DM", "USB_DP"])
+    seen = iter([["USB_DM", "USB_DP"], []])
+    monkeypatch.setattr(K, "left_pair_legs", lambda *a, **k: next(seen))
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
+    assert [os.path.basename(x[1]) for x in calls] == ["route_planes.py", "route_diff.py", "route.py"]
+    assert r["steps"][3]["step"] == "pairleft-single" and r["steps"][3]["rc"] == 0
+
+
+def test_deferred_pair_step_failure_keeps_the_board(tmp_path, monkeypatch):
+    c, calls, runner = _ctx(tmp_path, monkeypatch, [0, 1, 1, 0], left=["USB_DM", "USB_DP"])
+    r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)          # route_diff and the singles call both exit 1: the stage goes on
+    assert r["steps"][-1]["step"] == "route" and r["steps"][-1]["rc"] == 0 and r["verdict"] == "warn"
+
+
+def test_left_pair_legs_uses_pair_naming_and_open_state():
+    pn = ["USB_DM_J", "USB_DP_J", "ETH_P0_N", "ETH_P0_P"]
+    assert K.left_pair_legs("b", pn, {"USB_DM_J", "USB_DP_J"}, set(), {}, still={"USB_DP_J"}) == ["USB_DM_J", "USB_DP_J"]
+    assert K.left_pair_legs("b", pn, set(), {"ETH_P0_P"}, {}, still={"ETH_P0_N"}) == ["ETH_P0_N", "ETH_P0_P"]
+    assert K.left_pair_legs("b", pn, {"USB_DM_J", "USB_DP_J"}, set(), {}, still={"ETH_P0_N"}) == []
+
+
+def test_left_pair_legs_includes_pairgroups_failures_missing_from_pn():
+    assert K.left_pair_legs("b", ["A_P", "A_N"], set(), {"INJ_SEC_P", "INJ_SEC_N"}, {}, still={"INJ_SEC_P"}) == ["INJ_SEC_N", "INJ_SEC_P"]
