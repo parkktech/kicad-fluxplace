@@ -83,6 +83,9 @@ BOARD = "/var/kicad/utv-comms-bridge/W16/stageA/placetour-5/out.kicad_pcb"   # t
 
 
 @pytest.mark.skipif(not (os.path.exists(REVIEW) and os.path.exists(BOARD)), reason="W16 board not on this machine")
+@pytest.mark.xfail(reason="stale expectation: review-preview-w40 (2026-11-26) predates the D71eu net-budget data; 6 NET_OVER_BUDGET rows "
+                          "no longer reproduce from current W16 data (fails with the 8ce29c3 inputs too). Ledger 2026-11-27: regenerate "
+                          "the review snapshot with its inputs pinned.", strict=False)
 def test_w16_placement_gate_lists_the_review_placement_findings():
     """Real board (slow, ~10 s): every placement FAIL of the review preview is a gap of the gate."""
     fs = [f for f in json.load(open(REVIEW)) if f["level"] == "FAIL" and GM.kind(f["code"]) in ("support-far", "net-budget")]

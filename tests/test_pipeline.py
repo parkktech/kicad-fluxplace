@@ -183,6 +183,23 @@ def test_silk_fail_findings_do_not_stop_the_flow_before_review(tmp_path, monkeyp
     assert r["verdict"] == "warn" and r["board"] == out and "review" in r["next"][0]
 
 
+def test_silk_stage_with_clean_check_is_a_warn_while_drc_silk_items_remain(tmp_path, monkeypatch):
+    b = _board(tmp_path)
+    a = _args(tmp_path, b)
+    c = PL.Ctx(a, a.workdir, b, {})
+    out = os.path.join(c.dir(9, "silk"), "board.kicad_pcb")
+
+    def fake(argv, log):
+        shutil.copy(b, out)
+        return 0, "silk: ok (exit 0) - silk: 0 FAIL, 0 WARN, 0 INFO (after fix)\n"
+    monkeypatch.setattr(PL, "_run_cli", fake)
+    monkeypatch.setattr(PL, "_silk_drc_left", lambda board: {"silk_over_copper": 3})
+    r = PL.st_silk(c, 9, b)
+    assert r["verdict"] == "warn" and r["silk_left"]["drc"] == {"silk_over_copper": 3} and "silk_over_copper" in r["line"]
+    monkeypatch.setattr(PL, "_silk_drc_left", lambda board: {})
+    assert PL.st_silk(c, 9, b)["verdict"] == "pass"
+
+
 def test_in_fresh_process_runs_elsewhere_and_keeps_the_traceback():
     assert PL.in_fresh_process("os", "getpid") != os.getpid()
     assert PL.in_fresh_process("os.path", "join", "a", "b") == os.path.join("a", "b")

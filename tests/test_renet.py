@@ -195,3 +195,16 @@ def test_foreign_via_inside_the_clearance_of_a_swapped_pad_is_stripped(tmp_path)
     text = open(out).read()
     assert "(at 24.5 19.45)" not in text and "(at 10 9.45)" in text           # only the swapped part's neighbour went
     assert RN.changed_refs(b, out) == set()                                  # same pads: refs compare by pads, not copper
+
+
+def test_open_pads_scan_finds_a_swap_already_in_the_input(tmp_path):
+    """no baseline to diff (the swapped part is not new, not changed): a netted pad no own-net copper reaches has its foreign neighbour stripped
+    with open_pads; a pad its own net reaches (R1.1, track A) keeps its neighbour."""
+    body = (two("R1", 10, 10, "A", "G") + two("R3", 25, 20, "N", "M") + _via(24.5, 19.45, "G") + seg((9.5, 10), (9.5, 14), "A") + _via(9.5, 9.45, "B"))
+    b = G.write(tmp_path, body, name="v.kicad_pcb")
+    (tmp_path / "v.kicad_pro").write_text("{}")
+    out = str(tmp_path / "o" / "v.kicad_pcb")
+    assert RN.apply(b, out, None, ()) is None
+    rep = RN.apply(b, out, None, (), True)
+    assert rep["pads"] == ["R3.1"] and rep["removed"] == {"G": 1}
+    assert "(at 9.5 9.45)" in open(out).read()

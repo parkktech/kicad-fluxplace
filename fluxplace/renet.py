@@ -58,11 +58,12 @@ def changed_refs(before, after):
     return {r for r, s in b.items() if a.get(r) != s}
 
 
-def _near_pads(B, pads, trk, refs):
+def _near_pads(B, pads, trk, refs, unserved=frozenset()):
     """{track index: [pads]}: foreign-net copper inside the board clearance of a netted pad of one of `refs` (an in-place footprint swap seats
     new pads beside shipped vias/tracks: no overlap, so no connection, but a clearance violation).  Other parts' pads are left alone: shipped
-    copper may sit under local rules below the default clearance."""
-    pads = [p for p in pads if p["ref"] in refs and p["net"]]
+    copper may sit under local rules below the default clearance.  `unserved` (ids of pads) also counts: a netted pad no same-net copper
+    reaches is a pad whose net changed in an input already swapped (no baseline to diff), so its neighbours are checked like a swapped part's."""
+    pads = [p for p in pads if (p["ref"] in refs or id(p) in unserved) and p["net"]]
     m = 2 * B["clearance"]
     fat = [(k, dict(o, w=o["w"] + m) if k == "seg" else dict(o, d=o["d"] + m)) for k, o in trk]
     off, out = len(pads), collections.defaultdict(list)
@@ -75,9 +76,10 @@ def _near_pads(B, pads, trk, refs):
     return out
 
 
-def _scan(B, near=()):
+def _scan(B, near=(), open_pads=False):
     """-> (seg indexes, via indexes) to strip, the pad refs that disagree with their copper, the nets those pads now carry.
-    `near` (refs) also seeds foreign copper closer than the clearance to a pad of those parts (incremental seat)."""
+    `near` (refs) also seeds foreign copper closer than the clearance to a pad of those parts (incremental seat); `open_pads` does the same for every
+    netted pad that no copper of its own net touches (an in-place swap already in the input)."""
     pads = [p for p in B["pads"] if not p.get("np")]
     trk = [("seg", s) for s in B["segs"]] + [("via", v) for v in B["vias"]]
     items = [("pad", p) for p in pads] + trk
@@ -96,7 +98,11 @@ def _scan(B, near=()):
             same[j - off].add(i - off)
     net = [o["net"] for _, o in trk]
     seeds = {t for t, ps in touch_pads.items() if any(p["net"] != net[t] for p in ps)}
-    close = _near_pads(B, pads, trk, near) if near else {}
+    unserved = set()
+    if open_pads:
+        served = {id(p) for t, ps in touch_pads.items() for p in ps if p["net"] == net[t]}
+        unserved = {id(p) for p in pads if p["net"] and id(p) not in served}
+    close = _near_pads(B, pads, trk, near, unserved) if (near or unserved) else {}
     seeds |= close.keys()
     if not seeds:
         return set(), set(), [], set()
@@ -137,12 +143,12 @@ def _rows(B):
                                [("via", v["net"], v["x"], v["y"], v["d"]) for v in B["vias"]])
 
 
-def apply(board, out, cons=None, near=()):
+def apply(board, out, cons=None, near=(), open_pads=False):
     """Write `out` = `board` minus its mismatched copper (`board` is never touched). -> report {nets, release, removed {net: n}, pads, items}
     or None (nothing written) when no copper disagrees with a pad net.  `release` = every net to re-route: `nets`, the nets the re-netted pads now carry, and the partner leg of each pair leg
-    (constraints), so the pairs machinery can re-lay the pair coupled.  `near` = refs of seated/swapped parts: copper nearer than the clearance to another net's pad of those parts goes too.  A strip that removes other copper than chosen raises."""
+    (constraints), so the pairs machinery can re-lay the pair coupled.  `near` = refs of seated/swapped parts: copper nearer than the clearance to another net's pad of those parts goes too.  `open_pads`: also every netted pad no own-net copper reaches. A strip that removes other copper than chosen raises."""
     B = RD.load(board)
-    segs, vias, refs, padnets = _scan(B, near)
+    segs, vias, refs, padnets = _scan(B, near, open_pads)
     if not segs and not vias:
         return None
     with open(board, errors="surrogateescape") as fh:

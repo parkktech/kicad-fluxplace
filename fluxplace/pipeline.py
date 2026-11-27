@@ -1119,8 +1119,26 @@ def st_silk(c, n, board):
                     left[GM.kind(f["code"]) or "other"][f["code"]] += 1
         except Exception as e:                                 # noqa: BLE001 - the verdict does not depend on this listing
             left = {"unlisted": {type(e).__name__: 1}}
-    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out, "silk_left": left,
-            "next": [] if rc == 0 else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+    drc_silk = _silk_drc_left(out)                             # kicad-cli's own silk items (over copper / overlap / edge) on the fitted board: silk's check may not see them
+    if drc_silk:
+        left["drc"] = drc_silk
+    ok = rc == 0 and not drc_silk
+    return {"verdict": "pass" if ok else "warn", "line": summ + ("" if not drc_silk else f"; DRC silk items left {json.dumps(drc_silk)}"), "board": out, "silk_left": left,
+            "next": [] if ok else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+
+
+def _silk_drc_left(board):
+    """{DRC type: n} of the silk_* violations kicad-cli reports on `board` ({} when none or DRC cannot run: the verdict then rests on silk's own check)."""
+    from . import drcguard as DG_
+    try:
+        rep = DG_.drc_json(board, only_rules=["silk_overlap", "silk_over_copper", "silk_edge_clearance"], complete=False, refill=False)
+    except Exception:                                          # noqa: BLE001 - advisory
+        return {}
+    out = {}
+    for v in rep.get("violations", []):
+        if str(v.get("type", "")).startswith("silk_"):
+            out[v["type"]] = out.get(v["type"], 0) + 1
+    return out
 
 
 def st_review(c, n, board):
@@ -2019,13 +2037,13 @@ def _pinswap_entry(c, work, board, st):
     return out
 
 
-def _renet_entry(c, work, board, st, near=()):
+def _renet_entry(c, work, board, st, near=(), open_pads=False):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
     from . import boardwrite as BW_, renet as RN_
     out = os.path.join(work, "0-renet", "board.kicad_pcb")
     try:
-        rep = RN_.apply(board, out, c.cons, near)
+        rep = RN_.apply(board, out, c.cons, near, open_pads)
     except Exception as e:                                                # noqa: BLE001 - a board pcbnew cannot read is the stages' business
         print(f"pipeline: re-net check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
         return board
@@ -2037,7 +2055,7 @@ def _renet_entry(c, work, board, st, near=()):
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
     BW_.release(out, rep["release"], "re-net")                 # commit() re-protects every net's locked items; a released net's leftovers are re-laid with it
     c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
-    if near:
+    if near or open_pads:
         from . import opengate as OG_
         try:
             OG_.refill(out)                                   # the stripped via/track leaves its old clearance cut-out in the zone fill
@@ -2338,11 +2356,12 @@ def _run(a):
             from . import routediag as RD_, opengate as OG_, renet as RN_
             placed = set(res.get("placed") or ())
             _scope_add(c, {q["net"] for q in RD_.load(board)["pads"] if q["ref"] in placed and q["net"]})     # the new parts' nets are the route's scope
-            try:
-                OG_.refill(board)                              # an in-place footprint swap leaves the zones unfilled around its new pads and holes
-            except Exception as e:                             # noqa: BLE001 - the zones stay as they were; DRC says so later
-                print(f"pipeline: zone refill after the in-place seat skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
-            board = _renet_entry(c, work, board, st, placed | RN_.changed_refs(prev, board))     # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet)
+            board = _renet_entry(c, work, board, st, placed | RN_.changed_refs(prev, board), open_pads=True)     # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet), zones refilled
+            if not st.get("renet"):                            # nothing stripped (the strip refills): an in-place swap still leaves the zones unfilled around its new pads and holes
+                try:
+                    OG_.refill(board)
+                except Exception as e:                         # noqa: BLE001 - the zones stay as they were; DRC says so later
+                    print(f"pipeline: zone refill after the in-place seat skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
             res["line"] = res.get("line", "")
