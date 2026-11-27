@@ -36,3 +36,35 @@ def test_gaps_group_by_shared_copper_not_by_a_net_that_runs_through_every_window
     assert items["g1"] & items["g2"] and not items["g1"] & items["g3"]          # g1/g2 see the same X/Y copper; LONG copper is the same item only where both windows meet
     groups = CX.group_by_shared([(g["id"], g["nets"], items[g["id"]]) for g in gs])
     assert sorted(map(sorted, groups)) == [["g1", "g2"], ["g3"]]
+
+
+def test_pair_signature_changes_only_with_the_legs_copper_or_open_state(tmp_path):
+    import planboards as PB
+
+    def board(extra, name):
+        body = (PB.fp("A", 0, 0, [PB.pad("1", 10, 10, "D_P"), PB.pad("2", 10, 12, "D_N")])
+                + '(segment (start 10 10) (end 30 10) (width 0.2) (layer "F.Cu") (net "D_P"))\n' + extra)
+        return PB.write(tmp_path, body, name)
+    a = board('(segment (start 50 50) (end 60 50) (width 0.2) (layer "F.Cu") (net "OTHER"))\n', "a.kicad_pcb")
+    b = board('(segment (start 50 50) (end 70 50) (width 0.2) (layer "F.Cu") (net "OTHER"))\n', "b.kicad_pcb")
+    c = board('(segment (start 10 12) (end 30 12) (width 0.2) (layer "F.Cu") (net "D_N"))\n', "c.kicad_pcb")
+    sig = lambda f, opn=(): GP._pair_sig(f, "D_P", "D_N", set(opn), "k")
+    assert sig(a) == sig(b)                                  # an unrelated net's copper: the pair row is reused
+    assert sig(a) != sig(c)                                  # a leg got copper
+    assert sig(a) != sig(a, {"D_N"}) and sig(a) != GP._pair_sig(a, "D_P", "D_N", set(), "other-cons")
+
+
+def test_pair_audit_measures_only_the_pairs_whose_signature_is_new(tmp_path, monkeypatch):
+    from fluxplace import qualaudit as QA
+    import planboards as PB
+    body = PB.fp("A", 0, 0, [PB.pad("1", 10, 10, "D_P"), PB.pad("2", 10, 12, "D_N")])
+    f = PB.write(tmp_path, body)
+    calls = []
+    monkeypatch.setattr(QA, "pair_rows", lambda B, cls, cons, opn, pairs=None: calls.append(pairs) or
+                        [{"pair": f"{p}/{n}", "p": p, "n": n, "status": "open"} for p, n in pairs])
+    from fluxplace import pairaudit as PA
+    monkeypatch.setattr(PA, "pair_list", lambda cls: [("D_P", "D_N")])
+    GP._PAIR_ROWS.clear()
+    r1 = GP._pair_audit(f, {}, set())[2]
+    r2 = GP._pair_audit(f, {}, set())[2]
+    assert calls == [[("D_P", "D_N")]] and r1 == r2          # the second audit of the same legs measured nothing

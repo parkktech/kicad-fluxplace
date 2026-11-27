@@ -54,10 +54,23 @@ def _class(nets, rf, pairs):
     return "plain"
 
 
+_PAIR_ROWS = {}                                  # w69: (cons, leg copper, open flags) -> audited pair row (the audit reads only the two legs)
+
+
+def _pair_sig(board, p, n, opn, cons_key):
+    """Everything the audit of pair (p, n) reads from the board: the copper and pads of its two legs and whether each leg is open."""
+    rows = _board_rows(board)
+    legs = {p, n}
+    return hashlib.sha1(repr((cons_key, sorted(legs), p in opn, n in opn,
+                              [r for r in rows["tracks"] if r[0] in legs], [r for r in rows["vias"] if r[0] in legs],
+                              [r for r in rows["pads"] if r[0] in legs])).encode()).hexdigest()
+
+
 def _pair_audit(board, cons, opn=None):
     """(B, cls, rows) of the routing pair audit, built as review._pairs_from_audit builds it. `opn`: open-net set
-    (classify passes the DRC unconnected set); None -> routeconn.open_by_net."""
-    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC
+    (classify passes the DRC unconnected set); None -> routeconn.open_by_net. w69: a pair whose legs' copper, pads and open state are
+    those of an audited pair of an earlier board keeps that row; only the changed pairs are measured (kicad-cli)."""
+    from . import routediag as RD, netclass as NC, qualaudit as QA, routeconn as RC, pairaudit as PA
     B = RD.load(board)
     cls = NC.classify(B, cons or {})
     if opn is None:
@@ -65,7 +78,25 @@ def _pair_audit(board, cons, opn=None):
             opn = set(RC.open_by_net(board))
         except Exception:
             opn = set(RC.text_open(B))
-    return B, cls, QA.pair_rows(B, cls, cons or {}, opn)
+    pairs = PA.pair_list(cls)
+    try:
+        ck = hashlib.sha1(repr(sorted((cons or {}).items(), key=lambda kv: str(kv[0]))).encode()).hexdigest()
+        sig = {pr: _pair_sig(board, pr[0], pr[1], opn, ck) for pr in pairs}
+    except Exception:
+        sig = {}
+    todo = [pr for pr in pairs if sig.get(pr) not in _PAIR_ROWS]
+    fresh = {r["pair"]: r for r in QA.pair_rows(B, cls, cons or {}, opn, pairs=todo)} if todo else {}
+    rows = []
+    for pr in pairs:
+        r = fresh.get(f"{pr[0]}/{pr[1]}") or _PAIR_ROWS.get(sig.get(pr))
+        if r is None:
+            continue
+        if sig.get(pr) and f"{pr[0]}/{pr[1]}" in fresh and r.get("status") != "unknown":     # an unmeasured pair is retried, never cached
+            if len(_PAIR_ROWS) > 512:
+                _PAIR_ROWS.clear()
+            _PAIR_ROWS[sig[pr]] = r
+        rows.append(r)
+    return B, cls, rows
 
 
 SEV = {"pair-open": 3, "pair-unmeasured": 3, "pair-asym": 2, "pair-skew": 1, "pair-stub": 1, "pair-impedance": 1}     # severity of an incomplete pair (score sums it)
