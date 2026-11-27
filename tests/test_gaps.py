@@ -1269,9 +1269,9 @@ def test_mask_opening_gaps_dispatch_to_maskcut(monkeypatch, tmp_path):
 # ---- PHASE3G G4: power rungs dispatch; a power_mag drop with equal power is a lower score -----------------------
 def test_power_gaps_dispatch_to_the_power_rungs():
     from fluxplace import gaps as GP
-    assert GP.DISPATCH["power-width"] == ["powerwiden", "railpour"]
+    assert GP.DISPATCH["power-width"] == ["padvias", "powerwiden", "railpour"]
     assert GP.DISPATCH["power-vias"] == ["powervias"]
-    for r in ("powerwiden", "railpour", "powervias"):
+    for r in ("padvias", "powerwiden", "railpour", "powervias"):
         assert r in GP.RUNGS
     assert "powerwiden" in GP.SPLIT_RUNGS
 

@@ -48,3 +48,37 @@ def test_plane_islands_are_not_joined():
     plane = {"layer": "In1.Cu", "t_mm": 0.035, "contains": lambda x, y: True, "island": lambda x, y: 0 if x < 10 else 1}
     both = PF.solve(segs, vias, pads, zones=[plane], cap=1.0)["flow"][0]
     assert both["amps"] == pytest.approx(1.0, rel=0.01)                              # two islands: the trace is the only path
+
+
+# ---- padvias rung: via-in-pad from a narrow trunk's pad into the plane -------------------------------------------
+
+def test_padvias_rung_is_registered_first_for_power_width():
+    from fluxplace import gaps as GP
+    assert GP.DISPATCH["power-width"][0] == "padvias" and GP.RUNGS["padvias"] and "padvias" in GP.SPLIT_RUNGS
+
+
+def test_padvias_does_nothing_on_a_rail_without_a_plane(tmp_path):
+    pytest.importorskip("pcbnew")
+    import pcbnew as P
+    b = P.BOARD()
+    b.SetCopperLayerCount(4)
+    net = P.NETINFO_ITEM(b, "VB")
+    b.Add(net)
+    fp = P.FOOTPRINT(b)
+    fp.SetReference("L1")
+    b.Add(fp)
+    pad = P.PAD(fp)
+    pad.SetShape(P.PAD_SHAPE_RECTANGLE)
+    pad.SetAttribute(P.PAD_ATTRIB_SMD)
+    pad.SetSize(P.VECTOR2I(P.FromMM(2.0), P.FromMM(6.0)))
+    pad.SetPosition(P.VECTOR2I(P.FromMM(10), P.FromMM(10)))
+    pad.SetNumber("2")
+    pad.SetNet(net)
+    fp.Add(pad)
+    path = str(tmp_path / "b.kicad_pcb")
+    P.SaveBoard(path, b)
+    # the via placement is measured on the real 1.5.3 board (ledger); this pins the guard: no same-net zone, no vias
+    from fluxplace import power as PW
+    cons = {"power": {"VB": {"max_current_ma": 4000, "max_v": 5.0}}}
+    out = str(tmp_path / "o.kicad_pcb")
+    assert PW.add_pad_vias(path, cons, out, nets={"VB"}) == {"pads": {}} and not os.path.exists(out)
