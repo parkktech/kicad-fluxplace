@@ -257,9 +257,9 @@ class Ctx:
 # ------------------------------------------------------------------ stages
 def ready_line(text):
     """The verdict line of a `ready` report: the NOT READY / verdict line first (R077), never the placement-gap table title."""
-    ls = text.splitlines()
-    return (next((l for l in ls if l.startswith(("ready: NOT READY", "NOT READY", "ready: READY"))), None)
-            or next((l for l in ls if l.startswith("ready:")), None) or _last_line(text))
+    lines = text.splitlines()
+    return (next((l for l in lines if l.startswith(("ready: NOT READY", "NOT READY", "ready: READY"))), None)
+            or next((l for l in lines if l.startswith("ready:")), None) or _last_line(text))
 
 
 def st_ready(c, n, board):

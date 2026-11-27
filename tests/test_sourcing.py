@@ -75,9 +75,6 @@ class TestGrading(unittest.TestCase):
         self.assertNotIn(v, S.BLOCKERS)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 def test_unreachable_api_returns_within_the_cap(tmp_path, monkeypatch):
     """R107: every request hangs/fails; check() returns within [parts] lookup_budget_s + 1 request, parts are ERR (not a pass, not a blocker)."""
@@ -121,3 +118,7 @@ def test_host_down_is_remembered_so_the_outage_costs_two_timeouts(tmp_path, monk
     RD._DOWN.clear()
     report, _ = S.check({f"P{i}": [f"R{i}"] for i in range(30)}, qty=1, cache_dir=str(tmp_path), log=lambda *_: None)
     assert len(calls) == 2 and all(v["verdict"] == "ERR" for v in report.values())
+
+
+if __name__ == "__main__":
+    unittest.main()

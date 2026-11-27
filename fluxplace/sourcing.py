@@ -309,12 +309,13 @@ def _registry_tokens(board_path):
     """mpn map file names the registry names for this board's version, best first: the version entry's own `mpn_map`
     (a file name or a list), then mpn_map-<version>.json (lowercase). The version is the registry folder the board lies in."""
     names = []
+    paths = dict.fromkeys((os.path.abspath(board_path), os.path.realpath(board_path)))
     for root in _registry_roots(board_path):
         try:
             reg = json.load(open(os.path.join(root, "docs", "resume", "boards.json")))
         except (OSError, ValueError):
             continue
-        for p in dict.fromkeys((os.path.abspath(board_path), os.path.realpath(board_path))):
+        for p in paths:
             rel = os.path.relpath(p, root).split(os.sep)
             ver = rel[0] if rel and rel[0] in (reg.get("versions") or {}) else None
             if not ver:
@@ -331,11 +332,11 @@ def find_map(board_path):
     Looks beside the board, then in sibling tool/doc dirs — the common KiCad
     project shapes (hardware/<proj>/board.kicad_pcb + hardware/tools/)."""
     d = os.path.dirname(os.path.abspath(board_path))
-    toks_reg = _registry_tokens(board_path)
-    for name in toks_reg:                  # the registry's version of this board (R088): CURRENT.kicad_pcb has no version in its own name
-        for base in (d, os.path.join(d, "..", "tools"), os.path.join(d, ".."), os.path.join(d, "..", "..", "tools"),
-                     *(os.path.join(r, "tools") for r in _registry_roots(board_path)),
-                     *(os.path.join(r, "hardware", "tools") for r in _registry_roots(board_path))):
+    roots = _registry_roots(board_path)
+    reg_bases = (d, os.path.join(d, "..", "tools"), os.path.join(d, ".."), os.path.join(d, "..", "..", "tools"),
+                 *(os.path.join(r, "tools") for r in roots), *(os.path.join(r, "hardware", "tools") for r in roots))
+    for name in _registry_tokens(board_path):  # the registry's version of this board (R088): CURRENT.kicad_pcb has no version in its own name
+        for base in reg_bases:
             cand = os.path.normpath(os.path.join(base, name))
             if os.path.exists(cand):
                 return cand
