@@ -121,8 +121,9 @@ import re
 import tomllib
 
 
-def load(path):
-    """Parse the TOML; returns the raw dict ({} for None path)."""
+def load(path, project=None):
+    """Parse the TOML; returns the raw dict ({} for None path). `project`: a board / .kicad_pro path whose directory is the
+    second place a relative [docs] datasheets is looked for (after the constraints file's own directory)."""
     if not path:
         return {}
     from . import placerules as PR
@@ -131,7 +132,7 @@ def load(path):
     rel = (d.get("docs") or {}).get("datasheets")
     if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
         from . import parts as P
-        d["docs"]["datasheets"] = P.resolve_dir(rel, [path], strict=True)
+        d["docs"]["datasheets"] = P.resolve_dir(rel, [path], strict=True, project=project)
     sch = (d.get("happy") or {}).get("schematic")
     if isinstance(sch, str) and sch and not os.path.isabs(sch):      # B15: a relative schematic is the constraints file's, not the cwd's
         d["happy"]["schematic"] = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), sch))

@@ -232,7 +232,7 @@ class Ctx:
         self.assume = bool(getattr(a, "assume_defaults", False))
         if state is not None:
             state["answers"] = self.answers
-        self.cons = C.load(a.constraints)
+        self.cons = C.load(a.constraints, getattr(a, "board", None))
         self.spec = json.load(open(a.spec)) if a.spec else None
 
     def dir(self, n, name):
@@ -1426,7 +1426,20 @@ def _gate_measure(c, n, name, board, kinds, src=None, later=()):
             "line": f"gate {name} ({', '.join(kinds)}): {r['stop']}, {len(r['left'])} gap(s) in scope"
                     + (f", review source(s) failed: {', '.join(r['review_failed'])}" if r.get("review_failed") else "") + f", opens {r['start']['opens']}",
             "next": [] if ok else [f"gate {name}: {len(r['left'])} gap(s): {os.path.join(d, 'stop.json')}"],
-            "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"]}}
+            "gate": {"kinds": kinds, "stop": r["stop"], "dir": d, "left": r["left"], "review_failed": r.get("review_failed") or []}}
+
+
+def _earlier_gate_defers(g):
+    """--from run: an earlier stage's gate whose only findings are not connectivity (short / open-* / pair-open) does not stop a later
+    stage: those gaps belong to the stage that was skipped, so they are reported and deferred. -> rows or None."""
+    gt = g["gate"]
+    left = gt.get("left") or []
+    if g["verdict"] != "fail" or gt.get("stop") != "open" or gt.get("review_failed") or not left:
+        return None
+    from . import gaps as GP
+    if any(r["kind"] in ("short", "pair-open") or str(r["kind"]).startswith("open-") or r["kind"] not in GP.ORDER for r in left):
+        return None
+    return list(left)
 
 
 # A3: the one commit point. After `pairs` (which locks what it lays) a board carries a manifest of protected copper (boardwrite):
@@ -1961,6 +1974,11 @@ def _run(a):
             # Ledger 2026-11-25: a finding owned by a stage before --from was handled by that stage's run, which this run
             # skips, so it is deferred (warn, recorded), not an exit 5. Owners after --from are deferred as before.
             g = _gate_measure(c, STAGES_.index(k) + 1, k, board, gk_prev, src=board, later=STAGES_)
+            rows = _earlier_gate_defers(g)
+            if rows:
+                _stamp_stop(g["gate"]["dir"], {"deferred": rows})
+                g = {"verdict": "warn", "line": f"gate {k}: deferred, {_deferred_line(rows)} (owned by {k}, before --from)",
+                     "gate": {"stop": "deferred", "deferred": rows}}
             gst = {"stop": g["gate"]["stop"]}
             if g["gate"].get("deferred"):
                 gst["deferred"] = g["gate"]["deferred"]

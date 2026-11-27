@@ -411,3 +411,34 @@ def test_route_widths_failure_fails_the_stage_not_a_default_width_route(tmp_path
     assert PL.run(a2) == 1
     r = PL.load_state(a2.workdir)["stages"]["route"]
     assert r["verdict"] == "fail" and "rail width table failed" in r["line"]
+
+
+def test_from_silk_runs_when_the_route_gate_has_a_power_width_gap(tmp_path, monkeypatch, capsys):
+    from fluxplace import gaps as GP
+    board = _board(tmp_path)
+    left = [{"id": "w1", "kind": "power-width", "class": "power", "nets": ["+5V"], "at": [1.0, 2.0]}]
+    monkeypatch.setattr(GP, "gate_measure", lambda *a, **k: {"stop": "open", "left": left, "start": {"opens": 0}, "best": str(board)})
+    monkeypatch.setattr(GP, "close", lambda *a, **k: (_ for _ in ()).throw(AssertionError("repair loop ran on --from")))
+    seen = []
+    monkeypatch.setattr(PL, "FUNCS", {name: (lambda name: lambda c, n, b: seen.append(name) or {"verdict": "pass", "board": b})(name)
+                                      for name in PL.STAGES})
+    rc = PL.run(_args(tmp_path, board, from_stage="silk", to_stage="silk", flow="constructive"))
+    out = capsys.readouterr().out
+    assert rc == 0 and seen == ["silk"] and "deferred" in out, out
+
+
+def test_relative_datasheets_dir_falls_back_to_the_project_dir_and_names_both(tmp_path):
+    from fluxplace import constraints as C
+    proj, cdir = tmp_path / "proj", tmp_path / "elsewhere"
+    (proj / "docs" / "ds").mkdir(parents=True); cdir.mkdir()
+    (proj / "b.kicad_pro").write_text("{}")
+    board = proj / "b.kicad_pcb"; board.write_text("x")
+    cp = cdir / "c.toml"; cp.write_text('[docs]\ndatasheets = "docs/ds"\n')
+    assert C.load(str(cp), str(board))["docs"]["datasheets"] == str(proj / "docs" / "ds")
+    with pytest.raises(SystemExit) as e:
+        C.load(str(cp))
+    assert str(cdir / "docs/ds") in str(e.value)
+    (proj / "docs" / "ds").rmdir()
+    with pytest.raises(SystemExit) as e:
+        C.load(str(cp), str(board))
+    assert str(cdir / "docs/ds") in str(e.value) and str(proj / "docs/ds") in str(e.value)

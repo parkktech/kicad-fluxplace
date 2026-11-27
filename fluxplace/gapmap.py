@@ -69,6 +69,7 @@ _X = {
     "SILK_": ("silk-fit", "silk"),                 # B8: off board / over pad / over hole / overlap: the silk fit moves text, artwork goes to Fab
     "SILK_VERSION_STALE": ("silk-title", "silk"),
     "SILK_TITLE_": ("silk-title", "silk"),
+    "SILK_TITLEBLOCK_": ("silk-title", "silk"),
     "VIA_TYPE": (None, OWNER_DATA),
     "FAB_": (None, OWNER_DATA),
     "TRACK_BELOW_FAB": (None, OWNER_DATA),

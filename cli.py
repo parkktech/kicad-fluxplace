@@ -2240,7 +2240,7 @@ def _text_ctx(a):
     import json as _json
     from fluxplace import constraints as C
     spec = _json.load(open(a.spec)) if getattr(a, "spec", None) else None
-    return C.load(getattr(a, "constraints", None)), spec
+    return C.load(getattr(a, "constraints", None), getattr(a, "board", None)), spec
 
 
 def cmd_clusters(a):
@@ -2418,6 +2418,7 @@ def cmd_silk(a):
         out = a.board if a.in_place else (a.out or os.path.splitext(a.board)[0] + ".silk.kicad_pcb")
         res = SK.fit(sc, cfg, before, side=a.side)
         shown, _ = SK.apply_guarded(a.board, out, sc, cfg, before, res, a.side)
+        shown = SK.settle_titleblock(out, cons, spec, shown)
         label = out
     if a.json:
         print(_json.dumps({"board": label or a.board, "before": SK.counts(before), "after": SK.counts(shown),
