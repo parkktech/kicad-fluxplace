@@ -63,7 +63,7 @@ def board(path):
 
 def test_pad_inside_pour_is_tied_by_via_and_outside_pad_is_listed(tmp_path):
     src = board(str(tmp_path / "in.kicad_pcb"))
-    rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
+    rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path), cons={"pours": {"extend_to_pads": False}})
     assert any(t["net"] == "RAIL" and t["pad"] == "1" and t["via"] for t in rec["tied"])     # tied through a via into In2
     assert any(u["net"] == "RAIL" and "outside" in u["reason"] for u in rec["untied"])     # no via can reach it: listed
     assert rec["nets"]["RAIL"]["pour_layers"] == ["In2.Cu"]
@@ -133,3 +133,37 @@ def test_5a_rail_without_a_routed_spine_gets_a_spine_zone_at_least_the_ipc_width
     assert len(z) == 1
     bb = z[0].GetBoundingBox()
     assert pcbnew.ToMM(bb.GetHeight()) >= r["width_outer"] and pcbnew.ToMM(bb.GetWidth()) >= 28     # spans all three pads
+
+
+def _track(b, x0, y0, x1, y1, layer, net):
+    t = pcbnew.PCB_TRACK(b)
+    t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x0), pcbnew.FromMM(y0)))
+    t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
+    t.SetWidth(pcbnew.FromMM(0.2))
+    t.SetLayer(b.GetLayerID(layer))
+    t.SetNet(b.FindNet(net))
+    b.Add(t)
+
+
+def test_k14_pad_beyond_the_pour_is_reached_by_a_strip_when_the_box_growth_is_blocked(tmp_path):
+    """K14: U2 is 10 mm from the pour; a foreign pad (VT) sits where the grown rectangle would go, so the box growth is refused and a
+    narrow strip around it ties the pad."""
+    src = board(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    _track(b, 25, 16, 26, 16, "In2.Cu", "VT")            # inside the bounding box of the growth to U2 (30, 10), clear of the strip at y = 10
+    b.Save(src)
+    off = PT.run(src, str(tmp_path / "off.kicad_pcb"), str(tmp_path), cons={"pours": {"extend_to_pads": False}})
+    assert any(u["net"] == "RAIL" for u in off["untied"])
+    rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
+    assert not [u for u in rec["untied"] if u["net"] == "RAIL"], rec["untied"]
+    assert [o for o in rec["outside"] if o["net"] == "RAIL" and o["extendable"]]
+
+
+def test_k14_strip_is_refused_over_foreign_copper(tmp_path):
+    src = board(str(tmp_path / "in.kicad_pcb"))
+    b = pcbnew.LoadBoard(src)
+    _track(b, 25, 8, 25, 12, "In2.Cu", "VT")             # across the path to U2
+    b.Save(src)
+    rec = PT.run(src, str(tmp_path / "out.kicad_pcb"), str(tmp_path))
+    o = [o for o in rec["outside"] if o["net"] == "RAIL"][0]
+    assert not o["extendable"] and any(u["net"] == "RAIL" for u in rec["untied"])

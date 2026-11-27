@@ -260,12 +260,86 @@ def _grown_box(board, net, pad, pour_lids, max_mm):
     return z, old, grown, None
 
 
+TONGUE_MM = 1.0
+
+
+def _blocked(board, net, box, pour_lids, z):
+    """why the added `box` (BOX2I) cannot hold pour copper of `net` on `pour_lids`, else None: other-net track/via/pad, keepout or
+    other-net zone outline there (0.2 mm clearance)."""
+    clr = pcbnew.FromMM(0.2)
+    for t in board.GetTracks():
+        if t.GetNetname() == net or (t.Type() != pcbnew.PCB_VIA_T and t.GetLayer() not in pour_lids):
+            continue
+        tb = t.GetBoundingBox()
+        tb.Inflate(clr, clr)
+        if tb.Intersects(box):
+            return f"other-net copper {t.GetNetname()} in the added area"
+    for f in board.GetFootprints():
+        for q in f.Pads():
+            if q.GetNetname() in (net, "") or not any(l in pour_lids for l in pad_copper_lids(q)):
+                continue
+            qb = q.GetBoundingBox()
+            qb.Inflate(clr, clr)
+            if qb.Intersects(box):
+                return f"other-net pad {f.GetReference()}.{q.GetNumber()} in the added area"
+    for k in board.Zones():
+        if k is z or k.GetNetname() == net or not any(k.IsOnLayer(l) for l in pour_lids):
+            continue
+        if k.GetBoundingBox().Intersects(box):
+            return "keepout in the added area" if k.GetIsRuleArea() else f"other-net zone {k.GetNetname()} in the added area"
+    return None
+
+
+def _tongue(board, net, pad, pour_lids, max_mm):
+    """K14: a pad too far from its pour for the bounding-box growth (or whose box holds other copper): a narrow Manhattan strip
+    (TONGUE_MM wide, <= max_mm long) from the pour's rectangle to the pad, either horizontal-first or vertical-first, whichever holds
+    no other-net copper, pad, keepout or zone. -> (zone, [BOX2I legs], None) | (None, None, reason). Nothing is changed."""
+    x, y = _pad_xy(pad)
+    zs = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net and any(z.IsOnLayer(l) for l in pour_lids)]
+    if not zs:
+        return None, None, "no pour of this net"
+    z = min(zs, key=lambda q: q.Outline().Distance(pcbnew.VECTOR2I(int(x), int(y))))
+    if z.Outline().Outline(0).PointCount() != 4:
+        return None, None, "outline is not a rectangle"
+    bb, ins = z.Outline().Outline(0).BBox(), pcbnew.FromMM(0.5)      # the first contour: the pour's own rectangle, not later strips
+    sx = min(max(x, bb.GetLeft() + ins), bb.GetRight() - ins)
+    sy = min(max(y, bb.GetTop() + ins), bb.GetBottom() - ins)
+    h = pcbnew.FromMM(TONGUE_MM) // 2
+    why = "no clear strip"
+    for mid in ((x, sy), (sx, y)):                             # horizontal-first, vertical-first
+        pts = [(sx, sy), mid, (x, y)]
+        length = sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(pts, pts[1:]))
+        if pcbnew.ToMM(int(length)) > max_mm:
+            return None, None, f"{pcbnew.ToMM(int(length)):.2f} mm of strip (extend_max_mm {max_mm:g})"
+        legs = []
+        for a, b in zip(pts, pts[1:]):
+            if a == b:
+                continue
+            box = pcbnew.BOX2I(pcbnew.VECTOR2I(int(min(a[0], b[0]) - h), int(min(a[1], b[1]) - h)),
+                               pcbnew.VECTOR2I(int(abs(a[0] - b[0]) + 2 * h), int(abs(a[1] - b[1]) + 2 * h)))
+            legs.append(box)
+        bad = next((w for w in (_blocked(board, net, bx, pour_lids, z) for bx in legs) if w), None)
+        if not bad:
+            return z, legs, None
+        why = bad
+    return None, None, why
+
+
 def try_extend(board, net, pad, max_mm, pour_lids, commit=False):
     """grow a rectangular pour outline to take the pad when the added area holds no other-net copper, pad or keepout on
-    the pour's layers. -> (ok, reason). Changes the zone only when `commit`."""
+    the pour's layers; else (K14) add a narrow strip from the pour to the pad. -> (ok, reason). Changes the zone only when `commit`."""
     z, old, grown, why = _grown_box(board, net, pad, pour_lids, max_mm)
     if why:
-        return False, why
+        z, legs, why2 = _tongue(board, net, pad, pour_lids, max_mm)
+        if why2:
+            return False, f"{why}; strip: {why2}"
+        if commit:
+            o = z.Outline()
+            for bx in legs:
+                o.NewOutline()
+                for px, py in _rect_pts(bx):
+                    o.Append(px, py)
+        return True, None
     if commit:
         o = z.Outline()
         o.RemoveAllContours()
@@ -298,8 +372,8 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
     PL.refill(board)
     pm = pour_map(board)
     pcfg = ((cons or {}).get("pours") or {})
-    extend_on = bool(pcfg.get("extend_to_pads", False))
-    ext_max = float(pcfg.get("extend_max_mm", 5.0))
+    extend_on = bool(pcfg.get("extend_to_pads", True))
+    ext_max = float(pcfg.get("extend_max_mm", 15.0))
     rec["outside"] = []
     for net in sorted(pm):
         if nets is not None and net not in nets:
@@ -334,7 +408,11 @@ def run(board_in, board_out, workdir, nets=None, cons=None):
             ok, why = try_extend(board, o["net"], p_, ext_max, pm[o["net"]], commit=True)
             o["extendable"], o["why"] = ok, why
             if ok:
+                PL.refill(board)                           # K14: the grown pour is filled before the tie is verified against it
                 tied, _u = _tie_pads(board, o["net"], [p_], pm[o["net"]], rules)
+                if not tied and tie_status(board, o["net"], p_, pm[o["net"]])[0]:     # the grown pour already reaches it (tied through copper/via)
+                    x_, y_ = _pad_xy(p_)
+                    tied = [{"net": o["net"], "pad": p_.GetNumber(), "at": o["at"], "via": None}]
                 if tied:
                     rec["tied"] += tied
                     rec["satisfied"].append(dict(tied[0], ref=o["ref"]))
