@@ -523,3 +523,8 @@ def test_left_pair_legs_uses_pair_naming_and_open_state():
 
 def test_left_pair_legs_includes_pairgroups_failures_missing_from_pn():
     assert K.left_pair_legs("b", ["A_P", "A_N"], set(), {"INJ_SEC_P", "INJ_SEC_N"}, {}, still={"INJ_SEC_P"}) == ["INJ_SEC_N", "INJ_SEC_P"]
+
+
+def test_route_cap_scales_with_open_connections():
+    assert K.route_cap(0) == K.route_cap(100) == K.CAP_S                    # a small job keeps the fixed cap
+    assert K.route_cap(390) > K.CAP_S and K.route_cap(800) > K.route_cap(390)  # a larger job gets a larger cap
