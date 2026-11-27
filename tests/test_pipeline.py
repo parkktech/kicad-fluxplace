@@ -405,6 +405,7 @@ def test_route_widths_failure_fails_the_stage_not_a_default_width_route(tmp_path
     from fluxplace import power as PWR
     b = _board(tmp_path)
     PL.run(_args(tmp_path, b, to_stage="anchor-check"))
+    monkeypatch.setenv("FLUXPLACE_STAGE_INPROC", "1")       # B4: the patch must reach the stage, so run it in-process
     monkeypatch.setattr(PWR, "route_widths", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no width table")))
     a2 = _args(tmp_path, None, from_stage="route", to_stage="route", answer=["rule-floors=standard"])
     assert PL.run(a2) == 1
