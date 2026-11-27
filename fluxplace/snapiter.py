@@ -255,11 +255,17 @@ def _drop_trials(tmps):
                 os.remove(f)
 
 
-def run(src, dst, iters=6, log=print, locked_ok=False):
+def _ids_of_nets(path, nets):
+    """uuids (as DRC reports them) of the tracks and vias of `nets`."""
+    import pcbnew
+    return {t.m_Uuid.AsString() for t in pcbnew.LoadBoard(path).GetTracks() if t.GetNetname() in nets}
+
+
+def run(src, dst, iters=6, log=print, locked_ok=False, protect=()):
     """-> {"moved", "excluded", "iters", "centred_left", "refused_geom"}; `dst` = the last accepted board (src when none is).
     refused_geom: joints _snap refused for clearance (PHASE3F A6) on the accepted iteration."""
     base = _keys(_report(src))
-    skip, last, tmps = set(), None, []
+    skip, last, tmps = (_ids_of_nets(src, set(protect)) if protect else set()), None, []     # protected nets' copper is never snapped
     for i in range(iters):
         tmp = dst + f".i{i}.kicad_pcb"
         tmps.append(tmp)

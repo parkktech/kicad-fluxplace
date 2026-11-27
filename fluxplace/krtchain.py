@@ -248,7 +248,7 @@ def _post(best, d, planes, R, protect=()):
     Ends the snap leaves (clearance-refused) go to the via-to-end move, then the joiner (the close-stage fallbacks); each is DRC-guarded,
     lock-respecting and skips the `protect` nets (the manifest's nets), the last fallback (centre) included."""
     from . import snapiter as SI, planetie as PT, opengate as OG
-    snap = SI.run(best, best, log=lambda _m: None)
+    snap = SI.run(best, best, log=lambda _m: None, protect=list(protect))
     if snap.get("centred_left") != 0:
         for key, fn in (("via", SI.via_run), ("joiner", SI.joiner_run), ("centre", SI.centre_run)):
             try:
