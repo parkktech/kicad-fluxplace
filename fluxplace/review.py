@@ -2447,11 +2447,17 @@ _NUM = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
 _NAME_SPLIT = re.compile(r"[\s,;:()\[\]=<>]+")
 
 
+_IMP_RUN = re.compile(r"mm of ([\d.]+) mm on (\S+)")
+_SKEW_MAG = re.compile(r"skew ([\d.]+)")
+_RESEG_TOL = (0.25, 0.05)       # a run's length may grow 0.25 mm + 5 % (re-segmentation / endpoint nudge) and still be the same copper
+
+
 def baseline_key(f, nets=()):
     """Identity of a finding across two boards: (code, refs), or (code, nets named in the msg) when it has no refs.
     Never the message text: counts and measured values in it change between versions."""
     if f.get("refs"):
-        return (f["code"], tuple(sorted(f["refs"])), ())
+        g = _IMP_RUN.search(f.get("msg", "")) if f["code"] == "PAIR_IMPEDANCE_OFF" else None
+        return (f["code"], tuple(sorted(f["refs"])), g.groups() if g else ())    # per net AND per copper geometry (layer, width)
     toks = {t for w in _NAME_SPLIT.split(f.get("msg", "")) for t in [w, *w.split("/")] if t}
     hit = {n for n in nets if n in toks or ("/" in n and n in f.get("msg", ""))}
     return (f["code"], (), tuple(sorted(hit)))
@@ -2461,6 +2467,8 @@ def finding_mag(f):
     """Numeric severity: the finding's own `mag`, else the first standalone number of its msg (the measured value)."""
     if f.get("mag") is not None:
         return float(f["mag"])
+    if f["code"].startswith("PAIR_") and (s := _SKEW_MAG.search(f.get("msg", ""))):
+        return float(s.group(1))                  # a pair finding's measured value is its skew, not the first count (vias 4 vs 2)
     m = _NUM.search(f.get("msg", ""))
     return float(m.group()) if m else None
 
@@ -2478,7 +2486,8 @@ def mark_baseline(findings, base_findings, nets=()):
             f["baseline"] = "new"
             continue
         old, new = mags.pop(0), finding_mag(f)
-        worse = old is not None and new is not None and new > old * 1.005 + 1e-3
+        a, r = _RESEG_TOL if f["code"] == "PAIR_IMPEDANCE_OFF" else (1e-3, 0.005)
+        worse = old is not None and new is not None and new > old * (1 + r) + a
         f["baseline"] = "new" if worse else "inherited"
     return findings
 

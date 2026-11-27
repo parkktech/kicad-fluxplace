@@ -93,3 +93,26 @@ def test_interface_pair_check_grades(monkeypatch):
     assert r["fail"] == ["PAIR_SKEW: a/b over"] and len(r["warn"]) == 2
     monkeypatch.setattr(R, "_pairs_from_audit", lambda f, c: None)
     assert R.interface_pair_check("b", {})["fail"]
+
+
+def _imp(net, mm, w, layer):
+    return F("PAIR_IMPEDANCE_OFF", f"{net}: {mm} mm of {w} mm on {layer} is -30% off 100 ohm at the planned gap; this layer needs 0.12/0.152 (pairs.geometry)", [net])
+
+
+def test_impedance_run_resegmented_is_inherited_per_geometry():
+    assert mark([_imp("NA_N", 3.1, 0.15, "F.Cu")], [_imp("NA_N", 3.0, 0.15, "F.Cu")]) == ["inherited"]
+    assert mark([_imp("NA_P", 4.7, 0.15, "F.Cu")], [_imp("NA_P", 4.5, 0.15, "F.Cu")]) == ["inherited"]
+
+
+def test_impedance_new_geometry_or_real_growth_is_new():
+    assert mark([_imp("NA_N", 1.1, 0.2, "F.Cu")], [_imp("NA_N", 2.3, 0.15, "B.Cu")]) == ["new"]
+    assert mark([_imp("NA_N", 6.0, 0.15, "F.Cu")], [_imp("NA_N", 3.0, 0.15, "F.Cu")]) == ["new"]
+
+
+def test_pair_finding_magnitude_is_skew_not_via_count():
+    code = "PAIR_LAYER_MISMATCH"
+    old = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 4 vs 2; skew 5.00 > 1 mm", level="WARN")
+    same = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 3 vs 2; skew 5.00 > 1 mm", level="WARN")
+    worse = F(code, "NA_N/NA_P: layers F>In2 vs F; vias 1 vs 2; skew 9.00 > 1 mm", level="WARN")
+    assert mark([same], [old]) == ["inherited"]
+    assert mark([worse], [old]) == ["new"]
