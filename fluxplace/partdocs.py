@@ -105,9 +105,23 @@ def _get(url, timeout=60):
         return r.status, r.headers.get("Content-Type", ""), r.read()
 
 
+BROWSER_FETCH = os.environ.get("FLUXPLACE_BROWSER_FETCH", "on") != "off"      # constraints [docs] browser_fetch = "on"|"off" (default on)
+BROWSER_GAP_S = 2.0
+_last_browser = {}
+
+
 def _browser_get(url, timeout=60):
-    """-> bytes | None: the same URL through a browser-fingerprinted client (curl_cffi), the last resort for a host that serves its PDF
-    to browsers only (LCSC / manufacturer download pages). None when curl_cffi is missing or the request fails."""
+    """-> bytes | None: LAST RESORT for a public datasheet/document PDF that a host serves to browsers only. A browser-fingerprinted
+    client (curl_cffi), no cookies kept, never a login/sign-in/cookie wall (such URLs are skipped), at most one request per 2 s per host.
+    None when switched off ([docs] browser_fetch = "off"), curl_cffi is missing, or the request fails."""
+    import urllib.parse
+    if not BROWSER_FETCH or re.search(r"log-?in|sign-?in|auth|account|consent", url, re.I):
+        return None
+    host = urllib.parse.urlsplit(url).netloc
+    wait = BROWSER_GAP_S - (time.time() - _last_browser.get(host, 0))
+    if wait > 0:
+        time.sleep(wait)
+    _last_browser[host] = time.time()
     try:
         from curl_cffi import requests as cffi
         r = cffi.get(url, impersonate="chrome", timeout=timeout, allow_redirects=True)

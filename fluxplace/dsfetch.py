@@ -7,7 +7,9 @@ Order (each step is recorded with its URL and outcome, so a failure names what w
   4. manufacturer         URL templates for manufacturers that publish stable, programmatic PDF links (MFR_TEMPLATES)
   5. series               any candidate that carries only the series/base code is kept as a last resort and flagged "series"
 Conduct: official APIs and endpoints that answer an ordinary client.  The client says what it is (CLIENT_UA); there is no
-browser impersonation, no cookies, no CAPTCHA handling.  A 403/challenge is recorded as the outcome and the chain moves on.
+browser impersonation here, no cookies, no CAPTCHA handling.  The one exception is partdocs._browser_get, the LAST resort after this
+chain for PUBLIC datasheet/document PDFs only: a browser-fingerprinted client, no cookies, never a login/cookie wall, 1 request per
+2 s per host, switch [docs] browser_fetch = "off".  A 403/challenge is recorded as the outcome and the chain moves on.
 
 Validation (validate_pdf): `%PDF` header, a minimum size, pdftotext text, and the part number (or its base code with the
 packaging suffix removed) in the text -> "part"; only the series prefix -> "series"; neither -> rejected with the reason.
