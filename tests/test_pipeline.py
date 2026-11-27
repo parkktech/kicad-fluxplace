@@ -442,3 +442,33 @@ def test_relative_datasheets_dir_falls_back_to_the_project_dir_and_names_both(tm
     with pytest.raises(SystemExit) as e:
         C.load(str(cp), str(board))
     assert str(cdir / "docs/ds") in str(e.value) and str(proj / "docs/ds") in str(e.value)
+
+
+def _copied_constraints(tmp_path):
+    proj, bd = tmp_path / "proj", tmp_path / "build"
+    (proj / "docs" / "datasheets").mkdir(parents=True); bd.mkdir()
+    (proj / "p.kicad_pro").write_text("{}")
+    board = proj / "p.kicad_pcb"; board.write_text("(kicad_pcb)\n")
+    cp = bd / "constraints.toml"; cp.write_text('[docs]\ndatasheets = "docs/datasheets"\n')
+    return board, cp, proj / "docs" / "datasheets"
+
+
+def test_every_cli_command_resolves_datasheets_via_the_board_project_dir(tmp_path, monkeypatch):
+    from fluxplace import constraints as C
+    board, cp, ds = _copied_constraints(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(C, "PROJECT_REF", None)
+    with pytest.raises(SystemExit):
+        C.load(str(cp))                                   # no project known: refused
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_silk", lambda a: seen.update(ds=C.load(a.constraints)["docs"]["datasheets"]))
+    cli._main(["silk", str(board), "--constraints", str(cp)])
+    assert seen["ds"] == str(ds)
+
+
+def test_pipeline_intake_with_copied_constraints_finds_the_project_datasheets(tmp_path, monkeypatch):
+    from fluxplace import constraints as C
+    board, cp, ds = _copied_constraints(tmp_path)
+    monkeypatch.setattr(C, "PROJECT_REF", None)
+    c = PL.Ctx(_args(tmp_path, str(board), constraints=str(cp)), str(tmp_path / "W"), str(board), None)
+    assert c.cons["docs"]["datasheets"] == str(ds)

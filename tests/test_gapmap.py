@@ -7,6 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))      # tests/ is a package: pcbgen is not importable alone otherwise
 from fluxplace import gapmap as GM, placegaps as PG, routediag as RD  # noqa: E402
 import pcbgen as g  # noqa: E402
 
