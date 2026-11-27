@@ -14,6 +14,16 @@ Place, route, review, fab for KiCad 10.
 `fluxplace pipeline BOARD --constraints C --spec S --workdir W` runs staged (`W/state.json`). [Agent briefs](docs/AGENT-PIPELINE.md)
 
 Output: [output.md](docs/commands/output.md)
+
+## Packaging and update features
+
+- **Packaging-rules gate P1-P8**: a package is not ready unless all eight rules pass. Rules: [docs/PACKAGING-RULES.md](docs/PACKAGING-RULES.md).
+- **Fab sets for PCBWay and JLCPCB**: BOM and CPL in each house's format, DNP parts excluded, every part with an LCSC pick or a consigned reason.
+- **New version of an existing delivery**: `fluxplace deliver --prev-delivery DIR --prev-bom F --prev-assembly F --changes F`
+  carries previous BOM fields and DNP lines, carries assembly text, and writes README-FIRST (what changed, KNOWN OPEN status), review/, renders, datasheets and the KiCad project.
+- **Baseline gating**: `review|fab|deliver --baseline PREV` fails only on new findings; inherited ones are listed.
+- **Spec sync**: `fluxplace spec-sync BOARD --sch S --spec J [--write]` (schematic = electrical truth, board fields = part truth; constraints `[specsync] sch=`).
+- **Fab-house conformance**: `fluxplace fabconform BOARD --houses jlcpcb,pcbway --write OUT` fixes sub-minimum features or writes per-house order options.
 ## Commands
 
 <!-- index:start -->
