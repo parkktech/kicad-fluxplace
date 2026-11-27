@@ -56,7 +56,8 @@ def freeze(work):
 
 def _info(code):
     try:
-        s = open(os.path.join(code, "DONE")).read().split()
+        with open(os.path.join(code, "DONE")) as fh:
+            s = fh.read().split()
     except OSError:
         s = ["unknown"]
     return {"sha": s[0], "dirty": "dirty" in s[1:], "dir": code}

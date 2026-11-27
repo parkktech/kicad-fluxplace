@@ -1,5 +1,6 @@
 """w93: a pipeline run reads its own frozen copy of the code (<work>/.code), not the live checkout."""
 import os
+import shutil
 import sys
 
 import pytest
@@ -39,7 +40,6 @@ def test_checkout_change_mid_run_is_not_seen_and_resume_reuses_the_copy(fake):
     os.environ.pop(CF.ENV)                                    # a resumed run: new process, same workdir
     CF.freeze(str(work))
     assert in_fresh_process("fluxplace.probe", "v") == "v1"
-    import shutil
     os.environ.pop(CF.ENV)
     shutil.rmtree(work / ".code")                             # operator asks for new code
     CF.freeze(str(work))

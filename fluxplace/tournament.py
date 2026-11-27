@@ -26,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+from fluxplace import codefreeze
 from fluxplace import procs as _procs
 import sys
 import time
@@ -48,11 +49,6 @@ CANDIDATES = [
 ]
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _repo():
-    from fluxplace import codefreeze
-    return codefreeze.root()
 
 # Compile-target rule profiles (Quilter: fabricator constraint bundles).
 # A tournament can sweep candidates x profiles; every profile is a named
@@ -320,7 +316,7 @@ def import_session(workdir, idx, out_board=None):
     returns True headless but mangles geometry into sub-mm-gapped fragments
     (10-15 phantom opens per board)."""
     routed = out_board or os.path.join(workdir, f"cand_{idx}_routed.kicad_pcb")
-    code = (f"import sys, os; sys.path.insert(0, {_repo()!r}); import pcbnew; "
+    code = (f"import sys, os; sys.path.insert(0, {codefreeze.root()!r}); import pcbnew; "
             f"from fluxplace import ses as S; "
             f"b = pcbnew.LoadBoard({os.path.join(workdir, f'cand_{idx}.kicad_pcb')!r}); "
             f"nt, nv, nsk, unr = S.import_into(b, {os.path.join(workdir, f'cand_{idx}.ses')!r}); "
@@ -382,14 +378,14 @@ def run(board_path, jar, workdir, passes=25, jobs=3, candidates=None, log=print,
             sx, sy, gp, pk = c[:4]
             fl = c[4] if len(c) > 4 else "none"
             tb = bool(c[5]) if len(c) > 5 else False
-            code = (f"import sys; sys.path.insert(0, {_repo()!r}); "
+            code = (f"import sys; sys.path.insert(0, {codefreeze.root()!r}); "
                     f"from fluxplace.tournament import compact_candidate_worker; "
                     f"compact_candidate_worker({board_path!r}, {workdir!r}, {i}, "
                     f"{sx}, {sy}, {gp}, {pk}, {list(obstacles)!r}, {plane_nets!r}, "
                     f"profile={pf!r}, flip={fl!r}, tht_bands={tb!r})")
         else:
             fill, aspect, pad, jitter = c
-            code = (f"import sys; sys.path.insert(0, {_repo()!r}); "
+            code = (f"import sys; sys.path.insert(0, {codefreeze.root()!r}); "
                     f"from fluxplace.tournament import candidate_worker; "
                     f"candidate_worker({board_path!r}, {workdir!r}, {i}, "
                     f"{fill}, {aspect}, {pad}, {jitter}, profile={pf!r})")

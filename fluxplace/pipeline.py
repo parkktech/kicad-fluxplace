@@ -2016,7 +2016,7 @@ def run(a):
         _link_lib(work, a.board)
     saved = {k: os.environ.get(k) for k in _EV_ENV}
     from . import codefreeze as CF
-    pre = (os.environ.get("PYTHONPATH"), list(sys.path), os.environ.get(CF.ENV))
+    pre_pythonpath, pre_path, pre_frozen = os.environ.get("PYTHONPATH"), list(sys.path), os.environ.get(CF.ENV)
     if not getattr(a, "status", False):
         a.code = CF.freeze(work)                      # every child and lazy import of this run reads <work>/.code, not the checkout
         print(f"pipeline: code {a.code['sha'][:12]}{' +dirty' if a.code['dirty'] else ''} frozen at {a.code['dir']}", flush=True)
@@ -2028,8 +2028,8 @@ def run(a):
         return rc
     finally:
         _ev_call(_ev_end, work, rc, t0, os.path.abspath(a.board) if getattr(a, "board", None) else None)
-        if pre[2] is None and getattr(a, "code", None):
-            CF.release(pre[0], pre[1])
+        if pre_frozen is None and getattr(a, "code", None):
+            CF.release(pre_pythonpath, pre_path)
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
