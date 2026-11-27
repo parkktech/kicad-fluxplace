@@ -70,3 +70,12 @@ def test_shared_cache_fills_misses_folder_row_wins(tmp_path):
     got = S.cache_load("x.json", d)
     assert got["M"]["v"] == 0 and "N" in got          # the folder's own row wins
     assert S.cache_load("x.json", str(tmp_path / "other"))["M"]["v"] == 1   # another folder sees the shared (newest) row
+
+
+def test_w16_unclassified_packages_now_classify():
+    for d, f in [("TO-236AB", "SOT-23"), ("SOT-583", "SOT-583-8"), ("14-VQFN-HR (4x3.5)", "Texas_RJR0014A_VQFN-HR-14_4x3.5mm"),
+                 ("36-SQFN (6x6)", "QFN-36-1EP_6x6mm_P0.5mm_EP3.7x3.7mm"), ("4-SMD (3.2x2.5)", "Crystal_SMD_3225-4Pin_3.2x2.5mm"),
+                 ("2520", "L_1008_2520Metric"), ("2917 (7343 Metric)", "CP_EIA-7343-31_Kemet-D")]:
+        assert R.packages_agree(d, f)[0] == "ok", (d, f)
+    assert R.packages_agree("-", "L_0402_1005Metric")[0] == "unknown"          # no data: stays UNCHECKED, message says why
+    assert R.packages_agree("0603", "0805")[0] == "family" and R.packages_agree("SOT-23-5", "SOT-23-6")[0] == "pins"

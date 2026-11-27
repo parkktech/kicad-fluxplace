@@ -659,7 +659,7 @@ _PKG_RULES = [
     (r"\bSOT-?23\b(?!-)", "SOT23", 3), (r"\bSOT-?25\b", "SOT23", 5),
     (r"\bSOT-?26\b", "SOT23", 6), (r"\bSOT-?753\b", "SOT23", 5),
     (r"\bSOT-?457\b", "SOT23", 6), (r"\bTSOP-?6\b", "SOT23", 6),
-    (r"\bSC-?59\b", "SOT23", 3), (r"\bTO-?236\b", "SOT23", 3),
+    (r"\bSC-?59\b", "SOT23", 3), (r"\bTO-?236(?:AA|AB)?\b", "SOT23", 3), (r"\bSOT-?583(?:-(\d+))?\b", "SOT583", "g"),
     (r"\bSOT-?353\b", "SC70", 5), (r"\bSC-?70-?(\d)\b", "SC70", "g"),
     (r"\bSOT-?363\b", "SC70", 6), (r"\bSC-?88A?\b", "SC70", None),
     (r"\bSOT-?89-?(\d)?", "SOT89", "g"), (r"\bSOT-?223-?(\d)?", "SOT223", "g"),
@@ -673,6 +673,7 @@ _PKG_RULES = [
     (r"\b(\d+)-(?:SSOP)\b", "SSOP", "g1"), (r"\bSSOP-?(\d+)", "SSOP", "g"),
     (r"\b(\d+)-(?:W|V|U|T|X2)?(?:QFN|VQFN|WQFN|UQFN|TQFN|MLF|MLPQ|MLPD|LFCSP)\b", "QFN", "g1"),
     (r"\b(?:W|V|U|T|X2)?(?:QFN|MLF|MLPQ|MLPD|LFCSP)-?(\d+)", "QFN", "g"),
+    (r"\b(\d+)-(?:S|V)QFN\b", "QFN", "g1"), (r"\b(?:V|W)?QFN-HR-?(\d+)", "QFN", "g"),
     (r"\b(\d+)-(?:W|V|U|T|X2)?(?:DFN|SON|WSON|VSON|USON|WDFN|UDFN|TDFN|VDFN|X2SON)\b", "DFN", "g1"),
     (r"\b(?:W|V|U|T|X2)?(?:DFN|SON|WSON|VSON|USON|WDFN|UDFN|TDFN|VDFN|X2SON)-?(\d+)", "DFN", "g"),
     (r"\b(\d+)-(?:LGA|VFLGA|WLGA|HLGA)\b", "LGA", "g1"), (r"\b(?:VF|W|H)?LGA-?(\d+)", "LGA", "g"),
@@ -726,10 +727,26 @@ def _pins_from_pkg(text):
     return pins.pop() if len(pins) == 1 else None
 
 
+def _body_codes(text):
+    """Body-size codes in a package string ('3.2x2.5', '2520 Metric', 'EIA-7343', '3225-4Pin') as 4-digit LxW codes in 0.1 mm, e.g. {'3225'}."""
+    u = (text or "").upper()
+    out = set()
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*X\s*(\d+(?:\.\d+)?)", u):
+        a, b = (round(float(g) * 10) for g in m.groups())
+        out.add(f"{a:02d}{b:02d}")
+    out |= set(re.findall(r"(?<![\d.])(\d{4})(?=\s*METRIC|-\d+PIN|\))", u)) | set(re.findall(r"EIA-(\d{4})", u))
+    if re.fullmatch(r"\s*\d{4}\s*", u):
+        out.add(u.strip())
+    return out
+
+
 def packages_agree(distributor, footprint):
-    """-> (verdict, detail): 'ok' | 'family' | 'pins' | 'unknown'."""
+    """-> (verdict, detail): 'ok' | 'family' | 'pins' | 'unknown'. A string with no known family (a crystal 4-SMD (3.2x2.5), 2520 Metric)
+    agrees when both carry the same body-size code."""
     a, b = package_key(distributor), package_key(footprint)
     if not a or not b:
+        if _body_codes(distributor) & _body_codes(footprint):
+            return "ok", "body size"
         return "unknown", f"{distributor!r} vs {footprint!r}"
     fam_a, fam_b = {f for f, _ in a}, {f for f, _ in b}
     shared = fam_a & fam_b
@@ -867,9 +884,12 @@ def check_parts(facts, spec, partdata, cons, idx=None, ds_dir=None):
                                   f"'{fp.split(':')[-1]}' disagree on pin count "
                                   f"({detail})", refs=[ref]))
                 elif verdict == "unknown":
+                    miss = ("the distributor lists no package" if pkg.strip() in ("-", "")
+                            else "the package family is not in the package table, and no body size matches")
                     out.append(_f(INFO, "PACKAGE_UNCHECKED",
                                   f"{ref} {mpn}: cannot classify '{pkg}' vs "
-                                  f"'{fp.split(':')[-1]}'", refs=[ref]))
+                                  f"'{fp.split(':')[-1]}': {miss} (cite the package in the part's datasheet facts to settle it)",
+                                  refs=[ref]))
             npins = data.get("pins") or _pins_from_pkg(pkg)
             npads = p.get("connectable_pads")
             total = p.get("pads_total", npads)
