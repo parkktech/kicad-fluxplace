@@ -16,6 +16,9 @@ PACKET_MAX = 4096                    # bytes per packet file
 MAX_CONNS, MAX_HOT, MAX_AVOID = 6, 4, 6
 HOT_MM = 15.0                        # a hot region counts when its centre is within this of a connection end
 RF_VIA_COST = 20.0                   # suggest via cost (mm of track) for an RF net: every layer transition is an impedance discontinuity
+# k11: search escalation for one connection, (pitch mm, window margin mm, node cap). A search that ran out of window (few nodes,
+# no path) gets a wider window; one that hit the node cap (a long connection) gets a coarser grid with a larger cap.
+SEARCH = ((0.05, 2.0, 2500000), (0.05, 6.0, 2500000), (0.1, 3.0, 6000000), (0.1, 6.0, 8000000))
 GRID_MM = 10.0                       # density.compute default grid: region x/y is the cell corner
 ASK = "order, layers, avoid circles [x, y, r] for this net; no coordinates of copper"
 
@@ -181,6 +184,24 @@ def _drop(p):
         gaps._rm(stem + ext)
 
 
+def search(HR, board, net, i, cons_path, layers, avoid, width, rec, M, via_cost):
+    """k11: HR.suggest over SEARCH, one result per step (found or not); a path that the lay refuses gets the next step's path.
+    Same path twice is skipped; endpoints that are not two islands stop the search."""
+    seen = set()
+    for pitch, margin, cap in SEARCH:
+        r = HR.suggest(board, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None, width=width, rec=rec,
+                       M=M, via_cost=via_cost, pitch=pitch, margin=margin, max_nodes=cap)
+        if r.get("found"):
+            if r.get("path") in seen:
+                continue
+            seen.add(r.get("path"))
+        else:
+            r = dict(r, reason=f"p{pitch}/m{margin}: {r.get('reason') or ''}")
+        yield r
+        if "not two separate islands" in str(r.get("reason") or ""):
+            return
+
+
 def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
     """Lay the suggested path of every open connection of each critical net, in action order (default: `crit` order).
     A path is kept (locked) only when the measured opens fall and the shorts do not rise. The last kept board is copied to
@@ -218,9 +239,11 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
             tried.add(_key(rec))
             n_try += 1
             t0 = time.time()
-            r = HR.suggest(cur, net, conn=i, constraints=cons_path, layers=layers or None, avoid=avoid or None, width=width, rec=rec, M=M, via_cost=RF_VIA_COST if net in rf_w else 2.0)
-            result, why, tmp = "no-path", str(r.get("reason") or "")[:200], None
-            if r.get("found"):
+            result, why, whys = "no-path", "", []
+            for r in search(HR, cur, net, i, cons_path, layers, avoid, width, rec, M, RF_VIA_COST if net in rf_w else 2.0):
+                if not r.get("found"):
+                    whys.append(str(r.get("reason") or "")[:120])
+                    continue
                 tmp = HR._tmp_beside(board, f"critroute{n_try}")   # named from the stage input: a name built on `cur` grew by one tag per kept path (ENAMETOOLONG at ~14)
                 try:
                     res = HR.lay(cur, net, r["path"], out=tmp, constraints=cons_path, lock=True, width=width)
@@ -240,8 +263,13 @@ def apply(board, out, actions, cons_path, cons, attempts, log=None, crit=None):
                     result, why = "refused", str(e)
                 except Exception as e:                      # noqa: BLE001 - a failed lay is one failed try, not a stage error
                     result, why = "error", f"{type(e).__name__}: {str(e)[:160]}"
-            if tmp:
-                _drop(tmp)
+                if tmp:
+                    _drop(tmp)
+                if result == "kept":
+                    break
+                whys.append(f"{result}: {why}")             # k11: a refused lay (e.g. an escape lock) tries the next search step's path
+            if result != "kept":
+                why = " | ".join(whys)[:400]
             rec_log = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "stage": "critroute", "net": net, "conn": i,
                        "class": next((c["class"] for c in crit if c["net"] == net), None), "method": "suggest+lay",
                        "layers": layers, "width": width, "avoid": len(avoid), "result": result, "why": why,

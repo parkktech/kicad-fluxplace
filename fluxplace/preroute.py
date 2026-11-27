@@ -179,12 +179,24 @@ def _lane(p, part, L, w):
     return (p["x"] - w / 2, p["y"] - p["ey"] - L, p["x"] + w / 2, p["y"] - p["ey"])
 
 
-def pin_escape_blocked(B, only_nets=None, partners=None):
+def _escaped(B, segs, p):
+    """k11: the pad already has own-net copper starting on it (a track end inside the pad on a pad layer): it escaped."""
+    box = (p["x"] - p["ex"], p["y"] - p["ey"], p["x"] + p["ex"], p["y"] + p["ey"])
+    for k in segs.hits(box, "x"):
+        s = B["segs"][k]
+        if s["net"] == p["net"] and s["layer"] in p["layers"] and any(
+                box[0] - 1e-3 <= e[0] <= box[2] + 1e-3 and box[1] - 1e-3 <= e[1] <= box[3] + 1e-3 for e in (s["a"], s["b"])):
+            return True
+    return False
+
+
+def pin_escape_blocked(B, only_nets=None, partners=None, skip_escaped=False):
     """A fine-pitch (<= 0.5 mm) IC pad whose outward lane (track wide, track +
     clearance long) contains another net's pad, another part's courtyard, a
     track-forbidding rule area or existing copper of another net.
     only_nets: grade only pads of these nets (routed boards: the open nets). partners: {net: partner net}; copper of
-    a pad's partner is not a blocker (a pair's own legs)."""
+    a pad's partner is not a blocker (a pair's own legs). skip_escaped (k11): a pad whose own track already leaves it is not
+    graded (a lock beside it cannot close an escape it no longer needs)."""
     partners = partners or {}
     L, w = B["track"] + B["clearance"], B["track"]
     pads = GM.Hash(2.0)
@@ -209,6 +221,8 @@ def pin_escape_blocked(B, only_nets=None, partners=None):
             if not p["net"] or p["w"] * p["h"] > 1.5:
                 continue
             if only_nets is not None and p["net"] not in only_nets:
+                continue
+            if skip_escaped and _escaped(B, segs, p):
                 continue
             lane = _lane(p, part, L, w)
             why = None

@@ -264,5 +264,6 @@ def test_try_order_is_canonical_across_runs(tmp_path, monkeypatch):
                  crit=[{"net": "BT1_RF", "class": "rf", "reason": ""}, {"net": "XTAL_IN", "class": "clock", "reason": ""}])
         return tried
     r1, r2, r3 = run(1), run(2), run(3)
-    assert len(r1) == 9 and r1 == r2 == r3
+    assert len(r1) == 9 * len(CR.SEARCH) and r1 == r2 == r3                         # k11: every search step per connection
+    r1 = r1[::len(CR.SEARCH)]
     assert r1[:6] == sorted(r1[:6], key=lambda t: t[1])                              # by endpoint coordinates within a net

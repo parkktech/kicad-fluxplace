@@ -233,7 +233,7 @@ def pin_escape_blocked(board, cons=None):
     PIN_ESCAPE_BLOCKED check). The lock writers compare it before and after a lock."""
     from . import preroute, routediag
     out = set()
-    for f in preroute.pin_escape_blocked(routediag.load(board)):
+    for f in preroute.pin_escape_blocked(routediag.load(board), skip_escaped=True):     # k11: a routed pad has escaped
         if f.get("code") == "PIN_ESCAPE_BLOCKED":
             out |= set(f.get("pins") or [])
     return out

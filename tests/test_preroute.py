@@ -194,3 +194,21 @@ def test_congestion_on_a_routed_board_is_information(tmp_path):
     done_b = RD.load(g.board(tmp_path, g.two("R1", 10, 10, "A", "A") + seg, name="r.kicad_pcb"))
     assert PR.is_routed(open_b) is False and PR.is_routed(done_b) is True
     assert RV.INFO == "INFO"
+
+
+def test_pin_escape_skip_escaped_pad_with_own_track(tmp_path):
+    """k11: a pad whose own track already leaves it no longer needs its lane: skip_escaped drops it, the others stay blocked."""
+    ic = g.ic("U1", 20, 20, ["A", "B", "C", "D", "E", "F"], pitch=0.4)
+    far = g.two("R1", 12, 12, "X", "Y", court=(-1.0, -0.5, 1.0, 0.5))
+    seg = "(segment (start 17.5 18.5) (end 17.5 22) (width 0.15) (layer \"F.Cu\") (net \"ZZ\"))\n"
+    B = RD.load(g.board(tmp_path, ic + far + seg, name="f.kicad_pcb"))
+    pins = {p for f in PR.pin_escape_blocked(B) for p in f["pins"]}
+    assert pins
+    ref, num = sorted(pins)[0].split(".")
+    pad = next(q for q in B["pads"] if q["ref"] == ref and q["num"] == num)
+    own = (f"(segment (start {pad['x']} {pad['y']}) (end {pad['x']} {pad['y'] - 3}) (width 0.1) (layer \"F.Cu\") "
+           f"(net \"{pad['net']}\"))\n")
+    B2 = RD.load(g.board(tmp_path, ic + far + seg + own, name="g.kicad_pcb"))
+    left = {p for f in PR.pin_escape_blocked(B2, skip_escaped=True) for p in f["pins"]}
+    assert f"{ref}.{num}" not in left and left == pins - {f"{ref}.{num}"}
+    assert {p for f in PR.pin_escape_blocked(B2) for p in f["pins"]} >= pins        # default: unchanged grading

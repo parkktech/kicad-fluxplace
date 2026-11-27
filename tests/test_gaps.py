@@ -43,6 +43,11 @@ FREE = DRC["unconnected_items"][2]
 ALL_KINDS = {"short", "open-gap", "open-pour", "open-free", "clearance", "dangling", "via-offcentre", "other"}
 
 
+
+def _PLAIN_FREE():
+    """k11: the open-free rungs a plain (non-RF) gap is offered (rfroute only takes an RF open)."""
+    return [r for r in GP.DISPATCH["open-free"] if r != "rfroute"]
+
 def _mm(opens=0, shorts=0, errors=0, err_keys=None, gaps=None):
     return {"opens": opens, "shorts": shorts, "errors": errors, "err_keys": Counter(err_keys or []),
             "gaps": gaps or []}
@@ -203,7 +208,7 @@ def test_close_flat_and_memo(monkeypatch, loop):
     res2 = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     assert res2["stop"] == "flat"
     lines = [json.loads(x) for x in open(loop["attempts"])]
-    k = len(GP.DISPATCH["open-free"])
+    k = len(_PLAIN_FREE())
     assert [x["result"] for x in lines[:k]] == ["refused"] * k
     assert [x["why"] for x in lines[:k]] == ["no change"] * k
     assert all(x["drc_runs"] == 0 for x in lines[:k])
@@ -228,7 +233,7 @@ def test_rung_error_caught(monkeypatch, loop):
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert res["stop"] == "flat"
     assert {x["result"] for x in lines} == {"error"}
-    assert {x["method"] for x in lines} == set(GP.DISPATCH["open-free"])
+    assert {x["method"] for x in lines} == set(_PLAIN_FREE())
     assert lines[0]["why"] == "RuntimeError: boom"
 
 
@@ -238,7 +243,7 @@ def test_stop_json(monkeypatch, loop):
     res = _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)
     stop = json.load(open(os.path.join(loop["work"], "stop.json")))
     assert {"stop", "exit", "level", "minutes", "start", "end", "attempts", "left"} <= set(stop)
-    assert stop["attempts"] == len(GP.DISPATCH["open-free"]) and stop["level"] == "L0"
+    assert stop["attempts"] == len(_PLAIN_FREE()) and stop["level"] == "L0"
     assert len(stop["left"]) == 1
     left = stop["left"][0]
     assert left["kind"] == "open-free" and left["last_method"] == "ai" and left["why"] == "no change"
@@ -266,7 +271,7 @@ def test_rung_systemexit_is_error_and_loop_continues(monkeypatch, loop):
     lines = [json.loads(x) for x in open(loop["attempts"])]
     assert {x["result"] for x in lines} == {"error"}
     assert lines[0]["why"] == "SystemExit: bye"
-    assert len(lines) == len(GP.DISPATCH["open-free"])
+    assert len(lines) == len(_PLAIN_FREE())
 
 
 def test_st_close_warns_when_close_raises(monkeypatch, tmp_path):
@@ -474,7 +479,7 @@ def test_runs_line_keys_and_full_pass(monkeypatch, loop, tmp_path):
     assert lines[0]["full_pass"] is True and lines[0]["stop"] == "clean" and lines[0]["closed"] == 1
     assert lines[0]["methods_closed"] == {"patch": 1} and lines[0]["board"] == "in.kicad_pcb"
     assert lines[1]["full_pass"] is False and lines[1]["stop"] == "flat"
-    assert lines[1]["top_refusals"] == [["no change", len(GP.DISPATCH["open-free"])]]
+    assert lines[1]["top_refusals"] == [["no change", len(_PLAIN_FREE())]]
 
 
 def test_report_rows_and_skipped_excluded(tmp_path):

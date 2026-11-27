@@ -626,17 +626,22 @@ def _r_joingaps(base, out, gaps, ctx):
     return _brief(J.run(base, out, gap=J.GAP_MAX, nets=_nets(gaps)))
 
 
+POUR_ISLANDS_MAX = 12                          # k11: stitching vias one pourisland rung lays per net
+
+
 def _r_pourisland(base, out, gaps, ctx):
     from . import pourisland as P
     cur, wrote, tmps = base, False, []
     try:
         for i, net in enumerate(_nets(gaps)):
-            tmp = os.path.join(ctx["work"], f"pi-{i}.kicad_pcb")
-            tmps.append(tmp)
-            _rm(tmp)
-            _sidecars(cur, tmp)
-            P.repair(cur, tmp, net, constraints=ctx["cons_path"])
-            if os.path.exists(tmp):
+            for k in range(POUR_ISLANDS_MAX):       # k11: repair ties one island per call; every untied island of the net gets its via
+                tmp = os.path.join(ctx["work"], f"pi-{i}-{k}.kicad_pcb")
+                tmps.append(tmp)
+                _rm(tmp)
+                _sidecars(cur, tmp)
+                P.repair(cur, tmp, net, constraints=ctx["cons_path"])
+                if not os.path.exists(tmp):
+                    break
                 cur, wrote = tmp, True
         if wrote:
             _copy(cur, out)
@@ -1027,6 +1032,139 @@ def _r_krt_locked(base, out, gaps, ctx):
 
 
 
+UNSEAL_R_MM = 1.0                               # k11: foreign vias this close to a sealed open end are move candidates
+UNSEAL_STEPS = (0.1, 0.15, 0.2, 0.3)            # k11: via move distances (mm), away from the end, then sideways
+UNSEAL_SEALED_NODES = 5000                      # k11: a search that expands fewer nodes than this started in a sealed pocket
+UNSEAL_VIAS = 4
+
+
+def _move_via(board, out, x, y, nx, ny):
+    """Move the via at (x, y) and every track end on it to (nx, ny); write `out`. -> items moved."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    P, N, n = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), pcbnew.VECTOR2I(pcbnew.FromMM(nx), pcbnew.FromMM(ny)), 0
+    for t in b.GetTracks():
+        if t.Type() == pcbnew.PCB_VIA_T and (t.GetPosition() - P).EuclideanNorm() < 2000:
+            t.SetPosition(N)
+            n += 1
+        elif t.Type() == pcbnew.PCB_TRACE_T:
+            for get, put in ((t.GetStart, t.SetStart), (t.GetEnd, t.SetEnd)):
+                if (get() - P).EuclideanNorm() < 2000:
+                    put(N)
+                    n += 1
+    b.Save(out)
+    return n
+
+
+def _via_probe(M, v, nx, ny):
+    """The via `v` (routediag row) is legal at (nx, ny): its own copper and hole at the old place are not obstacles."""
+    from . import handroute as HR, hrgeom as G
+    own = {o.id for o in M.obs if o.kind in ("via", "hole") and o.net in (v["net"], "")
+           and abs((o.bb[0] + o.bb[2]) / 2 - v["x"]) < 0.01 and abs((o.bb[1] + o.bb[3]) / 2 - v["y"]) < 0.01}
+    return HR.probe_prims(M, v["net"], G.parse_path(f"via {nx},{ny}", M.cu), via=(v["d"], v["drill"]), skip_ids=own)["ok"]
+
+
+def _r_unseal(base, out, gaps, ctx):
+    """k11 (D71fm sealed pads): an open whose end sits in a pocket closed by another net's via (the grid search expands only a few
+    nodes) gets that via moved a little away from the end with its track ends (lock level FREE/SOFT; every moved segment and the
+    via probed clean first), then the connection is searched and laid (critroute.search + handroute.lay). First lay kept wins
+    per connection; the close guard judges the result."""
+    from . import critroute as CR, handroute as HR, lockpolicy as LP, routediag as RD
+    cons, cp = ctx["cons"], ctx.get("cons_path")
+    want = [n for n in dict.fromkeys(_nets(gaps)) if not any(g.get("class") == "rf" and n in g["nets"] for g in gaps)]
+    if not want:
+        return {"status": "no plain net"}
+    cur, res, tmps = base, {"status": "ran", "moved": [], "laid": []}, []
+    try:
+        for net in want:
+            M = HR._model(cur, cp)
+            for rec in [r for r in HR.open_nets(cur, constraints=cp, M=M)["connections"] if r["net"] == net]:
+                first = next(CR.search(HR, cur, net, None, cp, None, None, None, rec, M, 2.0))
+                nodes = re.search(r"searched (\d+) nodes", str(first.get("reason") or ""))
+                if first.get("found") or not nodes or int(nodes.group(1)) >= UNSEAL_SEALED_NODES:
+                    continue
+                B = RD.load(cur)
+                names = sorted({s_["net"] for s_ in B["segs"]} | {v["net"] for v in B["vias"]})
+                c = rec.get("closest") or {}
+                ends = [tuple(c.get("a") or (rec["a"]["x"], rec["a"]["y"])), tuple(c.get("b") or (rec["b"]["x"], rec["b"]["y"]))]
+                cands = sorted(((math.hypot(v["x"] - ex, v["y"] - ey), v, (ex, ey)) for v in B["vias"] for ex, ey in ends
+                                if v["net"] != net and math.hypot(v["x"] - ex, v["y"] - ey) < UNSEAL_R_MM
+                                and LP.level(v["net"], cons, names) in (LP.FREE, LP.SOFT)), key=lambda t: t[0])[:UNSEAL_VIAS]
+                done = False
+                for d, v, (ex, ey) in cands:
+                    ux, uy = (v["x"] - ex) / (d or 1), (v["y"] - ey) / (d or 1)
+                    for step in UNSEAL_STEPS:
+                        for dx, dy in ((ux, uy), (-uy, ux), (uy, -ux)):
+                            nx, ny = round(v["x"] + dx * step, 4), round(v["y"] + dy * step, 4)
+                            if not _via_probe(M, v, nx, ny):
+                                continue
+                            mv = f"{out}.unseal{len(tmps)}.kicad_pcb"
+                            tmps.append(mv)
+                            _sidecars(cur, mv)
+                            _move_via(cur, mv, v["x"], v["y"], nx, ny)
+                            M2 = HR._model(mv, cp)
+                            key = {(round(rec[k]["x"], 2), round(rec[k]["y"], 2)) for k in ("a", "b")}
+                            rec2 = next((r for r in HR.open_nets(mv, constraints=cp, M=M2)["connections"] if r["net"] == net
+                                         and {(round(r[k]["x"], 2), round(r[k]["y"], 2)) for k in ("a", "b")} == key), None)
+                            if rec2 is None:
+                                continue
+                            for r in CR.search(HR, mv, net, None, cp, None, None, None, rec2, M2, 2.0):
+                                if not r.get("found"):
+                                    continue
+                                lay = f"{out}.unseal{len(tmps)}.kicad_pcb"
+                                tmps.append(lay)
+                                if HR.lay(mv, net, r["path"], out=lay, constraints=cp, lock=True).get("accepted"):
+                                    cur, done = lay, True
+                                    res["moved"].append({"net": v["net"], "from": [v["x"], v["y"]], "to": [nx, ny]})
+                                    res["laid"].append(net)
+                                    break
+                            if done:
+                                break
+                        if done:
+                            break
+                    if done:
+                        break
+        if cur == base:
+            return dict(res, status="no change")
+        _copy(cur, out)
+        _sidecars(cur, out)
+        return res
+    finally:
+        for t in tmps:
+            _clean_board(t)
+
+
+RELAY_STUB_MM = 3.0                              # k11: a net with at most this much track is re-laid pad to pad when its stubs block the lay
+
+
+def _r_relay(base, out, gaps, ctx):
+    """k11: an open plain / low-speed pair net whose copper is only short stubs (sum <= RELAY_STUB_MM) is stripped and laid pad to
+    pad (critroute.apply, class from the gap): a path that has to land a via on the middle of a stub (track_not_centered_on_via) or
+    squeeze past it starts clean from the pad. RF nets go to rfroute. The close guard judges the result."""
+    from . import boardwrite as BW, critroute as CR, routediag as RD
+    B = RD.load(base)
+    length = {}
+    for s_ in B["segs"]:
+        length[s_["net"]] = length.get(s_["net"], 0.0) + math.hypot(s_["b"][0] - s_["a"][0], s_["b"][1] - s_["a"][1])
+    cls = {n: g.get("class") or "plain" for g in gaps for n in g["nets"]}
+    nets = [n for n in dict.fromkeys(_nets(gaps)) if cls.get(n) != "rf" and length.get(n, 0.0) <= RELAY_STUB_MM]
+    if not nets:
+        return {"status": "no stub net"}
+    tmp = f"{out}.relay.kicad_pcb"
+    text, cut = BW.strip_nets(open(base, errors="surrogateescape").read(), nets)
+    with open(tmp, "w", errors="surrogateescape") as fh:
+        fh.write(text)
+    _sidecars(base, tmp)
+    try:
+        r = CR.apply(tmp, out, None, ctx.get("cons_path"), ctx["cons"], None, crit=[{"net": n, "class": cls[n]} for n in nets])
+    finally:
+        _clean_board(tmp)
+    if not os.path.exists(out) or set(nets) & set(r["open_nets"]):
+        _rm(out)
+        return {"status": "no change", "stripped": cut, "nets": nets}
+    return {"status": "ran", "stripped": cut, "laid": len(r["kept"]), "nets": nets}
+
+
 def _r_relocate(base, out, gaps, ctx):
     """Move a small support part next to the pin it serves (route-diagnose `moves`), re-lay its nets with KRT, keep what lowers the
     opens (relocate.py). The close loop's guard and the manifest commit judge the candidate like any rung's."""
@@ -1092,13 +1230,22 @@ def _r_powervias(base, out, gaps, ctx):
     return {"status": "ran" if os.path.exists(out) else "no change", "added": sum(r["added"].values()), "refused": sum(r["refused"].values())}
 
 
+RF_OPEN_KINDS = ("open-free", "open-gap")      # k11: an RF-class open is laid by rfroute (krt refuses RF nets: "no plain net")
+
+
 def _r_rfroute(base, out, gaps, ctx):
     """A6: RF nets off their impedance are stripped and re-laid by critroute on the outer layers at the impedance width
     (rfroute.widths); no output when nothing was re-laid. The guard judges the candidate."""
     from . import boardwrite as BW, critroute as CR
     nets = [n for g in gaps if g["kind"] == "rf-impedance" for n in g["nets"]]
-    if not nets:
+    opens = list(dict.fromkeys(n for g in gaps if g["kind"] in RF_OPEN_KINDS and g.get("class") == "rf" for n in g["nets"]))
+    if not nets and not opens:
         return {"status": "no rf net"}
+    if not nets:                                   # k11: an open RF net keeps its copper; only the open connections are laid (outer, RF width)
+        r = CR.apply(base, out, None, ctx.get("cons_path"), ctx["cons"], None, crit=[{"net": n, "class": "rf"} for n in opens])
+        if not os.path.exists(out):
+            return {"status": "no change", "nets": len(opens)}
+        return {"status": "ran", "laid": len(r["kept"]), "open_nets": len(r["open_nets"])}
     tmp = f"{out}.rfstrip.kicad_pcb"
     text, cut = BW.strip_nets(open(base, errors="surrogateescape").read(), nets)
     with open(tmp, "w", errors="surrogateescape") as fh:
@@ -2329,14 +2476,14 @@ RUNGS = {"joingaps": _r_joingaps, "pourisland": _r_pourisland, "edgesliver": _r_
          "handrepair": _r_handrepair, "krt": _r_krt, "region": _r_region, "drcfix": _r_drcfix, "launder": _r_launder,
          "snapiter": _r_snapiter, "krt_region": _r_krt_region, "krt_locked": _r_krt_locked, "ai": _r_ai, "prune": _r_prune,
          "pairgroup": _r_pairgroup, "relocate": _r_relocate, "maskcut": _r_maskcut, "powerwiden": _r_powerwiden, "padvias": _r_padvias, "railpour": _r_railpour,
-         "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute}
+         "powervias": _r_powervias, "tune": _r_tune, "rfroute": _r_rfroute, "unseal": _r_unseal, "relay": _r_relay}
 
 # pour-tie, planetie, pair and RF rungs join in phase 3 (FLOW-REDESIGN 5)
 DISPATCH = {
     "short": ["drcfix"],
-    "open-gap": ["joingaps", "patch", "krt"],
+    "open-gap": ["joingaps", "patch", "rfroute", "krt"],
     "open-pour": ["edgesliver", "pourisland", "region", "ai"],     # PHASE3I B12: edge-band fill sliver = island removal
-    "open-free": ["patch", "krt", "prune", "handrepair", "relocate", "krt_region", "krt_locked", "region", "patch_rip", "ai"],   # krt_locked: W39 locked free copper; relocate (L1, moves a part) after the L0 router
+    "open-free": ["patch", "rfroute", "krt", "prune", "handrepair", "relocate", "krt_region", "krt_locked", "unseal", "relay", "region", "patch_rip", "ai"],   # krt_locked: W39 locked free copper; relocate (L1, moves a part) after the L0 router
     "clearance": ["drcfix", "region"],
     "dangling": ["prune", "launder"],
     "via-offcentre": ["snapiter"],
@@ -2352,7 +2499,7 @@ DISPATCH = {
     "pair-skew": ["pairgroup", "tune", "ai"],
     "pair-impedance": ["pairgroup", "ai"],     # PHASE3I F2: a pair off its target impedance is re-laid as a group     # PHASE3H B8: tune_pairs (shorter leg meandered) before the agent
 }
-LEVEL = {"relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt_locked": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
+LEVEL = {"unseal": "L1", "relay": "L1", "relocate": "L1", "region": "L1", "patch_rip": "L1", "ai": "L1", "krt_region": "L1", "krt_locked": "L1", "krt": "L0", "pairgroup": "L1"}  # every other rung is L0
 
 
 def _tool():
@@ -3017,8 +3164,9 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             rungs = [x for x in round_rank.setdefault(kind, _rank(kind, DISPATCH[kind], yields)) if not (x == "ai" and not _ai_pending(ctx_dir_ai(work), tg))]
             for gi, grp in enumerate(groups):
                 key = kind + "|" + hashlib.sha1(",".join(sorted(g["id"] for g in grp)).encode()).hexdigest()[:12]
-                units.append({"key": key, "kind": kind, "targets": grp, "kind_targets": tg,
-                              "order": rungs, "rungs": rungs if gi == 0 else [x for x in rungs if x != "ai" and x not in WHOLE_BOARD],
+                gr = rungs if kind not in RF_OPEN_KINDS or any(g.get("class") == "rf" for g in grp) else [x for x in rungs if x != "rfroute"]
+                units.append({"key": key, "kind": kind, "targets": grp, "kind_targets": tg,      # k11: rfroute only for a group with an RF open
+                              "order": gr, "rungs": gr if gi == 0 else [x for x in gr if x != "ai" and x not in WHOLE_BOARD],
                               "prio": (-1 if kind in CLOSE_FIRST else 0, ORDER.index(kind), min(CLASS_RANK[g["class"]] for g in grp))})
         return units
 
