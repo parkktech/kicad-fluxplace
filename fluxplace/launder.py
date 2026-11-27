@@ -96,7 +96,8 @@ def mutate(src_path, dst_path, picks):
     picks: [{"via": bool, "net": str, "x": mm, "y": mm}] — empty list =
     refill+save only."""
     import sys
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from fluxplace import codefreeze
+    repo = codefreeze.root()
     wenv = dict(os.environ)
     wenv["PYTHONPATH"] = repo + os.pathsep + wenv.get("PYTHONPATH", "")
     # the worker runs with cwd=repo: every path it gets must be absolute
