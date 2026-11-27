@@ -1038,9 +1038,11 @@ def _covered_by_twin(b, t, width_mm):
     """W68: another track of `t`'s net and layer with the same two ends (either order, to 0.1 um) and a width >= width_mm is on `b`."""
     import pcbnew
 
+    def pt(v):
+        return round(pcbnew.ToMM(v.x), 4), round(pcbnew.ToMM(v.y), 4)
+
     def ends(o):
-        return {(round(pcbnew.ToMM(o.GetStart().x), 4), round(pcbnew.ToMM(o.GetStart().y), 4)),
-                (round(pcbnew.ToMM(o.GetEnd().x), 4), round(pcbnew.ToMM(o.GetEnd().y), 4))}
+        return {pt(o.GetStart()), pt(o.GetEnd())}
     mine = ends(t)
     return any(o is not t and o.GetClass() == "PCB_TRACK" and o.GetNetCode() == t.GetNetCode() and o.GetLayer() == t.GetLayer()
                and pcbnew.ToMM(o.GetWidth()) >= width_mm - 1e-6 and ends(o) == mine for o in b.GetTracks())
