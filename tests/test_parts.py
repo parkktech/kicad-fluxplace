@@ -149,3 +149,25 @@ def test_review_runs_the_gate_without_duplicating_codes():
     f = R.check_part_entry({"mpn_map": {}, "parts": {}}, s, {}, None, None)
     got = {x["code"] for x in f}
     assert "PART_MPN_IN_VALUE" in got and "PART_PACKAGE_MISMATCH" in got and "PART_MPN_MISSING" not in got
+
+
+def test_resolve_dir_is_anchored_whatever_the_cwd(tmp_path, monkeypatch):
+    """R066/R114: a relative [docs] datasheets resolves from the constraints / board / project, never from the cwd."""
+    import os
+    from fluxplace import parts as P, constraints as C
+    proj = tmp_path / "proj"
+    (proj / "datasheets").mkdir(parents=True)
+    (proj / "W1" / "inputs").mkdir(parents=True)
+    cons = proj / "W1" / "inputs" / "c.toml"
+    cons.write_text('[docs]\ndatasheets = "datasheets"\n')
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    want = str(proj / "datasheets")
+    assert P.resolve_dir("datasheets", [str(cons)]) == want                       # found above the constraints file
+    assert P.resolve_dir("datasheets", [None, str(proj / "W1" / "x.kicad_pcb")]) == want
+    assert C.load(str(cons))["docs"]["datasheets"] == want                       # the loader every stage uses
+    with pytest.raises(SystemExit):                                              # set but nowhere: loud, not defaults
+        P.resolve_dir("nope", [str(cons)], strict=True)
+    (other / "datasheets").mkdir()
+    assert P.resolve_dir("datasheets", [str(cons)]) == want                      # a same-named dir in the cwd never wins

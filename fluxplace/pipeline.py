@@ -257,6 +257,13 @@ class Ctx:
 
 
 # ------------------------------------------------------------------ stages
+def ready_line(text):
+    """The verdict line of a `ready` report: the NOT READY / verdict line first (R077), never the placement-gap table title."""
+    lines = text.splitlines()
+    return (next((l for l in lines if l.startswith(("ready: NOT READY", "NOT READY", "ready: READY"))), None)
+            or next((l for l in lines if l.startswith("ready:")), None) or _last_line(text))
+
+
 def st_ready(c, n, board):
     """readiness gate (docs/commands/ready.md): parts, stackup-computed impedance geometry, rails, anchors, outline, floors."""
     if not c.spec_path:
@@ -270,7 +277,7 @@ def st_ready(c, n, board):
     q = _questions_result(rc, text, board)
     if q:
         return q
-    line = next((l for l in text.splitlines() if l.startswith(("ready:", "NOT READY"))), _last_line(text))
+    line = ready_line(text)
     if rc:
         return {"verdict": "blocked", "line": line, "board": board,
                 "next": [l.strip()[2:] for l in text.splitlines() if l.startswith("  - ")][:5] + [os.path.join(d, "stage.log")]}

@@ -75,5 +75,50 @@ class TestGrading(unittest.TestCase):
         self.assertNotIn(v, S.BLOCKERS)
 
 
+
+def test_unreachable_api_returns_within_the_cap(tmp_path, monkeypatch):
+    """R107: every request hangs/fails; check() returns within [parts] lookup_budget_s + 1 request, parts are ERR (not a pass, not a blocker)."""
+    import time
+    import urllib.error
+    from fluxplace import redact as RD
+    monkeypatch.setenv("FLUXPLACE_LOOKUP_BUDGET_S", "2")
+    monkeypatch.setenv("FLUXPLACE_HTTP_DOWN_AFTER", "1000000")          # the host-down negative cache is not what is tested here
+    monkeypatch.setattr(S, "credentials", lambda: {"DIGIKEY_CLIENT_ID": "x", "DIGIKEY_CLIENT_SECRET": "y", "MOUSER_API_KEY": "z"})
+    monkeypatch.setattr(S, "_DK_MIN_INTERVAL", 0, raising=False)
+    seen = []
+
+    def slow(req, timeout=30):
+        seen.append(timeout)
+        time.sleep(min(timeout, 0.6))
+        raise urllib.error.URLError("unreachable")
+    monkeypatch.setattr(RD.urllib.request, "urlopen", slow)
+    RD._DOWN.clear()
+    by = {f"PART{i}": [f"R{i}"] for i in range(40)}
+    t0 = time.time()
+    report, counts = S.check(by, qty=5, cache_dir=str(tmp_path), log=lambda *_: None)
+    took = time.time() - t0
+    assert took < 6, took
+    assert set(report) == set(by) and counts.get("OK", 0) == 0 and counts.get("NONE", 0) == 0
+    assert all(v["verdict"] == "ERR" for v in report.values())
+    assert S._DEADLINE[0] == 0.0
+
+
+def test_host_down_is_remembered_so_the_outage_costs_two_timeouts(tmp_path, monkeypatch):
+    import time
+    import urllib.error
+    from fluxplace import redact as RD
+    monkeypatch.setenv("FLUXPLACE_LOOKUP_BUDGET_S", "0")
+    monkeypatch.setattr(S, "credentials", lambda: {"MOUSER_API_KEY": "z"})
+    calls = []
+
+    def dead(req, timeout=30):
+        calls.append(1)
+        raise urllib.error.URLError("unreachable")
+    monkeypatch.setattr(RD.urllib.request, "urlopen", dead)
+    RD._DOWN.clear()
+    report, _ = S.check({f"P{i}": [f"R{i}"] for i in range(30)}, qty=1, cache_dir=str(tmp_path), log=lambda *_: None)
+    assert len(calls) == 2 and all(v["verdict"] == "ERR" for v in report.values())
+
+
 if __name__ == "__main__":
     unittest.main()
