@@ -160,3 +160,18 @@ def apply(board, out, cons=None, near=()):
     rel |= {mate[n] for n in rel if n in mate}
     return {"nets": sorted(removed), "release": sorted(rel), "removed": dict(sorted(removed.items())), "pads": refs,
             "items": len(segs) + len(vias)}
+
+
+def classify(B, cons):
+    """What changed on a board that already carries routed copper (no explicit --from): diff the board against its own copper and pads.
+    -> None (no track/via copper: a normal first run) or {"new": [refs off the outline], "renet_nets": [nets whose copper disagrees with a
+    pad], "scope": [nets the route may touch]}.  In-place footprint swaps are found when the new part is seated (apply(near=...)), not here."""
+    from . import incplace as IP
+    if not (B["segs"] or B["vias"]):
+        return None
+    det = IP.detect(B, cons)
+    new = det["free"] if det["incremental"] else []
+    segs, vias, _refs, padnets = _scan(B)
+    nets = sorted({B["segs"][i]["net"] for i in segs} | {B["vias"][i]["net"] for i in vias} | padnets)
+    newnets = {p["net"] for p in B["pads"] if p["ref"] in new and p["net"]}
+    return {"new": new, "renet_nets": nets, "scope": sorted(set(nets) | newnets)}

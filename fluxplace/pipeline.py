@@ -1973,6 +1973,38 @@ def _renet_entry(c, work, board, st, near=()):
     return out
 
 
+def _classify_update(a, stages):
+    """A BOARD that already carries routed copper and no explicit --from is an update (new schematic/BOM on a shipped board): classify it
+    against its own copper and pads and pick the entry stage.  New parts off the outline -> incremental floorplan (the re-net and swap
+    strips run inside it); pads whose net changed -> route (the re-net entry, scoped to those nets); nothing electrical changed and no
+    opens -> silk.  -> {"from", "line", ...} or None (no copper, nested run, unreadable board, open connections: today's whole flow)."""
+    if not getattr(a, "board", None) or os.environ.get("FLUXPLACE_NESTED") or not os.path.isfile(a.board):
+        return None
+    from . import renet as RN_, routediag as RD_, constraints as C_
+    try:
+        B = RD_.load(a.board)
+        cl = RN_.classify(B, (C_.load(a.constraints) or {}) if a.constraints else {})
+    except Exception as e:                                                # noqa: BLE001 - detection is advisory
+        print(f"pipeline: update classification skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
+        return None
+    if not cl:
+        return None
+    if cl["new"]:
+        start = "floorplan"
+    elif cl["renet_nets"]:
+        start = "route"
+    elif _open_count(a.board, B) == 0:
+        start = "silk"
+    else:
+        print("update: routed board with open connections, not classified: whole flow", flush=True)
+        return None
+    if start not in stages:
+        return None
+    scope = f"scope {len(cl['scope'])} nets" if start != "silk" else "no placement/route stages"
+    line = (f"update: re-net {len(cl['renet_nets'])} nets, {len(cl['new'])} new parts, swaps found at the seat -> from {start}, {scope}")
+    return dict(cl, **{"from": start, "line": line})
+
+
 def _exec_stage(c, n, name, board, later=()):
     """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
     commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
@@ -2048,6 +2080,10 @@ def _run(a):
                 STAGES_.insert(STAGES_.index("fanout"), "relieve")
             else:
                 STAGES_.insert(STAGES_.index("plan-route") + 1, "relieve")
+    upd = None if a.from_stage else _classify_update(a, STAGES_)
+    if upd:
+        a.from_stage = upd["from"]
+        print(upd["line"], flush=True)
     first = a.from_stage or STAGES_[0]
     last = a.to_stage or STAGES_[-1]
     i0, i1 = STAGES_.index(first), STAGES_.index(last)
@@ -2106,6 +2142,8 @@ def _run(a):
         st["board"] = board
     if "ready" in STAGES_[i0:]:
         st.pop("undocumented", None)               # the gate runs again; its bypass is re-recorded only if used again
+    if upd:
+        st["update"] = {k: upd[k] for k in ("from", "line", "new", "renet_nets", "scope")}
     sc = st.get("route_scope")
     if sc and a.board and os.path.abspath(a.board) != sc.get("input"):
         st.pop("route_scope")                       # a scope belongs to the run that made it: another BOARD argument is a normal whole-board run
