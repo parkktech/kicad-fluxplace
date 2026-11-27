@@ -1,0 +1,35 @@
+{
+ "pair_skew:eth": {
+  "rule": "pair_skew", "interface": "eth", "unit": "mm", "target": 0.15, "hard": 1.27, "basis": "sourced", "confidence": "medium",
+  "date": "2026-11-27",
+  "function": "Link is not affected at tens of mm (about 2 % of an 8 ns symbol at 25 mm; adaptive equalisation). Hard limit is vendor layout guidance, EMC-driven (mode conversion).",
+  "sources": [
+   {"url": "https://www.farnell.com/datasheets/2699973.pdf", "page": "p.2", "quote": "lengths of the differential traces (within each pair) should be equal to within 50 mils (1.25 mm)"},
+   {"url": "https://www.ti.com/lit/pdf/snla387", "page": "p.2", "quote": "length-matched within 20 mils for 1G, 50 mils for 100M/10M"},
+   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.2.1 p.7", "quote": "ideally within 0.15 mm"}],
+  "notes": "target = CM5 datasheet 'ideally'; hard = Pulse 50 mil (magnetics vendor of the part used); TI 20 mil (0.51 mm) is the tightest PHY-vendor figure. reports/ETH skew limits line vs PHY side.md"},
+ "pair_skew:usb2": {
+  "rule": "pair_skew", "interface": "usb2", "unit": "mm", "target": 0.15, "hard": 1.27, "basis": "sourced", "confidence": "medium",
+  "date": "2026-11-27",
+  "function": "USB-IF gives no PCB skew number (cable only, 100 ps). Vendor MAX 50-60 mil.",
+  "sources": [
+   {"url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf", "page": "App. A p.16-18", "quote": "50 mil MAX intra-pair skew, USB 2.0"},
+   {"url": "https://www.manualslib.com/manual/796664/Intel-Ep80579.html?page=169", "page": "sec 12.2.2.2 p.169", "quote": "must be no greater than 60 mils"},
+   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.4.2 p.8", "quote": "ideally within 0.15 mm"}],
+  "notes": "judge per signal path on USB-C joined rows (stub <= 3.5 mm, USB Type-C R2.0 Table 3-4)"},
+ "pair_skew:usb3": {
+  "rule": "pair_skew", "interface": "usb3", "unit": "mm", "target": 0.1, "hard": 0.127, "basis": "sourced", "confidence": "high",
+  "date": "2026-11-27", "function": "5 Gb/s, 200 ps UI: every primary vendor source gives 5 mil.",
+  "sources": [
+   {"url": "https://www.ti.com/lit/pdf/sllu149e", "page": "sec 5.4 p.19", "quote": "5 mil intra-pair"},
+   {"url": "https://www.ti.com/lit/pdf/slla414", "page": "sec 2.2 p.4", "quote": "5 mils"},
+   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.4.1 p.8", "quote": "ideally within 0.1 mm"}],
+  "notes": ""},
+ "pair_skew:pcie": {
+  "rule": "pair_skew", "interface": "pcie", "unit": "mm", "target": 0.1, "hard": 0.127, "basis": "sourced", "confidence": "high",
+  "date": "2026-11-27", "function": "Intra-pair within 5 mil, whole-route budget; PCI-SIG has no public PCB number.",
+  "sources": [
+   {"url": "https://www.ti.com/lit/pdf/snla426", "page": "sec 13-14 p.7", "quote": "has to be kept within 5 mils"},
+   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.3.1 p.8", "quote": "ideally within 0.1 mm"}],
+  "notes": ""}
+}

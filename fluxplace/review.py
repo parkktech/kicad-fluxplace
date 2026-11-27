@@ -244,6 +244,22 @@ def pair_gated(cons, master):
     return master.startswith(fams) or fam in _HS_FAMILIES
 
 
+def _limit_challenge(r, unit, facts, cons):
+    """w110: a PAIR_SKEW FAIL is challenged against the sourced hard limit of its interface (limits registry): inside it = WARN with
+    the citation, over it = FAIL with the citation.  None = no sourced limit (or the project set its own maximum): FAIL as before."""
+    if unit != "mm":
+        return None
+    from . import limits as LM, netclass as NC
+    try:
+        explicit = C.skew_max_source(cons or {}, r["p"], 1.0)[1] != C.skew_limit_source(cons or {}, r["p"], 1.0)[1]
+    except ValueError:
+        explicit = False
+    bp = facts.get("board_path") or facts.get("board")
+    log_dir = os.path.dirname(os.path.abspath(bp)) if isinstance(bp, str) and bp else None
+    return LM.regrade("pair_skew", NC.pair_kind(r["p"]), f"{r['p']}/{r['n']}", float(r["skew"]), float(r["limit"]), unit,
+                      r.get("target") or r["limit"], explicit, cons, log_dir, f"intra-pair skew of {r['p']}/{r['n']}")
+
+
 def _pairs_from_audit(facts, cons):
     """PAIR_* findings from the routing audit (qualaudit / pairaudit) when the board file is readable, else None."""
     path = facts.get("board_path") or facts.get("board")
@@ -280,7 +296,11 @@ def _pairs_from_audit(facts, cons):
         if "skew" in r["causes"]:
             u = r.get("unit", "mm")
             note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
-            out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
+            rg = _limit_challenge(r, u, facts, cons)
+            if rg:
+                out.append(_f(FAIL, "PAIR_SKEW", rg[1] + note) if rg[0] == "FAIL" else _f(WARN, "PAIR_SKEW_REGRADED", rg[1] + note))
+            else:
+                out.append(_f(FAIL, "PAIR_SKEW", f"{r['p']}/{r['n']}: skew {r['skew']:.2f} {u} > {r['limit']:g} {u} limit{note}"))
         if "layers" in r["causes"]:
             out.append(_f(WARN, "PAIR_LAYER_MISMATCH", f"{r['p']}/{r['n']}: {r['why']} — the pair does not share a reference plane"))
         if "vias" in r["causes"]:
