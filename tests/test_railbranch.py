@@ -6,6 +6,7 @@ import types
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fluxplace import railbranch as RB, krtchain as K, power as PW  # noqa: E402
 
 CONS = {"power": {"V5": {"max_current_ma": 3000, "max_v": 5.0, "pour": True, "source": "U1"}},
@@ -148,3 +149,97 @@ def test_plan_real_board_finds_open_connections_and_widths(tmp_path):
     assert {pp.GetNetname() for pp in pcbnew.LoadBoard(h).GetPads() if pp.GetParentFootprint().GetReference() == "C1"} == {"N~hold"}
     RB.unhold(h, {("C1", "1"): "N"})
     assert {pp.GetNetname() for pp in pcbnew.LoadBoard(h).GetPads()} == {"N"}
+
+
+# ---- W67 chain-aware widths -------------------------------------------------------------------------------------------------
+def _chain_board(path, width, extra=()):
+    """U1 (source) - C1 (decap) - U2 (1 A load) in a row on net N, tracks of `width` between them."""
+    import pcbnew
+    b = pcbnew.BOARD()
+    ni = pcbnew.NETINFO_ITEM(b, "N")
+    b.Add(ni)
+    for ref, x, val in (("U1", 0, "reg"), ("C1", 4, "100n"), ("U2", 8, "load")):
+        fp = pcbnew.FOOTPRINT(b)
+        fp.SetReference(ref)
+        fp.SetValue(val)
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), 0))
+        p = pcbnew.PAD(fp)
+        p.SetNumber("1")
+        p.SetShape(pcbnew.PAD_SHAPE_RECT)
+        p.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(0.8), pcbnew.FromMM(0.8)))
+        p.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        p.SetLayerSet(pcbnew.LSET.AllCuMask())
+        fp.Add(p)
+        p.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), 0))
+        p.SetNet(ni)
+        b.Add(fp)
+    for x1, x2 in ((0, 4), (4, 8)):
+        t = pcbnew.PCB_TRACK(b)
+        t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x1), 0))
+        t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x2), 0))
+        t.SetWidth(pcbnew.FromMM(width))
+        t.SetLayer(pcbnew.F_Cu)
+        t.SetNet(ni)
+        b.Add(t)
+    pcbnew.SaveBoard(path, b)
+
+
+CHAIN = {"power": {"N": {"max_current_ma": 1000, "max_v": 3.3, "nominal_v": 3.3, "source": "U1"}},
+         "dcdrop": [{"net": "N", "from": "U1", "to": "U2", "current_a": 1.0}]}
+
+
+def test_undersized_names_the_chain_run_the_solved_current_loads(tmp_path):
+    pytest.importorskip("pcbnew")
+    p = str(tmp_path / "n.kicad_pcb")
+    _chain_board(p, 0.15)
+    bad, short = RB.undersized(p, CHAIN, {"N"})
+    assert bad["N"] and bad["N"][0]["amps"] == pytest.approx(1.0, abs=0.05) and bad["N"][0]["need"] > 0.15 and short["N"] > 0
+    w = str(tmp_path / "w.kicad_pcb")
+    _chain_board(w, 0.5)
+    assert RB.undersized(w, CHAIN, {"N"})[0] == {}                      # wide enough for the solved current: nothing to fix
+
+
+def test_fix_undersized_relays_branch_copper_and_never_touches_other_copper(tmp_path, monkeypatch):
+    pytest.importorskip("pcbnew")
+    narrow, wide = str(tmp_path / "narrow.kicad_pcb"), str(tmp_path / "wide.kicad_pcb")
+    _chain_board(narrow, 0.15)
+    _chain_board(wide, 0.5)
+    laid = {"N": RB.track_keys(narrow, ["N"])["N"]}                      # both tracks were laid by the branch steps
+    calls = []
+
+    def runner(cmd, log, cap_s=0):                                       # the router stub lays the wide copper
+        calls.append(cmd[4])
+        open(cmd[3], "wb").write(open(wide, "rb").read())
+        return 0, 0.1
+    rec = {}
+    RB.fix_undersized(narrow, str(tmp_path / "o.kicad_pcb"), CHAIN, ["N"], 0.15, 6, ["F.Cu", "B.Cu"],
+                      lambda s, o, lay, widths, ns: ["py", "route.py", s, o, widths], runner, lambda: 100.0, laid, rec)
+    assert rec["N"]["reladed"] and not rec["N"].get("undersized")
+    assert calls and calls[0]["N"] >= 0.25                                # the group's solved width, not the pad's own
+    assert RB.undersized(str(tmp_path / "o.kicad_pcb"), CHAIN, {"N"})[0] == {}
+
+
+def test_fix_undersized_keeps_copper_it_did_not_lay_and_reports_why(tmp_path):
+    pytest.importorskip("pcbnew")
+    narrow = str(tmp_path / "narrow.kicad_pcb")
+    _chain_board(narrow, 0.15)
+    rec = {}
+    RB.fix_undersized(narrow, str(tmp_path / "o.kicad_pcb"), CHAIN, ["N"], 0.15, 6, ["F.Cu", "B.Cu"], None, None, lambda: 100.0, {}, rec)
+    assert rec["N"]["undersized"][0]["reason"].startswith("not branch copper")
+    assert RB.track_keys(str(tmp_path / "o.kicad_pcb"), ["N"]) == RB.track_keys(narrow, ["N"])      # untouched
+
+
+def test_fix_undersized_drops_a_trial_that_leaves_a_connection_open(tmp_path):
+    pytest.importorskip("pcbnew")
+    narrow = str(tmp_path / "narrow.kicad_pcb")
+    _chain_board(narrow, 0.15)
+    laid = {"N": RB.track_keys(narrow, ["N"])["N"]}
+
+    def runner(cmd, log, cap_s=0):                                       # no corridor: the router lays nothing
+        open(cmd[3], "wb").write(open(cmd[2], "rb").read())
+        return 0, 0.1
+    rec = {}
+    RB.fix_undersized(narrow, str(tmp_path / "o.kicad_pcb"), CHAIN, ["N"], 0.15, 6, ["F.Cu", "B.Cu"],
+                      lambda s, o, lay, widths, ns: ["py", "route.py", s, o, widths], runner, lambda: 100.0, laid, rec)
+    assert rec["N"]["undersized"][0]["reason"].startswith("no corridor")
+    assert RB.track_keys(str(tmp_path / "o.kicad_pcb"), ["N"]) == RB.track_keys(narrow, ["N"])      # the old copper stays

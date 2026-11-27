@@ -233,3 +233,139 @@ def summary(rec):
     necked = sum(len(v.get("necked", [])) for v in rec.values())
     left = sum(len(v.get("open", [])) for v in rec.values())
     return routed, necked, left
+
+
+# ---- W67: chain-aware widths.  The branch pass sizes a connection from its own pad's load; the router chains pads (a decap behind a load
+# ---- shares its copper), so a laid run can carry more than the pad it was laid for.  The rail's solved tree current (power.check's
+# ---- per-run solve, powerflow) names those runs; the branch copper under them is ripped and re-laid by `route` at the width of the
+# ---- group of pads it now feeds (plan() sums the pads of a group).  One bounded trial per net; a trial that opens a connection or does
+# ---- not lower the shortfall is dropped (the old copper stays) and the run is reported.
+FIX_ROUNDS = 3
+_Q = 3
+
+
+def _key(layer, x1, y1, x2, y2):
+    a, b = (round(x1, _Q), round(y1, _Q)), (round(x2, _Q), round(y2, _Q))
+    return (layer, *min(a, b), *max(a, b))
+
+
+def track_keys(board, nets):
+    """{net: {key}} of the unlocked tracks of `nets` (layer, ordered rounded ends)."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    out = {n: set() for n in nets}
+    for t in b.GetTracks():
+        if t.GetClass() == "PCB_TRACK" and t.GetNetname() in out and not t.IsLocked():
+            out[t.GetNetname()].add(_key(b.GetLayerName(t.GetLayer()), *(pcbnew.ToMM(v) for v in (t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y))))
+    return out
+
+
+def strip_keys(src, dst, drop):
+    """`dst` = `src` without the unlocked tracks whose key is in `drop` {net: {key}}, and without the vias of those nets that no remaining
+    track or pad of the net touches any more.  -> number of tracks removed."""
+    import pcbnew
+    b = pcbnew.LoadBoard(src)
+    gone, keep = [], {}
+    for t in b.GetTracks():
+        n = t.GetNetname()
+        if t.GetClass() != "PCB_TRACK" or n not in drop or t.IsLocked():
+            continue
+        k = _key(b.GetLayerName(t.GetLayer()), *(pcbnew.ToMM(v) for v in (t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y)))
+        (gone if k in drop[n] else keep.setdefault(n, [])).append(t if k in drop[n] else (pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y),
+                                                                                           pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y)))
+    for t in gone:
+        b.Remove(t)
+    pads = {}
+    for p in b.GetPads():
+        pads.setdefault(p.GetNetname(), []).append((pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)))
+    for t in list(b.GetTracks()):
+        if t.GetClass() != "PCB_VIA" or t.GetNetname() not in drop or t.IsLocked():
+            continue
+        x, y, rad = pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y), pcbnew.ToMM(t.GetWidth()) / 2 + 0.02
+        n = t.GetNetname()
+        touched = any(min(math.hypot(x - sx, y - sy), math.hypot(x - ex, y - ey)) <= rad for sx, sy, ex, ey in keep.get(n, [])) or \
+            any(math.hypot(x - px, y - py) <= rad for px, py in pads.get(n, []))
+        if not touched:
+            b.Remove(t)
+    pcbnew.SaveBoard(dst, b)
+    return len(gone)
+
+
+def undersized(board, cons, nets):
+    """Runs of `nets` narrower than the width their solved current needs (power.check's per-run solve; a run the D71da neck test proves, or
+    the zone credit covers, is not one): -> {net: [{"segs", "need", "min_w", "len", "amps", "layers"}]} and {net: shortfall mm}."""
+    from . import power as PWR, boardfile
+    detail = {}
+    PWR.check(boardfile.facts_from_file(board), cons, None, board=board, detail=detail)
+    out, short = {}, {}
+    for net, runs in detail.items():
+        if net not in nets:
+            continue
+        r = PWR.rail(cons, net)
+        for d in runs:
+            run, nr = d["run"], d["need_run"]
+            if d["cleared"] or not nr or run["min_w"] >= nr - 1e-6:
+                continue
+            if run["len"] <= PWR.NECK_MAX_MM and PWR.neck_heat_c(d["amps"] or 0.0, run["len"], run["min_w"], r["oz_outer"]) <= r["rise_c"]:
+                continue                                     # a proven neck-down (D71da): not a constriction
+            out.setdefault(net, []).append({"segs": d["segs"], "need": round(nr, 3), "min_w": run["min_w"], "len": round(run["len"], 2),
+                                            "amps": d["amps"], "layers": run["layers"]})
+            short[net] = short.get(net, 0.0) + run["len"] * (1.0 - run["min_w"] / nr)
+    return out, short
+
+
+def _open_count(board, cons, net, track_mm, nlayers):
+    return len(plan(board, cons, [net], track_mm, nlayers).get(net, {}).get("comps", []))
+
+
+def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner, left_s, laid, rec):
+    """Bounded solve -> rip -> re-lay loop over `nets` (see the block comment).  `laid` = {net: {key}} the branch steps laid (only that copper is
+    ever ripped: locked, trunk and earlier-stage copper stay).  `rec[net]["undersized"]` = the runs left, each with the reason.  -> rc 0."""
+    import shutil
+    cur = src
+    wd = os.path.dirname(dst)
+    for rnd in range(FIX_ROUNDS):
+        try:
+            bad, short = undersized(cur, cons, set(nets))
+        except Exception as e:                               # noqa: BLE001 - the solve is an improvement; the board stands
+            rec.setdefault("_error", f"{type(e).__name__}: {str(e)[:120]}")
+            break
+        if not bad or left_s() <= 0:
+            break
+        moved = False
+        for net in sorted(bad):
+            mine = {_key(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"]) for run in bad[net] for g in run["segs"]} & laid.get(net, set())
+            if not mine:
+                continue
+            tag = os.path.join(wd, f"{os.path.basename(dst)[:-10]}.f{rnd}.{abs(hash(net)) % 10**6}")
+            ripped, relaid = tag + ".rip.kicad_pcb", tag + ".out.kicad_pcb"
+            _carry_pro(cur, ripped)
+            if not strip_keys(cur, ripped, {net: mine}):
+                continue
+            before = _open_count(cur, cons, net, track_mm, nlayers)
+            sub = {}
+            route(ripped, relaid, cons, [net], track_mm, nlayers, sig, mk_cmd, runner, left_s, sub)
+            try:
+                _bad2, short2 = undersized(relaid, cons, {net})
+                still = _open_count(relaid, cons, net, track_mm, nlayers)
+            except Exception:                                # noqa: BLE001 - unmeasurable trial: dropped
+                continue
+            if still <= before and short2.get(net, 0.0) < short.get(net, 0.0) - 1e-6:
+                after = track_keys(relaid, [net])[net]
+                laid[net] = (laid.get(net, set()) - mine) | (after - track_keys(ripped, [net])[net])
+                cur, moved = relaid, True
+                rec.setdefault(net, {}).setdefault("reladed", []).append({"runs": len(bad[net]), "shortfall_mm": [round(short[net], 2), round(short2[net], 2) if net in short2 else 0.0]})
+        if not moved:
+            break
+    final, _s = undersized(cur, cons, set(nets)) if "_error" not in rec else ({}, {})
+    for net, runs in final.items():
+        laid_n = laid.get(net, set())
+        for run in runs:
+            ks = {_key(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"]) for g in run["segs"]}
+            why = ("no corridor: re-laying the branch at its solved width opened a connection or did not lower the shortfall" if ks & laid_n
+                   else "not branch copper (locked, rail trunk or earlier stage)")
+            rec.setdefault(net, {}).setdefault("undersized", []).append({"layers": run["layers"], "len_mm": run["len"], "width": run["min_w"],
+                                                                         "need": run["need"], "amps": run["amps"], "reason": why})
+    if os.path.abspath(cur) != os.path.abspath(dst):
+        shutil.copy(cur, dst)
+    return 0

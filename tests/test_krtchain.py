@@ -273,7 +273,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND"})        # GND has its plane zone: not a rail
     r = K.run(c, 5, str(tmp_path / "in.kicad_pcb"), runner)
     names = [s["step"] for s in r["steps"]]
-    assert names == ["plane-GND", "rails-pour", "rails-branch", "pairgroups", "pairleft", "pairleft-single", "route", "rails-branch2"]      # VBAT is a pour rail (PHASE3E 5); W46 branches; W39 pair legs
+    assert names == ["plane-GND", "rails-pour", "rails-branch", "pairgroups", "pairleft", "pairleft-single", "route", "rails-branch2", "rails-flow"]      # VBAT is a pour rail (PHASE3E 5); W46 branches; W39 pair legs
     rails_cmd = calls[1]
     assert os.path.basename(rails_cmd[1]) == "route.py"
     assert rails_cmd[rails_cmd.index("--nets") + 1:rails_cmd.index("--power-nets")] == ["VBAT"]
@@ -284,7 +284,7 @@ def test_rails_step_before_diff_and_zone_nets_excluded(tmp_path, monkeypatch):
     c2.cons["power"] = c.cons["power"]
     monkeypatch.setattr(GP, "_zone_nets", lambda b: {"GND", "VBAT"})
     r2 = K.run(c2, 5, str(tmp_path / "in.kicad_pcb"), runner2)
-    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "rails-branch", "pairgroups", "pairleft", "pairleft-single", "route", "rails-branch2"] and r2["rails"]["routed"] == []
+    assert [s["step"] for s in r2["steps"]] == ["plane-GND", "rails-branch", "pairgroups", "pairleft", "pairleft-single", "route", "rails-branch2", "rails-flow"] and r2["rails"]["routed"] == []
 
 
 def test_no_rails_no_step(tmp_path, monkeypatch):
