@@ -23,6 +23,8 @@ import json
 import os
 import re
 import shutil
+import tempfile
+from collections import Counter
 
 from . import procs as _procs
 
@@ -109,7 +111,6 @@ def carry_bom(prev_path, new_path, out_path, label=None, prev_label=None,
             row = dict(n)
             if old_c is not None:
                 used.add(id(old_c))
-                row["Manufacturer"] = n["Manufacturer"]
                 row["Notes"] = ("CHANGED in %s (was %s %s)" % (
                     label or "this version", old_c["Value"], old_c["MPN"] or "no MPN")
                     + ("; " + n["Notes"] if n["Notes"] else ""))
@@ -356,8 +357,8 @@ def renders(board, out_dir, stem, kicad_cli="kicad-cli", log=print):
     for name, extra in VIEWS:
         p = os.path.join(out_dir, "%s-%s.png" % (stem, name))
         try:
-            _run([kicad_cli, "pcb", "render", "--quality", "basic", "--background", "opaque",
-                  "-w", "1800", "-h", "1200"] + extra + ["-o", p, board], timeout=900)
+            _run([kicad_cli, "pcb", "render", "--quality", "high", "--background", "opaque",
+                  "-w", "1800", "-h", "1200"] + extra + ["-o", p, board])
         except Exception as e:
             log("    render %s failed: %s" % (name, str(e)[:80]))
             continue
@@ -390,11 +391,11 @@ def datasheets(mpns, dirs, out_dir, log=print):
             copied.append(m)
         else:
             missing.append(m)
-    for fn in ("datasheets.json",):
-        for d in dirs:
-            if os.path.isfile(os.path.join(d, fn)):
-                shutil.copy2(os.path.join(d, fn), os.path.join(out_dir, fn))
-                break
+    for d in dirs:
+        src = os.path.join(d, "datasheets.json")
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(out_dir, "datasheets.json"))
+            break
     return copied, missing
 
 
@@ -465,7 +466,6 @@ def start(a, boms, board_facts, log=print):
     """Before the PCBWay facts are collected: carry the BOM. -> (ctx, boms)
     with the board's BOM swapped for the carried one, or (None, boms) when no
     previous-version input was given."""
-    import tempfile
     prev = prev_files(a.prev_delivery) if a.prev_delivery else {}
     prev_bom = a.prev_bom or prev.get("bom")
     if not (prev_bom or a.prev_assembly or a.prev_delivery or a.changes):
@@ -505,23 +505,14 @@ def assembly_post(ctx, a, log=print):
     return post
 
 
-def _find_sch(a, ctx, out_dir, stem, log):
-    bdir = os.path.dirname(os.path.abspath(a.board))
-    own = os.path.join(bdir, stem + ".kicad_sch")
-    if os.path.isfile(own):
-        return own, "board's own schematic"
-    spec = a.spec or next((p for p in (os.path.join(bdir, "spec.json"),) if os.path.isfile(p)), None)
-    if spec:
-        from . import schematic as SCH
-        dst = os.path.join(ctx["tmp"], stem + ".kicad_sch")
-        try:
-            SCH.generate(spec, dst, title=stem)
-            return dst, "regenerated from %s" % os.path.basename(spec)
-        except Exception as e:
-            log("    schematic generation failed: %s" % str(e)[:100])
-    if ctx["prev"].get("sch"):
-        return ctx["prev"]["sch"], "CARRIED from the previous delivery (not regenerated)"
-    return None, "none"
+def _find_sch(a, bdir, stem):
+    """The project's real schematic: --sch, else <board stem>.kicad_sch beside the
+    board. Never regenerated from a spec and never taken from the previous
+    delivery: absent -> None and P6 fails 'schematic missing'."""
+    for p in (a.sch, os.path.join(bdir, stem + ".kicad_sch")):
+        if p and os.path.isfile(p):
+            return p
+    return None
 
 
 def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
@@ -555,11 +546,12 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
         if src and os.path.isfile(src):
             shutil.copy2(src, os.path.join(out, name))
     # schematic + project
-    sch, sch_how = _find_sch(a, ctx, out, stem, log)
     bdir = os.path.dirname(os.path.abspath(a.board))
+    sch = _find_sch(a, bdir, stem)
     project(a.board, out, [os.path.join(os.path.dirname(bdir), "lib"), os.path.join(bdir, "lib"),
                            prev.get("lib")], sch=sch, extra_sch_dirs=[a.prev_delivery or ""])
-    notes["schematic"] = sch_how
+    notes["schematic"] = ("from %s" % sch if sch
+                          else "MISSING (no --sch, none beside the board): not substituted")
     # review folder (from the delivered copy of the project)
     if getattr(a, "no_review", False):
         findings = None
@@ -573,19 +565,36 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
             if d and os.path.isdir(d)]
     mpns = [r["MPN"] for r in ctx["bom_rows"] if r["MPN"]]
     got, miss = datasheets(mpns, dirs, os.path.join(out, "docs", "datasheets"), log=log)
+    if miss and not getattr(a, "no_api", False):
+        try:
+            from . import partdocs as PD2
+            res_f = PD2.fetch(miss, os.path.join(out, "docs", "datasheets"), log=log)
+            miss = sorted(m for m in miss if not res_f.get(m))
+            got = sorted(set(mpns) - set(miss))
+        except Exception as e:
+            log("    datasheet fetch failed: %s" % str(e)[:100])
     notes["datasheets"] = "%d/%d MPNs; missing: %s" % (len(got), len(set(mpns)), ", ".join(miss) or "none")
     # hand-written docs carried (spec, decisions); review response is version-specific
-    pdocs = os.path.join(a.prev_delivery or "", "docs")
-    for f in sorted(glob.glob(os.path.join(pdocs, "*"))) if a.prev_delivery else []:
-        if os.path.isfile(f):
-            shutil.copy2(f, os.path.join(out, "docs", os.path.basename(f)))
-    # 3D model if the stage produced one
-    step = next((p for p in (os.path.join(bdir, "out", "model.step"),) if os.path.isfile(p)), None)
-    if step:
-        os.makedirs(os.path.join(out, "5-3D"), exist_ok=True)
-        shutil.copy2(step, os.path.join(out, "5-3D", "%s-assembly.step" % stem))
-    else:
-        notes["5-3D"] = "no model.step beside the board: not produced"
+    if a.prev_delivery:
+        for f in sorted(glob.glob(os.path.join(a.prev_delivery, "docs", "*"))):
+            if os.path.isfile(f):
+                shutil.copy2(f, os.path.join(out, "docs", os.path.basename(f)))
+    # 3D: assembly STEP (the stage's own when it made one) + bare board
+    d3 = os.path.join(out, "5-3D")
+    os.makedirs(d3, exist_ok=True)
+    pcb = os.path.join(out, stem + ".kicad_pcb")
+    step = os.path.join(bdir, "out", "model.step")
+    if os.path.isfile(step):
+        shutil.copy2(step, os.path.join(d3, "%s-assembly.step" % stem))
+    for name, extra in (("assembly", []), ("bare-board", ["--board-only"])):
+        dst = os.path.join(d3, "%s-%s.step" % (stem, name))
+        if not os.path.isfile(dst):
+            try:
+                _run([kicad_cli, "pcb", "export", "step", "--force", "--subst-models"] + extra + ["-o", dst, pcb])
+            except Exception as e:
+                log("    step %s failed: %s" % (name, str(e)[:80]))
+        if not os.path.isfile(dst):
+            notes["5-3D %s" % name] = "not produced"
     # README-FIRST
     prev_readme = open(prev["readme"], encoding="utf-8").read() if prev.get("readme") else ""
     res = _verify_line(findings, a.fab_dir)
@@ -604,13 +613,12 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
     write("")
     notes["claims"] = "; ".join(ctx.get("claims") or []) or "none"
     # packaging gate (docs/PACKAGING-RULES.md)
-    from . import packrules as PR, constraints as C, pcbway as PW
+    from . import packrules as PR, constraints as C
     cons = C.load(a.constraints) if a.constraints else {}
-    pboard = os.path.join(out, stem + ".kicad_pcb")
     fps = ctx["fps"]
-    pbom = prev.get("bom") if not a.prev_bom else a.prev_bom
+    pbom = a.prev_bom or prev.get("bom")
     pb = next(iter(sorted(glob.glob(os.path.join(a.prev_delivery or "", "*.kicad_pcb")))), None) if a.prev_delivery else None
-    pctx = dict(out=out, board=pboard, cons=cons, findings=findings, kicad_cli=kicad_cli,
+    pctx = dict(out=out, board=pcb, cons=cons, findings=findings, kicad_cli=kicad_cli,
                 prev_board=pb, prev_bom=pbom, prev_label=prev_lab, bom_rows=ctx["bom_rows"],
                 dnp=sorted({r for row in ctx["bom_rows"] if is_dnp(row) for r in row["Refs"]}
                            | {p["ref"] for p in fps if p["dnp"]}, key=_refkey),
@@ -623,8 +631,8 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
         log("    " + ln)
     PR.mark(out, res_p)
     write(PR.readme_block(res_p))
-    notes["packaging"] = "READY" if PR.ready(res_p) else "NOT-READY"
     ctx["ready"] = PR.ready(res_p)
+    notes["packaging"] = "READY" if ctx["ready"] else "NOT-READY"
     return notes
 
 
@@ -650,7 +658,6 @@ def _verify_line(findings, fab_dir):
     if findings is None:
         lines.append("REVIEW  skipped (--no-review): no review json in this delivery")
     else:
-        from collections import Counter
         c = Counter(f.get("level") or f.get("severity") for f in findings)
         lines.append("REVIEW  fluxplace review: %d FAIL, %d WARN, %d INFO (review/REVIEW-*.json)"
                      % (c.get("FAIL", 0), c.get("WARN", 0), c.get("INFO", 0)))

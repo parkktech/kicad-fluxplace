@@ -19,14 +19,10 @@ import importlib
 import json
 import os
 import re
+import shutil
 import tempfile
 
-from . import deliverver as DV
-
-NAMES = {"P1": "diff pairs vs interface hard limit", "P2": "review vs previous shipped version",
-         "P3": "DRC all rules, zones refilled", "P4": "PCBWay + JLCPCB sets",
-         "P5": "previous BOM fields carried", "P6": "package contents",
-         "P7": "title block + silk version", "P8": "3D model per footprint"}
+from . import deliverver as DV, procs
 
 
 def parse_waivers(entries):
@@ -91,11 +87,9 @@ def p2(ctx, W):
 
 
 def p3(ctx, W):
-    from . import procs
     tmp = tempfile.mkdtemp(prefix="fp-p3-")
     d = os.path.join(tmp, "b"); os.makedirs(d)
     stem = os.path.splitext(os.path.basename(ctx["board"]))[0]
-    import shutil
     for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
         s = os.path.join(os.path.dirname(ctx["board"]), stem + ext)
         if os.path.isfile(s):
@@ -118,7 +112,7 @@ def p3(ctx, W):
 
 def _csv_refs(path):
     rows = list(csv.DictReader(open(path, encoding="utf-8-sig")))
-    return rows, {r for row in rows for k in ("Refs", "Designators", "Ref") for r in DV.split_refs(row.get(k))}
+    return {r for row in rows for k in ("Refs", "Designators", "Ref") for r in DV.split_refs(row.get(k))}
 
 
 def p4(ctx, W):
@@ -128,7 +122,7 @@ def p4(ctx, W):
     if not (boms and cpls) or not glob.glob(os.path.join(out, "1-GERBERS-*.zip")):
         probs.append("PCBWay set incomplete (gerber zip / BOM / centroid)")
     else:
-        _, cpl_refs = _csv_refs(cpls[0])
+        cpl_refs = _csv_refs(cpls[0])
         for r in sorted(set(ctx["dnp"]) & cpl_refs, key=DV._refkey):
             probs.append("DNP %s is in the PCBWay centroid" % r)
         for row in ctx["bom_rows"]:
@@ -148,7 +142,7 @@ def p4(ctx, W):
 
 def p5(ctx, W):
     if not ctx.get("prev_bom"):
-        return dict(rule="P5", status="PASS", reason="no previous BOM (first version)", waived=[], warns=[])
+        return _res("P5", [], [], "no previous BOM (first version)")
     prev, new = DV.read_bom(ctx["prev_bom"]), ctx["bom_rows"]
     by = {r["MPN"].upper(): r for r in new if r["MPN"]}
     probs = []
@@ -163,8 +157,8 @@ def p5(ctx, W):
                     any(x in ctx["board_refs"] for x in r["Refs"]):
                 probs.append("DNP line %s missing" % " ".join(r["Refs"]))
     left, waived = _resolve("P5", probs, W)
-    removed = [x for x in (ctx.get("removed") or [])]
-    return _res("P5", left, waived, "Manufacturer/Notes/DNP carried; removed: %s" % (", ".join(removed) or "none"))
+    removed = ", ".join(ctx.get("removed") or []) or "none"
+    return _res("P5", left, waived, "Manufacturer/Notes/DNP carried; removed: %s" % removed)
 
 
 def known_open(readme_text):
@@ -177,18 +171,21 @@ def p6(ctx, W):
     def need(pat, what):
         fs = glob.glob(os.path.join(out, pat))
         if not any(os.path.getsize(f) > 0 for f in fs if os.path.isfile(f)):
-            probs.append("missing: " + what)
+            probs.append(what if what.endswith(" missing") else "missing: " + what)
     need("assembly-instructions-*.md", "assembly instructions"); need("4-ASSEMBLY-INSTRUCTIONS-*.pdf", "assembly pdf")
     need("PCBWay-Order-Worksheet-*.md", "order worksheet"); need("README-FIRST.txt", "README-FIRST")
     for f in ("SCHEMATIC-*.pdf", "ERC-*.rpt", "NETLIST-*.net", "REVIEW-*.json"):
         need(os.path.join("review", f), "review/" + f)
     for v in ("top", "bottom", "iso"):
         need("*-%s.png" % v, "render " + v)
-    need("*.kicad_pcb", "kicad_pcb"); need("*.kicad_sch", "kicad_sch"); need("*.kicad_pro", "kicad_pro")
-    need("lib/footprints/*/*", "project footprint lib") if os.path.isdir(os.path.join(out, "lib", "footprints")) else None
+    need("*.kicad_pcb", "kicad_pcb"); need("*.kicad_sch", "schematic missing"); need("*.kicad_pro", "kicad_pro")
+    need("5-3D/*-assembly.step", "assembly STEP"); need("5-3D/*-bare-board.step", "bare-board STEP")
+    if os.path.isdir(os.path.join(out, "lib", "footprints")):
+        need("lib/footprints/*/*", "project footprint lib")
     for m in ctx.get("missing_datasheets", []):
         probs.append("datasheet missing: " + m)
-    rd = open(os.path.join(out, "README-FIRST.txt"), encoding="utf-8").read() if os.path.isfile(os.path.join(out, "README-FIRST.txt")) else ""
+    readme = os.path.join(out, "README-FIRST.txt")
+    rd = open(readme, encoding="utf-8").read() if os.path.isfile(readme) else ""
     if ctx.get("prev_label") and "WHAT CHANGED SINCE" not in rd:
         probs.append("README-FIRST has no what-changed section")
     for item in ctx.get("prev_known_open", []):
@@ -206,9 +203,9 @@ def p7(ctx, W):
         return dict(rule="P7", status="FAIL", reason="constraints have no [project] version", waived=[], warns=[])
     want = SK.norm_version(str(ver).lstrip("vV"))
     probs = []
-    have = TB._parse_rev((TB.read(ctx["board"]).get("rev") or ""))
-    if have != want:
-        probs.append("title-block rev %r != [project] version %s" % (TB.read(ctx["board"]).get("rev"), ver))
+    rev = TB.read(ctx["board"]).get("rev")
+    if TB._parse_rev(rev or "") != want:
+        probs.append("title-block rev %r != [project] version %s" % (rev, ver))
     text = open(ctx["board"], encoding="utf-8").read()
     texts = [m.group(1) for m in re.finditer(r'\(gr_text "([^"]*)"[^\n]*?(?:\n[^\n]*?){0,12}?\(layer "[FB]\.SilkS"', text)] + \
             [m.group(1) for m in re.finditer(r'\(gr_text "([^"]*)"', text) if re.search(r"v\d", m.group(1))]
@@ -260,7 +257,7 @@ def ready(res):
 
 
 def readme_block(res):
-    L = [x for x in lines(res)]
+    L = lines(res)
     for r in res:
         L += ["  waived %s: %s -- %s" % (r["rule"], p, why) for p, why in r["waived"]]
         L += ["  WARN %s: %s" % (r["rule"], w) for w in r["warns"]]
