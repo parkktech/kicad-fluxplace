@@ -12,3 +12,10 @@
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01FSTSpBRTp2qW7mF1VZnbVY
 - Final reply <= 15 lines: branch + sha, what changed (files), tests added, merge-gate result, real-board measurement vs the ticket's acceptance, open items. Never claim a check you did not run.
+- Rules added 2026-11-26 session 7 (from mistakes that recurred):
+  - Base: branch from the current w16merge HEAD (`git -C /var/kicad/fluxplace-wt/w16merge log -1`), never a sha copied from an old brief. Scratch: the dir your brief names (session scratchpads are wiped at /clear).
+  - Registry tests: a test that stubs or lists GP.RUNGS / PG.RUNGS / stage tables must stub every registered entry first and build its expectation from the registry, so a rung merged later cannot break it (ledger d097696). Only a test whose purpose is "update me when the registry grows" may list it by hand, and it must say so.
+  - Gate queue: never kill another agent's gate. To yield, do not queue yet. A gate you must stop: kill its process group (`kill -- -$PGID`) or the timeout+pytest PIDs (`fuser /tmp/fluxplace-merge-gate/slotN`), never only the merge-gate.sh PID (the orphan suite keeps the slot lock).
+  - Waiting: wait for a marker that only the finished job writes (merge-gate "OK"/"NEW FAILURES" line, `SUMMARY <stage> [<folder>]` in RUN.md, a result.json). Never grep a log tail that may hold an older run's lines, and never match bare "slot" or "pipeline:".
+  - Measurement runs against mainline use a detached worktree pinned to a sha (`worktree add --detach`), never the live w16merge worktree (merges move its HEAD).
+  - Reap: when your result is reported, no background process of yours remains (`ps -eo pid,args | grep <your scratch dir>`).
