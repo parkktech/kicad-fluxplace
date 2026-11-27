@@ -1172,7 +1172,13 @@ def _incremental_floorplan(c, board, out):
     """A routed board whose only unlocked parts are new and off the outline (incplace.detect): seat those parts in free space and
     touch nothing else; the stages that would re-place or re-lay copper are skipped for the rest of the run. -> result or None."""
     from . import incplace as IP, routediag as RD
-    det = IP.detect(RD.load(board), c.cons)
+    if not os.path.isfile(board):                           # nothing to detect on (stubbed stage tests): the normal floorplan decides
+        return None
+    try:
+        det = IP.detect(RD.load(board), c.cons)
+    except Exception as e:                                  # noqa: BLE001 - detection is advisory: a board it cannot read runs the normal floorplan
+        print(f"floorplan: incremental check skipped ({type(e).__name__}: {e})", flush=True)
+        return None
     if not det["incremental"]:
         if det["copper"] and det["free"]:
             print(f"floorplan: not incremental ({det['why']}): the normal floorplan runs", flush=True)
