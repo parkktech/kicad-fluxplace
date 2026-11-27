@@ -278,6 +278,21 @@ def cmd_step(a):
     print("NOW: step in progress = " + a.text)
 
 
+def placement_refusal(cfg, board):
+    """'' or the refusal text: readychecks.gate_refusal on the registry's [config] constraints (+ spec) paths (relative to the repo root).
+    No constraints configured: the check cannot run and says so (never a silent pass)."""
+    cpath = cfg.get("constraints")
+    if not cpath:
+        print("placement classes: NOT CHECKED (registry config has no 'constraints' path)")
+        return ""
+    from . import constraints as C, readychecks as KO
+    spec = None
+    if cfg.get("spec"):
+        with open(os.path.join(ROOT, cfg["spec"])) as fh:
+            spec = json.load(fh)
+    return KO.gate_refusal(board, C.load(os.path.join(ROOT, cpath)), spec)
+
+
 def cmd_accept(a):
     r = load()
     cfg = config(r)
@@ -298,6 +313,10 @@ def cmd_accept(a):
         if worse:
             sys.exit("refused: %s rose (%s -> %s). Use reject, or --allow-worse with a note saying why."
                      % (",".join(worse), fmt(prev), fmt(m)))
+    if a.allow_worse:                                      # readychecks T2: --allow-worse never carries a placement-class FAIL
+        why = placement_refusal(cfg, b)
+        if why:
+            sys.exit("refused: %s (--allow-worse does not bypass it)" % why)
     try:
         PG.checkpoint(b, workdir=os.path.join(ROOT, v), note=a.note, metrics=dict(m),
                       measure_fn=lambda _b: dict(m, islands=islands), allow_new_shorts=a.allow_worse)
