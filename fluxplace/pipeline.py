@@ -1597,6 +1597,15 @@ def _commit_point(name, prev, res, cons=None):
             ct = BW.contract_check(prev, new, cons)
         except Exception as e:                                          # noqa: BLE001 - an unchecked commit must not pass
             ct = {"ok": False, "why": f"contract check crashed: {type(e).__name__}: {str(e)[:100]}"}
+        if not ct["ok"] and ct.get("changed"):                          # w84: strip only the offending new items; the stage is not lost for a few nets
+            try:
+                st = BW.strip_contract(prev, new, cons)
+                ct2 = BW.contract_check(prev, new, cons)
+            except Exception as e:                                      # noqa: BLE001
+                st, ct2 = None, {"ok": False, "why": ct["why"], "changed": ct["changed"]}
+            if ct2["ok"] and st and st["removed"]:
+                res = dict(res, line=(res.get("line") or "") + f"; contract: stripped {st['removed']} off-contract item(s) on {', '.join(sorted(st['nets']))} (left open)")
+                ct = ct2
         if not ct["ok"]:
             return dict(res, verdict="fail", board=prev, line=f"{name}: commit refused: {ct['why']}"[:200],
                         next=[f"{name}: output not adopted ({ct['why'][:150]}); the net stays open with its gap, never off its contract"])

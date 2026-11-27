@@ -567,6 +567,13 @@ def run(c, n, board, runner=run_step):
             _status(spath, "failed", rows, left, rc)
             return {"verdict": "fail", "board": cur, "line": f"krt-whole: step {name} rc={rc} after {secs}s (total budget {budget:g}s)",
                     "next": tail, "steps": rows}
+        try:                                                 # w84: the step breaks no net contract: off-contract NEW copper is stripped here, not refused at the commit
+            from . import boardwrite as BW
+            st = BW.strip_contract(cur, dst, c.cons, getattr(c, "spec", None))
+            if st["removed"]:
+                rows[-1]["contract_stripped"] = st
+        except Exception as e:                               # noqa: BLE001 - the commit point still enforces the contract
+            rows[-1]["contract_strip_error"] = f"{type(e).__name__}: {str(e)[:100]}"
         changed = _restore_project(board, dst)
         if changed:
             rows[-1]["router_project_discarded"] = changed
@@ -704,6 +711,7 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
     one rung.  -> rc; rung 0 writes dst's summary json, later rungs `<dst>.r<k>.json`, `rec` gets {net: [{width, layers, open}]}."""
     from . import power as PWR
     cur, todo, k = src, list(nets), 0
+    allowed = _contract_layers(src, c, nets)
     ladders = {n: PWR.ladder_widths(c.cons, n, rails[n], R_TRACK(base, a)) for n in nets}
     base_json = dst[:-10] + ".json"
     while todo:
@@ -713,6 +721,7 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
         lows = {n: w for n, w in widths.items() if w <= PWR.LADDER_INNER_MAX_MM + 1e-9 and k > 0}
         groups = [(g, PWR.ladder_layers(c.cons, sig, min(g.values()), fallback=k > 0)) for g in
                   ({n: w for n, w in widths.items() if n not in lows}, lows) if g]
+        groups = _contract_split(groups, allowed)          # w84: a rail whose contract names its layers is never laid off them
         for gi, (g, lay) in enumerate(groups):
             out_k = f"{dst[:-10]}.r{k}{gi}.kicad_pcb"
             summ = base_json if (k == 0 and gi == 0) else f"{dst[:-10]}.r{k}{gi}.json"
@@ -734,6 +743,31 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
         k += 1
     shutil_copy(cur, dst)
     return 0
+
+
+def _contract_layers(board, c, nets):
+    """{net: [allowed copper layers]} for the nets whose net contract (netclass.contract) names its layers; {} when unreadable."""
+    try:
+        from . import netclass as NC, routediag as RD
+        con = NC.contract(RD.load(board), c.cons, getattr(c, "spec", None), board=board, lock=False)
+        return {n: list(con[n]["layers"]) for n in nets if con.get(n) and con[n]["layers"]}
+    except Exception:                                       # noqa: BLE001 - no contract facts: the commit point still enforces it
+        return {}
+
+
+def _contract_split(groups, allowed):
+    """w84: [(group {net: width}, layers)] -> the same with every net laid only on the layers its contract allows: nets of one
+    group that differ in their allowed layers become separate calls; a net with no allowed layer in the call stays open."""
+    out = []
+    for g, lay in groups:
+        by = {}
+        for n, w in g.items():
+            a = allowed.get(n)
+            ls = tuple(l for l in lay if a is None or l in a)
+            if ls:
+                by.setdefault(ls, {})[n] = w
+        out += [(sub, list(ls)) for ls, sub in by.items()]
+    return out
 
 
 def R_TRACK(base, a):

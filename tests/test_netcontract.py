@@ -36,7 +36,8 @@ def test_rf_fallback_inner_layer_copper_is_refused_and_the_net_stays_open(tmp_pa
     prev = mk(tmp_path, "prev.kicad_pcb", "")
     new = mk(tmp_path, "new.kicad_pcb", seg_w("RF_ANT", (20, 20), (40, 20), 0.3, "In1.Cu"))
     r = PL._commit_point("route", prev, {"verdict": "pass", "board": new, "line": "routed"}, CONS)
-    assert r["verdict"] == "fail" and r["board"] == prev and "CONTRACT_CHANGED RF_ANT" in r["line"] and "In1.Cu" in r["line"]
+    assert r["verdict"] == "pass" and "stripped 1 off-contract item(s) on RF_ANT" in r["line"]      # w84: the item goes, the stage is kept
+    assert not [x for x in RD.load(new)["segs"] if x["net"] == "RF_ANT"] and BW.contract_check(prev, new, CONS)["ok"]
     ok = mk(tmp_path, "ok.kicad_pcb", seg_w("RF_ANT", (20, 20), (40, 20), 0.3))
     assert PL._commit_point("route", prev, {"verdict": "pass", "board": ok}, CONS)["verdict"] == "pass"
 
@@ -45,7 +46,8 @@ def test_production_guard_refuses_a_hand_injected_015_rf_segment(tmp_path):
     prev = mk(tmp_path, "prev.kicad_pcb", "")
     new = mk(tmp_path, "new.kicad_pcb", seg_w("RF_ANT", (20, 20), (40, 20), 0.15))
     r = PL._commit_point("route", prev, {"verdict": "pass", "board": new}, CONS)
-    assert r["verdict"] == "fail" and "CONTRACT_CHANGED RF_ANT" in r["line"] and "0.15 mm on F.Cu, contract 0.3" in r["line"]
+    assert r["verdict"] == "pass" and "stripped 1 off-contract item(s) on RF_ANT" in r["line"]
+    assert not [x for x in RD.load(new)["segs"] if x["net"] == "RF_ANT"]
     short = mk(tmp_path, "short.kicad_pcb", seg_w("RF_ANT", (20, 20), (21, 20), 0.15))                 # a pad neck is exempt
     assert PL._commit_point("route", prev, {"verdict": "pass", "board": short}, CONS)["verdict"] == "pass"
 
@@ -54,7 +56,7 @@ def test_power_default_width_a_rail_with_a_current_figure_cannot_gain_015_copper
     prev = mk(tmp_path, "prev.kicad_pcb", "")
     new = mk(tmp_path, "new.kicad_pcb", seg_w("VRAIL", (20, 22), (40, 22), 0.15))
     r = PL._commit_point("route", prev, {"verdict": "pass", "board": new}, CONS)
-    assert r["verdict"] == "fail" and "CONTRACT_CHANGED VRAIL" in r["line"] and "under minimum" in r["line"]
+    assert r["verdict"] == "pass" and "stripped 1 off-contract item(s) on VRAIL" in r["line"]
     wide = mk(tmp_path, "wide.kicad_pcb", seg_w("VRAIL", (20, 22), (40, 22), 0.8))
     assert PL._commit_point("route", prev, {"verdict": "pass", "board": wide}, CONS)["verdict"] == "pass"
     nofig = {"rf": CONS["rf"], "power": {"VRAIL": {"nominal_v": 3.3}}}                                  # no current figure: no width contract
@@ -94,3 +96,25 @@ def test_the_tables_agree_on_every_net_of_the_corpus_boards(tmp_path):
                 assert e["owner"] == "pairs"
             if n in cls:
                 assert cls[n]["owner"] in set(NC.OWNER.values()) | {"router"}
+
+
+def test_a_rails_step_that_lays_inner_copper_on_an_outer_only_rail_is_stripped_at_the_step_not_at_the_commit(tmp_path):
+    """w84 (route-7: VBATT_PROT on In2.Cu, VMODEM on In3.Cu): strip_contract removes only the off-contract NEW items."""
+    cons = {"route": {"power_spine": "ipc-outer"}, "power": {"VRAIL": {"max_current_ma": 2000, "pour": True}}}
+    keep = seg_w("VRAIL", (20, 22), (40, 22), 0.8, "F.Cu")
+    prev = mk(tmp_path, "prev.kicad_pcb", keep)
+    new = mk(tmp_path, "new.kicad_pcb", keep + seg_w("VRAIL", (20, 24), (40, 24), 0.8, "In2.Cu") + seg_w("VRAIL", (20, 26), (40, 26), 0.8, "B.Cu"))
+    assert not BW.contract_check(prev, new, cons)["ok"]
+    st = BW.strip_contract(prev, new, cons)
+    assert st == {"removed": 1, "nets": {"VRAIL": 1}}
+    layers = sorted(x["layer"] for x in RD.load(new)["segs"] if x["net"] == "VRAIL")
+    assert layers == ["B.Cu", "F.Cu"] and BW.contract_check(prev, new, cons)["ok"]
+    assert BW.strip_contract(prev, new, cons)["removed"] == 0
+
+
+def test_rails_ladder_layers_follow_the_contract_per_net():
+    from fluxplace import krtchain as KC
+    groups = [({"A": 0.6, "B": 0.6}, ["F.Cu", "In2.Cu", "B.Cu"])]
+    out = KC._contract_split(groups, {"A": ["F.Cu", "B.Cu"]})
+    assert sorted((sorted(g), l) for g, l in out) == [(["A"], ["F.Cu", "B.Cu"]), (["B"], ["F.Cu", "In2.Cu", "B.Cu"])]
+    assert KC._contract_split([({"A": 0.6}, ["In2.Cu"])], {"A": ["F.Cu", "B.Cu"]}) == []        # no allowed layer in the call: the rail stays open

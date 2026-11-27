@@ -474,6 +474,35 @@ def contract_check(prev, cand, cons, spec=None):
     return {"ok": not names, "why": why, "changed": names, "detail": bad}
 
 
+def strip_contract(prev, cand, cons, spec=None):
+    """w84: remove from `cand` (in place) the tracks it ADDED over `prev` that are off their net contract (layer not allowed, width off),
+    so a few rail items never cost the whole stage its commit: the net is left with a gap (open), never off its contract.
+    -> {"removed": n, "nets": {net: n}}.  Text edit (no pcbnew write); items present in `prev` are never touched."""
+    import math
+    from . import netclass as NC, routediag as RD, boardtext as BT
+    con = NC.contract(RD.load(cand), cons, spec, board=cand, lock=False)
+    watch = {n for n, e in con.items() if e["layers"] or e["width"] or e["width_min"]}
+    if not watch:
+        return {"removed": 0, "nets": {}}
+    text = open(cand, errors="surrogateescape").read()
+    old = set(BT.blocks(open(prev, errors="surrogateescape").read()))
+    drop, per = [], {}
+    for _i, _j, key, blk in BT.scan(text):
+        if key[0] != "s" or key in old:
+            continue
+        n = BT.net_name(blk)
+        if n not in watch:
+            continue
+        (ax, ay), (bx, by) = key[1], key[2]
+        why = NC.contract_reason(con[n], key[4], float(key[3] or 0), math.hypot(ax - bx, ay - by))
+        if why:
+            drop.append(key)
+            per[n] = per.get(n, 0) + 1
+    if drop:
+        open(cand, "w", errors="surrogateescape").write(BT.remove_blocks(text, drop))
+    return {"removed": len(drop), "nets": per}
+
+
 def changed(board, manifest, release=(), allow=None):
     """Protected nets whose protected copper is not intact in `board`: a "locked" net lost or moved one of its locked items (additions are
     fine); a "pair" net differs at all.  `allow` = {net: {"remove": [hash], "add": [hash]}}: the exact items an authorized pass removed
