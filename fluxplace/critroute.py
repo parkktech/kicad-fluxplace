@@ -284,7 +284,7 @@ def stage(c, n, board):
         if gaps.ai_answer_required(c.cons):
             return {"verdict": "packets", "board": board, "next": [f"write {apath} (order, nets: layers, avoid circles) and re-run"],
                     "line": f"critroute: {len(names)} packet(s) in {ai}; write {apath} and re-run"}
-        unanswered = {"n": len(names), "packets": [os.path.join(ai, _safe(x) + ".packet.json") for x in names]}
+        unanswered = True
     res = apply(board, os.path.join(d, "board.kicad_pcb"), acts, c.cons_path, c.cons, calllog.attempts_path(board), crit=crit)
     still = [x for x in names if x in res["open_nets"]]
     with open(os.path.join(d, "stage.log"), "a") as fh:
@@ -294,5 +294,10 @@ def stage(c, n, board):
     out = {"verdict": "warn" if still else "pass", "line": line, "board": res["board"],
            "next": [f"critroute open: {x}" for x in still]}
     if unanswered:
-        out["ai_unanswered"] = unanswered
+        from . import packets as PK, questions as QS
+        ans = {**{str(k): str(v) for k, v in ((c.cons or {}).get("answers") or {}).items()}, **QS.parse_answers(getattr(getattr(c, "a", None), "answer", None))}
+        ua = PK.resolve([(os.path.join(ai, _safe(x) + ".packet.json"), x) for x in names], set(still), ans, ai_dir=ai)
+        out["ai_unanswered"] = ua
+        if ua["questions"]:
+            out.update(verdict="questions", next=[f"owner decision {q['id']}: {q['found']}; options: " + "/".join(o["choice"] for o in q["options"]) for q in ua["questions"]])
     return out

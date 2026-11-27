@@ -23,7 +23,7 @@ def test_critroute_optional_uses_defaults_and_reports_count(tmp_path, monkeypatc
     seen = []
     _crit(monkeypatch, seen)
     res = CR.stage(_Ctx(str(tmp_path / "w")), 3, "b.kicad_pcb")
-    assert res["verdict"] == "pass" and seen == [None] and res["ai_unanswered"]["n"] == 2
+    assert res["verdict"] == "pass" and seen == [None] and res["ai_unanswered"]["n"] == 2 and res["ai_unanswered"]["classes"]["default"] == 2
     assert all(os.path.exists(p) for p in res["ai_unanswered"]["packets"])          # packets stay on disk
 
 
@@ -55,7 +55,7 @@ def _gate(tmp_path, monkeypatch, cons):
 
 def test_gate_optional_continues_required_stops(tmp_path, monkeypatch):
     g = _gate(tmp_path, monkeypatch, {})
-    assert g["verdict"] == "warn" and g["ai_unanswered"]["n"] == 2 and "2 packets unanswered, defaults used" in g["line"]
+    assert g["verdict"] == "warn" and g["ai_unanswered"]["n"] == 2 and "2 bounded search" in g["line"] and "STILL OPEN" in g["line"]
     g = _gate(tmp_path / "r", monkeypatch, {"ai": {"answer": "required"}})
     assert g["verdict"] == "packets" and "ai_unanswered" not in g
 
@@ -77,9 +77,32 @@ def _close_flow(tmp_path, monkeypatch, cons_text):
 def test_close_optional_continues_and_records(tmp_path, monkeypatch):
     rc, st, seen = _close_flow(tmp_path, monkeypatch, None)
     assert rc == 0 and seen == ["tf"] and st["ai_unanswered"]["close"]["n"] == 1
-    assert "1 packets unanswered, defaults used" in open(os.path.join(st["paths"]["workdir"], "LEDGER.txt")).read()
+    assert "1 bounded search" in open(os.path.join(st["paths"]["workdir"], "LEDGER.txt")).read()
 
 
 def test_close_required_exits_5(tmp_path, monkeypatch):
     rc, st, seen = _close_flow(tmp_path, monkeypatch, '[ai]\nanswer = "required"\n')
     assert rc == 5 and seen == []
+
+
+def test_packet_classes_default_search_owner(tmp_path):
+    """B12 / OUTSIDE-REVIEW 9.3: closed by the default plan = default; still open = bounded search, named in the line; needs = owner question."""
+    from fluxplace import packets as PK
+    pk = {}
+    for k, need in (("A", None), ("B", None), ("C", "board-size")):
+        pk[k] = str(tmp_path / f"{k}.packet.json")
+        json.dump({"net": k, **({"needs": need} if need else {})}, open(pk[k], "w"))
+    r = PK.resolve([(pk[k], k) for k in "ABC"], {"B", "C"}, ai_dir=str(tmp_path / "ai"))
+    assert r["classes"] == {"default": 1, "search": 1, "owner": 1}
+    assert "STILL OPEN" in r["line"] and "B" in r["line"] and [q["id"] for q in r["questions"]] == ["packet:C"]
+    assert json.load(open(tmp_path / "ai" / "owner-questions.json"))[0]["id"] == "packet:C"
+    assert PK.resolve([(pk["C"], "C")], {"C"}, {"packet:C": "accept-open"})["questions"] == []        # answered: resumes
+
+
+def test_critroute_owner_packet_suspends_with_question(tmp_path, monkeypatch):
+    seen = []
+    _crit(monkeypatch, seen)
+    monkeypatch.setattr(CR, "packet", lambda board, net, cons, spec, cons_path=None, **kw: {"v": 1, "net": net, "needs": "stackup"})
+    monkeypatch.setattr(CR, "apply", lambda board, out, acts, *a, **k: {"board": board, "kept": [], "tried": 2, "open_nets": ["BT1_RF", "CAN_CLK"], "lines": []})
+    res = CR.stage(_Ctx(str(tmp_path / "w")), 3, "b.kicad_pcb")
+    assert res["verdict"] == "questions" and len(res["ai_unanswered"]["questions"]) == 2 and "packet:BT1_RF" in res["next"][0]

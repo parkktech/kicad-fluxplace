@@ -1069,15 +1069,18 @@ def _rip_mm(base, net, ids, cons_path=None):
 def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=None):
     """{"actions", "tokens", "why", "dropped"} from an AI action file. Invalid actions are dropped with a log line and
     listed in "dropped" as {do, reason} (PHASE3H A4). Never raises. `protect` (drcguard.protected_nets: rf nets and pair
-    legs) may not be rip_locked. At most AI_MAX_ACTIONS are kept; the rest are dropped."""
-    out = {"actions": [], "tokens": 0, "why": "", "dropped": []}
+    legs) may not be rip_locked. At most AI_MAX_ACTIONS are kept; the rest are dropped.
+    B12/R051: "refused" is the reason the whole file is refused ("" when usable): unreadable, not an object, no actions list, or
+    any dropped action (the answer is applied whole or not at all). check_ai_actions() reports it without touching a board."""
+    out = {"actions": [], "tokens": 0, "why": "", "dropped": [], "refused": ""}
     try:
         with open(path) as fh:
             a = json.load(fh)
         if not isinstance(a, dict):
-            raise ValueError("not an object")
+            raise ValueError("not a JSON object")
     except (OSError, ValueError) as e:
         print(f"ai: unreadable action file {os.path.basename(path)}: {e}", file=sys.stderr)
+        out["refused"] = f"unreadable action file: {e}"[:160]
         return out
     try:
         copper = signal_layers(base)   # routes go on signal layers only (planes stay planes)
@@ -1087,6 +1090,8 @@ def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=N
         out["tokens"] = int(a["tokens"])
     out["why"] = str(a.get("why") or "")[:200]
     raw = a.get("actions") if isinstance(a.get("actions"), list) else []
+    if not isinstance(a.get("actions"), list):
+        out["refused"] = "no actions list"
     rip_mm = {}                                  # PHASE3H B9: rips on a high-speed leg in this same file
     for x in raw:
         if isinstance(x, dict) and x.get("do") == "rip" and x.get("net") in hs_legs and isinstance(x.get("ids"), list):
@@ -1104,7 +1109,21 @@ def load_ai_action(path, base, protect=(), hs_legs=(), open_legs=(), cons_path=N
             out["dropped"].append({"do": str(x.get("do") if isinstance(x, dict) else "")[:20], "reason": why[:120]})
         else:
             out["actions"].append(v)
+    if out["dropped"] and not out["refused"]:
+        out["refused"] = f"{len(out['dropped'])} of {len(raw)} actions invalid: {out['dropped'][0]['do'] or '?'}: {out['dropped'][0]['reason']}"[:160]
     return out
+
+
+def check_ai_actions(ai_dir, base, **ctx):
+    """B12/R051: validate every pending `*.action.json` in `ai_dir` with the loader (no board change; replaces
+    W14/scripts/check-ai-actions.sh). `ctx` = load_ai_action's protect, hs_legs, open_legs, cons_path.
+    -> [{file, ok, kept: [do], lost, reason}]."""
+    rows = []
+    for f in sorted(glob.glob(os.path.join(ai_dir, "*.action.json"))):
+        a = load_ai_action(f, base, **ctx)
+        rows.append({"file": os.path.basename(f), "ok": not a["refused"], "kept": [x["do"] for x in a["actions"]],
+                     "lost": len(a["dropped"]), "reason": a["refused"]})
+    return rows
 
 
 def _xy(p):
@@ -1708,6 +1727,11 @@ def _rank(kind, rungs, yields):
     return order
 
 
+def ai_memo_part(ai_dir, names):
+    """B12/R052: the memo-key part of pending answers: name plus content hash, so a rewritten answer of the same name is a new key."""
+    return "ai:" + ",".join(f"{n}@{hashlib.sha1(open(os.path.join(ai_dir, n), 'rb').read()).hexdigest()[:12]}" for n in names)
+
+
 def _ai_pending(ai_dir, gaps):
     """True when an unapplied action file exists for one of `gaps`."""
     return bool(_ai_pending_names(ai_dir, gaps))
@@ -1784,10 +1808,10 @@ def _r_ai(base, out, gaps, ctx):
         a = load_ai_action(act, base, ctx.get("protect", ()), hs_legs=ctx.get("hs_legs", ()),
                            open_legs=ctx.get("open_legs", ()), cons_path=ctx.get("cons_path"))
         a["gap_id"] = gap["id"]
-        if a.get("dropped"):                                    # PHASE3H A4: nothing applied, nothing charged
-            _feedback_note(ai_dir, sid, dropped=a["dropped"][:8], refused="action invalid")
+        if a.get("refused"):                                    # PHASE3H A4 / B12 R051: nothing applied, nothing charged, the reason is stated
+            _feedback_note(ai_dir, sid, dropped=a["dropped"][:8], refused="action invalid: " + a["refused"])
             _consume(act)
-            return {"status": "invalid", "commit": False, "why": "action invalid: " + a["dropped"][0]["reason"],
+            return {"status": "invalid", "commit": False, "why": "action invalid: " + a["refused"],
                     "tokens": 0, "gap_id": gap["id"]}
         a["actions"] = _ai_filter_pair(gap, a["actions"])   # PHASE3G G1 / H2: hs-pair gaps are restricted
         try:
@@ -2327,8 +2351,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         ai_names = _ai_pending_names(ctx_dir_ai(work), targets) if rung == "ai" else []
         if rung == "ai":                                     # PHASE3G-H2: an answer file refused once must not block the next one
             # PHASE3I B3: an answer is keyed by its content, so a rewritten answer with the same name is tried again
-            key = key + ("ai:" + ",".join(f"{n}@{hashlib.sha1(open(os.path.join(ctx_dir_ai(work), n), 'rb').read()).hexdigest()[:12]}"
-                                          for n in ai_names),)
+            key = key + (ai_memo_part(ctx_dir_ai(work), ai_names),)
         vec0, t_try = score(m, m["gaps"]), time.time()
         out = os.path.join(work, "close", f"r{r}-{kind}-{rung}.kicad_pcb")
         rrow_done = []
