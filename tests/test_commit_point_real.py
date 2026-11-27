@@ -183,3 +183,30 @@ def test_close_on_a_stale_manifest_returns_a_stop_dict_and_leaves_the_incumbent(
     assert res["stop"] == "manifest_stale" and res["verdict"] == "fail" and any(x.startswith("L:") for x in res["diff"])
     assert any(x.startswith("  L:") for x in msgs) and open(base).read() == before and BW.is_stale(base)
     assert not os.path.exists(tmp_path / "work" / "best.kicad_pcb") and os.path.exists(tmp_path / "work" / "stop.json")
+
+def test_route_post_centre_fallback_never_moves_protected_copper(tmp_path, monkeypatch):
+    """W46: the route stage's post ran centre_run with protect=[] and moved locked copper of the manifest nets (25 nets: PROTECTED_CHANGED at the commit)."""
+    from fluxplace import krtchain as K, snapiter as SI, planetie as PT, opengate as OG
+    prev = board(tmp_path, "prev.kicad_pcb", BASE())
+    BW.seed(prev)
+    best = str(tmp_path / "best.kicad_pcb")
+    open(best, "w").write(open(prev).read())
+    open(str(tmp_path / "best.kicad_pro"), "w").write("{}")
+    seen = {}
+
+    def centre(src, dst, iters=3, log=print, protect=()):
+        seen["protect"] = set(protect)
+        if "D_P" not in protect:                                       # the real move: a locked D_P end moves onto the via centre
+            open(dst, "w").write(open(src).read().replace("(end 30 20)", "(end 30 20.05)", 1))
+        return {"centred_left": 0}
+    monkeypatch.setattr(SI, "run", lambda *a, **k: {"centred_left": 3, "moved": 0})
+    monkeypatch.setattr(SI, "via_run", lambda *a, **k: {"centred_left": 3})
+    monkeypatch.setattr(SI, "joiner_run", lambda *a, **k: {"centred_left": 3})
+    monkeypatch.setattr(SI, "centre_run", centre)
+    monkeypatch.setattr(PT, "run_guarded", lambda *a, **k: {"placed": 0})
+    monkeypatch.setattr(OG, "refill", lambda *a, **k: None)
+    R = {"track": 0.15, "clearance": 0.127, "via": 0.45, "drill": 0.2, "clearance_class": 0.0, "min_clearance": 0.127}
+    K._post(best, str(tmp_path), [], R, protect=sorted(BW.load_manifest(prev)["nets"]))
+    assert {"D_P", "D_N"} <= seen["protect"]
+    r = PL._commit_point("route", prev, {"verdict": "pass", "board": best})
+    assert r["verdict"] == "pass"

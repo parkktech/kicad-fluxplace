@@ -380,7 +380,7 @@ def test_centre_run_clears_the_drc_for_a_locked_off_centre_end(tmp_path):
     assert rec["centred_left"] == 0 and rec["moved"] == 1 and len(rec["moves"]) == 2 and _centred(src) == 0
 
 
-def test_route_stage_post_ends_with_the_centre_fallback_that_ignores_protection(tmp_path, monkeypatch):
+def test_route_stage_post_ends_with_the_centre_fallback_that_respects_protection(tmp_path, monkeypatch):
     KC = _post_stubs(monkeypatch)
     calls = []
     monkeypatch.setattr(SI, "run", lambda *a, **k: {"moved": 0, "centred_left": 5})
@@ -388,4 +388,4 @@ def test_route_stage_post_ends_with_the_centre_fallback_that_ignores_protection(
     monkeypatch.setattr(SI, "joiner_run", lambda *a, **k: calls.append(("joiner", k["protect"])) or {"centred_left": 3})
     monkeypatch.setattr(SI, "centre_run", lambda *a, **k: calls.append(("centre", k["protect"])) or {"centred_left": 0})
     rec = KC._post("b.kicad_pcb", str(tmp_path), [], {"track": 0.2, "clearance": 0.127, "via": 0.6, "drill": 0.3}, protect=["P"])
-    assert calls == [("via", ["P"]), ("joiner", ["P"]), ("centre", [])] and rec["snap"]["centred_left"] == 0
+    assert calls == [("via", ["P"]), ("joiner", ["P"]), ("centre", ["P"])] and rec["snap"]["centred_left"] == 0
