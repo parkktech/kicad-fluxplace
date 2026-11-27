@@ -379,7 +379,11 @@ def run(c, n, board, runner=run_step):
         got = route_net_set(allnets, failed_legs | set(rf_nets), hs_block, still)
         if not branch_nets:
             return got
-        return sorted((set(allnets) if got == ("*",) else set(got)) - set(branch_nets))     # W46: rail nets belong to the rail steps
+        try:
+            have = {str(p.GetNetname()) for p in _pcb().LoadBoard(src).GetPads()} - {""}   # nets with a pad on THIS step's board (the router refuses a net it cannot find)
+        except Exception:                                    # noqa: BLE001 - unreadable board: the nets read at the start
+            have = set(allnets)
+        return sorted(((have if got == ("*",) else set(got)) & have) - set(branch_nets))     # W46: rail nets belong to the rail steps
     if diff:
         for gi, (gnets, glay, gw, ggap) in enumerate(diff_groups(c.cons, board, diff, sig)):
             steps.append(("diff" if gi == 0 else f"diff{gi + 1}",
@@ -405,7 +409,12 @@ def run(c, n, board, runner=run_step):
     power = {net: float(((c.cons or {}).get("power") or {}).get(net, {}).get("width_mm") or POWER_W)    # plane nets: taps, not rails
              for net in dict.fromkeys(x for x, _ in planes)}
     power = {**rails, **power}                               # plane entries win for plane nets
-    steps.append(("route", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=_route_nets(s), extra=xtra)))
+    def _plain(s, o):
+        ns = _route_nets(s)
+        if not ns:                                           # W46: every net is a rail / pair / RF net owned by an earlier step: nothing for the plain router
+            return lambda s_, o_: (shutil_copy(s_, o_), 0)[1]
+        return cmd_route(a.router_py, a.router_dir, s, o, sig, base, power, o[:-10] + ".json", nets=ns, extra=xtra)
+    steps.append(("route", _plain))
     if branch_nets:                                          # W46: the plain step's tracks split rail zone fills (KRT does not repair zone nets outside its --nets):
         steps.append(("rails-branch2", lambda s, o: _branch))        # the same class-by-class pass reconnects what it cut, at the same D71da widths
     sizes = {"track": R["track"], "clearance": RR.request_clearance(R), "via": R["via"], "drill": R["drill"]}
