@@ -2000,9 +2000,9 @@ def _classify_update(a, stages):
         return None
     if start not in stages:
         return None
-    scope = f"scope {len(cl['scope'])} nets" if start != "silk" else "no placement/route stages"
-    line = (f"update: re-net {len(cl['renet_nets'])} nets, {len(cl['new'])} new parts, swaps found at the seat -> from {start}, {scope}")
-    return dict(cl, **{"from": start, "line": line})
+    scope = "no placement/route stages" if start == "silk" else f"scope {len(cl['scope'])} nets"
+    line = f"update: re-net {len(cl['renet_nets'])} nets, {len(cl['new'])} new parts, swaps found at the seat -> from {start}, {scope}"
+    return {**cl, "from": start, "line": line}
 
 
 def _exec_stage(c, n, name, board, later=()):

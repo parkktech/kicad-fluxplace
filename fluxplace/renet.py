@@ -172,6 +172,6 @@ def classify(B, cons):
     det = IP.detect(B, cons)
     new = det["free"] if det["incremental"] else []
     segs, vias, _refs, padnets = _scan(B)
-    nets = sorted({B["segs"][i]["net"] for i in segs} | {B["vias"][i]["net"] for i in vias} | padnets)
+    nets = {B["segs"][i]["net"] for i in segs} | {B["vias"][i]["net"] for i in vias} | padnets
     newnets = {p["net"] for p in B["pads"] if p["ref"] in new and p["net"]}
-    return {"new": new, "renet_nets": nets, "scope": sorted(set(nets) | newnets)}
+    return {"new": new, "renet_nets": sorted(nets), "scope": sorted(nets | newnets)}
