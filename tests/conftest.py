@@ -53,7 +53,8 @@ SERIAL_NODEID_PREFIXES = (
     "tests/test_core.py::test_constraints_ingest",         # default arg path=/tmp/fluxtest_cons.toml
     "tests/test_routefr.py::",
     "tests/test_handroute_ends.py::test_via_min_budget_writes_verified_prefix_and_marks_remainder",   # time budget, fails under load (85), 1.4 s alone
-    "tests/test_lookahead.py::test_stage_runs_each_ghost_and_drops_a_failed_one",   # load flake (ledger row 219), fails under -n 8                             # stall/timing assertions fail under -n 8 load (2026-11-26 main-all run), pass serially
+    "tests/test_lookahead.py::test_stage_runs_each_ghost_and_drops_a_failed_one",
+    "tests/test_gate_script.py::",                        # queue timing (GATE_POLL 0.3 s) fails under -n 8 at load 40+ (batch5b gate), passes alone   # load flake (ledger row 219), fails under -n 8                             # stall/timing assertions fail under -n 8 load (2026-11-26 main-all run), pass serially
 )
 
 

@@ -79,7 +79,7 @@ def test_microboard_crystal_20mm_is_also_a_net_bound_gap_when_a8_is_merged(tmp_p
 
 
 REVIEW = "/var/kicad/utv-comms-bridge/W16/view/review-preview-w40.json"
-BOARD = "/var/kicad/utv-comms-bridge/W16/CURRENT.kicad_pcb"
+BOARD = "/var/kicad/utv-comms-bridge/W16/stageA/placetour-5/out.kicad_pcb"   # the placement review-preview-w40 was judged on (CURRENT moves; D71eq)
 
 
 @pytest.mark.skipif(not (os.path.exists(REVIEW) and os.path.exists(BOARD)), reason="W16 board not on this machine")
