@@ -574,7 +574,9 @@ def commit(base, cand, dst, release=(), complete=None, reason="", log=None, lock
     locked items.  -> verify's dict plus "written".  Refused: nothing is written."""
     man = manifest if manifest is not None else load_manifest(base)
     kw = {} if cons is None else {"cons": cons, "spec": spec}
-    r = verify(base, cand, release, manifest=man if manifest is not None else None, allow=allow, **kw)
+    if allow:
+        kw["allow"] = allow
+    r = verify(base, cand, release, manifest=man if manifest is not None else None, **kw)
     r["written"] = False
     if not r["ok"]:
         if log:
