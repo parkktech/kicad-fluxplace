@@ -1168,9 +1168,31 @@ def _residual_fail(res, c, d):
     return res
 
 
+def _incremental_floorplan(c, board, out):
+    """A routed board whose only unlocked parts are new and off the outline (incplace.detect): seat those parts in free space and
+    touch nothing else; the stages that would re-place or re-lay copper are skipped for the rest of the run. -> result or None."""
+    from . import incplace as IP, routediag as RD
+    det = IP.detect(RD.load(board), c.cons)
+    if not det["incremental"]:
+        if det["copper"] and det["free"]:
+            print(f"floorplan: not incremental ({det['why']}): the normal floorplan runs", flush=True)
+        return None
+    try:
+        moves = IP.place(board, out, c.cons)
+    except IP.IncError as e:
+        return {"verdict": "fail", "line": f"floorplan: incremental placement refused: {e}", "board": board, "incremental": True}
+    _sidecar(board, out)
+    return {"verdict": "pass", "board": out, "incremental": True, "placed": {r: [round(v, 3) for v in m] for r, m in moves.items()},
+            "line": f"floorplan: incremental: {len(moves)} new part(s) seated ({', '.join(sorted(moves))}); {det['why']}; "
+                    f"stages skipped: {', '.join(IP.SKIP_STAGES)}"}
+
+
 def st_floorplan(c, n, board):
     d = c.dir(n, "floorplan")
     out = os.path.join(d, "board.kicad_pcb")
+    inc = _incremental_floorplan(c, board, out)
+    if inc:
+        return inc
     res = _engine_floorplan(c, d, board, out)
     if res:
         return _residual_fail(res, c, d)
@@ -1654,6 +1676,11 @@ def _apply_lock_at(a, work, board):
     cons = C_.load(a.constraints)
     if not LA.rows(cons):
         return board
+    from . import incplace as IP, routediag as RD
+    det = IP.detect(RD.load(board), cons)
+    if det["incremental"] and det["drift"]:         # a routed board with new parts: a locked part is never moved (its copper stays)
+        raise SystemExit("pipeline: REFUSED: [lock.at] would move locked part(s) of a board with copper: "
+                         + ", ".join(f"{r} ({p[0]:.2f},{p[1]:.2f}) -> ({q[0]:.2f},{q[1]:.2f})" for r, p, q in det["drift"][:6]))
     out = os.path.join(work, "0-lock", "board.kicad_pcb")
     try:
         moved = LA.apply(board, out, cons)
@@ -1978,8 +2005,16 @@ def _run(a):
             sp = os.path.join(c.dir(STAGES_.index(k) + 1, "gate"), "stop.json")
             print(f"pipeline: gate {k} is not clean ({gst.get('stop') or 'never run'}); fix it first: {sp} (exit 5, no stage started)")
             return 5
+    from . import incplace as IP
+    incremental = False
     for i in range(i0, i1 + 1):
         name = STAGES_[i]
+        if incremental and name in IP.SKIP_STAGES:      # w74: new parts on a routed board; nothing re-places or re-lays copper
+            st["stages"][name] = {"verdict": "na", "line": "incremental placement: stage skipped (existing parts and copper stay)",
+                                  "dir": f"{i + 1}-{name}", "board": board}
+            print(f"[{i + 1}/{len(STAGES_)}] {name}: na - incremental placement: skipped", flush=True)
+            done = i
+            continue
         t = time.time()
         os.environ["FLUXPLACE_STAGE"] = name
         _ev_call(_ev_stage, "stage_start", i + 1, name)
@@ -1993,6 +2028,9 @@ def _run(a):
             from . import questions as QS
             QS.inherit(prev, res["board"])
         board = res.get("board", board)
+        if res.get("incremental") and res["verdict"] in ("pass", "warn"):
+            incremental = st["incremental"] = True
+            c.answers.setdefault("rip-existing", "never")      # the existing copper stays: routing only adds (an owner --answer wins)
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
             res["line"] = res.get("line", "")
