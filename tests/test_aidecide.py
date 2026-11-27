@@ -1,0 +1,140 @@
+"""w94-aidecide: the AI decider (decider.py) at the question choke point (questions.Session.ask) and the [pinswap]
+sealed-pad pin choice (pinswap.py).  The model is a stub command; no network, no real model."""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+import planboards as PB
+from fluxplace import decider as DC, pinswap as PS, questions as QS, routediag as RD
+
+Q = {"id": "rule-floors", "topic": "rule-floors", "found": "no floors", "default": "relaxed", "settle": "fab sheet",
+     "options": [{"choice": "standard", "consequence": "0.127 mm"}, {"choice": "relaxed", "consequence": "0.2 mm"}]}
+
+
+def stub(answer):
+    """[ai] constraints whose model command prints `answer` (a dict is JSON-encoded) after reading the prompt."""
+    text = answer if isinstance(answer, str) else json.dumps(answer)
+    return {"ai": {"decide": "on", "decide_cmd": [sys.executable, "-c", "import sys; sys.stdin.read(); print(sys.argv[1])", text]}}
+
+
+def test_reasoned_decision_is_logged_mirrored_and_cached(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    d = DC.decide(Q, ["fab sheet: 0.127 mm"], stub({"choice": "standard", "rationale": "fab allows it", "evidence": ["fab sheet"]}), str(tmp_path))
+    assert d["choice"] == "standard" and d["reasoned"] and d["by"] == "ai" and d["evidence"] == ["fab sheet"]
+    rows = [json.loads(l) for l in open(tmp_path / DC.LOG)]
+    assert rows[-1]["hash"] == d["hash"] and rows[-1]["rationale"] == "fab allows it"
+    assert '"rule-floors" = "standard"' in (tmp_path / DC.ANSWERS).read_text()
+    # same question again, model now broken: answered from the log, no call
+    d2 = DC.decide(Q, ["fab sheet: 0.127 mm"], {"ai": {"decide": "on", "decide_cmd": ["/nonexistent/model"]}}, str(tmp_path))
+    assert d2["choice"] == "standard" and d2["by"] == "cache"
+
+
+def test_offline_and_off_menu_fall_back_to_default_not_reasoned(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
+    d = DC.decide(Q, [], stub({"choice": "standard"}), str(tmp_path))
+    assert d["choice"] == "relaxed" and not d["reasoned"] and d["rationale"].startswith("default, not reasoned")
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE")
+    d = DC.decide(Q, [], stub('{"choice": "advanced"} then {"choice": "nope"}'), str(tmp_path))
+    assert d["choice"] == "relaxed" and not d["reasoned"]
+    assert DC.parse('noise {"x": 1} {"choice": "standard", "rationale": "r"}', ["standard"])["choice"] == "standard"
+
+
+def test_session_uses_the_decider_instead_of_stopping(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    board = tmp_path / "b.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    opts = {o["choice"]: o["consequence"] for o in Q["options"]}
+    S = QS.Session(str(board), stub({"choice": "standard", "rationale": "r"}), {}, False, "t")
+    assert S.ask("rule-floors", "rule-floors", "no floors", opts, "relaxed", "fab") == "standard"
+    out = []
+    assert S.gate(out=out.append) == 0 and not S.open and S.used == {"rule-floors": "standard"}
+    assert any(l.startswith("DECIDED: rule-floors = standard (ai)") for l in out)
+    # offline: the default, not reasoned -> ASSUMED (fab refuses), still no stop
+    monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
+    S = QS.Session(str(board), stub({"choice": "standard"}), {}, False, "t")
+    assert S.ask("rule-floors", "rule-floors", "no floors", opts, "relaxed", "fab") == "standard"     # the log answers it
+    (tmp_path / "o").mkdir()
+    board = tmp_path / "o" / "b.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    S = QS.Session(str(board), stub({"choice": "standard"}), {}, False, "t")
+    assert S.ask("rule-floors", "rule-floors", "no floors", opts, "relaxed", "fab") == "relaxed"
+    assert S.gate(out=lambda _l: None) == 0 and S.assumed == ["rule-floors"] and not S.used
+    # decider off: unchanged (open question, exit 3)
+    S = QS.Session(str(board), {}, {}, False, "t")
+    S.ask("rule-floors", "rule-floors", "no floors", opts, "relaxed", "fab")
+    assert S.gate(out=lambda _l: None) == QS.EXIT
+
+
+SIG = [f"S{i}" for i in range(10)]
+
+
+def sealed_board(tmp):
+    """west column of U1 walled in (4 pins sealed), east column 7 nets + 3 free pads (18-20) that escape east."""
+    east = [f"E{i}" for i in range(7)] + ["", "", ""]
+    body = PB.column_ic("U1", 20.0, 40.0, SIG, east=east) + PB.wall("R1", 18.5 - 0.4 - 1.0 - 0.2, 40.0, 14)
+    body += PB.fp("J1", 60.0, 40.0, [PB.pad(str(i + 1), 0, i * 1.5, s, 1.0, 1.0) for i, s in enumerate(SIG + east[:7])])
+    return PB.write(tmp, body)
+
+
+def group(**kw):
+    return {"pinswap": {"gpio": dict({"pins": [f"U1.{i}" for i in range(1, 21)]}, **kw)}}
+
+
+def test_pinswap_lists_only_free_escapable_pads(tmp_path):
+    B = RD.load(sealed_board(tmp_path))
+    rows = PS.probe(B, group(functions={"U1.18": "GPIO18"}), None)
+    assert [r["pad"] for r in rows] == ["3", "5", "7", "9"]
+    assert all({c["pad"] for c in r["cands"]} == {"18", "19", "20"} for r in rows)
+    assert rows[0]["functions"]["18"] == "GPIO18"
+    spec = {"components": [{"ref": "U1"}], "nets": {"X": [["U1", "19"]]}}          # the spec already uses pad 19
+    assert all({c["pad"] for c in r["cands"]} == {"18", "20"} for r in PS.probe(B, group(), spec))
+    assert PS.probe(B, {"pinswap": {"bad": {"pins": ["U1.1", "R1.1"]}}}, None) == []   # a group spans one part only
+
+
+def test_pinswap_decided_by_ai_applies_to_spec_and_board(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    path = sealed_board(tmp_path)
+    B = RD.load(path)
+    cons = dict(group(), **stub({"choice": "U1.20", "rationale": "GPIO, free, escapes"}))
+    S = QS.Session(path, cons, {}, False, "route")
+    QS.check_pinswap(S, B, cons)
+    # the first sealed pad takes U1.20; the decider's later answers name a pad no longer offered -> default keep (not reasoned)
+    assert S.used == {"pinswap:U1.3": "U1.20"} and set(S.assumed) == {"pinswap:U1.5", "pinswap:U1.7", "pinswap:U1.9"}
+    assert "U1.20" not in json.dumps([q for q in S.decided if q["id"] != "pinswap:U1.3"])
+    assert any("function" in e for e in S.evidence["pinswap:U1.3"])
+    spec = {"components": [{"ref": "U1"}], "nets": {"S2": [["U1", "3"], ["J1", "3"]]}}
+    _c, spec2 = S.apply({}, spec)
+    assert spec2["nets"]["S2"] == [["U1", "20"], ["J1", "3"]] and spec["nets"]["S2"][0] == ["U1", "3"]
+    assert PS.moves(dict(S.used, **{"pinswap:U1.5": "keep"})) == [("U1", "3", "20")]
+
+
+def test_apply_board_moves_the_pad_net(tmp_path):
+    import pytest
+    pytest.importorskip("pcbnew")
+    path = sealed_board(tmp_path)
+    out = str(tmp_path / "o" / "b.kicad_pcb")
+    assert PS.apply_board(path, out, [("U1", "3", "20"), ("U1", "5", "11")]) == ["S2"]   # pad 11 carries E0: refused
+    pads = {p["num"]: p["net"] for p in RD.load(out)["parts"]["U1"]["pads"]}
+    assert pads["3"] == "" and pads["20"] == "S2" and pads["5"] == "S4"
+
+
+def test_pipeline_entry_decides_and_renets_into_the_work_dir(tmp_path, monkeypatch):
+    import types
+    import pytest
+    pytest.importorskip("pcbnew")
+    from fluxplace import pipeline as P
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    path = sealed_board(tmp_path)
+    work = str(tmp_path / "work")
+    c = types.SimpleNamespace(cons=dict(group(), **stub({"choice": "U1.20", "rationale": "r"})), answers={}, state={}, spec=None,
+                              a=types.SimpleNamespace(board=path))
+    st = {}
+    out = P._pinswap_entry(c, work, path, st)
+    assert out == os.path.join(work, "0-pinswap", "board.kicad_pcb") and st["pinswap"] == [("U1", "3", "20")]
+    assert c.answers == {"pinswap:U1.3": "U1.20"} and c.state["route_scope"]["nets"] == ["S2"]
+    assert os.path.exists(os.path.join(work, DC.LOG)) and not os.path.exists(tmp_path / DC.LOG)
+    pads = {p["num"]: p["net"] for p in RD.load(out)["parts"]["U1"]["pads"]}
+    assert pads["3"] == "" and pads["20"] == "S2"
+    assert P._pinswap_entry(c, work, out, {}) == out           # re-run on the moved board: nothing sealed in the group, no change

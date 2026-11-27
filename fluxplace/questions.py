@@ -9,13 +9,15 @@ compactly (`--json` as JSON) and written to `<board>.questions.json`.  Answers: 
 twice.  `--assume-defaults` proceeds with each default, prints `ASSUMED: <id>` and writes `<output>.assumed.json`; fab and
 deliver refuse a board that carries one.  Decisive inferences are not questions: they print `inferred: ... because ...`.
 
-An agent that gets exit code 3 relays the questions to the user and waits; it never answers them itself."""
+An agent that gets exit code 3 relays the questions to the user and waits; it never answers them itself.  With `[ai] decide = "on"`
+an unanswered question goes to the AI decider (decider.py) instead: a reasoned decision is used and recorded like an answer
+(`DECIDED:`); with no model it is the default, marked "default, not reasoned" and treated as ASSUMED.  Nothing stops."""
 import copy
 import json
 import os
 import re
 
-from . import netclass as NC
+from . import decider as DC, netclass as NC
 
 EXIT = 3
 
@@ -102,6 +104,8 @@ class Session:
         self.cons_ans = {str(k): str(v) for k, v in ((cons or {}).get("answers") or {}).items()}
         self.map_ans = self._map_answers()
         self.open, self.assumed, self.used, self.notes, self.appliers = [], [], {}, [], []
+        self.evidence, self.decided = {}, []          # qid -> evidence lines for the decider; decider rows of this session
+        self.log_dir = os.path.dirname(os.path.abspath(board)) if board else None     # the decider's log and cache
 
     # -- storage
     def map_path(self):
@@ -140,6 +144,16 @@ class Session:
                 raise SystemExit(f"answer {qid}={ans!r}: choose one of {', '.join(options)}")
             self.used[qid] = ans
             choice = ans
+        elif DC.enabled(self.cons):
+            q = {"id": qid, "topic": topic, "found": found, "default": default, "settle": settle,
+                 "options": [{"choice": k, "consequence": v} for k, v in options.items()]}
+            d = DC.decide(q, self.evidence.get(qid, ()), self.cons, self.log_dir)
+            self.decided.append(d)
+            if d["reasoned"]:
+                self.used[qid] = d["choice"]
+            else:
+                self.assumed.append(qid)
+            choice = d["choice"]
         elif self.assume:
             self.assumed.append(qid)
             choice = default
@@ -166,6 +180,8 @@ class Session:
             out(n)
         if len(self.notes) > 8:
             out(f"INFO inferred: ... {len(self.notes) - 8} more")
+        for d in self.decided:
+            out(f"DECIDED: {d['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'}): {d['rationale'][:140]}")
         for qid in self.assumed:
             out(f"ASSUMED: {qid}")
         if not self.open:
@@ -609,10 +625,20 @@ def check_connector_entry(S, B, cons, **_):
 
 
 CHECKS["connector-entry"] = check_connector_entry
+
+
+def check_pinswap(S, B, cons, spec=None, **_):
+    """a sealed pad of a [pinswap] group with free interchangeable pads that escape: which pad carries the net."""
+    if (cons or {}).get("pinswap"):
+        from . import pinswap as PS
+        PS.ask(S, B, cons, spec)
+
+
+CHECKS["pinswap"] = check_pinswap
 TOPICS = {"fanout": ("spec-board", "layer-roles", "controlled", "floors", "rail-pour"),
           "modules": ("spec-board", "fixed-parts", "layer-roles", "controlled", "placement-sides"),
           "floorplan": ("spec-board", "fixed-parts", "layer-roles", "controlled", "connector-entry", "placement-sides"),
-          "route": ("spec-board", "rip-existing", "layer-roles", "controlled", "floors", "rail-pour")}
+          "route": ("spec-board", "rip-existing", "layer-roles", "controlled", "floors", "rail-pour", "pinswap")}
 
 
 def guard(a, cmd, board, cons, spec, topics=None, B=None):
