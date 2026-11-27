@@ -1844,6 +1844,13 @@ def _link_lib(workdir, board):
 RENET_FROM = ("route-ready", "critroute", "route")        # a run that starts here meets a board routed before a netlist change
 
 
+def _scope_add(c, nets):
+    """Nets the route stage may touch on a routed board (state `route_scope`): released re-net nets and the nets of new parts.  Valid for this
+    run's lineage only (`input` = the BOARD argument it started from); krtchain.renet_scope reads it."""
+    sc = c.state.setdefault("route_scope", {"input": os.path.abspath(c.a.board) if getattr(c.a, "board", None) else None, "nets": []})
+    sc["nets"] = sorted(set(sc["nets"]) | set(nets))
+
+
 def _renet_entry(c, work, board, st):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
@@ -1860,8 +1867,11 @@ def _renet_entry(c, work, board, st):
     v = BW_.commit(board, out, out, release=rep["release"], reason="re-net", log=print)
     if not v["written"]:
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
+    BW_.release(out, rep["release"], "re-net")                 # commit() re-protects every net's locked items; a released net's leftovers are re-laid with it
     c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
     st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))
+    st["renet"].pop("release")
+    _scope_add(c, rep["release"])
     st["board"] = out
     print(f"pipeline: re-net: {rep['items']} item(s) stripped from {len(rep['nets'])} net(s) at pad(s) {', '.join(rep['pads'][:8])}; "
           f"they are routed as open nets ({out})", flush=True)
@@ -2000,6 +2010,9 @@ def _run(a):
         st["board"] = board
     if "ready" in STAGES_[i0:]:
         st.pop("undocumented", None)               # the gate runs again; its bypass is re-recorded only if used again
+    sc = st.get("route_scope")
+    if sc and a.board and os.path.abspath(a.board) != sc.get("input"):
+        st.pop("route_scope")                       # a scope belongs to the run that made it: another BOARD argument is a normal whole-board run
     c = Ctx(a, work, board, st)
     if i0 == 0 or a.board:
         _silk_version_line(c, board)
@@ -2084,6 +2097,13 @@ def _run(a):
         if res.get("incremental") and res["verdict"] in ("pass", "warn"):
             incremental = st["incremental"] = True
             c.answers.setdefault("rip-existing", "never")      # the existing copper stays: routing only adds (an owner --answer wins)
+            from . import routediag as RD_, opengate as OG_
+            placed = set(res.get("placed") or ())
+            _scope_add(c, {q["net"] for q in RD_.load(board)["pads"] if q["ref"] in placed and q["net"]})     # the new parts' nets are the route's scope
+            try:
+                OG_.refill(board)                              # an in-place footprint swap leaves the zones unfilled around its new pads and holes
+            except Exception as e:                             # noqa: BLE001 - the zones stay as they were; DRC says so later
+                print(f"pipeline: zone refill after the in-place seat skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
             board = _renet_entry(c, work, board, st)           # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet)
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
@@ -2104,7 +2124,7 @@ def _run(a):
         st["stages"][name] = {"verdict": res["verdict"], "line": res.get("line", ""),
                               "dir": f"{i + 1}-{name}", "board": board}
         if i == i0 and st.get("renet"):
-            st["stages"][name]["renet"] = st["renet"]
+            st["stages"][name]["renet"] = {k: st["renet"][k] for k in ("nets", "items", "pads")}
         if res.get("gate"):
             st["stages"][name]["gate"] = {"stop": res["gate"]["stop"], "kinds": res["gate"]["kinds"], "dir": res["gate"]["dir"]}
             if res["gate"].get("deferred"):

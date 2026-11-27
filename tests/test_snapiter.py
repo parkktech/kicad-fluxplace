@@ -389,3 +389,23 @@ def test_route_stage_post_ends_with_the_centre_fallback_that_respects_protection
     monkeypatch.setattr(SI, "centre_run", lambda *a, **k: calls.append(("centre", k["protect"])) or {"centred_left": 0})
     rec = KC._post("b.kicad_pcb", str(tmp_path), [], {"track": 0.2, "clearance": 0.127, "via": 0.6, "drill": 0.3}, protect=["P"])
     assert calls == [("via", ["P"]), ("joiner", ["P"]), ("centre", ["P"])] and rec["snap"]["centred_left"] == 0
+
+
+def test_protected_nets_are_skipped_by_the_snap(tmp_path, monkeypatch):
+    """w73b: the krt-whole post snap moved copper of protected pair nets (PROTECTED_CHANGED at the stage commit): their items start in `skip`."""
+    import shutil
+    src = tmp_path / "b.kicad_pcb"
+    src.write_text("board")
+    (tmp_path / "b.kicad_pro").write_text("{}")
+    monkeypatch.setattr(SI, "_report", lambda _board: {"violations": [], "unconnected_items": []})
+    monkeypatch.setattr(SI, "_ids_of_nets", lambda path, nets: {f"id-{n}" for n in nets})
+    seen = {}
+
+    def snap(src, dst, skip):
+        seen["skip"] = set(skip)
+        shutil.copy(src, dst)
+        return 0, 0
+
+    monkeypatch.setattr(SI, "_snap", snap)
+    SI.run(str(src), str(src), protect=["P1", "P2"])
+    assert seen["skip"] == {"id-P1", "id-P2"}
