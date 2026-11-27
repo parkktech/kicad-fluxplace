@@ -31,3 +31,18 @@ def _drc_gate_off_for_synthetic_boards(monkeypatch, request):
     from fluxplace import legalgate as LG
     monkeypatch.setattr(LG, "gate", lambda *a, **k: {"n": {}, "items": [], "pairs": [], "reverted": {}})
     yield
+
+
+# B9 (merge gate speed): the gate runs `pytest -n N --dist loadgroup`. Tests that share a fixed path/port or
+# process-global state must run in ONE worker, one after another: list them here (node-id prefix) and they get
+# xdist_group("serial"). Everything else is free to spread. Plain `pytest` (no xdist) ignores the mark.
+SERIAL_NODEID_PREFIXES = (
+    "tests/test_core.py::test_adaptive_fanout_priority",   # default arg tmpdir=/tmp/fluxtest_ff
+    "tests/test_core.py::test_constraints_ingest",         # default arg path=/tmp/fluxtest_cons.toml
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.nodeid.startswith(SERIAL_NODEID_PREFIXES):
+            item.add_marker(pytest.mark.xdist_group("serial"))
