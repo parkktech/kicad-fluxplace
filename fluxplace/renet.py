@@ -11,13 +11,12 @@ def _scan(B):
     """-> (set of seg indexes, set of via indexes) to strip, the pad refs that disagree with their copper."""
     pads = [p for p in B["pads"] if not p.get("np")]
     trk = [("seg", s) for s in B["segs"]] + [("via", v) for v in B["vias"]]
-    ns = len(B["segs"])
     items = [("pad", p) for p in pads] + trk
     off = len(pads)
     touch_pads, same = collections.defaultdict(list), collections.defaultdict(set)      # track -> pads / same-net neighbours
     for i, j in RC.near_pairs(items):
         i, j = min(i, j), max(i, j)
-        if j < off or items[i][0] == "zone":
+        if j < off:
             continue
         if i < off:
             if RC.touch(B, items[i], items[j]):
@@ -56,6 +55,7 @@ def _scan(B):
                 gone.add(t)
                 grew = True
     refs = sorted({f"{p['ref']}.{p['num']}" for t in seeds for p in touch_pads[t] if p["net"] != net[t]})
+    ns = len(B["segs"])
     return {t for t in gone if t < ns}, {t - ns for t in gone if t >= ns}, refs
 
 
@@ -72,7 +72,8 @@ def apply(board, out, cons=None):
     segs, vias, refs = _scan(B)
     if not segs and not vias:
         return None
-    text = BW.strip_indexed(open(board, errors="surrogateescape").read(), segs, vias)
+    with open(board, errors="surrogateescape") as fh:
+        text = BW.strip_indexed(fh.read(), segs, vias)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", errors="surrogateescape") as fh:
         fh.write(text)

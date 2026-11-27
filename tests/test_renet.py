@@ -43,8 +43,6 @@ def _args(tmp_path, board, **kw):
 
 
 def test_apply_strips_only_the_wrong_copper(tmp_path):
-    b = routed(tmp_path, "b.kicad_pcb", ("B", "P"))              # consistent: R2.1=B, R2.2=P
-    assert RN.apply(b, str(tmp_path / "o" / "x.kicad_pcb")) is None
     # re-net: R2.1 B -> Q (plain net), R2.2 P -> A (a leg joins another net); copper keeps the old nets
     b2 = routed(tmp_path, "c.kicad_pcb", ("Q", "A"))
     out = str(tmp_path / "o" / "c.kicad_pcb")
@@ -59,7 +57,6 @@ def test_no_mismatch_changes_nothing(tmp_path):
     b = routed(tmp_path, "b.kicad_pcb", ("B", "P"))
     assert RN.apply(b, str(tmp_path / "o" / "b.kicad_pcb")) is None and not (tmp_path / "o").exists()
     a = _args(tmp_path, b, from_stage="route-ready", to_stage="route-ready")
-    PL._renet_entry  # noqa: B018 - the entry check exists
     assert PL._renet_entry(PL.Ctx(a, a.workdir, b, {}), a.workdir, b, {}) == b
 
 
@@ -67,8 +64,7 @@ def test_dangling_strand_goes_with_the_stale_copper(tmp_path):
     body = (two("R1", 10, 10, "A", "B") + two("R2", 30, 10, "Q", "B")
             + seg((10.5, 10), (20, 10), "B") + seg((20, 10), (29.5, 10), "B"))      # R1.2 -> R2.1; R2.1 is now Q
     b = G.write(tmp_path, body, name="d.kicad_pcb")
-    out = str(tmp_path / "o" / "d.kicad_pcb")
-    rep = RN.apply(b, out)
+    rep = RN.apply(b, str(tmp_path / "o" / "d.kicad_pcb"))
     assert rep["items"] == 2 and rep["removed"] == {"B": 2}      # the touching segment and the strand it leaves
 
 
@@ -107,7 +103,7 @@ def test_from_route_without_mismatch_hands_on_the_input_untouched(tmp_path, monk
     sha = BW.file_sha(b)
     rc, seen, st = _run_to_stage(tmp_path, monkeypatch, b)
     assert rc == 0 and seen["board"] == b and BW.file_sha(b) == sha and "renet" not in st["stages"]["critroute"]
-    assert not os.path.exists(os.path.join(str(tmp_path / "W"), "0-renet"))
+    assert not (tmp_path / "W" / "0-renet").exists()
 
 
 def test_partner_leg_is_released_with_a_stripped_pair_leg(tmp_path):
@@ -116,10 +112,10 @@ def test_partner_leg_is_released_with_a_stripped_pair_leg(tmp_path):
             + seg((10.5, 12), (29.5, 12), "D_N"))                         # the partner leg: clear of every re-netted pad
     b = G.write(tmp_path, body, name="p.kicad_pcb")
     (tmp_path / "p.kicad_pro").write_text("{}")
-    cons = {"pairs": {"D_": {}}}
-    rep = RN.apply(b, str(tmp_path / "o" / "p.kicad_pcb"), cons)
+    out = str(tmp_path / "o" / "p.kicad_pcb")
+    rep = RN.apply(b, out, {"pairs": {"D_": {}}})
     assert rep["nets"] == ["D_P"] and rep["release"] == ["D_N", "D_P"]
-    assert BW.net_items(str(tmp_path / "o" / "p.kicad_pcb"))["D_N"] == BW.net_items(b)["D_N"]      # released, not stripped
+    assert BW.net_items(out)["D_N"] == BW.net_items(b)["D_N"]      # released, not stripped
 
 
 def test_t_junction_and_via_inside_a_segment_are_seen(tmp_path):
@@ -130,6 +126,7 @@ def test_t_junction_and_via_inside_a_segment_are_seen(tmp_path):
             + seg((12.5, 20), (12.5, 14), "B"))                                     # a correct spur: its trunk end lands mid-segment
     b = G.write(tmp_path, body, name="t.kicad_pcb")
     (tmp_path / "t.kicad_pro").write_text("{}")
-    rep = RN.apply(b, str(tmp_path / "o" / "t.kicad_pcb"))
+    out = str(tmp_path / "o" / "t.kicad_pcb")
+    rep = RN.apply(b, out)
     assert rep["removed"] == {"B": 2}                                      # the touching segment and the branch stub; trunk and spur stay
-    assert len(BW.net_items(str(tmp_path / "o" / "t.kicad_pcb"))["B"]) == 4
+    assert len(BW.net_items(out)["B"]) == 4

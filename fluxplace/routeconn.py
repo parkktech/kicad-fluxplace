@@ -47,9 +47,9 @@ def touch(B, ia, ib):
     (ka, a), (kb, b) = ia, ib
     if ka == "zone" and kb == "zone":
         return False
-    if ka in ("pad",) and kb in ("seg", "via"):
+    if ka == "pad" and kb in ("seg", "via"):
         return any(_in_pad(a, x, y, TOL) and (l & a["layers"]) for x, y, l in _pts_of(B, ib))
-    if ka in ("seg", "via") and kb in ("pad",):
+    if ka in ("seg", "via") and kb == "pad":
         return touch(B, ib, ia)
     if ka == "zone" and kb in ("pad", "seg", "via"):
         if kb == "pad":
@@ -147,8 +147,7 @@ def text_open(B, groups=None, members=None):
         def union(i, j):
             par[find(i)] = find(j)
 
-        pairs = near_pairs(items)
-        for i, j in pairs:
+        for i, j in near_pairs(items):
             if items[i][0] == "pad" and items[j][0] == "pad":
                 continue
             if find(i) != find(j) and touch(B, items[i], items[j]):
