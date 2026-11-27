@@ -557,13 +557,12 @@ def lean_krt(a, board, outdir, budget_min, extra=(), only=None, info=None):
             ok, _s = _run_capped(cmd, a.router_dir, outdir, tag, o, cap)
             return k, (ok and os.path.exists(o)), o
 
-        res_open, runs = {}, []
+        res_open = {}
         for k in ("fwd", "rev"):                  # B11 / R124: the reverse order only when the forward one leaves a critical net open (or failed)
             if k == "rev" and res_open.get("fwd") is not None and not res_open["fwd"]:
                 _ghost_out(outdir, "[krt-first] fwd leaves no critical net open: reverse order not run")
                 break
-            _k, ok, o = _variant(k)
-            runs.append((k, ok, o))
+            _, ok, o = _variant(k)
             res_open[k] = (set(RC.text_open(RD.load(o))) & set(first)) if ok else None
         pick, fragile = _pick_first(res_open)
         if pick:

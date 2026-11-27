@@ -1316,8 +1316,7 @@ def run(board, cons=None, spec=None, out=None, plan_only=False, only=None, log=l
         t_run = time.time()
         cons = FB0.variant(cons, _deadline=t_run + P0["budget_s"])
         cons_plan = FB0.variant(cons, _deadline=t_run + 0.6 * P0["budget_s"])
-    res = plan(board, cons_plan, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide) if (plan_only or not out) else \
-        plan(board, cons_plan, spec, only=only, log=log, guide=guide)
+    res = plan(board, cons_plan, spec, plan_only=plan_only or not out, only=only, log=log, guide=guide)
     rep = {"board": board, "out": out, "plan_only": bool(plan_only or not out), "secs": res["secs"], "signal_layers": res["signal_layers"],
            "passes": res.get("passes", 0), "order": res.get("order", []), "negotiation": res.get("negotiation"),
            "plane_layers": res["plane_layers"], "pairs": []}

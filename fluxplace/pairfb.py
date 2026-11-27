@@ -211,7 +211,7 @@ def trial_deadline(rep, P, now=None):
     now = now or time.time()
     fb = rep.setdefault("fallback_budget", {})
     slots = max(1, fb.get("slots", 1))
-    fb["slots"] = slots - 1 if slots > 1 else 1
+    fb["slots"] = max(1, slots - 1)
     return min(dl, now + max(30.0, (dl - now) / slots))
 
 
@@ -242,17 +242,15 @@ def _trial(rep, out, cons_v, spec, run_fn, tag, state, log, src=None, victims=()
         return 0
     if dl_stage:
         cons_v = variant(cons_v, _deadline=trial_deadline(rep, {"deadline": dl_stage}))
-    pend_all, pend = pend, fresh
     trial = os.path.join(d, f"fb-{tag}.kicad_pcb")
-    only = {n for r in pend for n in r["pair"]} | {n for v in victims for n in v}
+    only = {n for r in fresh for n in r["pair"]} | {n for v in victims for n in v}
     sub = run_fn(srcb, cons_v, spec, trial, only=only, fallback=False)
     got = {tuple(r["pair"]) for r in sub["pairs"] if r["status"] == "complete"}
-    new = [r for r in pend if tuple(r["pair"]) in got]
+    new = [r for r in fresh if tuple(r["pair"]) in got]
     ok = bool(new) and all(tuple(v) in got for v in victims)
-    memo.extend(keys[tuple(r["pair"])] for r in pend if tuple(r["pair"]) not in got)      # a pair that failed here fails the same way again
-    log(f"pairs fallback {tag}: {len(new)} of {len(pend)} pending pair(s) completed" + (f", {len(victims)} ripped pair(s) laid again" if victims else "")
+    memo.extend(keys[tuple(r["pair"])] for r in fresh if tuple(r["pair"]) not in got)     # a pair that failed here fails the same way again
+    log(f"pairs fallback {tag}: {len(new)} of {len(fresh)} pending pair(s) completed" + (f", {len(victims)} ripped pair(s) laid again" if victims else "")
         + ("" if ok else " (trial discarded)"))
-    pend = pend_all
     for r in pend:                                              # what was tried, per pair
         r.setdefault("tried", []).append(f"{state}:{'ok' if ok and tuple(r['pair']) in got else 'no'}")
     if ok:
