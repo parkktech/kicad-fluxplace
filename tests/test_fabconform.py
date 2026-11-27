@@ -59,8 +59,8 @@ def test_house_verdicts_ok_option_impossible():
     v = FX.classify("via_ring", 0.125, hs, 6, l)                          # JLC standard 0.125 ok; PCBWay standard 0.127 -> medium difficulty
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and "capabilities.html" in v["pcbway"]["source"]
     assert FX.action_of(v, False) == "ORDER-OPTION"
-    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry hard 0.05 < 0.1 < rec 0.125 -> option
-    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "option"
+    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry HARD 0.05 <= 0.1 -> ok (0.125 is only its recommended value)
+    assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "ok"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), True) == "FIXED"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), False) == "OK"
 
@@ -68,7 +68,7 @@ def test_house_verdicts_ok_option_impossible():
 def test_house_rule_pro_edit_sets_house_space_not_project_preference():
     pd = {"net_settings": {"classes": [{"clearance": 0.12}]}}
     FX._house_pro_edit(_lims())(pd)
-    assert pd["net_settings"]["classes"][0]["clearance"] == 0.1 and pd["board"]["design_settings"]["rules"]["min_via_annular_width"] == 0.15   # design floor = strictest recommended (PCBWay 0.15)
+    assert pd["net_settings"]["classes"][0]["clearance"] == 0.1 and pd["board"]["design_settings"]["rules"]["min_via_annular_width"] == 0.127   # HARD: strictest reject value (PCBWay 0.127), not the 0.15 design floor
     pd = {"net_settings": {"classes": [{"clearance": 0.2}]}}
     FX._relax_edit(_lims())(pd)
     assert pd["net_settings"]["classes"][0]["clearance"] == 0.1
@@ -136,3 +136,16 @@ def test_deliver_helpers_write_house_notes_and_skip_without_fab_profile(tmp_path
     assert "0.088" in (tmp_path / "pkg-order-notes-pcbway.md").read_text() and (tmp_path / "pkg-order-notes-jlcpcb.md").exists()
     cons.write_text("[route]\nmin_track_mm = 0.1\n")
     assert cli._deliver_fabconform(a) is None
+
+
+def test_near_never_indexes_the_ladder_and_limits_are_hard_not_recommended():
+    it = {"kind": "track", "geom": ((0.0, 0.0), (1.0, 0.0)), "ladder": [], "rung": 3, "old": 0.088}
+    assert FX._near(it, {"x": 0.5, "y": 0.3}) and not FX._near(it, {"x": 0.5, "y": 2.0})
+    via = {"kind": "via_ring", "geom": ((5.0, 5.0),), "ladder": [], "rung": -1, "old": 0.1}
+    assert FX._near(via, {"x": 5.2, "y": 5.0})
+    from fluxplace import limits as L
+    hs = FX.resolve_houses("jlcpcb,pcbway")
+    lims = FX.house_limits(hs, 6)
+    for h, _p in hs:
+        for f, (hard, _rec, _c) in L.fab_bounds(h, 6).items():
+            assert lims[h][f] == hard                                  # never the recommended design floor FC.limits() carries
