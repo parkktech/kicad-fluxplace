@@ -284,3 +284,35 @@ def fab_houses(prof, layers, cons=None):
             recs = [r[1] for r in rows if r[1] is not None]
             strict[f] = (hard, max(recs) if recs else None, "strictest of " + ", ".join(sorted(allh)) + ": " + "; ".join(r[2] for r in rows))
     return {"strictest": strict}, "gerber check: no [fab] houses / profile: graded against the strictest registry row of " + ", ".join(sorted(allh))
+
+
+HOUSE_MARGIN = {"track_min": 0.01, "space_min": 0.01, "via_annular_min": 0.003, "pth_annular_min": 0.003}   # owner 2026-11-27: copper sits a margin above the hard minimum
+
+
+def house_floors(cons, layers):
+    """({feature: hard + margin}, source text) - the strictest HARD minimum over the targeted houses ([fab] houses, else every registry
+    house at `layers`) plus HOUSE_MARGIN. ({}, "") when the registry knows no house at this layer count. Used where there is no [fab] table."""
+    if not layers:
+        return {}, ""
+    houses, _note = fab_houses({}, int(layers), cons)
+    rows = [b for b in houses.values() if b]
+    out = {}
+    for f, m in HOUSE_MARGIN.items():
+        hv = [b[f][0] for b in rows if f in b]
+        if hv:
+            out[f] = round(max(hv) + m, 4)
+    names = ", ".join(sorted(houses)) if houses else ""
+    return out, f"strictest hard minimum of {names} at {layers} layers + margin (track/space {HOUSE_MARGIN['track_min']:g}, ring {HOUSE_MARGIN['via_annular_min']:g} mm)"
+
+
+def board_layers(board):
+    """Copper layer count of a board path or pcbnew BOARD; None when unknown."""
+    if hasattr(board, "GetCopperLayerCount"):
+        return board.GetCopperLayerCount()
+    if board:
+        from . import fabcaps as FC
+        try:
+            return FC.board_layer_count(board)
+        except TypeError:
+            return None
+    return None

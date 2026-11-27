@@ -589,6 +589,8 @@ def stitch_islands(board, net="GND", via_mm=0.45, drill_mm=0.25, clearance_mm=0.
     if ni is None:
         return 0
     code = ni.GetNetCode()
+    from . import holes as H
+    holes, h2h = H.board_holes(board), H.hole_floor(board, R.get("hole_to_hole"))
     vias = [t.GetPosition() for t in board.GetTracks()
             if t.GetClass() == "PCB_VIA" and t.GetNetCode() == code]
     tht = [p.GetPosition() for fp in board.GetFootprints() for p in fp.Pads()
@@ -624,8 +626,10 @@ def stitch_islands(board, net="GND", via_mm=0.45, drill_mm=0.25, clearance_mm=0.
                     ang = k * math.pi / 6
                     pt = pcbnew.VECTOR2I(int(pp.x + ring * 1e6 * math.cos(ang)),
                                          int(pp.y + ring * 1e6 * math.sin(ang)))
-                    if not polys.Contains(pt, i) or not _clear_for_via(board, pt, r_need, code):
+                    if (not polys.Contains(pt, i) or not _clear_for_via(board, pt, r_need, code)
+                            or not H.hole_clear(holes, pt.x / 1e6, pt.y / 1e6, drill_mm, h2h)):
                         continue
+                    holes.append((pt.x / 1e6, pt.y / 1e6, drill_mm))
                     via = pcbnew.PCB_VIA(board)
                     via.SetPosition(pt)
                     via.SetViaType(pcbnew.VIATYPE_THROUGH)

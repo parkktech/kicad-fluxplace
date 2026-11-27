@@ -58,11 +58,14 @@ def _segs(path):
     return B["segs"], B
 
 
-def widths_for(board, baseline, pairs):
+def widths_for(board, baseline, pairs, cons=None):
     """{(master, slave): (width mm, source)} for pairs that have a width worth keeping."""
     segs_b, _Bb = _segs(board)
     from . import zgeom as ZG
-    floor = ZG._project_floors(board)[0]                     # the DRC minimum track: never a width worth keeping
+    floor = ZG._project_floors(board)[0]
+    if (cons or {}).get("fab") is None:
+        from . import limits as LM
+        floor = max(floor, LM.house_floors(cons, LM.board_layers(board))[0].get("track_min", 0.0))   # house hard + margin, not the DRC minimum alone
     base_segs = _segs(baseline)[0] if baseline else None
     out = {}
     for pr in pairs:
@@ -83,7 +86,7 @@ def with_widths(cons, board, baseline, pairs):
     from . import zgeom as ZG
     if not cons:
         return cons, {}                                  # no constraints: fail closed, nothing is stated for the pair
-    got = widths_for(board, baseline, pairs)
+    got = widths_for(board, baseline, pairs, cons)
     if not got:
         return cons, {}                                  # nothing to state: the constraints stay exactly as given (an empty one fails closed)
     c = copy.deepcopy(cons or {})

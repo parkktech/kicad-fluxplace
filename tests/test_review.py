@@ -379,7 +379,7 @@ def test_fab_min_drill_annular_and_via_diameter():
     f = facts(
         track_geom=[],
         vias=[{"net": "GND", "type": "through", "x": 1.0, "y": 1.0,
-               "layers": "F.Cu-B.Cu", "dia_mm": 0.35, "drill_mm": 0.15}],
+               "layers": "F.Cu-B.Cu", "dia_mm": 0.34, "drill_mm": 0.15}],
         pth_pads=[{"ref": "J1A", "pad": "1", "drill_mm": 0.18, "dia_mm": 0.5,
                    "x": 5.0, "y": 5.0}],
         design_min={"track_mm": 0.1, "via_mm": 0.4, "drill_mm": 0.2, "clearance_mm": 0.1},
@@ -817,3 +817,14 @@ def test_model_outside_project_library_fails_in_review(tmp_path):
         "U1": {"footprint": "X", "models": [str(tmp_path / "other" / "o.step")], "mech": False},
         "U2": {"footprint": "Y", "models": [str(tmp_path / "lib" / "3dmodels" / "i.step")], "mech": False}}}
     assert [(f["code"], f["refs"][0]) for f in R.check_models(facts) if f["level"] == "FAIL"] == [("MODEL_OUTSIDE_LIB", "U1")]
+
+
+def test_model_outside_lib_not_graded_at_deliver_stage_which_bundles(tmp_path):
+    from fluxplace import review as R
+    (tmp_path / "lib" / "3dmodels").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "o.step").write_text(_valid_step_text())
+    facts = {"board_path": str(tmp_path / "b.kicad_pcb"), "parts": {
+        "U1": {"footprint": "X", "models": [str(tmp_path / "other" / "o.step")], "mech": False}}}
+    assert not [f for f in R.check_models(facts, bundled=True) if f["code"] == "MODEL_OUTSIDE_LIB"]
+    assert [f["code"] for f in R.check_models(facts) if f["level"] == "FAIL"] == ["MODEL_OUTSIDE_LIB"]

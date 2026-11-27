@@ -152,8 +152,11 @@ def _footprints(text):
                 if 0.01 < d < pitch:              # footprint frame is fine
                     pitch = d
         attr = re.search(r"\(attr ([^)]*)\)", f)
+        val = re.search(r'\(property "Value" "([^"]*)"', f)
+        mpn = re.search(r'\(property "(?:MPN|Manufacturer_Part_Number|Mfr\. Part #)" "([^"]*)"', f)
         out.append(dict(
             ref=(ref.group(1) if ref else "?"),
+            value=(val.group(1) if val else ""), mpn=(mpn.group(1) if mpn else ""),
             lib=(lib.group(1) if lib else ""),
             side=("B" if re.search(r'\(layer "B\.Cu"\)', f) else "F"),
             pads=len(pads), tht_pads=drilled, pitch=pitch,

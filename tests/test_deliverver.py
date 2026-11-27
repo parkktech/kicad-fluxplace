@@ -156,3 +156,35 @@ def test_project_bundles_every_referenced_model_into_the_delivery(tmp_path):
     assert "${KIPRJMOD}/lib/3dmodels/MOLEX_43650-0315.step" in txt          # unresolved stock path -> the project library's copy
     assert "${KIPRJMOD}/lib/3dmodels/gone.step" in txt and not (out / "lib" / "3dmodels" / "gone.step").exists()   # unresolved: left, reported
     assert any("MODEL_BUNDLE_UNRESOLVED" in m for m in logs)
+
+
+def test_no_bom_builds_board_bom_with_dnp(tmp_path):
+    fps = [dict(FPS[0], value="10uF"), dict(FPS[1], value="10uF"), dict(FPS[2], value="100k"), dict(FPS[3], value="IC", mpn="U-1")]
+    rows = DV.board_bom("b.kicad_pcb", fps, {"C1": "AAA1", "C2": "AAA1"})
+    by = {tuple(r["Refs"]): r for r in rows}
+    assert by[("C1", "C2")]["MPN"] == "AAA1" and by[("C1", "C2")]["Qty"] == "2"
+    assert DV.is_dnp(by[("R38",)]) and by[("U1",)]["MPN"] == "U-1"
+    p = DV.write_bom(rows, str(tmp_path / "o.csv"))
+    assert {r["Refs"][0] for r in DV.read_bom(p)} == {"C1", "R38", "U1"}
+
+
+def test_verify_line_with_baseline_counts_new_and_inherited():
+    f = [{"level": "FAIL", "baseline": "inherited"}, {"level": "WARN", "baseline": "inherited"},
+         {"level": "WARN", "baseline": "new"}]
+    line = DV._verify_line(f, "/nonexistent", baseline="/x/W15.kicad_pcb")
+    assert "0 new FAIL vs W15.kicad_pcb; 1 inherited FAIL, 1 inherited WARN" in line
+    assert "FAIL," in DV._verify_line(f, "/nonexistent") and "new FAIL" not in DV._verify_line(f, "/nonexistent")
+
+
+def test_datasheets_reads_mpns_from_board_and_spec_without_a_map(tmp_path):
+    import json
+    from fluxplace import partdocs as PD
+    b = tmp_path / "b.kicad_pcb"
+    b.write_text('(kicad_pcb (footprint "L:SOIC" (layer "F.Cu") (property "Reference" "U1") (property "Value" "IC") (property "MPN" "BOARD-1") '
+                 '(pad "1" smd rect (at 0 0) (size 1 1))))\\n'.replace("\\n", "\n"))
+    sp = tmp_path / "s.json"
+    sp.write_text(json.dumps({"components": [{"ref": "U2", "mpn": "SPEC-2"}, {"ref": "R1"}]}))
+    assert PD.collect_mpns(None, str(b), str(sp)) == ["BOARD-1", "SPEC-2"]
+    mp = tmp_path / "m.json"
+    mp.write_text(json.dumps({"_x": "no", "U3": "MAP-3"}))
+    assert PD.collect_mpns(str(mp), None, None) == ["MAP-3"]

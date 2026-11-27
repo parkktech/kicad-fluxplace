@@ -110,3 +110,32 @@ def test_fab_profile_minimum_is_fail_and_fallback_overlap_is_fail(tmp_path):
     path = _board(tmp_path / "ov", via(10, 10, 0.3) + via(10.2, 10, 0.3))
     h = [f for f in HO.check_hole_spacing(R.facts_from_board(path), CONS) if f["code"] == "HOLE_TO_HOLE"]
     assert h and h[0]["level"] == "FAIL", h
+
+
+def test_stitch_grid_keeps_hole_to_hole_to_npth_mounting_hole():
+    import pcbnew
+    from fluxplace import planes, holes as H
+    b = pcbnew.BOARD()
+    ed = b.GetLayerID("Edge.Cuts")
+    for x0, y0, x1, y1 in ((0, 0, 20, 0), (20, 0, 20, 20), (20, 20, 0, 20), (0, 20, 0, 0)):
+        s = pcbnew.PCB_SHAPE(b); s.SetShape(pcbnew.SHAPE_T_SEGMENT); s.SetLayer(ed)
+        s.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x0), pcbnew.FromMM(y0))); s.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
+        b.Add(s)
+    b.GetDesignSettings().m_HoleToHoleMin = 0           # only the passed fab floor gates
+    b.Add(pcbnew.NETINFO_ITEM(b, "GND"))
+    fp = pcbnew.FOOTPRINT(b)
+    pad = pcbnew.PAD(fp)
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_NPTH); pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+    pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(3.2), pcbnew.FromMM(3.2))); pad.SetDrillSize(pcbnew.VECTOR2I(pcbnew.FromMM(3.2), pcbnew.FromMM(3.2)))
+    pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(11.1), pcbnew.FromMM(10)))
+    fp.Add(pad); b.Add(fp)
+    # grid x = 1,4,7,10,13: the point at x=13 is 1.9 mm from the hole centre (edge gap 0.15 < 0.279) outside the pad box, so only the gate refuses it
+    H2H = 0.279
+    n = planes.stitch(b, "GND", pitch=3.0, via_d=0.45, via_drill=0.3, keep=0.0, edge_in=1.0, hole_to_hole=H2H)
+    assert n > 0 and not any(abs(v[0] - 13.0) < 0.01 and abs(v[1] - 10.0) < 0.01 for v in H.board_holes(b))
+    holes = H.board_holes(b)
+    npth = [h for h in holes if h[2] == 3.2][0]
+    for x, y, d in holes:
+        if d != 3.2:
+            assert ((x - npth[0]) ** 2 + (y - npth[1]) ** 2) ** 0.5 - (3.2 + d) / 2 >= 0.279 - 1e-6
+    assert not H.hole_clear([npth], 13.0, 10.0, 0.3, 0.279) and H.hole_clear([npth], 13.2, 10.0, 0.3, 0.279)

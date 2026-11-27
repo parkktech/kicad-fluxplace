@@ -1281,7 +1281,7 @@ def resolve_model(path, board_path):
     return out
 
 
-def check_models(facts, board_path=None):
+def check_models(facts, board_path=None, bundled=False):
     """Every electrical footprint carries a 3D model whose file exists.
     A board that renders with holes is a board nobody has looked at: the
     V1.5 RJ45 pointed at RJHSE5380.step (library file: RJHSE538X) and the
@@ -1331,7 +1331,7 @@ def check_models(facts, board_path=None):
                               + (f" (same name exists as {alt[0]})" if alt else ""),
                               refs=[ref]))
                 continue
-            if bp and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
+            if bp and not bundled and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
                 out.append(_f(FAIL, "MODEL_OUTSIDE_LIB",
                               f"{ref} 3D model {m} resolves outside the project model library "
                               f"(copy the vendor STEP into the project lib/3dmodels and bind it there)",
@@ -1569,18 +1569,21 @@ def check_fab_capability(facts, cons):
                                 f"{s['width']:g}mm ({s['x']:g},{s['y']:g})"),
                       refs={s["net"] for s in narrow}))
 
+    # vias/PTH are FAILed only below the houses' HARD (reject) values, never the recommended design floors fab[...] carries (k10 rule)
+    gr = fab.get("grade") or {}
+    g_drill, g_dia, g_ring = (gr.get(k, fab[k]) for k in ("min_drill_mm", "min_via_dia_mm", "min_annular_mm"))
     vias = facts.get("vias") or []
     bad_drill = [v for v in vias if v.get("drill_mm") is not None
-                and v["drill_mm"] < fab["min_drill_mm"]]
+                and v["drill_mm"] < g_drill]
     bad_via = [v for v in vias if v.get("dia_mm") is not None
-              and v["dia_mm"] < fab["min_via_dia_mm"]]
+              and v["dia_mm"] < g_dia]
     bad_ann = [v for v in vias if v.get("dia_mm") is not None and v.get("drill_mm") is not None
-              and (v["dia_mm"] - v["drill_mm"]) / 2.0 < fab["min_annular_mm"]]
+              and (v["dia_mm"] - v["drill_mm"]) / 2.0 < g_ring - FC.HOUSE_TOL_MM]
     for p in facts.get("pth_pads") or []:
-        if p.get("drill_mm") is not None and p["drill_mm"] < fab["min_drill_mm"]:
+        if p.get("drill_mm") is not None and p["drill_mm"] < g_drill:
             bad_drill.append(p)
         if p.get("dia_mm") is not None and p.get("drill_mm") is not None and \
-                (p["dia_mm"] - p["drill_mm"]) / 2.0 < max(fab["min_annular_mm"], hard.get("pth_annular_min", 0.0)):
+                (p["dia_mm"] - p["drill_mm"]) / 2.0 < max(g_ring, hard.get("pth_annular_min", 0.0)) - FC.HOUSE_TOL_MM:
             bad_ann.append(p)
 
     def _via_ref(it):
@@ -2343,7 +2346,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_fab_capability(facts, cons)
     out += check_acid_traps(facts, cons)
     out += check_slivers(facts, cons)
-    out += check_models(facts)
+    out += check_models(facts, bundled=(stage == "deliver"))   # deliver bundles every model into the delivery's lib/3dmodels
     out += check_power(facts, cons)
     from . import power as PWR
     out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
