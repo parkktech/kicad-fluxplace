@@ -55,13 +55,27 @@ def _call(k):
     return k, g["fn"](k, cost, g.get("bx", 1))
 
 
+PAIRNEG_TASK_S = 900.0                          # one search past this = the pool is stuck: terminate, run serially
+
+
 def run_parallel(fn, ids, workers, **shared):
     _G.clear()
     _G.update(fn=fn, **shared)
-    if workers <= 1 or len(ids) < 3:
+    import threading
+    if workers <= 1 or len(ids) < 3 or threading.current_thread() is not threading.main_thread() or threading.active_count() > 1:
+        return dict(_call(k) for k in ids)      # fork() in a threaded process can leave a child on a held lock (w103: pairneg hang)
+    pool = None
+    try:
+        pool = mp.get_context("fork").Pool(min(workers, len(ids)))
+        jobs = [pool.apply_async(_call, (k,)) for k in ids]
+        out = dict(j.get(PAIRNEG_TASK_S) for j in jobs)
+        pool.close()
+        pool.join()
+        return out
+    except Exception:                           # noqa: BLE001 - a broken / stuck pool: the serial path gives the same answer
+        if pool is not None:
+            pool.terminate()
         return dict(_call(k) for k in ids)
-    with mp.get_context("fork").Pool(min(workers, len(ids))) as pool:
-        return dict(pool.map(_call, ids, chunksize=1))
 
 
 def negotiate(F, layers, pair_of, search, grow, workers=4, passes=8, pres=30, hstep=6, log=lambda m: None):
