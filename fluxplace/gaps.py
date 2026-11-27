@@ -16,7 +16,7 @@ import time
 from collections import Counter
 
 from . import audit, calllog, closeexec as CX, refusal, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
-from . import events as EV
+from . import decider as DC, events as EV
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "clearance": "clearance", "hole_clearance": "clearance", "hole_to_hole": "clearance",
@@ -2019,7 +2019,8 @@ def _r_ai(base, out, gaps, ctx):
         if status == "applied" and a.get("executed"):           # PHASE3H A9: an applied answer that ran an action
             used[key] = used.get(key, 0) + 1
         return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"], "gap_id": gap["id"]}
-    n = 0
+    n, answered = 0, 0
+    decide = DC.enabled(ctx.get("cons")) and not ctx.get("_ai_decided")
     for gap, key, sid in todo[:_ai_packets(ctx.get("cons"))]:
         pk = gap_packet(base, gap, ctx, sid=sid)
         if gap["kind"] == "pair-asym" and pk.get("conn") is None:      # PHASE3H B10: a proposal row, no packet
@@ -2028,6 +2029,13 @@ def _r_ai(base, out, gaps, ctx):
         with open(os.path.join(ai_dir, sid + ".packet.json"), "w") as fh:
             fh.write(json.dumps(pk))
         n += 1
+        env = DC.act(pk, ctx.get("cons"), ai_dir, key) if decide else None      # w94: the model answers instead of a person
+        if env:
+            with open(os.path.join(ai_dir, sid + ".action.json"), "w") as fh:
+                fh.write(json.dumps(env))
+            answered += 1
+    if answered:                                   # apply one answer now, through the same validation and guard
+        return _r_ai(base, out, gaps, dict(ctx, _ai_decided=True))
     return {"status": "packet", "n": n} if n else {"status": "no packet", "n": 0}
 
 
@@ -2354,7 +2362,8 @@ def _cons_hash(path):
 
 
 def _repo_root():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from fluxplace import codefreeze
+    return codefreeze.root()
 
 
 # ---- out-of-process rungs: a segfault in pcbnew must not kill the close run ----
@@ -2627,7 +2636,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     clock.switch("idle")
     board_fp0 = versions.copper_fingerprint(best)
     if runs is None and calllog.enabled():
-        runs = os.path.join(_repo_root(), "docs", "corpus", "runs.jsonl")
+        runs = calllog.runs_log_path()         # w97: a data log outside the code tree (the frozen .code copy is lost with the workdir)
     tries = []
 
     state_path = os.path.join(work, "gaps.json")
@@ -3125,14 +3134,16 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         refused = Counter(t["why"] for t in tries if t["result"] == "refused")
         methods = Counter(t["method"] for t in ok)
         os.makedirs(os.path.dirname(runs), exist_ok=True)
-        calllog.append({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id, "tool": tool,
-                        "board": os.path.basename(board), "board_fp": board_fp0[:8] if len(board_fp0) > 8
-                        else board_fp0, "stage": "close", "variant": None, "start": start,
-                        "end": _vitals(m), "stop": stop, "minutes": res["minutes"], "attempts": n_att,
-                        "closed": len(ok), "methods_closed": dict(methods),
-                        "top_refusals": [[w, n] for w, n in refused.most_common(3)],
-                        "full_pass": m["opens"] == 0 and m["shorts"] == 0 and m["errors"] == 0,
-                        "ai_tokens": 0}, runs)
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run": run_id, "tool": tool,
+               "board": os.path.basename(board), "board_fp": board_fp0[:8] if len(board_fp0) > 8 else board_fp0,
+               "stage": "close", "variant": None, "start": start,
+               "end": _vitals(m), "stop": stop, "minutes": res["minutes"], "attempts": n_att,
+               "closed": len(ok), "methods_closed": dict(methods),
+               "top_refusals": [[w, n] for w, n in refused.most_common(3)],
+               "full_pass": m["opens"] == 0 and m["shorts"] == 0 and m["errors"] == 0,
+               "ai_tokens": 0}
+        calllog.append(rec, runs)
+        _copy_record(work, rec)
     date, rows = time.strftime("%Y-%m-%d"), []
     for kind in ORDER + ["other"]:
         n = sum(1 for g in m["gaps"] if g["kind"] == kind)
@@ -3184,13 +3195,21 @@ def report(paths, runs=None):
 
 def runs_summary(path):
     """(runs, full passes) from a runs.jsonl file."""
-    n = k = 0
-    with open(path) as fh:
-        for line in fh:
-            if line.strip():
-                n += 1
-                k += bool(json.loads(line).get("full_pass"))
-    return n, k
+    rs = calllog.read_runs(path)
+    return len(rs), sum(bool(r.get("full_pass")) for r in rs)
+
+
+def _copy_record(work, rec):
+    """w97: the run's own record also lives in <work>/run.json (key "record"), so it survives the data log."""
+    p = os.path.join(work, "run.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        doc = {}
+    if isinstance(doc, dict) and "record" not in doc:
+        doc["record"] = rec
+        _write_json(p, doc)
 
 
 def print_report(rows, runs=None):
@@ -3222,7 +3241,7 @@ def _main(argv=None):
         return _rung_job(a.rung_job)
     t0 = time.time()
     if a.report:
-        print_report(report(a.report, a.runs), a.runs)
+        print_report(report(a.report, a.runs), a.runs or calllog.runs_log_path())
         return 0
     if not a.board or not a.work:
         ap.error("board and --work are required unless --report is given")

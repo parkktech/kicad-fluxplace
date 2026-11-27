@@ -1,0 +1,281 @@
+# UTV Comms Bridge — engineering constraints for the fluxplace review gate.
+# Every block here is a rule an outside reviewer applied to V1.4 by hand
+# (Review Document.pdf, 2026-09-03). The gate now applies them on every
+# fab/deliver run. See docs/DECISIONS.md D70.
+
+[env]   # 2026-09-04 (user): mostly inside vehicle cabs, UTVs used 30..100 F ambient;
+        # Arizona heat is the dominant risk. Floor relaxed -40 -> -20 C (30 F with
+        # margin); ceiling stays +85 C for a sun-soaked cab and enclosure rise.
+temp_min_c = -20
+temp_max_c = 85
+vibration = "high"
+moisture = "outdoor"
+transient = "auto-12v"
+location = "exposed-vehicle"
+
+# The board is assembled in China (user directive 2026-09-03): every MPN is
+# graded on JLCPCB/LCSC live stock as well as DigiKey/Mouser. CN_ABSENT and
+# CN_NONE fail the gate; consigned parts are waived by name with the reason.
+[sourcing]
+china = true
+cn_need = 100
+[sourcing.cn_alias]         # our MPN -> what LCSC catalogues it under
+"G6K-2F-Y DC5" = "G6K-2F-Y-5V"
+"HX5084FNLT" = "HX5084FNL"
+"BAT60AE6327HTSA1" = "BAT60AE6327"
+"0436500215" = "43650-0215"      # LCSC lists the Molex header under the hyphenated form (C293740)
+
+# Documentation is a build requirement (D70q): every MPN's datasheet lives in
+# docs/datasheets with datasheets.json; every pinmap cites its page.
+[docs]
+datasheets = "docs/datasheets"
+strict = true
+project_libs = ["hardware/lib/footprints/utv-comms.pretty"]   # footprints drawn here need a landpattern citation (D70x)
+
+# Rule 1: Pin 1 (PTT) is straight copper J1 -> J2. No component ever touches it.
+[nets.PTT_THRU]
+straight_copper = ["J1A:1", "J2A:1"]
+
+# RF: GNSS feed, antenna switch and both antenna paths at 50 ohm, graded on
+# the layer the copper is on. One layer transition allowed per net.
+[rf]
+target_z = 50
+tolerance_pct = 10
+max_vias = 1
+neck_max_mm = 2.5           # a +-0.6 mm neck that straddles a segment joint reads as ~2.4 mm
+
+# Gigabit Ethernet: P and N within 1 mm (IEEE allows more; EMI does not)
+[pairs.ETH_]
+impedance_diff = 100
+skew_mm = 1.0
+
+[si]
+default_skew_mm = 1.0
+
+# +5V bulk: the spec's ride-through claim is checked against C12+C13.
+# D70: the requirement is restated as brown-out smoothing + PWRFAIL warning,
+# not "tens of ms" — that would need ~80,000 uF at 1 A.
+[power."+5V"]
+max_current_ma = 4000
+pour = true
+holdup_ms = 0.5
+nominal_v = 5.0
+min_v = 4.75
+load_a = 1.0
+
+# Input TVS D1 (SMDJ24A, Vc 38.9 V @ Ipp) ahead of Q1 (40 V P-FET).
+[protection]
+tvs_ref = "D1"
+downstream_max_v = 40
+clamp_v = 38.9
+min_margin_pct = 15
+
+[pairs.USB_]                # USB 2.0 HS: a few mm is fine, tens is not
+impedance_diff = 90
+skew_mm = 3.0
+
+# Waivers are DECISIONS, recorded here so the gate stays honest (D70):
+#  - J1A/J2A/J6/J9 JST GH/SH headers are rated -25..+85 C. The box is a sealed
+#    enclosure on the vehicle; a -25 C connector floor is accepted for V1.5 and
+#    the -40 C harness-connector question is an open item for the enclosure
+#    review (candidates: Molex Pico-Lock -40..+105). Re-open before production.
+[review]
+#  - L1 XAL7070-153MEC is sold by Coilcraft direct (D37): neither distributor
+#    nor Nexar describes it, so the part-data and datasheet checks cannot run.
+#    Coilcraft's own sheet is the reference; the 3D/land come from Coilcraft.
+#  - L1 XAL7070-153MEC (Coilcraft-direct, D37): only Nexar describes it, and the
+#    evaluation plan's 10-lookups/day was spent proving that. Re-run
+#    `fluxplace datasheets` + `review --refresh` tomorrow to fetch its sheet
+#    and drop these two waivers.
+#  - China stock (D70v): these parts have no or thin LCSC stock and no
+#    like-for-like LCSC-stocked equivalent without a footprint or spec change.
+#    PCBWay turnkey buys them from DigiKey/Mouser (stock in brackets); for a
+#    JLCPCB build they are consigned. ANT1 Taoglas patch (DK 1.6k), BT1/BT2
+#    Seiko MS621FE (DK 29k), L1 Coilcraft XAL7070 (direct), J12 Amphenol RJHSE-5380
+#    (DK 9.7k), C12/C13 Panasonic EEU-FR1C152 (DK), R12/R13 Yageo AC0603FR-135K1L
+#    (DK; no 135k at LCSC), T3 HX5084FNL (LCSC 61, DK 1.8k/8.7k).
+# D70x (2026-09-04): T3 -> HX5084NLT (LCSC 1563), J12 hyphen fix, R12/R13 -> AC0603FR-075K1L,
+# C12/C13 back in stock: those waivers are gone.
+# Temperature waivers ACCEPTED by the user 2026-09-04 ("the temperature ranges are fine"):
+#  - K1 G6K-2F-Y: Omron's sheet says -40..+70 C (DigiKey said +85).
+#  - BT1/BT2 MS621FE: Seiko's sheet says -20..+60 C.
+#  - J1A/J2A/J6/J9 JST GH/SH (-25 C) clear the -20 C floor now; waiver dropped.
+# Still USER DECISIONS pending:
+#  - L1: consign (D70z). BT1/BT2: PCBWay sources (D70aa). ANT1: DNP on cab units, external puck via J4.
+waive = ["TEMP_RATING:^K1 ", "TEMP_RATING:^BT[12] ",
+         "PART_DATA_UNAVAILABLE:L1", "DATASHEET_MISSING:^L1 ",
+         "CN_ABSENT:^(ANT1|BT1 BT2|L1) ", "CN_NONE:^(ANT1|BT1 BT2) "]
+
+[project]
+version = "1.5.3"
+
+[finish]
+enabled = true
+
+[silk.title]
+text = "Parkktech.com v{version}"
+side = "F"
+
+[lock.at]
+C59 = [10.421, 44.91, "F"]
+D7 = [41.947, 36.019, "F"]
+K1 = [34.115, 46.977, "F"]
+R47 = [24.7, 62.2, "F"]
+MH1 = [-3.333, -11.873, "F"]
+U12 = [10.035, 42.0, "F"]
+J9 = [1.837, 17.23, "F"]
+D3 = [57.961, 23.039, "F"]
+U11 = [1.99, 35.055, "F"]
+C5 = [35.784, 9.773, "F"]
+D1 = [31.012, -4.173, "F"]
+J4 = [26.455, 43.758, "F"]
+J2A = [52.647, 2.1, "F"]
+BT1 = [37.707, -2.633, "F"]
+Q2 = [45.483, 26.93, "F"]
+MK4 = [6.0, 41.5, "F"]
+U8 = [38.833, 31.036, "F"]
+FB2 = [38.262, 34.151, "F"]
+MH3 = [63.778, 65.67, "F"]
+L2 = [16.94, 34.802, "F"]
+MK3 = [6.0, 8.5, "F"]
+R45 = [21.7, 62.2, "F"]
+J12 = [-1.99, 57.0, "F"]
+D9 = [22.079, 10.823, "F"]
+U1 = [31.717, 2.512, "F"]
+J1A = [44.7, 41.869, "F"]
+MH2 = [63.778, -11.873, "F"]
+C1 = [25.214, 4.252, "F"]
+J5 = [61.86, 32.219, "F"]
+U5 = [39.916, 25.326, "F"]
+SW1 = [26.079, 9.153, "F"]
+D2 = [29.967, 13.604, "F"]
+L3 = [22.456, 29.208, "F"]
+U13 = [56.0, 50.0, "F"]
+T1 = [16.439, 18.203, "F"]
+U4 = [24.711, 28.567, "F"]
+U9 = [19.408, 29.243, "F"]
+FB5 = [34.307, 12.603, "F"]
+C12 = [31.1, 61.341, "F"]
+T3 = [19.65, 55.1, "F"]
+ANT1 = [12.553, -4.71, "F"]
+T2 = [31.331, 24.554, "F"]
+L1 = [42.694, 5.803, "F"]
+FB3 = [42.863, 30.934, "F"]
+D4 = [27.889, 40.235, "F"]
+U6 = [28.868, 37.156, "F"]
+R44 = [20.2, 62.2, "F"]
+U2 = [15.224, 31.699, "F"]
+J7 = [2.523, 3.63, "F"]
+J6 = [22.599, 37.247, "F"]
+U10 = [33.353, 37.137, "F"]
+MH4 = [15.5, 65.7, "F"]
+MK1 = [54.0, 8.5, "F"]
+C60 = [25.4, 66.6, "F"]
+BT2 = [15.132, 37.403, "F"]
+C3 = [30.682, 9.773, "F"]
+D5 = [45.156, 21.899, "F"]
+C2 = [19.164, 25.258, "F"]
+C13 = [44.77, 61.2, "F"]
+FB4 = [34.494, 40.419, "F"]
+Q1 = [40.489, 17.604, "F"]
+R46 = [23.2, 62.2, "F"]
+U3 = [0.63, 26.93, "F"]
+J3 = [29.534, -11.823, "F"]
+D8 = [49.615, 30.098, "F"]
+C62 = [58.4, 50.0, "F"]
+C61 = [53.6, 50.0, "F"]
+U7 = [14.489, 26.93, "F"]
+C4 = [50.213, 25.938, "F"]
+D6 = [23.897, 25.607, "F"]
+D10 = [24.161, 32.393, "F"]
+MK2 = [54.0, 41.5, "F"]
+FB1 = [31.034, 40.496, "F"]
+C10 = [31.039, 28.425, "B"]
+R10 = [28.545, 49.292, "B"]
+R36 = [31.034, 26.211, "B"]
+C51 = [33.744, 22.735, "B"]
+C33 = [37.604, 46.38, "B"]
+C38 = [36.145, 54.057, "B"]
+C20 = [40.5, 15.0, "B"]
+C28 = [28.5, 35.0, "B"]
+R21 = [44.798, 53.479, "B"]
+R20 = [42.278, 49.546, "B"]
+C26 = [36.5, 35.0, "B"]
+C6 = [37.977, -0.392, "B"]
+C49 = [31.034, 20.312, "B"]
+C45 = [42.051, 3.065, "B"]
+R25 = [42.338, 51.516, "B"]
+R5 = [31.034, -3.456, "B"]
+C21 = [36.5, 15.0, "B"]
+J10 = [32.5, 8.0, "B"]
+R37 = [21.677, 48.493, "B"]
+C9 = [21.806, 3.82, "B"]
+R11 = [28.299, 46.372, "B"]
+C30 = [30.573, 50.495, "B"]
+C35 = [25.586, 45.63, "B"]
+R7 = [31.034, -1.496, "B"]
+R4 = [38.131, 3.32, "B"]
+R2 = [24.739, 3.065, "B"]
+C46 = [40.382, 45.622, "B"]
+C34 = [46.51, 6.025, "B"]
+J11 = [32.5, 42.0, "B"]
+R35 = [31.034, 54.858, "B"]
+R27 = [33.744, -3.075, "B"]
+C8 = [35.037, 1.857, "B"]
+C44 = [40.091, 3.32, "B"]
+R39 = [18.213, 47.95, "B"]
+R33 = [13.24, 26.93, "B"]
+C48 = [27.919, 30.24, "B"]
+R31 = [27.459, 4.065, "B"]
+C54 = [33.549, 49.004, "B"]
+R1 = [31.352, 2.424, "B"]
+R30 = [27.892, 2.095, "B"]
+C56 = [18.09, 26.93, "B"]
+C32 = [36.704, 26.93, "B"]
+R23 = [45.798, 48.145, "B"]
+R12 = [47.302, 26.93, "B"]
+C40 = [34.193, 45.351, "B"]
+C23 = [28.5, 15.0, "B"]
+R28 = [28.324, 24.246, "B"]
+R41 = [20.4, 26.93, "B"]
+R38 = [22.116, 45.63, "B"]
+C31 = [33.763, 51.224, "B"]
+C57 = [19.674, 45.81, "B"]
+R26 = [33.744, 25.455, "B"]
+C36 = [30.511, 46.59, "B"]
+C11 = [37.666, 51.577, "B"]
+R3 = [35.363, 4.069, "B"]
+C58 = [32.453, 45.81, "B"]
+C39 = [33.032, 53.165, "B"]
+C43 = [32.472, 4.337, "B"]
+C27 = [32.5, 35.0, "B"]
+R32 = [22.36, 26.93, "B"]
+R24 = [39.565, 48.34, "B"]
+C29 = [24.5, 35.0, "B"]
+C55 = [34.894, 47.042, "B"]
+R13 = [43.842, 45.62, "B"]
+R22 = [38.914, 26.93, "B"]
+R6 = [34.812, -0.363, "B"]
+R34 = [15.95, 26.93, "B"]
+R29 = [31.034, 23.491, "B"]
+C50 = [25.361, 48.391, "B"]
+C52 = [30.352, 4.114, "B"]
+C47 = [42.338, 47.584, "B"]
+C25 = [40.5, 35.0, "B"]
+C24 = [24.5, 15.0, "B"]
+C7 = [31.352, 0.464, "B"]
+C37 = [30.904, 53.165, "B"]
+C22 = [32.5, 15.0, "B"]
+R40 = [28.324, 22.276, "B"]
+
+[[intent.near]]
+name = "new-near-J3"
+refs = ["R50", "R53", "R54"]
+to = "J3"
+max_mm = 12.0
+
+[[intent.near]]
+name = "new-near-J10"
+refs = ["C63", "D11", "Q3", "Q4", "R51", "R52", "R55"]
+to = "J10"
+max_mm = 12.0

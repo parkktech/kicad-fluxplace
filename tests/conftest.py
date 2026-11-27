@@ -16,6 +16,13 @@ def _events_isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _runs_log_isolated(monkeypatch, tmp_path):
+    """w97: run records go to a tmp data log, never the user's ~/.local/share/fluxplace or the repo."""
+    monkeypatch.setenv("FLUXPLACE_RUNS_LOG", str(tmp_path / "_runs_data" / "runs.jsonl"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _shared_cache_isolated(monkeypatch, tmp_path):
     """The shared per-user lookup cache (~/.cache/fluxplace) is a tmp dir in tests."""
     monkeypatch.setenv("FLUXPLACE_CACHE_HOME", str(tmp_path / "_shared_cache"))
@@ -70,3 +77,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.nodeid.startswith(SERIAL_NODEID_PREFIXES):
             item.add_marker(pytest.mark.xdist_group("serial"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "replay: slow-tier real-board replay (tests/replay); skipped unless GATE_REPLAY=1")

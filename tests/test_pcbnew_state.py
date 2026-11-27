@@ -67,3 +67,29 @@ def test_guard_fails_a_stage_that_breaks_the_process_and_names_it(tmp_path):
         print(r["verdict"], "|", r["line"])
     ''')
     assert out.startswith("fail |") and "after fake-stage" in out
+
+
+def test_rail_strip_keys_then_loadboard_is_a_board(tmp_path):
+    """w86-postdecay: railbranch.strip_keys (rails-flow, in the route process) used Remove(): the post-processing LoadBoard then returned a SwigPyObject."""
+    mk = textwrap.dedent('''
+        import sys, os, pcbnew
+        b = pcbnew.CreateEmptyBoard()
+        ni = pcbnew.NETINFO_ITEM(b, "VR"); b.Add(ni)
+        t = pcbnew.PCB_TRACK(b); t.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(10))); t.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(10)))
+        t.SetLayer(pcbnew.F_Cu); t.SetWidth(pcbnew.FromMM(0.2)); t.SetNet(ni); b.Add(t)
+        pcbnew.SaveBoard(os.path.join(sys.argv[1], "r.kicad_pcb"), b)
+    ''')
+    subprocess.run(["/usr/bin/python3", "-c", mk, str(tmp_path)], capture_output=True, text=True, timeout=120, check=True)
+    body = textwrap.dedent('''
+        import sys, os
+        sys.path.insert(0, %r)
+        import pcbnew
+        from fluxplace import railbranch as RB
+        d = sys.argv[1]; src = os.path.join(d, "r.kicad_pcb")
+        key = RB.track_keys(src, {"VR"})["VR"]
+        assert RB.strip_keys(src, os.path.join(d, "o.kicad_pcb"), {"VR": set(key)}) == 1
+        print(type(pcbnew.LoadBoard(src)).__name__)
+    ''' % ROOT)
+    r = subprocess.run(["/usr/bin/python3", "-c", body, str(tmp_path)], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-800:]
+    assert r.stdout.strip() == "BOARD"

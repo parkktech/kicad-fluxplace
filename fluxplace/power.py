@@ -818,7 +818,7 @@ def _strip_rail_zones(src, dst, nets):
     names = {RAIL_ZONE + n for n in nets}
     old = [z for z in b.Zones() if (z.GetZoneName() or "") in names]
     for z in old:
-        b.Remove(z)
+        b.Delete(z)
     pcbnew.SaveBoard(dst, b)
     return len(old)
 
@@ -1225,7 +1225,7 @@ def widen(board, cons, out, nets=None, protect=()):
             if not _covered_by_twin(b, wt, chosen):      # W68: a piece as wide with the same ends is already there (an earlier pass)
                 b.Add(wt)
         elif _covered_by_twin(b, t, chosen):             # W68: a track with the same ends is already as wide: widening this one would stack an exact duplicate
-            b.Remove(t)
+            b.Delete(t)
         else:
             t.SetWidth(pcbnew.FromMM(chosen))
         if run is not None and run["len"] <= NECK_MAX_MM + 1e-9 and chosen < need - 1e-6:   # a short run left under the need: a neck-down (D71da)

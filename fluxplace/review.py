@@ -1720,6 +1720,33 @@ def _spec_pads(comp, pin, pads):
     return [c for c in cand if c in pads]
 
 
+def _spec_wiring(parts, net_pads, nets, comps):
+    """Declared-but-unwired: a pad the spec puts on net N whose board net is not N. Wired-but-undeclared: a pad on board
+    net N that spec net N does not list (only nets the spec declares; a part the board lacks is SPEC_COMPONENT_MISMATCH)."""
+    def listed(items):
+        return ", ".join(items[:8]) + (f" (+{len(items) - 8})" if len(items) > 8 else "")
+
+    out = []
+    for name, pins in sorted(nets.items()):
+        declared, complete = set(), True
+        for ref, pin in pins:
+            p = parts.get(ref)
+            got = _spec_pads(comps.get(ref), str(pin), p["pads"]) if p else []
+            complete &= bool(got)               # an unresolved pin is SPEC_PIN_UNRESOLVED's; the net is not fully known
+            declared.update((ref, pad) for pad in got)
+        bad = sorted(f"{r}.{pd} ({parts[r]['pads'][pd] or 'NO NET'})" for r, pd in declared if parts[r]["pads"][pd] != name)
+        if bad:
+            out.append(_f(FAIL, "SPEC_DECLARED_UNWIRED", f"{name}: spec pins not on this net on the board: {listed(bad)}",
+                          refs=sorted({b.split(".")[0] for b in bad})))
+        if not complete:
+            continue
+        extra = sorted(f"{r}.{pd}" for r, pd in map(tuple, net_pads.get(name, ())) if (r, pd) not in declared and r in comps)
+        if extra:
+            out.append(_f(FAIL, "SPEC_WIRED_UNDECLARED", f"{name}: board pads on this net that the spec does not list: {listed(extra)}",
+                          refs=sorted({e.split(".")[0] for e in extra})))
+    return out
+
+
 def check_spec_nets(facts, spec):
     """DRC proves the copper matches the board's OWN netlist. It cannot see a
     pad that was never put on its net: a one-pad net has no ratsnest edge
@@ -1763,6 +1790,7 @@ def check_spec_nets(facts, spec):
                           f"{name}: the spec ties these pads together, the board "
                           f"has them on different nets — {desc}",
                           refs=sorted({x.split('.')[0] for v in groups.values() for x in v})))
+    out += _spec_wiring(parts, facts.get("net_pads") or {}, nets, comps)
     if unresolved:
         out.append(_f(WARN, "SPEC_PIN_UNRESOLVED",
                       f"{len(unresolved)} spec pin(s) match no pad and no pinmap "
@@ -2289,10 +2317,62 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += HP.check_emc(facts, cons)
     order = {FAIL: 0, WARN: 1, INFO: 2}
     out = [f for f in out if not _waived(f, waivers)]
+    out = ai_waive(out, facts, cons, ds_dir)
     from . import fpcheck as FC
     out += FC.refused_waivers(waivers)
     out.sort(key=lambda f: (order[f["level"]], f["code"], f["msg"]))
     return out
+
+
+AI_WAIVE_MAX = 8                              # w94: FAIL findings the decider is asked about per review ([ai] waive_max)
+
+
+def _ds_lines(ds_dir, mpn, words, n=4):
+    """'file.pdf#pN: line' rows of the part's datasheet whose text holds one of `words`."""
+    from . import partdocs as PD
+    name = PD.ds_file_for_mpn(ds_dir, mpn) if ds_dir and mpn else None
+    text = PD.page_text(os.path.join(ds_dir, name)) if name else None
+    rows = []
+    for i, page in enumerate((text or "").split("\f")):
+        for l in page.splitlines():
+            if len(rows) < n and any(w in l.lower() for w in words):
+                rows.append(f"{name}#p{i + 1}: {' '.join(l.split())[:160]}")
+    return rows
+
+
+def ai_waive(out, facts, cons, ds_dir):
+    """w94: with `[ai] decide`, each FAIL (never a footprint defect) goes to the decider as waive/fix.  A waiver is applied only
+    when the decision cites a datasheet line it was given (-> INFO AI_WAIVED with the reason and the cite); uncited, the
+    FAIL stays and says so, so fab still refuses the board.  Every decision is in the decision log beside the board."""
+    from . import decider as DC, fpcheck as FC
+    if not DC.enabled(cons):
+        return out
+    bp = facts.get("board_path") or facts.get("board")
+    log_dir = os.path.dirname(os.path.abspath(bp)) if isinstance(bp, str) and bp else None
+    mpns = facts.get("mpn_map", {})
+    left = int(((cons or {}).get("ai") or {}).get("waive_max", AI_WAIVE_MAX))
+    res = []
+    for f in out:
+        if f["level"] != FAIL or FC.is_geometry(f["code"]) or left <= 0:
+            res.append(f)
+            continue
+        left -= 1
+        refs = f.get("refs", [])
+        words = [w for w in f["code"].lower().split("_") if len(w) >= 4]
+        src = [r for ref in refs[:2] for r in _ds_lines(ds_dir, mpns.get(ref), words)]
+        ev = [f"finding {f['code']}: {f['msg']}"] + [f"{ref} MPN {mpns.get(ref) or 'none'}" for ref in refs[:2]] + src
+        d = DC.ask(f"waive:{f['code']}:{','.join(refs[:3]) or f['msg'][:40]}", "waiver", f"{f['code']}: {f['msg']}",
+                   {"waive": "accept the finding as a deliberate exception (needs a cited datasheet line)", "fix": "the FAIL stands until fixed"},
+                   "fix", "a datasheet line showing the finding does not apply or is within the part's rating", ev, cons, log_dir)
+        cites = [r.split(": ", 1)[0] for r in src]
+        if d["choice"] == "waive" and DC.cited(d, cites):
+            hit = [c for c in cites if c in " ".join(d["evidence"])]
+            res.append(_f(INFO, "AI_WAIVED", f"{f['code']} {f['msg'][:160]} - waived by the AI decider: {d['rationale'][:200]} ({', '.join(hit)})", refs=refs))
+        elif d["choice"] == "waive":
+            res.append(dict(f, msg=f["msg"] + " (AI waiver refused: no cited datasheet line)"))
+        else:
+            res.append(f)
+    return res
 
 
 # findings that say a check did not (fully) run: the review then reads INCOMPLETE, never a bare pass

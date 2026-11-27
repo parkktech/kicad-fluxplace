@@ -303,7 +303,7 @@ def strip_keys(src, dst, drop):
         else:
             keep.setdefault(n, []).append(_track_ends(t))
     for t in gone:
-        b.Remove(t)
+        b.Delete(t)
     pads = {}
     for p in b.GetPads():
         pads.setdefault(p.GetNetname(), []).append((pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)))
@@ -315,7 +315,7 @@ def strip_keys(src, dst, drop):
         touched = any(min(math.hypot(x - sx, y - sy), math.hypot(x - ex, y - ey)) <= rad for sx, sy, ex, ey in keep.get(n, [])) or \
             any(math.hypot(x - px, y - py) <= rad for px, py in pads.get(n, []))
         if not touched:
-            b.Remove(t)
+            b.Delete(t)
     pcbnew.SaveBoard(dst, b)
     return len(gone)
 

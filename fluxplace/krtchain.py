@@ -646,7 +646,7 @@ def run(c, n, board, runner=run_step):
     if post:
         line += f"; snap {post['snap']['moved']} end(s), {post['snap']['centred_left']} off-centre left; guarded plane ties {post['ties']['placed']}"
     if post_error:
-        line += f"; POST ERROR {post_error['type']}: {post_error['message']} (routed board kept, cleanup skipped)"
+        line += f"; WARN post-processing failed (snap, plane ties, rail pours and widening skipped): POST ERROR {post_error['type']}: {post_error['message']} (routed board kept, cleanup skipped)"
     missed, already_done = [], []
     try:                                                    # pairs the external pair router did not see or did not route coupled
         from . import pairs as PRS, pairaudit as PA, routediag as RD2, netclass as NC2
@@ -701,7 +701,7 @@ def run(c, n, board, runner=run_step):
         line += f"; {len(hs_rec['excluded'])} gated pair leg(s) left to the pairs gate: " + ", ".join(hs_rec["excluded"][:6])
     if left:
         line += "; open: " + ", ".join(sorted(left))
-    unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
+    unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error) or bool(flow_rec.get("_error"))
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
     return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"], "released": sorted(laid_legs)}
 

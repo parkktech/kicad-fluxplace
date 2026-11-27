@@ -79,6 +79,17 @@ def test_contact_current():
     assert not _codes(EL.check_spec(_spec(), c, facts=FACTS), "CONTACT_CURRENT")
 
 
+def test_contact_current_continuous_vs_burst():
+    c = json.loads(json.dumps(CONS))
+    c["power"]["VM"]["continuous_ma"] = 900                           # contacts 1 A >= 0.9 A continuous < 3 A burst
+    f = _codes(EL.check_spec(_spec(), c, facts=FACTS), "CONTACT_CURRENT")
+    assert [x["level"] for x in f] == ["WARN"]
+    c["power"]["VM"]["burst_cite"] = "bulk 2x47uF, DS p37"
+    assert not _codes(EL.check_spec(_spec(), c, facts=FACTS), "CONTACT_CURRENT")
+    c["power"]["VM"]["continuous_ma"] = 1500
+    assert [x["level"] for x in _codes(EL.check_spec(_spec(), c, facts=FACTS), "CONTACT_CURRENT")] == ["FAIL"]
+
+
 def test_pin_strap_documented_mode_is_info_other_rail_warns_resistor_quiet():
     f = _codes(EL.check_spec(_spec(), CONS, facts=FACTS), "PIN_STRAP")
     assert [x["level"] for x in f] == ["INFO"] and "documented" in f[0]["msg"]

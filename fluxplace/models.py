@@ -274,7 +274,8 @@ def measure_model(model_path, rotation=(0.0, 0.0, 0.0), kicad_cli="kicad-cli",
     dict(w, h, z, zmin, cx, cy) mm or None."""
     import json as _json
     import subprocess
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from fluxplace import codefreeze
+    repo = codefreeze.root()
     args = _json.dumps(dict(path=str(model_path), rotation=list(rotation),
                             offset=list(offset) if offset else None,
                             kicad_cli=kicad_cli))

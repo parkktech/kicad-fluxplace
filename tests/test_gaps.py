@@ -1469,3 +1469,44 @@ def test_rung_timeout_is_a_recorded_unknown_refusal_and_close_continues(monkeypa
     recs = refusal_mod.load(refusal_mod.path(loop["work"]))
     to = [r for r in recs if r["rung"] == "pourisland"]
     assert to and to[0]["rules"][0]["status"] == "UNKNOWN" and to[0]["rules"][0]["rule"] == "rung" and "rung timeout" in to[0]["why"]
+
+
+# ---- w97: run records live in a data log outside the code tree ----
+
+def test_default_run_record_goes_to_data_log_and_leaves_code_tree_clean(monkeypatch, loop, tmp_path):
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    before = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    data = tmp_path / "data" / "runs.jsonl"
+    monkeypatch.setenv("FLUXPLACE_RUNS_LOG", str(data))
+    monkeypatch.setenv("FLUXPLACE_CALL_LOG", "1")                       # enabled() is off under pytest by default
+    monkeypatch.setitem(GP.RUNGS, "patch", _rung("fix"))
+    _close(loop["board"], loop["work"], attempts=loop["attempts"], log=lambda m: None)    # runs=None -> default location
+    after = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    assert after == before
+    recs = [json.loads(x) for x in open(data)]
+    assert len(recs) == 1 and set(recs[0]) == RUN_KEYS
+    assert json.load(open(os.path.join(loop["work"], "run.json")))["record"] == recs[0]
+
+
+def test_runs_log_default_respects_xdg_and_override(monkeypatch, tmp_path):
+    from fluxplace import calllog
+    monkeypatch.delenv("FLUXPLACE_RUNS_LOG")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "x"))
+    assert calllog.runs_log_path() == str(tmp_path / "x" / "fluxplace" / "runs.jsonl")
+
+
+def test_corpus_readers_see_data_log_and_committed_history_and_import_dedupes(monkeypatch, tmp_path):
+    from fluxplace import calllog
+    hist = tmp_path / "hist.jsonl"
+    hist.write_text(json.dumps({"run": "h1", "ts": "1", "full_pass": True}) + "\n")
+    monkeypatch.setattr(calllog, "history_path", lambda: str(hist))
+    data = calllog.runs_log_path()
+    os.makedirs(os.path.dirname(data))
+    open(data, "w").write(json.dumps({"run": "d1", "ts": "2", "full_pass": False}) + "\n")
+    assert GP.runs_summary(data) == (2, 1)
+    park = tmp_path / "park.jsonl"
+    park.write_text(json.dumps({"run": "p1", "ts": "3", "full_pass": True}) + "\n" + json.dumps({"run": "d1", "ts": "2"}) + "\n")
+    assert calllog.import_runs(str(park)) == 1 and calllog.import_runs(str(park)) == 0
+    assert GP.runs_summary(data) == (3, 2)
+    assert GP.runs_summary(str(park)) == (2, 1)                          # an explicit file is read alone

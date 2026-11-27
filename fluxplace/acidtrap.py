@@ -209,7 +209,8 @@ def _trim_overlaps_subprocess(src, dst, log=print):
     import subprocess
     from fluxplace import procs as _procs
     import sys
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from fluxplace import codefreeze
+    root = codefreeze.root()
     r = _procs.run([sys.executable, "-m", "fluxplace.acidtrap", "--trim", src, dst],
                        capture_output=True, text=True, timeout=600, cwd=root)
     # pcbnew prints its SWIG leak warnings to stdout at exit, so the count is a marked line
