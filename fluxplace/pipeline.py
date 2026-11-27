@@ -1119,8 +1119,26 @@ def st_silk(c, n, board):
                     left[GM.kind(f["code"]) or "other"][f["code"]] += 1
         except Exception as e:                                 # noqa: BLE001 - the verdict does not depend on this listing
             left = {"unlisted": {type(e).__name__: 1}}
-    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out, "silk_left": left,
-            "next": [] if rc == 0 else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+    drc_silk = _silk_drc_left(out)                             # kicad-cli's own silk items (over copper / overlap / edge) on the fitted board: silk's check may not see them
+    if drc_silk:
+        left["drc"] = drc_silk
+    ok = rc == 0 and not drc_silk
+    return {"verdict": "pass" if ok else "warn", "line": summ + ("" if not drc_silk else f"; DRC silk items left {json.dumps(drc_silk)}"), "board": out, "silk_left": left,
+            "next": [] if ok else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+
+
+def _silk_drc_left(board):
+    """{DRC type: n} of the silk_* violations kicad-cli reports on `board` ({} when none or DRC cannot run: the verdict then rests on silk's own check)."""
+    from . import drcguard as DG_
+    try:
+        rep = DG_.drc_json(board, only_rules=["silk_overlap", "silk_over_copper", "silk_edge_clearance"], complete=False, refill=False)
+    except Exception:                                          # noqa: BLE001 - advisory
+        return {}
+    out = {}
+    for v in rep.get("violations", []):
+        if str(v.get("type", "")).startswith("silk_"):
+            out[v["type"]] = out.get(v["type"], 0) + 1
+    return out
 
 
 def st_review(c, n, board):
