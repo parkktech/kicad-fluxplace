@@ -136,6 +136,18 @@ def _mask_bridges(board, tmp):
     return sum(1 for v in json.load(open(out)).get("violations", []) if v["type"] == "solder_mask_bridge")
 
 
+def _window_vias(bd, grow):
+    """-> [(net, x_mm, y_mm)] of the vias inside the window_board window (x 5..35, y 5..28) grown by `grow` mm."""
+    out = []
+    for v in bd.GetTracks():
+        if v.GetClass() != "PCB_VIA":
+            continue
+        x, y = v.GetPosition().x / 1e6, v.GetPosition().y / 1e6
+        if 5 - grow <= x <= 35 + grow and 5 - grow <= y <= 28 + grow:
+            out.append((v.GetNetname(), x, y))
+    return out
+
+
 def test_mask_window_no_foreign_via(tmp_path):
     """B7: no stage lays a foreign-net via in the window (stripped before routing, still forbidden to other nets), and the re-cut window
     of every stage output has the same solder_mask_bridge count as the input's re-cut (delta 0)."""
@@ -147,12 +159,9 @@ def test_mask_window_no_foreign_via(tmp_path):
     res = H.chain(c, b, ["fanout", "pour-tie"])
     for r in res:
         bd = pcbnew.LoadBoard(r["board"])
-        bad = [(v.GetNetname(), round(v.GetPosition().x / 1e6, 2), round(v.GetPosition().y / 1e6, 2)) for v in bd.GetTracks()
-               if v.GetClass() == "PCB_VIA" and v.GetNetname() != "GND" and 5 - 0.3 <= v.GetPosition().x / 1e6 <= 35 + 0.3
-               and 5 - 0.3 <= v.GetPosition().y / 1e6 <= 28 + 0.3]
+        bad = [(net, round(x, 2), round(y, 2)) for net, x, y in _window_vias(bd, 0.3) if net != "GND"]
         assert not bad, f"{r['line']}: foreign vias in the window {bad}"
-        gnd = [v for v in bd.GetTracks() if v.GetClass() == "PCB_VIA" and v.GetNetname() == "GND" and 5 <= v.GetPosition().x / 1e6 <= 35
-               and 5 <= v.GetPosition().y / 1e6 <= 28]
+        gnd = [v for v in _window_vias(bd, 0.0) if v[0] == "GND"]
         assert gnd, f"{r['line']}: the GND via inside the window (the owner net) must be kept"
         rc = r["board"].replace(".kicad_pcb", ".recut.kicad_pcb")
         TH.recut(r["board"], c.cons, rc)

@@ -196,9 +196,9 @@ class Obstacles:
                 n += 1
         self.kt = [z for z in B["zones"] if z["keepout"] and z["no_tracks"] and z["pts"]]
         self.kv = [z for z in B["zones"] if z["keepout"] and z.get("no_vias", z["no_tracks"]) and z["pts"]]
-        self.mo = [dict(z) for z in B.get("mask_open", []) if z["pts"]]
         from . import forbid as FB
-        self.mo = [dict(z) for z in FB.augment({"copper": B["copper"], "mask_open": self.mo}, pr.get("forbid"))["mask_open"]]
+        mo = [dict(z) for z in B.get("mask_open", []) if z["pts"]]
+        self.mo = [dict(z) for z in FB.augment({"copper": B["copper"], "mask_open": mo}, pr.get("forbid"))["mask_open"]]
         for z in self.kt + self.kv + self.mo:
             xs, ys = [q[0] for q in z["pts"]], [q[1] for q in z["pts"]]
             z["_bb"] = (min(xs), min(ys), max(xs), max(ys))

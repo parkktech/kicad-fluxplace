@@ -15,11 +15,8 @@ def windows(cons):
     The rule (lead, D71cd: exposed GND copper + GND thermal-via array + soft pad): no via or track of any non-GND net in the opening, a GND
     via is allowed and wanted; the same in every stage, whether the opening is on the board or stripped."""
     from . import thermal as TH
-    out = []
-    for sp in TH.blocks(cons, pre=False):
-        if sp["mask"]:
-            out.append({"name": f"mask window {sp['name']}", "side": sp["side"], "pts": [tuple(p) for p in sp["pts"]], "owner": sp["net"]})
-    return out
+    return [{"name": f"mask window {sp['name']}", "side": sp["side"], "pts": [tuple(p) for p in sp["pts"]], "owner": sp["net"]}
+            for sp in TH.blocks(cons, pre=False) if sp["mask"]]
 
 
 def _layer(copper, side):
@@ -38,9 +35,9 @@ def _same(a, b):
 
 def augment(B, wins):
     """Add the stripped windows (`windows(cons)`) to B["mask_open"] (routediag format) unless the board still carries them. -> B."""
+    if not B.get("copper"):
+        return B
     for w in wins or ():
-        if not B.get("copper"):
-            break
         r = {"name": w["name"], "layers": {_layer(B["copper"], w["side"])}, "pts": w["pts"], "owner": w["owner"], "mask": w["side"] + ".Mask"}
         same = [m for m in B.get("mask_open", []) if _same(r, m)]
         for m in same:
@@ -66,4 +63,4 @@ def via_pins(B, ref):
     p = B["parts"].get(ref)
     if not p or p["n_pads"] < 3:
         return []
-    return [q for q in p["pads"] if q["net"] and not q.get("np") and blocked(B, q["x"], q["y"], q["net"], r=0.0)]
+    return [q for q in p["pads"] if q["net"] and not q.get("np") and blocked(B, q["x"], q["y"], q["net"])]

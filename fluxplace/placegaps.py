@@ -1454,9 +1454,11 @@ def _r_clear_region(g, ctx):
     ref = g["refs"][0]
     B = ctx.B()
     p = B["parts"].get(ref)
-    if not p or p.get("locked") or ref not in set(PT._movable(B, ctx["cons"], _P(ctx))):
+    if not p or p.get("locked"):
         return []
     mov = set(PT._movable(B, ctx["cons"], _P(ctx)))
+    if ref not in mov:
+        return []
     out, seen, found = [], set(), []
     for k in range(8):
         a = k * math.pi / 4
