@@ -92,6 +92,7 @@ same contract as preflight and lint.
 """
 import glob
 import math
+from collections import defaultdict
 import os
 import re
 
@@ -2394,15 +2395,66 @@ def incomplete(findings):
 
 def summarize(findings, log=print):
     n = {FAIL: 0, WARN: 0, INFO: 0}
+    inh = {FAIL: 0, WARN: 0, INFO: 0}
     for f in findings:
-        n[f["level"]] += 1
-        log(f"  {f['level']:4s} {f['code']:28s} {f['msg']}")
+        old = f.get("baseline") == "inherited"
+        (inh if old else n)[f["level"]] += 1
+        log(f"  {f['level']:4s} {'INHERITED ' if old else ''}{f['code']:28s} {f['msg']}")
     log(f"review: {n[FAIL]} FAIL, {n[WARN]} WARN, {n[INFO]} INFO")
+    if any(f.get("baseline") for f in findings):
+        log(f"review: vs baseline: {n[FAIL]} FAIL / {n[WARN]} WARN new; INHERITED (listed, not gating) "
+            f"{inh[FAIL]} FAIL, {inh[WARN]} WARN, {inh[INFO]} INFO")
     inc = incomplete(findings)
     if inc:
         log("review: INCOMPLETE - not covered: " + ", ".join(f"{c} x{k}" for c, k, _m in inc)
             + " (waive the code with a reason, or --allow-incomplete)")
     return {"fail": n[FAIL], "warning": n[WARN], "info": n[INFO], "incomplete": sum(k for _c, k, _m in inc)}
+
+
+_NUM = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
+_NAME_SPLIT = re.compile(r"[\s,;:()\[\]=<>]+")
+
+
+def baseline_key(f, nets=()):
+    """Identity of a finding across two boards: (code, refs), or (code, nets named in the msg) when it has no refs.
+    Never the message text: counts and measured values in it change between versions."""
+    if f.get("refs"):
+        return (f["code"], tuple(sorted(f["refs"])), ())
+    toks = {t for w in _NAME_SPLIT.split(f.get("msg", "")) for t in [w, *w.split("/")] if t}
+    hit = {n for n in nets if n in toks or ("/" in n and n in f.get("msg", ""))}
+    return (f["code"], (), tuple(sorted(hit)))
+
+
+def finding_mag(f):
+    """Numeric severity: the finding's own `mag`, else the first standalone number of its msg (the measured value)."""
+    if f.get("mag") is not None:
+        return float(f["mag"])
+    m = _NUM.search(f.get("msg", ""))
+    return float(m.group()) if m else None
+
+
+def mark_baseline(findings, base_findings, nets=()):
+    """Tag each finding f["baseline"] = "new" | "inherited" against the previous version's findings.
+    Multiset match on baseline_key (a second instance of a key is new); a matched finding whose magnitude
+    grew (> 0.5 % + 1e-3) is new. Returns the findings (mutated)."""
+    pool = defaultdict(list)
+    for b in base_findings:
+        pool[baseline_key(b, nets)].append(finding_mag(b))
+    for f in findings:
+        mags = pool.get(baseline_key(f, nets))
+        if not mags:
+            f["baseline"] = "new"
+            continue
+        old, new = mags.pop(0), finding_mag(f)
+        worse = old is not None and new is not None and new > old * 1.005 + 1e-3
+        f["baseline"] = "new" if worse else "inherited"
+    return findings
+
+
+def file_sha(path, n=12):
+    import hashlib
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()[:n]
 
 
 # ==========================================================================
