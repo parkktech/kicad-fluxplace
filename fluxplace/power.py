@@ -478,47 +478,6 @@ def zone_credit_mm(ctx, net, layer, seg, band_mm):
     return max(seg["width"], got / L)
 
 
-PLANE_END_TOL_MM = 0.1       # a run end is tied to a plane when a same-net via barrel / through pad centre is within its radius + this
-
-
-def plane_parallel_credit(ctx, net, mem):
-    """D71da zone credit for a run PARALLELED by a same-net plane on another layer: every end of the run (a point used by one member
-    only) sits on a same-net via or through pad that reaches the plane layer, and the plane's fill covers the run's band; the
-    credit is the plane's conducting width across the run (zone_credit_mm on that layer, worst member). 0.0 when the run is not
-    tied at both ends or no plane covers it. `mem`: the run's segment rows ({layer, x1,y1,x2,y2, width, need})."""
-    import pcbnew
-    b = ctx["b"]
-    cnt = {}
-    for g in mem:
-        for k in (("x1", "y1"), ("x2", "y2")):
-            pt = (round(g[k[0]], 2), round(g[k[1]], 2))
-            cnt[pt] = cnt.get(pt, 0) + 1
-    ends = [pt for pt, n in cnt.items() if n == 1]
-    if len(ends) < 2:
-        return 0.0
-    vias = ctx["copper"].get(net, ([], []))[1]
-    pads = [(p[5], p[6]) for p in (ctx.get("pads", {}).get(net) or []) if len(p) >= 7]
-    own = {g["layer"] for g in mem}
-    best = 0.0
-    for z in b.Zones():
-        if z.GetNetname() != net or z.GetIsRuleArea():
-            continue
-        for lname in [b.GetLayerName(l) for l in z.GetLayerSet().CuStack()]:
-            if lname in own:
-                continue
-            ok = True
-            for x, y in ends:
-                tied = any(math.hypot(x - vx, y - vy) <= vr + PLANE_END_TOL_MM for vx, vy, vr in vias) or \
-                    any(lname in (ly or ()) and math.hypot(x - px, y - py) <= PLANE_END_TOL_MM + 0.5 for (px, py), ly in pads)
-                fill = z.GetFilledPolysList(b.GetLayerID(lname))
-                if not tied or fill is None or not fill.OutlineCount() or not fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0):
-                    ok = False
-                    break
-            if ok:
-                best = max(best, min(zone_credit_mm(ctx, net, lname, g, g.get("need") or g["width"]) for g in mem))
-    return best
-
-
 def _pad_amps(pad, npins, rows, src, tot, volts):
     """Current (A) one pad of a rail draws, and the source of the figure: -> (amps | None, how). None = unknown.
     Capacitor 0 A DC; MOSFET gate pin 0 A; resistor at most V_rail / R from its Value (0R = a series link: unknown); the
@@ -580,6 +539,24 @@ def unknown_loads(board, cons, layers=None):
     return out
 
 
+def _fill_contains(fill):
+    import pcbnew
+    return lambda x, y: fill.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0)
+
+
+def _fill_island(fill):
+    """x, y -> index of the fill outline (island) holding the point, -1 when none: contacts in different islands are not joined."""
+    import pcbnew
+
+    def isl(x, y):
+        pt = pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+        for k in range(fill.OutlineCount()):
+            if fill.COutline(k).PointInside(pt):
+                return k
+        return -1
+    return isl
+
+
 def rail_flows(ctx, cons, net, r, rows):
     """W40 tree-flow solve of one rail (powerflow.solve) on the copper `rows` (the net's facts track_geom rows) -> the per-row
     current list [{amps | None, unk, mode, loads}] and its context (source label), cached in ctx["flows"]; None when the rail has no
@@ -613,15 +590,15 @@ def rail_flows(ctx, cons, net, r, rows):
     zones = []
     b = ctx["b"]
     for z in b.Zones():
-        if z.GetNetname() != net:
+        if z.GetNetname() != net or z.GetIsRuleArea():
             continue
-        for lname in {g["layer"] for g in rows}:
-            lid = b.GetLayerID(lname)
-            if not z.IsOnLayer(lid):
-                continue
+        for lid in z.GetLayerSet().CuStack():           # every layer the zone is on, not only the layers the rail has tracks on
             fill = z.GetFilledPolysList(lid)
-            if fill is not None and fill.OutlineCount():
-                zones.append({"layer": lname, "contains": (lambda f: lambda x, y: f.Collide(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0))(fill)})
+            if fill is None or not fill.OutlineCount():
+                continue
+            lname = b.GetLayerName(lid)
+            oz = float(r.get("oz_outer" if lname in outer else "oz_inner") or 1.0)
+            zones.append({"layer": lname, "t_mm": 0.035 * oz, "contains": _fill_contains(fill), "island": _fill_island(fill)})
     res = PF.solve(segs, vias, gp, zones, cap=tot or None)
     res["src"] = sorted(srcs)
     cache[net] = res
@@ -745,7 +722,6 @@ def check(facts, cons, dc=None, board=None, detail=None):
                         if amps is None:             # a load on the branch is unknown: the rail total, flagged
                             amps = r["current_a"]
                     cw = min(zone_credit_mm(ctx, net, narrow[i]["layer"], narrow[i], narrow[i]["need"]) for i in run["members"])
-                    cw = max(cw, plane_parallel_credit(ctx, net, [narrow[i] for i in run["members"]]))
                     rise = r.get("rise_c") or DEFAULT_RISE_C
                     need_run = max((ipc2221_width_mm(amps, rise, r["oz_outer"], False) if l in outer else
                                     ipc2221_width_mm(amps, rise, r["oz_inner"], True)) for l in run["layers"]) if amps else 0.0

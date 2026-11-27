@@ -123,12 +123,43 @@ def build(segs, vias, pads, zones=()):
         chain = [(0.0, a)] + cuts + [(L, z)]
         for (s0, n0), (s1, n1) in zip(chain, chain[1:]):
             edges.append((T[n0]["node"], T[n1]["node"], i, s1 - s0))
-    for zn in zones:                                    # one node per zone fill layer
-        node = uf.add()
-        for t in T:
-            if (t["layers"] is None or zn["layer"] in t["layers"]) and zn["contains"](t["x"], t["y"]):
-                uf.union(node, t["node"])
+    for zn in zones:                                    # a zone fill is a resistive sheet between its contacts (plane_edges)
+        edges += plane_edges(uf, T, zn)
     return uf, edges, [T[k]["node"] for k in pad_t], T
+
+
+PLANE_KNN = 6                        # each contact of a plane is joined to its nearest PLANE_KNN contacts
+PLANE_R0_MM = 0.3                    # contact radius floor of the spreading-resistance formula
+
+
+def plane_edges(uf, T, zn):
+    """Conductance edges (u, v, None, siemens) of one same-net zone fill (`zn`: {layer, contains, t_mm, island?}).
+    Contacts = every terminal (track end, via, pad) on the zone's layer inside its fill, one per junction node and fill island.
+    Approximation (coarse on purpose): two contacts d mm apart in a copper sheet of sheet resistance Rs = rho / t are joined by
+    R = Rs * ln(max(d, 2 r0) / r0) / pi (the spreading resistance between two point electrodes of radius r0 in an infinite sheet),
+    and each contact is joined only to its PLANE_KNN nearest ones: the missing parallel paths make the plane look more resistive than
+    it is, so a track in parallel with it is credited with a slightly larger share (conservative for the track's width check)."""
+    rs = RHO_MM / max(float(zn.get("t_mm") or 0.035), 1e-4)
+    isl = zn.get("island") or (lambda x, y: 0)
+    pts = {}
+    for t in T:
+        if (t["layers"] is None or zn["layer"] in t["layers"]) and zn["contains"](t["x"], t["y"]):
+            pts.setdefault((isl(t["x"], t["y"]), uf.find(t["node"])), (t["x"], t["y"]))
+    out = []
+    byisl = {}
+    for (i_, n_), xy in pts.items():
+        byisl.setdefault(i_, []).append((n_, xy))
+    seen = set()
+    for lst in byisl.values():
+        for a, (na, xa) in enumerate(lst):
+            near = sorted(((math.hypot(xa[0] - xb[0], xa[1] - xb[1]), nb) for b, (nb, xb) in enumerate(lst) if b != a))[:PLANE_KNN]
+            for d, nb in near:
+                key = (min(na, nb), max(na, nb))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((na, nb, None, math.pi / (rs * math.log(max(d, 2 * PLANE_R0_MM) / PLANE_R0_MM))))
+    return out
 
 
 RHO_MM = 1.72e-5                     # copper resistivity, ohm * mm at 20 C
@@ -155,7 +186,9 @@ def _kirchhoff(E, segs, roots, pad_node, pads, f, blk, reach, subu):
     for k, (u, v, i, ln, virt) in enumerate(E):
         if u == v or u not in ix or v not in ix:
             continue
-        if virt:
+        if isinstance(virt, tuple):
+            g = virt[1]
+        elif virt:
             g = 1e9
         else:
             sg = segs[i]
@@ -196,7 +229,7 @@ def solve(segs, vias, pads, zones=(), cap=None):
     E = []                                              # (u, v, seg, len, virtual)
     for u, v, i, ln in edges:
         u, v = f(u), f(v)
-        E.append((u, v, i, ln, False))
+        E.append((u, v, i, ln, False if i is not None else ("g", ln)))     # a plane edge carries its conductance
     roots = sorted({f(n) for n, p in zip(pad_node, pads) if p["role"] == "source"})
     for r in roots[1:]:                                 # several source pads: one virtual root, joined by virtual edges
         E.append((roots[0], r, None, 0.0, True))
@@ -325,6 +358,9 @@ def solve(segs, vias, pads, zones=(), cap=None):
         if virt or i is None:
             continue
         if blk[u] in reach:
+            if u == v and ik:                           # both ends in one junction (inside one via / pad): no voltage across it, no current
+                flow[i] = flow[i] or {"amps": 0.0, "unk": [], "mode": "mesh-solve", "loads": subn[blk[u]]}
+                continue
             if k in bridge:
                 child = blk[v] if parent.get(blk[v]) and parent[blk[v]][1] == k else blk[u]
                 amps, us, n, mode = sub[child], subu[child], subn[child], "tree"
