@@ -1814,6 +1814,7 @@ def _renet_entry(c, work, board, st):
     v = BW_.commit(board, out, out, release=rep["release"], reason="re-net", log=print)
     if not v["written"]:
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
+    c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
     st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))
     st["board"] = out
     print(f"pipeline: re-net: {rep['items']} item(s) stripped from {len(rep['nets'])} net(s) at pad(s) {', '.join(rep['pads'][:8])}; "

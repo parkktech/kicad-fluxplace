@@ -130,3 +130,17 @@ def test_t_junction_and_via_inside_a_segment_are_seen(tmp_path):
     rep = RN.apply(b, out)
     assert rep["removed"] == {"B": 2}                                      # the touching segment and the branch stub; trunk and spur stay
     assert len(BW.net_items(out)["B"]) == 4
+
+
+def test_renet_pre_answers_rip_existing_never_unless_the_owner_answered(tmp_path):
+    b = routed(tmp_path, "c.kicad_pcb", ("Q", "A"))
+    c = PL.Ctx(_args(tmp_path, b), str(tmp_path / "W"), b, {"stages": {}})
+    PL._renet_entry(c, str(tmp_path / "W"), b, {})
+    assert c.answers["rip-existing"] == "never"
+    c2 = PL.Ctx(_args(tmp_path, b, answer=["rip-existing=low-speed"]), str(tmp_path / "W2"), b, {"stages": {}})
+    PL._renet_entry(c2, str(tmp_path / "W2"), b, {})
+    assert c2.answers["rip-existing"] == "low-speed"
+    ok = routed(tmp_path, "b.kicad_pcb", ("B", "P"))
+    c3 = PL.Ctx(_args(tmp_path, ok), str(tmp_path / "W3"), ok, {"stages": {}})
+    PL._renet_entry(c3, str(tmp_path / "W3"), ok, {})
+    assert "rip-existing" not in c3.answers                      # no mismatch: nothing pre-answered
