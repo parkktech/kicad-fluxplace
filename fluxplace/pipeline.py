@@ -2048,9 +2048,10 @@ def _specsync_entry(c, work, board, st):
         return 2
     if not os.path.isabs(sch) and c.cons_path:
         sch = os.path.join(os.path.dirname(c.cons_path), sch)
-    d, rc = SY_.sync(board, sch, c.spec_path, write=True, log=lambda m: print("pipeline: specsync: " + m, flush=True))
-    st["specsync"] = {"errors": d["errors"], "changes": {k: len(v) for g in ("parts", "nets") for k, v in d[g].items()}}
-    if rc:
+    d, rc = SY_.sync(board, sch, c.spec_path, write=True, log=lambda m: print("pipeline: specsync: " + m, flush=True),
+                      ds_dir=((c.cons.get("docs") or {}).get("datasheets")))
+    st["specsync"] = {"errors": d["errors"], "fails": d["fails"], "changes": {k: len(v) for g in ("parts", "nets") for k, v in d[g].items()}}
+    if rc == 2:
         print("pipeline: specsync: schematic and board disagree (exit 2, no stage started)", flush=True)
         return rc
     c.spec = json.load(open(c.spec_path))

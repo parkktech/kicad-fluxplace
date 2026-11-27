@@ -89,3 +89,45 @@ def test_pipeline_entry_syncs_and_stops_on_mismatch(tmp_path):
     assert st["specsync"]["errors"] == []
     b2, x2, sp2 = _setup(tmp_path, q_gnd="OTHER")
     assert PL._specsync_entry(c, str(tmp_path), b, {}) == 2
+
+
+def _swap_setup(tmp_path, monkeypatch, dossier):
+    """U1's footprint changed (SOIC-8 spec -> board SOIC-8 pads 1,2 but spec said fp SOT): a swap with a pinmap."""
+    from fluxplace import dossier as DO
+    spec = json.loads(json.dumps(SPEC))
+    spec["components"][1]["fp"] = "OLD-FP"
+    spec["components"][1]["mpn"] = "OLDPART"
+    spec["components"][1]["pinmap"] = {"IN": "2", "GND": "1"}          # stale: the old part had the pins the other way round
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "NEWPART.pdf").write_bytes(b"%PDF")
+    (ds / "datasheets.json").write_text(json.dumps({"NEWPART": {"file": "NEWPART.pdf", "sha256": "x"}}))
+    board = BOARD.replace('(property "Value" "IC")', '(property "Value" "IC") (property "MPN" "NEWPART")')
+    (tmp_path / "b.kicad_pcb").write_text(board)
+    (tmp_path / "n.xml").write_text(_xml())
+    (tmp_path / "spec.json").write_text(json.dumps(spec))
+    monkeypatch.setattr(DO, "load", lambda mpn, sha, *a, **k: dossier)
+    return str(tmp_path / "b.kicad_pcb"), str(tmp_path / "n.xml"), str(tmp_path / "spec.json"), str(ds)
+
+
+FULL = {"pins": [{"num": ["1"], "name": "IN", "alt": ["INPUT"], "p": 3}, {"num": ["2"], "name": "VSS", "alt": ["GND"], "p": 3}]}
+
+
+def test_swap_rebuilds_pinmap_from_dossier(tmp_path, monkeypatch):
+    b, x, sp, ds = _swap_setup(tmp_path, monkeypatch, FULL)
+    d, rc = SY.sync(b, x, sp, write=True, log=lambda m: None, ds_dir=ds)
+    u1 = next(c for c in json.load(open(sp))["components"] if c["ref"] == "U1")
+    assert rc == 0 and not d["fails"]
+    assert u1["pinmap"] == {"IN": "1", "GND": "2"} and u1["pinmap_source"] == "NEWPART.pdf#p3" and u1["mpn"] == "NEWPART"
+    nets = json.load(open(sp))["nets"]
+    assert ["U1", "IN"] in nets["SIG"] and ["U1", "GND"] in nets["GND"]   # schematic pin names resolve through the NEW pinmap
+
+
+def test_swap_without_pin_table_is_a_fail_not_a_silent_keep(tmp_path, monkeypatch):
+    b, x, sp, ds = _swap_setup(tmp_path, monkeypatch, None)
+    d, rc = SY.sync(b, x, sp, write=True, log=lambda m: None, ds_dir=ds)
+    assert d["fails"] and rc in (1, 2) and d["fails"][0][0] == "SWAP_PINMAP_REVIEW" and "U1" in d["fails"][0][1]
+    partial = {"pins": [FULL["pins"][0]]}
+    monkeypatch.setattr(__import__("fluxplace.dossier", fromlist=["x"]), "load", lambda *a, **k: partial)
+    d, rc = SY.sync(b, x, sp, write=False, log=lambda m: None, ds_dir=ds)
+    assert "no pad 2" in d["fails"][0][1] and rc in (1, 2)       # 2: the kept stale pinmap now also disagrees with the board

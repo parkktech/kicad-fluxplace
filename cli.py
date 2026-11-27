@@ -2100,7 +2100,7 @@ def cmd_speccheck(a):
 def cmd_specsync(a):
     """Diff the netlist spec against the schematic netlist + board footprints; --write applies it (backup + log)."""
     from fluxplace import specsync as SY
-    _d, rc = SY.sync(a.board, a.sch, a.spec, write=a.write)
+    _d, rc = SY.sync(a.board, a.sch, a.spec, write=a.write, ds_dir=a.datasheets)
     raise SystemExit(rc)
 
 
@@ -3749,6 +3749,7 @@ def build_parser():
     pss.add_argument("board")
     pss.add_argument("--sch", required=True, help=".kicad_sch (via kicad-cli) or a KiCad XML netlist")
     pss.add_argument("--spec", required=True)
+    pss.add_argument("--datasheets", default=None, help="datasheets dir (a swapped part's pinmap is rebuilt from its dossier)")
     pss.add_argument("--write", action="store_true", help="apply in place (backup + spec-sync.log); default prints the diff")
     pss.set_defaults(fn=cmd_specsync)
 
