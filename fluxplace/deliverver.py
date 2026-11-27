@@ -464,15 +464,13 @@ def prev_files(prev_dir):
 # ------------------------------------------------------------------ orchestration
 def start(a, boms, board_facts, log=print):
     """Before the PCBWay facts are collected: carry the BOM. -> (ctx, boms)
-    with the board's BOM swapped for the carried one, or (None, boms) when no
-    previous-version input was given."""
+    with the board's BOM swapped for the carried one (a first version has no
+    previous input: the gate still runs)."""
     prev = prev_files(a.prev_delivery) if a.prev_delivery else {}
     prev_bom = a.prev_bom or prev.get("bom")
-    if not (prev_bom or a.prev_assembly or a.prev_delivery or a.changes):
-        return None, boms
     ctx = {"prev": prev, "label": version_label(a.name, a.out) or "new version",
            "fps": board_facts.get("footprints") or [], "rep": None, "bom_rows": []}
-    ctx["prev_label"] = prev.get("label") or version_label(prev_bom, a.prev_assembly, a.prev_delivery) or "the previous version"
+    ctx["prev_label"] = prev.get("label") or version_label(prev_bom, a.prev_assembly, a.prev_delivery)
     ctx["changes"] = open(a.changes, encoding="utf-8").read() if a.changes else ""
     ctx["tmp"] = tempfile.mkdtemp(prefix="fp-deliverver-")
     boms = list(boms)

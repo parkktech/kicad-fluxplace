@@ -108,3 +108,15 @@ def test_docx_xlsx_deps_are_pinned_and_named_by_doctor():
     assert re.search(r"^python-docx==\d", req, re.M) and re.search(r"^openpyxl==\d", req, re.M)
     pins = {d["key"]: d.get("pip") for d in deps.REQUIREMENTS} if hasattr(deps, "REQUIREMENTS") else {}
     assert ("==" in pins["python-docx"] and "==" in pins["openpyxl"])
+
+
+def test_schematic_is_never_regenerated_or_substituted(tmp_path):
+    b = tmp_path / "b"; b.mkdir()
+    (b / "x.kicad_pcb").write_text("")
+    a = type("A", (), {"sch": None})()
+    assert DV._find_sch(a, str(b), "x") is None
+    (b / "x.kicad_sch").write_text("s")
+    assert DV._find_sch(a, str(b), "x") == str(b / "x.kicad_sch")
+    other = tmp_path / "real.kicad_sch"; other.write_text("s")
+    a.sch = str(other)
+    assert DV._find_sch(a, str(b), "x") == str(other)

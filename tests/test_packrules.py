@@ -144,3 +144,8 @@ def test_known_open_status_lines_in_readme():
     prev = "KNOWN OPEN\n----------\n  - T3 HX5084 pin table\n  - J1 gender pending\n\nCONTENTS\n--------\nx\n"
     s = DV.known_open_status(prev, "- T3 HX5084 pin table fixed against datasheet")
     assert "CLOSED per --changes" in s and "STILL OPEN" in s
+
+
+def test_p6_schematic_missing_and_steps(tmp_path):
+    r = _status(PR.check(_ctx(tmp_path)), "P6")
+    assert "schematic missing" in r["all"] and "missing: assembly STEP" in r["all"] and "missing: bare-board STEP" in r["all"]

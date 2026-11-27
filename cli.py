@@ -3269,6 +3269,8 @@ def build_parser():
     pd.add_argument("--changes", help="text file: what changed since the previous version "
                     "(README-FIRST and the last assembly section)")
     pd.add_argument("--kicad-cli", default="kicad-cli")
+    pd.add_argument("--sch", help="the project's real .kicad_sch (never regenerated from a spec; "
+                    "absent and none beside the board -> P6 FAIL 'schematic missing')")
     pd.add_argument("--pack-waive", action="append", default=[],
                     help="recorded reason for a packaging-rule problem: 'P6:REGEX: reason', repeatable "
                          "(also [packaging] waive in the constraints)")
