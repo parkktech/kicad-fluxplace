@@ -40,7 +40,8 @@ def params(cons):
             "shortlist": max(1, min(5, int(e.get("escape_shortlist", 5)))), "reach": float(e.get("escape_reach_mm", 3.0)),
             "grow": int(e.get("escape_grow", 2)), "budget_s": float(e.get("escape_budget_s", 900.0)),
             "dirs": int(e.get("escape_dirs", 4)), "variants": int(e.get("escape_variants", 6)),
-            "verify_reach": float(e.get("escape_verify_reach_mm", 8.0))}
+            "verify_reach": float(e.get("escape_verify_reach_mm", 8.0)), "grow_reach": float(e.get("escape_grow_reach_mm", 15.0)),
+            "watch": [str(x) for x in (e.get("escape_watch") or [])], "cross": e.get("escape_cross", True) is not False}
 
 
 def tkey(pr, t):
@@ -258,7 +259,7 @@ def select(domains, clr, expansions, shortlist, forbidden=frozenset(), access=No
     sols.sort(key=lambda s: s[0])
     out, seen = [], set()
     for _c, asg in sols:
-        sg = tuple(sorted(str(b["sig"]) for b in asg.values()))
+        sg = tuple(sorted(str((b["vkey"], b["layer"])) for b in asg.values()))       # material = variant + layer; a 45-degree heading change is a duplicate
         if sg in seen:
             continue
         seen.add(sg)
@@ -270,11 +271,11 @@ def select(domains, clr, expansions, shortlist, forbidden=frozenset(), access=No
 
 # ---------------------------------------------------------------- 3. verify
 
-def verification_set(info, rules, key, live, targets, boxes, reach):
+def verification_set(info, rules, key, live, targets, boxes, reach, watch=()):
     """targets + every live pair of equal or higher rank (smaller (prio, kind)) whose straight terminal-to-terminal corridor passes
     within `reach` of the neighbourhood boxes [(x0, y0, x1, y1)] -> list of pairs in emission order."""
     rk = max(key[q][:2] for q in targets)
-    out = set(targets)
+    out = set(targets) | {q for q in watch if q in key}               # observed victims stay in, wherever their corridor runs
     for q in live:
         if q in out or key[q][:2] > rk or not info[q][2]:
             continue
@@ -381,6 +382,35 @@ def _load(cons, fp, ctx, info, rules, p):
     return {"choice": choice, "reserve": reserve, "report": rep}
 
 
+def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
+    """diagnostic (outside review 2026-11-26): two materially different candidate exits crossed with the two emission orders of the target
+    pairs, each pair scored on its own (laid in full, skew inside the guard limit).  Never changes the selection or the pairs order."""
+    picks, seen = [], set()
+    for asg in cands:
+        m = tuple(sorted(str((b["vkey"], b["layer"])) for b in asg.values()))
+        if m not in seen:
+            seen.add(m)
+            picks.append(asg)
+        if len(picks) == 2:
+            break
+    rows = []
+    for ci, asg in enumerate(picks):
+        esc = {tkey(pr, info[pr][0][ti]): b["var"] for (pr, ti), b in asg.items()}
+        rsv = {}
+        for (pr, ti), b in asg.items():
+            rsv[pr] = rsv.get(pr, []) + [x for pcs in b["own"].values() for x in pcs] + b["foot"]
+        tl = [q for q in vset if q in targets]
+        for oname, order in (("emission", list(vset)), ("targets-reversed", [q for q in vset if q not in targets] + tl[::-1])):
+            res = ghost(order, esc, rsv)
+            rep["ghost_runs"] += 1
+            sc = {}
+            for q in vset:
+                c = res.get(q)
+                sc["/".join(q)] = bool(c) and (c["full"] or c["e"]["status"] == "kept") and c["skew"] <= limit(q[0]) + 1e-9
+            rows.append({"hood": hood, "candidate": ci, "order": oname, "exits": {"/".join(pr) + f"@{ti}": [b["vkey"][0], b["layer"]] for (pr, ti), b in asg.items()}, "scores": sc})
+    return rows
+
+
 def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None):
     """-> {"choice", "reserve", "report"}.
     ctx_of() -> fresh lay context; ghost(pairs, escape, reserve) -> {pair: lay result} (production lay on a fresh state, in `pairs` order)."""
@@ -399,6 +429,9 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     if hit is not None:
         return hit
     forbidden, depri = set(), set()
+    watch = {q for q in live if any(n.startswith(w) for n in q for w in p["watch"])}          # [pairlay] escape_watch = net prefixes (board intent in the constraints)
+    rep["watch"] = sorted("/".join(q) for q in watch)
+    rep["cross"] = []
     done_parts = set()
     for seed in sorted(seeds):
         if seed in done_parts or time.time() - t0 > p["budget_s"]:
@@ -425,7 +458,7 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                 nh["why"].append("a terminal has no legal bundle")
                 break
             boxes = [part_box(B, c) for c in hood]
-            vset = sorted(verification_set(info, rules, key, live, targets, boxes, p["verify_reach"]), key=lambda q: pos.get(q, 1e9))
+            vset = sorted(verification_set(info, rules, key, live, targets, boxes, p["verify_reach"], watch), key=lambda q: pos.get(q, 1e9))
             base = ghost(vset, {}, {})
             rep["ghost_runs"] += 1
             okb, whyb = judge(base, set(targets), vset, base, limit)
@@ -453,6 +486,11 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     chosen = (esc, rsv, asg)
                     break
                 nh["why"] += why[:2]
+                for q in vset:                                    # a pair laid before and not now is an observed victim: it stays in every later verification
+                    if q not in targets and base.get(q) and (base[q]["full"] or base[q]["e"]["status"] == "kept") and not (res.get(q) or {}).get("full"):
+                        if q not in watch:
+                            rep.setdefault("victims", []).append("/".join(q))
+                        watch.add(q)
                 geom = [c for c in res.values() if c["e"].get("status") in ("not-laid", "partial")]
                 if any("search budget" in (c["e"].get("why") or "") for c in geom):
                     depri.add(sig)
@@ -462,6 +500,8 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     rep["memory"]["forbidden"] += 1
                 for c in res.values():
                     blockers |= blocker_parts(c, set(comps))
+            if p["cross"] and cands and not any(c.get("hood") == tuple(hood) for c in rep["cross"]):
+                rep["cross"] += cross_scores(ghost, cands, info, vset, targets, base, limit, tuple(hood), rep)
             if chosen:
                 esc, rsv, asg = chosen
                 out["choice"].update(esc)
@@ -472,6 +512,11 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                 done_parts |= set(hood)
                 break
             grow_to = sorted(c for c in blockers if c not in hood and c in comps)
+            if not grow_to:                                        # a blocked channel / via bank names no part: the nearest part with pairs on it
+                gb = [(math.hypot((a[0] + a[2]) / 2 - (b[0] + b[2]) / 2, (a[1] + a[3]) / 2 - (b[1] + b[3]) / 2), c) for c in comps if c not in hood
+                      for a in [part_box(B, c)] for b in boxes[:1]]
+                near = sorted(gb)[:1]
+                grow_to = [near[0][1]] if near and near[0][0] <= p["grow_reach"] else []
             if not grow_to:
                 nh["verdict"] = "no candidate verified"
                 break

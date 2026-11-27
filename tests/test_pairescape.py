@@ -184,3 +184,44 @@ def test_plan_is_cached_by_placement_and_constraints(monkeypatch, tmp_path):
     B2 = {"pads": [dict(B["pads"][0], x=5)]}                                    # a moved pad is a different placement: planned again
     PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1], cons, B2, lambda net: 1.0, order=[p0, p1])
     assert len(n) > calls
+
+
+def test_shortlist_has_no_heading_duplicates():
+    p0, p1 = ("A_N", "A_P"), ("B_N", "B_P")
+    d0 = [bundle(p0, 0, "mid", 1.0, 1.0)] + [dict(bundle(p0, 0, "mid", 1.0, 1.0 + 0.01 * k), dir=(0, k), sig=("mid", "F.Cu", (0, k))) for k in range(1, 5)] + [bundle(p0, 0, "left", 0.0, 3.0)]
+    d1 = [bundle(p1, 0, "far", 5.0, 1.0)]
+    sols, _ = PE.select({(p0, 0): d0, (p1, 0): d1}, 0.127, 10000, 5)
+    assert len(sols) == 2                                            # (mid, far) and (left, far): the four heading variants of "mid" are one plan
+
+
+def test_observed_victims_stay_in_the_verification_set_and_params_carry_the_watch():
+    p0, p1, p2 = ("A_N", "A_P"), ("B_N", "B_P"), ("C_N", "C_P")
+    mk = lambda a, b: ([{"c": a}, {"c": b}], [], [(0, 1)], 1.0)
+    info = {p0: mk((0, 0), (10, 0)), p1: mk((2, 40), (8, 40)), p2: mk((2, 80), (8, 80))}
+    key = {p0: (1, 1, 1), p1: (0, 0, 1), p2: (0, 0, 1)}
+    v = PE.verification_set(info, {}, key, [p0, p1, p2], [p0], [(4, -1, 6, 1)], 5.0, watch={p2})
+    assert set(v) == {p0, p2}                                        # p2's corridor misses the part: in by the watch only
+    assert PE.params({"pairlay": {"escape_watch": ["PCIE_RX", "USB3"]}})["watch"] == ["PCIE_RX", "USB3"]
+
+
+def test_failed_probe_records_victims_and_crosses_orders(monkeypatch, tmp_path):
+    p0, p1, info, rules, key = fake_world(monkeypatch)
+    v = ("V_N", "V_P")
+    info[v] = ([{"name": "X", "c": (0.0, 9.0), "p": {"ref": "X"}}, {"name": "Y", "c": (9.0, 9.0), "p": {"ref": "Y"}}], [], [(0, 1)], 9.0)
+    rules[v] = {"clr": 0.127}
+    key[v] = (0, 0, 3.0)
+    calls = []
+
+    def ghost(prs, esc, rsv):
+        calls.append((tuple(prs), bool(esc)))
+        names = {x["name"] for x in esc.values()}
+        out = {}
+        for q in prs:
+            ok = (bool(esc) and "left" not in names and q != p0) or (q == v and not esc) or (bool(esc) and q in (p0, p1) and "left" not in names) or (q == v and "left" not in names)
+            out[q] = {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}}
+        return out
+    cons = {"pairlay": {"escape_cache_dir": str(tmp_path), "escape_watch": ["V_"]}}
+    res = PE.plan(lambda: {"budget": {}}, ghost, info, rules, key, [p0, p1, v], cons, {}, lambda net: 1.0, order=[p0, p1, v])
+    rep = res["report"]
+    assert "V_N/V_P" in rep["watch"] and any(c["order"] == "targets-reversed" for c in rep["cross"])
+    assert {r["candidate"] for r in rep["cross"]} <= {0, 1} and all(set(r["scores"]) >= {"A_N/A_P", "B_N/B_P", "V_N/V_P"} for r in rep["cross"])
