@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 import time
 
-VERSION = 4                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
+VERSION = 5                           # 2: escalation + required sections; a v1 dossier is upgraded (no second text pass)
 MODEL = "haiku"
 TEXT_BUDGET = 240_000                 # characters of datasheet text sent per part (~60k tokens)
 LIST_SECTIONS = ("pins", "swap_groups", "supplies", "currents", "abs_max", "io_levels", "interfaces", "decoupling", "keepouts",
@@ -346,9 +346,10 @@ def _gap_pass(mpn, pdf, pg, dos, td, ask, model):
     thin = [k for k in range(1, len(pg) + 1) if len(pg[k - 1].strip()) < 300]           # pages whose content is a picture
     hot = [k for k in range(1, len(pg) + 1) if k not in thin and re.search(r"pin (configuration|description|function)|pinout|"
                                                                            r"absolute maximum|recommended operating", pg[k - 1], re.I)]
-    pics = [k for k in (thin + hot)[:GAP_PAGES] if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
     pat = re.compile("|".join(_GAP_WORDS[s] for s in need if s in _GAP_WORDS) or "$^", re.I)
     own = [k for k in range(1, len(pg) + 1) if k not in thin and pat.search(pg[k - 1])]
+    order = list(dict.fromkeys(thin + own + hot))           # a drawing page that names the subject is a picture too (pin diagrams)
+    pics = [k for k in order[:GAP_PAGES] if PC.render_page(pdf, k, os.path.join(td, f"page-{k}.png"))[0]]
     docs = {}
     for f in siblings(pdf, mpn):
         docs[os.path.basename(f)] = pages(f)
