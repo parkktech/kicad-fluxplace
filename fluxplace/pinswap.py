@@ -44,12 +44,13 @@ def _spec_pads(spec, ref):
 
 def _functions(spec, cons, ref, pads, fn):
     """{pad: function text} from the group, the spec pinmap, else datasheet page lines naming the pad number."""
-    inv = {str(v): k for k, v in (_spec_part(spec, ref).get("pinmap") or {}).items()}
+    part = _spec_part(spec, ref)
+    inv = {str(v): k for k, v in (part.get("pinmap") or {}).items()}
     out = {p: fn.get(p) or inv.get(p) for p in pads}
     need = [p for p in pads if not out[p]]
     if need:
         from . import partdocs as PD
-        f, pages = PD.parse_source(_spec_part(spec, ref).get("pinmap_source"))
+        f, pages = PD.parse_source(part.get("pinmap_source"))
         ds = ((cons or {}).get("docs") or {}).get("datasheets") or ""
         pdf = next((c for c in (f, os.path.join(ds, f or ""), os.path.join(ds, os.path.basename(f or ""))) if f and os.path.isfile(c)), None)
         text = (PD.page_text(pdf, pages or None) or "") if pdf else ""

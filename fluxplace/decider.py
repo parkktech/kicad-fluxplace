@@ -108,9 +108,7 @@ def _write(d, row):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, LOG), "a") as fh:
             fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-        last = {}
-        for r in _log_rows(d):
-            last[r["id"]] = r
+        last = {r["id"]: r for r in _log_rows(d)}
         L = ["# written by fluxplace decider: the latest decision per question ([answers] syntax); log: " + LOG, "[answers]"]
         for qid, r in sorted(last.items()):
             L.append(f"{json.dumps(qid)} = {json.dumps(r['choice'])}   # {r['by']}: {r.get('rationale', '')[:120]}".replace("\n", " "))

@@ -1954,8 +1954,9 @@ def _pinswap_entry(c, work, board, st):
     for d in S.decided:
         print(f"pipeline: DECIDED {d['id']} = {d['choice']} ({d['by']}{'' if d['reasoned'] else ', default, not reasoned'})", flush=True)
     c.answers.update(S.used)
+    mv = PS_.moves(S.used)
     out = os.path.join(work, "0-pinswap", "board.kicad_pcb")
-    nets = PS_.apply_board(board, out, PS_.moves(S.used))
+    nets = PS_.apply_board(board, out, mv)
     if not nets:
         return board
     _sidecar(board, out)
@@ -1963,7 +1964,7 @@ def _pinswap_entry(c, work, board, st):
     if not v["written"]:
         print(f"pipeline: pinswap re-net refused: {v['why']}", flush=True)
         return board
-    st["pinswap"] = PS_.moves(S.used)
+    st["pinswap"] = mv
     _scope_add(c, nets)
     st["board"] = out
     return out
