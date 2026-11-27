@@ -2467,11 +2467,17 @@ _NUM = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w])")
 _NAME_SPLIT = re.compile(r"[\s,;:()\[\]=<>]+")
 
 
+_IMP_RUN = re.compile(r"mm of ([\d.]+) mm on (\S+)")
+_SKEW_MAG = re.compile(r"skew ([\d.]+)")
+_RESEG_TOL = (0.25, 0.05)       # a run's length may grow 0.25 mm + 5 % (re-segmentation / endpoint nudge) and still be the same copper
+
+
 def baseline_key(f, nets=()):
     """Identity of a finding across two boards: (code, refs), or (code, nets named in the msg) when it has no refs.
     Never the message text: counts and measured values in it change between versions."""
     if f.get("refs"):
-        return (f["code"], tuple(sorted(f["refs"])), ())
+        g = _IMP_RUN.search(f.get("msg", "")) if f["code"] == "PAIR_IMPEDANCE_OFF" else None
+        return (f["code"], tuple(sorted(f["refs"])), g.groups() if g else ())    # per net AND per copper geometry (layer, width)
     toks = {t for w in _NAME_SPLIT.split(f.get("msg", "")) for t in [w, *w.split("/")] if t}
     hit = {n for n in nets if n in toks or ("/" in n and n in f.get("msg", ""))}
     return (f["code"], (), tuple(sorted(hit)))
@@ -2481,24 +2487,51 @@ def finding_mag(f):
     """Numeric severity: the finding's own `mag`, else the first standalone number of its msg (the measured value)."""
     if f.get("mag") is not None:
         return float(f["mag"])
+    if f["code"].startswith("PAIR_") and (s := _SKEW_MAG.search(f.get("msg", ""))):
+        return float(s.group(1))                  # a pair finding's measured value is its skew, not the first count (vias 4 vs 2)
     m = _NUM.search(f.get("msg", ""))
     return float(m.group()) if m else None
 
 
-def mark_baseline(findings, base_findings, nets=()):
+UNGRADED_CODES = frozenset({"MEASURE_DISAGREE", "PAIR_UNMEASURED", "PAIR_DELAY_UNKNOWN"})
+
+
+def copper_equal(facts, base_facts, nets):
+    """True when every net in `nets` has the same copper on both boards within the re-segmentation tolerance:
+    same via count and, per (layer, width), run length within _RESEG_TOL. Facts from boardfile.facts_from_file."""
+    a_tol, r_tol = _RESEG_TOL
+    for n in nets:
+        a, b = (facts.get("net_tracks") or {}).get(n), (base_facts.get("net_tracks") or {}).get(n)
+        if not a or not b or a.get("vias") != b.get("vias"):
+            return False
+        sa, sb = {(l, w): mm for l, w, mm in a["segments"]}, {(l, w): mm for l, w, mm in b["segments"]}
+        if set(sa) != set(sb) or any(abs(sa[k] - sb[k]) > a_tol + r_tol * sb[k] for k in sa):
+            return False
+    return True
+
+
+def mark_baseline(findings, base_findings, nets=(), equal=None):
     """Tag each finding f["baseline"] = "new" | "inherited" against the previous version's findings.
     Multiset match on baseline_key (a second instance of a key is new); a matched finding whose magnitude
-    grew (> 0.5 % + 1e-3) is new. Returns the findings (mutated)."""
+    grew (> 0.5 % + 1e-3) is new. A PAIR_* finding with no match whose pair the baseline could not grade (UNGRADED_CODES)
+    is inherited ("baseline ungraded, copper equal") when equal(nets) says the pair's copper is unchanged. Returns the findings (mutated)."""
+    ungraded = {tuple(sorted(n for n in nets if n in b.get("msg", ""))) for b in base_findings if b["code"] in UNGRADED_CODES} if equal else set()
     pool = defaultdict(list)
     for b in base_findings:
         pool[baseline_key(b, nets)].append(finding_mag(b))
     for f in findings:
         mags = pool.get(baseline_key(f, nets))
         if not mags:
-            f["baseline"] = "new"
+            pn = tuple(sorted(n for n in nets if n in f.get("msg", ""))) if f["code"].startswith("PAIR_") else ()
+            if pn and pn in ungraded and equal(pn):
+                f["baseline"] = "inherited"
+                f["msg"] += " [baseline ungraded, copper equal]"
+            else:
+                f["baseline"] = "new"
             continue
         old, new = mags.pop(0), finding_mag(f)
-        worse = old is not None and new is not None and new > old * 1.005 + 1e-3
+        a, r = _RESEG_TOL if f["code"] == "PAIR_IMPEDANCE_OFF" else (1e-3, 0.005)
+        worse = old is not None and new is not None and new > old * (1 + r) + a
         f["baseline"] = "new" if worse else "inherited"
     return findings
 
