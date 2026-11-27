@@ -298,7 +298,7 @@ def test_close_rounds_stop(monkeypatch, tmp_path, guard):
     res = _close(str(board), str(tmp_path / "w"), max_rounds=1, attempts=str(tmp_path / "a.jsonl"),
                    log=lambda m: None)
     assert res["stop"] == "rounds"
-    assert res["end"]["opens"] == 1 and res["start"]["opens"] == 2
+    assert res["end"]["opens"] < res["start"]["opens"] == 2          # w78: the next group of a connection kind goes on after an accept, in the same round
 
 
 def test_memo_dropped_when_cons_changes(monkeypatch, loop, tmp_path):
@@ -1170,6 +1170,25 @@ def test_pair_refused_by_pairgroup_goes_to_fallback(monkeypatch, loop):
 def test_hs_pair_refused_goes_to_the_krt_fallback_too(monkeypatch, loop):
     pair_gap = dict(_g("pg", kind="pair-open", cls="hs-pair"), nets=["PX", "NX"])
     monkeypatch.setitem(GP.RUNGS, "pairgroup", lambda base, out, gaps, ctx: {"status": "nothing laid"})
+    monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
+    monkeypatch.setattr(GP, "_remeasure", lambda p, kicad_cli="kicad-cli": {"drc": {}, "opens": 2, "shorts": 0,
+                                                                              "errors": 0, "err_keys": Counter(),
+                                                                              "gaps": [pair_gap]})
+    monkeypatch.setattr(GP, "_classify_into", lambda mm, cons, board: None)
+    monkeypatch.setattr(GP, "_protect", lambda board, cons: set())
+    monkeypatch.setattr(GP, "_clean_board", lambda p: None)
+    _close(loop["board"], loop["work"], max_rounds=1, attempts=loop["attempts"], log=lambda m: None)
+    st = json.load(open(os.path.join(loop["work"], "gaps.json")))
+    assert st["fallback"] == [["PX", "NX"]]                 # w78: a gated pair pairgroup could not lay is routed by KRT, both legs in one call
+
+
+def _boom(base, out, gaps, ctx):
+    raise CX.RungFailure('timeout', 'rung timeout after 9 s')
+
+
+def test_a_timed_out_pairgroup_also_feeds_the_krt_fallback(monkeypatch, loop):
+    pair_gap = dict(_g("pg", kind="pair-open", cls="hs-pair"), nets=["PX", "NX"])
+    monkeypatch.setitem(GP.RUNGS, "pairgroup", _boom)
     monkeypatch.setitem(GP.DISPATCH, "pair-open", ["pairgroup"])
     monkeypatch.setattr(GP, "_remeasure", lambda p, kicad_cli="kicad-cli": {"drc": {}, "opens": 2, "shorts": 0,
                                                                               "errors": 0, "err_keys": Counter(),
