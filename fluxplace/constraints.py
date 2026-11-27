@@ -190,10 +190,9 @@ def fab_profile(cons, layers=None, board=None):
     hf = FC.hard_floors(res["profiles"], layers, res["floors"]) if res else {}
     route = (cons or {}).get("route") or {}
     for k in _FAB_DEFAULTS:
-        src = f"[fab] {k}"
-        raw = fab.get(k)
-        if raw is None and res and k in res["floors"] and _ROUTE_FLOOR_KEY.get(k) in route:
-            raw, src = route[_ROUTE_FLOOR_KEY[k]], f"[route] {_ROUTE_FLOOR_KEY[k]}"
+        src, raw, route_key = f"[fab] {k}", fab.get(k), _ROUTE_FLOOR_KEY.get(k)
+        if raw is None and res and k in res["floors"] and route_key in route:
+            raw, src = route[route_key], f"[route] {route_key}"
         if raw is None:
             continue
         v = float(raw)
