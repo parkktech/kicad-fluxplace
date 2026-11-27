@@ -1892,13 +1892,13 @@ def _scope_add(c, nets):
     sc["nets"] = sorted(set(sc["nets"]) | set(nets))
 
 
-def _renet_entry(c, work, board, st):
+def _renet_entry(c, work, board, st, near=()):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
     `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
     from . import boardwrite as BW_, renet as RN_
     out = os.path.join(work, "0-renet", "board.kicad_pcb")
     try:
-        rep = RN_.apply(board, out, c.cons)
+        rep = RN_.apply(board, out, c.cons, near)
     except Exception as e:                                                # noqa: BLE001 - a board pcbnew cannot read is the stages' business
         print(f"pipeline: re-net check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
         return board
@@ -1910,6 +1910,12 @@ def _renet_entry(c, work, board, st):
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
     BW_.release(out, rep["release"], "re-net")                 # commit() re-protects every net's locked items; a released net's leftovers are re-laid with it
     c.answers.setdefault("rip-existing", "never")             # the kept copper stays: routing only adds (an owner --answer wins)
+    if near:
+        from . import opengate as OG_
+        try:
+            OG_.refill(out)                                   # the stripped via/track leaves its old clearance cut-out in the zone fill
+        except Exception as e:                                # noqa: BLE001 - the zones stay as they were; DRC says so later
+            print(f"pipeline: zone refill after the re-net strip skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
     st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))
     st["renet"].pop("release")
     _scope_add(c, rep["release"])
@@ -2139,14 +2145,14 @@ def _run(a):
         if res.get("incremental") and res["verdict"] in ("pass", "warn"):
             incremental = st["incremental"] = True
             c.answers.setdefault("rip-existing", "never")      # the existing copper stays: routing only adds (an owner --answer wins)
-            from . import routediag as RD_, opengate as OG_
+            from . import routediag as RD_, opengate as OG_, renet as RN_
             placed = set(res.get("placed") or ())
             _scope_add(c, {q["net"] for q in RD_.load(board)["pads"] if q["ref"] in placed and q["net"]})     # the new parts' nets are the route's scope
             try:
                 OG_.refill(board)                              # an in-place footprint swap leaves the zones unfilled around its new pads and holes
             except Exception as e:                             # noqa: BLE001 - the zones stay as they were; DRC says so later
                 print(f"pipeline: zone refill after the in-place seat skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
-            board = _renet_entry(c, work, board, st)           # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet)
+            board = _renet_entry(c, work, board, st, placed | RN_.changed_refs(prev, board))     # an in-place footprint swap: pads against the shipped copper, mismatches stripped (renet)
         if res.get("ai_unanswered"):
             ua = res["ai_unanswered"]
             res["line"] = res.get("line", "")
