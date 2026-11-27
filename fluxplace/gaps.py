@@ -2884,7 +2884,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             memo.add(key)
         if result == "error" and not ai_names:               # PHASE3I F3 R7: a crash or timeout is not a refusal
             memo_err.add(key)
-        if rung == "pairgroup" and result == "refused":      # PHASE3F A5: a refused non-gated pair goes to the router
+        if rung == "pairgroup" and result in ("refused", "error"):     # w78: a timed-out pairgroup laid nothing either      # PHASE3F A5: a refused non-gated pair goes to the router
             for g in targets:
                 if g["class"] in ("pair", "hs-pair") and len(g["nets"]) == 2 and g["nets"] not in fallback:
                     fallback.append(list(g["nets"]))
@@ -2987,10 +2987,11 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         round_vec0 = score(m, m["gaps"])                 # PHASE3E 9: the round's start, for the no-gain counter
         round_rank.clear()
         done = set()                                     # B6a: (unit key, rung) tried this round
+        accepted_units = set()
         accepted_kinds = set()                           # a kind that had an accept is done for the round (the next round re-reads it)
         clock.switch("queue")
         while True:
-            units = [u for u in units_of(vis(m["gaps"])) if u["kind"] not in accepted_kinds]
+            units = [u for u in units_of(vis(m["gaps"])) if u["kind"] not in accepted_kinds and u["key"] not in accepted_units]
             pick = CX.next_task(units, done, {k: tuple(v) for k, v in stats.items()})
             clock.switch("idle")
             if pick is None:
@@ -3020,7 +3021,10 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
                 save(r)
             if accepted:
                 hit = True
-                accepted_kinds.add(kind)
+                if kind not in CLOSE_FIRST:                       # w78: a connection accept ends only its own group: the other groups of the kind go on at once
+                    accepted_kinds.add(kind)
+                else:
+                    accepted_units.add(unit["key"])
         deferred = [] if stop else [k for k in ORDER if "ai" in DISPATCH.get(k, [])
                                     and any(g["kind"] == k for g in vis(m["gaps"]))
                                     and not _ai_pending(ctx_dir_ai(work), [g for g in vis(m["gaps"]) if g["kind"] == k])]
