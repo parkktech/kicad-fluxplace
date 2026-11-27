@@ -157,7 +157,7 @@ def test_p1_p2_wired_to_review(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "interface_pair_check", lambda b, c: {"fail": ["PAIR_SKEW: x"], "warn": ["PAIR_SKEW_REGRADED: y"]})
     r = _status(PR.check(_ctx(tmp_path)), "P1")
     assert r["status"] == "FAIL" and r["warns"] == ["PAIR_SKEW_REGRADED: y"]
-    monkeypatch.setattr(R, "baseline_check", lambda b, p, f, c: {"fail": [], "warn": ["inherited A"]})
+    monkeypatch.setattr(R, "baseline_check", lambda b, p, f, c, base=None: {"fail": [], "warn": ["inherited A"]})
     r = _status(PR.check(_ctx(tmp_path, prev_board="p.kicad_pcb")), "P2")
     assert r["status"] == "PASS" and r["warns"] == ["inherited A"]
 
@@ -168,3 +168,16 @@ def test_p4_no_pcbway_and_fabconform(tmp_path):
     assert "PCBWay set incomplete" not in r["reason"]
     c = _ctx(tmp_path, no_pcbway=True, fabconform={"coverage": {"raw": 3, "listed": 2, "ok": False}})
     assert "fabconform" in _status(PR.check(c), "P4")["reason"]
+
+
+def test_p2_prev_board_reviewed_with_same_inputs_spec_finding_inherited(tmp_path):
+    spec_f = {"level": "FAIL", "code": "SPEC_NET_MISSING", "refs": ["U1"], "msg": "U1 pin 3 not wired"}
+    seen = []
+    def review_prev(board):
+        seen.append(board)
+        return [dict(spec_f)]
+    c = _ctx(tmp_path, findings=[dict(spec_f)], prev_board="prev.kicad_pcb", review_prev=review_prev)
+    r = _status(PR.check(c), "P2")
+    assert seen == ["prev.kicad_pcb"] and r["status"] == "PASS" and r["warns"] and "inherited" in r["warns"][0]
+    c = _ctx(tmp_path, findings=[dict(spec_f)], prev_board="prev.kicad_pcb", review_prev=lambda b: [])
+    assert _status(PR.check(c), "P2")["status"] == "FAIL"

@@ -80,7 +80,12 @@ def p2(ctx, W):
     if f is None:
         return _nc("P2", "review skipped (--no-review)")
     if ctx.get("prev_board"):
-        return _hooked("P2", "review", "baseline_check", (ctx["board"], ctx["prev_board"], f, ctx["cons"]), W)
+        rp = ctx.get("review_prev")      # review of the prev board with the same spec/constraints/waivers/datasheets (w105's rule)
+        try:
+            base = rp(ctx["prev_board"]) if rp else None
+        except Exception as e:
+            return dict(rule="P2", status="FAIL", reason="baseline review of the previous board failed: %s" % str(e)[:100], waived=[], warns=[])
+        return _hooked("P2", "review", "baseline_check", (ctx["board"], ctx["prev_board"], f, ctx["cons"], base), W)
     fails = ["%s %s" % (x["code"], " ".join(x.get("refs") or ())) for x in f if x["level"] == "FAIL"]
     left, waived = _resolve("P2", fails, W)
     return _res("P2", left, waived, "first version: plain review, 0 FAIL")

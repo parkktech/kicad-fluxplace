@@ -623,7 +623,8 @@ def finish(ctx, a, findings, slots, facts, kicad_cli="kicad-cli", log=print):
                 board_refs={p["ref"] for p in fps}, claims=ctx.get("claims") or [],
                 removed=[m for _, m in (ctx["rep"] or {}).get("removed", []) if m],
                 missing_datasheets=miss, prev_known_open=PR.known_open(prev_readme),
-                no_pcbway=bool(getattr(a, "no_pcbway", False)), fabconform=getattr(a, "_fc_rep", None))
+                no_pcbway=bool(getattr(a, "no_pcbway", False)), fabconform=getattr(a, "_fc_rep", None),
+                review_prev=getattr(a, "_review_prev", None))
     waive = list((cons.get("packaging") or {}).get("waive", [])) + list(a.pack_waive or [])
     res_p = PR.check(pctx, waive)
     for ln in PR.lines(res_p):

@@ -178,6 +178,7 @@ def cmd_deliver(a):
         raise SystemExit(1)
     fc_rep = _deliver_fabconform(a)
     a._fc_rep = fc_rep
+    a._review_prev = lambda board: _review_findings(a, board, "deliver")[0]     # P2: same spec/constraints/waivers/datasheets as the delivered board
     docs = list(a.doc or [])
     if a.brief:
         docs.append(a.brief)
