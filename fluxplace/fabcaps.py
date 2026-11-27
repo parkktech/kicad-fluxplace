@@ -76,9 +76,9 @@ def all_tiers():
 
 
 def _registry_overlay(vendor, layers, lim, unv):
-    """(standard tier only: the registry researched the no-surcharge service.)  ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l).  These limits feed DESIGN
-    floors (router / rules), so the house's RECOMMENDED (no-surcharge) value is used, else its hard value; the reject value is for
-    grading only (gerbercheck FAIL).  A sourced entry replaces the JSON number; a layer count the registry has no row for keeps the JSON number, flagged unverified."""
+    """ONE source for the capability features the limits registry researches (fab_<feature>:<vendor>-<n>l); standard tier only.
+    These feed DESIGN floors, so a sourced entry's recommended (target) value replaces the JSON number, else its hard value; the
+    hard/reject value is for grading only (gerbercheck). A layer count with no registry row keeps the JSON number, flagged unverified."""
     from . import limits as LM
     lim, unv = dict(lim), list(unv)
     for f in LM.FAB_FEATURES:
