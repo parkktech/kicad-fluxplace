@@ -26,6 +26,7 @@ import shutil
 import tempfile
 from collections import Counter
 
+from . import modelpaths as MP
 from . import procs as _procs
 
 BOM_COLS = ["Refs", "Qty", "Value", "Footprint", "MPN", "Manufacturer", "Notes"]
@@ -413,7 +414,15 @@ def project(board, out_dir, lib_dirs, sch=None, extra_sch_dirs=(), log=print):
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(out_dir, stem + ext))
             made.append(stem + ext)
-    txt = open(board, encoding="utf-8").read()
+    if lib:
+        dst = os.path.join(out_dir, "lib")
+        if not os.path.exists(dst):
+            shutil.copytree(lib, dst)
+        made.append("lib/")
+    txt, bundled = MP.bundle_models(open(board, encoding="utf-8").read(), bdir, out_dir,
+                                    [d for d in lib_dirs if d and os.path.isdir(d)], log=log)
+    if bundled["copied"]:
+        log("  3D models: %d file(s) copied into lib/3dmodels (delivery is self-contained)" % bundled["copied"])
     if lib:
         txt = txt.replace("${KIPRJMOD}/../lib/", "${KIPRJMOD}/lib/")
     open(os.path.join(out_dir, stem + ".kicad_pcb"), "w", encoding="utf-8").write(txt)
@@ -422,10 +431,6 @@ def project(board, out_dir, lib_dirs, sch=None, extra_sch_dirs=(), log=print):
         shutil.copy2(sch, os.path.join(out_dir, stem + ".kicad_sch"))
         made.append(stem + ".kicad_sch")
     if lib:
-        dst = os.path.join(out_dir, "lib")
-        if not os.path.exists(dst):
-            shutil.copytree(lib, dst)
-        made.append("lib/")
         tbl = next((t for t in (os.path.join(bdir, "fp-lib-table"),
                                 os.path.join(os.path.dirname(lib), "fp-lib-table"),
                                 *[os.path.join(os.path.dirname(d), "fp-lib-table") for d in extra_sch_dirs])

@@ -181,3 +181,15 @@ def test_p2_prev_board_reviewed_with_same_inputs_spec_finding_inherited(tmp_path
     assert seen == ["prev.kicad_pcb"] and r["status"] == "PASS" and r["warns"] and "inherited" in r["warns"][0]
     c = _ctx(tmp_path, findings=[dict(spec_f)], prev_board="prev.kicad_pcb", review_prev=lambda b: [])
     assert _status(PR.check(c), "P2")["status"] == "FAIL"
+
+
+def test_p8_model_outside_the_delivery_is_fail(tmp_path):
+    """k8: a stock-library or ../lib path resolves on the builder's machine only; the model must be inside the delivery."""
+    b = BOARD.replace("${KIPRJMOD}/m.step", "${KICAD10_3DMODEL_DIR}/x.step")
+    r = _status(PR.check(_ctx(tmp_path, board=b)), "P8")
+    assert r["status"] == "FAIL" and "inside the delivery" in r["reason"]
+    outside = tmp_path / "m.step"
+    outside.write_text("x")
+    r = _status(PR.check(_ctx(tmp_path, board=BOARD.replace("${KIPRJMOD}/m.step", str(outside)))), "P8")
+    assert r["status"] == "FAIL"
+    assert _status(PR.check(_ctx(tmp_path)), "P8")["status"] == "PASS"                  # inside the delivery, literally ${KIPRJMOD}

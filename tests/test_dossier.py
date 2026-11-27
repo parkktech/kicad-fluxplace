@@ -298,3 +298,29 @@ def test_connector_terminals_named_without_numbers_cover_the_package():
     DO.merge(d, {"pins": [{"num": [], "name": n} for n in ("CONTACT", "GND", "GND", "GND")]})
     assert DO.gaps(d) == [] and len(d["pins"]) == 4
     assert "pins" in DO.gaps(dict(d, category="logic", pins=d["pins"]))     # an IC's pins must be numbered
+
+
+def _sib_dossier(tmp_path, mpn, pins):
+    d = tmp_path / "cache"
+    (d / "dossier").mkdir(parents=True, exist_ok=True)
+    dos = {"mpn": mpn, "knowable": True, "file": mpn + ".pdf", "category": "connector", "package": {"pins": 2},
+           "temp_range": {"min": -40, "max": 85}, "currents": [{"max": 1}], "pins": pins}
+    (d / "dossier" / (mpn + ".abc.json")).write_text(json.dumps(dos))
+    return str(d)
+
+
+def test_family_sibling_fills_pins_only_when_the_series_drawing_lists_both_suffixes(tmp_path):
+    """k8: 10164227-1004A1RLF has no pin table of its own; the structure drawing prints XXX1A1RLF and XXX4A1RLF."""
+    d = _sib_dossier(tmp_path, "10164227-1001A1RLF", [{"num": ["1", "2"], "name": "C", "p": 1}])
+    mk = lambda: {"mpn": "10164227-1004A1RLF", "category": "connector", "package": {"pins": 2}, "temp_range": {"min": -40, "max": 85},
+                  "currents": [{"max": 1}], "pins": []}
+    both = ["Rec P/N: 10164227-XXX1A1RLF\nP/N: 10164227-XXX4A1RLF"]
+    dos = mk()
+    assert DO.family_sibling("10164227-1004A1RLF", dos, both, d) == "10164227-1001A1RLF"
+    assert dos["pins"][0]["sib"] == "10164227-1001A1RLF" and dos["sibling"]["mpn"] == "10164227-1001A1RLF" and not DO.gaps(dos)
+    for texts in (["P/N: 10164227-XXX4A1RLF"], ["unrelated"]):        # the drawing does not name the sibling: stays blocked
+        dos = mk()
+        assert DO.family_sibling("10164227-1004A1RLF", dos, texts, d) is None and "pins" in DO.gaps(dos)
+    other = mk()
+    other["mpn"] = "99999999-1004A1RLF"
+    assert DO.family_sibling("99999999-1004A1RLF", other, both, d) is None          # different series

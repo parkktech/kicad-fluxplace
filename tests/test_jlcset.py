@@ -158,3 +158,13 @@ def test_check_ok_and_problems(tmp_path):
     assert "U1 has no LCSC" in p or "no LCSC # and no consigned" in p
     assert "DNP R1" in p and "R9 is in the JLC CPL but not the BOM" in p
     assert jlcset.check(str(tmp_path / "none"), [], [])[0].startswith("JLCPCB set incomplete")
+
+
+def test_jlc_lookup_runs_with_constraints_or_prev_bom_and_says_when_it_has_no_source():
+    """k8: a fab/deliver run with constraints or a previous BOM does the live LCSC lookup; with neither (or --no-api) it says so."""
+    from fluxplace import fab
+    logs = []
+    assert fab.jlc_lookup({}, None, logs.append) is None and "JLC_NO_LCSC_SOURCE" in logs[0] and "no constraints" in logs[0]
+    assert callable(fab.jlc_lookup({"sourcing": {}}, None)) and callable(fab.jlc_lookup({}, "prev.csv"))
+    logs.clear()
+    assert fab.jlc_lookup({"x": 1}, None, logs.append, live=False) is None and "--no-api" in logs[0]

@@ -75,6 +75,19 @@ def _listfiles(d):
     return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
 
 
+def jlc_lookup(cons, prev_bom, log=print, live=True):
+    """The `check(mpns, need)` the JLC set uses for LCSC picks: live lookup whenever the run has constraints or a previous BOM (picks come
+    from [sourcing.lcsc], the previous BOM's LCSC notes, then the live lookup), a China build always. None + a clear line when the run has
+    no source at all (every part would be consigned 'not looked up')."""
+    if live and (cons or prev_bom):
+        from . import lcsc
+        return lambda mpns, need: lcsc.check(mpns, need=need, log=log)
+    log("WARN JLC_NO_LCSC_SOURCE: " + ("live LCSC lookup is off (--no-api): picks come only from [sourcing.lcsc] and the previous BOM's LCSC notes"
+        if not live else "no constraints and no previous BOM, so no LCSC source: every JLC part is consigned 'not looked up' "
+        "(pass --constraints / --prev-bom)"))
+    return None
+
+
 def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None, cons=None, jlc_prev_bom=None):
     """Write the full fab package for `board` under `out/`. Returns a dict summary
     (drc verdict, files written). Never raises on a single stage failing — it records
@@ -119,12 +132,8 @@ def emit(board, out, kicad_cli="kicad-cli", layers=None, log=print, formats=None
     for m in xcheck:
         log("FAIL " + m)
 
-    # JLCPCB upload set beside the PCBWay one (jlcset.py); live LCSC lookups only for a China build
-    jlc_check = None
-    if (cons or {}).get("sourcing", {}).get("china"):
-        from . import lcsc
-        jlc_check = lambda mpns, need: lcsc.check(mpns, need=need, log=log)
-    jlc = jlcset.emit(board, out, pos_path, cons, jlc_prev_bom, jlc_check, log)
+    # JLCPCB upload set beside the PCBWay one (jlcset.py)
+    jlc = jlcset.emit(board, out, pos_path, cons, jlc_prev_bom, jlc_lookup(cons, jlc_prev_bom, log), log)
     done["jlcpcb"] = "FAIL" if "error" in jlc or jlc.get("cpl_missing") else True
 
     # extra formats (ODB++, IPC-2581, IPC-D-356). formats=None -> every format

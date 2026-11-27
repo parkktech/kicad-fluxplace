@@ -127,3 +127,17 @@ def test_datasheet_named_for_mpn_without_manifest_entry_passes(tmp_path):
     finds = PD.spec_check(spec, d, mpn_map={"U9": "TLV7031DBVR", "U7": "TLV7031DBVS"})
     missing = {ref for lvl, code, ref, _ in finds if code == "DATASHEET_MISSING"}
     assert missing == {"U7"}, finds
+
+
+def test_fetch_falls_back_to_lcsc_chain_and_a_browser_client(tmp_path, monkeypatch):
+    """k8: no DigiKey/Mouser URL, the plain client gets an HTML page: the chain's LCSC URL is tried through the browser client."""
+    from fluxplace import dsfetch as DF, sourcing as S
+    monkeypatch.setattr(S, "datasheet_urls", lambda mpn, creds: [])
+    monkeypatch.setattr(DF, "SOURCES", [("lcsc", lambda mpn, creds: [("lcsc", "https://x/ds.html")])])
+    monkeypatch.setattr(DF, "get", lambda url, timeout=30, headers=None: (200, "text/html", b"<html>"))
+    monkeypatch.setattr(PD, "_get", lambda url, timeout: (200, "text/html", b"<html>"))
+    monkeypatch.setattr(PD, "_browser_get", lambda url, timeout=60: b"%PDF-1.4 x")
+    from fluxplace import dossier as DS
+    monkeypatch.setattr(DS, "doc_urls", lambda *a, **k: [])
+    r = PD.fetch(["ABC-1"], str(tmp_path), creds={})
+    assert r["ABC-1"] and open(os.path.join(str(tmp_path), r["ABC-1"]["file"]), "rb").read().startswith(b"%PDF")

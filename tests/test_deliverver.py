@@ -120,3 +120,39 @@ def test_schematic_is_never_regenerated_or_substituted(tmp_path):
     other = tmp_path / "real.kicad_sch"; other.write_text("s")
     a.sch = str(other)
     assert DV._find_sch(a, str(b), "x") == str(other)
+
+
+def test_project_bundles_every_referenced_model_into_the_delivery(tmp_path):
+    """k8: models named by ${KIPRJMOD}/../lib, a stock KiCad path and a path under another library all land in <out>/lib/3dmodels and the
+    delivered board points at them; the previous delivery's partial lib does not hide the missing ones."""
+    src = tmp_path / "src"
+    (src / "lib" / "3dmodels" / "kicad" / "Cap").mkdir(parents=True)
+    (src / "lib" / "3dmodels" / "kicad" / "Cap" / "C.step").write_text("c")
+    (src / "lib" / "3dmodels" / "J.step").write_text("jj")
+    stock = tmp_path / "stock" / "R.3dshapes"
+    stock.mkdir(parents=True)
+    (stock / "R.step").write_text("r")
+    (src / "lib" / "3dmodels" / "MOLEX_43650-0315.step").write_text("m")
+    (src / "stage").mkdir()
+    board = src / "stage" / "b.kicad_pcb"
+    board.write_text('(kicad_pcb\n (footprint "A" (model "${KIPRJMOD}/../lib/3dmodels/kicad/Cap/C.step"))\n'
+                     ' (footprint "B" (model "${KIPRJMOD}/../lib/3dmodels/J.step"))\n'
+                     ' (footprint "C" (model "${KICAD10_3DMODEL_DIR}/R.3dshapes/R.step"))\n'
+                     ' (footprint "E" (model "${KICAD10_3DMODEL_DIR}/Conn.3dshapes/Molex_Micro-Fit_43650-0315_1x03.step"))\n'
+                     ' (footprint "D" (model "${KIPRJMOD}/../lib/3dmodels/gone.step")))\n')
+    prev = tmp_path / "prev" / "lib"
+    (prev / "3dmodels").mkdir(parents=True)
+    out = tmp_path / "out"
+    out.mkdir()
+    os.environ["KICAD10_3DMODEL_DIR"] = str(tmp_path / "stock")
+    try:
+        logs = []
+        DV.project(str(board), str(out), [str(src / "lib"), str(prev)], log=logs.append)
+    finally:
+        del os.environ["KICAD10_3DMODEL_DIR"]
+    txt = (out / "b.kicad_pcb").read_text()
+    for rel in ("kicad/Cap/C.step", "J.step", "kicad/R.3dshapes/R.step"):
+        assert "${KIPRJMOD}/lib/3dmodels/" + rel in txt and (out / "lib" / "3dmodels" / rel).is_file()
+    assert "${KIPRJMOD}/lib/3dmodels/MOLEX_43650-0315.step" in txt          # unresolved stock path -> the project library's copy
+    assert "${KIPRJMOD}/lib/3dmodels/gone.step" in txt and not (out / "lib" / "3dmodels" / "gone.step").exists()   # unresolved: left, reported
+    assert any("MODEL_BUNDLE_UNRESOLVED" in m for m in logs)

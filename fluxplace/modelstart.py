@@ -152,10 +152,9 @@ def rebind_swapped(board_path, fp_name, models, log=print):
     bad = [m for m in models if not _resolve_in(m[0], bd)]
     if not models or not bad:
         return {"bound": None, "line": "3D model: resolves" if models else "3D model: the library footprint names none"}
-    lib = MP.project_lib(bd)
     name = fp_name.split(":")[-1]
-    hit = None
-    if lib:
+    hit, lib = None, None
+    for lib in MP.project_libs(bd):                     # every library up the tree: the source project's, not only the nearest
         src = find_sources(lib)
         row = ((json.load(open(src)).get("bindings") or {}).get(name)) if src else None
         if row and os.path.isfile(os.path.join(lib, row["file"])):
@@ -167,6 +166,8 @@ def rebind_swapped(board_path, fp_name, models, log=print):
         if not hit:
             toks = set(re.findall(r"\d{3,}-\d{2,}", name + " " + base))
             hit = next((f for f in sorted(files) if any(t in os.path.basename(f) for t in toks)), None) if toks else None
+        if hit:
+            break
     if not hit:
         return {"bound": None, "line": f"WARNING 3D model {bad[0][0]} does not resolve and the project library has no match: run `fluxplace ready` model start"}
     _p, off, sc, rot = bad[0]
