@@ -4424,7 +4424,8 @@ def main(argv=None):
 def _main(argv=None):
     ap = build_parser()
     a = ap.parse_args(argv)
-    from fluxplace import outputs as OUT
+    from fluxplace import constraints as _CP, outputs as OUT
+    _CP.set_project(getattr(a, "board", None) if isinstance(getattr(a, "board", None), str) else None)   # every C.load() finds the project's datasheets
     if a.cmd == "doctor" and getattr(a, "context", False):
         from fluxplace import context_check as CC
         text, ok = CC.report()
