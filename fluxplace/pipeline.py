@@ -2298,6 +2298,9 @@ def _run(a):
             if ko and ko["choice"] == "reopen":
                 rr = st_ready(c, 0, board)
                 print(f"pipeline: kickoff re-run: {rr['verdict']} - {_clip(rr.get('line', ''), 120)}", flush=True)
+                if rr["verdict"] == "blocked" and KO_.stock_only(__import__("fluxplace.reportdir", fromlist=["x"]).redirect(c.a, os.path.splitext(board)[0]) + ".ready.json"):
+                    rr = dict(rr, verdict="warn", line="WARN stock not checked (offline): " + rr.get("line", ""))
+                    print(f"pipeline: {rr['line'][:140]}", flush=True)
                 if rr["verdict"] not in ("pass", "warn"):
                     st["stages"]["ready"] = {"verdict": rr["verdict"], "line": rr.get("line", ""), "dir": f"{i}-ready", "board": board}
                     save_state(work, st)

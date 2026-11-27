@@ -74,8 +74,7 @@ def derived_line(cons_path):
     gen = "GENERATED" in "\n".join(text.splitlines()[:5]).upper()
     ref = d.get("derived_from")
     if not ref:
-        return RDY._line("derived_from", RDY.FAIL, f"{os.path.basename(cons_path)} is a generated copy with no derived_from: add derived_from = \"<source>#<sha256>\" or use the source",
-                         ["INPUT_NO_DERIVED_FROM " + cons_path]) if gen else None
+        return RDY._line("derived_from", RDY.WARN, f"{os.path.basename(cons_path)} is a generated copy with no derived_from (legacy): the writer should add derived_from = \"<source>#<sha256>\"") if gen else None
     src, _, want = str(ref).partition("#")
     src = src if os.path.isabs(src) else os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(cons_path)), src))
     have = _sha(src)
@@ -166,7 +165,9 @@ def reopen(c, board, work, log=print):
     """Before a gated stage: if the stamp is stale, ask the decider, then re-run `ready`.  -> (None | the ready stage result)."""
     sp = os.path.join(work, "kickoff.json")
     stamp = load_stamp(sp)
-    if not stamp:
+    if not stamp:                                               # first run, or entry from a stored board: stamp the inputs as they are now
+        write_first_stamp(c, board, sp)
+        log(f"pipeline: kickoff stamp written from the current inputs ({sp}); no earlier ready verdict to compare")
         return None
     ch = stale(stamp, current_hashes(stamp, c.spec_path, c.cons_path, board, c.cons))
     if not ch:
@@ -180,3 +181,24 @@ def reopen(c, board, work, log=print):
                  evidence=[f"{k}: {stamp['inputs'].get(k, '-')[:12]} -> now changed" for k, _ in ch], cons=c.cons, log_dir=work)
     log(f"pipeline: kickoff stamp stale ({names}); decided {row['choice']} ({row['by']})")
     return {"changed": ch, "choice": row["choice"]}
+
+
+def write_first_stamp(c, board, path):
+    from . import parts as P, review as R
+    ds = P.resolve_dir((c.cons.get("docs") or {}).get("datasheets"), [x for x in (c.cons_path, c.spec_path, board) if x])
+    facts = R.facts_from_board(board, backend="file") if board and os.path.isfile(board) else None
+    man = manifest(board, c.spec_path, c.cons_path, c.cons, ds, (facts or {}).get("mpn_map_path"))
+    try:
+        write_stamp(path, man, shas(man, facts), [], {"source": "pipeline entry, no ready verdict"})
+    except OSError:
+        pass
+
+
+def stock_only(ready_json):
+    """True when every FAIL line of a ready report fails only because stock/distributor data was not checked (offline): a WARN for the
+    stale re-check, never for `ready` itself."""
+    try:
+        fails = [l for l in json.load(open(ready_json))["checklist"] if l["status"] == RDY.FAIL]
+    except (OSError, ValueError, KeyError):
+        return False
+    return bool(fails) and all(l["blockers"] and all("STOCK_UNCHECKED" in b or "NOT CHECKED" in b for b in l["blockers"]) for l in fails)

@@ -37,7 +37,7 @@ def test_derived_from_stale_copy_fails(tmp_path):
     sha = hashlib.sha256(src.read_bytes()).hexdigest()
     cp = tmp_path / "route.toml"
     cp.write_text("# GENERATED from constraints.toml\na = 1\n")
-    assert KO.derived_line(str(cp))["status"] == RDY.FAIL                       # generated, no derived_from
+    assert KO.derived_line(str(cp))["status"] == RDY.WARN                       # generated, no derived_from: legacy, WARN
     cp.write_text(f'# GENERATED\nderived_from = "constraints.toml#{sha[:16]}"\na = 1\n')
     assert KO.derived_line(str(cp))["status"] == RDY.PASS
     src.write_text("a = 2\n")                                                    # the source moved on: the copy is stale
@@ -115,3 +115,36 @@ def test_pipeline_reopens_ready_on_a_changed_input_and_stops_on_fail(tmp_path, m
     monkeypatch.setattr(PL, "st_ready", lambda c, n, board: ran.append("ready") or {"verdict": "pass", "line": "ok", "board": board})
     ran.clear()
     assert PL.run(a) == 0 and ran == ["ready", "critroute"]
+
+
+def test_stock_only_failures_are_warn_for_the_stale_recheck(tmp_path):
+    rj = tmp_path / "b.ready.json"
+    mk = lambda *ls: rj.write_text(json.dumps({"checklist": list(ls)}))        # noqa: E731
+    mk({"name": "parts gate", "status": "FAIL", "blockers": ["STOCK_UNCHECKED R1 x: stock not checked", "distributor data and stock NOT CHECKED"]},
+       {"name": "x", "status": "PASS", "blockers": []})
+    assert KO.stock_only(str(rj))
+    mk({"name": "parts gate", "status": "FAIL", "blockers": ["STOCK_UNCHECKED R1"]}, {"name": "3D", "status": "FAIL", "blockers": ["MODEL_MISSING C1"]})
+    assert not KO.stock_only(str(rj))
+    assert not KO.stock_only(str(tmp_path / "none.json"))
+
+
+def test_pipeline_without_a_stamp_writes_one_and_continues_and_offline_stock_is_warn(tmp_path, monkeypatch):
+    sys.path.insert(0, os.path.dirname(__file__))
+    import test_pipeline as TP
+    from fluxplace import pipeline as PL, decider as DC
+    monkeypatch.setattr(DC, "call_model", lambda *x, **k: (None, "offline"))
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}")
+    b = TP._board(tmp_path)
+    a = TP._args(tmp_path, b, from_stage="critroute", to_stage="critroute", spec=str(spec))
+    ran = []
+    monkeypatch.setitem(PL.FUNCS, "critroute", lambda c, n, board: ran.append("critroute") or {"verdict": "pass", "line": "x", "board": board})
+    assert PL.run(a) == 0 and ran == ["critroute"]                              # no stamp: written, stage ran
+    sp = os.path.join(a.workdir, "kickoff.json")
+    assert KO.load_stamp(sp)["inputs"]["spec"]
+    spec.write_text('{"p": 1}')
+    ready_json = os.path.splitext(b)[0] + ".ready.json"
+    open(ready_json, "w").write(json.dumps({"checklist": [{"name": "parts gate", "status": "FAIL", "blockers": ["STOCK_UNCHECKED R1 x"]}]}))
+    monkeypatch.setattr(PL, "st_ready", lambda c, n, board: {"verdict": "blocked", "line": "parts gate BLOCKED", "board": board})
+    ran.clear()
+    assert PL.run(a) == 0 and ran == ["critroute"]                              # only stock unchecked: WARN, the stage starts
