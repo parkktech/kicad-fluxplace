@@ -160,13 +160,14 @@ def test_a_part_no_source_completes_is_unknowable_and_the_parts_gate_fails_witho
     assert st == "UNKNOWABLE" and not d["knowable"] and d["missing"] == ["temp_range", "abs_max", "io_levels", "interfaces"]
     assert len(calls) == 3 and d["sources"][1:] == ["pictures+documents (haiku)", "distributor", "pictures+documents (sonnet)"]
     assert d["rejected"][-1]["why"] == "max=99 is not on page 1"                 # 99 V is not printed in the app note
-    DO.record_replacement("TPS0000", "ab" * 32, [{"mpn": "TPS0001", "drop_in": True, "differs": [], "knowable": True, "missing": []}])
+    rows = [{"mpn": "TPS0001", "drop_in": False, "differs": ["package: 'SOT-23-6' vs original 'SOT-23-5'"], "knowable": True, "missing": []}]
+    DO.record_replacement("TPS0000", "ab" * 32, rows, DO.choose("TPS0000", d, rows))
     from fluxplace import parts as P
     spec = {"components": [{"ref": "U1", "mpn": "TPS0000", "mfr": "TI", "value": "TPS0000", "fp": "SOT-23-5"}], "nets": {}}
     res = P.run(spec, {"parts": {"waive": ["PART_UNKNOWABLE"]}}, ds_dir=ds)
     f = [x for x in res["findings"] if x["code"] == "PART_UNKNOWABLE"]
     assert len(f) == 1 and f[0]["level"] == "FAIL" and "temp_range, abs_max, io_levels, interfaces" in f[0]["msg"]
-    assert "proposed replacement TPS0001 (drop-in)" in f[0]["msg"]
+    assert "blocker for the kickoff decision: proposal TPS0001, D-row: Replace TPS0000 by TPS0001" in f[0]["msg"]
 
 
 def test_a_v1_dossier_is_upgraded_without_a_second_text_pass(tmp_path, monkeypatch):
@@ -252,17 +253,24 @@ def test_unknowable_part_fetches_its_other_documents_and_is_read_again(tmp_path,
     assert sorted(f for f in os.listdir(ds) if "__" in f) == ["TPS0000__spec.pdf"]
 
 
-def test_choose_takes_a_drop_in_else_asks_the_decider(tmp_path, monkeypatch):
-    from fluxplace import decider as DC
+def test_only_a_verified_same_pinout_drop_in_is_applied():
     dos = {"missing": ["decoupling"]}
-    rows = [{"mpn": "A", "knowable": True, "drop_in": False, "differs": ["qualification: no AEC-Q"]},
-            {"mpn": "B", "knowable": False, "drop_in": True, "differs": []}]
-    assert DO.choose("X", dos, rows + [{"mpn": "C", "knowable": True, "drop_in": True}])["choice"] == "C"
-    monkeypatch.setattr(DC, "call_model", lambda *a, **k: ('{"choice": "A", "rationale": "only knowable", "evidence": ["A: knowable"]}', ""))
-    got = DO.choose("X", dos, rows, log_dir=str(tmp_path))
-    assert got["choice"] == "A" and got["by"] == "ai"
-    monkeypatch.setattr(DC, "call_model", lambda *a, **k: (None, "offline"))
-    assert DO.choose("Y", dos, rows, log_dir=str(tmp_path))["choice"] is None          # no model: the part stays blocked
+    other = {"mpn": "A", "knowable": True, "drop_in": False, "same_pinout": False, "differs": ["package: other family"]}
+    pin_off = {"mpn": "B", "knowable": True, "drop_in": True, "same_pinout": False, "differs": []}
+    good = {"mpn": "C", "knowable": True, "drop_in": True, "same_pinout": True, "differs": []}
+    assert DO.choose("X", dos, [other, pin_off, good])["choice"] == "C"
+    got = DO.choose("X", dos, [other, pin_off])
+    assert got["choice"] is None and got["blocker"] and got["proposal"] == "A" and got["d_row"].startswith("Replace X by A")
+    assert DO.choose("X", dos, [{"mpn": "D", "knowable": False}]) == {"choice": None, "by": "rule", "rationale": "no knowable candidate"}
+
+
+def test_same_pinout_needs_complete_matching_tables():
+    a = {"category": "logic", "package": {"pins": 3}, "pins": [{"num": ["1"], "name": "A"}, {"num": ["2"], "name": "GND", "type": "ground"},
+                                                             {"num": ["3"], "name": "Y"}]}
+    b = {"category": "logic", "package": {"pins": 3}, "pins": [{"num": ["1"], "name": "A"}, {"num": ["2"], "name": "VSS", "type": "ground"},
+                                                             {"num": ["3"], "name": "Y"}]}
+    c = dict(b, pins=[{"num": ["1"], "name": "Y"}, {"num": ["2"], "name": "GND"}, {"num": ["3"], "name": "A"}])
+    assert DO.same_pinout(a, b) and not DO.same_pinout(a, c) and not DO.same_pinout(a, dict(b, pins=b["pins"][:2]))
 
 
 def test_decider_call_model_passes_tools_cwd_and_reports_cost(tmp_path, monkeypatch):

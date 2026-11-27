@@ -623,10 +623,10 @@ def pinmap_mismatches(pinmap, dos):
 
 # ------------------------------------------------------------------ an unknowable part: a knowable replacement
 def propose_replacement(mpn, fp=None, required=1, temp=(None, None), searcher=None, enricher=None, fetch=None, ask=None, top=5,
-                        log=lambda m: None):
+                        log=lambda m: None, orig=None):
     """Candidates for an UNKNOWABLE part: partsgate.alternatives (same function and package class, in stock at `required`), each
     candidate's datasheet fetched (partdocs.fetch) and read into its own dossier. -> [{mpn, mfr, stock, drop_in, differs, knowable,
-    missing}], knowable drop-ins first; the first row is the proposal. Writes the list into the part's dossier as `replacement`."""
+    missing, same_pinout (vs `orig`, the part's dossier)}], knowable same-pinout drop-ins first; the first row is the proposal. Writes the list into the part's dossier as `replacement`."""
     from . import partdocs as PD, partsearch as PS, partsgate as PG
     row = _dist_row(mpn) or {"description": mpn}
     alts = PG.alternatives(mpn, row, fp, required, temp, searcher or PS.keyword_search, limit=top,
@@ -642,13 +642,14 @@ def propose_replacement(mpn, fp=None, required=1, temp=(None, None), searcher=No
         f = os.path.join(cd, ent["file"]) if ent and ent.get("file") else None
         cdos = build(o["mpn"], f, ent.get("sha256") or PD._sha(f), ask=ask)[0] if f and os.path.isfile(f) else None
         r = {"mpn": o["mpn"], "mfr": o.get("mfr"), "stock": o.get("stock"), "drop_in": bool(o.get("drop_in")),
+             "same_pinout": same_pinout(orig, cdos),
              "differs": o.get("differs") or [], "knowable": bool(cdos and cdos.get("knowable")),
              "missing": (cdos or {}).get("missing", ["dossier not made"] if f else ["no datasheet fetched"])}
         out.append(r)
         log(f"  candidate {r['mpn']}: drop_in {r['drop_in']}, knowable {r['knowable']}")
-        if r["drop_in"] and r["knowable"]:
+        if r["drop_in"] and r["knowable"] and r["same_pinout"]:
             break
-    return sorted(out, key=lambda r: (not r["knowable"], not r["drop_in"], len(r["differs"])))
+    return sorted(out, key=lambda r: (not r["knowable"], not (r["drop_in"] and r["same_pinout"]), not r["drop_in"], len(r["differs"])))
 
 
 def record_replacement(mpn, sha, rows, choice=None, d=None):
@@ -675,7 +676,7 @@ def _dk_media(mpn):
     """[(media type, title, url)] of the part's DigiKey media links (by MPN, else by its DigiKey number from a keyword search)."""
     import urllib.parse
     import urllib.request
-    from . import partsearch as PS, sourcing as S
+    from . import partsearch as PS, redact as R, sourcing as S
     c = PS.credentials()
     if "DIGIKEY_CLIENT_ID" not in c:
         return []
@@ -685,7 +686,7 @@ def _dk_media(mpn):
         req = urllib.request.Request(f"https://api.digikey.com/products/v4/search/{urllib.parse.quote(key, safe='')}/media",
                                      headers={"X-DIGIKEY-Client-Id": c["DIGIKEY_CLIENT_ID"], "Authorization": "Bearer " + tok})
         return [(m.get("MediaType") or "", m.get("Title") or "", m.get("Url") or "")
-                for m in json.load(urllib.request.urlopen(req, timeout=30)).get("MediaLinks") or []]
+                for m in json.load(R.urlopen(req, timeout=30)).get("MediaLinks") or []]
     try:
         return get(mpn)
     except Exception:                                       # noqa: BLE001 - not found by MPN: its DigiKey number
@@ -741,24 +742,33 @@ def fetch_docs(mpn, ds_dir, need, mfr="", media=None, web=None, download=None, l
     return new
 
 
-def choose(mpn, dos, rows, log_dir=None, cons=None):
-    """The replacement of an unknowable part: the first knowable drop-in when there is one, else decider.ask among the knowable
-    candidates (each with what differs) or keeping the part blocked. -> {"choice", "by", "rationale"}."""
+def same_pinout(a, b):
+    """True when two dossiers number the same pins with compatible names (every pad of `a` has a name `b` prints on that pad, ground
+    on ground). False when either pin table is incomplete: an unverified pinout is not the same pinout."""
+    if not a or not b or "pins" in gaps(a) or "pins" in gaps(b):
+        return False
+    ta, tb = pin_table(a), pin_table(b)
+    return bool(ta) and set(ta) == set(tb) and all(ta[k][0] & tb[k][0] or (ta[k][1] and tb[k][1]) for k in ta)
+
+
+def choose(mpn, dos, rows):
+    """The replacement of an unknowable part. Applied (`choice`) only when it is a verified drop-in: distributor-verified footprint and
+    ratings (partsgate.alternatives), knowable, and the same pinout as the part (same_pinout). Anything else is never applied: the best
+    knowable candidate is recorded as a `proposal` with its D-row text, a blocker for the kickoff decision step; the part stays blocked.
+    -> {"choice", "by", "rationale", "proposal"?, "blocker"?, "d_row"?}."""
     ok = [r for r in rows if r.get("knowable")]
-    first = next((r for r in ok if r.get("drop_in")), None)
+    first = next((r for r in ok if r.get("drop_in") and r.get("same_pinout")), None)
     if first:
-        return {"choice": first["mpn"], "by": "rule", "rationale": "knowable verified drop-in"}
+        return {"choice": first["mpn"], "by": "rule", "rationale": "knowable verified drop-in, same pinout"}
     if not ok:
         return {"choice": None, "by": "rule", "rationale": "no knowable candidate"}
-    from . import decider as DC
-    opts = {r["mpn"]: "replace " + mpn + "; differs: " + ("; ".join(r.get("differs") or []) or "nothing listed, not a verified drop-in")
-            for r in ok}
-    opts["keep-blocked"] = f"{mpn} stays PART_UNKNOWABLE; placement does not start until a person or a later document closes it"
-    ev = [f"{mpn} cannot be fully known: no source gives {', '.join(dos.get('missing') or [])}"] + \
-         [f"{r['mpn']}: knowable (its own dossier), stock {r.get('stock')}, mfr {r.get('mfr')}" for r in ok]
-    row = DC.ask(f"replace:{mpn}", "parts", f"{mpn} is unknowable; choose a knowable replacement", opts, "keep-blocked",
-                 "the replacement goes into the spec as an MPN change (D-row)", ev, cons, log_dir)
-    return {"choice": None if row["choice"] == "keep-blocked" else row["choice"], "by": row["by"], "rationale": row.get("rationale", "")}
+    best = ok[0]
+    why = "; ".join(best.get("differs") or []) or ("pinout differs or unverified" if best.get("drop_in") else "not a verified drop-in")
+    return {"choice": None, "by": "rule", "rationale": f"blocked: {best['mpn']} is knowable but not a verified drop-in ({why})",
+            "proposal": best["mpn"], "blocker": True,
+            "d_row": f"Replace {mpn} by {best['mpn']} ({best.get('mfr') or '?'}): {mpn} cannot be fully known (no source gives "
+                     f"{', '.join(dos.get('missing') or [])}); {best['mpn']} is fully documented but differs: {why}. Footprint, pinmap "
+                     f"and spec change needed before placement."}
 
 
 def replace_unknowable(dres, log_dir=None, log=print):
@@ -767,7 +777,7 @@ def replace_unknowable(dres, log_dir=None, log=print):
     out = {}
     for m in sorted(k for k, (dos, _, _) in dres.items() if dos and not dos.get("knowable")):
         dos = dres[m][0]
-        rows = dos.get("replacement") if dos.get("replacement") is not None else propose_replacement(m, log=log)
-        out[m] = choose(m, dos, rows, log_dir)
+        rows = dos.get("replacement") if dos.get("replacement") is not None else propose_replacement(m, log=log, orig=dos)
+        out[m] = choose(m, dos, rows)
         record_replacement(m, dos["sha256"], rows, out[m])
     return out
