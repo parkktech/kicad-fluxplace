@@ -14,6 +14,7 @@ ENVIRONMENT. This module does that:
   PAIR_SKEW / PAIR_LAYER_MISMATCH / PAIR_VIA_MISMATCH
                          diff pair P and N routed differently
   PAIR_GEOMETRY / PAIR_IMPEDANCE_UNREACHABLE / PAIR_IMPEDANCE_OFF
+  PAIR_NARROWED          (with --baseline) update-laid pair tracks narrower than the same pair on the baseline board; FAIL
                          pair width/gap/impedance per layer from the stackup (zgeom);
                          FAIL when unreachable or the routed copper is off target
   RF_IMPEDANCE_OFF       RF copper graded on the LAYER it is actually on
@@ -551,6 +552,15 @@ def _pair_legs(facts, cons, names):
     return legs - C.not_pairs(cons)
 
 
+def _pair_partners(nets):
+    """{net: partner net} for the differential pairs among `nets` (naming convention)."""
+    from . import graph as G
+    out = {}
+    for sl, ma in G.diff_pairs(set(nets)).items():
+        out[sl], out[ma] = ma, sl
+    return out
+
+
 def check_pair_geometry(facts, cons):
     """Controlled-impedance pair families graded against zgeom.pair_geometry (the geometry the pairs stage lays):
     PAIR_GEOMETRY (info: width/gap/impedance per layer), PAIR_IMPEDANCE_UNREACHABLE (FAIL: no allowed layer meets the target),
@@ -583,6 +593,7 @@ def check_pair_geometry(facts, cons):
             continue                                              # explicit geometry is kept; the table above reports its impedance
         nt = facts.get("net_tracks") or {}
         legs = _pair_legs(facts, cons, nt)
+        partner, bsegs = _pair_partners(nt), None
         for net, tr in sorted(nt.items()):
             if not net.startswith(fam) or ZG.family_of(cons, net) != fam or net not in legs:
                 continue                                      # PHASE3G G3a: a single-ended net with a family prefix is not graded
@@ -594,7 +605,16 @@ def check_pair_geometry(facts, cons):
                 gg = IM.geometry(rows, planes, layer)
                 if not gg or not gg["model"]:
                     continue
-                z = IM.z_diff(w, g["gap"], gg)
+                gap = g["gap"]
+                if net in partner and board and os.path.isfile(str(board)):             # the gap the pair was laid at (measured), not only the planned one
+                    try:
+                        from . import pairbase as PB, routediag as RD_
+                        bsegs = bsegs if bsegs is not None else RD_.load(board)["segs"]
+                        mg = PB.modal_gap([x for x in bsegs if x["layer"] == layer and abs(x["w"] - w) < 1e-6], tuple(sorted((net, partner[net]))))
+                        gap = mg if mg and mg >= 0.05 else gap
+                    except Exception:                                                    # noqa: BLE001 - the planned gap stands
+                        pass
+                z = IM.z_diff(w, gap, gg)
                 err = 100.0 * (z - v["impedance_diff"]) / v["impedance_diff"]
                 if abs(err) > g["tol_pct"] and (bad is None or abs(err) > abs(bad[0])):
                     bad = (err, layer, w, mm, g)

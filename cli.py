@@ -1077,6 +1077,8 @@ def cmd_replacefp(a):
     rep = IO.replace_footprint(board, a.ref, a.lib, a.name,
                                net_by_pin=net_by_pin, renames=renames)
     IO.save(board, a.out or a.board)
+    from fluxplace import modelstart as MS_
+    print(MS_.rebind_swapped(a.out or a.board, a.name, rep.get("models") or [])["line"])    # a model path that does not resolve is bound from the project library
     print(f"{a.ref} -> {a.name}: {rep['assigned']} pads netted"
           + (f"; created nets {rep['created_nets']}" if rep['created_nets'] else ""))
     if rep["unnetted_pads"]:
@@ -1720,6 +1722,8 @@ def _review_gate(a, stage="review", hard=True):
         if not os.path.isfile(base):
             raise SystemExit(f"--baseline: {base} is not a file")
         base_findings, _bf = _review_findings(a, base, stage)
+        from fluxplace import pairbase as _PB
+        findings += [R._f(f["level"], f["code"], f["msg"]) for f in _PB.findings(board, base)]       # PAIR_NARROWED: an update-laid pair thinner than on the baseline
         R.mark_baseline(findings, base_findings, set(facts.get("net_pads") or ()) | set(_bf.get("net_pads") or ()))
         base_info = {"board": os.path.abspath(base), "sha256": R.file_sha(base)}
         print(f"baseline: {base} sha {base_info['sha256']}", flush=True)
@@ -2019,7 +2023,7 @@ def cmd_tune(a):
     res = {}
     rep = TU.tune_pairs(a.board, out, pairs, lim, kicad_cli=a.kicad_cli,
                         amp_mm=a.amplitude, max_rounds=a.rounds, budget=budget, stall=a.stall, result=res, cons=cons,
-                        log=lambda m: print(m, flush=True))
+                        allow_mismatch=a.allow_layer_mismatch, log=lambda m: print(m, flush=True))
     _tune_refill(out, res)
     from fluxplace import tune as TU
     TU.lock_tuned(out, pairs)                                    # PHASE3E 8: same lock as the krt stage's tune step
@@ -4152,6 +4156,9 @@ def build_parser():
                           "or on SIGTERM/SIGINT, the best accepted board is written to --out (exit 2)")
     ptu.add_argument("--stall", type=int, default=8,
                      help="stop a pair/net after N DRC-guarded tries without an accepted step (default 8)")
+    ptu.add_argument("--allow-layer-mismatch", action="store_true",
+                     help="also length-tune pairs whose legs run on different layers / via counts (default: they are needs_reroute); "
+                          "a last resort when `pairs --only` cannot re-lay them: the pair stays uncoupled but meets its skew limit")
     ptu.add_argument("--report", default=None, help="JSON report (default OUT.tune.json)")
     ptu.add_argument("--match", default=None, metavar="NAME|all",
                      help="tune [match.*] length groups instead of diff pairs")

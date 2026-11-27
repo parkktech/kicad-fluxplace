@@ -179,7 +179,7 @@ def _commit_guard(board, out, sel, rows, log):
 
 
 def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budget=None, allow_shove=False,
-            log=print, lay=None, drc=None, result=None, unlock=False, force=(), group=True):
+            log=print, lay=None, drc=None, result=None, unlock=False, force=(), group=True, baseline=None, tune_skew=True, accept_skew_x=1.0):
     """-> report {out, stopped, elapsed_s, budget_s, unmatched, pairs: [row]}; row.status is rerouted | kept_original |
     refused_locked | already_ok | not_reached. `lay(board_path, cons, spec, only=set)` defaults to pairs.plan, `drc(path)` ->
     (keys, counts) to a kicad-cli DRC; both can be replaced (tests)."""
@@ -190,6 +190,10 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
     B0 = RD.load(board)
     cls = NC.classify(B0, cons, spec)
     sel, unmatched = resolve(names, PA.pair_list(cls))
+    from . import pairbase as PB
+    cons, geom_from = PB.with_widths(cons, board, baseline, sel)     # the pair's own width (baseline / input board), never the DRC minimum
+    for pr_, (w_, src_) in sorted(geom_from.items()):
+        log(f"  {pr_[0]}/{pr_[1]}: laid at {w_:g} mm ({src_})")
     protect = set(QA.rf_names(B0, cons))
     bud = budget if isinstance(budget, TU.Budget) else TU.Budget(budget if budget is not None else TU.default_budget(len(sel), PER_PAIR_S), 0)
     work = out + ".work.kicad_pcb"
@@ -290,6 +294,20 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                 B2 = RD.load(try_)
                 opn = RC.text_open(B2)
                 a = PA.audit(B2, [pr], cons, {n for n, k in opn.items() if k})[pr]
+                if a["status"] == "mismatch" and (a.get("why") or "").startswith("skew") and tune_skew:
+                    # laid coupled on one layer sequence but over the skew limit: a cheap guarded tune of THIS pair (meander on its shorter leg)
+                    tt = try_ + ".tune.kicad_pcb"
+                    try:
+                        _sidecars(try_, tt)
+                        TU.tune_pairs(try_, tt, {pr[1]: pr[0]}, lambda m: PR.guard_limit(cons, m), budget=90.0, cons=cons, log=lambda m: None)
+                        if os.path.isfile(tt):
+                            os.replace(tt, try_)
+                            B2 = RD.load(try_)
+                            opn = RC.text_open(B2)
+                            a = PA.audit(B2, [pr], cons, {n for n, k in opn.items() if k})[pr]
+                            row["tuned"] = True
+                    except Exception as e:                       # noqa: BLE001 - the untuned candidate is judged as it is
+                        row["tune_error"] = f"{type(e).__name__}: {str(e)[:80]}"
                 prof = _profile_row(B2, pr)
                 rr = PR.rules_for(pre, res["B"], cons, R, pr[0], Pm, proj)
                 ends = PU.breakout_ends(B2, pr, PR.terminals(B2, pr[0], pr[1], Pm["pad_max"])[0], rr["w"], rr["gap"])
@@ -299,6 +317,9 @@ def reroute(board, out, names, cons=None, spec=None, kicad_cli="kicad-cli", budg
                     pp, pn = PA.profile(B2, pr[0]), PA.profile(B2, pr[1])
                     if not (pp["path"] and pn["path"] and pp["layers"] == pn["layers"] and pp["vias"] == pn["vias"]):
                         why = "pair not connected on one layer sequence"
+                elif (a["status"] == "mismatch" and (a.get("why") or "").startswith("skew") and why is None and accept_skew_x > 1.0
+                      and abs(prof["skew"] or 0.0) <= accept_skew_x * PR.guard_limit(cons, pr[0])):
+                    row["skew_accepted"] = f"skew {prof['skew']} mm within {accept_skew_x:g} x the limit (reported by review, not tuned further)"
                 elif a["status"] != "complete" and why is None:
                     why = f"pair audit: {a['status']}" + (f" ({a['why']})" if a["why"] else "")
                 if why is None:

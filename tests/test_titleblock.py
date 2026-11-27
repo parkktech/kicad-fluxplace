@@ -50,6 +50,15 @@ def test_rev_stale_is_fail_and_matching_forms_are_not(tmp_path):
     assert codes(TB.findings(TB.read(p), p, {"project": {"version": "2.0"}})) == ["TITLEBLOCK_REV_STALE"]
 
 
+def test_patch_rev_of_the_file_name_line_is_not_stale_but_a_declared_version_still_rules(tmp_path):
+    p = mk(tmp_path, BLOCK.replace('"1.6"', '"1.6.3"'))
+    assert TB.findings(TB.read(p), p, CONS) == []                       # v16 in the name, rev 1.6.3: same line
+    assert TB.findings(TB.read(p), p, {"project": {"version": "1.6.3"}}) == []
+    assert codes(TB.findings(TB.read(p), p, {"project": {"version": "1.6.4"}})) == ["TITLEBLOCK_REV_STALE"]
+    q = mk(tmp_path, BLOCK.replace('"1.6"', '"1.5.3"'))
+    assert codes(TB.findings(TB.read(q), q, CONS)) == ["TITLEBLOCK_REV_STALE"]
+
+
 def test_filled_correct_block_is_silent_in_check_and_review(tmp_path):
     p = mk(tmp_path, BLOCK)
     assert TB.findings(TB.read(p), p, CONS, stage="fab") == []
