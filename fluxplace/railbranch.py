@@ -343,56 +343,118 @@ def undersized(board, cons, nets):
     return out, short
 
 
+def drop_dangling(board, net, tol_mm=0.05):
+    """K14: delete the UNLOCKED tracks of `net` that end on nothing (no pad, via, other track end or zone of the net on that layer),
+    repeatedly: what a re-lay leaves of a ripped run is a stub with an open end that the solve counts as open copper. Writes `board`
+    in place. -> number of tracks removed."""
+    import pcbnew
+    b = pcbnew.LoadBoard(board)
+    mm = pcbnew.ToMM
+    n_total = 0
+    while True:
+        trs = [t for t in b.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetname() == net]
+        pads = [p for f in b.GetFootprints() for p in f.Pads() if p.GetNetname() == net]
+        pts = [(mm(v.GetPosition().x), mm(v.GetPosition().y)) for v in b.GetTracks() if v.GetClass() == "PCB_VIA" and v.GetNetname() == net]
+        zones = [z for z in b.Zones() if not z.GetIsRuleArea() and z.GetNetname() == net]
+        gone = []
+        for t in trs:
+            if t.IsLocked():
+                continue
+            lay = t.GetLayer()
+            for e in (t.GetStart(), t.GetEnd()):
+                x, y = mm(e.x), mm(e.y)
+                ok = any((px - x) ** 2 + (py - y) ** 2 <= 0.04 for px, py in pts) or any(p.HitTest(e, pcbnew.FromMM(0.05)) for p in pads)
+                ok = ok or any(o is not t and o.GetLayer() == lay and any(abs(mm(q.x) - x) <= tol_mm and abs(mm(q.y) - y) <= tol_mm
+                                                                           for q in (o.GetStart(), o.GetEnd())) for o in trs)
+                ok = ok or any(z.IsOnLayer(lay) and z.Outline().Contains(pcbnew.VECTOR2I(e.x, e.y)) for z in zones)
+                if not ok:
+                    gone.append(t)
+                    break
+        if not gone:
+            break
+        for t in gone:
+            b.Delete(t)
+        n_total += len(gone)
+    if n_total:
+        pcbnew.SaveBoard(board, b)
+    return n_total
+
+
+def _gate_mag(board, cons, net):
+    """The route gate's own number for `net` (power.check POWER_WIDTH value, 0 when it passes): a trial that raises it is refused even when
+    the undersized-run shortfall fell (K14: a re-lay that left a stub as open copper scored better there and worse at the gate)."""
+    from . import power as PWR, boardfile
+    return sum(float(f.get("value") or 0.0) for f in PWR.check(boardfile.facts_from_file(board), cons, PWR.dcdrop_status(board, cons), board=board)
+               if f.get("code") == "POWER_WIDTH" and (f.get("refs") or [""])[0] == net)
+
+
 def _open_count(board, cons, net, track_mm, nlayers):
     return len(plan(board, cons, [net], track_mm, nlayers).get(net, {}).get("comps", []))
 
 
 def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner, left_s, laid, rec):
-    """Bounded solve -> rip -> re-lay loop over `nets` (see the block comment).  `laid` = {net: {key}} the branch steps laid (only that copper is
-    ever ripped: locked, trunk and earlier-stage copper stay).  `rec[net]["undersized"]` = the runs left, each with the reason.  -> rc 0."""
+    """Bounded solve -> rip -> re-lay loop over `nets` (see the block comment).  `laid` = {net: {key}} the branch steps laid.  Phase 0 rips
+    only that copper; K14 phase 1 (what is still undersized) also rips the UNLOCKED copper of those runs from any stage (a widen the
+    clearance refused: the run is re-laid by the router at the solved width, another layer or path).  Locked copper never moves.
+    `rec[net]["undersized"]` = the runs left, each with the reason.  -> rc 0."""
     import shutil
     cur = src
     wd = os.path.dirname(dst)
-    for rnd in range(FIX_ROUNDS):
-        try:
-            bad, short = undersized(cur, cons, set(nets))
-        except Exception as e:                               # noqa: BLE001 - the solve is an improvement; the board stands
-            rec.setdefault("_error", f"{type(e).__name__}: {str(e)[:120]}")
-            break
-        if not bad or left_s() <= 0:
-            break
-        moved = False
-        for net in sorted(bad):
-            mine = {_seg_key(g) for run in bad[net] for g in run["segs"]} & laid.get(net, set())
-            if not mine:
-                continue
-            tag = os.path.join(wd, f"{os.path.basename(dst)[:-10]}.f{rnd}.{abs(hash(net)) % 10**6}")
-            ripped, relaid = tag + ".rip.kicad_pcb", tag + ".out.kicad_pcb"
-            _carry_pro(cur, ripped)
-            if not strip_keys(cur, ripped, {net: mine}):
-                continue
-            before = _open_count(cur, cons, net, track_mm, nlayers)
-            sub = {}
-            route(ripped, relaid, cons, [net], track_mm, nlayers, sig, mk_cmd, runner, left_s, sub)
+    err = None
+
+    def one_phase(owned):
+        nonlocal cur, err
+        for rnd in range(FIX_ROUNDS):
             try:
-                short2 = undersized(relaid, cons, {net})[1]
-                still = _open_count(relaid, cons, net, track_mm, nlayers)
-            except Exception:                                # noqa: BLE001 - unmeasurable trial: dropped
-                continue
-            if still <= before and short2.get(net, 0.0) < short.get(net, 0.0) - 1e-6:
-                after = track_keys(relaid, [net])[net]
-                laid[net] = (laid.get(net, set()) - mine) | (after - track_keys(ripped, [net])[net])
-                cur, moved = relaid, True
-                rec.setdefault(net, {}).setdefault("reladed", []).append({"runs": len(bad[net]), "shortfall_mm": [round(short[net], 2), round(short2.get(net, 0.0), 2)]})
-        if not moved:
-            break
+                bad, short = undersized(cur, cons, set(nets))
+            except Exception as e:                           # noqa: BLE001 - the solve is an improvement; the board stands
+                err = rec.setdefault("_error", f"{type(e).__name__}: {str(e)[:120]}")
+                return
+            if not bad or left_s() <= 0:
+                return
+            moved = False
+            for net in sorted(bad):
+                mine = {_seg_key(g) for run in bad[net] for g in run["segs"]} & owned(cur, net)
+                if not mine:
+                    continue
+                tag = os.path.join(wd, f"{os.path.basename(dst)[:-10]}.f{rnd}.{abs(hash(net)) % 10**6}")
+                ripped, relaid = tag + ".rip.kicad_pcb", tag + ".out.kicad_pcb"
+                _carry_pro(cur, ripped)
+                if not strip_keys(cur, ripped, {net: mine}):
+                    continue
+                drop_dangling(ripped, net)                   # K14: what the rip cut off (a stub with an open end) goes with it
+                before = _open_count(cur, cons, net, track_mm, nlayers)
+                sub = {}
+                route(ripped, relaid, cons, [net], track_mm, nlayers, sig, mk_cmd, runner, left_s, sub)
+                try:
+                    if os.path.exists(relaid):
+                        drop_dangling(relaid, net)
+                    short2 = undersized(relaid, cons, {net})[1]
+                    still = _open_count(relaid, cons, net, track_mm, nlayers)
+                except Exception:                            # noqa: BLE001 - unmeasurable trial: dropped
+                    continue
+                try:
+                    gate_ok = _gate_mag(relaid, cons, net) <= _gate_mag(cur, cons, net) + 1e-6
+                except Exception:                            # noqa: BLE001 - the gate number is a second opinion; the shortfall decides
+                    gate_ok = True
+                if still <= before and gate_ok and short2.get(net, 0.0) < short.get(net, 0.0) - 1e-6:
+                    after = track_keys(relaid, [net])[net]
+                    laid[net] = (laid.get(net, set()) - mine) | (after - track_keys(ripped, [net])[net])
+                    cur, moved = relaid, True
+                    rec.setdefault(net, {}).setdefault("reladed", []).append({"runs": len(bad[net]), "shortfall_mm": [round(short[net], 2), round(short2.get(net, 0.0), 2)]})
+            if not moved:
+                return
+    one_phase(lambda _b, net: laid.get(net, set()))
+    if runner is not None and "_error" not in rec:
+        one_phase(lambda b, net: track_keys(b, [net])[net])   # K14: any unlocked copper of the still-undersized runs
+    free = track_keys(cur, nets) if "_error" not in rec else {}
     final = undersized(cur, cons, set(nets))[0] if "_error" not in rec else {}
     for net, runs in final.items():
-        laid_n = laid.get(net, set())
+        laid_n = laid.get(net, set()) | free.get(net, set())
         for run in runs:
             ks = {_seg_key(g) for g in run["segs"]}
-            why = ("no corridor: re-laying the branch at its solved width opened a connection or did not lower the shortfall" if ks & laid_n
-                   else "not branch copper (locked, rail trunk or earlier stage)")
+            why = ("no corridor: re-laying the run at its solved width opened a connection or did not lower the shortfall" if ks & laid_n
+                   else "not rippable: locked copper (or none of it unlocked)")
             rec.setdefault(net, {}).setdefault("undersized", []).append({"layers": run["layers"], "len_mm": run["len"], "width": run["min_w"],
                                                                          "need": run["need"], "amps": run["amps"], "reason": why})
     if os.path.abspath(cur) != os.path.abspath(dst):

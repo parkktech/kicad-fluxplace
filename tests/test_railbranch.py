@@ -223,9 +223,13 @@ def test_fix_undersized_keeps_copper_it_did_not_lay_and_reports_why(tmp_path):
     pytest.importorskip("pcbnew")
     narrow = str(tmp_path / "narrow.kicad_pcb")
     _chain_board(narrow, 0.15)
+    import pcbnew
+    b = pcbnew.LoadBoard(narrow)
+    [t.SetLocked(True) for t in b.GetTracks()]
+    pcbnew.SaveBoard(narrow, b)
     rec = {}
     RB.fix_undersized(narrow, str(tmp_path / "o.kicad_pcb"), CHAIN, ["N"], 0.15, 6, ["F.Cu", "B.Cu"], None, None, lambda: 100.0, {}, rec)
-    assert rec["N"]["undersized"][0]["reason"].startswith("not branch copper")
+    assert rec["N"]["undersized"][0]["reason"].startswith("not rippable")
     assert RB.track_keys(str(tmp_path / "o.kicad_pcb"), ["N"]) == RB.track_keys(narrow, ["N"])      # untouched
 
 
@@ -253,3 +257,19 @@ def test_ladder_never_under_the_rail_contract():
         lad = RB.conn_ladder(CONS, "V5", R, amps, 10.0, TRK)
         assert all(w >= floor - 1e-6 for w, _p in lad)
     assert RB.conn_ladder(CONS, "V5", R, 0.0, 0.5, TRK)[0][0] == 0.15      # a pad neck keeps the signal width
+
+
+def test_fix_undersized_second_phase_relays_unlocked_copper_a_branch_step_did_not_lay(tmp_path):
+    """K14: the VBATT_PROT remainder of route-9 was earlier-stage unlocked copper the widen's clearance refused: it is re-laid at its solved width."""
+    pytest.importorskip("pcbnew")
+    narrow, wide = str(tmp_path / "narrow.kicad_pcb"), str(tmp_path / "wide.kicad_pcb")
+    _chain_board(narrow, 0.15)
+    _chain_board(wide, 0.5)
+
+    def runner(cmd, log, cap_s=0):
+        open(cmd[3], "wb").write(open(wide, "rb").read())
+        return 0, 0.1
+    rec = {}
+    RB.fix_undersized(narrow, str(tmp_path / "o.kicad_pcb"), CHAIN, ["N"], 0.15, 6, ["F.Cu", "B.Cu"],
+                      lambda s, o, lay, widths, ns: ["py", "route.py", s, o, widths], runner, lambda: 100.0, {}, rec)       # laid = {}
+    assert rec["N"]["reladed"] and not rec["N"].get("undersized")
