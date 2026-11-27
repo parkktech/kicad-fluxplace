@@ -89,19 +89,12 @@ def call_model(text, cons, model):
 
 def parse(out, options):
     """the first JSON object in `out` whose choice is on the menu -> dict, else None."""
-    s = out or ""
-    i = s.find("{")
-    while i >= 0:
-        try:
-            d, _ = json.JSONDecoder().raw_decode(s[i:])
-        except ValueError:
-            d = None
-        if isinstance(d, dict) and str(d.get("choice")) in options:
-            ev = d.get("evidence")
-            return {"choice": str(d["choice"]), "rationale": str(d.get("rationale") or "")[:400],
-                    "evidence": [str(x)[:EV_CHARS] for x in (ev if isinstance(ev, list) else [ev] if ev else [])][:8]}
-        i = s.find("{", i + 1)
-    return None
+    d = _first_obj(out, lambda d: str(d.get("choice")) in options)
+    if d is None:
+        return None
+    ev = d.get("evidence")
+    return {"choice": str(d["choice"]), "rationale": str(d.get("rationale") or "")[:400],
+            "evidence": [str(x)[:EV_CHARS] for x in (ev if isinstance(ev, list) else [ev] if ev else [])][:8]}
 
 
 def _log_rows(d):
@@ -117,7 +110,7 @@ def _write(d, row):
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, LOG), "a") as fh:
             fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-        last = {r["id"]: r for r in _log_rows(d)}
+        last = {r["id"]: r for r in _log_rows(d) if "envelope" not in r}      # rung envelopes are not [answers]
         L = ["# written by fluxplace decider: the latest decision per question ([answers] syntax); log: " + LOG, "[answers]"]
         for qid, r in sorted(last.items()):
             L.append(f"{json.dumps(qid)} = {json.dumps(r['choice'])}   # {r['by']}: {r.get('rationale', '')[:120]}".replace("\n", " "))
@@ -156,3 +149,54 @@ def decide(q, evidence=(), cons=None, log_dir=None):
     if log_dir:
         _write(log_dir, row)
     return row
+
+
+def _first_obj(s, ok):
+    """the first JSON object in `s` that `ok` accepts, else None."""
+    s = s or ""
+    i = s.find("{")
+    while i >= 0:
+        try:
+            d, _ = json.JSONDecoder().raw_decode(s[i:])
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and ok(d):
+            return d
+        i = s.find("{", i + 1)
+    return None
+
+
+def act(packet, cons=None, log_dir=None, key=""):
+    """The close `ai` rung without a person: the packet (its own `actions` text is the syntax) goes to the model, which
+    answers an action envelope {"actions": [...], "why"}.  -> the envelope, or None (no model / nothing usable: the packet
+    stays on disk for an agent, as before).  The envelope is not trusted: close validates and guards it like any answer.
+    Logged as id `ai:<key>` in the decision log; cached by packet hash."""
+    body = json.dumps(packet, sort_keys=True, default=str)
+    h = hashlib.sha1((body + rule(cons)).encode()).hexdigest()[:16]
+    hit = next((r for r in reversed(_log_rows(log_dir)) if r.get("hash") == h and r.get("envelope")), None) if log_dir else None
+    if hit:
+        env, model, cached = hit["envelope"], hit.get("model"), True
+    else:
+        text = ("You repair one open gap on a routed PCB so the flow needs no person. Rule to optimise: " + rule(cons) + ".\n"
+                "The packet below describes the gap, the copper near it and the allowed actions (key `actions`). Use only ids, "
+                "nets, layers and coordinates from the packet. If nothing safe exists, answer give_up with the reason.\n"
+                "Answer with ONLY the JSON action envelope.\nPacket:\n" + body[:12000])
+        env, model, cached = None, None, False
+        for m in [str(x) for x in _ai(cons).get("models") or MODELS]:
+            out, _why = call_model(text, cons, m)
+            if out is None:
+                break
+            env = _first_obj(out, lambda d: isinstance(d.get("actions"), list) and d["actions"])
+            if env:
+                model = m
+                break
+    if not env:
+        return None
+    env.setdefault("why", "")
+    env["tokens"] = int(env.get("tokens") or 0)
+    if log_dir:
+        _write(log_dir, {"id": "ai:" + str(key), "hash": h, "choice": ",".join(str(a.get("do")) for a in env["actions"])[:80],
+                         "by": "cache" if cached else "ai", "reasoned": True, "cached": cached, "model": model,
+                         "rationale": str(env.get("why"))[:400], "evidence": ["packet " + str(key)], "envelope": env,
+                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    return env

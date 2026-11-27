@@ -151,3 +151,30 @@ def test_pipeline_entry_decides_and_renets_into_the_work_dir(tmp_path, monkeypat
     pads = {p["num"]: p["net"] for p in RD.load(out)["parts"]["U1"]["pads"]}
     assert pads["3"] == "" and pads["20"] == "S2"
     assert P._pinswap_entry(c, work, out, {}) == out           # re-run on the moved board: nothing sealed in the group, no change
+
+
+def test_ai_rung_asks_the_model_and_applies_through_the_guard(tmp_path, monkeypatch):
+    from fluxplace import critroute, gaps as GP, handroute as HR
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    monkeypatch.setattr(HR, "open_nets", lambda *a, **k: {"connections": []})
+    seen = []
+    monkeypatch.setattr(GP, "load_ai_action", lambda path, *a, **k: dict(json.load(open(path)), tokens=0))
+    monkeypatch.setattr(GP, "_apply_ai", lambda base, out, a, ctx, sid: (seen.append(a["actions"]), ("applied", False, "gave up"))[1])
+    gap = {"id": "open-free:SIG2:1:2", "kind": "open-free", "class": "plain", "nets": ["SIG2"]}
+    ai_dir = tmp_path / "ai"
+
+    def ctx(cons):
+        return {"cons": cons, "cons_path": None, "work": str(tmp_path), "ai_dir": str(ai_dir), "ai_used": {}, "ai_mode": "packet",
+                "budget_s": 60, "attempts": str(tmp_path / "att.jsonl")}
+    env = {"actions": [{"do": "give_up", "why": "sealed"}], "why": "no lane"}
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"), [gap], ctx(stub(env)))
+    assert res["status"] == "applied" and res["gap_id"] == gap["id"] and seen == [env["actions"]]
+    row = [json.loads(l) for l in open(ai_dir / DC.LOG)][-1]
+    assert row["id"] == "ai:" + GP.ai_key(gap) and row["envelope"]["actions"] == env["actions"] and not row["cached"]
+    assert "ai:" not in (ai_dir / DC.ANSWERS).read_text()
+    # no model (and no cached envelope in a fresh folder): the packet is left for an agent, exactly as before
+    monkeypatch.setenv("FLUXPLACE_AI_OFFLINE", "1")
+    ai_dir = tmp_path / "ai2"
+    res = GP._r_ai(str(tmp_path / "in.kicad_pcb"), str(tmp_path / "out.kicad_pcb"), [gap], ctx(stub(env)))
+    assert res == {"status": "packet", "n": 1}
+    assert not (ai_dir / (critroute._safe(GP.ai_key(gap))[:80] + ".action.json")).exists()

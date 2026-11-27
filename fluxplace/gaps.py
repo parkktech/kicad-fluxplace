@@ -16,7 +16,7 @@ import time
 from collections import Counter
 
 from . import audit, calllog, closeexec as CX, refusal, constraints as C, critroute, drcfull, drcguard, joingaps, krtchain, versions
-from . import events as EV
+from . import decider as DC, events as EV
 
 KIND_OF_TYPE = {"shorting_items": "short", "solder_mask_bridge": "short",
                 "clearance": "clearance", "hole_clearance": "clearance", "hole_to_hole": "clearance",
@@ -2019,7 +2019,8 @@ def _r_ai(base, out, gaps, ctx):
         if status == "applied" and a.get("executed"):           # PHASE3H A9: an applied answer that ran an action
             used[key] = used.get(key, 0) + 1
         return {"status": status, "commit": commit, "why": why, "tokens": a["tokens"], "gap_id": gap["id"]}
-    n = 0
+    n, answered = 0, 0
+    decide = DC.enabled(ctx.get("cons")) and not ctx.get("_ai_decided")
     for gap, key, sid in todo[:_ai_packets(ctx.get("cons"))]:
         pk = gap_packet(base, gap, ctx, sid=sid)
         if gap["kind"] == "pair-asym" and pk.get("conn") is None:      # PHASE3H B10: a proposal row, no packet
@@ -2028,6 +2029,13 @@ def _r_ai(base, out, gaps, ctx):
         with open(os.path.join(ai_dir, sid + ".packet.json"), "w") as fh:
             fh.write(json.dumps(pk))
         n += 1
+        env = DC.act(pk, ctx.get("cons"), ai_dir, key) if decide else None      # w94: the model answers instead of a person
+        if env:
+            with open(os.path.join(ai_dir, sid + ".action.json"), "w") as fh:
+                fh.write(json.dumps(env))
+            answered += 1
+    if answered:                                   # apply one answer now, through the same validation and guard
+        return _r_ai(base, out, gaps, dict(ctx, _ai_decided=True))
     return {"status": "packet", "n": n} if n else {"status": "no packet", "n": 0}
 
 
