@@ -286,7 +286,7 @@ def _len_feas(ctx):
 
     def make():
         try:
-            return {r["net"]: {k: r[k] for k in ("T", "T_src", "B_current", "B_all", "U", "verdict", "text")}
+            return {r["net"]: {k: r[k] for k in ("T", "T_src", "T_why", "B_current", "B_all", "U", "verdict", "text")}
                     for r in BG.length_feasibility(ctx.B(), ctx["cons"], ctx.get("spec"))}
         except Exception as e:                              # noqa: BLE001
             ctx["len_feas_error"] = f"{type(e).__name__}: {e}"

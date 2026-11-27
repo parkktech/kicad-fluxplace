@@ -438,3 +438,14 @@ def test_len_routed_within_budget_is_feasible_and_detour_is_unresolved():
                  {"net": "NET", "a": (20, 30), "b": (20, 0), "w": 0.2, "layer": "F.Cu"}]
     r = BG.length_feasibility(B, _cons(25.0), fixed={"J1", "J2"})[0]
     assert r["U"] == pytest.approx(80.0) and r["verdict"] == "unresolved"
+
+
+def test_len_budget_provenance_default_vs_per_net_row_with_reason():
+    from fluxplace import budget as BG
+    B = _lenboard([_pad("J1", "1", "NET", 0, 0), _pad("J2", "1", "NET", 20, 0)])
+    r = BG.length_feasibility(B, {}, fixed={"J1", "J2"})
+    assert r == [] or r[0]["T_src"] == "default" and r[0]["T_why"] == ""     # the class default applies when no per-net row exists
+    c = _cons(30.0)
+    c["placement"]["budget"] = {"NET": {"mm": 45.0, "reason": "accepted 1.2 dB, D71ee"}}
+    r = BG.length_feasibility(B, c, fixed={"J1", "J2"})[0]
+    assert r["T"] == 45.0 and r["T_src"] == "override" and r["T_why"] == "accepted 1.2 dB, D71ee"

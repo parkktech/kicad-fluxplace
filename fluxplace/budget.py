@@ -767,7 +767,7 @@ def length_feasibility(B, cons, spec=None, fixed=None, nets=None):
         U = routed_length(B, net)
         T = r["limit"]
         v = verdict_of(T, b_all, r["bound"], U)
-        out.append({"net": net, "cls": r["cls"], "T": T, "T_src": "override" if cls[net].get("override") else "default",
+        out.append({"net": net, "cls": r["cls"], "T": T, "T_src": "override" if cls[net].get("override") else "default", "T_why": cls[net].get("override_reason") or "",
                     "B_current": r["bound"], "B_all": round(b_all, 3), "U": U, "verdict": v, "text": VERDICT[v],
                     "fixed_refs": sorted({p["ref"] for p in fx}), "movable_refs": mv})
     return out
