@@ -563,3 +563,25 @@ def test_clean_keeps_a_category_that_would_add_a_drc_key(tmp_path, monkeypatch):
     res = TF.clean(src, out)
     assert res["removed"] == {} and "stacked" in res["refused"]
     assert _items(out) == _items(src)                            # nothing kept
+
+
+def test_clean_removes_a_dead_end_via_with_its_stub_and_keeps_a_via_in_a_rule_area(tmp_path):
+    import pcbnew
+    P = pcbnew
+    src = _t2_board(tmp_path, extra_tracks=[(10, 6, 10, 9, "A")], vias=[(10, 9), (14, 9)], zero=[], zone=False)
+    b = P.LoadBoard(src)
+    for t in b.GetTracks():
+        t.SetLocked(True)                                        # routers lock their copper; the lock must not block the clean
+    z = P.ZONE(b); z.SetIsRuleArea(True); z.SetLayerSet(P.LSET.AllCuMask())
+    ch = P.SHAPE_LINE_CHAIN()
+    for x, y in ((13, 8), (15, 8), (15, 10), (13, 10)):
+        ch.Append(P.FromMM(x), P.FromMM(y))
+    ch.SetClosed(True); z.Outline().AddOutline(ch); b.Add(z)     # the thermal window around the via at (14, 9)
+    P.SaveBoard(src, b)
+    assert _items(src) == (2, 2, 0)
+    out = str(tmp_path / "out.kicad_pcb")
+    res = TF.clean(src, out)
+    assert res["refused"] == {} and res["removed"].get("dangling") == 2      # the via and the stub it alone held up
+    assert _items(out) == (1, 1, 0)
+    v = [t for t in P.LoadBoard(out).GetTracks() if t.Type() == P.PCB_VIA_T][0]
+    assert abs(v.GetPosition().x - P.FromMM(14)) < 10               # the rule-area via stays
