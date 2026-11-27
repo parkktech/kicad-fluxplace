@@ -287,3 +287,92 @@ def test_escape_repair_is_free_when_every_pair_laid(monkeypatch):
     best, neg, calls, run, q1 = _repair_world(monkeypatch, (2, 0, 0.0))
     best["res"][q1] = {"full": True, "e": {"status": "laid"}}
     assert run() is best and calls == []
+
+
+def _pure_ghost(prs, esc, rsv):
+    ok = bool(esc) and not any(v["name"] == "left" for v in esc.values())
+    return {q: {"full": ok, "skew": 0.0, "nok": int(ok), "e": {"status": "laid" if ok else "not-laid", "why": ""}} for q in prs}
+
+
+def test_parallel_probes_give_the_serial_plan_and_emit_progress(monkeypatch, tmp_path):
+    """fanout speed (w103): probes spread over workers are judged in shortlist order, so the plan equals the one-worker plan; every
+    probe and neighbourhood emits an iteration event."""
+    from fluxplace import events as EV
+    ev = []
+    monkeypatch.setattr(EV, "iteration", lambda loop, i, n=None, metrics=None, note="": ev.append((loop, i)))
+    p0, p1, info, rules, key = fake_world(monkeypatch)
+    monkeypatch.setattr(PE, "_variants_of", lambda ctx, t, rule, pr, nmax: [d["var"] for d in two_vars()[(pr, 0)]])
+    out = {}
+    for w in (1, 4):
+        cons = {"pairlay": {"escape_cache_dir": str(tmp_path / f"w{w}"), "escape_workers": w}}
+        r = PE.plan(lambda: {"budget": {}}, _pure_ghost, info, rules, key, [p0, p1], cons, {}, lambda net: 1.0, order=[p0, p1])
+        r["report"].pop("secs", None)
+        out[w] = ({k: v["name"] for k, v in r["choice"].items()}, r["reserve"], r["report"])
+    assert out[1] == out[4]
+    assert any(l == "escape" for l, _i in ev) and any(l == "escape-hood" for l, _i in ev)
+
+
+def test_pmap_keeps_input_order_across_workers():
+    assert PE.pmap(lambda a, b: a * 10 + b, [(i, 1) for i in range(7)], 3) == [i * 10 + 1 for i in range(7)]
+    assert PE.pmap(lambda a: a, [(1,)], 4) == [1]
+
+
+def _coarse_dist_reference(free, viaok, goals, f, step, via_cost):
+    """the original Jacobi relaxation, one array op per layer and direction (kept as the oracle for the fused one)"""
+    import numpy as np
+    from fluxplace import pocket as PK
+    nl = len(free)
+    cj, ci = free[0].shape[0] // f, free[0].shape[1] // f
+    C = np.stack([a[:cj * f, :ci * f].reshape(cj, f, ci, f).any(axis=(1, 3)) for a in free])
+    Vc = viaok[:cj * f, :ci * f].reshape(cj, f, ci, f).any(axis=(1, 3)) if viaok is not None and nl > 1 else None
+    d = np.full(C.shape, PK.INF, np.float32)
+    for li, j, i in goals:
+        if j // f < cj and i // f < ci:
+            d[li, j // f, i // f] = 0.0
+    w1, w2 = np.float32(step * f), np.float32(step * f * math.sqrt(2))
+    dirs = [(0, 1, w1), (0, -1, w1), (1, 0, w1), (-1, 0, w1), (1, 1, w2), (1, -1, w2), (-1, 1, w2), (-1, -1, w2)]
+    for _ in range(4 * max(cj, ci)):
+        nd = d.copy()
+        for l in range(nl):
+            for dy, dx, w in dirs:
+                np.minimum(nd[l], PK._shift(d[l], dy, dx, PK.INF) + w, out=nd[l])
+        if Vc is not None:
+            m = d.min(axis=0) + np.float32(via_cost)
+            for l in range(nl):
+                np.minimum(nd[l], np.where(Vc, m, PK.INF), out=nd[l])
+        nd[~C] = PK.INF
+        for li, j, i in goals:
+            if j // f < cj and i // f < ci:
+                nd[li, j // f, i // f] = 0.0
+        if np.array_equal(nd, d):
+            break
+        d = nd
+    return d
+
+
+def test_coarse_dist_is_bit_identical_to_the_reference():
+    import numpy as np
+    from fluxplace import pairlay as PL
+    rng = np.random.default_rng(7)
+    for nl, vi in ((1, False), (3, True), (3, False)):
+        free = [rng.random((83, 61)) > 0.3 for _ in range(nl)]
+        viaok = rng.random((83, 61)) > 0.4 if vi else None
+        goals = [(0, 5, 7), (nl - 1, 70, 50), (0, 999, 3)]
+        a = PL.coarse_dist(free, viaok, goals, 4, 0.1, 20.0)
+        b = _coarse_dist_reference(free, viaok, goals, 4, 0.1, 20.0)
+        assert a.dtype == b.dtype and np.array_equal(a, b)
+
+
+def test_pmap_falls_back_to_serial_in_a_thread_and_on_a_stuck_pool():
+    import os
+    import threading
+    import time
+    pid = os.getpid()
+    f = lambda a: (a, os.getpid() == pid)
+    got = []
+    t = threading.Thread(target=lambda: got.append(PE.pmap(f, [(1,), (2,), (3,)], 3)))
+    t.start()
+    t.join()
+    assert got[0] == [(1, True), (2, True), (3, True)]                          # not the main thread: no fork
+    stuck = lambda a: (time.sleep(30) if os.getpid() != pid else None, a)[1]
+    assert PE.pmap(stuck, [(1,), (2,)], 2, timeout=0.5) == [1, 2]                # a stuck worker: serial answer
