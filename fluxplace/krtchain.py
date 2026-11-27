@@ -395,13 +395,14 @@ def run(c, n, board, runner=run_step):
     laid, flow_rec = {}, {}                                  # W67: the branch copper the branch steps laid {net: {track key}}; the flow pass's record
     mk = lambda src, out, lay, widths, ns: cmd_route(a.router_py, a.router_dir, src, out, lay, base, widths, out[:-10] + ".json", nets=ns, extra=xtra)
     rn = lambda cmd, log, cap_s: runner(cmd, log, cap_s=min(CAP_S, cap_s), status_path=spath, step="rails-branch", env=no_rip_env())
+    time_left = lambda: budget - (time.time() - t0)
     if branch_nets:
         def _branch(s, o):
             try:
                 before = RB.track_keys(s, branch_nets)
-                rc = RB.route(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, lambda: budget - (time.time() - t0), branch_rec)
-                for n, ks in RB.track_keys(o, branch_nets).items():
-                    laid.setdefault(n, set()).update(ks - before[n])
+                rc = RB.route(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, time_left, branch_rec)
+                for net, ks in RB.track_keys(o, branch_nets).items():
+                    laid.setdefault(net, set()).update(ks - before[net])
                 return rc
             except Exception as e:                           # noqa: BLE001 - a failed branch step leaves the board as it was; reported
                 branch_rec["error"] = f"{type(e).__name__}: {str(e)[:160]}"
@@ -503,7 +504,7 @@ def run(c, n, board, runner=run_step):
         steps.append(("rails-branch2", lambda s, o: _branch))        # the same class-by-class pass reconnects what it cut, at the same D71da widths
         def _flow(s, o):                                     # W67: runs the solved tree current says are too narrow: re-lay the branch copper at the group's width
             try:
-                return RB.fix_undersized(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, lambda: budget - (time.time() - t0), laid, flow_rec)
+                return RB.fix_undersized(s, o, c.cons, branch_nets, R_TRACK(base, a), nl, sig, mk, rn, time_left, laid, flow_rec)
             except Exception as e:                           # noqa: BLE001 - the board stands as it was
                 flow_rec["_error"] = f"{type(e).__name__}: {str(e)[:160]}"
                 shutil_copy(s, o)
@@ -639,9 +640,10 @@ def run(c, n, board, runner=run_step):
         br, bn, bo = RB.summary({k: v for k, v in branch_rec.items() if isinstance(v, dict)})
         line += f"; rail branches routed {br} ({bn} neck-down(s) proven), {bo} left open at their width" + (f" ({branch_rec['error']})" if branch_rec.get("error") else "")
     if flow_rec:
-        fx = sum(len(v.get("reladed", [])) for v in flow_rec.values() if isinstance(v, dict))
-        left_runs = sum(len(v.get("undersized", [])) for v in flow_rec.values() if isinstance(v, dict))
-        line += f"; rail flow: {fx} branch(es) re-laid at the solved width, {left_runs} undersized run(s) left (reasons in result.json)" + (f" ({flow_rec['_error']})" if flow_rec.get("_error") else "")
+        flow_nets = [v for v in flow_rec.values() if isinstance(v, dict)]
+        relaid = sum(len(v.get("reladed", [])) for v in flow_nets)
+        left_runs = sum(len(v.get("undersized", [])) for v in flow_nets)
+        line += f"; rail flow: {relaid} branch(es) re-laid at the solved width, {left_runs} undersized run(s) left (reasons in result.json)" + (f" ({flow_rec['_error']})" if flow_rec.get("_error") else "")
     if rails_rec["rail_refused"]:
         line += "; rail_refused: " + ", ".join(rails_rec["rail_refused"])
     if quality["not_done"]["count"]:

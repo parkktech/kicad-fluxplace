@@ -249,6 +249,19 @@ def _key(layer, x1, y1, x2, y2):
     return (layer, *min(a, b), *max(a, b))
 
 
+def _track_ends(t):
+    import pcbnew
+    return tuple(pcbnew.ToMM(v) for v in (t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y))
+
+
+def _track_key(b, t):
+    return _key(b.GetLayerName(t.GetLayer()), *_track_ends(t))
+
+
+def _seg_key(g):
+    return _key(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"])
+
+
 def track_keys(board, nets):
     """{net: {key}} of the unlocked tracks of `nets` (layer, ordered rounded ends)."""
     import pcbnew
@@ -256,7 +269,7 @@ def track_keys(board, nets):
     out = {n: set() for n in nets}
     for t in b.GetTracks():
         if t.GetClass() == "PCB_TRACK" and t.GetNetname() in out and not t.IsLocked():
-            out[t.GetNetname()].add(_key(b.GetLayerName(t.GetLayer()), *(pcbnew.ToMM(v) for v in (t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y))))
+            out[t.GetNetname()].add(_track_key(b, t))
     return out
 
 
@@ -270,9 +283,10 @@ def strip_keys(src, dst, drop):
         n = t.GetNetname()
         if t.GetClass() != "PCB_TRACK" or n not in drop or t.IsLocked():
             continue
-        k = _key(b.GetLayerName(t.GetLayer()), *(pcbnew.ToMM(v) for v in (t.GetStart().x, t.GetStart().y, t.GetEnd().x, t.GetEnd().y)))
-        (gone if k in drop[n] else keep.setdefault(n, [])).append(t if k in drop[n] else (pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y),
-                                                                                           pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y)))
+        if _track_key(b, t) in drop[n]:
+            gone.append(t)
+        else:
+            keep.setdefault(n, []).append(_track_ends(t))
     for t in gone:
         b.Remove(t)
     pads = {}
@@ -334,7 +348,7 @@ def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner,
             break
         moved = False
         for net in sorted(bad):
-            mine = {_key(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"]) for run in bad[net] for g in run["segs"]} & laid.get(net, set())
+            mine = {_seg_key(g) for run in bad[net] for g in run["segs"]} & laid.get(net, set())
             if not mine:
                 continue
             tag = os.path.join(wd, f"{os.path.basename(dst)[:-10]}.f{rnd}.{abs(hash(net)) % 10**6}")
@@ -346,7 +360,7 @@ def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner,
             sub = {}
             route(ripped, relaid, cons, [net], track_mm, nlayers, sig, mk_cmd, runner, left_s, sub)
             try:
-                _bad2, short2 = undersized(relaid, cons, {net})
+                short2 = undersized(relaid, cons, {net})[1]
                 still = _open_count(relaid, cons, net, track_mm, nlayers)
             except Exception:                                # noqa: BLE001 - unmeasurable trial: dropped
                 continue
@@ -354,14 +368,14 @@ def fix_undersized(src, dst, cons, nets, track_mm, nlayers, sig, mk_cmd, runner,
                 after = track_keys(relaid, [net])[net]
                 laid[net] = (laid.get(net, set()) - mine) | (after - track_keys(ripped, [net])[net])
                 cur, moved = relaid, True
-                rec.setdefault(net, {}).setdefault("reladed", []).append({"runs": len(bad[net]), "shortfall_mm": [round(short[net], 2), round(short2[net], 2) if net in short2 else 0.0]})
+                rec.setdefault(net, {}).setdefault("reladed", []).append({"runs": len(bad[net]), "shortfall_mm": [round(short[net], 2), round(short2.get(net, 0.0), 2)]})
         if not moved:
             break
-    final, _s = undersized(cur, cons, set(nets)) if "_error" not in rec else ({}, {})
+    final = undersized(cur, cons, set(nets))[0] if "_error" not in rec else {}
     for net, runs in final.items():
         laid_n = laid.get(net, set())
         for run in runs:
-            ks = {_key(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"]) for g in run["segs"]}
+            ks = {_seg_key(g) for g in run["segs"]}
             why = ("no corridor: re-laying the branch at its solved width opened a connection or did not lower the shortfall" if ks & laid_n
                    else "not branch copper (locked, rail trunk or earlier stage)")
             rec.setdefault(net, {}).setdefault("undersized", []).append({"layers": run["layers"], "len_mm": run["len"], "width": run["min_w"],
