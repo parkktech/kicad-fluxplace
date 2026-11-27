@@ -87,8 +87,7 @@ def _variants_of(ctx, t, rule, pr, nmax):
 
 
 def _leave_layers(v, sig):
-    both = [l for l in sig if l in v["p"]["layers"] and l in v["n"]["layers"]]
-    return both
+    return [l for l in sig if l in v["p"]["layers"] and l in v["n"]["layers"]]
 
 
 def _legs(v, layer, d, reach, rule):
@@ -159,16 +158,15 @@ def bundles(ctx, pr, ti, rule, others, p):
     out = []
     ref = t["p"]["ref"]
     nbrs = [q for q in ctx["grid"].B["pads"] if q["ref"] == ref and q["net"] and q["net"] not in pr and not q.get("np")]
+    nets = {"p": pr[0], "n": pr[1]}
     for v in _variants_of(ctx, t, rule, pr, p["variants"]):
+        if v is not t and not v.get("via") and not v.get("new"):
+            continue
         own = _pieces_of(v)
         flat = [x for pcs in own.values() for x in pcs]
         stub = sum(math.hypot(x[3][0] - x[2][0], x[3][1] - x[2][1]) for x in flat if x[0] == "seg")
         nv = sum(1 for x in flat if x[0] == "via")
-        if v is not t and not v.get("via") and not v.get("new"):
-            continue
         layers = _leave_layers(v, sig)
-        if v is t and any(len(q["layers"]) <= 1 for q in (v["p"], v["n"])):
-            layers = _leave_layers(v, sig)
         # copper that exists already (a fan-out via pair of the board) is an obstacle already; only NEW copper is checked
         if v.get("new") and any(PL.check(items, pcs, net, clr, ctx["skip"])[0] < clr - 1e-6 for net, pcs in v["new"].items()):
             continue
@@ -177,7 +175,6 @@ def bundles(ctx, pr, ti, rule, others, p):
             for d in DIRS:
                 align = d[0] * head[0] + d[1] * head[1]
                 legs = _legs(v, layer, d, p["reach"], rule)
-                nets = {"p": pr[0], "n": pr[1]}
                 if any(PL.check(items, [legs[s]], nets[s], clr, ctx["skip"])[0] < clr - 1e-6 for s in ("p", "n")):
                     continue
                 cands.append((-align, d, legs))
@@ -259,7 +256,7 @@ def select(domains, clr, expansions, shortlist, forbidden=frozenset(), access=No
     sols.sort(key=lambda s: s[0])
     out, seen = [], set()
     for _c, asg in sols:
-        sg = tuple(sorted(str((b["vkey"], b["layer"])) for b in asg.values()))       # material = variant + layer; a 45-degree heading change is a duplicate
+        sg = _material(asg)
         if sg in seen:
             continue
         seen.add(sg)
@@ -299,15 +296,33 @@ def part_box(B, ref):
             max(q["x"] + q["w"] / 2 for q in ps), max(q["y"] + q["h"] / 2 for q in ps))
 
 
+def _in_tol(c, lim):
+    """a lay result laid in full (or kept) with its skew inside `lim`."""
+    return bool(c) and (c["full"] or c["e"]["status"] == "kept") and c["skew"] <= lim + 1e-9
+
+
+def _material(asg):
+    """what makes two assignments materially different: variant + layer per terminal (a 45-degree heading change is a duplicate)."""
+    return tuple(sorted(str((b["vkey"], b["layer"])) for b in asg.values()))
+
+
+def _escape_of(asg, info):
+    """an assignment -> (escape {terminal key: variant}, reserve {pair: pieces})."""
+    esc = {tkey(pr, info[pr][0][ti]): b["var"] for (pr, ti), b in asg.items()}
+    rsv = {}
+    for (pr, ti), b in asg.items():
+        rsv[pr] = rsv.get(pr, []) + [x for pcs in b["own"].values() for x in pcs] + b["foot"]
+    return esc, rsv
+
+
 def judge(res, targets, vset, base, limit):
     """production judgement of a ghost lay: every target laid in full and in tolerance; no other pair worse than its baseline.
     -> (ok, [reasons])"""
     why = []
     for q in vset:
         c = res.get(q)
-        ok = bool(c) and (c["full"] or c["e"]["status"] == "kept") and (c["skew"] <= limit(q[0]) + 1e-9)
-        b = base.get(q)
-        bok = bool(b) and (b["full"] or b["e"]["status"] == "kept") and (b["skew"] <= limit(q[0]) + 1e-9)
+        ok = _in_tol(c, limit(q[0]))
+        bok = _in_tol(base.get(q), limit(q[0]))
         if q in targets and not ok:
             why.append(f"{'/'.join(q)}: not laid in tolerance ({(c or {}).get('e', {}).get('status')})")
         elif q not in targets and bok and not ok:
@@ -387,7 +402,7 @@ def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
     pairs, each pair scored on its own (laid in full, skew inside the guard limit).  Never changes the selection or the pairs order."""
     picks, seen = [], set()
     for asg in cands:
-        m = tuple(sorted(str((b["vkey"], b["layer"])) for b in asg.values()))
+        m = _material(asg)
         if m not in seen:
             seen.add(m)
             picks.append(asg)
@@ -395,18 +410,12 @@ def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
             break
     rows = []
     for ci, asg in enumerate(picks):
-        esc = {tkey(pr, info[pr][0][ti]): b["var"] for (pr, ti), b in asg.items()}
-        rsv = {}
-        for (pr, ti), b in asg.items():
-            rsv[pr] = rsv.get(pr, []) + [x for pcs in b["own"].values() for x in pcs] + b["foot"]
+        esc, rsv = _escape_of(asg, info)
         tl = [q for q in vset if q in targets]
         for oname, order in (("emission", list(vset)), ("targets-reversed", [q for q in vset if q not in targets] + tl[::-1])):
             res = ghost(order, esc, rsv)
             rep["ghost_runs"] += 1
-            sc = {}
-            for q in vset:
-                c = res.get(q)
-                sc["/".join(q)] = bool(c) and (c["full"] or c["e"]["status"] == "kept") and c["skew"] <= limit(q[0]) + 1e-9
+            sc = {"/".join(q): _in_tol(res.get(q), limit(q[0])) for q in vset}
             rows.append({"hood": hood, "candidate": ci, "order": oname, "exits": {"/".join(pr) + f"@{ti}": [b["vkey"][0], b["layer"]] for (pr, ti), b in asg.items()}, "scores": sc})
     return rows
 
@@ -419,7 +428,7 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     t0 = time.time()
     rep = {"neighbourhoods": [], "expansions": 0, "limit": p["expansions"], "ghost_runs": 0, "memory": {"forbidden": 0, "deprioritised": 0, "recorded": []}}
     out = {"choice": {}, "reserve": {}, "report": rep}
-    if not p["on"] or len(live) < 1:
+    if not p["on"] or not live:
         return out
     comps = components(info, live)
     seeds = [c for c, ts in comps.items() if len({q for q, _ti in ts}) >= 2]      # a part with two or more pairs on it
@@ -428,7 +437,9 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     hit = _load(cons, fp, ctx0, info, rules, p)
     if hit is not None:
         return hit
-    forbidden, depri = set(), set()
+    from . import budget as BG
+    ctx0["budget"] = ctx0.get("budget") or {}
+    forbidden = set()                                     # a timeout / budget stop is only counted (deprioritised), never forbidden
     watch = {q for q in live if any(n.startswith(w) for n in q for w in p["watch"])}          # [pairlay] escape_watch = net prefixes (board intent in the constraints)
     rep["watch"] = sorted("/".join(q) for q in watch)
     rep["cross"] = []
@@ -446,9 +457,7 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                 rule = rules[pr]
                 clr = max(clr, rule["clr"])
                 others = [t["c"] for k, t in enumerate(info[pr][0]) if k != ti]
-                ctx0["budget"] = ctx0.get("budget") or {}
                 if pr not in ctx0["budget"]:
-                    from . import budget as BG
                     try:
                         ctx0["budget"][pr] = BG.pair_limits(cons, pr[0])[0]
                     except Exception:                            # noqa: BLE001 - no channel family: no length term
@@ -474,10 +483,7 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                     nh["why"].append("escape budget spent")
                     break
                 nh["candidates"] += 1
-                esc = {tkey(pr, info[pr][0][ti]): b["var"] for (pr, ti), b in asg.items()}
-                rsv = {}
-                for (pr, ti), b in asg.items():
-                    rsv[pr] = rsv.get(pr, []) + [x for pcs in b["own"].values() for x in pcs] + b["foot"]
+                esc, rsv = _escape_of(asg, info)
                 res = ghost(vset, esc, rsv)
                 rep["ghost_runs"] += 1
                 ok, why = judge(res, set(targets), vset, base, limit)
@@ -493,7 +499,6 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
                         watch.add(q)
                 geom = [c for c in res.values() if c["e"].get("status") in ("not-laid", "partial")]
                 if any("search budget" in (c["e"].get("why") or "") for c in geom):
-                    depri.add(sig)
                     rep["memory"]["deprioritised"] += 1
                 else:
                     forbidden.add(sig)
