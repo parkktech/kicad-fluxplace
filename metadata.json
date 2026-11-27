@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
-  "name": "fluxplace \u2014 KiCad engineering suite",
-  "description": "Signal-flow placement, routing, DFM and fab packaging for KiCad 10 \u2014 placement, autorouting, comprehension, sourcing and the manufacturer upload package, end to end.",
-  "description_full": "fluxplace is a full PCB engineering suite for KiCad 10, not just a placer. It reads the board's communication graph (power/ground excluded so they do not tie everything together), places components so routing falls out as a tree, runs a placement tournament judged by a real router, pours and stitches planes, laundres copper against DRC, patches walled islands with rip-up-and-reroute, checks every MPN against live DigiKey/Mouser stock before a part reaches copper, and emits the manufacturer upload package (gerbers, drill, centroid, BOM, assembly instructions, order worksheet) shaped to the fab's own upload form.\n\nREQUIRES KiCad 10.0 or newer (pcbnew + kicad-cli). Several capabilities need components pip cannot install: Java and the freerouting 2.3.0+ jar for routing, LibreOffice for the PDF upload slot, and DigiKey/Mouser API credentials for the availability gate. On first run the plugin checks every requirement and offers to install the python packages for you; `fluxplace doctor` does the same from the CLI.",
+  "name": "fluxplace — KiCad engineering suite",
+  "description": "Signal-flow placement, routing, DFM and fab packaging for KiCad 10 — placement, autorouting, comprehension, sourcing and a manufacturer upload package for PCBWay and JLCPCB, end to end, gated by the packaging rules.",
+  "description_full": "fluxplace is a full PCB engineering suite for KiCad 10, not just a placer. It reads the board's communication graph (power/ground excluded so they do not tie everything together), places components so routing falls out as a tree, runs a placement tournament judged by a real router, pours and stitches planes, launders copper against DRC, patches walled islands with rip-up-and-reroute, checks every MPN against live DigiKey/Mouser stock before a part reaches copper, and emits the manufacturer upload package (gerbers, drill, centroid, BOM, assembly instructions, order worksheet).\n\nPackaging and update features:\n- Packaging-rules gate (P1-P8): a package is not 'ready' unless all eight rules pass; deliver prints one PASS/FAIL line per rule.\n- Fab sets for PCBWay AND JLCPCB: BOM and CPL in each house's format, DNP parts excluded, every part with an LCSC pick or marked consigned.\n- Delivery for a new version of an existing delivery: previous BOM fields and DNP lines carried, assembly text carried, README-FIRST with what changed and known-open status, review folder, renders, datasheets, KiCad project.\n- review, fab and deliver accept --baseline PREV: fail only on new findings, inherited ones are listed.\n- spec-sync: schematic is the electrical truth, board fields are the part truth.\n- Limit research: numeric limits are graded against sourced hard limits; over the hard limit is FAIL, between target and hard limit is WARN.\n- Fab-house conformance: sub-minimum features are fixed, or written as per-house order options.\n\nREQUIRES KiCad 10.0 or newer (pcbnew + kicad-cli). Several capabilities need components pip cannot install: Java and the freerouting 2.3.0+ jar for routing, LibreOffice for the PDF upload slot, and DigiKey/Mouser API credentials for the availability gate. On first run the plugin checks every requirement and offers to install the python packages for you; `fluxplace doctor` does the same from the CLI.",
   "identifier": "com.parkktech.fluxplace",
   "type": "plugin",
   "author": {
@@ -32,6 +32,13 @@
     "fabrication"
   ],
   "versions": [
+    {
+      "version": "0.9.0",
+      "status": "development",
+      "kicad_version": "10.0",
+      "download_url": "https://github.com/parkktech/kicad-fluxplace/archive/refs/tags/v0.9.0.zip",
+      "changelog": "Packaging-rules gate P1-P8; PCBWay and JLCPCB fab sets; delivery for a new version of an existing delivery; review/fab/deliver --baseline; spec-sync; limits registry and AI limit research; fabconform; extension docs."
+    },
     {
       "version": "0.8.0",
       "status": "development",

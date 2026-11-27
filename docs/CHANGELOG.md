@@ -1,5 +1,23 @@
 # Change log (moved from the README)
 
+## 2026-11-27
+
+- re-net/incremental runs strip foreign copper on swapped/new pads before the zone refill (open_pads)
+- route gate baselines inherited gaps
+- [ai] decide = "on": the AI decider answers route/tool questions, logged with evidence
+- run records live outside the code tree (~/.local/share/fluxplace/runs.jsonl)
+- pad-net audit treats same-number twin pads as one pin
+- pair skew measured by copper per path; FAIL only above the interface's sourced hard limit, tighter targets are WARN (PACKAGING-RULES P1)
+- review/fab/deliver --baseline: new-vs-inherited by finding code + refs; a worse value is new
+- title block rev from [project] version; swapped footprints get a resolving 3D model
+- deliver for a version of an existing delivery (prev BOM/DNP/assembly carried, README-FIRST what-changed + KNOWN OPEN, review/, renders, datasheets, project)
+- JLCPCB set beside PCBWay (rotation corrections fetched from JLCKicadTools at a pinned sha, consigned/thin-stock lists)
+- spec-sync; pinmaps of swapped parts rebuilt from datasheet pin tables
+- POWER_WIDTH judges plane taps by branch current; unknown rail loads are a kickoff finding
+- limits registry + AI limit research on numeric FAILs
+- fabconform: sub-minimum features fixed or written as per-house order options
+- PACKAGING-RULES P1-P8 enforced by the deliver gate
+
 
 ## 2026-11-19 - fp-check: footprint defects caught before placement, never waived
 
