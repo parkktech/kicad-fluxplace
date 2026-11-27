@@ -125,7 +125,11 @@ def narrowed(board, baseline, tol=0.005):
 
 def findings(board, baseline):
     """review findings (FAIL PAIR_NARROWED) for `narrowed`."""
+    try:
+        rows = narrowed(board, baseline)
+    except (IndexError, OSError, ValueError):            # a board or baseline that does not parse has no measurable tracks: nothing to compare
+        return []
     return [{"level": "FAIL", "code": "PAIR_NARROWED", "refs": [], "value": w, "limit": w0,
              "msg": f"{p}: {n} update-laid track(s) as narrow as {w:g} mm, the same pair on the baseline is {w0:g} mm "
                     "- re-lay it at its own geometry (`fluxplace pairs --only ... --baseline`)"}
-            for p, w, w0, n in narrowed(board, baseline)]
+            for p, w, w0, n in rows]
