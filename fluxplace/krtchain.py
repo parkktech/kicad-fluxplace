@@ -267,7 +267,7 @@ def _post(best, d, planes, R, protect=()):
     return {"snap": snap, "ties": ties}
 
 
-def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=None):
+def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=None, released=None):
     """PHASE3C C.1 `pairgroups`: regroup the incomplete pairs (pairaudit) per connector group -> dst. No incomplete pair:
     dst is a copy of src. Legs of the pairs still failed go to `failed_legs` (the route step leaves them to the pair stage).
     PHASE3E 4: budget = PER_PAIR_S x incomplete pairs, capped by budget_s (the stage budget left). Any exception puts
@@ -292,6 +292,8 @@ def _run_pairgroups(c, d, src, dst, failed_legs, budget_s, pair_legs=(), scope=N
                 raise RuntimeError("no stage budget left for pairgroups")
             rep = PO.regroup(src, dst, c.cons, spec, todo, log=lines.append, budget_s=budget)
             failed_legs.update(x for p in rep["failed"] for x in p)
+            if released is not None:                          # w84: the pairs this step re-laid replace their old (locked) copper: the commit point releases them
+                released.update(x for g in rep["groups"].values() for nm in g.get("laid", []) for x in str(nm).split("/"))
         else:
             shutil_copy(src, dst)
             rep = {"skipped": "no incomplete pair"}
@@ -429,9 +431,10 @@ def run(c, n, board, runner=run_step):
                 shutil_copy(s, o)
                 return 0
         steps.append(("rails-branch", lambda s, o: _branch))
+    laid_legs = set()                                        # w84: legs of the pairs pairgroups re-laid (released at the commit point)
     failed_legs = set()                                      # C.2: legs of pairs pairgroups could not lay are never plain nets
     def _pairgroups(s, o):
-        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope)
+        return _run_pairgroups(c, d, s, o, failed_legs, min(CAP_S, max(0.0, budget - (time.time() - t0))), pair_legs=pn, scope=scope, released=laid_legs)
     steps.append(("pairgroups", lambda s, o: _pairgroups))   # a callable step: run() calls it, not the router runner
     hs_rec = {"excluded": []}
     def _route_nets(src):
@@ -567,6 +570,13 @@ def run(c, n, board, runner=run_step):
             _status(spath, "failed", rows, left, rc)
             return {"verdict": "fail", "board": cur, "line": f"krt-whole: step {name} rc={rc} after {secs}s (total budget {budget:g}s)",
                     "next": tail, "steps": rows}
+        try:                                                 # w84: the step breaks no net contract: off-contract NEW copper is stripped here, not refused at the commit
+            from . import boardwrite as BW
+            st = BW.strip_contract(cur, dst, c.cons, getattr(c, "spec", None))
+            if st["removed"]:
+                rows[-1]["contract_stripped"] = st
+        except Exception as e:                               # noqa: BLE001 - the commit point still enforces the contract
+            rows[-1]["contract_strip_error"] = f"{type(e).__name__}: {str(e)[:100]}"
         changed = _restore_project(board, dst)
         if changed:
             rows[-1]["router_project_discarded"] = changed
@@ -693,7 +703,7 @@ def run(c, n, board, runner=run_step):
         line += "; open: " + ", ".join(sorted(left))
     unfinished = bool(left) or bool(quality["not_done"]["count"]) or bool(post_error)
     _status(spath, "warn" if unfinished else "done", rows, left, 0, extra=dict(quality, pairs_missed=missed, pairs_already_done=already_done, **({"post_error": post_error} if post_error else {})))
-    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"]}
+    return {"verdict": "warn" if unfinished else "pass", "open": left, "board": best, "line": line, "steps": rows, "post": post, "post_error": post_error, "quality": quality, "rails": rails_rec, "rf": rf_rec, "hs_excluded": hs_rec["excluded"], "released": sorted(laid_legs)}
 
 
 def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spath):
@@ -704,6 +714,7 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
     one rung.  -> rc; rung 0 writes dst's summary json, later rungs `<dst>.r<k>.json`, `rec` gets {net: [{width, layers, open}]}."""
     from . import power as PWR
     cur, todo, k = src, list(nets), 0
+    allowed = _contract_layers(src, c, nets)
     ladders = {n: PWR.ladder_widths(c.cons, n, rails[n], R_TRACK(base, a)) for n in nets}
     base_json = dst[:-10] + ".json"
     while todo:
@@ -713,6 +724,7 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
         lows = {n: w for n, w in widths.items() if w <= PWR.LADDER_INNER_MAX_MM + 1e-9 and k > 0}
         groups = [(g, PWR.ladder_layers(c.cons, sig, min(g.values()), fallback=k > 0)) for g in
                   ({n: w for n, w in widths.items() if n not in lows}, lows) if g]
+        groups = _contract_split(groups, allowed)          # w84: a rail whose contract names its layers is never laid off them
         for gi, (g, lay) in enumerate(groups):
             out_k = f"{dst[:-10]}.r{k}{gi}.kicad_pcb"
             summ = base_json if (k == 0 and gi == 0) else f"{dst[:-10]}.r{k}{gi}.json"
@@ -734,6 +746,31 @@ def _rails_ladder(a, c, base, rails, nets, sig, src, dst, xtra, rec, runner, spa
         k += 1
     shutil_copy(cur, dst)
     return 0
+
+
+def _contract_layers(board, c, nets):
+    """{net: [allowed copper layers]} for the nets whose net contract (netclass.contract) names its layers; {} when unreadable."""
+    try:
+        from . import netclass as NC, routediag as RD
+        con = NC.contract(RD.load(board), c.cons, getattr(c, "spec", None), board=board, lock=False)
+        return {n: list(con[n]["layers"]) for n in nets if con.get(n) and con[n]["layers"]}
+    except Exception:                                       # noqa: BLE001 - no contract facts: the commit point still enforces it
+        return {}
+
+
+def _contract_split(groups, allowed):
+    """w84: [(group {net: width}, layers)] -> the same with every net laid only on the layers its contract allows: nets of one
+    group that differ in their allowed layers become separate calls; a net with no allowed layer in the call stays open."""
+    out = []
+    for g, lay in groups:
+        by = {}
+        for n, w in g.items():
+            a = allowed.get(n)
+            ls = tuple(x for x in lay if a is None or x in a)
+            if ls:
+                by.setdefault(ls, {})[n] = w
+        out += [(sub, list(ls)) for ls, sub in by.items()]
+    return out
 
 
 def R_TRACK(base, a):

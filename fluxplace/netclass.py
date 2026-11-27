@@ -444,6 +444,19 @@ def contract(B, cons=None, spec=None, cls=None, board=None, lock=True):
     return out
 
 
+def contract_reason(e, layer, w, length):
+    """Why a track of `layer` / width `w` / `length` mm is off the net contract entry `e`, or None."""
+    if e["layers"] and layer not in e["layers"]:
+        return f"{layer} not in {'/'.join(e['layers'])}"
+    if length > e["neck_mm"]:
+        want = (e["width"] or {}).get(layer)
+        if want and abs(w - want) > e["width_tol"] + 1e-9:
+            return f"{w:g} mm on {layer}, contract {want:g}"
+        if e["width_min"] and w < e["width_min"] - 1e-6:
+            return f"{w:g} mm under minimum {e['width_min']:g}"
+    return None
+
+
 def contract_violations(con, rows):
     """rows = {net: [{kind, layer, w, len}]} (the NEW copper of a candidate) -> {net: [reason]} for every net whose new copper is off
     its contract (layer not allowed, width off the per-layer width by more than the tolerance, width under the minimum).  A run no
@@ -456,16 +469,7 @@ def contract_violations(con, rows):
         for it in items:
             if it["kind"] != "track":
                 continue
-            lay, w = it["layer"], it["w"]
-            why = None
-            if e["layers"] and lay not in e["layers"]:
-                why = f"{lay} not in {'/'.join(e['layers'])}"
-            elif it["len"] > e["neck_mm"]:
-                want = (e["width"] or {}).get(lay)
-                if want and abs(w - want) > e["width_tol"] + 1e-9:
-                    why = f"{w:g} mm on {lay}, contract {want:g}"
-                elif e["width_min"] and w < e["width_min"] - 1e-6:
-                    why = f"{w:g} mm under minimum {e['width_min']:g}"
+            why = contract_reason(e, it["layer"], it["w"], it["len"])
             if why:
                 bad.setdefault(n, []).append(why)
     return bad
