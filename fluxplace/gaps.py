@@ -260,6 +260,17 @@ def deferred_left(left, later_stages):
     return None
 
 
+def split_preexisting(left, base_left, tol=0.01):
+    """Re-net / incremental runs: (new, pre) rows of `left`. A row is pre-existing when the input board had a gap with the same id
+    and the same-or-smaller magnitude (`mag`, power gaps); a row that is absent from the input or larger is new."""
+    base = {g["id"]: g.get("mag") or 0 for g in base_left or ()}
+    new, pre = [], []
+    for g in left or ():
+        was_there = g["id"] in base and (g.get("mag") or 0) <= base[g["id"]] + tol
+        (pre if was_there else new).append(g)
+    return new, pre
+
+
 def gate_kinds(cons, stage):
     """Kinds gating `stage` ([] = no gate). cons [flow.gates] = {stage: [kind, ...]} overrides the defaults."""
     over = ((cons or {}).get("flow") or {}).get("gates") or {}
@@ -2454,7 +2465,7 @@ def gate_measure(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", 
     left = [g for g in m["gaps"] if kinds is None or in_scope(g, kinds)]
     failed = list(m.get("review_failed") or [])
     stop = "open" if (left or failed) else "clean"
-    rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at")} for g in left]
+    rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at"), "mag": g.get("mag")} for g in left]
     res = {"stop": stop, "exit": 0 if stop == "clean" else 5, "measure_only": True, "start": _vitals(m), "left": rows,
            "review_failed": failed}
     _write_json(os.path.join(work, "stop.json"), res)
@@ -2556,9 +2567,10 @@ def _attempt_doc(n, run_id, kind, rung, rnd, board, bsha, cons_path, cons_hash, 
 
 
 def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_min=None, max_rounds=40,
-          attempts=None, runs=None, log=print, inproc=False, kinds=None):
+          attempts=None, runs=None, log=print, inproc=False, kinds=None, baseline=None):
     """Gap loop on a copy of `board` in `work`. Returns the stop dict plus "best"; writes work/best.kicad_pcb,
-    work/gaps.json, work/stop.json, work/ledger-rows.md."""
+    work/gaps.json, work/stop.json, work/ledger-rows.md.  `baseline`: gap rows of the input board (re-net / incremental run): a gap
+    already there (same id, not worse) is reported, never worked or counted as left."""
     clock = CX.Clock()                                   # B6a: every second of this stage lands in exactly one category
     clock.switch("queue")
     os.makedirs(work, exist_ok=True)
@@ -2637,7 +2649,8 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         pass
 
     def vis(gs):                                         # PHASE3I F2: the gate's scope selects targets; the guard sees all gaps
-        return gs if kinds is None else [g for g in gs if in_scope(g, kinds)]
+        gs = gs if kinds is None else [g for g in gs if in_scope(g, kinds)]
+        return split_preexisting(gs, baseline)[0] if baseline is not None else gs
 
     def save(r):
         _write_json(state_path, {"gaps": m["gaps"], "memo": sorted(list(k) for k in memo), "round": r,
@@ -2981,7 +2994,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
         return units
 
     for r in range(max_rounds):
-        if kinds is None and not any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in m["gaps"]) or kinds is not None and not vis(m["gaps"]):
+        if kinds is None and not any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in vis(m["gaps"])) or kinds is not None and not vis(m["gaps"]):
             stop = "clean"                               # a scoped gap with no rung keeps the gate open: stop "flat"
             break
         hit = False
@@ -3081,7 +3094,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
             m = _remeasure(best, kicad_cli)
             _classify_into(m, cons, best)
             if stop == "clean" and (vis(m["gaps"]) if kinds is not None else
-                                    any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in m["gaps"])):
+                                    any(g["kind"] in DISPATCH or g["kind"] == "pair-unmeasured" for g in vis(m["gaps"]))):
                 stop = "protection"                      # the board handed on is an earlier state: its gaps are back, it is not clean
         else:
             shutil.rmtree(os.path.join(work, "accepted"), ignore_errors=True)       # the final board verifies: the snapshots are not needed
@@ -3090,7 +3103,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     left = []
     for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
-        left.append({"id": g["id"], "kind": g["kind"], "class": g["class"],
+        left.append({"id": g["id"], "kind": g["kind"], "class": g["class"], "mag": g.get("mag"),
                      "last_method": l.get("method"), "why": l.get("why")})
     ignored = []                                  # PHASE3H A7: answers left unapplied, with the reason
     by_sid = {critroute._safe(ai_key(g))[:80]: g for g in m["gaps"]}

@@ -1010,8 +1010,9 @@ def st_close(c, n, board):
             post = dict(post or {}, refused=v["why"])                          # the snap broke a protected item: close the board as it came
     except (Exception, SystemExit):                       # noqa: BLE001 - never blocks the close loop
         post = None
+    base = _input_baseline(c, None, c.dir(n, "close"))      # re-net / incremental run: the input board's gaps are reported, not worked
     try:
-        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att)
+        res = in_fresh_process("fluxplace.gaps", "close", board, c.dir(n, "close"), c.cons_path, c.cons, attempts=att, baseline=base)
     except (Exception, SystemExit) as e:
         try:
             open(os.path.join(c.dir(n, "close"), "crash.log"), "w").write(str(e))
@@ -1438,6 +1439,40 @@ def _deferred_line(rows):
     return ", ".join(f"{k} {v}" for k, v in sorted(Counter(g["kind"] for g in rows).items()))
 
 
+def _input_baseline(c, kinds, d):
+    """Re-net / incremental run (state `route_scope`): the gap rows of the input board in `kinds` (None = all), measured once per kinds;
+    None on a whole-board run or when the measure fails (the gate / close stay strict)."""
+    sc = (getattr(c, "state", None) or {}).get("route_scope")
+    if not (sc and sc.get("input")):
+        return None
+    cache = c.state.setdefault("_gate_baseline", {})
+    k = ",".join(kinds) if kinds else "*"
+    if k not in cache:
+        from . import gaps as GP
+        try:
+            cache[k] = GP.gate_measure(sc["input"], d + "-input", c.cons_path, c.cons, kinds=kinds)["left"]
+        except (Exception, SystemExit):                     # noqa: BLE001
+            return None
+    return cache[k]
+
+
+def _preexisting_only(c, r, d, kinds):
+    """Re-net / incremental run (state `route_scope`): a gate that ended on gaps only (stop flat/no-gain/rounds) and where every left gap
+    is also on the input board (same id, not worse) does not stop the flow. -> the pre-existing rows or None. Stamps stop.json."""
+    left = r.get("left") or []
+    if not left or r["stop"] in ("clean", "packets", "protection", "crashed", "manifest_stale"):
+        return None
+    base = _input_baseline(c, kinds, d)
+    if base is None:
+        return None
+    from . import gaps as GP
+    new, pre = GP.split_preexisting(left, base)
+    if new or not pre:
+        return None
+    _stamp_stop(d, {"preexisting": pre})
+    return pre
+
+
 def _gate_check(c, n, name, board, kinds, src=None, later=()):
     """PHASE3I B1: stage gate. The gap loop (gaps.close) scoped to `kinds` must end clean before the next stage runs.
     -> {"verdict": pass|packets|fail, "board": best board, "line", "next", "gate"}; the gate dir holds gaps.json and stop.json."""
@@ -1462,6 +1497,10 @@ def _gate_check(c, n, name, board, kinds, src=None, later=()):
     unans = verdict == "packets" and not GP.ai_answer_required(c.cons)          # [ai] answer = optional: defaults used, the flow goes on
     ua = {"ai_unanswered": _packet_ua(c, pk, [p.get("gap_id") or os.path.basename(p["packet"]) for p in r.get("packets") or [] if p.get("packet")],
                                       os.path.join(d, "ai"), "the next stage's gap loop")} if unans else {}
+    pre = _preexisting_only(c, r, d, kinds)
+    if pre:                                                 # re-net / incremental run: only gaps the input board already had
+        return {"verdict": "warn", "board": r["best"], "gate": {"kinds": kinds, "stop": "preexisting", "dir": d, "preexisting": pre},
+                "line": line.replace(f": {stop},", ": pre-existing,", 1) + f"; WARN {len(pre)} gap(s) already on the input board: {_deferred_line(pre)}", "next": []}
     rows = _defer_gate(r, d, later)
     if rows:                                                # only findings a later stage owns: the flow goes on
         return {"verdict": "warn", "board": r["best"], "line": line.replace(f": {stop},", ": deferred,", 1) + f"; carried to {', '.join(sorted({o for g in rows for o in GP.GATE_DEFER[g['kind']] if o in later}))}: {_deferred_line(rows)}",
