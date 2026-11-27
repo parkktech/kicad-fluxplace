@@ -256,3 +256,34 @@ def test_a_blocked_terminal_does_not_abandon_the_neighbourhood(monkeypatch, tmp_
     nh = res["report"]["neighbourhoods"][0]
     assert nh["verdict"] == "chosen", nh
     assert {k[0] for k in res["choice"]} == {p0} and any("generic exit" in w for w in nh["why"])
+
+
+def _repair_world(monkeypatch, new_score):
+    q0, q1 = ("A_N", "A_P"), ("B_N", "B_P")
+    ok = {"full": True, "e": {"status": "laid"}}
+    bad = {"full": False, "e": {"status": "partial"}}
+    best = {"order": [q0, q1], "res": {q0: ok, q1: bad}, "score": (1, 0, 0.0)}
+    info = {q0: ([], [], [(0, 1)], 1.0), q1: ([], [], [(0, 1)], 1.0)}
+    neg, calls = {"escape": {}, "escape_reserve": {}}, []
+
+    def fake_plan(*a, **kw):
+        calls.append(kw.get("focus"))
+        return {"choice": {("x", 0): {}}, "reserve": {}, "report": {"neighbourhoods": []}}
+    monkeypatch.setattr(PE, "plan", fake_plan)
+    monkeypatch.setattr(PR, "guard_limit", lambda cons, net: 1.0)
+    run = lambda: PR._escape_repair(best, [q0, q1], [q0, q1], info, {}, {}, {}, {}, None, lambda order: {"order": order, "score": new_score}, {}, neg, None, None, lambda m: None)
+    return best, neg, calls, run, q1
+
+
+def test_escape_repair_plans_only_for_a_failed_pair_and_keeps_only_a_gain(monkeypatch):
+    best, neg, calls, run, q1 = _repair_world(monkeypatch, (2, 0, 0.0))
+    st = run()
+    assert calls == [{q1}] and st["score"] == (2, 0, 0.0) and neg["escape"]
+    best, neg, calls, run, q1 = _repair_world(monkeypatch, (1, 0, 0.0))
+    assert run() is best and not neg["escape"] and not neg["escape_reserve"]          # no gain: the choice is dropped
+
+
+def test_escape_repair_is_free_when_every_pair_laid(monkeypatch):
+    best, neg, calls, run, q1 = _repair_world(monkeypatch, (2, 0, 0.0))
+    best["res"][q1] = {"full": True, "e": {"status": "laid"}}
+    assert run() is best and calls == []

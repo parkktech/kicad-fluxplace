@@ -355,7 +355,7 @@ def cache_dir(cons):
     return d or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(tempfile.gettempdir(), "fluxplace-cache"), "pair-escape")
 
 
-def fingerprint(B, cons, live):
+def fingerprint(B, cons, live, focus=()):
     """sha of what the plan depends on: the placement (pads with net, position, size, layers), the board's rule areas and outline, the
     pairlay / pairs / channel / plan constraints and the pairs to lay.  Tracks and vias are NOT in it: the fan-out stage adds and strips
     copper, the exits planned before it are the ones the pairs stage reuses."""
@@ -366,6 +366,7 @@ def fingerprint(B, cons, live):
     sub = {k: (cons or {}).get(k) for k in ("pairlay", "pairs", "channel", "plan", "fab", "netclass")}
     h.update(json.dumps(sub, sort_keys=True, default=str).encode())
     h.update(json.dumps(sorted("/".join(q) for q in live)).encode())
+    h.update(json.dumps(sorted("/".join(q) for q in focus)).encode())
     return h.hexdigest()
 
 
@@ -430,7 +431,7 @@ def cross_scores(ghost, cands, info, vset, targets, base, limit, hood, rep):
     return rows
 
 
-def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None):
+def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: None, order=None, focus=None):
     """-> {"choice", "reserve", "report"}.
     ctx_of() -> fresh lay context; ghost(pairs, escape, reserve) -> {pair: lay result} (production lay on a fresh state, in `pairs` order)."""
     p = params(cons)
@@ -441,9 +442,9 @@ def plan(ctx_of, ghost, info, rules, key, live, cons, B, limit, log=lambda m: No
     if not p["on"] or not live:
         return out
     comps = components(info, live)
-    seeds = [c for c, ts in comps.items() if len({q for q, _ti in ts}) >= 2]      # a part with two or more pairs on it
+    seeds = [c for c, ts in comps.items() if len({q for q, _ti in ts}) >= 2 and (not focus or any(q in focus for q, _ti in ts))]      # a part with two or more pairs on it (one of them a failed pair, in a repair)
     ctx0 = ctx_of()
-    fp = fingerprint(B, cons, live)
+    fp = fingerprint(B, cons, live, focus or ())
     hit = _load(cons, fp, ctx0, info, rules, p)
     if hit is not None:
         return hit
