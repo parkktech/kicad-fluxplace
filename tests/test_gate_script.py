@@ -1,6 +1,5 @@
 """tools/merge-gate.sh: a killed gate must free its slot (no orphan suite holding the flock)."""
-import os, signal, subprocess, sys, time, fcntl
-import pytest
+import contextlib, fcntl, os, signal, subprocess, sys, time
 
 GATE = os.environ.get("GATE_SCRIPT") or os.path.join(os.path.dirname(__file__), "..", "tools", "merge-gate.sh")
 
@@ -16,31 +15,6 @@ def _free(path):
         os.close(fd)
 
 
-def test_killed_gate_releases_its_slot(tmp_path):
-    wt = tmp_path / "wt"; (wt / "tests").mkdir(parents=True)
-    (wt / "tests" / "test_slow.py").write_text("import time\ndef test_slow():\n    time.sleep(120)\n")
-    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
-        subprocess.run(["git", "-C", str(wt)] + c, check=True, capture_output=True)
-    lock = tmp_path / "lock"; (tmp_path / "base").write_text("")
-    env = dict(os.environ, GATE_SLOTS="1", GATE_LOCKDIR=str(lock), GATE_WORKERS="0", PY=sys.executable)
-    p = subprocess.Popen(["bash", GATE, str(wt), str(tmp_path / "base")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    slot = str(lock / "slot1")
-    t = time.time()
-    while time.time() - t < 30 and (not os.path.exists(slot) or _free(slot) or not _suite_running(wt)):
-        time.sleep(0.3)
-    assert not _free(slot), "gate never took the slot"
-    p.send_signal(signal.SIGTERM); p.wait(timeout=20)
-    t = time.time()
-    while time.time() - t < 10 and not _free(slot):
-        time.sleep(0.3)
-    assert _free(slot), "slot still held after the gate was killed (orphaned suite)"
-
-
-def _suite_running(wt):
-    return subprocess.run(["pgrep", "-f", f"pytest.*tests/"], capture_output=True).stdout.strip() != b"" and \
-        subprocess.run(["pgrep", "-f", "test_slow"], capture_output=True).returncode in (0, 1)
-
-
 def _wt(tmp_path, name="wt", body="def test_ok():\n    pass\n"):
     wt = tmp_path / name; (wt / "tests").mkdir(parents=True)
     (wt / "tests" / "test_ok.py").write_text(body)
@@ -49,12 +23,11 @@ def _wt(tmp_path, name="wt", body="def test_ok():\n    pass\n"):
     return wt
 
 
-def _gate(tmp_path, wt, extra=None, *args):
+def _gate(tmp_path, wt, extra=None):
     (tmp_path / "base").write_text("")
     env = dict(os.environ, GATE_SLOTS="1", GATE_LOCKDIR=str(tmp_path / "lock"), GATE_WORKERS="0", GATE_POLL="0.3",
                PY=sys.executable, **(extra or {}))
-    return subprocess.Popen(["bash", GATE, *args] if args else ["bash", GATE, str(wt), str(tmp_path / "base")],
-                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return subprocess.Popen(["bash", GATE, str(wt), str(tmp_path / "base")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
 def _hold_slot(tmp_path):
@@ -64,6 +37,11 @@ def _hold_slot(tmp_path):
     while _free(str(lock / "slot1")) and time.time() - t < 10:
         time.sleep(0.1)
     return h
+
+
+def _kill_holder(h):
+    with contextlib.suppress(OSError):
+        os.killpg(h.pid, signal.SIGKILL)
 
 
 def _wait_queued(tmp_path, n):
@@ -85,19 +63,35 @@ def _finish_order(procs, timeout=90):
     return order
 
 
+def test_killed_gate_releases_its_slot(tmp_path):
+    wt = _wt(tmp_path, body="import time\ndef test_ok():\n    time.sleep(120)\n")
+    p = _gate(tmp_path, wt)
+    slot = str(tmp_path / "lock" / "slot1")
+    t = time.time()
+    while time.time() - t < 30 and (not os.path.exists(slot) or _free(slot) or not _suite_running()):
+        time.sleep(0.3)
+    assert not _free(slot), "gate never took the slot"
+    p.send_signal(signal.SIGTERM); p.wait(timeout=20)
+    t = time.time()
+    while time.time() - t < 10 and not _free(slot):
+        time.sleep(0.3)
+    assert _free(slot), "slot still held after the gate was killed (orphaned suite)"
+
+
+def _suite_running():
+    return subprocess.run(["pgrep", "-f", "pytest.*tests/"], capture_output=True).stdout.strip() != b""
+
+
 def test_waiters_take_slots_in_arrival_order(tmp_path):
     wt = _wt(tmp_path); h = _hold_slot(tmp_path)
     try:
         procs = {}
         for k in ("a", "b", "c"):
             procs[k] = _gate(tmp_path, wt); _wait_queued(tmp_path, len(procs))
-        os.killpg(h.pid, signal.SIGKILL); h.wait()
+        _kill_holder(h); h.wait()
         assert _finish_order(procs) == ["a", "b", "c"]
     finally:
-        try:
-            os.killpg(h.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _kill_holder(h)
 
 
 def test_priority_gate_overtakes_earlier_waiters(tmp_path):
@@ -106,13 +100,10 @@ def test_priority_gate_overtakes_earlier_waiters(tmp_path):
         procs = {"a": _gate(tmp_path, wt)}; _wait_queued(tmp_path, 1)
         procs["b"] = _gate(tmp_path, wt); _wait_queued(tmp_path, 2)
         procs["main"] = _gate(tmp_path, wt, {"GATE_PRIORITY": "1"}); _wait_queued(tmp_path, 3)
-        os.killpg(h.pid, signal.SIGKILL); h.wait()
+        _kill_holder(h); h.wait()
         assert _finish_order(procs) == ["main", "a", "b"]
     finally:
-        try:
-            os.killpg(h.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _kill_holder(h)
 
 
 def test_queue_listing_names_holder_and_waiters_in_order(tmp_path):

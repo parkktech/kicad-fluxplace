@@ -11,7 +11,6 @@
 #   Queue line: "merge-gate: queue: testing HEAD <sha>"; the gate fails (exit 2) if HEAD moved or tracked files changed
 #   during the run, so the sha printed is the sha to merge.
 set -u
-out=$(mktemp)
 # Gate queue (2026-11-26): 5-6 concurrent gates on 32 cores gave load 90-170, timeouts (rc 124, 149 failures) and
 # timing flakes. At most GATE_SLOTS gates run at once; the rest wait for a slot (the wait is not part of the timeout).
 # B9 queue rules: waiters take slots in ARRIVAL order (ticket number); GATE_PRIORITY=1 (mainline gate) goes before every
@@ -36,7 +35,7 @@ fi
 WT=${1:?worktree}; HERE=$(cd "$(dirname "$0")/.." && pwd); BASE=${2:-$HERE/docs/TEST-BASELINE.txt}
 PY=${PY:-/usr/bin/python3}
 "$PY" "$HERE/tools/ledger-lint.py" "$WT" || true          # B2: information only, never fails the gate (yet)
-child=; wfile=; got=
+out=$(mktemp); child=; wfile=; got=
 cleanup() { [ -n "${GATE_KEEP:-}" ] && cp "$out" "$GATE_KEEP"; rm -f "$out" "$wfile"; [ -n "$got" ] && rm -f "$LOCKDIR/slot$got.info"; }
 trap cleanup EXIT
 # TERM/INT/HUP: kill the suite's process group (a killed gate used to leave timeout+pytest orphaned under init, still
