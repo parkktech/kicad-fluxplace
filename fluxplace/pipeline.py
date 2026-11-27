@@ -1059,13 +1059,67 @@ def _packet_ua(c, paths, keys, ai_dir, carried):
     return PK.resolve(list(zip(paths, keys)), set(keys), ans, carried=carried, ai_dir=ai_dir)
 
 
+def _relay_and_retune(c, d, out, targs, text):
+    """A pair whose legs differ in layers/vias (`needs_reroute`: laid by two routers, or re-laid by a re-net run) cannot be length-tuned as is:
+    its copper is re-laid whole (`pairs --only ... --unlock`, other copper untouched, kept unless the new pair is in tolerance and
+    DRC/open-clean) and tuned.  A pair the re-lay could not improve is length-tuned as it stands (`tune --allow-layer-mismatch`, last resort,
+    reported).  -> (rc, text) of the tune steps."""
+    rep = out + ".tune.json"
+
+    def rows():
+        try:
+            return json.load(open(rep)).get("pairs", [])
+        except (OSError, ValueError):
+            return []
+
+    def need_of(rs):                                     # only pairs over their limit: a mismatched pair inside it is not churned
+        return [r["pair"] for r in rs if r.get("status") == "needs_reroute" and "/" in str(r.get("pair"))
+                and (r.get("skew") is None or r.get("limit") is None or abs(r["skew"]) > r["limit"])]
+
+    need = need_of(rows())
+    if not need:
+        return 0, text
+    only = ",".join(x for p in need for x in p.split("/", 1))
+    src, tmp = os.path.join(d, "relay-in.kicad_pcb"), os.path.join(d, "relay.kicad_pcb")      # pairs refuses --out == the input board
+    _copy(out, src)
+    _sidecar(out, src)
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    rc, _ = _run_cli(["pairs", src, "--only", only, "--unlock", "--out", tmp, "--budget", str(150 * len(need))] + c.cs(),
+                     os.path.join(d, "relay.log"))
+    done = rc != 99 and os.path.isfile(tmp)              # exit 1 = some pair kept as it was: the file still carries the pairs that were re-laid
+    note = f"relay: pairs --only {only}: " + ("done" if done else f"failed (exit {rc})") + f" ({os.path.join(d, 'relay.log')})"
+    if done:
+        _copy(tmp, out)
+    rc2, text2 = _run_cli(targs, os.path.join(d, "stage2.log"))
+    text += f"\n{note}\n" + text2
+    left = need_of(rows())
+    if rc2 == 0 and left:                                 # the re-lay kept the original: tune the legs as they stand, only these pairs
+        keep = [r for r in rows() if r["pair"] not in left]
+        masters = [p.split("/", 1)[0] for p in left]
+        rc3, text3 = _run_cli(targs + ["--allow-layer-mismatch", "--prefix"] + masters + ["--report", os.path.join(d, "mismatch.tune.json")],
+                              os.path.join(d, "stage3.log"))
+        try:
+            sub = json.load(open(os.path.join(d, "mismatch.tune.json")))
+            sub["pairs"] = keep + [r for r in sub.get("pairs", []) if r["pair"] in left]
+            json.dump(sub, open(rep, "w"), indent=1)
+        except (OSError, ValueError):
+            pass
+        text += f"\nrelay: {', '.join(left)} could not be re-laid; length-tuned as they stand (legs stay on different layers)\n" + text3
+        rc2 = rc3
+    return rc2, text
+
+
 def st_tune(c, n, board):
     d = c.dir(n, "tune")
     out = os.path.join(d, "board.kicad_pcb")
     _copy(board, out)
     _sidecar(board, out)
-    rc, text = _run_cli(["tune", "--board", out, "--out", out] + (["--constraints", c.cons_path] if c.cons_path else []),
-                        os.path.join(d, "stage.log"))
+    only = [x for x in os.environ.get("FLUXPLACE_TUNE_ONLY", "").split(",") if x]       # a re-net / incremental run tunes only the pairs it re-laid
+    targs = ["tune", "--board", out, "--out", out] + (["--constraints", c.cons_path] if c.cons_path else []) + (["--prefix"] + only if only else [])
+    rc, text = _run_cli(targs, os.path.join(d, "stage.log"))
+    if rc == 0:
+        rc, text = _relay_and_retune(c, d, out, targs, text)
     over = [l for l in text.splitlines() if "still over" in l]
     if rc != 0:
         return {"verdict": "fail", "line": _last_line(text) or f"exit {rc}", "board": board,
@@ -2124,6 +2178,30 @@ def _classify_update(a, stages):
     return {**cl, "from": start, "line": line}
 
 
+def _retune_relaid(c, work, board, st, n, later):
+    """Re-net / incremental run (state `route_scope`): the route re-laid the scope's nets, and the `tune` stage is not in this run (or was skipped as
+    incremental), so a pair the route re-laid is never length-matched.  Runs the tune stage on the diff pairs the scope touches (other pairs and
+    all other copper untouched; `needs_reroute` pairs are re-laid whole, else length-tuned as they stand).  -> the tuned board, or `board`."""
+    sc = (st or {}).get("route_scope")
+    if not sc or not os.path.isfile(board):
+        return board
+    from . import boardtext as BT, graph as G
+    src = open(board, errors="surrogateescape").read()
+    names = {BT.net_name(b) for _i, _j, _k, b in BT.scan(src)} - {None}
+    masters = sorted(m for s_, m in G.diff_pairs(names).items() if s_ in sc["nets"] or m in sc["nets"])
+    if not masters:
+        return board
+    os.environ["FLUXPLACE_TUNE_ONLY"] = ",".join(masters)
+    try:
+        res = _exec_stage(c, f"{n}b", "tune", board, later)
+    finally:
+        os.environ.pop("FLUXPLACE_TUNE_ONLY", None)
+    print(f"pipeline: re-laid pairs tuned ({', '.join(masters)}): {res['verdict']} - {_clip(res.get('line', ''), 120)}", flush=True)
+    st["retune"] = {"pairs": masters, "verdict": res["verdict"], "line": res.get("line", "")}
+    save_state(work, st)
+    return res["board"] if res["verdict"] in ("pass", "warn") and res.get("board") else board
+
+
 def _exec_stage(c, n, name, board, later=()):
     """THE stage executor (the pipeline loop and tests/golden both call it): stage function (or the reused gate board), then the A3
     commit point, the pcbnew state guard and the stage gate. `later` = the stages still to run (gate deferral). -> the stage result."""
@@ -2466,6 +2544,8 @@ def _run(a):
         if res["verdict"] in ("fail", "blocked"):
             rc = 1
             break
+        if name == "close" and res["verdict"] in ("pass", "warn") and "tune" not in STAGES_[i + 1:i1 + 1]:
+            board = _retune_relaid(c, work, board, st, i + 1, STAGES_[i + 1:])
         done = i
     inc = led.finish(done)
     if failed_on:
