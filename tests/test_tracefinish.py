@@ -493,3 +493,73 @@ def test_drc_base_open_pairing_does_not_make_h10_worse(monkeypatch):
         b = TF._drc_base("x.kicad_pcb", "kicad-cli")
         outs.append({"hard": [{"id": "H10", "base": {"opens": b["opens"], "drc_keys": sum(b["types"].values())}}], "drc": b["keys"]})
     assert outs[0]["hard"][0]["base"]["opens"] == 2 and TF._worse(outs[0], outs[1]) == []
+
+
+# ---- T2 clean pass (B8): zero-length, duplicate, stacked, dangling; guarded by the DRC key multiset ---------------------------------
+
+def _t2_board(tmp_path, extra_tracks=(), vias=((10, 6),), zero=((5, 6),), zone=True):
+    pcbnew = pytest.importorskip("pcbnew")
+    from test_routerules_syn import _board
+    P = pcbnew
+    b0 = _board(str(tmp_path / "t2.kicad_pcb"), pads=[("U1", 2, 6, "A"), ("U2", 18, 6, "A")], tracks=[(2, 6, 18, 6, "A")] + list(extra_tracks))
+    b = P.LoadBoard(b0)
+    net = b.FindNet("A")
+    for x, y in zero:
+        t = P.PCB_TRACK(b); t.SetStart(P.VECTOR2I(P.FromMM(x), P.FromMM(y))); t.SetEnd(P.VECTOR2I(P.FromMM(x), P.FromMM(y)))
+        t.SetWidth(P.FromMM(0.15)); t.SetLayer(P.F_Cu); t.SetNet(net); b.Add(t)
+    for x, y in vias:
+        v = P.PCB_VIA(b); v.SetPosition(P.VECTOR2I(P.FromMM(x), P.FromMM(y))); v.SetWidth(P.FromMM(0.6)); v.SetDrill(P.FromMM(0.3))
+        v.SetNet(net); v.SetLayerPair(P.F_Cu, P.B_Cu); b.Add(v)
+    if zone:                                         # a B.Cu pour of the net: the via is a real two-layer connection
+        z = P.ZONE(b); z.SetLayer(P.B_Cu); z.SetNetCode(net.GetNetCode())
+        ch = P.SHAPE_LINE_CHAIN()
+        for x, y in ((1, 1), (19, 1), (19, 11), (1, 11)):
+            ch.Append(P.FromMM(x), P.FromMM(y))
+        ch.SetClosed(True); z.Outline().AddOutline(ch); b.Add(z)
+    P.SaveBoard(b0, b)
+    return b0
+
+
+def _items(path):
+    import pcbnew
+    b = pcbnew.LoadBoard(path)
+    tr = [t for t in b.GetTracks() if t.Type() == pcbnew.PCB_TRACE_T]
+    return len(tr), len([t for t in b.GetTracks() if t.Type() == pcbnew.PCB_VIA_T]), sum(1 for t in tr if t.GetStart() == t.GetEnd())
+
+
+def test_clean_removes_three_duplicate_vias_and_a_zero_length_segment_with_no_new_drc_key(tmp_path):
+    src = _t2_board(tmp_path, vias=[(10, 6)] * 4)                 # one via + 3 stacked duplicates, one zero-length segment
+    assert _items(src) == (2, 4, 1)
+    out = str(tmp_path / "out.kicad_pcb")
+    res = TF.clean(src, out)
+    assert res["removed"] == {"zero": 1, "stacked": 3} and res["refused"] == {}
+    assert _items(out) == (1, 1, 0)                              # the live via (zone on B.Cu) and the real track stay
+    from fluxplace import drcguard as DG
+    assert not DG.new_keys(DG.keys_per_net(TF._drc(src)), DG.keys_per_net(TF._drc(out)))      # 0 new keys
+
+
+def test_clean_removes_duplicate_and_dangling_segments_not_connected_copper(tmp_path):
+    stub = [(10, 6, 10, 9, "A"), (2, 6, 18, 6, "A")]             # a dangling stub off the track, and an exact duplicate of the track
+    src = _t2_board(tmp_path, extra_tracks=stub, vias=[], zero=[], zone=False)
+    out = str(tmp_path / "out.kicad_pcb")
+    res = TF.clean(src, out)
+    assert res["removed"].get("duplicate") == 1 and res["removed"].get("dangling") == 1
+    assert _items(out) == (1, 0, 0)
+
+
+def test_clean_keeps_a_category_that_would_add_a_drc_key(tmp_path, monkeypatch):
+    src = _t2_board(tmp_path, vias=[(10, 6)] * 2, zero=[])
+    real = TF._drc
+    calls = []
+
+    def worse(path, **k):
+        d = real(path, **k)
+        calls.append(path)
+        if len(calls) > 1:                                       # every trial board reads worse than the base
+            d = dict(d, violations=list(d["violations"]) + [{"type": "clearance", "severity": "error", "description": "new", "items": [{"description": "x", "pos": {"x": 1, "y": 1}}]}])
+        return d
+    monkeypatch.setattr(TF, "_drc", worse)
+    out = str(tmp_path / "out.kicad_pcb")
+    res = TF.clean(src, out)
+    assert res["removed"] == {} and "stacked" in res["refused"]
+    assert _items(out) == _items(src)                            # nothing kept

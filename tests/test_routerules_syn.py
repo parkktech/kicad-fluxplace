@@ -104,3 +104,21 @@ def test_router_keeps_the_floor_from_pads_tracks_and_vias(tmp_path):
     cls = FR.net_classes(None, {"track": 0.15, "min_track": FLOOR, "min_clearance": FLOOR, "clearance": FLOOR}, 0.0)
     bad = FR.subfloor_copper(out, str(tmp_path / "chk"), cls, FLOOR)
     assert not bad, bad[:5]
+
+
+@need_pcbnew
+def test_hole_to_hole_is_error_severity_with_the_fab_minimum(tmp_path):
+    from fluxplace import routerules as RR, drcguard as DG
+    b = _board(str(tmp_path / "h.kicad_pcb"), pads=[("U1", 5, 6, "NA")])
+    pro = str(tmp_path / "h.kicad_pro")
+    d = json.load(open(pro))
+    d["board"] = {"design_settings": {"rule_severities": {"hole_to_hole": "warning"}, "rules": {"min_hole_to_hole": 0.1}}}
+    json.dump(d, open(pro, "w"))
+    R = RR.rules({"fab": {"profile": "pcbway-standard"}}, b)
+    assert R["hole_to_hole_fab"] > 0 and R["hole_to_hole"] >= R["hole_to_hole_fab"]      # the fab's via-to-via figure is a floor
+    assert R["hole_to_hole_severity"] == "error"
+    assert RR.project_rules(R)["rule_severities"] == {"hole_to_hole": "error"}
+    assert RR.enforce_project(pro, R) is True
+    got = json.load(open(pro))["board"]["design_settings"]
+    assert got["rule_severities"]["hole_to_hole"] == "error" and got["rules"]["min_hole_to_hole"] >= R["hole_to_hole_fab"]
+    assert RR.enforce_project(pro, R) is False                 # idempotent

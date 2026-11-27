@@ -123,6 +123,8 @@ def drc_json(board_path, kicad_cli="kicad-cli", timeout=600, rules=None, only_ru
                 rs[k] = "ignore"
             for k in only_rules:
                 rs[k] = "error"
+        if pd and only_rules is None:                   # D71dz: drills breaking into each other are an error in every judged DRC
+            pd.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})["hole_to_hole"] = "error"
         if pro_edit:
             pro_edit(pd)
         if pd:

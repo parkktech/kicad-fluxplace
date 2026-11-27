@@ -172,11 +172,13 @@ def _copy(src, dst):
 
 
 def _sidecar(src, dst):
+    from . import routerules as _RR_
     if os.path.exists(dst) and os.path.exists(src) and os.path.samefile(src, dst):
         return
     s = os.path.splitext(src)[0] + ".kicad_pro"
     if os.path.exists(s):
         shutil.copy(s, os.path.splitext(dst)[0] + ".kicad_pro")
+        _RR_.enforce_project(os.path.splitext(dst)[0] + ".kicad_pro")      # D71dz: hole_to_hole is an error on every stage board
     pn = os.path.splitext(src)[0] + ".pins.json"           # pin-conflict decisions (pins.py) travel with the board: review reports them
     if os.path.exists(pn):
         shutil.copy(pn, os.path.splitext(dst)[0] + ".pins.json")
@@ -1089,8 +1091,19 @@ def st_silk(c, n, board):
     summ = next((l.strip() for l in text.splitlines() if l.strip().startswith("silk:")), _last_line(text))
     # Silk never copper-touches the board and review runs check_silk itself: what --fix could not fix stays a review finding at its own
     # severity, so a silk FAIL is a WARN here and the flow reaches review (one flow: silk fixes, review judges).
-    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out,
-            "next": [] if rc == 0 else ["silk findings left (review reports them with their severity): " + os.path.join(d, "stage.log")]}
+    left = {}
+    if rc != 0:                                                # B8: what the fit could not fix, by gap kind (gapmap), for the ledger and the review
+        try:
+            from . import gapmap as GM, silk as SK
+            _sc, _cfg, fnd = SK.run_check(out, c.cons, spec=json.load(open(c.spec_path)) if c.spec_path else None)
+            for f in fnd:
+                if f["level"] == "FAIL":
+                    left.setdefault(GM.kind(f["code"]) or "other", {}).setdefault(f["code"], 0)
+                    left[GM.kind(f["code"]) or "other"][f["code"]] += 1
+        except Exception as e:                                 # noqa: BLE001 - the verdict does not depend on this listing
+            left = {"unlisted": {type(e).__name__: 1}}
+    return {"verdict": "pass" if rc == 0 else "warn", "line": summ, "board": out, "silk_left": left,
+            "next": [] if rc == 0 else ["silk findings left by gap kind " + json.dumps(left) + " (review reports them with their severity): " + os.path.join(d, "stage.log")]}
 
 
 def st_review(c, n, board):
@@ -1475,7 +1488,8 @@ def _commit_point(name, prev, res, cons=None):
         if man["nets"][x].get("why") != "locked":
             complete.setdefault(x, man["nets"][x].get("why", "kept"))
     try:
-        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man)      # the stage ran: items decide, not the sha
+        v = BW.commit(prev, new, new, release=rel, complete=complete, reason=name, manifest=man,
+                      allow=res.get("authorized") if name == "trace-finish" else None)      # B8: trace-finish writes only the items it names      # the stage ran: items decide, not the sha
     except Exception as e:                                              # noqa: BLE001 - an unchecked commit must not pass
         return dict(res, verdict="fail", board=prev, line=f"commit check crashed: {type(e).__name__}: {str(e)[:100]}",
                     next=[f"{name}: output not adopted"])

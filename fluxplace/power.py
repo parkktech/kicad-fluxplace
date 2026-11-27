@@ -776,6 +776,23 @@ def _spine_segments(b, nc, L):
     return out
 
 
+def pad_spine(b, nc, L, width_mm):
+    """R036: the spine of a rail the router never laid (or laid on inner layers only): a minimum spanning tree over the net's pads that
+    touch copper layer `L`, straight segments `width_mm` wide. -> [(x1, y1, x2, y2, w) mm]; [] for fewer than two pads."""
+    import pcbnew
+    pts = [(pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)) for p in b.GetPads()
+           if p.GetNetCode() == nc and p.IsOnLayer(L)]
+    if len(pts) < 2:
+        return []
+    done, out = {0}, []
+    while len(done) < len(pts):
+        i, j = min(((i, j) for i in done for j in range(len(pts)) if j not in done),
+                   key=lambda ij: math.hypot(pts[ij[0]][0] - pts[ij[1]][0], pts[ij[0]][1] - pts[ij[1]][1]))
+        out.append((pts[i][0], pts[i][1], pts[j][0], pts[j][1], width_mm))
+        done.add(j)
+    return out
+
+
 def rail_inner_mm(board_path, rails):
     """{net: mm} of track length on inner copper layers for each rail (spines that do not reach the outer pour)."""
     import pcbnew
@@ -856,8 +873,13 @@ def pour_rails(board_path, cons, out, layers=None, nets=None):
         if ni is None:
             rec["skipped"][net] = "net not on board"
             continue
-        for L in (pcbnew.F_Cu, pcbnew.B_Cu):
-            segs = _spine_segments(b, ni.GetNetCode(), L)
+        spines = {L: _spine_segments(b, ni.GetNetCode(), L) for L in (pcbnew.F_Cu, pcbnew.B_Cu)}
+        if not any(spines.values()):                      # R036: no outer spine: one over the net's pads on the outer layer that has most
+            w = max(0.15, float(plan(cons, layers=layers)[net]["track_mm"]) - 2.0 * over)      # the pour is spine + 2 * over: at least the IPC width
+            tries = {L: pad_spine(b, ni.GetNetCode(), L, w) for L in spines}
+            best = max(tries, key=lambda L: (len(tries[L]), L == pcbnew.F_Cu))
+            spines[best] = tries[best]
+        for L, segs in spines.items():
             if not segs:
                 continue
             rings = rail_outline(segs, over)

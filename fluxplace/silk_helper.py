@@ -53,6 +53,38 @@ def _ink(t):
     return (mm(bb.GetLeft() - pos.x), mm(bb.GetTop() - pos.y), mm(bb.GetRight() - pos.x), mm(bb.GetBottom() - pos.y))
 
 
+def _is_mark(g):
+    """An assembly mark by PATTERN (never by reference): a polarity / pin-1 shape of a footprint's silk artwork. Circles, polygons and arcs (dots, triangles,
+    diode-bar caps, polarity arcs), a filled rectangle, a short stroke (<= 1.5 mm: the arms of a cap '+'), a heavy stroke (>= 0.3 mm: a diode bar) and a
+    diagonal stroke (a chamfered pin-1 corner) are marks; a plain horizontal / vertical outline stroke is not. A one- or two-character text is a mark."""
+    try:
+        if g.GetClass() == "PCB_TEXT":
+            return len(pcbnew.Cast_to_PCB_TEXT(g).GetText().strip()) <= 2
+        if g.GetClass() != "PCB_SHAPE":
+            return False
+        sh = g.GetShapeStr()
+        if sh in ("Circle", "Polygon", "Arc", "Bezier"):
+            return True
+        if sh == "Rect":
+            return bool(g.IsFilled())
+        s, e = g.GetStart(), g.GetEnd()
+        dx, dy = mm(e.x - s.x), mm(e.y - s.y)
+        return (dx * dx + dy * dy) ** 0.5 <= 1.5 or mm(g.GetWidth()) >= 0.3 or (abs(dx) > 0.01 and abs(dy) > 0.01)
+    except Exception:                                    # noqa: BLE001 - an unreadable shape is kept, never removed
+        return True
+
+
+def _to_fab(item):
+    """Move a silkscreen item to the same side's Fab layer. -> False (untouched) when it is not on silkscreen."""
+    if item.GetLayer() == pcbnew.F_SilkS:
+        item.SetLayer(pcbnew.F_Fab)
+    elif item.GetLayer() == pcbnew.B_SilkS:
+        item.SetLayer(pcbnew.B_Fab)
+    else:
+        return False
+    return True
+
+
 def _text(t, kind, owner, side):
     ang = t.GetTextAngleDegrees()
     t.SetTextAngleDegrees(0)
@@ -122,7 +154,7 @@ def scene(path):
                 d = _text(f, kind, ref, lay)
                 if d:
                     out["texts"].append(d)
-        for g in fp.GraphicalItems():
+        for gi, g in enumerate(fp.GraphicalItems()):
             lay = silk.get(g.GetLayer())
             if not lay:
                 continue
@@ -138,7 +170,7 @@ def scene(path):
             else:
                 polys = _shape_poly(g, g.GetLayer())
                 if polys:
-                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys})
+                    out["gfx"].append({"owner": ref, "side": lay, "polys": polys, "gi": gi, "mark": _is_mark(g)})
                 if lay == fside:
                     part["silk_gfx"] += 1
                     if g.GetClass() == "PCB_SHAPE" and g.GetShapeStr() in ("Circle", "Polygon", "Arc"):
@@ -248,6 +280,18 @@ def apply(path, dst, plan):
     for key in sorted(k for k in plan if k.startswith("@title")):
         _apply_title(b, drawings, plan[key])
         n["title"] += 1
+    for key in sorted(k for k in plan if k.startswith("@field:")):          # a hard-offending value / free text goes to the fab layer
+        ref, _, text = key[len("@field:"):].partition("|")
+        fp = b.FindFootprintByReference(ref)
+        for f in (fp.GetFields() if fp else []):
+            if not f.IsReference() and f.GetText() == text and _to_fab(f):
+                n["hidden"] += 1
+    for key in sorted(k for k in plan if k.startswith("@gfx:")):              # footprint artwork over a pad / off the board goes to the fab layer
+        fp = b.FindFootprintByReference(key[len("@gfx:"):])
+        gl = list(fp.GraphicalItems()) if fp else []
+        for i in plan[key].get("items", []):
+            if i < len(gl) and _to_fab(gl[i]):
+                n["hidden"] += 1
     for ref, p in sorted((k, v) for k, v in plan.items() if not k.startswith("@")):
         fp = b.FindFootprintByReference(ref)
         if fp is None:

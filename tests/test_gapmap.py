@@ -92,3 +92,12 @@ def test_w16_placement_gate_lists_the_review_placement_findings():
     res = PG.detect(ctx, ["support-far", "net-budget"])
     assert res["errors"] == {}
     assert GM.uncovered(fs, res["gaps"]) == []
+
+
+def test_silk_fail_codes_map_to_silk_gap_kinds_owned_by_the_silk_stage():
+    """B8: the silk stage runs in the flow; every SILK_ FAIL code has a gap kind and the silk stage owns it."""
+    for code, kind in (("SILK_OVER_PAD", "silk-fit"), ("SILK_OFF_BOARD", "silk-fit"), ("SILK_OVER_HOLE", "silk-fit"),
+                       ("SILK_TITLE_NO_ROOM", "silk-title"), ("SILK_VERSION_STALE", "silk-title")):
+        assert GM.kind(code) == kind and GM.owner(code) == "silk", code
+    assert {"silk-fit", "silk-title"} <= GM.kinds_known()
+    assert all(GM.kind(c) for c in GM.fail_codes() if c.startswith("SILK_"))
