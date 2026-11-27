@@ -33,6 +33,23 @@ def _read(p):
         return {}
 
 
+def _save(entries):
+    """merge `entries` into the cache file (best effort: an unwritable cache only loses the memo)."""
+    p = cache_path()
+    c = _read(p)
+    c.update(entries)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            json.dump(c, fh, indent=1, sort_keys=True)
+    except OSError:
+        pass
+
+
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def load():
     """seed overlaid by the cache; a cache entry replaces the seed one only when it has a sourced hard value or the seed has none."""
     reg = _read(SEED)
@@ -120,15 +137,7 @@ def research(rule, iface, measured, target, unit, cons=None, log_dir=None, ctx="
          "hard": hard, "basis": basis if hard is not None else "unverified", "guidance": d.get("guidance"), "physics": d.get("physics"), "confidence": str(d.get("confidence") or "low"),
          "date": time.strftime("%Y-%m-%d"), "function": str(d.get("function") or "")[:400], "sources": srcs[:6], "notes": "researched",
          "unverified": unv, "research": {"model": model, "seconds": secs, "cost_usd": cost}}
-    try:
-        p = cache_path()
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        c = _read(p)
-        c[k] = e
-        with open(p, "w") as fh:
-            json.dump(c, fh, indent=1, sort_keys=True)
-    except OSError:
-        pass
+    _save({k: e})
     _log(log_dir, f"limit-research:{k}", "hard=%s" % hard, e["function"] or "no sourced hard limit", [cite(e)] if srcs else [], model,
          hard is not None, seconds=secs, cost_usd=cost)
     return e
@@ -148,14 +157,15 @@ def regrade(rule, iface, subject, measured, project_max, unit, target, explicit,
     hard, tgt = float(e["hard"]), float(e.get("target") if e.get("target") is not None else target)
     c = cite(e)
     g = e.get("guidance")
+    rid = f"limit:{key(rule, iface)}:{subject}"
     if measured <= hard and g and measured > float(g[1]) and e.get("basis") != "guidance-gate":     # over vendor guidance, inside the hard limit
-        _log(log_dir, f"limit:{key(rule, iface)}:{subject}", "FAIL->WARN", f"{measured:g} {unit} over vendor guidance {g[0]:g}-{g[1]:g}, inside hard {hard:g} ({e['basis']}): {e.get('emc_note', '')}", [c])
+        _log(log_dir, rid, "FAIL->WARN", f"{measured:g} {unit} over vendor guidance {g[0]:g}-{g[1]:g}, inside hard {hard:g} ({e['basis']}): {e.get('emc_note', '')}", [c])
         return "WARN", (f"{subject}: {measured:.2f} {unit} over vendor guidance {g[0]:g}-{g[1]:g} {unit}, inside the hard limit {hard:g} {unit} "
                         f"[{e['basis']}: {(e.get('physics') or {}).get('result', '')}; {c}]. EMC: {e.get('emc_note', '')}")
     if measured > hard:
-        _log(log_dir, f"limit:{key(rule, iface)}:{subject}", "FAIL-stays", f"{measured:g} {unit} > sourced hard {hard:g} ({e['basis']}, {e['confidence']})", [c])
+        _log(log_dir, rid, "FAIL-stays", f"{measured:g} {unit} > sourced hard {hard:g} ({e['basis']}, {e['confidence']})", [c])
         return "FAIL", f"{subject}: {measured:.2f} {unit} > sourced hard limit {hard:g} {unit} [{c}]"
-    _log(log_dir, f"limit:{key(rule, iface)}:{subject}", "FAIL->WARN",
+    _log(log_dir, rid, "FAIL->WARN",
          f"{measured:g} {unit} within sourced hard {hard:g} (project target {max(tgt, project_max):g}); {e.get('function', '')}", [c])
     return "WARN", (f"{subject}: {measured:.2f} {unit} over target {project_max:g} but inside the sourced hard limit {hard:g} {unit} "
                     f"[{c}; {e['basis']}, {e['confidence']}; re-graded FAIL->WARN by the limits registry]")
@@ -197,15 +207,13 @@ def research_fab(house, layers=6, cons=None, log_dir=None, force=False):
     if not d:
         _log(log_dir, f"limit-research:fab:{iface}", "no-answer", f"research failed: {why or 'no JSON'} ({secs}s)", [], model, False)
         return have
-    p = cache_path()
-    c = _read(p)
+    new = {}
     for it in d["items"]:
         f = str(it.get("feature"))
         if f not in FAB_FEATURES:
             continue
         ok = str(it.get("url", "")).startswith("http") and it.get("quote")
-        num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-        hard, rec = (num(it.get("hard")), num(it.get("recommended"))) if ok else (None, None)
+        hard, rec = (_num(it.get("hard")), _num(it.get("recommended"))) if ok else (None, None)
         if rec is not None and hard is not None and rec < hard:
             rec = hard
         e = {"rule": "fab_" + f, "interface": iface, "unit": "mm", "direction": "min", "target": rec, "hard": hard,
@@ -213,14 +221,9 @@ def research_fab(house, layers=6, cons=None, log_dir=None, force=False):
              "date": time.strftime("%Y-%m-%d"), "function": str(it.get("note") or "")[:300],
              "sources": [{"url": str(it["url"])[:300], "page": str(it.get("page", ""))[:80], "quote": str(it["quote"])[:300]}] if ok else [],
              "unverified": [] if ok else [f"{f}: no sourced value"], "research": {"model": model, "seconds": secs, "cost_usd": cost}}
-        c[key("fab_" + f, iface)] = e
+        new[key("fab_" + f, iface)] = e
         have[f] = e
-    try:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as fh:
-            json.dump(c, fh, indent=1, sort_keys=True)
-    except OSError:
-        pass
+    _save(new)
     _log(log_dir, f"limit-research:fab:{iface}", f"{sum(1 for e in have.values() if e and e.get('hard') is not None)} sourced", "fab capability rows", [],
          model, True, seconds=secs, cost_usd=cost)
     return have

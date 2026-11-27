@@ -854,7 +854,8 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
     houses = {}
     for h in prof.get("_house") or {}:
         fs = [f for f in findings if f.get("house") in (None, h)]
-        houses[h] = "FAIL" if any(f["level"] == FAIL for f in fs) else ("WARN" if any(f["level"] == WARN for f in fs) else "PASS")
+        levels = {f["level"] for f in fs}
+        houses[h] = next((lvl for lvl in (FAIL, WARN) if lvl in levels), "PASS")
     return {"status": status, "findings": findings, "counts": counts, "houses": houses,
             "seconds": round(time.time() - t0, 2), "resolution_mm": res_mm,
             "copper_layers": copper_layers, "holes": len(holes)}
