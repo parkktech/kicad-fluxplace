@@ -167,15 +167,43 @@
   "unverified": []
  },
  "pair_skew:eth": {
-  "basis": "sourced",
+  "basis": "physics",
   "confidence": "medium",
   "date": "2026-11-27",
-  "function": "Link is not affected at tens of mm (about 2 % of an 8 ns symbol at 25 mm; adaptive equalisation). Hard limit is vendor layout guidance, EMC-driven (mode conversion).",
-  "hard": 1.27,
+  "emc_note": "Over the vendor guidance (0.51-1.27 mm) the link still works but common-mode / EMC grows (line side, after the transformer, radiates): ~-30 dB mode conversion at 25 mm. See reports/ETH skew limits line vs PHY side.md. Tune when routing allows.",
+  "function": "Link: adaptive equalisation, 25 mm = 2 % of an 8 ns symbol. Hard = 10 % symbol (physics). Guidance values are TARGET-class.",
+  "guidance": [
+   0.51,
+   1.27
+  ],
+  "hard": 112.7,
   "interface": "eth",
   "notes": "target = CM5 datasheet 'ideally'; hard = Pulse 50 mil (magnetics vendor of the part used); TI 20 mil (0.51 mm) is the tightest PHY-vendor figure. reports/ETH skew limits line vs PHY side.md",
+  "owner": {
+   "date": "2026-11-27",
+   "statement": "13-25 mm would work fine"
+  },
+  "physics": {
+   "fraction": 0.1,
+   "fraction_is": "ASSUMPTION (lead 2026-11-27): hard skew = 10 % of one symbol",
+   "ps_per_mm": 7.1,
+   "ps_per_mm_from": "TI SLLA500 p.5: 150 ps/in microstrip, 180 ps/in stripline FR4 -> 5.9..7.1 ps/mm; slowest (7.1) used = fewest mm",
+   "result": "0.10 x 8000 ps = 800 ps / 7.1 ps/mm = 112.7 mm",
+   "symbol_from": "1000BASE-T quinary symbol rate 125.00 MHz (IEEE 802.3 Cl.40 via UNH-IOL PMA suite p.20) -> 8 ns",
+   "symbol_ns": 8.0
+  },
   "rule": "pair_skew",
   "sources": [
+   {
+    "page": "p.20 (Test 40.1.x discussion)",
+    "quote": "quinary symbol transmission rate of 125.00 MHz",
+    "url": "https://www.iol.unh.edu/sites/default/files/testsuites/ethernet/CL40_PMA/PMA_Test_Suite_v2.5.pdf"
+   },
+   {
+    "page": "sec 4 p.5",
+    "quote": "typical propagation delay numbers for a microstrip in FR4 of 150 ps/in (a stripline of 180 ps/in)",
+    "url": "https://www.ti.com/lit/pdf/slla500"
+   },
    {
     "page": "p.2",
     "quote": "lengths of the differential traces (within each pair) should be equal to within 50 mils (1.25 mm)",
@@ -196,10 +224,15 @@
   "unit": "mm"
  },
  "pair_skew:pcie": {
-  "basis": "sourced",
+  "basis": "guidance-gate",
   "confidence": "high",
   "date": "2026-11-27",
+  "emc_note": "PRACTICAL GATE: every primary vendor source says 5 mil; no spec-break figure found. Label: guidance used as the hard gate.",
   "function": "Intra-pair within 5 mil, whole-route budget; PCI-SIG has no public PCB number.",
+  "guidance": [
+   0.127,
+   0.127
+  ],
   "hard": 0.127,
   "interface": "pcie",
   "notes": "",
@@ -220,15 +253,34 @@
   "unit": "mm"
  },
  "pair_skew:usb2": {
-  "basis": "sourced",
-  "confidence": "medium",
+  "basis": "physics",
+  "confidence": "low",
   "date": "2026-11-27",
+  "emc_note": "Over vendor guidance (TI 50 mil, Intel 60 mil) the eye closes progressively; USB-IF only limits the cable (100 ps, Type-C R2.0 Table 3-27).",
   "function": "USB-IF gives no PCB skew number (cable only, 100 ps). Vendor MAX 50-60 mil.",
-  "hard": 1.27,
+  "guidance": [
+   1.27,
+   1.52
+  ],
+  "hard": 29.3,
   "interface": "usb2",
   "notes": "judge per signal path on USB-C joined rows (stub <= 3.5 mm, USB Type-C R2.0 Table 3-4)",
+  "physics": {
+   "fraction": 0.1,
+   "fraction_is": "ASSUMPTION (same 10 % as eth; no USB-IF PCB number exists)",
+   "ps_per_mm": 7.1,
+   "ps_per_mm_from": "TI SLLA500 p.5",
+   "result": "0.10 x 2083 ps = 208 ps / 7.1 ps/mm = 29.3 mm",
+   "symbol_from": "USB 2.0 high speed 480 Mb/s -> UI 2.083 ns",
+   "symbol_ns": 2.083
+  },
   "rule": "pair_skew",
   "sources": [
+   {
+    "page": "sec 4 p.5",
+    "quote": "typical propagation delay numbers for a microstrip in FR4 of 150 ps/in (a stripline of 180 ps/in)",
+    "url": "https://www.ti.com/lit/pdf/slla500"
+   },
    {
     "page": "App. A p.16-18",
     "quote": "50 mil MAX intra-pair skew, USB 2.0",
@@ -249,10 +301,15 @@
   "unit": "mm"
  },
  "pair_skew:usb3": {
-  "basis": "sourced",
+  "basis": "guidance-gate",
   "confidence": "high",
   "date": "2026-11-27",
+  "emc_note": "PRACTICAL GATE: every primary vendor source says 5 mil; no spec-break figure found. Label: guidance used as the hard gate.",
   "function": "5 Gb/s, 200 ps UI: every primary vendor source gives 5 mil.",
+  "guidance": [
+   0.127,
+   0.127
+  ],
   "hard": 0.127,
   "interface": "usb3",
   "notes": "",

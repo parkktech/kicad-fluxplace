@@ -22,7 +22,7 @@ def test_seed_has_sourced_hard_values_for_the_four_pair_interfaces(tmp_path, mon
 def test_between_target_and_hard_is_a_warn_with_the_citation_and_is_logged(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
     lvl, txt = LM.regrade("pair_skew", "eth", "P/N", 1.0, 0.15, "mm", 0.15, False, {}, str(tmp_path))
-    assert lvl == "WARN" and "sourced hard limit 1.27" in txt and "http" in txt
+    assert lvl == "WARN" and "sourced hard limit 112.7" in txt and "http" in txt
     row = json.loads(open(tmp_path / DC.LOG).read().splitlines()[-1])
     assert row["choice"] == "FAIL->WARN" and row["evidence"]
 
@@ -31,6 +31,30 @@ def test_over_the_hard_limit_stays_fail(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
     lvl, txt = LM.regrade("pair_skew", "usb3", "P/N", 0.3, 0.1, "mm", 0.1, False, {}, None)
     assert lvl == "FAIL" and "0.127" in txt
+    assert LM.regrade("pair_skew", "eth", "P/N", 150.0, 1.0, "mm", 0.15, False, {}, None)[0] == "FAIL"
+
+
+def test_eth_over_guidance_inside_physics_hard_is_warn_with_emc_note(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    lvl, txt = LM.regrade("pair_skew", "eth", "L0", 24.97, 1.0, "mm", 0.15, False, {}, str(tmp_path))
+    assert lvl == "WARN" and "vendor guidance 0.51-1.27" in txt and "EMC" in txt and "physics" in txt
+    e = LM.get("pair_skew", "eth")
+    assert e["physics"]["fraction"] == 0.10 and e["owner"]["date"] == "2026-11-27" and 112 < e["hard"] < 113
+
+
+def test_guidance_gate_is_labelled_and_not_downgraded(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    assert LM.get("pair_skew", "pcie")["basis"] == "guidance-gate"
+    assert LM.regrade("pair_skew", "pcie", "P/N", 0.2, 0.1, "mm", 0.1, False, {}, None)[0] == "FAIL"
+
+
+def test_research_hard_without_spec_or_physics_basis_is_guidance_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    ans = {"hard": 2.0, "basis": "none", "sources": [{"url": "https://x.example/a", "page": "p1", "quote": "within 2 mm"}]}
+    assert LM.regrade("pair_skew", "can", "P/N", 3.0, 1.0, "mm", 1.0, False, stub(ans), None) is None
+    e = LM.get("pair_skew", "can")
+    assert e["hard"] is None and e["guidance"] == [2.0, 2.0]
 
 
 def test_project_explicit_maximum_wins(tmp_path, monkeypatch):
@@ -46,7 +70,7 @@ def test_unknown_rule_without_research_is_left_alone(tmp_path, monkeypatch):
 def test_research_with_sources_adds_a_hard_limit_and_regrades(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
-    ans = {"hard": 3.0, "unit": "mm", "confidence": "medium", "function": "link breaks at 3 mm",
+    ans = {"hard": 3.0, "unit": "mm", "basis": "spec", "confidence": "medium", "function": "link breaks at 3 mm",
            "sources": [{"url": "https://example.com/ds.pdf", "page": "p4", "quote": "skew must stay below 3 mm"}], "unverified": []}
     r = LM.regrade("pair_skew", "can", "P/N", 1.0, 0.5, "mm", 0.5, False, stub(ans), str(tmp_path))
     assert r[0] == "WARN" and "example.com" in r[1]
@@ -58,7 +82,7 @@ def test_research_with_sources_adds_a_hard_limit_and_regrades(tmp_path, monkeypa
 def test_unsourced_answer_cannot_loosen_a_limit(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
-    ans = {"hard": 50.0, "unit": "mm", "function": "trust me", "sources": [], "unverified": ["from memory"]}
+    ans = {"hard": 50.0, "unit": "mm", "basis": "spec", "function": "trust me", "sources": [], "unverified": ["from memory"]}
     assert LM.regrade("pair_skew", "can", "P/N", 1.0, 0.5, "mm", 0.5, False, stub(ans), None) is None
     e = LM.get("pair_skew", "can")
     assert e["hard"] is None and any("unsourced hard value" in u for u in e["unverified"])

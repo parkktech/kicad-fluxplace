@@ -73,11 +73,13 @@ def _prompt(rule, iface, measured, target, unit, ctx):
     return (f"Research one PCB design limit and answer with sources.\nRule: {rule}; interface/class: {iface}; unit: {unit}.\n"
             f"The project's target is {target} {unit}; the board measures {measured} {unit}. Context: {ctx}\n"
             "Use web search; prefer standards, silicon/magnetics/connector vendor layout guides and datasheets. Questions:\n"
-            "1. Is this a real HARD limit (where the link/function or a spec actually breaks) or only a target / recommendation?\n"
-            "2. What is the sourced HARD limit (a number printed in a source), and does the measured value break function or only the target?\n"
+            "Tiers: TARGET = project/vendor wish; GUIDANCE = vendor layout recommendations (never a hard limit); HARD = where function or a spec breaks: "
+            "a spec number (standard / house rejects), or physics derived ONLY from sourced quantities with the arithmetic written out in `physics`.\n"
+            "1. What is the sourced HARD limit and its basis (spec | physics)? Vendor layout guidance goes in `guidance` [lo, hi], not in `hard`.\n"
+            "2. Does the measured value break function or only the target?\n"
             "Rules: every number needs a source with a URL, page/section and a short verbatim quote. If you find no printed number, "
             'set hard to null. Never invent a value.\nAnswer with ONLY JSON: {"hard": <number|null>, "target": <number|null>, '
-            '"unit": "<unit>", "basis": "sourced|arithmetic", "confidence": "high|medium|low", "function": "<=2 sentences: what breaks and '
+            '"unit": "<unit>", "guidance": [<lo>, <hi>]|null, "basis": "spec|physics|none", "physics": "<arithmetic with sources>"|null, "confidence": "high|medium|low", "function": "<=2 sentences: what breaks and '
             'at what value", "sources": [{"url": "...", "page": "...", "quote": "..."}], "unverified": ["<claims without a source>"]}')
 
 
@@ -106,11 +108,16 @@ def research(rule, iface, measured, target, unit, cons=None, log_dir=None, ctx="
     except (TypeError, ValueError):
         hard = None
     unv = [str(x)[:200] for x in d.get("unverified") or []][:6]
+    basis = str(d.get("basis") or "none")
+    if hard is not None and basis not in ("spec", "physics"):
+        unv.append(f"hard value {hard} {unit} has basis {basis!r}: not a spec or physics figure, kept as guidance only")
+        d["guidance"] = d.get("guidance") or [hard, hard]
+        hard = None
     if hard is not None and not srcs:
         unv.append(f"unsourced hard value {hard} {unit} ignored")
         hard = None
     e = {"rule": rule, "interface": iface, "unit": str(d.get("unit") or unit), "target": target if d.get("target") is None else d["target"],
-         "hard": hard, "basis": "sourced" if hard is not None else "unverified", "confidence": str(d.get("confidence") or "low"),
+         "hard": hard, "basis": basis if hard is not None else "unverified", "guidance": d.get("guidance"), "physics": d.get("physics"), "confidence": str(d.get("confidence") or "low"),
          "date": time.strftime("%Y-%m-%d"), "function": str(d.get("function") or "")[:400], "sources": srcs[:6], "notes": "researched",
          "unverified": unv, "research": {"model": model, "seconds": secs, "cost_usd": cost}}
     try:
@@ -140,6 +147,11 @@ def regrade(rule, iface, subject, measured, project_max, unit, target, explicit,
         return None
     hard, tgt = float(e["hard"]), float(e.get("target") if e.get("target") is not None else target)
     c = cite(e)
+    g = e.get("guidance")
+    if measured <= hard and g and measured > float(g[1]) and e.get("basis") != "guidance-gate":     # over vendor guidance, inside the hard limit
+        _log(log_dir, f"limit:{key(rule, iface)}:{subject}", "FAIL->WARN", f"{measured:g} {unit} over vendor guidance {g[0]:g}-{g[1]:g}, inside hard {hard:g} ({e['basis']}): {e.get('emc_note', '')}", [c])
+        return "WARN", (f"{subject}: {measured:.2f} {unit} over vendor guidance {g[0]:g}-{g[1]:g} {unit}, inside the hard limit {hard:g} {unit} "
+                        f"[{e['basis']}: {(e.get('physics') or {}).get('result', '')}; {c}]. EMC: {e.get('emc_note', '')}")
     if measured > hard:
         _log(log_dir, f"limit:{key(rule, iface)}:{subject}", "FAIL-stays", f"{measured:g} {unit} > sourced hard {hard:g} ({e['basis']}, {e['confidence']})", [c])
         return "FAIL", f"{subject}: {measured:.2f} {unit} > sourced hard limit {hard:g} {unit} [{c}]"
