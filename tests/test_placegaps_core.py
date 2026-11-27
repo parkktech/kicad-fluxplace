@@ -390,3 +390,51 @@ def test_transformer_coupled_pair_is_two_budgets():
 def test_net_bound_kind_is_in_floorplan_and_placetour_scope_and_dispatch_is_a_todo():
     assert "net-bound" in PG.SCOPE["floorplan"] and "net-bound" in PG.SCOPE["placetour"] and "net-bound" not in PG.SCOPE["ready"]
     assert PG.DISPATCH["net-bound"] == []          # TODO: w45supports net-budget "pull" rung once merged (ledger row 2026-11-26 A8)
+
+
+# ---- B14: length-budget verdicts (T / B_current / B_all / U)
+def _lenboard(pads, bbox=(0, 0, 100, 100)):
+    B = _bound_board(pads)
+    B["bbox"] = bbox
+    for r, p in B["parts"].items():
+        xs = [q["x"] for q in p["pads"]]
+        p["pos"] = (sum(xs) / len(xs), p["pads"][0]["y"])
+        p["court"] = (p["pos"][0] - 1, p["pos"][1] - 1, p["pos"][0] + 1, p["pos"][1] + 1)
+    return B
+
+
+def test_len_fixed_anchor_pair_over_budget_is_infeasible():
+    from fluxplace import budget as BG
+    B = _lenboard([_pad("J1", "1", "NET", 0, 0), _pad("J2", "1", "NET", 40, 0)])
+    r = BG.length_feasibility(B, _cons(30.0), fixed={"J1", "J2"})[0]
+    assert r["B_all"] == pytest.approx(40.0) and r["verdict"] == "infeasible" and r["U"] is None
+    c = _cons(30.0)
+    c["placement"]["fixed"] = ["J1", "J2"]
+    gs = PG.detect(ctx(B=B, cons=c), ["net-bound"])["gaps"]
+    assert gs and gs[0]["len"]["verdict"] == "infeasible"
+
+
+def test_len_movable_end_far_now_but_reachable_is_current_poses_excluded():
+    from fluxplace import budget as BG
+    B = _lenboard([_pad("J1", "1", "NET", 0, 0), _pad("U1", "1", "NET", 60, 0)])
+    r = BG.length_feasibility(B, _cons(30.0), fixed={"J1"})[0]
+    assert r["B_current"] == pytest.approx(60.0) and r["B_all"] < 2.0 and r["verdict"] == "excluded"
+
+
+def test_len_b_all_is_a_lower_bound_never_above_any_pose_and_shares_the_pose_across_pads():
+    from fluxplace import budget as BG
+    # movable U1 has two pads 10 apart on the net, anchors 0 and 10 apart: no pose gets both pads close: B_all >= the rigid pad gap
+    B = _lenboard([_pad("J1", "1", "NET", 0, 0), _pad("J2", "1", "NET", 40, 0), _pad("U1", "1", "NET", 20, 50), _pad("U1", "2", "NET", 30, 50)])
+    r = BG.length_feasibility(B, _cons(100.0), fixed={"J1", "J2"})[0]
+    assert r["B_all"] >= 40.0 - 1e-6 and r["B_all"] <= r["B_current"] + 1e-9
+
+
+def test_len_routed_within_budget_is_feasible_and_detour_is_unresolved():
+    from fluxplace import budget as BG
+    B = _lenboard([_pad("J1", "1", "NET", 0, 0), _pad("J2", "1", "NET", 20, 0)])
+    B["segs"] = [{"net": "NET", "a": (0, 0), "b": (20, 0), "w": 0.2, "layer": "F.Cu"}]
+    assert BG.length_feasibility(B, _cons(25.0), fixed={"J1", "J2"})[0]["verdict"] == "feasible"
+    B["segs"] = [{"net": "NET", "a": (0, 0), "b": (0, 30), "w": 0.2, "layer": "F.Cu"}, {"net": "NET", "a": (0, 30), "b": (20, 30), "w": 0.2, "layer": "F.Cu"},
+                 {"net": "NET", "a": (20, 30), "b": (20, 0), "w": 0.2, "layer": "F.Cu"}]
+    r = BG.length_feasibility(B, _cons(25.0), fixed={"J1", "J2"})[0]
+    assert r["U"] == pytest.approx(80.0) and r["verdict"] == "unresolved"

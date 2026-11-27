@@ -638,3 +638,136 @@ def net_bounds(B, cons, spec=None):
                         "risk": r["limit"] is not None and r["bound"] * margin > r["limit"] + 1e-9,
                         "why": r["why"] or f"path {' - '.join(r['chain'])} needs >= {r['bound']:.1f} mm"})
     return out
+
+
+# ------------------------------------------------------------------ B14: T / B_current / B_all / U and the verdict
+LIP = (1.0 + SQRT2M1 ** 2) ** 0.5         # Lipschitz constant of octi() in the Euclidean norm (gradient (1, sqrt2-1))
+LEN_GRID = 0.25                           # mm: B_all grid step; the certificate subtracts LIP * step / sqrt2 (the covering radius)
+VERDICT = {"infeasible": "infeasible under declared fixed parts and pose domains", "feasible": "feasible; retain placement and route as a witness",
+           "excluded": "current poses excluded; search other legal placements", "unresolved": "unresolved; inspect access constraints and routing detour"}
+
+
+def _orients(part, pads):
+    """Pad offsets (dx, dy, e) of one footprint under every pose it may take: 4 rotations x both sides (mirror in x). e = the larger pad
+    half extent (a square that contains the rectangle at any rotation: only shrinks the pad gap, so the bound stays a lower bound)."""
+    px, py = part["pos"]
+    out = []
+    for mirror in (1.0, -1.0):
+        for k in range(4):
+            offs = []
+            for p in pads:
+                dx, dy = mirror * (p["x"] - px), p["y"] - py
+                for _ in range(k):
+                    dx, dy = -dy, dx
+                offs.append((dx, dy, max(p.get("ex", 0.0), p.get("ey", 0.0))))
+            out.append(offs)
+    return out
+
+
+def _gap_bound(dx, dy, ea, eb):
+    """numpy twin of pad_bound for |dx|, |dy| centre offsets and square half extents ea, eb."""
+    import numpy as np
+    gx, gy = np.maximum(0.0, np.abs(dx) - ea - eb), np.maximum(0.0, np.abs(dy) - ea - eb)
+    return np.maximum(gx, gy) + SQRT2M1 * np.minimum(gx, gy)
+
+
+def pose_lower_bound(B, ref, anchors, pads, step=LEN_GRID):
+    """Certified lower bound on max over pad pairs (movable `ref` pad, anchor pad) and (its own pad pairs, rigid) over EVERY pose of `ref`:
+    centre anywhere in the board box that keeps its smallest courtyard half extent inside, 8 orientations, one pose shared by all its pads.
+    Exact grid minimum minus the Lipschitz covering slack, so it never exceeds the true minimum (a sampled best pose is not a bound)."""
+    import numpy as np
+    part = B["parts"][ref]
+    c = part.get("court") or (0, 0, 0, 0)
+    m = min(c[2] - c[0], c[3] - c[1]) / 2.0
+    x0, y0, x1, y1 = B["bbox"]
+    xs = np.arange(x0 + m, max(x0 + m, x1 - m) + step, step)
+    ys = np.arange(y0 + m, max(y0 + m, y1 - m) + step, step)
+    X, Y = np.meshgrid(xs, ys)
+    best = None
+    for offs in _orients(part, pads):
+        f = np.zeros_like(X)
+        for i, (dx, dy, e) in enumerate(offs):
+            for a in anchors:
+                f = np.maximum(f, _gap_bound(X + dx - a["x"], Y + dy - a["y"], e, max(a.get("ex", 0.0), a.get("ey", 0.0))))
+            for dx2, dy2, e2 in offs[i + 1:]:
+                f = np.maximum(f, float(_gap_bound(dx - dx2, dy - dy2, e, e2)))
+        v = float(f.min())
+        best = v if best is None else min(best, v)
+    return max(0.0, (best or 0.0) - LIP * step / 2 ** 0.5)
+
+
+def routed_length(B, net):
+    """Copper length of `net` in a routed board if its pads are one connected piece (else None): a verified route, not a partial one."""
+    segs = [s for s in B.get("segs") or [] if s["net"] == net]
+    pads = [p for p in B["pads"] if p["net"] == net]
+    if not segs or len(pads) < 2:
+        return None
+    key = lambda q: (round(q[0], 2), round(q[1], 2))          # noqa: E731
+    par = {}
+
+    def find(a):
+        par.setdefault(a, a)
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    for s in segs:
+        par[find(key(s["a"]))] = find(key(s["b"]))
+    for v in B.get("vias") or []:
+        if v["net"] == net:
+            find(key((v["x"], v["y"])))
+    nodes = list(par)
+    roots = set()
+    for p in pads:
+        hit = next((n for n in nodes if abs(n[0] - p["x"]) <= p.get("ex", 0.0) + 0.02 and abs(n[1] - p["y"]) <= p.get("ey", 0.0) + 0.02), None)
+        if hit is None:
+            return None
+        roots.add(find(hit))
+    if len(roots) != 1:
+        return None
+    return round(sum(((s["a"][0] - s["b"][0]) ** 2 + (s["a"][1] - s["b"][1]) ** 2) ** 0.5 for s in segs), 3)
+
+
+def verdict_of(T, b_all, b_cur, U, tol=LEN_GRID):
+    """The decision logic of the outside review, in its order."""
+    if b_all > T + tol:
+        return "infeasible"
+    if U is not None and U <= T + tol:
+        return "feasible"
+    if b_cur > T + tol:
+        return "excluded"
+    return "unresolved"
+
+
+def length_feasibility(B, cons, spec=None, fixed=None, nets=None):
+    """[{net, cls, T, T_src, B_current, B_all, U, verdict, text, fixed_refs, movable_refs}] for every budgeted net (or the `nets` named).
+    B_current: net_bounds (A8). B_all: max of the fixed-pair bound and, per movable part, pose_lower_bound over all its poses (pairs of two
+    movable parts are bounded by 0; a part's own pose is shared by all its pads). U: routed_length. Domain = board box (a superset of the
+    legal seats: keep-outs and side rules are not subtracted, so B_all can only be lower than the true bound, never higher)."""
+    from . import netclass as NC
+    if fixed is None:
+        from . import preroute as PR
+        try:
+            fixed = PR.fixed_parts(B, cons)
+        except Exception:                                      # noqa: BLE001 - anchor detection needs a full board; explicit fixed is the floor
+            fixed = PR.explicit_fixed(B, cons)
+    cls, pads = NC.classify(B, cons, spec), NC.net_pads(B)
+    cur = {r["name"]: r for r in net_bounds(B, cons, spec) if r["kind"] == "net"}
+    out = []
+    for net, r in sorted(cur.items()):
+        if nets is not None and net not in nets:
+            continue
+        ps = pads[net]
+        fx = [p for p in ps if p["ref"] in fixed]
+        mv = sorted({p["ref"] for p in ps if p["ref"] not in fixed})
+        b_all = net_bound(fx) if len(fx) > 1 else 0.0
+        for ref in mv:
+            b_all = max(b_all, pose_lower_bound(B, ref, fx, [p for p in ps if p["ref"] == ref]) if fx else 0.0)
+        b_all = min(b_all, r["bound"])                          # the current pose is one of the poses: the bound cannot exceed it
+        U = routed_length(B, net)
+        T = r["limit"]
+        v = verdict_of(T, b_all, r["bound"], U)
+        out.append({"net": net, "cls": r["cls"], "T": T, "T_src": "override" if cls[net].get("override") else "default",
+                    "B_current": r["bound"], "B_all": round(b_all, 3), "U": U, "verdict": v, "text": VERDICT[v],
+                    "fixed_refs": sorted({p["ref"] for p in fx}), "movable_refs": mv})
+    return out
