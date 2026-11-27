@@ -1554,7 +1554,7 @@ def _earlier_gate_defers(g):
 # every later stage output is verified against it before the next stage starts.  `tune` is the one sanctioned editor of pair legs (under
 # its own DRC guard); it releases them and the locked scan after it protects the re-tuned copper again.
 SEED_STAGES = ("pairs", "tune")
-RELEASING_STAGES = ("tune",)
+RELEASING_STAGES = ("tune", "close", "route")
 
 
 def _pcbnew_state_guard(name, res):
@@ -1601,9 +1601,9 @@ def _commit_point(name, prev, res, cons=None):
             try:
                 st = BW.strip_contract(prev, new, cons)
                 ct2 = BW.contract_check(prev, new, cons)
-            except Exception as e:                                      # noqa: BLE001
-                st, ct2 = None, {"ok": False, "why": ct["why"], "changed": ct["changed"]}
-            if ct2["ok"] and st and st["removed"]:
+            except Exception:                                           # noqa: BLE001 - the refusal stands
+                st, ct2 = None, ct
+            if ct2["ok"] and st["removed"]:
                 res = dict(res, line=(res.get("line") or "") + f"; contract: stripped {st['removed']} off-contract item(s) on {', '.join(sorted(st['nets']))} (left open)")
                 ct = ct2
         if not ct["ok"]:
@@ -1619,7 +1619,7 @@ def _commit_point(name, prev, res, cons=None):
                 return res
         except Exception:                                               # noqa: BLE001
             return res
-    rel = (set(res.get("released") or ()) if name in RELEASING_STAGES or name in ("close", "route") else set())      # tune / close release the pairs they re-laid, not the manifest
+    rel = set(res.get("released") or ()) if name in RELEASING_STAGES else set()      # these stages release the pairs they re-laid, not the manifest
     complete = {x: f"pair {p}/{q}" for p, q in res.get("complete_pairs") or [] for x in (p, q)}
     for x in rel & set(man["nets"]):                                    # a released pair is protected again at its new copper
         if man["nets"][x].get("why") != "locked":

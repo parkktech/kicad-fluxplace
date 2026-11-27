@@ -766,7 +766,7 @@ def _contract_split(groups, allowed):
         by = {}
         for n, w in g.items():
             a = allowed.get(n)
-            ls = tuple(l for l in lay if a is None or l in a)
+            ls = tuple(x for x in lay if a is None or x in a)
             if ls:
                 by.setdefault(ls, {})[n] = w
         out += [(sub, list(ls)) for ls, sub in by.items()]
