@@ -1096,7 +1096,7 @@ def _r_rfroute(base, out, gaps, ctx):
 
 def _r_snapiter(base, out, gaps, ctx):
     from . import snapiter as SI
-    return _brief(SI.run(base, out, log=ctx["log"]))
+    return _brief(SI.run(base, out, log=ctx["log"], via_follow=True))   # w80: a KRT via beside a locked stub end moves onto it
 
 
 PACKET_BYTES = 4096
