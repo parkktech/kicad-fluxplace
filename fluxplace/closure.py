@@ -465,10 +465,11 @@ def _decide_pair(ctx, board, net, o, opts):
         return
     pairs = [f"[pairs.{k}] {json.dumps(v, default=str)[:200]}" for k, v in ((ctx.cons or {}).get("pairs") or {}).items()
              if any(n in json.dumps(v, default=str) or k in n for n in o["nets"])]
-    ev = [f"needs: {o['needs']}", f"controlled copper touched: {o['controlled_mm']} mm, {o['controlled_vias']} via(s) on {', '.join(o['nets'])}"]
+    nets = ", ".join(o["nets"])
+    ev = [f"needs: {o['needs']}", f"controlled copper touched: {o['controlled_mm']} mm, {o['controlled_vias']} via(s) on {nets}"]
     ev += [f"other option {x['type']} at {x['pad']}: cost {x['cost']}" for x in opts if x is not o][:4] + pairs[:4]
-    d = DC.ask(f"closure-relay:{net}:{o['pad']}", "re-lay controlled copper", f"{net} open at {o['pad']}: closing it re-lays {', '.join(o['nets'])}",
-               {"re-lay": f"re-lay {o['controlled_mm']} mm / {o['controlled_vias']} via(s) of {', '.join(o['nets'])}, then re-tune the pair(s)",
+    d = DC.ask(f"closure-relay:{net}:{o['pad']}", "re-lay controlled copper", f"{net} open at {o['pad']}: closing it re-lays {nets}",
+               {"re-lay": f"re-lay {o['controlled_mm']} mm / {o['controlled_vias']} via(s) of {nets}, then re-tune the pair(s)",
                 "leave-open": f"{net} stays open at {o['pad']}; the controlled copper is untouched"},
                "leave-open", "pair budgets (skew / length / via count) against the change", ev, ctx.cons,
                os.path.dirname(os.path.abspath(board)))

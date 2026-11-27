@@ -2329,16 +2329,17 @@ def ai_waive(out, facts, cons, ds_dir):
             res.append(f)
             continue
         left -= 1
+        refs = f.get("refs", [])
         words = [w for w in f["code"].lower().split("_") if len(w) >= 4]
-        src = [r for ref in f.get("refs", [])[:2] for r in _ds_lines(ds_dir, mpns.get(ref), words)]
-        ev = [f"finding {f['code']}: {f['msg']}"] + [f"{ref} MPN {mpns.get(ref) or 'none'}" for ref in f.get("refs", [])[:2]] + src
-        d = DC.ask(f"waive:{f['code']}:{','.join(f.get('refs', [])[:3]) or f['msg'][:40]}", "waiver", f"{f['code']}: {f['msg']}",
+        src = [r for ref in refs[:2] for r in _ds_lines(ds_dir, mpns.get(ref), words)]
+        ev = [f"finding {f['code']}: {f['msg']}"] + [f"{ref} MPN {mpns.get(ref) or 'none'}" for ref in refs[:2]] + src
+        d = DC.ask(f"waive:{f['code']}:{','.join(refs[:3]) or f['msg'][:40]}", "waiver", f"{f['code']}: {f['msg']}",
                    {"waive": "accept the finding as a deliberate exception (needs a cited datasheet line)", "fix": "the FAIL stands until fixed"},
                    "fix", "a datasheet line showing the finding does not apply or is within the part's rating", ev, cons, log_dir)
         cites = [r.split(": ", 1)[0] for r in src]
         if d["choice"] == "waive" and DC.cited(d, cites):
             hit = [c for c in cites if c in " ".join(d["evidence"])]
-            res.append(_f(INFO, "AI_WAIVED", f"{f['code']} {f['msg'][:160]} - waived by the AI decider: {d['rationale'][:200]} ({', '.join(hit)})", refs=f.get("refs", [])))
+            res.append(_f(INFO, "AI_WAIVED", f"{f['code']} {f['msg'][:160]} - waived by the AI decider: {d['rationale'][:200]} ({', '.join(hit)})", refs=refs))
         elif d["choice"] == "waive":
             res.append(dict(f, msg=f["msg"] + " (AI waiver refused: no cited datasheet line)"))
         else:

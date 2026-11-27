@@ -982,8 +982,9 @@ def _ai_gate(gid, machine, g, default, cons, log_dir):
     Never exits 5: a "stop" is recorded, the stage's own verdict decides the run."""
     from . import decider as DC
     cands = [c["cand"] for c in g["candidates"]]
+    pick = machine is None and bool(cands)
     ev = [f"machine verdict: {machine}"] + [f"candidate {c['cand']}: {json.dumps(c.get('criteria'), default=str)[:200]}" for c in g["candidates"][:6]]
-    if machine is None and cands:
+    if pick:
         opts = {c: f"approve candidate {c}" for c in cands}
         dflt = cands[0]
     else:
@@ -991,9 +992,10 @@ def _ai_gate(gid, machine, g, default, cons, log_dir):
         dflt = default if default in opts else "proceed"
     d = DC.ask(f"gate:{gid}", "live gate", f"gate {gid}: machine {machine}, {len(cands)} candidate(s)", opts, dflt,
                "the candidates' criteria against the board's rules", ev, cons, log_dir)
-    if machine is None and cands:
-        return {"by": "ai" if d["reasoned"] else "default", "action": "approve", "choice": d["choice"], "text": d["rationale"], "reasoned": d["reasoned"]}
-    return {"by": "ai" if d["reasoned"] else "default", "action": d["choice"], "text": d["rationale"], "reasoned": d["reasoned"]}
+    out = {"by": "ai" if d["reasoned"] else "default", "action": "approve" if pick else d["choice"], "text": d["rationale"], "reasoned": d["reasoned"]}
+    if pick:
+        out["choice"] = d["choice"]
+    return out
 
 
 def gate(gid, machine, candidates, fb, cons, exporter=None, clock=time.time, sleep=time.sleep, stage=None):
