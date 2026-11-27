@@ -108,3 +108,28 @@ def test_from_route_without_mismatch_hands_on_the_input_untouched(tmp_path, monk
     rc, seen, st = _run_to_stage(tmp_path, monkeypatch, b)
     assert rc == 0 and seen["board"] == b and BW.file_sha(b) == sha and "renet" not in st["stages"]["critroute"]
     assert not os.path.exists(os.path.join(str(tmp_path / "W"), "0-renet"))
+
+
+def test_partner_leg_is_released_with_a_stripped_pair_leg(tmp_path):
+    body = (two("R1", 10, 10, "A", "D_P") + two("R2", 30, 10, "D_N", "Q")
+            + seg((10.5, 10), (29.5, 10), "D_P")                          # R1.2 -> R2.1 which is now D_N
+            + seg((10.5, 12), (29.5, 12), "D_N"))                         # the partner leg: clear of every re-netted pad
+    b = G.write(tmp_path, body, name="p.kicad_pcb")
+    (tmp_path / "p.kicad_pro").write_text("{}")
+    cons = {"pairs": {"D_": {}}}
+    rep = RN.apply(b, str(tmp_path / "o" / "p.kicad_pcb"), cons)
+    assert rep["nets"] == ["D_P"] and rep["release"] == ["D_N", "D_P"]
+    assert BW.net_items(str(tmp_path / "o" / "p.kicad_pcb"))["D_N"] == BW.net_items(b)["D_N"]      # released, not stripped
+
+
+def test_t_junction_and_via_inside_a_segment_are_seen(tmp_path):
+    # stale copper reaches R2.1 (now Q) through a branch that ends in the INTERIOR of a trunk segment of the same net
+    body = (two("R1", 10, 10, "A", "B") + two("R2", 30, 10, "Q", "B") + two("R3", 20, 30, "B", "A") + two("R4", 13, 14, "B", "A")
+            + seg((10.5, 10), (10.5, 20), "B") + seg((10.5, 20), (19.5, 20), "B") + seg((19.5, 20), (19.5, 30), "B")    # trunk R1.2 -> R3.1
+            + seg((15.5, 20), (15.5, 10), "B") + seg((15.5, 10), (29.5, 10), "B")         # branch: T at (15.5, 20), -> R2.1
+            + seg((12.5, 20), (12.5, 14), "B"))                                     # a correct spur: its trunk end lands mid-segment
+    b = G.write(tmp_path, body, name="t.kicad_pcb")
+    (tmp_path / "t.kicad_pro").write_text("{}")
+    rep = RN.apply(b, str(tmp_path / "o" / "t.kicad_pcb"))
+    assert rep["removed"] == {"B": 2}                                      # the touching segment and the branch stub; trunk and spur stay
+    assert len(BW.net_items(str(tmp_path / "o" / "t.kicad_pcb"))["B"]) == 4

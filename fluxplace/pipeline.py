@@ -1800,18 +1800,18 @@ RENET_FROM = ("route-ready", "critroute", "route")        # a run that starts he
 
 def _renet_entry(c, work, board, st):
     """Route-entry check: copper that touches a pad of another net (a re-net after routing) is stripped with its dangling strands into
-    `0-renet/`, the affected nets lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
+    `0-renet/`, the affected nets (and the partner leg of a stripped pair leg) lose their protection and are routed like any open net.  No mismatch: the board is returned untouched."""
     from . import boardwrite as BW_, renet as RN_
     out = os.path.join(work, "0-renet", "board.kicad_pcb")
     try:
-        rep = RN_.apply(board, out)
+        rep = RN_.apply(board, out, c.cons)
     except Exception as e:                                                # noqa: BLE001 - a board pcbnew cannot read is the stages' business
         print(f"pipeline: re-net check skipped ({type(e).__name__}: {str(e)[:80]})", flush=True)
         return board
     if not rep:
         return board
     _sidecar(board, out)
-    v = BW_.commit(board, out, out, release=rep["nets"], reason="re-net", log=print, cons=None)
+    v = BW_.commit(board, out, out, release=rep["release"], reason="re-net", log=print)
     if not v["written"]:
         raise SystemExit(f"pipeline: re-net strip refused: {v['why']}")
     st["renet"] = dict(rep, pads=rep["pads"][:12], removed=dict(list(rep["removed"].items())[:12]))

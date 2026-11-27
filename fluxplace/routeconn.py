@@ -32,6 +32,73 @@ def _pcbnew(board, fill, timeout):
 
 
 # ---------------------------------------------------------------- text fallback
+def _pts_of(B, it):
+    """(x, y, layers) anchor points of an item (kind, obj)."""
+    k, o = it
+    if k == "seg":
+        return [(o["a"][0], o["a"][1], {o["layer"]}), (o["b"][0], o["b"][1], {o["layer"]})]
+    if k == "via":
+        return [(o["x"], o["y"], o["layers"] | set(B["copper"]))]
+    return []
+
+
+def touch(B, ia, ib):
+    """True when two items (kind, obj) of one net touch: pad / seg / via / zone in any pairing (zone-zone never)."""
+    (ka, a), (kb, b) = ia, ib
+    if ka == "zone" and kb == "zone":
+        return False
+    if ka in ("pad",) and kb in ("seg", "via"):
+        return any(_in_pad(a, x, y, TOL) and (l & a["layers"]) for x, y, l in _pts_of(B, ib))
+    if ka in ("seg", "via") and kb in ("pad",):
+        return touch(B, ib, ia)
+    if ka == "zone" and kb in ("pad", "seg", "via"):
+        if kb == "pad":
+            return bool(a["layers"] & b["layers"]) and _in_poly(a["pts"], b["x"], b["y"])
+        return any(_in_poly(a["pts"], x, y) and (l & a["layers"]) for x, y, l in _pts_of(B, ib))
+    if kb == "zone":
+        return touch(B, ib, ia)
+    if ka == "via" and kb == "via":
+        return math.hypot(a["x"] - b["x"], a["y"] - b["y"]) <= (a["d"] + b["d"]) / 2 + TOL
+    if ka == "via" or kb == "via":
+        v, g = (a, b) if ka == "via" else (b, a)
+        return RD._seg_dist(v["x"], v["y"], g["a"][0], g["a"][1], g["b"][0], g["b"][1]) <= g["w"] / 2 + v["d"] / 2 + TOL
+    if a["layer"] != b["layer"]:
+        return False
+    ends = [(x, y, b) for x, y, _l in _pts_of(B, ia)] + [(x, y, a) for x, y, _l in _pts_of(B, ib)]
+    return any(RD._seg_dist(x, y, o["a"][0], o["a"][1], o["b"][0], o["b"][1]) <= o["w"] / 2 + TOL for x, y, o in ends)
+
+
+def near_pairs(items):
+    """Index pairs of items (kind, obj) whose 1 mm grid cells overlap (zones pair with everything)."""
+    cells, zl = {}, []
+    for i, (k, o) in enumerate(items):
+        if k == "zone":
+            zl.append(i)
+            continue
+        if k == "seg":
+            x0, x1 = sorted((o["a"][0], o["b"][0]))
+            y0, y1 = sorted((o["a"][1], o["b"][1]))
+            r = o["w"] / 2
+        elif k == "via":
+            x0 = x1 = o["x"]
+            y0 = y1 = o["y"]
+            r = o["d"] / 2
+        else:
+            x0 = x1 = o["x"]
+            y0 = y1 = o["y"]
+            r = math.hypot(o["w"], o["h"]) / 2
+        for cx in range(int((x0 - r - TOL) // 1.0), int((x1 + r + TOL) // 1.0) + 1):
+            for cy in range(int((y0 - r - TOL) // 1.0), int((y1 + r + TOL) // 1.0) + 1):
+                cells.setdefault((cx, cy), []).append(i)
+    pairs = set()
+    for lst in cells.values():
+        for x in range(len(lst)):
+            for y in range(x + 1, len(lst)):
+                pairs.add((lst[x], lst[y]))
+    pairs.update((z, i) for z in zl for i in range(len(items)) if i != z)
+    return pairs
+
+
 def _in_pad(p, x, y, tol):
     """point (x, y) inside the pad's rotated rectangle / circle / oval, grown by tol."""
     rad = math.radians(-(p.get("angle") or 0.0))
@@ -80,70 +147,11 @@ def text_open(B, groups=None, members=None):
         def union(i, j):
             par[find(i)] = find(j)
 
-        def pts_of(it):                       # (x, y, layers) anchor points of an item
-            k, o = it
-            if k == "seg":
-                return [(o["a"][0], o["a"][1], {o["layer"]}), (o["b"][0], o["b"][1], {o["layer"]})]
-            if k == "via":
-                return [(o["x"], o["y"], o["layers"] | set(B["copper"]))]
-            return []
-
-        def touches(i, j):
-            (ka, a), (kb, b) = items[i], items[j]
-            if ka == "zone" and kb == "zone":
-                return False
-            if ka in ("pad",) and kb in ("seg", "via"):
-                return any(_in_pad(a, x, y, TOL) and (l & a["layers"]) for x, y, l in pts_of(items[j]))
-            if ka in ("seg", "via") and kb in ("pad",):
-                return touches(j, i)
-            if ka == "zone" and kb in ("pad", "seg", "via"):
-                if kb == "pad":
-                    return bool(a["layers"] & b["layers"]) and _in_poly(a["pts"], b["x"], b["y"])
-                return any(_in_poly(a["pts"], x, y) and (l & a["layers"]) for x, y, l in pts_of(items[j]))
-            if kb == "zone":
-                return touches(j, i)
-            if ka == "via" and kb == "via":
-                return math.hypot(a["x"] - b["x"], a["y"] - b["y"]) <= (a["d"] + b["d"]) / 2 + TOL
-            if ka == "via" or kb == "via":
-                v, g = (a, b) if ka == "via" else (b, a)
-                return RD._seg_dist(v["x"], v["y"], g["a"][0], g["a"][1], g["b"][0], g["b"][1]) <= \
-                    g["w"] / 2 + v["d"] / 2 + TOL
-            if a["layer"] != b["layer"]:
-                return False
-            ends = [(x, y, b) for x, y, _l in pts_of(items[i])] + [(x, y, a) for x, y, _l in pts_of(items[j])]
-            return any(RD._seg_dist(x, y, o["a"][0], o["a"][1], o["b"][0], o["b"][1]) <= o["w"] / 2 + TOL
-                       for x, y, o in ends)
-
-        cells, zl = {}, []
-        for i, (k, o) in enumerate(items):
-            if k == "zone":
-                zl.append(i)
-                continue
-            if k == "seg":
-                x0, x1 = sorted((o["a"][0], o["b"][0]))
-                y0, y1 = sorted((o["a"][1], o["b"][1]))
-                r = o["w"] / 2
-            elif k == "via":
-                x0 = x1 = o["x"]
-                y0 = y1 = o["y"]
-                r = o["d"] / 2
-            else:
-                x0 = x1 = o["x"]
-                y0 = y1 = o["y"]
-                r = math.hypot(o["w"], o["h"]) / 2
-            for cx in range(int((x0 - r - TOL) // 1.0), int((x1 + r + TOL) // 1.0) + 1):
-                for cy in range(int((y0 - r - TOL) // 1.0), int((y1 + r + TOL) // 1.0) + 1):
-                    cells.setdefault((cx, cy), []).append(i)
-        pairs = set()
-        for lst in cells.values():
-            for x in range(len(lst)):
-                for y in range(x + 1, len(lst)):
-                    pairs.add((lst[x], lst[y]))
-        pairs.update((z, i) for z in zl for i in range(len(items)) if i != z)
+        pairs = near_pairs(items)
         for i, j in pairs:
             if items[i][0] == "pad" and items[j][0] == "pad":
                 continue
-            if find(i) != find(j) and touches(i, j):
+            if find(i) != find(j) and touch(B, items[i], items[j]):
                 union(i, j)
         groups = {find(i) for i, it in enumerate(items) if it[0] == "pad"}
         if len(groups) > 1:

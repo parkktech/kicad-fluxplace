@@ -1,91 +1,87 @@
 """Re-net on a routed board: at route entry, find copper that touches a pad of another net (a netlist change after routing), strip only that
 copper plus the strands the removal leaves dangling, and hand the affected nets to the route stage as ordinary open nets.
-Board geometry only (pcbnew read, text write through boardwrite); no ref, net name or constant of any board."""
+Connectivity is routeconn's (T-junctions, vias inside a segment, rotated pads); no ref, net name or constant of any board."""
 import collections
 import os
 
-from . import boardwrite as BW
+from . import boardwrite as BW, netclass as NC, routeconn as RC, routediag as RD
 
 
-def _scan(b):
-    """-> (indexes into b.GetTracks() to strip, tracks, pad refs that disagree with their copper)."""
-    import pcbnew
-    tr = list(b.GetTracks())
-    pads = [p for f in b.GetFootprints() for p in f.Pads()]
-    pt = lambda p: (int(p.x), int(p.y))                                       # noqa: E731
-    via = [t.GetClass() == "PCB_VIA" for t in tr]
-    net = [t.GetNetname() for t in tr]
-    ends = [[pt(t.GetPosition())] if v else [pt(t.GetStart()), pt(t.GetEnd())] for t, v in zip(tr, via)]
-    hit = lambda p, e, t: p.HitTest(pcbnew.VECTOR2I(*e)) and (p.IsOnLayer(t.GetLayer()) if not isinstance(t, pcbnew.PCB_VIA)      # noqa: E731
-                                                                else p.IsOnLayer(t.TopLayer()) or p.IsOnLayer(t.BottomLayer()))
-    touch = collections.defaultdict(dict)                                     # item -> {end point: [pads]}
-    for i, t in enumerate(tr):
-        for e in ends[i]:
-            ps = [p for p in pads if hit(p, e, t)]
-            if ps:
-                touch[i][e] = ps
-    seeds = {i for i, d in touch.items() if any(p.GetNetname() != net[i] for ps in d.values() for p in ps)}
+def _scan(B):
+    """-> (set of seg indexes, set of via indexes) to strip, the pad refs that disagree with their copper."""
+    pads = [p for p in B["pads"] if not p.get("np")]
+    trk = [("seg", s) for s in B["segs"]] + [("via", v) for v in B["vias"]]
+    ns = len(B["segs"])
+    items = [("pad", p) for p in pads] + trk
+    off = len(pads)
+    touch_pads, same = collections.defaultdict(list), collections.defaultdict(set)      # track -> pads / same-net neighbours
+    for i, j in RC.near_pairs(items):
+        i, j = min(i, j), max(i, j)
+        if j < off or items[i][0] == "zone":
+            continue
+        if i < off:
+            if RC.touch(B, items[i], items[j]):
+                touch_pads[j - off].append(items[i][1])
+        elif items[i][1]["net"] == items[j][1]["net"] and RC.touch(B, items[i], items[j]):
+            same[i - off].add(j - off)
+            same[j - off].add(i - off)
+    net = [o["net"] for _, o in trk]
+    seeds = {t for t, ps in touch_pads.items() if any(p["net"] != net[t] for p in ps)}
     if not seeds:
-        return [], tr, []
-    at = collections.defaultdict(list)
-    for i, es in enumerate(ends):
-        for e in es:
-            at[(net[i], e)].append(i)
-    nbr = lambda i, gone=(): {j for e in ends[i] for j in at[(net[i], e)] if j != i and j not in gone}      # noqa: E731
+        return set(), set(), []
     comp, todo = set(seeds), list(seeds)
     while todo:
-        for j in nbr(todo.pop()):
-            if j not in comp:
-                comp.add(j)
-                todo.append(j)
+        for u in same[todo.pop()]:
+            if u not in comp:
+                comp.add(u)
+                todo.append(u)
     gone = set(seeds)
+
+    def on_end(pt, layer, j):                       # does the point (a zero-length segment) touch track j
+        return RC.touch(B, ("seg", {"a": pt, "b": pt, "w": 0.0, "layer": layer, "net": ""}), trk[j])
+
     grew = True
-    while grew:                                                               # strands left dangling by the removal go too
+    while grew:                                     # strands left dangling by the removal go too
         grew = False
-        for i in sorted(comp - gone):
-            live = nbr(i, gone)
-            padded = {e for e, ps in touch[i].items() if any(p.GetNetname() == net[i] for p in ps)}
-            if via[i]:
-                dead = not padded and len({tr[j].GetLayer() for j in live if not via[j]}) < 2
+        for t in sorted(comp - gone):
+            kind, o = trk[t]
+            live = same[t] - gone
+            own = [p for p in touch_pads[t] if p["net"] == net[t]]
+            if kind == "via":
+                dead = not own and len({trk[j][1]["layer"] for j in live if trk[j][0] == "seg"}) < 2
             else:
-                dead = any(e not in padded and not any(e in ends[j] for j in live) for e in ends[i])
+                dead = any(not any(RC._in_pad(p, *e, RC.TOL) and o["layer"] in p["layers"] for p in own)
+                           and not any(on_end(e, o["layer"], j) for j in live) for e in (o["a"], o["b"]))
             if dead:
-                gone.add(i)
+                gone.add(t)
                 grew = True
-    refs = sorted({f"{p.GetParentFootprint().GetReference()}.{p.GetNumber()}" for i in seeds for ps in touch[i].values()
-                   for p in ps if p.GetNetname() != net[i]})
-    return sorted(gone), tr, refs
+    refs = sorted({f"{p['ref']}.{p['num']}" for t in seeds for p in touch_pads[t] if p["net"] != net[t]})
+    return {t for t in gone if t < ns}, {t - ns for t in gone if t >= ns}, refs
 
 
-def apply(board, out):
-    """Write `out` = `board` minus its mismatched copper (`board` is never touched). -> report {nets, removed {net: n}, pads, items}, or None
-    (nothing written) when no copper disagrees with a pad net.  A strip that does not remove exactly what was chosen raises."""
-    import pcbnew
-    b = pcbnew.LoadBoard(board)
-    gone, tr, refs = _scan(b)
-    if not gone:
+def _rows(B):
+    return collections.Counter([("seg", s["net"], s["layer"], tuple(s["a"]), tuple(s["b"]), s["w"]) for s in B["segs"]] +
+                               [("via", v["net"], v["x"], v["y"], v["d"]) for v in B["vias"]])
+
+
+def apply(board, out, cons=None):
+    """Write `out` = `board` minus its mismatched copper (`board` is never touched). -> report {nets, release, removed {net: n}, pads, items}
+    or None (nothing written) when no copper disagrees with a pad net.  `release` = `nets` plus the partner leg of every stripped pair leg
+    (constraints), so the pairs machinery can re-lay the pair coupled.  A strip that removes other copper than chosen raises."""
+    B = RD.load(board)
+    segs, vias, refs = _scan(B)
+    if not segs and not vias:
         return None
-    gs = set(gone)
-    segs, vias, si, vi = set(), set(), 0, 0
-    for k, t in enumerate(tr):                                                # file order, as boardwrite.strip_indexed counts it
-        if t.GetClass() == "PCB_VIA":
-            vi += 1
-            if k in gs:
-                vias.add(vi - 1)
-        else:
-            si += 1
-            if k in gs:
-                segs.add(si - 1)
     text = BW.strip_indexed(open(board, errors="surrogateescape").read(), segs, vias)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", errors="surrogateescape") as fh:
         fh.write(text)
-    want = collections.Counter(BW.row_hash(BW.item_row(b, tr[i])) for i in gone)
-    have = collections.Counter(BW.row_hash(BW.item_row(b, t)) for t in tr)
-    left = collections.Counter(h for rows in BW.net_rows(out).values() for h, _ in rows)
-    left.update(BW.row_hash(BW.item_row(b, t)) for t in tr if not t.GetNetname())
-    if have - left != want:
+    want = _rows(dict(segs=[B["segs"][i] for i in segs], vias=[B["vias"][i] for i in vias]))
+    if _rows(B) - _rows(RD.load(out)) != want:
         os.remove(out)
         raise RuntimeError("re-net strip removed other copper than chosen")
-    removed = collections.Counter(tr[i].GetNetname() for i in gone)
-    return {"nets": sorted(removed), "removed": dict(sorted(removed.items())), "pads": refs, "items": len(gone)}
+    removed = collections.Counter([B["segs"][i]["net"] for i in segs] + [B["vias"][i]["net"] for i in vias])
+    mate = NC._pairs(sorted({p["net"] for p in B["pads"] if p["net"]}), cons or {})
+    rel = set(removed) | {mate[n] for n in removed if n in mate}
+    return {"nets": sorted(removed), "release": sorted(rel), "removed": dict(sorted(removed.items())), "pads": refs,
+            "items": len(segs) + len(vias)}
