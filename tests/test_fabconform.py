@@ -37,9 +37,10 @@ def test_parse_and_apply_edits_touch_only_the_named_fields():
 def test_via_candidates_reach_ring_smallest_pad_growth_first_and_keep_power_drill():
     v = {"size": 0.45, "drill": 0.25}
     c = FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=False)
-    assert all((p - d) / 2 >= 0.127 - 1e-9 and p >= 0.45 for p, d, _l in c)
-    assert [x[:2] for x in c][0] == (0.455, 0.2)                        # smaller drill, almost no pad growth
-    assert all(d == 0.25 for _p, d, _l in FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=True))
+    assert all((p - d) / 2 >= 0.127 - 0.003 - 1e-9 and p >= 0.45 for p, d, _l in c)
+    assert [x[:2] for x in c][0] == (0.45, 0.2)                         # drill-only rung first: ring 0.125 = 5 mil within tolerance, no copper change
+    assert all(d == 0.25 or p == 0.45 for p, d, _l in FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=True))   # kept drill shrinks only without pad growth
+    assert FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=True)[0][:2] == (0.45, 0.2)
     assert FX.via_candidates({"size": 0.6, "drill": 0.3}, 0.127, 0.2, 0.45, False) == [] or all(
         (p - d) / 2 >= 0.127 - 1e-9 for p, d, _l in FX.via_candidates({"size": 0.6, "drill": 0.3}, 0.127, 0.2, 0.45, False))
 
@@ -56,10 +57,12 @@ def test_house_verdicts_ok_option_impossible():
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and FX.action_of(v, True) == "ORDER-OPTION"
     v = FX.classify("track", 0.085, hs, 6, l)
     assert v["pcbway"]["status"] == "impossible" and FX.action_of(v, True) == "IMPOSSIBLE"
-    v = FX.classify("via_ring", 0.125, hs, 6, l)                          # JLC standard 0.125 ok; PCBWay standard 0.127 -> medium difficulty
+    v = FX.classify("via_ring", 0.125, hs, 6, l)                          # 0.125 is 5 mil within the 0.003 mil-conversion tolerance: standard at both houses, no order line
+    assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "ok"
+    v = FX.classify("via_ring", 0.105, hs, 6, l)                           # 0.11 is below standard, inside PCBWay medium difficulty (0.1016 exact)
     assert v["jlcpcb"]["status"] == "ok" and v["pcbway"]["status"] == "option" and "capabilities.html" in v["pcbway"]["source"]
     assert FX.action_of(v, False) == "ORDER-OPTION"
-    v = FX.classify("via_ring", 0.1, hs, 6, l)                            # below PCBWay medium (0.1016): impossible there; JLC registry HARD 0.05 <= 0.1 -> ok (0.125 is only its recommended value)
+    v = FX.classify("via_ring", 0.09, hs, 6, l)                           # below PCBWay medium (0.1016, tolerance 0.0986): impossible there; JLC registry HARD 0.05 <= 0.09 -> ok (0.125 is only its recommended value)
     assert v["pcbway"]["status"] == "impossible" and v["jlcpcb"]["status"] == "ok"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), True) == "FIXED"
     assert FX.action_of(FX.classify("track", 0.1, hs, 6, l), False) == "OK"
@@ -98,12 +101,12 @@ def _mini(path, tracks, vias):
 
 def test_run_fixes_track_and_via_and_leaves_the_rest_as_order_options(tmp_path):
     src, out = tmp_path / "a.kicad_pcb", tmp_path / "o.kicad_pcb"
-    _mini(src, [("A", (5, 5), (15, 5), 0.088)], [("A", (15, 5), 0.45, 0.2), ("B", (30, 30), 0.45, 0.2), ("C", (40, 40), 0.52, 0.4)])
+    _mini(src, [("A", (5, 5), (15, 5), 0.088)], [("A", (15, 5), 0.44, 0.2), ("B", (30, 30), 0.44, 0.2), ("C", (40, 40), 0.52, 0.4)])
     rep = FX.run(str(src), {}, houses="jlcpcb,pcbway", out=str(out), log=lambda *_a: None)
     assert rep["accepted"]
     segs, vias = FX.parse(out.read_text())
     assert min(s["w"] for s in segs) >= 0.1 - 1e-9
-    assert all((v["size"] - v["drill"]) / 2 >= 0.130 - 1e-9 for v in vias if v["net"] in ("A", "B"))
+    assert all((v["size"] - v["drill"]) / 2 >= 0.125 - 1e-9 for v in vias if v["net"] in ("A", "B"))
     t = [g for g in rep["rows"] if g["kind"] == "track"][0]
     assert t["action"] == "FIXED" and t["old"] == 0.088 and t["new"] == 0.1
     vias_rows = [g for g in rep["rows"] if g["kind"] == "via_ring"]
@@ -114,7 +117,7 @@ def test_run_fixes_track_and_via_and_leaves_the_rest_as_order_options(tmp_path):
 
 def test_audit_lists_every_sub_minimum_item_and_notes_split_options_from_confirmations(tmp_path):
     src = tmp_path / "a.kicad_pcb"
-    _mini(src, [("A", (5, 5), (15, 5), 0.088), ("A", (5, 8), (15, 8), 0.2)], [("A", (30, 30), 0.45, 0.2), ("B", (40, 40), 0.6, 0.3)])
+    _mini(src, [("A", (5, 5), (15, 5), 0.088), ("A", (5, 8), (15, 8), 0.2)], [("A", (30, 30), 0.44, 0.2), ("B", (40, 40), 0.6, 0.3)])
     rep = FX.audit(str(src), {}, houses="jlcpcb,pcbway", log=lambda *_a: None)
     assert rep["coverage"] == {"raw": 2, "listed": 2, "ok": True}
     opts, conf = FX.house_lines(rep, "pcbway")
@@ -127,7 +130,7 @@ def test_deliver_helpers_write_house_notes_and_skip_without_fab_profile(tmp_path
     import types
     import cli
     src, cons = tmp_path / "a.kicad_pcb", tmp_path / "c.toml"
-    _mini(src, [("A", (5, 5), (15, 5), 0.088)], [("A", (30, 30), 0.45, 0.2)])
+    _mini(src, [("A", (5, 5), (15, 5), 0.088)], [("A", (30, 30), 0.44, 0.2)])
     cons.write_text("[fab]\nprofile = [\"jlcpcb-standard\", \"pcbway-standard\"]\n")
     a = types.SimpleNamespace(board=str(src), constraints=str(cons))
     rep = cli._deliver_fabconform(a)
@@ -149,3 +152,10 @@ def test_near_never_indexes_the_ladder_and_limits_are_hard_not_recommended():
     for h, _p in hs:
         for f, (hard, _rec, _c) in L.fab_bounds(h, 6).items():
             assert lims[h][f] == hard                                  # never the recommended design floor FC.limits() carries
+
+
+def test_gnd_via_drill_only_rung_keeps_pad_and_drill_floor():
+    v = {"size": 0.45, "drill": 0.25}
+    first = FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=True)[0]
+    assert first[:2] == (0.45, 0.2) and "pad" not in first[2]              # ring 0.100 -> 0.125, copper untouched, drill >= house min
+    assert all(d >= 0.2 for _p, d, _l in FX.via_candidates(v, 0.127, 0.2, 0.45, keep_drill=True))

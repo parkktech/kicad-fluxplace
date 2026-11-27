@@ -31,7 +31,6 @@ EPS = 1e-6
 REG_CITE = {}                               # (house, limit key) -> w110 registry citation of the value in use
 DRILL_STEP = 0.05                          # standard drill grid (0.2 / 0.25 / 0.3 ...)
 PAD_STEP = 0.005
-RING_MARGIN = 0.003                        # mm above the strictest house via ring (the sourced limits are rounded to 0.003)
 UNCOUPLED_GAP = 5.0                        # mm: a pair leg with no partner beside it is a lone microstrip (coupling term ~ 0)
 HOUSE_DEFAULT_TIER = "standard"
 _OPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fabconform_options.json")
@@ -221,11 +220,18 @@ def _pad_for(drill, ring, dia_min):
 
 
 def via_candidates(v, ring_t, drill_min, dia_min, keep_drill):
-    """Ordered [(size, drill, label)] that reach ring >= ring_t, smallest pad growth first."""
+    """Ordered [(size, drill, label)] reaching ring >= ring_t (within HOUSE_TOL_MM), least copper change first: drill-only rungs
+    (pad kept, no copper change) come before any pad growth. A kept (power/zone) drill may shrink only on those rungs."""
     out = []
-    for d in [v["drill"]] + ([] if keep_drill else _std_down(v["drill"], drill_min)):
-        for pad in {max(v["size"], _pad_for(d, ring_t, dia_min)), _pad_for(d, ring_t, dia_min)}:
-            if (pad - d) / 2 >= ring_t - EPS and pad >= v["size"] - EPS and (pad, d) != (v["size"], v["drill"]):
+    tol = FC.HOUSE_TOL_MM
+    for d in [v["drill"]] + _std_down(v["drill"], drill_min):
+        pads = {_pad_for(d, ring_t, dia_min), max(v["size"], _pad_for(d, ring_t, dia_min))}
+        if d != v["drill"] and (v["size"] - d) / 2 >= ring_t - tol - EPS:
+            pads.add(v["size"])                                        # drill-only rung: pad untouched
+        for pad in pads:
+            if keep_drill and d != v["drill"] and pad > v["size"] + EPS:
+                continue
+            if (pad - d) / 2 >= ring_t - tol - EPS and pad >= v["size"] - EPS and (pad, d) != (v["size"], v["drill"]):
                 out.append((pad, d))
     out = sorted(set(out), key=lambda c: (round(c[0] - v["size"], 4), round(v["drill"] - c[1], 4)))
     return [(p, d, ("drill %.2f->%.2f" % (v["drill"], d) if d != v["drill"] else "") +
@@ -260,7 +266,7 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
     strict_ring = strictest(lims, "via_annular_min") or 0.0
     drill_min = strictest(lims, "drill_min") or 0.0
     dia_min = strictest(lims, "via_dia_min") or 0.0
-    ring_targets = sorted({l["via_annular_min"] + RING_MARGIN for l in lims.values() if l.get("via_annular_min")} |
+    ring_targets = sorted({l["via_annular_min"] for l in lims.values() if l.get("via_annular_min")} |
                           {o["limit_mm"] for h in lims for o in options_data().get(h, []) if o["kind"] == "via_ring"}, reverse=True)
     zone_nets = set(facts.get("zone_nets") or []) | set((cons.get("power") or {}))
     plan = Plan()
@@ -304,7 +310,7 @@ def build_plan(text, segs, vias, lims, zm, cons, facts, log=print):
                  rung=0 if rungs else -1, why="" if rungs else "impedance-blocked" if info.get("z_blocked") else "no rung")
     for v in vias:
         ring = (v["size"] - v["drill"]) / 2
-        if ring >= strict_ring + RING_MARGIN - EPS:
+        if ring >= strict_ring - FC.HOUSE_TOL_MM - EPS:      # 0.125 is 5 mil (0.127) within the mil-conversion tolerance
             continue
         where = dict(kind="via_ring", span=v["span"], net=v["net"], layer="F.Cu-B.Cu", x=v["x"], y=v["y"], geom=((v["x"], v["y"]),), old=ring)
         if not v["through"] or v["locked"]:
@@ -405,7 +411,8 @@ def house_verdict(house, profile, kind, value, layers, lims_by_house):
     """-> dict(status ok|option|impossible, tier, text, source, retrieved) for one item value at one house."""
     key = LIMIT_KEY[kind]
     need = lims_by_house[house].get(key)
-    if need is None or value >= need - EPS:
+    tol = FC.HOUSE_TOL_MM                       # one rule with gerbercheck/constraints: a value within the mil-conversion rounding meets the house standard (published options keep their exact limits)
+    if need is None or value >= need - tol - EPS:
         return {"status": "ok"}
     v, t0 = FC.split(profile)
     for vv, t in FC.all_tiers():
@@ -549,7 +556,7 @@ def audit(board, cons=None, houses="jlcpcb,pcbway", log=print):
     house_drc = DG.drc_json(board, pro_edit=_house_pro_edit(lims))
     rows = [g for g in build_rows(plan, hs, layers, lims, zm, facts, house_drc, centre, segs, vias, text) if g["action"] != "OK"]
     tmin, rmin = strictest(lims, "track_min"), strictest(lims, "via_annular_min")
-    raw = sum(1 for s in segs if s["w"] < tmin - EPS) + sum(1 for v in vias if (v["size"] - v["drill"]) / 2 < rmin - EPS)
+    raw = sum(1 for s in segs if s["w"] < tmin - EPS) + sum(1 for v in vias if (v["size"] - v["drill"]) / 2 < rmin - FC.HOUSE_TOL_MM - EPS)
     listed = sum(g["n"] for g in rows if g["kind"] in ("track", "via_ring"))
     return {"board": board, "layers": layers, "houses": [p for _h, p in hs], "rows": rows, "counts": count(rows),
             "limits": _limits_view(lims, hs),
