@@ -2098,7 +2098,8 @@ def _run(a):
             incremental = st["incremental"] = True
             c.answers.setdefault("rip-existing", "never")      # the existing copper stays: routing only adds (an owner --answer wins)
             from . import routediag as RD_, opengate as OG_
-            _scope_add(c, {q["net"] for q in RD_.load(board)["pads"] if q["ref"] in set(res.get("placed") or ()) and q["net"]})     # the new parts' nets are the route's scope
+            placed = set(res.get("placed") or ())
+            _scope_add(c, {q["net"] for q in RD_.load(board)["pads"] if q["ref"] in placed and q["net"]})     # the new parts' nets are the route's scope
             try:
                 OG_.refill(board)                              # an in-place footprint swap leaves the zones unfilled around its new pads and holes
             except Exception as e:                             # noqa: BLE001 - the zones stay as they were; DRC says so later

@@ -365,7 +365,8 @@ def run(c, n, board, runner=run_step):
     xtra = list(getattr(c, "krt_extra", None) or [])         # D71ct: variant flags, route.py calls only (not route_diff/planes)
     sig, planes = plane_plan(board)
     scope = renet_scope(c)                            # a re-net run: only these nets are touched, every other net is protected copper
-    plane_steps = [(x, lay) for x, lay in planes if scope is None or x in scope]
+    in_scope = lambda x: scope is None or x in scope
+    plane_steps = [(x, lay) for x, lay in planes if in_scope(x)]
     names = set(RC.open_by_net(board))                       # nets that are open
     rep = None
     pd = ((getattr(c, "state", None) or {}).get("stages") or {}).get("pairs", {}).get("dir")
@@ -382,7 +383,7 @@ def run(c, n, board, runner=run_step):
     opn = {x for x in pn if x in names or x in hand}                 # a pair is incomplete when either leg is open
     diff = sorted(x for x in pn if any(_diffnamed(x, y) and (x in opn or y in opn) for y in pn))
     hs_block = PFB.gated_open_legs(c.cons, pn, names, hand)          # PHASE3I F1: gated pair legs are the pair builder's, not KRT's
-    diff = [x for x in diff if x not in hs_block and (scope is None or x in scope)]
+    diff = [x for x in diff if x not in hs_block and in_scope(x)]
     if scope is not None:
         hs_block, opn = {x for x in hs_block if x in scope}, {x for x in opn if x in scope}
     from . import power as PWR      # D71cj: [power] rails at their width; a net with a zone on the board is not a rail
@@ -407,7 +408,7 @@ def run(c, n, board, runner=run_step):
         steps.append(("rails", lambda s, o: cmd_route(a.router_py, a.router_dir, s, o, list(sig), base, rails, o[:-10] + ".json", nets=other_rail_nets, extra=xtra)))
     from . import railbranch as RB                           # W46: rail branches at each connection's D71da width; the plain step skips rail nets
     try:
-        branch_nets = [x for x in RB.branch_nets(c.cons, {x for x, _l in planes}) if scope is None or x in scope]
+        branch_nets = [x for x in RB.branch_nets(c.cons, {x for x, _l in planes}) if in_scope(x)]
     except Exception:                                        # noqa: BLE001 - no [power] facts: no branch step
         branch_nets = []
     branch_rec = {}
@@ -503,7 +504,7 @@ def run(c, n, board, runner=run_step):
         is_rf_net = lambda n: n in rfc or of(n)[0] == "rf"
     except Exception:                                        # noqa: BLE001 - no board facts: the name rule
         is_rf_net = lambda n: n in rfc or RV.is_rf(n)
-    rf_nets = sorted(n for n in allnets if (scope is None or n in scope) and is_rf_net(n) and n not in pn and n not in rail_nets and n not in {x for x, _l in planes})
+    rf_nets = sorted(n for n in allnets if in_scope(n) and is_rf_net(n) and n not in pn and n not in rail_nets and n not in {x for x, _l in planes})
     rf_rec = {"nets": rf_nets, "layers": [], "widths": {}, "unknown_width": [], "open": [], "routed": []}
     if rf_nets:                                              # RF before plain: one router call on the RF nets, the route step never takes them
         from . import rfroute as RFR
