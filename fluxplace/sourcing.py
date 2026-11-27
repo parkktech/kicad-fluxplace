@@ -409,9 +409,9 @@ def _newest(a, b):
 
 
 def cache_load(name, cache_dir=None):
-    """One lookup cache by file name: the board folder's copy merged with the shared per-user one (~/.cache/fluxplace), newest row per MPN.
+    """One lookup cache by file name: the shared per-user one (~/.cache/fluxplace) filling the misses of the board folder's copy (the folder's row wins).
     A fact fetched for one board, stage or folder is reused by every other (w76)."""
-    return _newest(_read_json(os.path.join(cache_home(None), name)), _read_json(os.path.join(cache_home(cache_dir), name)))
+    return {**_read_json(os.path.join(cache_home(None), name)), **_read_json(os.path.join(cache_home(cache_dir), name))}
 
 
 def cache_save(name, cache_dir, cache, indent=None):

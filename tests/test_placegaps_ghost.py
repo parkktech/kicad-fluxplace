@@ -307,6 +307,7 @@ def test_checkpoint_is_atomic_and_cache_never_falls_back_to_cwd(monkeypatch, tmp
     S.write_json(str(path), {"a": 2})
     assert json.load(open(path)) == {"a": 2} and sorted(os.listdir(tmp_path)) == ["c.json"]      # no .tmp left behind
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FLUXPLACE_CACHE_HOME", raising=False)      # the conftest fixture's shared cache; this test is about the HOME default
     monkeypatch.chdir(tmp_path)
     d = S.cache_home(None)
     assert d == str(tmp_path / "home" / ".cache" / "fluxplace") and os.path.isdir(d)

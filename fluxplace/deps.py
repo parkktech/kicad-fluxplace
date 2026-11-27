@@ -92,7 +92,7 @@ REQUIREMENTS = [
          label="openpyxl", why="the .xlsx twins of the BOM and centroid uploads",
          pip="openpyxl", apt="python3-openpyxl"),
     dict(key="curl_cffi", kind="python", module="curl_cffi", tier="sourcing",
-         label="curl_cffi", why="the LCSC/JLCPCB stock check in review (CN_*); without it every part is CN_UNCHECKED",
+         label="curl_cffi", why="the China-build stock check in review (CN_*); without it every part is CN_UNCHECKED",
          pip="curl_cffi", apt=None,
          hint="/usr/bin/python3 -m pip install --user curl_cffi"),
     dict(key="pytest-xdist", kind="python", module="xdist", tier="suite",

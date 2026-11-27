@@ -63,9 +63,10 @@ def test_cn_unchecked_message_carries_the_reason(monkeypatch):
     assert f[0]["code"] == "CN_UNCHECKED" and "lookup budget spent" in f[0]["msg"]
 
 
-def test_shared_cache_newest_row_wins(tmp_path):
+def test_shared_cache_fills_misses_folder_row_wins(tmp_path):
     d = str(tmp_path / "d")
     S.cache_save("x.json", d, {"M": {"_t": 5, "v": 1}})
     S.cache_save("x.json", d, {"M": {"_t": 3, "v": 0}, "N": {"_t": 1}})
     got = S.cache_load("x.json", d)
-    assert got["M"]["v"] == 1 and "N" in got
+    assert got["M"]["v"] == 0 and "N" in got          # the folder's own row wins
+    assert S.cache_load("x.json", str(tmp_path / "other"))["M"]["v"] == 1   # another folder sees the shared (newest) row
