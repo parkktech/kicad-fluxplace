@@ -102,6 +102,25 @@ _X = {
     "SHEET_OFF_PAGE": (None, OWNER_DATA),
     "TITLEBLOCK_": (None, OWNER_DATA),
     "PART_SUBSTITUTION_": (None, OWNER_DATA),
+    # B15: kicad-happy EMC (review) and SPICE (ready) findings, warn-only until a constraint promotes a code to FAIL
+    "EMC_DC_": ("support-far", "floorplan"),            # decoupling cap far from its IC
+    "EMC_ES_001": ("support-far", "floorplan"),         # ESD device far from its connector
+    "EMC_ES_": (None, "route"),
+    "EMC_SW_001": (None, OWNER_DATA),
+    "EMC_SW_": ("row-pin-bypass", "floorplan"),         # switch-node copper / input-cap loop
+    "EMC_DP_001": ("pair-skew", "tune"),
+    "EMC_DP_": (None, "route"),
+    "EMC_BE_001": (None, "route"),
+    "EMC_BE_": (None, "close"),
+    "EMC_VS_": (None, "close"),
+    "EMC_GP_003": (None, OWNER_DATA),
+    "EMC_GP_005": (None, OWNER_DATA),
+    "EMC_GP_": (None, "route"),
+    "EMC_CK_": (None, "route"),
+    "EMC_RP_": (None, "route"),
+    "EMC_XT_": (None, "route"),
+    "EMC_": (None, OWNER_DATA),                         # stackup, I/O filter, PDN, EMI filter, thermal, shielding, emission estimates, UNKNOWN
+    "SPICE_": (None, "ready"),
 }
 # codes a review can raise that the source scan cannot see (the level or the code is built at run time)
 EXTRA_FAIL = ("MEASURE_DISAGREE", "UNROUTED", "CONGESTION", "SILK_OFF_BOARD", "SILK_OVER_PAD", "SILK_OVER_HOLE", "SILK_VERSION_STALE",
@@ -110,6 +129,11 @@ EXTRA_FAIL = ("MEASURE_DISAGREE", "UNROUTED", "CONGESTION", "SILK_OFF_BOARD", "S
 # modules whose code-like strings are not review findings: the planner's PLAN_* findings, router drop reasons, a KiCad enum
 _NOT_REVIEW = ("gapmap.py", "planroute.py", "globalroute.py", "batchroute.py", "routepar.py", "thermal.py")
 _CODE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$")
+
+
+def _happy_codes():
+    from . import happy
+    return happy.codes()
 
 
 def lookup(code):
@@ -179,7 +203,7 @@ def fail_codes(pkg_dir=None):
                 for k, v in zip(n.value.keys, n.value.values):                  # silk.LEVEL = {"CODE": FAIL, ...}
                     if isinstance(k, ast.Constant) and _is_fail(v) and _CODE.match(str(k.value)):
                         res.setdefault(k.value, set()).add(mod)
-    for c in EXTRA_FAIL:
+    for c in EXTRA_FAIL + _happy_codes():            # B15: the adapter's codes are built at run time and promotable to FAIL
         res.setdefault(c, set()).add("(dynamic)")
     return {c: sorted(m) for c, m in sorted(res.items())}
 

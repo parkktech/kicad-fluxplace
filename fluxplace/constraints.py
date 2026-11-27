@@ -117,6 +117,7 @@ floor — wide enough for a 10C rise at the stated current, narrow enough not to
 eat the board. The engineer can always state width_mm directly instead.
 """
 import re
+import os
 import tomllib
 
 
@@ -131,6 +132,9 @@ def load(path):
     if isinstance(rel, str) and rel:               # a relative datasheet dir is the constraints file's project's, not the cwd's
         from . import parts as P
         d["docs"]["datasheets"] = P.resolve_dir(rel, [path], strict=True)
+    sch = (d.get("happy") or {}).get("schematic")
+    if isinstance(sch, str) and sch and not os.path.isabs(sch):      # B15: a relative schematic is the constraints file's, not the cwd's
+        d["happy"]["schematic"] = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), sch))
     return d
 
 

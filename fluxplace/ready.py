@@ -23,7 +23,7 @@ import sys
 
 from . import questions as QS
 
-PASS, FAIL, OPEN, UNCHECKED, WAIVED = "PASS", "FAIL", "OPEN", "UNCHECKED", "WAIVED"
+PASS, FAIL, OPEN, UNCHECKED, WAIVED, WARN = "PASS", "FAIL", "OPEN", "UNCHECKED", "WAIVED", "WARN"
 
 
 def notready_path(board):
@@ -258,11 +258,30 @@ def evaluate(spec, cons, facts, board, ds_dir, sess, parts_res, api=False, allow
     else:
         lines.append(_line("board checks", UNCHECKED, "no --board: rails, fixed parts, outline and floors not checked"))
         lines += power_plan_lines(spec, cons, facts, None, ds_dir, sess, rows, planes, None, detail)
+    lines += spice_lines(board, cons, detail)
     from . import liveview as LV                  # F16: this stage's criteria list, when a stream is on
-    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED) for x in lines) else "refused",
-                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED), "value": x["status"],
+    LV.progress("ready", "gate", always=True, verdict="kept" if all(x["status"] in (PASS, WAIVED, WARN) for x in lines) else "refused",
+                criteria=[{"id": x["name"], "ok": None if x["status"] == UNCHECKED else x["status"] in (PASS, WAIVED, WARN), "value": x["status"],
                            "limit": PASS, "text": x["detail"]} for x in lines])
     return lines, detail
+
+
+def spice_lines(board, cons, detail):
+    """B15: kicad-happy SPICE subcircuit checks (crystal load, RC/LC filters, dividers, op-amp gain). Warn-only: WARN never blocks; a run that
+    could not happen is UNCHECKED, never PASS; a code promoted by `[happy] fail` is a FAIL line."""
+    from . import happy as HP
+    if HP.settings(cons) is None:
+        return []
+    r = HP.run_spice(board, cons)
+    if r["status"] != HP.OK:
+        return [_line("spice", UNCHECKED, f"SPICE subcircuits NOT CHECKED: {r['reason']}")]
+    fs = HP.as_findings(r["findings"], cons)
+    detail["spice"] = fs
+    nf = sum(f["level"] == FAIL for f in fs)
+    if not fs:
+        return [_line("spice", PASS, "SPICE subcircuits simulated: no warnings")]
+    return [_line("spice", FAIL if nf else WARN, f"{len(fs)} SPICE finding(s) ({', '.join(sorted({f['code'] for f in fs}))}), {nf} promoted to FAIL; listed in .ready.json",
+                  [f"{f['code']} {f['msg']}" for f in fs[:6]] if nf else [])]
 
 
 def density_line(spec, cons, B):
@@ -538,7 +557,7 @@ def cmd_ready(a):
         with open(stem + ".ready.json", "w") as fh:
             json.dump({"verdict": verdict, "checklist": lines, "classes": detail.get("classes", []),
                        "questions": sess.open, "fixed_reasons": detail.get("fixed_reasons", []),
-                       "pairs_unclassified": detail.get("pairs_unclassified", [])}, fh, indent=1)
+                       "pairs_unclassified": detail.get("pairs_unclassified", []), "spice": detail.get("spice", [])}, fh, indent=1)
         if detail.get("power_plan"):
             with open(stem + ".power-plan.json", "w") as fh:
                 json.dump(detail["power_plan"], fh, indent=1)
