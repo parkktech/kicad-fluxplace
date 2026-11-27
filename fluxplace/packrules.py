@@ -141,6 +141,13 @@ def p4(ctx, W):
         cv = fc.get("coverage") or {}
         if not cv.get("ok", True):
             probs.append("fabconform: %s sub-minimum item(s), only %s FIXED / ORDER-OPTION / listed" % (cv.get("raw"), cv.get("listed")))
+        for g in fc.get("rows") or []:                  # owner 2026-11-27: under a targeted house's HARD minimum = FAIL unless that house has an ORDER-OPTION
+            if g.get("kind") not in ("track", "via_ring", "pth_ring"):
+                continue
+            for h, v in (g.get("verdicts") or {}).items():
+                if v.get("status") == "impossible":
+                    probs.append("%s %s x%s %.3f mm on %s at %s is under %s's hard minimum, no ORDER-OPTION: %s" % (
+                        g["kind"], g.get("layer") or "", g.get("n"), g.get("old") or 0.0, g.get("net") or "-", g.get("loc") or "?", h, v.get("text", "")))
     left, waived = _resolve("P4", probs, W)
     ok = "%s; DNP %s excluded and listed" % ("PCBWay set n/a (--no-pcbway)" if no_pw else "PCBWay set ok", ", ".join(sorted(ctx["dnp"])) or "none")
     pcbway = _res("P4", left, waived, ok)

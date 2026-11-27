@@ -113,11 +113,21 @@ def rules(cons, board=None, track=None, clearance=None, via=0.45, drill=0.2, B=N
         v = [float(x) for x in vals if x]
         return max(v) if v else default
 
-    R = {"min_track": floor(fab.get("min_track_mm"), r.get("min_track_mm"), pro.get("min_track_width")),
-         "min_clearance": floor(fab.get("min_clearance_mm"), r.get("min_clearance_mm"), pro.get("min_clearance")),
+    house, house_src = {}, ""
+    if (cons or {}).get("fab") is None:             # no [fab] table: never the .kicad_pro minimum alone (owner 2026-11-27)
+        from . import limits as LM
+        house, house_src = LM.house_floors(cons, LM.board_layers(board))
+    R = {"min_track": floor(fab.get("min_track_mm"), house.get("track_min"), r.get("min_track_mm"), pro.get("min_track_width")),
+         "min_clearance": floor(fab.get("min_clearance_mm"), house.get("space_min"), r.get("min_clearance_mm"), pro.get("min_clearance")),
          "min_via": floor(fab.get("min_via_dia_mm"), r.get("min_via_mm"), pro.get("min_via_diameter")),
          "min_drill": floor(fab.get("min_drill_mm"), r.get("min_drill_mm"), pro.get("min_through_hole_diameter")),
          "hole_to_hole": floor(_fab_hole_to_hole(fab), r.get("hole_to_hole_mm"), pro.get("min_hole_to_hole"), default=0.0)}
+    R["min_ring"] = max(house.get("via_annular_min", 0.0), house.get("pth_annular_min", 0.0))
+    R["floor_source"] = {"min_track": "house" if house.get("track_min", 0) >= (pro.get("min_track_width") or 0) else ".kicad_pro",
+                         "min_clearance": "house" if house.get("space_min", 0) >= (pro.get("min_clearance") or 0) else ".kicad_pro"} if house else {}
+    if house:
+        print(f"INFO floors: track {R['min_track']:g} ({R['floor_source']['min_track']}), clearance {R['min_clearance']:g} "
+              f"({R['floor_source']['min_clearance']}), ring >= {R['min_ring']:g}: {house_src}; .kicad_pro track {pro.get('min_track_width') or 0:g} clearance {pro.get('min_clearance') or 0:g}")
     R["hole_to_hole_fab"] = _fab_hole_to_hole(fab)
     R["hole_to_hole_severity"] = HOLE_TO_HOLE_SEVERITY
     # HARD fab limits (manufacturer row for this board's layer count): the router may never go below them, and a

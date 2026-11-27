@@ -88,6 +88,10 @@ def floors(cons, board=None, layers=None):
     r = (cons or {}).get("route") or {}
     fab = C.fab_profile(cons, layers=layers, board=board) if (cons or {}).get("fab") is not None else {}
     bt, bs = _project_floors(board)                 # constraints without [fab]/[route] floors: the board's own rules, not 0.05 mm
+    if (cons or {}).get("fab") is None:             # ... but never below the strictest house hard minimum + margin (owner 2026-11-27)
+        from . import limits as LM
+        hf, _src = LM.house_floors(cons, layers or LM.board_layers(board))
+        bt, bs = max(bt, hf.get("track_min", 0.0)), max(bs, hf.get("space_min", 0.0))
     ht = float(fab.get("min_track_mm") or 0.0) or float(r.get("min_track_mm") or 0.0) or bt or 0.05
     hs = float(fab.get("min_clearance_mm") or 0.0) or float(r.get("min_clearance_mm") or 0.0) or bs or 0.05
     pref = max(float(r.get("min_track_mm") or 0.0), float(r.get("min_clearance_mm") or 0.0), ht, hs)
