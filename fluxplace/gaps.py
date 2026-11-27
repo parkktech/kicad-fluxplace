@@ -260,6 +260,16 @@ def deferred_left(left, later_stages):
     return None
 
 
+def split_preexisting(left, base_left, tol=0.01):
+    """Re-net / incremental runs: (new, pre) rows of `left`. A row is pre-existing when the input board had a gap with the same id
+    and the same-or-smaller magnitude (`mag`, power gaps); a row that is absent from the input or larger is new."""
+    base = {g["id"]: g.get("mag") or 0 for g in base_left or ()}
+    new, pre = [], []
+    for g in left or ():
+        (pre if g["id"] in base and (g.get("mag") or 0) <= base[g["id"]] + tol else new).append(g)
+    return new, pre
+
+
 def gate_kinds(cons, stage):
     """Kinds gating `stage` ([] = no gate). cons [flow.gates] = {stage: [kind, ...]} overrides the defaults."""
     over = ((cons or {}).get("flow") or {}).get("gates") or {}
@@ -2454,7 +2464,7 @@ def gate_measure(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", 
     left = [g for g in m["gaps"] if kinds is None or in_scope(g, kinds)]
     failed = list(m.get("review_failed") or [])
     stop = "open" if (left or failed) else "clean"
-    rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at")} for g in left]
+    rows = [{"id": g["id"], "kind": g["kind"], "class": g.get("class"), "nets": g.get("nets"), "at": g.get("at"), "mag": g.get("mag")} for g in left]
     res = {"stop": stop, "exit": 0 if stop == "clean" else 5, "measure_only": True, "start": _vitals(m), "left": rows,
            "review_failed": failed}
     _write_json(os.path.join(work, "stop.json"), res)
@@ -3090,7 +3100,7 @@ def close(board, work, cons_path=None, cons=None, kicad_cli="kicad-cli", budget_
     left = []
     for g in vis(m["gaps"]):
         l = last.get(g["kind"], {})
-        left.append({"id": g["id"], "kind": g["kind"], "class": g["class"],
+        left.append({"id": g["id"], "kind": g["kind"], "class": g["class"], "mag": g.get("mag"),
                      "last_method": l.get("method"), "why": l.get("why")})
     ignored = []                                  # PHASE3H A7: answers left unapplied, with the reason
     by_sid = {critroute._safe(ai_key(g))[:80]: g for g in m["gaps"]}

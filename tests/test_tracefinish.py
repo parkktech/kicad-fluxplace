@@ -585,3 +585,11 @@ def test_clean_removes_a_dead_end_via_with_its_stub_and_keeps_a_via_in_a_rule_ar
     assert _items(out) == (1, 1, 0)
     v = [t for t in P.LoadBoard(out).GetTracks() if t.Type() == P.PCB_VIA_T][0]
     assert abs(v.GetPosition().x - P.FromMM(14)) < 10               # the rule-area via stays
+
+
+def test_clean_removes_a_sub_0p2_mm_dangling_stub(tmp_path):
+    src = _t2_board(tmp_path, extra_tracks=[(10, 6, 10, 6.05, "A")], vias=[], zero=[], zone=False)     # w79: the 0.05 mm stub a re-route leaves
+    out = str(tmp_path / "out.kicad_pcb")
+    res = TF.clean(src, out)
+    assert res["removed"].get("dangling") == 1 and res["refused"] == {}
+    assert _items(out) == (1, 0, 0)
