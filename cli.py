@@ -1504,6 +1504,23 @@ def cmd_compact(a):
     _stages_outline_to_fab(a, board, parts, nets, IO, pos, rot, label="COMPACT")
 
 
+def cmd_fabconform(a):
+    """Fix copper under any fab house's minimum (guarded); the rest becomes per-house order options."""
+    import json as _json
+    from fluxplace import fabconform as FX, constraints as C
+    cons = C.load(a.constraints) if a.constraints else {}
+    rep = FX.run(a.board, cons, houses=a.houses, out=a.out, relax_clearance=a.relax_clearance)
+    print(FX.table(rep))
+    if a.out:
+        base = a.out[:-len(".kicad_pcb")] if a.out.endswith(".kicad_pcb") else a.out
+        _json.dump(rep, open(base + ".fabconform.json", "w"), indent=1, default=str)
+        for h, md in FX.order_notes(rep).items():
+            open(f"{base}.order-{h}.md", "w").write(md)
+        print(f"wrote {a.out} (+ .fabconform.json, .order-<house>.md)" if rep["accepted"] else "board NOT changed (guard refused)")
+    if not rep["accepted"]:
+        raise SystemExit(1)
+
+
 def cmd_fab_advise(a):
     """Which manufacturer tier builds this board as designed; what each constraint costs."""
     import json as _json
@@ -3680,6 +3697,18 @@ def build_parser():
                      default="never", help="exit 1 at this severity (default never)")
     pli.set_defaults(fn=cmd_lint)
 
+    pfc = sub.add_parser("fabconform",
+                         help="make the board build first time at every selected fab house: guarded fixes for copper under a house "
+                              "minimum (track, via ring, drill), per-house order options for the rest")
+    pfc.add_argument("board")
+    pfc.add_argument("--houses", default="jlcpcb,pcbway", help="comma list of vendors or <vendor>-<tier> profiles (default jlcpcb,pcbway)")
+    pfc.add_argument("--constraints", default=None, help="[pairs] impedance targets / [rf] / [power] are read")
+    pfc.add_argument("--write", dest="out", default=None, metavar="OUT", help="write the fixed board here (+ sidecars); without it nothing is written")
+    pfc.add_argument("--relax-clearance", action="store_true",
+                     help="guard against the strictest HOUSE space instead of the project's own (larger) clearance: a gap legal at every fab but "
+                          "under the project preference is accepted (the board's own DRC then reports it)")
+    pfc.set_defaults(fn=cmd_fabconform)
+
     pfa = sub.add_parser("fab-advise",
                          help="cheapest manufacturer tier that builds the board as designed + what each constraint costs")
     pfa.add_argument("--board", default=None)
@@ -4320,7 +4349,7 @@ def _silk_hook(a):
 
 
 # commands that never write a board: no connectivity snapshot is taken for them
-_GUARD_READ_ONLY = {"lint", "review", "fab-advise", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
+_GUARD_READ_ONLY = {"lint", "review", "fab-advise", "fabconform", "route-status", "route-wait", "route-diagnose", "doctor", "help-brief",
                     "floorplan-check", "rules", "analyze", "comprehend", "open-nets", "window", "probe", "suggest", "session", "calls", "progress", "versions"}
 
 

@@ -1,0 +1,10 @@
+{
+ "_comment": "Order options a house publishes beyond the tiers in fab_capabilities.json. kind = fabconform item kind, limit_mm = the smallest value the option accepts. Read from the vendor page itself.",
+ "pcbway": [
+  {"kind": "via_ring", "limit_mm": 0.1016, "option": "pcbway Advanced table, 'Medium difficulty' column",
+   "cost": "medium-difficulty class, priced at instant quote; price not published",
+   "source": "https://www.pcbway.com/capabilities.html (Advanced PCB table, row 17 'Minimum weld ring (outer layer)': via hole >= 5 mil normal, >= 4 mil medium difficulty, 18 um and 35 um outer copper)",
+   "retrieved": "2026-11-27"}
+ ],
+ "jlcpcb": []
+}
