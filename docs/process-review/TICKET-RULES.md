@@ -19,3 +19,4 @@
   - Waiting: wait for a marker that only the finished job writes (merge-gate "OK"/"NEW FAILURES" line, `SUMMARY <stage> [<folder>]` in RUN.md, a result.json). Never grep a log tail that may hold an older run's lines, and never match bare "slot" or "pipeline:".
   - Measurement runs against mainline use a detached worktree pinned to a sha (`worktree add --detach`), never the live w16merge worktree (merges move its HEAD).
   - Reap: when your result is reported, no background process of yours remains (`ps -eo pid,args | grep <your scratch dir>`).
+  - Conflicts: resolve hunk by hunk. Whole-file `--ours`/`--theirs` only after `git diff $(git merge-base A B) B -- FILE` shows the conflicting hunk is the other side's only change (ledger: w69 hook rename lost, session 7).
