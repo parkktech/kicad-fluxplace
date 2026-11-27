@@ -1281,7 +1281,7 @@ def resolve_model(path, board_path):
     return out
 
 
-def check_models(facts, board_path=None):
+def check_models(facts, board_path=None, bundled=False):
     """Every electrical footprint carries a 3D model whose file exists.
     A board that renders with holes is a board nobody has looked at: the
     V1.5 RJ45 pointed at RJHSE5380.step (library file: RJHSE538X) and the
@@ -1331,7 +1331,7 @@ def check_models(facts, board_path=None):
                               + (f" (same name exists as {alt[0]})" if alt else ""),
                               refs=[ref]))
                 continue
-            if bp and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
+            if bp and not bundled and MP.outside_lib(m, full, os.path.dirname(os.path.abspath(bp))):
                 out.append(_f(FAIL, "MODEL_OUTSIDE_LIB",
                               f"{ref} 3D model {m} resolves outside the project model library "
                               f"(copy the vendor STEP into the project lib/3dmodels and bind it there)",
@@ -2343,7 +2343,7 @@ def run(facts, spec=None, cons=None, partdata=None, idx=None, waivers=(),
     out += check_fab_capability(facts, cons)
     out += check_acid_traps(facts, cons)
     out += check_slivers(facts, cons)
-    out += check_models(facts)
+    out += check_models(facts, bundled=(stage == "deliver"))   # deliver bundles every model into the delivery's lib/3dmodels
     out += check_power(facts, cons)
     from . import power as PWR
     out += [_f(x['level'], x['code'], x['msg'], refs=x['refs'])
