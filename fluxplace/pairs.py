@@ -1160,28 +1160,9 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
         res["negotiation"] = {"sections": len(secs_of), "passes": used, "unresolved": ["/".join(pr) for pr in sorted(unresolved)],
                               "failed_alone": alone_fail, "secs": round(time.time() - tn, 1), "workers": P["workers"]}
         log(f"pairs: negotiation {res['negotiation']}")
-    if live and not only:                                    # B5: joint pair exits per component, proved by a ghost lay of a shortlist
-        from . import pairescape as PE
-
-        def ghost(prs, escape, reserve):
-            ctx = mk_ctx()
-            ctx["escape"], ctx["escape_reserve"] = escape, reserve
-            got = {}
-            for q in prs:
-                got[q] = c = _lay_pair(ctx, q, info[q], rules[q], False)
-                _apply(ctx, q, c, False)
-                ctx["done"].add(q)
-            return got
-        try:
-            esc = PE.plan(mk_ctx, ghost, info, rules, key, live, cons, B, lambda net: guard_limit(cons, net), log, order=order0)
-        except Exception as e:                               # noqa: BLE001 - without an escape plan the stage is what it was
-            log(f"pairs: escape planner failed ({type(e).__name__}: {e}); generic exits")
-            esc = None
-        if esc:
-            neg["escape"].update(esc["choice"])
-            neg["escape_reserve"].update(esc["reserve"])
-            res["escape"] = esc["report"]
     best = one_pass(order0)
+    if live:                                                 # B5 repair: only when a pair failed its plain lay, never upfront (+790 s on W16 for no gain)
+        best = _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pass, cache, neg, _lay_pair, _apply, log)
     tried = {tuple(best["order"])}
     for _ in range(max(0, P["passes"])):
         mv = moves(best)
@@ -1230,9 +1211,50 @@ def plan(board, cons=None, spec=None, plan_only=False, only=None, B=None, log=la
                 pc = ("seg", o["layer"], o["a"], o["b"], o["w"]) if kind == "seg" else ("via", o["x"], o["y"], o["d"])
                 if PL.check(new, [pc], net, clr, ())[0] < clr - 1e-6:
                     res["kill"].append((kind, o))
+    res["escape"] = best.get("escape_report")
     res["order"] = ["/".join(pr) for pr in best["order"]]
     res["secs"] = round(time.time() - t0, 1)
     return res
+
+
+def _escape_repair(best, order0, live, info, rules, key, cons, B, mk_ctx, one_pass, cache, neg, lay_pair, apply_, log):
+    """B5: the pairs that failed the plain lay name the parts whose exits are planned jointly (pairescape.plan, focus = the failed pairs);
+    the pass is repeated with the chosen exits and kept only when its score is higher (never rip a pair to gain nothing)."""
+    failed = {q for q in best["order"] if not best["res"][q]["full"] and best["res"][q]["e"]["status"] != "kept" and info[q][2]}
+    if not failed:
+        return best
+    from . import pairescape as PE
+
+    def ghost(prs, escape, reserve):
+        ctx = mk_ctx()
+        ctx["escape"], ctx["escape_reserve"] = escape, reserve
+        got = {}
+        for q in prs:
+            got[q] = c = lay_pair(ctx, q, info[q], rules[q], False)
+            apply_(ctx, q, c, False)
+            ctx["done"].add(q)
+        return got
+    try:
+        esc = PE.plan(mk_ctx, ghost, info, rules, key, live, cons, B, lambda net: guard_limit(cons, net), log, order=order0, focus=failed)
+    except Exception as e:                                   # noqa: BLE001 - without an escape plan the stage is what it was
+        log(f"pairs: escape planner failed ({type(e).__name__}: {e}); generic exits")
+        return best
+    best["escape_report"] = esc["report"]
+    if not esc["choice"]:
+        return best
+    neg["escape"].update(esc["choice"])
+    neg["escape_reserve"].update(esc["reserve"])
+    cache.clear()                                            # lay results depend on the exits
+    st = one_pass(best["order"])
+    st["escape_report"] = esc["report"]
+    if st["score"] > best["score"]:
+        log(f"pairs: escape repair score {st['score']} (was {best['score']})")
+        return st
+    neg["escape"].clear()
+    neg["escape_reserve"].clear()
+    cache.clear()
+    log(f"pairs: escape repair gave {st['score']}, not above {best['score']}: dropped")
+    return best
 
 
 def has_twin_pads(board, cons, spec, P):
