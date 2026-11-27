@@ -68,3 +68,41 @@ def test_unsourced_cache_entry_never_replaces_a_sourced_seed(tmp_path, monkeypat
     monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
     (tmp_path / "limits.json").write_text(json.dumps({"pair_skew:eth": {"hard": None, "unverified": ["x"]}}))
     assert LM.sourced(LM.get("pair_skew", "eth"))
+
+
+def test_fab_rows_are_seeded_for_both_houses_with_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    for house in ("jlcpcb", "pcbway"):
+        for f in LM.FAB_FEATURES:
+            e = LM.get("fab_" + f, f"{house}-6l")
+            assert e and e["direction"] == "min" and e["date"] and (e["hard"] is None or LM.sourced(e)), (house, f)
+
+
+def test_grade_min_below_hard_fail_between_warn_above_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    assert LM.grade_min("fab_via_annular_min", "pcbway-6l", 0.1)[0] == "FAIL"
+    assert LM.grade_min("fab_via_annular_min", "pcbway-6l", 0.14)[0] == "WARN"
+    assert LM.grade_min("fab_via_annular_min", "pcbway-6l", 0.16)[0] is None
+    assert LM.grade_min("fab_nothing", "x-6l", 1)[0] == "NONE"
+
+
+def test_research_fab_drops_values_without_a_quote_and_caches(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    monkeypatch.delenv("FLUXPLACE_AI_OFFLINE", raising=False)
+    ans = {"items": [{"feature": "track_min", "hard": 0.08, "recommended": 0.1, "url": "https://h.example/cap", "page": "row 3", "quote": "min trace 0.08"},
+                     {"feature": "space_min", "hard": 0.05, "recommended": None, "url": "", "quote": ""}]}
+    cons = {"ai": {"decide_cmd": [sys.executable, "-c", "import sys; sys.stdin.read(); print(sys.argv[1])", json.dumps(ans)]}}
+    r = LM.research_fab("h", 6, cons, str(tmp_path))
+    assert r["track_min"]["hard"] == 0.08 and r["space_min"]["hard"] is None and r["space_min"]["unverified"]
+    assert LM.get("fab_track_min", "h-6l")["hard"] == 0.08
+
+
+def test_gerbercheck_grades_tracks_against_the_house_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXPLACE_LIMITS_DIR", str(tmp_path))
+    from fluxplace import gerbercheck as GC
+    prof = {"min_track_mm": 0.1, "_house": LM.fab_bounds({"vendor": "pcbway", "hard": {}}, 6)}
+    objs = [("draw", None, ("C", 0.088), [(1.0, 2.0), (3.0, 2.0)]), ("draw", None, ("C", 0.2), [(1.0, 5.0), (3.0, 5.0)])]
+    f = []
+    GC._check_copper(objs, "F_Cu", dict(prof, min_clearance_mm=0.1), (0, 0, 5, 6), 0.05, f, lambda m: None)
+    w = [x for x in f if x["code"] == "GERBER_MIN_WIDTH"]
+    assert len(w) == 1 and w[0]["level"] == "FAIL" and "pcbway.com" in w[0]["msg"]

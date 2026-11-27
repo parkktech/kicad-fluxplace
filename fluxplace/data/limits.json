@@ -1,35 +1,280 @@
 {
+ "fab_pth_annular_min:jlcpcb-6l": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. The general row says '\u22670.20mm'. For 2 oz multilayer the page says '0.254 mm or above'.",
+  "hard": 0.15,
+  "interface": "jlcpcb-6l",
+  "rule": "fab_pth_annular_min",
+  "sources": [
+   {
+    "page": "Rigid PCB capabilities: row 'PTH annular ring', Multilayer 1 oz",
+    "quote": "Recommended 0.20 mm or above; absolute minimum 0.15 mm",
+    "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
+   }
+  ],
+  "target": 0.2,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_pth_annular_min:pcbway-6l": {
+  "basis": "unverified",
+  "confidence": "medium",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. The Standard table has no separate value for PTH or component holes; its only annular ring row covers vias. The value used is the Advanced table's Normal (no-surcharge) tier for 35um copper. 18um copper gives Normal \u22658mil (0.203) and Medium \u22656mil (0.152). Medium 35um \u22658mil (0.2",
+  "hard": null,
+  "interface": "pcbway-6l",
+  "rule": "fab_pth_annular_min",
+  "sources": [
+   {
+    "page": "Advanced PCB table, row 17 'Minimum weld ring (outer layer)', 35um copper, compo",
+    "quote": "component hole Normal \"\u226510mil\"; Medium \"\u22658mil\"",
+    "url": "https://www.pcbway.com/capabilities.html"
+   }
+  ],
+  "target": 0.254,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_space_min:jlcpcb-6l": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. Track width and spacing share one row. With 2 oz copper the minimum is 0.15 mm. The page prints no recommended spacing value.",
+  "hard": 0.09,
+  "interface": "jlcpcb-6l",
+  "rule": "fab_space_min",
+  "sources": [
+   {
+    "page": "Rigid PCB capabilities: Traces, row 'Min. track width and spacing (1 oz)', Multi",
+    "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs.",
+    "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
+   }
+  ],
+  "target": null,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_space_min:pcbway-6l": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. Advanced table, Normal tier, 35um copper: inner '\u22654/5 mil' (0.127 mm space), outer '\u22655/6 mil' (0.152 mm space). Medium tier inner 35um is '\u22654/4 mil'. The tier wording suggests these extra limits apply under the advanced process, not standard orders.",
+  "hard": 0.1,
+  "interface": "pcbway-6l",
+  "rule": "fab_space_min",
+  "sources": [
+   {
+    "page": "Standard PCB table, row 'Min Spacing'",
+    "quote": "Min manufacturable spacing is 4mil(0.1mm)",
+    "url": "https://www.pcbway.com/capabilities.html"
+   }
+  ],
+  "target": null,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_track_min:jlcpcb-6l": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. The page gives no separate inner and outer values for multilayer boards. Inner copper defaults to 0.5 oz. With 2 oz copper the multilayer minimum is 0.15/0.15 mm ('Multilayer: 0.15 / 0.15 mm (6 / 6 mil)'). 3 mil (0.0762 mm) is allowed only in BGA fan-outs. The page prints no re",
+  "hard": 0.09,
+  "interface": "jlcpcb-6l",
+  "rule": "fab_track_min",
+  "sources": [
+   {
+    "page": "Rigid PCB capabilities: Traces, row 'Min. track width and spacing (1 oz)', Multi",
+    "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs.",
+    "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
+   }
+  ],
+  "target": null,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_track_min:pcbway-6l": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. The Standard table gives one value for all layers. The Advanced table, Normal (no-surcharge) tier, splits by layer, before compensation: inner 35um copper '\u22654/5 mil', i.e. 0.1 mm track; outer 35um copper '\u22655/6 mil', i.e. 0.127 mm track. So outer layers on 1oz copper can be take",
+  "hard": 0.1,
+  "interface": "pcbway-6l",
+  "rule": "fab_track_min",
+  "sources": [
+   {
+    "page": "Standard PCB table, row 'Min Trace'",
+    "quote": "0.1mm/4mil ... Min manufacturable trace is 4mil(0.1mm)",
+    "url": "https://www.pcbway.com/capabilities.html"
+   }
+  ],
+  "target": null,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_via_annular_min:jlcpcb-6l": {
+  "basis": "arithmetic",
+  "confidence": "medium",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. The page states these as diameters, not as an annular ring. The values here are my derivation: hard = (0.25-0.15)/2, and recommended = 0.15/2 from 'preferred'. The page also says: 'Preferred Min. Via hole size: 0.2mm'. Surcharge: '0.1mm or 0.15mm hole size with any size via dia",
+  "hard": 0.05,
+  "interface": "jlcpcb-6l",
+  "notes": "ring = (via dia - hole)/2 from the printed 0.25/0.15 mm and the preferred +0.15 mm; page states diameters, not a ring. No-surcharge pad for 0.2 mm holes is 0.45 mm (ring 0.125, fabcaps standard row).",
+  "rule": "fab_via_annular_min",
+  "sources": [
+   {
+    "page": "Rigid PCB capabilities: Drilling, row 'Min. Via hole size/diameter', Multilayer,",
+    "quote": "0.15 mm hole size / 0.25 mm via diameter ... Via diameter should be 0.1mm(0.15mm preferred) larger than Via hole size.",
+    "url": "https://jlcpcb.com/capabilities/pcb-capabilities"
+   }
+  ],
+  "target": 0.075,
+  "unit": "mm",
+  "unverified": []
+ },
+ "fab_via_annular_min:pcbway-6l": {
+  "basis": "sourced",
+  "confidence": "medium",
+  "date": "2026-11-27",
+  "direction": "min",
+  "function": "Retrieved 2026-11-27. Advanced table, row 17 'Minimum weld ring (outer layer)', 35um copper, via hole: Normal '\u22655mil' (0.127), Medium '\u22654mil' (0.102). The Standard table value (0.15) is the binding one for standard orders.",
+  "hard": 0.127,
+  "interface": "pcbway-6l",
+  "notes": "hard = Advanced table Normal tier (5 mil, no extra charge, == fabcaps via_annular_min); recommended = Standard table headline 0.15 mm (6 mil). Standard-table 0.15 is what the house prints as its minimum for standard orders.",
+  "rule": "fab_via_annular_min",
+  "sources": [
+   {
+    "page": "Advanced PCB table, row 17 'Minimum weld ring (outer layer)', 35um, via hole, Normal",
+    "quote": "via hole Normal >=5mil (0.127 mm)",
+    "url": "https://www.pcbway.com/capabilities.html"
+   },
+   {
+    "page": "Standard PCB table, row 'Min Width of Annular Ring'",
+    "quote": "For pads with vias in the middle, Min width for Annular Ring is 0.15mm(6mil).",
+    "url": "https://www.pcbway.com/capabilities.html"
+   }
+  ],
+  "target": 0.15,
+  "unit": "mm",
+  "unverified": []
+ },
  "pair_skew:eth": {
-  "rule": "pair_skew", "interface": "eth", "unit": "mm", "target": 0.15, "hard": 1.27, "basis": "sourced", "confidence": "medium",
+  "basis": "sourced",
+  "confidence": "medium",
   "date": "2026-11-27",
   "function": "Link is not affected at tens of mm (about 2 % of an 8 ns symbol at 25 mm; adaptive equalisation). Hard limit is vendor layout guidance, EMC-driven (mode conversion).",
+  "hard": 1.27,
+  "interface": "eth",
+  "notes": "target = CM5 datasheet 'ideally'; hard = Pulse 50 mil (magnetics vendor of the part used); TI 20 mil (0.51 mm) is the tightest PHY-vendor figure. reports/ETH skew limits line vs PHY side.md",
+  "rule": "pair_skew",
   "sources": [
-   {"url": "https://www.farnell.com/datasheets/2699973.pdf", "page": "p.2", "quote": "lengths of the differential traces (within each pair) should be equal to within 50 mils (1.25 mm)"},
-   {"url": "https://www.ti.com/lit/pdf/snla387", "page": "p.2", "quote": "length-matched within 20 mils for 1G, 50 mils for 100M/10M"},
-   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.2.1 p.7", "quote": "ideally within 0.15 mm"}],
-  "notes": "target = CM5 datasheet 'ideally'; hard = Pulse 50 mil (magnetics vendor of the part used); TI 20 mil (0.51 mm) is the tightest PHY-vendor figure. reports/ETH skew limits line vs PHY side.md"},
+   {
+    "page": "p.2",
+    "quote": "lengths of the differential traces (within each pair) should be equal to within 50 mils (1.25 mm)",
+    "url": "https://www.farnell.com/datasheets/2699973.pdf"
+   },
+   {
+    "page": "p.2",
+    "quote": "length-matched within 20 mils for 1G, 50 mils for 100M/10M",
+    "url": "https://www.ti.com/lit/pdf/snla387"
+   },
+   {
+    "page": "sec 2.2.1 p.7",
+    "quote": "ideally within 0.15 mm",
+    "url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf"
+   }
+  ],
+  "target": 0.15,
+  "unit": "mm"
+ },
+ "pair_skew:pcie": {
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "function": "Intra-pair within 5 mil, whole-route budget; PCI-SIG has no public PCB number.",
+  "hard": 0.127,
+  "interface": "pcie",
+  "notes": "",
+  "rule": "pair_skew",
+  "sources": [
+   {
+    "page": "sec 13-14 p.7",
+    "quote": "has to be kept within 5 mils",
+    "url": "https://www.ti.com/lit/pdf/snla426"
+   },
+   {
+    "page": "sec 2.3.1 p.8",
+    "quote": "ideally within 0.1 mm",
+    "url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf"
+   }
+  ],
+  "target": 0.1,
+  "unit": "mm"
+ },
  "pair_skew:usb2": {
-  "rule": "pair_skew", "interface": "usb2", "unit": "mm", "target": 0.15, "hard": 1.27, "basis": "sourced", "confidence": "medium",
+  "basis": "sourced",
+  "confidence": "medium",
   "date": "2026-11-27",
   "function": "USB-IF gives no PCB skew number (cable only, 100 ps). Vendor MAX 50-60 mil.",
+  "hard": 1.27,
+  "interface": "usb2",
+  "notes": "judge per signal path on USB-C joined rows (stub <= 3.5 mm, USB Type-C R2.0 Table 3-4)",
+  "rule": "pair_skew",
   "sources": [
-   {"url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf", "page": "App. A p.16-18", "quote": "50 mil MAX intra-pair skew, USB 2.0"},
-   {"url": "https://www.manualslib.com/manual/796664/Intel-Ep80579.html?page=169", "page": "sec 12.2.2.2 p.169", "quote": "must be no greater than 60 mils"},
-   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.4.2 p.8", "quote": "ideally within 0.15 mm"}],
-  "notes": "judge per signal path on USB-C joined rows (stub <= 3.5 mm, USB Type-C R2.0 Table 3-4)"},
+   {
+    "page": "App. A p.16-18",
+    "quote": "50 mil MAX intra-pair skew, USB 2.0",
+    "url": "https://www.ti.com/lit/an/spraar7j/spraar7j.pdf"
+   },
+   {
+    "page": "sec 12.2.2.2 p.169",
+    "quote": "must be no greater than 60 mils",
+    "url": "https://www.manualslib.com/manual/796664/Intel-Ep80579.html?page=169"
+   },
+   {
+    "page": "sec 2.4.2 p.8",
+    "quote": "ideally within 0.15 mm",
+    "url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf"
+   }
+  ],
+  "target": 0.15,
+  "unit": "mm"
+ },
  "pair_skew:usb3": {
-  "rule": "pair_skew", "interface": "usb3", "unit": "mm", "target": 0.1, "hard": 0.127, "basis": "sourced", "confidence": "high",
-  "date": "2026-11-27", "function": "5 Gb/s, 200 ps UI: every primary vendor source gives 5 mil.",
+  "basis": "sourced",
+  "confidence": "high",
+  "date": "2026-11-27",
+  "function": "5 Gb/s, 200 ps UI: every primary vendor source gives 5 mil.",
+  "hard": 0.127,
+  "interface": "usb3",
+  "notes": "",
+  "rule": "pair_skew",
   "sources": [
-   {"url": "https://www.ti.com/lit/pdf/sllu149e", "page": "sec 5.4 p.19", "quote": "5 mil intra-pair"},
-   {"url": "https://www.ti.com/lit/pdf/slla414", "page": "sec 2.2 p.4", "quote": "5 mils"},
-   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.4.1 p.8", "quote": "ideally within 0.1 mm"}],
-  "notes": ""},
- "pair_skew:pcie": {
-  "rule": "pair_skew", "interface": "pcie", "unit": "mm", "target": 0.1, "hard": 0.127, "basis": "sourced", "confidence": "high",
-  "date": "2026-11-27", "function": "Intra-pair within 5 mil, whole-route budget; PCI-SIG has no public PCB number.",
-  "sources": [
-   {"url": "https://www.ti.com/lit/pdf/snla426", "page": "sec 13-14 p.7", "quote": "has to be kept within 5 mils"},
-   {"url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf", "page": "sec 2.3.1 p.8", "quote": "ideally within 0.1 mm"}],
-  "notes": ""}
+   {
+    "page": "sec 5.4 p.19",
+    "quote": "5 mil intra-pair",
+    "url": "https://www.ti.com/lit/pdf/sllu149e"
+   },
+   {
+    "page": "sec 2.2 p.4",
+    "quote": "5 mils",
+    "url": "https://www.ti.com/lit/pdf/slla414"
+   },
+   {
+    "page": "sec 2.4.1 p.8",
+    "quote": "ideally within 0.1 mm",
+    "url": "https://datasheets.raspberrypi.com/cm5/cm5-datasheet.pdf"
+   }
+  ],
+  "target": 0.1,
+  "unit": "mm"
+ }
 }

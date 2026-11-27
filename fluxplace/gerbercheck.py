@@ -41,6 +41,8 @@ import time
 
 import numpy as np
 
+from fluxplace import limits as LM
+
 FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 RESOLUTION_MM = 0.02
 ARC_CHORD_MM = 0.05
@@ -598,7 +600,18 @@ def _min_gaps(lab, min_mm, res):
 
 def _check_copper(objs, layer, prof, bbox, res, findings, log, gap_level=WARN):
     # exact: aperture width of drawn tracks
-    thin = [o for o in objs if o[0] == "draw" and _ap_w(o[2]) < prof["min_track_mm"] - 1e-6]
+    hb = (prof.get("_house") or {}).get("track_min")
+    if hb:                                 # house row (limits registry): below hard = FAIL, below recommended = WARN
+        ws = [(_ap_w(o[2]), o) for o in objs if o[0] == "draw"]
+        for lvl, lo, hi, tag in ((FAIL, 0, hb[0], "hard limit"), (WARN, hb[0], hb[1], "recommended")):
+            bad = [(w, o) for w, o in ws if hi is not None and lo - HOUSE_TOL_MM <= w < hi - HOUSE_TOL_MM]
+            if bad:
+                w, o = min(bad, key=lambda t: t[0])
+                findings.append(_f(lvl, "GERBER_MIN_WIDTH", f"{len(bad)} drawn segment(s) below the house {tag} {hi:g} mm; narrowest "
+                                   f"{w:.4f} mm [{hb[2]}]", layer, o[3][0][0], o[3][0][1]))
+        thin = []
+    else:
+        thin = [o for o in objs if o[0] == "draw" and _ap_w(o[2]) < prof["min_track_mm"] - 1e-6]
     if thin:
         o = thin[0]
         p = o[3][0]
@@ -683,6 +696,10 @@ def _edge_open(objs):
 
 
 # ----------------------------------------------------------------- package
+HOUSE_TOL_MM = 0.003            # mil -> mm rounding (5 mil = 0.127 vs a 0.125 ring): not a violation
+VIA_MAX_DRILL_MM = 0.5          # plated holes up to this drill are vias (via ring rule), larger are component holes
+
+
 def _profile(cons):
     from fluxplace import constraints as C
     return C.fab_profile(cons)     # cons None -> the [fab] defaults
@@ -735,6 +752,7 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 findings.append(_f(INFO, "GERBER_LAYER_EMPTY", f"{lay} has no features (nothing to mask or print)", lay))
         parsed[lay] = objs
     log(f"gerber check: {len(parsed)} layer(s) parsed, copper {copper_layers} layer(s)")
+    prof["_house"] = LM.fab_bounds(prof, copper_layers)
 
     # edge closure
     if parsed.get("Edge_Cuts"):
@@ -777,6 +795,7 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 holes += parse_excellon(os.path.join(ddir, name))
             except GerberUnsupported as e:
                 findings.append(_f(FAIL, "GERBER_UNSUPPORTED", f"{name}: {e}"))
+    house_rings = {}
     if holes:
         if outer_flashes:
             fx = np.array([f[0] for f in outer_flashes])
@@ -787,12 +806,24 @@ def check_package(fab_dir, board=None, cons=None, copper_layers=None, res_mm=RES
                 near = np.flatnonzero(np.hypot(fx - hx, fy - hy) <= 0.02)   # same hole
                 for jj in near.tolist():
                     ring = (pd[jj] - hd) / 2
+                    hb = (prof.get("_house") or {}).get("via_annular_min" if hd <= VIA_MAX_DRILL_MM else "pth_annular_min")
+                    if hb:
+                        for lvl, lo, hi in ((FAIL, 0, hb[0]), (WARN, hb[0], hb[1])):
+                            if hi is not None and lo - HOUSE_TOL_MM <= ring < hi - HOUSE_TOL_MM:
+                                house_rings.setdefault(lvl, []).append((ring, hd, hx, hy, pl[jj], hb, hi))
+                                break
+                        continue
                     if ring < prof["min_annular_mm"] - 1e-6:
                         findings.append(_f(FAIL, "GERBER_ANNULAR",
                                            f"hole d{hd:.3f} at ({hx:.3f},{hy:.3f}): "
                                            f"{pl[jj]} ring {ring:.3f} mm < min_annular "
                                            f"{prof['min_annular_mm']:g} mm", pl[jj], hx, hy))
                         break
+        for lvl, rows in house_rings.items():              # one finding per level: the count and the worst ring
+            ring, hd, hx, hy, lay, hb, hi = min(rows, key=lambda t: t[0])
+            findings.append(_f(lvl, "GERBER_ANNULAR", f"{len(rows)} plated hole(s) with a ring below the house "
+                               f"{'hard limit' if lvl == FAIL else 'recommended'} {hi:g} mm; worst d{hd:.3f} at ({hx:.3f},{hy:.3f}) "
+                               f"{lay} ring {ring:.3f} mm [{hb[2]}]", lay, hx, hy))
         if holes_cov is not None:
             ox0, oy0, ox1, oy1 = gbox
             nocopper = 0

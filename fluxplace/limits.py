@@ -147,3 +147,98 @@ def regrade(rule, iface, subject, measured, project_max, unit, target, explicit,
          f"{measured:g} {unit} within sourced hard {hard:g} (project target {max(tgt, project_max):g}); {e.get('function', '')}", [c])
     return "WARN", (f"{subject}: {measured:.2f} {unit} over target {project_max:g} but inside the sourced hard limit {hard:g} {unit} "
                     f"[{c}; {e['basis']}, {e['confidence']}; re-graded FAIL->WARN by the limits registry]")
+
+
+# ---- fab capability rows: direction "min" (a value BELOW hard is rejected by the house; below recommended = DFM warning / auto-adjust)
+FAB_FEATURES = {"track_min": "minimum trace width (outer and inner layers separately if they differ)",
+                "space_min": "minimum copper-to-copper spacing",
+                "via_annular_min": "minimum annular ring of a via pad (pad radius minus drill radius, on a multilayer board)",
+                "pth_annular_min": "minimum annular ring of a plated component (PTH) hole"}
+
+
+def _fab_prompt(house, layers):
+    feats = "\n".join(f"- {k}: {v}" for k, v in FAB_FEATURES.items())
+    return (f"Research the PUBLISHED manufacturing capability of {house} for a {layers}-layer rigid FR-4 PCB (standard, no-surcharge service) "
+            f"from the house's own capabilities page or help articles. Use web search / fetch.\nFeatures (mm):\n{feats}\n"
+            "For each feature give: hard = the value below which the house rejects the order or cannot build it; recommended = the value "
+            "below which its DFM check warns, auto-adjusts or charges extra (null if the page states only one value). Every number needs "
+            "the page URL, the section/row and a short verbatim quote; a value with no printed source must be null, never estimated. "
+            "Also note the retrieval date.\nAnswer with ONLY JSON: {\"items\": [{\"feature\": \"track_min\", \"hard\": <mm|null>, "
+            "\"recommended\": <mm|null>, \"url\": \"...\", \"page\": \"...\", \"quote\": \"...\", \"confidence\": \"high|medium|low\", "
+            "\"note\": \"...\"}]}")
+
+
+def research_fab(house, layers=6, cons=None, log_dir=None, force=False):
+    """One research pass for a house's capability rows -> {feature: entry}; stored as `fab_<feature>:<house>-<layers>l` (direction "min").
+    A value without URL + quote is dropped (unverified note).  Cached per house and layer count."""
+    iface = f"{house}-{layers}l"
+    have = {f: load().get(key("fab_" + f, iface)) for f in FAB_FEATURES}
+    if all(have.values()) and not force:
+        return have
+    cfg = (cons or {}).get("limits") or {}
+    model = str(cfg.get("model") or "sonnet")
+    t0 = time.time()
+    out, why = DC.call_model(_fab_prompt(house, layers), cons, model, tools="WebSearch,WebFetch", timeout=cfg.get("timeout_s", 300),
+                             budget_usd=cfg.get("budget_usd", 1.5))
+    secs, cost = round(time.time() - t0, 1), DC.LAST.get("cost_usd")
+    d = DC._first_obj(out, lambda d: isinstance(d.get("items"), list)) if out else None
+    if not d:
+        _log(log_dir, f"limit-research:fab:{iface}", "no-answer", f"research failed: {why or 'no JSON'} ({secs}s)", [], model, False)
+        return have
+    p = cache_path()
+    c = _read(p)
+    for it in d["items"]:
+        f = str(it.get("feature"))
+        if f not in FAB_FEATURES:
+            continue
+        ok = str(it.get("url", "")).startswith("http") and it.get("quote")
+        num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        hard, rec = (num(it.get("hard")), num(it.get("recommended"))) if ok else (None, None)
+        if rec is not None and hard is not None and rec < hard:
+            rec = hard
+        e = {"rule": "fab_" + f, "interface": iface, "unit": "mm", "direction": "min", "target": rec, "hard": hard,
+             "basis": "sourced" if hard is not None else "unverified", "confidence": str(it.get("confidence") or "low"),
+             "date": time.strftime("%Y-%m-%d"), "function": str(it.get("note") or "")[:300],
+             "sources": [{"url": str(it["url"])[:300], "page": str(it.get("page", ""))[:80], "quote": str(it["quote"])[:300]}] if ok else [],
+             "unverified": [] if ok else [f"{f}: no sourced value"], "research": {"model": model, "seconds": secs, "cost_usd": cost}}
+        c[key("fab_" + f, iface)] = e
+        have[f] = e
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            json.dump(c, fh, indent=1, sort_keys=True)
+    except OSError:
+        pass
+    _log(log_dir, f"limit-research:fab:{iface}", f"{sum(1 for e in have.values() if e and e.get('hard') is not None)} sourced", "fab capability rows", [],
+         model, True, seconds=secs, cost_usd=cost)
+    return have
+
+
+def grade_min(rule, iface, measured, unit="mm"):
+    """-> (level, text) for a value that must stay ABOVE a house limit: below hard = FAIL, below recommended = WARN, else None (ok);
+    ("NONE", "") when the registry has no sourced hard value."""
+    e = get(rule, iface)
+    if not sourced(e) or e.get("unit") != unit:
+        return "NONE", ""
+    hard, rec, c = float(e["hard"]), e.get("target"), cite(e)
+    if measured < hard - 1e-6:
+        return "FAIL", f"{measured:.4f} {unit} < {iface} hard limit {hard:g} {unit} [{c}, {e['date']}]"
+    if rec is not None and measured < float(rec) - 1e-6:
+        return "WARN", f"{measured:.4f} {unit} between {iface} hard {hard:g} and recommended {float(rec):g} {unit} [{c}, {e['date']}]"
+    return None, ""
+
+
+def fab_bounds(prof, layers):
+    """{feature: (hard, recommended, citation)} for the house row of a fab profile (`prof` = constraints.fab_profile).  Registry value
+    when sourced, else the fabcaps row's hard limit (no recommended).  {} without a profile or layer count."""
+    v, n = prof.get("vendor"), layers or prof.get("layers")
+    if not v or not n:
+        return {}
+    out = {}
+    for f in FAB_FEATURES:
+        e = get("fab_" + f, f"{v}-{n}l")
+        if sourced(e):
+            out[f] = (float(e["hard"]), None if e.get("target") is None else float(e["target"]), f"{cite(e)}, {e['date']}")
+        elif (prof.get("hard") or {}).get(f) is not None:
+            out[f] = (float(prof["hard"][f]), None, f"fabcaps {prof.get('name')}")
+    return out
