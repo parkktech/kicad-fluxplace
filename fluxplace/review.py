@@ -244,6 +244,9 @@ def pair_gated(cons, master):
     return master.startswith(fams) or fam in _HS_FAMILIES
 
 
+TAP_STUB_INFO_MM = 10.0
+
+
 def _limit_challenge(r, unit, facts, cons):
     """w110: a PAIR_SKEW FAIL is challenged against the sourced hard limit of its interface (limits registry): inside it = WARN with
     the citation, over it = FAIL with the citation.  None = no sourced limit (or the project set its own maximum): FAIL as before."""
@@ -289,6 +292,9 @@ def _pairs_from_audit(facts, cons):
                                                    f"{vs['stub_mm']:.2f} mm barrel stub" + (" (the pair never changes layer there: remove the via)" if vs["dead"] else "")))
         if r["status"] == "complete" and r.get("over_target") and gated(r["p"]):      # D71cv: over the target, inside the maximum: passes, said so
             out.append(_f(INFO, "PAIR_SKEW_OVER_TARGET", PA_.over_target_line(r["p"], r["n"], r["skew"], r["target"], r["limit"], r.get("unit", "mm"))))
+        tap = max([x["mm"] for x in r.get("stubs") or []] + [0.0])
+        if tap > TAP_STUB_INFO_MM and gated(r["p"]):          # a part hung on the trunk by a long stub (ESD / series array)
+            out.append(_f(INFO, "PAIR_TAP_STUB", f"{r['p']}/{r['n']}: tap stub {tap:.1f} mm to a part hung on the trunk (limit for a note {TAP_STUB_INFO_MM:g} mm)"))
         if r["status"] != "mismatch" or not gated(r["p"]):
             continue
         if "stub" in r["causes"]:
@@ -296,6 +302,9 @@ def _pairs_from_audit(facts, cons):
         if "skew" in r["causes"]:
             u = r.get("unit", "mm")
             note = _ps_note(facts, r["p"], r["skew"], r["limit"]) if u == "mm" else ""
+            if r.get("basis") == "path" and None not in (r.get("net_mm") or (None,)):      # advisory: the whole-net copper sums (stubs included)
+                np_, nn_ = r["net_mm"]
+                note += f" [advisory, whole-net KiCad length (vias, in-pad copper, stubs included) P {np_:.2f} / N {nn_:.2f} mm: diff {np_ - nn_:+.2f}; trunk path measure is the graded one]"
             rg = _limit_challenge(r, u, facts, cons)
             if rg:
                 out.append(_f(FAIL, "PAIR_SKEW", rg[1] + note) if rg[0] == "FAIL" else _f(WARN, "PAIR_SKEW_REGRADED", rg[1] + note))
