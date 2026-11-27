@@ -201,3 +201,19 @@ def test_packets_answered_gate_is_rechecked_without_stage_rerun(tmp_path, monkey
     monkeypatch.setattr(PL2, "_gate_check", gate)
     assert PL2.run(_args(tmp_path, b, flow="constructive", from_stage="pairs", to_stage="pairs")) == 0
     assert ran == [] and checked == ["resume.kicad_pcb"] and os.path.exists(os.path.join(gd, "resume.kicad_pcb"))
+
+
+def test_close_with_baseline_does_not_work_preexisting_gaps(tmp_path, monkeypatch):
+    """w79: a re-net run passes the input board's gaps as `baseline`: only pre-existing gaps -> clean at once, no rung runs; a new gap is worked."""
+    pre = _gap("pair:A_P/A_N", "pair-open", "hs-pair", ["A_P", "A_N"], sev=3)
+    ran = []
+    _stub_close(monkeypatch, [pre])
+    monkeypatch.setattr(GP, "_call_rung", lambda name, *a, **k: ran.append(name) or {})
+    b = make(str(tmp_path / "in.kicad_pcb"))
+    r = GP.close(b, str(tmp_path / "W1"), cons={}, log=lambda *a: None, baseline=[dict(pre)])
+    assert r["stop"] == "clean" and r["left"] == [] and ran == []
+    new = _gap("pair:B_P/B_N", "pair-open", "hs-pair", ["B_P", "B_N"], sev=3)
+    _stub_close(monkeypatch, [pre, new])
+    monkeypatch.setattr(GP, "_call_rung", lambda name, *a, **k: ran.append(name) or {})
+    r = GP.close(b, str(tmp_path / "W2"), cons={}, log=lambda *a: None, baseline=[dict(pre)], budget_min=0.5)
+    assert ran and [g["id"] for g in r["left"]] == ["pair:B_P/B_N"]
