@@ -75,7 +75,8 @@ def _fit(p):
 def packet(board, net, cons, spec, cons_path=None, cls=None, R=None, B=None):
     """Packet for one critical net (keys as the recipe's schema). `cls`, `R`, `B` may be passed in to avoid recomputing."""
     from . import density as DS, gaps, handroute as HR, netclass as NC, routediag as RD
-    B = B if B is not None else RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(B if B is not None else RD.load(board), FB.windows(cons))      # B7
     cls = cls if cls is not None else NC.classify(B, cons, spec)
     R = R if R is not None else HR.open_nets(board, constraints=cons_path)
     idx = [i for i, r in enumerate(R["connections"]) if r["net"] == net][:MAX_CONNS]
@@ -268,7 +269,8 @@ def stage(c, n, board):
     if not crit:
         return {"verdict": "pass", "line": "critroute: no critical net open", "board": board}
     from . import netclass as NC, routediag as RD, handroute as HR
-    B = RD.load(board)
+    from . import forbid as FB
+    B = FB.augment(RD.load(board), FB.windows(c.cons))      # B7
     cls = NC.classify(B, c.cons, c.spec)
     R = HR.open_nets(board, constraints=c.cons_path)
     names = [r["net"] for r in crit]

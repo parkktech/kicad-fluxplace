@@ -132,7 +132,7 @@ def _drop_illegal_claims(board, job, claimed, wd, log):
     """reserved escapes whose via or stub lies in a keep-out / rule area (board or footprint) or inside the board-edge clearance
     are dropped (those pins escape through the normal, fully checked fan-out); the reason is logged."""
     jp = os.path.join(wd, "claims.json")
-    json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed}, open(jp, "w"))
+    json.dump({"params": job["params"], "signal_layers": job["signal_layers"], "parts": {}, "nets": {}, "claims": claimed, "forbid": job.get("forbid") or []}, open(jp, "w"))
     r = _procs.run(["/usr/bin/python3", HELPER, jp, board, os.path.join(wd, "unused.kicad_pcb")], capture_output=True, text=True)
     line = [l for l in r.stdout.splitlines() if l.startswith(MARK)]
     if not line:
@@ -217,6 +217,8 @@ def run(board, cons, spec, out, a, refs=None, log=print, _drop=frozenset(), _dep
     from . import routerules as RR
     job = {"params": params(a, pol["pr"], board, cons), "parts": pol["parts"], "nets": pol["nets"], "away": pol["away"],
            "signal_layers": pol["signal_layers"], "check_only": bool(a.check_only)}
+    from . import forbid as FB
+    job["forbid"] = FB.windows(cons)                          # B7: mask windows stripped above stay via/track-forbidden for foreign nets
     job["params"]["share_reach"] = float(((cons or {}).get("escape") or {}).get("share_reach_mm", 1.5))
     job["params"]["surface_exit"] = float(((cons or {}).get("escape") or {}).get("surface_exit_mm", 1.0))
     job["params"]["same_net_via"] = getattr(a, "same_net_via_spacing", None) or RR.same_net_via_spacing(cons)

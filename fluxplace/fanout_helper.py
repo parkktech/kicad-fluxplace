@@ -236,6 +236,14 @@ class Model:
             owner = max(sorted(cover), key=lambda n: cover[n]) if cover else ""
             self.keepouts.append({"name": f"{ml} opening", "tracks": True, "vias": True, "layers": {lay}, "poly": ps, "bb": ps.BBox(),
                                   "owner": owner, "margin": MASK_MARGIN})
+        for w in self.job.get("forbid") or ():       # B7: the [thermal.*] mask windows stripped before routing stay forbidden to foreign copper
+            ps = pcbnew.SHAPE_POLY_SET()
+            ps.NewOutline()
+            for x, y in w["pts"]:
+                ps.Append(nm(x), nm(y))
+            lay = self.cu[0] if w["side"] == "F" else self.cu[-1]
+            self.keepouts.append({"name": w["name"], "tracks": True, "vias": True, "layers": {lay}, "poly": ps, "bb": ps.BBox(),
+                                  "owner": w["owner"], "margin": MASK_MARGIN})
 
     def add_track(self, t):
         net = t.GetNetname()

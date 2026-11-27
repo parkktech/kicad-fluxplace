@@ -121,9 +121,75 @@ def test_mask_window_via(fanned):
     assert r["blocks"] == 1 and board_types(rc) == ("BOARD", 1)
 
 
-@pytest.mark.skip(reason="owner: B7 (w55-forbid): one via/track-forbidden region model; no stage lays a foreign-net via in the window")
-def test_mask_window_no_foreign_via():
-    raise AssertionError("placeholder")
+def window_board(tmp):
+    """An 8-pin IC standing 2 mm inside the window's edge (window x 5..35, B side, GND), two of its pins on a rail whose plane is on In1.Cu
+    (their vias are foreign-net vias, which the window forbids) and one on GND (its via is the owner's: allowed and kept)."""
+    nets = ["V1", "V1", "N2", "GND", "N4", "N5", "N6", "N7"]
+    plane = ('(zone (net 2) (net_name "V1") (layer "In1.Cu") (hatch edge 0.5) (polygon (pts (xy 1 1) (xy 39 1) (xy 39 29) (xy 1 29))))\n')
+    body = g.ic("U1", 33, 15, nets, pitch=0.5) + g.two("R1", 38, 15, "N2", "N3")
+    return H.write_board(tmp, body + plane + MASK.replace("(xy 10 10) (xy 25 10) (xy 25 25) (xy 10 25)", "(xy 5 5) (xy 35 5) (xy 35 28) (xy 5 28)"))
+
+
+def _mask_bridges(board, tmp):
+    out = os.path.join(str(tmp), os.path.basename(board) + ".drc.json")
+    subprocess.run(["kicad-cli", "pcb", "drc", "--format", "json", "--all-track-errors", "-o", out, board], capture_output=True, timeout=300)
+    return sum(1 for v in json.load(open(out)).get("violations", []) if v["type"] == "solder_mask_bridge")
+
+
+def _window_vias(bd, grow):
+    """-> [(net, x_mm, y_mm)] of the vias inside the window_board window (x 5..35, y 5..28) grown by `grow` mm."""
+    out = []
+    for v in bd.GetTracks():
+        if v.GetClass() != "PCB_VIA":
+            continue
+        x, y = v.GetPosition().x / 1e6, v.GetPosition().y / 1e6
+        if 5 - grow <= x <= 35 + grow and 5 - grow <= y <= 28 + grow:
+            out.append((v.GetNetname(), x, y))
+    return out
+
+
+def test_mask_window_no_foreign_via(tmp_path):
+    """B7: no stage lays a foreign-net via in the window (stripped before routing, still forbidden to other nets), and the re-cut window
+    of every stage output has the same solder_mask_bridge count as the input's re-cut (delta 0)."""
+    from fluxplace import forbid as FB, thermal as TH
+    b = window_board(tmp_path)
+    c = H.context(tmp_path, b, THERMAL)
+    win = FB.windows(c.cons)
+    assert [(w["side"], w["owner"]) for w in win] == [("B", "GND")]
+    res = H.chain(c, b, ["fanout", "pour-tie"])
+    for r in res:
+        bd = pcbnew.LoadBoard(r["board"])
+        bad = [(net, round(x, 2), round(y, 2)) for net, x, y in _window_vias(bd, 0.3) if net != "GND"]
+        assert not bad, f"{r['line']}: foreign vias in the window {bad}"
+        gnd = [v for v in _window_vias(bd, 0.0) if v[0] == "GND"]
+        assert gnd, f"{r['line']}: the GND via inside the window (the owner net) must be kept"
+        rc = r["board"].replace(".kicad_pcb", ".recut.kicad_pcb")
+        TH.recut(r["board"], c.cons, rc)
+        assert _mask_bridges(rc if os.path.exists(rc) else r["board"], tmp_path) == 0
+    # boundary: the same predicate refuses a foreign via and keeps a GND via exactly on the edge, for the stripped window
+    from fluxplace import routediag as RD
+    B = FB.augment(RD.load(b), FB.windows(c.cons))
+    assert FB.blocked(B, 34.9, 15, "N9") and FB.blocked(B, 35.02, 15, "N9") and not FB.blocked(B, 35.5, 15, "N9")
+    assert not FB.blocked(B, 34.9, 15, "GND") and not FB.blocked(B, 20, 15, "GND")
+
+
+def test_via_forbidden_gap_is_a_row_for_an_ic_not_a_passive(tmp_path):
+    """B7 / R127: placegaps reads the same model: an IC whose foreign-net pads stand in the window needs vias there, a two-pad part does not."""
+    from fluxplace import forbid as FB, routediag as RD
+    b = window_board(tmp_path)
+    c = H.context(tmp_path, b, THERMAL)
+    B = FB.augment(RD.load(b), FB.windows(c.cons))              # the file carries the polygon; the thermal block adds nothing twice
+    assert len(B["mask_open"]) == 1
+    assert [q["net"] for q in FB.via_pins(B, "U1")] and FB.via_pins(B, "R1") == []
+    from fluxplace import placegaps as PG
+    ctx = PG.Ctx(stage="placetour", board=b, cons=c.cons, spec={})
+    rows = PG.detect(ctx, ["via-forbidden"])
+    assert [x["id"] for x in rows["gaps"]] == ["via-forbidden:U1"], rows
+    cands = PG.RUNGS["clear-region"](rows["gaps"][0], ctx)           # the rung steps the part out of the window
+    assert cands and cands[0]["moves"]["U1"][0] > 35.0, cands
+    B2 = RD.load(b)
+    B2["mask_open"] = []
+    assert FB.via_pins(FB.augment(B2, FB.windows(c.cons)), "U1")   # polygon stripped: the block still forbids
 
 
 # ------------------------------------------------------------------ locked_power_widen
