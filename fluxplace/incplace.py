@@ -14,8 +14,8 @@ every pad clear of tracks and vias (the board's clearance), clear of keep-out ar
 Choice: minimum wire length to the partners ([[intent.near]] rows first, else the other pads of the part's nets), then the
 nearest. Board-agnostic: nothing here names a ref or a net."""
 import math
+from collections import Counter
 
-from . import boardfile as BF
 from . import boardwrite as BW
 from . import geom as GM
 from . import preroute as PR
@@ -30,6 +30,11 @@ SKIP_STAGES = ("modules", "fanout", "pour-tie", "placetour", "lookahead", "pairs
 
 class IncError(RuntimeError):
     pass
+
+
+def _rect(q, g=0.0):
+    """pad q's copper box grown by g."""
+    return (q["x"] - q["ex"] - g, q["y"] - q["ey"] - g, q["x"] + q["ex"] + g, q["y"] + q["ey"] + g)
 
 
 def _off_board(B, part):
@@ -57,8 +62,7 @@ def detect(B, cons):
     """-> {"incremental": bool, "free": [refs to place], "why": str, "drift": [...]}"""
     fixed = PR.explicit_fixed(B, cons)
     free = sorted(r for r in B["parts"] if r not in fixed)
-    copper = bool(B["segs"] or B["vias"])
-    if not copper:
+    if not (B["segs"] or B["vias"]):
         return {"incremental": False, "copper": False, "free": free, "why": "the board has no track or via copper", "drift": []}
     if not free:
         return {"incremental": False, "copper": True, "free": [], "why": "every part is locked", "drift": []}
@@ -72,7 +76,7 @@ def detect(B, cons):
 
 # ------------------------------------------------------------------ geometry of a candidate seat
 class _World:
-    def __init__(self, B, cons, free):
+    def __init__(self, B, free):
         self.B, self.free = B, set(free)
         self.clr = float(B.get("clearance") or 0.15)
         self.edge = max(EDGE_MARGIN, self.clr)
@@ -80,7 +84,7 @@ class _World:
         self.segs = [dict(s, box=(min(s["a"][0], s["b"][0]), min(s["a"][1], s["b"][1]), max(s["a"][0], s["b"][0]), max(s["a"][1], s["b"][1])))
                      for s in B["segs"]]
         self.keep = [z for z in B["zones"] if z["keepout"] and (z["no_footprints"] or z["no_pads"] or z["no_tracks"]) and len(z["pts"]) >= 3]
-        self.placed = {}                               # ref -> (pads, court, side) of the new parts seated so far
+        self.placed = {}                               # ref -> (pads, court, side, tht) of the new parts seated so far
         self.blockers = {}                             # ref -> times a locked part's courtyard rejected a candidate
 
     def others(self, ref):
@@ -96,25 +100,21 @@ class _World:
     def layers_of(self, q, side):
         return set(self.cop) if q.get("tht") else (q["layers"] or {side})
 
-    def seg_poly(self, s):
-        return [s["a"], s["mid"], s["b"]] if s.get("mid") else [s["a"], s["b"]]
-
     def clear_of_copper(self, pads, side):
         for q in pads:
             lay = self.layers_of(q, side)
-            rect = (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"])
             for s in self.segs:
                 if s["layer"] not in lay:
                     continue
-                g = self.clr + s["w"] / 2
-                if not (rect[0] - g < s["box"][2] and s["box"][0] < rect[2] + g and rect[1] - g < s["box"][3] and s["box"][1] < rect[3] + g):
+                rect = _rect(q, self.clr + s["w"] / 2)
+                if not (rect[0] < s["box"][2] and s["box"][0] < rect[2] and rect[1] < s["box"][3] and s["box"][1] < rect[3]):
                     continue
-                pl = self.seg_poly(s)
-                if any(GM.seg_hits_rect(pl[i], pl[i + 1], (rect[0] - g, rect[1] - g, rect[2] + g, rect[3] + g)) for i in range(len(pl) - 1)):
+                pl = [s["a"], s["mid"], s["b"]] if s.get("mid") else [s["a"], s["b"]]
+                if any(GM.seg_hits_rect(a, b, rect) for a, b in zip(pl, pl[1:])):
                     return False
             for v in self.B["vias"]:
-                g = self.clr + v["d"] / 2
-                if rect[0] - g < v["x"] < rect[2] + g and rect[1] - g < v["y"] < rect[3] + g:
+                rect = _rect(q, self.clr + v["d"] / 2)
+                if rect[0] < v["x"] < rect[2] and rect[1] < v["y"] < rect[3]:
                     return False
         return True
 
@@ -129,7 +129,7 @@ class _World:
             if any(GM.poly_has(z["pts"], *c) for c in ctr) or any(court[0] <= x <= court[2] and court[1] <= y <= court[3] for x, y in z["pts"]):
                 return False
             pts = z["pts"]
-            if any(GM.seg_hits_rect(pts[i], pts[(i + 1) % len(pts)], court) for i in range(len(pts))):
+            if any(GM.seg_hits_rect(a, b, court) for a, b in zip(pts, pts[1:] + pts[:1])):
                 return False
         return True
 
@@ -144,9 +144,7 @@ class _World:
                 return False
             for q in pads:
                 for o in opads:
-                    if self.layers_of(q, side) & self.layers_of(o, os_) and GM.rect_gap(
-                            (q["x"] - q["ex"], q["y"] - q["ey"], q["x"] + q["ex"], q["y"] + q["ey"]),
-                            (o["x"] - o["ex"], o["y"] - o["ey"], o["x"] + o["ex"], o["y"] + o["ey"])) < self.clr:
+                    if self.layers_of(q, side) & self.layers_of(o, os_) and GM.rect_gap(_rect(q), _rect(o)) < self.clr:
                         return False
         return self.clear_of_copper(pads, side) and self.clear_of_keepout(court, pads, side)
 
@@ -167,9 +165,7 @@ def _pull_points(B, cons, ref, world):
             for q in pads_of(r):
                 if q["net"] in mine:
                     by_net.setdefault(q["net"], []).append((q["x"], q["y"]))
-    size = {}
-    for q in B["pads"]:
-        size[q["net"]] = size.get(q["net"], 0) + 1
+    size = Counter(q["net"] for q in B["pads"])
     tg = [(n, pts) for n, pts in sorted(by_net.items()) if size[n] <= BIG_NET]
     near = []
     try:
@@ -191,10 +187,11 @@ def _pull_points(B, cons, ref, world):
 
 def _cost(pads, tg, near):
     c = 0.0
+    targets = dict(tg)
     for q in pads:
-        for n, pts in tg:
-            if q["net"] == n:
-                c += min(math.hypot(q["x"] - x, q["y"] - y) for x, y in pts)
+        pts = targets.get(q["net"])
+        if pts:
+            c += min(math.hypot(q["x"] - x, q["y"] - y) for x, y in pts)
     if near:
         cx, cy = sum(q["x"] for q in pads) / len(pads), sum(q["y"] for q in pads) / len(pads)
         for w, pts, _mx in near:
@@ -210,7 +207,7 @@ def _anchor(B, tg, near):
     return (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
 
 
-def _order(B, cons, free):
+def _order(B, free):
     """Parts with the most pulls toward seated copper first; parts tied only to other new parts after their partners."""
     seated = {r for r in B["parts"] if r not in free}
     rank = {}
@@ -260,14 +257,15 @@ def place(board_in, board_out, cons):
         raise IncError("[lock.at] would move locked part(s) of a board with copper: "
                        + ", ".join(f"{r} ({a[0]:.2f},{a[1]:.2f}) -> ({b[0]:.2f},{b[1]:.2f})" for r, a, b in d["drift"][:6])
                        + "; fix the rows or the board, nothing was written")
-    world = _World(B, cons, d["free"])
+    world = _World(B, d["free"])
     moves = {}
-    for ref in _order(B, cons, d["free"]):
+    for ref in _order(B, d["free"]):
         world.blockers.clear()
-        _k, pose, pads, court = _seat(world, B, cons, ref)
+        _, pose, pads, court = _seat(world, B, cons, ref)
         world.placed[ref] = (pads, court, B["parts"][ref]["side"], B["parts"][ref]["tht"])
         moves[ref] = pose
-    text = open(board_in, errors="surrogateescape").read()
+    with open(board_in, errors="surrogateescape") as fh:
+        text = fh.read()
     text, done = BW.apply_moves(text, moves)
     if set(done) != set(moves):
         raise IncError("footprint(s) not found in the board text: " + ", ".join(sorted(set(moves) - set(done))))

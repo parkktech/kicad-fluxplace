@@ -1,5 +1,6 @@
 """Incremental placement on a routed board (w74-incplace): new off-board parts are seated in free space, every other byte
 stays, the stages that would re-place or re-lay copper are skipped, the open nets are routed, a locked part never moves."""
+import math
 import os
 import re
 import shutil
@@ -84,8 +85,7 @@ def test_intent_near_pulls(tmp_path):
     out = str(tmp_path / "out.kicad_pcb")
     IP.place(p, out, C.load(cp))
     B = RD.load(out)
-    d = lambda a, b: ((B["parts"][a]["pos"][0] - B["parts"][b]["pos"][0]) ** 2 + (B["parts"][a]["pos"][1] - B["parts"][b]["pos"][1]) ** 2) ** .5
-    assert d("R3", "J1") < 9
+    assert math.dist(B["parts"]["R3"]["pos"], B["parts"]["J1"]["pos"]) < 9
 
 
 def test_refuses_when_a_locked_part_would_move(tmp_path):
